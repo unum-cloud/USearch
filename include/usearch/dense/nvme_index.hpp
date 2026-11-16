@@ -131,7 +131,7 @@ struct nvme_index {
     template <typename, typename, typename>
     friend class utilities::query_walker;
     template <typename>
-    friend struct nvme_compact_plan;
+    friend struct nvme_reshard_plan;
 
     using scalar_t = typename quads_kit_type_::scalar_t;
     inline static constexpr nk_dtype_t vector_dtype_k = scalar_t::dtype();

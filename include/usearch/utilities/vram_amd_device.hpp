@@ -36,7 +36,7 @@
 #include "usearch/utilities/blocking_files.hpp" // `shared_library_t` - the HIP runtime opened by `hip_api_t::load`
 #include "usearch/utilities/ram_buffers.hpp"    // `growing_buffer` - an executor's table of streams
 #include "usearch/utilities/ram_device.hpp" // `forkunion_allocator_t`, `fu_memory_domain_id_of_pci` - pinned placement
-#include "usearch/utilities/types.hpp"          // `gpu_device_t`, `gpu_devices_capacity_k`
+#include "usearch/utilities/types.hpp"      // `gpu_device_t`, `gpu_devices_capacity_k`
 
 namespace unum::usearch::utilities {
 
@@ -494,7 +494,7 @@ struct hip_virtual_memory_allocator {
 
     /**
      *  @brief Maps every slab, those committed already included, for @p devices too, as a sharded
-     *      index absorbing this storage names its own. No slab may be committed meanwhile.
+     *      index packing this storage into its own names it. No slab may be committed meanwhile.
      *
      *  @par Statuses:
      *  - @c config_mismatch_k One of @p devices cannot reach the owner; nothing is granted.

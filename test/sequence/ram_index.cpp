@@ -599,8 +599,9 @@ std::size_t check_sequence_sharded(u64_t seed) {
         return best;
     };
     levenshtein_bytes_fixture_t::metric_t metric = levenshtein_bytes_fixture_t::make_metric();
-    return test_basic_sharded<us::basic::ram_indexes<index_t>>(
-        seed, metric, std::span<us::utilities::uuid128_t const>(keys), make_values, query_of, best_of);
+    return test_basic_sharded<us::basic::ram_indexes<index_t>>(seed, metric, levenshtein_bytes_fixture_t::make_codec(),
+                                                               std::span<us::utilities::uuid128_t const>(keys),
+                                                               make_values, query_of, best_of);
 }
 
 /** Generated strings sampled from two shards, as @c test_basic_sharded_sample checks. */
@@ -631,9 +632,9 @@ std::size_t check_sequence_sample(u64_t seed) {
         seed, metric, std::span<us::utilities::uuid128_t const>(keys), make_values, no_fixed_coordinates_t {});
 }
 
-/** 600 strings in a sharded index of two shards split into two sharded indexes of two, as
- *  @c test_basic_sharded_split checks. */
-std::size_t check_sequence_sharded_split(u64_t seed) {
+/** 600 strings in a sharded index of two shards cut into two sharded indexes of two, as
+ *  @c test_basic_sharded_cut checks. */
+std::size_t check_sequence_sharded_cut(u64_t seed) {
     using index_t = sequence::ram_index<us::utilities::uuid128_t, u32_t, flaky_waiter_t, fu::standard_atomic_ref,
                                         forkunion_allocator_t>;
     using value_t = index_t::value_t;
@@ -642,7 +643,7 @@ std::size_t check_sequence_sharded_split(u64_t seed) {
     {
         allocation_ledger_t ledger;
         for (sequence_value_t const& value :
-             generate_values(entries_k, stream_key(seed, "plural_split"), levenshtein_alphabet_k, levenshtein_symbols_k,
+             generate_values(entries_k, stream_key(seed, "plural_cut"), levenshtein_alphabet_k, levenshtein_symbols_k,
                              counting_allocator_t {ledger}))
             texts.emplace_back(std::string_view {value});
     }
@@ -657,8 +658,9 @@ std::size_t check_sequence_sharded_split(u64_t seed) {
         return values;
     };
     levenshtein_bytes_fixture_t::metric_t metric = levenshtein_bytes_fixture_t::make_metric();
-    return test_basic_sharded_split<us::basic::ram_indexes<index_t>>(
-        seed, metric, std::span<us::utilities::uuid128_t const>(keys), make_values);
+    return test_basic_sharded_cut<us::basic::ram_indexes<index_t>>(
+        seed, metric, levenshtein_bytes_fixture_t::make_codec(), std::span<us::utilities::uuid128_t const>(keys),
+        make_values);
 }
 
 /** Searches racing a clear of one shard read only retired entries nothing frees: each answers
@@ -800,7 +802,7 @@ std::size_t check_sequence(settings_t const& settings) {
     failures += test_basic_nvme_engines(levenshtein_nvme_fixture_t {settings.seed}, "sequence", settings.seed);
     failures += check_sequence_sharded(settings.seed);
     failures += check_sequence_sample(settings.seed);
-    failures += check_sequence_sharded_split(settings.seed);
+    failures += check_sequence_sharded_cut(settings.seed);
     failures += check_sequence_sharded_clear_race(settings.seed);
     return report("sequence", failures);
 }

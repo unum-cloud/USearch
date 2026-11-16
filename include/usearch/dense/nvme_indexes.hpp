@@ -3,7 +3,7 @@
  *  @author Ash Vardanian
  *  @date October 10, 2026
  *  @brief The sharded index over SafeGraphs parts on block storage: every read verb of
- *      @c ram_indexes, walking every shard of a row on one thread; @c nvme_compaction.hpp
+ *      @c ram_indexes, walking every shard of a row on one thread; @c nvme_reshard.hpp
  *      rewrites its parts.
  *
  *  A view opens the manifest or the monolith a RAM or VRAM index saved, keeps every part's medium
@@ -55,9 +55,9 @@ namespace unum::usearch::dense {
  *  A row's walks, one per part, share one row state on one executor thread, so the verbs reuse the
  *  in-memory index's folds and rescorings unchanged and need no lock. A view mutates nothing:
  *  growth is a new part from a RAM or VRAM save, opened by a fresh @ref view. An index @ref load
- *  opened owns a writer instead, through which a refine replaces whole parts, and a view is simply
- *  an index holding none. The metric is the one the parts' headers name, so one instantiation views
- *  parts of any kernel its kits finalize.
+ *  opened owns a writer instead, through which a refine or a reshard replaces whole parts, and a
+ *  view is simply an index holding none. The metric is the one the parts' headers name, so one
+ *  instantiation views parts of any kernel its kits finalize.
  */
 template <                                                                    //
     typename key_type_ = uuid128_t,                                           //
@@ -72,7 +72,7 @@ template <                                                                    //
     >
 struct nvme_indexes {
     template <typename>
-    friend struct nvme_compact_plan;
+    friend struct nvme_reshard_plan;
 
     /** A reader's walk over every part's entries, as stored or breadth-first. */
     using cursor_t = nvme_parts_cursor<key_type_, dense::node_id_t>;
@@ -280,24 +280,24 @@ struct nvme_indexes {
     }
 
     /**
-     *  @brief Claims a loaded index's writer for one refine, which @ref end_refine gives back.
+     *  @brief Claims a loaded index's writer for one refine or reshard until @ref end_rewrite.
      *
      *  @par Statuses:
      *  - @c read_only_k The index is a view.
-     *  - @c contended_k Another refine holds the writer, or a replacement found another writer and
-     *    the writer gave up its lock.
+     *  - @c contended_k Another refine or reshard holds the writer, or a replacement found another
+     *    writer and the writer gave up its lock.
      */
-    status_t begin_refine() noexcept {
+    status_t begin_rewrite() noexcept {
         if (!writer_) return status_t::read_only_k;
         u64_t idle = 0;
-        if (!atomic_ref<u64_t>(writer_->refining)
+        if (!atomic_ref<u64_t>(writer_->rewriting)
                  .compare_exchange_strong(idle, 1, std::memory_order_acquire, std::memory_order_relaxed))
             return status_t::contended_k;
         if (writer_->lock.file) return status_t::success_k;
-        end_refine();
+        end_rewrite();
         return status_t::contended_k;
     }
-    void end_refine() noexcept { atomic_ref<u64_t>(writer_->refining).store(0, std::memory_order_release); }
+    void end_rewrite() noexcept { atomic_ref<u64_t>(writer_->rewriting).store(0, std::memory_order_release); }
 
     /**
      *  @brief Commits the durable part at @p path, @p bytes long, as part @p shard of a loaded
@@ -2873,8 +2873,8 @@ struct nvme_indexes {
         /** Odd while a swap is in progress, as @c ram_shards keeps its epoch. */
         u64_t epoch = 0;
 
-        /** One while a refine holds the writer. */
-        u64_t refining = 0;
+        /** One while a refine or reshard holds the writer. */
+        u64_t rewriting = 0;
 
         explicit writer_t(forkunion_allocator_t allocator) noexcept
             : manifest(allocator), parts(allocator), retired(allocator) {}

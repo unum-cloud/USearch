@@ -51,14 +51,16 @@ static_assert(sizeof(entry_in_shard_t) == 2 * sizeof(std::size_t));
 /** Whether a target shard shares the source shard's placement, which every rank prefers. */
 enum class placement_match_t : bool { other_k, same_k };
 
-/** Ranks a target shard with room for a compaction, the lowest first: any on the source shard's
- *  placement before any other, the earliest on ties, so each shard fills before the next takes. */
+/** Ranks a target shard with room for a repacking reshard, the lowest first: any on the source
+ *  shard's placement before any other, the earliest on ties, so each shard fills before the next
+ *  one takes any. */
 inline std::size_t rank_first_fit(std::size_t, placement_match_t match) noexcept {
     return match == placement_match_t::same_k ? 0 : 1;
 }
 
-/** Ranks a target shard with room for an absorb, the lowest first: the fewest entries, then one on
- *  the source shard's placement, so the entries spread over the shards as they stand. */
+/** Ranks a target shard with room for a reshard keeping the target's shards, the lowest first: the
+ *  fewest entries, then one on the source shard's placement, so the entries spread over the shards
+ *  as they stand. */
 inline std::size_t rank_fewest_entries(std::size_t entries, placement_match_t match) noexcept {
     return 2 * entries + (match == placement_match_t::same_k ? 0 : 1);
 }
@@ -664,24 +666,24 @@ struct shard_set {
     }
 
     /** Writes into @p part_bases, one run per shard as @p part_offsets cuts it, a part for every
-     *  non-empty shard of @p donor its load @p plans appended where @p moves, one per donor shard,
-     *  put it, after the resident part and any earlier donor's; a shard empty beforehand keeps the
-     *  first part moving into it as its own, and in place a shard moving into itself stays
-     *  resident. The offsets count the shards the plans span, never a shard generation opened
-     *  since; the donor may sit on another residency, as a compaction's device sources do. */
-    template <typename donor_type_, typename plans_type_>
-    void record_parts(donor_type_ const& donor, std::span<shard_move_t const> moves, plans_type_ const& plans,
+     *  non-empty shard of @p source its load @p plans appended where @p moves, one per source
+     *  shard, put it, after the resident part and any earlier source's; a shard empty beforehand
+     *  keeps the first part moving into it as its own, and in place a shard moving into itself
+     *  stays resident. The offsets count the shards the plans span, never a shard generation opened
+     *  since; the source may sit on another residency, as a reshard's device sources do. */
+    template <typename source_type_, typename plans_type_>
+    void record_parts(source_type_ const& source, std::span<shard_move_t const> moves, plans_type_ const& plans,
                       node_id_t* part_bases, std::span<std::size_t const> part_offsets) const noexcept {
-        std::size_t const shards = part_offsets.size() - 1, donors = moves.size();
+        std::size_t const shards = part_offsets.size() - 1, source_shards = moves.size();
         for (std::size_t into = 0; into != shards; ++into) {
             node_id_t* const parts = part_bases + part_offsets[into];
             std::size_t const room = part_offsets[into + 1] - part_offsets[into];
             std::size_t count = 0;
             while (count != room && parts[count] != node_id_limits<node_id_t>::unknown_k) ++count;
             node_id_t base = plans[into].base;
-            for (std::size_t from = 0; from != donors; ++from) {
-                if (moves[from].into != into || (static_cast<void const*>(&donor) == this && from == into)) continue;
-                node_id_t const entries = static_cast<node_id_t>(donor[from].index->size());
+            for (std::size_t from = 0; from != source_shards; ++from) {
+                if (moves[from].into != into || (static_cast<void const*>(&source) == this && from == into)) continue;
+                node_id_t const entries = static_cast<node_id_t>(source[from].index->size());
                 if (!entries) continue;
                 if (!count && base) parts[count++] = 0;
                 parts[count++] = base;

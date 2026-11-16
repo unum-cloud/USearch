@@ -382,25 +382,6 @@ struct settings_t {
      *  enforced, so a base-page fallback cannot pass as a huge-page result. */
     count_t huge_pages {.minimum = 0};
 
-    /** Ingest the second half of the rows into a donor index and absorb it into the first, so the
-     *  absorbing refine is measured on its own; absent ingests every row into one index. */
-    switch_t merge = switch_t::absent_k;
-
-    /** How many candidates a merge keeps; absent inherits `--expansion-add`. */
-    count_t expansion_merge;
-
-    /** Indexes the inserted rows build as, over equal contiguous slices, the later ones absorbed
-     *  into the first; absent builds one. */
-    count_t donors;
-
-    /** Entries one shard may hold, past which an insertion opens another shard generation; absent
-     *  bounds shards by the ID space alone. */
-    count_t shard_capacity;
-
-    /** Entries one shard may hold after the built index compacts in place; absent skips the
-     *  compaction. */
-    count_t compact_capacity;
-
     /** Upper bound on refinement passes after ingestion or a load; a pass that re-selects
      *  nothing ends the phase early, and zero skips it outright. */
     count_t max_refines {.minimum = 0};
@@ -977,7 +958,7 @@ inline machine_t probe_machine() noexcept {
     [[maybe_unused]] fu_status_t const memory_status = fu_memory_domains_count(machine.topology,
                                                                                &machine.memory_domains);
     machine.schedule = fu_runtime_capabilities();
-    if (nk_cpu_capabilities_enabled(&machine.compute) != nk_success_k) machine.compute = nk_cap_serial_k;
+    if (nk_capabilities_enabled_cpu(&machine.compute) != nk_success_k) machine.compute = nk_cap_serial_k;
     return machine;
 }
 

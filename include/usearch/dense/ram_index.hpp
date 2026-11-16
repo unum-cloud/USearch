@@ -1715,11 +1715,8 @@ struct ram_index {
     /** Optional tuning knobs for @c refine(); zeros mean "derive from connectivity". */
     using refine_config_t = dense::refine_config_t;
 
-    /** A split's knobs: its refine's, and the seed that orders the parts' growth. */
-    struct split_config_t {
-        refine_config_t refine {};
-        u64_t seed = 0;
-    };
+    /** A reshard's knobs: its rounds', and the seed that orders the parts' growth. */
+    using reshard_config_t = dense::reshard_config_t;
 
     using refine_report_t = dense::refine_report_t;
     using reachability_t = dense::reachability_t;
@@ -1836,7 +1833,7 @@ struct ram_index {
               unlinked_(other.unlinked_), underlinked_(other.underlinked_),
               unreached_islands_(other.unreached_islands_), stranded_islands_(other.stranded_islands_),
               components_(other.components_), depth_from_root_(other.depth_from_root_),
-              depth_to_root_(other.depth_to_root_), depth_(other.depth_), phase_(other.phase_),
+              depth_to_root_(other.depth_to_root_), depth_(other.depth_), step_(other.step_),
               islands_status_(other.islands_status_) {}
         health_plan_t& operator=(health_plan_t&& other) noexcept {
             visible = other.visible;
@@ -1868,7 +1865,7 @@ struct ram_index {
             depth_from_root_ = other.depth_from_root_;
             depth_to_root_ = other.depth_to_root_;
             depth_ = other.depth_;
-            phase_ = other.phase_;
+            step_ = other.step_;
             islands_status_ = other.islands_status_;
             return *this;
         }
@@ -1963,9 +1960,9 @@ struct ram_index {
          */
         std::size_t sweep(task_t const& task) noexcept {
             if (task.nodes.empty()) return 0;
-            if (phase_ == phase_t::expand_k) return expand_(task);
-            if (phase_ == phase_t::recheck_k) return recheck_reaches_root_(task);
-            if (phase_ == phase_t::count_links_k) return count_in_and_out_links_(task);
+            if (step_ == step_t::expand_k) return expand_(task);
+            if (step_ == step_t::recheck_k) return recheck_reaches_root_(task);
+            if (step_ == step_t::count_links_k) return count_in_and_out_links_(task);
             return 0;
         }
 
@@ -1974,27 +1971,27 @@ struct ram_index {
          *  islands and keeps the root or re-roots once a recheck marks nothing, and labels the
          *  islands after the count; zero means the audit converged or could not gather them. */
         std::size_t advance_depth() noexcept {
-            if (phase_ == phase_t::expand_k) {
+            if (step_ == step_t::expand_k) {
                 std::size_t const reached = std::exchange(reached_in_depth_, 0);
                 swept_entries_ += reached + std::exchange(marked_in_depth_, 0);
                 if (!reached) {
-                    phase_ = phase_t::recheck_k;
+                    step_ = step_t::recheck_k;
                     return 1;
                 }
                 depth_entries_[min_of<std::size_t>(++depth_, unknown_depth_k - 1u)] += reached;
                 ++depth_from_root_;
                 return reached;
             }
-            if (phase_ == phase_t::recheck_k) {
+            if (step_ == step_t::recheck_k) {
                 std::size_t const marked = std::exchange(marked_in_depth_, 0);
                 if (!marked) return choose_root_();
                 swept_entries_ += marked;
                 ++depth_to_root_;
                 return 1;
             }
-            if (phase_ == phase_t::count_links_k) {
+            if (step_ == step_t::count_links_k) {
                 label_islands_();
-                phase_ = phase_t::done_k;
+                step_ = step_t::done_k;
             }
             return 0;
         }
@@ -2163,7 +2160,7 @@ struct ram_index {
          */
         expected<reachability_t> finish() const noexcept {
             if (!index_) return {{}, status_t::uninitialized_k};
-            if (phase_ != phase_t::done_k) return {{}, status_t::internal_k};
+            if (step_ != step_t::done_k) return {{}, status_t::internal_k};
             if (failed(islands_status_)) return {{}, islands_status_};
             reachability_t result;
             result.audited_nodes = visible;
@@ -2185,7 +2182,7 @@ struct ram_index {
 
       private:
 
-        enum class phase_t : u8_t { expand_k, recheck_k, count_links_k, done_k };
+        enum class step_t : u8_t { expand_k, recheck_k, count_links_k, done_k };
 
         /** The smallest depth to root among the links one read met, and how many links met it. */
         struct way_to_root_t {
@@ -2294,7 +2291,7 @@ struct ram_index {
             depth_from_root_ = depth_to_root_ = depth_ = 0;
             islands_status_ = status_t::success_k;
             root_ = root;
-            phase_ = root == node_id_unknown_k ? phase_t::done_k : phase_t::expand_k;
+            step_ = root == node_id_unknown_k ? step_t::done_k : step_t::expand_k;
             if (root == node_id_unknown_k) return;
             insert_(reached_k, root);
             insert_(reaches_root_k, root);
@@ -2404,7 +2401,7 @@ struct ram_index {
             gather_islands_(visible - component);
             if (succeeded(islands_status_)) close_islands_();
             if (failed(islands_status_)) {
-                phase_ = phase_t::done_k;
+                step_ = step_t::done_k;
                 return 0;
             }
             if (root_ == drawn_root_ && largest_island_entries_ > component) {
@@ -2412,7 +2409,7 @@ struct ram_index {
                 start_from_(largest_island_);
                 return 1;
             }
-            phase_ = phase_t::count_links_k;
+            step_ = step_t::count_links_k;
             return 1;
         }
 
@@ -2713,7 +2710,7 @@ struct ram_index {
         std::size_t depth_ = 0;
 
         /** The pass the next tasks run. */
-        phase_t phase_ = phase_t::done_k;
+        step_t step_ = step_t::done_k;
 
         /** Whether the islands' adjacency could be placed. */
         status_t islands_status_ = status_t::success_k;
@@ -2740,10 +2737,12 @@ struct ram_index {
                11 * default_alignment_k;
     }
 
+    struct reshard_plan_t;
+
     /**
      *  @brief One refinement round in flight, from its opening health check to its closing one.
      *
-     *  A plan from @ref plan_round runs one round: the opening health check, the islands it named
+     *  A plan from @ref plan_refine runs one round: the opening health check, the islands it named
      *  healed without a distance, a seeded draw of one cache-sized pack of hubs, a gather streaming
      *  every stored entry past them into the neighborhood of its nearest hub, and again inside
      *  every neighborhood over its capacity, a restitch of each neighborhood in one core's cache,
@@ -2760,11 +2759,6 @@ struct ram_index {
      *  Every entry the opening health check reached both ways stays reached both ways throughout,
      *  so searches run throughout and a round stopped between tasks leaves the graph correct, as
      *  long as no insertion overlaps it.
-     *
-     *  A split moves first: the donor's rows partition into one graph-local part per receiver,
-     *  scatter into the receivers with their keys and the links inside each part rebased and the
-     *  links across dropped, every receiver files its keys on one task of its own, and the parts
-     *  publish; then every receiver runs one round in turn, the counts summing over the receivers.
      */
     struct refine_plan_t {
         using task_t = typename health_plan_t::task_t;
@@ -2786,21 +2780,15 @@ struct ram_index {
         /** An unbound plan over @p health, its buffers placed by @p allocator - what a refused plan
          *  answers with, and what planning fills. */
         refine_plan_t(health_plan_t&& health, part_bases_allocator_t const& allocator) noexcept
-            : health(std::move(health)), changed_ {bitset_allocator_t {allocator}}, receiver_claims_(allocator),
-              part_slots_(allocator), part_members_(allocator), part_extents_(allocator), hub_nodes_(allocator),
+            : health(std::move(health)), changed_ {bitset_allocator_t {allocator}}, hub_nodes_(allocator),
               hub_vectors_ {bytes_allocator_t {allocator}}, hub_norms_ {norms_allocator_t {allocator}},
               entry_neighborhoods_ {neighborhoods_allocator_t {allocator}}, neighborhood_entries_(allocator),
               neighborhood_offsets_(allocator) {}
         refine_plan_t(refine_plan_t&& other) noexcept
             : health(std::move(other.health)), index_(std::exchange(other.index_, nullptr)),
-              changed_(std::move(other.changed_)), split_donor_(std::exchange(other.split_donor_, nullptr)),
-              receivers_(other.receivers_), receiver_claims_(std::move(other.receiver_claims_)),
-              part_slots_(std::move(other.part_slots_)), part_members_(std::move(other.part_members_)),
-              part_extents_(std::move(other.part_extents_)), seed_(other.seed_),
-              refined_receivers_(other.refined_receivers_), receivers_tally_(other.receivers_tally_),
-              phase_(other.phase_), swept_after_(other.swept_after_), islands_waiting_(other.islands_waiting_),
-              waiting_before_(other.waiting_before_), tally_(other.tally_), status_(other.status_),
-              cache_bytes_(other.cache_bytes_), hubs_per_draw_(other.hubs_per_draw_),
+              changed_(std::move(other.changed_)), phase_(other.phase_), swept_after_(other.swept_after_),
+              islands_waiting_(other.islands_waiting_), waiting_before_(other.waiting_before_), tally_(other.tally_),
+              status_(other.status_), cache_bytes_(other.cache_bytes_), hubs_per_draw_(other.hubs_per_draw_),
               neighborhood_capacity_(other.neighborhood_capacity_), hub_nodes_(std::move(other.hub_nodes_)),
               hub_vectors_(std::move(other.hub_vectors_)), hub_norms_(std::move(other.hub_norms_)),
               entry_neighborhoods_(std::move(other.entry_neighborhoods_)),
@@ -2809,20 +2797,13 @@ struct ram_index {
         refine_plan_t(refine_plan_t const&) = delete;
         refine_plan_t& operator=(refine_plan_t const&) = delete;
 
-        /** Task @p position of the current phase: a health check's bitset word, a donor row
-         *  scattered, a receiver's keys, the whole partition, the islands healed, a
-         *  neighborhood capacity of entries gathered, or a neighborhood; and past the end, a
-         *  task spanning nothing. */
+        /** Task @p position of the current phase, an empty one past the end: a health check's
+         *  bitset word, the islands healed, the entries of one gather, or one neighborhood. */
         task_t operator[](std::size_t position) const noexcept {
             if (phase_ == phase_t::health_k) return health[position];
             task_t task;
             if (position >= tasks().size()) return task;
             task.position = position;
-            // One task per receiver files the keys its part received.
-            if (phase_ == phase_t::keys_k) {
-                task.nodes = {0, part_extents_[position].nodes};
-                return task;
-            }
             iota_view<node_id_t> const range = phase_nodes_();
             std::size_t const width = phase_width_();
             std::size_t const first = range.first + (position * width);
@@ -2834,8 +2815,6 @@ struct ram_index {
         /** The current phase's tasks, positionally; none once the plan is over. */
         indexed_range<refine_plan_t> tasks() const noexcept {
             if (!index_ || phase_ == phase_t::done_k) return {this, 0u};
-            if (phase_ == phase_t::partition_k) return {this, 1u};
-            if (phase_ == phase_t::keys_k) return {this, receivers_.size()};
             if (phase_ == phase_t::health_k) return {this, health.tasks().size()};
             return {this, divide_round_up<std::size_t>(phase_nodes_().size(), phase_width_())};
         }
@@ -2845,11 +2824,9 @@ struct ram_index {
          *      of one phase, and never failing on a bound plan once @ref reserve grew @p context,
          *      since planning claimed and reserved everything a task writes.
          *
-         *  The one partition task grows a split's parts, a scatter task copies donor nodes and
-         *  their keys into their receivers, and a keys task files one receiver's keys, its map's
-         *  one writer. A heal task links the round's islands, a gather task files a neighborhood
-         *  capacity of entries under their nearest hubs, and a restitch task re-stitches one
-         *  neighborhood in one core's cache.
+         *  A heal task links the round's islands, a gather task files a neighborhood capacity of
+         *  entries under their nearest hubs, and a restitch task re-stitches one neighborhood in
+         *  one core's cache.
          *
          *  @par Statuses:
          *  - @c uninitialized_k The plan is bound to no index.
@@ -2857,38 +2834,25 @@ struct ram_index {
         status_t run(task_t const& task, traversal_context_t& context) noexcept {
             if (!index_) return status_t::uninitialized_k;
             switch (phase_) {
-            case phase_t::partition_k: partition_(); break;
-            case phase_t::scatter_k: scatter_(task); break;
-            case phase_t::keys_k: receivers_[task.position]->keyed_.publish(task.nodes); break;
             case phase_t::health_k: health.sweep(task); break;
             case phase_t::heal_k: heal_(task); break;
-            case phase_t::gather_neighborhoods_k: gather_neighborhoods_(task, context); break;
+            case phase_t::gather_k: gather_neighborhoods_(task, context); break;
             case phase_t::restitch_k: restitch_neighborhoods_(task, context); break;
             default: break;
             }
             return status_t::success_k;
         }
 
-        /** The barrier between phases, one caller after every task of the current one ran:
-         *  publishes a split's parts, packs the hubs, sorts the entries by neighborhood, or picks
-         *  the next phase, and answers whether one follows. */
+        /** The barrier between phases, one caller after every task of the current one ran: packs
+         *  the hubs, sorts the entries by neighborhood, or picks the next phase, and answers
+         *  whether one follows. */
         bool advance() noexcept {
             if (!index_ || failed(status_)) return false;
-            if (phase_ == phase_t::partition_k || phase_ == phase_t::scatter_k) {
-                phase_ = phase_ == phase_t::partition_k ? phase_t::scatter_k : phase_t::keys_k;
-                return true;
-            }
-            if (phase_ == phase_t::keys_k) {
-                publish_parts_();
-                bind_receiver_();
-                return true;
-            }
             if (phase_ == phase_t::health_k) {
                 if (!health.advance_depth()) converge_();
             }
             else advance_round_();
             if (failed(status_)) return false;
-            if (phase_ == phase_t::done_k && refined_receivers_ != receivers_.size()) settle_receiver_();
             return phase_ != phase_t::done_k;
         }
 
@@ -2896,20 +2860,10 @@ struct ram_index {
          *  or a heal not yet run, ends the round with nothing written; a hubs draw, a gather or a
          *  restitch sends the round to the closing health check, the heal's links and the
          *  neighborhoods already re-stitched standing; the closing health check runs on, and the
-         *  verdict reads stopped. A no-op in a split's partition, scatter and keys, and once the
-         *  round is over. */
+         *  verdict reads stopped. A no-op once the round is over. */
         void stop() noexcept {
             if (rounding()) stop_round_();
         }
-
-        /** Whether the current phase moves a split's rows or keys - the phases no stop skips. */
-        bool moving() const noexcept {
-            return phase_ == phase_t::partition_k || phase_ == phase_t::scatter_k || phase_ == phase_t::keys_k;
-        }
-
-        /** Whether the round's heal ended and its hubs draw next: where a caller wanting the heal
-         *  alone stops it. */
-        bool drawing_hubs() const noexcept { return phase_ == phase_t::draw_hubs_k; }
 
         /** The first failure the plan met, which ended it; success otherwise. */
         status_t status() const noexcept { return status_; }
@@ -2940,34 +2894,15 @@ struct ram_index {
             return status_t::success_k;
         }
 
-        /** Whether the plan is inside a round, whose every barrier a caller's progress hears:
-         *  past a split's moves and short of its end. */
-        bool rounding() const noexcept { return phase_ >= phase_t::health_k && phase_ != phase_t::done_k; }
+        /** Whether the plan is inside a round, whose every barrier a caller's progress hears. */
+        bool rounding() const noexcept { return phase_ >= phase_t::health_k && phase_ <= phase_t::restitch_k; }
 
-        /** The phase the plan is in, by the name a progress line prints. */
-        char const* phase_name() const noexcept {
-            switch (phase_) {
-            case phase_t::partition_k: return "partition";
-            case phase_t::gather_neighborhoods_k: return "gather";
-            case phase_t::scatter_k:
-            case phase_t::keys_k: return "scatter";
-            case phase_t::health_k: return "health";
-            case phase_t::draw_hubs_k: return "hubs";
-            case phase_t::restitch_k: return "restitch";
-            case phase_t::heal_k: return "heal";
-            default: return "done";
-            }
-        }
+        /** The phase the plan is in. */
+        phase_t phase() const noexcept { return phase_; }
 
-        /** The position of the round's phase in hand among its six, from the opening health
-         *  check to the closing one; zero outside a round's phases. */
-        std::size_t ordinal() const noexcept {
-            std::size_t const opening = static_cast<std::size_t>(phase_t::opening_k);
-            if (phase_ == phase_t::health_k && swept_after_ == phase_t::opening_k) return 1;
-            if (phase_ == phase_t::health_k && swept_after_ == phase_t::restitch_k)
-                return static_cast<std::size_t>(phase_t::restitch_k) - opening + 2;
-            return rounding() ? static_cast<std::size_t>(phase_) - opening + 1 : 0;
-        }
+        /** The position of the round's phase in hand among its six, from the opening health check
+         *  to the closing one; zero outside a round's phases. */
+        std::size_t ordinal() const noexcept { return round_ordinal(phase_, swept_after_); }
 
         /** Units of the round's phase in hand done so far, at a barrier before it advances:
          *  entries swept and marked by an audit, and otherwise all of the phase's, since each of
@@ -2983,8 +2918,8 @@ struct ram_index {
             switch (phase_) {
             case phase_t::health_k: return 2 * std::size_t {health.visible};
             case phase_t::heal_k: return health.islands();
-            case phase_t::draw_hubs_k: return hubs_for_(health.visible);
-            case phase_t::gather_neighborhoods_k: return gathered_entries_();
+            case phase_t::hubs_k: return hubs_for_(health.visible);
+            case phase_t::gather_k: return gathered_entries_();
             case phase_t::restitch_k: return health.visible;
             default: return 0;
             }
@@ -3002,7 +2937,7 @@ struct ram_index {
             // re-stitches those alone.
             static_cast<void>(health.widen(static_cast<node_id_t>(index_->size())));
             if (failed(reserve_round_(cache_bytes_))) return status_ = status_t::bad_alloc_k, void();
-            open_health_(phase_t::opening_k);
+            open_health_(phase_t::none_k);
         }
 
         /**
@@ -3022,26 +2957,13 @@ struct ram_index {
 
       private:
         friend ram_index;
-
-        enum class phase_t : u8_t {
-            partition_k,
-            scatter_k,
-            keys_k,
-            health_k,
-            // What a round's opening health check follows, and the round's phases in their order.
-            opening_k,
-            heal_k,
-            draw_hubs_k,
-            gather_neighborhoods_k,
-            restitch_k,
-            done_k
-        };
+        friend reshard_plan_t;
 
         /** What a @ref add_or_swap_link_ found. */
         enum class taken_t : u8_t { written_k, present_k, refused_k };
 
         /** Opens the health check following @p phase from the root the last one kept: the opening
-         *  one, or the closing one after the restitch. */
+         *  one after none, or the closing one after the restitch. */
         void open_health_(phase_t phase) noexcept {
             health.restart_sweep();
             swept_after_ = phase;
@@ -3052,33 +2974,23 @@ struct ram_index {
             atomic_ref<std::size_t>(into).store_add(value, std::memory_order_relaxed);
         }
 
-        /** The rows the current phase tasks over: a split donor's, the round's islands, the entries
-         *  it gathers into neighborhoods, or its neighborhoods; none while it draws hubs, since the
-         *  barrier closing that phase draws them. */
+        /** The rows the current phase tasks over: the round's islands, the entries it gathers into
+         *  neighborhoods, or its neighborhoods; none while it draws hubs, since the barrier closing
+         *  that phase draws them. */
         iota_view<node_id_t> phase_nodes_() const noexcept {
-            if (phase_ == phase_t::partition_k || phase_ == phase_t::scatter_k) return {0, split_nodes_()};
             if (phase_ == phase_t::heal_k) return {0, static_cast<node_id_t>(health.islands())};
-            if (phase_ == phase_t::gather_neighborhoods_k) return {0, health.visible};
+            if (phase_ == phase_t::gather_k) return {0, health.visible};
             if (phase_ == phase_t::restitch_k) return {0, static_cast<node_id_t>(neighborhoods_())};
             return {};
         }
 
-        /** Rows one task of the current phase spans: the whole partition, every island, a
-         *  neighborhood capacity of entries gathered, or one donor row or neighborhood. */
+        /** Rows one task of the current phase spans: every island, a neighborhood capacity of
+         *  entries gathered, or one neighborhood. */
         std::size_t phase_width_() const noexcept {
-            if (phase_ == phase_t::partition_k) return max_of<std::size_t>(split_nodes_(), 1);
             // One heal task: islands sharing an owner row then link in one order.
             if (phase_ == phase_t::heal_k) return max_of<std::size_t>(health.islands(), 1);
-            if (phase_ == phase_t::gather_neighborhoods_k) return neighborhood_capacity_;
+            if (phase_ == phase_t::gather_k) return neighborhood_capacity_;
             return 1;
-        }
-
-        /** Rows the split's donor published at planning: one slot each. */
-        node_id_t split_nodes_() const noexcept { return static_cast<node_id_t>(part_slots_.size()); }
-
-        /** The most rows one part takes: the donor's rows over the receivers, rounded up. */
-        std::size_t part_capacity_() const noexcept {
-            return divide_round_up<std::size_t>(part_slots_.size(), receivers_.size());
         }
 
         /** Marks row @p node_id counted as changed, answering whether it was already. */
@@ -3086,135 +2998,6 @@ struct ram_index {
             return atomic_ref<u1x64_t>(changed_[node_id / health_plan_t::lanes_k])
                 .fetch_test_and_set_bit(static_cast<unsigned>(node_id % health_plan_t::lanes_k),
                                         std::memory_order_relaxed);
-        }
-
-        /** Calls @p callback with every live link of donor row @p row, skipping the self-loop of
-         *  a published-empty row; reads plain, since nothing writes the donor meanwhile. */
-        template <typename callback_type_>
-        void for_each_link_(node_id_t node, callback_type_&& callback) const noexcept {
-            node_ids_view_t const links =
-                static_cast<ram_index const&>(*split_donor_).neighbors_for(chunk_schedule_t::locate(node));
-            for (std::size_t slot = 0; slot != links.size() && links[slot] != node_id_unknown_k; ++slot)
-                if (links[slot] != node) callback(links[slot]);
-        }
-
-        /** Places donor node @p node last in @p part, its slot naming the part and the
-         *  position. */
-        void enlist_(node_id_t node, std::size_t part) noexcept {
-            std::size_t const position = part_extents_[part].nodes++, capacity = part_capacity_();
-            part_members_[part * capacity + position] = node;
-            part_slots_[node] = static_cast<node_id_t>(part * capacity + position);
-        }
-
-        /** Expands the oldest unexpanded member of @p part, enlisting its unplaced neighbors while
-         *  the part has room; answers whether the part could expand at all. */
-        bool expand_(std::size_t part) noexcept {
-            node_id_t& expanded = part_extents_[part].expanded;
-            std::size_t const capacity = part_capacity_();
-            if (expanded == part_extents_[part].nodes || part_extents_[part].nodes == capacity) return false;
-            node_id_t const node_id = part_members_[part * capacity + expanded++];
-            node_id_t const split_nodes = split_nodes_();
-            for_each_link_(node_id, [&](node_id_t target) noexcept {
-                if (target < split_nodes && part_slots_[target] == node_id_unknown_k &&
-                    part_extents_[part].nodes != capacity)
-                    enlist_(target, part);
-            });
-            return true;
-        }
-
-        /** Grows one part per receiver from a root the seed picks, breadth first over the source's
-         *  links and one expansion per part in turn, each capped at the part capacity; every node
-         *  left unplaced then seeds a growth of the smallest part. Every node's slot names its part
-         *  and its ID in the receiver, in the order the growth enlisted it. */
-        void partition_() noexcept {
-            std::size_t const parts = receivers_.size();
-            node_id_t const split_nodes = split_nodes_();
-            for (node_id_t& slot : part_slots_) slot = node_id_unknown_k;
-            for (std::size_t part = 0; part != parts; ++part) part_extents_[part] = {};
-            for (std::size_t part = 0; part != parts && part != split_nodes; ++part)
-                enlist_(static_cast<node_id_t>(seeded_bijection(part, split_nodes, seed_)), part);
-            for (std::size_t expanded = parts; expanded;) {
-                expanded = 0;
-                for (std::size_t part = 0; part != parts; ++part) expanded += expand_(part);
-            }
-            for (node_id_t node = 0; node != split_nodes; ++node) {
-                if (part_slots_[node] != node_id_unknown_k) continue;
-                std::size_t smallest = 0;
-                for (std::size_t part = 1; part != parts; ++part)
-                    if (part_extents_[part].nodes < part_extents_[smallest].nodes) smallest = part;
-                enlist_(node, smallest);
-                while (expand_(smallest)) {}
-            }
-        }
-
-        /** Copies the donor nodes of @p task into their receivers' claimed rows - keys, vectors,
-         *  norms, and the links inside each part rebased through its slots, the links across
-         *  dropped, a row left with none becoming the published-empty self-loop. */
-        void scatter_(task_t const& task) noexcept {
-            ram_index const& donor = *split_donor_;
-            geometry_t const geometry = donor.geometry();
-            std::size_t const connectivity = geometry.connectivity;
-            std::size_t const row_bytes = padded_row_values(geometry) * sizeof(scalar_t);
-            std::size_t const capacity = part_capacity_();
-            node_id_t const split_nodes = split_nodes_();
-            for (node_id_t node = task.nodes.first; node < task.nodes.bound; ++node) {
-                std::size_t const slot = part_slots_[node], part = slot / capacity;
-                node_id_t const placed = static_cast<node_id_t>(slot % capacity);
-                ram_index& into = *receivers_[part];
-                location_t const from = chunk_schedule_t::locate(node), to = chunk_schedule_t::locate(placed);
-                into.keyed_.assign(placed, donor.keyed_[node]);
-                std::memcpy(into.vectors_[to], donor.vectors_[from], row_bytes);
-                if (donor.stores_norms()) into.norm_ref_for(to) = donor.norms_[from];
-                node_id_t* const links = into.neighbors_[to];
-                std::size_t kept = 0;
-                for_each_link_(node, [&](node_id_t target) noexcept {
-                    if (target < split_nodes && part_slots_[target] / capacity == part)
-                        links[kept++] = static_cast<node_id_t>(part_slots_[target] % capacity);
-                });
-                if (!kept) links[kept++] = placed;
-                for (std::size_t tail = kept; tail != connectivity; ++tail) links[tail] = node_id_unknown_k;
-            }
-        }
-
-        /** Publishes every receiver's nodes, consuming the claim of a full part and returning what
-         *  the part left unused, then empties the donor. */
-        void publish_parts_() noexcept {
-            std::size_t const capacity = part_capacity_();
-            for (std::size_t part = 0; part != receivers_.size(); ++part) {
-                ram_index& into = *receivers_[part];
-                node_id_t const nodes = part_extents_[part].nodes;
-                receiver_claims_[part].consume();
-                if (capacity != nodes) into.release_capacity(capacity - nodes);
-                if (!nodes) continue;
-                node_id_t dispensed = 0;
-                atomic_ref<node_id_t>(into.next_dispensed_id_)
-                    .compare_exchange_strong(dispensed, nodes, std::memory_order_release, std::memory_order_relaxed);
-                atomic_ref<node_id_t>(into.last_visible_id_).store(nodes, std::memory_order_release);
-            }
-            split_donor_->forget_(split_nodes_());
-            split_donor_ = nullptr;
-        }
-
-        /** Turns the plan to the next receiver: its health check over the rows its part received,
-         *  their changed marks cleared, and its round. */
-        void bind_receiver_() noexcept {
-            std::size_t const receiver = refined_receivers_;
-            index_ = receivers_[receiver];
-            health.rebind(*index_, part_extents_[receiver].nodes);
-            // Within what planning reserved for a full part.
-            [[maybe_unused]] status_t const unchanged = changed_.resize(health_plan_t::words_for(health.visible));
-            swept_after_ = phase_t::opening_k;
-            phase_ = phase_t::health_k;
-        }
-
-        /** Folds a receiver's round into the split's, then binds the next receiver, or reports the
-         *  sums once the last one's round ended. */
-        void settle_receiver_() noexcept {
-            if (refined_receivers_) receivers_tally_ += tally_;
-            else receivers_tally_ = tally_;
-            if (++refined_receivers_ == receivers_.size()) return tally_ = receivers_tally_, void();
-            tally_ = {};
-            bind_receiver_();
         }
 
         /** Takes in a converged health check: the opening one opens the round; the closing one
@@ -3230,12 +3013,11 @@ struct ram_index {
             }
             std::size_t const islands = reachability.audited_nodes - reachability.reachable_nodes;
             tally_.reachability = reachability;
-            if (swept_after_ == phase_t::opening_k) return open_round_(reachability);
+            if (swept_after_ == phase_t::none_k) return open_round_(reachability);
             // The restitch gave the islands the heal could not link their links, which a heal from
             // this check follows without a distance, as a moved part nothing links into needs.
-            bool const fewer_waiting = islands_waiting_ && islands_waiting_ < waiting_before_;
             bool const stopped = tally_.verdict == refine_verdict_t::stopped_k;
-            if (islands && fewer_waiting && !stopped) return heal_from_(reachability);
+            if (heals_again(islands, islands_waiting_, waiting_before_) && !stopped) return heal_from_(reachability);
             tally_.verdict = concluded_verdict(tally_);
             phase_ = phase_t::done_k;
         }
@@ -3255,12 +3037,12 @@ struct ram_index {
          *  neighborhood, or the next phase opens. */
         void advance_round_() noexcept {
             switch (phase_) {
-            case phase_t::heal_k: phase_ = phase_t::draw_hubs_k; break;
-            case phase_t::draw_hubs_k:
+            case phase_t::heal_k: phase_ = phase_t::hubs_k; break;
+            case phase_t::hubs_k:
                 draw_hubs_();
-                phase_ = phase_t::gather_neighborhoods_k;
+                phase_ = phase_t::gather_k;
                 break;
-            case phase_t::gather_neighborhoods_k:
+            case phase_t::gather_k:
                 // Neighborhoods over capacity gather again among their own entries.
                 order_neighborhoods_();
                 if (tally_.widest_neighborhood <= neighborhood_capacity_) phase_ = phase_t::restitch_k;
@@ -3275,11 +3057,11 @@ struct ram_index {
             tally_.verdict = refine_verdict_t::stopped_k;
             switch (phase_) {
             case phase_t::health_k:
-                if (swept_after_ == phase_t::opening_k) phase_ = phase_t::done_k;
+                if (swept_after_ == phase_t::none_k) phase_ = phase_t::done_k;
                 break;
             case phase_t::heal_k: phase_ = phase_t::done_k; break;
-            case phase_t::draw_hubs_k:
-            case phase_t::gather_neighborhoods_k:
+            case phase_t::hubs_k:
+            case phase_t::gather_k:
             case phase_t::restitch_k: open_health_(phase_t::restitch_k); break;
             default: break;
             }
@@ -3338,13 +3120,10 @@ struct ram_index {
             heal_from_(opening);
         }
 
-        /** Seeds the draws from the health check @p measured, so a round over a changed graph draws
-         *  anew while the ID order decides nothing, and opens the heal of the islands it named. */
+        /** Seeds the draws from the health check @p measured and opens the heal of the islands it
+         *  named, counting anew the ones it leaves waiting. */
         void heal_from_(reachability_t const& measured) noexcept {
-            round_seed_ = mix_bits(
-                measured.audited_nodes ^
-                mix_bits(measured.reachable_nodes ^
-                         mix_bits(measured.unlinked ^ mix_bits(measured.underlinked ^ measured.depth_from_root))));
+            round_seed_ = round_seed(measured);
             waiting_before_ = std::exchange(islands_waiting_, 0);
             phase_ = health.visible ? phase_t::heal_k : phase_t::done_k;
         }
@@ -3732,46 +3511,12 @@ struct ram_index {
         /** Per entry, whether the round counted it changed already. */
         growing_bitset_t changed_;
 
-        /** The index a split empties once its rows publish in the receivers; null otherwise. */
-        ram_index* split_donor_ = nullptr;
-
-        /** The caller's receiver slots of a split, one part each; empty otherwise. */
-        std::span<ram_index*> receivers_;
-
-        /** One claim of the part capacity per receiver, its rows released unless the scatter
-         *  published them. */
-        growing_buffer<capacity_claim_t, part_bases_allocator_t> receiver_claims_;
-
-        /** Per source row: its part times the part capacity, plus its row in that receiver. */
-        part_bases_t part_slots_;
-
-        /** Per part, a run of the part capacity: its source nodes in receiver order. */
-        part_bases_t part_members_;
-
-        /** One part's rows, and how many of them its growth expanded. */
-        struct part_extent_t {
-            node_id_t nodes = 0;
-            node_id_t expanded = 0;
-        };
-
-        /** Per part, its extent. */
-        growing_buffer<part_extent_t, part_bases_allocator_t> part_extents_;
-
-        /** What picks the parts' roots. */
-        u64_t seed_ = 0;
-
-        /** Receivers whose rounds ended so far; the bound one is the next. */
-        std::size_t refined_receivers_ = 0;
-
-        /** The reports of the receivers' rounds ended so far, folded. */
-        refine_report_t receivers_tally_ {};
-
         /** The phase whose tasks run now. */
         phase_t phase_ = phase_t::done_k;
 
-        /** The phase the current health check follows - what decides the phase
-         *  after it converges. */
-        phase_t swept_after_ = phase_t::opening_k;
+        /** The phase the current health check follows, none for the opening one - what decides the
+         *  phase after it converges. */
+        phase_t swept_after_ = phase_t::none_k;
 
         /** Island components the last heal could not link, having no link to or from the root's,
          *  and those the heal before it could not, which the repeats must shrink. */
@@ -3827,21 +3572,20 @@ struct ram_index {
      *  @par Statuses:
      *  - @c bad_alloc_k The audit or the round's columns cannot be placed.
      */
-    expected<refine_plan_t> plan_round(refine_config_t config = {}) noexcept {
-        using phase_t = typename refine_plan_t::phase_t;
+    expected<refine_plan_t> plan_refine(refine_config_t config = {}) noexcept {
         auto [health, status] = plan_health();
         refine_plan_t plan {std::move(health), typename refine_plan_t::part_bases_allocator_t {vectors_allocator_}};
         if (failed(status)) return {std::move(plan), status};
         plan.index_ = this;
         if (failed(plan.reserve_round_(config.cache_bytes))) return {std::move(plan), status_t::bad_alloc_k};
-        plan.swept_after_ = phase_t::opening_k;
+        plan.swept_after_ = phase_t::none_k;
         plan.phase_ = phase_t::health_k;
         return {std::move(plan), status_t::success_k};
     }
 
     /**
      *  @brief Runs one refinement round over every published node on the calling thread: one
-     *      @ref plan_round, its tasks drained in order.
+     *      @ref plan_refine, its tasks drained in order.
      *
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
      *  @param[in,out] context The calling thread's scratch & telemetry, reused across rounds.
@@ -3851,7 +3595,7 @@ struct ram_index {
      *  - @c bad_alloc_k The plan's columns cannot be placed, or @p context cannot fit a task.
      */
     expected<refine_report_t> refine(refine_config_t config, traversal_context_t& context) noexcept {
-        auto [plan, status] = plan_round(config);
+        auto [plan, status] = plan_refine(config);
         if (failed(status)) return {{}, status};
         if (status_t const sized = reserve_traversal(context, insert_config_t {non_zero_expansion_factor(config)});
             failed(sized))
@@ -3865,51 +3609,382 @@ struct ram_index {
     }
 
     /**
-     *  @brief Opens a split of this index into @p receivers: its plan's first phases copy every row
-     *      into one graph-local part per receiver, then run one round on every receiver in turn;
-     *      the source ends empty.
+     *  @brief One reshard in flight out of one source into its targets: the moves, then one round
+     *      on every target in turn.
      *
-     *  The one partition task grows the parts breadth first over the links, one root per part
-     *  through @ref seeded_bijection under the config's seed, each part capped at the rows over the
-     *  receivers rounded up; rows no growth reached seed the smallest part. Scatter tasks copy each
-     *  row's key, vector, norms and neighbors into its receiver, the links inside its part rebased
-     *  and the links across dropped, one task per receiver then files its keys, and the phase
-     *  boundary publishes every receiver's rows, then forgets this index's, so its IDs restart from
-     *  zero. Every receiver then runs one round as @ref plan_round does, which links in what the
-     *  dropped links left apart, and the result sums over the receivers.
-     *  A plan dying before the scatter published releases the receivers' claims and leaves this
-     *  index as it was.
+     *  The partition grows the source's rows into one graph-local part per target, breadth first
+     *  over the links, one root per part through @ref seeded_bijection under the config's seed,
+     *  each part capped at the rows over the targets rounded up; rows no growth reached seed the
+     *  smallest part. Scatter tasks copy each row's key, vector, norms and links into its target,
+     *  the links inside its part rebased and the links across dropped, one write task per target
+     *  files its keys, and the barrier closing the writes publishes every target's rows, then
+     *  forgets the source's, so its IDs restart from zero. Every target then runs one round as
+     *  @ref refine_plan_t does, which links in what the dropped links left apart, the rounds
+     *  summing over the targets; @ref next_round runs another round on every target.
      *
-     *  Every fallible step happens here: a full part's rows claimed in every receiver, and one
-     *  audit and one round's columns over a full part, everything the plan keeps on this index's
-     *  own allocator. The tasks cannot fail on contexts @c refine_plan_t::reserve grew past the
-     *  plan's expansion factor. Nothing may insert into this index or a receiver meanwhile, nor
-     *  search this one; the sharded index closes the dispensers, and a direct caller keeps the
-     *  others out itself.
+     *  The plan owns its target list and every claim, so a plan dying before the writes published
+     *  releases the targets' claims and leaves the source as it was. Tasks of one phase are
+     *  disjoint, and @ref advance is the single-caller barrier, as in @ref refine_plan_t.
+     */
+    struct reshard_plan_t {
+        using task_t = typename refine_plan_t::task_t;
+        using part_bases_allocator_t = typename refine_plan_t::part_bases_allocator_t;
+        using part_bases_t = typename refine_plan_t::part_bases_t;
+
+        /** An unbound plan placed by @p allocator - what a refused plan answers with. */
+        explicit reshard_plan_t(refine_plan_t&& rounds, part_bases_allocator_t const& allocator) noexcept
+            : rounds_(std::move(rounds)), targets_(allocator), target_claims_(allocator), part_slots_(allocator),
+              part_members_(allocator), part_extents_(allocator) {}
+        reshard_plan_t(reshard_plan_t&& other) noexcept
+            : rounds_(std::move(other.rounds_)), source_(std::exchange(other.source_, nullptr)),
+              targets_(std::move(other.targets_)), target_claims_(std::move(other.target_claims_)),
+              part_slots_(std::move(other.part_slots_)), part_members_(std::move(other.part_members_)),
+              part_extents_(std::move(other.part_extents_)), seed_(other.seed_), moves_(other.moves_),
+              refined_targets_(other.refined_targets_), targets_tally_(other.targets_tally_) {}
+        reshard_plan_t(reshard_plan_t const&) = delete;
+        reshard_plan_t& operator=(reshard_plan_t const&) = delete;
+
+        /** Task @p position of the current phase: the whole partition, a source row scattered, a
+         *  target's keys, or a task of the bound target's round; past the end, an empty task. */
+        task_t operator[](std::size_t position) const noexcept {
+            if (!moving()) return rounds_[position];
+            task_t task;
+            if (position >= tasks().size()) return task;
+            task.position = position;
+            if (moves_ == phase_t::partition_k) task.nodes = {0, split_nodes_()};
+            else if (moves_ == phase_t::write_k) task.nodes = {0, part_extents_[position].nodes};
+            else task.nodes = {static_cast<node_id_t>(position), static_cast<node_id_t>(position + 1)};
+            return task;
+        }
+
+        /** The current phase's tasks, positionally: one partition, a scatter per source row, a
+         *  write per target, then the bound target's round. */
+        indexed_range<reshard_plan_t> tasks() const noexcept {
+            if (!moving()) return {this, rounds_.tasks().size()};
+            if (moves_ == phase_t::partition_k) return {this, 1u};
+            if (moves_ == phase_t::write_k) return {this, targets_.size()};
+            return {this, std::size_t {split_nodes_()}};
+        }
+
+        /**
+         *  @brief Runs @p task of the current phase on the calling thread - safe for disjoint tasks
+         *      of one phase, and never failing on a bound plan once @ref reserve grew @p context.
+         *
+         *  The one partition task grows the parts, a scatter task copies one source row into its
+         *  target, and a write task files one target's keys, its map's one writer; the rounds run
+         *  as @ref refine_plan_t::run does.
+         *
+         *  @par Statuses:
+         *  - @c uninitialized_k The plan is bound to no source.
+         */
+        status_t run(task_t const& task, traversal_context_t& context) noexcept {
+            if (!rounds_.index_) return status_t::uninitialized_k;
+            switch (moves_) {
+            case phase_t::partition_k: partition_(); break;
+            case phase_t::scatter_k: scatter_(task); break;
+            case phase_t::write_k: targets_[task.position]->keyed_.publish(task.nodes); break;
+            default: return rounds_.run(task, context);
+            }
+            return status_t::success_k;
+        }
+
+        /** The barrier between phases, one caller after every task of the current one ran:
+         *  publishes the parts once their keys are written, binds the next target once a round
+         *  ended, and answers whether a phase follows. */
+        bool advance() noexcept {
+            if (!rounds_.index_ || failed(rounds_.status_)) return false;
+            if (moves_ == phase_t::partition_k) return moves_ = phase_t::scatter_k, true;
+            if (moves_ == phase_t::scatter_k) return moves_ = phase_t::write_k, true;
+            if (moves_ == phase_t::write_k) {
+                publish_parts_();
+                moves_ = phase_t::done_k;
+                bind_target_();
+                return true;
+            }
+            if (rounds_.advance()) return true;
+            // A plan whose last target's round ended settles nothing more.
+            if (failed(rounds_.status_) || refined_targets_ == targets_.size()) return false;
+            return settle_target_();
+        }
+
+        /** Stops the bound target's round as @ref refine_plan_t::stop does, past the moves. */
+        void stop() noexcept {
+            if (!moving()) rounds_.stop();
+        }
+
+        /** Whether the current phase moves rows or keys - the phases no stop skips. */
+        bool moving() const noexcept { return moves_ != phase_t::done_k; }
+
+        /** Whether the bound target is inside a round. */
+        bool rounding() const noexcept { return !moving() && rounds_.rounding(); }
+
+        /** The phase the plan is in: a move's, then the bound target's round's. */
+        phase_t phase() const noexcept { return moving() ? moves_ : rounds_.phase(); }
+
+        /** Where the round's phase sits among its six; zero in the moves. */
+        std::size_t ordinal() const noexcept { return moving() ? 0 : rounds_.ordinal(); }
+
+        /** Units of the round's phase done and in all; none in the moves, which report nothing. */
+        std::size_t completed() const noexcept { return moving() ? 0 : rounds_.completed(); }
+        std::size_t total() const noexcept { return moving() ? 0 : rounds_.total(); }
+
+        /** The first failure the plan met, which ended it; success otherwise. */
+        status_t status() const noexcept { return rounds_.status(); }
+
+        /** Grows @p context to what a round's task touches, as @ref refine_plan_t::reserve does. */
+        status_t reserve(traversal_context_t& context) const noexcept { return rounds_.reserve(context); }
+
+        /** Runs another round on every target once every target's ended, from the first; a no-op
+         *  in the moves and mid-round. */
+        void next_round() noexcept {
+            if (moving() || rounds_.phase_ != phase_t::done_k || failed(rounds_.status_)) return;
+            refined_targets_ = 0;
+            bind_target_();
+        }
+
+        /**
+         *  @brief The rounds so far, summed over the targets: complete once @ref advance answered
+         *      false, else cancelled.
+         *
+         *  @par Statuses:
+         *  - @c uninitialized_k The plan is bound to no source.
+         *  - @c cancelled_k The moves or a round stopped before @ref advance answered false.
+         *  - @c bad_alloc_k A health check could not place its islands' adjacency.
+         */
+        expected<refine_report_t> finish() const noexcept {
+            if (!rounds_.index_) return {{}, status_t::uninitialized_k};
+            if (moving()) return {{}, status_t::cancelled_k};
+            return rounds_.finish();
+        }
+
+      private:
+        friend ram_index;
+
+        /** Rows the source published at planning: one slot each. */
+        node_id_t split_nodes_() const noexcept { return static_cast<node_id_t>(part_slots_.size()); }
+
+        /** The most rows one part takes: the source's rows over the targets, rounded up. */
+        std::size_t part_capacity_() const noexcept {
+            return divide_round_up<std::size_t>(part_slots_.size(), targets_.size());
+        }
+
+        /** Calls @p callback with every live link of source row @p node, skipping the self-loop of
+         *  a published-empty row; reads plain, since nothing writes the source meanwhile. */
+        template <typename callback_type_>
+        void for_each_link_(node_id_t node, callback_type_&& callback) const noexcept {
+            node_ids_view_t const links = static_cast<ram_index const&>(*source_).neighbors_for(
+                chunk_schedule_t::locate(node));
+            for (std::size_t slot = 0; slot != links.size() && links[slot] != node_id_unknown_k; ++slot)
+                if (links[slot] != node) callback(links[slot]);
+        }
+
+        /** Places source node @p node last in @p part, its slot naming the part and position. */
+        void enlist_(node_id_t node, std::size_t part) noexcept {
+            std::size_t const position = part_extents_[part].nodes++, capacity = part_capacity_();
+            part_members_[part * capacity + position] = node;
+            part_slots_[node] = static_cast<node_id_t>(part * capacity + position);
+        }
+
+        /** Expands the oldest unexpanded member of @p part, enlisting its unplaced neighbors while
+         *  the part has room; answers whether the part could expand at all. */
+        bool expand_(std::size_t part) noexcept {
+            node_id_t& expanded = part_extents_[part].expanded;
+            std::size_t const capacity = part_capacity_();
+            if (expanded == part_extents_[part].nodes || part_extents_[part].nodes == capacity) return false;
+            node_id_t const node_id = part_members_[part * capacity + expanded++];
+            node_id_t const split_nodes = split_nodes_();
+            for_each_link_(node_id, [&](node_id_t target) noexcept {
+                if (target < split_nodes && part_slots_[target] == node_id_unknown_k &&
+                    part_extents_[part].nodes != capacity)
+                    enlist_(target, part);
+            });
+            return true;
+        }
+
+        /** Grows one part per target from a root the seed picks, breadth first over the source's
+         *  links and one expansion per part in turn, each capped at the part capacity; every node
+         *  left unplaced then seeds a growth of the smallest part. Every node's slot names its part
+         *  and its ID in the target, in the order the growth enlisted it. */
+        void partition_() noexcept {
+            std::size_t const parts = targets_.size();
+            node_id_t const split_nodes = split_nodes_();
+            for (node_id_t& slot : part_slots_) slot = node_id_unknown_k;
+            for (std::size_t part = 0; part != parts; ++part) part_extents_[part] = {};
+            for (std::size_t part = 0; part != parts && part != split_nodes; ++part)
+                enlist_(static_cast<node_id_t>(seeded_bijection(part, split_nodes, seed_)), part);
+            for (std::size_t expanded = parts; expanded;) {
+                expanded = 0;
+                for (std::size_t part = 0; part != parts; ++part) expanded += expand_(part);
+            }
+            for (node_id_t node = 0; node != split_nodes; ++node) {
+                if (part_slots_[node] != node_id_unknown_k) continue;
+                std::size_t smallest = 0;
+                for (std::size_t part = 1; part != parts; ++part)
+                    if (part_extents_[part].nodes < part_extents_[smallest].nodes) smallest = part;
+                enlist_(node, smallest);
+                while (expand_(smallest)) {}
+            }
+        }
+
+        /** Copies the source nodes of @p task into their targets' claimed rows - keys, vectors,
+         *  norms, and the links inside each part rebased through its slots, the links across
+         *  dropped, a row left with none becoming the published-empty self-loop. */
+        void scatter_(task_t const& task) noexcept {
+            ram_index const& source = *source_;
+            geometry_t const geometry = source.geometry();
+            std::size_t const connectivity = geometry.connectivity;
+            std::size_t const row_bytes = padded_row_values(geometry) * sizeof(scalar_t);
+            std::size_t const capacity = part_capacity_();
+            node_id_t const split_nodes = split_nodes_();
+            for (node_id_t node = task.nodes.first; node < task.nodes.bound; ++node) {
+                std::size_t const slot = part_slots_[node], part = slot / capacity;
+                node_id_t const placed = static_cast<node_id_t>(slot % capacity);
+                ram_index& into = *targets_[part];
+                location_t const from = chunk_schedule_t::locate(node), to = chunk_schedule_t::locate(placed);
+                into.keyed_.assign(placed, source.keyed_[node]);
+                std::memcpy(into.vectors_[to], source.vectors_[from], row_bytes);
+                if (source.stores_norms()) into.norm_ref_for(to) = source.norms_[from];
+                node_id_t* const links = into.neighbors_[to];
+                std::size_t kept = 0;
+                for_each_link_(node, [&](node_id_t target) noexcept {
+                    if (target < split_nodes && part_slots_[target] / capacity == part)
+                        links[kept++] = static_cast<node_id_t>(part_slots_[target] % capacity);
+                });
+                if (!kept) links[kept++] = placed;
+                for (std::size_t tail = kept; tail != connectivity; ++tail) links[tail] = node_id_unknown_k;
+            }
+        }
+
+        /** Publishes every target's nodes, consuming the claim of a full part and returning what
+         *  the part left unused, then empties the source. */
+        void publish_parts_() noexcept {
+            std::size_t const capacity = part_capacity_();
+            for (std::size_t part = 0; part != targets_.size(); ++part) {
+                ram_index& into = *targets_[part];
+                node_id_t const nodes = part_extents_[part].nodes;
+                target_claims_[part].consume();
+                if (capacity != nodes) into.release_capacity(capacity - nodes);
+                if (!nodes) continue;
+                node_id_t dispensed = 0;
+                atomic_ref<node_id_t>(into.next_dispensed_id_)
+                    .compare_exchange_strong(dispensed, nodes, std::memory_order_release, std::memory_order_relaxed);
+                atomic_ref<node_id_t>(into.last_visible_id_).store(nodes, std::memory_order_release);
+            }
+            std::exchange(source_, nullptr)->forget_(split_nodes_());
+        }
+
+        /** Turns the rounds to the next target: its health check over the rows its part received,
+         *  their changed marks cleared, and its round from an empty count. */
+        void bind_target_() noexcept {
+            std::size_t const target = refined_targets_;
+            rounds_.index_ = targets_[target];
+            rounds_.health.rebind(*rounds_.index_, part_extents_[target].nodes);
+            // Within what planning reserved for a full part.
+            [[maybe_unused]] status_t const unchanged = rounds_.changed_.resize(
+                health_plan_t::words_for(rounds_.health.visible));
+            rounds_.tally_ = {};
+            rounds_.swept_after_ = phase_t::none_k;
+            rounds_.phase_ = phase_t::health_k;
+        }
+
+        /** Folds an ended round into the reshard's, then binds the next target and answers true,
+         *  or leaves the sums in the rounds once the last target's round ended. */
+        bool settle_target_() noexcept {
+            if (refined_targets_) targets_tally_ += rounds_.tally_;
+            else targets_tally_ = rounds_.tally_;
+            if (++refined_targets_ == targets_.size()) return rounds_.tally_ = targets_tally_, false;
+            bind_target_();
+            return true;
+        }
+
+        /** One round's columns over a full part, rebound to every target in turn. */
+        refine_plan_t rounds_;
+
+        /** The index the reshard empties once its rows publish in the targets; null otherwise. */
+        ram_index* source_ = nullptr;
+
+        /** The targets, one part each, copied at planning. */
+        growing_buffer<ram_index*,
+                       typename std::allocator_traits<part_bases_allocator_t>::template rebind_alloc<ram_index*>>
+            targets_;
+
+        /** One claim of the part capacity per target, its rows released unless the writes
+         *  published them. */
+        growing_buffer<capacity_claim_t, part_bases_allocator_t> target_claims_;
+
+        /** Per source row: its part times the part capacity, plus its row in that target. */
+        part_bases_t part_slots_;
+
+        /** Per part, a run of the part capacity: its source nodes in target order. */
+        part_bases_t part_members_;
+
+        /** One part's rows, and how many of them its growth expanded. */
+        struct part_extent_t {
+            node_id_t nodes = 0;
+            node_id_t expanded = 0;
+        };
+
+        /** Per part, its extent. */
+        growing_buffer<part_extent_t, part_bases_allocator_t> part_extents_;
+
+        /** What picks the parts' roots. */
+        u64_t seed_ = 0;
+
+        /** The phase of the moves still pending; done once the parts published. */
+        phase_t moves_ = phase_t::done_k;
+
+        /** Targets whose rounds ended so far; the bound one is the next. */
+        std::size_t refined_targets_ = 0;
+
+        /** The reports of the targets' rounds ended so far, folded. */
+        refine_report_t targets_tally_ {};
+    };
+
+    /**
+     *  @brief Opens a reshard of @p sources into @p targets: this index, the one source, moves into
+     *      one graph-local part per target, then every target runs one round, as
+     *      @ref reshard_plan_t describes; the source ends empty.
      *
-     *  @param[in] receivers The empty indexes taking the parts, at least two, all distinct; the
-     *      slots must outlive the plan.
-     *  @param[in] config The refine's knobs, zeros meaning "derive from connectivity", and the seed
+     *  Every fallible step happens here: the target list copied, a full part's rows claimed in
+     *  every target, and one audit and one round's columns over a full part, everything the plan
+     *  keeps on this index's own allocator. The tasks cannot fail on contexts
+     *  @c reshard_plan_t::reserve grew past the plan's expansion factor. Nothing may insert into
+     *  this index or a target meanwhile, nor search this one; the sharded index closes the
+     *  dispensers, and a direct caller keeps the others out itself.
+     *
+     *  @param[in] sources This index alone: a RAM mono-index moves one source into its targets.
+     *  @param[in] targets The empty indexes taking the parts, at least two, all distinct.
+     *  @param[in] config The rounds' knobs, zeros meaning "derive from connectivity", and the seed
      *      picking the parts' roots, so equal seeds over equal graphs split alike.
      *
      *  @par Statuses:
-     *  - @c config_mismatch_k Fewer than two receivers, a null, repeated or non-empty one, this
-     *    index itself, another metric or another geometry.
-     *  - @c contended_k An insertion in flight on this index or on a receiver.
+     *  - @c invalid_argument_k No source, no target, or a null or repeated index in either list.
+     *  - @c unsupported_k Several sources and several targets.
+     *  - @c config_mismatch_k Sources other than this index alone, fewer than two targets, a
+     *    non-empty one, this index itself, another metric or another geometry.
+     *  - @c contended_k An insertion in flight on this index or on a target.
+     *  - @c overflow_k The parts pass the 32-bit ID space.
      */
-    expected<refine_plan_t> plan_split(std::span<ram_index*> receivers, split_config_t config = {}) noexcept {
-        using phase_t = typename refine_plan_t::phase_t;
+    expected<reshard_plan_t> plan_reshard(std::span<ram_index* const> sources, std::span<ram_index* const> targets,
+                                          reshard_config_t config = {}) noexcept {
         using bitset_allocator_t = typename health_plan_t::bitset_allocator_t;
-        refine_plan_t plan {health_plan_t {bitset_allocator_t {vectors_allocator_}},
-                            typename refine_plan_t::part_bases_allocator_t {vectors_allocator_}};
-        std::size_t const parts = receivers.size();
-        if (parts < 2) return {std::move(plan), status_t::config_mismatch_k};
-        for (std::size_t receiver = 0; receiver != parts; ++receiver) {
-            ram_index const* into = receivers[receiver];
-            if (!into || into == this || into->kernel_ != kernel_ || into->size() || into->geometry() != geometry_)
+        using part_bases_allocator_t = typename refine_plan_t::part_bases_allocator_t;
+        reshard_plan_t plan {refine_plan_t {health_plan_t {bitset_allocator_t {vectors_allocator_}},
+                                            part_bases_allocator_t {vectors_allocator_}},
+                             part_bases_allocator_t {vectors_allocator_}};
+        std::size_t const parts = targets.size();
+        if (sources.empty() || targets.empty()) return {std::move(plan), status_t::invalid_argument_k};
+        for (std::span<ram_index* const> const listed : {sources, targets})
+            for (std::size_t position = 0; position != listed.size(); ++position) {
+                if (!listed[position]) return {std::move(plan), status_t::invalid_argument_k};
+                for (std::size_t earlier = 0; earlier != position; ++earlier)
+                    if (listed[earlier] == listed[position]) return {std::move(plan), status_t::invalid_argument_k};
+            }
+        if (sources.size() > 1 && parts > 1) return {std::move(plan), status_t::unsupported_k};
+        if (sources.front() != this || parts < 2) return {std::move(plan), status_t::config_mismatch_k};
+        for (ram_index const* into : targets) {
+            if (into == this || into->kernel_ != kernel_ || into->size() || into->geometry() != geometry_)
                 return {std::move(plan), status_t::config_mismatch_k};
-            for (std::size_t earlier = 0; earlier != receiver; ++earlier)
-                if (receivers[earlier] == into) return {std::move(plan), status_t::config_mismatch_k};
             if (!into->settled_()) return {std::move(plan), status_t::contended_k};
         }
         if (!settled_()) return {std::move(plan), status_t::contended_k};
@@ -3918,30 +3993,32 @@ struct ram_index {
         std::size_t const capacity = divide_round_up<std::size_t>(rows, parts);
         if (parts * capacity > static_cast<std::size_t>(node_id_unknown_k))
             return {std::move(plan), status_t::overflow_k};
-        if (failed(plan.receiver_claims_.reserve_exactly(parts)) || failed(plan.part_extents_.resize(parts)) ||
-            failed(plan.part_slots_.resize(rows)) || failed(plan.part_members_.resize(parts * capacity)))
+        if (failed(plan.targets_.reserve_exactly(parts)) || failed(plan.target_claims_.reserve_exactly(parts)) ||
+            failed(plan.part_extents_.resize(parts)) || failed(plan.part_slots_.resize(rows)) ||
+            failed(plan.part_members_.resize(parts * capacity)))
             return {std::move(plan), status_t::bad_alloc_k};
-        // One audit over a full part sweeps every receiver in turn, rebound as its turn comes.
+        for (ram_index* into : targets) plan.targets_.push_back_reserved(into);
+        // One audit over a full part sweeps every target in turn, rebound as its turn comes.
         auto [health, health_status] = plan_audit_(static_cast<node_id_t>(capacity));
         if (failed(health_status)) return {std::move(plan), health_status};
-        plan.health = std::move(health);
-        // A full part's rows in every receiver, claimed from its empty watermark, die with the plan
-        // unless the scatter publishes them.
-        for (ram_index* into : receivers) {
+        plan.rounds_.health = std::move(health);
+        // A full part's rows in every target, claimed from its empty watermark, die with the plan
+        // unless the writes publish them.
+        for (ram_index* into : targets) {
             auto [claimed, claim_status] = into->claim(capacity);
             if (failed(claim_status)) return {std::move(plan), claim_status};
             bool const based = claimed.base() == 0;
-            plan.receiver_claims_.push_back_reserved(std::move(claimed));
+            plan.target_claims_.push_back_reserved(std::move(claimed));
             if (!based) return {std::move(plan), status_t::contended_k};
         }
 
-        // One round's columns over a full part serve every receiver in turn.
-        plan.index_ = receivers[0];
-        if (failed(plan.reserve_round_(config.refine.cache_bytes))) return {std::move(plan), status_t::bad_alloc_k};
-        plan.split_donor_ = this;
-        plan.receivers_ = receivers;
+        // One round's columns over a full part serve every target in turn.
+        plan.rounds_.index_ = targets[0];
+        if (failed(plan.rounds_.reserve_round_(config.refine.cache_bytes)))
+            return {std::move(plan), status_t::bad_alloc_k};
+        plan.source_ = this;
         plan.seed_ = config.seed;
-        plan.phase_ = phase_t::partition_k;
+        plan.moves_ = phase_t::partition_k;
         return {std::move(plan), status_t::success_k};
     }
 
@@ -4599,8 +4676,8 @@ struct ram_index {
         }
 
         /**
-         *  @brief The same copy out of @p source 's own chunks rather than columns, as an absorb
-         *      drives it, one donor shard's slice at a time, its task naming the rows in that
+         *  @brief The same copy out of @p source 's own chunks rather than columns, as a reshard
+         *      drives it, one source shard's slice at a time, its task naming the rows in that
          *      shard's row and ID spaces.
          *
          *  Both indexes keep padded rows of one geometry, so every run moves whole with its norms

@@ -75,6 +75,8 @@ __device__ __forceinline__ tangent_frame_t cuda_tangent_frame(earth_fixed_t base
  *  Each lane classifies a candidate by @c octant_of, two integer dot products against the node's
  *  frame, so no distance between candidates is scored. Candidates arrive ascending, so the first
  *  one a cone sees is its nearest, and the kept positions go out ascending.
+ *  The long links are the rule itself, as on the CPU, so a restitch keeps them too and no refill
+ *  flag changes it.
  */
 struct vram_keep_octants_t {
 
@@ -82,7 +84,7 @@ struct vram_keep_octants_t {
     static __device__ __forceinline__ u32_t select( //
         basic::vram_ragged_view<node_id_type_> const& storage, schedule_&, typename kit_::query_t const& query, byte_t*,
         node_id_type_ const* candidate_ids, f32_t const*, u32_t candidates_count, u32_t* kept_positions,
-        vram_telemetry_t&, u32_t lane) noexcept {
+        vram_telemetry_t&, u32_t lane, bool = true) noexcept {
 
         using warp_t = typename kit_::warp_t;
         constexpr u32_t cones_k = static_cast<u32_t>(surface_keep_octants_t::cones_k);

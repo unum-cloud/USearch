@@ -238,19 +238,36 @@ __device__ __forceinline__ void cuda_back_link(vram_build_view<node_id_type_> co
         schedule, view.storage, view.assigned_nodes, 0u, *view.touched_count, slice, [&](u32_t offset) {
             node_id_type_ const node_id = view.touched_ids[offset];
             vram_telemetry_t telemetry;
-            vram_back_link_one<vram_kernel_t::back_link_k, kit_, typename kit_::selector_t>( //
-                view, schedule, node_id, slice.scratch, slice.scratch + view.span_bytes, selection, telemetry, lane,
-                static_cast<node_id_type_ const*>(nullptr), 0);
+            vram_back_link_one<kit_, typename kit_::selector_t>( //
+                view, schedule, node_id, slice.scratch, slice.scratch + view.span_bytes, selection, telemetry, lane);
             if (lane == 0) view.link_heads[node_id] = (std::numeric_limits<node_id_type_>::max)();
             telemetry.template flush<cuda_warp_t, vram_traversal_t::inserting_k>(view.telemetry, lane);
         });
 }
 
-/** One walker merges one target node of a sweep's tile at a time with the run its scatter left,
- *  assigning itself the tile's nodes from the launch counter; a walked node that gains a member
- *  counts as changed once, whichever of its merges gains it. */
+/** One walker files one entry of a gather's runs at a time under its nearest hub, assigning itself
+ *  the runs' positions from the launch counter. */
 template <vram_basic_kit kit_, u32_t rung_, typename node_id_type_>
-__device__ __forceinline__ void cuda_merge_back_links(vram_build_view<node_id_type_> const& view) {
+__device__ __forceinline__ void cuda_gather_neighborhoods(vram_round_view<node_id_type_> const& view) {
+    using schedule_t = cuda_schedule<kit_, rung_, node_id_type_>;
+    extern __shared__ byte_t dynamic_scratch[];
+    __shared__ typename schedule_t::shared_t schedule_state;
+
+    vram_warp_slice_t const slice = vram_carve_slice<cuda_warp_t, node_id_type_>(view, dynamic_scratch);
+    schedule_t schedule {schedule_state};
+    vram_telemetry_t telemetry;
+    cuda_for_each_assigned( //
+        schedule, view.storage, view.assigned, 0u, view.run_entries[view.runs_count], slice,
+        [&](u32_t position) { vram_gather_one<kit_>(view, schedule, position, slice.scratch, telemetry, slice.lane); });
+    telemetry.template flush<cuda_warp_t, vram_traversal_t::searching_k>(view.telemetry, slice.lane);
+}
+
+/** One walker re-stitches one entry of the neighborhoods at a time, assigning itself their
+ *  positions from the launch counter; an entry sits in one neighborhood and its walker alone writes
+ *  its row, so no row is locked, and the links added and dropped and the rows changed add to the
+ *  counters once per warp. */
+template <vram_basic_kit kit_, u32_t rung_, typename node_id_type_>
+__device__ __forceinline__ void cuda_restitch(vram_round_view<node_id_type_> const& view) {
     using schedule_t = cuda_schedule<kit_, rung_, node_id_type_>;
     extern __shared__ byte_t dynamic_scratch[];
     __shared__ typename schedule_t::shared_t schedule_state;
@@ -260,21 +277,20 @@ __device__ __forceinline__ void cuda_merge_back_links(vram_build_view<node_id_ty
     vram_selection_scratch<node_id_type_> const selection = vram_selection_scratch<node_id_type_>::carve(
         slice.scratch + 2 * view.span_bytes, view.selection_nodes);
     schedule_t schedule {schedule_state};
+    vram_telemetry_t telemetry;
+    u32_t added = 0, dropped = 0, changed = 0;
     cuda_for_each_assigned( //
-        schedule, view.storage, view.assigned_nodes, view.first_id, view.end_id, slice, [&](node_id_type_ node_id) {
-            node_id_type_ const row = node_id - view.first_id;
-            u32_t const first = row ? min_of(view.incoming_offsets[row - 1], view.tape_size) : 0u;
-            u32_t const bound = min_of(view.incoming_offsets[row], view.tape_size);
-            if (first == bound) return;
-            vram_telemetry_t telemetry;
-            bool const gained =
-                vram_back_link_one<vram_kernel_t::merge_back_links_k, kit_, typename kit_::selector_t>( //
-                    view, schedule, node_id, slice.scratch, slice.scratch + view.span_bytes, selection, telemetry, lane,
-                    view.back_links + first, bound - first);
-            if (lane == 0 && gained && node_id >= view.walked_first && node_id < view.walked_bound)
-                telemetry.changed_nodes += vram_bitset_insert<cuda_warp_t>(view.changed, node_id);
-            telemetry.template flush<cuda_warp_t, vram_traversal_t::searching_k>(view.telemetry, lane);
+        schedule, view.storage, view.assigned, 0u, view.neighborhood_offsets[view.neighborhoods_count], slice,
+        [&](u32_t position) {
+            vram_restitch_one<kit_, typename kit_::selector_t>( //
+                view, schedule, position, slice.scratch, slice.scratch + view.span_bytes, selection, telemetry, added,
+                dropped, changed, lane);
         });
+    vram_round_counters_t* const counters = view.health.counters;
+    if (lane == 0 && added) cuda_warp_t::fetch_add_relaxed(counters->added_links, added);
+    if (lane == 0 && dropped) cuda_warp_t::fetch_add_relaxed(counters->dropped_links, dropped);
+    if (lane == 0 && changed) cuda_warp_t::fetch_add_relaxed(counters->changed, changed);
+    telemetry.template flush<cuda_warp_t, vram_traversal_t::searching_k>(view.telemetry, lane);
 }
 
 /** One walker per query on the rung of @p slots_, the arena frontier at zero; walkers take queries
@@ -334,13 +350,7 @@ __device__ __forceinline__ vram_build_view<node_id_type_> vram_view(vram_build<n
             build.link_heads,
             build.link_next,
             build.touched_ids,
-            build.touched_count,
-            build.changed,
-            build.incoming_offsets,
-            build.back_links,
-            build.tape_size,
-            build.walked_first,
-            build.walked_bound};
+            build.touched_count};
 }
 template <typename node_id_type_>
 __device__ __forceinline__ vram_search_view<node_id_type_> vram_view(
@@ -365,6 +375,27 @@ __device__ __forceinline__ vram_search_view<node_id_type_> vram_view(
             search.count};
 }
 
+template <typename node_id_type_>
+__device__ __forceinline__ vram_round_view<node_id_type_> vram_view(vram_round<node_id_type_> const& round) noexcept {
+    return {vram_view(round.storage),
+            round.span_bytes,
+            round.scratch_bytes_per_warp,
+            round.arena,
+            vram_view(round.arena_shape),
+            round.selection_nodes,
+            round.telemetry,
+            round.assigned,
+            round.entries,
+            round.hub_nodes,
+            round.runs,
+            round.run_entries,
+            round.runs_count,
+            round.entry_neighborhoods,
+            round.neighborhood_offsets,
+            round.neighborhoods_count,
+            round.health};
+}
+
 #pragma endregion Views
 
 /** The body of every NVIDIA basic kernel: @p kernel_ picks the walk, @p kit_ scores on its
@@ -377,8 +408,9 @@ __device__ __forceinline__ void cuda_kernel_body(vram_arguments<node_id_type_> c
     if constexpr (kernel_ == vram_kernel_t::insert_k || kernel_ == vram_kernel_t::refine_k)
         cuda_insert<kit_, rung_, slots_, kernel_>(vram_view(build));
     else if constexpr (kernel_ == vram_kernel_t::back_link_k) cuda_back_link<kit_, rung_>(vram_view(build));
-    else if constexpr (kernel_ == vram_kernel_t::merge_back_links_k)
-        cuda_merge_back_links<kit_, rung_>(vram_view(build));
+    else if constexpr (kernel_ == vram_kernel_t::gather_neighborhoods_k)
+        cuda_gather_neighborhoods<kit_, rung_>(vram_view(arguments.round));
+    else if constexpr (kernel_ == vram_kernel_t::restitch_k) cuda_restitch<kit_, rung_>(vram_view(arguments.round));
     // Kits without the hook store values as saved and size spans by length; these never launch.
     else if constexpr (kernel_ == vram_kernel_t::load_values_k) {
         if constexpr (requires { kit_::load_values(arguments.load); }) kit_::load_values(arguments.load);

@@ -457,19 +457,20 @@ std::size_t check_shapes_sharded(u64_t seed) {
         return best;
     };
     return test_basic_sharded<chamfer_indexes_t>(
-        seed, metric, std::span<us::utilities::uuid128_t const> {entries.keys}.first(entries_k),
+        seed, metric, chamfer_fixture_t::make_codec(),
+        std::span<us::utilities::uuid128_t const> {entries.keys}.first(entries_k),
         [&] { return entries.values(entries_k); }, query_of, best_of);
 }
 
-/** 600 clouds in a sharded index of two shards split into two sharded indexes of two, as
- *  @c test_basic_sharded_split checks. */
-std::size_t check_shapes_sharded_split(u64_t seed) {
+/** 600 clouds in a sharded index of two shards cut into two sharded indexes of two, as
+ *  @c test_basic_sharded_cut checks. */
+std::size_t check_shapes_sharded_cut(u64_t seed) {
     constexpr std::size_t entries_k = 600;
-    chamfer_entries_t const entries {entries_k, stream_key(seed, "plural_split")};
+    chamfer_entries_t const entries {entries_k, stream_key(seed, "plural_cut")};
     chamfer_fixture_t::metric_t metric = chamfer_fixture_t::make_metric();
-    return test_basic_sharded_split<chamfer_indexes_t>(seed, metric,
-                                                       std::span<us::utilities::uuid128_t const> {entries.keys},
-                                                       [&] { return entries.values(entries_k); });
+    return test_basic_sharded_cut<chamfer_indexes_t>(seed, metric, chamfer_fixture_t::make_codec(),
+                                                     std::span<us::utilities::uuid128_t const> {entries.keys},
+                                                     [&] { return entries.values(entries_k); });
 }
 
 /** Clouds sampled from two shards, as @c test_basic_sharded_sample checks. */
@@ -555,7 +556,7 @@ std::size_t check_shapes(settings_t const& settings) {
     failures += check_shapes_packing<chamfer_fixture_t>(settings.seed);
     failures += check_shapes_packing<procrustes_fixture_t>(settings.seed);
     failures += check_shapes_sharded(settings.seed);
-    failures += check_shapes_sharded_split(settings.seed);
+    failures += check_shapes_sharded_cut(settings.seed);
     failures += check_shapes_sample(settings.seed);
     failures += check_shapes_cursor(settings.seed);
     failures += test_basic_nvme_engines(chamfer_nvme_fixture_t {settings.seed}, "shapes", settings.seed);

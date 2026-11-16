@@ -1179,12 +1179,13 @@ struct vram_nvidia_index {
     using search_config_t = typename core_t::search_config_t;
     using search_result_t = typename core_t::search_result_t;
     using refine_config_t = dense::refine_config_t;
-    using split_config_t = typename core_t::split_config_t;
+    using reshard_config_t = dense::reshard_config_t;
     using refine_report_t = typename core_t::refine_report_t;
     using reachability_t = typename core_t::reachability_t;
 
     /* Plans */
     using refine_plan_t = typename core_t::refine_plan_t;
+    using reshard_plan_t = typename core_t::reshard_plan_t;
     using health_plan_t = typename core_t::health_plan_t;
     using save_plan_t = typename core_t::save_plan_t;
     using load_plan_t = typename core_t::load_plan_t;
@@ -1317,8 +1318,8 @@ struct vram_nvidia_index {
         return core_.traversal_memory_usage(rows, config, head_count, shards);
     }
 
-    std::size_t traversal_memory_usage(refine_config_t config, std::size_t receivers = 0) const noexcept {
-        return core_.traversal_memory_usage(config, receivers);
+    std::size_t traversal_memory_usage(refine_config_t config, std::size_t targets = 0) const noexcept {
+        return core_.traversal_memory_usage(config, targets);
     }
 
     /**
@@ -1457,15 +1458,15 @@ struct vram_nvidia_index {
 
     /**
      *  @brief Opens one refinement round over the published nodes on @p context 's stream, as the
-     *      core's @c plan_round does.
+     *      core's @c plan_refine does.
      *
      *  @par Statuses:
      *  - @c uninitialized_k The index never grew.
      *  - @c config_mismatch_k The @p context rides another device or cannot launch.
      *  - @c bad_alloc_k A column, a mirror, the arena or the counters cannot be placed.
      */
-    expected<refine_plan_t> plan_round(refine_config_t config, traversal_context_t& context) noexcept {
-        return core_.plan_round(config, context);
+    expected<refine_plan_t> plan_refine(refine_config_t config, traversal_context_t& context) noexcept {
+        return core_.plan_refine(config, context);
     }
 
     /**
@@ -1482,20 +1483,37 @@ struct vram_nvidia_index {
     }
 
     /**
-     *  @brief Opens a split of this index into @p receivers on @p context 's stream, as the core's
-     *      @c plan_split does, under the claim words its caller closed.
+     *  @brief Opens a reshard of @p sources into @p targets on @p context 's stream, as the core's
+     *      @c plan_reshard does, under the claim words its caller closed: this index alone into two
+     *      or more empty targets.
      *
      *  @par Statuses:
+     *  - @c invalid_argument_k An empty list, a null index, or an index listed twice.
+     *  - @c unsupported_k A nonzero shard capacity, or any shape but this index alone into two or
+     *    more targets.
      *  - @c uninitialized_k The index never grew.
-     *  - @c config_mismatch_k Fewer than two receivers, a null, repeated or non-empty one, this
-     *    index itself, one of another device, metric or geometry, or a @p context of another
-     *    device or one that cannot walk.
-     *  - @c contended_k This index's or a receiver's claim word is open.
+     *  - @c config_mismatch_k This index among the targets, a non-empty target, one of another
+     *    device, metric or geometry, or a @p context of another device or one that cannot launch.
+     *  - @c contended_k This index's or a target's claim word is open.
      *  - @c overflow_k Part slots past the 32-bit IDs.
+     *  - @c bad_alloc_k A column, a mirror, the arena or the counters cannot be placed.
      */
-    expected<refine_plan_t> plan_split(std::span<vram_nvidia_index*> receivers, split_config_t config,
-                                       traversal_context_t& context) noexcept {
-        return core_.plan_split(receivers, &vram_nvidia_index::core_, config, context);
+    expected<reshard_plan_t> plan_reshard(std::span<vram_nvidia_index* const> sources,
+                                          std::span<vram_nvidia_index* const> targets, reshard_config_t config,
+                                          traversal_context_t& context) noexcept {
+        return core_.plan_reshard(sources, targets, &vram_nvidia_index::core_, config, context);
+    }
+
+    /**
+     *  @brief One @ref plan_reshard driven to its end on the calling thread.
+     *
+     *  @par Statuses:
+     *  - Those of @ref plan_reshard, then @c device_error_k when a launch or a copy failed.
+     */
+    expected<refine_report_t> reshard(std::span<vram_nvidia_index* const> sources,
+                                      std::span<vram_nvidia_index* const> targets, reshard_config_t config,
+                                      traversal_context_t& context) noexcept {
+        return core_.reshard(sources, targets, &vram_nvidia_index::core_, config, context);
     }
 
     /**
@@ -1582,7 +1600,7 @@ struct vram_nvidia_index {
   private:
 
     /** The sharded index walks its shards under one snapshot of their watermarks, merges their
-     *  attends on its first device, and publishes or fails their batches together; a compaction
+     *  attends on its first device, and publishes or fails their batches together; a reshard
      *  maps every shard of a fold bin for the bin's other devices. */
     template <typename, nk_dtype_t, typename, typename, typename, typename>
     friend struct vram_nvidia_indexes;
@@ -1591,7 +1609,7 @@ struct vram_nvidia_index {
     template <typename, typename, typename>
     friend struct utilities::vram_shard_fanout;
     template <typename, typename>
-    friend struct vram_nvidia_compact_plan;
+    friend struct vram_nvidia_reshard_plan;
 
     expected<node_id_t> claim_(std::size_t rows) noexcept { return core_.claim_(rows); }
     std::size_t claimed_() const noexcept { return core_.claimed_(); }

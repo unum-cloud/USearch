@@ -208,8 +208,8 @@ template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
     requires tiles_supported<kernel_, scalar_, caps_>
 static int check_tiles() noexcept {
     nk_capability_t available = 0;
-    if (nk_cpu_capabilities_enabled(&available) != nk_success_k || (available & caps_) != caps_) return 0;
-    if (nk_cpu_configure_thread(available) != nk_success_k) return 0;
+    if (nk_capabilities_enabled_cpu(&available) != nk_success_k || (available & caps_) != caps_) return 0;
+    if (nk_configure_thread_cpu(available) != nk_success_k) return 0;
 
     using tiles_kit_t = typename tiles_ladder<scalar_, caps_>::kit_t;
     using quads_kit_t = typename quads_ladder<scalar_, caps_>::kit_t;

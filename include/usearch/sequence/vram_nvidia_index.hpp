@@ -139,12 +139,13 @@ struct vram_nvidia_index {
     using search_config_t = typename graph_t::search_config_t;
     using search_result_t = typename graph_t::search_result_t;
     using refine_config_t = typename graph_t::refine_config_t;
-    using split_config_t = typename graph_t::split_config_t;
+    using reshard_config_t = typename graph_t::reshard_config_t;
     using refine_report_t = typename graph_t::refine_report_t;
     using reachability_t = typename graph_t::reachability_t;
 
     /* Plans */
     using refine_plan_t = typename graph_t::refine_plan_t;
+    using reshard_plan_t = typename graph_t::reshard_plan_t;
     using save_plan_t = typename graph_t::save_plan_t;
     using load_plan_t = typename graph_t::load_plan_t;
 
@@ -201,24 +202,24 @@ struct vram_nvidia_index {
         return graph_.traversal_memory_usage(config, entries);
     }
     std::size_t traversal_memory_usage(refine_config_t config, std::size_t entries,
-                                       std::size_t receivers) const noexcept {
-        return graph_.traversal_memory_usage(config, entries, receivers);
+                                       std::size_t targets) const noexcept {
+        return graph_.traversal_memory_usage(config, entries, targets);
     }
-    expected<refine_plan_t> plan_refine(iota_view<node_id_t> nodes, refine_config_t config,
-                                        traversal_context_t& context) noexcept {
-        return graph_.plan_refine(nodes, config, context);
+    expected<refine_plan_t> plan_refine(refine_config_t config, traversal_context_t& context) noexcept {
+        return graph_.plan_refine(config, context);
     }
-    expected<refine_report_t> refine(iota_view<node_id_t> nodes, refine_config_t config,
-                                     traversal_context_t& context) noexcept {
-        return graph_.refine(nodes, config, context);
+    expected<refine_report_t> refine(refine_config_t config, traversal_context_t& context) noexcept {
+        return graph_.refine(config, context);
     }
-    expected<refine_plan_t> plan_absorb(std::span<vram_nvidia_index*> donors, refine_config_t config,
-                                        traversal_context_t& context) noexcept {
-        return graph_.plan_absorb(donors, &vram_nvidia_index::graph_, config, context);
+    expected<reshard_plan_t> plan_reshard(std::span<vram_nvidia_index* const> sources,
+                                          std::span<vram_nvidia_index* const> targets, reshard_config_t config,
+                                          traversal_context_t& context) noexcept {
+        return graph_.plan_reshard(sources, targets, &vram_nvidia_index::graph_, config, context);
     }
-    expected<refine_plan_t> plan_split(std::span<vram_nvidia_index*> receivers, split_config_t config,
-                                       traversal_context_t& context) noexcept {
-        return graph_.plan_split(receivers, &vram_nvidia_index::graph_, config, context);
+    expected<refine_report_t> reshard(std::span<vram_nvidia_index* const> sources,
+                                      std::span<vram_nvidia_index* const> targets, reshard_config_t config,
+                                      traversal_context_t& context) noexcept {
+        return graph_.reshard(sources, targets, &vram_nvidia_index::graph_, config, context);
     }
     expected<reachability_t> health(traversal_context_t& context) noexcept { return graph_.health(context); }
 

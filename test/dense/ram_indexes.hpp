@@ -38,6 +38,15 @@ using ram_indexes_for = ram_indexes<uuid128_t, quads_kit_of<dtype_, cpu_class_>,
                                     elementwise_kit_of<cpu_class_>, rmscast_kit_of<dtype_, cpu_class_>,
                                     visits_kit_of<cpu_class_>, waiter_type_, atomic_ref_>;
 
+/** Reshards @p source into @p target, which leads its own sources and keeps its shards. */
+template <typename indexes_type_>
+static expected<reshard_report_t> ram_indexes_gather(indexes_type_& target, indexes_type_& source,
+                                                     typename indexes_type_::executor_t& executor) {
+    std::array<indexes_type_*, 2> const sources {&target, &source};
+    std::array<indexes_type_*, 1> const targets {&target};
+    return reshard(std::span<indexes_type_* const> {sources}, std::span<indexes_type_* const> {targets}, executor);
+}
+
 /** No-op sibling picked when the cell cannot be compiled on this target: its serial
  *  kernels are not adapted yet, or the requested kit is absent from the build. */
 template <                                          //
@@ -52,22 +61,22 @@ static std::size_t test_ram_indexes_configuration(char const* name, u64_t) {
 }
 
 /**
- *  @brief An insertion arriving while an absorb into the index runs answers @c contended_k and
- *      places nothing, and an absorb meeting a batch in flight answers the same and leaves the
- *      donor whole; every entry that was placed resolves exactly once.
+ *  @brief An insertion arriving while a gather into the index runs answers @c contended_k and
+ *      places nothing, and a gather meeting a batch in flight answers the same and leaves the
+ *      source whole; every entry that was placed resolves exactly once.
  *
- *  One thread absorbs, retrying while a racing insertion holds a batch in flight, while another
- *  inserts single entries until the absorb returns. A round that sees no refusal refills the donor
+ *  One thread gathers, retrying while a racing insertion holds a batch in flight, while another
+ *  inserts single entries until the gather returns. A round that sees no refusal refills the source
  *  and races again.
  */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
-static std::size_t test_ram_indexes_absorb_refusals(u64_t seed) {
+static std::size_t test_ram_indexes_gather_refusals(u64_t seed) {
     using scalar_t = typename indexes_type_::index_t::scalar_t;
     using key_t = typename indexes_type_::key_t;
     std::size_t failures = 0;
     std::size_t const part = 2 * dense_thread_nodes_k, rounds = 4;
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
-    auto vectors = make_vectors<scalar_t>(part * (rounds + 1), dimensions, stream_key(seed, "indexes_absorb_refusals"));
+    auto vectors = make_vectors<scalar_t>(part * (rounds + 1), dimensions, stream_key(seed, "indexes_gather_refusals"));
     auto rows_of = [&](std::size_t first) { return vectors(nk::range(first, first + part), nk::slice); };
     std::vector<key_t> keys(part * (rounds + 1));
     for (std::size_t row = 0; row != keys.size(); ++row) keys[row] = dense_key<key_t>(1 + row);
@@ -76,62 +85,62 @@ static std::size_t test_ram_indexes_absorb_refusals(u64_t seed) {
     std::array<dense_indexes_executor<indexes_type_>, 2> drivers;
     for (dense_indexes_executor<indexes_type_> const& driver : drivers)
         if (failed(driver.status)) return failures + expect(false);
-    indexes_type_ recipient {kernel_, {dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
-    indexes_type_ donor {kernel_, {dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
-    failures += expect(succeeded(place_shards(recipient)) && succeeded(place_shards(donor)));
-    for (indexes_type_* built : {&recipient, &donor})
+    indexes_type_ target {kernel_, {dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
+    indexes_type_ source {kernel_, {dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
+    failures += expect(succeeded(place_shards(target)) && succeeded(place_shards(source)));
+    for (indexes_type_* built : {&target, &source})
         failures += expect(succeeded(built->reserve({part * (rounds + 1)}).status));
-    failures += expect(succeeded(recipient.insert(keys_of(0), rows_of(0), drivers[0].executor).status));
-    failures += expect(succeeded(donor.insert(keys_of(part), rows_of(part), drivers[1].executor).status));
+    failures += expect(succeeded(target.insert(keys_of(0), rows_of(0), drivers[0].executor).status));
+    failures += expect(succeeded(source.insert(keys_of(part), rows_of(part), drivers[1].executor).status));
 
     // Racing entries take keys past every part's, so each resolves to the one entry it placed.
     std::vector<key_t> inserted_keys;
     u64_t next_number = keys.size() + 1;
     key_t next_key = dense_key<key_t>(next_number);
     {
-        auto [plan, plan_status] = recipient.plan_insert(1, drivers[0].executor);
+        auto [plan, plan_status] = target.plan_insert(1, drivers[0].executor);
         failures += expect(succeeded(plan_status));
         failures += expect_eq(plan.insert(0, std::span<key_t const> {&next_key, 1}, vectors(nk::range(0, 1), nk::slice),
                                           to_writable_span(drivers[0].traversals)),
                               status_t::success_k);
-        failures += expect_eq(recipient.absorb(donor, {}, drivers[1].executor).status, status_t::contended_k);
-        failures += expect_eq(donor.size(), part);
+        failures += expect_eq(ram_indexes_gather(target, source, drivers[1].executor).status, status_t::contended_k);
+        failures += expect_eq(source.size(), part);
         failures += expect(succeeded(plan.finish().status));
         inserted_keys.push_back(next_key);
         next_key = dense_key<key_t>(++next_number);
     }
 
-    dense_indexes_row_driver<indexes_type_> rows_driver {recipient, drivers[0]};
+    dense_indexes_row_driver<indexes_type_> rows_driver {target, drivers[0]};
     failures += expect(succeeded(rows_driver.status));
     fu::flat_pool_t pool;
     if (fu::failed(pool.spawn(2))) return failures + expect(false);
-    std::size_t refused = 0, unexpected = 0, absorbed_entries = 0;
+    std::size_t refused = 0, unexpected = 0, gathered_entries = 0;
     for (std::size_t round = 0; round != rounds && !refused; ++round) {
-        // A consumed donor stays closed and sealed, so every round absorbs a fresh one.
+        // A consumed source stays closed and sealed, so every round gathers a fresh one.
         if (round) {
-            donor =
+            source =
                 indexes_type_ {kernel_, {dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
-            failures += expect(succeeded(place_shards(donor)));
-            failures += expect(succeeded(donor.reserve({part}).status));
+            failures += expect(succeeded(place_shards(source)));
+            failures += expect(succeeded(source.reserve({part}).status));
             failures += expect(succeeded(
-                donor.insert(keys_of(part * (round + 1)), rows_of(part * (round + 1)), drivers[1].executor).status));
+                source.insert(keys_of(part * (round + 1)), rows_of(part * (round + 1)), drivers[1].executor).status));
         }
-        bool absorbing = false, absorbed = false;
-        status_t absorb_status = status_t::success_k;
+        bool gathering = false, gathered = false;
+        status_t gather_status = status_t::success_k;
         pool.for_threads([&](std::size_t thread) noexcept {
             if (thread == 0) {
-                fu::standard_atomic_ref<bool>(absorbing).store(true, std::memory_order_release);
-                do absorb_status = recipient.absorb(donor, {}, drivers[1].executor).status;
-                while (absorb_status == status_t::contended_k);
-                fu::standard_atomic_ref<bool>(absorbed).store(true, std::memory_order_release);
+                fu::standard_atomic_ref<bool>(gathering).store(true, std::memory_order_release);
+                do gather_status = ram_indexes_gather(target, source, drivers[1].executor).status;
+                while (gather_status == status_t::contended_k);
+                fu::standard_atomic_ref<bool>(gathered).store(true, std::memory_order_release);
             }
             else if (thread == 1) {
-                while (!fu::standard_atomic_ref<bool>(absorbing).load(std::memory_order_acquire))
+                while (!fu::standard_atomic_ref<bool>(gathering).load(std::memory_order_acquire))
                     std::this_thread::yield();
-                for (std::size_t row = 0; !fu::standard_atomic_ref<bool>(absorbed).load(std::memory_order_acquire);
+                for (std::size_t row = 0; !fu::standard_atomic_ref<bool>(gathered).load(std::memory_order_acquire);
                      row = (row + 1) % part) {
                     status_t const status =
-                        recipient.insert(next_key, vectors.view().row(row).as_vector(), rows_driver.handle()).status;
+                        target.insert(next_key, vectors.view().row(row).as_vector(), rows_driver.handle()).status;
                     if (status == status_t::success_k) {
                         inserted_keys.push_back(next_key);
                         next_key = dense_key<key_t>(++next_number);
@@ -142,17 +151,16 @@ static std::size_t test_ram_indexes_absorb_refusals(u64_t seed) {
                 }
             }
         });
-        failures += expect_eq(absorb_status, status_t::success_k);
-        failures += expect_eq(donor.size(), 0u);
-        absorbed_entries += part;
+        failures += expect_eq(gather_status, status_t::success_k);
+        failures += expect_eq(source.size(), 0u);
+        gathered_entries += part;
     }
     failures += expect(refused > 0);
     failures += expect_eq(unexpected, 0u);
-    failures += expect_eq(recipient.size(), part + absorbed_entries + inserted_keys.size());
+    failures += expect_eq(target.size(), part + gathered_entries + inserted_keys.size());
     std::size_t miscounted = 0;
-    for (std::size_t entry = 0; entry != part + absorbed_entries; ++entry)
-        miscounted += recipient.count(keys[entry]) != 1;
-    for (key_t const key : inserted_keys) miscounted += recipient.count(key) != 1;
+    for (std::size_t entry = 0; entry != part + gathered_entries; ++entry) miscounted += target.count(keys[entry]) != 1;
+    for (key_t const key : inserted_keys) miscounted += target.count(key) != 1;
     failures += expect_eq(miscounted, 0u);
     return failures;
 }
@@ -186,6 +194,32 @@ static std::size_t test_ram_indexes_abandoned_plan(u64_t seed) {
     failures += expect(succeeded(indexes.insert(keys, vectors.view(), driver.executor).status));
     failures += expect_eq(indexes.size(), rows);
     failures += expect_eq(indexes.capacity(), capacity);
+    return failures;
+}
+
+/** A batch narrower than the executor fills an empty index: its entries wire at once, each while
+ *  the ones dispensed ahead of it may be unwired, and the audit still reaches every entry. */
+template <typename indexes_type_, nk_kernel_kind_t kernel_>
+static std::size_t test_ram_indexes_wide_executor(u64_t seed) {
+    using scalar_t = typename indexes_type_::index_t::scalar_t;
+    using key_t = typename indexes_type_::key_t;
+    std::size_t failures = 0;
+    std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k), rows = 64;
+    dense_indexes_executor<indexes_type_> driver {2 * rows};
+    if (failed(driver.status)) return failures + expect(false);
+    auto vectors = make_vectors<scalar_t>(rows, dimensions, stream_key(seed, "indexes_wide_executor"));
+    std::vector<key_t> keys(rows);
+    for (std::size_t row = 0; row != rows; ++row) keys[row] = dense_key<key_t>(1 + row);
+    // Each build races differently, so a few of them catch a herd that one may miss.
+    for (std::size_t build = 0; build != 4; ++build) {
+        indexes_type_ indexes {kernel_, {dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
+        failures += expect(succeeded(indexes.emplace(no_memory_domain_k)));
+        failures += expect(succeeded(indexes.reserve({rows}).status));
+        failures += expect(succeeded(indexes.insert(keys, vectors.view(), driver.executor).status));
+        auto const [health, status] = indexes.health(driver.executor);
+        failures += expect(succeeded(status));
+        failures += expect_eq(health.reachable_nodes, rows);
+    }
     return failures;
 }
 
@@ -388,13 +422,13 @@ static std::size_t test_ram_indexes_generations(u64_t seed) {
     return failures;
 }
 
-/** Four even shards compact in place under a bound of half the entries into two, the kept ones
+/** Four even shards recut in place under a bound of half the entries into two, the kept ones
  *  keeping their IDs and the others staying as idle slots, while a looker counts every key once,
  *  then out of place into a fresh single shard, which empties the source. Every key resolves once
  *  with its vector intact after each, and searches find sampled vectors themselves within noise of
  *  before. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
-static std::size_t test_ram_indexes_compact(u64_t seed) {
+static std::size_t test_ram_indexes_recut(u64_t seed) {
     using scalar_t = typename indexes_type_::index_t::scalar_t;
     using key_t = typename indexes_type_::key_t;
     using distance_t = typename indexes_type_::distance_t;
@@ -405,7 +439,7 @@ static std::size_t test_ram_indexes_compact(u64_t seed) {
     dense_indexes_executor<indexes_type_> driver;
     if (failed(driver.status)) return failures + expect(false);
     auto& executor = driver.executor;
-    auto vectors = make_vectors<scalar_t>(rows, dimensions, stream_key(seed, "indexes_compact"));
+    auto vectors = make_vectors<scalar_t>(rows, dimensions, stream_key(seed, "indexes_recut"));
     std::vector<key_t> keys(rows);
     for (std::size_t row = 0; row != rows; ++row) keys[row] = dense_key<key_t>(1 + row);
     auto filled_shards = [](indexes_type_ const& indexes) {
@@ -442,32 +476,34 @@ static std::size_t test_ram_indexes_compact(u64_t seed) {
     failures += expect_eq(filled_shards(indexes), 4u);
     std::size_t const hits_before = self_hits(indexes);
 
-    // In place: each kept shard takes one other, the only entries that move and re-select. A looker
-    // counts keys throughout, and each moved entry's key moves and its old shard forgets it inside
-    // one window, so every key counts exactly once.
+    // In place: each kept shard takes one other, the only entries that move, and then runs a round
+    // sized by the executor's cache. A looker counts keys throughout, and each moved entry's key
+    // moves and its old shard forgets it inside one window, so every key counts exactly once.
     std::array<indexes_type_*, 1> const in_place {&indexes};
-    compact_config_t halves;
+    reshard_config_t halves;
     halves.shard_capacity = rows / 2;
-    expected<compact_result_t> compacted {};
-    bool compacting = true;
+    expected<reshard_report_t> recut {};
+    bool recutting = true;
     std::size_t miscounted = 0;
     fu::flat_pool_t pool;
     if (fu::failed(pool.spawn(2))) return failures + expect(false);
     pool.for_threads([&](std::size_t thread) noexcept {
         if (thread == 0) {
-            compacted = compact(std::span<indexes_type_* const> {in_place}, indexes, executor, halves);
-            fu::standard_atomic_ref<bool>(compacting).store(false, std::memory_order_release);
+            recut = reshard(std::span<indexes_type_* const> {in_place}, std::span<indexes_type_* const> {in_place},
+                            executor, halves);
+            fu::standard_atomic_ref<bool>(recutting).store(false, std::memory_order_release);
         }
         else if (thread == 1)
-            for (std::size_t row = 0; fu::standard_atomic_ref<bool>(compacting).load(std::memory_order_acquire);
+            for (std::size_t row = 0; fu::standard_atomic_ref<bool>(recutting).load(std::memory_order_acquire);
                  row = (row + 1) % rows)
                 miscounted += indexes.count(keys[row]) != 1;
     });
     failures += expect_eq(miscounted, 0u);
-    auto const [packed, packed_status] = compacted;
+    auto const [packed, packed_status] = recut;
     failures += expect_eq(packed_status, status_t::success_k);
     failures += expect(packed.source_shards == 4 && packed.target_shards == 2 && packed.moved_entries == rows / 2);
-    failures += expect(packed.graph.reselected_nodes >= rows / 2);
+    failures += expect(packed.graph.reselected_nodes >= rows);
+    failures += expect(packed.graph.neighborhoods > 1 && packed.graph.traversal_stats.visited_members == 0);
     failures += expect_eq(indexes.shards_count(), 4u);
     failures += expect_eq(filled_shards(indexes), 2u);
     failures += dense_indexes_expect_restored(indexes, vectors, keys, dimensions, executor, seed);
@@ -479,15 +515,19 @@ static std::size_t test_ram_indexes_compact(u64_t seed) {
     failures += expect(succeeded(place_shards(mismatched)));
     failures += expect(succeeded(mismatched.reserve({rows}).status));
     std::array<indexes_type_*, 2> const mixed {&indexes, &mismatched};
-    failures += expect_eq(compact(std::span<indexes_type_* const> {mixed}, indexes, executor, halves).status,
-                          status_t::config_mismatch_k);
+    failures += expect_eq(
+        reshard(std::span<indexes_type_* const> {mixed}, std::span<indexes_type_* const> {in_place}, executor, halves)
+            .status,
+        status_t::config_mismatch_k);
     failures += expect(succeeded(indexes.plan_insert(1, executor).status));
     failures += expect(succeeded(mismatched.plan_insert(1, executor).status));
 
     // Out of place into a fresh single shard: every entry moves, and the source ends empty.
     indexes_type_ single {kernel_, {dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
     failures += expect(succeeded(single.emplace(no_memory_domain_k)));
-    auto const [moved, moved_status] = compact(std::span<indexes_type_* const> {in_place}, single, executor);
+    std::array<indexes_type_*, 1> const into_single {&single};
+    auto const [moved, moved_status] = reshard(std::span<indexes_type_* const> {in_place},
+                                               std::span<indexes_type_* const> {into_single}, executor);
     failures += expect_eq(moved_status, status_t::success_k);
     failures += expect(moved.source_shards == 4 && moved.target_shards == 1 && moved.moved_entries == rows);
     failures += expect_eq(indexes.size(), 0u);
@@ -497,7 +537,7 @@ static std::size_t test_ram_indexes_compact(u64_t seed) {
 }
 
 /** Every verb is safe beside a clear: searches racing one return their own rows or
- *  @c contended_k, an insertion plan holding claims refuses a clear and an absorb with
+ *  @c contended_k, an insertion plan holding claims refuses a clear and a gather with
  *  @c contended_k until it dies, and a cursor opened before a clear answers @c contended_k. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
 static std::size_t test_ram_indexes_clear_race(u64_t seed) {
@@ -554,16 +594,16 @@ static std::size_t test_ram_indexes_clear_race(u64_t seed) {
     }
     failures += expect_eq(foreign_count, 0u);
 
-    // Claims a plan holds refuse every close, so neither a clear nor an absorb frees them.
+    // Claims a plan holds refuse every close, so neither a clear nor a gather frees them.
     failures += expect(
         succeeded(indexes.insert(std::span<key_t const> {keys}, vectors.view(), drivers[0].executor).status));
-    indexes_type_ donor {kernel_, {dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
-    failures += expect(succeeded(place_shards(donor)));
+    indexes_type_ source {kernel_, {dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
+    failures += expect(succeeded(place_shards(source)));
     {
         auto [plan, plan_status] = indexes.plan_insert(1, drivers[0].executor);
         failures += expect(succeeded(plan_status));
         failures += expect_eq(indexes.clear(), status_t::contended_k);
-        failures += expect_eq(indexes.absorb(donor, {}, drivers[1].executor).status, status_t::contended_k);
+        failures += expect_eq(ram_indexes_gather(indexes, source, drivers[1].executor).status, status_t::contended_k);
     }
     failures += expect_eq(indexes.size(), rows);
 
@@ -1021,15 +1061,16 @@ static std::size_t test_ram_indexes_configuration(char const* name, u64_t seed) 
     failures_count += test_dense_indexes_scan<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_arena_growth<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_refine<indexes_t, kernel_>(seed);
-    failures_count += test_dense_indexes_absorb<indexes_t, kernel_>(seed);
-    failures_count += test_dense_indexes_absorb_many<indexes_t, kernel_>(seed);
-    failures_count += test_ram_indexes_absorb_refusals<indexes_t, kernel_>(seed);
+    failures_count += test_dense_indexes_gather<indexes_t, kernel_>(seed);
+    failures_count += test_dense_indexes_gather_many<indexes_t, kernel_>(seed);
+    failures_count += test_ram_indexes_gather_refusals<indexes_t, kernel_>(seed);
     failures_count += test_ram_indexes_abandoned_plan<indexes_t, kernel_>(seed);
+    failures_count += test_ram_indexes_wide_executor<indexes_t, kernel_>(seed);
     failures_count += test_ram_indexes_sample<indexes_t, kernel_>(seed);
     failures_count += test_ram_indexes_generations<indexes_t, kernel_>(seed);
-    failures_count += test_ram_indexes_compact<indexes_t, kernel_>(seed);
+    failures_count += test_ram_indexes_recut<indexes_t, kernel_>(seed);
     failures_count += test_ram_indexes_clear_race<indexes_t, kernel_>(seed);
-    failures_count += test_dense_indexes_split<indexes_t, kernel_>(seed);
+    failures_count += test_dense_indexes_cut<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_growth<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_products<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_indexer_search<indexes_t, kernel_>(seed);

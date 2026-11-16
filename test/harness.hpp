@@ -628,15 +628,17 @@ std::size_t expect_built(sweep_cell_t const& cell, handle<verbs_type_>& index, t
 
 /** Writes into @p recall the share of the exact scan's top ten in @p oracle a walk at @p expansion
  *  keeps over the first @p count queries of @p queries, ties at the cut counting however the scan
- *  happened to break them. */
+ *  happened to break them, and into @p spent, when named, what the walk spent. */
 template <typename verbs_type_>
 usearch_outcome_t walk_recall(handle<verbs_type_>& index, typename verbs_type_::queries_t queries, std::size_t count,
-                              std::size_t expansion, copied_matches_t const& oracle, double& recall) {
+                              std::size_t expansion, copied_matches_t const& oracle, double& recall,
+                              usearch_traversal_stats_t* spent = nullptr) {
     copied_matches_t found;
     usearch_traversal_stats_t stats {};
     usearch_outcome_t const walked = search_queries(index, queries, count, cell_batch_k, cell_wanted_k, expansion,
                                                     usearch_traversal_walk_k, stats, found);
-    if (walked.status == usearch_status_success_k) recall = recall_at(cell_wanted_k, found, oracle);
+    if (spent) *spent = stats;
+    if (walked.status == usearch_status_success_k) recall = k_recall_at(cell_wanted_k, found, oracle);
     return walked;
 }
 
@@ -667,7 +669,7 @@ std::size_t expect_hints(handle<verbs_type_>& index, typename verbs_type_::queri
     std::size_t failures = check(search_queries(index, queries, count, cell_batch_k, cell_wanted_k, expansion,
                                                 usearch_traversal_walk_k, stats, found));
     if (failures) return failures;
-    std::vector<std::size_t> const offsets = match_offsets(found);
+    st::vector<std::size_t> const offsets = match_offsets(found);
     std::vector<usearch_key_t> keys(2 * count);
     std::vector<std::size_t> const counts(count, 2);
     for (std::size_t query = 0; query != count; ++query) {
@@ -684,7 +686,7 @@ std::size_t expect_hints(handle<verbs_type_>& index, typename verbs_type_::queri
     if (accepted != usearch_status_success_k) return check(outcome.status == accepted);
     failures += check(outcome);
     if (failures) return failures;
-    std::vector<std::size_t> const hinted_offsets = match_offsets(hinted);
+    st::vector<std::size_t> const hinted_offsets = match_offsets(hinted);
     std::size_t farther = 0;
     for (std::size_t query = 0; query != count; ++query)
         farther += !hinted.counts[query] || !within(hinted.scores[hinted_offsets[query]], found.scores[offsets[query]]);
@@ -693,7 +695,7 @@ std::size_t expect_hints(handle<verbs_type_>& index, typename verbs_type_::queri
     usearch_traversal_stats_t warm_stats {};
     failures += check(search_queries(index, queries, count, divide_round_up<std::size_t>(count, 4), cell_wanted_k,
                                      expansion, usearch_traversal_walk_k, warm_stats, warm, &hints));
-    failures += check(warm.counts == hinted.counts && warm_stats.missing_hints == count);
+    failures += check(std::ranges::equal(warm.counts, hinted.counts) && warm_stats.missing_hints == count);
     return failures + check(hinted_stats.missing_hints == count) + check(farther == 0);
 }
 
@@ -797,36 +799,86 @@ std::size_t expect_sample(handle<verbs_type_>& index, std::size_t count) {
                             std::equal(drawn[0].begin(), drawn[0].end(), drawn[1].begin(), same_key));
 }
 
-/** Splitting @p index , whose entries are keyed by its first offsets, into two empty receivers of
- *  its own session and shard count leaves @p index empty and every key in one receiver once, where
- *  the residency counts entries; an NVMe view refuses it as read-only and a GPU index answers
+/** Calls @p call with a handler cancelling at its first report until a call answers other than
+ *  cancelled or @p limit calls ran, each cancelled call leaving @p plan live and naming one of its
+ *  phases; answers the failures, @p outcome keeping the last call's. */
+template <typename plan_type_, typename call_type_>
+std::size_t drive_cancelled_plan(plan_type_ const& plan, usearch_outcome_t const& outcome, std::size_t limit,
+                                 call_type_ const& call) {
+    usearch_progress_t const cancelling {[](std::size_t, std::size_t, void*) noexcept { return usearch_cancel_k; },
+                                         nullptr, 0};
+    std::size_t failures = 0;
+    for (std::size_t calls = 0; calls <= limit; ++calls) {
+        usearch_phase_progress_t phase {};
+        call(cancelling, &phase);
+        if (outcome.status != usearch_status_cancelled_k) break;
+        failures += check(plan != nullptr && phase.phase != usearch_phase_none_k &&
+                          phase.phase != usearch_phase_done_k && phase.completed <= phase.total);
+    }
+    return failures;
+}
+
+/** Resharding @p index , whose entries are keyed by its first offsets, as the one source into two
+ *  empty targets of its own session and shard count through a plan every call of which is
+ *  cancelled leaves @p index empty and live and every key in one target once, where the residency
+ *  counts entries, and the plan's finish audits every entry; malformed lists and several sources
+ *  into several targets refuse first, an NVMe view refuses it as read-only and a GPU index answers
  *  @p on_device, a refusal saying why. */
 template <typename verbs_type_>
-std::size_t expect_split(handle<verbs_type_>& index, usearch_status_t on_device) {
+std::size_t expect_reshard_cut(handle<verbs_type_>& index, usearch_status_t on_device) {
     usearch_status_t const wanted = index.residency == usearch_residency_nvme_k   ? usearch_status_read_only_k
                                     : index.residency == usearch_residency_vram_k ? on_device
                                                                                   : usearch_status_success_k;
     typename verbs_type_::description_t const before = describe(index);
-    std::array<handle<verbs_type_>, 2> receivers {
+    std::array<handle<verbs_type_>, 2> targets {
         open_index<verbs_type_>(*index.session, index.geometry, before.shards_count),
         open_index<verbs_type_>(*index.session, index.geometry, before.shards_count)};
-    if (!receivers[0] || !receivers[1]) return 1;
-    std::array<typename verbs_type_::index_t, 2> const handles {receivers[0].get(), receivers[1].get()};
+    if (!targets[0] || !targets[1]) return 1;
+    typename verbs_type_::index_t const source = index.get();
+    std::array<typename verbs_type_::index_t, 2> const handles {targets[0].get(), targets[1].get()};
     usearch_outcome_t outcome {};
     usearch_refine_report_t report {};
-    verbs_type_::split(index.get(), index.executor(), handles.data(), handles.size(), index.session->seed, &report,
-                       &outcome);
-    if (wanted != usearch_status_success_k) return check(outcome.status == wanted && outcome.message);
-    std::size_t failures = check(outcome);
+    if (wanted != usearch_status_success_k) {
+        verbs_type_::reshard({&source, 1}, handles, index.executor(), index.session->seed, &report, &outcome);
+        return check(outcome.status == wanted && outcome.message);
+    }
+    // Malformed lists refuse as arguments before anything closes: no targets, a null slot, or a
+    // target named twice; several sources into several targets is not a case a reshard has.
+    std::size_t failures = 0;
+    using index_t = typename verbs_type_::index_t;
+    std::array<index_t, 2> const holding_null {targets[0].get(), nullptr};
+    std::array<index_t, 2> const repeated {targets[0].get(), targets[0].get()};
+    for (std::span<index_t const> malformed :
+         {std::span<index_t const> {}, std::span<index_t const> {holding_null}, std::span<index_t const> {repeated}}) {
+        verbs_type_::reshard({&source, 1}, malformed, index.executor(), index.session->seed, &report, &outcome);
+        failures += check(outcome.status == usearch_status_invalid_argument_k && outcome.message);
+    }
+    std::array<index_t, 2> const several {source, targets[1].get()};
+    verbs_type_::reshard(several, handles, index.executor(), index.session->seed, &report, &outcome);
+    failures += check(outcome.status == usearch_status_unsupported_k && outcome.message);
+    failures += check(describe(index).size == before.size);
+
+    typename verbs_type_::reshard_plan_t plan = nullptr;
+    failures += drive_cancelled_plan(
+        plan, outcome, before.size, [&](usearch_progress_t progress, usearch_phase_progress_t* phase) {
+            verbs_type_::reshard({&source, 1}, handles, index.executor(), index.session->seed, &report, &outcome, 0, 0,
+                                 progress, &plan, phase);
+        });
+    failures += check(outcome) + check(plan != nullptr);
+    verbs_type_::reshard_plan_finish(index.executor(), plan, &report, &outcome);
+    failures += check(outcome) + check(report.reachability.audited == before.size);
+    // The finish freed the plan, so finishing again can only name none.
+    verbs_type_::reshard_plan_finish(index.executor(), nullptr, nullptr, &outcome);
+    failures += check(outcome.status == usearch_status_invalid_argument_k);
     failures += check(describe(index).size == 0 &&
-                      describe(receivers[0]).size + describe(receivers[1]).size == before.size);
+                      describe(targets[0]).size + describe(targets[1]).size == before.size);
     std::size_t miscounted = 0;
     for (std::size_t offset = 0; offset != before.size; ++offset) {
         usearch_key_t const key = key_of_offset(index.session->seed, offset);
         std::size_t landed = 0;
-        for (handle<verbs_type_>& receiver : receivers) {
+        for (handle<verbs_type_>& target : targets) {
             std::size_t entries = 0;
-            verbs_type_::count(receiver.get(), receiver.executor(), key, &entries, &outcome);
+            verbs_type_::count(target.get(), target.executor(), key, &entries, &outcome);
             if (outcome.status == usearch_status_unsupported_k) return failures;
             landed += entries;
         }
@@ -857,7 +909,7 @@ std::size_t expect_buffer_round_trip(handle<verbs_type_>& index, typename verbs_
     typename verbs_type_::metadata_t metadata {};
     verbs_type_::metadata_read_buffer(index.session->executor, bytes_view(bytes), &metadata, &outcome);
     failures += check(outcome) + check(metadata.connectivity != 0);
-    std::vector<std::int32_t> placement;
+    st::vector<std::int32_t> placement;
     typename verbs_type_::index_t copy = nullptr;
     verbs_type_::load_ram_buffer(&copy, index.session->executor_for(usearch_residency_ram_k), bytes_view(bytes),
                                  index.session->ram_options(0, placement), index.geometry, &outcome);
@@ -906,7 +958,8 @@ std::size_t expect_persistence(sweep_cell_t const& cell, handle<verbs_type_>& in
         if (!score_band || outcome.status == usearch_status_unsupported_k)
             found = {}, outcome = search_queries(searched, queries, count, cell_batch_k, cell_wanted_k, expansion,
                                                  usearch_traversal_walk_k, stats, found);
-        return outcome.status == usearch_status_success_k ? found : copied_matches_t {};
+        if (outcome.status != usearch_status_success_k) return copied_matches_t {};
+        return found;
     };
     std::size_t failures = check_checkpoint_round_trip(index, stem, cell.shards, bytes, score_band, search);
     if (cell.residency != usearch_residency_nvme_k) return failures;
@@ -918,7 +971,7 @@ std::size_t expect_persistence(sweep_cell_t const& cell, handle<verbs_type_>& in
         failures += expect_health(view, entries);
         failures += expect_cursor(view, entries);
         failures += expect_sample(view, entries);
-        failures += expect_split(view, usearch_status_unsupported_k);
+        failures += expect_reshard_cut(view, usearch_status_unsupported_k);
         failures += expect_buffer_round_trip(view, queries, count, expansion, floor, usearch_status_unsupported_k);
         usearch_outcome_t outcome {};
         usearch_key_t const key = key_of_offset(view.session->seed, 0);
@@ -928,25 +981,27 @@ std::size_t expect_persistence(sweep_cell_t const& cell, handle<verbs_type_>& in
         failures += check(outcome.status == usearch_status_read_only_k);
     }
     view = {};
-    for (std::string const& file : files_starting_with(stem + "-view")) std::remove(file.c_str());
+    for (sz::string_t const& file : files_starting_with(stem + "-view")) std::remove(file.c_str());
     return failures;
 }
 
-/** Two refinements settle: each changes no more entries than it re-selected, the second no more
- *  than the first, and a walk at @p expansion keeps as much of the exact scan's top ten over the
- *  first @p count queries of @p queries, so the scan and the walk that judge it must both succeed,
- *  where the residency serves a scan; a VRAM index whose tower still declares its refinement
- *  answers @p on_device instead and is left out of the judging. */
+/** Two refinements settle: each changes no more entries than it re-selected, the second keeps every
+ *  entry the first left reachable, and a walk spending as many distances as one at @p expansion did
+ *  before keeps as much of the exact scan's top ten over the first @p count queries of @p queries,
+ *  so the scan and the walks that judge it must all succeed, where the residency serves a scan; a
+ *  VRAM index whose tower still declares its refinement answers @p on_device instead and is left
+ *  out of the judging. */
 template <typename verbs_type_>
 std::size_t expect_refined(handle<verbs_type_>& index, typename verbs_type_::queries_t queries, std::size_t count,
                            std::size_t expansion, usearch_status_t on_device) {
     copied_matches_t oracle;
     double recall_before = 0, recall_after = 0;
+    usearch_traversal_stats_t spent_before {}, spent_after {};
     char const* refused = nullptr;
     usearch_outcome_t oracle_outcome = scan_oracle(index, queries, count, cell_wanted_k, cell_batch_k, oracle);
     usearch_status_t const scanned = oracle_outcome.status;
     if (scanned != usearch_status_success_k) refused = "scan_oracle";
-    else if (oracle_outcome = walk_recall(index, queries, count, expansion, oracle, recall_before);
+    else if (oracle_outcome = walk_recall(index, queries, count, expansion, oracle, recall_before, &spent_before);
              oracle_outcome.status != usearch_status_success_k)
         refused = "walk_recall";
     usearch_refine_report_t reports[2] {};
@@ -958,7 +1013,8 @@ std::size_t expect_refined(handle<verbs_type_>& index, typename verbs_type_::que
             return check(outcome.status == on_device);
         failures += check(outcome) + check(report.changed <= report.reselected);
     }
-    failures += check(reports[1].changed <= reports[0].changed);
+    // A round draws new hubs, so its changed count need not shrink; its reach must not.
+    failures += check(reports[1].reachability.reachable >= reports[0].reachability.reachable);
     if (scanned == usearch_status_unsupported_k) return failures;
     if (refused) {
         fmt::println(stderr, "  the recall oracle's {} refused with {}: {}", refused,
@@ -966,70 +1022,82 @@ std::size_t expect_refined(handle<verbs_type_>& index, typename verbs_type_::que
                      oracle_outcome.message ? oracle_outcome.message : "no message");
         return failures + 1;
     }
-    failures += check(walk_recall(index, queries, count, expansion, oracle, recall_after));
+    // A round keeps only diverse links, so a walk of one breadth now spends fewer distances.
+    std::size_t breadth = expansion;
+    failures += check(walk_recall(index, queries, count, breadth, oracle, recall_after, &spent_after));
+    while (recall_after < recall_before && spent_after.computed_distances < spent_before.computed_distances &&
+           breadth < 2 * expansion) {
+        breadth += max_of<std::size_t>(expansion / 8, 1);
+        failures += check(walk_recall(index, queries, count, breadth, oracle, recall_after, &spent_after));
+    }
     if (recall_after < recall_before)
-        fmt::println(stderr, "  recall at ten fell from {:.3f} to {:.3f} over two refinements", recall_before,
-                     recall_after);
+        fmt::println(stderr, "  recall at ten fell from {:.3f} to {:.3f} over two refinements, at breadth {}",
+                     recall_before, recall_after, breadth);
     return failures + check(recall_after >= recall_before);
 }
 
-/** A refinement opened on @p index holds it closed to an insertion of the first entry of @p inputs
- *  under a fresh key, pulls its handler cancels at their first report carry the running totals on
- *  until the pass ends, no more entries changing than were re-selected, and its finish reports at
- *  least the changes the pulls made and audits all @p count entries, the refused one never landing;
- *  a VRAM index whose tower still declares its refinement answers @p on_device when it opens. */
+/** A refine plan driven by calls each cancelled at their first report ends its round, holds
+ *  @p index closed to an insertion of the first entry of @p inputs under a fresh key until it
+ *  finishes, and its finish audits all @p count entries, the refused one never landing; a VRAM
+ *  index whose tower still declares its plan answers @p on_device at the opening call. */
 template <typename verbs_type_>
-std::size_t expect_refinement(handle<verbs_type_>& index, typename verbs_type_::values_t inputs, std::size_t count,
-                              usearch_status_t on_device) {
+std::size_t expect_refine_plan(handle<verbs_type_>& index, typename verbs_type_::values_t inputs, std::size_t count,
+                               usearch_status_t on_device) {
     usearch_outcome_t outcome {};
-    typename verbs_type_::refinement_t refinement = nullptr;
-    verbs_type_::refinement_init(index.get(), index.executor(), &refinement, &outcome);
+    usearch_refine_report_t report {};
+    typename verbs_type_::refine_plan_t plan = nullptr;
+    std::size_t failures = drive_cancelled_plan(
+        plan, outcome, count, [&](usearch_progress_t progress, usearch_phase_progress_t* phase) {
+            verbs_type_::refine(index.get(), index.executor(), &report, &outcome, 0, 0, nullptr, progress, &plan,
+                                phase);
+        });
     if (index.residency == usearch_residency_vram_k && on_device != usearch_status_success_k)
-        return check(outcome.status == on_device && !refinement);
-    std::size_t failures = check(outcome);
-    if (!refinement) return failures + 1;
+        return check(outcome.status == on_device && !plan);
+    failures += check(outcome) + check(plan != nullptr && report.changed <= report.reselected);
     usearch_key_t const fresh = key_of_offset(index.session->seed, count);
     verbs_type_::insert(index.get(), index.executor(), 1, keys_view({&fresh, 1}), inputs, 0, nullptr, &outcome);
     failures += check(outcome.status == usearch_status_contended_k);
-    usearch_progress_t const cancelling {[](std::size_t, std::size_t, void*) noexcept { return usearch_cancel_k; },
-                                         nullptr, 0};
-    std::size_t reselected = 0, changed = 0, shrunk = 0, pulls = 0;
-    // Every pull finishes at least one report's slice of the entries before its handler cancels it.
-    do {
-        std::size_t pulled_reselected = 0, pulled_changed = 0;
-        verbs_type_::refinement_next(index.get(), index.executor(), refinement, cancelling, &pulled_reselected,
-                                     &pulled_changed, &outcome);
-        shrunk += pulled_reselected < reselected || pulled_changed < changed || pulled_changed > pulled_reselected;
-        reselected = pulled_reselected, changed = pulled_changed;
-    } while (outcome.status == usearch_status_cancelled_k && ++pulls <= count);
-    failures += check(outcome) + check(shrunk == 0);
-    usearch_refine_report_t report {};
-    verbs_type_::refinement_finish(index.get(), index.executor(), refinement, &report, &outcome);
-    failures += check(outcome) + check(report.changed >= changed && report.reachability.audited == count);
+    verbs_type_::refine_plan_finish(index.get(), index.executor(), plan, &report, &outcome);
+    failures += check(outcome) + check(report.reachability.audited == count);
     return failures + check(describe(index).size == count);
 }
 
-/** A donor of @p count entries of @p inputs, keyed past the index's own @p first_offset entries,
- *  absorbs whole: its slot is consumed and the sizes add up; a device index answers @p on_device
- *  instead, where absorption is not implemented yet. */
+/** A second source of @p count entries of @p inputs, keyed past the index's own @p first_offset
+ *  entries, gathers whole into @p index , the one target, through a reshard plan every call of
+ *  which is cancelled: the source ends empty and live, the plan holds the index closed to an
+ *  insertion until it finishes, its finish audits every entry, and the sizes add up; a device
+ *  index whose tower does not reshard yet answers @p on_device instead. */
 template <typename verbs_type_>
-std::size_t expect_absorbed(handle<verbs_type_>& index, typename verbs_type_::values_t inputs, std::size_t count,
-                            std::size_t first_offset, usearch_status_t on_device) {
-    handle<verbs_type_> donor = open_index<verbs_type_>(*index.session, index.geometry, 1);
-    if (!donor) return 1;
+std::size_t expect_reshard_gather(handle<verbs_type_>& index, typename verbs_type_::values_t inputs, std::size_t count,
+                                  std::size_t first_offset, usearch_status_t on_device) {
+    handle<verbs_type_> other = open_index<verbs_type_>(*index.session, index.geometry, 1);
+    if (!other) return 1;
     usearch_traversal_stats_t stats {};
-    std::size_t failures = check(insert_entries(donor, inputs, count, first_offset, cell_batch_k, 0, stats));
+    std::size_t failures = check(insert_entries(other, inputs, count, first_offset, cell_batch_k, 0, stats));
     if (failures) return failures;
+    std::array<typename verbs_type_::index_t, 2> const sources {index.get(), other.get()};
+    typename verbs_type_::index_t const target = index.get();
     usearch_outcome_t outcome {};
-    verbs_type_::absorb(index.get(), index.executor(), &donor.index, 1, &outcome);
+    usearch_refine_report_t report {};
+    typename verbs_type_::reshard_plan_t plan = nullptr;
+    failures += drive_cancelled_plan(plan, outcome, first_offset + count,
+                                     [&](usearch_progress_t progress, usearch_phase_progress_t* phase) {
+                                         verbs_type_::reshard(sources, {&target, 1}, index.executor(), 0, &report,
+                                                              &outcome, 0, 0, progress, &plan, phase);
+                                     });
     if (index.residency == usearch_residency_vram_k && on_device != usearch_status_success_k)
-        return check(outcome.status == on_device);
-    failures += check(outcome) + check(!donor);
+        return check(outcome.status == on_device && !plan);
+    failures += check(outcome) + check(plan != nullptr) + check(describe(other).size == 0);
+    usearch_key_t const fresh = key_of_offset(index.session->seed, first_offset + count);
+    verbs_type_::insert(index.get(), index.executor(), 1, keys_view({&fresh, 1}), inputs, 0, nullptr, &outcome);
+    failures += check(outcome.status == usearch_status_contended_k);
+    verbs_type_::reshard_plan_finish(index.executor(), plan, &report, &outcome);
+    failures += check(outcome) + check(report.reachability.audited == first_offset + count);
     return failures + check(describe(index).size == first_offset + count);
 }
 
 /** A cleared index holds nothing, and a cursor opened over its entries before the clear answers
- *  @c contended_k after it; an index a split emptied first takes the first entry of @p inputs
+ *  @c contended_k after it; an index a reshard emptied first takes the first entry of @p inputs
  *  back, since clearing nothing need not end a cursor. */
 template <typename verbs_type_>
 std::size_t expect_cleared(handle<verbs_type_>& index, typename verbs_type_::values_t inputs) {

@@ -326,13 +326,14 @@ enum class vram_kernel_t : u32_t {
     partition_picked_k,
 
     // Split Moves
-    /** Moves every node's neighbors into its part's receiver, rebased through the slots. */
+
+    /** Moves every node's neighbors into its part's target, rebased through the slots. */
     split_links_k,
 
-    /** Moves every node's ragged value into its part's receiver. */
+    /** Moves every node's ragged value into its part's target. */
     split_tape_k,
 
-    /** Moves every node's vector, norms and key into its part's receiver. */
+    /** Moves every node's vector, norms and key into its part's target. */
     split_nodes_k,
 
     // Gathers and Products

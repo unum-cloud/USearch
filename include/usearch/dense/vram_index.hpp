@@ -129,9 +129,9 @@ struct vram_fold_shard_t {
 };
 static_assert(sizeof(vram_fold_shard_t) == 32, "Every row a fold re-selects or merges reads its shard's entry");
 
-/** Which phase of a fold a launch runs: the re-selection of each row, or the merge of the picks
+/** Which step of a fold a launch runs: the re-selection of each row, or the merge of the picks
  *  the bin's other shards made of it. */
-enum class vram_fold_phase_t : u32_t { reselect_k, merge_k };
+enum class vram_fold_step_t : u32_t { reselect_k, merge_k };
 
 /** One fold launch over the rows of one shard of a bin, mirroring the shared fold view: the
  *  geometry of the shards' storage, the bin's tables on the launching device, the launching
@@ -147,7 +147,7 @@ struct vram_fold_t {
     u32_t cross_count = 0;
     u32_t scratch_bytes_per_warp = 0;
     u32_t selection_nodes = 0;
-    vram_fold_phase_t phase = vram_fold_phase_t::reselect_k;
+    vram_fold_step_t step = vram_fold_step_t::reselect_k;
     byte_t* arena = nullptr;
     gpu_arena_shape_t arena_shape {};
     vram_telemetry_block_t* telemetry = nullptr;
@@ -217,7 +217,7 @@ struct vram_graph_t {
     u32_t parts_count = 0;
     u32_t part_capacity = 0;
 
-    /** The receivers' neighbors, vectors, norms and keys, @c parts_count bases each, the donor's
+    /** The targets' neighbors, vectors, norms and keys, @c parts_count bases each, the source's
      *  keys, and the words of a key, of a vector row and of a norms entry, zero where none are
      *  kept at all. */
     u32_t* const* part_columns = nullptr;
@@ -226,84 +226,6 @@ struct vram_graph_t {
     u32_t norm_words = 0;
     u32_t key_words = 0;
 };
-
-/** What a health check and a round copy into one page-locked slot, in the device's order: the
- *  check's counters first, which every fresh sweep zeroes, then the round's, which a round's heal
- *  zeroes; and the claim counter of the launch in flight. */
-struct vram_round_counters_t {
-
-    /** Entries the last two depths reached and the last two depths or rechecks marked a way to the
-     *  root for, by parity; a pass whose predecessor counted zero was queued past convergence. */
-    u32_t reached[2], marked[2];
-
-    /** Island labels the last two passes over the islands lowered or marked, by parity. */
-    u32_t relabeled[2];
-
-    /** Depths from the root that reached an entry, and rechecks that marked one. */
-    u32_t depth_from_root, depth_to_root;
-
-    /** Entries outside the root's component, and those no component claims yet after a settle. */
-    u32_t islands, unassigned;
-
-    /** The population counts @c reachability_t reports. */
-    u32_t unlinked, underlinked, beyond_most_populated_depth;
-    u32_t unreached_islands, stranded_islands, components;
-
-    /** The largest island component's entries above the complement of its least node, whose
-     *  maximum names it. */
-    u64_t largest_island;
-
-    /** Entries the sweeps reached plus entries they marked a way to the root for. */
-    u64_t swept;
-
-    /** Links the heal wrote, rows whose link set changed, and links the round added and dropped. */
-    u32_t healed, changed, added_links, dropped_links;
-
-    /** Items or neighborhoods the blocks of the launch in flight claimed so far. */
-    u32_t claimed;
-};
-
-/** One pass of a health check over the neighbors matrix, the columns the RAM health check keeps,
- *  on the device: depths both ways in bytes, the in-link and shallower in-link counts, the
- *  reached, reaching-root and two-ways bits, the islands' ranked nodes, components, parents,
- *  labels, entries and roles, the rows a round counted as changed, and the counters. */
-struct vram_health_t {
-    u32_t* neighbors = nullptr;
-    u32_t rows_count = 0;
-    u32_t connectivity = 0;
-
-    /** The depth, recheck or pass of the launch, whose parity picks its counters. */
-    u32_t depth = 0;
-
-    /** Which step of the island passes a launch of @c island_components_k or @c label_islands_k
-     *  runs, a @c vram_island_pass_t. */
-    u32_t pass = 0;
-    u8_t* depths_from_root = nullptr;
-    u8_t* depths_to_root = nullptr;
-    u32_t* in_links = nullptr;
-    u32_t* shallower_in_links = nullptr;
-
-    /** Entries each depth reached, the deepest recorded one saturating. */
-    u32_t* depth_entries = nullptr;
-    vram_bitset_t reached, reaches_root, two_ways_to_root, changed;
-    u32_t* island_nodes = nullptr;
-    u32_t* island_components = nullptr;
-    u32_t* island_parents = nullptr;
-
-    /** Per island node a color while its components close, then its weak label; one more slot
-     *  stands for the root's component. */
-    u32_t* island_labels = nullptr;
-    u64_t* island_entries = nullptr;
-    u32_t* island_roles = nullptr;
-    vram_round_counters_t* counters = nullptr;
-};
-
-/** One run of a gather: @c width entries from position @c first of the entries in neighborhood
- *  order, or from ID @c first in the first gather, filed among @c hubs hubs from @c first_hub. */
-struct vram_neighborhood_run_t {
-    u32_t first = 0, width = 0, first_hub = 0, hubs = 0;
-};
-static_assert(sizeof(vram_neighborhood_run_t) == 16, "A run is one hot sixteen-byte entry");
 
 /** One gather launch. @c entries is null in the first gather, whose one run spans IDs. Every run
  *  splits into items of as many entries as its hubs, never fewer than a block's warps, so staging
@@ -552,47 +474,6 @@ struct [[nodiscard]] vram_search_result_t {
 struct vram_attend_heads_t {
     rows_view_t rows;
     std::size_t head_count;
-};
-
-/** Which step of the island passes a launch takes: the colors running forward along the links,
- *  the marks running back to each color's least rank, the settle that closes the marked
- *  components, the largest one's tally; then the roles' start, the roles, their spread over each
- *  component's members, the entries, the weak labels and their count. */
-enum class vram_island_pass_t : u32_t {
-    forward_k,
-    backward_k,
-    settle_k,
-    largest_k,
-    roles_start_k,
-    roles_k,
-    roles_spread_k,
-    entries_k,
-    weak_k,
-    weak_count_k,
-};
-
-/** Device columns one round carves once from a @p traversal_context_type_ and its phases reuse:
- *  the health check's, then the round's, which alias the islands', since only the checks and the
- *  heal read those, then each resident block's slice of a neighborhood capacity of mates. */
-template <typename traversal_context_type_>
-struct vram_round_scratch {
-    typename traversal_context_type_::bytes_ptr_t bytes;
-
-    /** The check's columns and counters, as @c vram_health_t names them. */
-    vram_health_t health;
-
-    /** Each entry's neighborhood, the entries in neighborhood order, the starts with room for
-     *  splits, the hubs of every gather run, the runs, and the items before each run. */
-    u16_t* entry_neighborhoods = nullptr;
-    u32_t* neighborhood_entries = nullptr;
-    u32_t* neighborhood_offsets = nullptr;
-    u32_t* hub_nodes = nullptr;
-    vram_neighborhood_run_t* runs = nullptr;
-    u32_t* run_items = nullptr;
-    byte_t* mates = nullptr;
-
-    /** Words of one bitset over the entries the scratch was carved for. */
-    std::size_t words = 0;
 };
 
 #pragma endregion Shard Types
@@ -988,8 +869,9 @@ struct vram_shard_core {
         vectors_matrix_.share_with(devices), norms_column_.share_with(devices), neighbors_matrix_.share_with(devices);
     }
 
-    /** Maps the storage, rows committed already included, for @p devices too, as a sharded index
-     *  absorbing this shard names its own; @c config_mismatch_k when one cannot reach this one. */
+    /** Maps the storage, rows committed already included, for @p devices too, as a sharded
+     *  index packing this shard into its own names them; @c config_mismatch_k when one of those
+     *  devices cannot reach this storage. */
     status_t grant_(std::bitset<gpu_devices_capacity_k> devices) noexcept {
         if (status_t const granted = vectors_matrix_.grant(devices); failed(granted)) return granted;
         if (status_t const granted = norms_column_.grant(devices); failed(granted)) return granted;
@@ -1371,16 +1253,15 @@ struct vram_shard_core {
      *  grants. */
     using refine_config_t = dense::refine_config_t;
 
-    /** A split's knobs: its rounds', and the seed that orders the parts' growth. */
-    struct split_config_t {
-        refine_config_t refine {};
-        u64_t seed = 0;
-    };
+    /** A reshard's knobs: its rounds', a shard capacity a mono-index refuses, and the seed that
+     *  orders the parts' growth. */
+    using reshard_config_t = dense::reshard_config_t;
 
     using refine_report_t = dense::refine_report_t;
     using reachability_t = dense::reachability_t;
 
     struct refine_plan_t;
+    struct reshard_plan_t;
 
   private:
     using round_scratch_t = vram_round_scratch<traversal_context_t>;
@@ -1414,25 +1295,25 @@ struct vram_shard_core {
         u16_t* entry_neighborhoods = nullptr;
     };
 
-    /** One receiver's part of a split as the host assigns it: its nodes, and those assigned so
+    /** One target's part of a split as the host assigns it: its nodes, and those assigned so
      *  far. */
     struct split_part_t {
         std::size_t entries = 0, assigned_nodes = 0;
     };
 
-    /** A split's state beside the rounds it turns into, empty for a refine. */
+    /** A reshard's moves beside the rounds they turn into. */
     struct split_t {
 
         /** The index the split empties, until the scatter finished. */
-        vram_shard_core* donor = nullptr;
+        vram_shard_core* source = nullptr;
 
-        /** The receivers, one part each, and the one the round is bound to. */
-        growing_buffer<vram_shard_core*> receivers {global_allocator};
+        /** The targets, one part each, and the one the round is bound to. */
+        growing_buffer<vram_shard_core*> targets {global_allocator};
         growing_buffer<split_part_t> parts {global_allocator};
-        std::size_t bound_receiver = 0;
+        std::size_t bound_target = 0;
 
-        /** The donor's nodes at planning, and the most nodes one part takes: those over the
-         *  receivers, rounded up. */
+        /** The source's nodes at planning, and the most nodes one part takes: those over the
+         *  targets, rounded up. */
         std::size_t entries = 0, part_capacity = 0;
 
         /** The device scratch, laid out as @c split_scratch_ reads it. */
@@ -1446,9 +1327,9 @@ struct vram_shard_core {
          *  unplaced nodes are placed next. */
         u32_t next_round = 0;
 
-        /** The reports of the receivers whose rounds closed, folded, and how many closed. */
+        /** The reports of the targets whose rounds closed, folded, and how many closed. */
         refine_report_t settled {};
-        std::size_t settled_receivers = 0;
+        std::size_t settled_targets = 0;
 
         explicit split_t(typename traversal_context_t::bytes_ptr_t&& empty) noexcept : device_bytes(std::move(empty)) {}
     };
@@ -1470,7 +1351,7 @@ struct vram_shard_core {
      *  than the largest island gives way once to that island's least entry. A count pass then reads
      *  every row once more, and the islands' roles, entries and weak components follow.
      *
-     *  Each phase queues its passes in batches that double, a pass queued past convergence leaving
+     *  Each step queues its passes in batches that double, a pass queued past convergence leaving
      *  at entry, then the copy of the counters into a page-locked slot. Nothing waits and nothing
      *  allocates: planning carved every column. Read-only on the graph.
      */
@@ -1485,9 +1366,9 @@ struct vram_shard_core {
         node_id_t visible = 0;
 
         /** Whether another batch of passes follows. */
-        bool running() const noexcept { return index_ && succeeded(status_) && phase_ != phase_t::done_k; }
+        bool running() const noexcept { return index_ && succeeded(status_) && step_ != step_t::done_k; }
 
-        /** Queues the next batch of the current phase on @p context, then the copy of the counters;
+        /** Queues the next batch of the current step on @p context, then the copy of the counters;
          *  a no-op unless @ref running. */
         status_t queue(traversal_context_t& context) noexcept {
             if (!running()) return status_;
@@ -1509,26 +1390,26 @@ struct vram_shard_core {
             if (!running()) return false;
             round_counters_t const& counters = *counters_;
             u32_t const parity = last_pass_ & 1u;
-            switch (phase_) {
-            case phase_t::expand_k:
+            switch (step_) {
+            case step_t::expand_k:
                 if (counters.reached[parity]) return true;
-                return next_phase_(phase_t::recheck_k);
-            case phase_t::recheck_k:
+                return next_step_(step_t::recheck_k);
+            case step_t::recheck_k:
                 if (counters.marked[parity]) return true;
-                return next_phase_(phase_t::islands_k);
-            case phase_t::islands_k:
-                if (!counters.islands) return next_phase_(phase_t::count_links_k);
+                return next_step_(step_t::islands_k);
+            case step_t::islands_k:
+                if (!counters.islands) return next_step_(step_t::count_links_k);
                 if (counters.marked[parity]) return true;
                 island_pass_ = vram_island_pass_t::forward_k;
-                return next_phase_(phase_t::components_k);
-            case phase_t::components_k: return advance_components_(counters);
-            case phase_t::count_links_k:
-                if (!counters.islands || !counters.relabeled[0]) return next_phase_(phase_t::done_k);
-                phase_ = phase_t::labels_k, next_pass_ = 1;
+                return next_step_(step_t::components_k);
+            case step_t::components_k: return advance_components_(counters);
+            case step_t::count_links_k:
+                if (!counters.islands || !counters.relabeled[0]) return next_step_(step_t::done_k);
+                step_ = step_t::labels_k, next_pass_ = 1;
                 return true;
-            case phase_t::labels_k:
+            case step_t::labels_k:
                 if (counters.relabeled[parity]) return true;
-                return next_phase_(phase_t::done_k);
+                return next_step_(step_t::done_k);
             default: return false;
             }
         }
@@ -1550,7 +1431,7 @@ struct vram_shard_core {
         expected<reachability_t> finish() const noexcept {
             if (failed(status_)) return {{}, status_};
             if (!index_ || !visible) return {reachability_t {}, status_t::success_k};
-            if (phase_ != phase_t::done_k) return {{}, status_t::internal_k};
+            if (step_ != step_t::done_k) return {{}, status_t::internal_k};
             round_counters_t const& counters = *counters_;
             reachability_t result;
             result.audited_nodes = visible;
@@ -1590,23 +1471,24 @@ struct vram_shard_core {
       private:
         friend struct vram_shard_core;
         friend refine_plan_t;
+        friend reshard_plan_t;
 
-        /** The check's phases, as the RAM check names its passes, plus the passes that label its
+        /** The check's steps, as the RAM check names its passes, plus the passes that label its
          *  islands on the device, which RAM runs on one thread once its rechecks end. */
-        enum class phase_t : u8_t { expand_k, recheck_k, islands_k, components_k, count_links_k, labels_k, done_k };
+        enum class step_t : u8_t { expand_k, recheck_k, islands_k, components_k, count_links_k, labels_k, done_k };
 
         /** Clears what one root's sweep fills, the next batch queuing the fills, and marks
          *  @p root both ways at depth zero; with no root the check is over. */
         void start_from_(node_id_t root) noexcept {
             root_ = root;
             next_pass_ = 0;
-            phase_ = root == node_id_unknown_k ? phase_t::done_k : phase_t::expand_k;
+            step_ = root == node_id_unknown_k ? step_t::done_k : step_t::expand_k;
         }
 
-        /** Turns to @p phase from its first pass, answering whether a batch follows. */
-        bool next_phase_(phase_t phase) noexcept {
-            phase_ = phase, next_pass_ = 0;
-            return phase != phase_t::done_k;
+        /** Turns to @p step from its first pass, answering whether a batch follows. */
+        bool next_step_(step_t step) noexcept {
+            step_ = step, next_pass_ = 0;
+            return step != step_t::done_k;
         }
 
         /** The barrier inside the island components: colors forward until none lowers, marks back
@@ -1632,7 +1514,7 @@ struct vram_shard_core {
                 start_from_(static_cast<node_id_t>(~static_cast<u32_t>(counters.largest_island)));
                 return true;
             }
-            return next_phase_(phase_t::count_links_k);
+            return next_step_(step_t::count_links_k);
         }
 
         /** The check's and the round's device columns, carved once at planning. */
@@ -1648,7 +1530,7 @@ struct vram_shard_core {
          *  the last one the queued batch holds. */
         u32_t next_pass_ = 0, last_pass_ = 0;
         vram_island_pass_t island_pass_ = vram_island_pass_t::forward_k;
-        phase_t phase_ = phase_t::done_k;
+        step_t step_ = step_t::done_k;
         status_t status_ = status_t::success_k;
     };
 
@@ -1671,10 +1553,6 @@ struct vram_shard_core {
      *  Every phase takes the context the plan was opened on back from its caller. Demands an
      *  exclusive caller: the heal and the restitch write live neighbors with plain stores. A
      *  stopped round leaves the graph correct and merely less improved.
-     *
-     *  A split's plan first partitions and scatters, as @ref plan_split describes, then binds the
-     *  receivers one after another, each running one round over its part, their reports folding
-     *  into the plan's.
      */
     struct refine_plan_t {
 
@@ -1682,9 +1560,7 @@ struct vram_shard_core {
         health_plan_t health;
 
         /** An unbound plan over @p health - what a refused plan answers with. */
-        explicit refine_plan_t(health_plan_t&& health) noexcept
-            : health(std::move(health)),
-              split_(typename traversal_context_t::bytes_ptr_t {nullptr, this->health.columns_.bytes.get_deleter()}) {}
+        explicit refine_plan_t(health_plan_t&& health) noexcept : health(std::move(health)) {}
         refine_plan_t(refine_plan_t&&) noexcept = default;
         refine_plan_t& operator=(refine_plan_t&&) noexcept = default;
 
@@ -1702,18 +1578,12 @@ struct vram_shard_core {
             if (!index_) return status_t::uninitialized_k;
             if (failed(status_)) return status_;
             if (context.device() != index_->device_.ordinal) return status_t::config_mismatch_k;
-            stream_handle_t const stream = context.stream();
             auto const [kernels, kernels_status] = index_->kernels_.kernels_(context);
             if (failed(kernels_status)) return kernels_status;
             switch (phase_) {
-            case phase_t::partition_k:
-                status_ = split_.next_round ? index_->queue_rounds_(*kernels, split_, stream)
-                                            : index_->queue_partition_islands_(*kernels, split_, stream);
-                break;
-            case phase_t::scatter_k: status_ = index_->queue_scatter_(*kernels, split_, stream); break;
             case phase_t::health_k: status_ = health.queue(context); break;
             case phase_t::heal_k: status_ = index_->queue_heal_(context, health); break;
-            case phase_t::gather_neighborhoods_k: status_ = index_->queue_gather_(context, *this); break;
+            case phase_t::gather_k: status_ = index_->queue_gather_(context, *this); break;
             case phase_t::restitch_k: status_ = index_->queue_restitch_(context, *this); break;
             // The barrier closing the draw draws the hubs, which the gather uploads with its runs.
             default: return status_t::success_k;
@@ -1733,27 +1603,15 @@ struct vram_shard_core {
          *  and answers whether one follows. */
         bool advance() noexcept {
             if (!index_ || failed(status_) || phase_ == phase_t::done_k) return false;
-            if (phase_ == phase_t::partition_k) {
-                // A growth batch that still placed nodes leaves others unplaced, so it grows on;
-                // once one placed none, the rest are placed, and the host assigns the slots.
-                if (!split_.next_round) assign_slots_(), phase_ = phase_t::scatter_k;
-                else if (!index_->placing_(split_)) split_.next_round = 0;
-                return true;
-            }
-            if (phase_ == phase_t::scatter_k) {
-                publish_parts_();
-                bind_receiver_();
-                return phase_ != phase_t::done_k;
-            }
             switch (phase_) {
             case phase_t::health_k:
                 if (health.advance()) return true;
                 converge_();
                 break;
-            case phase_t::heal_k: phase_ = phase_t::draw_hubs_k; break;
-            case phase_t::draw_hubs_k: draw_hubs_(), phase_ = phase_t::gather_neighborhoods_k; break;
+            case phase_t::heal_k: phase_ = phase_t::hubs_k; break;
+            case phase_t::hubs_k: draw_hubs_(), phase_ = phase_t::gather_k; break;
             // Neighborhoods over capacity gather again among their own entries.
-            case phase_t::gather_neighborhoods_k:
+            case phase_t::gather_k:
                 if (!order_neighborhoods_()) phase_ = phase_t::restitch_k;
                 break;
             case phase_t::restitch_k:
@@ -1762,29 +1620,27 @@ struct vram_shard_core {
                 break;
             default: break;
             }
-            if (failed(status_)) return false;
-            if (phase_ == phase_t::done_k && split_.receivers.size()) settle_receiver_();
-            return phase_ != phase_t::done_k;
+            return succeeded(status_) && phase_ != phase_t::done_k;
         }
 
         /** Skips what is left of the round's phase in hand: an opening health check, or a heal not
          *  yet run, ends the round with nothing written; a hubs draw, a gather or a restitch sends
          *  the round to the closing health check, the heal's links and the neighborhoods already
          *  re-stitched standing; the closing check runs on, and the verdict reads stopped. A no-op
-         *  outside a round, a split's partition and scatter included. */
+         *  outside a round. */
         void stop() noexcept {
             if (!rounding()) return;
             tally_.verdict = refine_verdict_t::stopped_k;
             switch (phase_) {
             case phase_t::health_k:
-                if (swept_after_ == phase_t::opening_k) phase_ = phase_t::done_k;
+                if (swept_after_ == phase_t::none_k) phase_ = phase_t::done_k;
                 break;
             case phase_t::heal_k:
                 tally_.reachability = tally_.opening;
                 phase_ = phase_t::done_k;
                 break;
-            case phase_t::draw_hubs_k:
-            case phase_t::gather_neighborhoods_k:
+            case phase_t::hubs_k:
+            case phase_t::gather_k:
             case phase_t::restitch_k: verify_(phase_t::restitch_k); break;
             default: break;
             }
@@ -1793,33 +1649,16 @@ struct vram_shard_core {
         /** Whether the plan runs a round, whose every barrier a caller's progress hears. */
         bool rounding() const noexcept {
             if (phase_ == phase_t::health_k)
-                return swept_after_ == phase_t::opening_k || swept_after_ == phase_t::restitch_k;
+                return swept_after_ == phase_t::none_k || swept_after_ == phase_t::restitch_k;
             return phase_ >= phase_t::heal_k && phase_ <= phase_t::restitch_k;
         }
 
-        /** The phase the plan is in, by the name a progress line prints. */
-        char const* phase_name() const noexcept {
-            switch (phase_) {
-            case phase_t::partition_k: return "partition";
-            case phase_t::scatter_k: return "scatter";
-            case phase_t::health_k: return "health";
-            case phase_t::heal_k: return "heal";
-            case phase_t::draw_hubs_k: return "hubs";
-            case phase_t::gather_neighborhoods_k: return "gather";
-            case phase_t::restitch_k: return "restitch";
-            default: return "done";
-            }
-        }
+        /** The phase the plan is in. */
+        phase_t phase() const noexcept { return phase_; }
 
         /** The position of the round's phase in hand among its six, from the opening health check
          *  to the closing one; zero outside a round's phases. */
-        std::size_t ordinal() const noexcept {
-            std::size_t const opening = static_cast<std::size_t>(phase_t::opening_k);
-            if (phase_ == phase_t::health_k && swept_after_ == phase_t::opening_k) return 1;
-            if (phase_ == phase_t::health_k && swept_after_ == phase_t::restitch_k)
-                return static_cast<std::size_t>(phase_t::restitch_k) - opening + 2;
-            return rounding() ? static_cast<std::size_t>(phase_) - opening + 1 : 0;
-        }
+        std::size_t ordinal() const noexcept { return rounding() ? round_ordinal(phase_, swept_after_) : 0; }
 
         /** Units of the round's phase in hand done so far, at a barrier before it advances: entries
          *  swept and marked by a health check, and otherwise all of the phase's. */
@@ -1834,8 +1673,8 @@ struct vram_shard_core {
             switch (phase_) {
             case phase_t::health_k: return 2 * std::size_t {health.visible};
             case phase_t::heal_k: return health.islands();
-            case phase_t::draw_hubs_k: return round_hubs(health.visible, shape_.hubs_per_draw, shape_.capacity);
-            case phase_t::gather_neighborhoods_k: {
+            case phase_t::hubs_k: return round_hubs(health.visible, shape_.hubs_per_draw, shape_.capacity);
+            case phase_t::gather_k: {
                 std::size_t entries = 0;
                 for (std::size_t run = 0; run != runs_; ++run) entries += mirrors_.runs[run].width;
                 return entries;
@@ -1849,9 +1688,9 @@ struct vram_shard_core {
          *  report starts over, and the opening health check sweeps again; a no-op mid-round. */
         void next_round() noexcept {
             if (phase_ != phase_t::done_k || failed(status_)) return;
-            if (swept_after_ != phase_t::opening_k && swept_after_ != phase_t::restitch_k) return;
+            if (swept_after_ != phase_t::none_k && swept_after_ != phase_t::restitch_k) return;
             tally_ = {};
-            verify_(phase_t::opening_k);
+            verify_(phase_t::none_k);
         }
 
         /**
@@ -1878,19 +1717,7 @@ struct vram_shard_core {
 
       private:
         friend struct vram_shard_core;
-
-        enum class phase_t : u8_t {
-            partition_k,
-            scatter_k,
-            health_k,
-            // What a round's opening health check follows, and the round's phases in their order.
-            opening_k,
-            heal_k,
-            draw_hubs_k,
-            gather_neighborhoods_k,
-            restitch_k,
-            done_k
-        };
+        friend reshard_plan_t;
 
         /** Opens the health check following @p phase from the root the last one kept. */
         void verify_(phase_t phase) noexcept {
@@ -1910,7 +1737,7 @@ struct vram_shard_core {
                 return;
             }
             tally_.reachability = reachability;
-            if (swept_after_ == phase_t::opening_k) open_round_(reachability);
+            if (swept_after_ == phase_t::none_k) open_round_(reachability);
             else close_round_();
         }
 
@@ -2002,63 +1829,6 @@ struct vram_shard_core {
             return true;
         }
 
-        /** Assigns every donor node its slot in place in the pinned host bytes, in ID order within
-         *  each part. */
-        void assign_slots_() noexcept {
-            u32_t* const slots = reinterpret_cast<u32_t*>(split_.host_bytes);
-            for (split_part_t& part : split_.parts) part = {};
-            for (std::size_t node = 0; node != split_.entries; ++node) ++split_.parts[slots[node]].entries;
-            for (std::size_t node = 0; node != split_.entries; ++node) {
-                std::size_t const part = slots[node];
-                slots[node] = static_cast<u32_t>(part * split_.part_capacity + split_.parts[part].assigned_nodes++);
-            }
-        }
-
-        /** Files every donor key under its slot in its receiver, as a load's tasks do, publishes
-         *  every receiver's nodes at once under the closed claim words, and empties the donor. */
-        void publish_parts_() noexcept {
-            vram_shard_core& donor = *std::exchange(split_.donor, nullptr);
-            u32_t const* const slots = reinterpret_cast<u32_t const*>(split_.host_bytes);
-            for (std::size_t node = 0; node != split_.entries; ++node)
-                split_.receivers[slots[node] / split_.part_capacity]->keyed_.assign(
-                    static_cast<node_id_t>(slots[node] % split_.part_capacity),
-                    donor.keyed_[static_cast<node_id_t>(node)]);
-            for (std::size_t index = 0; index != split_.receivers.size(); ++index) {
-                vram_shard_core& receiver = *split_.receivers[index];
-                std::size_t const entries = split_.parts[index].entries;
-                receiver.publish_keys_({0, static_cast<node_id_t>(entries)});
-                if (status_t const published = receiver.publish_(0, entries); failed(published)) status_ = published;
-            }
-            donor.forget_();
-        }
-
-        /** Turns the plan to the next receiver holding nodes, its round opening with a check
-         *  rebound onto its part; past the last, reports the receivers' folded reports. */
-        void bind_receiver_() noexcept {
-            while (split_.bound_receiver != split_.receivers.size() && !split_.parts[split_.bound_receiver].entries)
-                ++split_.bound_receiver;
-            if (split_.bound_receiver == split_.receivers.size()) {
-                tally_ = split_.settled;
-                phase_ = phase_t::done_k;
-                return;
-            }
-            index_ = split_.receivers[split_.bound_receiver];
-            tally_ = {};
-            health.rebind(*index_, static_cast<node_id_t>(split_.parts[split_.bound_receiver].entries));
-            swept_after_ = phase_t::opening_k;
-            phase_ = phase_t::health_k;
-        }
-
-        /** Folds a receiver's closed round into the split's, the first one taken whole, then binds
-         *  the next one. */
-        void settle_receiver_() noexcept {
-            if (split_.settled_receivers++) split_.settled += tally_;
-            else split_.settled = tally_;
-            ++split_.bound_receiver;
-            bind_receiver_();
-        }
-
-        split_t split_;
         vram_shard_core* index_ = nullptr;
 
         /** The page-locked mirrors the barriers order on. */
@@ -2080,7 +1850,7 @@ struct vram_shard_core {
         u64_t round_seed_ = 0;
 
         /** The phase the current health check follows, which decides the one after it. */
-        phase_t swept_after_ = phase_t::opening_k;
+        phase_t swept_after_ = phase_t::none_k;
         phase_t phase_ = phase_t::done_k;
         status_t status_ = status_t::success_k;
         refine_report_t tally_;
@@ -2088,7 +1858,7 @@ struct vram_shard_core {
 
     /**
      *  @brief Opens one refinement round over the published nodes on @p context 's stream, as
-     *      the RAM @c plan_round does.
+     *      the RAM @c plan_refine does.
      *
      *  Carves the check's columns and the round's from the context, takes page-locked counters and
      *  mirrors, and sizes the hubs and the neighborhood capacity from the shared memory a block
@@ -2099,21 +1869,20 @@ struct vram_shard_core {
      *  - @c config_mismatch_k The @p context rides another device or cannot launch.
      *  - @c bad_alloc_k A column, a mirror, the arena or the counters cannot be placed.
      */
-    expected<refine_plan_t> plan_round(refine_config_t config, traversal_context_t& context) noexcept {
-        using phase_t = typename refine_plan_t::phase_t;
+    expected<refine_plan_t> plan_refine(refine_config_t config, traversal_context_t& context) noexcept {
         refine_plan_t plan {health_plan_t {empty_round_scratch_(context)}};
         std::size_t const rows = size();
         if (status_t const carved = carve_round_(plan, context, rows, config.cache_bytes, 0); failed(carved))
             return {std::move(plan), carved};
         plan.index_ = this;
         plan.health.rebind(*this, static_cast<node_id_t>(rows));
-        plan.swept_after_ = phase_t::opening_k;
+        plan.swept_after_ = phase_t::none_k;
         plan.phase_ = rows ? phase_t::health_k : phase_t::done_k;
         return {std::move(plan), status_t::success_k};
     }
 
     /**
-     *  @brief One @ref plan_round driven to its end on the calling thread, waiting once per phase.
+     *  @brief One @ref plan_refine driven to its end on the calling thread, waiting once per phase.
      *
      *  @par Statuses:
      *  - @c uninitialized_k The index never grew.
@@ -2122,7 +1891,7 @@ struct vram_shard_core {
      *  - @c device_error_k A launch or a copy failed.
      */
     expected<refine_report_t> refine(refine_config_t config, traversal_context_t& context) noexcept {
-        auto [plan, status] = plan_round(config, context);
+        auto [plan, status] = plan_refine(config, context);
         if (failed(status)) return {{}, status};
         do
             if (failed(plan.queue(context, config)) || failed(plan.wait(context))) break;
@@ -2131,85 +1900,305 @@ struct vram_shard_core {
     }
 
     /**
-     *  @brief Opens a split of this index into @p receivers - the inverse of an absorb: the plan's
-     *      first phases move every node into one graph-local part per receiver, then run one round
-     *      in every receiver in turn.
+     *  @brief One reshard in flight from this index into its targets, on one device, in the shape
+     *      of @ref refine_plan_t: @ref queue a phase, @ref wait for it, @ref advance past it, and
+     *      @ref finish once no phase follows.
+     *
+     *  The moves come first: the partition grows one graph-local part per target on the device,
+     *  the barrier after it assigns every source node its slot, the scatter moves every node's
+     *  vector, norms, key and neighbors into its target, the links inside its part rebased and the
+     *  links across dropped, and the barrier after it files the keys, publishes every target at
+     *  once and empties the source. Then every target holding nodes runs one round as
+     *  @ref refine_plan_t does, its opening heal linking what the cut left apart, the targets'
+     *  reports folding into the plan's; @ref next_round runs another round on every target, the
+     *  first target first.
+     */
+    struct reshard_plan_t {
+
+        /** An unbound plan over @p rounds - what a refused plan answers with. */
+        explicit reshard_plan_t(refine_plan_t&& rounds) noexcept
+            : rounds_(std::move(rounds)),
+              split_(typename traversal_context_t::bytes_ptr_t {nullptr, rounds_.health.columns_.bytes.get_deleter()}) {
+        }
+        reshard_plan_t(reshard_plan_t&&) noexcept = default;
+        reshard_plan_t& operator=(reshard_plan_t&&) noexcept = default;
+
+        /**
+         *  @brief Queues the current phase on @p context 's stream: a move's launches, or the bound
+         *      target's round's, as @ref refine_plan_t::queue does; never waits or allocates.
+         *
+         *  @par Statuses:
+         *  - @c uninitialized_k The plan is unbound, as a refused one answers.
+         *  - @c config_mismatch_k The @p context rides another device, or the plan keeps it.
+         *  - @c device_error_k A launch or a copy failed, or the plan keeps it.
+         */
+        status_t queue(traversal_context_t& context, refine_config_t config) noexcept {
+            if (!rounds_.index_) return status_t::uninitialized_k;
+            if (!moving()) return rounds_.queue(context, config);
+            status_t& status = rounds_.status_;
+            if (failed(status)) return status;
+            vram_shard_core& source = *split_.source;
+            if (context.device() != source.device_.ordinal) return status_t::config_mismatch_k;
+            stream_handle_t const stream = context.stream();
+            auto const [kernels, kernels_status] = source.kernels_.kernels_(context);
+            if (failed(kernels_status)) return kernels_status;
+            if (moves_ == phase_t::scatter_k) status = source.queue_scatter_(*kernels, split_, stream);
+            else
+                status = split_.next_round ? source.queue_rounds_(*kernels, split_, stream)
+                                           : source.queue_partition_islands_(*kernels, split_, stream);
+            if (succeeded(status)) status = context.record();
+            return status;
+        }
+
+        /** Sleeps until the queued phase finished, on @p context 's event. */
+        status_t wait(traversal_context_t& context) noexcept {
+            if (!moving()) return rounds_.wait(context);
+            if (succeeded(rounds_.status_)) rounds_.status_ = context.event_.wait();
+            return rounds_.status_;
+        }
+
+        /** The barrier after a phase finished: grows the parts on, assigns the slots, publishes
+         *  the parts, or advances the bound target's round and binds the next target once it
+         *  ended; answers whether a phase follows. */
+        bool advance() noexcept {
+            if (!rounds_.index_ || failed(rounds_.status_)) return false;
+            if (moves_ == phase_t::partition_k) {
+                // A growth batch that still placed nodes leaves others unplaced, so it grows on;
+                // once one placed none, the rest are placed, and the host assigns the slots.
+                if (!split_.next_round) assign_slots_(), moves_ = phase_t::scatter_k;
+                else if (!vram_shard_core::placing_(split_)) split_.next_round = 0;
+                return true;
+            }
+            if (moves_ == phase_t::scatter_k) {
+                publish_parts_();
+                moves_ = phase_t::done_k;
+                if (failed(rounds_.status_)) return false;
+                bind_target_();
+                return rounds_.phase_ != phase_t::done_k;
+            }
+            if (rounds_.advance()) return true;
+            // A plan whose last target's round ended settles nothing more.
+            if (failed(rounds_.status_) || split_.bound_target == split_.targets.size()) return false;
+            return settle_target_();
+        }
+
+        /** Stops the bound target's round as @ref refine_plan_t::stop does; the moves run on. */
+        void stop() noexcept {
+            if (!moving()) rounds_.stop();
+        }
+
+        /** Whether the plan still moves the source's nodes: its partition or its scatter. */
+        bool moving() const noexcept { return moves_ != phase_t::done_k; }
+
+        /** Whether the bound target runs a round, whose every barrier a caller's progress hears. */
+        bool rounding() const noexcept { return !moving() && rounds_.rounding(); }
+
+        /** The phase the plan is in: a move's, then the bound target's round's. */
+        phase_t phase() const noexcept { return moving() ? moves_ : rounds_.phase(); }
+
+        /** Where the round's phase sits among its six, and its units done and in all; none in the
+         *  moves, which report nothing. */
+        std::size_t ordinal() const noexcept { return moving() ? 0 : rounds_.ordinal(); }
+        std::size_t completed() const noexcept { return moving() ? 0 : rounds_.completed(); }
+        std::size_t total() const noexcept { return moving() ? 0 : rounds_.total(); }
+
+        /** Runs another round on every target once every target's ended, from the first; a no-op
+         *  in the moves and mid-round. */
+        void next_round() noexcept {
+            if (moving() || !rounds_.index_ || rounds_.phase_ != phase_t::done_k || failed(rounds_.status_)) return;
+            split_.bound_target = 0, split_.settled_targets = 0;
+            bind_target_();
+        }
+
+        /**
+         *  @brief The rounds so far, folded over the targets: complete once @ref advance answered
+         *      false, else cancelled; a failure a phase kept answers instead.
+         *
+         *  @par Statuses:
+         *  - @c uninitialized_k The plan is unbound.
+         *  - @c config_mismatch_k, @c device_error_k or @c internal_k A phase kept it.
+         *  - @c cancelled_k The moves or a round still follow, or a round was stopped.
+         */
+        expected<refine_report_t> finish(traversal_context_t const& context) const noexcept {
+            if (!rounds_.index_) return {{}, status_t::uninitialized_k};
+            if (failed(rounds_.status_)) return {{}, rounds_.status_};
+            if (moving()) return {{}, status_t::cancelled_k};
+            return rounds_.finish(context);
+        }
+
+      private:
+        friend struct vram_shard_core;
+
+        /** Assigns every source node its slot in place in the pinned host bytes, in ID order
+         *  within each part. */
+        void assign_slots_() noexcept {
+            u32_t* const slots = reinterpret_cast<u32_t*>(split_.host_bytes);
+            for (split_part_t& part : split_.parts) part = {};
+            for (std::size_t node = 0; node != split_.entries; ++node) ++split_.parts[slots[node]].entries;
+            for (std::size_t node = 0; node != split_.entries; ++node) {
+                std::size_t const part = slots[node];
+                slots[node] = static_cast<u32_t>(part * split_.part_capacity + split_.parts[part].assigned_nodes++);
+            }
+        }
+
+        /** Files every source key under its slot in its target, as a load's tasks do, publishes
+         *  every target's nodes at once under the closed claim words, and empties the source. */
+        void publish_parts_() noexcept {
+            vram_shard_core& source = *std::exchange(split_.source, nullptr);
+            u32_t const* const slots = reinterpret_cast<u32_t const*>(split_.host_bytes);
+            for (std::size_t node = 0; node != split_.entries; ++node)
+                split_.targets[slots[node] / split_.part_capacity]->keyed_.assign(
+                    static_cast<node_id_t>(slots[node] % split_.part_capacity),
+                    source.keyed_[static_cast<node_id_t>(node)]);
+            for (std::size_t index = 0; index != split_.targets.size(); ++index) {
+                vram_shard_core& target = *split_.targets[index];
+                std::size_t const entries = split_.parts[index].entries;
+                target.publish_keys_({0, static_cast<node_id_t>(entries)});
+                if (status_t const published = target.publish_(0, entries); failed(published))
+                    rounds_.status_ = published;
+            }
+            source.forget_();
+        }
+
+        /** Turns the rounds to the bound target or the next one holding nodes, its round opening
+         *  with a check rebound onto its part; past the last, reports the folded rounds. */
+        void bind_target_() noexcept {
+            while (split_.bound_target != split_.targets.size() && !split_.parts[split_.bound_target].entries)
+                ++split_.bound_target;
+            if (split_.bound_target == split_.targets.size()) {
+                rounds_.tally_ = split_.settled;
+                rounds_.phase_ = phase_t::done_k;
+                return;
+            }
+            rounds_.index_ = split_.targets[split_.bound_target];
+            rounds_.tally_ = {};
+            rounds_.health.rebind(*rounds_.index_, static_cast<node_id_t>(split_.parts[split_.bound_target].entries));
+            rounds_.swept_after_ = phase_t::none_k;
+            rounds_.phase_ = phase_t::health_k;
+        }
+
+        /** Folds the bound target's ended round into the plan's, the first one taken whole, then
+         *  binds the next target, answering whether a phase follows. */
+        bool settle_target_() noexcept {
+            if (split_.settled_targets++) split_.settled += rounds_.tally_;
+            else split_.settled = rounds_.tally_;
+            ++split_.bound_target;
+            bind_target_();
+            return rounds_.phase_ != phase_t::done_k;
+        }
+
+        /** The rounds, bound to the source through the moves, then to each target in turn. */
+        refine_plan_t rounds_;
+        split_t split_;
+
+        /** The move still pending; done once the parts published. */
+        phase_t moves_ = phase_t::done_k;
+    };
+
+    /**
+     *  @brief Opens a reshard of @p sources into @p targets: this index, the one source, moves into
+     *      one graph-local part per target, then every target runs one round, as
+     *      @ref reshard_plan_t describes; this index ends empty.
      *
      *  Planning queues the partition behind every allocation: one root per part through @ref
-     *  seeded_bijection under @p seed, then rounds of growth over the links, each part capped at
-     *  the nodes over the receivers rounded up, and each node a round reaches kept by its lowest-ID
-     *  proposer, so equal seeds over equal graphs split alike; nodes no round reached go to the
-     *  smallest parts in ID order. The barrier after the partition assigns every node its slot. The
-     *  scatter moves every node's vector, norms, key and neighbors on the device, the links inside
-     *  its part rebased and the links across dropped, and the barrier after it files the keys into
-     *  the receivers, publishes every receiver at once and empties this index. Each receiver then
-     *  runs one round as @ref plan_round does, its opening heal linking what the cut left apart,
-     *  and the reports fold over every one of them.
+     *  seeded_bijection under the config's seed, then rounds of growth over the links, each part
+     *  capped at the nodes over the targets rounded up, and each node a round reaches kept by its
+     *  lowest-ID proposer, so equal seeds over equal graphs split alike; nodes no round reached go
+     *  to the smallest parts in ID order.
      *
-     *  The caller holds the claim words of this index and of every receiver closed for the plan's
-     *  life, and nothing searches this index meanwhile. Receivers must be empty, distinct, and
-     *  share this index's device, metric and geometry.
+     *  The caller holds the claim words of this index and of every target closed for the plan's
+     *  life, and nothing searches this index meanwhile. Every index either list names must
+     *  outlive the plan's finish.
      *
-     *  @param[in] receivers The empty indexes taking the parts, at least two.
-     *  @param[in] core The member of each receiver holding its core.
-     *  @param[in] config The rounds' knobs and the seed picking the parts' roots, so equal seeds
-     *      over equal graphs split alike.
+     *  @param[in] sources This index alone: a mono-index moves one source into its targets.
+     *  @param[in] targets The empty indexes taking the parts, at least two, all distinct.
+     *  @param[in] core The member of each listed index holding its core.
+     *  @param[in] config The rounds' knobs and the seed picking the parts' roots; a mono-index
+     *      places no shards, so the shard capacity must be zero.
      *  @param[in,out] context The driving context, which every phase takes back; the partition's
      *      scratch and the rounds' are carved from it.
      *
      *  @par Statuses:
+     *  - @c invalid_argument_k An empty list, a null index, or an index listed twice.
+     *  - @c unsupported_k A nonzero shard capacity, or any shape but this index alone into two or
+     *    more targets.
      *  - @c uninitialized_k The index never grew.
-     *  - @c config_mismatch_k Fewer than two receivers, a null, repeated or non-empty one, this
-     *    index itself, one of another device, metric or geometry, or a @p context of another
-     *    device or one that cannot launch.
-     *  - @c contended_k This index's or a receiver's claim word is open.
+     *  - @c config_mismatch_k This index among the targets, a non-empty target, one of another
+     *    device, metric or geometry, or a @p context of another device or one that cannot launch.
+     *  - @c contended_k This index's or a target's claim word is open.
      *  - @c overflow_k Part slots past the 32-bit IDs.
      *  - @c bad_alloc_k A column, a mirror, the arena or the counters cannot be placed.
      */
     template <typename owner_type_>
-    expected<refine_plan_t> plan_split(std::span<owner_type_*> receivers, vram_shard_core owner_type_::* core,
-                                       split_config_t config, traversal_context_t& context) noexcept {
-        using phase_t = typename refine_plan_t::phase_t;
-        refine_plan_t plan {health_plan_t {empty_round_scratch_(context)}};
-        std::size_t const parts = receivers.size();
-        if (parts < 2) return {std::move(plan), status_t::config_mismatch_k};
+    expected<reshard_plan_t> plan_reshard(std::span<owner_type_* const> sources, std::span<owner_type_* const> targets,
+                                          vram_shard_core owner_type_::* core, reshard_config_t config,
+                                          traversal_context_t& context) noexcept {
+        reshard_plan_t plan {refine_plan_t {health_plan_t {empty_round_scratch_(context)}}};
+        for (std::span<owner_type_* const> const listed : {sources, targets}) {
+            if (listed.empty()) return {std::move(plan), status_t::invalid_argument_k};
+            for (std::size_t position = 0; position != listed.size(); ++position) {
+                if (!listed[position]) return {std::move(plan), status_t::invalid_argument_k};
+                for (std::size_t earlier = 0; earlier != position; ++earlier)
+                    if (listed[earlier] == listed[position]) return {std::move(plan), status_t::invalid_argument_k};
+            }
+        }
+        std::size_t const parts = targets.size();
+        if (config.shard_capacity || sources.size() != 1 || &(sources[0]->*core) != this || parts < 2)
+            return {std::move(plan), status_t::unsupported_k};
+        for (owner_type_* const into : targets)
+            if (&(into->*core) == this) return {std::move(plan), status_t::config_mismatch_k};
         if (!claims_.closed()) return {std::move(plan), status_t::contended_k};
         split_t& split = plan.split_;
-        if (failed(split.receivers.reserve_exactly(parts)) || failed(split.parts.resize(parts)))
+        if (failed(split.targets.reserve_exactly(parts)) || failed(split.parts.resize(parts)))
             return {std::move(plan), status_t::bad_alloc_k};
-        for (std::size_t receiver = 0; receiver != parts; ++receiver) {
-            owner_type_* const into = receivers[receiver];
-            if (!into || &(into->*core) == this) return {std::move(plan), status_t::config_mismatch_k};
-            for (std::size_t earlier = 0; earlier != receiver; ++earlier)
-                if (receivers[earlier] == into) return {std::move(plan), status_t::config_mismatch_k};
+        for (owner_type_* const into : targets) {
             vram_shard_core& part = into->*core;
             if (part.device_.ordinal != device_.ordinal || part.kernel_ != kernel_ || !(part.geometry_ == geometry_) ||
                 part.size())
                 return {std::move(plan), status_t::config_mismatch_k};
             if (!part.claims_.closed()) return {std::move(plan), status_t::contended_k};
-            split.receivers.push_back_reserved(&part);
+            split.targets.push_back_reserved(&part);
         }
-        split.donor = this;
+        split.source = this;
         split.entries = size();
         split.part_capacity = divide_round_up<std::size_t>(split.entries, parts);
         if (parts * split.part_capacity >= (std::numeric_limits<u32_t>::max)())
             return {std::move(plan), status_t::overflow_k};
-        // Every receiver holds a full part's nodes, sentinel-filled, before the partition queues.
+        // Every target holds a full part's nodes, sentinel-filled, before the partition queues.
         stream_handle_t const stream = context.stream();
-        for (vram_shard_core* const part : split.receivers)
+        for (vram_shard_core* const part : split.targets)
             if (status_t const grown = part->grow_nodes_(split.part_capacity, stream); failed(grown))
                 return {std::move(plan), grown};
         auto const [kernels, kernels_status] = kernels_.kernels_(context);
         if (failed(kernels_status)) return {std::move(plan), kernels_status};
         // The rounds' mirrors take over the split's pinned bytes once the parts publish.
-        status_t opened = carve_round_(plan, context, split.part_capacity, config.refine.cache_bytes,
+        status_t opened = carve_round_(plan.rounds_, context, split.part_capacity, config.refine.cache_bytes,
                                        split_layout_(split.entries, parts).host_bytes);
         if (succeeded(opened) && split.entries) opened = carve_split_(split, config.seed, context);
         if (succeeded(opened) && split.entries) opened = queue_partition_(*kernels, split, stream);
         if (failed(opened)) return {std::move(plan), opened};
-        plan.index_ = this;
-        plan.phase_ = split.entries ? phase_t::partition_k : phase_t::done_k;
+        plan.rounds_.index_ = this;
+        plan.moves_ = split.entries ? phase_t::partition_k : phase_t::done_k;
+        if (!split.entries) plan.bind_target_();
         return {std::move(plan), status_t::success_k};
+    }
+
+    /**
+     *  @brief One @ref plan_reshard driven to its end on the calling thread, one wait a phase.
+     *
+     *  @par Statuses:
+     *  - Those of @ref plan_reshard, then @c device_error_k when a launch or a copy failed.
+     */
+    template <typename owner_type_>
+    expected<refine_report_t> reshard(std::span<owner_type_* const> sources, std::span<owner_type_* const> targets,
+                                      vram_shard_core owner_type_::* core, reshard_config_t config,
+                                      traversal_context_t& context) noexcept {
+        auto [plan, status] = plan_reshard(sources, targets, core, config, context);
+        if (failed(status)) return {{}, status};
+        do
+            if (failed(plan.queue(context, config.refine)) || failed(plan.wait(context))) break;
+        while (plan.advance());
+        return plan.finish(context);
     }
 
     /**
@@ -2252,15 +2241,15 @@ struct vram_shard_core {
 
     /** The bytes an executor's run must hold before a context carved over it can refine the rows
      *  published now under @p config: the context's counters, the round's columns and the restitch
-     *  arena, then a split's partition scratch and its receivers' rounds past two @p receivers. */
-    std::size_t traversal_memory_usage(refine_config_t config, std::size_t receivers = 0) const noexcept {
+     *  arena, then a split's partition scratch and its targets' rounds past two @p targets. */
+    std::size_t traversal_memory_usage(refine_config_t config, std::size_t targets = 0) const noexcept {
         if (!dimensions() || !device_.multiprocessor_count) return 0;
         auto aligned = [](std::size_t bytes) noexcept { return round_up_to_multiple(bytes, default_alignment_k); };
-        std::size_t const entries = receivers > 1 ? divide_round_up<std::size_t>(size(), receivers) : size();
+        std::size_t const entries = targets > 1 ? divide_round_up<std::size_t>(size(), targets) : size();
         round_shape_t const shape = round_shape_(entries, config.cache_bytes);
         return aligned(sizeof(vram_telemetry_block_t)) + 2 * aligned(sizeof(u32_t)) +
                aligned(lay_out_round_(shape).device_bytes) + aligned(restitch_arena_bytes_()) +
-               (receivers > 1 ? aligned(split_layout_(size(), receivers).device_bytes) : 0);
+               (targets > 1 ? aligned(split_layout_(size(), targets).device_bytes) : 0);
     }
 
 #pragma endregion Refinement
@@ -2728,13 +2717,13 @@ struct vram_shard_core {
 
         /**
          *  @brief The same copy out of @p source_shard 's own storage rather than host columns, as
-         *      an absorb drives it, one donor shard at a time, its task naming the rows in that
-         *      shard's row and ID spaces.
+         *      a pack into one target drives it, one source shard at a time, its task naming the
+         *      rows in that shard's row and ID spaces.
          *
          *  Both matrices keep fragment-padded rows of one geometry, so every column moves as one
          *  copy on the plan's stream, from another device's storage as well once its sharded index
          *  mapped it for this one; storage this device cannot reach is refused. The neighbors then
-         *  rebase on the plan's stream, and the donor's keys go into the host key column. Nothing
+         *  rebase on the plan's stream, and the source's keys go into the host key column. Nothing
          *  waits, so @p source_shard must stay quiescent until the caller drains that stream.
          *
          *  @param[in] task The task to fill; its source nodes address @p source_shard.
@@ -2856,9 +2845,9 @@ struct vram_shard_core {
      *      neighbor rows arrive sentinel-filled.
      *
      *  Its tasks source the rows from host or device columns, as a sharded plan drives its parts,
-     *  or from other indexes, as an absorb does; a plan reading a part the vendor's reader
-     *  registers opens its staging slots first. Refuses an unreserved index, a kept failure, a
-     *  batch or load in flight, and rows past the ID space.
+     *  or from other indexes, as a pack does; a plan reading a part the vendor's reader registers
+     *  opens its staging slots first. Refuses an unreserved index, a kept failure, a batch or load
+     *  in flight, and rows past the ID space.
      *
      *  @param[in] rows Rows to append.
      *  @param[in] stream The stream every copy and the norms kernel queue on.
@@ -2879,7 +2868,7 @@ struct vram_shard_core {
         if (failed(kernels_status)) return {{}, kernels_status};
         if (!rows)
             return {load_plan_t {*this, stream, *kernels, static_cast<node_id_t>(claimed_()), 0}, status_t::success_k};
-        // A closed word is the caller's, who refines or absorbs around the load; an open one is
+        // A closed word is the caller's, who refines or reshards around the load; an open one is
         // claimed like a batch's, so no batch goes beside it.
         bool const claiming = !claims_.closed();
         node_id_t base = static_cast<node_id_t>(size());
@@ -3462,7 +3451,7 @@ struct vram_shard_core {
      *  pass with the roles and entries, queue whole.
      */
     status_t queue_health_(traversal_context_t& context, health_plan_t& plan) noexcept {
-        using phase_t = typename health_plan_t::phase_t;
+        using step_t = typename health_plan_t::step_t;
         auto const [kernels, kernels_status] = kernels_.kernels_(context);
         if (failed(kernels_status)) return kernels_status;
         stream_handle_t const stream = context.stream();
@@ -3495,17 +3484,17 @@ struct vram_shard_core {
             }
         };
         plan.last_pass_ = bound - 1;
-        switch (plan.phase_) {
-        case phase_t::expand_k:
+        switch (plan.step_) {
+        case step_t::expand_k:
             if (!first) queued = queue_health_start_(plan, health, stream);
             passes(vram_kernel_t::health_expand_k, counters->reached, counters->marked);
             break;
-        case phase_t::recheck_k: passes(vram_kernel_t::health_recheck_k, counters->marked, nullptr); break;
-        case phase_t::islands_k:
+        case step_t::recheck_k: passes(vram_kernel_t::health_recheck_k, counters->marked, nullptr); break;
+        case step_t::islands_k:
             if (!first) launch(vram_kernel_t::order_islands_k, 1);
             passes(vram_kernel_t::health_islands_k, counters->marked, nullptr);
             break;
-        case phase_t::components_k:
+        case step_t::components_k:
             health.pass = static_cast<u32_t>(plan.island_pass_);
             if (plan.island_pass_ != vram_island_pass_t::settle_k) {
                 passes(vram_kernel_t::island_components_k, counters->relabeled, nullptr);
@@ -3515,14 +3504,14 @@ struct vram_shard_core {
             island_step(vram_kernel_t::island_components_k, vram_island_pass_t::settle_k);
             island_step(vram_kernel_t::island_components_k, vram_island_pass_t::largest_k);
             break;
-        case phase_t::count_links_k:
+        case step_t::count_links_k:
             launch(vram_kernel_t::health_count_links_k, striding);
             if (!plan.counters_->islands) break;
             for (vram_island_pass_t const pass : {vram_island_pass_t::roles_start_k, vram_island_pass_t::roles_k,
                                                   vram_island_pass_t::roles_spread_k, vram_island_pass_t::entries_k})
                 island_step(vram_kernel_t::label_islands_k, pass);
             [[fallthrough]];
-        case phase_t::labels_k:
+        case step_t::labels_k:
             health.pass = static_cast<u32_t>(vram_island_pass_t::weak_k);
             passes(vram_kernel_t::label_islands_k, counters->relabeled, nullptr);
             zeroed(counters->components);
@@ -3640,7 +3629,7 @@ struct vram_shard_core {
     }
 
     /** Bytes a split of @p nodes nodes into @p parts parts carves on the device and pins on the
-     *  host, and where each places the receivers' columns, then where the pinned bytes place the
+     *  host, and where each places the targets' columns, then where the pinned bytes place the
      *  roots and the placed count, as @c split_t lays them out. */
     struct split_layout_t {
         std::size_t device_bytes = 0, device_columns = 0;
@@ -3662,7 +3651,7 @@ struct vram_shard_core {
     /** Where a split's device scratch keeps each array: each node's part, which the scatter reads
      *  back as its slot, the round's proposals, @b [nodes] each, the two frontiers, one bit per
      *  node each, then per part its size and its round count, the nodes the last two rounds
-     *  placed, by the round number's parity, the parts' roots, and the receivers' neighbors,
+     *  placed, by the round number's parity, the parts' roots, and the targets' neighbors,
      *  vectors, norms and keys. */
     struct split_scratch_t {
         u32_t* node_parts = nullptr;
@@ -3677,7 +3666,7 @@ struct vram_shard_core {
 
     /** The arrays of @p split 's device scratch, read off its bytes. */
     static split_scratch_t split_scratch_(split_t const& split) noexcept {
-        std::size_t const entries = split.entries, parts = split.receivers.size();
+        std::size_t const entries = split.entries, parts = split.targets.size();
         std::size_t const words = divide_round_up<std::size_t>(entries, 32);
         split_scratch_t carved;
         carved.node_parts = reinterpret_cast<u32_t*>(split.device_bytes.get());
@@ -3695,10 +3684,10 @@ struct vram_shard_core {
 
     /** Carves @p split 's device scratch from @p context 's allocator, borrows its pinned results,
      *  which the rounds' mirrors already sized, as the host bytes, and queues the upload of the
-     *  receivers' columns and of the roots that @p seed picks. */
+     *  targets' columns and of the roots that @p seed picks. */
     status_t carve_split_(split_t& split, u64_t seed, traversal_context_t& context) noexcept {
         static_assert(sizeof(norms_t) % sizeof(u32_t) == 0 && sizeof(key_t) % sizeof(u32_t) == 0);
-        std::size_t const entries = split.entries, parts = split.receivers.size();
+        std::size_t const entries = split.entries, parts = split.targets.size();
         split_layout_t const bytes = split_layout_(entries, parts);
         split.device_bytes.reset(context.allocator_.allocate(bytes.device_bytes));
         split.device_bytes.get_deleter().count = bytes.device_bytes;
@@ -3709,11 +3698,11 @@ struct vram_shard_core {
         u32_t** const columns = reinterpret_cast<u32_t**>(split.host_bytes + bytes.host_columns);
         u32_t* const roots = reinterpret_cast<u32_t*>(split.host_bytes + bytes.host_roots);
         for (std::size_t part = 0; part != parts; ++part) {
-            vram_shard_core const& receiver = *split.receivers[part];
-            columns[part] = receiver.neighbor_rows_();
-            columns[parts + part] = reinterpret_cast<u32_t*>(receiver.vectors_rows_());
-            columns[2 * parts + part] = reinterpret_cast<u32_t*>(receiver.norms_column_.base());
-            columns[3 * parts + part] = reinterpret_cast<u32_t*>(receiver.device_keys_());
+            vram_shard_core const& target = *split.targets[part];
+            columns[part] = target.neighbor_rows_();
+            columns[parts + part] = reinterpret_cast<u32_t*>(target.vectors_rows_());
+            columns[2 * parts + part] = reinterpret_cast<u32_t*>(target.norms_column_.base());
+            columns[3 * parts + part] = reinterpret_cast<u32_t*>(target.device_keys_());
             roots[part] = static_cast<u32_t>(seeded_bijection(part, entries, seed));
         }
         split_scratch_t const carved = split_scratch_(split);
@@ -3726,7 +3715,7 @@ struct vram_shard_core {
 
     /** The record every launch of @p split reads: this index's columns and the split's scratch. */
     vram_arguments_t split_arguments_(split_t const& split) const noexcept {
-        std::size_t const parts = split.receivers.size();
+        std::size_t const parts = split.targets.size();
         split_scratch_t const carved = split_scratch_(split);
         vram_arguments_t arguments {};
         vram_graph_t& graph = arguments.graph;
@@ -3760,7 +3749,7 @@ struct vram_shard_core {
     /** Queues the start of @p split 's partition through @p kernels: the node parts and proposals
      *  unknown, the frontiers, the parts' counters and the rounds' counts empty, then the roots. */
     status_t queue_partition_(kernel_table_t const& kernels, split_t& split, stream_handle_t stream) noexcept {
-        std::size_t const entries = split.entries, parts = split.receivers.size();
+        std::size_t const entries = split.entries, parts = split.targets.size();
         std::size_t const words = divide_round_up<std::size_t>(entries, 32);
         split_scratch_t const carved = split_scratch_(split);
         // Each run lies back to back.
@@ -3813,7 +3802,7 @@ struct vram_shard_core {
         }
         split.next_round = 2 * first_round;
         u32_t* const assigned_count = reinterpret_cast<u32_t*>(
-            split.host_bytes + split_layout_(split.entries, split.receivers.size()).host_assigned);
+            split.host_bytes + split_layout_(split.entries, split.targets.size()).host_assigned);
         return failed(vendor_t::copy(api(), assigned_count, carved.placed + ((2 * first_round - 1) & 1u), sizeof(u32_t),
                                      stream))
                    ? status_t::device_error_k
@@ -3822,7 +3811,7 @@ struct vram_shard_core {
 
     /** Whether the last growth round of @p split placed anything, so more rounds follow. */
     static bool placing_(split_t const& split) noexcept {
-        std::size_t const host_assigned = split_layout_(split.entries, split.receivers.size()).host_assigned;
+        std::size_t const host_assigned = split_layout_(split.entries, split.targets.size()).host_assigned;
         return *reinterpret_cast<u32_t const*>(split.host_bytes + host_assigned) != 0;
     }
 
@@ -3840,14 +3829,14 @@ struct vram_shard_core {
                    : status_t::success_k;
     }
 
-    /** Queues @p split 's scatter: the assigned slots and the receivers' published counts up, then
-     *  every node's neighbors, vector, norms and key into its receiver. */
+    /** Queues @p split 's scatter: the assigned slots and the targets' published counts up, then
+     *  every node's neighbors, vector, norms and key into its target. */
     status_t queue_scatter_(kernel_table_t const& kernels, split_t const& split, stream_handle_t stream) noexcept {
         if (failed(vendor_t::copy(api(), split_scratch_(split).node_parts, split.host_bytes,
                                   split.entries * sizeof(u32_t), stream)))
             return status_t::device_error_k;
-        for (std::size_t index = 0; index != split.receivers.size(); ++index)
-            if (failed(vendor_t::fill_words(api(), split.receivers[index]->published_rows_(),
+        for (std::size_t index = 0; index != split.targets.size(); ++index)
+            if (failed(vendor_t::fill_words(api(), split.targets[index]->published_rows_(),
                                             static_cast<u32_t>(split.parts[index].entries), 1, stream)))
                 return status_t::device_error_k;
         vram_arguments_t const arguments = split_arguments_(split);
@@ -4484,7 +4473,7 @@ struct vram_shard_core {
     /** The neighbors matrix, on the same terms. */
     neighbors_matrix_allocator_t neighbors_matrix_;
 
-    /** The claim word, closed while a refine, an absorb, a load or a save of the sharded index
+    /** The claim word, closed while a refine, a reshard, a load or a save of the sharded index
      *  holds it. */
     claim_word_t claims_;
 

@@ -2,17 +2,16 @@
  *  @file include/usearch/dense/vram_nvidia_reshard.hpp
  *  @author Ash Vardanian
  *  @date October 22, 2026
- *  @brief The freestanding compaction of @c vram_nvidia_indexes sources into a RAM target under a
- *      shard capacity.
+ *  @brief The reshard of @c vram_nvidia_indexes sources into a RAM target under a shard capacity.
  *
- *  A compaction packs the source shards largest first into target shards of at most a shard
- *  capacity of rows, each into the first with room, so it ends with as few shards as fit. The
- *  shards of one source going side by side into one target shard form fold bins, which link on the
- *  GPUs before anything crosses: every row searches the bin's other shards through the normal
- *  search, re-selects its neighbors from its own and those over the whole bin as one storage, and
- *  every pick in another shard merges back into the picked row. Each bin then crosses to the host
- *  through its shards' save plans and goes into its target shard through one load, its edges in the
- *  bin's dense ID space and its keys beside it, and each target shard heals.
+ *  A reshard packs the source shards largest first into target shards of at most a shard capacity
+ *  of rows, each into the first with room, so it ends with as few shards as fit. The shards of one
+ *  source going side by side into one target shard form fold bins, which link on the GPUs before
+ *  anything crosses: every row searches the bin's other shards through the normal search,
+ *  re-selects its neighbors from its own and those over the whole bin as one storage, and every
+ *  pick in another shard merges back into the picked row. Each bin then crosses to the host through
+ *  its shards' save plans and goes into its target shard through one load, its edges in the bin's
+ *  dense ID space and its keys beside it, and each target shard heals.
  *
  *  The one header that sees both residencies: it includes the NVIDIA tower and the portable RAM
  *  one, which never include each other.
@@ -27,14 +26,14 @@
 #include <type_traits> // `std::is_same_v`
 #include <utility>     // `std::exchange`
 
-#include "usearch/dense/types.hpp" // `compact_config_t`, `compact_result_t`
+#include "usearch/dense/types.hpp" // `reshard_config_t`, `reshard_report_t`
 #include "usearch/dense/ram_indexes.hpp"
 #include "usearch/dense/vram_nvidia_indexes.hpp"
 
 namespace unum::usearch::dense {
 
 /**
- *  @brief Opens a compaction of the device @p sources into the host @p target, each target shard
+ *  @brief Opens a reshard of the device @p sources into the host @p target, each target shard
  *      holding at most @p config.shard_capacity rows.
  *
  *  The target and every source close here, each under its own gate, so the packing never goes
@@ -43,7 +42,7 @@ namespace unum::usearch::dense {
  *  throughout, since the fold writes only its own buffers, retrying once around the window that
  *  empties each; searches of the target retry around the commits that publish each source's rows.
  *  Every row moves, so the sources end empty, closed and sealed, keeping their shards and storage,
- *  and their slots must outlive the plan.
+ *  and the plan copies their list.
  *
  *  @param[in] sources The device indexes giving their rows up, on the devices @p device_executor
  *      drives.
@@ -54,13 +53,14 @@ namespace unum::usearch::dense {
  *  @param[in] config The shard capacity every target shard holds to.
  *
  *  @par Statuses:
- *  - @c uninitialized_k No source is named, the target has no shards, or @p host_executor has no
- *    threads; or a source keeps it, as its @c status says.
- *  - @c config_mismatch_k A null or repeated source, another metric or geometry, a source device
- *    @p device_executor drives no stream on, or a bin's device that cannot reach another
- *    member's storage; or a source keeps it.
+ *  - @c invalid_argument_k No source is named, or a source is null or named twice.
+ *  - @c uninitialized_k The target has no shards, or @p host_executor has no threads; or a source
+ *    keeps it, as its @c status says.
+ *  - @c config_mismatch_k Another metric or geometry, a source device @p device_executor drives
+ *    no stream on, or a bin's device that cannot reach another member's storage; or a source
+ *    keeps it.
  *  - @c contended_k A call or batch in flight on the target or a source, or another refine,
- *    absorb, split, compaction, save or load holding either.
+ *    reshard, save or load holding either.
  *  - @c unsupported_k A source shard past the capacity, which would have to be cut first, or a
  *    source keeps it.
  *  - @c overflow_k A fresh target shard generation still has no room for a source shard, or a
@@ -68,22 +68,23 @@ namespace unum::usearch::dense {
  *  - @c cancelled_k or @c unsupported_layout_k A source keeps it, as its @c status says.
  */
 template <typename vram_indexes_type_, typename ram_indexes_type_>
-expected<vram_nvidia_compact_plan<vram_indexes_type_, ram_indexes_type_>> plan_compact(
+expected<vram_nvidia_reshard_plan<vram_indexes_type_, ram_indexes_type_>> plan_reshard(
     std::span<vram_indexes_type_* const> sources, ram_indexes_type_& target, cuda_executor_t& device_executor,
-    typename ram_indexes_type_::executor_t& host_executor, compact_config_t const& config = {}) noexcept;
+    typename ram_indexes_type_::executor_t& host_executor, reshard_config_t const& config = {}) noexcept;
 
 /**
- *  @brief The one-shot @c plan_compact, run and finished on contexts carved for the call;
- *      @p on_visited reports and cancels the fold alone, as in @c vram_nvidia_compact_plan::run.
+ *  @brief The one-shot @c plan_reshard, run and finished on contexts carved for the call;
+ *      @p on_visited reports and cancels the fold alone, as in @c vram_nvidia_reshard_plan::run.
  *
  *  @par Statuses:
- *  - @c uninitialized_k No source is named, the target has no shards, or @p host_executor has no
- *    threads; or a source keeps it, as its @c status says.
- *  - @c config_mismatch_k A null or repeated source, another metric or geometry, a source device
- *    @p device_executor drives no stream on, a bin's device that cannot reach another member's
- *    storage, or a source's rows that are never copied; or a source keeps it.
- *  - @c contended_k A call or batch in flight on the target or a source, another refine, absorb,
- *    split, compaction, save or load holding either, or another call holding an executor.
+ *  - @c invalid_argument_k No source is named, or a source is null or named twice.
+ *  - @c uninitialized_k The target has no shards, or @p host_executor has no threads; or a source
+ *    keeps it, as its @c status says.
+ *  - @c config_mismatch_k Another metric or geometry, a source device @p device_executor drives
+ *    no stream on, a bin's device that cannot reach another member's storage, or a source's rows
+ *    that are never copied; or a source keeps it.
+ *  - @c contended_k A call or batch in flight on the target or a source, another refine,
+ *    reshard, save or load holding either, or another call holding an executor.
  *  - @c unsupported_k A source shard past the capacity, which would have to be cut first, or a
  *    source keeps it.
  *  - @c overflow_k A fresh target shard generation still has no room for a source shard, the
@@ -91,18 +92,18 @@ expected<vram_nvidia_compact_plan<vram_indexes_type_, ram_indexes_type_>> plan_c
  *  - @c unsupported_layout_k A source keeps it, as its @c status says.
  */
 template <typename vram_indexes_type_, typename ram_indexes_type_, typename progress_type_ = dummy_progress_t>
-expected<compact_result_t> compact(std::span<vram_indexes_type_* const> sources, ram_indexes_type_& target,
+expected<reshard_report_t> reshard(std::span<vram_indexes_type_* const> sources, ram_indexes_type_& target,
                                    cuda_executor_t& device_executor,
                                    typename ram_indexes_type_::executor_t& host_executor,
-                                   compact_config_t const& config = {}, progress_type_&& on_visited = {}) noexcept;
+                                   reshard_config_t const& config = {}, progress_type_&& on_visited = {}) noexcept;
 
 /**
- *  @brief One compaction in flight from NVIDIA device shards into a RAM target, holding every
+ *  @brief One reshard in flight from NVIDIA device shards into a RAM target, holding every
  *      index it moves closed meanwhile.
  *
- *  @ref run drives the fold's three phases on the devices - the cross searches, the re-selection
- *  and the merge - then copies the sources still pending, each bin staged on the host once through
- *  columns the plan sized at planning for the widest; a cancel pauses between phases, and a later
+ *  @ref run drives the fold's three steps on the devices - the cross searches, the re-selection and
+ *  the merge - then copies the sources still pending, each bin staged on the host once through
+ *  columns the plan sized at planning for the widest; a cancel pauses between steps, and a later
  *  call continues there. @ref finish heals every target shard once the sources were copied, reopens
  *  the target and every source still pending, and reports.
  *
@@ -114,37 +115,37 @@ expected<compact_result_t> compact(std::span<vram_indexes_type_* const> sources,
  *  a row of appended nodes beside the row it holds.
  */
 template <typename vram_indexes_type_, typename ram_indexes_type_>
-struct [[nodiscard]] vram_nvidia_compact_plan {
+struct [[nodiscard]] vram_nvidia_reshard_plan {
     using vram_indexes_t = vram_indexes_type_;
     using ram_indexes_t = ram_indexes_type_;
     using device_executor_t = typename vram_indexes_t::executor_t;
     using host_executor_t = typename ram_indexes_t::executor_t;
     using traversal_context_t = typename ram_indexes_t::traversal_context_t;
     using refine_plan_t = typename ram_indexes_t::refine_plan_t;
-    using result_t = compact_result_t;
+    using result_t = reshard_report_t;
     static_assert(vram_indexes_t::vector_dtype_k == ram_indexes_t::vector_dtype_k,
                   "Rows cross as stored, so both residencies keep one scalar");
     static_assert(std::is_same_v<typename vram_indexes_t::key_t, typename ram_indexes_t::key_t>,
                   "Keys cross as stored, so both residencies keep one key");
 
-    vram_nvidia_compact_plan() noexcept = default;
-    vram_nvidia_compact_plan(vram_nvidia_compact_plan&& other) noexcept
+    vram_nvidia_reshard_plan() noexcept = default;
+    vram_nvidia_reshard_plan(vram_nvidia_reshard_plan&& other) noexcept
         : refining_(std::move(other.refining_)), columns_(std::move(other.columns_)),
           members_(std::move(other.members_)), bins_(std::move(other.bins_)), folds_(std::move(other.folds_)),
           bin_tables_(std::move(other.bin_tables_)), fold_tables_(std::move(other.fold_tables_)),
-          arenas_(std::move(other.arenas_)), walks_(std::move(other.walks_)),
-          sources_(std::exchange(other.sources_, {})), copied_(other.copied_), moved_entries_(other.moved_entries_),
-          folded_(other.folded_), phase_(other.phase_) {}
-    vram_nvidia_compact_plan& operator=(vram_nvidia_compact_plan&&) = delete;
-    vram_nvidia_compact_plan(vram_nvidia_compact_plan const&) = delete;
-    vram_nvidia_compact_plan& operator=(vram_nvidia_compact_plan const&) = delete;
+          arenas_(std::move(other.arenas_)), walks_(std::move(other.walks_)), moves_(std::move(other.moves_)),
+          sources_(std::move(other.sources_)), copied_(other.copied_), moved_entries_(other.moved_entries_),
+          folded_(other.folded_), fold_step_(other.fold_step_) {}
+    vram_nvidia_reshard_plan& operator=(vram_nvidia_reshard_plan&&) = delete;
+    vram_nvidia_reshard_plan(vram_nvidia_reshard_plan const&) = delete;
+    vram_nvidia_reshard_plan& operator=(vram_nvidia_reshard_plan const&) = delete;
 
     /** Reopens every source still pending; the refine plan reopens the target. */
-    ~vram_nvidia_compact_plan() noexcept { release_sources_(); }
+    ~vram_nvidia_reshard_plan() noexcept { release_sources_(); }
 
     /**
-     *  @brief Drives the fold's pending phases, then copies the pending sources; @c cancelled_k
-     *      means a later call continues at the next phase.
+     *  @brief Drives the fold's pending steps, then copies the pending sources; @c cancelled_k
+     *      means a later call continues at the next step.
      *
      *  A source failing to copy stays pending and closed, with every later one, for the next call.
      *
@@ -153,7 +154,7 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
      *  @param[in,out] traversals The caller's context of every host thread, which @ref finish heals
      *      on; the call checks their count.
      *  @param[in] on_visited Fires once the re-selection and once the merge finished, with the rows
-     *      folded so far and the rows moving; a @c cancel_k answer stops before the next phase.
+     *      folded so far and the rows moving; a @c cancel_k answer stops before the next step.
      *
      *  @par Statuses:
      *  - @c uninitialized_k The plan is empty or finished.
@@ -196,10 +197,10 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
         result_t result;
         ram_indexes_t* const target = refining_.owner_;
         if (!target) return {result, status_t::uninitialized_k};
-        result.source_shards = refining_.moves_.size();
+        result.source_shards = moves_.size();
         result.moved_entries = moved_entries_;
         release_sources_();
-        auto [graph, status] = refining_.finish(host_executor, traversals);
+        auto [graph, status] = refining_.close_(host_executor, traversals);
         result.graph = graph;
         result.graph += folded_;
         for (std::size_t shard = 0; shard != target->shards_count(); ++shard)
@@ -207,14 +208,20 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
         return {result, status};
     }
 
+    /** The phase the plan is in: the moves' while a source is pending, then the target's. */
+    phase_t phase() const noexcept { return copied_ != sources_.size() ? phase_t::copy_k : refining_.phase(); }
+
+    /** The sources the plan moves out, in the order they were named. */
+    std::span<vram_indexes_t* const> sources() const noexcept { return to_span(sources_); }
+
   private:
     template <typename other_vram_type_, typename other_ram_type_>
-    friend expected<vram_nvidia_compact_plan<other_vram_type_, other_ram_type_>> plan_compact(
+    friend expected<vram_nvidia_reshard_plan<other_vram_type_, other_ram_type_>> plan_reshard(
         std::span<other_vram_type_* const>, other_ram_type_&, cuda_executor_t&, typename other_ram_type_::executor_t&,
-        compact_config_t const&) noexcept;
+        reshard_config_t const&) noexcept;
     template <typename other_vram_type_, typename other_ram_type_, typename progress_type_>
-    friend expected<compact_result_t> compact(std::span<other_vram_type_* const>, other_ram_type_&, cuda_executor_t&,
-                                              typename other_ram_type_::executor_t&, compact_config_t const&,
+    friend expected<reshard_report_t> reshard(std::span<other_vram_type_* const>, other_ram_type_&, cuda_executor_t&,
+                                              typename other_ram_type_::executor_t&, reshard_config_t const&,
                                               progress_type_&&) noexcept;
 
     using vram_index_t = typename vram_indexes_t::index_t;
@@ -242,12 +249,13 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
         std::size_t state = 0;
     };
 
-    /** The fold's phases, the last one copying what it linked. */
-    enum class phase_t : u8_t { cross_k, reselect_k, merge_k, copy_k };
+    /** The fold's steps, the last one copying what it linked. */
+    enum class fold_step_t : u8_t { cross_k, reselect_k, merge_k, copy_k };
 
-    explicit vram_nvidia_compact_plan(forkunion_allocator_t allocator) noexcept
+    explicit vram_nvidia_reshard_plan(forkunion_allocator_t allocator) noexcept
         : refining_(allocator), columns_(allocator), members_(allocator), bins_(allocator), folds_(allocator),
-          bin_tables_(allocator), fold_tables_(allocator), arenas_(allocator), walks_(allocator) {}
+          bin_tables_(allocator), fold_tables_(allocator), arenas_(allocator), walks_(allocator), moves_(allocator),
+          sources_(allocator) {}
 
     /** Bytes one row of @p index takes in the host columns: its packed vector, then its
      *  neighbors. */
@@ -304,19 +312,23 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
      *  own gate, packs every source shard into the target under the tighter of
      *  @p config.shard_capacity and the target's own bound, cuts the moves into bins, and sizes
      *  the host columns for the widest bin and every folding bin's buffers and contexts. */
-    static expected<vram_nvidia_compact_plan> open_(std::span<vram_indexes_t* const> sources, ram_indexes_t& target,
+    static expected<vram_nvidia_reshard_plan> open_(std::span<vram_indexes_t* const> sources, ram_indexes_t& target,
                                                     device_executor_t& device_executor,
                                                     host_executor_t const& host_executor,
-                                                    compact_config_t const& config) noexcept {
-        if (sources.empty() || !target.shards_count() || !host_executor.size()) return {{}, status_t::uninitialized_k};
+                                                    reshard_config_t const& config) noexcept {
+        if (sources.empty()) return {{}, status_t::invalid_argument_k};
+        for (std::size_t position = 0; position != sources.size(); ++position) {
+            if (!sources[position]) return {{}, status_t::invalid_argument_k};
+            for (std::size_t earlier = 0; earlier != position; ++earlier)
+                if (sources[earlier] == sources[position]) return {{}, status_t::invalid_argument_k};
+        }
+        if (!target.shards_count() || !host_executor.size()) return {{}, status_t::uninitialized_k};
         vram_indexes_t const* shaped = sources.front();
         for (std::size_t position = 0; position != sources.size(); ++position) {
             vram_indexes_t const* source = sources[position];
-            if (!source || source->kernel() != target.kernel() || source->dimensions() != target.dimensions() ||
+            if (source->kernel() != target.kernel() || source->dimensions() != target.dimensions() ||
                 source->connectivity() != target.connectivity())
                 return {{}, status_t::config_mismatch_k};
-            for (std::size_t earlier = 0; earlier != position; ++earlier)
-                if (sources[earlier] == source) return {{}, status_t::config_mismatch_k};
             if (status_t const kept = source->status(); failed(kept)) return {{}, kept};
             if (status_t const paired = fanout_t::pairs_with(source->shards_, device_executor); failed(paired))
                 return {{}, paired};
@@ -327,18 +339,20 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
                                          ? config.shard_capacity
                                          : target.shard_capacity();
 
-        vram_nvidia_compact_plan plan {target.shards_.allocator()};
+        vram_nvidia_reshard_plan plan {target.shards_.allocator()};
         refine_plan_t& refining = plan.refining_;
         if (status_t const closed = target.close_gated_(); failed(closed)) return {{}, closed};
         refining.owner_ = &target;
-        refining.config_.expansion_factor = config.expansion_factor;
-        refining.config_.cache_bytes = config.cache_bytes ? config.cache_bytes : host_executor.cache_bytes_per_core();
+        refining.config_.expansion_factor = config.refine.expansion_factor;
+        refining.config_.cache_bytes = config.refine.cache_bytes ? config.refine.cache_bytes
+                                                                 : host_executor.cache_bytes_per_core();
+        if (failed(plan.sources_.reserve_exactly(sources.size()))) return {{}, status_t::bad_alloc_k};
         for (std::size_t closing = 0; closing != sources.size(); ++closing)
             if (status_t const closed = sources[closing]->close_gated_(); failed(closed)) {
                 while (closing) sources[--closing]->shards_.reopen();
                 return {{}, closed};
             }
-        plan.sources_ = sources;
+        for (vram_indexes_t* source : sources) plan.sources_.push_back_reserved(source);
 
         // Closed, the sources hold still, so their shards are what the moves pack.
         std::size_t count = 0;
@@ -346,7 +360,7 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
             count += source->shards_.size();
             plan.moved_entries_ += source->size();
         }
-        if (failed(refining.moves_.resize(count))) return {{}, status_t::bad_alloc_k};
+        if (failed(plan.moves_.resize(count))) return {{}, status_t::bad_alloc_k};
         auto source_shard = [&](std::size_t from) noexcept -> vram_shard_t const& { return plan.shard_at_(from); };
         auto open = [&]() noexcept {
             // The target is sealed, so the shard generation opens closed like the rest, past the
@@ -355,7 +369,7 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
                 target.shards_.open_shard_generation(),
                 [&target](ram_shard_t const& built) noexcept { return target.build_shard_(built); });
         };
-        if (status_t const packed = target.shards_.pack(to_writable_span(refining.moves_), 0, capacity, source_shard,
+        if (status_t const packed = target.shards_.pack(to_writable_span(plan.moves_), 0, capacity, source_shard,
                                                         placement_of_t {}, rank_first_fit, open);
             failed(packed))
             return {{}, packed};
@@ -372,7 +386,7 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
      *  one more member would leave, or once one more would leave each other member no slot of a
      *  row; then sizes the host columns for the widest bin. */
     status_t cut_bins_(std::size_t shards) noexcept {
-        std::size_t const count = refining_.moves_.size();
+        std::size_t const count = moves_.size();
         if (failed(members_.reserve_exactly(count)) || failed(bins_.reserve_exactly(count)))
             return status_t::bad_alloc_k;
         std::size_t first = 0;
@@ -383,7 +397,7 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
                 std::size_t widest = 0;
                 for (std::size_t from = first; from != first + source_shards; ++from) {
                     std::size_t const rows = source->shards_[from - first].index->size();
-                    if (refining_.moves_[from].into != into || !rows) continue;
+                    if (moves_[from].into != into || !rows) continue;
                     if (bin.count && ((max_of(widest, rows) >> row_bits_(bin.count + 1)) || connectivity < bin.count)) {
                         bins_.push_back_reserved(bin);
                         bin = {members_.size(), 0}, widest = 0;
@@ -482,7 +496,7 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
 
     /** The fold launch of the shard at @p place in @p bin for @p phase, over its copies of the
      *  bin's tables. */
-    vram_fold_t fold_launch_(bin_t const& bin, std::size_t place, vram_fold_phase_t phase) const noexcept {
+    vram_fold_t fold_launch_(bin_t const& bin, std::size_t place, vram_fold_step_t step) const noexcept {
         vram_index_t const& index = *shard_at_(members_[bin.first + place]).index;
         vram_bin_shard_t const* const bin_shards = reinterpret_cast<vram_bin_shard_t const*>(
             folds_[bin.state + place].base());
@@ -495,14 +509,14 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
         fold.row_bits = row_bits_(bin.count);
         fold.cross_count = cross_count_(bin.count, index.connectivity());
         fold.selection_nodes = index.core().reselection_nodes_();
-        fold.phase = phase;
+        fold.step = step;
         return fold;
     }
 
-    /** Queues the current phase on every folding bin's members: the tables, the empty heads and
-     *  every member's searches of the others for the cross phase, one fold launch per member for
+    /** Queues the current step on every folding bin's members: the tables, the empty heads and
+     *  every member's searches of the others for the cross step, one fold launch per member for
      *  the others. Stops at the first refusal. */
-    status_t queue_phase_() noexcept {
+    status_t queue_step_() noexcept {
         for (bin_t const& bin : bins_) {
             if (bin.count == 1) continue;
             search_config_t search;
@@ -513,11 +527,11 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
                 std::size_t const connectivity = index.connectivity();
                 walk_context_t& walk = walks_[bin.state + place];
                 if (failed(cuda_vendor_t::select(walk.api(), walk.device()))) return status_t::device_error_k;
-                if (phase_ != phase_t::cross_k) {
-                    vram_fold_phase_t const phase = phase_ == phase_t::reselect_k ? vram_fold_phase_t::reselect_k
-                                                                                  : vram_fold_phase_t::merge_k;
+                if (fold_step_ != fold_step_t::cross_k) {
+                    vram_fold_step_t const step = fold_step_ == fold_step_t::reselect_k ? vram_fold_step_t::reselect_k
+                                                                                        : vram_fold_step_t::merge_k;
                     if (status_t const launched = index.core().kernels().launch_fold_(
-                            index.core(), fold_launch_(bin, place, phase), walk);
+                            index.core(), fold_launch_(bin, place, step), walk);
                         failed(launched))
                         return launched;
                     continue;
@@ -563,37 +577,37 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
         return status_t::success_k;
     }
 
-    /** Drives the fold's pending phases, each queued on every folding bin and awaited on every
-     *  member's context before the next, so a phase reads only what the last one finished; the
-     *  tallies of the re-selection and the merge enter the report. A phase failing partway leaves
-     *  some members past it, so the fold restarts at the cross phase, which refills every head and
+    /** Drives the fold's pending steps, each queued on every folding bin and awaited on every
+     *  member's context before the next, so a step reads only what the last one finished; the
+     *  tallies of the re-selection and the merge enter the report. A step failing partway leaves
+     *  some members past it, so the fold restarts at the cross step, which refills every head and
      *  pick. */
     template <typename progress_type_>
     status_t fold_(progress_type_& on_visited) noexcept {
-        while (phase_ != phase_t::copy_k) {
-            status_t const queued = queue_phase_();
+        while (fold_step_ != fold_step_t::copy_k) {
+            status_t const queued = queue_step_();
             // Every launch queued so far finishes before anything returns, as the buffers die with
             // the plan.
             status_t waited = status_t::success_k;
             for (walk_context_t& walk : walks_)
                 if (status_t const drained = walk.wait(); failed(drained) && succeeded(waited)) waited = drained;
             if (failed(queued) || failed(waited)) {
-                phase_ = phase_t::cross_k;
+                fold_step_ = fold_step_t::cross_k;
                 return failed(queued) ? queued : waited;
             }
-            // The cross phase only searches, so only the re-selection and the merge count.
+            // The cross step only searches, so only the re-selection and the merge count.
             for (bin_t const& bin : bins_) {
-                if (phase_ == phase_t::cross_k || bin.count == 1) continue;
+                if (fold_step_ == fold_step_t::cross_k || bin.count == 1) continue;
                 for (std::size_t place = 0; place != bin.count; ++place) {
                     vram_telemetry_block_t const spent = walks_[bin.state + place].spent();
                     folded_.traversal_stats.computed_distances += spent.scored;
                     folded_.changed_nodes += spent.changed_nodes;
-                    if (phase_ == phase_t::reselect_k)
+                    if (fold_step_ == fold_step_t::reselect_k)
                         folded_.reselected_nodes += shard_at_(members_[bin.first + place]).index->size();
                 }
             }
-            phase_ = static_cast<phase_t>(static_cast<u8_t>(phase_) + 1);
-            if (phase_ != phase_t::reselect_k &&
+            fold_step_ = static_cast<fold_step_t>(static_cast<u8_t>(fold_step_) + 1);
+            if (fold_step_ != fold_step_t::reselect_k &&
                 on_visited(folded_.reselected_nodes, moved_entries_) == continuation_t::cancel_k)
                 return status_t::cancelled_k;
         }
@@ -634,7 +648,7 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
                    host_executor_t& host_executor) noexcept {
         std::size_t const shards = refining_.cursors_.size();
         if (!source.size()) return status_t::success_k;
-        std::span<shard_move_t const> const moves = to_span(refining_.moves_).subspan(first, source.shards_.size());
+        std::span<shard_move_t const> const moves = to_span(moves_).subspan(first, source.shards_.size());
         // The source empties once its rows are copied, so its gate comes before anything that a
         // refusal might undo.
         typename vram_indexes_t::unique_lock_t const emptying {source.gate_, std::try_to_lock};
@@ -671,8 +685,8 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
             node_id_t offset = 0;
             for (std::size_t member = bin.first; member != bin.first + bin.count; ++member) {
                 std::size_t const from = members_[member] - first;
-                vram_shard_t const& donor_slot = source.shards_[from];
-                node_id_t const part_rows = static_cast<node_id_t>(donor_slot.index->size());
+                vram_shard_t const& from_slot = source.shards_[from];
+                node_id_t const part_rows = static_cast<node_id_t>(from_slot.index->size());
                 typename vram_index_t::columns_t const staged {
                     bytes_of(vectors + offset * vectors_row_bytes, part_rows * vectors_row_bytes),
                     bytes_of(neighbors + offset * neighbors_row_bytes, part_rows * neighbors_row_bytes),
@@ -680,8 +694,7 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
                 typename device_executor_t::stream_t& stream = device_executor.stream(
                     fanout_t::stream_of(source.shards_, device_executor, from));
                 if (status_t const entered = fanout_t::enter(source.shards_, from); failed(entered)) return entered;
-                auto [saving, save_status] = donor_slot.index->plan_save(staged, synchronization_t::immutable_k,
-                                                                         stream);
+                auto [saving, save_status] = from_slot.index->plan_save(staged, synchronization_t::immutable_k, stream);
                 if (failed(save_status)) return save_status;
                 for (typename vram_index_t::save_plan_t::task_t const task : saving.tasks())
                     if (status_t const saved = saving.save(task); failed(saved)) return saved;
@@ -729,9 +742,8 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
                 return loaded;
         }
 
-        // Every bin was copied, so no plan refuses; each plan files its keys ahead of the bracket,
-        // which shows a search every shard's rows with their keys or none.
-        for (ram_load_plan_t& plan : plans) plan.publish_keys();
+        // Every bin was copied, so no plan refuses, and every run filed its keys as it settled; the
+        // bracket shows a search every shard's rows with their keys or none.
         auto publish = [&]() noexcept {
             for (ram_load_plan_t& plan : plans)
                 if (status_t const finished = plan.finish(); failed(finished)) return finished;
@@ -750,11 +762,11 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
     /** Reopens every source still pending, each closed at planning; the plan holds none after. */
     void release_sources_() noexcept {
         for (std::size_t pending = copied_; pending < sources_.size(); ++pending) sources_[pending]->shards_.reopen();
-        sources_ = {};
+        copied_ = sources_.size();
     }
 
     /** Runs and finishes the plan on host contexts carved for the call: the one-shot
-     *  @ref compact. */
+     *  @ref reshard. */
     template <typename progress_type_>
     expected<result_t> drive_(device_executor_t& device_executor, host_executor_t& host_executor,
                               progress_type_& on_visited) noexcept {
@@ -767,7 +779,7 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
         return {result, failed(finish_status) ? finish_status : ran};
     }
 
-    /** The absorb plan over the target: its moves and per-shard rounds. */
+    /** The target's per-shard rounds, which link the moved rows in. */
     refine_plan_t refining_;
 
     /** One bin's packed vectors, then its neighbors, sized at planning for the widest, which every
@@ -785,7 +797,7 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
      *  its bin's state on; the tables, runs and contexts below are laid out alike. */
     growing_buffer<cuda_virtual_memory_allocator<byte_t>, forkunion_allocator_t> folds_ {forkunion_allocator_t {}};
 
-    /** Every folding member's entries of its bin's shard table and fold table, as the cross phase
+    /** Every folding member's entries of its bin's shard table and fold table, as the cross step
      *  uploads them into each member's buffer. */
     growing_buffer<vram_bin_shard_t, forkunion_allocator_t> bin_tables_ {forkunion_allocator_t {}};
     growing_buffer<vram_fold_shard_t, forkunion_allocator_t> fold_tables_ {forkunion_allocator_t {}};
@@ -795,8 +807,11 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
     growing_buffer<typename device_executor_t::arena_t, forkunion_allocator_t> arenas_ {forkunion_allocator_t {}};
     growing_buffer<walk_context_t, forkunion_allocator_t> walks_ {forkunion_allocator_t {}};
 
-    /** The caller's source slots, borrowed until the plan dies. */
-    std::span<vram_indexes_t* const> sources_;
+    /** One move per source shard, numbered across the sources, as the packing placed it. */
+    growing_buffer<shard_move_t, forkunion_allocator_t> moves_ {forkunion_allocator_t {}};
+
+    /** The sources, as the caller named them. */
+    growing_buffer<vram_indexes_t*, forkunion_allocator_t> sources_ {forkunion_allocator_t {}};
 
     /** Sources copied so far. */
     std::size_t copied_ = 0;
@@ -807,24 +822,24 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
     /** The fold's re-selections and merges, as a refine counts them. */
     refine_report_t folded_;
 
-    /** The fold's next phase. */
-    phase_t phase_ = phase_t::cross_k;
+    /** The fold's next step. */
+    fold_step_t fold_step_ = fold_step_t::cross_k;
 };
 
 template <typename vram_indexes_type_, typename ram_indexes_type_>
-expected<vram_nvidia_compact_plan<vram_indexes_type_, ram_indexes_type_>> plan_compact(
+expected<vram_nvidia_reshard_plan<vram_indexes_type_, ram_indexes_type_>> plan_reshard(
     std::span<vram_indexes_type_* const> sources, ram_indexes_type_& target, cuda_executor_t& device_executor,
-    typename ram_indexes_type_::executor_t& host_executor, compact_config_t const& config) noexcept {
-    return vram_nvidia_compact_plan<vram_indexes_type_, ram_indexes_type_>::open_(sources, target, device_executor,
+    typename ram_indexes_type_::executor_t& host_executor, reshard_config_t const& config) noexcept {
+    return vram_nvidia_reshard_plan<vram_indexes_type_, ram_indexes_type_>::open_(sources, target, device_executor,
                                                                                   host_executor, config);
 }
 
 template <typename vram_indexes_type_, typename ram_indexes_type_, typename progress_type_>
-expected<compact_result_t> compact(std::span<vram_indexes_type_* const> sources, ram_indexes_type_& target,
+expected<reshard_report_t> reshard(std::span<vram_indexes_type_* const> sources, ram_indexes_type_& target,
                                    cuda_executor_t& device_executor,
                                    typename ram_indexes_type_::executor_t& host_executor,
-                                   compact_config_t const& config, progress_type_&& on_visited) noexcept {
-    auto [plan, status] = plan_compact(sources, target, device_executor, host_executor, config);
+                                   reshard_config_t const& config, progress_type_&& on_visited) noexcept {
+    auto [plan, status] = plan_reshard(sources, target, device_executor, host_executor, config);
     if (failed(status)) return {{}, status};
     return plan.drive_(device_executor, host_executor, on_visited);
 }

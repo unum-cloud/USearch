@@ -317,6 +317,18 @@ static std::size_t check_geospatial_vram_collection(u64_t seed, std::int32_t ord
                    vram_recall, ram_recall);
     failures += expect(vram_recall + 0.05 >= ram_recall);
 
+    // One round on the GPU keeps every entry under the octant rule and concludes a verdict.
+    usearch_refine_report_t report {};
+    usearch_geospatial_refine_t refine {};
+    refine.index = vram_index;
+    refine.executor = executor;
+    refine.outcome = &outcome;
+    refine.report = &report;
+    if (!failures) usearch_geospatial_refine(&refine);
+    failures += expect(!outcome.message);
+    failures += expect(report.verdict == usearch_refine_improved_k || report.verdict == usearch_refine_converged_k);
+    failures += expect(report.neighborhoods != 0 && report.opening.audited == count);
+
     usearch_geospatial_free(vram_index);
     usearch_geospatial_free(ram_index);
     usearch_executor_free(executor);

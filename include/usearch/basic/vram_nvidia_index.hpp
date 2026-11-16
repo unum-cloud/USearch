@@ -14,8 +14,9 @@
  */
 #pragma once
 
-#include <cstddef> // `std::size_t`
+#include <cstddef> // `std::size_t`, `offsetof` - where a round's counters follow the check's
 
+#include <array>            // `std::array` - a round's column offsets
 #include <bit>              // `std::bit_ceil`, `std::bit_width`, `std::has_single_bit`
 #include <concepts>         // `std::same_as` - the sharded index takes 32-bit shards
 #include <functional>       // `std::hash` - the key map's default hash
@@ -82,12 +83,6 @@ struct vram_build {
     node_id_type_* link_next = nullptr;
     node_id_type_* touched_ids = nullptr;
     u32_t* touched_count = nullptr;
-    vram_bitset_t changed {};
-    u32_t const* incoming_offsets = nullptr;
-    node_id_type_ const* back_links = nullptr;
-    u32_t tape_size = 0;
-    node_id_type_ walked_first = 0;
-    node_id_type_ walked_bound = 0;
 };
 
 /** One walking launch and where it writes its outputs, mirroring the shared search view. */
@@ -126,17 +121,42 @@ struct vram_load {
     u32_t count = 0;
 };
 
+/** One gather or restitch launch of a round, mirroring the shared round view: the warps' spans and
+ *  selection scratch as a build's, the runs a gather files and the neighborhoods a restitch reads,
+ *  and the health check's columns the reach rule reads and the counters take the round's counts. */
+template <typename node_id_type_>
+struct vram_round {
+    vram_ragged_storage<node_id_type_> storage;
+    u32_t span_bytes = 0;
+    u32_t scratch_bytes_per_warp = 0;
+    byte_t* arena = nullptr;
+    gpu_arena_shape_t arena_shape {};
+    u32_t selection_nodes = 0;
+    vram_telemetry_block_t* telemetry = nullptr;
+    u32_t* assigned = nullptr;
+    u32_t const* entries = nullptr;
+    u32_t const* hub_nodes = nullptr;
+    vram_neighborhood_run_t const* runs = nullptr;
+    u32_t const* run_entries = nullptr;
+    u32_t runs_count = 0;
+    u16_t* entry_neighborhoods = nullptr;
+    u32_t const* neighborhood_offsets = nullptr;
+    u32_t neighborhoods_count = 0;
+    vram_health_t health {};
+};
+
 /** The one argument every NVIDIA basic kernel takes, each reading the record its kernel names. */
 template <typename node_id_type_>
 struct vram_arguments {
     vram_build<node_id_type_> build;
     vram_search<node_id_type_> search;
     vram_load<node_id_type_> load;
+    vram_round<node_id_type_> round;
 };
 
-/** One launch over the neighbors matrix alone, reading no value: the rebase of nodes a donor gave
- *  up, the reachability audit and the reconnection healing it, a sweep tile's count and scatter,
- *  and a split's partition and the scatter moving its nodes, whose values pass as opaque bytes. */
+/** One launch over the neighbors matrix alone, reading no value: the rebase of nodes a source gave
+ *  up, a pass of the health check or its heal, and a cut's partition and the scatter moving its
+ *  nodes, whose values pass as opaque bytes. */
 template <typename node_id_type_>
 struct vram_graph {
     node_id_type_* neighbors = nullptr;
@@ -146,22 +166,16 @@ struct vram_graph {
     node_id_type_ source_first = 0;
     node_id_type_ source_bound = 0;
     node_id_type_ shift = 0;
-    vram_bitset_t reached {};
     vram_bitset_t frontier {};
     vram_bitset_t next_frontier {};
     u32_t* counter = nullptr;
     u32_t const* previous_counter = nullptr;
-    u32_t* levels = nullptr;
     u32_t seed_count = 0;
-    u32_t* island_ids = nullptr;
-    u32_t islands_count = 0;
-    u32_t* in_links = nullptr;
-    u32_t* reconnected = nullptr;
 
-    /** The sweep tile a count, an offset or a scatter launch works on. */
-    vram_sweep_t sweep {};
+    /** The health check's columns and the pass a health launch runs. */
+    vram_health_t health {};
 
-    /** A split's part of each node, then its slot once the parts are ordered, the round's
+    /** A cut's part of each node, then its slot once the parts are ordered, the round's
      *  proposals, and per part its size, its round count and its root. */
     u32_t* node_parts = nullptr;
     u32_t* proposals = nullptr;
@@ -170,9 +184,8 @@ struct vram_graph {
     u32_t const* roots = nullptr;
     u32_t parts_count = 0;
     u32_t part_capacity = 0;
-    vram_bitset_t picked {};
 
-    /** The receivers' neighbors matrices, tapes and offsets columns, by part, and the source's tape
+    /** The targets' neighbors matrices, tapes and offsets columns, by part, and the source's tape
      *  and offsets. */
     u32_t* const* part_neighbors = nullptr;
     byte_t* const* part_values = nullptr;
@@ -206,14 +219,15 @@ constexpr u32_t cuda_resident_blocks(vram_kernel_t kernel, u32_t slots) noexcept
     switch (kernel) {
     case vram_kernel_t::search_k: return slots <= 8 ? 4 : 3;
     case vram_kernel_t::rebase_links_k:
-    case vram_kernel_t::reachability_sweep_k:
-    case vram_kernel_t::reached_in_links_k:
-    case vram_kernel_t::count_back_links_k:
-    case vram_kernel_t::scatter_back_links_k:
+    case vram_kernel_t::health_expand_k:
+    case vram_kernel_t::health_recheck_k:
+    case vram_kernel_t::health_islands_k:
+    case vram_kernel_t::island_components_k:
+    case vram_kernel_t::health_count_links_k:
+    case vram_kernel_t::label_islands_k:
     case vram_kernel_t::partition_propose_k:
     case vram_kernel_t::partition_count_k:
     case vram_kernel_t::partition_accept_k:
-    case vram_kernel_t::partition_picked_k:
     case vram_kernel_t::split_links_k:
     case vram_kernel_t::split_tape_k:
     case vram_kernel_t::widen_links_k: return 8;
@@ -230,12 +244,24 @@ struct cuda_rung_t {
 
 /** Every instantiation each rung of a modality's kits exports. */
 inline constexpr cuda_rung_t cuda_rungs[] = {
-    {vram_kernel_t::insert_k, 0},  {vram_kernel_t::insert_k, 2},           {vram_kernel_t::insert_k, 4},
-    {vram_kernel_t::insert_k, 8},  {vram_kernel_t::insert_k, 16},          {vram_kernel_t::refine_k, 0},
-    {vram_kernel_t::refine_k, 2},  {vram_kernel_t::refine_k, 4},           {vram_kernel_t::refine_k, 8},
-    {vram_kernel_t::refine_k, 16}, {vram_kernel_t::back_link_k, 0},        {vram_kernel_t::search_k, 0},
-    {vram_kernel_t::search_k, 2},  {vram_kernel_t::search_k, 4},           {vram_kernel_t::search_k, 8},
-    {vram_kernel_t::search_k, 16}, {vram_kernel_t::merge_back_links_k, 0},
+    {vram_kernel_t::insert_k, 0},
+    {vram_kernel_t::insert_k, 2},
+    {vram_kernel_t::insert_k, 4},
+    {vram_kernel_t::insert_k, 8},
+    {vram_kernel_t::insert_k, 16},
+    {vram_kernel_t::refine_k, 0},
+    {vram_kernel_t::refine_k, 2},
+    {vram_kernel_t::refine_k, 4},
+    {vram_kernel_t::refine_k, 8},
+    {vram_kernel_t::refine_k, 16},
+    {vram_kernel_t::back_link_k, 0},
+    {vram_kernel_t::search_k, 0},
+    {vram_kernel_t::search_k, 2},
+    {vram_kernel_t::search_k, 4},
+    {vram_kernel_t::search_k, 8},
+    {vram_kernel_t::search_k, 16},
+    {vram_kernel_t::gather_neighborhoods_k, 0},
+    {vram_kernel_t::restitch_k, 0},
 };
 
 /** The kernels a load queues, which each kit exports once, on its first rung. */
@@ -244,13 +270,13 @@ inline constexpr vram_kernel_t cuda_load_kernels[] = {vram_kernel_t::load_values
 /** Every kernel of the unit all NVIDIA basic faces share, over the neighbors matrix alone, so one
  *  instantiation per node-ID type serves every modality. */
 inline constexpr vram_kernel_t cuda_graph_kernels[] = {
-    vram_kernel_t::rebase_links_k,         vram_kernel_t::mark_landmarks_k,    vram_kernel_t::reachability_sweep_k,
-    vram_kernel_t::reachability_islands_k, vram_kernel_t::reached_in_links_k,  vram_kernel_t::reconnect_island_k,
-    vram_kernel_t::partition_roots_k,      vram_kernel_t::partition_propose_k, vram_kernel_t::partition_count_k,
-    vram_kernel_t::partition_accept_k,     vram_kernel_t::partition_fill_k,    vram_kernel_t::partition_islands_k,
-    vram_kernel_t::partition_picked_k,     vram_kernel_t::split_links_k,       vram_kernel_t::split_tape_k,
-    vram_kernel_t::gather_tape_k,          vram_kernel_t::count_back_links_k,  vram_kernel_t::offset_back_links_k,
-    vram_kernel_t::scatter_back_links_k,   vram_kernel_t::widen_links_k,
+    vram_kernel_t::rebase_links_k,       vram_kernel_t::health_expand_k,     vram_kernel_t::health_recheck_k,
+    vram_kernel_t::order_islands_k,      vram_kernel_t::health_islands_k,    vram_kernel_t::island_components_k,
+    vram_kernel_t::health_count_links_k, vram_kernel_t::label_islands_k,     vram_kernel_t::heal_islands_k,
+    vram_kernel_t::partition_roots_k,    vram_kernel_t::partition_propose_k, vram_kernel_t::partition_count_k,
+    vram_kernel_t::partition_accept_k,   vram_kernel_t::partition_fill_k,    vram_kernel_t::partition_islands_k,
+    vram_kernel_t::split_links_k,        vram_kernel_t::split_tape_k,        vram_kernel_t::gather_tape_k,
+    vram_kernel_t::widen_links_k,
 };
 
 /** The fatbin of @ref cuda_graph_kernels over 32-bit node IDs, defined beside them in
@@ -371,13 +397,15 @@ struct vram_load_step {
  *  another answers @c contended_k meanwhile, while searches on other streams keep running
  *  throughout.
  *
- *  A refinement re-selects nodes over the whole graph, each merging its picks into its row at once,
- *  then sweeps tiles of target nodes sized from its limit, merging the nodes linking to each one,
- *  and an absorb appends other indexes' nodes on the device before refining. Both, and the
- *  reachability audit, launch kernels that read the neighbors matrix alone, which one unit shares
- *  across every modality. Saves and loads cross the snapshot columns of the basic RAM index through
- *  a pinned bounce, values through the kits' codec. Plans close the claim word, or claim their
- *  nodes, for their whole lives.
+ *  A refine runs the dense device round: a health check over the neighbors matrix, a heal with no
+ *  distance, a seeded draw of hubs, a gather filing every entry under its nearest hub, and a
+ *  restitch of each neighborhood through the kits, then the closing check. A reshard moves entries
+ *  first - a gather appends other graphs' nodes on the device, a cut partitions and scatters them
+ *  into its targets - then runs the same round on every target. The health check, the heal and the
+ *  moves launch kernels that read the neighbors matrix alone, which one unit shares across every
+ *  modality. Saves and loads cross the snapshot columns of the basic RAM index through a pinned
+ *  bounce, values through the kits' codec. Plans close the claim word, or claim their nodes, for
+ *  their whole lives.
  *
  *  A modality's face owns one as a member and forwards its verbs, so no modality derives from it.
  *  It stands alone as the RAM index does, under either node-ID width and any hashable key, which it
@@ -386,8 +414,8 @@ struct vram_load_step {
  *  to 32-bit IDs, whose nodes a shard table locates in 8 bytes.
  *
  *  @tparam node_id_type_ The node IDs of the neighbors matrix, the walks and the matches, @c u32_t
- *      or @c u64_t; the all-ones ID is the sentinel. The shared kernels cover @c u32_t alone, so
- *      the refinement, the absorb and the audit answer @c unsupported_k over any other.
+ *      or @c u64_t; the all-ones ID is the sentinel. The shared kernels cover @c u32_t alone, so a
+ *      refine, a reshard and a health check answer @c unsupported_k over any other.
  *  @tparam kits_type_ The modality's kits, held as a member, whose @c rungs_k kit rungs its kernels
  *      cover, narrowest first, and whose members read them: @c rung_serving_ nodes of a length, or
  *      @c rungs_k past the widest, @c lanes_per_entry_ of a rung, the @c span_bytes_ one value
@@ -1150,404 +1178,835 @@ struct vram_ragged_graph {
 
 #pragma region Refinement
 
-    /** Optional tuning knobs of @c refine(); zeros mean "derive from connectivity". */
+    /** A round's knobs, as the RAM tower names them. */
     struct refine_config_t {
 
-        /** How many candidates a re-selection walk keeps, as an insertion's. */
-        candidates_count_t expansion_factor = 0;
+        /** Bytes of cache one multiprocessor keeps, half for a draw's hubs and half for a
+         *  neighborhood's entries, each the mean stored value; zero takes the device's, and no
+         *  more than the device's is ever taken. */
+        std::size_t cache_bytes = 0;
+    };
 
-        /** Bytes the whole pass may hold on the device beyond the index: the audit, the heal's
-         *  buffers, a bit per node and the walks' arena, then tiles of nodes at 4 B per neighbor
-         *  slot plus 4 B each, as many as fit. Zero takes every walked node in one tile. */
-        std::size_t memory_limit = 0;
+    /** A reshard's knobs, as the RAM tower names them: its rounds', the most entries a sharded
+     *  target's shard holds, which no device index honours, and the seed a cut grows parts by. */
+    struct reshard_config_t {
+        refine_config_t refine {};
+        std::size_t shard_capacity = 0;
+        u64_t seed = 0;
     };
 
     using refine_report_t = basic::refine_report_t;
-
-    /** A split's knobs: its refine's, and the seed that orders the parts' growth. */
-    struct split_config_t {
-        refine_config_t refine {};
-        u64_t seed = 0;
-    };
     using reachability_t = utilities::reachability_t;
 
+    struct refine_plan_t;
+    struct reshard_plan_t;
+
   private:
+    using round_scratch_t = vram_round_scratch<traversal_context_t>;
+    using round_counters_t = vram_round_counters_t;
 
-    /** Device scratch an audit carves over the nodes it judges: the reached set and two frontiers,
-     *  then the levels that expanded anything and the nodes the last two sweeps expanded, by the
-     *  sweep number's parity, then the unreached and reconnected counters an audit copies together,
-     *  the nodes and links a sweep's tile kept, and for a refine the unreached nodes' IDs and their
-     *  in-link counts, @b [nodes] each, and the changed bits. Sweeps run until one expands nothing:
-     *  every node enters one frontier at most, so the nodes bound them. */
-    struct audit_scratch_t {
-        typename traversal_context_t::bytes_ptr_t bytes;
-        vram_bitset_t reached, frontier, next_frontier;
-        u32_t* levels = nullptr;
-        u32_t* expanded = nullptr;
-        u32_t* unreached = nullptr;
-        u32_t* reconnected = nullptr;
-        u32_t* swept = nullptr;
-        u32_t* island_ids = nullptr;
-        u32_t* in_links = nullptr;
-        vram_bitset_t changed {};
-        std::size_t words = 0;
-    };
-
-    /** Which share of the scratch a carve covers: the audit's alone, or a refine's with its
-     *  heal. */
-    enum class audit_use_t : u8_t { health_k, refine_k };
-
-    /** The counters an audit copies into page-locked memory, in the device's order: the levels that
-     *  expanded, the last sweep's count, nonzero only for a sweep short of convergence, then the
-     *  unreached and reconnected counters, and the nodes and links a sweep's tile kept. */
-    struct audit_counters_t {
-        u32_t levels;
-        u32_t last_expanded;
-        u32_t unreached;
-        u32_t reconnected;
-        u32_t swept[2];
-    };
-
-    /** Gives an audit's counters back to the stream's pinned slots they came from. */
-    struct audit_counters_return_t {
+    /** Gives a round's counters back to the stream's pinned slots they came from. */
+    struct round_counters_return_t {
         cuda_pinned_slots_t* pinned_slots = nullptr;
-        void operator()(audit_counters_t* counters) const noexcept { pinned_slots->give_back(counters); }
+        void operator()(round_counters_t* counters) const noexcept { pinned_slots->give_back(counters); }
     };
-    using audit_counters_ptr_t = std::unique_ptr<audit_counters_t, audit_counters_return_t>;
-    static_assert(sizeof(audit_counters_t) <= cuda_pinned_slots_t::slot_bytes_k, "An audit's counters fit one slot");
+    using round_counters_ptr_t = std::unique_ptr<round_counters_t, round_counters_return_t>;
+    static_assert(sizeof(round_counters_t) <= cuda_pinned_slots_t::slot_bytes_k, "A round's counters fit one slot");
 
-    /** One part of a split as the host assigns it: its nodes and the picked ones leading them, its
-     *  value bytes and longest value, and where its receiver's offsets column starts inside the
-     *  pinned host byte span. */
+    /** Who holds the claim word of a refine plan's graph: the plan, as @ref plan_refine closes it,
+     *  or the reshard plan running its rounds. */
+    enum class claim_t : u8_t { borrowed_k, held_k };
+
+    /** How a round over @c entries entries sizes its columns: the hubs one gather draws at most and
+     *  the most entries a neighborhood holds, as RAM names them, then the room for the starts with
+     *  splits, for the hubs of every gather's runs and for the runs. */
+    struct round_shape_t {
+        std::size_t entries = 0, hubs_per_draw = 0, capacity = 0;
+        std::size_t offsets = 0, hubs = 0, runs = 0;
+    };
+
+    /** The page-locked host bytes a round's barriers order on, borrowed from its context's results:
+     *  the entries by neighborhood, the starts with split room, the hubs, runs and entries before
+     *  each run of the next gather, and each entry's neighborhood. */
+    struct round_mirrors_t {
+        u32_t* neighborhood_entries = nullptr;
+        u32_t* neighborhood_offsets = nullptr;
+        u32_t* hub_nodes = nullptr;
+        vram_neighborhood_run_t* runs = nullptr;
+        u32_t* run_entries = nullptr;
+        u16_t* entry_neighborhoods = nullptr;
+    };
+
+    /** How a round's gather and restitch launch on the kit rung its longest value needs: the span
+     *  one value prepares into, the selection's rows, its two halves of candidates, and each warp's
+     *  dynamic-shared scratch, zero when the arena slice carries it. */
+    struct round_launch_t {
+        std::size_t rung = 0;
+        u32_t span_bytes = 0, selection_nodes = 0, scratch_bytes_per_warp = 0;
+        gpu_arena_shape_t arena_shape {};
+    };
+
+    /** One part of a cut as the host assigns it: its nodes, its value bytes and longest value,
+     *  and where its target's offsets column starts inside the pinned host bytes. */
     struct split_part_t {
-        std::size_t entries = 0, picked_count = 0, bytes = 0, longest = 0, offsets_first = 0;
+        std::size_t entries = 0, bytes = 0, longest = 0, offsets_first = 0;
     };
 
-    /** A split's state beside the refinement it turns into, empty for a refine or an absorb. */
+    /** A cut's moves, empty for a gather. */
     struct split_t {
 
-        /** The index the split empties, while it still holds its nodes. */
-        vram_ragged_graph* donor = nullptr;
+        /** The index the cut empties, while it still holds its nodes and its claim word. */
+        vram_ragged_graph* source = nullptr;
 
-        /** The receivers' graphs, one part each, the ones whose claim words the plan closed,
-         *  counted from the first, and the one the refinement is bound to. */
-        growing_buffer<vram_ragged_graph*> receivers {global_allocator};
-        std::size_t closed_receivers = 0;
-        std::size_t bound_receiver = 0;
-
-        /** The donor's nodes at planning, and the most nodes one part takes: those over the
-         *  receivers, rounded up. */
+        /** The source's nodes at planning, and the most nodes one part takes: those over the
+         *  targets, rounded up. */
         std::size_t entries = 0, part_capacity = 0;
 
         /** The device scratch, laid out as @c split_scratch_ reads it. */
         typename traversal_context_t::bytes_ptr_t device_bytes;
 
         /** Page-locked host bytes borrowed from the plan's context, laid out as @c split_layout_
-         *  places them: the node parts, assigned into slots in place, the picked bits, the
-         *  receivers' offsets columns back to back, the donor's value starts, the bases and the
-         *  roots planning uploads, and the last round's placed count. */
+         *  places them: the node parts, assigned into slots in place, the targets' offsets columns
+         *  back to back, the source's value starts, the bases and the roots planning uploads, and
+         *  the last growth's placed count. */
         byte_t* host_bytes = nullptr;
 
-        /** The growth round the next batch queues from. */
+        /** The growth round the next batch queues from, zero once the growth converged and the
+         *  unplaced nodes are placed next. */
         u32_t next_round = 0;
 
         /** The parts as the host assigns them. */
         growing_buffer<split_part_t> parts {global_allocator};
 
-        /** The audits and islands of the receivers healed so far, summed. */
-        reachability_t reachability {};
-        std::size_t islands = 0;
-
-        /** Rounds of re-selection each receiver runs, none once a stop cut the pass. */
-        u32_t rounds = 1;
-
         explicit split_t(typename traversal_context_t::bytes_ptr_t&& empty) noexcept : device_bytes(std::move(empty)) {}
         split_t(split_t&& other) noexcept
-            : donor(std::exchange(other.donor, nullptr)), receivers(std::move(other.receivers)),
-              closed_receivers(std::exchange(other.closed_receivers, 0)), bound_receiver(other.bound_receiver),
-              entries(other.entries), part_capacity(other.part_capacity), device_bytes(std::move(other.device_bytes)),
-              host_bytes(std::exchange(other.host_bytes, nullptr)), next_round(other.next_round),
-              parts(std::move(other.parts)), reachability(other.reachability), islands(other.islands),
-              rounds(other.rounds) {}
+            : source(std::exchange(other.source, nullptr)), entries(other.entries), part_capacity(other.part_capacity),
+              device_bytes(std::move(other.device_bytes)), host_bytes(std::exchange(other.host_bytes, nullptr)),
+              next_round(other.next_round), parts(std::move(other.parts)) {}
         split_t& operator=(split_t&&) = delete;
     };
 
   public:
 
     /**
-     *  @brief One refinement in flight on this index's device: @ref queue a phase, @ref wait for
-     *      it, @ref advance past it, and @ref finish once no phase follows.
+     *  @brief One health check in flight on this graph's device, the dense check over the
+     *      neighbors matrix alone: @ref queue a batch of passes, @ref wait for it, @ref advance
+     *      past it, and @ref finish once none follows.
      *
-     *  The phases re-select every node of the planned range in one walk launch, each merging its
-     *  picks into its row, then sweep tiles of target nodes, sized from @c refine_config_t, each by
-     *  a count, a scatter onto a tape and a merge of every target's run into its row, then audit
-     *  reachability, then heal round by round while the islands shrink, reconnecting each unreached
-     *  node into a reached pick or the landmark covering it.
-     *  Planning made every allocation and closed the claim word, which the plan's death reopens, so
-     *  batches answer @c contended_k meanwhile while searches on other streams run throughout. A
-     *  phase only queues, and only a device fault fails one; a stopped sequence of phases leaves
-     *  the graph correct and merely less improved.
+     *  It draws one root by seeded bijection, or keeps the one an earlier check kept, sweeps the
+     *  depths from it and to it, names the islands outside its strong component and their
+     *  components, and counts the unlinked and underlinked entries. Read-only on the graph.
+     */
+    struct health_plan_t {
+
+        /** An unbound plan over @p scratch - what an empty graph or a refused plan answers with. */
+        explicit health_plan_t(round_scratch_t&& scratch) noexcept : columns_(std::move(scratch)) {}
+        health_plan_t(health_plan_t&&) noexcept = default;
+        health_plan_t& operator=(health_plan_t&&) noexcept = default;
+
+        /** The watermark the check covers; IDs strictly below it are swept. */
+        node_id_t visible = 0;
+
+        /** Whether another batch of passes follows. */
+        bool running() const noexcept { return index_ && succeeded(status_) && step_ != step_t::done_k; }
+
+        /** Queues the next batch of the current step on @p context, then the copy of the counters;
+         *  a no-op unless @ref running. */
+        status_t queue(traversal_context_t& context) noexcept {
+            if (!running()) return status_;
+            status_ = index_->queue_health_(context, *this);
+            return status_;
+        }
+
+        /** Sleeps until the queued batch finished on @p context; a no-op unless @ref running. */
+        status_t wait(traversal_context_t& context) noexcept {
+            if (!running()) return status_;
+            status_ = context.wait();
+            return status_;
+        }
+
+        /** The barrier after a batch finished: reads the counters, moves through the passes as the
+         *  RAM @c advance_depth does, and answers whether another batch follows. */
+        bool advance() noexcept {
+            if (!running()) return false;
+            round_counters_t const& counters = *counters_;
+            u32_t const parity = last_pass_ & 1u;
+            switch (step_) {
+            case step_t::expand_k:
+                if (counters.reached[parity]) return true;
+                return next_step_(step_t::recheck_k);
+            case step_t::recheck_k:
+                if (counters.marked[parity]) return true;
+                return next_step_(step_t::islands_k);
+            case step_t::islands_k:
+                if (!counters.islands) return next_step_(step_t::count_links_k);
+                if (counters.marked[parity]) return true;
+                island_pass_ = vram_island_pass_t::forward_k;
+                return next_step_(step_t::components_k);
+            case step_t::components_k: return advance_components_(counters);
+            case step_t::count_links_k:
+                if (!counters.islands || !counters.relabeled[0]) return next_step_(step_t::done_k);
+                step_ = step_t::labels_k, next_pass_ = 1;
+                return true;
+            case step_t::labels_k:
+                if (counters.relabeled[parity]) return true;
+                return next_step_(step_t::done_k);
+            default: return false;
+            }
+        }
+
+        /** Entries the sweeps reached plus entries they marked a way to the root for, of twice the
+         *  checked ones: what a caller's progress counts. */
+        std::size_t swept() const noexcept { return counters_ ? static_cast<std::size_t>(counters_->swept) : 0; }
+
+        /** Entries outside the root's component, as the last batch counted them. */
+        std::size_t islands() const noexcept { return counters_ ? counters_->islands : 0; }
+
+        /**
+         *  @brief The report: the entries of the root's component, the depths each direction took,
+         *      the in-link counts and the islands' components; @c internal_k while passes remain.
+         *
+         *  @par Statuses:
+         *  - @c config_mismatch_k, @c device_error_k A batch failed, as it kept.
+         */
+        expected<reachability_t> finish() const noexcept {
+            if (failed(status_)) return {{}, status_};
+            if (!index_ || !visible) return {reachability_t {}, status_t::success_k};
+            if (step_ != step_t::done_k) return {{}, status_t::internal_k};
+            round_counters_t const& counters = *counters_;
+            reachability_t result;
+            result.audited_nodes = visible;
+            result.reachable_nodes = visible - counters.islands;
+            result.depth_from_root = counters.depth_from_root;
+            result.depth_to_root = counters.depth_to_root;
+            result.unlinked = counters.unlinked;
+            result.underlinked = counters.underlinked;
+            result.beyond_most_populated_depth = counters.beyond_most_populated_depth;
+            result.unreached_islands = counters.islands ? counters.unreached_islands : 0;
+            result.stranded_islands = counters.islands ? counters.stranded_islands : 0;
+            result.components = counters.islands ? counters.components : 1;
+            return {result, status_t::success_k};
+        }
+
+        /** Turns the check onto @p index 's IDs below @p visible, which its columns must span, and
+         *  restarts it from a fresh draw. */
+        void rebind(vram_ragged_graph& index, node_id_t visible) noexcept {
+            index_ = &index;
+            this->visible = visible;
+            root_ = unknown_k;
+            restart_sweep();
+        }
+
+        /** Starts over from the root an earlier sweep kept, or else from a seeded draw; the next
+         *  batch clears the columns first. */
+        void restart_sweep() noexcept {
+            // Opening and closing checks share their root, so a fresh draw cannot read as progress.
+            bool const kept = root_ < visible;
+            node_id_t const root = kept      ? root_
+                                   : visible ? static_cast<node_id_t>(seeded_bijection(0, visible, 0))
+                                             : unknown_k;
+            drawn_root_ = kept ? unknown_k : root;
+            start_from_(root);
+        }
+
+      private:
+        friend struct vram_ragged_graph;
+        friend refine_plan_t;
+
+        inline static constexpr node_id_t unknown_k = node_id_limits<node_id_t>::unknown_k;
+
+        /** The check's steps, as the RAM check names its passes, plus the passes that label its
+         *  islands on the device. */
+        enum class step_t : u8_t { expand_k, recheck_k, islands_k, components_k, count_links_k, labels_k, done_k };
+
+        /** Clears what one root's sweep fills, the next batch queuing the fills, and marks
+         *  @p root both ways at depth zero; with no root the check is over. */
+        void start_from_(node_id_t root) noexcept {
+            root_ = root;
+            next_pass_ = 0;
+            step_ = root == unknown_k ? step_t::done_k : step_t::expand_k;
+        }
+
+        /** Turns to @p step from its first pass, answering whether a batch follows. */
+        bool next_step_(step_t step) noexcept {
+            step_ = step, next_pass_ = 0;
+            return step != step_t::done_k;
+        }
+
+        /** The barrier inside the island components: colors forward until none lowers, marks back
+         *  until none spreads, a settle; then again while islands stay unclaimed, else the re-root
+         *  or the count. */
+        bool advance_components_(round_counters_t const& counters) noexcept {
+            u32_t const parity = last_pass_ & 1u;
+            if (island_pass_ != vram_island_pass_t::settle_k) {
+                if (counters.relabeled[parity]) return true;
+                island_pass_ = island_pass_ == vram_island_pass_t::forward_k ? vram_island_pass_t::backward_k
+                                                                             : vram_island_pass_t::settle_k;
+                next_pass_ = 0;
+                return true;
+            }
+            if (counters.unassigned) {
+                island_pass_ = vram_island_pass_t::forward_k, next_pass_ = 0;
+                return true;
+            }
+            std::size_t const component = visible - counters.islands;
+            std::size_t const largest = static_cast<std::size_t>(counters.largest_island >> 32);
+            if (root_ == drawn_root_ && largest > component) {
+                drawn_root_ = unknown_k;
+                start_from_(static_cast<node_id_t>(~static_cast<u32_t>(counters.largest_island)));
+                return true;
+            }
+            return next_step_(step_t::count_links_k);
+        }
+
+        /** The check's and the round's device columns, carved once at planning. */
+        round_scratch_t columns_;
+        vram_ragged_graph* index_ = nullptr;
+        round_counters_ptr_t counters_ {nullptr, round_counters_return_t {}};
+
+        /** The root the sweeps start from, which the closing check keeps; the draw it began with,
+         *  which may give way once to the largest island. */
+        node_id_t root_ = unknown_k, drawn_root_ = unknown_k;
+
+        /** The depth, recheck or pass the next batch queues from, doubling as the batches do, and
+         *  the last one the queued batch holds. */
+        u32_t next_pass_ = 0, last_pass_ = 0;
+        vram_island_pass_t island_pass_ = vram_island_pass_t::forward_k;
+        step_t step_ = step_t::done_k;
+        status_t status_ = status_t::success_k;
+    };
+
+    /**
+     *  @brief One refinement round in flight on this graph's device - the dense device round over
+     *      values of any length: @ref queue a phase, @ref wait for it, @ref advance past it, and
+     *      @ref finish once no phase follows.
      *
-     *  A split's plan first partitions and scatters, as @ref plan_split describes, then binds the
-     *  receivers one after another, each refined over its picked nodes and healed, its tallies
-     *  summing into the plan's; it closed every receiver's claim word and the donor's, and its
-     *  death reopens every one still closed.
+     *  The round opens with a health check, heals the islands it named with no distance, draws one
+     *  cache-sized set of hubs by seeded bijection, gathers every entry into the neighborhood of
+     *  its nearest hub, and again inside every neighborhood over its capacity among hubs drawn from
+     *  its own entries, then restitches each neighborhood: every entry keeps the links the kit's
+     *  selector keeps among its own and its nearest neighborhood-mates and those reachability
+     *  needs, never refilled. The closing health check from the same root decides the verdict. The
+     *  hubs are drawn and the entries ordered by neighborhood on the host, at the barriers, over
+     *  page-locked mirrors.
+     *
+     *  A phase queues its launches and their copies behind the context's event and never waits;
+     *  planning made every allocation, so no phase allocates, and only a device fault fails one.
+     *  Every phase takes the context the plan was opened on back from its caller. A plan
+     *  @ref plan_refine opened holds the claim word closed for its life, so batches answer
+     *  @c contended_k meanwhile while searches on other streams run throughout; a stopped round
+     *  leaves the graph correct and merely less improved.
      */
     struct refine_plan_t {
 
-        /** An unbound plan over @p scratch - what a refused plan answers with. */
-        explicit refine_plan_t(audit_scratch_t&& scratch) noexcept
-            : scratch_(std::move(scratch)),
-              split_(typename traversal_context_t::bytes_ptr_t {nullptr, scratch_.bytes.get_deleter()}) {}
+        /** The check the round opens and closes with, which owns the device scratch. */
+        health_plan_t health;
+
+        /** An unbound plan over @p health - what a refused plan answers with. */
+        explicit refine_plan_t(health_plan_t&& health) noexcept : health(std::move(health)) {}
         refine_plan_t(refine_plan_t&& other) noexcept
-            : scratch_(std::move(other.scratch_)), split_(std::move(other.split_)),
-              index_(std::exchange(other.index_, nullptr)), counters_(std::move(other.counters_)),
-              config_(other.config_), nodes_(other.nodes_), islands_(other.islands_), next_sweep_(other.next_sweep_),
-              sweep_(other.sweep_), tile_rows_(other.tile_rows_), swept_links_(other.swept_links_),
-              phase_(other.phase_), status_(other.status_), tally_(other.tally_) {}
+            : health(std::move(other.health)), index_(std::exchange(other.index_, nullptr)),
+              claim_(std::exchange(other.claim_, claim_t::borrowed_k)), mirrors_(other.mirrors_), shape_(other.shape_),
+              neighborhoods_(other.neighborhoods_), runs_(other.runs_), hubs_(other.hubs_),
+              round_seed_(other.round_seed_), swept_after_(other.swept_after_), phase_(other.phase_),
+              status_(other.status_), tally_(other.tally_) {}
         refine_plan_t& operator=(refine_plan_t&&) = delete;
         refine_plan_t(refine_plan_t const&) = delete;
         refine_plan_t& operator=(refine_plan_t const&) = delete;
 
-        /** Reopens the claim words the plan closed, whether it finished or not. */
+        /** Reopens the claim word @ref plan_refine closed, whether the round finished or not. */
         ~refine_plan_t() noexcept {
-            if (index_ && split_.receivers.empty()) index_->reopen_();
-            for (std::size_t receiver = 0; receiver != split_.closed_receivers; ++receiver)
-                split_.receivers[receiver]->reopen_();
-            if (split_.donor) split_.donor->reopen_();
+            if (claim_ == claim_t::held_k) index_->reopen_();
         }
 
         /**
-         *  @brief Queues the current phase on the stream of @p context, the one the plan was opened
-         *      on, then the copy of its counters and telemetry behind its event, without waiting or
-         *      allocating anything.
+         *  @brief Queues the current phase on @p context 's stream, then its copies behind the
+         *      context's event; never waits and never allocates anything at all.
          *
          *  @par Statuses:
          *  - @c uninitialized_k The plan is unbound, as a refused one answers.
+         *  - @c config_mismatch_k The @p context rides another device, or the plan keeps it.
+         *  - @c device_error_k A launch or a copy failed, or the plan keeps it.
          */
         status_t queue(traversal_context_t& context) noexcept {
-            if (!counters_) return status_t::uninitialized_k;
+            if (!index_) return status_t::uninitialized_k;
             if (failed(status_)) return status_;
-            cuda_stream_handle_t const stream = context.stream();
-            // A split's donor holds the graph until its scatter published the parts.
-            vram_ragged_graph const& graph = split_.donor ? *split_.donor : *index_;
-            auto const [graph_kernels, kernels_status] = graph.graph_kernels_(context);
-            if (failed(kernels_status)) return kernels_status;
             switch (phase_) {
-            case phase_t::partition_k: status_ = split_.donor->queue_rounds_(*graph_kernels, split_, stream); break;
-            case phase_t::picking_k: status_ = split_.donor->queue_picked_(*graph_kernels, split_, stream); break;
-            case phase_t::scatter_k: status_ = split_.donor->queue_scatter_(*graph_kernels, split_, stream); break;
-            case phase_t::reselect_k:
-                status_ = index_->reselect_(context, scratch_, config_, nodes_, index_->size());
-                break;
-            case phase_t::count_back_links_k:
-                status_ = index_->queue_count_back_links_(*graph_kernels, context, scratch_, counters_.get(), nodes_,
-                                                          sweep_, tile_rows_);
-                break;
-            case phase_t::scatter_back_links_k:
-                status_ = index_->queue_scatter_back_links_(*graph_kernels, context, scratch_, nodes_, sweep_,
-                                                            tile_rows_, swept_links_);
-                break;
-            case phase_t::merge_back_links_k:
-                status_ = index_->queue_merge_back_links_(context, scratch_, config_, nodes_, sweep_, tile_rows_,
-                                                          swept_links_);
-                break;
-            case phase_t::health_k: status_ = queue_sweeps_(*graph_kernels, stream); break;
-            case phase_t::heal_k:
-                // Only island nodes gain links, and no reached node points at one, so the audit
-                // before stands.
-                if (!next_sweep_)
-                    status_ = index_->queue_reconnect_(*graph_kernels, scratch_, islands_, index_->size(), stream);
-                if (succeeded(status_)) status_ = queue_sweeps_(*graph_kernels, stream);
-                break;
+            case phase_t::health_k: status_ = health.queue(context); break;
+            case phase_t::heal_k: status_ = index_->queue_heal_(context, health); break;
+            case phase_t::gather_k: status_ = index_->queue_gather_(context, *this); break;
+            case phase_t::restitch_k: status_ = index_->queue_restitch_(context, *this); break;
+            // The barrier closing the draw draws the hubs, which the gather uploads with its runs.
             default: return status_t::success_k;
             }
             if (succeeded(status_)) status_ = context.record();
             return status_;
         }
 
-        /** Sleeps until the queued phase finished, on the event of @p context. */
+        /** Sleeps until the queued phase finished, on @p context 's event. */
         status_t wait(traversal_context_t& context) noexcept {
-            if (!counters_ || phase_ == phase_t::done_k) return status_;
+            if (!index_ || phase_ == phase_t::done_k) return status_;
             if (succeeded(status_)) status_ = context.event_.wait();
             return status_;
         }
 
-        /** The barrier after a phase finished: reads its counters, picks the next phase, and
-         *  answers whether one follows. */
+        /** The barrier after a phase finished: reads its counters or mirrors, picks the next phase,
+         *  and answers whether one follows. */
         bool advance() noexcept {
-            if (!counters_ || failed(status_) || phase_ == phase_t::done_k) return false;
-            if (phase_ == phase_t::partition_k) {
-                // A last round that still placed nodes leaves others unplaced, so the phase grows
-                // on.
-                if (!placing_(split_)) phase_ = phase_t::picking_k;
-                return true;
+            if (!index_ || failed(status_) || phase_ == phase_t::done_k) return false;
+            switch (phase_) {
+            case phase_t::health_k:
+                if (health.advance()) return true;
+                converge_();
+                break;
+            // A round after a stop heals and verifies alone.
+            case phase_t::heal_k:
+                if (tally_.verdict == refine_verdict_t::stopped_k) verify_(phase_t::restitch_k);
+                else phase_ = phase_t::hubs_k;
+                break;
+            case phase_t::hubs_k: draw_hubs_(), phase_ = phase_t::gather_k; break;
+            // Neighborhoods over capacity gather again among their own entries.
+            case phase_t::gather_k:
+                if (!order_neighborhoods_()) phase_ = phase_t::restitch_k;
+                break;
+            case phase_t::restitch_k:
+                tally_.reselected_nodes += health.visible;
+                verify_(phase_t::restitch_k);
+                break;
+            default: break;
             }
-            if (phase_ == phase_t::picking_k) {
-                assign_slots_();
-                phase_ = phase_t::scatter_k;
-                return true;
-            }
-            if (phase_ == phase_t::scatter_k) {
-                publish_parts_();
-                bind_receiver_();
-                return phase_ != phase_t::done_k;
-            }
-            audit_counters_t const& counters = *counters_;
-            if (phase_ == phase_t::reselect_k) {
-                tally_.reselected_nodes += nodes_.size();
-                open_sweep_(0);
-                return true;
-            }
-            if (phase_ == phase_t::count_back_links_k) {
-                sweep_.bound = static_cast<node_id_t>(sweep_.first + counters.swept[0]);
-                swept_links_ = counters.swept[1];
-                tally_.swept_links += swept_links_;
-                phase_ = phase_t::scatter_back_links_k;
-                return true;
-            }
-            if (phase_ == phase_t::scatter_back_links_k) {
-                phase_ = phase_t::merge_back_links_k;
-                return true;
-            }
-            if (phase_ == phase_t::merge_back_links_k) {
-                if (sweep_.bound < index_->size()) open_sweep_(sweep_.bound);
-                else phase_ = phase_t::health_k;
-                return true;
-            }
-            // A last sweep that still expanded leaves nodes unjudged, so the phase sweeps on.
-            if (counters.last_expanded) return true;
-            next_sweep_ = 0;
-            tally_.reachability = audited_(counters, index_->size());
-            tally_.islands_reconnected = counters.reconnected;
-            u32_t const left = counters.unreached;
-            if (phase_ == phase_t::health_k) tally_.islands_found = left;
-            // A round that frees no island frees none on the next either, since the picks it needs
-            // are unreached.
-            bool const healing = left && (phase_ == phase_t::health_k || left < islands_);
-            islands_ = left;
-            phase_ = healing ? phase_t::heal_k : phase_t::done_k;
-            if (!healing && !split_.receivers.empty()) return settle_receiver_();
-            return healing;
+            return succeeded(status_) && phase_ != phase_t::done_k;
         }
 
-        /** Skips the re-selection when it has not been queued yet, so the next phase audits and
-         *  heals, and a split's later receivers skip theirs too; a sweep under way finishes, and it
-         *  is a no-op in any other phase, a split's partition and scatter included. */
+        /** Skips what is left of the round's phase in hand: an opening health check, or a heal not
+         *  yet run, ends the round with nothing written; a hubs draw, a gather or a restitch sends
+         *  the round to the closing health check, the heal's links and the neighborhoods already
+         *  re-stitched standing; the closing check runs on, and the verdict reads stopped. */
         void stop() noexcept {
-            if (phase_ == phase_t::reselect_k) phase_ = phase_t::health_k, split_.rounds = 0;
-            else if (sweeping_()) split_.rounds = 0;
+            if (!rounding()) return;
+            tally_.verdict = refine_verdict_t::stopped_k;
+            switch (phase_) {
+            case phase_t::health_k:
+                if (swept_after_ == phase_t::none_k) phase_ = phase_t::done_k;
+                break;
+            case phase_t::heal_k:
+                tally_.reachability = tally_.opening;
+                phase_ = phase_t::done_k;
+                break;
+            case phase_t::hubs_k:
+            case phase_t::gather_k:
+            case phase_t::restitch_k: verify_(phase_t::restitch_k); break;
+            default: break;
+            }
         }
 
-        /** Whether the current phase re-selects the planned range - the phase a caller's
-         *  progress counts. */
-        bool reselecting() const noexcept { return phase_ == phase_t::reselect_k; }
-
-        /** Whether the current phase moves a split's nodes - the phases no stop skips. */
-        bool moving() const noexcept {
-            return phase_ == phase_t::partition_k || phase_ == phase_t::picking_k || phase_ == phase_t::scatter_k;
+        /** Whether the plan runs a round, whose every barrier a caller's progress hears. */
+        bool rounding() const noexcept {
+            if (phase_ == phase_t::health_k)
+                return swept_after_ == phase_t::none_k || swept_after_ == phase_t::restitch_k;
+            return phase_ >= phase_t::heal_k && phase_ <= phase_t::restitch_k;
         }
 
-        /** Where every node of a split's donor goes, by donor ID: its node in its part's receiver,
-         *  plus its part times @ref part_capacity; empty until the partition finished, and for a
-         *  refine or an absorb. The keys follow it once the scatter finished. */
-        std::span<u32_t const> slots() const noexcept {
-            if (!split_.part_capacity || phase_ == phase_t::partition_k || phase_ == phase_t::picking_k ||
-                failed(status_))
-                return {};
-            return {reinterpret_cast<u32_t const*>(split_.host_bytes), split_.entries};
+        /** The phase the plan is in. */
+        phase_t phase() const noexcept { return phase_; }
+
+        /** The position of the round's phase in hand among its six, from the opening health check
+         *  to the closing one; zero outside a round's phases. */
+        std::size_t ordinal() const noexcept { return rounding() ? round_ordinal(phase_, swept_after_) : 0; }
+
+        /** Units of the round's phase in hand done so far, at a barrier before it advances: entries
+         *  swept and marked by a health check, and otherwise all of the phase's. */
+        std::size_t completed() const noexcept {
+            if (phase_ == phase_t::health_k) return health.swept();
+            return total();
         }
 
-        /** The most nodes one part of a split takes, the stride of @ref slots; zero otherwise. */
-        std::size_t part_capacity() const noexcept { return split_.part_capacity; }
+        /** Units of the round's phase in hand in all, which @ref completed counts toward: islands
+         *  healed, hubs drawn, entries one gather files, or entries re-stitched. */
+        std::size_t total() const noexcept {
+            switch (phase_) {
+            case phase_t::health_k: return 2 * std::size_t {health.visible};
+            case phase_t::heal_k: return health.islands();
+            case phase_t::hubs_k: return round_hubs(health.visible, shape_.hubs_per_draw, shape_.capacity);
+            case phase_t::gather_k: return runs_ ? mirrors_.run_entries[runs_] : 0;
+            case phase_t::restitch_k: return health.visible;
+            default: return 0;
+            }
+        }
 
-        /** Nodes re-selected so far. */
-        std::size_t visited() const noexcept { return tally_.reselected_nodes; }
+        /** Opens the next round once one ended, from the root the closing health check kept: the
+         *  report starts over, and the opening health check sweeps again; a no-op mid-round. */
+        void next_round() noexcept {
+            if (!index_ || phase_ != phase_t::done_k || failed(status_)) return;
+            if (swept_after_ != phase_t::none_k && swept_after_ != phase_t::restitch_k) return;
+            tally_ = {};
+            verify_(phase_t::none_k);
+        }
 
         /**
-         *  @brief The pass: its telemetry read from the last copy on @p context, complete once the
-         *      @ref advance answered false, otherwise @c cancelled_k; a failure that a phase kept
-         *      takes its place.
+         *  @brief The round, complete once @ref advance answered false: its report, the walks'
+         *      telemetry read off @p context 's last copy; a failure a phase kept answers instead.
          *
          *  @par Statuses:
-         *  - @c uninitialized_k The plan is unbound, as a refused one answers.
-         *  - @c cancelled_k A phase still follows.
+         *  - @c uninitialized_k The plan is unbound.
+         *  - @c config_mismatch_k, @c device_error_k or @c internal_k A phase kept it.
+         *  - @c cancelled_k A phase still follows, or the round was stopped.
          */
         expected<refine_report_t> finish(traversal_context_t const& context) const noexcept {
-            if (!counters_) return {{}, status_t::uninitialized_k};
+            if (!index_) return {{}, status_t::uninitialized_k};
             refine_report_t result = tally_;
             vram_telemetry_block_t const spent = context.spent();
-            result.changed_nodes = spent.changed_nodes;
             result.traversal_stats = {.computed_distances = spent.scored,
                                       .visited_members = spent.hops,
                                       .restarts = spent.restarts,
                                       .saturated_walks = spent.visited_saturations};
             if (failed(status_)) return {result, status_};
-            return {result, phase_ == phase_t::done_k ? status_t::success_k : status_t::cancelled_k};
+            bool const done = phase_ == phase_t::done_k && result.verdict != refine_verdict_t::stopped_k;
+            return {result, done ? status_t::success_k : status_t::cancelled_k};
         }
 
       private:
         friend struct vram_ragged_graph;
-        enum class phase_t : u8_t {
-            partition_k,
-            picking_k,
-            scatter_k,
-            reselect_k,
-            health_k,
-            count_back_links_k,
-            scatter_back_links_k,
-            merge_back_links_k,
-            heal_k,
-            done_k
-        };
+        friend reshard_plan_t;
 
-        /** Whether the current phase runs a kernel of a sweep's tile. */
-        bool sweeping_() const noexcept {
-            return phase_ == phase_t::count_back_links_k || phase_ == phase_t::scatter_back_links_k ||
-                   phase_ == phase_t::merge_back_links_k;
+        /** Opens the health check following @p phase from the root the last one kept. */
+        void verify_(phase_t phase) noexcept {
+            health.restart_sweep();
+            swept_after_ = phase;
+            phase_ = phase_t::health_k;
         }
 
-        /** Opens the sweep's tile of target nodes from @p first, up to @c tile_rows_ of them. */
-        void open_sweep_(node_id_t first) noexcept {
-            sweep_ = {first, static_cast<node_id_t>(min_of<std::size_t>(first + tile_rows_, index_->size()))};
-            ++tally_.swept_tiles;
-            phase_ = phase_t::count_back_links_k;
+        /** Turns the plan onto a fresh round over @p index 's published entries, which the columns
+         *  must span; with none, the plan ends at once. */
+        void bind_(vram_ragged_graph& index) noexcept {
+            index_ = &index;
+            tally_ = {};
+            neighborhoods_ = runs_ = hubs_ = 0;
+            health.rebind(index, static_cast<node_id_t>(index.size()));
+            swept_after_ = phase_t::none_k;
+            phase_ = health.visible ? phase_t::health_k : phase_t::done_k;
         }
 
-        /** Assigns every donor node its slot in place in the pinned host bytes, each part's picked
-         *  nodes first and both runs in ID order, and lays out the receivers' offsets columns. */
+        /** Takes in a converged check: opens the round after the opening one, concludes it after
+         *  the closing one. */
+        void converge_() noexcept {
+            auto const [reachability, status] = health.finish();
+            // A check that failed fails the plan, never reads as no islands.
+            if (failed(status)) {
+                status_ = status;
+                phase_ = phase_t::done_k;
+                return;
+            }
+            tally_.reachability = reachability;
+            if (swept_after_ == phase_t::none_k) open_round_(reachability);
+            else close_round_();
+        }
+
+        /** Takes in the opening health check and opens the heal, the round's draws seeded from what
+         *  it measured, so a changed graph draws anew while the ID order decides nothing. */
+        void open_round_(reachability_t const& opening) noexcept {
+            tally_.opening = opening;
+            tally_.islands_found = opening.audited_nodes - opening.reachable_nodes;
+            round_seed_ = mix_bits(
+                opening.audited_nodes ^
+                mix_bits(opening.reachable_nodes ^
+                         mix_bits(opening.unlinked ^ mix_bits(opening.underlinked ^ opening.depth_from_root))));
+            phase_ = health.visible ? phase_t::heal_k : phase_t::done_k;
+        }
+
+        /** Concludes the round once its closing health check converged, from the counts the heal
+         *  and the restitch left: stopped as the caller left it, converged when it changed no
+         *  entry's link set, improved otherwise. */
+        void close_round_() noexcept {
+            round_counters_t const& counters = *health.counters_;
+            tally_.islands_reconnected = counters.healed;
+            tally_.changed_nodes = counters.changed;
+            tally_.added_links = counters.added_links;
+            tally_.dropped_links = counters.dropped_links;
+            tally_.verdict = concluded_verdict(tally_);
+            phase_ = phase_t::done_k;
+        }
+
+        /** Draws one set of hubs by seeded bijection over the visible entries, ascending, as the
+         *  first gather's one run over every ID. */
+        void draw_hubs_() noexcept {
+            node_id_t const visible = health.visible;
+            std::size_t const hubs = round_hubs(visible, shape_.hubs_per_draw, shape_.capacity);
+            for (std::size_t rank = 0; rank != hubs; ++rank)
+                mirrors_.hub_nodes[rank] = static_cast<u32_t>(seeded_bijection(rank, visible, round_seed_));
+            partial_sort(std::span<u32_t> {mirrors_.hub_nodes, hubs}, hubs);
+            mirrors_.runs[0] = {0, static_cast<u32_t>(visible), 0, static_cast<u32_t>(hubs)};
+            mirrors_.run_entries[0] = 0;
+            mirrors_.run_entries[1] = static_cast<u32_t>(visible);
+            runs_ = 1, hubs_ = hubs, neighborhoods_ = 0;
+        }
+
+        /**
+         *  @brief Sorts the entries by neighborhood, the labels the gather copied down; answers
+         *      whether a neighborhood over capacity was given hubs of its own, so the gather runs
+         *      once more over those neighborhoods alone.
+         *
+         *  The first pass counts the entries by hub. Every later one splits each neighborhood over
+         *  capacity by the labels its last gather gave, or cuts by ID one that gather left whole,
+         *  so no neighborhood stays over capacity. Each still too wide is then one run of the next
+         *  gather, its hubs drawn among its own entries as RAM draws them.
+         */
+        bool order_neighborhoods_() noexcept {
+            node_id_t const visible = health.visible;
+            std::span<u16_t const> const labels {mirrors_.entry_neighborhoods, visible};
+            std::span<u32_t> const entries {mirrors_.neighborhood_entries, visible};
+            std::span<u32_t> const offsets {mirrors_.neighborhood_offsets, shape_.offsets};
+            neighborhood_order_t const order = neighborhoods_
+                                                   ? split_wide_neighborhoods(labels, entries, offsets, neighborhoods_,
+                                                                              shape_.capacity, shape_.hubs_per_draw)
+                                                   : order_by_neighborhood(labels, hubs_, entries, offsets);
+            std::size_t const count = order.neighborhoods;
+            neighborhoods_ = count;
+            tally_.neighborhoods = count;
+            tally_.widest_neighborhood = order.widest;
+            if (order.widest <= shape_.capacity) return false;
+            std::size_t runs = 0, hubs = 0;
+            mirrors_.run_entries[0] = 0;
+            for (std::size_t neighborhood = 0; neighborhood != count; ++neighborhood) {
+                u32_t const first = offsets[neighborhood], width = offsets[neighborhood + 1] - first;
+                if (width <= shape_.capacity) continue;
+                std::size_t const drawn = round_hubs(width, shape_.hubs_per_draw, shape_.capacity);
+                u64_t const seed = mix_bits(round_seed_ ^ first);
+                for (std::size_t rank = 0; rank != drawn; ++rank)
+                    mirrors_.hub_nodes[hubs + rank] = entries[first + seeded_bijection(rank, width, seed)];
+                mirrors_.runs[runs] = {first, width, static_cast<u32_t>(hubs), static_cast<u32_t>(drawn)};
+                mirrors_.run_entries[runs + 1] = mirrors_.run_entries[runs] + width;
+                ++runs, hubs += drawn;
+            }
+            runs_ = runs, hubs_ = hubs;
+            return true;
+        }
+
+        vram_ragged_graph* index_ = nullptr;
+
+        /** Who holds @c index_ 's claim word, which the plan reopens at its death when it does. */
+        claim_t claim_ = claim_t::borrowed_k;
+
+        /** The page-locked mirrors the barriers order on. */
+        round_mirrors_t mirrors_;
+
+        /** The round's sizes, as RAM names them. */
+        round_shape_t shape_;
+
+        /** Neighborhoods the order holds, zero before the first gather's; the runs and hubs the
+         *  next gather takes. */
+        std::size_t neighborhoods_ = 0, runs_ = 0, hubs_ = 0;
+
+        /** The seed of the round's draws. */
+        u64_t round_seed_ = 0;
+
+        /** The phase the current health check follows, which decides the one after it. */
+        phase_t swept_after_ = phase_t::none_k;
+        phase_t phase_ = phase_t::done_k;
+        status_t status_ = status_t::success_k;
+        refine_report_t tally_;
+    };
+
+    /**
+     *  @brief One reshard in flight on this graph's device, as @ref plan_reshard opens it: the
+     *      moves first, then one round on every target in turn, through the same @ref queue,
+     *      @ref wait, @ref advance and @ref finish as a refine.
+     *
+     *  A gather copies every other source's nodes past this graph's watermark at planning, so its
+     *  plan opens on the one target's round. A cut partitions on the device, then scatters every
+     *  node into its target, the links inside its part rebased and the links across dropped, and
+     *  the barrier after the scatter files the keys, publishes every target at once and empties
+     *  the source; every target then runs one round, its opening heal linking what the cut left
+     *  apart, and the rounds' reports fold. @ref next_round runs another round on every target,
+     *  from the first.
+     *
+     *  The plan copies its target list and holds every claim word it closed for its life, its
+     *  death reopening every one still closed; nothing may search the cut's source meanwhile.
+     */
+    struct reshard_plan_t {
+
+        /** An unbound plan over @p rounds - what a refused plan answers with. */
+        explicit reshard_plan_t(refine_plan_t&& rounds) noexcept
+            : rounds_(std::move(rounds)),
+              split_(typename traversal_context_t::bytes_ptr_t {nullptr, rounds_.health.columns_.bytes.get_deleter()}) {
+        }
+        reshard_plan_t(reshard_plan_t&& other) noexcept
+            : rounds_(std::move(other.rounds_)), split_(std::move(other.split_)), targets_(std::move(other.targets_)),
+              closed_targets_(std::exchange(other.closed_targets_, 0)), moves_(other.moves_),
+              refined_targets_(other.refined_targets_), folded_targets_(other.folded_targets_),
+              targets_tally_(other.targets_tally_) {}
+        reshard_plan_t& operator=(reshard_plan_t&&) = delete;
+        reshard_plan_t(reshard_plan_t const&) = delete;
+        reshard_plan_t& operator=(reshard_plan_t const&) = delete;
+
+        /** Reopens every claim word the plan closed, whether it finished or not. */
+        ~reshard_plan_t() noexcept {
+            for (std::size_t target = 0; target != closed_targets_; ++target) targets_[target]->reopen_();
+            if (split_.source) split_.source->reopen_();
+        }
+
+        /**
+         *  @brief Queues the current phase on @p context 's stream: a growth batch, the end of the
+         *      partition or the scatter, then the bound target's round.
+         *
+         *  @par Statuses:
+         *  - @c uninitialized_k The plan is unbound, as a refused one answers.
+         *  - Those of @ref refine_plan_t::queue.
+         */
+        status_t queue(traversal_context_t& context) noexcept {
+            if (!rounds_.health.columns_.bytes) return status_t::uninitialized_k;
+            // Targets left empty bind no round, which ends with nothing to queue.
+            if (!moving()) return rounds_.index_ ? rounds_.queue(context) : rounds_.status_;
+            if (failed(rounds_.status_)) return rounds_.status_;
+            vram_ragged_graph& source = *split_.source;
+            auto const [graph_kernels, kernels_status] = source.graph_kernels_(context);
+            if (failed(kernels_status)) return kernels_status;
+            cuda_stream_handle_t const stream = context.stream();
+            status_t& status = rounds_.status_;
+            if (moves_ == phase_t::scatter_k)
+                status = source.queue_scatter_(*graph_kernels, split_, to_span(targets_), stream);
+            else if (split_.next_round) status = source.queue_rounds_(*graph_kernels, split_, targets_.size(), stream);
+            else status = source.queue_partition_end_(*graph_kernels, split_, targets_.size(), stream);
+            if (succeeded(status)) status = context.record();
+            return status;
+        }
+
+        /** Sleeps until the queued phase finished, on @p context 's event. */
+        status_t wait(traversal_context_t& context) noexcept {
+            if (!moving()) return rounds_.index_ ? rounds_.wait(context) : rounds_.status_;
+            if (succeeded(rounds_.status_)) rounds_.status_ = context.event_.wait();
+            return rounds_.status_;
+        }
+
+        /** The barrier after a phase finished: grows the parts on, assigns the slots, publishes the
+         *  parts and binds the first target, or binds the next target once a round ended; answers
+         *  whether a phase follows, never once the last target's round ended. */
+        bool advance() noexcept {
+            if (!rounds_.health.columns_.bytes || failed(rounds_.status_)) return false;
+            if (moves_ == phase_t::partition_k) {
+                // A growth batch that still placed nodes leaves others unplaced, so it grows on;
+                // once one placed none, the rest are placed, and the host assigns the slots.
+                if (!split_.next_round) assign_slots_(), moves_ = phase_t::scatter_k;
+                else if (!placing_(split_, targets_.size())) split_.next_round = 0;
+                return true;
+            }
+            if (moves_ == phase_t::scatter_k) {
+                publish_parts_();
+                moves_ = phase_t::done_k;
+                return bind_target_();
+            }
+            if (rounds_.advance()) return true;
+            // A plan whose last target's round ended settles nothing more.
+            if (failed(rounds_.status_) || refined_targets_ == targets_.size()) return false;
+            return settle_target_();
+        }
+
+        /** Stops the bound target's round as @ref refine_plan_t::stop does, past the moves; every
+         *  later target heals and verifies alone. */
+        void stop() noexcept {
+            if (!moving()) rounds_.stop();
+        }
+
+        /** Whether the plan still moves a cut's nodes: its partition or its scatter. */
+        bool moving() const noexcept { return moves_ != phase_t::done_k; }
+
+        /** Whether the bound target is inside a round. */
+        bool rounding() const noexcept { return !moving() && rounds_.rounding(); }
+
+        /** The phase the plan is in: a move's, then the bound target's round's. */
+        phase_t phase() const noexcept { return moving() ? moves_ : rounds_.phase(); }
+
+        /** Where the round's phase sits among its six, and its units done and in all; none in the
+         *  moves. */
+        std::size_t ordinal() const noexcept { return moving() ? 0 : rounds_.ordinal(); }
+        std::size_t completed() const noexcept { return moving() ? 0 : rounds_.completed(); }
+        std::size_t total() const noexcept { return moving() ? 0 : rounds_.total(); }
+
+        /** Runs another round on every target once every target's ended, from the first; a no-op
+         *  in the moves and mid-round. */
+        void next_round() noexcept {
+            if (moving() || rounds_.phase_ != phase_t::done_k || failed(rounds_.status_)) return;
+            refined_targets_ = folded_targets_ = 0;
+            targets_tally_ = {};
+            bind_target_();
+        }
+
+        /**
+         *  @brief The rounds so far, folded over the targets: complete once @ref advance answered
+         *      false, else cancelled.
+         *
+         *  @par Statuses:
+         *  - @c uninitialized_k The plan is unbound.
+         *  - @c cancelled_k The moves or a round stopped before @ref advance answered false.
+         *  - Those of @ref refine_plan_t::finish.
+         */
+        expected<refine_report_t> finish(traversal_context_t const& context) const noexcept {
+            if (!rounds_.health.columns_.bytes) return {{}, status_t::uninitialized_k};
+            if (moving()) return {{}, failed(rounds_.status_) ? rounds_.status_ : status_t::cancelled_k};
+            expected<refine_report_t> result = rounds_.finish(context);
+            if (result.status == status_t::uninitialized_k) return {targets_tally_, status_t::success_k};
+            // Past the last target the rounds hold the fold already; short of it, the bound round
+            // adds to the targets settled before it.
+            if (refined_targets_ != targets_.size() && folded_targets_) {
+                refine_report_t folded = targets_tally_;
+                folded += result.value;
+                result.value = folded;
+            }
+            return result;
+        }
+
+      private:
+        friend struct vram_ragged_graph;
+
+        /** Binds the round to the next target holding entries; a target after a stop heals and
+         *  verifies alone. Past the last, reports the folded rounds and answers false. */
+        bool bind_target_() noexcept {
+            while (refined_targets_ != targets_.size() && !targets_[refined_targets_]->size()) ++refined_targets_;
+            if (refined_targets_ == targets_.size()) {
+                rounds_.tally_ = targets_tally_;
+                rounds_.phase_ = phase_t::done_k;
+                return false;
+            }
+            rounds_.bind_(*targets_[refined_targets_]);
+            if (folded_targets_ && targets_tally_.verdict == refine_verdict_t::stopped_k)
+                rounds_.tally_.verdict = refine_verdict_t::stopped_k;
+            return true;
+        }
+
+        /** Folds the bound target's ended round into the targets' report, the first taken whole,
+         *  then binds the next one, answering whether a phase follows. */
+        bool settle_target_() noexcept {
+            if (folded_targets_++) targets_tally_ += rounds_.tally_;
+            else targets_tally_ = rounds_.tally_;
+            ++refined_targets_;
+            return bind_target_();
+        }
+
+        /** Assigns every source node its slot in place in the pinned host bytes, in ID order within
+         *  each part, and lays out the targets' offsets columns. */
         void assign_slots_() noexcept {
-            std::size_t const entries = split_.entries, parts = split_.receivers.size();
+            std::size_t const entries = split_.entries, parts = targets_.size();
             split_layout_t const layout = split_layout_(entries, parts);
             u32_t* const slots = reinterpret_cast<u32_t*>(split_.host_bytes);
-            u32_t const* const picked = slots + entries;
             u64_t* const offsets = reinterpret_cast<u64_t*>(split_.host_bytes + layout.host_offsets);
             u64_t const* const starts = reinterpret_cast<u64_t const*>(split_.host_bytes + layout.host_starts);
-            auto const picked_of = [&](std::size_t node) noexcept { return (picked[node / 32] >> (node % 32)) & 1u; };
             for (std::size_t part = 0; part != parts; ++part) split_.parts[part] = {};
-            for (std::size_t node = 0; node != entries; ++node) {
-                split_part_t& part = split_.parts[slots[node]];
-                ++part.entries, part.picked_count += picked_of(node);
-            }
-            // Each column's first entry counts its part's assigned nodes until the sums below zero
-            // it: the picked nodes are assigned in a first pass, so the rest continue past them in
-            // a second pass over the nodes.
+            for (std::size_t node = 0; node != entries; ++node) ++split_.parts[slots[node]].entries;
             for (std::size_t part = 0, first = 0; part != parts; ++part) {
                 split_.parts[part].offsets_first = first;
                 offsets[first] = 0;
                 first += split_.parts[part].entries + 1;
             }
-            for (u32_t const picked_pass : {1u, 0u})
-                for (std::size_t node = 0; node != entries; ++node) {
-                    if (picked_of(node) != picked_pass) continue;
-                    std::size_t const index = slots[node];
-                    split_part_t& part = split_.parts[index];
-                    std::size_t const position = offsets[part.offsets_first]++;
-                    std::size_t const bytes = starts[node + 1] - starts[node];
-                    offsets[part.offsets_first + position + 1] = bytes;
-                    part.bytes += bytes, part.longest = max_of(part.longest, bytes);
-                    slots[node] = static_cast<u32_t>(index * split_.part_capacity + position);
-                }
+            // A column's first entry counts its part's assigned nodes until the sums zero it.
+            for (std::size_t node = 0; node != entries; ++node) {
+                std::size_t const index = slots[node];
+                split_part_t& part = split_.parts[index];
+                std::size_t const position = offsets[part.offsets_first]++;
+                std::size_t const bytes = starts[node + 1] - starts[node];
+                offsets[part.offsets_first + position + 1] = bytes;
+                part.bytes += bytes, part.longest = max_of(part.longest, bytes);
+                slots[node] = static_cast<u32_t>(index * split_.part_capacity + position);
+            }
             for (split_part_t const& part : split_.parts) {
                 u64_t* const column = offsets + part.offsets_first;
                 column[0] = 0;
@@ -1556,418 +2015,217 @@ struct vram_ragged_graph {
             }
         }
 
-        /** Moves every donor key to its slot and publishes every receiver's nodes at once, its keys
+        /** Moves every source key to its slot and publishes every target's nodes at once, its keys
          *  filed under the closed claim words, its tape's extent and longest value its part's and
-         *  its spans the donor's, then empties the donor and reopens its claim word at zero. */
+         *  its spans the source's, then empties the source and reopens its claim word at zero. */
         void publish_parts_() noexcept {
-            vram_ragged_graph& donor = *std::exchange(split_.donor, nullptr);
+            vram_ragged_graph& source = *std::exchange(split_.source, nullptr);
             u32_t const* const slots = reinterpret_cast<u32_t const*>(split_.host_bytes);
             for (std::size_t node = 0; node != split_.entries; ++node)
-                split_.receivers[slots[node] / split_.part_capacity]->keyed_.assign(
+                targets_[slots[node] / split_.part_capacity]->keyed_.assign(
                     static_cast<node_id_t>(slots[node] % split_.part_capacity),
-                    donor.keyed_[static_cast<node_id_t>(node)]);
-            for (std::size_t index = 0; index != split_.receivers.size(); ++index) {
+                    source.keyed_[static_cast<node_id_t>(node)]);
+            for (std::size_t index = 0; index != targets_.size(); ++index) {
                 split_part_t const& part = split_.parts[index];
-                vram_ragged_graph& receiver = *split_.receivers[index];
-                receiver.tape_bytes_ = part.bytes, receiver.longest_value_ = part.longest;
-                receiver.span_bytes_ = donor.span_bytes_;
-                receiver.publish_keys_({0, static_cast<node_id_t>(part.entries)});
-                fu::standard_atomic_ref<std::size_t>(receiver.last_visible_id_)
+                vram_ragged_graph& target = *targets_[index];
+                target.tape_bytes_ = part.bytes, target.longest_value_ = part.longest;
+                target.span_bytes_ = source.span_bytes_;
+                target.publish_keys_({0, static_cast<node_id_t>(part.entries)});
+                fu::standard_atomic_ref<std::size_t>(target.last_visible_id_)
                     .store(part.entries, std::memory_order_release);
             }
-            donor.forget_();
-            donor.reopen_();
+            source.forget_();
+            source.reopen_();
         }
 
-        /** Turns the pass to the next receiver holding nodes: its picked nodes as the range, or
-         *  straight the audit when it has none or a stop cut the pass; past the last receiver, it
-         *  reports the sums over every part. */
-        void bind_receiver_() noexcept {
-            while (split_.bound_receiver != split_.receivers.size() && !split_.parts[split_.bound_receiver].entries)
-                ++split_.bound_receiver;
-            if (split_.bound_receiver == split_.receivers.size()) {
-                tally_.reachability = split_.reachability, tally_.islands_found = split_.islands;
-                phase_ = phase_t::done_k;
-                return;
-            }
-            split_part_t const& part = split_.parts[split_.bound_receiver];
-            index_ = split_.receivers[split_.bound_receiver];
-            nodes_ = {0, static_cast<node_id_t>(part.picked_count)};
-            islands_ = 0, next_sweep_ = 0;
-            phase_ = !split_.rounds || nodes_.empty() ? phase_t::health_k : phase_t::reselect_k;
-        }
+        /** The rounds over the bound target, which own the device columns. */
+        refine_plan_t rounds_;
 
-        /** Folds a healed receiver's audit and islands into the split's, then binds the next one,
-         *  answering whether a phase follows. */
-        bool settle_receiver_() noexcept {
-            split_.reachability += tally_.reachability;
-            split_.islands += tally_.islands_found;
-            ++split_.bound_receiver;
-            bind_receiver_();
-            return phase_ != phase_t::done_k;
-        }
-
-        audit_scratch_t scratch_;
+        /** A cut's moves; empty for a gather. */
         split_t split_;
-        vram_ragged_graph* index_ = nullptr;
 
-        /** The page-locked counters every phase copies into, held once the plan is bound. */
-        audit_counters_ptr_t counters_ {nullptr, audit_counters_return_t {}};
-        refine_config_t config_ {};
+        /** The targets, as the caller named them: this graph alone for a gather, the cut's parts'
+         *  graphs otherwise; and how many of them, from the first, the plan closed. */
+        growing_buffer<vram_ragged_graph*> targets_ {global_allocator};
+        std::size_t closed_targets_ = 0;
 
-        /** The IDs the re-selection walks, over every node the bound index publishes. */
-        iota_view<node_id_t> nodes_;
+        /** The phase of the moves still pending; done once the parts published. */
+        phase_t moves_ = phase_t::done_k;
 
-        /** The islands the last audit left. */
-        u32_t islands_ = 0;
+        /** Targets whose rounds ended so far, the bound one the next, and those folded. */
+        std::size_t refined_targets_ = 0, folded_targets_ = 0;
 
-        /** The audit sweep the next batch queues from, zero before an audit starts. */
-        u32_t next_sweep_ = 0;
-
-        /** The open sweep tile's targets, the most nodes a tile takes, and the links it kept. */
-        iota_view<node_id_t> sweep_;
-        std::size_t tile_rows_ = 0;
-        u32_t swept_links_ = 0;
-
-        /** Queues the audit's next batch of sweeps through @p graph_kernels, its seeds first when
-         *  it starts. */
-        status_t queue_sweeps_(kernel_table_t const& graph_kernels, cuda_stream_handle_t stream) noexcept {
-            std::size_t const entries = index_->size();
-            status_t const queued =
-                next_sweep_
-                    ? index_->queue_sweeps_(graph_kernels, scratch_, counters_.get(), entries, next_sweep_, stream)
-                    : index_->queue_audit_(graph_kernels, scratch_, counters_.get(), entries, stream);
-            next_sweep_ = next_sweep_ ? 2 * next_sweep_ : 2;
-            return queued;
-        }
-        phase_t phase_ = phase_t::done_k;
-        status_t status_ = status_t::success_k;
-        refine_report_t tally_;
+        /** The reports of the targets' rounds ended so far, folded. */
+        refine_report_t targets_tally_ {};
     };
 
     /**
-     *  @brief Opens a refinement of the nodes in @p nodes, clamped to the published IDs, on
-     *      @p context 's stream: closes the claim word, carves the scratch, grows the context's
-     *      arena and staging for the walk, and takes page-locked counters.
+     *  @brief Opens one refinement round over the published nodes on @p context 's stream, as the
+     *      RAM @c plan_refine does.
      *
-     *  No phase allocates. An empty range heals alone. Each re-selection walks from the node's own
-     *  neighbors and from landmarks over every published node, so a range refines against the whole
-     *  graph.
+     *  Closes the claim word, carves the check's columns and the round's from the context, takes
+     *  page-locked counters and mirrors, grows the context's arena for the restitch's scratch, and
+     *  sizes the hubs and the neighborhood capacity from @c cache_bytes and the mean stored value,
+     *  never past what this device's multiprocessor keeps. No phase allocates.
      *
      *  @par Statuses:
      *  - @c uninitialized_k No @c reserve froze the connectivity yet.
-     *  - @c bad_alloc_k The scratch, the arena or a tile cannot be placed, or the limit holds not
-     *    even one tile row past the carried state.
      *  - @c unsupported_k The shared kernels lack this node-ID type.
-     *  - @c config_mismatch_k The @p context rides another device or cannot walk.
+     *  - @c config_mismatch_k The @p context rides another device or cannot launch.
      *  - @c contended_k A batch, a load or another plan in flight.
+     *  - @c bad_alloc_k A column, a mirror, the arena or the counters cannot be placed.
      */
-    expected<refine_plan_t> plan_refine(iota_view<node_id_t> nodes, refine_config_t config,
-                                        traversal_context_t& context) noexcept {
-        refine_plan_t plan = unbound_plan_(context);
+    expected<refine_plan_t> plan_refine(refine_config_t config, traversal_context_t& context) noexcept {
+        refine_plan_t plan {health_plan_t {empty_round_scratch_(context)}};
         if (status_t const refused = graph_kernels_(context).status; failed(refused)) return {std::move(plan), refused};
         if (status_t const closed = close_(); failed(closed)) return {std::move(plan), closed};
-        plan.index_ = this;
-        std::size_t const entries = size();
-        node_id_t const bound = static_cast<node_id_t>(min_of<std::size_t>(nodes.bound, entries));
-        status_t const opened = open_refine_(plan, {min_of(nodes.first, bound), bound}, entries, longest_value_,
-                                             span_bytes_, context, config);
-        return {std::move(plan), opened};
+        plan.index_ = this, plan.claim_ = claim_t::held_k;
+        round_shape_t const shape = round_shape_(size(), mean_value_bytes_(), config.cache_bytes);
+        std::size_t const arena_bytes = round_arena_bytes_(round_launch_(longest_value_, span_bytes_));
+        // A refused plan keeps the claim word to reopen it, and its status to refuse every phase.
+        if (status_t const carved = carve_round_(plan, context, shape, arena_bytes, 0); failed(carved)) {
+            plan.status_ = carved;
+            return {std::move(plan), carved};
+        }
+        plan.bind_(*this);
+        return {std::move(plan), status_t::success_k};
     }
 
     /**
-     *  One @ref refine_plan_t driven to its end on the calling thread, waiting once per phase.
+     *  @brief One @ref plan_refine driven to its end on the calling thread, waiting once per phase.
      *
      *  @par Statuses:
-     *  - @c uninitialized_k No @c reserve froze the connectivity yet.
-     *  - @c unsupported_k The shared kernels lack this node-ID type.
-     *  - @c config_mismatch_k The @p context rides another device or cannot walk.
-     *  - @c contended_k A batch, a load or another plan in flight.
+     *  - Those of @ref plan_refine and @ref refine_plan_t::finish.
      */
-    expected<refine_report_t> refine(iota_view<node_id_t> nodes, refine_config_t config,
-                                     traversal_context_t& context) noexcept {
-        auto [plan, status] = plan_refine(nodes, config, context);
+    expected<refine_report_t> refine(refine_config_t config, traversal_context_t& context) noexcept {
+        auto [plan, status] = plan_refine(config, context);
         if (failed(status)) return {{}, status};
         do
-            if (status_t const queued = plan.queue(context); failed(queued) || failed(plan.wait(context))) break;
+            if (failed(plan.queue(context)) || failed(plan.wait(context))) break;
         while (plan.advance());
         return plan.finish(context);
     }
 
     /**
-     *  @brief Opens an absorb of @p donors: appends every node of each past the watermark on this
-     *      device, one donor after another, empties them, and answers the refinement re-selecting
-     *      every node and healing.
+     *  @brief Opens a reshard of @p sources into @p targets, as @ref reshard_plan_t describes: a
+     *      gather of every other source into this graph, its one target, or a cut of this graph,
+     *      its one source, into at least two empty targets.
      *
-     *  Every allocation and every copy happens here, behind one wait: each donor's values copy
-     *  past this tape, its offsets shift by this tape's bytes on the host, its neighbor rows copy
-     *  and rebase onto the IDs past the watermark on the device, and its keys move on the host.
-     *  The appended keys file and the watermark turns over them before the plan returns, and the
-     *  claim word stays closed until the plan dies, so searches see the appended parts at once and
-     *  walk across them as the re-selection links them. Donors must share this index's device,
-     *  connectivity and metric, and nothing may search them meanwhile.
+     *  A gather copies every other source's values, offsets and neighbor rows past this graph's
+     *  watermark on the device behind one wait, its offsets shifted on the host and its links
+     *  rebased on the device, files their keys, turns the watermark over them and empties those
+     *  sources, all before the plan returns; their claim words close for the copies alone. A cut
+     *  queues its partition behind every allocation: one root per part through
+     *  @ref seeded_bijection under the config's seed, then rounds of growth over the links, each
+     *  part capped at the nodes over the targets rounded up, each node a round reaches kept by its
+     *  lowest-ID proposer, so equal seeds over equal graphs split alike, and nodes no round reached
+     *  entering the smallest parts in ID order. Planning maps each target's tape for the most its
+     *  part can take, never past this graph's tape. Every graph must share this graph's device and
+     *  metric, and its connectivity or, for a cut's target, none yet, which planning reserves.
+     *  Every listed graph must outlive both the call and the plan's finish.
      *
-     *  @param[in,out] donors The indexes giving their nodes up, each emptied once absorbed.
-     *  @param[in] graph The member of each donor holding its graph.
-     *  @param[in] config The refinement budget the plan runs under.
-     *  @param[in,out] context The traversal context the plan's walks draw their buffers from.
+     *  @param[in] sources The graphs giving their nodes up: this graph alone for a cut, any others
+     *      for a gather, which keeps this graph's own nodes when it is among them.
+     *  @param[in] targets This graph alone for a gather, or at least two empty graphs for a cut.
+     *  @param[in] graph The member of each listed owner holding its graph.
+     *  @param[in] config The rounds' knobs and the seed picking a cut's part roots.
+     *  @param[in,out] context The driving context, which every phase takes back; the moves' scratch
+     *      and the rounds' are carved from it.
      *
      *  @par Statuses:
-     *  - @c config_mismatch_k A null donor, this index itself, or one of another device,
-     *    connectivity or metric.
-     *  - @c contended_k A batch, a load or a plan in flight on this index or on a donor.
-     *  - @c overflow_k Nodes past the reserved ceiling.
+     *  - @c invalid_argument_k An empty list, a null or a repeated graph within one.
+     *  - @c unsupported_k Several sources and several targets, or a nonzero
+     *    @c reshard_config_t::shard_capacity, as a graph holds no shards.
+     *  - @c config_mismatch_k Neither a gather into this graph nor a cut of it, a cut target that
+     *    is this graph or not empty, or a graph of another device, connectivity or metric.
+     *  - @c contended_k A batch, a load or a plan in flight on a listed graph.
+     *  - @c overflow_k Nodes past the reserved ceiling, or part slots past the 32-bit IDs.
+     *  - @c bad_alloc_k A column, a mirror, the arena or the counters cannot be placed.
      */
     template <typename owner_type_>
-    expected<refine_plan_t> plan_absorb(std::span<owner_type_*> donors, vram_ragged_graph owner_type_::* graph,
-                                        refine_config_t config, traversal_context_t& context) noexcept {
-        refine_plan_t plan = unbound_plan_(context);
-        auto const [graph_kernels, kernels_status] = graph_kernels_(context);
-        if (failed(kernels_status)) return {std::move(plan), kernels_status};
-        std::size_t donor_nodes = 0, donor_bytes = 0, longest = longest_value_, span_bytes = span_bytes_;
-        for (owner_type_* const donor : donors) {
-            if (!donor || &(donor->*graph) == this) return {std::move(plan), status_t::config_mismatch_k};
-            vram_ragged_graph const& donor_graph = donor->*graph;
-            if (!donor_graph.size()) continue;
-            if (donor_graph.device_.ordinal != device_.ordinal || donor_graph.connectivity() != connectivity() ||
-                donor_graph.kernel_ != kernel_)
-                return {std::move(plan), status_t::config_mismatch_k};
-            if (status_t const kept = donor_graph.status(); failed(kept)) return {std::move(plan), kept};
-            donor_nodes += donor_graph.size(), donor_bytes += donor_graph.tape_bytes_;
-            longest = max_of(longest, donor_graph.longest_value_),
-            span_bytes = max_of(span_bytes, donor_graph.span_bytes_);
-        }
-        if (status_t const closed = close_(); failed(closed)) return {std::move(plan), closed};
-        plan.index_ = this;
-        std::size_t const base = size();
-        if (donor_nodes > ceiling_nodes_ - base) return {std::move(plan), status_t::overflow_k};
-        // Donors close one by one, and a refusal reopens the ones closed before it.
-        std::size_t closed_donors = 0;
-        auto const reopen_donors = [&]() noexcept {
-            for (std::size_t donor = 0; donor != closed_donors; ++donor) (donors[donor]->*graph).reopen_();
-        };
-        for (; closed_donors != donors.size(); ++closed_donors)
-            if (status_t const closed = (donors[closed_donors]->*graph).close_(); failed(closed)) {
-                reopen_donors();
-                return {std::move(plan), closed};
+    expected<reshard_plan_t> plan_reshard(std::span<owner_type_* const> sources, std::span<owner_type_* const> targets,
+                                          vram_ragged_graph owner_type_::* graph, reshard_config_t config,
+                                          traversal_context_t& context) noexcept {
+        reshard_plan_t plan {refine_plan_t {health_plan_t {empty_round_scratch_(context)}}};
+        if (sources.empty() || targets.empty()) return {std::move(plan), status_t::invalid_argument_k};
+        for (std::span<owner_type_* const> const listed : {sources, targets})
+            for (std::size_t position = 0; position != listed.size(); ++position) {
+                if (!listed[position]) return {std::move(plan), status_t::invalid_argument_k};
+                for (std::size_t earlier = 0; earlier != position; ++earlier)
+                    if (listed[earlier] == listed[position]) return {std::move(plan), status_t::invalid_argument_k};
             }
-        std::size_t const entries = base + donor_nodes;
-        cuda_stream_handle_t const stream = context.stream();
-        growing_buffer<u64_t> shifted_offsets {global_allocator};
-        status_t absorbed = open_refine_(plan, {0, static_cast<node_id_t>(entries)}, entries, longest, span_bytes,
-                                         context, config);
-        if (succeeded(absorbed)) absorbed = grow_nodes_(entries, stream);
-        if (succeeded(absorbed)) absorbed = values_tape_.commit(tape_bytes_ + donor_bytes + tape_margin_k);
-        if (succeeded(absorbed) && failed(shifted_offsets.resize_uninitialized(entries - base + 1)))
-            absorbed = status_t::bad_alloc_k;
-
-        // The appended nodes publish only once every donor's copies drained, so a refusal publishes
-        // none.
-        std::size_t const row_bytes = connectivity() * sizeof(node_id_t);
-        std::size_t into = base, tape_bytes = tape_bytes_;
-        for (owner_type_* const donor : donors) {
-            vram_ragged_graph& donor_graph = donor->*graph;
-            std::size_t const count = donor_graph.size();
-            if (failed(absorbed) || !count) continue;
-            if (cuda_copy(api(), shifted_offsets.data(), donor_graph.offsets_column_.base(),
-                          (count + 1) * sizeof(u64_t)) != cuda_success_k) {
-                absorbed = status_t::device_error_k;
-                continue;
-            }
-            for (std::size_t node = 0; node <= count; ++node) shifted_offsets[node] += tape_bytes;
-            vram_graph<node_id_t> graph {};
-            graph.neighbors = reinterpret_cast<node_id_t*>(neighbors_matrix_.base());
-            graph.connectivity = static_cast<u32_t>(connectivity());
-            graph.first_id = static_cast<node_id_t>(into);
-            graph.nodes_count = static_cast<u32_t>(count);
-            graph.source_bound = static_cast<node_id_t>(count);
-            graph.shift = static_cast<node_id_t>(into);
-            if (cuda_copy(api(), offsets_column_.base() + into * sizeof(u64_t), shifted_offsets.data(),
-                          (count + 1) * sizeof(u64_t)) != cuda_success_k ||
-                (donor_graph.tape_bytes_ &&
-                 cuda_copy_async(api(), values_tape_.base() + tape_bytes, donor_graph.values_tape_.base(),
-                                 donor_graph.tape_bytes_, stream) != cuda_success_k) ||
-                cuda_copy_async(api(), neighbors_matrix_.base() + into * row_bytes,
-                                donor_graph.neighbors_matrix_.base(), count * row_bytes, stream) != cuda_success_k)
-                absorbed = status_t::device_error_k;
-            else
-                absorbed = launch_graph_(*graph_kernels, vram_kernel_t::rebase_links_k,
-                                         graph_blocks_(vram_kernel_t::rebase_links_k), graph, stream);
-            into += count, tape_bytes += donor_graph.tape_bytes_;
-        }
-        if (succeeded(absorbed)) absorbed = context.wait();
-        if (failed(absorbed)) {
-            // The nodes past the watermark hold whatever was copied, so the next grow refills them.
-            filled_nodes_ = min_of(filled_nodes_, base);
-            reopen_donors();
-            return {std::move(plan), absorbed};
-        }
-        // The closed claim words make this call every map's one writer.
-        into = base;
-        for (owner_type_* const donor : donors) {
-            vram_ragged_graph& donor_graph = donor->*graph;
-            for (std::size_t node = 0, count = donor_graph.size(); node != count; ++node)
-                keyed_.assign(static_cast<node_id_t>(into++), donor_graph.keyed_[static_cast<node_id_t>(node)]);
-            donor_graph.forget_();
-        }
-        reopen_donors();
-        tape_bytes_ = tape_bytes, longest_value_ = longest, span_bytes_ = span_bytes;
-        publish_keys_({static_cast<node_id_t>(base), static_cast<node_id_t>(entries)});
-        fu::standard_atomic_ref<std::size_t>(last_visible_id_).store(entries, std::memory_order_release);
-        return {std::move(plan), status_t::success_k};
+        if (sources.size() > 1 && targets.size() > 1) return {std::move(plan), status_t::unsupported_k};
+        if (config.shard_capacity) return {std::move(plan), status_t::unsupported_k};
+        bool const gathering = targets.size() == 1 && &(targets[0]->*graph) == this;
+        bool const cutting = sources.size() == 1 && &(sources[0]->*graph) == this && targets.size() > 1;
+        if (!gathering && !cutting) return {std::move(plan), status_t::config_mismatch_k};
+        if (status_t const refused = graph_kernels_(context).status; failed(refused)) return {std::move(plan), refused};
+        status_t const opened = gathering ? open_gather_(plan, sources, graph, config, context)
+                                          : open_cut_(plan, targets, graph, config, context);
+        return {std::move(plan), opened};
     }
 
     /**
-     *  @brief Opens a split of this index into @p receivers - the inverse of @c plan_absorb: the
-     *      plan's first phases move every node into one graph-local part per receiver, then refine
-     *      every receiver in turn over the nodes that lost a link, and heal.
-     *
-     *  Planning queues the partition behind every allocation: one root per part through @ref
-     *  seeded_bijection under @p seed, then rounds of growth over the links, each part capped at
-     *  the nodes over the receivers rounded up, and each node a round reaches kept by its lowest-ID
-     *  proposer, so equal seeds over equal graphs split alike; nodes no round reached enter the
-     *  smallest parts in ID order, and the nodes linking across are picked. Planning maps each
-     *  receiver's tape for the most its part can take, its nodes' capacity at the longest value,
-     *  never past this index's tape. The barrier after the partition assigns every node its slot,
-     *  each part's picked nodes first. The scatter moves every node's value and neighbors on the
-     *  device, the links inside its part rebased and the links across dropped, and the barrier
-     *  after it publishes every receiver at once and empties this index, whose claim word reopens
-     *  at zero. Each receiver then re-selects its picked nodes, audits and heals as @ref
-     *  plan_refine does, and the tallies sum over the receivers.
-     *
-     *  The keys move with the nodes, by the plan's @c slots, at the barrier after the scatter.
-     *  Receivers must share this index's device and metric, and either its connectivity or none
-     *  yet, which planning then reserves; every claim word stays closed for the plan's life, and
-     *  nothing may search this index meanwhile.
-     *
-     *  @param[in,out] receivers The empty indexes taking the parts, at least two, all distinct.
-     *  @param[in] graph The member of each receiver holding its graph.
-     *  @param[in] config The refinement knobs, zeros meaning "derive from connectivity", and the
-     *      seed picking the parts' roots, so equal seeds over equal graphs split alike.
-     *  @param[in,out] context The traversal context the plan's walks draw their buffers from.
+     *  @brief One @ref plan_reshard driven to its end on the calling thread, one wait a phase.
      *
      *  @par Statuses:
-     *  - @c config_mismatch_k Fewer than two receivers, a null, repeated or non-empty one, this
-     *    index itself, or one of another device, connectivity or metric.
-     *  - @c contended_k A batch, a load or a plan in flight on this index or on a receiver.
-     *  - @c overflow_k Part slots past the 32-bit IDs.
+     *  - Those of @ref plan_reshard and @ref reshard_plan_t::finish.
      */
     template <typename owner_type_>
-    expected<refine_plan_t> plan_split(std::span<owner_type_*> receivers, vram_ragged_graph owner_type_::* graph,
-                                       split_config_t config, traversal_context_t& context) noexcept {
-        using phase_t = typename refine_plan_t::phase_t;
-        refine_plan_t plan = unbound_plan_(context);
-        auto const [graph_kernels, kernels_status] = graph_kernels_(context);
-        if (failed(kernels_status)) return {std::move(plan), kernels_status};
-        std::size_t const parts = receivers.size();
-        if (parts < 2) return {std::move(plan), status_t::config_mismatch_k};
-        split_t& split = plan.split_;
-        if (failed(split.receivers.reserve_exactly(parts))) return {std::move(plan), status_t::bad_alloc_k};
-        for (std::size_t receiver = 0; receiver != parts; ++receiver) {
-            owner_type_* const into = receivers[receiver];
-            if (!into || &(into->*graph) == this) return {std::move(plan), status_t::config_mismatch_k};
-            for (std::size_t earlier = 0; earlier != receiver; ++earlier)
-                if (receivers[earlier] == into) return {std::move(plan), status_t::config_mismatch_k};
-            vram_ragged_graph const& part = into->*graph;
-            if (part.device_.ordinal != device_.ordinal || part.kernel_ != kernel_ ||
-                (part.connectivity() && part.connectivity() != connectivity()))
-                return {std::move(plan), status_t::config_mismatch_k};
-        }
-        if (status_t const closed = close_(); failed(closed)) return {std::move(plan), closed};
-        for (owner_type_* const into : receivers) split.receivers.push_back_reserved(&(into->*graph));
-        split.donor = this;
-        split.entries = size();
-        split.part_capacity = divide_round_up<std::size_t>(split.entries, parts);
-        if (parts * split.part_capacity >= (std::numeric_limits<u32_t>::max)())
-            return {std::move(plan), status_t::overflow_k};
-        for (vram_ragged_graph* const into : split.receivers) {
-            vram_ragged_graph& part = *into;
-            if (status_t const closed = part.close_(); failed(closed)) return {std::move(plan), closed};
-            ++split.closed_receivers;
-            if (part.size()) return {std::move(plan), status_t::config_mismatch_k};
-            if (status_t const kept = part.status(); failed(kept)) return {std::move(plan), kept};
-        }
-        // Every receiver holds a full part's nodes, sentinel-filled, and the most value bytes they
-        // can take, before the partition queues.
-        cuda_stream_handle_t const stream = context.stream();
-        std::size_t const part_bytes = min_of(tape_bytes_, split.part_capacity * longest_value_);
-        for (vram_ragged_graph* const into : split.receivers) {
-            vram_ragged_graph& part = *into;
-            if (status_t const reserved =
-                    part.reserve({split.part_capacity, static_cast<connectivity_t>(connectivity()), 0}).status;
-                failed(reserved))
-                return {std::move(plan), reserved};
-            if (status_t const grown = part.grow_nodes_(split.part_capacity, stream); failed(grown))
-                return {std::move(plan), grown};
-            if (status_t const mapped = part.values_tape_.commit(part_bytes + tape_margin_k); failed(mapped))
-                return {std::move(plan), mapped};
-        }
-        node_id_t const capacity = static_cast<node_id_t>(split.part_capacity);
-        status_t opened = open_refine_(plan, {0, capacity}, split.part_capacity, longest_value_, span_bytes_, context,
-                                       config.refine);
-        if (succeeded(opened) && split.entries) opened = carve_split_(split, config.seed, context);
-        if (succeeded(opened) && split.entries) opened = queue_partition_(*graph_kernels, split, stream);
-        if (failed(opened)) return {std::move(plan), opened};
-        plan.phase_ = split.entries ? phase_t::partition_k : phase_t::done_k;
-        return {std::move(plan), status_t::success_k};
+    expected<refine_report_t> reshard(std::span<owner_type_* const> sources, std::span<owner_type_* const> targets,
+                                      vram_ragged_graph owner_type_::* graph, reshard_config_t config,
+                                      traversal_context_t& context) noexcept {
+        auto [plan, status] = plan_reshard(sources, targets, graph, config, context);
+        if (failed(status)) return {{}, status};
+        do
+            if (failed(plan.queue(context)) || failed(plan.wait(context))) break;
+        while (plan.advance());
+        return plan.finish(context);
     }
 
     /**
-     *  Measures forward reachability from as many stride-spread landmarks as one search draws -
-     *  the connectivity; any shortfall against @c size() is the population no search can
-     *  discover. Read-only on the graph, so concurrent insertions may leave fresh nodes
-     *  uncounted. Waits on the context's event once per batch of sweeps, the batches doubling
-     *  until one expands nothing.
+     *  @brief Checks the health of the published nodes from one drawn root, as a round's opening
+     *      check does: the root's strong component, the depths each way, and the outer islands.
+     *
+     *  Read-only on the graph, so concurrent insertions may leave fresh nodes uncounted. Waits on
+     *  the context once per batch of passes, and every island's component is named.
      *
      *  @par Statuses:
      *  - @c uninitialized_k No @c reserve froze the connectivity yet.
      *  - @c unsupported_k The shared kernels lack this node-ID type.
-     *  - @c config_mismatch_k The @p context rides another device or cannot walk.
+     *  - @c config_mismatch_k The @p context rides another device or cannot launch.
+     *  - @c bad_alloc_k The columns or the counters cannot be placed.
      */
     expected<reachability_t> health(traversal_context_t& context) noexcept {
         std::size_t const entries = size();
         if (!entries) return {{}, status_t::success_k};
-        auto const [graph_kernels, kernels_status] = graph_kernels_(context);
-        if (failed(kernels_status)) return {{}, kernels_status};
-        audit_scratch_t scratch = unbound_scratch_(context);
-        if (status_t const carved = carve_audit_(scratch, context, audit_use_t::health_k, entries); failed(carved))
-            return {{}, carved};
-        audit_counters_ptr_t const counters = take_audit_counters_(context);
-        if (!counters) return {{}, status_t::bad_alloc_k};
-        if (status_t const queued = queue_audit_(*graph_kernels, scratch, counters.get(), entries, context.stream());
-            failed(queued))
-            return {{}, queued};
-        for (u32_t first_sweep = 2;; first_sweep *= 2) {
-            if (status_t const drained = context.wait(); failed(drained)) return {{}, drained};
-            if (!counters->last_expanded) break;
-            if (status_t const queued = queue_sweeps_(*graph_kernels, scratch, counters.get(), entries, first_sweep,
-                                                      context.stream());
-                failed(queued))
-                return {{}, queued};
-        }
-        return {audited_(*counters, entries), status_t::success_k};
+        if (status_t const refused = graph_kernels_(context).status; failed(refused)) return {{}, refused};
+        health_plan_t plan {empty_round_scratch_(context)};
+        if (status_t const carved = carve_health_(plan, context, {entries}); failed(carved)) return {{}, carved};
+        plan.rebind(*this, static_cast<node_id_t>(entries));
+        do
+            if (failed(plan.queue(context)) || failed(plan.wait(context))) break;
+        while (plan.advance());
+        return plan.finish();
     }
 
-    /** The bytes an executor's run must hold before a context carved over it can refine @p nodes
-     *  nodes under @p config - @c size() for a refine, past the donors' nodes for an absorb: the
-     *  context's counters, the re-selection's arena and staging, and the audit's scratch. */
+    /** The bytes an executor's run must hold before a context carved over it can run rounds over
+     *  @p nodes nodes under @p config: the context's counters, the restitch arena, the columns. */
     std::size_t traversal_memory_usage(refine_config_t config, std::size_t nodes) const noexcept {
         if (!connectivity() || !device_.multiprocessor_count) return 0;
-        std::size_t const rung = kits_.rung_serving_(longest_value_);
-        std::size_t const arena_bytes = refine_arena_bytes_(config, static_cast<u32_t>(span_bytes_), rung);
-        return aligned_(sizeof(vram_telemetry_block_t)) + 2 * aligned_(sizeof(u32_t)) + aligned_(arena_bytes) +
-               aligned_(refine_tile_bytes_(refine_tile_rows_(nodes, nodes, config, arena_bytes))) +
-               aligned_(audit_bytes_(audit_use_t::refine_k, nodes));
+        round_shape_t const shape = round_shape_(nodes, mean_value_bytes_(), config.cache_bytes);
+        return aligned_(sizeof(vram_telemetry_block_t)) + 2 * aligned_(sizeof(u32_t)) +
+               aligned_(round_arena_bytes_(round_launch_(longest_value_, span_bytes_))) +
+               aligned_(lay_out_round_(shape).device_bytes);
     }
 
-    /** The bytes an executor's run must hold before a context carved over it can split @p nodes
-     *  nodes into @p receivers receivers under @p config: a refine's over the widest part, and the
+    /** The bytes an executor's run must hold before a context carved over it can cut @p nodes
+     *  nodes into @p targets targets under @p config: rounds over the widest part, and the
      *  partition's scratch. */
-    std::size_t traversal_memory_usage(refine_config_t config, std::size_t nodes,
-                                       std::size_t receivers) const noexcept {
-        if (!connectivity() || !device_.multiprocessor_count || receivers < 2) return 0;
-        return traversal_memory_usage(config, divide_round_up(nodes, receivers)) +
-               aligned_(split_layout_(nodes, receivers).device_bytes);
+    std::size_t traversal_memory_usage(refine_config_t config, std::size_t nodes, std::size_t targets) const noexcept {
+        if (!connectivity() || !device_.multiprocessor_count || targets < 2) return 0;
+        return traversal_memory_usage(config, divide_round_up(nodes, targets)) +
+               aligned_(split_layout_(nodes, targets).device_bytes);
     }
 
 #pragma endregion Refinement
@@ -3018,8 +3276,8 @@ struct vram_ragged_graph {
 
     /**
      *  @brief The shared kernels on @p context 's stream, loaded there at the first ask and kept
-     *      until the stream dies, for a refinement, an absorb, an audit or a gather over the
-     *      neighbors matrix; every such verb resolves them once per call.
+     *      until the stream dies, for a round, a reshard's moves, a health check or a gather;
+     *      every such verb resolves them once per call.
      *
      *  @par Statuses:
      *  - @c uninitialized_k No @c reserve froze the connectivity yet, or the @p context rides no
@@ -3052,371 +3310,625 @@ struct vram_ragged_graph {
                            block_threads_k, 0, stream, cuda_overlap_t::serialized_k, graph);
     }
 
-    /** An unbound refinement over @p context 's allocator, which a refused plan answers with. */
-    static refine_plan_t unbound_plan_(traversal_context_t& context) noexcept {
-        return refine_plan_t {unbound_scratch_(context)};
-    }
-
-    /** Bytes of an audit's scratch over @p nodes nodes, its heal's buffers and the changed bits too
-     *  for a refine. */
-    static std::size_t audit_bytes_(audit_use_t use, std::size_t nodes) noexcept {
-        std::size_t const words = divide_round_up<std::size_t>(nodes, 32);
-        std::size_t const heal_words = use == audit_use_t::refine_k ? 2 * nodes + words : 0;
-        return (words * 3 + 7 + heal_words) * sizeof(u32_t);
-    }
-
-    /** Bytes of a sweep tile of @p tile_rows rows: a run offset per row, and a row's worth of links
-     *  on its tape per row. */
-    std::size_t refine_tile_bytes_(std::size_t tile_rows) const noexcept {
-        return tile_rows * (connectivity() + 1) * sizeof(node_id_t);
-    }
-
-    /** Bytes of the arena a refine walk preparing into @p span_bytes on the kit rung @p rung takes
-     *  under @p config. */
-    std::size_t refine_arena_bytes_(refine_config_t config, u32_t span_bytes, std::size_t rung) const noexcept {
-        std::size_t const slices = std::size_t {device_.multiprocessor_count} *
-                                   cuda_resident_blocks(vram_kernel_t::refine_k, 0) * vram_warps_per_block_k;
-        return slices *
-               build_shape_(config.expansion_factor, span_bytes, rung).arena_shape.template slice_bytes<node_id_t>();
-    }
-
-    /** Rows one sweep tile of a pass over @p nodes nodes re-selecting @p forward_rows of them takes
-     *  under @p config: as many as its limit holds past the audit's scratch and the @p arena_bytes
-     *  arena, every one without a limit; never more than the tape's offsets count, and zero when
-     *  the limit holds not one. */
-    std::size_t refine_tile_rows_(std::size_t forward_rows, std::size_t nodes, refine_config_t config,
-                                  std::size_t arena_bytes) const noexcept {
-        std::size_t const row_bytes = refine_tile_bytes_(1);
-        std::size_t const capped = min_of<std::size_t>(forward_rows, node_id_limits<u32_t>::unknown_k / connectivity());
-        if (!config.memory_limit) return capped;
-        std::size_t const carried = audit_bytes_(audit_use_t::refine_k, nodes) + arena_bytes;
-        return config.memory_limit > carried ? min_of((config.memory_limit - carried) / row_bytes, capped) : 0;
-    }
-
-    /** An empty audit scratch over @p context 's allocator. */
-    static audit_scratch_t unbound_scratch_(traversal_context_t& context) noexcept {
+    /** Scratch holding nothing yet over @p context 's allocator - what a refused plan keeps. */
+    static round_scratch_t empty_round_scratch_(traversal_context_t& context) noexcept {
         using bytes_ptr_t = typename traversal_context_t::bytes_ptr_t;
-        return audit_scratch_t {bytes_ptr_t {nullptr, typename bytes_ptr_t::deleter_type {context.allocator_, 0}}};
+        return round_scratch_t {bytes_ptr_t {nullptr, typename bytes_ptr_t::deleter_type {context.allocator_, 0}}};
     }
 
-    /** Carves @p scratch over @p nodes nodes from @p context 's allocator, which it was made over,
-     *  the reconnected counter zeroed. */
-    static status_t carve_audit_(audit_scratch_t& scratch, traversal_context_t& context, audit_use_t use,
-                                 std::size_t nodes) noexcept {
-        std::size_t const bytes = audit_bytes_(use, nodes);
+    /** Zeroed round counters in a slot of @p context 's stream, or null when it cannot pin one. */
+    static round_counters_ptr_t take_round_counters_(traversal_context_t& context) noexcept {
+        cuda_pinned_slots_t* const pinned_slots = context.allocator_.pinned_slots();
+        void* const slot = pinned_slots ? pinned_slots->take() : nullptr;
+        return {slot ? new (slot) round_counters_t {} : nullptr, round_counters_return_t {pinned_slots}};
+    }
+
+    /** The mean bytes of a published value, one at least, which sizes a round's hubs and
+     *  neighborhoods as a dense row would. */
+    std::size_t mean_value_bytes_() const noexcept {
+        std::size_t const entries = size();
+        return entries ? max_of<std::size_t>(divide_round_up(tape_bytes_, entries), 1) : 1;
+    }
+
+    /**
+     *  @brief A round's shape over @p entries entries of @p value_bytes each on average under
+     *      @p cache_bytes, zero for this device's figure, never more than it.
+     *
+     *  Half the budget holds a draw's hubs, never below one, and the other half a neighborhood's
+     *  entries, never below a row of mates and the entry itself. A neighborhood over capacity
+     *  holds more entries than one, so they number fewer than the entries over the capacity, the
+     *  hubs of a gather inside them at most twice that and one each, and a cut's starts the room
+     *  @c split_room counts.
+     */
+    round_shape_t round_shape_(std::size_t entries, std::size_t value_bytes, std::size_t cache_bytes) const noexcept {
+        std::size_t const device_bytes = device_.cache_bytes_per_core();
+        std::size_t const budget = cache_bytes ? min_of(cache_bytes, device_bytes) : device_bytes;
+        std::size_t const entry_bytes = max_of<std::size_t>(value_bytes, 1);
+        round_shape_t shape;
+        shape.entries = entries;
+        shape.hubs_per_draw = max_of<std::size_t>(budget / (2 * entry_bytes), 1);
+        std::size_t const rest = budget - min_of(budget, shape.hubs_per_draw * entry_bytes);
+        shape.capacity = max_of(rest / entry_bytes, connectivity() + 1);
+        std::size_t const wide = divide_round_up(entries, shape.capacity);
+        shape.offsets = split_room(entries, shape.hubs_per_draw);
+        shape.hubs = max_of(shape.hubs_per_draw, 3 * wide + 1);
+        shape.runs = max_of<std::size_t>(wide, 1);
+        return shape;
+    }
+
+    /** How a round's gather and restitch launch over values of @p longest bytes at most, preparing
+     *  into @p span_bytes: on the kit rung serving them, each warp's spans and its selection over
+     *  a live row and a row of mates, twice over, in shared memory where a resident block's warps
+     *  fit, in an arena slice otherwise. */
+    round_launch_t round_launch_(std::size_t longest, std::size_t span_bytes) const noexcept {
+        round_launch_t launch;
+        launch.rung = kits_.rung_serving_(longest);
+        launch.span_bytes = static_cast<u32_t>(span_bytes);
+        launch.selection_nodes = 2 * reselection_nodes_();
+        u32_t const bytes = build_scratch_bytes_(launch.span_bytes, launch.selection_nodes);
+        std::size_t const block_bytes = walkers_per_block_(launch.rung) * bytes + static_shared_bytes_k;
+        bool const fits = block_bytes <= device_.shared_memory_per_block_bytes &&
+                          cuda_resident_blocks(vram_kernel_t::restitch_k, 0) *
+                                  (block_bytes + device_.reserved_shared_memory_per_block_bytes) <=
+                              device_.shared_memory_per_multiprocessor_bytes;
+        launch.scratch_bytes_per_warp = fits ? bytes : 0;
+        launch.arena_shape = gpu_arena_shape(0, 0, fits ? 0 : bytes);
+        return launch;
+    }
+
+    /** Bytes the arena of a round's @p launch takes: every resident warp's scratch slice, where
+     *  shared memory cannot fit it, and none otherwise. */
+    std::size_t round_arena_bytes_(round_launch_t const& launch) const noexcept {
+        if (!launch.arena_shape.scratch_bytes) return 0;
+        return std::size_t {device_.multiprocessor_count} * cuda_resident_blocks(vram_kernel_t::restitch_k, 0) *
+               vram_warps_per_block_k * launch.arena_shape.template slice_bytes<node_id_t>();
+    }
+
+    /** Bytes a round's device scratch and its page-locked mirrors take. */
+    struct round_layout_t {
+        std::size_t device_bytes = 0, host_bytes = 0;
+    };
+
+    /**
+     *  @brief Lays a round of @p shape out, answering the bytes of its columns and its mirrors and
+     *      placing them from @p device into @p scratch and from @p host into @p mirrors.
+     *
+     *  The device holds the counters, the depths' tally, the bitsets, the depths both ways and the
+     *  in-link counts, then one region the islands' columns and the round's share, since only the
+     *  checks and the heal read the islands'. The mirrors take the round's columns in that order.
+     */
+    static round_layout_t lay_out_round_(round_shape_t const& shape, byte_t* device = nullptr,
+                                         round_scratch_t* scratch = nullptr, byte_t* host = nullptr,
+                                         round_mirrors_t* mirrors = nullptr) noexcept {
+        std::size_t const entries = shape.entries, words = divide_round_up<std::size_t>(entries, 32);
+        std::size_t cursor = 0;
+        auto take = [&](std::size_t bytes) noexcept {
+            std::size_t const offset = cursor;
+            cursor = round_up_to_multiple(cursor + bytes, default_alignment_k);
+            return offset;
+        };
+        std::size_t const counters = take(sizeof(round_counters_t));
+        std::size_t const depth_entries = take(256 * sizeof(u32_t));
+        std::size_t const bitsets = take(4 * words * sizeof(u32_t));
+        std::size_t const depths = take(2 * entries);
+        std::size_t const links = take(2 * entries * sizeof(u32_t));
+        std::size_t const region = cursor;
+        std::size_t const island_entries = take(entries * sizeof(u64_t));
+        std::size_t const island_columns = take(4 * entries * sizeof(u32_t));
+        std::size_t const island_labels = take((entries + 1) * sizeof(u32_t));
+        std::size_t const islands_end = cursor;
+        cursor = region;
+        auto take_round_columns = [&]() noexcept {
+            std::size_t const neighborhood_entries = take(entries * sizeof(u32_t));
+            std::size_t const neighborhood_offsets = take(shape.offsets * sizeof(u32_t));
+            std::size_t const hub_nodes = take(shape.hubs * sizeof(u32_t));
+            std::size_t const runs = take(shape.runs * sizeof(vram_neighborhood_run_t));
+            std::size_t const run_entries = take((shape.runs + 1) * sizeof(u32_t));
+            std::size_t const entry_neighborhoods = take(entries * sizeof(u16_t));
+            return std::array<std::size_t, 6> {neighborhood_entries, neighborhood_offsets, hub_nodes, runs,
+                                               run_entries,          entry_neighborhoods};
+        };
+        std::array<std::size_t, 6> const round_columns = take_round_columns();
+        cursor = max_of(cursor, islands_end);
+        round_layout_t layout;
+        layout.device_bytes = cursor;
+        if (scratch) {
+            vram_health_t& health = scratch->health;
+            scratch->words = words;
+            health.counters = reinterpret_cast<round_counters_t*>(device + counters);
+            health.depth_entries = reinterpret_cast<u32_t*>(device + depth_entries);
+            health.reached.words = reinterpret_cast<u32_t*>(device + bitsets);
+            health.reaches_root.words = health.reached.words + words;
+            health.two_ways_to_root.words = health.reaches_root.words + words;
+            health.changed.words = health.two_ways_to_root.words + words;
+            health.depths_from_root = reinterpret_cast<u8_t*>(device + depths);
+            health.depths_to_root = health.depths_from_root + entries;
+            health.in_links = reinterpret_cast<u32_t*>(device + links);
+            health.shallower_in_links = health.in_links + entries;
+            health.island_entries = reinterpret_cast<u64_t*>(device + island_entries);
+            health.island_nodes = reinterpret_cast<u32_t*>(device + island_columns);
+            health.island_components = health.island_nodes + entries;
+            health.island_parents = health.island_components + entries;
+            health.island_roles = health.island_parents + entries;
+            health.island_labels = reinterpret_cast<u32_t*>(device + island_labels);
+            scratch->neighborhood_entries = reinterpret_cast<u32_t*>(device + round_columns[0]);
+            scratch->neighborhood_offsets = reinterpret_cast<u32_t*>(device + round_columns[1]);
+            scratch->hub_nodes = reinterpret_cast<u32_t*>(device + round_columns[2]);
+            scratch->runs = reinterpret_cast<vram_neighborhood_run_t*>(device + round_columns[3]);
+            scratch->run_items = reinterpret_cast<u32_t*>(device + round_columns[4]);
+            scratch->entry_neighborhoods = reinterpret_cast<u16_t*>(device + round_columns[5]);
+        }
+        cursor = 0;
+        std::array<std::size_t, 6> const mirrored = take_round_columns();
+        layout.host_bytes = cursor;
+        if (mirrors) {
+            mirrors->neighborhood_entries = reinterpret_cast<u32_t*>(host + mirrored[0]);
+            mirrors->neighborhood_offsets = reinterpret_cast<u32_t*>(host + mirrored[1]);
+            mirrors->hub_nodes = reinterpret_cast<u32_t*>(host + mirrored[2]);
+            mirrors->runs = reinterpret_cast<vram_neighborhood_run_t*>(host + mirrored[3]);
+            mirrors->run_entries = reinterpret_cast<u32_t*>(host + mirrored[4]);
+            mirrors->entry_neighborhoods = reinterpret_cast<u16_t*>(host + mirrored[5]);
+        }
+        return layout;
+    }
+
+    /** Carves @p plan 's columns for a check of @p shape from @p context 's allocator and takes its
+     *  page-locked counters. */
+    status_t carve_health_(health_plan_t& plan, traversal_context_t& context, round_shape_t const& shape) noexcept {
+        if (context.device() != device_.ordinal || !context) return status_t::config_mismatch_k;
+        std::size_t const bytes = lay_out_round_(shape).device_bytes;
+        round_scratch_t& scratch = plan.columns_;
         scratch.bytes.reset(context.allocator_.allocate(bytes));
         scratch.bytes.get_deleter().count = bytes;
         if (!scratch.bytes) return status_t::bad_alloc_k;
-        scratch.words = divide_round_up<std::size_t>(nodes, 32);
-        scratch.reached.words = reinterpret_cast<u32_t*>(scratch.bytes.get());
-        scratch.frontier.words = scratch.reached.words + scratch.words;
-        scratch.next_frontier.words = scratch.frontier.words + scratch.words;
-        scratch.levels = scratch.next_frontier.words + scratch.words;
-        scratch.expanded = scratch.levels + 1;
-        scratch.unreached = scratch.expanded + 2;
-        scratch.reconnected = scratch.unreached + 1;
-        scratch.swept = scratch.reconnected + 1;
-        if (use == audit_use_t::refine_k) {
-            scratch.island_ids = scratch.swept + 2;
-            scratch.in_links = scratch.island_ids + nodes;
-            scratch.changed.words = scratch.in_links + nodes;
-        }
-        return cuda_fill_async(context.api(), scratch.reconnected, 0, sizeof(u32_t), context.stream()) == cuda_success_k
+        lay_out_round_(shape, scratch.bytes.get(), &scratch);
+        plan.counters_ = take_round_counters_(context);
+        return plan.counters_ ? status_t::success_k : status_t::bad_alloc_k;
+    }
+
+    /** Carves everything @p plan 's rounds of @p shape keep: the check's and the round's columns,
+     *  the page-locked mirrors, holding at least @p pinned_floor bytes for a cut's own, and the
+     *  @p arena_bytes restitch arena; zeroes the telemetry once, so every phase adds to it. */
+    status_t carve_round_(refine_plan_t& plan, traversal_context_t& context, round_shape_t const& shape,
+                          std::size_t arena_bytes, std::size_t pinned_floor) noexcept {
+        if (status_t const carved = carve_health_(plan.health, context, shape); failed(carved)) return carved;
+        plan.shape_ = shape;
+        growing_buffer<scored_node_t, cuda_pinned_allocator_t>& pinned = context.results.entries_;
+        std::size_t const host_bytes = max_of(lay_out_round_(shape).host_bytes, pinned_floor);
+        if (failed(pinned.resize_uninitialized(divide_round_up(host_bytes, sizeof(scored_node_t)))))
+            return status_t::bad_alloc_k;
+        lay_out_round_(shape, nullptr, nullptr, reinterpret_cast<byte_t*>(pinned.data()), &plan.mirrors_);
+        if (arena_bytes && !context.ensure_arena(arena_bytes)) return status_t::bad_alloc_k;
+        return cuda_fill_async(api(), context.telemetry_.get(), 0, sizeof(vram_telemetry_block_t), context.stream()) ==
+                       cuda_success_k
                    ? status_t::success_k
                    : status_t::device_error_k;
     }
 
-    /** Zeroed audit counters in a slot of @p context 's stream, or null when it cannot pin one. */
-    static audit_counters_ptr_t take_audit_counters_(traversal_context_t& context) noexcept {
-        cuda_pinned_slots_t* const pinned_slots = context.allocator_.pinned_slots();
-        void* const slot = pinned_slots ? pinned_slots->take() : nullptr;
-        return {slot ? new (slot) audit_counters_t {} : nullptr, audit_counters_return_t {pinned_slots}};
+    /** The record every launch of @p plan 's check reads, over this graph's neighbors. */
+    vram_health_t health_record_(health_plan_t const& plan) const noexcept {
+        vram_health_t health = plan.columns_.health;
+        health.neighbors = reinterpret_cast<u32_t*>(neighbors_matrix_.base());
+        health.rows_count = plan.visible;
+        health.connectivity = static_cast<u32_t>(connectivity());
+        return health;
     }
 
-    /** The converged audit @p counters reports over @p nodes nodes. */
-    static reachability_t audited_(audit_counters_t const& counters, std::size_t nodes) noexcept {
-        // A sweep that expands nothing ends the levels, and it counts as one, as on the CPU.
-        return {nodes, nodes - counters.unreached, std::size_t {counters.levels} + 1};
+    /** Queues @p count words of @p value from @p words on @p stream. */
+    status_t fill_words_(u32_t* words, u32_t value, std::size_t count, cuda_stream_handle_t stream) const noexcept {
+        return api().fill_words_async(cuda_address(words), value, count, stream) == cuda_success_k
+                   ? status_t::success_k
+                   : status_t::device_error_k;
     }
 
-    /** Binds @p plan, whose claim word the caller closed, to a refinement of @p nodes over
-     *  @p entries nodes of @p longest bytes at most, preparing into @p span_bytes: carves the
-     *  audit's scratch, grows the context's arena for the walk and its staging for a sweep tile, so
-     *  no phase allocates, and takes the counters last, which marks the plan bound. */
-    status_t open_refine_(refine_plan_t& plan, iota_view<node_id_t> nodes, std::size_t entries, std::size_t longest,
-                          std::size_t span_bytes, traversal_context_t& context, refine_config_t config) noexcept {
-        using phase_t = typename refine_plan_t::phase_t;
-        if (status_t const carved = carve_audit_(plan.scratch_, context, audit_use_t::refine_k, entries);
-            failed(carved))
-            return carved;
-        std::size_t const arena_bytes = refine_arena_bytes_(config, static_cast<u32_t>(span_bytes),
-                                                            kits_.rung_serving_(longest));
-        if (!context.ensure_arena(arena_bytes)) return status_t::bad_alloc_k;
-        plan.tile_rows_ = refine_tile_rows_(nodes.size(), entries, config, arena_bytes);
-        if ((!nodes.empty() && !plan.tile_rows_) ||
-            (plan.tile_rows_ && !context.ensure_staging(refine_tile_bytes_(plan.tile_rows_))))
-            return status_t::bad_alloc_k;
-        // Zeroed once, so every phase adds up, and copied with every phase.
-        if (cuda_fill_async(api(), context.telemetry_.get(), 0, sizeof(vram_telemetry_block_t), context.stream()) !=
-            cuda_success_k)
+    /** Queues the clearing of what one root's sweep of @p plan fills, then @p health 's root marked
+     *  both ways at depth zero, where the depths' tally starts and both directions count it. */
+    status_t queue_health_start_(health_plan_t const& plan, vram_health_t const& health,
+                                 cuda_stream_handle_t stream) noexcept {
+        std::size_t const visible = plan.visible, words = plan.columns_.words;
+        u32_t const root = static_cast<u32_t>(plan.root_);
+        u32_t const bit = 1u << (root & 31u);
+        cuda_api_t const& driver = api();
+        bool const filled =
+            cuda_fill_async(driver, health.reached.words, 0, 3 * words * sizeof(u32_t), stream) == cuda_success_k &&
+            cuda_fill_async(driver, health.depths_from_root, 0xFF, visible, stream) == cuda_success_k &&
+            cuda_fill_async(driver, health.depths_to_root, 0xFF, visible, stream) == cuda_success_k &&
+            cuda_fill_async(driver, health.in_links, 0, visible * sizeof(u32_t), stream) == cuda_success_k &&
+            cuda_fill_async(driver, health.shallower_in_links, 0, visible * sizeof(u32_t), stream) == cuda_success_k &&
+            cuda_fill_async(driver, health.depth_entries, 0, 256 * sizeof(u32_t), stream) == cuda_success_k &&
+            cuda_fill_async(driver, health.counters, 0, offsetof(round_counters_t, healed), stream) == cuda_success_k &&
+            succeeded(fill_words_(health.reached.words + root / 32, bit, 1, stream)) &&
+            succeeded(fill_words_(health.reaches_root.words + root / 32, bit, 1, stream)) &&
+            cuda_fill_async(driver, health.depths_from_root + root, 0, 1, stream) == cuda_success_k &&
+            cuda_fill_async(driver, health.depths_to_root + root, 0, 1, stream) == cuda_success_k &&
+            succeeded(fill_words_(health.depth_entries, 1, 1, stream)) &&
+            succeeded(fill_words_(reinterpret_cast<u32_t*>(&health.counters->swept), 2, 1, stream));
+        return filled ? status_t::success_k : status_t::device_error_k;
+    }
+
+    /**
+     *  @brief Queues @p plan 's next batch on @p context 's stream, then the copy of its counters.
+     *
+     *  A fixpoint phase queues its passes from the next one up to twice it, each zeroing its
+     *  parity's counter first, so the batches double until one ends past convergence; the island
+     *  steps that run once, the order, a settle with the largest island's tally, and the count
+     *  pass with the roles and entries, queue whole.
+     */
+    status_t queue_health_(traversal_context_t& context, health_plan_t& plan) noexcept {
+        using step_t = typename health_plan_t::step_t;
+        auto const [graph_kernels, kernels_status] = graph_kernels_(context);
+        if (failed(kernels_status)) return kernels_status;
+        cuda_stream_handle_t const stream = context.stream();
+        vram_graph<node_id_t> graph {};
+        vram_health_t& health = graph.health;
+        health = health_record_(plan);
+        round_counters_t* const counters = health.counters;
+        u32_t const striding = graph_blocks_(vram_kernel_t::health_expand_k);
+        u32_t const first = plan.next_pass_, bound = first ? 2 * first : 1;
+        status_t queued = status_t::success_k;
+        auto zeroed = [&](u32_t& word) noexcept {
+            if (succeeded(queued) && cuda_fill_async(api(), &word, 0, sizeof(u32_t), stream) != cuda_success_k)
+                queued = status_t::device_error_k;
+        };
+        auto launch = [&](vram_kernel_t kernel, u32_t blocks) noexcept {
+            if (succeeded(queued)) queued = launch_graph_(*graph_kernels, kernel, blocks, graph, stream);
+        };
+        auto island_step = [&](vram_kernel_t kernel, vram_island_pass_t pass) noexcept {
+            health.pass = static_cast<u32_t>(pass);
+            launch(kernel, striding);
+        };
+        // Each pass of a fixpoint zeroes the counters of its parity, which the one after it reads.
+        auto passes = [&](vram_kernel_t kernel, u32_t* parity_counters, u32_t* second_counters) noexcept {
+            for (u32_t pass = first; pass != bound; ++pass) {
+                health.depth = pass;
+                zeroed(parity_counters[pass & 1u]);
+                if (second_counters) zeroed(second_counters[pass & 1u]);
+                launch(kernel, striding);
+            }
+        };
+        plan.last_pass_ = bound - 1;
+        switch (plan.step_) {
+        case step_t::expand_k:
+            if (!first) queued = queue_health_start_(plan, health, stream);
+            passes(vram_kernel_t::health_expand_k, counters->reached, counters->marked);
+            break;
+        case step_t::recheck_k: passes(vram_kernel_t::health_recheck_k, counters->marked, nullptr); break;
+        case step_t::islands_k:
+            if (!first) launch(vram_kernel_t::order_islands_k, 1);
+            passes(vram_kernel_t::health_islands_k, counters->marked, nullptr);
+            break;
+        case step_t::components_k:
+            health.pass = static_cast<u32_t>(plan.island_pass_);
+            if (plan.island_pass_ != vram_island_pass_t::settle_k) {
+                passes(vram_kernel_t::island_components_k, counters->relabeled, nullptr);
+                break;
+            }
+            zeroed(counters->unassigned);
+            island_step(vram_kernel_t::island_components_k, vram_island_pass_t::settle_k);
+            island_step(vram_kernel_t::island_components_k, vram_island_pass_t::largest_k);
+            break;
+        case step_t::count_links_k:
+            launch(vram_kernel_t::health_count_links_k, striding);
+            if (!plan.counters_->islands) break;
+            for (vram_island_pass_t const pass : {vram_island_pass_t::roles_start_k, vram_island_pass_t::roles_k,
+                                                  vram_island_pass_t::roles_spread_k, vram_island_pass_t::entries_k})
+                island_step(vram_kernel_t::label_islands_k, pass);
+            [[fallthrough]];
+        case step_t::labels_k:
+            health.pass = static_cast<u32_t>(vram_island_pass_t::weak_k);
+            passes(vram_kernel_t::label_islands_k, counters->relabeled, nullptr);
+            zeroed(counters->components);
+            island_step(vram_kernel_t::label_islands_k, vram_island_pass_t::weak_count_k);
+            break;
+        default: break;
+        }
+        plan.next_pass_ = bound;
+        if (succeeded(queued) &&
+            cuda_copy_async(api(), plan.counters_.get(), counters, sizeof(round_counters_t), stream) != cuda_success_k)
+            queued = status_t::device_error_k;
+        return queued;
+    }
+
+    /** Queues the round's start on @p context 's stream, its counters and changed bits zeroed, then
+     *  the distance-free heal of every island component @p plan named, on one thread. */
+    status_t queue_heal_(traversal_context_t& context, health_plan_t const& plan) noexcept {
+        auto const [graph_kernels, kernels_status] = graph_kernels_(context);
+        if (failed(kernels_status)) return kernels_status;
+        cuda_stream_handle_t const stream = context.stream();
+        vram_graph<node_id_t> graph {};
+        graph.health = health_record_(plan);
+        std::size_t const round_offset = offsetof(round_counters_t, healed);
+        if (cuda_fill_async(api(), reinterpret_cast<byte_t*>(graph.health.counters) + round_offset, 0,
+                            sizeof(round_counters_t) - round_offset, stream) != cuda_success_k ||
+            cuda_fill_async(api(), graph.health.changed.words, 0, plan.columns_.words * sizeof(u32_t), stream) !=
+                cuda_success_k)
             return status_t::device_error_k;
-        plan.counters_ = take_audit_counters_(context);
-        if (!plan.counters_) return status_t::bad_alloc_k;
-        plan.config_ = config;
-        plan.nodes_ = nodes;
-        plan.phase_ = !entries ? phase_t::done_k : nodes.empty() ? phase_t::health_k : phase_t::reselect_k;
+        if (!plan.counters_->islands) return status_t::success_k;
+        return launch_graph_(*graph_kernels, vram_kernel_t::heal_islands_k, 1, graph, stream);
+    }
+
+    /** The record a gather or a restitch of @p plan launches with, its warps' spans as @p launch
+     *  shapes them over @p arena, and the claim counter zeroed behind it. */
+    vram_round<node_id_t> round_record_(refine_plan_t const& plan, round_launch_t const& launch, byte_t* arena,
+                                        traversal_context_t& context) const noexcept {
+        round_scratch_t const& scratch = plan.health.columns_;
+        vram_round<node_id_t> round {};
+        round.storage = storage();
+        round.span_bytes = launch.span_bytes;
+        round.scratch_bytes_per_warp = launch.scratch_bytes_per_warp;
+        round.arena = arena;
+        round.arena_shape = launch.arena_shape;
+        round.selection_nodes = launch.selection_nodes;
+        round.telemetry = context.telemetry_.get();
+        round.assigned = &scratch.health.counters->claimed;
+        round.health = health_record_(plan.health);
+        return round;
+    }
+
+    /** Launches the kits' round @p kernel of @p plan, a gather or a restitch, over @p round on
+     *  @p context 's stream, on the rung @p launch serves, its claim counter zeroed first. */
+    status_t launch_round_(traversal_context_t& context, vram_kernel_t kernel, round_launch_t const& launch,
+                           vram_round<node_id_t> const& round) noexcept {
+        auto const [kits, kits_status] = kits_kernels_(context);
+        if (failed(kits_status)) return kits_status;
+        cuda_stream_handle_t const stream = context.stream();
+        if (cuda_fill_async(api(), round.assigned, 0, sizeof(u32_t), stream) != cuda_success_k)
+            return status_t::device_error_k;
+        vram_arguments<node_id_t> arguments {};
+        arguments.round = round;
+        return cuda_launch(api(), kits_function_at_(*kits, launch.rung, kernel, 0),
+                           device_.multiprocessor_count * cuda_resident_blocks(kernel, 0), block_threads_k,
+                           walkers_per_block_(launch.rung) * launch.scratch_bytes_per_warp, stream,
+                           cuda_overlap_t::serialized_k, arguments);
+    }
+
+    /** The arena a round's @p launch carves its warps' scratch from, grown at planning; null where
+     *  shared memory carries it, and on a refused growth. */
+    byte_t* round_arena_(traversal_context_t& context, round_launch_t const& launch) const noexcept {
+        return launch.arena_shape.scratch_bytes ? context.ensure_arena(round_arena_bytes_(launch)) : nullptr;
+    }
+
+    /** Queues one gather of @p plan on @p context 's stream: its hubs, runs and the entries before
+     *  each run uploaded from the mirrors, the entries in neighborhood order too past the first
+     *  gather, then the launch, then the labels copied down for the barrier to order. */
+    status_t queue_gather_(traversal_context_t& context, refine_plan_t const& plan) noexcept {
+        cuda_stream_handle_t const stream = context.stream();
+        round_scratch_t const& scratch = plan.health.columns_;
+        round_mirrors_t const& mirrors = plan.mirrors_;
+        std::size_t const visible = plan.health.visible;
+        bool const nested = plan.neighborhoods_ != 0;
+        if (cuda_copy_async(api(), scratch.hub_nodes, mirrors.hub_nodes, plan.hubs_ * sizeof(u32_t), stream) !=
+                cuda_success_k ||
+            cuda_copy_async(api(), scratch.runs, mirrors.runs, plan.runs_ * sizeof(vram_neighborhood_run_t), stream) !=
+                cuda_success_k ||
+            cuda_copy_async(api(), scratch.run_items, mirrors.run_entries, (plan.runs_ + 1) * sizeof(u32_t), stream) !=
+                cuda_success_k ||
+            (nested && cuda_copy_async(api(), scratch.neighborhood_entries, mirrors.neighborhood_entries,
+                                       visible * sizeof(u32_t), stream) != cuda_success_k))
+            return status_t::device_error_k;
+        round_launch_t const launch = round_launch_(longest_value_, span_bytes_);
+        byte_t* const arena = round_arena_(context, launch);
+        if (launch.arena_shape.scratch_bytes && !arena) return status_t::bad_alloc_k;
+        vram_round<node_id_t> round = round_record_(plan, launch, arena, context);
+        round.entries = nested ? scratch.neighborhood_entries : nullptr;
+        round.hub_nodes = scratch.hub_nodes;
+        round.runs = scratch.runs;
+        round.run_entries = scratch.run_items;
+        round.runs_count = static_cast<u32_t>(plan.runs_);
+        round.entry_neighborhoods = scratch.entry_neighborhoods;
+        if (status_t const launched = launch_round_(context, vram_kernel_t::gather_neighborhoods_k, launch, round);
+            failed(launched))
+            return launched;
+        return cuda_copy_async(api(), mirrors.entry_neighborhoods, scratch.entry_neighborhoods, visible * sizeof(u16_t),
+                               stream) == cuda_success_k
+                   ? status_t::success_k
+                   : status_t::device_error_k;
+    }
+
+    /** Queues @p plan 's restitch on @p context 's stream: the entries in neighborhood order and
+     *  the starts uploaded from the mirrors, then the launch, warps claiming entries in turn. */
+    status_t queue_restitch_(traversal_context_t& context, refine_plan_t const& plan) noexcept {
+        cuda_stream_handle_t const stream = context.stream();
+        round_scratch_t const& scratch = plan.health.columns_;
+        round_mirrors_t const& mirrors = plan.mirrors_;
+        if (cuda_copy_async(api(), scratch.neighborhood_entries, mirrors.neighborhood_entries,
+                            std::size_t {plan.health.visible} * sizeof(u32_t), stream) != cuda_success_k ||
+            cuda_copy_async(api(), scratch.neighborhood_offsets, mirrors.neighborhood_offsets,
+                            (plan.neighborhoods_ + 1) * sizeof(u32_t), stream) != cuda_success_k)
+            return status_t::device_error_k;
+        round_launch_t const launch = round_launch_(longest_value_, span_bytes_);
+        byte_t* const arena = round_arena_(context, launch);
+        if (launch.arena_shape.scratch_bytes && !arena) return status_t::bad_alloc_k;
+        vram_round<node_id_t> round = round_record_(plan, launch, arena, context);
+        round.entries = scratch.neighborhood_entries;
+        round.neighborhood_offsets = scratch.neighborhood_offsets;
+        round.neighborhoods_count = static_cast<u32_t>(plan.neighborhoods_);
+        return launch_round_(context, vram_kernel_t::restitch_k, launch, round);
+    }
+
+    /**
+     *  @brief Binds @p plan to a gather of every source of @p sources other than this graph: copies
+     *      their nodes past the watermark behind one wait, files their keys, publishes them, and
+     *      empties those sources, then opens the round over every node.
+     *
+     *  Every allocation and every check happens first: each source's values copy past this tape,
+     *  its offsets shift by this tape's bytes on the host, its neighbor rows copy and rebase onto
+     *  the IDs past the watermark on the device, and its keys move on the host. The sources' claim
+     *  words close for the copies alone; this graph's stays closed for the plan's life.
+     */
+    template <typename owner_type_>
+    status_t open_gather_(reshard_plan_t& plan, std::span<owner_type_* const> sources,
+                          vram_ragged_graph owner_type_::* graph, reshard_config_t const& config,
+                          traversal_context_t& context) noexcept {
+        auto const [graph_kernels, kernels_status] = graph_kernels_(context);
+        if (failed(kernels_status)) return kernels_status;
+        std::size_t moved_nodes = 0, moved_bytes = 0, longest = longest_value_, span_bytes = span_bytes_;
+        for (owner_type_* const source : sources) {
+            vram_ragged_graph const& given = source->*graph;
+            if (&given == this || !given.size()) continue;
+            if (given.device_.ordinal != device_.ordinal || given.connectivity() != connectivity() ||
+                given.kernel_ != kernel_)
+                return status_t::config_mismatch_k;
+            if (status_t const kept = given.status(); failed(kept)) return kept;
+            moved_nodes += given.size(), moved_bytes += given.tape_bytes_;
+            longest = max_of(longest, given.longest_value_), span_bytes = max_of(span_bytes, given.span_bytes_);
+        }
+        if (failed(plan.targets_.reserve_exactly(1))) return status_t::bad_alloc_k;
+        if (status_t const closed = close_(); failed(closed)) return closed;
+        plan.targets_.push_back_reserved(this);
+        plan.closed_targets_ = 1;
+        std::size_t const base = size();
+        if (moved_nodes > ceiling_nodes_ - base) return status_t::overflow_k;
+        // Sources close one by one, and every one closed reopens once the copies end.
+        std::size_t closed_sources = 0;
+        auto const reopen_sources = [&]() noexcept {
+            for (std::size_t source = 0; source != closed_sources; ++source)
+                if (&(sources[source]->*graph) != this) (sources[source]->*graph).reopen_();
+        };
+        for (; closed_sources != sources.size(); ++closed_sources) {
+            vram_ragged_graph& given = sources[closed_sources]->*graph;
+            if (&given == this) continue;
+            if (status_t const closed = given.close_(); failed(closed)) {
+                reopen_sources();
+                return closed;
+            }
+        }
+        std::size_t const entries = base + moved_nodes;
+        cuda_stream_handle_t const stream = context.stream();
+        growing_buffer<u64_t> shifted_offsets {global_allocator};
+        round_shape_t const shape = round_shape_(
+            entries, entries ? max_of<std::size_t>(divide_round_up(tape_bytes_ + moved_bytes, entries), 1) : 1,
+            config.refine.cache_bytes);
+        status_t packed = carve_round_(plan.rounds_, context, shape,
+                                       round_arena_bytes_(round_launch_(longest, span_bytes)), 0);
+        if (succeeded(packed)) packed = grow_nodes_(entries, stream);
+        if (succeeded(packed)) packed = values_tape_.commit(tape_bytes_ + moved_bytes + tape_margin_k);
+        if (succeeded(packed) && failed(shifted_offsets.resize_uninitialized(moved_nodes + 1)))
+            packed = status_t::bad_alloc_k;
+
+        // The appended nodes publish once every source's copies drained, so a refusal shows none.
+        std::size_t const row_bytes = connectivity() * sizeof(node_id_t);
+        std::size_t into = base, tape_bytes = tape_bytes_;
+        for (owner_type_* const source : sources) {
+            vram_ragged_graph& given = source->*graph;
+            std::size_t const count = given.size();
+            if (failed(packed) || &given == this || !count) continue;
+            if (cuda_copy(api(), shifted_offsets.data(), given.offsets_column_.base(), (count + 1) * sizeof(u64_t)) !=
+                cuda_success_k) {
+                packed = status_t::device_error_k;
+                continue;
+            }
+            for (std::size_t node = 0; node <= count; ++node) shifted_offsets[node] += tape_bytes;
+            vram_graph<node_id_t> rebased {};
+            rebased.neighbors = reinterpret_cast<node_id_t*>(neighbors_matrix_.base());
+            rebased.connectivity = static_cast<u32_t>(connectivity());
+            rebased.first_id = static_cast<node_id_t>(into);
+            rebased.nodes_count = static_cast<u32_t>(count);
+            rebased.source_bound = static_cast<node_id_t>(count);
+            rebased.shift = static_cast<node_id_t>(into);
+            if (cuda_copy(api(), offsets_column_.base() + into * sizeof(u64_t), shifted_offsets.data(),
+                          (count + 1) * sizeof(u64_t)) != cuda_success_k ||
+                (given.tape_bytes_ &&
+                 cuda_copy_async(api(), values_tape_.base() + tape_bytes, given.values_tape_.base(), given.tape_bytes_,
+                                 stream) != cuda_success_k) ||
+                cuda_copy_async(api(), neighbors_matrix_.base() + into * row_bytes, given.neighbors_matrix_.base(),
+                                count * row_bytes, stream) != cuda_success_k)
+                packed = status_t::device_error_k;
+            else
+                packed = launch_graph_(*graph_kernels, vram_kernel_t::rebase_links_k,
+                                       graph_blocks_(vram_kernel_t::rebase_links_k), rebased, stream);
+            into += count, tape_bytes += given.tape_bytes_;
+        }
+        if (succeeded(packed)) packed = context.wait();
+        if (failed(packed)) {
+            // The nodes past the watermark hold whatever was copied, so the next grow refills them.
+            filled_nodes_ = min_of(filled_nodes_, base);
+            reopen_sources();
+            return packed;
+        }
+        // The closed claim words make this call every map's one writer.
+        into = base;
+        for (owner_type_* const source : sources) {
+            vram_ragged_graph& given = source->*graph;
+            if (&given == this) continue;
+            for (std::size_t node = 0, count = given.size(); node != count; ++node)
+                keyed_.assign(static_cast<node_id_t>(into++), given.keyed_[static_cast<node_id_t>(node)]);
+            given.forget_();
+        }
+        reopen_sources();
+        tape_bytes_ = tape_bytes, longest_value_ = longest, span_bytes_ = span_bytes;
+        publish_keys_({static_cast<node_id_t>(base), static_cast<node_id_t>(entries)});
+        fu::standard_atomic_ref<std::size_t>(last_visible_id_).store(entries, std::memory_order_release);
+        plan.rounds_.bind_(*this);
         return status_t::success_k;
     }
 
-    /** Queues one re-selection of every node in @p nodes over the @p entries published nodes, each
-     *  merging its picks into its row, on the arena the plan grew; a launch cache holds a walk's
-     *  candidates or a merge round's, whichever are more. */
-    status_t reselect_(traversal_context_t& context, audit_scratch_t const& scratch, refine_config_t config,
-                       iota_view<node_id_t> nodes, std::size_t entries) noexcept {
-        auto const [kits, kits_status] = kits_kernels_(context);
-        if (failed(kits_status)) return kits_status;
-        cuda_stream_handle_t const stream = context.stream();
-        std::size_t const walked = nodes.size(), rung = kits_.rung_serving_(longest_value_);
-        u32_t const span_bytes = static_cast<u32_t>(span_bytes_);
-        build_shape_t const shape = build_shape_(config.expansion_factor, span_bytes, rung);
-        std::size_t const slices = std::size_t {device_.multiprocessor_count} *
-                                   cuda_resident_blocks(vram_kernel_t::refine_k, 0) * vram_warps_per_block_k;
-        std::size_t const arena_bytes_before = context.arena_bytes_;
-        byte_t* const arena = context.ensure_arena(slices * shape.arena_shape.template slice_bytes<node_id_t>());
-        if (!arena) return status_t::bad_alloc_k;
-        auto const [epoch_base, epochs_status] = context.take_epochs(walked, arena_bytes_before);
-        if (failed(epochs_status)) return epochs_status;
-
-        vram_arguments<node_id_t> arguments {};
-        vram_build<node_id_t>& build = arguments.build;
-        build.storage = storage();
-        build.first_id = nodes.first;
-        build.end_id = nodes.bound;
-        build.sampling_bound = static_cast<node_id_t>(entries);
-        build.span_bytes = span_bytes;
-        build.arena = arena;
-        build.arena_shape = shape.arena_shape;
-        build.expansion = shape.expansion;
-        build.epoch_base = epoch_base;
-        build.telemetry = context.telemetry_.get();
-        build.assigned_nodes = context.assigned_nodes_.get();
-        build.changed = scratch.changed;
-        build.selection_nodes = max_of(shape.walk_selection_nodes, shape.reselection_nodes);
-        build.scratch_bytes_per_warp = max_of(shape.walk_scratch_bytes, shape.back_link_scratch_bytes);
-        if (cuda_fill_async(api(), scratch.changed.words, 0, scratch.words * sizeof(u32_t), stream) != cuda_success_k ||
-            cuda_fill_async(api(), build.assigned_nodes, 0, sizeof(u32_t), stream) != cuda_success_k)
-            return status_t::device_error_k;
-        u32_t const blocks = device_.multiprocessor_count *
-                             cuda_resident_blocks(vram_kernel_t::refine_k, shape.candidate_slots);
-        return cuda_launch(api(), kits_function_at_(*kits, rung, vram_kernel_t::refine_k, shape.candidate_slots),
-                           blocks, block_threads_k, walkers_per_block_(rung) * build.scratch_bytes_per_warp, stream,
-                           cuda_overlap_t::serialized_k, arguments);
-    }
-
-    /** The launch record of a sweep's tile of @p targets over the links of @p sources: its run
-     *  offsets lead the staging the plan grew for @p tile_rows rows, and the tape follows them,
-     *  holding @p tape_capacity links. */
-    vram_sweep_t sweep_record_(traversal_context_t& context, audit_scratch_t const& scratch,
-                               iota_view<node_id_t> sources, iota_view<node_id_t> targets, std::size_t tile_rows,
-                               std::size_t tape_capacity) const noexcept {
-        u32_t* const offsets = reinterpret_cast<u32_t*>(context.staging_.get());
-        return {reinterpret_cast<u32_t const*>(neighbors_matrix_.base()),
-                static_cast<u32_t>(connectivity()),
-                static_cast<u32_t>(size()),
-                static_cast<u32_t>(sources.first),
-                static_cast<u32_t>(sources.bound),
-                static_cast<u32_t>(targets.first),
-                static_cast<u32_t>(targets.bound),
-                offsets,
-                offsets + tile_rows,
-                static_cast<u32_t>(tape_capacity),
-                scratch.swept};
-    }
-
-    /** Queues the count of every link @p sources hold into the tile of @p targets, none counted
-     *  yet, the offset kernel, which keeps as many rows as a tile's tape of @p tile_rows rows of
-     *  links holds, and the copy of what it kept into @p counters. */
-    status_t queue_count_back_links_(kernel_table_t const& graph_kernels, traversal_context_t& context,
-                                     audit_scratch_t const& scratch, audit_counters_t* counters,
-                                     iota_view<node_id_t> sources, iota_view<node_id_t> targets,
-                                     std::size_t tile_rows) noexcept {
-        cuda_stream_handle_t const stream = context.stream();
-        vram_graph<node_id_t> graph {};
-        graph.sweep = sweep_record_(context, scratch, sources, targets, tile_rows, tile_rows * connectivity());
-        if (cuda_fill_async(api(), graph.sweep.incoming_offsets, 0, targets.size() * sizeof(u32_t), stream) !=
-            cuda_success_k)
-            return status_t::device_error_k;
-        if (status_t const counted = launch_graph_(graph_kernels, vram_kernel_t::count_back_links_k,
-                                                   graph_blocks_(vram_kernel_t::count_back_links_k), graph, stream);
-            failed(counted))
-            return counted;
-        if (status_t const offset = launch_graph_(graph_kernels, vram_kernel_t::offset_back_links_k, 1, graph, stream);
-            failed(offset))
-            return offset;
-        return cuda_copy_async(api(), counters->swept, scratch.swept, sizeof(counters->swept), stream) == cuda_success_k
-                   ? status_t::success_k
-                   : status_t::device_error_k;
-    }
-
-    /** Queues the scatter of every link @p sources hold into the tile of @p targets onto the first
-     *  @p tape_size slots of its tape. */
-    status_t queue_scatter_back_links_(kernel_table_t const& graph_kernels, traversal_context_t& context,
-                                       audit_scratch_t const& scratch, iota_view<node_id_t> sources,
-                                       iota_view<node_id_t> targets, std::size_t tile_rows, u32_t tape_size) noexcept {
-        vram_graph<node_id_t> graph {};
-        graph.sweep = sweep_record_(context, scratch, sources, targets, tile_rows, tape_size);
-        return launch_graph_(graph_kernels, vram_kernel_t::scatter_back_links_k,
-                             graph_blocks_(vram_kernel_t::scatter_back_links_k), graph, context.stream());
-    }
-
-    /** Queues the merge of each node of the tile of @p targets with its run of the @p tape_size
-     *  links on its tape, on the walk's grid and arena, and counts a node of @p sources that gained
-     *  a member as changed. */
-    status_t queue_merge_back_links_(traversal_context_t& context, audit_scratch_t const& scratch,
-                                     refine_config_t config, iota_view<node_id_t> sources, iota_view<node_id_t> targets,
-                                     std::size_t tile_rows, u32_t tape_size) noexcept {
-        auto const [kits, kits_status] = kits_kernels_(context);
-        if (failed(kits_status)) return kits_status;
-        cuda_stream_handle_t const stream = context.stream();
-        std::size_t const rung = kits_.rung_serving_(longest_value_);
-        u32_t const span_bytes = static_cast<u32_t>(span_bytes_);
-        build_shape_t const shape = build_shape_(config.expansion_factor, span_bytes, rung);
-        byte_t* const arena = context.ensure_arena(refine_arena_bytes_(config, span_bytes, rung));
-        if (!arena) return status_t::bad_alloc_k;
-        vram_sweep_t const sweep = sweep_record_(context, scratch, sources, targets, tile_rows, tape_size);
-        vram_arguments<node_id_t> arguments {};
-        vram_build<node_id_t>& build = arguments.build;
-        build.storage = storage();
-        build.first_id = targets.first;
-        build.end_id = targets.bound;
-        build.sampling_bound = static_cast<node_id_t>(size());
-        build.span_bytes = span_bytes;
-        build.arena = arena;
-        build.arena_shape = shape.arena_shape;
-        build.expansion = shape.expansion;
-        build.telemetry = context.telemetry_.get();
-        build.assigned_nodes = context.assigned_nodes_.get();
-        build.selection_nodes = shape.reselection_nodes;
-        build.scratch_bytes_per_warp = shape.back_link_scratch_bytes;
-        build.changed = scratch.changed;
-        build.incoming_offsets = sweep.incoming_offsets;
-        build.back_links = reinterpret_cast<node_id_t const*>(sweep.back_links);
-        build.tape_size = tape_size;
-        build.walked_first = sources.first;
-        build.walked_bound = sources.bound;
-        if (cuda_fill_async(api(), build.assigned_nodes, 0, sizeof(u32_t), stream) != cuda_success_k)
-            return status_t::device_error_k;
-        static_assert(cuda_resident_blocks(vram_kernel_t::merge_back_links_k, 0) ==
-                      cuda_resident_blocks(vram_kernel_t::refine_k, 0));
-        return cuda_launch(api(), kits_function_at_(*kits, rung, vram_kernel_t::merge_back_links_k, 0),
-                           device_.multiprocessor_count * cuda_resident_blocks(vram_kernel_t::refine_k, 0),
-                           block_threads_k, walkers_per_block_(rung) * build.scratch_bytes_per_warp, stream,
-                           cuda_overlap_t::serialized_k, arguments);
-    }
-
-    /** Queues a reachability audit over @p nodes nodes from as many stride-spread landmarks as one
-     *  search draws - the connectivity - and its first sweep, through @c queue_sweeps_. Nothing
-     *  waits; the caller reads @p counters once its event fired, and queues further sweeps from
-     *  sweep 2 while the last one still expanded. */
-    status_t queue_audit_(kernel_table_t const& graph_kernels, audit_scratch_t const& scratch,
-                          audit_counters_t* counters, std::size_t nodes, cuda_stream_handle_t stream) noexcept {
-        // The bitsets, the levels, the sweeps' expanded counters and the unreached counter lie back
-        // to back.
-        if (cuda_fill_async(api(), scratch.reached.words, 0, (scratch.words * 3 + 4) * sizeof(u32_t), stream) !=
-            cuda_success_k)
-            return status_t::device_error_k;
-        vram_graph<node_id_t> graph {};
-        graph.neighbors = reinterpret_cast<node_id_t*>(neighbors_matrix_.base());
-        graph.connectivity = static_cast<u32_t>(connectivity());
-        graph.nodes_count = static_cast<u32_t>(nodes);
-        graph.seed_count = static_cast<u32_t>(min_of<std::size_t>(connectivity(), nodes));
-        graph.reached = scratch.reached;
-        graph.frontier = scratch.frontier;
-        if (status_t const launched = launch_graph_(graph_kernels, vram_kernel_t::mark_landmarks_k,
-                                                    divide_round_up<u32_t>(graph.seed_count, block_threads_k), graph,
-                                                    stream);
-            failed(launched))
-            return launched;
-        return queue_sweeps_(graph_kernels, scratch, counters, nodes, 1, stream);
-    }
-
-    /** Queues the audit's sweeps from @p first_sweep up to twice it over @p nodes nodes, so the
-     *  batches double until one ends past convergence, then a count of the nodes no sweep reached
-     *  so far, collecting their IDs when @p scratch has room for them, then the copy of every
-     *  counter, the last sweep's expanded count among them. */
-    status_t queue_sweeps_(kernel_table_t const& graph_kernels, audit_scratch_t const& scratch,
-                           audit_counters_t* counters, std::size_t nodes, u32_t first_sweep,
-                           cuda_stream_handle_t stream) noexcept {
-        vram_graph<node_id_t> graph {};
-        graph.neighbors = reinterpret_cast<node_id_t*>(neighbors_matrix_.base());
-        graph.connectivity = static_cast<u32_t>(connectivity());
-        graph.nodes_count = static_cast<u32_t>(nodes);
-        graph.reached = scratch.reached;
-        graph.levels = scratch.levels;
-        // A sweep queued past convergence finds the one before it expanded nothing and leaves at
-        // entry; odd sweeps grow the first frontier, even ones the second.
-        for (u32_t sweep_number = first_sweep; sweep_number != 2 * first_sweep; ++sweep_number) {
-            bool const odd = sweep_number & 1u;
-            graph.frontier = odd ? scratch.frontier : scratch.next_frontier;
-            graph.next_frontier = odd ? scratch.next_frontier : scratch.frontier;
-            graph.counter = scratch.expanded + odd;
-            graph.previous_counter = sweep_number == 1 ? nullptr : scratch.expanded + !odd;
-            if (cuda_fill_async(api(), graph.next_frontier.words, 0, scratch.words * sizeof(u32_t), stream) !=
-                    cuda_success_k ||
-                cuda_fill_async(api(), graph.counter, 0, sizeof(u32_t), stream) != cuda_success_k)
-                return status_t::device_error_k;
-            if (status_t const launched = launch_graph_(graph_kernels, vram_kernel_t::reachability_sweep_k,
-                                                        graph_blocks_(vram_kernel_t::reachability_sweep_k), graph,
-                                                        stream);
-                failed(launched))
-                return launched;
+    /** Binds @p plan to a cut of this graph into @p targets: closes this graph and every target,
+     *  reserves and grows every target for a full part and maps its tape for the most its part can
+     *  take, carves the rounds over a full part and the partition, then queues the partition. */
+    template <typename owner_type_>
+    status_t open_cut_(reshard_plan_t& plan, std::span<owner_type_* const> targets,
+                       vram_ragged_graph owner_type_::* graph, reshard_config_t const& config,
+                       traversal_context_t& context) noexcept {
+        std::size_t const parts = targets.size();
+        split_t& split = plan.split_;
+        if (failed(plan.targets_.reserve_exactly(parts)) || failed(split.parts.resize(parts)))
+            return status_t::bad_alloc_k;
+        for (owner_type_* const listed : targets) {
+            vram_ragged_graph const& part = listed->*graph;
+            if (&part == this || part.device_.ordinal != device_.ordinal || part.kernel_ != kernel_ ||
+                (part.connectivity() && part.connectivity() != connectivity()))
+                return status_t::config_mismatch_k;
         }
-        graph.island_ids = scratch.island_ids;
-        graph.counter = scratch.unreached;
-        if (cuda_fill_async(api(), scratch.unreached, 0, sizeof(u32_t), stream) != cuda_success_k)
-            return status_t::device_error_k;
-        if (status_t const launched = launch_graph_(graph_kernels, vram_kernel_t::reachability_islands_k,
-                                                    divide_round_up<u32_t>(graph.nodes_count, block_threads_k), graph,
-                                                    stream);
-            failed(launched))
-            return launched;
-        u32_t const* const last_expanded = scratch.expanded + ((2 * first_sweep - 1) & 1u);
-        return cuda_copy_async(api(), &counters->levels, scratch.levels, sizeof(u32_t), stream) == cuda_success_k &&
-                       cuda_copy_async(api(), &counters->last_expanded, last_expanded, sizeof(u32_t), stream) ==
-                           cuda_success_k &&
-                       cuda_copy_async(api(), &counters->unreached, scratch.unreached, 2 * sizeof(u32_t), stream) ==
-                           cuda_success_k
-                   ? status_t::success_k
-                   : status_t::device_error_k;
+        if (status_t const closed = close_(); failed(closed)) return closed;
+        split.source = this;
+        for (owner_type_* const listed : targets) plan.targets_.push_back_reserved(&(listed->*graph));
+        split.entries = size();
+        split.part_capacity = divide_round_up<std::size_t>(split.entries, parts);
+        if (parts * split.part_capacity >= (std::numeric_limits<u32_t>::max)()) return status_t::overflow_k;
+        for (vram_ragged_graph* const part : plan.targets_) {
+            if (status_t const closed = part->close_(); failed(closed)) return closed;
+            ++plan.closed_targets_;
+            if (part->size()) return status_t::config_mismatch_k;
+            if (status_t const kept = part->status(); failed(kept)) return kept;
+        }
+        // Every target holds a full part's nodes, sentinel-filled, and the most value bytes they
+        // can take, before the partition queues.
+        cuda_stream_handle_t const stream = context.stream();
+        std::size_t const part_bytes = min_of(tape_bytes_, split.part_capacity * longest_value_);
+        for (vram_ragged_graph* const part : plan.targets_) {
+            if (status_t const reserved =
+                    part->reserve({split.part_capacity, static_cast<connectivity_t>(connectivity()), 0}).status;
+                failed(reserved))
+                return reserved;
+            if (status_t const grown = part->grow_nodes_(split.part_capacity, stream); failed(grown)) return grown;
+            if (status_t const mapped = part->values_tape_.commit(part_bytes + tape_margin_k); failed(mapped))
+                return mapped;
+        }
+        // The rounds' mirrors take over the cut's pinned bytes once the parts publish.
+        round_shape_t const shape = round_shape_(split.part_capacity, mean_value_bytes_(), config.refine.cache_bytes);
+        if (status_t const carved = carve_round_(plan.rounds_, context, shape,
+                                                 round_arena_bytes_(round_launch_(longest_value_, span_bytes_)),
+                                                 split_layout_(split.entries, parts).host_bytes);
+            failed(carved))
+            return carved;
+        // An empty source leaves every target empty, so no round binds.
+        if (!split.entries) {
+            plan.refined_targets_ = parts;
+            return status_t::success_k;
+        }
+        auto const [graph_kernels, kernels_status] = graph_kernels_(context);
+        if (failed(kernels_status)) return kernels_status;
+        if (status_t const carved = carve_split_(split, to_span(plan.targets_), config.seed, context); failed(carved))
+            return carved;
+        if (status_t const queued = queue_partition_(*graph_kernels, split, parts, stream); failed(queued))
+            return queued;
+        plan.moves_ = phase_t::partition_k;
+        return status_t::success_k;
     }
 
-    /** Queues the reconnection of the @p islands islands the last audit in @p scratch collected
-     *  over @p nodes nodes: the reached in-links first, so no reconnection takes the last link a
-     *  reached node is found through, then each island into a reached pick or its landmark. */
-    status_t queue_reconnect_(kernel_table_t const& graph_kernels, audit_scratch_t const& scratch, u32_t islands,
-                              std::size_t nodes, cuda_stream_handle_t stream) noexcept {
-        if (cuda_fill_async(api(), scratch.in_links, 0, nodes * sizeof(u32_t), stream) != cuda_success_k)
-            return status_t::device_error_k;
-        vram_graph<node_id_t> graph {};
-        graph.neighbors = reinterpret_cast<node_id_t*>(neighbors_matrix_.base());
-        graph.connectivity = static_cast<u32_t>(connectivity());
-        graph.nodes_count = static_cast<u32_t>(nodes);
-        graph.seed_count = static_cast<u32_t>(min_of<std::size_t>(connectivity(), nodes));
-        graph.reached = scratch.reached;
-        graph.in_links = scratch.in_links;
-        graph.island_ids = scratch.island_ids;
-        graph.islands_count = islands;
-        graph.reconnected = scratch.reconnected;
-        if (status_t const counted = launch_graph_(graph_kernels, vram_kernel_t::reached_in_links_k,
-                                                   graph_blocks_(vram_kernel_t::reached_in_links_k), graph, stream);
-            failed(counted))
-            return counted;
-        return launch_graph_(graph_kernels, vram_kernel_t::reconnect_island_k,
-                             divide_round_up<u32_t>(islands, block_threads_k), graph, stream);
-    }
-
-    /** Bytes a split of @p nodes nodes into @p parts parts carves on the device and pins on the
-     *  host, and where the pinned bytes place the offsets columns, the donor's value starts, the
+    /** Bytes a cut of @p nodes nodes into @p parts parts carves on the device and pins on the
+     *  host, and where the pinned bytes place the offsets columns, the source's value starts, the
      *  bases and the roots, as @c split_t lays them out. */
     struct split_layout_t {
         std::size_t device_bytes = 0, device_bases = 0;
@@ -3426,9 +3938,9 @@ struct vram_ragged_graph {
     static split_layout_t split_layout_(std::size_t nodes, std::size_t parts) noexcept {
         std::size_t const words = divide_round_up<std::size_t>(nodes, 32);
         split_layout_t layout;
-        layout.device_bases = aligned_((2 * nodes + 3 * words + 3 * parts + 2) * sizeof(u32_t));
+        layout.device_bases = aligned_((2 * nodes + 2 * words + 3 * parts + 2) * sizeof(u32_t));
         layout.device_bytes = layout.device_bases + 3 * parts * sizeof(byte_t*);
-        layout.host_offsets = aligned_((nodes + words) * sizeof(u32_t));
+        layout.host_offsets = aligned_(nodes * sizeof(u32_t));
         layout.host_starts = layout.host_offsets + aligned_((nodes + parts) * sizeof(u64_t));
         layout.host_bases = layout.host_starts + aligned_((nodes + 1) * sizeof(u64_t));
         layout.host_roots = layout.host_bases + 3 * parts * sizeof(byte_t*);
@@ -3437,14 +3949,14 @@ struct vram_ragged_graph {
         return layout;
     }
 
-    /** Where a split's device scratch keeps each array: each node's part, which the scatter reads
-     *  back as its slot, the round's proposals, @b [nodes] each, the two frontiers and the picked
-     *  bits, one bit per node each, then per part its size and its round count, the nodes the last
-     *  two rounds placed, by round parity, the parts' roots, and the receivers' bases. */
+    /** Where a cut's device scratch keeps each array: each node's part, which the scatter reads
+     *  back as its slot, the round's proposals, @b [nodes] each, the two frontiers, one bit per
+     *  node each, then per part its size and its round count, the nodes the last two rounds
+     *  placed, by round parity, the parts' roots, and the targets' bases. */
     struct split_scratch_t {
         u32_t* node_parts = nullptr;
         u32_t* proposals = nullptr;
-        vram_bitset_t frontier {}, next_frontier {}, picked {};
+        vram_bitset_t frontier {}, next_frontier {};
         u32_t* part_sizes = nullptr;
         u32_t* round_counts = nullptr;
         u32_t* placed = nullptr;
@@ -3452,17 +3964,16 @@ struct vram_ragged_graph {
         byte_t** part_bases = nullptr;
     };
 
-    /** The arrays of @p split 's device scratch, read off its bytes. */
-    static split_scratch_t split_scratch_(split_t const& split) noexcept {
-        std::size_t const entries = split.entries, parts = split.receivers.size();
+    /** The arrays of @p split 's device scratch over @p parts parts, read off its bytes. */
+    static split_scratch_t split_scratch_(split_t const& split, std::size_t parts) noexcept {
+        std::size_t const entries = split.entries;
         std::size_t const words = divide_round_up<std::size_t>(entries, 32);
         split_scratch_t carved;
         carved.node_parts = reinterpret_cast<u32_t*>(split.device_bytes.get());
         carved.proposals = carved.node_parts + entries;
         carved.frontier.words = carved.proposals + entries;
         carved.next_frontier.words = carved.frontier.words + words;
-        carved.picked.words = carved.next_frontier.words + words;
-        carved.part_sizes = carved.picked.words + words;
+        carved.part_sizes = carved.next_frontier.words + words;
         carved.round_counts = carved.part_sizes + parts;
         carved.placed = carved.round_counts + parts;
         carved.roots = carved.placed + 2;
@@ -3472,28 +3983,27 @@ struct vram_ragged_graph {
     }
 
     /** Carves @p split 's device scratch from @p context 's allocator, borrows its pinned results
-     * as the host bytes, copies this index's value starts into it, and queues the upload of the
-     * receivers' bases and the roots
-     *  @p seed picks. */
-    status_t carve_split_(split_t& split, u64_t seed, traversal_context_t& context) noexcept {
-        std::size_t const entries = split.entries, parts = split.receivers.size();
+     *  as the host bytes, copies this graph's value starts into it, and queues the upload of the
+     *  @p targets ' bases and the roots @p seed picks. */
+    status_t carve_split_(split_t& split, std::span<vram_ragged_graph* const> targets, u64_t seed,
+                          traversal_context_t& context) noexcept {
+        std::size_t const entries = split.entries, parts = targets.size();
         split_layout_t const layout = split_layout_(entries, parts);
         split.device_bytes.reset(context.allocator_.allocate(layout.device_bytes));
         split.device_bytes.get_deleter().count = layout.device_bytes;
         if (!split.device_bytes) return status_t::bad_alloc_k;
         growing_buffer<scored_node_t, cuda_pinned_allocator_t>& pinned = context.results.entries_;
-        if (failed(pinned.resize_uninitialized(divide_round_up(layout.host_bytes, sizeof(scored_node_t)))) ||
-            failed(split.parts.resize(parts)))
+        if (failed(pinned.resize_uninitialized(divide_round_up(layout.host_bytes, sizeof(scored_node_t)))))
             return status_t::bad_alloc_k;
         split.host_bytes = reinterpret_cast<byte_t*>(pinned.data());
-        split_scratch_t const carved = split_scratch_(split);
+        split_scratch_t const carved = split_scratch_(split, parts);
         byte_t** const bases = reinterpret_cast<byte_t**>(split.host_bytes + layout.host_bases);
         u32_t* const roots = reinterpret_cast<u32_t*>(split.host_bytes + layout.host_roots);
         for (std::size_t part = 0; part != parts; ++part) {
-            vram_ragged_graph& receiver = *split.receivers[part];
-            bases[part] = receiver.neighbors_matrix_.base();
-            bases[parts + part] = receiver.values_tape_.base();
-            bases[2 * parts + part] = receiver.offsets_column_.base();
+            vram_ragged_graph& target = *targets[part];
+            bases[part] = target.neighbors_matrix_.base();
+            bases[parts + part] = target.values_tape_.base();
+            bases[2 * parts + part] = target.offsets_column_.base();
             roots[part] = static_cast<u32_t>(seeded_bijection(part, entries, seed));
         }
         cuda_stream_handle_t const stream = context.stream();
@@ -3506,11 +4016,10 @@ struct vram_ragged_graph {
                    : status_t::device_error_k;
     }
 
-    /** The record every launch of @p split reads: this index's neighbors and nodes, and the split's
-     *  scratch. */
-    vram_graph<node_id_t> split_graph_(split_t const& split) const noexcept {
-        std::size_t const parts = split.receivers.size();
-        split_scratch_t const carved = split_scratch_(split);
+    /** The record every launch of @p split into @p parts parts reads: this graph's neighbors and
+     *  nodes, and the split's scratch. */
+    vram_graph<node_id_t> split_graph_(split_t const& split, std::size_t parts) const noexcept {
+        split_scratch_t const carved = split_scratch_(split, parts);
         vram_graph<node_id_t> graph {};
         graph.neighbors = reinterpret_cast<node_id_t*>(neighbors_matrix_.base());
         graph.connectivity = static_cast<u32_t>(connectivity());
@@ -3525,27 +4034,25 @@ struct vram_ragged_graph {
         graph.roots = carved.roots;
         graph.parts_count = static_cast<u32_t>(parts);
         graph.part_capacity = static_cast<u32_t>(split.part_capacity);
-        graph.picked = carved.picked;
         graph.part_neighbors = reinterpret_cast<u32_t* const*>(carved.part_bases);
         graph.part_values = carved.part_bases + parts;
         graph.part_offsets = reinterpret_cast<u64_t const* const*>(carved.part_bases + 2 * parts);
         return graph;
     }
 
-    /** Queues the start of @p split 's partition through @p graph_kernels: the node parts and
-     *  proposals unknown, the bitsets, the parts' counters and the rounds' counts empty, then the
-     *  roots filed in. */
-    status_t queue_partition_(kernel_table_t const& graph_kernels, split_t& split,
+    /** Queues the start of @p split 's partition into @p parts parts through @p graph_kernels: the
+     *  node parts and proposals unknown, the bitsets, the parts' counters and the rounds' counts
+     *  empty, then the roots filed in. */
+    status_t queue_partition_(kernel_table_t const& graph_kernels, split_t& split, std::size_t parts,
                               cuda_stream_handle_t stream) noexcept {
-        std::size_t const entries = split.entries, parts = split.receivers.size();
-        std::size_t const words = divide_round_up<std::size_t>(entries, 32);
-        split_scratch_t const carved = split_scratch_(split);
+        std::size_t const entries = split.entries, words = divide_round_up<std::size_t>(entries, 32);
+        split_scratch_t const carved = split_scratch_(split, parts);
         // Each run lies back to back.
         if (cuda_fill_async(api(), carved.node_parts, 0xFF, 2 * entries * sizeof(u32_t), stream) != cuda_success_k ||
-            cuda_fill_async(api(), carved.frontier.words, 0, (3 * words + 2 * parts + 2) * sizeof(u32_t), stream) !=
+            cuda_fill_async(api(), carved.frontier.words, 0, (2 * words + 2 * parts + 2) * sizeof(u32_t), stream) !=
                 cuda_success_k)
             return status_t::device_error_k;
-        vram_graph<node_id_t> graph = split_graph_(split);
+        vram_graph<node_id_t> graph = split_graph_(split, parts);
         split.next_round = 1;
         return launch_graph_(graph_kernels, vram_kernel_t::partition_roots_k,
                              divide_round_up<u32_t>(graph.seed_count, block_threads_k), graph, stream);
@@ -3560,10 +4067,11 @@ struct vram_ragged_graph {
      *  rounds grow the first frontier, even ones the second. Every node is placed once at most, so
      *  the nodes bound the rounds.
      */
-    status_t queue_rounds_(kernel_table_t const& graph_kernels, split_t& split, cuda_stream_handle_t stream) noexcept {
-        std::size_t const words = divide_round_up<std::size_t>(split.entries, 32), parts = split.receivers.size();
-        split_scratch_t const carved = split_scratch_(split);
-        vram_graph<node_id_t> graph = split_graph_(split);
+    status_t queue_rounds_(kernel_table_t const& graph_kernels, split_t& split, std::size_t parts,
+                           cuda_stream_handle_t stream) noexcept {
+        std::size_t const words = divide_round_up<std::size_t>(split.entries, 32);
+        split_scratch_t const carved = split_scratch_(split, parts);
+        vram_graph<node_id_t> graph = split_graph_(split, parts);
         u32_t const first_round = split.next_round;
         for (u32_t round = first_round; round != 2 * first_round; ++round) {
             bool const odd = round & 1u;
@@ -3591,53 +4099,47 @@ struct vram_ragged_graph {
                    : status_t::device_error_k;
     }
 
-    /** The last growth round of @p split placed something, so more rounds follow. */
-    static bool placing_(split_t const& split) noexcept {
-        std::size_t const host_assigned = split_layout_(split.entries, split.receivers.size()).host_assigned;
+    /** The last growth round of @p split into @p parts parts placed something, so more rounds
+     *  follow. */
+    static bool placing_(split_t const& split, std::size_t parts) noexcept {
+        std::size_t const host_assigned = split_layout_(split.entries, parts).host_assigned;
         return *reinterpret_cast<u32_t const*>(split.host_bytes + host_assigned) != 0;
     }
 
     /** Queues the end of @p split 's partition once no round places anything: the nodes no round
-     *  reached, the picked nodes, and the copy of the node parts and the picked bits. */
-    status_t queue_picked_(kernel_table_t const& graph_kernels, split_t& split, cuda_stream_handle_t stream) noexcept {
-        std::size_t const entries = split.entries, words = divide_round_up<std::size_t>(entries, 32);
-        vram_graph<node_id_t> graph = split_graph_(split);
+     *  reached, then the copy of the node parts. */
+    status_t queue_partition_end_(kernel_table_t const& graph_kernels, split_t& split, std::size_t parts,
+                                  cuda_stream_handle_t stream) noexcept {
+        vram_graph<node_id_t> graph = split_graph_(split, parts);
         if (status_t const launched = launch_graph_(graph_kernels, vram_kernel_t::partition_islands_k, 1, graph,
                                                     stream);
             failed(launched))
             return launched;
-        if (status_t const launched = launch_graph_(graph_kernels, vram_kernel_t::partition_picked_k,
-                                                    graph_blocks_(vram_kernel_t::partition_picked_k), graph, stream);
-            failed(launched))
-            return launched;
-        byte_t* const host_bytes = split.host_bytes;
-        split_scratch_t const carved = split_scratch_(split);
-        return cuda_copy_async(api(), host_bytes, carved.node_parts, entries * sizeof(u32_t), stream) ==
-                           cuda_success_k &&
-                       cuda_copy_async(api(), host_bytes + entries * sizeof(u32_t), carved.picked.words,
-                                       words * sizeof(u32_t), stream) == cuda_success_k
+        return cuda_copy_async(api(), split.host_bytes, graph.node_parts, split.entries * sizeof(u32_t), stream) ==
+                       cuda_success_k
                    ? status_t::success_k
                    : status_t::device_error_k;
     }
 
-    /** Queues @p split 's scatter: the assigned slots and the receivers' offsets columns up, then
-     *  every node's neighbors and value into its receiver. */
+    /** Queues @p split 's scatter into @p targets: the assigned slots and the targets' offsets
+     *  columns up, then every node's neighbors and value into its target. */
     status_t queue_scatter_(kernel_table_t const& graph_kernels, split_t const& split,
-                            cuda_stream_handle_t stream) noexcept {
+                            std::span<vram_ragged_graph* const> targets, cuda_stream_handle_t stream) noexcept {
         byte_t const* const host_bytes = split.host_bytes;
-        u64_t const* const offsets = reinterpret_cast<u64_t const*>(
-            host_bytes + split_layout_(split.entries, split.receivers.size()).host_offsets);
-        if (cuda_copy_async(api(), split_scratch_(split).node_parts, host_bytes, split.entries * sizeof(u32_t),
+        std::size_t const parts = targets.size();
+        u64_t const* const offsets = reinterpret_cast<u64_t const*>(host_bytes +
+                                                                    split_layout_(split.entries, parts).host_offsets);
+        if (cuda_copy_async(api(), split_scratch_(split, parts).node_parts, host_bytes, split.entries * sizeof(u32_t),
                             stream) != cuda_success_k)
             return status_t::device_error_k;
-        for (std::size_t index = 0; index != split.receivers.size(); ++index) {
+        for (std::size_t index = 0; index != parts; ++index) {
             split_part_t const& part = split.parts[index];
-            vram_ragged_graph const& receiver = *split.receivers[index];
-            if (part.entries && cuda_copy_async(api(), receiver.offsets_column_.base(), offsets + part.offsets_first,
+            vram_ragged_graph const& target = *targets[index];
+            if (part.entries && cuda_copy_async(api(), target.offsets_column_.base(), offsets + part.offsets_first,
                                                 (part.entries + 1) * sizeof(u64_t), stream) != cuda_success_k)
                 return status_t::device_error_k;
         }
-        vram_graph<node_id_t> graph = split_graph_(split);
+        vram_graph<node_id_t> graph = split_graph_(split, parts);
         graph.values = values_tape_.base();
         graph.value_offsets = reinterpret_cast<u64_t const*>(offsets_column_.base());
         for (vram_kernel_t const pass : {vram_kernel_t::split_links_k, vram_kernel_t::split_tape_k})
@@ -3646,7 +4148,6 @@ struct vram_ragged_graph {
                 return launched;
         return status_t::success_k;
     }
-
     /** Hardware identity: the ordinal comes from the storage allocator at construction, the
      *  remaining specs fill at the first @c reserve. */
     cuda_device_specs_t device_;

@@ -10,8 +10,8 @@
  */
 #pragma once
 
-#include "usearch/dense/vram_amd_reshard.hpp"    // `plan_compact` of AMD shards into RAM
-#include "usearch/dense/vram_nvidia_reshard.hpp" // `plan_compact` of NVIDIA shards into RAM
+#include "usearch/dense/vram_amd_reshard.hpp"    // `plan_reshard` of AMD shards into RAM
+#include "usearch/dense/vram_nvidia_reshard.hpp" // `plan_reshard` of NVIDIA shards into RAM
 
 #include "dense.cuh"
 #include "nvme_indexes.hpp" // `nvme_reference`, `nvme_checkpoint_t` - the round trip through storage
@@ -499,13 +499,13 @@ std::size_t test_dense_vram_indexes_nvme_roundtrip(u64_t seed, typename indexes_
     return failures;
 }
 
-/** Device shards compact into one host shard: every entry crosses with its key exactly once, the
+/** Device shards reshard into one host shard: every entry crosses with its key exactly once, the
  *  source ends empty, nodes of every source shard link into the others', and the merged graph walks
  *  within noise of the recall at ten one built from every entry at once reaches. Past
  *  @c connectivity+1 tiny shards the fold splits them into bins, each member keeping a slot of a
  *  node from every other, and the run stops once the re-selection finished and resumes. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
-std::size_t test_dense_vram_indexes_compact(u64_t seed, typename indexes_type_::executor_t& placement,
+std::size_t test_dense_vram_indexes_reshard(u64_t seed, typename indexes_type_::executor_t& placement,
                                             std::size_t shards_count) {
     using key_t = typename indexes_type_::key_t;
     using scalar_t = typename indexes_type_::scalar_t;
@@ -522,8 +522,8 @@ std::size_t test_dense_vram_indexes_compact(u64_t seed, typename indexes_type_::
     dense_indexes_executor<indexes_type_> driver {placement};
     dense_indexes_executor<ram_t> host;
     if (failed(driver.status) || failed(host.status)) return failures + expect(false);
-    auto const vectors = make_vectors<scalar_t>(rows, dimensions, stream_key(seed, "indexes_compact"));
-    auto const queries = make_vectors<scalar_t>(samples_k, dimensions, stream_key(seed, "indexes_compact", 1));
+    auto const vectors = make_vectors<scalar_t>(rows, dimensions, stream_key(seed, "indexes_reshard"));
+    auto const queries = make_vectors<scalar_t>(samples_k, dimensions, stream_key(seed, "indexes_reshard", 1));
     std::vector<key_t> keys(rows);
     for (std::size_t row = 0; row != rows; ++row) keys[row] = dense_key<key_t>(1 + row);
 
@@ -533,7 +533,7 @@ std::size_t test_dense_vram_indexes_compact(u64_t seed, typename indexes_type_::
     failures += expect_eq(source.reserve({rows}).status, status_t::success_k);
     failures += expect(
         succeeded(source.insert(std::span<key_t const> {keys.data(), rows}, vectors.view(), driver.executor).status));
-    // The donor shards are appended in their order, so each one's nodes follow the counts of the
+    // The source shards are appended in their order, so each one's nodes follow the counts of the
     // shards before it.
     std::vector<std::size_t> shard_ends(shards_count);
     for (std::size_t shard = 0, end = 0; shard != shards_count; ++shard)
@@ -542,10 +542,10 @@ std::size_t test_dense_vram_indexes_compact(u64_t seed, typename indexes_type_::
     failures += expect(succeeded(target.emplace(no_memory_domain_k)));
 
     indexes_type_* const sources[1] = {&source};
-    std::span<indexes_type_* const> const compacted {sources};
+    std::span<indexes_type_* const> const resharded {sources};
     // The run stops once the re-selection finished, moving nothing, and the next call resumes it.
     auto resumed = [&] {
-        auto [plan, plan_status] = plan_compact(compacted, target, driver.executor, host.executor);
+        auto [plan, plan_status] = plan_reshard(resharded, target, driver.executor, host.executor);
         failures += expect_eq(plan_status, status_t::success_k);
         auto cancel = [](std::size_t, std::size_t) noexcept { return continuation_t::cancel_k; };
         failures += expect_eq(plan.run(driver.executor, host.executor, to_writable_span(host.traversals), cancel),
@@ -556,7 +556,7 @@ std::size_t test_dense_vram_indexes_compact(u64_t seed, typename indexes_type_::
         return plan.finish(host.executor, to_writable_span(host.traversals));
     };
     auto const [result, status] = shards_count <= connectivity_16_k + 1
-                                      ? compact(compacted, target, driver.executor, host.executor)
+                                      ? reshard(resharded, target, driver.executor, host.executor)
                                       : resumed();
     failures += expect_eq(status, status_t::success_k);
     failures += expect(result.source_shards == shards_count && result.target_shards == 1 &&
@@ -597,11 +597,11 @@ std::size_t test_dense_vram_indexes_compact(u64_t seed, typename indexes_type_::
     return failures;
 }
 
-/** A two-shard index splits into two receivers of two shards each: the sizes add up, every key
- *  counts once across the receivers, the source ends empty, and the receivers' merged recall at
+/** A two-shard index splits into two targets of two shards each: the sizes add up, every key
+ *  counts once across the targets, the source ends empty, and the targets' merged recall at
  *  ten against an exact reference stays within noise of the source's. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
-std::size_t test_dense_vram_indexes_split(u64_t seed, typename indexes_type_::executor_t& placement) {
+std::size_t test_dense_vram_indexes_cut(u64_t seed, typename indexes_type_::executor_t& placement) {
     using key_t = typename indexes_type_::key_t;
     using scalar_t = typename indexes_type_::scalar_t;
     using distance_t = typename indexes_type_::distance_t;
@@ -670,13 +670,29 @@ std::size_t test_dense_vram_indexes_split(u64_t seed, typename indexes_type_::ex
     };
     std::size_t const source_recall = recall({&source});
 
-    indexes_type_* refused[2] = {&first, &source};
-    failures += expect_eq(source.plan_split(std::span<indexes_type_*> {refused}, {}, driver.executor).status,
+    indexes_type_* const sources[1] = {&source};
+    indexes_type_* const refused[2] = {&first, &source};
+    failures += expect_eq(plan_reshard(std::span<indexes_type_* const> {sources},
+                                       std::span<indexes_type_* const> {refused}, driver.executor)
+                              .status,
                           status_t::config_mismatch_k);
-    indexes_type_* receivers[2] = {&first, &second};
-    auto const [split, split_status] = source.split(std::span<indexes_type_*> {receivers}, {{}, seed}, driver.executor);
-    failures += expect_eq(split_status, status_t::success_k);
-    failures += expect_eq(split.reachability.audited_nodes, rows);
+    indexes_type_* const targets[2] = {&first, &second};
+    reshard_config_t config;
+    config.seed = seed;
+    auto [plan, plan_status] = plan_reshard(std::span<indexes_type_* const> {sources},
+                                            std::span<indexes_type_* const> {targets}, driver.executor, config);
+    failures += expect_eq(plan_status, status_t::success_k);
+    failures += expect_eq(plan.run(driver.executor), status_t::success_k);
+    // A second round restarts at the first target and runs on every one, never past the last.
+    failures += expect(plan.phase() == phase_t::done_k);
+    plan.next_round();
+    failures += expect(plan.phase() != phase_t::done_k);
+    failures += expect_eq(plan.run(driver.executor), status_t::success_k);
+    failures += expect(plan.phase() == phase_t::done_k);
+    auto const [cut, cut_status] = plan.finish(driver.executor);
+    failures += expect_eq(cut_status, status_t::success_k);
+    failures += expect_eq(cut.moved_entries, rows);
+    failures += expect_eq(cut.graph.reachability.audited_nodes, rows);
     failures += expect_eq(source.size(), 0u);
     failures += expect_eq(first.size() + second.size(), rows);
     failures += expect(first.size() && second.size());
@@ -688,15 +704,15 @@ std::size_t test_dense_vram_indexes_split(u64_t seed, typename indexes_type_::ex
     for (std::size_t row = 0; row != rows; ++row) miscounted += in_first[row] + in_second[row] != 1;
     failures += expect_eq(miscounted, 0u);
 
-    std::size_t const split_recall = recall({&first, &second});
-    failures += expect(split_recall * 100 + noise_percent_k * samples_k * wanted_k >= source_recall * 100);
+    std::size_t const cut_recall = recall({&first, &second});
+    failures += expect(cut_recall * 100 + noise_percent_k * samples_k * wanted_k >= source_recall * 100);
     return failures;
 }
 
-/** A split refused for want of a second receiver leaves the donor whole: its size and the count of
- *  every key stay as inserted. */
+/** A reshard of several sources into several targets, or one naming a shard capacity, is refused
+ *  and leaves the source whole: its size and the count of every key stay as inserted. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
-std::size_t test_dense_vram_indexes_split_refused(u64_t seed, typename indexes_type_::executor_t& placement) {
+std::size_t test_dense_vram_indexes_cut_refused(u64_t seed, typename indexes_type_::executor_t& placement) {
     using key_t = typename indexes_type_::key_t;
     using scalar_t = typename indexes_type_::scalar_t;
     std::size_t const rows = 2 * dense_thread_nodes_k;
@@ -709,20 +725,31 @@ std::size_t test_dense_vram_indexes_split_refused(u64_t seed, typename indexes_t
     std::vector<key_t> keys(rows);
     for (std::size_t row = 0; row != rows; ++row) keys[row] = dense_key<key_t>(1 + row);
 
-    indexes_type_ donor {kernel_, {dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
+    indexes_type_ source {kernel_, {dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
     indexes_type_ lone {kernel_, {dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
-    for (indexes_type_* placed : {&donor, &lone})
+    indexes_type_ first {kernel_, {dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
+    indexes_type_ second {kernel_, {dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
+    for (indexes_type_* placed : {&source, &lone, &first, &second})
         failures += expect(succeeded(place_shards(*placed, placement)) && succeeded(place_shards(*placed, placement)));
-    failures += expect_eq(donor.reserve({rows}).status, status_t::success_k);
+    failures += expect_eq(source.reserve({rows}).status, status_t::success_k);
     failures += expect(
-        succeeded(donor.insert(std::span<key_t const> {keys.data(), rows}, vectors.view(), driver.executor).status));
+        succeeded(source.insert(std::span<key_t const> {keys.data(), rows}, vectors.view(), driver.executor).status));
 
-    indexes_type_* receivers[1] = {&lone};
-    failures += expect_eq(donor.plan_split(std::span<indexes_type_*> {receivers}, {}, driver.executor).status,
-                          status_t::config_mismatch_k);
-    failures += expect_eq(donor.size(), rows);
+    indexes_type_* const sources[2] = {&source, &lone};
+    indexes_type_* const targets[2] = {&first, &second};
+    failures += expect_eq(plan_reshard(std::span<indexes_type_* const> {sources},
+                                       std::span<indexes_type_* const> {targets}, driver.executor)
+                              .status,
+                          status_t::unsupported_k);
+    reshard_config_t capped;
+    capped.shard_capacity = rows;
+    failures += expect_eq(plan_reshard(std::span<indexes_type_* const> {sources}.first(1),
+                                       std::span<indexes_type_* const> {sources}.first(1), driver.executor, capped)
+                              .status,
+                          status_t::unsupported_k);
+    failures += expect_eq(source.size(), rows);
     std::size_t miscounted = 0;
-    for (key_t const& key : keys) miscounted += donor.count(key) != 1;
+    for (key_t const& key : keys) miscounted += source.count(key) != 1;
     failures += expect_eq(miscounted, 0u);
     return failures;
 }
@@ -878,18 +905,18 @@ std::size_t test_vram_indexes_configuration(char const* name, u64_t seed, execut
     if constexpr (executor_type_::vendor_k != gpu_vendor_t::apple_k)
         failures_count += test_dense_vram_indexes_generations<indexes_t, kernel_>(seed, executor);
     failures_count += test_dense_indexes_refine<indexes_t, kernel_>(seed, executor);
-    failures_count += test_dense_indexes_absorb<indexes_t, kernel_>(seed, executor);
-    failures_count += test_dense_indexes_absorb_many<indexes_t, kernel_>(seed, executor);
-    // Apple's split is unverified until an Apple run takes this cell.
+    failures_count += test_dense_indexes_gather<indexes_t, kernel_>(seed, executor);
+    failures_count += test_dense_indexes_gather_many<indexes_t, kernel_>(seed, executor);
+    // Apple's cut is unverified until an Apple run takes this cell.
     if constexpr (executor_type_::vendor_k != gpu_vendor_t::apple_k)
-        failures_count += test_dense_vram_indexes_split<indexes_t, kernel_>(seed, executor);
+        failures_count += test_dense_vram_indexes_cut<indexes_t, kernel_>(seed, executor);
     if constexpr (executor_type_::vendor_k != gpu_vendor_t::apple_k)
-        failures_count += test_dense_vram_indexes_split_refused<indexes_t, kernel_>(seed, executor);
+        failures_count += test_dense_vram_indexes_cut_refused<indexes_t, kernel_>(seed, executor);
     failures_count += test_dense_vram_indexes_cursor<indexes_t, kernel_>(seed, executor);
-    // Apple's tower has no compaction into RAM.
+    // Apple's tower has no reshard into RAM.
     if constexpr (executor_type_::vendor_k != gpu_vendor_t::apple_k)
         for (std::size_t const shards : {std::size_t {2}, std::size_t {2} * (connectivity_16_k + 1)})
-            failures_count += test_dense_vram_indexes_compact<indexes_t, kernel_>(seed, executor, shards);
+            failures_count += test_dense_vram_indexes_reshard<indexes_t, kernel_>(seed, executor, shards);
     failures_count += test_dense_indexes_products<indexes_t, kernel_>(seed, executor);
     failures_count += test_dense_indexes_maxsim<indexes_t, kernel_>(seed, executor);
     failures_count += test_dense_vram_indexes_indexer_search<indexes_t, kernel_>(seed, executor);

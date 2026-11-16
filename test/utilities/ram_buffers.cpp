@@ -511,6 +511,25 @@ std::size_t check_chunked_column() noexcept {
     return failures;
 }
 
+/** Rows read packed into the tail of padded storage spread forward to their own places, each
+ *  padded with the fill, and rows already as wide as their storage stay put. */
+std::size_t check_expand_entries_forward() noexcept {
+    constexpr std::size_t rows = 5, stored_bytes = 3, padded_bytes = 8;
+    std::size_t failures = 0;
+    std::array<byte_t, rows * padded_bytes> storage {};
+    for (std::size_t byte = 0; byte != rows * stored_bytes; ++byte)
+        storage[storage.size() - rows * stored_bytes + byte] = static_cast<byte_t>(byte + 1);
+    expand_entries_forward(storage, rows, stored_bytes, padded_bytes, byte_t {0xFF});
+    for (std::size_t row = 0; row != rows; ++row)
+        for (std::size_t byte = 0; byte != padded_bytes; ++byte)
+            failures += expect_eq(std::to_integer<unsigned>(storage[row * padded_bytes + byte]),
+                                  byte < stored_bytes ? static_cast<unsigned>(row * stored_bytes + byte + 1) : 0xFFu);
+    std::array<byte_t, rows * padded_bytes> const unchanged = storage;
+    expand_entries_forward(storage, rows, padded_bytes, padded_bytes, byte_t {0});
+    failures += expect(storage == unchanged);
+    return failures;
+}
+
 std::size_t check_ram_buffers(settings_t const& settings) {
     std::size_t failures = 0;
     failures += check_sorted_buffer_single_element();
@@ -552,6 +571,7 @@ std::size_t check_ram_buffers(settings_t const& settings) {
     failures += check_max_heap_pop_many<4>();
     failures += check_max_heap_pop_many<8>();
     failures += check_chunked_column();
+    failures += check_expand_entries_forward();
 
     return static_cast<std::size_t>(failures);
 }

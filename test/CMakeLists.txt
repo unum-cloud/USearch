@@ -6,7 +6,9 @@ add_executable(
 )
 usearch_setup_target(usearch_test_header_only HOST)
 target_include_directories(usearch_test_header_only PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/tools)
-target_link_libraries(usearch_test_header_only PRIVATE fmt::fmt yyjson forkunion::header numkong::header)
+target_link_libraries(
+    usearch_test_header_only PRIVATE fmt::fmt yyjson forkunion::header numkong::header stringzilla::header
+)
 add_test(NAME usearch_test_header_only COMMAND usearch_test_header_only)
 
 # The header-only tier's witness: everything under `utilities/`, `basic/` & `geospatial/` compiles & runs from headers
@@ -151,5 +153,7 @@ add_test(NAME usearch_test COMMAND usearch_test)
 add_executable(usearch_test_tools tools.cpp)
 usearch_setup_target(usearch_test_tools HOST)
 target_include_directories(usearch_test_tools PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/tools)
-target_link_libraries(usearch_test_tools PRIVATE fmt::fmt yyjson forkunion::static ${USEARCH_PUNNED_LIBRARIES})
+target_link_libraries(
+    usearch_test_tools PRIVATE fmt::fmt yyjson forkunion::static stringzilla::header ${USEARCH_PUNNED_LIBRARIES}
+)
 add_test(NAME usearch_test_tools COMMAND usearch_test_tools)

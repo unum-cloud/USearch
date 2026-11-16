@@ -12,7 +12,8 @@
  */
 #include <cmath>   // `std::sqrt` - the angular oracle
 #include <cstdio>  // `std::snprintf`, `std::remove` - the saved monoliths and manifests
-#include <cstring> // `std::memcpy` - the codec's views of stored entries
+#include <cstdlib> // `std::getenv` - the folder a direct read's file goes in
+#include <cstring> // `std::memcpy`, `std::memcmp` - the codec's views of stored entries, read rows
 
 #include <algorithm> // `std::find` - a query's saved keys
 #include <array>     // `std::array` - the fixed embedding
@@ -475,6 +476,54 @@ static std::size_t expect_manifest_replaced_durably(u64_t seed) {
     return failures;
 }
 
+/** Rows read through a column source match the mapped bytes wherever they start, into a
+ *  destination that shares their place within a page, whose whole pages come off the drive where
+ *  @c TMPDIR's filesystem takes unbuffered reads, and into one that does not, which copies. */
+static std::size_t expect_column_rows_read_direct(u64_t seed) {
+    constexpr std::size_t row_bytes = 48, rows = 1000, column_offset = 4096 + 160;
+    std::size_t failures = 0;
+    char const* const folder = std::getenv("TMPDIR");
+    char path[256];
+    std::snprintf(path, sizeof(path), "%s/usearch-column-%08x.bin", folder ? folder : "/tmp",
+                  static_cast<unsigned>(seed));
+    {
+        auto [written, write_status] = mapped_file_t::write(path, column_offset + rows * row_bytes + 77);
+        failures += expect(succeeded(write_status));
+        if (failed(write_status)) return failures;
+        bytes_span_t const bytes = written.span();
+        for (std::size_t byte = 0; byte != bytes.size(); ++byte)
+            bytes[byte] = static_cast<byte_t>((byte * 131 + seed) & 0xFF);
+        failures += expect(succeeded(written.sync()));
+    }
+    auto [mapping, map_status] = mapped_file_t::read(path);
+    failures += expect(succeeded(map_status));
+    seekable_file_t const direct = mapping.open_direct();
+    bytes_view_t const column = mapping.view().subspan(column_offset, rows * row_bytes);
+    column_source_t const source {
+        column, direct ? file_view_t {&direct, column_offset, column_offset + column.size()} : file_view_t {}};
+    std::size_t const page = fu::ram_page_size();
+    std::vector<byte_t> staged(rows * row_bytes + 3 * page);
+    struct run_t {
+        std::size_t first, count;
+    };
+    for (run_t const run : {run_t {0, rows}, run_t {256, 512}, run_t {3, 997}, run_t {999, 1}})
+        for (std::size_t const shift : {std::size_t {0}, std::size_t {8}}) {
+            // The destination shares the run's place within a page, or misses it by a shift.
+            std::size_t const offset_in_page = (column_offset + run.first * row_bytes) % page;
+            std::size_t const lead = (page - reinterpret_cast<std::uintptr_t>(staged.data()) % page) % page;
+            bytes_span_t const destination = bytes_span_t {staged}.subspan(lead + offset_in_page + shift,
+                                                                           run.count * row_bytes);
+            failures += expect_eq(copy_entries(source, run.first, run.count, row_bytes, destination),
+                                  status_t::success_k);
+            failures += expect(
+                std::memcmp(destination.data(), column.data() + run.first * row_bytes, destination.size()) == 0);
+        }
+    failures += expect_eq(copy_entries(source, 999, 2, row_bytes, bytes_span_t {staged}.first(2 * row_bytes)),
+                          status_t::config_mismatch_k);
+    std::remove(path);
+    return failures;
+}
+
 /** The shared basic-tier scenarios over the embeddings fixture - a fixed-width value column, which
  *  no modality unit has: monolith, hostile header battery, and the distributed form, each at every
  *  alignment and executor the scenarios cover - then the narrower key columns widening into UUIDs,
@@ -490,6 +539,7 @@ std::size_t test::utilities::check_safegraphs_format(settings_t const& settings)
     failures += expect_wide_nodes_refused(settings.seed);
     failures += expect_view_reads_headers_alone(settings.seed);
     failures += expect_manifest_replaced_durably(settings.seed);
+    failures += expect_column_rows_read_direct(settings.seed);
     return report("safegraphs format", failures);
 }
 

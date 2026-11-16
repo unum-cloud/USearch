@@ -112,4 +112,123 @@ struct vram_sweep_t {
     u32_t* swept = nullptr;
 };
 
+/** What a health check and a round copy into one page-locked slot, in the device's order: the
+ *  check's counters first, which every fresh sweep zeroes, then the round's, which a round's heal
+ *  zeroes; and the claim counter of the launch in flight. */
+struct vram_round_counters_t {
+
+    /** Entries the last two depths reached and the last two depths or rechecks marked a way to the
+     *  root for, by parity; a pass whose predecessor counted zero was queued past convergence. */
+    u32_t reached[2], marked[2];
+
+    /** Island labels the last two passes over the islands lowered or marked, by parity. */
+    u32_t relabeled[2];
+
+    /** Depths from the root that reached an entry, and rechecks that marked one. */
+    u32_t depth_from_root, depth_to_root;
+
+    /** Entries outside the root's component, and those no component claims yet after a settle. */
+    u32_t islands, unassigned;
+
+    /** The population counts @c reachability_t reports. */
+    u32_t unlinked, underlinked, beyond_most_populated_depth;
+    u32_t unreached_islands, stranded_islands, components;
+
+    /** The largest island component's entries above the complement of its least node, whose
+     *  maximum names it. */
+    u64_t largest_island;
+
+    /** Entries the sweeps reached plus entries they marked a way to the root for. */
+    u64_t swept;
+
+    /** Links the heal wrote, rows whose link set changed, and links the round added and dropped. */
+    u32_t healed, changed, added_links, dropped_links;
+
+    /** Items or neighborhoods the blocks of the launch in flight claimed so far. */
+    u32_t claimed;
+};
+
+/** One pass of a health check over the neighbors matrix, the columns the RAM health check keeps,
+ *  on the device: depths both ways in bytes, the in-link and shallower in-link counts, the
+ *  reached, reaching-root and two-ways bits, the islands' ranked nodes, components, parents,
+ *  labels, entries and roles, the rows a round counted as changed, and the counters. */
+struct vram_health_t {
+    u32_t* neighbors = nullptr;
+    u32_t rows_count = 0;
+    u32_t connectivity = 0;
+
+    /** The depth, recheck or pass of the launch, whose parity picks its counters. */
+    u32_t depth = 0;
+
+    /** Which step of the island passes a launch of @c island_components_k or @c label_islands_k
+     *  runs, a @c vram_island_pass_t. */
+    u32_t pass = 0;
+    u8_t* depths_from_root = nullptr;
+    u8_t* depths_to_root = nullptr;
+    u32_t* in_links = nullptr;
+    u32_t* shallower_in_links = nullptr;
+
+    /** Entries each depth reached, the deepest recorded one saturating. */
+    u32_t* depth_entries = nullptr;
+    vram_bitset_t reached, reaches_root, two_ways_to_root, changed;
+    u32_t* island_nodes = nullptr;
+    u32_t* island_components = nullptr;
+    u32_t* island_parents = nullptr;
+
+    /** Per island node a color while its components close, then its weak label; one more slot
+     *  stands for the root's component. */
+    u32_t* island_labels = nullptr;
+    u64_t* island_entries = nullptr;
+    u32_t* island_roles = nullptr;
+    vram_round_counters_t* counters = nullptr;
+};
+
+/** One run of a gather: @c width entries from position @c first of the entries in neighborhood
+ *  order, or from ID @c first in the first gather, filed among @c hubs hubs from @c first_hub. */
+struct vram_neighborhood_run_t {
+    u32_t first = 0, width = 0, first_hub = 0, hubs = 0;
+};
+static_assert(sizeof(vram_neighborhood_run_t) == 16, "A run is one hot sixteen-byte entry");
+
+/** Which step of the island passes a launch takes: the colors running forward along the links,
+ *  the marks running back to each color's least rank, the settle that closes the marked
+ *  components, the largest one's tally; then the roles' start, the roles, their spread over each
+ *  component's members, the entries, the weak labels and their count. */
+enum class vram_island_pass_t : u32_t {
+    forward_k,
+    backward_k,
+    settle_k,
+    largest_k,
+    roles_start_k,
+    roles_k,
+    roles_spread_k,
+    entries_k,
+    weak_k,
+    weak_count_k,
+};
+
+/** Device columns one round carves once from a @p traversal_context_type_ and its phases reuse:
+ *  the health check's, then the round's, which alias the islands', since only the checks and the
+ *  heal read those, then each resident block's slice of a neighborhood capacity of mates. */
+template <typename traversal_context_type_>
+struct vram_round_scratch {
+    typename traversal_context_type_::bytes_ptr_t bytes;
+
+    /** The check's columns and counters, as @c vram_health_t names them. */
+    vram_health_t health;
+
+    /** Each entry's neighborhood, the entries in neighborhood order, the starts with room for
+     *  splits, the hubs of every gather run, the runs, and the items before each run. */
+    u16_t* entry_neighborhoods = nullptr;
+    u32_t* neighborhood_entries = nullptr;
+    u32_t* neighborhood_offsets = nullptr;
+    u32_t* hub_nodes = nullptr;
+    vram_neighborhood_run_t* runs = nullptr;
+    u32_t* run_items = nullptr;
+    byte_t* mates = nullptr;
+
+    /** Words of one bitset over the entries the scratch was carved for. */
+    std::size_t words = 0;
+};
+
 } // namespace unum::usearch::utilities

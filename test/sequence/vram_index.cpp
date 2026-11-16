@@ -18,14 +18,14 @@
  */
 #include <cstdio> // `std::remove` - a reloaded checkpoint's files
 
-#include <algorithm> // `std::nth_element`
-#include <array>     // `std::array` - the templates
-#include <limits>    // `std::numeric_limits` - the node-ID type's sentinel
-#include <memory>    // `std::unique_ptr` - a sharded index's shards
-#include <new>       // `std::nothrow` - a sharded index's shards
-#include <string>    // `std::string` - the tape and the generated strings
+#include <algorithm>   // `std::nth_element`
+#include <array>       // `std::array` - the templates
+#include <limits>      // `std::numeric_limits` - the node-ID type's sentinel
+#include <memory>      // `std::unique_ptr` - a sharded index's shards
+#include <new>         // `std::nothrow` - a sharded index's shards
+#include <string>      // `std::string` - the tape and the generated strings
 #include <type_traits> // `std::conditional_t` - the GPU kit of a kind
-#include <vector>    // `std::vector` - strings, offsets, matches
+#include <vector>      // `std::vector` - strings, offsets, matches
 
 #include "usearch/sequence_index.h"
 #include "usearch/sequence/ram_index.hpp"
@@ -462,9 +462,86 @@ static std::size_t check_sequence_vram_sharded(u64_t seed, cuda_executor_t& exec
     return failures;
 }
 
-/** A split refused for want of a second receiver leaves the sharded index whole: its size and the
- *  count of every key stay as inserted. */
-static std::size_t check_sequence_vram_split_refused(u64_t seed, cuda_executor_t& executor) {
+/** Rounds over a sharded index of two shards: a refine plan driven to its end concludes a real
+ *  verdict and fills the round's report, a next round runs over the same plan, and a finished plan
+ *  answers @c uninitialized_k to another run or finish. A cut into two targets of two shards each
+ *  moves every entry exactly once and leaves its source empty, after its refusals left every index
+ *  whole: empty or repeated lists, several sources into several targets, a shard capacity, and one
+ *  other index that is neither a gather into this one nor a cut of it. */
+static std::size_t check_sequence_vram_rounds(u64_t seed, cuda_executor_t& executor) {
+    using index_t = sequence_vram_shards_t::index_t;
+    using indexes_t = us::basic::vram_nvidia_indexes<index_t, us::utilities::uuid128_t, sequence_vram_shards_t>;
+    constexpr std::size_t entries_k = 512, expansion_k = 64;
+    std::size_t failures = 0;
+
+    std::vector<std::string> const strings = generate_nucleotides(entries_k, 100, seed);
+    std::string tape;
+    std::vector<std::size_t> offsets {0};
+    for (std::string const& symbols : strings) tape += symbols, offsets.push_back(tape.size());
+    tape_view<byte_t const> const sequences {reinterpret_cast<byte_t const*>(tape.data()),
+                                             {offsets.data(), entries_k + 1}};
+    std::vector<us::utilities::uuid128_t> keys(entries_k);
+    for (std::size_t entry = 0; entry != entries_k; ++entry) keys[entry] = uuid_of(entry);
+
+    auto placed = [&]() {
+        auto indexes = std::make_unique<indexes_t>(forkunion_allocator_t {no_memory_domain_k},
+                                                   sequence_vram_shards_t {});
+        failures += expect_eq(indexes->emplace(executor.stream(0).device), status_t::success_k);
+        failures += expect_eq(indexes->emplace(executor.stream(0).device), status_t::success_k);
+        return indexes;
+    };
+    std::unique_ptr<indexes_t> const source = placed(), first = placed(), second = placed(), lone = placed();
+    failures += expect_eq(source->reserve({entries_k, connectivity_32_k, offsets[entries_k]}).status,
+                          status_t::success_k);
+    failures += expect_eq(source->insert(keys, sequences, executor, {expansion_k}).status, status_t::success_k);
+
+    {
+        auto [plan, plan_status] = source->plan_refine({}, executor);
+        failures += expect_eq(plan_status, status_t::success_k);
+        failures += expect_eq(plan.run(executor), status_t::success_k);
+        us::utilities::refine_report_t const round = plan.running();
+        failures += expect(round.verdict == us::utilities::refine_verdict_t::improved_k ||
+                           round.verdict == us::utilities::refine_verdict_t::converged_k);
+        failures += expect(round.neighborhoods != 0 && round.opening.audited_nodes == entries_k);
+        plan.next_round();
+        failures += expect_eq(plan.run(executor), status_t::success_k);
+        failures += expect_eq(plan.finish(executor).status, status_t::success_k);
+        failures += expect_eq(plan.run(executor), status_t::uninitialized_k);
+        failures += expect_eq(plan.finish(executor).status, status_t::uninitialized_k);
+    }
+
+    using listed_t = std::span<indexes_t* const>;
+    indexes_t* const sources[1] = {source.get()};
+    indexes_t* const targets[2] = {first.get(), second.get()};
+    indexes_t* const repeated[2] = {first.get(), first.get()};
+    indexes_t* const several[2] = {source.get(), lone.get()};
+    indexes_t* const one[1] = {lone.get()};
+    failures += expect_eq(source->plan_reshard(listed_t {sources}, listed_t {}, {}, executor).status,
+                          status_t::invalid_argument_k);
+    failures += expect_eq(source->plan_reshard(listed_t {sources}, listed_t {repeated}, {}, executor).status,
+                          status_t::invalid_argument_k);
+    failures += expect_eq(source->plan_reshard(listed_t {several}, listed_t {targets}, {}, executor).status,
+                          status_t::unsupported_k);
+    failures += expect_eq(source->plan_reshard(listed_t {sources}, listed_t {targets}, {{}, 16, 0}, executor).status,
+                          status_t::unsupported_k);
+    failures += expect_eq(source->plan_reshard(listed_t {sources}, listed_t {one}, {}, executor).status,
+                          status_t::config_mismatch_k);
+    failures += expect_eq(source->size(), entries_k);
+
+    auto const [cut, cut_status] = source->reshard(listed_t {sources}, listed_t {targets}, {}, executor);
+    failures += expect_eq(cut_status, status_t::success_k);
+    failures += expect(cut.verdict != us::utilities::refine_verdict_t::none_k && cut.neighborhoods != 0);
+    failures += expect_eq(source->size(), std::size_t {0});
+    failures += expect_eq(first->size() + second->size(), entries_k);
+    std::size_t miscounted = 0;
+    for (us::utilities::uuid128_t const& key : keys) miscounted += first->count(key) + second->count(key) != 1;
+    failures += expect_eq(miscounted, std::size_t {0});
+    return failures;
+}
+
+/** A reshard of the sharded index into one other index, neither a gather into it nor a cut of it,
+ *  is refused and leaves it whole: its size and the count of every key stay as inserted. */
+static std::size_t check_sequence_vram_cut_refused(u64_t seed, cuda_executor_t& executor) {
     using index_t = sequence_vram_shards_t::index_t;
     using indexes_t = us::basic::vram_nvidia_indexes<index_t, us::utilities::uuid128_t, sequence_vram_shards_t>;
     constexpr std::size_t entries_k = 256, expansion_k = 64;
@@ -479,22 +556,25 @@ static std::size_t check_sequence_vram_split_refused(u64_t seed, cuda_executor_t
     std::vector<us::utilities::uuid128_t> keys(entries_k);
     for (std::size_t entry = 0; entry != entries_k; ++entry) keys[entry] = uuid_of(entry);
 
-    indexes_t donor {forkunion_allocator_t {no_memory_domain_k}, sequence_vram_shards_t {}};
+    indexes_t source {forkunion_allocator_t {no_memory_domain_k}, sequence_vram_shards_t {}};
     indexes_t lone {forkunion_allocator_t {no_memory_domain_k}, sequence_vram_shards_t {}};
-    for (indexes_t* placed : {&donor, &lone}) {
+    for (indexes_t* placed : {&source, &lone}) {
         failures += expect_eq(placed->emplace(executor.stream(0).device), status_t::success_k);
         failures += expect_eq(placed->emplace(executor.stream(0).device), status_t::success_k);
     }
-    failures += expect_eq(donor.reserve({entries_k, connectivity_32_k, offsets[entries_k]}).status,
+    failures += expect_eq(source.reserve({entries_k, connectivity_32_k, offsets[entries_k]}).status,
                           status_t::success_k);
-    failures += expect_eq(donor.insert(keys, sequences, executor, {expansion_k}).status, status_t::success_k);
+    failures += expect_eq(source.insert(keys, sequences, executor, {expansion_k}).status, status_t::success_k);
 
-    indexes_t* receivers[1] = {&lone};
-    failures += expect_eq(donor.plan_split(std::span<indexes_t*> {receivers}, {}, executor).status,
-                          status_t::config_mismatch_k);
-    failures += expect_eq(donor.size(), entries_k);
+    indexes_t* const sources[1] = {&source};
+    indexes_t* const targets[1] = {&lone};
+    failures += expect_eq(
+        source.plan_reshard(std::span<indexes_t* const> {sources}, std::span<indexes_t* const> {targets}, {}, executor)
+            .status,
+        status_t::config_mismatch_k);
+    failures += expect_eq(source.size(), entries_k);
     std::size_t miscounted = 0;
-    for (us::utilities::uuid128_t const& key : keys) miscounted += donor.count(key) != 1;
+    for (us::utilities::uuid128_t const& key : keys) miscounted += source.count(key) != 1;
     failures += expect_eq(miscounted, std::size_t {0});
     return failures;
 }
@@ -615,8 +695,10 @@ std::size_t check_sequence_vram(settings_t const& settings, gpu_device_t const& 
     });
     run("sequence_vram sharded",
         [&] { return check_sequence_vram_sharded(stream_key(settings.seed, "plural"), executor); });
-    run("sequence_vram split refused",
-        [&] { return check_sequence_vram_split_refused(stream_key(settings.seed, "split_refused"), executor); });
+    run("sequence_vram rounds",
+        [&] { return check_sequence_vram_rounds(stream_key(settings.seed, "rounds"), executor); });
+    run("sequence_vram cut refused",
+        [&] { return check_sequence_vram_cut_refused(stream_key(settings.seed, "cut_refused"), executor); });
     run("sequence_vram get", [&] {
         // The C interface names devices by their place in the listing, which `device` belongs to.
         return check_sequence_vram_get(stream_key(settings.seed, "get"),

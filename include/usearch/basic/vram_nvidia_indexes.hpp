@@ -82,7 +82,6 @@ struct vram_nvidia_indexes {
     using search_config_t = typename index_t::search_config_t;
     using search_result_t = typename index_t::search_result_t;
     using refine_config_t = typename index_t::refine_config_t;
-    using split_config_t = typename index_t::split_config_t;
     using refine_report_t = typename index_t::refine_report_t;
     using reachability_t = typename index_t::reachability_t;
     using scored_node_t = scored_node<node_id_t, distance_t>;
@@ -99,15 +98,6 @@ struct vram_nvidia_indexes {
     using traversals_t = typename fanout_t::traversals_t;
     using shard_insert_plan_t = typename index_t::insert_plan_t;
     using graph_t = typename index_t::graph_t;
-
-    /** One shard's reachability audit in flight: its sweep tables and pinned counters, the nodes it
-     *  judges, and the sweep its next batch queues from, zero once a batch expanded nothing. */
-    struct shard_audit_t {
-        typename graph_t::audit_scratch_t sweep_tables;
-        typename graph_t::audit_counters_ptr_t counters;
-        std::size_t entries = 0;
-        u32_t next_sweep = 1;
-    };
 
   public:
 #pragma region Placement and Measures
@@ -666,13 +656,12 @@ struct vram_nvidia_indexes {
 #pragma region Refinement
 
     /**
-     *  @brief Measures how much of every shard a search can reach, every shard's batch of sweeps
-     *      queued on its own device before any waits: reachable nodes summed and the depth of the
-     *      deepest shard taken.
+     *  @brief Checks the health of every shard, every shard's batch of passes queued on its own
+     *      device before any waits: each shard's root component, depths and islands, as its own
+     *      @c health finds them, folded over the shards.
      *
-     *  Each shard audits the nodes it published when its audit began, as its own @c health does,
-     *  and the batches double until each one expanded nothing. Read-only, and bracketed by the
-     *  epoch as every reader is.
+     *  Each shard checks the nodes it published when its check began. Read-only, and bracketed by
+     *  the epoch as every reader is.
      *
      *  @param[in,out] executor The streams and their scratch, one per shard's device.
      *
@@ -682,8 +671,11 @@ struct vram_nvidia_indexes {
      *  - @c contended_k Another call holds the @p executor, or a destructive window overlapped
      *    the read twice.
      *  - @c unsupported_k The shared kernels lack the node-ID type.
+     *  - @c bad_alloc_k A shard's columns or counters cannot be placed.
      */
     expected<reachability_t> health(executor_t& executor) noexcept {
+        using health_plan_t = typename graph_t::health_plan_t;
+        using round_shape_t = typename graph_t::round_shape_t;
         return shards_.read_retrying_once([&]() noexcept -> expected<reachability_t> {
             if (status_t const paired = fanout_t::pairs_with(shards_, executor); failed(paired)) return {{}, paired};
             auto [claim, claim_status] = executor.claim();
@@ -696,79 +688,67 @@ struct vram_nvidia_indexes {
                                                                     widest);
                 failed(ready))
                 return {{}, ready};
-            growing_buffer<shard_audit_t, forkunion_allocator_t> audits {shards_.allocator()};
-            if (failed(audits.reserve_exactly(traversals.size()))) return {{}, status_t::bad_alloc_k};
+            growing_buffer<health_plan_t, forkunion_allocator_t> checks {shards_.allocator()};
+            if (failed(checks.reserve_exactly(traversals.size()))) return {{}, status_t::bad_alloc_k};
             for (std::size_t shard = 0; shard != traversals.size(); ++shard) {
                 graph_t& graph = shards_[shard].index->graph_;
                 traversal_context_t& context = traversals[shard];
-                audits.push_back_reserved(shard_audit_t {graph_t::unbound_scratch_(context),
-                                                         graph_t::take_audit_counters_(context), graph.size()});
-                shard_audit_t& audit = audits.back();
-                if (!audit.entries) {
-                    audit.next_sweep = 0;
-                    continue;
-                }
+                checks.push_back_reserved(health_plan_t {graph_t::empty_round_scratch_(context)});
+                std::size_t const entries = graph.size();
+                if (!entries) continue;
                 if (status_t const refused = graph.graph_kernels_(context).status; failed(refused))
                     return {{}, refused};
-                if (!audit.counters) return {{}, status_t::bad_alloc_k};
-                if (status_t const carved = graph_t::carve_audit_(audit.sweep_tables, context,
-                                                                  graph_t::audit_use_t::health_k, audit.entries);
+                if (status_t const carved = graph.carve_health_(checks.back(), context, round_shape_t {entries});
                     failed(carved))
                     return {{}, carved};
+                checks.back().rebind(graph, static_cast<node_id_t>(entries));
             }
-            // Every shard's batch queues before any waits, so the devices sweep at once.
-            for (std::size_t sweeping = audits.size(); sweeping;) {
-                sweeping = 0;
-                for (std::size_t shard = 0; shard != audits.size(); ++shard) {
-                    shard_audit_t& audit = audits[shard];
-                    if (!audit.next_sweep) continue;
-                    graph_t& graph = shards_[shard].index->graph_;
-                    auto const [graph_kernels, kernels_status] = graph.graph_kernels_(traversals[shard]);
-                    if (failed(kernels_status)) return {{}, kernels_status};
-                    cuda_stream_handle_t const stream = traversals[shard].stream();
+            // Every shard's batch queues before any waits, so the devices check at once.
+            for (bool running = true; running;) {
+                for (std::size_t shard = 0; shard != checks.size(); ++shard) {
+                    if (!checks[shard].running()) continue;
                     if (status_t const entered = fanout_t::enter(shards_, shard); failed(entered)) return {{}, entered};
-                    status_t const queued = audit.next_sweep == 1
-                                                ? graph.queue_audit_(*graph_kernels, audit.sweep_tables,
-                                                                     audit.counters.get(), audit.entries, stream)
-                                                : graph.queue_sweeps_(*graph_kernels, audit.sweep_tables,
-                                                                      audit.counters.get(), audit.entries,
-                                                                      audit.next_sweep, stream);
-                    if (failed(queued)) return {{}, queued};
+                    if (status_t const queued = checks[shard].queue(traversals[shard]); failed(queued))
+                        return {{}, queued};
                 }
-                for (std::size_t shard = 0; shard != audits.size(); ++shard) {
-                    shard_audit_t& audit = audits[shard];
-                    if (!audit.next_sweep) continue;
-                    if (status_t const drained = traversals[shard].wait(); failed(drained)) return {{}, drained};
-                    audit.next_sweep = audit.counters->last_expanded ? 2 * audit.next_sweep : 0;
-                    sweeping += audit.next_sweep != 0;
+                running = false;
+                for (std::size_t shard = 0; shard != checks.size(); ++shard) {
+                    if (!checks[shard].running()) continue;
+                    if (status_t const drained = checks[shard].wait(traversals[shard]); failed(drained))
+                        return {{}, drained};
+                    running |= checks[shard].advance();
                 }
             }
             reachability_t result;
-            for (shard_audit_t const& audit : audits)
-                if (audit.entries) result += graph_t::audited_(*audit.counters, audit.entries);
+            for (health_plan_t const& check : checks) {
+                auto const [checked, status] = check.finish();
+                if (failed(status)) return {{}, status};
+                result += checked;
+            }
             return {result, status_t::success_k};
         });
     }
 
+    /** A reshard's knobs, as every shard's graph names them. */
+    using reshard_config_t = typename index_t::reshard_config_t;
+
+    struct reshard_plan_t;
+
     /**
-     *  @brief A refinement across every live shard: one shard plan each, opened on its device's
-     *      stream over a run of the plan's own, and driven in lockstep, every shard's batch queued
-     *      before any is awaited.
+     *  @brief A refine across every live shard: one shard round each, opened on its device's stream
+     *      over a run of the plan's own, and driven in lockstep, every shard's phase queued before
+     *      any is awaited. Every claim word the shard plans closed reopens when they die.
      *
-     *  An absorb empties its donors while planning, so every donor is consumed once the plan
-     *  exists; a split moves every node into the receivers' shards while its shard plans run, and
-     *  this index forgets its entries once the moves finished. Every claim word the shard plans
-     *  closed reopens when they die.
+     *  @ref run continues it after a cancel; @ref next_round opens every shard's next round once
+     *  each one's ended; @ref finish stops the rounds, closes what they leave, and reports.
      */
     struct [[nodiscard]] refine_plan_t {
 
         explicit refine_plan_t(forkunion_allocator_t allocator) noexcept
-            : arenas_(allocator), traversals_(allocator), shard_plans_(allocator), donor_slots_(allocator) {}
+            : arenas_(allocator), traversals_(allocator), shard_plans_(allocator) {}
         refine_plan_t(refine_plan_t&& other) noexcept
             : arenas_(std::move(other.arenas_)), traversals_(std::move(other.traversals_)),
-              shard_plans_(std::move(other.shard_plans_)), donor_slots_(std::move(other.donor_slots_)),
-              donors_count_(other.donors_count_), receivers_count_(other.receivers_count_), config_(other.config_),
-              population_(other.population_), owner_(std::exchange(other.owner_, nullptr)) {}
+              shard_plans_(std::move(other.shard_plans_)), owner_(std::exchange(other.owner_, nullptr)) {}
         refine_plan_t& operator=(refine_plan_t&&) = delete;
         refine_plan_t(refine_plan_t const&) = delete;
         refine_plan_t& operator=(refine_plan_t const&) = delete;
@@ -778,9 +758,10 @@ struct vram_nvidia_indexes {
         }
 
         /**
-         *  @brief Queues every shard's next batch, then awaits them all, until no shard advances; a
-         *      @c cancel_k answer from @p on_visited, asked per re-selecting round with the nodes
-         *      visited and the population, stops the rounds and answers @c cancelled_k.
+         *  @brief Queues every shard's next phase, then awaits them all, until no shard advances; a
+         *      @c cancel_k answer from @p on_visited, asked at every barrier of a round with the
+         *      units its phase did so far and in all, summed over the shards, stops before the next
+         *      phase and answers @c cancelled_k.
          *
          *  @par Statuses:
          *  - @c uninitialized_k The plan is empty or finished.
@@ -793,15 +774,15 @@ struct vram_nvidia_indexes {
             if (status_t const paired = fanout_t::pairs_with(owner_->shards_, executor); failed(paired)) return paired;
             auto [claim, claim_status] = executor.claim();
             if (failed(claim_status)) return claim_status;
-            return drive_(on_visited);
+            return owner_->drive_shard_plans_(shard_plans_, traversals_, on_visited);
         }
 
         /**
-         *  @brief Skips the re-selection rounds left, heals what they leave, sums every shard's
-         *      tallies, and releases the plan; a split's index forgets its entries here.
+         *  @brief Stops every round, runs its closing health check, sums every shard's report, and
+         *      releases the plan.
          *
          *  @par Statuses:
-         *  - As @ref run, and the first shard plan's refusal.
+         *  - As @ref run, and the first shard plan's failure.
          */
         expected<refine_report_t> finish(executor_t& executor) noexcept {
             if (!owner_) return {{}, status_t::uninitialized_k};
@@ -809,48 +790,134 @@ struct vram_nvidia_indexes {
                 return {{}, paired};
             auto [claim, claim_status] = executor.claim();
             if (failed(claim_status)) return {{}, claim_status};
-            for (shard_plan_t& plan : shard_plans_) plan.stop();
-            dummy_progress_t heal_alone;
-            status_t healed = drive_(heal_alone);
-            refine_report_t result;
-            for (std::size_t shard = 0; shard != shard_plans_.size(); ++shard) {
-                expected<refine_report_t> const kept = shard_plans_[shard].finish(traversals_[shard]);
-                result += kept.value;
-                if (failed(kept.status) && succeeded(healed)) healed = kept.status;
-            }
+            expected<refine_report_t> const healed = owner_->close_shard_plans_(shard_plans_, traversals_);
             release_();
-            return {result, healed};
+            return healed;
         }
 
-        /** The tallies every shard plan holds so far. */
-        refine_report_t running() const noexcept {
-            refine_report_t result;
-            for (std::size_t shard = 0; shard != shard_plans_.size(); ++shard)
-                result += shard_plans_[shard].finish(traversals_[shard]).value;
-            return result;
+        /** The reports every shard plan holds so far, folded. */
+        refine_report_t running() const noexcept { return fold_shard_plans_(shard_plans_, traversals_); }
+
+        /** The phase the shards are in, where it sits among a round's six, and its units done and
+         *  in all, summed over the shards. */
+        phase_t phase() const noexcept { return shard_plans_phase_(shard_plans_); }
+        std::size_t ordinal() const noexcept { return shard_plans_ordinal_(shard_plans_); }
+        std::size_t completed() const noexcept { return shard_plans_completed_(shard_plans_); }
+        std::size_t total() const noexcept { return shard_plans_total_(shard_plans_); }
+
+        /** Opens every shard's next round once each one's ended; a no-op while any is mid-round. */
+        void next_round() noexcept { next_shard_rounds_(shard_plans_); }
+
+      private:
+        friend vram_nvidia_indexes;
+
+        /** Drops every shard plan, whose death reopens the claim words, unbinding the plan. */
+        void release_() noexcept {
+            shard_plans_.clear();
+            owner_ = nullptr;
         }
 
-        /** Whether a split still moves nodes into its receivers. */
+        /** One run per live shard, which the plan's contexts carve from, so no other call's
+         *  rewind of the executor's runs reaches them. */
+        growing_buffer<typename executor_t::arena_t, forkunion_allocator_t> arenas_;
+        growing_buffer<traversal_context_t, forkunion_allocator_t> traversals_;
+        growing_buffer<typename index_t::refine_plan_t, forkunion_allocator_t> shard_plans_;
+        vram_nvidia_indexes* owner_ = nullptr;
+    };
+
+    /**
+     *  @brief A reshard across every live shard, as @ref plan_reshard opens it: one shard reshard
+     *      each, driven in lockstep as @ref refine_plan_t drives its rounds.
+     *
+     *  A gather of sources into this index appends every other source's shards into the first live
+     *  shard of this index on their device while planning, so every one is consumed once the plan
+     *  exists. A cut of this index moves every live shard's nodes into the matching live shard of
+     *  every target while its shard plans run, and this index forgets its entries once the moves
+     *  finished. Every target shard then runs its rounds.
+     */
+    struct [[nodiscard]] reshard_plan_t {
+
+        explicit reshard_plan_t(forkunion_allocator_t allocator) noexcept
+            : arenas_(allocator), traversals_(allocator), shard_plans_(allocator), sources_(allocator),
+              targets_(allocator), slots_(allocator) {}
+        reshard_plan_t(reshard_plan_t&& other) noexcept
+            : arenas_(std::move(other.arenas_)), traversals_(std::move(other.traversals_)),
+              shard_plans_(std::move(other.shard_plans_)), sources_(std::move(other.sources_)),
+              targets_(std::move(other.targets_)), slots_(std::move(other.slots_)),
+              owner_(std::exchange(other.owner_, nullptr)) {}
+        reshard_plan_t& operator=(reshard_plan_t&&) = delete;
+        reshard_plan_t(reshard_plan_t const&) = delete;
+        reshard_plan_t& operator=(reshard_plan_t const&) = delete;
+
+        ~reshard_plan_t() noexcept {
+            if (owner_) release_();
+        }
+
+        /** Drives the shard plans, as @ref refine_plan_t::run does. */
+        template <typename progress_type_ = dummy_progress_t>
+        status_t run(executor_t& executor, progress_type_&& on_visited = {}) noexcept {
+            if (!owner_) return status_t::uninitialized_k;
+            if (status_t const paired = fanout_t::pairs_with(owner_->shards_, executor); failed(paired)) return paired;
+            auto [claim, claim_status] = executor.claim();
+            if (failed(claim_status)) return claim_status;
+            return owner_->drive_shard_plans_(shard_plans_, traversals_, on_visited);
+        }
+
+        /**
+         *  @brief Stops every round, runs its closing health check, sums every shard's report, and
+         *      releases the plan; a cut's source forgets its entries here once its moves finished.
+         *
+         *  @par Statuses:
+         *  - As @ref refine_plan_t::finish.
+         */
+        expected<refine_report_t> finish(executor_t& executor) noexcept {
+            if (!owner_) return {{}, status_t::uninitialized_k};
+            if (status_t const paired = fanout_t::pairs_with(owner_->shards_, executor); failed(paired))
+                return {{}, paired};
+            auto [claim, claim_status] = executor.claim();
+            if (failed(claim_status)) return {{}, claim_status};
+            expected<refine_report_t> const healed = owner_->close_shard_plans_(shard_plans_, traversals_);
+            release_();
+            return healed;
+        }
+
+        /** The reports every shard plan holds so far, folded. */
+        refine_report_t running() const noexcept { return fold_shard_plans_(shard_plans_, traversals_); }
+
+        /** Whether a cut still moves nodes into its targets. */
         bool moving() const noexcept {
-            for (shard_plan_t const& plan : shard_plans_)
+            for (typename index_t::reshard_plan_t const& plan : shard_plans_)
                 if (plan.moving()) return true;
             return false;
         }
 
-        /** Whether donor @p donor gave its nodes up, which every donor did once the plan exists. */
-        bool consumed(std::size_t donor) const noexcept { return donor < donors_count_; }
+        /** The shards' phase, its place among a round's six, and its units, as @ref refine_plan_t
+         *  reports them. */
+        phase_t phase() const noexcept { return shard_plans_phase_(shard_plans_); }
+        std::size_t ordinal() const noexcept { return shard_plans_ordinal_(shard_plans_); }
+        std::size_t completed() const noexcept { return shard_plans_completed_(shard_plans_); }
+        std::size_t total() const noexcept { return shard_plans_total_(shard_plans_); }
 
-        /** The entries the re-selection walks, the progress callback's total. */
-        std::size_t population() const noexcept { return population_; }
+        /** Opens every target shard's next round once each one's ended; a no-op mid-round. */
+        void next_round() noexcept { next_shard_rounds_(shard_plans_); }
+
+        /** Whether the nodes of @p index moved out and left it empty, consumed: a gather's other
+         *  source, each emptied while planning, or a cut's source once all its moves finished. */
+        bool moved(vram_nvidia_indexes const* index) const noexcept {
+            if (targets_.size() > 1) return index == sources_[0] && !shard_plans_.empty() && !moving();
+            for (vram_nvidia_indexes const* source : sources_)
+                if (source == index) return index != targets_[0];
+            return false;
+        }
 
       private:
         friend vram_nvidia_indexes;
-        using shard_plan_t = typename index_t::refine_plan_t;
 
-        /** Reopens what the plan closed: a finished split's index forgets its entries first. */
+        /** Drops every shard plan, whose death reopens the claim words, a finished cut's source
+         *  forgetting its entries after; the plan is unbound after. */
         void release_() noexcept {
             vram_nvidia_indexes& owner = *std::exchange(owner_, nullptr);
-            bool const moved = receivers_count_ && !shard_plans_.empty() && !moving();
+            bool const moved = targets_.size() > 1 && !shard_plans_.empty() && !moving();
             shard_plans_.clear();
             if (moved) {
                 owner.shards_.begin_window();
@@ -859,161 +926,99 @@ struct vram_nvidia_indexes {
             }
         }
 
-        template <typename progress_type_>
-        status_t drive_(progress_type_& on_visited) noexcept {
-            status_t outcome = status_t::success_k;
-            std::size_t const first = owner_->shards_.retired_shards();
-            for (bool advancing = true; advancing;) {
-                bool reselected = false;
-                for (std::size_t shard = 0; shard != shard_plans_.size(); ++shard) {
-                    reselected |= shard_plans_[shard].reselecting();
-                    status_t queued = fanout_t::enter(owner_->shards_, first + shard);
-                    if (succeeded(queued)) queued = shard_plans_[shard].queue(traversals_[shard]);
-                    if (failed(queued) && succeeded(outcome)) outcome = queued;
-                }
-                for (std::size_t shard = 0; shard != shard_plans_.size(); ++shard)
-                    if (status_t const waited = shard_plans_[shard].wait(traversals_[shard]);
-                        failed(waited) && succeeded(outcome))
-                        outcome = waited;
-                std::size_t advanced = 0, visited = 0;
-                for (shard_plan_t& plan : shard_plans_) {
-                    advanced += plan.advance();
-                    visited += plan.visited();
-                }
-                advancing = advanced != 0;
-                if (advancing && reselected && on_visited(visited, population_) == continuation_t::cancel_k)
-                    return status_t::cancelled_k;
-            }
-            return outcome;
-        }
-
-        /** One run per live shard, which the plan's contexts carve from, so no other call's
-         *  rewind of the executor's runs reaches them. */
         growing_buffer<typename executor_t::arena_t, forkunion_allocator_t> arenas_;
         growing_buffer<traversal_context_t, forkunion_allocator_t> traversals_;
-        growing_buffer<shard_plan_t, forkunion_allocator_t> shard_plans_;
+        growing_buffer<typename index_t::reshard_plan_t, forkunion_allocator_t> shard_plans_;
 
-        /** An absorb's donor shards, grouped by the live shard taking them in. */
-        growing_buffer<index_t*, forkunion_allocator_t> donor_slots_;
+        /** Both lists, as the caller named them. */
+        growing_buffer<vram_nvidia_indexes*, forkunion_allocator_t> sources_;
+        growing_buffer<vram_nvidia_indexes*, forkunion_allocator_t> targets_;
 
-        std::size_t donors_count_ = 0;
-        std::size_t receivers_count_ = 0;
-        refine_config_t config_ {};
-        std::size_t population_ = 0;
+        /** A gather's source shards grouped by the live shard taking them in, or a cut's target
+         *  shards grouped by the live shard parting into them, which the shard plans borrow. */
+        growing_buffer<index_t*, forkunion_allocator_t> slots_;
         vram_nvidia_indexes* owner_ = nullptr;
     };
 
     /**
-     *  @brief Opens a re-selection of every stored node on every live shard, then an audit and a
-     *      heal, each shard's plan on its device's stream.
+     *  @brief Opens one round on every live shard, each shard's plan on its device's stream, which
+     *      closes its claim word for the plan's life.
      *
      *  @par Statuses:
      *  - @c uninitialized_k The index has no live shards.
      *  - @c config_mismatch_k The @p executor drives no stream on some shard's device.
      *  - @c contended_k A batch, a load or a plan in flight on a shard.
+     *  - Those of the shards' @c plan_refine.
      */
     expected<refine_plan_t> plan_refine(refine_config_t config, executor_t& executor) noexcept {
-        return open_plan_(config, executor, 0,
-                          [&](index_t& shard, traversal_context_t& context, std::size_t, refine_plan_t&) noexcept {
-                              return shard.plan_refine({0, node_id_limits<node_id_t>::unknown_k}, config, context);
-                          });
+        refine_plan_t plan {shards_.allocator()};
+        status_t const opened = open_plan_(plan, config, executor, 0, 0,
+                                           [&](index_t& shard, traversal_context_t& context, std::size_t) noexcept {
+                                               return shard.plan_refine(config, context);
+                                           });
+        return {std::move(plan), opened};
     }
 
     /**
-     *  @brief Opens an absorb of every live shard of @p donors: each donor shard enters the first
-     *      live shard of this index on its device, which appends its nodes and keys, empties it,
-     *      and re-selects and heals as @ref plan_refine does.
+     *  @brief Opens a reshard of @p sources into @p targets: this index the one target of a gather
+     *      of several sources, or the one source of a cut into several targets.
      *
-     *  Every donor is consumed once the plan exists; nothing may search a donor meanwhile.
+     *  A gather takes every live shard of every other source into the first live shard of this
+     *  index on its device, which appends its nodes and keys, empties it, and runs a round as
+     *  @ref plan_refine does; every other source is consumed once the plan exists, and nothing may
+     *  search one meanwhile. A cut parts every live shard's nodes among the matching live shard of
+     *  every target, which then run a round each; this index forgets its entries once the moves
+     *  have all finished. The plan copies both lists, and every index either names must outlive it.
      *
      *  @par Statuses:
      *  - As @ref plan_refine.
-     *  - @c config_mismatch_k A null donor, this index itself, or a donor shard on a device none of
-     *    this index's live shards sits on, or of another connectivity or metric.
+     *  - @c invalid_argument_k An empty list, a null or a repeated index within one.
+     *  - @c unsupported_k Several sources and several targets, or a nonzero
+     *    @p config.shard_capacity, as no device reshard places shards anew.
+     *  - @c config_mismatch_k Neither a gather into this index nor a cut of it, a source shard on a
+     *    device none of this index's live shards sits on, or a cut target whose live shards differ
+     *    from this index's in count or device.
      *  - @c overflow_k Nodes past a shard's reserved ceiling.
      */
-    expected<refine_plan_t> plan_absorb(std::span<vram_nvidia_indexes*> donors, refine_config_t config,
-                                        executor_t& executor) noexcept {
-        refine_plan_t opening {shards_.allocator()};
-        std::size_t donor_shards = 0, donor_entries = 0;
-        for (vram_nvidia_indexes* const donor : donors) {
-            if (!donor || donor == this) return {std::move(opening), status_t::config_mismatch_k};
-            donor_shards += donor->live_shards_count();
-            for (index_t const& shard : donor->live_shards()) {
-                if (first_live_on_(shard.device_specs().ordinal) == shards_.size())
-                    return {std::move(opening), status_t::config_mismatch_k};
-                donor_entries += shard.size();
+    expected<reshard_plan_t> plan_reshard(std::span<vram_nvidia_indexes* const> sources,
+                                          std::span<vram_nvidia_indexes* const> targets, reshard_config_t config,
+                                          executor_t& executor) noexcept {
+        reshard_plan_t plan {shards_.allocator()};
+        if (sources.empty() || targets.empty()) return {std::move(plan), status_t::invalid_argument_k};
+        for (std::span<vram_nvidia_indexes* const> const listed : {sources, targets})
+            for (std::size_t position = 0; position != listed.size(); ++position) {
+                if (!listed[position]) return {std::move(plan), status_t::invalid_argument_k};
+                for (std::size_t earlier = 0; earlier != position; ++earlier)
+                    if (listed[earlier] == listed[position]) return {std::move(plan), status_t::invalid_argument_k};
             }
-        }
-        if (failed(opening.donor_slots_.reserve_exactly(donor_shards)))
-            return {std::move(opening), status_t::bad_alloc_k};
-        std::size_t const first = shards_.retired_shards();
-        auto [opened, status] = open_plan_(
-            config, executor, donor_entries,
-            [&](index_t& shard, traversal_context_t& context, std::size_t live, refine_plan_t& plan) noexcept {
-                // The first live shard on a device takes every donor shard there.
-                std::size_t const from = plan.donor_slots_.size();
-                int const device = shard.device_specs().ordinal;
-                bool const first_there = first_live_on_(device) == first + live;
-                for (vram_nvidia_indexes* const donor : donors)
-                    for (index_t& given : donor->live_shards())
-                        if (first_there && given.device_specs().ordinal == device)
-                            plan.donor_slots_.push_back_reserved(&given);
-                std::span<index_t*> const taken {plan.donor_slots_.data() + from, plan.donor_slots_.size() - from};
-                return shard.plan_absorb(taken, config, context);
-            },
-            std::move(opening));
-        if (succeeded(status)) {
-            opened.donors_count_ = donors.size();
-            for (vram_nvidia_indexes* const donor : donors) {
-                donor->shards_.begin_window();
-                donor->shards_.forget_entries();
-                donor->shards_.end_window();
-            }
-        }
-        return {std::move(opened), status};
+        if (sources.size() > 1 && targets.size() > 1) return {std::move(plan), status_t::unsupported_k};
+        if (config.shard_capacity) return {std::move(plan), status_t::unsupported_k};
+        bool const gathering = targets.size() == 1 && targets[0] == this;
+        bool const cutting = sources.size() == 1 && sources[0] == this && targets.size() > 1;
+        if (!gathering && !cutting) return {std::move(plan), status_t::config_mismatch_k};
+        if (failed(plan.sources_.reserve_exactly(sources.size())) ||
+            failed(plan.targets_.reserve_exactly(targets.size())))
+            return {std::move(plan), status_t::bad_alloc_k};
+        for (vram_nvidia_indexes* source : sources) plan.sources_.push_back_reserved(source);
+        for (vram_nvidia_indexes* target : targets) plan.targets_.push_back_reserved(target);
+        status_t const opened = cutting ? open_cut_(plan, config, executor) : open_gather_(plan, config, executor);
+        return {std::move(plan), opened};
     }
 
-    /**
-     *  @brief Opens a split of every live shard into the matching live shard of every one of
-     *      @p receivers: shard @c s of this index parts its nodes among shard @c s of each, which
-     *      re-select their picked nodes, audit and heal; this index forgets its entries once the
-     *      moves have all finished.
-     *
-     *  @par Statuses:
-     *  - As @ref plan_refine.
-     *  - @c config_mismatch_k Fewer than two receivers, a null one or this index, or a receiver
-     *    whose live shards differ from this index's in count or device.
-     */
-    expected<refine_plan_t> plan_split(std::span<vram_nvidia_indexes*> receivers, split_config_t config,
-                                       executor_t& executor) noexcept {
-        refine_plan_t opening {shards_.allocator()};
-        std::size_t const live = live_shards_count();
-        if (receivers.size() < 2) return {std::move(opening), status_t::config_mismatch_k};
-        for (vram_nvidia_indexes* const receiver : receivers) {
-            if (!receiver || receiver == this || receiver->live_shards_count() != live)
-                return {std::move(opening), status_t::config_mismatch_k};
-            for (std::size_t shard = 0; shard != live; ++shard)
-                if (receiver->live_shard_(shard).device_specs().ordinal != live_shard_(shard).device_specs().ordinal)
-                    return {std::move(opening), status_t::config_mismatch_k};
-        }
-        if (failed(opening.donor_slots_.reserve_exactly(live * receivers.size())))
-            return {std::move(opening), status_t::bad_alloc_k};
-        opening.receivers_count_ = receivers.size();
-        return open_plan_(
-            config.refine, executor, 0,
-            [&](index_t& shard, traversal_context_t& context, std::size_t at, refine_plan_t& plan) noexcept {
-                std::size_t const from = plan.donor_slots_.size();
-                for (vram_nvidia_indexes* const receiver : receivers)
-                    plan.donor_slots_.push_back_reserved(&receiver->live_shard_(at));
-                std::span<index_t*> const parts {plan.donor_slots_.data() + from, receivers.size()};
-                return shard.plan_split(parts, config, context);
-            },
-            std::move(opening));
+    /** Moves @p sources into @p targets and links them in: @ref plan_reshard, then @c run and
+     *  @c finish. */
+    template <typename progress_type_ = dummy_progress_t>
+    expected<refine_report_t> reshard(std::span<vram_nvidia_indexes* const> sources,
+                                      std::span<vram_nvidia_indexes* const> targets, reshard_config_t config,
+                                      executor_t& executor, progress_type_&& on_visited = {}) noexcept {
+        auto [plan, status] = plan_reshard(sources, targets, config, executor);
+        if (failed(status)) return {{}, status};
+        status_t const ran = plan.run(executor, on_visited);
+        auto const [result, finish_status] = plan.finish(executor);
+        return {result, failed(ran) ? ran : finish_status};
     }
 
-    /** Re-selects the neighbors of every stored node and heals the islands that leaves:
-     *  @ref plan_refine, then @c run and @c finish. */
+    /** Runs one round on every live shard: @ref plan_refine, then @c run and @c finish. */
     template <typename progress_type_ = dummy_progress_t>
     expected<refine_report_t> refine(refine_config_t config, executor_t& executor,
                                      progress_type_&& on_visited = {}) noexcept {
@@ -1038,48 +1043,205 @@ struct vram_nvidia_indexes {
         return shards_.size();
     }
 
-    /** Opens one shard plan per live shard through @p open_shard, called as
-     *  <tt>open_shard(shard, context, live, plan)</tt>, over a context and a run of @p plan 's own on the
-     *  shard's device's stream, sized for the widest shard grown by @p appended entries. */
-    template <typename open_shard_type_>
-    expected<refine_plan_t> open_plan_(refine_config_t config, executor_t& executor, std::size_t appended,
-                                       open_shard_type_&& open_shard,
-                                       refine_plan_t plan = refine_plan_t {forkunion_allocator_t {}}) noexcept {
+    /** Drives every shard plan of @p plans on its context of @p traversals until none follows or
+     *  @p on_visited cancels, every phase queued on every shard's device before any waits; a failed
+     *  phase keeps its status in its plan, and the first one answers. Shards whose rounds end early
+     *  sit idle, since a finished plan queues nothing. */
+    template <typename plans_type_, typename progress_type_>
+    status_t drive_shard_plans_(plans_type_& plans,
+                                growing_buffer<traversal_context_t, forkunion_allocator_t>& traversals,
+                                progress_type_& on_visited) noexcept {
+        status_t outcome = status_t::success_k;
+        std::size_t const first = shards_.retired_shards();
+        for (bool advancing = true; advancing;) {
+            for (std::size_t shard = 0; shard != plans.size(); ++shard) {
+                status_t queued = fanout_t::enter(shards_, first + shard);
+                if (succeeded(queued)) queued = plans[shard].queue(traversals[shard]);
+                if (failed(queued) && succeeded(outcome)) outcome = queued;
+            }
+            for (std::size_t shard = 0; shard != plans.size(); ++shard)
+                if (status_t const waited = plans[shard].wait(traversals[shard]); failed(waited) && succeeded(outcome))
+                    outcome = waited;
+            // A round's every barrier is heard in its phase's own units, as the RAM drain does.
+            std::size_t completed = 0, total = 0, advanced = 0;
+            bool rounding = false;
+            for (auto& plan : plans) {
+                rounding |= plan.rounding();
+                completed += plan.completed(), total += plan.total();
+                advanced += plan.advance();
+            }
+            advancing = advanced != 0;
+            if (advancing && rounding && on_visited(completed, total) == continuation_t::cancel_k)
+                return status_t::cancelled_k;
+        }
+        return outcome;
+    }
+
+    /** Stops every round of @p plans, drives what they leave to their closing checks under the
+     *  caller's claim of the executor, and folds every shard's report, the first failure kept. */
+    template <typename plans_type_>
+    expected<refine_report_t> close_shard_plans_(
+        plans_type_& plans, growing_buffer<traversal_context_t, forkunion_allocator_t>& traversals) noexcept {
+        for (auto& plan : plans) plan.stop();
+        dummy_progress_t closing_alone;
+        status_t closed = drive_shard_plans_(plans, traversals, closing_alone);
+        for (std::size_t shard = 0; shard != plans.size(); ++shard)
+            if (status_t const kept = plans[shard].finish(traversals[shard]).status; failed(kept) && succeeded(closed))
+                closed = kept;
+        return {fold_shard_plans_(plans, traversals), closed};
+    }
+
+    /** The reports of @p plans so far, folded, the first taken whole. */
+    template <typename plans_type_>
+    static refine_report_t fold_shard_plans_(
+        plans_type_ const& plans,
+        growing_buffer<traversal_context_t, forkunion_allocator_t> const& traversals) noexcept {
+        refine_report_t result;
+        for (std::size_t shard = 0; shard != plans.size(); ++shard)
+            if (shard) result += plans[shard].finish(traversals[shard]).value;
+            else result = plans[shard].finish(traversals[shard]).value;
+        return result;
+    }
+
+    /** The phase of the first of @p plans not done, or the first's once all are. */
+    template <typename plans_type_>
+    static phase_t shard_plans_phase_(plans_type_ const& plans) noexcept {
+        for (auto const& plan : plans)
+            if (plan.phase() != phase_t::done_k) return plan.phase();
+        return plans.empty() ? phase_t::none_k : plans[0].phase();
+    }
+
+    /** Where the first rounding plan's phase sits among a round's six; zero once none rounds. */
+    template <typename plans_type_>
+    static std::size_t shard_plans_ordinal_(plans_type_ const& plans) noexcept {
+        for (auto const& plan : plans)
+            if (plan.rounding()) return plan.ordinal();
+        return 0;
+    }
+
+    /** Units of the phases in hand done and in all, summed over @p plans. */
+    template <typename plans_type_>
+    static std::size_t shard_plans_completed_(plans_type_ const& plans) noexcept {
+        std::size_t sum = 0;
+        for (auto const& plan : plans) sum += plan.completed();
+        return sum;
+    }
+    template <typename plans_type_>
+    static std::size_t shard_plans_total_(plans_type_ const& plans) noexcept {
+        std::size_t sum = 0;
+        for (auto const& plan : plans) sum += plan.total();
+        return sum;
+    }
+
+    /** Opens every next round of @p plans once each one's ended; a no-op while any is not done. */
+    template <typename plans_type_>
+    static void next_shard_rounds_(plans_type_& plans) noexcept {
+        for (auto const& plan : plans)
+            if (plan.phase() != phase_t::done_k) return;
+        for (auto& plan : plans) plan.next_round();
+    }
+
+    /** Opens one shard plan per live shard of @p plan through @p open_shard, called as
+     *  <tt>open_shard(shard, context, live)</tt>, over a context and a run of the plan's own on the
+     *  shard's device's stream, sized for the widest shard grown by @p appended entries, or cut
+     *  into @p targets parts when two or more. */
+    template <typename plan_type_, typename open_shard_type_>
+    status_t open_plan_(plan_type_& plan, refine_config_t config, executor_t& executor, std::size_t appended,
+                        std::size_t targets, open_shard_type_&& open_shard) noexcept {
         std::size_t const live = live_shards_count(), first = shards_.retired_shards();
-        if (!live) return {std::move(plan), status_t::uninitialized_k};
-        if (status_t const paired = fanout_t::pairs_with(shards_, executor); failed(paired))
-            return {std::move(plan), paired};
+        if (!live) return status_t::uninitialized_k;
+        if (status_t const paired = fanout_t::pairs_with(shards_, executor); failed(paired)) return paired;
         auto [claim, claim_status] = executor.claim();
-        if (failed(claim_status)) return {std::move(plan), claim_status};
+        if (failed(claim_status)) return claim_status;
         std::size_t widest = 0;
         for (index_t const& shard : live_shards()) widest = max_of(widest, shard.size());
         std::size_t walk_bytes = 0;
         for (index_t const& shard : live_shards())
-            walk_bytes = max_of(walk_bytes, plan.receivers_count_
-                                                ? shard.traversal_memory_usage(config, widest, plan.receivers_count_)
-                                                : shard.traversal_memory_usage(config, widest + appended));
+            walk_bytes = max_of(walk_bytes, targets ? shard.traversal_memory_usage(config, widest, targets)
+                                                    : shard.traversal_memory_usage(config, widest + appended));
         if (failed(plan.arenas_.reserve_exactly(live)) || failed(plan.traversals_.reserve_exactly(live)) ||
             failed(plan.shard_plans_.reserve_exactly(live)))
-            return {std::move(plan), status_t::bad_alloc_k};
+            return status_t::bad_alloc_k;
         plan.owner_ = this;
-        plan.config_ = config;
         for (std::size_t shard = 0; shard != live; ++shard) {
             typename executor_t::stream_t& stream = executor.stream(
                 fanout_t::stream_of(shards_, executor, first + shard));
             plan.arenas_.push_back_reserved(typename executor_t::arena_t {stream.arena.upstream()});
-            if (failed(plan.arenas_[shard].reserve_exactly(walk_bytes)))
-                return {std::move(plan), status_t::bad_alloc_k};
+            if (failed(plan.arenas_[shard].reserve_exactly(walk_bytes))) return status_t::bad_alloc_k;
             plan.traversals_.push_back_reserved(
                 traversal_context_t {typename traversal_context_t::allocator_t {plan.arenas_[shard], stream}});
-            if (!plan.traversals_.back()) return {std::move(plan), status_t::bad_alloc_k};
-            if (status_t const entered = fanout_t::enter(shards_, first + shard); failed(entered))
-                return {std::move(plan), entered};
-            auto [shard_plan, status] = open_shard(*shards_[first + shard].index, plan.traversals_[shard], shard, plan);
-            if (failed(status)) return {std::move(plan), status};
+            if (!plan.traversals_.back()) return status_t::bad_alloc_k;
+            if (status_t const entered = fanout_t::enter(shards_, first + shard); failed(entered)) return entered;
+            auto [shard_plan, status] = open_shard(*shards_[first + shard].index, plan.traversals_[shard], shard);
+            if (failed(status)) return status;
             plan.shard_plans_.push_back_reserved(std::move(shard_plan));
         }
-        for (index_t const& shard : live_shards()) plan.population_ += shard.size();
-        return {std::move(plan), status_t::success_k};
+        return status_t::success_k;
+    }
+
+    /** Opens a gather of the plan's other sources into this index: each source shard enters the
+     *  first live shard of this index on its device, and every other source forgets its entries
+     *  once every shard plan opened. A live shard taking no source shard gathers only itself. */
+    status_t open_gather_(reshard_plan_t& plan, reshard_config_t const& config, executor_t& executor) noexcept {
+        std::size_t source_shards = 0, source_entries = 0;
+        for (vram_nvidia_indexes* const source : plan.sources_) {
+            if (source == this) continue;
+            source_shards += source->live_shards_count();
+            for (index_t const& shard : source->live_shards()) {
+                if (first_live_on_(shard.device_specs().ordinal) == shards_.size()) return status_t::config_mismatch_k;
+                source_entries += shard.size();
+            }
+        }
+        if (failed(plan.slots_.reserve_exactly(source_shards + live_shards_count()))) return status_t::bad_alloc_k;
+        std::size_t const first = shards_.retired_shards();
+        typename index_t::reshard_config_t const shard_config {config.refine, 0, config.seed};
+        status_t const opened = open_plan_(
+            plan, config.refine, executor, source_entries, 0,
+            [&](index_t& shard, traversal_context_t& context, std::size_t live) noexcept {
+                // The first live shard on a device takes every source shard there.
+                std::size_t const from = plan.slots_.size();
+                int const device = shard.device_specs().ordinal;
+                bool const first_there = first_live_on_(device) == first + live;
+                plan.slots_.push_back_reserved(&shard);
+                for (vram_nvidia_indexes* const source : plan.sources_)
+                    if (source != this)
+                        for (index_t& given : source->live_shards())
+                            if (first_there && given.device_specs().ordinal == device)
+                                plan.slots_.push_back_reserved(&given);
+                std::span<index_t* const> const taken {plan.slots_.data() + from, plan.slots_.size() - from};
+                return shard.plan_reshard(taken, taken.first(1), shard_config, context);
+            });
+        if (failed(opened)) return opened;
+        for (vram_nvidia_indexes* const source : plan.sources_) {
+            if (source == this) continue;
+            source->shards_.begin_window();
+            source->shards_.forget_entries();
+            source->shards_.end_window();
+        }
+        return status_t::success_k;
+    }
+
+    /** Opens a cut of this index into the plan's targets: shard @c s parts its nodes among shard
+     *  @c s of every target. */
+    status_t open_cut_(reshard_plan_t& plan, reshard_config_t const& config, executor_t& executor) noexcept {
+        std::size_t const live = live_shards_count(), targets = plan.targets_.size();
+        for (vram_nvidia_indexes* const target : plan.targets_) {
+            if (target->live_shards_count() != live) return status_t::config_mismatch_k;
+            for (std::size_t shard = 0; shard != live; ++shard)
+                if (target->live_shard_(shard).device_specs().ordinal != live_shard_(shard).device_specs().ordinal)
+                    return status_t::config_mismatch_k;
+        }
+        if (failed(plan.slots_.reserve_exactly(live * (targets + 1)))) return status_t::bad_alloc_k;
+        typename index_t::reshard_config_t const shard_config {config.refine, 0, config.seed};
+        return open_plan_(plan, config.refine, executor, 0, targets,
+                          [&](index_t& shard, traversal_context_t& context, std::size_t at) noexcept {
+                              std::size_t const from = plan.slots_.size();
+                              plan.slots_.push_back_reserved(&shard);
+                              for (vram_nvidia_indexes* const target : plan.targets_)
+                                  plan.slots_.push_back_reserved(&target->live_shard_(at));
+                              std::span<index_t* const> const listed {plan.slots_.data() + from, targets + 1};
+                              return shard.plan_reshard(listed.first(1), listed.subspan(1), shard_config, context);
+                          });
     }
 
     /** One shard of a new shard generation on the device @p like sits on, reserved under the bound

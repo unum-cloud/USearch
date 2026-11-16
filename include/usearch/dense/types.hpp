@@ -170,38 +170,6 @@ struct geometry_t {
     bool operator==(geometry_t const&) const noexcept = default;
 };
 
-/** What a compaction targets: the most rows any target shard may hold, and the breadth of every
- *  re-selection walk. */
-struct compact_config_t {
-
-    /** Rows one target shard may hold; zero, or anything past the 32-bit ID space, means 2^32 - 2.
-     *  A source shard larger than this is cut, so a smaller capacity redistributes. */
-    std::size_t shard_capacity = 0;
-
-    /** Breadth of every re-selection walk and block build; zero means twice the connectivity. */
-    u32_t expansion_factor = 0;
-
-    /** Bytes a closing refine may hold beyond the index, as @c refine_config_t takes them. */
-    std::size_t memory_limit = 0;
-
-    /** Bytes of cache each core keeps to itself, which size a round's hubs and its neighborhood
-     *  capacity; zero takes the executor's cache per core. */
-    std::size_t cache_bytes = 0;
-};
-
-/** Outcome of a compaction, whatever its residencies. */
-struct [[nodiscard]] compact_result_t {
-
-    /** Shards the sources held, and shards the target holds after. */
-    std::size_t source_shards = 0, target_shards = 0;
-
-    /** Rows that changed shard, and edges dropped because a cut separated their ends. */
-    std::size_t moved_entries = 0, cut_edges = 0;
-
-    /** The re-selections and the heal, counted as every refine counts them. */
-    refine_report_t graph;
-};
-
 /** The breadth every graph engine counts its candidates in. */
 using candidates_count_t = u32_t;
 
@@ -232,6 +200,36 @@ struct refine_config_t {
      *  as one storage chunk, a VRAM mono-index as its device's figure. A GPU never takes more than
      *  its device grants. */
     std::size_t cache_bytes = 0;
+};
+
+/** What a reshard targets: the rounds linking the moved entries in, the most rows any target shard
+ *  may hold, and the seed picking a split's part roots, so equal seeds split equal graphs alike. */
+struct reshard_config_t {
+
+    /** The knobs of every target's rounds; zeros mean "derive from connectivity". */
+    refine_config_t refine {};
+
+    /** Rows one target shard may hold; zero, or anything past the 32-bit ID space, means 2^32 - 2.
+     *  A source shard larger than this is cut, so a smaller capacity redistributes. */
+    std::size_t shard_capacity = 0;
+
+    /** What picks the roots a split grows its parts from. */
+    u64_t seed = 0;
+};
+
+/** Outcome of a reshard, whatever its residencies. */
+struct [[nodiscard]] reshard_report_t {
+
+    /** Shards the sources held, and shards the targets hold after. */
+    std::size_t source_shards = 0, target_shards = 0;
+
+    /** Rows that changed shard, and edges dropped because a cut by ID range separated their ends,
+     *  as NVMe cuts parts; a split growing its parts over the links counts none, its rounds
+     *  linking the parts back in. */
+    std::size_t moved_entries = 0, cut_edges = 0;
+
+    /** The rounds over every target, counted as every refine counts them. */
+    refine_report_t graph;
 };
 
 /** Optional tuning knobs for every ranking walk; zeros mean "derive from connectivity". */

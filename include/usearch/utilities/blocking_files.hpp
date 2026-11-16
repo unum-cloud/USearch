@@ -588,6 +588,15 @@ struct seekable_file_t {
         return {std::move(file), opened};
     }
 
+    /** Opens the plain file at the terminated @p path, an address form never parsed, as @ref open
+     *  does without its transient allocation. */
+    static expected<seekable_file_t> open_terminated(char const* path, file_access_t access) noexcept {
+        seekable_file_t file;
+        file.descriptor_ = open_(path, access, 0);
+        status_t const opened = file ? status_t::success_k : status_t::io_k;
+        return {std::move(file), opened};
+    }
+
     /**
      *  @brief Sets the file's length to @p bytes past its base, so positional writes land in a
      *      pre-sized file; a device keeps its size and answers @c overflow_k when they do not fit.

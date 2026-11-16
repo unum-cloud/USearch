@@ -181,6 +181,12 @@ __device__ __forceinline__ distance_t cuda_levenshtein_bound_ampere(sz_levenshte
                                                          : 0);
 }
 
+/** The sum of @p value over the warp, in every lane, which StringZilla's group scorers count
+ *  through: one @c redux.sync on the Ampere floor every sequence kit compiles for. */
+__device__ __forceinline__ sz_u32_t cuda_u32_lanes_sum_ampere(sz_u32_t value) noexcept {
+    return __reduce_add_sync(0xFFFFFFFFu, value);
+}
+
 /** The distance over @p symbol_ from @p query to @p sequence, scored by a group of @p lanes_ lanes
  *  owning @p lane_words_ Myers words apiece, exact within @p limit and the running score past it.
  *  Out of line, so each body compiles once per unit, whatever number of walks call it. */
@@ -192,10 +198,11 @@ __device__ __noinline__ sz_ssize_t cuda_levenshtein_group_ampere(sz_levenshtein_
     if constexpr (symbol_ == sz_levenshtein_runes_k)
         return sz_levenshtein_group_score_utf8_simt_(&query, text, sequence.bytes, lane_words_, lanes_, limit,
                                                      lane % lanes_, sz_group_shuffle_up_cuda_,
-                                                     sz_group_shuffle_index_cuda_);
+                                                     sz_group_shuffle_index_cuda_, cuda_u32_lanes_sum_ampere);
     else
         return sz_levenshtein_group_score_simt_(&query, text, sequence.bytes, lane_words_, lanes_, limit, lane % lanes_,
-                                                sz_group_shuffle_up_cuda_, sz_group_shuffle_index_cuda_);
+                                                sz_group_shuffle_up_cuda_, sz_group_shuffle_index_cuda_,
+                                                cuda_u32_lanes_sum_ampere);
 }
 
 /** Scores a lone lane's candidate at the query's exact word count, through the scorer of that count
@@ -409,7 +416,7 @@ __device__ __noinline__ inline u64_t cuda_overlap_score_ampere(sz_overlap_query_
     }
     u64_t const matches = sz_overlap_candidate_matches_simt_(&query, reinterpret_cast<sz_cptr_t>(sequence.data),
                                                              sequence.bytes, misses_limit, lane % lanes, lanes,
-                                                             sz_group_shuffle_index_cuda_);
+                                                             sz_group_shuffle_index_cuda_, sz_group_any_cuda_);
     return overlap_distance(longer, matches);
 }
 

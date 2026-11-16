@@ -218,8 +218,8 @@ struct machine_t {
 /** Probes the capabilities @c machine_t reports. */
 inline machine_t probe_machine() noexcept {
     machine_t machine;
-    if (nk_cpu_capabilities_compiled(&machine.compiled) != nk_success_k) machine.compiled = nk_cap_serial_k;
-    if (nk_cpu_capabilities_detected(&machine.detected) != nk_success_k) machine.detected = nk_cap_serial_k;
+    if (nk_capabilities_compiled_cpu(&machine.compiled) != nk_success_k) machine.compiled = nk_cap_serial_k;
+    if (nk_capabilities_detected_cpu(&machine.detected) != nk_success_k) machine.detected = nk_cap_serial_k;
     return machine;
 }
 
@@ -488,7 +488,7 @@ template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
 static void measure_distances_tile(loop_t& loop, environment_t const& env, std::size_t dim) {
     if (!runs_on<caps_>(env.machine)) return loop.skip("capabilities missing at runtime");
     nk_capability_t available = 0;
-    if (nk_cpu_capabilities_enabled(&available) != nk_success_k || nk_cpu_configure_thread(available) != nk_success_k)
+    if (nk_capabilities_enabled_cpu(&available) != nk_success_k || nk_configure_thread_cpu(available) != nk_success_k)
         return loop.skip("the thread cannot run these capabilities");
     using tiles_kit_t = typename tiles_ladder<scalar_, caps_>::kit_t;
     using quads_kit_t = typename quads_ladder<scalar_, caps_>::kit_t;

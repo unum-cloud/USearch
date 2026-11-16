@@ -11,7 +11,7 @@
  */
 #pragma once
 
-#include <cmath> // `std::log2` for ranking gains, `std::sqrt` for angular scores
+#include <cmath> // `std::log2` for ranking gains, `std::sqrt` for angular scores, `std::fabs` for score rounding
 
 #include <algorithm> // `std::nth_element`, `std::partial_sort`
 #include <span>      // `std::span`
@@ -130,8 +130,8 @@ struct refinement_report_t {
     /** Nodes a search still reaches once the heal returned. */
     std::size_t reachable_nodes = 0;
 
-    /** Level-synchronous sweeps the final audit took - a diameter proxy. */
-    std::size_t sweeps = 0;
+    /** Depths the final health check took from the root - a diameter proxy. */
+    std::size_t depth_from_root = 0;
 };
 
 /** Prints the refinement phase - the passes, their cost, and the reachability the heal left
@@ -147,7 +147,8 @@ inline void report_refinement_metrics(refinement_report_t const& report) {
     fmt::println("  distances: {}", humanized(report.sums.computed_distances));
     fmt::println("  visited: {}", humanized(report.sums.visited_members));
     fmt::println("  islands: {} found, {} reconnected", report.islands_found, report.islands_reconnected);
-    fmt::println("  reachable: {} of {} · {} sweeps", report.reachable_nodes, report.nodes, report.sweeps);
+    fmt::println("  reachable: {} of {} · depth {} from the root", report.reachable_nodes, report.nodes,
+                 report.depth_from_root);
 }
 
 /** Prints the search phase's wall clock, throughput, latency percentiles, the searched index's own
@@ -196,18 +197,21 @@ inline void fill_discounts(std::span<double> discounts, std::span<double> ideal)
     }
 }
 
+/** Whether a row scored @p found ranks no further than one scored @p exact, higher nearer,
+ *  within the rounding two kits may differ by. */
+inline bool within(f64_t found, f64_t exact) noexcept { return found >= exact - 1e-6 * max_of(1.0, std::fabs(exact)); }
+
 /** The verdicts of one query's judgment, produced together by @c judge_ranking. */
 struct ranking_verdict_t {
 
-    /** 1 when a returned row is no farther than the true nearest neighbor. Averaged
-     *  over queries this is the production Recall@K - the probability of finding @b the
-     *  nearest neighbor within the top K - monotone in K, so Recall@1 never exceeds
-     *  Recall@10. */
+    /** 1 when a returned row is no farther than the true nearest neighbor. Averaged over queries
+     *  this is 1-recall@K - the probability of finding @b the nearest neighbor within the top K -
+     *  monotone in K, so 1-recall@1 never exceeds 1-recall@10. */
     std::size_t found_nearest = 0;
 
     /** Returned rows no farther than the deepest expected one, at most as many as were
-     *  expected - "overlap", the set-coverage metric big-ANN leaderboards report. Stricter
-     *  than Recall@K and not monotone against it. */
+     *  expected - over the expected count this is K-recall@K, the set-coverage metric
+     *  big-ANN leaderboards report. Stricter than 1-recall@K and not monotone against it. */
     std::size_t overlap = 0;
 
     /** Unnormalized discounted cumulative gain: every row counted in @c overlap earns its
@@ -230,8 +234,8 @@ inline ranking_verdict_t judge_ranking(std::span<f64_t const> returned, f64_t ne
                                        std::span<double const> discounts) noexcept {
     ranking_verdict_t verdict;
     for (std::size_t position = 0; position != returned.size(); ++position) {
-        verdict.found_nearest |= static_cast<std::size_t>(returned[position] >= nearest);
-        if (returned[position] < deepest || verdict.overlap == depth) continue;
+        verdict.found_nearest |= static_cast<std::size_t>(within(returned[position], nearest));
+        if (!within(returned[position], deepest) || verdict.overlap == depth) continue;
         verdict.overlap += 1;
         if (position < discounts.size()) verdict.gain += discounts[position];
     }
@@ -438,9 +442,9 @@ void judge_hits(settings_t const& settings, bench_indexer_heads<scalar_type_> co
             auto const returned = to_span(results.hit_rows.row(query).as_vector()).first(results.hit_counts[query]);
             u64_t const own_row = settings.first_vector.value + query;
             found_at_1 += !returned.empty() && returned.front() == own_row;
-            bool within = false;
-            for (u64_t row : returned) within |= row == own_row;
-            found_at_k += within;
+            bool own_found = false;
+            for (u64_t row : returned) own_found |= row == own_row;
+            found_at_k += own_found;
         }
         double const queries = double(query_count);
         double const self_at_1 = 100.0 * double(found_at_1) / queries;
@@ -468,7 +472,7 @@ void judge_hits(settings_t const& settings, bench_indexer_heads<scalar_type_> co
             for (std::size_t position = 0; position != returned.size(); ++position)
                 scores[position] = score_of(returned[position]);
             f64_t const nearest = score_of(expected[0]);
-            found_at_1 += !returned.empty() && scores[0] >= nearest;
+            found_at_1 += !returned.empty() && within(scores[0], nearest);
             ranking_verdict_t const verdict = judge_ranking(std::span<f64_t const> {scores}.first(returned.size()),
                                                             nearest, score_of(expected[judged_depth - 1]), judged_depth,
                                                             std::span<double const> {discounts});
@@ -482,9 +486,9 @@ void judge_hits(settings_t const& settings, bench_indexer_heads<scalar_type_> co
         double const recall_at_k = 100.0 * double(found_at_k) / queries;
         double const overlap_at_k = 100.0 * double(shared) / (queries * double(judged_depth));
         double const gain_at_k = 100.0 * gain / (queries * ideal[judged_depth - 1]);
-        fmt::println("  recall@1: {:.3f}%", recall_at_1);
-        fmt::println("  recall@{}: {:.3f}%", judged_depth, recall_at_k);
-        fmt::println("  overlap@{}: {:.3f}%", judged_depth, overlap_at_k);
+        fmt::println("  1-recall@1: {:.3f}%", recall_at_1);
+        fmt::println("  1-recall@{}: {:.3f}%", judged_depth, recall_at_k);
+        fmt::println("  {}-recall@{}: {:.3f}%", judged_depth, judged_depth, overlap_at_k);
         fmt::println("  ndcg@{}: {:.3f}%", judged_depth, gain_at_k);
     }
     else { fmt::println("  recall: skipped, no ground-truth neighbors provided"); }

@@ -25,9 +25,9 @@
  */
 #pragma once
 
-#include <chrono>    // `std::chrono::steady_clock`
-#include <memory>    // `std::unique_ptr`
-#include <vector>    // `std::vector`
+#include <chrono> // `std::chrono::steady_clock`
+#include <memory> // `std::unique_ptr`
+#include <vector> // `std::vector`
 
 #include <fmt/format.h>
 
@@ -153,8 +153,8 @@ bool prepare(streamed_dataset_type_& streamed, fu_pool_t pool) {
         auto& bench = *static_cast<bench_t*>(punned);
         // AMX tile state needs a per-thread OS permission handshake before first use.
         nk_capability_t available = 0;
-        if (nk_cpu_capabilities_enabled(&available) != nk_success_k) available = nk_cap_serial_k;
-        [[maybe_unused]] nk_status_t const configured = nk_cpu_configure_thread(available);
+        if (nk_capabilities_enabled_cpu(&available) != nk_success_k) available = nk_cap_serial_k;
+        [[maybe_unused]] nk_status_t const configured = nk_configure_thread_cpu(available);
         fu_memory_domain_id_t const domain = bench.settings.memory_domains.empty()
                                                  ? fu_memory_domain_id_t {-1}
                                                  : bench.settings.memory_domains.front();
@@ -246,7 +246,7 @@ bool run_insertion(streamed_dataset_type_& streamed, fu_pool_t pool) {
     fmt::println("  quads: {} · {} · {} kit", scalar_t::dtype_name(), nk_kernel_name(bench.kernel),
                  bit_name(compute_choices_k, index_t::quads_kit_t::capability_k, "serial"));
     nk_capability_t available = 0;
-    if (nk_cpu_capabilities_enabled(&available) != nk_success_k) available = nk_cap_serial_k;
+    if (nk_capabilities_enabled_cpu(&available) != nk_success_k) available = nk_cap_serial_k;
     if (index_t::quads_kit_t::capability_k == nk_cap_serial_k &&
         (bench.settings.max_compute & available & ~nk_cap_serial_k))
         fmt::println("  ⚠ scalar fallback: no SIMD kit is adapted for this dtype & metric");
@@ -280,7 +280,7 @@ struct refinement_fanout {
     std::size_t failures = 0;
 };
 
-/** One step of the plan's current phase per task, on the thread that pulled it. */
+/** One task of the plan's current phase, on the thread that pulled it. */
 template <typename bench_type_>
 void refinement_callback(fu_lambda_context_t punned, std::size_t task, std::size_t thread, std::size_t) noexcept {
     auto& fanout = *static_cast<refinement_fanout<bench_type_>*>(punned);
@@ -288,13 +288,12 @@ void refinement_callback(fu_lambda_context_t punned, std::size_t task, std::size
         standard_atomic_ref<std::size_t>(fanout.failures).fetch_add(1, std::memory_order_relaxed);
 }
 
-/** Refines every node, pass after pass - each pass re-selects the graph, then heals whatever that strands - and
- *  stops at the first pass that re-wires nothing. */
+/** Refines every node, round after round, each one healing, gathering and re-stitching the graph,
+ *  and stops at the first round that re-wires nothing. */
 template <typename streamed_dataset_type_>
 bool run_refinement(streamed_dataset_type_& streamed, fu_pool_t pool) {
     using bench_t = typename streamed_dataset_type_::bench_t;
     using index_t = typename bench_t::index_t;
-    using node_id_t = typename index_t::node_id_t;
     using candidates_count_t = typename bench_t::candidates_count_t;
     auto& bench = streamed.bench;
     std::size_t const max_refines = bench.settings.max_refines.value;
@@ -308,10 +307,10 @@ bool run_refinement(streamed_dataset_type_& streamed, fu_pool_t pool) {
     report.expansion = bench.index->non_zero_expansion_factor(config);
     [[maybe_unused]] fu_status_t const counted = fu_pool_threads_count(pool, &report.threads);
 
-    // The passes' steps cannot fail on contexts reserved for their walks.
+    // The rounds' tasks cannot fail on contexts reserved for their selections.
     for (std::unique_ptr<typename bench_t::traversal_t> const& traversal : bench.traversals)
         if (failed(bench.index->reserve_traversal(*traversal, {config.expansion_factor}))) {
-            fmt::println("Failed to reserve the refinement walks");
+            fmt::println("Failed to reserve the refinement contexts");
             return false;
         }
 
@@ -319,23 +318,29 @@ bool run_refinement(streamed_dataset_type_& streamed, fu_pool_t pool) {
     changed_per_pass.reserve(max_refines);
     progress_bar_t progress {"refining", max_refines, bench.settings.terminal};
     for (std::size_t pass = 0; pass != max_refines; ++pass) {
-        auto [plan, plan_status] = bench.index->plan_refine({0, static_cast<node_id_t>(nodes)}, {}, {}, config);
+        auto [plan, plan_status] = bench.index->plan_refine(config);
         if (failed(plan_status)) {
-            fmt::println("Failed to open refinement pass {}: status {}", pass, int(plan_status));
+            fmt::println("Failed to open refinement round {}: status {}", pass, int(plan_status));
             return false;
         }
+        for (std::unique_ptr<typename bench_t::traversal_t> const& traversal : bench.traversals)
+            if (failed(plan.reserve(*traversal))) {
+                fmt::println("Failed to reserve refinement round {}", pass);
+                return false;
+            }
         refinement_fanout<bench_t> fanout {bench, plan};
         auto started = steady_clock_t::now();
         do {
-            // The re-selection is the refining share of the wall time, the audit and the rounds after it the healing.
-            bool const reselecting = plan.reselecting();
-            fu_pool_for_n_dynamic(pool, plan.steps().size(), &refinement_callback<bench_t>, &fanout);
-            (reselecting ? report.refining_seconds
-                         : report.healing_seconds) += stdc::duration<double>(steady_clock_t::now() - started).count();
+            // The health checks and the heal are the healing share of the wall time.
+            phase_t const phase = plan.phase();
+            bool const healing = phase == phase_t::health_k || phase == phase_t::heal_k;
+            fu_pool_for_n_dynamic(pool, plan.tasks().size(), &refinement_callback<bench_t>, &fanout);
+            (healing ? report.healing_seconds
+                     : report.refining_seconds) += stdc::duration<double>(steady_clock_t::now() - started).count();
             started = steady_clock_t::now();
         } while (plan.advance());
         if (std::size_t failures = fanout.failures; failures) {
-            fmt::println("Refinement failed on {} steps", failures);
+            fmt::println("Refinement failed on {} tasks", failures);
             return false;
         }
         auto const [pass_result, pass_status] = plan.finish();
@@ -347,7 +352,7 @@ bool run_refinement(streamed_dataset_type_& streamed, fu_pool_t pool) {
         report.islands_found += pass_result.islands_found;
         report.islands_reconnected += pass_result.islands_reconnected;
         report.reachable_nodes = pass_result.reachability.reachable_nodes;
-        report.sweeps = pass_result.reachability.sweeps;
+        report.depth_from_root = pass_result.reachability.depth_from_root;
         report.sums.visited_members += pass_result.traversal_stats.visited_members;
         report.sums.computed_distances += pass_result.traversal_stats.computed_distances;
         report.sums.restarts += pass_result.traversal_stats.restarts;

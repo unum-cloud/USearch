@@ -759,31 +759,31 @@ struct vram_apple_index {
     /** Optional tuning knobs of @c refine(): the dense refine config, as nothing here differs. */
     using refine_config_t = dense::refine_config_t;
 
-    /** A split's knobs: its refine's, and the seed that orders the parts' growth. */
-    struct split_config_t {
-        refine_config_t refine {};
-        u64_t seed = 0;
-    };
+    /** A reshard's knobs: its rounds', the shard capacity a mono-index refuses, and the seed
+     *  that orders a split's growth. */
+    using reshard_config_t = dense::reshard_config_t;
 
-    /** One receiver's part of a split as the host assigns it: its nodes, and those given slots so
+    struct reshard_plan_t;
+
+    /** One target's part of a split as the host assigns it: its nodes, and those given slots so
      *  far. */
     struct split_part_t {
         std::size_t entries = 0, assigned_nodes = 0;
     };
 
-    /** A split's state beside the rounds it turns into, empty for a refine. */
+    /** A split's state beside the rounds it turns into. */
     struct split_t {
 
         /** The index the split empties, until the scatter finished. */
-        vram_apple_index* donor = nullptr;
+        vram_apple_index* source = nullptr;
 
-        /** The receivers, one part each, and the one the round is bound to. */
-        growing_buffer<vram_apple_index*> receivers {global_allocator};
+        /** The targets, one part each, and the one the round is bound to. */
+        growing_buffer<vram_apple_index*> targets {global_allocator};
         growing_buffer<split_part_t> parts {global_allocator};
-        std::size_t bound_receiver = 0;
+        std::size_t bound_target = 0;
 
-        /** The donor's nodes at planning, and the most nodes one part takes: those over the
-         *  receivers, rounded up. */
+        /** The source's nodes at planning, and the most nodes one part takes: those over the
+         *  targets, rounded up. */
         std::size_t entries = 0, part_capacity = 0;
 
         /** The partition's shared buffer, laid out as @c split_layout_ places it, which the host
@@ -793,10 +793,10 @@ struct vram_apple_index {
         /** The growth round the next batch queues from, zero once the growth converged. */
         u32_t next_round = 0;
 
-        /** The round every receiver runs. */
+        /** The round every target runs. */
         refine_config_t config {};
 
-        /** The rounds of the receivers settled so far, folded, and how many settled. */
+        /** The rounds of the targets settled so far, folded, and how many settled. */
         refine_report_t report {};
         std::size_t settled = 0;
     };
@@ -877,24 +877,24 @@ struct vram_apple_index {
             arguments.pass = pass_;
             u32_t* const words = counters();
             vram_apple_index& index = *index_;
-            switch (phase_) {
-            case phase_t::expand_k:
+            switch (step_) {
+            case step_t::expand_k:
                 words[metal_round_reached_k] = words[metal_round_marked_k] = 0;
                 return index.launch_round_(vram_kernel_t::health_expand_k, arguments, layout, visible, context);
-            case phase_t::recheck_k:
+            case step_t::recheck_k:
                 words[metal_round_marked_k] = 0;
                 return index.launch_round_(vram_kernel_t::health_recheck_k, arguments, layout, visible, context);
-            case phase_t::order_islands_k:
+            case step_t::order_islands_k:
                 return index.launch_round_(vram_kernel_t::order_islands_k, arguments, layout, 0, context);
-            case phase_t::islands_k:
+            case step_t::islands_k:
                 return index.launch_round_(vram_kernel_t::health_islands_k, arguments, layout, islands_, context);
-            case phase_t::components_k:
+            case step_t::components_k:
                 words[metal_round_relabeled_k] = 0;
                 return index.launch_round_(vram_kernel_t::island_components_k, arguments, layout, islands_, context);
-            case phase_t::count_links_k:
+            case step_t::count_links_k:
                 words[metal_round_unlinked_k] = words[metal_round_underlinked_k] = 0;
                 return index.launch_round_(vram_kernel_t::health_count_links_k, arguments, layout, visible, context);
-            case phase_t::labels_k:
+            case step_t::labels_k:
                 words[metal_round_unreached_islands_k] = words[metal_round_stranded_islands_k] = 0;
                 words[metal_round_components_k] = 0;
                 return index.launch_round_(vram_kernel_t::label_islands_k, arguments, layout, islands_ + 1, context);
@@ -909,35 +909,35 @@ struct vram_apple_index {
          *  roles; answers whether another pass follows. */
         bool advance() noexcept {
             u32_t const* const words = counters();
-            switch (phase_) {
-            case phase_t::expand_k: {
+            switch (step_) {
+            case step_t::expand_k: {
                 std::size_t const reached = words[metal_round_reached_k];
                 swept_ += reached + words[metal_round_marked_k];
                 if (!reached) {
-                    phase_ = phase_t::recheck_k;
+                    step_ = step_t::recheck_k;
                     return true;
                 }
                 depth_entries_[min_of<std::size_t>(++depth_, metal_deepest_depth_k)] += reached;
                 ++depth_from_root_;
                 return true;
             }
-            case phase_t::recheck_k:
+            case step_t::recheck_k:
                 if (std::size_t const marked = words[metal_round_marked_k]; marked) {
                     swept_ += marked, ++depth_to_root_;
                     return true;
                 }
                 component_ = component_entries_();
-                phase_ = component_ == visible ? phase_t::count_links_k : phase_t::order_islands_k;
+                step_ = component_ == visible ? step_t::count_links_k : step_t::order_islands_k;
                 return true;
-            case phase_t::order_islands_k:
+            case step_t::order_islands_k:
                 islands_ = words[metal_round_islands_k];
-                phase_ = phase_t::islands_k;
+                step_ = step_t::islands_k;
                 return true;
-            case phase_t::islands_k:
+            case step_t::islands_k:
                 unsettled_ = islands_, pass_ = 0;
-                phase_ = phase_t::components_k;
+                step_ = step_t::components_k;
                 return true;
-            case phase_t::components_k:
+            case step_t::components_k:
                 // Labels lower until none moves, then the islands whose labels meet settle.
                 if (pass_ == 0) {
                     pass_ = words[metal_round_relabeled_k] ? 0 : 1;
@@ -945,17 +945,17 @@ struct vram_apple_index {
                 }
                 unsettled_ -= words[metal_round_relabeled_k], pass_ = 0;
                 return unsettled_ ? true : choose_root_();
-            case phase_t::count_links_k:
+            case step_t::count_links_k:
                 unlinked_ = words[metal_round_unlinked_k], underlinked_ = words[metal_round_underlinked_k];
                 if (!islands_) {
                     components_ = 1;
-                    phase_ = phase_t::done_k;
+                    step_ = step_t::done_k;
                     return false;
                 }
                 pass_ = 0;
-                phase_ = phase_t::labels_k;
+                step_ = step_t::labels_k;
                 return true;
-            case phase_t::labels_k:
+            case step_t::labels_k:
                 if (pass_ == 2) {
                     unreached_islands_ = words[metal_round_unreached_islands_k];
                     stranded_islands_ = words[metal_round_stranded_islands_k];
@@ -965,7 +965,7 @@ struct vram_apple_index {
                     return true;
                 }
                 components_ = words[metal_round_components_k];
-                phase_ = phase_t::done_k;
+                step_ = step_t::done_k;
                 return false;
             default: return false;
             }
@@ -1012,7 +1012,7 @@ struct vram_apple_index {
       private:
         /** The passes, as the RAM audit names its own, plus those labeling the islands on the
          *  device, which RAM runs on one thread once its rechecks end. */
-        enum class phase_t : u8_t {
+        enum class step_t : u8_t {
             expand_k,
             recheck_k,
             order_islands_k,
@@ -1048,7 +1048,7 @@ struct vram_apple_index {
                 start_from_(island_nodes[largest]);
                 return true;
             }
-            phase_ = phase_t::count_links_k;
+            step_ = step_t::count_links_k;
             return true;
         }
 
@@ -1070,7 +1070,7 @@ struct vram_apple_index {
             unlinked_ = underlinked_ = unreached_islands_ = stranded_islands_ = components_ = 0;
             pass_ = 0;
             root_ = root;
-            phase_ = root == node_id_unknown_k ? phase_t::done_k : phase_t::expand_k;
+            step_ = root == node_id_unknown_k ? step_t::done_k : step_t::expand_k;
             if (root == node_id_unknown_k) return;
             u32_t* const reached = column<u32_t>(layout.reached);
             u32_t* const reaches_root = column<u32_t>(layout.reaches_root);
@@ -1107,7 +1107,7 @@ struct vram_apple_index {
 
         /** The pass within the components or labels the next batch queues. */
         u32_t pass_ = 0;
-        phase_t phase_ = phase_t::done_k;
+        step_t step_ = step_t::done_k;
     };
 
     /**
@@ -1121,12 +1121,9 @@ struct vram_apple_index {
      *  in one core's threadgroup memory, every entry keeping the diverse links among its own and
      *  its nearest neighborhood-mates and no others, and the closing health check from the same
      *  root, which decides the verdict. Hubs are drawn and entries ordered by neighborhood on the
-     *  host over unified memory at the barriers. @ref plan_round sized every column, so no phase
+     *  host over unified memory at the barriers. @ref plan_refine sized every column, so no phase
      *  allocates. Every phase takes the context the plan was opened on back from its caller. Holds
      *  the index's batch lock from plan to death, so demands an exclusive caller.
-     *
-     *  A split runs it in reverse: the partition grows on the device, the host scatters the parts
-     *  into the receivers and publishes them, and each receiver then runs one round in turn.
      */
     struct refine_plan_t {
         refine_plan_t() noexcept = default;
@@ -1148,10 +1145,9 @@ struct vram_apple_index {
             if (!index_) return status_t::uninitialized_k;
             if (failed(status_)) return status_;
             switch (phase_) {
-            case phase_t::partition_k: status_ = index_->queue_rounds_(split_, context); break;
             case phase_t::health_k: status_ = health.queue(context); break;
             case phase_t::heal_k: status_ = index_->queue_heal_(health, context); break;
-            case phase_t::gather_neighborhoods_k: status_ = queue_gather_(context); break;
+            case phase_t::gather_k: status_ = queue_gather_(context); break;
             case phase_t::restitch_k: status_ = queue_restitch_(context); break;
             default: break;
             }
@@ -1171,27 +1167,25 @@ struct vram_apple_index {
 
         /** The barrier after a phase, one caller once it finished, answering whether one follows:
          *  takes a converged check in, draws the hubs, orders the entries by neighborhood or
-         *  gathers the wide ones again, reads the restitch's counts, or binds the next receiver. */
-        bool advance(traversal_context_t& context) noexcept {
-            if (!index_ || failed(status_)) return false;
-            if (phase_ == phase_t::done_k) return next_receiver_(context);
-            if (phase_ == phase_t::partition_k) return advance_partition_(context);
-            if (phase_ == phase_t::health_k) return health.advance() || converge_(context);
+         *  gathers the wide ones again, or reads the restitch's counts. */
+        bool advance(traversal_context_t&) noexcept {
+            if (!index_ || failed(status_) || phase_ == phase_t::done_k) return false;
+            if (phase_ == phase_t::health_k) return health.advance() || converge_();
             u32_t const* const words = health.counters();
             switch (phase_) {
             case phase_t::heal_k:
                 tally_.islands_reconnected += words[metal_round_healed_k];
                 tally_.changed_nodes = words[metal_round_changed_k];
-                // A receiver after a stop heals and verifies alone.
+                // A round bound after a reshard's stop heals and verifies alone.
                 if (tally_.verdict == refine_verdict_t::stopped_k) verify_(phase_t::restitch_k);
-                else phase_ = phase_t::draw_hubs_k;
+                else phase_ = phase_t::hubs_k;
                 break;
-            case phase_t::draw_hubs_k:
+            case phase_t::hubs_k:
                 draw_hubs_();
-                phase_ = phase_t::gather_neighborhoods_k;
+                phase_ = phase_t::gather_k;
                 break;
             // Neighborhoods over capacity gather again among their own entries.
-            case phase_t::gather_neighborhoods_k:
+            case phase_t::gather_k:
                 if (!order_neighborhoods_()) phase_ = phase_t::restitch_k;
                 break;
             case phase_t::restitch_k:
@@ -1209,21 +1203,20 @@ struct vram_apple_index {
         /** Skips what is left of the round's phase in hand, as the RAM round's @c stop does: an
          *  opening health check, or a heal not yet run, ends the round with nothing written; a hubs
          *  draw, a gather or a restitch sends the round to the closing health check; the closing
-         *  one runs on, and the verdict reads stopped. A split's later receivers heal and verify
-         *  alone; the partition of a split runs on. */
+         *  one runs on, and the verdict reads stopped. */
         void stop() noexcept {
             if (!rounding()) return;
             tally_.verdict = refine_verdict_t::stopped_k;
             switch (phase_) {
             case phase_t::health_k:
-                if (swept_after_ == phase_t::opening_k) phase_ = phase_t::done_k;
+                if (swept_after_ == phase_t::none_k) phase_ = phase_t::done_k;
                 break;
             case phase_t::heal_k:
                 tally_.reachability = tally_.opening;
                 phase_ = phase_t::done_k;
                 break;
-            case phase_t::draw_hubs_k:
-            case phase_t::gather_neighborhoods_k:
+            case phase_t::hubs_k:
+            case phase_t::gather_k:
             case phase_t::restitch_k: verify_(phase_t::restitch_k); break;
             default: break;
             }
@@ -1232,32 +1225,19 @@ struct vram_apple_index {
         /** Whether the plan runs a round's phase, whose every barrier a caller's progress hears. */
         bool rounding() const noexcept {
             if (phase_ == phase_t::health_k)
-                return swept_after_ == phase_t::opening_k || swept_after_ == phase_t::restitch_k;
+                return swept_after_ == phase_t::none_k || swept_after_ == phase_t::restitch_k;
             return phase_ >= phase_t::heal_k && phase_ <= phase_t::restitch_k;
         }
 
-        /** The phase the plan is in, by the name a progress line prints. */
-        char const* phase_name() const noexcept {
-            switch (phase_) {
-            case phase_t::partition_k: return "partition";
-            case phase_t::health_k: return "health";
-            case phase_t::heal_k: return "heal";
-            case phase_t::draw_hubs_k: return "hubs";
-            case phase_t::gather_neighborhoods_k: return "gather";
-            case phase_t::restitch_k: return "restitch";
-            default: return "done";
-            }
-        }
+        /** The phase the plan is in. */
+        phase_t phase() const noexcept { return phase_; }
+
+        /** Whether the plan moves entries, which a refine never does. */
+        bool moving() const noexcept { return false; }
 
         /** The position of the round's phase in hand among its six, from the opening health check
          *  to the closing one; zero outside a round's phases. */
-        std::size_t ordinal() const noexcept {
-            std::size_t const opening = static_cast<std::size_t>(phase_t::opening_k);
-            if (phase_ == phase_t::health_k && swept_after_ == phase_t::opening_k) return 1;
-            if (phase_ == phase_t::health_k && swept_after_ == phase_t::restitch_k)
-                return static_cast<std::size_t>(phase_t::restitch_k) - opening + 2;
-            return rounding() ? static_cast<std::size_t>(phase_) - opening + 1 : 0;
-        }
+        std::size_t ordinal() const noexcept { return rounding() ? round_ordinal(phase_, swept_after_) : 0; }
 
         /** Units of the round's phase in hand done so far, at a barrier before it advances: entries
          *  swept and marked by a check, and otherwise all of the phase's. */
@@ -1269,8 +1249,8 @@ struct vram_apple_index {
             switch (phase_) {
             case phase_t::health_k: return 2 * std::size_t {health.visible};
             case phase_t::heal_k: return health.islands();
-            case phase_t::draw_hubs_k: return hubs_for_(health.visible);
-            case phase_t::gather_neighborhoods_k: return gathered_;
+            case phase_t::hubs_k: return hubs_for_(health.visible);
+            case phase_t::gather_k: return gathered_;
             case phase_t::restitch_k: return health.visible;
             default: return 0;
             }
@@ -1280,9 +1260,9 @@ struct vram_apple_index {
          *  the changed marks start over, and the opening check sweeps again. A no-op mid-round. */
         void next_round() noexcept {
             if (!index_ || phase_ != phase_t::done_k || failed(status_)) return;
-            if (swept_after_ != phase_t::opening_k && swept_after_ != phase_t::restitch_k) return;
+            if (swept_after_ != phase_t::none_k && swept_after_ != phase_t::restitch_k) return;
             tally_ = {};
-            verify_(phase_t::opening_k);
+            verify_(phase_t::none_k);
         }
 
         /**
@@ -1303,18 +1283,7 @@ struct vram_apple_index {
 
       private:
         friend struct vram_apple_index;
-
-        enum class phase_t : u8_t {
-            partition_k,
-            health_k,
-            // What a round's opening health check follows, and the round's phases in their order.
-            opening_k,
-            heal_k,
-            draw_hubs_k,
-            gather_neighborhoods_k,
-            restitch_k,
-            done_k
-        };
+        friend reshard_plan_t;
 
         /** Opens the check following @p phase from the root the last one kept. */
         void verify_(phase_t phase) noexcept {
@@ -1324,13 +1293,13 @@ struct vram_apple_index {
         }
 
         /** Takes in a converged check: opens the round after the opening one, concludes it after
-         *  the closing one, and binds a split's next receiver once its round ended. */
-        bool converge_(traversal_context_t& context) noexcept {
+         *  the closing one; answers whether a phase follows. */
+        bool converge_() noexcept {
             reachability_t const reachability = health.finish();
             tally_.reachability = reachability;
-            if (swept_after_ == phase_t::opening_k) open_round_(reachability);
+            if (swept_after_ == phase_t::none_k) open_round_(reachability);
             else phase_ = phase_t::done_k, tally_.verdict = concluded_verdict(tally_);
-            return phase_ != phase_t::done_k || next_receiver_(context);
+            return phase_ != phase_t::done_k;
         }
 
         /** Takes in the opening check: seeds the round's draws from what it measured, so a round
@@ -1437,95 +1406,6 @@ struct vram_apple_index {
                                                  context);
         }
 
-        /** The barrier after a partition batch: grows on while a round still placed nodes, and once
-         *  one placed none places the nodes no round reached, assigns every node its slot, scatters
-         *  them on the host over unified memory, files their keys, publishes every receiver and
-         *  binds the first. */
-        bool advance_partition_(traversal_context_t& context) noexcept {
-            vram_apple_index& donor = *index_;
-            if (donor.placing_(split_)) return true;
-            donor.place_islands_(split_);
-            split_.next_round = 0;
-            assign_slots_();
-            donor.scatter_(split_);
-            publish_parts_();
-            split_.bound_receiver = 0;
-            bind_receiver_(context);
-            return phase_ != phase_t::done_k;
-        }
-
-        /** Turns every donor node's part into its slot in place, in ID order within each part. */
-        void assign_slots_() noexcept {
-            split_layout_t const layout = split_layout_(split_.entries, split_.receivers.size());
-            u32_t* const slots = reinterpret_cast<u32_t*>(split_.device_bytes.host + layout.node_parts);
-            for (split_part_t& part : split_.parts) part = {};
-            for (std::size_t node = 0; node != split_.entries; ++node) {
-                std::size_t const part = slots[node];
-                ++split_.parts[part].entries;
-                slots[node] = static_cast<u32_t>(part * split_.part_capacity + split_.parts[part].assigned_nodes++);
-            }
-        }
-
-        /** Files every donor key under its slot in its receiver, publishes every receiver's nodes
-         *  at once under the closed claim words, and empties the donor. */
-        void publish_parts_() noexcept {
-            vram_apple_index& donor = *std::exchange(split_.donor, nullptr);
-            split_layout_t const layout = split_layout_(split_.entries, split_.receivers.size());
-            u32_t const* const slots = reinterpret_cast<u32_t const*>(split_.device_bytes.host + layout.node_parts);
-            for (std::size_t node = 0; node != split_.entries; ++node)
-                split_.receivers[slots[node] / split_.part_capacity]->keyed_.assign(
-                    static_cast<node_id_t>(slots[node] % split_.part_capacity),
-                    donor.keyed_[static_cast<node_id_t>(node)]);
-            for (std::size_t index = 0; index != split_.receivers.size(); ++index) {
-                vram_apple_index& receiver = *split_.receivers[index];
-                std::size_t const entries = split_.parts[index].entries;
-                u32_t* const words = metal_words(receiver.counters_);
-                words[metal_published_k] = static_cast<u32_t>(entries);
-                receiver.publish_keys_({0, static_cast<node_id_t>(entries)});
-                if (status_t const published = receiver.publish_(0, entries); failed(published)) status_ = published;
-            }
-            donor.forget_();
-        }
-
-        /** Binds the round to the bound receiver or the next one holding nodes, under its own batch
-         *  hold and over the round buffer @ref plan_split sized for a whole part; a receiver after
-         *  a stop heals and verifies alone. Past the last, reports the folded rounds. */
-        void bind_receiver_(traversal_context_t& context) noexcept {
-            while (split_.bound_receiver != split_.receivers.size() && !split_.parts[split_.bound_receiver].entries)
-                ++split_.bound_receiver;
-            if (split_.bound_receiver == split_.receivers.size()) {
-                tally_ = split_.report;
-                phase_ = phase_t::done_k;
-                return;
-            }
-            vram_apple_index& receiver = *split_.receivers[split_.bound_receiver];
-            auto [bound, status] = receiver.plan_round(split_.config, context);
-            if (failed(status)) {
-                status_ = status, phase_ = phase_t::done_k;
-                return;
-            }
-            bool const stopped = split_.settled && split_.report.verdict == refine_verdict_t::stopped_k;
-            batch_ = std::move(bound.batch_);
-            health = std::move(bound.health);
-            index_ = &receiver;
-            sizing_ = bound.sizing_;
-            swept_after_ = bound.swept_after_;
-            phase_ = bound.phase_;
-            tally_ = {};
-            if (stopped) tally_.verdict = refine_verdict_t::stopped_k;
-        }
-
-        /** Once a split's bound receiver ended its round, folds its report into the split's and
-         *  binds the next one, answering whether a phase follows, which no refine has. */
-        bool next_receiver_(traversal_context_t& context) noexcept {
-            if (split_.bound_receiver >= split_.receivers.size()) return false;
-            if (split_.settled++) split_.report += tally_;
-            else split_.report = tally_;
-            ++split_.bound_receiver;
-            bind_receiver_(context);
-            return phase_ != phase_t::done_k;
-        }
-
         batch_lock_t batch_;
         vram_apple_index* index_ = nullptr;
 
@@ -1540,16 +1420,243 @@ struct vram_apple_index {
         u64_t round_seed_ = 0;
 
         /** The phase the current check follows, which decides the phase after it converges. */
-        phase_t swept_after_ = phase_t::opening_k;
+        phase_t swept_after_ = phase_t::none_k;
         phase_t phase_ = phase_t::done_k;
         status_t status_ = status_t::success_k;
         refine_report_t tally_;
+    };
+
+    /**
+     *  @brief One reshard in flight from this index into its targets, in the shape of the CUDA and
+     *      HIP plans: @ref queue a phase, @ref wait for it, @ref advance past it, and @ref finish
+     *      once no phase follows.
+     *
+     *  The partition grows on the device; the barrier after its last batch scatters the parts into
+     *  the targets on the host over unified memory and publishes them; each target then runs one
+     *  round, as @ref refine_plan_t does, in turn, the reports folding over the targets.
+     *  @ref next_round runs another round on every target from the first. Holds the source's batch
+     *  lock through the moves and the bound target's through its round.
+     */
+    struct reshard_plan_t {
+        reshard_plan_t() noexcept = default;
+        reshard_plan_t(reshard_plan_t&&) noexcept = default;
+        reshard_plan_t& operator=(reshard_plan_t&&) noexcept = default;
+
+        /**
+         *  @brief Submits the current phase on @p context 's stream: a partition batch, or the
+         *      bound target's round's phase, after a @ref next_round binding the first target.
+         *
+         *  @par Statuses:
+         *  - @c uninitialized_k The plan is unbound, as a refused one answers.
+         *  - @c device_error_k A phase could not be encoded.
+         *  - Those of @ref plan_refine, binding a target.
+         */
+        status_t queue(traversal_context_t& context, refine_config_t config) noexcept {
+            if (!source_) return status_t::uninitialized_k;
+            if (failed(status_)) return status_;
+            if (moving()) return status_ = source_->queue_rounds_(split_, context);
+            if (unbound_()) bind_target_(context);
+            if (failed(status_) || ended_()) return status_;
+            return rounds_.queue(context, config);
+        }
+
+        /**
+         *  @brief Waits on @p context for the submitted phase.
+         *
+         *  @par Statuses:
+         *  - @c device_error_k The device failed the phase.
+         */
+        status_t wait(traversal_context_t& context) noexcept {
+            if (!source_ || failed(status_)) return status_;
+            if (moving()) return status_ = context.wait();
+            return rounds_.index_ ? rounds_.wait(context) : status_;
+        }
+
+        /** The barrier after a phase, one caller once it finished, answering whether one follows:
+         *  grows the partition on or ends it in the moves, advances the bound target's round, or
+         *  folds its ended round and binds the next target. Once the last target settled, it
+         *  settles nothing more. */
+        bool advance(traversal_context_t& context) noexcept {
+            if (!source_ || failed(status_)) return false;
+            if (moving()) return advance_partition_(context);
+            if (unbound_()) bind_target_(context);
+            if (failed(status_) || ended_()) return false;
+            if (rounds_.advance(context)) return true;
+            if (failed(rounds_.status_)) return false;
+            return settle_target_(context);
+        }
+
+        /** Stops the bound target's round, as @ref refine_plan_t::stop does, and every later
+         *  target heals and verifies alone; the partition runs on. */
+        void stop() noexcept {
+            if (!moving()) rounds_.stop();
+        }
+
+        /** Whether the plan runs a round's phase, whose every barrier a caller's progress hears. */
+        bool rounding() const noexcept { return !moving() && !ended_() && rounds_.rounding(); }
+
+        /** The phase the plan is in: the partition through the moves, then the bound target's
+         *  round's; none while @ref next_round left the first target to bind. */
+        phase_t phase() const noexcept {
+            if (moving()) return moves_;
+            if (ended_()) return phase_t::done_k;
+            return rounds_.index_ ? rounds_.phase() : phase_t::none_k;
+        }
+
+        /** Whether the plan still moves entries: its partition, whose last barrier scatters. */
+        bool moving() const noexcept { return moves_ != phase_t::done_k; }
+
+        /** Where the bound round's phase sits among its six, and its units done and in all; zero
+         *  in the moves. */
+        std::size_t ordinal() const noexcept { return rounding() ? rounds_.ordinal() : 0; }
+        std::size_t completed() const noexcept { return moving() || ended_() ? 0 : rounds_.completed(); }
+        std::size_t total() const noexcept { return moving() || ended_() ? 0 : rounds_.total(); }
+
+        /** Runs another round on every target once every target's ended, from the first; the
+         *  report starts over. A no-op in the moves and mid-round. */
+        void next_round() noexcept {
+            if (!source_ || moving() || failed(status_) || !ended_()) return;
+            // The first target binds on the next call taking a context, as `plan_refine` needs one.
+            rounds_ = refine_plan_t {};
+            split_.bound_target = 0;
+            split_.settled = 0;
+            split_.report = {};
+        }
+
+        /**
+         *  @brief The rounds so far, folded over the targets: complete once @ref advance answered
+         *      false, otherwise @c cancelled_k; a failure a phase kept answers instead.
+         *
+         *  @par Statuses:
+         *  - @c uninitialized_k The plan is unbound, as a refused one answers.
+         *  - @c cancelled_k A phase still follows, or a round was stopped.
+         *  - @c device_error_k The device failed a phase.
+         *  - Those of @ref plan_refine, binding a target.
+         */
+        expected<refine_report_t> finish() const noexcept {
+            if (!source_) return {{}, status_t::uninitialized_k};
+            if (moving()) return {{}, failed(status_) ? status_ : status_t::cancelled_k};
+            refine_report_t result = split_.report;
+            status_t outcome = status_;
+            if (!ended_() && rounds_.index_) {
+                auto const [bound, bound_status] = rounds_.finish();
+                if (split_.settled) result += bound;
+                else result = bound;
+                if (succeeded(outcome)) outcome = bound_status;
+            }
+            if (succeeded(outcome) && (!ended_() || result.verdict == refine_verdict_t::stopped_k))
+                outcome = status_t::cancelled_k;
+            return {result, outcome};
+        }
+
+      private:
+        friend struct vram_apple_index;
+
+        /** Whether every target's round ended and settled. */
+        bool ended_() const noexcept { return !moving() && split_.bound_target >= split_.targets.size(); }
+
+        /** Whether @ref next_round left the first target to bind. */
+        bool unbound_() const noexcept { return !moving() && !ended_() && !rounds_.index_; }
+
+        /** The barrier after a partition batch: grows on while a batch still placed nodes, and once
+         *  one placed none places the nodes no batch reached, assigns every node its slot, scatters
+         *  them on the host over unified memory, files their keys, publishes every target, lets the
+         *  source go and binds the first target holding entries. */
+        bool advance_partition_(traversal_context_t& context) noexcept {
+            vram_apple_index& source = *source_;
+            if (source.placing_(split_)) return true;
+            source.place_islands_(split_);
+            split_.next_round = 0;
+            assign_slots_();
+            source.scatter_(split_);
+            publish_parts_();
+            source_batch_ = batch_lock_t {};
+            moves_ = phase_t::done_k;
+            split_.bound_target = 0;
+            bind_target_(context);
+            return succeeded(status_) && !ended_();
+        }
+
+        /** Turns every source node's part into its slot in place, in ID order within each part. */
+        void assign_slots_() noexcept {
+            split_layout_t const layout = split_layout_(split_.entries, split_.targets.size());
+            u32_t* const slots = reinterpret_cast<u32_t*>(split_.device_bytes.host + layout.node_parts);
+            for (split_part_t& part : split_.parts) part = {};
+            for (std::size_t node = 0; node != split_.entries; ++node) {
+                std::size_t const part = slots[node];
+                ++split_.parts[part].entries;
+                slots[node] = static_cast<u32_t>(part * split_.part_capacity + split_.parts[part].assigned_nodes++);
+            }
+        }
+
+        /** Files every source key under its slot in its target, publishes every target's nodes at
+         *  once under the closed claim words, and empties the source. */
+        void publish_parts_() noexcept {
+            vram_apple_index& source = *std::exchange(split_.source, nullptr);
+            split_layout_t const layout = split_layout_(split_.entries, split_.targets.size());
+            u32_t const* const slots = reinterpret_cast<u32_t const*>(split_.device_bytes.host + layout.node_parts);
+            for (std::size_t node = 0; node != split_.entries; ++node)
+                split_.targets[slots[node] / split_.part_capacity]->keyed_.assign(
+                    static_cast<node_id_t>(slots[node] % split_.part_capacity),
+                    source.keyed_[static_cast<node_id_t>(node)]);
+            for (std::size_t index = 0; index != split_.targets.size(); ++index) {
+                vram_apple_index& target = *split_.targets[index];
+                std::size_t const entries = split_.parts[index].entries;
+                u32_t* const words = metal_words(target.counters_);
+                words[metal_published_k] = static_cast<u32_t>(entries);
+                target.publish_keys_({0, static_cast<node_id_t>(entries)});
+                if (status_t const published = target.publish_(0, entries); failed(published)) status_ = published;
+            }
+            source.forget_();
+        }
+
+        /** Binds the round to the bound target or the next one holding nodes, under its own batch
+         *  hold and over the round buffer @ref plan_reshard sized for a whole part; a target after
+         *  a stop heals and verifies alone. Past the last, the plan has ended. */
+        void bind_target_(traversal_context_t& context) noexcept {
+            while (split_.bound_target != split_.targets.size() && !split_.parts[split_.bound_target].entries)
+                ++split_.bound_target;
+            if (ended_()) return;
+            auto [bound, status] = split_.targets[split_.bound_target]->plan_refine(split_.config, context);
+            if (failed(status)) {
+                status_ = status;
+                return;
+            }
+            bool const stopped = split_.settled && split_.report.verdict == refine_verdict_t::stopped_k;
+            rounds_ = std::move(bound);
+            if (stopped) rounds_.tally_.verdict = refine_verdict_t::stopped_k;
+        }
+
+        /** Folds the bound target's ended round into the plan's report and binds the next target,
+         *  answering whether a phase follows. */
+        bool settle_target_(traversal_context_t& context) noexcept {
+            if (split_.settled++) split_.report += rounds_.tally_;
+            else split_.report = rounds_.tally_;
+            ++split_.bound_target;
+            bind_target_(context);
+            return succeeded(status_) && !ended_();
+        }
+
+        /** The bound target's round, unbound in the moves and after @ref next_round. */
+        refine_plan_t rounds_;
+
+        /** The split's state: its targets, their parts and the folded reports. */
         split_t split_;
+
+        /** The source's batch hold, let go once its parts published. */
+        batch_lock_t source_batch_;
+
+        /** The index the entries move out of; null in a refused plan. */
+        vram_apple_index* source_ = nullptr;
+
+        /** The phase of the moves still pending; done once the parts published. */
+        phase_t moves_ = phase_t::done_k;
+        status_t status_ = status_t::success_k;
     };
 
     /**
      *  @brief Opens one refinement round over the published nodes on @p context 's stream, as the
-     *      RAM @c plan_round does, so no phase allocates.
+     *      RAM @c plan_refine does, so no phase allocates.
      *
      *  Takes the batch lock, grows the context's round buffer to the check's columns and the
      *  round's, and sizes the hubs and the neighborhood capacity from the threadgroup memory one
@@ -1560,8 +1667,7 @@ struct vram_apple_index {
      *  - @c config_mismatch_k The @p context rides another device or cannot submit.
      *  - @c bad_alloc_k The round buffer cannot grow.
      */
-    expected<refine_plan_t> plan_round(refine_config_t config, traversal_context_t& context) noexcept {
-        using phase_t = typename refine_plan_t::phase_t;
+    expected<refine_plan_t> plan_refine(refine_config_t config, traversal_context_t& context) noexcept {
         refine_plan_t plan;
         plan.batch_ = batch_lock_t {batch_};
         std::size_t const rows = size();
@@ -1574,19 +1680,19 @@ struct vram_apple_index {
             plan.health.restart_sweep();
         }
         plan.index_ = this;
-        plan.swept_after_ = phase_t::opening_k;
+        plan.swept_after_ = phase_t::none_k;
         plan.phase_ = rows ? phase_t::health_k : phase_t::done_k;
         return {std::move(plan), status_t::success_k};
     }
 
     /**
-     *  @brief One @ref plan_round driven to its end on the calling thread, waiting once per pass.
+     *  @brief One @ref plan_refine driven to its end on the calling thread, waiting once per pass.
      *
      *  @par Statuses:
-     *  - Those of @ref plan_round and of the plan's phases.
+     *  - Those of @ref plan_refine and of the plan's phases.
      */
     expected<refine_report_t> refine(refine_config_t config, traversal_context_t& context) noexcept {
-        auto [plan, status] = plan_round(config, context);
+        auto [plan, status] = plan_refine(config, context);
         if (failed(status)) return {{}, status};
         do
             if (status_t const queued = plan.queue(context, config); failed(queued) || failed(plan.wait(context)))
@@ -1596,64 +1702,80 @@ struct vram_apple_index {
     }
 
     /**
-     *  @brief Opens a split of this index's nodes into @p receivers, the CUDA and HIP plan's twin:
-     *      the partition grows on the device, and the moves run on the host over unified memory.
+     *  @brief Opens a reshard of @p sources into @p targets, the CUDA and HIP plan's twin: this
+     *      index, the one source, splits into one graph-local part per target, the partition
+     *      growing on the device and the moves running on the host over unified memory.
      *
      *  One root per part through @ref seeded_bijection under @p config.seed, then rounds of growth
-     *  over the links on the device, each part capped at the nodes over the receivers rounded up,
+     *  over the links on the device, each part capped at the nodes over the targets rounded up,
      *  and each node a round reaches kept by its lowest-ID proposer, so equal seeds over equal
      *  graphs split alike, as on NVIDIA and AMD. The nodes no round reached enter the smallest
      *  parts in ID order on the host, which then assigns the slots in ID order within each part,
-     *  moves every node's vector, norms and neighbors into its receiver, the links inside its part
-     *  rebased and those across dropped, files the keys, publishes every receiver at once and
-     *  empties this index. Each receiver then runs one round, as @ref plan_round does, the moved
+     *  moves every node's vector, norms and neighbors into its target, the links inside its part
+     *  rebased and those across dropped, files the keys, publishes every target at once and
+     *  empties this index. Each target then runs one round, as @ref plan_refine does, the moved
      *  part's islands healed and its neighborhoods re-stitched, and the reports fold.
      *
-     *  The caller keeps this index's and every receiver's claim word closed for the plan's life,
-     *  and nothing searches this index meanwhile. Receivers must be empty, distinct, and share this
+     *  The caller keeps this index's and every target's claim word closed for the plan's life, and
+     *  nothing searches this index meanwhile. Targets must be empty, distinct, and share this
      *  index's device, metric and geometry.
      *
+     *  @param[in] sources This index alone: an Apple mono-index splits one source into its targets.
+     *  @param[in] targets The empty indexes taking the parts, at least two, all distinct.
+     *  @param[in] config The rounds' knobs and the seed picking the parts' roots; a shard capacity
+     *      is refused, as a mono-index has no shards to cap.
+     *  @param[in,out] context The driving context, whose round buffer takes a whole part's round.
+     *
      *  @par Statuses:
+     *  - @c invalid_argument_k No sources or no targets, a null one, or an index named twice
+     *    within a list.
+     *  - @c unsupported_k A nonzero @c shard_capacity, or any shape but this index alone into two
+     *    or more targets: a pack, a recut or several sources into several targets.
      *  - @c uninitialized_k The index never grew.
-     *  - @c config_mismatch_k Fewer than two receivers, a null, repeated or non-empty one, this
-     *    index itself, one of another device, metric or geometry, or a @p context of another
-     *    device or one that cannot submit.
-     *  - @c contended_k This index's or a receiver's claim word is open.
+     *  - @c config_mismatch_k This index among the targets, a non-empty target, one of another
+     *    device, metric or geometry, or a @p context of another device or one that cannot submit.
+     *  - @c contended_k This index's or a target's claim word is open.
      *  - @c overflow_k Part slots past the 32-bit IDs.
      *  - @c bad_alloc_k The partition's buffer or the round buffer cannot grow.
      */
-    expected<refine_plan_t> plan_split(std::span<vram_apple_index*> receivers, split_config_t config,
-                                       traversal_context_t& context) noexcept {
-        using phase_t = typename refine_plan_t::phase_t;
-        refine_plan_t plan;
-        plan.batch_ = batch_lock_t {batch_};
-        std::size_t const parts = receivers.size(), rows = size();
+    expected<reshard_plan_t> plan_reshard(std::span<vram_apple_index* const> sources,
+                                          std::span<vram_apple_index* const> targets, reshard_config_t config,
+                                          traversal_context_t& context) noexcept {
+        reshard_plan_t plan;
+        for (std::span<vram_apple_index* const> const listed : {sources, targets}) {
+            if (listed.empty()) return {std::move(plan), status_t::invalid_argument_k};
+            for (std::size_t position = 0; position != listed.size(); ++position) {
+                if (!listed[position]) return {std::move(plan), status_t::invalid_argument_k};
+                for (std::size_t earlier = 0; earlier != position; ++earlier)
+                    if (listed[earlier] == listed[position]) return {std::move(plan), status_t::invalid_argument_k};
+            }
+        }
+        if (config.shard_capacity) return {std::move(plan), status_t::unsupported_k};
+        if (sources.size() != 1 || sources[0] != this || targets.size() < 2)
+            return {std::move(plan), status_t::unsupported_k};
+        std::size_t const parts = targets.size(), rows = size();
         if (!counters_) return {std::move(plan), status_t::uninitialized_k};
-        if (parts < 2 || context.device() != device_.ordinal || !context)
-            return {std::move(plan), status_t::config_mismatch_k};
-        if (!claims_.closed()) return {std::move(plan), status_t::contended_k};
-        split_t& split = plan.split_;
-        if (failed(split.receivers.reserve_exactly(parts)) || failed(split.parts.resize(parts)))
-            return {std::move(plan), status_t::bad_alloc_k};
-        for (std::size_t receiver = 0; receiver != parts; ++receiver) {
-            vram_apple_index* const into = receivers[receiver];
-            if (!into || into == this) return {std::move(plan), status_t::config_mismatch_k};
-            for (std::size_t earlier = 0; earlier != receiver; ++earlier)
-                if (receivers[earlier] == into) return {std::move(plan), status_t::config_mismatch_k};
-            if (into->device_.ordinal != device_.ordinal || into->kernel_ != kernel_ ||
+        if (context.device() != device_.ordinal || !context) return {std::move(plan), status_t::config_mismatch_k};
+        for (vram_apple_index const* into : targets)
+            if (into == this || into->device_.ordinal != device_.ordinal || into->kernel_ != kernel_ ||
                 !(into->geometry_ == geometry_) || into->size())
                 return {std::move(plan), status_t::config_mismatch_k};
+        plan.source_batch_ = batch_lock_t {batch_};
+        if (!claims_.closed()) return {std::move(plan), status_t::contended_k};
+        for (vram_apple_index const* into : targets)
             if (!into->claims_.closed()) return {std::move(plan), status_t::contended_k};
-            split.receivers.push_back_reserved(into);
-        }
-        split.donor = this;
+        split_t& split = plan.split_;
+        if (failed(split.targets.reserve_exactly(parts)) || failed(split.parts.resize(parts)))
+            return {std::move(plan), status_t::bad_alloc_k};
+        for (vram_apple_index* const into : targets) split.targets.push_back_reserved(into);
+        split.source = this;
         split.entries = rows;
         split.part_capacity = divide_round_up<std::size_t>(rows, parts);
         split.config = config.refine;
         if (parts * split.part_capacity >= (std::numeric_limits<u32_t>::max)())
             return {std::move(plan), status_t::overflow_k};
-        // Every receiver holds a full part's rows, sentinel-filled, before the partition runs.
-        for (vram_apple_index* const into : split.receivers) {
+        // Every target holds a full part's rows, sentinel-filled, before the partition runs.
+        for (vram_apple_index* const into : split.targets) {
             batch_lock_t held {into->batch_};
             if (status_t const bound = into->bind_(); failed(bound)) return {std::move(plan), bound};
             if (status_t const grown = into->grow_nodes_(split.part_capacity); failed(grown))
@@ -1663,7 +1785,7 @@ struct vram_apple_index {
             split_layout_t const layout = split_layout_(rows, parts);
             split.device_bytes = context.buffers_allocator_.allocate(layout.device_bytes);
             if (!split.device_bytes) return {std::move(plan), status_t::bad_alloc_k};
-            // The round buffer takes a whole part's round now, so no receiver grows it later.
+            // The round buffer takes a whole part's round now, so no target grows it later.
             round_layout_t const part_layout = round_layout_(
                 split.part_capacity, round_sizing_(split.part_capacity, split.config.cache_bytes));
             bool fresh = false;
@@ -1671,10 +1793,29 @@ struct vram_apple_index {
                 return {std::move(plan), grown};
             seed_partition_(split, config.seed);
         }
-        else split.bound_receiver = parts;
-        plan.index_ = this;
-        plan.phase_ = rows ? phase_t::partition_k : phase_t::done_k;
+        else split.bound_target = parts;
+        plan.source_ = this;
+        plan.moves_ = rows ? phase_t::partition_k : phase_t::done_k;
         return {std::move(plan), status_t::success_k};
+    }
+
+    /**
+     *  @brief One @ref plan_reshard driven to its end on the calling thread, waiting once per pass.
+     *
+     *  @par Statuses:
+     *  - Those of @ref plan_reshard and of the plan's phases.
+     */
+    expected<refine_report_t> reshard(std::span<vram_apple_index* const> sources,
+                                      std::span<vram_apple_index* const> targets, reshard_config_t config,
+                                      traversal_context_t& context) noexcept {
+        auto [plan, status] = plan_reshard(sources, targets, config, context);
+        if (failed(status)) return {{}, status};
+        do
+            if (status_t const queued = plan.queue(context, config.refine);
+                failed(queued) || failed(plan.wait(context)))
+                break;
+        while (plan.advance(context));
+        return plan.finish();
     }
 
     /**
@@ -1951,8 +2092,8 @@ struct vram_apple_index {
         }
 
         /**
-         *  @brief Copies the task's rows out of @p source 's own storage rather than columns, as an
-         *      absorb drives it.
+         *  @brief Copies the task's rows out of @p source 's own storage rather than columns, as a
+         *      reshard packing into one target drives it.
          *
          *  Both keep padded rows of one geometry in shared buffers, so every column moves whole on
          *  the host with its keys, and the neighbors rebase from @p source_range onto the appended
@@ -2042,7 +2183,7 @@ struct vram_apple_index {
         batch_lock_t batch {batch_, std::try_to_lock};
         if (!batch.owns_lock()) return {{}, status_t::contended_k};
         if (status_t const bound = bind_(); failed(bound)) return {{}, bound};
-        // A closed word is the caller's, who refines or absorbs around the load; an open one is
+        // A closed word is the caller's, who refines or reshards around the load; an open one is
         // claimed like a batch's, so no batch goes beside it.
         bool const claiming = !claims_.closed();
         node_id_t base = static_cast<node_id_t>(size());
@@ -2951,7 +3092,7 @@ struct vram_apple_index {
      *  unproposed, the bitsets and counters empty, and the roots @p seed picks placed alone into
      *  the frontier of round one. */
     void seed_partition_(split_t& split, u64_t seed) noexcept {
-        std::size_t const entries = split.entries, parts = split.receivers.size();
+        std::size_t const entries = split.entries, parts = split.targets.size();
         split_layout_t const layout = split_layout_(entries, parts);
         byte_t* const scratch = split.device_bytes.host;
         std::memset(scratch, 0xFF, layout.frontier);
@@ -2972,7 +3113,7 @@ struct vram_apple_index {
      *  swapped on even rounds. */
     void bind_partition_(metal_launch_t& launch, metal_arguments_t const& arguments,
                          split_t const& split) const noexcept {
-        split_layout_t const layout = split_layout_(split.entries, split.receivers.size());
+        split_layout_t const layout = split_layout_(split.entries, split.targets.size());
         bool const odd = arguments.round & 1u;
         launch.bind_bytes(&arguments, sizeof(arguments), metal_arguments_buffer_k);
         launch.bind(neighbors_matrix_, metal_neighbors_buffer_k);
@@ -2992,7 +3133,7 @@ struct vram_apple_index {
         metal_arguments_t arguments = arguments_();
         arguments.end_id = static_cast<u32_t>(split.entries);
         arguments.part_capacity = static_cast<u32_t>(split.part_capacity);
-        u32_t const first_round = split.next_round, parts = static_cast<u32_t>(split.receivers.size());
+        u32_t const first_round = split.next_round, parts = static_cast<u32_t>(split.targets.size());
         shared_lock_t storage {storage_};
         for (u32_t round = first_round; round != 2 * first_round; ++round) {
             arguments.round = round;
@@ -3016,7 +3157,7 @@ struct vram_apple_index {
     /** Whether the last growth round of @p split placed anything, so more rounds follow; read once
      *  its batch finished. */
     static bool placing_(split_t const& split) noexcept {
-        split_layout_t const layout = split_layout_(split.entries, split.receivers.size());
+        split_layout_t const layout = split_layout_(split.entries, split.targets.size());
         u32_t const* const placed = reinterpret_cast<u32_t const*>(split.device_bytes.host + layout.placed);
         return placed[(split.next_round - 1) & 1u] != 0;
     }
@@ -3024,10 +3165,10 @@ struct vram_apple_index {
     /** Places every node no growth round reached on the host, in ID order, each entering the part
      *  smallest at its turn, the lowest-indexed among equals, as the CUDA pass does on a block. */
     static void place_islands_(split_t& split) noexcept {
-        split_layout_t const layout = split_layout_(split.entries, split.receivers.size());
+        split_layout_t const layout = split_layout_(split.entries, split.targets.size());
         u32_t* const node_parts = reinterpret_cast<u32_t*>(split.device_bytes.host + layout.node_parts);
         u32_t* const part_sizes = reinterpret_cast<u32_t*>(split.device_bytes.host + layout.part_sizes);
-        std::size_t const parts = split.receivers.size();
+        std::size_t const parts = split.targets.size();
         for (std::size_t node = 0; node != split.entries; ++node) {
             if (node_parts[node] != node_id_unknown_k) continue;
             std::size_t smallest = 0;
@@ -3038,26 +3179,26 @@ struct vram_apple_index {
         }
     }
 
-    /** Moves every node of @p split into its receiver at the slot it was assigned, on the host over
+    /** Moves every node of @p split into its target at the slot it was assigned, on the host over
      *  unified memory: its vector and norms as they are, and its neighbors with the links inside
      *  its part rebased through their own slots and packed to the front, the links across dropped,
      *  and a node nothing survived in pointing at itself. */
     void scatter_(split_t const& split) noexcept {
-        split_layout_t const layout = split_layout_(split.entries, split.receivers.size());
+        split_layout_t const layout = split_layout_(split.entries, split.targets.size());
         u32_t const* const slots = reinterpret_cast<u32_t const*>(split.device_bytes.host + layout.node_parts);
         std::size_t const capacity = split.part_capacity, connectivity = this->connectivity();
         shared_lock_t storage {storage_};
         for (std::size_t node = 0; node != split.entries; ++node) {
             u32_t const part = static_cast<u32_t>(slots[node] / capacity);
             std::size_t const position = slots[node] % capacity;
-            vram_apple_index& receiver = *split.receivers[part];
-            std::memcpy(receiver.vectors_matrix_.host + position * row_bytes(),
-                        vectors_matrix_.host + node * row_bytes(), row_bytes());
+            vram_apple_index& target = *split.targets[part];
+            std::memcpy(target.vectors_matrix_.host + position * row_bytes(), vectors_matrix_.host + node * row_bytes(),
+                        row_bytes());
             if (stores_norms())
-                std::memcpy(receiver.norms_column_.host + position * sizeof(norms_t),
+                std::memcpy(target.norms_column_.host + position * sizeof(norms_t),
                             norms_column_.host + node * sizeof(norms_t), sizeof(norms_t));
             node_id_t const* const from = neighbor_rows_() + node * connectivity;
-            node_id_t* const into = receiver.neighbor_rows_() + position * connectivity;
+            node_id_t* const into = target.neighbor_rows_() + position * connectivity;
             std::size_t kept = 0;
             for (std::size_t slot = 0; slot != connectivity; ++slot) {
                 node_id_t const id = from[slot];
@@ -3304,7 +3445,7 @@ struct vram_apple_index {
      *  storage a growth would relocate. */
     std::mutex batch_;
 
-    /** The claim word, closed while a refine, an absorb, a load or a save of the sharded index
+    /** The claim word, closed while a refine, a reshard, a load or a save of the sharded index
      *  holds it. */
     claim_word_t claims_;
     std::size_t last_visible_id_ = 0;

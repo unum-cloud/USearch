@@ -4,8 +4,8 @@
  *  @date July 22, 2026
  *  @brief The device bodies every dense VRAM index compiled by NVCC or HIP-Clang shares: the views,
  *      the greedy walk, the diversity selection, the back-linker, insertion, the fold of a
- *      compaction's shards, the attention fold, the reachability audits, the health check, a
- *      round's gather and restitch, the sharded search's rankings, and a split's moves.
+ *      reshard's shards, the attention fold, the reachability audits, the health check, a round's
+ *      gather and restitch, the sharded search's rankings, and a split's moves.
  *
  *  Every body here is templated on a quads kit and its vendor's warp policy, or on that warp policy
  *  alone; see @c vram_queue.cuh for what a warp policy provides. Walks and builders also take a
@@ -1262,7 +1262,7 @@ struct vram_fold_view {
 
     /** Bytes of the per-warp dynamic-shared slice, zero where the arena holds it. */
     u32_t scratch_bytes_per_warp;
-    vram_fold_phase_t phase;
+    vram_fold_step_t step;
 
     /** The arena the slices carve from when shared memory cannot hold them, and their shape. */
     byte_t* arena;
@@ -2114,7 +2114,7 @@ __device__ __forceinline__ vram_fold_view<kit_> vram_view(vram_fold_t const& fol
             fold.cross_count,
             fold.selection_nodes,
             fold.scratch_bytes_per_warp,
-            fold.phase,
+            fold.step,
             fold.arena,
             vram_view(fold.arena_shape),
             fold.telemetry,
@@ -2256,7 +2256,7 @@ __device__ __forceinline__ void vram_fold(vram_fold_view<kit_> const& view) {
         return warp_t::shuffle(row, 0);
     };
     // The phase is a launch argument, so the branch sits outside the loop every warp spins in.
-    if (view.phase == vram_fold_phase_t::reselect_k)
+    if (view.step == vram_fold_step_t::reselect_k)
         for (u32_t row = assign(); row < rows; row = assign()) {
             vram_telemetry_t telemetry;
             vram_fold_reselect_one<kit_, schedule_, resident_blocks_>( //
@@ -2922,10 +2922,6 @@ __device__ __forceinline__ void vram_reconnect_island(u32_t* neighbors, u32_t co
 
 #pragma region Health Check
 
-/** The depth a health check reached no entry at; the deepest it records is one less, past which
- *  depths saturate, as on RAM. */
-inline constexpr u32_t vram_unknown_depth_k = 255;
-
 /** An island node's roles, the bits of its word in the island roles: the first two are its strong
  *  component's, as on RAM, and the last marks a member reaching its color's least rank while its
  *  component is being named. */
@@ -2962,37 +2958,11 @@ __device__ __forceinline__ bool vram_fetch_clear(u32_t& word, u32_t bits) noexce
     return false;
 }
 
-/** Takes one of @p count 's links when another remains, as RAM's take-if-spare does. */
-template <typename warp_type_>
-__device__ __forceinline__ bool vram_take_if_spare(u32_t& count) noexcept {
-    u32_t observed = warp_type_::load_relaxed(count);
-    while (observed > 1 && !warp_type_::compare_exchange_relaxed(count, observed, observed - 1u))
-        observed = warp_type_::load_relaxed(count);
-    return observed > 1;
-}
-
 /** The least of every lane's @p value. */
 template <typename warp_type_>
 __device__ __forceinline__ u32_t vram_reduce_min(u32_t value) noexcept {
     for (u32_t mask = warp_type_::width_k / 2; mask; mask >>= 1)
         value = min_of(value, warp_type_::shuffle_xor(value, mask));
-    return value;
-}
-
-/** The sum of every lane's @p value. */
-template <typename warp_type_>
-__device__ __forceinline__ u32_t vram_reduce_sum(u32_t value) noexcept {
-    for (u32_t mask = warp_type_::width_k / 2; mask; mask >>= 1) value += warp_type_::shuffle_xor(value, mask);
-    return value;
-}
-
-/** The nearest of every lane's @p value, the lower ID among equals. */
-template <typename warp_type_>
-__device__ __forceinline__ vram_scored_node<node_id_t> vram_reduce_least(vram_scored_node<node_id_t> value) noexcept {
-    for (u32_t mask = warp_type_::width_k / 2; mask; mask >>= 1) {
-        vram_scored_node<node_id_t> const other = shuffle_xor<warp_type_>(value, mask);
-        if (other < value) value = other;
-    }
     return value;
 }
 
@@ -3820,81 +3790,6 @@ __device__ __forceinline__ void vram_score_mates(vram_flat_view<kit_> const& sto
             kept[slot] = scored_t::sentinel();
         warp_type_::sync();
     }
-}
-
-/**
- *  @brief Puts back what the @p selected_count picks dropped of the @p live_count live links that
- *      reachability needs, exactly as RAM's @c keep_reach_ does, on one lane.
- *
- *  Picks and live links are cache positions, the live links leading them, @p candidate_ids naming
- *  each position's node and @p candidate_distances its distance. Kept back are a live member whose
- *  last shallower in-link @p node_id is and, when no pick stands closer to the root, the nearest
- *  live member that does. A short row grows by each; a full one gives up its farthest pick that is
- *  kept by neither, a live member only once another shallower in-link keeps it.
- *
- *  @return The selected count.
- */
-template <typename warp_type_>
-__device__ __forceinline__ u32_t vram_keep_reach(vram_health_t const& health, node_id_t node_id,
-                                                 u32_t const* candidate_ids, f32_t const* candidate_distances,
-                                                 u32_t live_count, u32_t* selected, u32_t selected_count,
-                                                 u32_t connectivity) noexcept {
-    auto depth_from_root = [&](u32_t node) noexcept -> u32_t {
-        return warp_type_::load_relaxed(health.depths_from_root[node]);
-    };
-    auto depth_to_root = [&](u32_t node) noexcept -> u32_t {
-        return warp_type_::load_relaxed(health.depths_to_root[node]);
-    };
-    u32_t const depth = depth_from_root(node_id), own_depth_to_root = depth_to_root(node_id);
-    // The saturated depth counts no shallower in-links, so its children are never released.
-    u32_t const child = depth < vram_unknown_depth_k - 1 ? depth + 1 : vram_unknown_depth_k;
-    auto selected_at = [&](u32_t position) noexcept {
-        u32_t at = 0;
-        while (at != selected_count && selected[at] != position) ++at;
-        return at;
-    };
-    auto releasable = [&](u32_t position) noexcept {
-        u32_t const member = candidate_ids[position];
-        return child == vram_unknown_depth_k || depth_from_root(member) != child || position >= live_count ||
-               vram_take_if_spare<warp_type_>(health.shallower_in_links[member]);
-    };
-    // The kept members gather at the tail, ahead of which the farthest releasable pick gives way.
-    u32_t kept = 0;
-    auto keep = [&](u32_t position) noexcept {
-        if (selected_at(position) != selected_count) return;
-        if (selected_count < connectivity) {
-            selected[selected_count++] = position;
-            ++kept;
-            return;
-        }
-        u32_t const tail = selected_count - kept;
-        u32_t at = tail;
-        while (at && !releasable(selected[at - 1])) --at;
-        if (!at--) return;
-        selected[at] = selected[tail - 1];
-        selected[tail - 1] = position;
-        ++kept;
-    };
-    if (child != vram_unknown_depth_k)
-        for (u32_t position = 0; position != live_count; ++position) {
-            u32_t const member = candidate_ids[position];
-            if (depth_from_root(member) != child || selected_at(position) != selected_count) continue;
-            if (!vram_take_if_spare<warp_type_>(health.shallower_in_links[member])) keep(position);
-        }
-    if (own_depth_to_root != vram_unknown_depth_k && own_depth_to_root != 0) {
-        u32_t standing = 0;
-        while (standing != selected_count && depth_to_root(candidate_ids[selected[standing]]) >= own_depth_to_root)
-            ++standing;
-        u32_t way_to_root = standing != selected_count ? selected[standing] : node_id_unknown_k;
-        f32_t way_distance = standing != selected_count ? candidate_distances[way_to_root]
-                                                        : std::numeric_limits<f32_t>::infinity();
-        for (u32_t position = 0; position != live_count && standing == selected_count; ++position)
-            if (depth_to_root(candidate_ids[position]) < own_depth_to_root &&
-                candidate_distances[position] < way_distance)
-                way_to_root = position, way_distance = candidate_distances[position];
-        if (way_to_root != node_id_unknown_k) keep(way_to_root);
-    }
-    return selected_count;
 }
 
 /**

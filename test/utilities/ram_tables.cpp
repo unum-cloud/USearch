@@ -194,8 +194,8 @@ std::size_t check_multimap_probe_termination() noexcept {
     return failures;
 }
 
-/** N lanes each file every node of the chunk they hold under a shared key alphabet - one writer
- *  per chunk, as an index files its own nodes: no lost inserts, no duplicates, exact counts. */
+/** N lanes file interleaved nodes of the same chunks under a shared key alphabet, several writers
+ *  per chunk as a load's runs are: no lost inserts, no duplicates, and exact counts per key. */
 std::size_t check_multimap_concurrent_insert() noexcept {
     using multimap_t = chunked_multimap<u64_t, u32_t, std::hash<u64_t>, counting_allocator_t>;
     using nodes_schedule_t = typename multimap_t::nodes_schedule_t;
@@ -212,8 +212,7 @@ std::size_t check_multimap_concurrent_insert() noexcept {
         if (fu::failed(pool.spawn(lanes_k))) return failures + expect(false);
         pool.for_threads([&](std::size_t lane) noexcept {
             if (lane >= lanes_k) return;
-            for (std::size_t node = nodes_schedule_t::nodes_before(lane);
-                 node != nodes_schedule_t::nodes_before(lane + 1); ++node)
+            for (std::size_t node = lane; node < nodes; node += lanes_k)
                 multimap.insert(node % keys_alphabet_k, static_cast<u32_t>(node));
         });
 
@@ -409,6 +408,11 @@ std::size_t check_keyed_nodes_forget() noexcept {
         failures += expect(!keyed.contains(100 + node, nodes_k));
     }
     failures += expect(!keyed.contains(100 + nodes_k - 1, nodes_k));
+
+    // Forgetting from a node inside a chunk keeps the earlier nodes that chunk held.
+    keyed.forget_from(nodes_k / 4);
+    for (u32_t node = 0; node != nodes_k / 2; ++node)
+        failures += expect_eq(keyed.count(500 + node, nodes_k), node < nodes_k / 4 ? 1u : 0u);
     return failures;
 }
 

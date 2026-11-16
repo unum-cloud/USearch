@@ -992,8 +992,11 @@ struct traversal_stats_t {
 /** What one refinement round concluded, valued as the C verdicts are. */
 enum class refine_verdict_t : u8_t {
 
+    /** No round concluded: a report no round filled yet. */
+    none_k = 0,
+
     /** The round changed some entry's link set, so another round can help. */
-    improved_k = 0,
+    improved_k,
 
     /** The round changed no entry's link set. */
     converged_k,
@@ -1003,6 +1006,47 @@ enum class refine_verdict_t : u8_t {
 
     /** The caller stopped the round. */
     stopped_k,
+};
+
+/** Where a refine or reshard plan stands, valued as the C phases are: the moves a reshard runs
+ *  first, then a round's phases in their order, then NVMe's closing write. */
+enum class phase_t : u8_t {
+
+    /** The plan is bound to nothing yet, or a plan with no phase of its own. */
+    none_k = 0,
+
+    /** Source entries copied into their target with their links shifted. */
+    copy_k,
+
+    /** Graphs built over entries that arrived with no links, as NVMe parts and shards are. */
+    build_k,
+
+    /** A source's entries grown into one graph-local part per target. */
+    partition_k,
+
+    /** Every part's entries moved into its target with the links inside it rebased. */
+    scatter_k,
+
+    /** A reachability audit, opening or closing a round. */
+    health_k,
+
+    /** The islands an audit named linked through the root's component, without a distance. */
+    heal_k,
+
+    /** A seeded draw of the hubs a round gathers entries under. */
+    hubs_k,
+
+    /** Every entry filed under its nearest hub, again inside every neighborhood over capacity. */
+    gather_k,
+
+    /** Every neighborhood re-stitched in one core's cache. */
+    restitch_k,
+
+    /** What the moves or rounds produced, filed where it lands: a split's keys, or NVMe parts. */
+    write_k,
+
+    /** Nothing is pending. */
+    done_k,
 };
 
 /** Outcome of one refinement or heal pass: every count means the same in every family, layer and
@@ -1039,8 +1083,8 @@ struct [[nodiscard]] refine_report_t {
     std::size_t added_links = 0;
     std::size_t dropped_links = 0;
 
-    /** What the round concluded; improved for a pass that runs no round. */
-    refine_verdict_t verdict = refine_verdict_t::improved_k;
+    /** What the round concluded; none for a pass that runs no round. */
+    refine_verdict_t verdict = refine_verdict_t::none_k;
 
     /** The health check opening the round. */
     reachability_t opening;
@@ -1065,9 +1109,9 @@ struct [[nodiscard]] refine_report_t {
         added_links += other.added_links;
         dropped_links += other.dropped_links;
         // A stop anywhere stops the whole; else one shard improving is enough for another round,
-        // so a fold starts from its first report rather than from an empty one.
+        // and a report no round filled yields to any that one did.
         auto const rank = [](refine_verdict_t verdict) noexcept {
-            constexpr u8_t ranks_k[] = {2, 0, 1, 3};
+            constexpr u8_t ranks_k[] = {0, 3, 1, 2, 4};
             return ranks_k[static_cast<u8_t>(verdict)];
         };
         if (rank(other.verdict) > rank(verdict)) verdict = other.verdict;
@@ -1101,6 +1145,17 @@ constexpr std::size_t round_hubs(std::size_t entries, std::size_t hubs_per_draw,
 constexpr refine_verdict_t concluded_verdict(refine_report_t const& report) noexcept {
     if (report.verdict == refine_verdict_t::stopped_k) return report.verdict;
     return report.changed_nodes ? refine_verdict_t::improved_k : refine_verdict_t::converged_k;
+}
+
+/** The position of a round's @p phase among its six, from the opening health check to the closing
+ *  one: a health check following no phase opens the round, one following any other closes it; zero
+ *  outside a round's phases. */
+constexpr std::size_t round_ordinal(phase_t phase, phase_t swept_after) noexcept {
+    std::size_t const health = static_cast<std::size_t>(phase_t::health_k);
+    if (phase == phase_t::health_k)
+        return swept_after == phase_t::none_k ? 1 : static_cast<std::size_t>(phase_t::restitch_k) - health + 2;
+    if (phase < phase_t::heal_k || phase > phase_t::restitch_k) return 0;
+    return static_cast<std::size_t>(phase) - health + 1;
 }
 
 /** The nodes that @p node_id walks across first in round @p round of merging @p parts parts, whose
@@ -1864,6 +1919,22 @@ constexpr u64_t mix_bits(u64_t word) noexcept {
     word = (word ^ (word >> 30)) * 0xBF58476D1CE4E5B9ull;
     word = (word ^ (word >> 27)) * 0x94D049BB133111EBull;
     return word ^ (word >> 31);
+}
+
+/** The seed of a round's draws from the health check @p measured that opened the round or its
+ *  latest heal, so a round over a changed graph draws anew while the ID order decides nothing. */
+constexpr u64_t round_seed(reachability_t const& measured) noexcept {
+    return mix_bits(measured.audited_nodes ^
+                    mix_bits(measured.reachable_nodes ^
+                             mix_bits(measured.unlinked ^ mix_bits(measured.underlinked ^ measured.depth_from_root))));
+}
+
+/** Whether a closing health check leaving @p islands entries unreached heals again from what it
+ *  measured: while the last heal left fewer island components @p waiting, with no link to or from
+ *  the root's, than the heal before it left, @p waiting_before. The restitch between them gives
+ *  those islands the links a heal follows without a distance. */
+constexpr bool heals_again(std::size_t islands, std::size_t waiting, std::size_t waiting_before) noexcept {
+    return islands && waiting && waiting < waiting_before;
 }
 
 /** How far @p candidate sits past @p query on the Fibonacci-hashed ring, the hashes' difference
