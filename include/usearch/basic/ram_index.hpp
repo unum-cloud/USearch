@@ -2248,7 +2248,7 @@ struct ram_index {
             switch (phase_) {
             case phase_t::health_k: return 2 * std::size_t {health.visible};
             case phase_t::heal_k: return health.islands();
-            case phase_t::hubs_k: return hubs_for_(health.visible);
+            case phase_t::hubs_k: return first_hubs_(health.visible);
             case phase_t::gather_k: return gathered_entries_();
             case phase_t::restitch_k: return health.visible;
             default: return 0;
@@ -2464,6 +2464,11 @@ struct ram_index {
             return round_hubs(entries, hubs_per_draw_, neighborhood_capacity_);
         }
 
+        /** Hubs the round's first gather over @p entries draws, as @ref round_first_hubs counts. */
+        std::size_t first_hubs_(std::size_t entries) const noexcept {
+            return round_first_hubs(entries, hubs_per_draw_, neighborhood_capacity_);
+        }
+
         /** Neighborhoods the order by neighborhood holds. */
         std::size_t neighborhoods_() const noexcept {
             return neighborhood_offsets_.size() ? neighborhood_offsets_.size() - 1 : 0;
@@ -2488,7 +2493,7 @@ struct ram_index {
         /** Draws one set of neighborhood hubs by seeded bijection over the visible entries,
          *  ascending. */
         void draw_hubs_() noexcept {
-            std::size_t const visible = health.visible, hubs = hubs_for_(visible);
+            std::size_t const visible = health.visible, hubs = first_hubs_(visible);
             hub_nodes_.clear();
             for (std::size_t rank = 0; rank != hubs; ++rank)
                 hub_nodes_.push_back_reserved(static_cast<node_id_t>(seeded_bijection(rank, visible, round_seed_)));
@@ -2959,10 +2964,11 @@ struct ram_index {
      *
      *  Into one target, this index, every source other than it moves in first, one after another,
      *  each a part with its links shifted and no link across, and one round then runs over
-     *  everything. Out of one source, this index, into several targets, the source's nodes
-     *  partition into one graph-local part per target, scatter into the targets with the links
-     *  inside each part rebased and the links across dropped, and publish; then every target runs
-     *  one round in turn, the counts summing over them.
+     *  everything. Out of this index into several targets, every other source first moves in as
+     *  into one target but with no round, then this index's nodes partition into one graph-local
+     *  part per target, scatter into the targets with the links inside each part rebased and the
+     *  links across dropped, and publish; then every target runs one round in turn, the counts
+     *  summing over them.
      *
      *  The plan owns its source and target lists, copied at planning, and holds every source's
      *  unique side until it moved, and the targets' claims closed, from planning to its death, so
@@ -3042,7 +3048,8 @@ struct ram_index {
             // Every source moves in before the opening health check, which takes them all in.
             if (moves_ == phase_t::copy_k) {
                 publish_copied_();
-                if (moved_sources_ == sources_.size()) moves_ = phase_t::done_k;
+                if (moved_sources_ == sources_.size())
+                    moves_ = targets_.size() > 1 ? phase_t::partition_k : phase_t::done_k;
                 return true;
             }
             if (moves_ == phase_t::partition_k) return moves_ = phase_t::scatter_k, true;
@@ -3105,12 +3112,11 @@ struct ram_index {
             bind_target_();
         }
 
-        /** Whether the nodes of @p index moved out and left it empty: a source that moved in, or a
-         *  split's source once its parts published. */
+        /** Whether the nodes of @p index moved out and left it empty: a source that moved in, or
+         *  every source of a split once its parts published. */
         bool moved(ram_index const* index) const noexcept {
-            if (targets_.size() > 1) return !moving() && !sources_.empty() && index == sources_[0];
             for (std::size_t source = 0; source != moved_sources_; ++source)
-                if (sources_[source] == index) return true;
+                if (sources_[source] == index) return targets_.size() == 1 || source || !moving();
             return false;
         }
 
@@ -3132,7 +3138,10 @@ struct ram_index {
       private:
         friend ram_index;
 
-        /** Nodes the split's source published at planning: one slot each. */
+        /** The index the sources copy into: the one target, or a split's source. */
+        ram_index& copied_into_() const noexcept { return targets_.size() > 1 ? *sources_[0] : *rounds_.index_; }
+
+        /** Nodes the split's source holds once every other source moved in: one slot each. */
         node_id_t split_nodes_() const noexcept { return static_cast<node_id_t>(part_slots_.size()); }
 
         /** The most nodes one part takes: the source's nodes over the targets, rounded up. */
@@ -3145,7 +3154,7 @@ struct ram_index {
          *  allocates nothing at all. */
         void copy_(task_t const& task) noexcept {
             ram_index& source = *sources_[moved_sources_];
-            ram_index& target = *rounds_.index_;
+            ram_index& target = copied_into_();
             node_id_t const base = static_cast<node_id_t>(target.size());
             for (node_id_t source_node = task.nodes.first; source_node < task.nodes.bound; ++source_node) {
                 node_t& from = source.nodes_[source_node];
@@ -3161,7 +3170,7 @@ struct ram_index {
          *  this barrier the map's one writer, then empties the source and releases it. */
         void publish_copied_() noexcept {
             ram_index& source = *sources_[moved_sources_];
-            ram_index& target = *rounds_.index_;
+            ram_index& target = copied_into_();
             node_id_t const copied = static_cast<node_id_t>(source.size());
             node_id_t const base = static_cast<node_id_t>(target.size());
             if (copied) {
@@ -3256,7 +3265,6 @@ struct ram_index {
             }
             sources_[0]->forget_(split_nodes_());
             source_holds_[0].unlock();
-            moved_sources_ = 1;
         }
 
         /** Turns the rounds to the next target: its health check over the nodes its part received,
@@ -3293,13 +3301,14 @@ struct ram_index {
          *  turn. */
         refine_plan_t rounds_;
 
-        /** The sources other than the target, or a split's one source, copied at planning. */
+        /** The sources other than the target, or a split's source and then the others moving into
+         *  it, copied at planning. */
         growing_buffer<ram_index*, allocator_t> sources_;
 
         /** One unique hold per source, each released once its source moved. */
         growing_buffer<unique_lock_t, allocator_t> source_holds_;
 
-        /** Sources moved so far. */
+        /** Sources moved so far; a split's own source counts first, from planning. */
         std::size_t moved_sources_ = 0;
 
         /** The one target, or every split target, one part each, copied at planning. */
@@ -3381,7 +3390,8 @@ struct ram_index {
     /**
      *  @brief Opens a reshard of @p sources into @p targets, as @ref reshard_plan_t describes: into
      *      this index alone, every other source moving in as a part of its own, or out of this
-     *      index alone into several targets, one graph-local part each.
+     *      index, the first source, into several targets, one graph-local part each, every other
+     *      source moving into it first.
      *
      *  Every fallible step happens here. Into this index: each other source's unique side taken,
      *  the records and the key multimap past the watermark covered, and every neighbor list
@@ -3396,9 +3406,10 @@ struct ram_index {
      *  publishes its nodes, then empties this index, so its claims reopen at zero. Sources and
      *  targets must share this index's allocator, and nothing may search a source meanwhile.
      *
-     *  @param[in] sources The indexes giving their nodes up: this index alone for a split, or any
+     *  @param[in] sources The indexes giving their nodes up: this index first for a split, or any
      *      others for a pack into this index, which keeps its own nodes when it is among them.
-     *  @param[in] targets This index alone, or at least two empty indexes taking a split's parts.
+     *  @param[in] targets This index alone, or at least two empty indexes, no source among them,
+     *      taking a split's parts.
      *  @param[in] config The cache a core keeps, which sizes the rounds, and the seed picking a
      *      split's part roots, so equal seeds over equal graphs split alike.
      *  @param[in] selector Picks the neighbors each node keeps when the rounds re-stitch.
@@ -3408,9 +3419,8 @@ struct ram_index {
      *  @par Statuses:
      *  - @c invalid_argument_k No source outside a pack into this index alone, no target, or a
      *    null or repeated index in either list.
-     *  - @c unsupported_k Several sources and several targets.
-     *  - @c config_mismatch_k Neither this index the one target nor the one source of several
-     *    targets, a split target that is this index or not empty, or a zero budget.
+     *  - @c config_mismatch_k Neither this index the one target nor the first source of several
+     *    targets, a split target that is a source or not empty, or a zero budget.
      *  - @c contended_k A batch in flight on this index, a source or a target, or another plan.
      *  - @c overflow_k Nodes past the reserved ceiling, or part slots past the node ID type.
      */
@@ -3433,11 +3443,12 @@ struct ram_index {
                 for (std::size_t earlier = 0; earlier != position; ++earlier)
                     if (listed[earlier] == listed[position]) return refuse(status_t::invalid_argument_k);
             }
-        if (sources.size() > 1 && targets.size() > 1) return refuse(status_t::unsupported_k);
         bool const packing = targets.size() == 1 && targets[0] == this;
-        bool const splitting = sources.size() == 1 && sources[0] == this && targets.size() > 1;
+        bool const splitting = !sources.empty() && sources[0] == this && targets.size() > 1;
         if (!selector.connectivity || (!packing && !splitting)) return refuse(status_t::config_mismatch_k);
-        if (splitting) return plan_split_(std::move(plan), targets, context, selector.connectivity, config, codec);
+        if (splitting)
+            return plan_split_(std::move(plan), sources.subspan(1), targets, context, selector.connectivity, config,
+                               codec);
 
         // From here the plan reopens the claims on any refusal, and at its death.
         refine_plan_t& rounds = plan.rounds_;
@@ -4539,36 +4550,59 @@ struct ram_index {
     }
 
     /** What a split's @ref plan_reshard does: every check, hold, claim, cover and reservation of a
-     *  split of this index into @p targets, every neighbor list reserved to @p connectivity. */
+     *  split of this index into @p targets once every one of @p gathered moved into it, every
+     *  neighbor list reserved to @p connectivity. */
     template <typename codec_type_>
-    expected<reshard_plan_t> plan_split_(reshard_plan_t&& plan, std::span<ram_index* const> targets,
-                                         traversal_context_t& context, std::size_t connectivity,
-                                         reshard_config_t config, codec_type_ const& codec) noexcept {
+    expected<reshard_plan_t> plan_split_(reshard_plan_t&& plan, std::span<ram_index* const> gathered,
+                                         std::span<ram_index* const> targets, traversal_context_t& context,
+                                         std::size_t connectivity, reshard_config_t config,
+                                         codec_type_ const& codec) noexcept {
         auto refuse = [&](status_t status) noexcept {
             plan.release_();
             return expected<reshard_plan_t> {std::move(plan), status};
         };
         std::size_t const parts = targets.size();
-        for (ram_index const* into : targets)
-            if (into == this) return refuse(status_t::config_mismatch_k);
+        std::array<ram_index const*, 1> const own {this};
+        if (lists_share(own, targets) || lists_share(gathered, targets)) return refuse(status_t::config_mismatch_k);
 
         // The split's source is held as a pack's source is, so no batch goes into it while its
-        // nodes move out.
+        // nodes move out, and so is every source moving into it first.
         unique_lock_t source_hold {shared_mutex_, std::try_to_lock};
         if (!source_hold) return refuse(status_t::contended_k);
-        auto const [entries, watermark_status] = watermark_();
+        auto const [own_entries, watermark_status] = watermark_();
         if (failed(watermark_status)) return refuse(watermark_status);
-        if (failed(plan.sources_.reserve_exactly(1)) || failed(plan.source_holds_.reserve_exactly(1)) ||
+        if (failed(plan.sources_.reserve_exactly(1 + gathered.size())) ||
+            failed(plan.source_holds_.reserve_exactly(1 + gathered.size())) ||
             failed(plan.targets_.reserve_exactly(parts)) || failed(plan.target_holds_.reserve_exactly(parts)))
             return refuse(status_t::bad_alloc_k);
         plan.sources_.push_back_reserved(this);
         plan.source_holds_.push_back_reserved(std::move(source_hold));
+        plan.moved_sources_ = 1;
+        std::size_t entries = own_entries;
+        std::size_t const ceiling = atomic_ref<std::size_t>(ceiling_nodes_).load(std::memory_order_relaxed);
+        for (ram_index* from : gathered) {
+            unique_lock_t hold {from->shared_mutex_, std::try_to_lock};
+            if (!hold) return refuse(status_t::contended_k);
+            auto const [from_entries, from_status] = from->watermark_();
+            if (failed(from_status)) return refuse(from_status);
+            plan.source_holds_.push_back_reserved(std::move(hold));
+            plan.sources_.push_back_reserved(from);
+            // Both terms stay within the address space's records, so their sum never wraps.
+            if (entries + static_cast<std::size_t>(from_entries) > ceiling) return refuse(status_t::overflow_k);
+            entries += from_entries;
+        }
+        if (!gathered.empty()) {
+            if (status_t const covered = nodes_.cover(entries); failed(covered)) return refuse(covered);
+            if (status_t const keyed = key_map_.reserve(entries); failed(keyed)) return refuse(keyed);
+        }
         for (ram_index* into : targets) plan.targets_.push_back_reserved(into);
         std::size_t const capacity = divide_round_up<std::size_t>(entries, parts);
         if (parts * capacity > static_cast<std::size_t>(missing_k)) return refuse(status_t::overflow_k);
         if (failed(plan.part_extents_.resize(parts)) || failed(plan.part_slots_.resize(entries)) ||
             failed(plan.part_members_.resize(parts * capacity)))
             return refuse(status_t::bad_alloc_k);
+        std::size_t payload = payload_bytes_(codec);
+        for (ram_index const* from : gathered) payload += from->payload_bytes_(codec);
         // One audit and one round's columns over a full part serve every target in turn, rebound as
         // its turn comes.
         refine_plan_t& rounds = plan.rounds_;
@@ -4577,7 +4611,7 @@ struct ram_index {
         rounds.health = std::move(health);
         rounds.connectivity_ = connectivity;
         rounds.widest_list_ = max_of(connectivity + 1, this->connectivity());
-        std::size_t const payload = payload_bytes_(codec);
+        for (ram_index const* from : gathered) rounds.widest_list_ = max_of(rounds.widest_list_, from->connectivity());
         rounds.size_round_(config.refine.cache_bytes,
                            sizeof(value_t) + divide_round_up<std::size_t>(payload, max_of<std::size_t>(entries, 1)));
         if (failed(rounds.reserve_round_(capacity))) return refuse(status_t::bad_alloc_k);
@@ -4598,17 +4632,19 @@ struct ram_index {
         }
         // Neighbor lists last; each moves its buffer into a target, where re-stitching allocates
         // nothing, with a slot past the budget for a heal.
-        for (node_id_t node_id = 0; node_id != entries; ++node_id)
-            if (status_t const grown = nodes_[node_id].neighbors.reserve_exactly(connectivity + 1); failed(grown))
-                return refuse(grown);
+        for (ram_index* from : plan.sources_)
+            for (node_id_t node_id = 0; node_id != static_cast<node_id_t>(from->size()); ++node_id)
+                if (status_t const grown = from->nodes_[node_id].neighbors.reserve_exactly(connectivity + 1);
+                    failed(grown))
+                    return refuse(grown);
 
         for (ram_index* into : targets) {
             into->widen_(connectivity + 1);
-            into->widen_(this->connectivity());
+            for (ram_index const* from : plan.sources_) into->widen_(from->connectivity());
         }
         rounds.index_ = targets[0];
         plan.seed_ = config.seed;
-        plan.moves_ = phase_t::partition_k;
+        plan.moves_ = gathered.empty() ? phase_t::partition_k : phase_t::copy_k;
         return {std::move(plan), status_t::success_k};
     }
 

@@ -1500,8 +1500,15 @@ struct vram_nvidia_index {
      */
     expected<reshard_plan_t> plan_reshard(std::span<vram_nvidia_index* const> sources,
                                           std::span<vram_nvidia_index* const> targets, reshard_config_t config,
+                                          traversal_context_t& context, std::size_t rows) noexcept {
+        return core_.plan_reshard(sources, targets, &vram_nvidia_index::core_, config, context, rows);
+    }
+
+    /** @ref plan_reshard of the rows this index holds now. */
+    expected<reshard_plan_t> plan_reshard(std::span<vram_nvidia_index* const> sources,
+                                          std::span<vram_nvidia_index* const> targets, reshard_config_t config,
                                           traversal_context_t& context) noexcept {
-        return core_.plan_reshard(sources, targets, &vram_nvidia_index::core_, config, context);
+        return plan_reshard(sources, targets, config, context, size());
     }
 
     /**

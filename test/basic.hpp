@@ -2006,15 +2006,16 @@ refine_report_t basic_cut(index_type_& source, std::vector<index_type_*>& target
  *  Recall at ten against the exact oracle stays within noise of the source's at every task, at the
  *  distances the source's walks spend. Two cuts of equal graphs under one seed save byte-identical
  *  targets. Refusals leave the source whole and every target open: fewer than two targets, a
- *  malformed list, several sources into several targets, a non-empty target or the source among
- *  them; the source then takes batches again once its cut published.
+ *  malformed list, a second source among the targets, a non-empty target or the source among them;
+ *  the source then takes batches again once its cut published.
  */
 template <typename fixture_type_>
 std::size_t test_basic_cut(u64_t seed) {
     using index_t = typename fixture_type_::index_t;
     using context_t = typename index_t::traversal_context_t;
     using node_id_t = typename index_t::node_id_t;
-    constexpr std::size_t entries_k = basic_growth_nodes_k, noise_percent_k = 10;
+    constexpr std::size_t entries_k = basic_growth_nodes_k,
+                          noise_percent_k = static_cast<std::size_t>(rewrite_recall_margin_k * 100);
     std::size_t failures = 0;
     allocation_ledger_t ledger;
     {
@@ -2077,7 +2078,7 @@ std::size_t test_basic_cut(u64_t seed) {
                 source->plan_reshard(basic_alone(*source), single, {}, selector, codec, context).status,
                 status_t::config_mismatch_k);
             // Malformed lists, empty, holding a null or naming an index twice, refuse as arguments,
-            // and several sources into several targets is not a case a reshard has.
+            // and a second source among the targets would be cut into itself.
             for (std::vector<index_t*> const& malformed :
                  {std::vector<index_t*> {}, std::vector<index_t*> {targets[0], nullptr},
                   std::vector<index_t*> {targets[0], targets[0]}})
@@ -2088,8 +2089,9 @@ std::size_t test_basic_cut(u64_t seed) {
                 source->plan_reshard(std::span<index_t* const> {}, targets, {}, selector, codec, context).status,
                 status_t::invalid_argument_k);
             std::array<index_t*, 2> const several {source.get(), twin.get()};
-            failures += expect_eq(source->plan_reshard(several, targets, {}, selector, codec, context).status,
-                                  status_t::unsupported_k);
+            std::vector<index_t*> const holding_twin {targets[0], twin.get()};
+            failures += expect_eq(source->plan_reshard(several, holding_twin, {}, selector, codec, context).status,
+                                  status_t::config_mismatch_k);
             failures += expect_eq(
                 source->plan_reshard(basic_alone(*source), including, {}, selector, codec, context).status,
                 status_t::config_mismatch_k);
@@ -2211,7 +2213,8 @@ std::size_t test_basic_sharded_cut(u64_t seed, metric_type_& metric, codec_type_
     using node_id_t = typename indexes_type_::node_id_t;
     using distance_t = typename indexes_type_::distance_t;
     using value_t = typename indexes_type_::value_t;
-    constexpr std::size_t shards_k = 2, wanted_k = 10, noise_percent_k = 10;
+    constexpr std::size_t shards_k = 2, wanted_k = 10,
+                          noise_percent_k = static_cast<std::size_t>(rewrite_recall_margin_k * 100);
     std::size_t const entries = keys.size();
     std::size_t failures = 0;
     forkunion_allocator_t const allocator {no_memory_domain_k};
@@ -2274,8 +2277,8 @@ std::size_t test_basic_sharded_cut(u64_t seed, metric_type_& metric, codec_type_
     indexes_type_* targets[2] = {&first, &second};
     typename indexes_type_::reshard_config_t cut_config;
     cut_config.seed = seed;
-    // Malformed lists refuse as arguments, and several sources into several targets is not a case
-    // a reshard has; each refusal leaves every index as it was.
+    // Malformed lists refuse as arguments, and a second source among the targets would be cut into
+    // itself; each refusal leaves every index as it was.
     indexes_type_* const repeated[2] = {&first, &first};
     indexes_type_* const holding_null[2] = {&first, nullptr};
     for (std::span<indexes_type_* const> malformed :
@@ -2286,7 +2289,7 @@ std::size_t test_basic_sharded_cut(u64_t seed, metric_type_& metric, codec_type_
             status_t::invalid_argument_k);
     indexes_type_* const several[2] = {&source, &second};
     failures += expect_eq(source.reshard(several, targets, cut_config, selector, codec, metric, context).status,
-                          status_t::unsupported_k);
+                          status_t::config_mismatch_k);
     failures += expect_eq(source.size(), entries);
     auto const [cut, cut_status] = source.reshard(basic_alone(source), targets, cut_config, selector, codec, metric,
                                                   context);

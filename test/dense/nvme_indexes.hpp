@@ -1311,10 +1311,6 @@ std::size_t test_nvme_index_search(u64_t seed) {
                                     comparison_verdict_t::assert_k, ram_errors, 0);
 }
 
-/** Recall a rewrite may lose against a fresh RAM build of the same entries, as a share of the
- *  results. */
-constexpr f64_t rewrite_recall_margin_k = 0.05;
-
 /** Queries every recall is measured over, and results each one keeps. */
 constexpr std::size_t rewrite_queries_k = 64, rewrite_wanted_k = 10;
 
@@ -2023,10 +2019,11 @@ std::size_t test_nvme_reshard_gathers(u64_t seed) {
         reshard(std::span<nvme_type_* const> {sources}, std::span<nvme_type_* const> {}, fixture.driver.executor)
             .status,
         status_t::invalid_argument_k);
+    // Cutting into targets that name a view answers read-only before the source among them.
     fixture.failures += expect_eq(
         reshard(std::span<nvme_type_* const> {sources}, std::span<nvme_type_* const> {sources}, fixture.driver.executor)
             .status,
-        status_t::unsupported_k);
+        status_t::read_only_k);
     auto const [gathered, status] = reshard(std::span<nvme_type_* const> {sources},
                                             std::span<nvme_type_* const> {targets}, fixture.driver.executor);
     fixture.failures += expect_eq(status, status_t::success_k);
@@ -2092,30 +2089,34 @@ std::size_t test_nvme_reshard_recuts(u64_t seed) {
     return fixture.failures;
 }
 
-/** A loaded index of two parts is cut into two empty targets: each loads two parts of its own,
- *  together they serve every entry, each key once, every entry reached from its target's root,
- *  and the source is left empty. */
+/** Two loaded indexes of two parts each are cut into two empty targets, several sources into
+ *  several targets: each target loads four parts of its own, one per source part, together
+ *  they serve every entry, each key once, every entry reached from its target's root, and both
+ *  sources are left empty. */
 template <typename nvme_type_, nk_kernel_kind_t kernel_>
 std::size_t test_nvme_reshard_cuts(u64_t seed) {
     std::size_t const dimensions = dense_dimensions_for<typename nvme_type_::scalar_t>(dense_values_k);
+    std::size_t const half = rewrite_entries_k / 2;
     rewrite_fixture<nvme_type_> fixture {"reshard_cuts", kernel_, rewrite_entries_k, dimensions, seed};
-    char const* const saved = fixture.save(0, rewrite_entries_k, 2);
-    nvme_type_ loaded {forkunion_allocator_t {no_memory_domain_k}};
+    char const* const saved = fixture.save(0, half, 2);
+    char const* const other_saved = fixture.save(half, rewrite_entries_k - half, 2);
+    nvme_type_ loaded {forkunion_allocator_t {no_memory_domain_k}}, other {forkunion_allocator_t {no_memory_domain_k}};
     fixture.failures += nvme_load_writable(loaded, saved, fixture);
+    fixture.failures += nvme_load_writable(other, other_saved, fixture);
     if (fixture.failures) return fixture.failures;
     std::array<nvme_type_, 2> targets {nvme_type_ {forkunion_allocator_t {no_memory_domain_k}},
                                        nvme_type_ {forkunion_allocator_t {no_memory_domain_k}}};
     std::array<nvme_type_*, 2> const slots {&targets[0], &targets[1]};
-    std::array<nvme_type_*, 1> const source {&loaded};
-    auto const [cut, status] = reshard(std::span<nvme_type_* const> {source}, std::span<nvme_type_* const> {slots},
+    std::array<nvme_type_*, 2> const sources {&loaded, &other};
+    auto const [cut, status] = reshard(std::span<nvme_type_* const> {sources}, std::span<nvme_type_* const> {slots},
                                        fixture.driver.executor);
     fixture.failures += expect_eq(status, status_t::success_k);
     fixture.failures += expect(cut.graph.neighborhoods > 0);
-    fixture.failures += expect_eq(loaded.shards_count(), 0u);
+    fixture.failures += expect_eq(loaded.shards_count() + other.shards_count(), 0u);
     fixture.failures += expect_eq(targets[0].size() + targets[1].size(), rewrite_entries_k);
     std::vector<std::size_t> totals(rewrite_entries_k, 0), entries(rewrite_entries_k);
     for (nvme_type_& target : targets) {
-        fixture.failures += expect_eq(target.shards_count(), 2u);
+        fixture.failures += expect_eq(target.shards_count(), 4u);
         fixture.failures += expect(
             succeeded(target.hold_keys(forkunion_allocator_t {no_memory_domain_k}, 0, fixture.driver.executor)));
         auto const [health, health_status] = target.health(fixture.driver.executor);

@@ -1231,6 +1231,10 @@ typedef struct usearch_geospatial_reshard_t {
  *  Each part enters its target with its edges into other parts dropped and the entries that lost
  *  one placed first.
  *
+ *  Gathering then cutting names several sources and several targets, none of them a source: every
+ *  other source gathers into the first as a gather would, with no round, and the first is then
+ *  cut into the targets, every source ending empty and live.
+ *
  *  No walk links a moved entry in: each target then runs a round, as @c usearch_geospatial_refine
  *  does, healing what arrived as an island and re-stitching the neighborhoods it shares with the
  *  entries already there. Every handle is checked and held before the first entry moves, so a
@@ -1255,9 +1259,8 @@ typedef struct usearch_geospatial_reshard_t {
  *  - @c usearch_status_config_mismatch_k A handle of another residency, class, scalar, kind or
  *    geometry than the first source, a target neither a source nor empty, or a source cut into
  *    targets that include it.
- *  - @c usearch_status_unsupported_k Several sources into several targets, one handle as its only
- *    source and target, since a handle of one shard has nothing to recut, or a handle on an AMD or
- *    Apple GPU, which no basic tower serves.
+ *  - @c usearch_status_unsupported_k One handle as its only source and target, since a handle of
+ *    one shard has nothing to recut, or a handle on an AMD or Apple GPU, which no tower serves.
  *  - @c usearch_status_contended_k An insertion or refinement in flight on a handle named; nothing
  *    moves.
  *  - @c usearch_status_overflow_k A part passes a target shard's ceiling.

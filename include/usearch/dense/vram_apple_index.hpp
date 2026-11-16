@@ -1249,7 +1249,7 @@ struct vram_apple_index {
             switch (phase_) {
             case phase_t::health_k: return 2 * std::size_t {health.visible};
             case phase_t::heal_k: return health.islands();
-            case phase_t::hubs_k: return hubs_for_(health.visible);
+            case phase_t::hubs_k: return first_hubs_(health.visible);
             case phase_t::gather_k: return gathered_;
             case phase_t::restitch_k: return health.visible;
             default: return 0;
@@ -1322,10 +1322,15 @@ struct vram_apple_index {
             return round_hubs(entries, sizing_.hubs_per_draw, sizing_.capacity);
         }
 
-        /** Draws one pack of hubs by seeded bijection over the visible entries, ascending, into the
-         *  first gather's one run over every ID. */
+        /** Hubs the round's first gather over @p entries draws, as @ref round_first_hubs counts. */
+        std::size_t first_hubs_(std::size_t entries) const noexcept {
+            return round_first_hubs(entries, sizing_.hubs_per_draw, sizing_.capacity);
+        }
+
+        /** Draws the first gather's hubs by seeded bijection over the visible entries, ascending,
+         *  into its one run over every ID. */
         void draw_hubs_() noexcept {
-            std::size_t const visible = health.visible, hubs = hubs_for_(visible);
+            std::size_t const visible = health.visible, hubs = first_hubs_(visible);
             std::span<node_id_t> const hub_nodes {health.template column<node_id_t>(health.layout.hub_nodes), hubs};
             for (std::size_t rank = 0; rank != hubs; ++rank)
                 hub_nodes[rank] = static_cast<node_id_t>(seeded_bijection(rank, visible, round_seed_));
@@ -1725,6 +1730,8 @@ struct vram_apple_index {
      *  @param[in] config The rounds' knobs and the seed picking the parts' roots; a shard capacity
      *      is refused, as a mono-index has no shards to cap.
      *  @param[in,out] context The driving context, whose round buffer takes a whole part's round.
+     *  @param[in] rows The rows this index holds once the appends planned ahead of the split land,
+     *      as a gather into it before its cut plans them; the rows it holds now otherwise.
      *
      *  @par Statuses:
      *  - @c invalid_argument_k No sources or no targets, a null one, or an index named twice
@@ -1740,7 +1747,7 @@ struct vram_apple_index {
      */
     expected<reshard_plan_t> plan_reshard(std::span<vram_apple_index* const> sources,
                                           std::span<vram_apple_index* const> targets, reshard_config_t config,
-                                          traversal_context_t& context) noexcept {
+                                          traversal_context_t& context, std::size_t rows) noexcept {
         reshard_plan_t plan;
         for (std::span<vram_apple_index* const> const listed : {sources, targets}) {
             if (listed.empty()) return {std::move(plan), status_t::invalid_argument_k};
@@ -1753,7 +1760,7 @@ struct vram_apple_index {
         if (config.shard_capacity) return {std::move(plan), status_t::unsupported_k};
         if (sources.size() != 1 || sources[0] != this || targets.size() < 2)
             return {std::move(plan), status_t::unsupported_k};
-        std::size_t const parts = targets.size(), rows = size();
+        std::size_t const parts = targets.size();
         if (!counters_) return {std::move(plan), status_t::uninitialized_k};
         if (context.device() != device_.ordinal || !context) return {std::move(plan), status_t::config_mismatch_k};
         for (vram_apple_index const* into : targets)
@@ -1797,6 +1804,13 @@ struct vram_apple_index {
         plan.source_ = this;
         plan.moves_ = rows ? phase_t::partition_k : phase_t::done_k;
         return {std::move(plan), status_t::success_k};
+    }
+
+    /** @ref plan_reshard of the rows this index holds now. */
+    expected<reshard_plan_t> plan_reshard(std::span<vram_apple_index* const> sources,
+                                          std::span<vram_apple_index* const> targets, reshard_config_t config,
+                                          traversal_context_t& context) noexcept {
+        return plan_reshard(sources, targets, config, context, size());
     }
 
     /**

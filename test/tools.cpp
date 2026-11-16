@@ -521,10 +521,13 @@ static std::size_t check_tool_pipes(settings_t const& settings, std::string_view
         fmt::format("'{}' dense refine '{}' --max-refines 2 --save '{}' > /dev/null && '{}' metadata '{}' > /dev/null",
                     binary, index, refined, binary, refined));
     std::string const cut = fmt::format("{}-cut.json", stem), gathered = fmt::format("{}-gathered.safegraphs", stem);
+    std::string const recut = fmt::format("{}-recut.json", stem);
     failures += run_shell(
         fmt::format("'{}' dense reshard '{}' --parts 2 --save '{}' > /dev/null && " //
                     "'{}' dense reshard '{}' --save '{}' > /dev/null && '{}' metadata '{}' > /dev/null",
                     binary, refined, cut, binary, cut, gathered, binary, gathered));
+    // Two parts gather and cut into three, several sources into several targets.
+    failures += run_shell(fmt::format("'{}' dense reshard '{}' --parts 3 --save '{}' > /dev/null", binary, cut, recut));
     failures += run_shell(fmt::format("cat '{}' | '{}' dense search --index - --input '{}' --keys-column id " //
                                       "--traversal scan --wanted 1 --output - > '{}'",                        //
                                       index, binary, stream, run));

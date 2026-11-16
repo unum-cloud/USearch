@@ -1202,7 +1202,7 @@ typedef enum usearch_continuation_t {
  *  synchronization of its own - and never after the call it was passed to stores its final status.
  *
  *  Arguments, in order:
- *  - @c completed: units finished so far, never decreasing across one call's reports.
+ *  - @c completed: units finished so far, never decreasing within one phase.
  *  - @c total: units the call finishes unless cancelled.
  *  - @c state: the opaque pointer registered alongside the handler, forwarded verbatim.
  */

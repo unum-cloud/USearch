@@ -996,9 +996,25 @@ expected<std::size_t> get_entries(variant_type_& variant, usearch_key_t key,
 
 #pragma region Variant Bodies
 
-/** What a basic reshard moves before its rounds: other sources packed into one target, or one
- *  source split into several targets. */
+/** What a basic reshard moves before its rounds: other sources packed into one target, or the
+ *  first source, with every other gathered into it, split into several targets. */
 enum class reshard_shape_t : u8_t { pack_k, split_k };
+
+/** Whether a reshard plan of @p plan_type_ tells which variant of @p variant_type_ it emptied. */
+template <typename plan_type_, typename variant_type_>
+concept names_emptied = requires(plan_type_ const& plan, variant_type_ const& variant) { plan.moved(&variant.index); };
+
+/** Whether a variant of @p variant_type_ folds the counts of a source a pack emptied into it. */
+template <typename variant_type_>
+concept folds_packed_sources = requires(variant_type_& driven, variant_type_& source) {
+    driven.count_packed_source(source);
+};
+
+/** Whether a variant of @p variant_type_ counts the part each target of its split took. */
+template <typename variant_type_>
+concept counts_split_targets = requires(variant_type_& driven, variant_type_& target) {
+    driven.count_split_target(target);
+};
 
 /** A refine plan in flight: the variant whose rounds it drives, and the engine plan, which also
  *  says where the calls stand. */
@@ -1012,8 +1028,9 @@ struct basic_refine_plan {
  *  @brief A reshard plan in flight: the variant whose rounds it drives, the variants whose entries
  *      move into it or out of it, and the engine plan, which also says where the calls stand.
  *
- *  A pack moves every other source into the driven target, and a split moves the driven source into
- *  every target; once the plan closes, every variant's own counts follow the entries it holds.
+ *  A pack moves every other source into the driven target, and a split moves every other source
+ *  into the driven one and it into every target; once the plan closes, every variant's own counts
+ *  follow the entries it holds.
  */
 template <typename variant_type_, typename plan_type_>
 struct basic_reshard_plan {
@@ -1270,9 +1287,8 @@ struct specialized_variant {
         else return open_refine(of(variant), config, executor);
     }
 
-    /** Opens a pack of every other source into the one target, or a split of the one source into
-     *  every target, and hands several of both to the engine, which refuses them; a handle of one
-     *  shard has nothing to recut in place. */
+    /** Opens a pack of every other source into the one target, or a split of the first source,
+     *  every other gathered into it, into every target; one shard has nothing to recut in place. */
     static expected<void*> reshard_plan_open(variants_view_t sources, variants_view_t targets,
                                              reshard_options_t options, executor_t& executor) noexcept {
         if constexpr (viewed_k) return {nullptr, status_t::read_only_k};
@@ -1298,10 +1314,11 @@ struct specialized_variant {
                                     reshard_shape_t::pack_k, options, executor);
             }
             variant_t& source = *listed_sources[0];
-            for (variant_t* const target : listed_targets) {
-                if (listed_sources.size() == 1 && target == &source) return {nullptr, status_t::config_mismatch_k};
-                moved.push_back_reserved(target);
-            }
+            // The gathered sources lead, so their counts fold into the first before the split's.
+            for (variant_t* const gathered : to_span(listed_sources).subspan(1)) moved.push_back_reserved(gathered);
+            if (lists_share(to_span(listed_sources), to_span(listed_targets)))
+                return {nullptr, status_t::config_mismatch_k};
+            for (variant_t* const target : listed_targets) moved.push_back_reserved(target);
             return open_reshard(source, to_span(moved), to_span(listed_sources), to_span(listed_targets),
                                 reshard_shape_t::split_k, options, executor);
         }
@@ -1314,21 +1331,42 @@ struct specialized_variant {
         else return held.driven->drive(held.plan, executor, ticks);
     }
 
-    /** Hands each variant a reshard moved in or out what its entries count: the driven target folds
+    /** Hands each variant a reshard moved in or out what its entries count: the driven index folds
      *  every emptied source's, and every target of a split counts its part. */
     template <typename plan_type_>
     static void count_moved(basic_reshard_plan<variant_t, plan_type_>& held) noexcept {
         for (variant_t* const moved : held.moved_variants) {
-            if (held.shape == reshard_shape_t::pack_k) {
-                if constexpr (requires {
-                                  held.plan.moved(&moved->index);
-                                  held.driven->count_packed_source(*moved);
-                              })
-                    if (held.plan.moved(&moved->index)) held.driven->count_packed_source(*moved);
-            }
-            else if constexpr (requires { held.driven->count_split_target(*moved); })
-                held.driven->count_split_target(*moved);
+            if (emptied_by_(held.plan, *moved)) fold_packed_(*held.driven, *moved);
+            else if (held.shape == reshard_shape_t::split_k) count_split_(*held.driven, *moved);
         }
+    }
+
+    /** Whether @p plan moved @p variant 's entries out and left it empty; never, for a plan that
+     *  empties none it could name. */
+    template <typename plan_type_>
+    static bool emptied_by_(plan_type_ const&, variant_t const&) noexcept {
+        return false;
+    }
+    template <typename plan_type_>
+        requires names_emptied<plan_type_, variant_t>
+    static bool emptied_by_(plan_type_ const& plan, variant_t const& variant) noexcept {
+        return plan.moved(&variant.index);
+    }
+
+    /** Folds the counts of @p source, which @p driven took in, into @p driven 's own. */
+    static void fold_packed_(variant_t&, variant_t&) noexcept {}
+    static void fold_packed_(variant_t& driven, variant_t& source) noexcept
+        requires folds_packed_sources<variant_t>
+    {
+        driven.count_packed_source(source);
+    }
+
+    /** Counts the part @p target took from @p driven 's split. */
+    static void count_split_(variant_t&, variant_t&) noexcept {}
+    static void count_split_(variant_t& driven, variant_t& target) noexcept
+        requires counts_split_targets<variant_t>
+    {
+        driven.count_split_target(target);
     }
 
     /** Stops the round at the barrier it stands at, runs the closing health check, or a round after

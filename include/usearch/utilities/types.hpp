@@ -1140,6 +1140,28 @@ constexpr std::size_t round_hubs(std::size_t entries, std::size_t hubs_per_draw,
     return min_of(min_of(hubs_per_draw, divide_round_up(2 * entries, neighborhood_capacity)), numbered_k);
 }
 
+/** Whether any index @p first names is also among @p second: a source among the targets of a cut,
+ *  which would empty a target it fills. */
+template <typename first_type_, typename second_type_>
+constexpr bool lists_share(first_type_ const& first, second_type_ const& second) noexcept {
+    for (auto const* listed : first)
+        for (auto const* other : second)
+            if (listed == other) return true;
+    return false;
+}
+
+/** Hubs a round's first gather over @p entries entries draws: about the square root of the
+ *  neighborhoods @ref round_hubs would fill, so every entry scores about twice that across this
+ *  gather and the one inside its own neighborhood, rather than a whole pack. */
+constexpr std::size_t round_first_hubs(std::size_t entries, std::size_t hubs_per_draw,
+                                       std::size_t neighborhood_capacity) noexcept {
+    if (!entries) return 0;
+    std::size_t const neighborhoods = divide_round_up(2 * entries, neighborhood_capacity);
+    std::size_t root = 1;
+    while (root * root < neighborhoods && root < hubs_per_draw) ++root;
+    return round_hubs(entries, root, neighborhood_capacity);
+}
+
 /** What a round that reached its closing health check concludes: stopped as its caller left it,
  *  converged when it changed no entry's link set, improved otherwise. */
 constexpr refine_verdict_t concluded_verdict(refine_report_t const& report) noexcept {

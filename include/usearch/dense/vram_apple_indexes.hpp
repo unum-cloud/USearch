@@ -53,7 +53,7 @@ struct vram_apple_indexes_cursor;
 
 /**
  *  @brief Opens a reshard of @p sources into @p targets on the devices @p executor drives: several
- *      sources into one target, or one source into several targets.
+ *      sources into one target, or any sources into several targets.
  *
  *  Into one target, every source but the target moves in, one after another: source shards,
  *  largest first, each append to the target shard with the fewest rows that keeps it under its
@@ -68,13 +68,14 @@ struct vram_apple_indexes_cursor;
  *  appended parts are islands its heal links without a distance, and its gather and restitch mix
  *  them with the rest.
  *
- *  Into several targets, the one source partitions every shard breadth-first into one part per
+ *  Into several targets, every other source first appends into the first one as into one target,
+ *  with no round, and the first source then partitions every shard breadth-first into one part per
  *  target, and part @c r of shard @c s goes to shard @c s of target @c r, on the same device, which
- *  must hold as many shards. Unverified on Linux. Every shard's split opens at planning, queuing
- *  its partition; the plan's phases then scatter every shard's nodes, keys included, publish the
- *  targets' shards, and run one round in each, its heal linking what the cut left apart, the parts'
- *  roots picked under @p config.seed, so equal seeds over equal graphs split alike. The source
- *  empties, keeping its shards and their storage.
+ *  must hold as many shards and be no source. Unverified on Linux. Every shard's split opens at
+ *  planning, sized for the rows the appends leave it, queuing its partition; the plan's phases then
+ *  scatter every shard's nodes, keys included, publish the targets' shards, and run one round in
+ *  each, its heal linking what the cut left apart, the parts' roots picked under @p config.seed, so
+ *  equal seeds over equal graphs split alike. Every source empties and keeps its shards.
  *
  *  The plan copies both lists, and every index closes here, each under its own gate, so the packing
  *  never goes stale: the target or targets stay closed while the plan lives and each source until
@@ -86,9 +87,8 @@ struct vram_apple_indexes_cursor;
  *  @par Statuses:
  *  - @c invalid_argument_k No sources or no targets, a null index, or one named twice within a
  *    list.
- *  - @c unsupported_k Several sources into several targets, or a nonzero @c shard_capacity, which
- *    the moves cannot honour; a source shard past the target's shard capacity, which would have to
- *    be cut.
+ *  - @c unsupported_k A nonzero @c shard_capacity, which the moves cannot honour; a source shard
+ *    past the target's shard capacity, which would have to be cut.
  *  - @c uninitialized_k A target with no shards, or an index keeping it, as its @c status says.
  *  - @c config_mismatch_k Another metric or geometry, a device the @p executor does not drive, a
  *    split's source among its targets, or a split target of another shard count or device.
@@ -990,11 +990,11 @@ struct vram_apple_indexes {
             if (status_t const paired = fanout_t::pairs_with(target->shards_, executor); failed(paired)) return paired;
             auto [claim, claim_status] = executor.claim();
             if (failed(claim_status)) return claim_status;
-            if (splitting_()) return rounds_.drive_(shard_splits_, on_visited);
             for (; moved_sources_ != incoming_(); ++moved_sources_)
                 if (status_t const moved = target->move_in_(*incoming_source_(moved_sources_), moves_of_(), executor);
                     failed(moved))
                     return moved;
+            if (splitting_()) return rounds_.drive_(shard_splits_, on_visited);
             if (rounds_.shard_plans_.empty())
                 if (status_t const opened = rounds_.open_shards_(); failed(opened)) return opened;
             return rounds_.drive_(rounds_.shard_plans_, on_visited);
@@ -1029,8 +1029,8 @@ struct vram_apple_indexes {
         /** The phase the plan is in: the appends' while a source is pending, then the target
          *  shards', a split's partition included. */
         phase_t phase() const noexcept {
-            if (splitting_()) return refine_plan_t::phase_(shard_splits_);
-            return moved_sources_ != incoming_() ? phase_t::copy_k : rounds_.phase();
+            if (moved_sources_ != incoming_()) return phase_t::copy_k;
+            return splitting_() ? refine_plan_t::phase_(shard_splits_) : rounds_.phase();
         }
 
         /** Where the rounds' phase sits among a round's six, and its units done and in all. */
@@ -1052,9 +1052,9 @@ struct vram_apple_indexes {
         }
 
         /** Whether the rows of @p index moved out and left it empty, consumed: a source appended
-         *  into the target, or a split's source once its parts scattered. */
+         *  into the target or into a split's first source, or that first source once scattered. */
         bool moved(vram_apple_indexes const* index) const noexcept {
-            if (splitting_()) return index == sources_[0] && !shard_splits_.empty() && !shard_splits_[0].moving();
+            if (splitting_() && index == sources_[0]) return !shard_splits_.empty() && !shard_splits_[0].moving();
             for (std::size_t position = 0; position != moved_sources_; ++position)
                 if (incoming_source_(position) == index) return true;
             return false;
@@ -1063,21 +1063,24 @@ struct vram_apple_indexes {
       private:
         friend vram_apple_indexes;
 
-        /** Whether the plan splits its one source into several targets. */
+        /** Whether the plan splits its first source into several targets. */
         bool splitting_() const noexcept { return targets_.size() > 1; }
 
-        /** Sources that move into the one target, it excepted; none for a split. */
+        /** The index the other sources append into: the one target, or a split's first source, as
+         *  for a split that cleared its targets on a refusal. */
+        vram_apple_indexes* receiving_() const noexcept { return targets_.size() == 1 ? targets_[0] : sources_[0]; }
+
+        /** Sources that append into @ref receiving_, it excepted. */
         std::size_t incoming_() const noexcept {
-            if (targets_.size() != 1) return 0;
             std::size_t count = 0;
-            for (vram_apple_indexes* source : sources_) count += source != targets_[0];
+            for (vram_apple_indexes* source : sources_) count += source != receiving_();
             return count;
         }
 
         /** The source at @p position among those @ref incoming_ counts. */
         vram_apple_indexes* incoming_source_(std::size_t position) const noexcept {
             for (vram_apple_indexes* source : sources_)
-                if (source != targets_[0] && !position--) return source;
+                if (source != receiving_() && !position--) return source;
             return nullptr;
         }
 
@@ -2345,14 +2348,14 @@ struct vram_apple_indexes {
                     if (listed[earlier] == listed[position]) return {{}, status_t::invalid_argument_k};
             }
         }
-        // The moves keep each source shard whole, so no capacity can be honoured.
-        if (config.shard_capacity) return {{}, status_t::unsupported_k};
-        if (sources.size() > 1 && targets.size() > 1) return {{}, status_t::unsupported_k};
         vram_apple_indexes& lead = *targets[0];
         for (std::span<vram_apple_indexes* const> const listed : {sources, targets})
             for (vram_apple_indexes const* index : listed)
                 if (index->kernel() != lead.kernel() || !(index->geometry() == lead.geometry()))
                     return {{}, status_t::config_mismatch_k};
+        if (targets.size() > 1 && lists_share(sources, targets)) return {{}, status_t::config_mismatch_k};
+        // The moves keep each source shard whole, so no capacity can be honoured.
+        if (config.shard_capacity) return {{}, status_t::unsupported_k};
         reshard_plan_t plan {lead.shards_.allocator()};
         if (failed(plan.sources_.reserve_exactly(sources.size())) ||
             failed(plan.targets_.reserve_exactly(targets.size())))
@@ -2365,11 +2368,10 @@ struct vram_apple_indexes {
         return {std::move(plan), status_t::success_k};
     }
 
-    /** Opens a reshard of the plan's sources into this index, its one target: closes it and every
-     *  other source under its gate and packs their shards. */
-    status_t open_pack_(reshard_plan_t& plan, executor_t& executor, reshard_config_t const& config) noexcept {
-        std::size_t const shards = shards_.size();
-        if (!shards) return status_t::uninitialized_k;
+    /** Gathers the plan's other sources into this index, the one target or a split's first source:
+     *  closes it and every other source under its gate and packs their shards. */
+    status_t open_gather_(reshard_plan_t& plan, executor_t& executor, reshard_config_t const& config) noexcept {
+        if (!shards_.size()) return status_t::uninitialized_k;
         if (status_t const kept = status(); failed(kept)) return kept;
         std::size_t const packed = plan.incoming_();
         for (std::size_t position = 0; position != packed; ++position) {
@@ -2391,7 +2393,6 @@ struct vram_apple_indexes {
                 plan.moved_sources_ = packed;
                 return closed;
             }
-        if (failed(rounds.shard_plans_.reserve_exactly(shards))) return status_t::bad_alloc_k;
         for (std::size_t position = 0; position != packed; ++position) {
             plan.source_shards_ += plan.incoming_source_(position)->shards_.size();
             plan.moved_entries_ += plan.incoming_source_(position)->size();
@@ -2412,52 +2413,73 @@ struct vram_apple_indexes {
                 return packed;
         }
         // A refine's contexts own their buffers, so they open as any verb's do.
-        if (status_t const opened = fanout_t::reserve_traversals(shards_, rounds.traversals_, executor); failed(opened))
-            return opened;
-        if (!packed)
+        return fanout_t::reserve_traversals(shards_, rounds.traversals_, executor);
+    }
+
+    /** Opens a reshard of the plan's sources into this index, its one target, as @ref open_gather_
+     *  packs them. */
+    status_t open_pack_(reshard_plan_t& plan, executor_t& executor, reshard_config_t const& config) noexcept {
+        if (status_t const gathered = open_gather_(plan, executor, config); failed(gathered)) return gathered;
+        refine_plan_t& rounds = plan.rounds_;
+        if (failed(rounds.shard_plans_.reserve_exactly(shards_.size()))) return status_t::bad_alloc_k;
+        if (!plan.incoming_())
             if (status_t const opened = rounds.open_shards_(); failed(opened)) return opened;
         return status_t::success_k;
     }
 
-    /** Opens a split of this index, the plan's one source, into its targets: closes this index and
-     *  every target under its gate, then opens every shard's split, queuing its partition. */
+    /** Opens a split of this index, the plan's first source, into its targets: gathers every other
+     *  source into it as @ref open_gather_ does, closes every target under its gate, and opens each
+     *  shard's split over the rows the appends leave it, queuing its partition. */
     status_t open_split_(reshard_plan_t& plan, executor_t& executor, reshard_config_t const& config) noexcept {
-        std::size_t const shards = shards_.size(), parts_count = plan.targets_.size();
-        if (!shards) return status_t::uninitialized_k;
-        if (status_t const kept = status(); failed(kept)) return kept;
+        std::size_t const shards = shards_.size(), parts = plan.targets_.size();
         for (vram_apple_indexes const* into : plan.targets_) {
-            if (into == this || into->shards_.size() != shards) return status_t::config_mismatch_k;
+            if (into->shards_.size() != shards) return status_t::config_mismatch_k;
             for (std::size_t shard = 0; shard != shards; ++shard)
                 if (into->shards_[shard].index->device_specs().ordinal != shards_[shard].index->device_specs().ordinal)
                     return status_t::config_mismatch_k;
         }
-        if (status_t const paired = fanout_t::pairs_with(shards_, executor); failed(paired)) return paired;
-        growing_buffer<index_t*, forkunion_allocator_t> parts {shards_.allocator()};
-        if (failed(parts.resize(parts_count))) return status_t::bad_alloc_k;
-        if (status_t const closed = close_gated_(); failed(closed)) return closed;
-        refine_plan_t& rounds = plan.rounds_;
-        rounds.owner_ = this;
-        rounds.config_ = config.refine;
-        if (!rounds.config_.cache_bytes) rounds.config_.cache_bytes = executor.cache_bytes_per_core();
-        for (std::size_t closing = 0; closing != parts_count; ++closing)
+        std::size_t const own_entries = size();
+        if (status_t const gathered = open_gather_(plan, executor, config); failed(gathered)) return gathered;
+        for (std::size_t closing = 0; closing != parts; ++closing)
             if (status_t const closed = plan.targets_[closing]->close_gated_(); failed(closed)) {
                 while (closing) plan.targets_[--closing]->shards_.reopen();
-                // Unbound, the plan reopens no target, so only this index reopens.
+                // Unbound, the plan reopens no target, so only the gathered indexes reopen.
                 plan.targets_.clear();
                 return closed;
             }
-        plan.source_shards_ = shards;
-        plan.moved_entries_ = size();
-        if (failed(plan.shard_splits_.reserve_exactly(shards))) return status_t::bad_alloc_k;
-        if (status_t const opened = fanout_t::reserve_traversals(shards_, rounds.traversals_, executor); failed(opened))
-            return opened;
-        reshard_config_t const shard_config {rounds.config_, 0, config.seed};
+        plan.source_shards_ += shards;
+        plan.moved_entries_ += own_entries;
+        return open_shard_splits_(plan, config.seed);
+    }
+
+    /** The rows every shard of this index holds once the appends @p plan placed land: its own, and
+     *  those of every incoming source shard its moves send there. */
+    void planned_rows_(reshard_plan_t const& plan, std::span<std::size_t> rows) const noexcept {
+        for (std::size_t shard = 0; shard != rows.size(); ++shard) rows[shard] = shards_[shard].index->size();
+        std::size_t move = 0;
+        for (std::size_t position = 0; position != plan.incoming_(); ++position)
+            for (shard_t const& shard : plan.incoming_source_(position)->shards_)
+                rows[plan.moves_[move++].into] += shard.index->size();
+    }
+
+    /** Opens every shard's split of this index into the same shard of every target of @p plan, each
+     *  sized for the rows the plan's appends leave it, queuing its partition. */
+    status_t open_shard_splits_(reshard_plan_t& plan, u64_t seed) noexcept {
+        std::size_t const shards = shards_.size(), parts_count = plan.targets_.size();
+        refine_plan_t& rounds = plan.rounds_;
+        growing_buffer<index_t*, forkunion_allocator_t> parts {shards_.allocator()};
+        growing_buffer<std::size_t, forkunion_allocator_t> rows {shards_.allocator()};
+        if (failed(parts.resize(parts_count)) || failed(rows.resize(shards)) ||
+            failed(plan.shard_splits_.reserve_exactly(shards)))
+            return status_t::bad_alloc_k;
+        planned_rows_(plan, to_writable_span(rows));
+        reshard_config_t const shard_config {rounds.config_, 0, seed};
         for (std::size_t shard = 0; shard != shards; ++shard) {
             for (std::size_t part = 0; part != parts_count; ++part)
                 parts[part] = plan.targets_[part]->shards_[shard].index.get();
             index_t* const source = shards_[shard].index.get();
             auto [shard_plan, status] = source->plan_reshard({&source, 1u}, to_span(parts), shard_config,
-                                                             rounds.traversals_[shard]);
+                                                             rounds.traversals_[shard], rows[shard]);
             if (failed(status)) return status;
             plan.shard_splits_.push_back_reserved(std::move(shard_plan));
         }

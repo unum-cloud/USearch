@@ -30,7 +30,7 @@ The verbs are named after the C interface they call:
   With a `--connectivity` wider than the checkpoint's, the load keeps every node's stored neighbors and leaves the new slots empty, and a round gives an entry the diverse links that lead somewhere new, so an M=32 graph widens toward an M=64 one without a rebuild.
 - `usearch dense reshard <first> <others>... --save <address>` loads every checkpoint and packs them all into the first in one call, keeping their graphs rather than re-inserting their vectors, and saves the packed index.
   A manifest stands for its parts, so `usearch dense reshard <manifest> --save <address>` packs a split checkpoint back into one, its first part the target.
-  `usearch dense reshard <address> --parts N --save <manifest>` splits one checkpoint into `N` graph-local parts instead and commits them as a manifest at `<manifest>`, the parts beside it.
+  `usearch dense reshard <address>... --parts N --save <manifest>` cuts the checkpoints into `N` graph-local parts instead, every other one gathered into the first before the cut, and commits them as a manifest at `<manifest>`, the parts beside it.
   No walk links a moved entry in: graphs move whole, and every target closes with a round that heals what arrived or what the split left unreached; the verb reports the entries, the time, the entries those rounds changed and how many a search reaches.
 - `usearch dense health <address>` views a checkpoint from storage and checks how many of its entries a search reaches, the depths its walk took, and the entries beyond the most populated depth.
 - `usearch dense search <address> --query-vectors <path>` views a checkpoint from storage under `--residency nvme`, and loads it into RAM otherwise, then searches every row of a RetriEval file and prints each query's keys and distances, then the queries per second.
@@ -267,7 +267,7 @@ Beyond those, the other verbs take only what they move:
 
 - `reshard` and `refine` take `--save`, and `refine` also `--max-refines`, defaulting to `1`, and `--connectivity`, defaulting to the checkpoint's and only ever widening a dense one.
   Both default to `--residency ram`, and a residency that cannot refine refuses.
-- `reshard` also takes `--parts` of at least `2`, cutting its one checkpoint, and `--save` then names the manifest.
+- `reshard` also takes `--parts` of at least `2`, cutting its checkpoints, and `--save` then names the manifest.
 - `health` defaults to `--residency nvme`, viewing the checkpoint from storage.
 - `search` takes `--wanted`, defaulting to `10`, `--expansion-search`, `--traversal`, `walk` by default or `scan`, `--batch`, and the queries in the format its modality's insert reads.
   A view also takes `--nvme-ram`, the bytes its key table may take, like `24G`: with it, key lookups and hints probe the table, and without it, the default, they refuse; the open line then counts the table's rows and bytes.

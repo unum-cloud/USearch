@@ -595,6 +595,8 @@ The two lists cover every layout change:
   Each other source lands all-or-nothing, its shards appending to the target's with their edges rebased, so at most one source's entries are ever held twice.
 - Cutting names one source and several empty targets, one graph-local part each.
   The part roots are drawn from `seed`, each part grows breadth-first over the links capped at an equal share, and part `p` of shard `s` lands in shard `s` of target `p`, its edges into other parts dropped.
+- Gathering then cutting names several sources and several empty targets, none of them a source.
+  Every other source gathers into the first with no round, and the first is then cut as one source would be.
 - Recutting names one handle as its only source and target.
   On RAM its shards pack largest first, each into the first shard with room under `ram->shard_capacity`, so many small shard generations pack into as few shards as fit, and the shard a bin keeps stays resident with its IDs.
 
@@ -627,8 +629,8 @@ A reshard refuses before anything moves, in every family:
 
 - `usearch_status_invalid_argument_k`: no sources or no targets, a `NULL` list or slot, a handle named twice within one list, a `plan` without an executor, a live plan opened with another executor, or a finish of a `NULL` plan.
 - `usearch_status_read_only_k`: an NVMe view.
-- `usearch_status_config_mismatch_k`: a handle unlike the first source in residency, scalar, class, metric or geometry, a target that is neither a source nor empty, a source cut into targets that include it, or a placement of another residency than the handles'.
-- `usearch_status_unsupported_k`: several sources into several targets; named memory domains, devices or paths, which would place shards anew; on RAM a shard past `ram->shard_capacity`, which would have to be cut first; on VRAM any `vram->shard_capacity`, which its moves cannot honour.
+- `usearch_status_config_mismatch_k`: a handle unlike the first source in residency, scalar, class, metric or geometry, a target that is neither a source nor empty, a source cut into targets that include it, a placement of another residency than the handles', or a class ceiling resolving to another variant than the handles'.
+- `usearch_status_unsupported_k`: named memory domains, devices or paths, which would place shards anew; on RAM a shard past `ram->shard_capacity`, which would have to be cut first; on VRAM any `vram->shard_capacity`, which its moves cannot honour.
 - `usearch_status_contended_k`: an insertion in flight on a handle named, or on VRAM a save of one.
 
 Sequences, shapes and geospatial indexes reshard through `usearch_<modality>_reshard` with the same lists and refusals, but without placements: a handle of one shard has nothing to recut, so one handle as its only source and target answers `usearch_status_unsupported_k`.

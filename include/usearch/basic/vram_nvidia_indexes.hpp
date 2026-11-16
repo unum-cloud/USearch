@@ -901,12 +901,13 @@ struct vram_nvidia_indexes {
         /** Opens every target shard's next round once each one's ended; a no-op mid-round. */
         void next_round() noexcept { next_shard_rounds_(shard_plans_); }
 
-        /** Whether the nodes of @p index moved out and left it empty, consumed: a gather's other
-         *  source, each emptied while planning, or a cut's source once all its moves finished. */
+        /** Whether the nodes of @p index moved out and left it empty, consumed: a source other than
+         *  the gathering index, each emptied while planning, or a cut's first source once moved. */
         bool moved(vram_nvidia_indexes const* index) const noexcept {
-            if (targets_.size() > 1) return index == sources_[0] && !shard_plans_.empty() && !moving();
+            bool const cutting = targets_.size() > 1;
+            if (cutting && index == sources_[0]) return !shard_plans_.empty() && !moving();
             for (vram_nvidia_indexes const* source : sources_)
-                if (source == index) return index != targets_[0];
+                if (source == index) return cutting || index != targets_[0];
             return false;
         }
 
@@ -961,7 +962,8 @@ struct vram_nvidia_indexes {
 
     /**
      *  @brief Opens a reshard of @p sources into @p targets: this index the one target of a gather
-     *      of several sources, or the one source of a cut into several targets.
+     *      of several sources, or the first source of a cut into several targets, every other
+     *      source gathered into it first, its rounds dropped.
      *
      *  A gather takes every live shard of every other source into the first live shard of this
      *  index on its device, which appends its nodes and keys, empties it, and runs a round as
@@ -973,11 +975,11 @@ struct vram_nvidia_indexes {
      *  @par Statuses:
      *  - As @ref plan_refine.
      *  - @c invalid_argument_k An empty list, a null or a repeated index within one.
-     *  - @c unsupported_k Several sources and several targets, or a nonzero
-     *    @p config.shard_capacity, as no device reshard places shards anew.
-     *  - @c config_mismatch_k Neither a gather into this index nor a cut of it, a source shard on a
-     *    device none of this index's live shards sits on, or a cut target whose live shards differ
-     *    from this index's in count or device.
+     *  - @c config_mismatch_k A source among several targets, neither a gather into this index nor
+     *    a cut of it, a source shard on a device none of this index's live shards sits on, or a
+     *    cut target holding entries or unlike this index's live shards in count or device.
+     *  - @c unsupported_k A nonzero @p config.shard_capacity, as no device reshard places shards
+     *    anew.
      *  - @c overflow_k Nodes past a shard's reserved ceiling.
      */
     expected<reshard_plan_t> plan_reshard(std::span<vram_nvidia_indexes* const> sources,
@@ -991,18 +993,22 @@ struct vram_nvidia_indexes {
                 for (std::size_t earlier = 0; earlier != position; ++earlier)
                     if (listed[earlier] == listed[position]) return {std::move(plan), status_t::invalid_argument_k};
             }
-        if (sources.size() > 1 && targets.size() > 1) return {std::move(plan), status_t::unsupported_k};
+        if (targets.size() > 1 && lists_share(sources, targets)) return {std::move(plan), status_t::config_mismatch_k};
         if (config.shard_capacity) return {std::move(plan), status_t::unsupported_k};
         bool const gathering = targets.size() == 1 && targets[0] == this;
-        bool const cutting = sources.size() == 1 && sources[0] == this && targets.size() > 1;
+        bool const cutting = sources[0] == this && targets.size() > 1;
         if (!gathering && !cutting) return {std::move(plan), status_t::config_mismatch_k};
         if (failed(plan.sources_.reserve_exactly(sources.size())) ||
             failed(plan.targets_.reserve_exactly(targets.size())))
             return {std::move(plan), status_t::bad_alloc_k};
         for (vram_nvidia_indexes* source : sources) plan.sources_.push_back_reserved(source);
         for (vram_nvidia_indexes* target : targets) plan.targets_.push_back_reserved(target);
-        status_t const opened = cutting ? open_cut_(plan, config, executor) : open_gather_(plan, config, executor);
-        return {std::move(plan), opened};
+        if (gathering) return {std::move(plan), open_gather_(plan, config, executor)};
+        // Every target answers before the gather empties a source, so a refused one moves nothing.
+        if (status_t const refused = refuses_cut_targets_(targets); failed(refused)) return {std::move(plan), refused};
+        if (status_t const gathered = gather_before_cut_(sources, config, executor); failed(gathered))
+            return {std::move(plan), gathered};
+        return {std::move(plan), open_cut_(plan, config, executor)};
     }
 
     /** Moves @p sources into @p targets and links them in: @ref plan_reshard, then @c run and
@@ -1035,6 +1041,9 @@ struct vram_nvidia_indexes {
 
     /** The live shard at @p live, counted past the retired ones. */
     index_t& live_shard_(std::size_t live) noexcept { return *shards_[shards_.retired_shards() + live].index; }
+    index_t const& live_shard_(std::size_t live) const noexcept {
+        return *shards_[shards_.retired_shards() + live].index;
+    }
 
     /** The first live shard on @p device, or the shard count when none sits there. */
     std::size_t first_live_on_(int device) const noexcept {
@@ -1221,16 +1230,37 @@ struct vram_nvidia_indexes {
         return status_t::success_k;
     }
 
-    /** Opens a cut of this index into the plan's targets: shard @c s parts its nodes among shard
-     *  @c s of every target. */
-    status_t open_cut_(reshard_plan_t& plan, reshard_config_t const& config, executor_t& executor) noexcept {
-        std::size_t const live = live_shards_count(), targets = plan.targets_.size();
-        for (vram_nvidia_indexes* const target : plan.targets_) {
-            if (target->live_shards_count() != live) return status_t::config_mismatch_k;
+    /** Gathers every other one of @p sources into this index before a cut, as a gather's planning
+     *  appends them, its rounds dropped unrun; nothing to do with this index the only source. */
+    status_t gather_before_cut_(std::span<vram_nvidia_indexes* const> sources, reshard_config_t const& config,
+                                executor_t& executor) noexcept {
+        if (sources.size() == 1) return status_t::success_k;
+        reshard_plan_t gathering {shards_.allocator()};
+        if (failed(gathering.sources_.reserve_exactly(sources.size())) || failed(gathering.targets_.reserve_exactly(1)))
+            return status_t::bad_alloc_k;
+        for (vram_nvidia_indexes* source : sources) gathering.sources_.push_back_reserved(source);
+        gathering.targets_.push_back_reserved(this);
+        return open_gather_(gathering, config, executor);
+    }
+
+    /** Whether @p targets can take a cut of this index: each empty, with as many live shards as
+     *  this index, shard @c s on the device this index's shard @c s sits on; a gather into this
+     *  index keeps its live shards, so the answer holds once it lands. */
+    status_t refuses_cut_targets_(std::span<vram_nvidia_indexes* const> targets) const noexcept {
+        std::size_t const live = live_shards_count();
+        for (vram_nvidia_indexes const* const target : targets) {
+            if (target->size() || target->live_shards_count() != live) return status_t::config_mismatch_k;
             for (std::size_t shard = 0; shard != live; ++shard)
                 if (target->live_shard_(shard).device_specs().ordinal != live_shard_(shard).device_specs().ordinal)
                     return status_t::config_mismatch_k;
         }
+        return status_t::success_k;
+    }
+
+    /** Opens a cut of this index into the plan's targets, which @ref refuses_cut_targets_ admitted:
+     *  shard @c s parts its nodes among shard @c s of every target. */
+    status_t open_cut_(reshard_plan_t& plan, reshard_config_t const& config, executor_t& executor) noexcept {
+        std::size_t const live = live_shards_count(), targets = plan.targets_.size();
         if (failed(plan.slots_.reserve_exactly(live * (targets + 1)))) return status_t::bad_alloc_k;
         typename index_t::reshard_config_t const shard_config {config.refine, 0, config.seed};
         return open_plan_(plan, config.refine, executor, 0, targets,

@@ -2173,7 +2173,8 @@ template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_ty
 std::size_t dense_expect_cut(make_index_type_ const& make_index, allocation_ledger_t& ledger, u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
     using node_id_t = typename index_type_::node_id_t;
-    constexpr std::size_t rows_k = dense_growth_nodes_k, samples_k = 32, noise_percent_k = 10;
+    constexpr std::size_t rows_k = dense_growth_nodes_k, samples_k = 32,
+                          noise_percent_k = static_cast<std::size_t>(rewrite_recall_margin_k * 100);
     constexpr nk_kernel_kind_t other_kernel_k = kernel_ == nk_kernel_euclidean_k ? nk_kernel_angular_k
                                                                                  : nk_kernel_euclidean_k;
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
@@ -2265,8 +2266,7 @@ std::size_t dense_expect_cut(make_index_type_ const& make_index, allocation_ledg
               std::vector<index_type_*> {targets[0], narrower.get()}})
             failures += expect_eq(source->plan_reshard(source_of(*source), refused).status,
                                   status_t::config_mismatch_k);
-        // Malformed lists, empty, holding a null or naming an index twice, refuse as arguments, and
-        // several sources into several targets is not a case a reshard has.
+        // Malformed lists, empty, holding a null or naming an index twice, refuse as arguments.
         for (std::vector<index_type_*> malformed :
              {std::vector<index_type_*> {}, std::vector<index_type_*> {targets[0], nullptr},
               std::vector<index_type_*> {targets[0], targets[0]}})
@@ -2808,13 +2808,9 @@ std::size_t dense_expect_indexes_maxsim(u64_t seed, placement_types_&... placeme
     // Offsets past the rows refuse their layout.
     failures += expect_eq(maxsim(queries(nk::range(std::size_t {0}, tokens_per_query + 1), nk::slice), {}).status,
                           status_t::config_mismatch_k);
-    // The device sums every row's best native dot in f64 over exact rankings, so it asserts within
-    // rounding; the host reducer truncates rankings and only warns.
-    constexpr bool device_k = requires { indexes_type_::vendor_k; };
-    return failures + (device_k ? expect_errors("maxsim scores", comparison_family_t::approximate_k,
-                                                comparison_verdict_t::assert_k, score_errors, 0)
-                                : expect_errors("maxsim scores", comparison_family_t::bounded_k,
-                                                comparison_verdict_t::warn_k, score_errors, 3));
+    // Every residency sums each row's best native dot over exact rankings: all assert alike.
+    return failures + expect_errors("maxsim scores", comparison_family_t::approximate_k, comparison_verdict_t::assert_k,
+                                    score_errors, 0);
 }
 
 /** @ref dense_expect_indexes_maxsim for the dot kernel; no other kernel offers MaxSim. */
@@ -3687,7 +3683,8 @@ std::size_t test_dense_indexes_cut(u64_t seed, placement_types_&... placement) {
     using distance_t = typename indexes_type_::distance_t;
     using oracle_kit_t =
         typename quads_ladder<scalar_t, dense_oracle_capability<typename indexes_type_::index_t>()>::kit_t;
-    constexpr std::size_t samples_k = 32, wanted_k = 10, noise_percent_k = 10;
+    constexpr std::size_t samples_k = 32, wanted_k = 10,
+                          noise_percent_k = static_cast<std::size_t>(rewrite_recall_margin_k * 100);
     constexpr nk_kernel_kind_t other_kernel_k = kernel_ == nk_kernel_euclidean_k ? nk_kernel_angular_k
                                                                                  : nk_kernel_euclidean_k;
     std::size_t failures = 0;
@@ -3821,11 +3818,12 @@ std::size_t test_dense_indexes_cut(u64_t seed, placement_types_&... placement) {
              {std::vector<indexes_type_*> {}, std::vector<indexes_type_*> {targets[0], nullptr},
               std::vector<indexes_type_*> {targets[0], targets[0]}})
             failures += expect_eq(cut_plan(source, malformed).status, status_t::invalid_argument_k);
+        // A second source of another kernel refuses as any foreign handle does, before the gather.
         std::array<indexes_type_*, 2> const several {&source, &foreign};
         failures += expect_eq(
             plan_reshard(std::span<indexes_type_* const> {several}, std::span<indexes_type_* const> {targets}, executor)
                 .status,
-            status_t::unsupported_k);
+            status_t::config_mismatch_k);
         failures += expect(succeeded(targets[1]->reserve({16}).status));
         failures += expect(succeeded(
             targets[1]

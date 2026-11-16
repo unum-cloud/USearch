@@ -1206,10 +1206,11 @@ struct ram_indexes {
         bool emptying_owner_() const noexcept { return targets_.size() > 1 || own_moves_ != 0; }
 
         /** Calls @p visit with the shard set of every index the moves publish into: this one in a
-         *  pack, every target in a split. */
+         *  pack or a split gathering others first, and every target in a split. */
         template <typename visit_type_>
         void for_each_receiving_(visit_type_&& visit) noexcept {
-            if (targets_.size() == 1) return visit(owner_->shards_);
+            if (targets_.size() == 1 || !sources_.empty()) visit(owner_->shards_);
+            if (targets_.size() == 1) return;
             for (ram_indexes* target : targets_) visit(target->shards_);
         }
 
@@ -1268,7 +1269,8 @@ struct ram_indexes {
         /** One plan per shard of this index, unbound where it runs no round. */
         growing_buffer<shard_reshard_plan_t, forkunion_allocator_t> shard_plans_;
 
-        /** The sources other than this index, copied at planning: a pack's. */
+        /** The sources other than this index, copied at planning: a pack's, or those a split
+         *  gathers into this index first. */
         growing_buffer<ram_indexes*, forkunion_allocator_t> sources_;
 
         /** Every source's unique side, held and closed in source order, each dropped once the
@@ -1335,7 +1337,7 @@ struct ram_indexes {
 
     /**
      *  @brief Opens a reshard of @p sources into @p targets: into this index alone, or out of this
-     *      index alone into several targets.
+     *      index, the first source, into several targets.
      *
      *  Into this index, every live source shard packs into a live shard of this index under the
      *  bound, the shards with the fewest entries first, opening shard generations as they fill, and
@@ -1345,9 +1347,10 @@ struct ram_indexes {
      *  then runs one round, so the finish audits the whole index. A source every shard of which
      *  moved in is emptied, and reopens empty and live once the plan dies.
      *
-     *  Out of this index, live shard @c s splits into live shard @c s of every target through its
-     *  own reshard, one graph-local part per target with its keys beside its nodes, and this index
-     *  empties; every target shard then runs one round.
+     *  Out of this index, every other source first packs into its live shards as into one target
+     *  under its own bound, with no round; then live shard @c s splits into live shard @c s of
+     *  every target through its own reshard, one graph-local part per target with its keys beside
+     *  its nodes, and every source empties; every target shard then runs one round.
      *
      *  Every fallible step happens here: every index the plan reads or moves closed under its
      *  unique side, the lists copied, and every shard's plan opened. The move phases open the
@@ -1355,9 +1358,9 @@ struct ram_indexes {
      *  moves shows a search of each receiving index every shard's nodes or none.
      *
      *  @param[in] sources The indexes giving their nodes up: any for a pack into this index, or
-     *      this index alone for a split.
-     *  @param[in] targets This index alone, or at least two empty indexes, each with as many live
-     *      shards as this one.
+     *      this index first for a split.
+     *  @param[in] targets This index alone, or at least two empty indexes, no source among them,
+     *      each with as many live shards as this one.
      *  @param[in] config The cache a core keeps, which sizes every round, the most entries a shard
      *      holds once packed, and the seed picking every shard's part roots.
      *  @param[in] selector Carries the budget every neighbor list is reserved for.
@@ -1366,12 +1369,11 @@ struct ram_indexes {
      *
      *  @par Statuses:
      *  - @c invalid_argument_k No source, no target, or a null or repeated index in either list.
-     *  - @c unsupported_k Several sources and several targets, or a source shard past the bound,
-     *    which would have to be cut first.
+     *  - @c unsupported_k A source shard past the bound, which would have to be cut first.
      *  - @c uninitialized_k No shard is placed.
-     *  - @c config_mismatch_k Neither this index the one target nor the one source of several
-     *    targets, a split target that is this index, holds entries or another live shard count, or
-     *    a zero budget.
+     *  - @c config_mismatch_k Neither this index the one target nor the first source of several
+     *    targets, a split target that is a source, holds entries or another live shard count, or a
+     *    zero budget.
      *  - @c contended_k A call or batch in flight on any index named, or another plan holding one.
      *  - @c overflow_k A part past a target shard's ceiling.
      */
@@ -1386,12 +1388,11 @@ struct ram_indexes {
                 for (std::size_t earlier = 0; earlier != position; ++earlier)
                     if (listed[earlier] == listed[position]) return {{}, status_t::invalid_argument_k};
             }
-        if (sources.size() > 1 && targets.size() > 1) return {{}, status_t::unsupported_k};
         if (shards_.empty()) return {{}, status_t::uninitialized_k};
         bool const packing = targets.size() == 1 && targets[0] == this;
-        bool const splitting = sources.size() == 1 && sources[0] == this && targets.size() > 1;
+        bool const splitting = sources[0] == this && targets.size() > 1;
         if (!packing && !splitting) return {{}, status_t::config_mismatch_k};
-        if (splitting) return plan_split_(targets, config, selector, codec, context);
+        if (splitting) return plan_split_(sources.subspan(1), targets, config, selector, codec, context);
         return plan_pack_(sources, config, selector, codec, context);
     }
 
@@ -1651,25 +1652,56 @@ struct ram_indexes {
         return {std::move(plan), status_t::success_k};
     }
 
-    /** What a split's @ref plan_reshard does: closes this index and every target under their
-     *  unique sides, all held until the plan dies, and opens every live shard's split into the
-     *  same live shard of every target. */
+    /** What a split's @ref plan_reshard does: closes this index, every one of @p gathered and every
+     *  target under their unique sides, all held until the plan dies, packs the gathered shards
+     *  into this index's live shards, and opens every live shard's split, with the shards packed
+     *  into it, into the same live shard of every target. */
     template <typename selector_type_, typename codec_type_>
-    expected<reshard_plan_t> plan_split_(std::span<ram_indexes* const> targets, reshard_config_t config,
-                                         selector_type_ const& selector, codec_type_ const& codec,
-                                         traversal_context_t& context) noexcept {
+    expected<reshard_plan_t> plan_split_(std::span<ram_indexes* const> gathered, std::span<ram_indexes* const> targets,
+                                         reshard_config_t config, selector_type_ const& selector,
+                                         codec_type_ const& codec, traversal_context_t& context) noexcept {
         std::size_t const parts = targets.size();
-        for (ram_indexes const* into : targets)
-            if (into == this) return {{}, status_t::config_mismatch_k};
+        std::array<ram_indexes const*, 1> const own {this};
+        if (lists_share(own, targets) || lists_share(gathered, targets)) return {{}, status_t::config_mismatch_k};
         reshard_plan_t plan {shards_.allocator()};
-        if (failed(plan.targets_.reserve_exactly(parts)) || failed(plan.target_holds_.reserve_exactly(parts)))
+        if (failed(plan.targets_.reserve_exactly(parts)) || failed(plan.target_holds_.reserve_exactly(parts)) ||
+            failed(plan.sources_.reserve_exactly(gathered.size())) ||
+            failed(plan.source_holds_.reserve_exactly(gathered.size())))
             return {{}, status_t::bad_alloc_k};
         for (ram_indexes* into : targets) plan.targets_.push_back_reserved(into);
+        std::size_t gathered_shards = 0;
+        for (ram_indexes* from : gathered) {
+            unique_lock_t hold {from->gate_, std::try_to_lock};
+            if (!hold) return {{}, status_t::contended_k};
+            if (status_t const closed = from->shards_.close(); failed(closed)) return {{}, closed};
+            plan.sources_.push_back_reserved(from);
+            plan.source_holds_.push_back_reserved(std::move(hold));
+            gathered_shards += from->shards_.size() - from->shards_.retired_shards();
+        }
         unique_lock_t hold {gate_, std::try_to_lock};
         if (!hold) return {{}, status_t::contended_k};
         if (status_t const closed = shards_.close(); failed(closed)) return {{}, closed};
         plan.owner_hold_ = std::move(hold);
         plan.owner_ = this;
+
+        // The gathered shards pack beside this index's own nodes, which stay where they are.
+        growing_buffer<shard_t const*, forkunion_allocator_t> moving_shards {shards_.allocator()};
+        growing_buffer<shard_move_t, forkunion_allocator_t> moves {shards_.allocator()};
+        if (failed(moving_shards.reserve_exactly(gathered_shards)) || failed(moves.resize(gathered_shards)))
+            return {{}, status_t::bad_alloc_k};
+        for (ram_indexes const* from : plan.sources_)
+            for (shard_t const& one : from->shards_) moving_shards.push_back_reserved(&one);
+        auto const moving_shard = [&](std::size_t from) noexcept -> shard_t const& { return *moving_shards[from]; };
+        auto const placement_of = [](shard_t const& one) noexcept { return one.index->get_allocator(); };
+        auto const open = [this]() noexcept {
+            return shards_.open_shard_generation_past_seal_(
+                shards_.open_shard_generation(), [this](shard_t const& like) noexcept { return build_shard_(like); });
+        };
+        if (status_t const packed = shards_.pack(to_writable_span(moves), 0, shards_.shard_capacity(), moving_shard,
+                                                 placement_of, rank_fewest_entries, open);
+            failed(packed))
+            return {{}, packed};
+
         std::size_t const shards = live_shards_count(), retired = shards_.retired_shards();
         // A closed target takes no entry, so its emptiness and shards hold for the plan's life.
         for (ram_indexes* into : targets) {
@@ -1680,7 +1712,9 @@ struct ram_indexes {
             if (into->live_shards_count() != shards || into->size()) return {{}, status_t::config_mismatch_k};
         }
         growing_buffer<index_t*, forkunion_allocator_t> into_shards {shards_.allocator()};
-        if (failed(plan.shard_plans_.reserve_exactly(shards)) || failed(into_shards.reserve_exactly(parts)))
+        growing_buffer<index_t*, forkunion_allocator_t> from_shards {shards_.allocator()};
+        if (failed(plan.shard_plans_.reserve_exactly(shards)) || failed(into_shards.reserve_exactly(parts)) ||
+            failed(from_shards.reserve_exactly(1 + gathered_shards)))
             return {{}, status_t::bad_alloc_k};
         for (std::size_t shard = 0; shard != shards; ++shard) {
             into_shards.clear();
@@ -1690,11 +1724,15 @@ struct ram_indexes {
                 target_shard->reopen_();
                 into_shards.push_back_reserved(target_shard);
             }
-            index_t* const source = shards_[retired + shard].index.get();
+            from_shards.clear();
+            from_shards.push_back_reserved(shards_[retired + shard].index.get());
+            for (std::size_t from = 0; from != gathered_shards; ++from)
+                if (moves[from].into == retired + shard)
+                    from_shards.push_back_reserved(moving_shards[from]->index.get());
             reshard_config_t shard_config = config;
             shard_config.seed = config.seed + shard;
-            auto [shard_plan, status] = source->plan_reshard(
-                std::span<index_t* const> {&source, 1}, to_span(into_shards), shard_config, selector, codec, context);
+            auto [shard_plan, status] = from_shards[0]->plan_reshard(to_span(from_shards), to_span(into_shards),
+                                                                     shard_config, selector, codec, context);
             plan.shard_plans_.push_back_reserved(std::move(shard_plan));
             if (failed(status)) return plan.shard_plans_.clear(), expected<reshard_plan_t> {{}, status};
         }

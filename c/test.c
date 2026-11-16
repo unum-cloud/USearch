@@ -577,8 +577,9 @@ void test_add_progress(void) {
 /** A RAM index bounded at a quarter of its rows holds four shards, and reshards in place, as its
  *  own only source and target, under a bound of half its rows into two through a plan whose every
  *  call is cancelled until its rounds end, each call naming the phase it stopped in: every key
- *  still resolves to one entry, and every entry stays. A placement of another residency, one
- *  naming memory domains, or a source named twice is refused before any entry moves anywhere. */
+ *  still resolves to one entry, and every entry stays. A placement of another residency, one naming
+ *  memory domains, a source named twice, or a class ceiling resolving to another variant than the
+ *  handle's is refused before any entry moves, and one resolving to the handle's own passes. */
 void test_reshard(size_t const dimensions) {
     printf("Test: Reshard... %zu dimensions\n", dimensions);
 
@@ -690,6 +691,37 @@ void test_reshard(size_t const dimensions) {
         expect(!outcome.message, outcome.message);
         expect_eq(entries, 1, "Every key must resolve to one row after resharding in place");
     }
+
+    // A class ceiling resolving to the handle's own variant passes, and one resolving to another
+    // is refused; a monoversioned build compiles no class under the serial floor.
+    usearch_dense_reshard(
+        &(usearch_dense_reshard_t) {.sources_count = 1,
+                                    .sources = &index,
+                                    .targets_count = 1,
+                                    .targets = &index,
+                                    .executor = executor,
+                                    .outcome = &outcome,
+                                    .ram = &(usearch_ram_options_t) {.cpu_class_ceiling = description.cpu_class}});
+    expect(!outcome.message, outcome.message);
+    if (description.cpu_class != usearch_cpu_class_serial_k) {
+        usearch_dense_reshard(&(usearch_dense_reshard_t) {
+            .sources_count = 1,
+            .sources = &index,
+            .targets_count = 1,
+            .targets = &index,
+            .executor = executor,
+            .outcome = &outcome,
+            .ram = &(usearch_ram_options_t) {.cpu_class_ceiling = usearch_cpu_class_serial_k}});
+        usearch_status_t const refused = description.cpu_class == usearch_cpu_class_monoversioned_k
+                                             ? usearch_status_unsupported_k
+                                             : usearch_status_config_mismatch_k;
+        expect_eq(outcome.status, refused, "A ceiling resolving to another variant than the handle's must be refused");
+    }
+    usearch_dense_describe(&(usearch_dense_describe_t) {.index = index,
+                                                        .executor = executor,
+                                                        .outcome = &outcome,
+                                                        .description = &description});
+    expect_eq(description.size, rows_count, "A reshard under a ceiling keeps every entry");
 
     free(keys);
     free(data);
@@ -3337,7 +3369,8 @@ void test_shapes_and_geospatial_reshard(void) {
              "A target neither a source nor empty must be refused"},                                                   \
             {1, fulls, 2, full_and_empty, usearch_status_config_mismatch_k,                                            \
              "A source cut into targets that include it must be refused"},                                             \
-            {2, fulls, 2, empties, usearch_status_unsupported_k, "Several sources into several targets are refused"},  \
+            {2, fulls, 2, full_and_empty, usearch_status_config_mismatch_k,                                            \
+             "Several sources cut into targets that include one must be refused"},                                     \
         };                                                                                                             \
         for (size_t refusal = 0; refusal != sizeof(refusals) / sizeof(refusals[0]); ++refusal) {                       \
             usearch_##family##_reshard(                                                                                \
@@ -4290,10 +4323,10 @@ static int file_exists(char const* path) {
 /** A RAM index of two shards saved as a manifest opens writable through @c usearch_dense_load_nvme:
  *  a lone part refuses, a second load of the manifest is contended, insertions, saves and a reshard
  *  naming drives answer @c usearch_status_unsupported_k while a view of the same manifest keeps
- *  answering @c usearch_status_read_only_k. A refine plan finished after the first shard committed
- *  leaves the second part in place and the handle searchable; a whole refine keeps or improves
- *  self-recall, keeps every entry reachable, and leaves only the refined parts once the handle is
- *  freed by its owner. */
+ *  answering @c usearch_status_read_only_k, even after a RAM source. A refine plan finished after
+ *  the first shard committed leaves the second part in place and the handle searchable; a whole
+ *  refine keeps or improves self-recall, keeps every entry reachable, and leaves only the refined
+ *  parts once the handle is freed by its owner. */
 void test_nvme_load(size_t const dimensions) {
     printf("Test: NVMe Load... %zu dimensions\n", dimensions);
 
@@ -4395,6 +4428,21 @@ void test_nvme_load(size_t const dimensions) {
                                                       .outcome = &outcome,
                                                       .nvme = &(usearch_nvme_options_t) {&part_view, 1}});
     expect_eq(outcome.status, usearch_status_unsupported_k, "A loaded handle's reshard must not place parts anew");
+    // A loaded handle takes its writes through rewrites, so its own reshard opens; one stopped at
+    // its first report and finished there commits nothing.
+    usearch_dense_reshard_plan_t recut = NULL;
+    usearch_dense_reshard(&(usearch_dense_reshard_t) {.sources_count = 1,
+                                                      .sources = &loaded,
+                                                      .targets_count = 1,
+                                                      .targets = &loaded,
+                                                      .executor = storage,
+                                                      .outcome = &outcome,
+                                                      .progress = {cancel_progress},
+                                                      .plan = &recut});
+    expect(outcome.status == usearch_status_cancelled_k || !outcome.message, outcome.message);
+    usearch_dense_reshard_plan_finish(
+        &(usearch_dense_reshard_plan_finish_t) {.executor = storage, .outcome = &outcome, .plan = recut});
+    expect(outcome.status == usearch_status_cancelled_k || !outcome.message, outcome.message);
     usearch_dense_reshard(&(usearch_dense_reshard_t) {.sources_count = 1,
                                                       .sources = &view,
                                                       .targets_count = 1,
@@ -4402,6 +4450,24 @@ void test_nvme_load(size_t const dimensions) {
                                                       .executor = storage,
                                                       .outcome = &outcome});
     expect_eq(outcome.status, usearch_status_read_only_k, "A view must refuse a reshard");
+    // Every handle answers read-only before any answers for its kind, so a view target refuses
+    // as read-only though a RAM source precedes it.
+    usearch_dense_index_t foreign = NULL;
+    usearch_dense_init_ram(&(usearch_dense_init_ram_t) {.index = &foreign,
+                                                        .outcome = &outcome,
+                                                        .metric = usearch_dense_metric_angular_k,
+                                                        .quantization = usearch_scalar_bf16_k,
+                                                        .dimensions = dimensions});
+    expect(!outcome.message, outcome.message);
+    usearch_dense_index_t const mixed[2] = {loaded, foreign};
+    usearch_dense_reshard(&(usearch_dense_reshard_t) {.sources_count = 2,
+                                                      .sources = mixed,
+                                                      .targets_count = 1,
+                                                      .targets = &view,
+                                                      .executor = storage,
+                                                      .outcome = &outcome});
+    expect_eq(outcome.status, usearch_status_read_only_k, "A view target must refuse before a foreign source");
+    usearch_dense_free(foreign);
 
     usearch_arena_t const arena = create_arena(storage);
     size_t const viewed_matches = count_self_matches(view, storage, arena, data, rows_count, dimensions, keys);

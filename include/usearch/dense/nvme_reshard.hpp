@@ -38,15 +38,15 @@
  *  four bytes and three bits, the neighborhood a gather gave the entry, its place in the order by
  *  neighborhood and its start, and a changed bit. @b Health audits the part from its root and the
  *  opening check heals the islands it names without a distance, row by row. @b Hubs reads and packs
- *  one cache-sized pack of hubs, and @b gather streams the value column once past them, filing
- *  every entry under its nearest, then gathers each neighborhood over capacity again among hubs
- *  drawn from its own entries. @b Restitch reads one neighborhood's rows and links by points,
- *  scores it against itself in cache, keeps each entry's diverse links among its own and its
- *  nearest neighborhood-mates under the reach rule, and appends the changed rows to the restitch
- *  tape, a scratch file beside the part holding one run per tile of rows. @b Write applies each run
- *  to its tile of the neighbors column in one read and one write, and the closing @b health check
- *  measures the round. Each entry's row is written only by its own neighborhood, which weighs both
- *  ends of every pair, so no sweep collects reverse links.
+ *  about the square root of the neighborhoods it needs as hubs, and @b gather streams the value
+ *  column once past them, filing every entry under its nearest, then gathers each neighborhood over
+ *  capacity again among hubs drawn from its own entries. @b Restitch reads one neighborhood's rows
+ *  and links by points, scores it against itself in cache, keeps each entry's diverse links among
+ *  its own and its nearest neighborhood-mates under the reach rule, and appends the changed rows to
+ *  the restitch tape, a scratch file beside the part holding one run per tile of rows. @b Write
+ *  applies each run to its tile of the neighbors column in one read and one write, and the closing
+ *  @b health check measures the round. Each entry's row is written only by its own neighborhood,
+ *  which weighs both ends of every pair, so no sweep collects reverse links.
  */
 #pragma once
 
@@ -180,31 +180,30 @@ expected<nvme_refine_plan<indexes_type_>> plan_refine(indexes_type_& index, refi
 
 /**
  *  @brief Opens a reshard of the loaded @p sources into the loaded @p targets: several sources into
- *      one target, or one source into several empty targets.
+ *      one target, or any sources into several empty targets.
  *
  *  Into one target, its own parts and every source's pack as @ref plan_reshard packs them into
  *  parts beside the target's manifest, which then names them, every target part that took a part in
  *  running rounds that link it until one stops improving; the other sources are read, never edited,
  *  and a caller drops them once @c finish answers success. A target alone, of one part and under a
- *  capacity it fits, keeps it. With one source, every part is cut into one contiguous range per
- *  target, the edges the cuts cross dropped, and range @c r of part @c s arrives as part @c s of
- *  target @c r, running rounds until one stops improving; ranges by ID, rather than parts grown
- *  over the links as the RAM split grows them, keep the split a streamed copy, and the rounds
- *  re-stitch what the cuts dropped. Target @c r's manifest is the source manifest's stem, a dash,
- *  the first free split number, and a dash and @c r from one on; @c finish empties the source and
- *  loads every target.
+ *  capacity it fits, keeps it. Into several targets, every part of every source, in source order,
+ *  is cut into one contiguous range per target, the edges the cuts cross dropped, and range @c r of
+ *  part @c s arrives as part @c s of target @c r, running rounds until one stops improving; ranges
+ *  by ID, rather than parts grown over the links as the RAM split grows them, keep the split a
+ *  streamed copy, and the rounds re-stitch what the cuts dropped. Target @c r's manifest is the
+ *  first source manifest's stem, a dash, the first free split number, and a dash and @c r from one
+ *  on; @c finish empties every source and loads every target.
  *
  *  The plan owns both lists and its workspace, @p config.refine.memory_limit bytes, zero deriving
- *  one that runs each round in RAM, and holds the writer of the target, or of the source it splits,
- *  while it lives; a plan dropped before @c finish leaves every index serving its own parts. No
- *  other call on any of the indexes may overlap it.
+ *  one that runs each round in RAM, and holds the writer of the target, or of the first source it
+ *  splits, while it lives; a plan dropped before @c finish leaves every index serving its own
+ *  parts. No other call on any of the indexes may overlap it.
  *
  *  @par Statuses:
  *  - @c invalid_argument_k No source, no target, or a null or repeated index in either list.
- *  - @c unsupported_k Several sources and several targets.
- *  - @c config_mismatch_k A split target that holds entries or is the source, or a source of
+ *  - @c read_only_k The target, or a source split, is a view.
+ *  - @c config_mismatch_k A split target that holds entries or is a source, or a source of
  *    another kernel, geometry or key width.
- *  - @c read_only_k The target, or the source split, is a view.
  *  - @c overflow_k A part holds too few entries to give every split target one.
  *  - @c contended_k A refine or reshard holds the writer.
  *  - Any status opening the rewrite answers, as @ref plan_reshard lists them.
@@ -628,19 +627,24 @@ struct [[nodiscard]] nvme_reshard_plan {
         return open_packed_(to_span(packed), to_string_view(manifest), to_writable_span(held_workspace_), config, {});
     }
 
-    /** Opens a split of the one loaded source of @p sources into the empty loaded @p receivers:
-     *  every part cut into one contiguous range per receiver, range @c r of part @c s arriving as
-     *  target part <tt>s * receivers + r</tt>, named after receiver @c r 's stem, each running its
-     *  rounds of linking. */
+    /** Opens a split of the loaded @p sources into the empty loaded @p receivers: every part of
+     *  every source, in source order, cut into one contiguous range per receiver, range @c r of
+     *  part @c s arriving as target part <tt>s * receivers + r</tt> under receiver @c r 's stem and
+     *  running its rounds of linking. */
     status_t open_scattered_(std::span<indexes_t* const> sources, std::span<indexes_t* const> receivers,
                              reshard_config_t const& config) noexcept {
         indexes_t& source = *sources[0];
-        if (status_t const refused = source.refuses_writes(); refused == status_t::read_only_k) return refused;
-        std::size_t const count = receivers.size(), parts = source.shards_count();
+        std::size_t const count = receivers.size();
+        std::size_t widest = 0, parts = 0;
+        for (indexes_t* from : sources) {
+            if (status_t const refused = from->refuses_writes(); refused == status_t::read_only_k) return refused;
+            for (std::size_t part = 0; part != from->shards_count(); ++part)
+                widest = max_of<std::size_t>(widest, from->part_size(part));
+            parts += from->shards_count();
+        }
+        if (lists_share(sources, receivers)) return status_t::config_mismatch_k;
         for (indexes_t* receiver : receivers)
-            if (receiver == &source || receiver->shards_count()) return status_t::config_mismatch_k;
-        std::size_t widest = 0;
-        for (std::size_t part = 0; part != parts; ++part) widest = max_of<std::size_t>(widest, source.part_size(part));
+            if (receiver->shards_count()) return status_t::config_mismatch_k;
         if (status_t const held = hold_(sources, receivers, source, divide_round_up(widest, count), config);
             failed(held))
             return held;
@@ -651,7 +655,8 @@ struct [[nodiscard]] nvme_reshard_plan {
         if (status_t const opened = open_workspace_(to_writable_span(held_workspace_), config, {}, source);
             failed(opened))
             return opened;
-        if (status_t const added = add_sources_(source, source); failed(added)) return added;
+        for (indexes_t* from : sources)
+            if (status_t const added = add_sources_(*from, source); failed(added)) return added;
         if (sources_.empty()) return status_t::uninitialized_k;
         growing_buffer<std::size_t, forkunion_allocator_t> rows {allocator_};
         if (failed(rows.reserve_exactly(sources_.size() * count))) return status_t::bad_alloc_k;
@@ -888,7 +893,7 @@ struct [[nodiscard]] nvme_reshard_plan {
     }
 
     /** Commits a split: every receiver's manifest naming its parts, removed again if a later one
-     *  fails; then the writer goes back, the source empties, and each receiver loads its own. */
+     *  fails; then the writer goes back, every source empties, and each receiver loads its own. */
     expected<result_t> finish_split_() noexcept {
         std::size_t const count = target_indexes_.size(), parts = targets_.size() / max_of<std::size_t>(count, 1);
         paths_t manifest {allocator_};
@@ -911,7 +916,7 @@ struct [[nodiscard]] nvme_reshard_plan {
         if (failed(split.status)) return split;
         // The receivers' manifests are durable, so the source empties and each receiver loads.
         writing_.reset();
-        source_indexes_[0]->release();
+        for (indexes_t* source : source_indexes_) source->release();
         for (std::size_t receiver = 0; receiver != count; ++receiver)
             if (status_t const loaded = target_indexes_[receiver]->load(
                     receiver_path_(manifest, receiver, ".safegraphs"));
@@ -2316,7 +2321,7 @@ struct [[nodiscard]] nvme_reshard_plan {
     status_t draw_hubs_(task_t const& task, executor_t& executor) noexcept {
         target_t& target = targets_[task.part];
         std::size_t const rows = target.view.size(), row_bytes = value_row_bytes_();
-        std::size_t const hubs = round_hubs(rows, hubs_per_draw_, neighborhood_capacity_);
+        std::size_t const hubs = round_first_hubs(rows, hubs_per_draw_, neighborhood_capacity_);
         hub_slices_t const slices = hubs_();
         for (std::size_t rank = 0; rank != hubs; ++rank)
             slices.nodes[rank] = static_cast<node_id_t>(seeded_bijection(rank, rows, round_seed_));
@@ -2374,7 +2379,8 @@ struct [[nodiscard]] nvme_reshard_plan {
         std::span<node_id_t const> const members {neighborhood_entries_.data() + task.nodes.first, task.nodes.size()};
         if (neighborhoods_ && members.size() <= neighborhood_capacity_) return status_t::success_k;
         std::size_t const entries = neighborhoods_ ? members.size() : rows;
-        std::size_t const hubs = round_hubs(entries, hubs_per_draw_, neighborhood_capacity_);
+        std::size_t const hubs = neighborhoods_ ? round_hubs(entries, hubs_per_draw_, neighborhood_capacity_)
+                                                : round_first_hubs(entries, hubs_per_draw_, neighborhood_capacity_);
         std::size_t const run_rows = neighborhoods_ ? 1 : target.view.scan_run_rows_(0, row_bytes);
         auto share_of = [&](share_carver_t& carver) noexcept { return gather_share_(carver, run_rows); };
         auto [call, call_status] = target.view.begin_scans_(executor, 1,
@@ -2425,7 +2431,7 @@ struct [[nodiscard]] nvme_reshard_plan {
         neighborhood_order_t const order =
             neighborhoods_ ? split_wide_neighborhoods(tags, neighborhood_entries_, neighborhood_offsets_,
                                                       neighborhoods_, neighborhood_capacity_, hubs_per_draw_)
-                           : order_by_neighborhood(tags, round_hubs(rows, hubs_per_draw_, neighborhood_capacity_),
+                           : order_by_neighborhood(tags, round_first_hubs(rows, hubs_per_draw_, neighborhood_capacity_),
                                                    neighborhood_entries_, neighborhood_offsets_);
         neighborhoods_ = order.neighborhoods;
         round_.neighborhoods = order.neighborhoods;
@@ -3284,7 +3290,6 @@ expected<nvme_reshard_plan<indexes_type_>> plan_reshard(std::span<indexes_type_*
             for (std::size_t earlier = 0; earlier != position; ++earlier)
                 if (listed[earlier] == listed[position]) return {std::move(plan), status_t::invalid_argument_k};
         }
-    if (sources.size() > 1 && targets.size() > 1) return {std::move(plan), status_t::unsupported_k};
     if (!config.refine.cache_bytes) config.refine.cache_bytes = executor.cache_bytes_per_core();
     status_t const opened = targets.size() == 1 ? plan.open_gathered_(sources, targets, config)
                                                 : plan.open_scattered_(sources, targets, config);

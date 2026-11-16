@@ -474,26 +474,21 @@ struct specialized_index {
     }
 
     /** What a reshard refuses of @p options: another residency's placement, which names nothing the
-     *  handles hold, or named domains, devices or drives, which would place shards anew, or a class
-     *  or memory limit, which a reshard keeping the handles' variant cannot honour. */
+     *  handles hold, or named domains, devices or drives, which would place shards anew, or a
+     *  memory limit, which a reshard cannot honour; a class ceiling the glue resolved passes. */
     static status_t refuses_placements(reshard_options_t options) noexcept {
         if constexpr (is_ram_index<index_type_>) {
             if (options.vram || options.nvme) return status_t::config_mismatch_k;
-            if (options.ram && (options.ram->memory_domains_count || options.ram->memory_limit ||
-                                options.ram->cpu_class_ceiling != usearch_cpu_class_unknown_k))
+            if (options.ram && (options.ram->memory_domains_count || options.ram->memory_limit))
                 return status_t::unsupported_k;
         }
         else if constexpr (is_nvme_index<index_type_>) {
             if (options.ram || options.vram) return status_t::config_mismatch_k;
-            if (options.nvme &&
-                (options.nvme->paths_count || options.nvme->cpu_class_ceiling != usearch_cpu_class_unknown_k))
-                return status_t::unsupported_k;
+            if (options.nvme && options.nvme->paths_count) return status_t::unsupported_k;
         }
         else {
             if (options.ram || options.nvme) return status_t::config_mismatch_k;
-            if (options.vram &&
-                (options.vram->devices_count || options.vram->gpu_class_ceiling != usearch_gpu_class_unknown_k))
-                return status_t::unsupported_k;
+            if (options.vram && options.vram->devices_count) return status_t::unsupported_k;
         }
         return status_t::success_k;
     }

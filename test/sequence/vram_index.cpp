@@ -412,7 +412,7 @@ static std::size_t check_sequence_vram_sharded(u64_t seed, cuda_executor_t& exec
     auto const [health, health_status] = indexes.health(executor);
     failures += expect_eq(health_status, status_t::success_k);
     failures += expect_eq(health.audited_nodes, entries_k);
-    failures += expect(health.reachable_nodes * 20 >= entries_k * 19);
+    failures += expect_eq(health.reachable_nodes, entries_k);
 
     std::vector<us::utilities::uuid128_t> found_keys(queries_k * wanted_k);
     std::vector<f32_t> found_distances(queries_k * wanted_k);
@@ -457,21 +457,22 @@ static std::size_t check_sequence_vram_sharded(u64_t seed, cuda_executor_t& exec
             found.push_back(static_cast<sz_size_t>(found_distances[query * wanted_k + rank]));
         single_matched += matched_count(found, exact[query], wanted_k);
     }
-    failures += expect(sharded_matched * 20 + queries_k * wanted_k >= single_matched * 20);
+    failures += expect(sharded_matched + rewrite_recall_margin_k * queries_k * wanted_k >= single_matched);
     failures += check_sequence_vram_reloaded(indexes, shard_capacity_k, executor, seed);
     return failures;
 }
 
 /** Rounds over a sharded index of two shards: a refine plan driven to its end concludes a real
  *  verdict and fills the round's report, a next round runs over the same plan, and a finished plan
- *  answers @c uninitialized_k to another run or finish. A cut into two targets of two shards each
- *  moves every entry exactly once and leaves its source empty, after its refusals left every index
- *  whole: empty or repeated lists, several sources into several targets, a shard capacity, and one
- *  other index that is neither a gather into this one nor a cut of it. */
+ *  answers @c uninitialized_k to another run or finish. Two sources gather and cut into two targets
+ *  of two shards each, then one target cuts back into the emptied sources, every entry landing
+ *  exactly once and every source ending empty, after refusals left every index whole: empty or
+ *  repeated lists, a shard capacity, one other index that is neither a gather into this one nor a
+ *  cut of it, and a target of one shard, refused before the other source moves in. */
 static std::size_t check_sequence_vram_rounds(u64_t seed, cuda_executor_t& executor) {
     using index_t = sequence_vram_shards_t::index_t;
     using indexes_t = us::basic::vram_nvidia_indexes<index_t, us::utilities::uuid128_t, sequence_vram_shards_t>;
-    constexpr std::size_t entries_k = 512, expansion_k = 64;
+    constexpr std::size_t entries_k = 512, lone_k = 64, expansion_k = 64;
     std::size_t failures = 0;
 
     std::vector<std::string> const strings = generate_nucleotides(entries_k, 100, seed);
@@ -494,6 +495,20 @@ static std::size_t check_sequence_vram_rounds(u64_t seed, cuda_executor_t& execu
     failures += expect_eq(source->reserve({entries_k, connectivity_32_k, offsets[entries_k]}).status,
                           status_t::success_k);
     failures += expect_eq(source->insert(keys, sequences, executor, {expansion_k}).status, status_t::success_k);
+    auto narrow = std::make_unique<indexes_t>(forkunion_allocator_t {no_memory_domain_k}, sequence_vram_shards_t {});
+    failures += expect_eq(narrow->emplace(executor.stream(0).device), status_t::success_k);
+
+    // The second source holds keys of its own, so a refusal that moved it would show in its size.
+    std::vector<std::string> const lone_strings = generate_nucleotides(lone_k, 100, seed + 1);
+    std::string lone_tape;
+    std::vector<std::size_t> lone_offsets {0};
+    for (std::string const& symbols : lone_strings) lone_tape += symbols, lone_offsets.push_back(lone_tape.size());
+    tape_view<byte_t const> const lone_sequences {reinterpret_cast<byte_t const*>(lone_tape.data()),
+                                                  {lone_offsets.data(), lone_k + 1}};
+    std::vector<us::utilities::uuid128_t> lone_keys(lone_k);
+    for (std::size_t entry = 0; entry != lone_k; ++entry) lone_keys[entry] = uuid_of(entries_k + entry);
+    failures += expect_eq(lone->reserve({lone_k, connectivity_32_k, lone_offsets[lone_k]}).status, status_t::success_k);
+    failures += expect_eq(lone->insert(lone_keys, lone_sequences, executor, {expansion_k}).status, status_t::success_k);
 
     {
         auto [plan, plan_status] = source->plan_refine({}, executor);
@@ -516,25 +531,38 @@ static std::size_t check_sequence_vram_rounds(u64_t seed, cuda_executor_t& execu
     indexes_t* const repeated[2] = {first.get(), first.get()};
     indexes_t* const several[2] = {source.get(), lone.get()};
     indexes_t* const one[1] = {lone.get()};
+    indexes_t* const uneven[2] = {first.get(), narrow.get()};
     failures += expect_eq(source->plan_reshard(listed_t {sources}, listed_t {}, {}, executor).status,
                           status_t::invalid_argument_k);
     failures += expect_eq(source->plan_reshard(listed_t {sources}, listed_t {repeated}, {}, executor).status,
                           status_t::invalid_argument_k);
-    failures += expect_eq(source->plan_reshard(listed_t {several}, listed_t {targets}, {}, executor).status,
-                          status_t::unsupported_k);
     failures += expect_eq(source->plan_reshard(listed_t {sources}, listed_t {targets}, {{}, 16, 0}, executor).status,
                           status_t::unsupported_k);
     failures += expect_eq(source->plan_reshard(listed_t {sources}, listed_t {one}, {}, executor).status,
                           status_t::config_mismatch_k);
+    failures += expect_eq(source->plan_reshard(listed_t {several}, listed_t {uneven}, {}, executor).status,
+                          status_t::config_mismatch_k);
     failures += expect_eq(source->size(), entries_k);
+    failures += expect_eq(lone->size(), lone_k);
 
-    auto const [cut, cut_status] = source->reshard(listed_t {sources}, listed_t {targets}, {}, executor);
+    auto const [cut, cut_status] = source->reshard(listed_t {several}, listed_t {targets}, {}, executor);
     failures += expect_eq(cut_status, status_t::success_k);
     failures += expect(cut.verdict != us::utilities::refine_verdict_t::none_k && cut.neighborhoods != 0);
-    failures += expect_eq(source->size(), std::size_t {0});
-    failures += expect_eq(first->size() + second->size(), entries_k);
+    failures += expect_eq(source->size() + lone->size(), std::size_t {0});
+    failures += expect_eq(first->size() + second->size(), entries_k + lone_k);
+
+    // The first target cuts back into the emptied sources, one source into several targets.
+    indexes_t* const back[1] = {first.get()};
+    auto const [recut, recut_status] = first->reshard(listed_t {back}, listed_t {several}, {}, executor);
+    failures += expect_eq(recut_status, status_t::success_k);
+    failures += expect_eq(first->size(), std::size_t {0});
+    failures += expect_eq(source->size() + lone->size() + second->size(), entries_k + lone_k);
     std::size_t miscounted = 0;
-    for (us::utilities::uuid128_t const& key : keys) miscounted += first->count(key) + second->count(key) != 1;
+    auto const landed = [&](us::utilities::uuid128_t const& key) {
+        return source->count(key) + lone->count(key) + second->count(key);
+    };
+    for (us::utilities::uuid128_t const& key : keys) miscounted += landed(key) != 1;
+    for (us::utilities::uuid128_t const& key : lone_keys) miscounted += landed(key) != 1;
     failures += expect_eq(miscounted, std::size_t {0});
     return failures;
 }

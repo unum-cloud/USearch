@@ -1924,10 +1924,11 @@ bool cut_into(handle_& source, std::span<handle_* const> targets, u64_t seed, sc
  *      targets, then sweeps the closing round over every target, each moved entry one whose links
  *      changed; a live plan moves nothing more and sweeps on where its last call stopped.
  *
- *  Several sources pack into the one target among them or into an empty one, one source splits
- *  among several empty targets as @ref partition_nodes parts it, and one handle as its only source
- *  and target recuts in place through @p recut, which answers false once it refused. Every handle
- *  stays the caller's; a source the targets do not name ends empty.
+ *  Several sources pack into the one target among them or into an empty one, the first source with
+ *  every other gathered into it splits among several empty targets, none a source, as
+ *  @ref partition_nodes parts it, and one handle as its only source and target recuts in place
+ *  through @p recut, which answers false once it refused. Every handle stays the caller's; a
+ *  source the targets do not name ends empty.
  */
 template <typename plan_handle_, typename arguments_, typename score_, typename same_kind_, typename recut_>
 void reshard_and_report(arguments_ const& arguments, score_ const& score, same_kind_ const& same_kind,
@@ -1951,9 +1952,6 @@ void reshard_and_report(arguments_ const& arguments, score_ const& score, same_k
             reject_if(!same_kind(sources.front()->options, handle->options), usearch_status_config_mismatch_k,
                       "Every handle must share the first source's kind and geometry", outcome))
             return;
-    if (reject_if(sources.size() > 1 && targets.size() > 1, usearch_status_unsupported_k,
-                  "Several sources pack into one target only", outcome))
-        return;
     // Locking in address order keeps two reshards over the same handles from deadlocking.
     std::vector<handle_t*> ordered = named;
     std::sort(ordered.begin(), ordered.end());
@@ -1983,15 +1981,23 @@ void reshard_and_report(arguments_ const& arguments, score_ const& score, same_k
         one_shot.entries = target.entries.size();
     }
     else {
-        if (reject_if(std::find(targets.begin(), targets.end(), sources.front()) != targets.end(),
-                      usearch_status_config_mismatch_k, "A source split into several targets cannot be one of them",
-                      outcome))
-            return;
+        for (handle_t* source : sources)
+            if (reject_if(std::find(targets.begin(), targets.end(), source) != targets.end(),
+                          usearch_status_config_mismatch_k, "A source cut into several targets cannot be one of them",
+                          outcome))
+                return;
         for (handle_t* target : targets)
             if (reject_if(!target->entries.empty(), usearch_status_config_mismatch_k,
                           "A target must be a source or empty", outcome))
                 return;
-        if (!cut_into(*sources.front(), targets, arguments.seed, score, outcome)) return;
+        handle_t& gathering = *sources.front();
+        for (handle_t* source : sources.subspan(1)) {
+            if (reject_if(!gathering.append_entries_of(*source), usearch_status_out_of_memory_k,
+                          "A source's entries could not be accommodated", outcome))
+                return;
+            source->reset();
+        }
+        if (!cut_into(gathering, targets, arguments.seed, score, outcome)) return;
         for (handle_t* target : targets) one_shot.entries += target->entries.size();
         one_shot.moved = one_shot.entries;
     }

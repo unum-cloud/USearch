@@ -69,6 +69,10 @@ inline std::size_t expect_eq_(actual_type_ const& actual, wanted_type_ const& wa
 /** The relative error a @c -ffast-math build leaves, which @c expect_errors allows. */
 inline constexpr f64_t approximate_tolerance_k = 1e-3;
 
+/** Recall a graph that moved or re-linked may lose against its reference, as a share of the
+ *  results, one bound for every modality and residency. */
+inline constexpr f64_t rewrite_recall_margin_k = 0.05;
+
 /** How a cell's results relate to their exact reference, the families NumKong's harness judges its
  *  kernels by: equal, within rounding, within rounding of the largest reference for weighted
  *  averages that pass through zero, or only statistically close for paths approximate by design. */
@@ -821,9 +825,10 @@ std::size_t drive_cancelled_plan(plan_type_ const& plan, usearch_outcome_t const
 /** Resharding @p index , whose entries are keyed by its first offsets, as the one source into two
  *  empty targets of its own session and shard count through a plan every call of which is
  *  cancelled leaves @p index empty and live and every key in one target once, where the residency
- *  counts entries, and the plan's finish audits every entry; malformed lists and several sources
- *  into several targets refuse first, an NVMe view refuses it as read-only and a GPU index answers
- *  @p on_device, a refusal saying why. */
+ *  counts entries, and the plan's finish audits every entry; both targets then gather and cut again
+ *  into @p index and a third index, several sources into several targets, every key landing once
+ *  more. Malformed lists, and a source among several targets, refuse first, an NVMe view refuses it
+ *  as read-only and a GPU index answers @p on_device, a refusal saying why. */
 template <typename verbs_type_>
 std::size_t expect_reshard_cut(handle<verbs_type_>& index, usearch_status_t on_device) {
     usearch_status_t const wanted = index.residency == usearch_residency_nvme_k   ? usearch_status_read_only_k
@@ -843,7 +848,7 @@ std::size_t expect_reshard_cut(handle<verbs_type_>& index, usearch_status_t on_d
         return check(outcome.status == wanted && outcome.message);
     }
     // Malformed lists refuse as arguments before anything closes: no targets, a null slot, or a
-    // target named twice; several sources into several targets is not a case a reshard has.
+    // target named twice; a source among several targets would be cut into itself.
     std::size_t failures = 0;
     using index_t = typename verbs_type_::index_t;
     std::array<index_t, 2> const holding_null {targets[0].get(), nullptr};
@@ -855,7 +860,7 @@ std::size_t expect_reshard_cut(handle<verbs_type_>& index, usearch_status_t on_d
     }
     std::array<index_t, 2> const several {source, targets[1].get()};
     verbs_type_::reshard(several, handles, index.executor(), index.session->seed, &report, &outcome);
-    failures += check(outcome.status == usearch_status_unsupported_k && outcome.message);
+    failures += check(outcome.status == usearch_status_config_mismatch_k && outcome.message);
     failures += check(describe(index).size == before.size);
 
     typename verbs_type_::reshard_plan_t plan = nullptr;
@@ -872,19 +877,31 @@ std::size_t expect_reshard_cut(handle<verbs_type_>& index, usearch_status_t on_d
     failures += check(outcome.status == usearch_status_invalid_argument_k);
     failures += check(describe(index).size == 0 &&
                       describe(targets[0]).size + describe(targets[1]).size == before.size);
-    std::size_t miscounted = 0;
-    for (std::size_t offset = 0; offset != before.size; ++offset) {
-        usearch_key_t const key = key_of_offset(index.session->seed, offset);
-        std::size_t landed = 0;
-        for (handle<verbs_type_>& target : targets) {
-            std::size_t entries = 0;
-            verbs_type_::count(target.get(), target.executor(), key, &entries, &outcome);
-            if (outcome.status == usearch_status_unsupported_k) return failures;
-            landed += entries;
+    auto const miscounted = [&](handle<verbs_type_>& first, handle<verbs_type_>& second) {
+        std::size_t wrong = 0;
+        for (std::size_t offset = 0; offset != before.size; ++offset) {
+            usearch_key_t const key = key_of_offset(index.session->seed, offset);
+            std::size_t landed = 0;
+            for (handle<verbs_type_>* target : {&first, &second}) {
+                std::size_t entries = 0;
+                verbs_type_::count(target->get(), target->executor(), key, &entries, &outcome);
+                if (outcome.status == usearch_status_unsupported_k) return std::size_t {0};
+                landed += entries;
+            }
+            wrong += landed != 1;
         }
-        miscounted += landed != 1;
-    }
-    return failures + check(miscounted == 0);
+        return wrong;
+    };
+    failures += check(miscounted(targets[0], targets[1]) == 0);
+
+    handle<verbs_type_> third = open_index<verbs_type_>(*index.session, index.geometry, before.shards_count);
+    if (!third) return failures + 1;
+    std::array<typename verbs_type_::index_t, 2> const recut {source, third.get()};
+    verbs_type_::reshard(handles, recut, index.executor(), index.session->seed + 1, &report, &outcome);
+    failures += check(outcome) + check(report.reachability.audited == before.size);
+    failures += check(describe(targets[0]).size == 0 && describe(targets[1]).size == 0 &&
+                      describe(index).size + describe(third).size == before.size);
+    return failures + check(miscounted(index, third) == 0);
 }
 
 /** A RAM index saves into its session's arena, whose bytes name their metadata, and loads from them

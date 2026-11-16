@@ -1340,16 +1340,16 @@ typedef struct usearch_dense_reshard_t {
     /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
-    /** The @b optional placement of a RAM handle recut in place, of which only @c shard_capacity is
-     *  honoured; @c NULL keeps it. */
+    /** The @b optional placement of a RAM handle recut in place, honouring its @c shard_capacity
+     *  and passing a @c cpu_class_ceiling resolving to the handles' variant; @c NULL keeps it. */
     usearch_ram_options_t const* ram;
 
-    /** The @b optional placement of a VRAM handle recut in place, of which no field is honoured;
-     *  @c NULL keeps it. */
+    /** The @b optional placement of a VRAM handle recut in place, passing only a
+     *  @c gpu_class_ceiling that resolves to the handles' variant; @c NULL keeps it. */
     usearch_vram_options_t const* vram;
 
-    /** The @b optional placement of an NVMe handle recut in place, of which no field is honoured;
-     *  @c NULL keeps it. */
+    /** The @b optional placement of an NVMe handle recut in place, passing only a
+     *  @c cpu_class_ceiling that resolves to the handles' variant; @c NULL keeps it. */
     usearch_nvme_options_t const* nvme;
 
     /** The @b optional output for what the call did to the graph, as @c usearch_refine_report_t
@@ -1391,6 +1391,10 @@ typedef struct usearch_dense_reshard_t {
  *  capped at an equal share of the entries, and entries no root reaches enter the smallest part. A
  *  sharded source is cut shard by shard, part @c p of shard @c s moving into shard @c s of target
  *  @c p, its edges into other parts dropped and the entries that lost one placed first.
+ *
+ *  Gathering then cutting names several sources and several targets, none of them a source: every
+ *  other source gathers into the first as a gather would, with no round, and the first is then
+ *  cut into the targets, every source ending empty and live.
  *
  *  Recutting names one handle as its only source and target. On RAM its shards pack largest first,
  *  each into the first shard with room under @c ram->shard_capacity entries, or the handle's own
@@ -1443,10 +1447,11 @@ typedef struct usearch_dense_reshard_t {
  *    class, metric or geometry, or on a device the executor does not drive.
  *  - @c usearch_status_config_mismatch_k A target neither a source nor empty, a source cut into
  *    targets that include it, or a placement of another residency than the handles'.
- *  - @c usearch_status_unsupported_k Several sources into several targets; named memory domains on
- *    RAM, named devices on VRAM or named paths on NVMe, which would place shards anew; on RAM a
- *    shard past @c ram->shard_capacity, which would have to be cut first; on VRAM any
- *    @c vram->shard_capacity, which its moves cannot honour.
+ *  - @c usearch_status_config_mismatch_k A class ceiling in @c ram, @c vram or @c nvme that
+ *    resolves to another variant than the handles', as creating a handle with it would.
+ *  - @c usearch_status_unsupported_k Named memory domains on RAM, named devices on VRAM or named
+ *    paths on NVMe, which would place shards anew; on RAM a shard past @c ram->shard_capacity,
+ *    which would have to be cut first; on VRAM any @c vram->shard_capacity.
  *  - @c usearch_status_contended_k An insertion in flight on a handle named, or on VRAM a save of
  *    one; nothing moves.
  *  - @c usearch_status_overflow_k A part passes a target's capacity or its node IDs, or on NVMe

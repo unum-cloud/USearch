@@ -603,8 +603,9 @@ int checkpoint_refine(world_t& world, int argc, char const* const* argv) {
 /**
  *  @brief Loads every part the positionals name and reshards them, then saves the result: without
  *      @c --parts the parts pack into the first and it saves under @c --save, and with @c --parts
- *      the one part splits into that many empty targets @p target_geometry opens from its
- *      metadata, each saved as a part beside the manifest @c --save commits.
+ *      every other part gathers into the first, which then splits into that many empty targets
+ *      @p target_geometry opens from its metadata, each saved as a part beside the manifest
+ *      @c --save commits.
  *
  *  A manifest stands for its parts, so naming one packs a split checkpoint back into one index.
  */
@@ -617,7 +618,7 @@ int checkpoint_reshard(world_t& world, int argc, char const* const* argv, std::s
         {
             {"--save", "address", "required: the packed index, or the manifest a split commits beside its parts",
              &settings.save},
-            {"--parts", "count", "splits the one part into this many targets, at least 2, instead of packing",
+            {"--parts", "count", "cuts the parts into this many targets, at least 2, instead of packing",
              &settings.parts},
         },
         modality_flags);
@@ -638,8 +639,8 @@ int checkpoint_reshard(world_t& world, int argc, char const* const* argv, std::s
     st::vector<sz::string_t> parts;
     for (std::string_view const address : std::span {positionals}.first(given))
         if (!checkpoint_parts_of(address, parts)) return EXIT_FAILURE;
-    if (split_into ? parts.size() != 1 : parts.size() < 2) {
-        fmt::println(stderr, "{} parts given: --parts splits exactly one, and packing needs two or more", parts.size());
+    if (!split_into && parts.size() < 2) {
+        fmt::println(stderr, "{} part given: packing needs two or more, and --parts cuts any", parts.size());
         return EXIT_FAILURE;
     }
     if (split_into && settings.save == "-") {

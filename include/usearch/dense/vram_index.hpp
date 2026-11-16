@@ -1673,7 +1673,7 @@ struct vram_shard_core {
             switch (phase_) {
             case phase_t::health_k: return 2 * std::size_t {health.visible};
             case phase_t::heal_k: return health.islands();
-            case phase_t::hubs_k: return round_hubs(health.visible, shape_.hubs_per_draw, shape_.capacity);
+            case phase_t::hubs_k: return round_first_hubs(health.visible, shape_.hubs_per_draw, shape_.capacity);
             case phase_t::gather_k: {
                 std::size_t entries = 0;
                 for (std::size_t run = 0; run != runs_; ++run) entries += mirrors_.runs[run].width;
@@ -1778,7 +1778,7 @@ struct vram_shard_core {
          *  first gather's one run over every ID. */
         void draw_hubs_() noexcept {
             node_id_t const visible = health.visible;
-            std::size_t const hubs = round_hubs(visible, shape_.hubs_per_draw, shape_.capacity);
+            std::size_t const hubs = round_first_hubs(visible, shape_.hubs_per_draw, shape_.capacity);
             for (std::size_t rank = 0; rank != hubs; ++rank)
                 mirrors_.hub_nodes[rank] = static_cast<u32_t>(seeded_bijection(rank, visible, round_seed_));
             partial_sort(std::span<u32_t> {mirrors_.hub_nodes, hubs}, hubs);
@@ -2117,6 +2117,8 @@ struct vram_shard_core {
      *      places no shards, so the shard capacity must be zero.
      *  @param[in,out] context The driving context, which every phase takes back; the partition's
      *      scratch and the rounds' are carved from it.
+     *  @param[in] rows The rows this index holds once the appends planned ahead of the split land,
+     *      as a gather into it before its cut plans them; the rows it holds now otherwise.
      *
      *  @par Statuses:
      *  - @c invalid_argument_k An empty list, a null index, or an index listed twice.
@@ -2132,7 +2134,7 @@ struct vram_shard_core {
     template <typename owner_type_>
     expected<reshard_plan_t> plan_reshard(std::span<owner_type_* const> sources, std::span<owner_type_* const> targets,
                                           vram_shard_core owner_type_::* core, reshard_config_t config,
-                                          traversal_context_t& context) noexcept {
+                                          traversal_context_t& context, std::size_t rows) noexcept {
         reshard_plan_t plan {refine_plan_t {health_plan_t {empty_round_scratch_(context)}}};
         for (std::span<owner_type_* const> const listed : {sources, targets}) {
             if (listed.empty()) return {std::move(plan), status_t::invalid_argument_k};
@@ -2160,7 +2162,7 @@ struct vram_shard_core {
             split.targets.push_back_reserved(&part);
         }
         split.source = this;
-        split.entries = size();
+        split.entries = rows;
         split.part_capacity = divide_round_up<std::size_t>(split.entries, parts);
         if (parts * split.part_capacity >= (std::numeric_limits<u32_t>::max)())
             return {std::move(plan), status_t::overflow_k};
@@ -2193,7 +2195,7 @@ struct vram_shard_core {
     expected<refine_report_t> reshard(std::span<owner_type_* const> sources, std::span<owner_type_* const> targets,
                                       vram_shard_core owner_type_::* core, reshard_config_t config,
                                       traversal_context_t& context) noexcept {
-        auto [plan, status] = plan_reshard(sources, targets, core, config, context);
+        auto [plan, status] = plan_reshard(sources, targets, core, config, context, size());
         if (failed(status)) return {{}, status};
         do
             if (failed(plan.queue(context, config.refine)) || failed(plan.wait(context))) break;

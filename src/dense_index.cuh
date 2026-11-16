@@ -567,26 +567,35 @@ static void load_dense_index(source_type_ source, residency_options_type_ const&
     propagate_error(usearch_status_success_k, outcome, nullptr);
 }
 
-/** Whether every handle a reshard's @p arguments name is of the very variant @p punned is and takes
- *  writes, and every target not among the sources is empty, waiting out the calls naming each
- *  first; false once @p outcome records why not. */
+/** Whether every handle a reshard's @p arguments name is of the very variant @p punned is and is no
+ *  view, and every target not among the sources is empty, waiting out the calls naming each first;
+ *  false once @p outcome records why not. Every handle answers @c read_only_k before any answers
+ *  @c config_mismatch_k, in the ruled order. */
 template <vendored_residency_t residency_>
 static bool accepts_dense_reshard(punned_dense_index<residency_> const& punned,
                                   usearch_dense_reshard_t const& arguments, usearch_outcome_t* outcome) noexcept {
     auto const accepts = [&](usearch_dense_index_t handle) noexcept {
         // Every scalar, class and residency is a variant of its own, so another shape is another
         // table.
-        void* const index = same_punned_index(punned, *handle);
-        if (!index)
+        if (!same_punned_index(punned, *handle))
             return propagate_error(usearch_status_config_mismatch_k, outcome,
                                    "Every handle must share the first source's residency, scalar and class");
-        if (status_t const served = punned.verbs.serves_writes(index); failed(served))
-            return propagate_error(served, outcome);
         // Calls already naming the handle end first; the caller keeps it alive past the plan's
         // finish, as the headers require, so no count follows the plan.
         wait_named_calls(handle->named_calls);
         return true;
     };
+    // Each handle answers for its writes through its own table, so a view of another variant
+    // refuses as read-only before any handle answers for its kind. A loaded NVMe handle refuses
+    // insertions as unsupported yet takes a reshard's rewrite, so only a view refuses here.
+    bool read_only = false;
+    for (std::span<usearch_dense_index_t const> const listed : {std::span {arguments.sources, arguments.sources_count},
+                                                                std::span {arguments.targets, arguments.targets_count}})
+        for (usearch_dense_index_t const handle : listed)
+            visit_punned(*handle, [&]<vendored_residency_t own_>(punned_dense_index<own_> own) noexcept {
+                read_only |= own.verbs.serves_writes(own.index) == status_t::read_only_k;
+            });
+    if (read_only) return propagate_error(status_t::read_only_k, outcome);
     for (std::size_t source = 0; source != arguments.sources_count; ++source)
         if (!accepts(arguments.sources[source])) return false;
     for (std::size_t target = 0; target != arguments.targets_count; ++target) {
@@ -598,6 +607,65 @@ static bool accepts_dense_reshard(punned_dense_index<residency_> const& punned,
         if (!sourced && punned.verbs.size(handle->index))
             return propagate_error(usearch_status_config_mismatch_k, outcome, "A target must be a source or empty");
     }
+    return true;
+}
+
+/** The variant a reshard's CPU class @p ceiling resolves to among @p verbs ' residency, as creating
+ *  a handle with it would; @p verbs itself when it sets no ceiling. */
+template <vendored_residency_t residency_>
+static expected<dense_verbs<residency_> const*> ceiling_cpu_variant(dense_verbs<residency_> const& verbs,
+                                                                    usearch_cpu_class_t ceiling) noexcept {
+    if (ceiling == usearch_cpu_class_unknown_k) return {&verbs, status_t::success_k};
+    auto const [picked, status] = pick_cpu_ceiling(ceiling);
+    if (failed(status)) return {nullptr, status};
+    return {pick_cpu_variant<residency_>(cpu_ladder_t {}, verbs.dtype, picked), status_t::success_k};
+}
+
+/** The variant a reshard's @p vram ceiling resolves to on @p ladder, as creating a handle with it
+ *  would; @p verbs itself when it sets no ceiling. */
+template <vendored_residency_t residency_, gpu_class_t... classes_>
+static expected<dense_verbs<residency_> const*> ceiling_gpu_variant(dense_verbs<residency_> const& verbs,
+                                                                    gpu_ladder<classes_...> ladder,
+                                                                    usearch_vram_options_t const* vram) noexcept {
+    if (!vram || vram->gpu_class_ceiling == usearch_gpu_class_unknown_k) return {&verbs, status_t::success_k};
+    auto const [placement, status] = resolve_placement(*vram);
+    if (failed(status)) return {nullptr, status};
+    return {pick_gpu_variant<residency_>(ladder, verbs.dtype, placement), status_t::success_k};
+}
+
+/** The variant a reshard placement's class ceiling resolves to, one overload per residency. */
+static expected<dense_verbs<vendored_residency_t::ram_k> const*> ceiling_variant(
+    dense_verbs<vendored_residency_t::ram_k> const& verbs, usearch_dense_reshard_t const& arguments) noexcept {
+    return ceiling_cpu_variant(verbs, arguments.ram ? arguments.ram->cpu_class_ceiling : usearch_cpu_class_unknown_k);
+}
+static expected<dense_verbs<vendored_residency_t::nvme_k> const*> ceiling_variant(
+    dense_verbs<vendored_residency_t::nvme_k> const& verbs, usearch_dense_reshard_t const& arguments) noexcept {
+    return ceiling_cpu_variant(verbs, arguments.nvme ? arguments.nvme->cpu_class_ceiling : usearch_cpu_class_unknown_k);
+}
+static expected<dense_verbs<vendored_residency_t::vram_nvidia_k> const*> ceiling_variant(
+    dense_verbs<vendored_residency_t::vram_nvidia_k> const& verbs, usearch_dense_reshard_t const& arguments) noexcept {
+    return ceiling_gpu_variant(verbs, nvidia_ladder_t {}, arguments.vram);
+}
+static expected<dense_verbs<vendored_residency_t::vram_amd_k> const*> ceiling_variant(
+    dense_verbs<vendored_residency_t::vram_amd_k> const& verbs, usearch_dense_reshard_t const& arguments) noexcept {
+    return ceiling_gpu_variant(verbs, amd_ladder_t {}, arguments.vram);
+}
+static expected<dense_verbs<vendored_residency_t::vram_apple_k> const*> ceiling_variant(
+    dense_verbs<vendored_residency_t::vram_apple_k> const& verbs, usearch_dense_reshard_t const& arguments) noexcept {
+    return ceiling_gpu_variant(verbs, apple_ladder_t {}, arguments.vram);
+}
+
+/** Whether a reshard's class ceiling resolves to the variant @p verbs is: a ceiling the devices
+ *  refuse answers as at creation, and one resolving to another variant answers
+ *  @c config_mismatch_k; false once @p outcome records why not. */
+template <vendored_residency_t residency_>
+static bool places_as_handles(dense_verbs<residency_> const& verbs, usearch_dense_reshard_t const& arguments,
+                              usearch_outcome_t* outcome) noexcept {
+    auto const [placed, status] = ceiling_variant(verbs, arguments);
+    if (failed(status)) return propagate_error(status, outcome, "The class ceiling does not resolve here");
+    if (placed != &verbs)
+        return propagate_error(usearch_status_config_mismatch_k, outcome,
+                               "The class ceiling resolves to another variant than the handles'");
     return true;
 }
 
@@ -1145,6 +1213,7 @@ USEARCH_EXPORT void usearch_dense_reshard(usearch_dense_reshard_t* arguments) {
         [&]<vendored_residency_t residency_>(dense_verbs<residency_> const* verbs) noexcept {
             punned_dense_index<residency_> const punned {*verbs, first ? first->index : nullptr};
             if (first && !accepts_dense_reshard(punned, *arguments, outcome)) return;
+            if (first && !places_as_handles(*verbs, *arguments, outcome)) return;
             usearch_executor_handle_t call_executor;
             typename punned_dense_index<residency_>::executor_t* const executor = executor_of(
                 punned, arguments->executor, call_executor, outcome);

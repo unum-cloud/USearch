@@ -3,7 +3,7 @@
  *  @author Ash Vardanian
  *  @date October 22, 2026
  *  @brief The freestanding reshard of @c ram_indexes sources into RAM targets: many sources packed
- *      into one target, or one source split into many targets.
+ *      into one target, or any sources split into many targets.
  *
  *  A reshard into one target packs every moved source shard into a target shard: a zero shard
  *  capacity keeps the target's shards and appends each moved shard to the one with the fewest rows,
@@ -11,9 +11,9 @@
  *  largest first into the first shard with room, so it ends with as few shards as fit. The shard a
  *  bin keeps stays resident with its IDs, every other source shard moves in after it with its edges
  *  rebased and its keys beside it, and then one round per target shard links them in. A reshard
- *  into many targets splits shard @c s of its one source into shard @c s of every target, one
- *  graph-local part each, and then every target shard runs one round. The moves and the rounds are
- *  the plan's own phases.
+ *  into many targets first gathers every other source into the first, as a pack with no rounds,
+ *  then splits shard @c s of that first source into shard @c s of every target, one graph-local
+ *  part each, and then every target shard runs one round; the moves and the rounds are its phases.
  */
 #pragma once
 
@@ -28,15 +28,16 @@
 namespace unum::usearch::dense {
 
 /**
- *  @brief Opens a reshard of @p sources into @p targets: several sources into one target, or one
- *      source into several targets.
+ *  @brief Opens a reshard of @p sources into @p targets: several sources into one target, or any
+ *      sources into several targets.
  *
  *  Into one target, a zero @p config.shard_capacity keeps the target's shards, the target's own
  *  rows staying where they are when it is a source, and every other source's shards move in beside
  *  them; a capacity repacks every source shard into target shards of at most that many rows, in
- *  place when the target is a source, so no shard's rows exist twice. Into several targets, the
- *  one source splits shard by shard into the same shard of every target, which must hold as many
- *  shards and no rows, and the source ends empty.
+ *  place when the target is a source, so no shard's rows exist twice. Into several targets, every
+ *  other source first moves into the first one beside its own rows, as a pack with a zero capacity
+ *  does but with no round, and the first source then splits shard by shard into the same shard of
+ *  every target, which must hold as many shards and no rows and be no source; all sources empty.
  *
  *  The plan copies both lists, and every index it reads or moves closes here, each under its own
  *  gate, so the packing never goes stale: the target or targets stay closed while the plan lives
@@ -46,11 +47,10 @@ namespace unum::usearch::dense {
  *
  *  @par Statuses:
  *  - @c invalid_argument_k No source, no target, or a null or repeated index in either list.
- *  - @c unsupported_k Several sources and several targets, or a source shard past the capacity,
- *    which would have to be cut first.
  *  - @c uninitialized_k No target shard, or @p executor has no threads.
  *  - @c config_mismatch_k Another metric or geometry, a split's source among its targets, or a
- *    split target holding rows or another shard count.
+ *    split target holding rows or a shard count other than the first source's once gathered.
+ *  - @c unsupported_k A source shard past the capacity, which would have to be cut first.
  *  - @c contended_k A call, batch, plan or load in flight on a target or on a source.
  */
 template <typename indexes_type_>
@@ -136,7 +136,11 @@ struct [[nodiscard]] ram_reshard_plan {
     template <typename progress_type_ = dummy_progress_t>
     status_t run(executor_t& executor, std::span<traversal_context_t> traversals,
                  progress_type_&& on_visited = {}) noexcept {
-        if (splits_()) return run_split_(executor, traversals, on_visited);
+        if (splits_()) {
+            if (!splitting_) return status_t::uninitialized_k;
+            if (status_t const moved = move_in_(*splitting_, executor); failed(moved)) return moved;
+            return run_split_(executor, traversals, on_visited);
+        }
         indexes_t* const target = rounds_.owner_;
         if (!target) return status_t::uninitialized_k;
         if (executor.size() != traversals.size()) return status_t::config_mismatch_k;
@@ -165,7 +169,8 @@ struct [[nodiscard]] ram_reshard_plan {
             if (!splitting_) return {result, status_t::uninitialized_k};
             if (executor.size() != traversals.size()) return {result, status_t::config_mismatch_k};
             status_t closed = status_t::success_k;
-            {
+            // Sources still to gather leave the first one short of the rows its cut planned.
+            if (!pending_sources_()) {
                 auto [executor_claim, claim_status] = executor.claim();
                 if (failed(claim_status)) return {result, claim_status};
                 dummy_progress_t closing_alone;
@@ -199,7 +204,8 @@ struct [[nodiscard]] ram_reshard_plan {
 
     /** The phase the plan is in: the moves', then the one the first shard still rounding is in. */
     phase_t phase() const noexcept {
-        if (!splits_()) return pending_sources_() ? phase_t::copy_k : rounds_.phase();
+        if (pending_sources_()) return phase_t::copy_k;
+        if (!splits_()) return rounds_.phase();
         for (shard_plan_t const& plan : shard_plans_)
             if (plan.moving() || plan.rounding()) return plan.phase();
         return shard_plans_.empty() ? phase_t::none_k : shard_plans_[0].phase();
@@ -253,9 +259,9 @@ struct [[nodiscard]] ram_reshard_plan {
     }
 
     /** Whether the rows of @p index moved out and left it empty: a source other than the target
-     *  once it moved in, or a split's source once its parts published. */
+     *  once it moved in, or a split's first source, while held, once its parts published. */
     bool moved(indexes_t const* index) const noexcept {
-        if (splits_()) return index == sources_[0] && !shard_plans_.empty() && !shard_plans_[0].moving();
+        if (splits_() && index == splitting_) return !shard_plans_.empty() && !shard_plans_[0].moving();
         std::size_t const lead = resident_shards_ ? 1 : 0, moved = moved_sources_ > lead ? moved_sources_ - lead : 0;
         for (std::size_t position = 0; position != moved && position != sources_.size(); ++position)
             if (sources_[position] == index) return true;
@@ -291,14 +297,13 @@ struct [[nodiscard]] ram_reshard_plan {
                 for (std::size_t earlier = 0; earlier != position; ++earlier)
                     if (listed[earlier] == listed[position]) return {{}, status_t::invalid_argument_k};
             }
-        if (sources.size() > 1 && targets.size() > 1) return {{}, status_t::unsupported_k};
         if (!executor.size()) return {{}, status_t::uninitialized_k};
         indexes_t const& shaped = *targets.front();
         for (std::span<indexes_t* const> const listed : {sources, targets})
             for (indexes_t const* index : listed)
                 if (index->kernel() != shaped.kernel() || index->geometry() != shaped.geometry())
                     return {{}, status_t::config_mismatch_k};
-        if (targets.size() > 1) return open_split_(*sources.front(), targets, executor, config);
+        if (targets.size() > 1) return open_split_(sources, targets, executor, config);
         return open_pack_(sources, *targets.front(), executor, config);
     }
 
@@ -360,46 +365,69 @@ struct [[nodiscard]] ram_reshard_plan {
         return {std::move(plan), status_t::success_k};
     }
 
-    /** Closes @p source and every target, each under its own gate, and opens every source shard's
-     *  split into the same shard of every target. */
-    static expected<ram_reshard_plan> open_split_(indexes_t& source, std::span<indexes_t* const> targets,
-                                                  executor_t const& executor, reshard_config_t config) noexcept {
-        std::size_t const shards = source.shards_.size(), parts = targets.size();
-        if (!shards) return {{}, status_t::uninitialized_k};
-        for (indexes_t const* into : targets)
-            if (into == &source || into->shards_.size() != shards) return {{}, status_t::config_mismatch_k};
+    /** Closes the first of @p sources, every other source and every target, each under its own
+     *  gate, plans the other sources' moves into the first beside its own rows, and opens every
+     *  shard's split of the first into the same shard of every target, sized for the moved rows. */
+    static expected<ram_reshard_plan> open_split_(std::span<indexes_t* const> sources,
+                                                  std::span<indexes_t* const> targets, executor_t const& executor,
+                                                  reshard_config_t config) noexcept {
+        indexes_t& source = *sources.front();
+        std::span<indexes_t* const> const gathered = sources.subspan(1);
+        std::size_t const parts = targets.size();
+        if (!source.shards_.size()) return {{}, status_t::uninitialized_k};
+        if (lists_share(sources, targets)) return {{}, status_t::config_mismatch_k};
         ram_reshard_plan plan {source.shards_.allocator()};
-        if (failed(plan.sources_.reserve_exactly(1)) || failed(plan.targets_.reserve_exactly(parts)))
+        if (failed(plan.sources_.reserve_exactly(gathered.size())) || failed(plan.targets_.reserve_exactly(parts)))
             return {{}, status_t::bad_alloc_k};
         for (indexes_t* into : targets) plan.targets_.push_back_reserved(into);
+        std::size_t const shards_before = source.shards_.size();
         if (status_t const closed = source.close_gated_(); failed(closed)) return {{}, closed};
-        plan.sources_.push_back_reserved(&source);
         plan.splitting_ = &source;
         if (!config.refine.cache_bytes) config.refine.cache_bytes = executor.cache_bytes_per_core();
         plan.config_ = config.refine;
         // A shard generation opened before the close would hold rows no shard's split moves.
-        if (source.shards_.size() != shards) return {{}, status_t::contended_k};
+        if (source.shards_.size() != shards_before) return {{}, status_t::contended_k};
+        std::size_t moved_entries = source.size();
+        for (indexes_t* from : gathered) {
+            if (status_t const closed = from->close_gated_(); failed(closed)) return {{}, closed};
+            plan.sources_.push_back_reserved(from);
+            moved_entries += from->size();
+        }
+        // The other sources pack beside the first one's rows, which stay; the shards they fill are
+        // the shards the split cuts.
+        if (status_t const packing = source.plan_moves_(to_span(plan.sources_), source.shard_capacity(),
+                                                        rank_fewest_entries, plan.moves_);
+            failed(packing))
+            return {{}, packing};
+        std::size_t const shards = source.shards_.size();
         // Closed, a target can take no row, so its emptiness holds for the plan's life.
         for (indexes_t* into : targets) {
+            if (into->shards_.size() != shards) return {{}, status_t::config_mismatch_k};
             if (status_t const closed = into->close_gated_(); failed(closed)) return {{}, closed};
             ++plan.closed_targets_;
             if (into->size()) return {{}, status_t::config_mismatch_k};
         }
         growing_buffer<index_t*, forkunion_allocator_t> into_shards {source.shards_.allocator()};
+        growing_buffer<std::size_t, forkunion_allocator_t> rows {source.shards_.allocator()};
         if (failed(plan.shard_plans_.reserve_exactly(shards)) || failed(plan.cursors_.resize(shards)) ||
-            failed(into_shards.reserve_exactly(parts)))
+            failed(into_shards.reserve_exactly(parts)) || failed(rows.resize(shards)))
             return {{}, status_t::bad_alloc_k};
+        for (std::size_t shard = 0; shard != shards; ++shard) rows[shard] = source.shard(shard).size();
+        std::size_t move = 0;
+        for (indexes_t const* from : plan.sources_)
+            for (std::size_t shard = 0; shard != from->shards_.size(); ++shard, ++move)
+                rows[plan.moves_[move].into] += from->shard(shard).size();
         for (std::size_t shard = 0; shard != shards; ++shard) {
             into_shards.clear();
             for (indexes_t* into : targets) into_shards.push_back_reserved(into->shards_[shard].index.get());
             index_t* const from = source.shards_[shard].index.get();
             auto [split, status] = from->plan_reshard(std::span<index_t* const> {&from, 1}, to_span(into_shards),
-                                                      {config.refine, 0, config.seed + shard});
+                                                      {config.refine, 0, config.seed + shard}, rows[shard]);
             if (failed(status)) return {{}, status};
             plan.shard_plans_.push_back_reserved(std::move(split));
         }
-        plan.source_shards_ = shards;
-        plan.moved_entries_ = source.size();
+        plan.source_shards_ = shards_before + plan.moves_.size();
+        plan.moved_entries_ = moved_entries;
         return {std::move(plan), status_t::success_k};
     }
 
@@ -422,12 +450,14 @@ struct [[nodiscard]] ram_reshard_plan {
     }
 
     /** Moves every pending source into @p target under the executor's claim: the target's own
-     *  shards first when it repacks, vacating the shards other sources may move into. */
+     *  shards first when it repacks, vacating the shards other sources may move into; a split's
+     *  target is its first source. */
     status_t move_in_(indexes_t& target, executor_t& executor) noexcept {
         if (!pending_sources_()) return status_t::success_k;
         auto [executor_claim, claim_status] = executor.claim();
         if (failed(claim_status)) return claim_status;
-        std::size_t const shards = rounds_.cursors_.size(), lead = resident_shards_ ? 1 : 0;
+        std::size_t const shards = splits_() ? shard_plans_.size() : rounds_.cursors_.size();
+        std::size_t const lead = resident_shards_ ? 1 : 0;
         if (lead && !moved_sources_) {
             std::span<shard_move_t const> const own = to_span(moves_).first(resident_shards_);
             if (status_t const moved = target.move_in_(target, own, shards, executor); failed(moved)) return moved;
@@ -529,7 +559,7 @@ struct [[nodiscard]] ram_reshard_plan {
     void release_() noexcept {
         if (splitting_) std::exchange(splitting_, nullptr)->shards_.reopen();
         for (; closed_targets_; --closed_targets_) targets_[closed_targets_ - 1]->shards_.reopen();
-        if (!splits_()) release_sources_();
+        release_sources_();
     }
 
     /** Runs and finishes the plan on contexts carved for the call: the one-shot @ref reshard. */
@@ -545,7 +575,7 @@ struct [[nodiscard]] ram_reshard_plan {
     }
 
     /** The sources still pending and moved, copied at planning: the ones that move out, the target
-     *  aside, or a split's one source. */
+     *  or a split's first source aside. */
     growing_buffer<indexes_t*, forkunion_allocator_t> sources_;
 
     /** The one target a pack fills, or every target a split fills, copied at planning. */
@@ -572,7 +602,8 @@ struct [[nodiscard]] ram_reshard_plan {
     /** Targets whose dispensers a split closed, in target order. */
     std::size_t closed_targets_ = 0;
 
-    /** A split's source, closed while the plan lives; null for a pack and once finished. */
+    /** A split's first source, which the others gather into and the split then cuts, closed while
+     *  the plan lives; null for a pack and once finished. */
     indexes_t* splitting_ = nullptr;
 
     /** The rounds' knobs. */

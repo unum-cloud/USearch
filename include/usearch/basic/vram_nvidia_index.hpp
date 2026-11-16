@@ -1627,7 +1627,7 @@ struct vram_ragged_graph {
             switch (phase_) {
             case phase_t::health_k: return 2 * std::size_t {health.visible};
             case phase_t::heal_k: return health.islands();
-            case phase_t::hubs_k: return round_hubs(health.visible, shape_.hubs_per_draw, shape_.capacity);
+            case phase_t::hubs_k: return round_first_hubs(health.visible, shape_.hubs_per_draw, shape_.capacity);
             case phase_t::gather_k: return runs_ ? mirrors_.run_entries[runs_] : 0;
             case phase_t::restitch_k: return health.visible;
             default: return 0;
@@ -1731,7 +1731,7 @@ struct vram_ragged_graph {
          *  first gather's one run over every ID. */
         void draw_hubs_() noexcept {
             node_id_t const visible = health.visible;
-            std::size_t const hubs = round_hubs(visible, shape_.hubs_per_draw, shape_.capacity);
+            std::size_t const hubs = round_first_hubs(visible, shape_.hubs_per_draw, shape_.capacity);
             for (std::size_t rank = 0; rank != hubs; ++rank)
                 mirrors_.hub_nodes[rank] = static_cast<u32_t>(seeded_bijection(rank, visible, round_seed_));
             partial_sort(std::span<u32_t> {mirrors_.hub_nodes, hubs}, hubs);

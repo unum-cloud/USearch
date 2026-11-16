@@ -2743,14 +2743,14 @@ struct ram_index {
      *  @brief One refinement round in flight, from its opening health check to its closing one.
      *
      *  A plan from @ref plan_refine runs one round: the opening health check, the islands it named
-     *  healed without a distance, a seeded draw of one cache-sized pack of hubs, a gather streaming
-     *  every stored entry past them into the neighborhood of its nearest hub, and again inside
-     *  every neighborhood over its capacity, a restitch of each neighborhood in one core's cache,
-     *  every entry keeping the diverse links among its own and its nearest neighborhood-mates and
-     *  no others, and the closing health check from the same root, which decides the verdict. When
-     *  the heal left islands with no link to or from the root's component, such as a moved part,
-     *  the round heals and re-stitches again from that check, while each heal leaves fewer such
-     *  islands than the one before it. No phase walks the graph.
+     *  healed without a distance, a seeded draw of about the square root of the neighborhoods it
+     *  needs as hubs, a gather streaming every stored entry past them into the neighborhood of its
+     *  nearest hub, and again inside every neighborhood over its capacity, a restitch of each
+     *  neighborhood in one core's cache, every entry keeping the diverse links among its own and
+     *  its nearest neighborhood-mates and no others, and the closing health check from the same
+     *  root, which decides the verdict. When the heal left islands with no link to or from the
+     *  root's component, such as a moved part, the round heals and re-stitches again from that
+     *  check, while each heal leaves fewer such islands than the one before it; no phase walks.
      *
      *  Tasks of the current phase are disjoint ranges, so any number of threads may @ref run them
      *  at once; @ref advance is the single-caller barrier between phases and answers whether
@@ -2918,7 +2918,7 @@ struct ram_index {
             switch (phase_) {
             case phase_t::health_k: return 2 * std::size_t {health.visible};
             case phase_t::heal_k: return health.islands();
-            case phase_t::hubs_k: return hubs_for_(health.visible);
+            case phase_t::hubs_k: return first_hubs_(health.visible);
             case phase_t::gather_k: return gathered_entries_();
             case phase_t::restitch_k: return health.visible;
             default: return 0;
@@ -3092,6 +3092,11 @@ struct ram_index {
             return round_hubs(entries, hubs_per_draw_, neighborhood_capacity_);
         }
 
+        /** Hubs the round's first gather over @p entries draws, as @ref round_first_hubs counts. */
+        std::size_t first_hubs_(std::size_t entries) const noexcept {
+            return round_first_hubs(entries, hubs_per_draw_, neighborhood_capacity_);
+        }
+
         /** Bytes the hubs of the first gather take, one padded row each, then their packs on
          *  a fresh line. */
         std::size_t hubs_bytes_(std::size_t hubs) const noexcept {
@@ -3202,10 +3207,10 @@ struct ram_index {
             return static_cast<u16_t>(nearest.node_id == node_id_unknown_k ? 0 : nearest.node_id);
         }
 
-        /** Draws one pack of neighborhood hubs by seeded bijection over the visible entries,
+        /** Draws the first gather's neighborhood hubs by seeded bijection over the visible entries,
          *  and packs them. */
         void draw_hubs_() noexcept {
-            std::size_t const visible = health.visible, hubs = hubs_for_(visible);
+            std::size_t const visible = health.visible, hubs = first_hubs_(visible);
             hub_nodes_.clear();
             for (std::size_t rank = 0; rank != hubs; ++rank)
                 hub_nodes_.push_back_reserved(static_cast<node_id_t>(seeded_bijection(rank, visible, round_seed_)));
@@ -3956,6 +3961,8 @@ struct ram_index {
      *  @param[in] targets The empty indexes taking the parts, at least two, all distinct.
      *  @param[in] config The rounds' knobs, zeros meaning "derive from connectivity", and the seed
      *      picking the parts' roots, so equal seeds over equal graphs split alike.
+     *  @param[in] rows The rows this index holds once the moves planned ahead of the split land,
+     *      as a gather into it before its cut plans them; the rows it holds now otherwise.
      *
      *  @par Statuses:
      *  - @c invalid_argument_k No source, no target, or a null or repeated index in either list.
@@ -3966,7 +3973,7 @@ struct ram_index {
      *  - @c overflow_k The parts pass the 32-bit ID space.
      */
     expected<reshard_plan_t> plan_reshard(std::span<ram_index* const> sources, std::span<ram_index* const> targets,
-                                          reshard_config_t config = {}) noexcept {
+                                          reshard_config_t config, std::size_t rows) noexcept {
         using bitset_allocator_t = typename health_plan_t::bitset_allocator_t;
         using part_bases_allocator_t = typename refine_plan_t::part_bases_allocator_t;
         reshard_plan_t plan {refine_plan_t {health_plan_t {bitset_allocator_t {vectors_allocator_}},
@@ -3989,9 +3996,8 @@ struct ram_index {
         }
         if (!settled_()) return {std::move(plan), status_t::contended_k};
 
-        node_id_t const rows = static_cast<node_id_t>(size());
         std::size_t const capacity = divide_round_up<std::size_t>(rows, parts);
-        if (parts * capacity > static_cast<std::size_t>(node_id_unknown_k))
+        if (rows >= node_id_unknown_k || parts * capacity > static_cast<std::size_t>(node_id_unknown_k))
             return {std::move(plan), status_t::overflow_k};
         if (failed(plan.targets_.reserve_exactly(parts)) || failed(plan.target_claims_.reserve_exactly(parts)) ||
             failed(plan.part_extents_.resize(parts)) || failed(plan.part_slots_.resize(rows)) ||
@@ -4020,6 +4026,12 @@ struct ram_index {
         plan.seed_ = config.seed;
         plan.moves_ = phase_t::partition_k;
         return {std::move(plan), status_t::success_k};
+    }
+
+    /** @ref plan_reshard of the rows this index holds now. */
+    expected<reshard_plan_t> plan_reshard(std::span<ram_index* const> sources, std::span<ram_index* const> targets,
+                                          reshard_config_t config = {}) noexcept {
+        return plan_reshard(sources, targets, config, size());
     }
 
 #pragma endregion Refinement

@@ -514,7 +514,7 @@ std::size_t test_dense_vram_indexes_reshard(u64_t seed, typename indexes_type_::
     using ram_t = typename nvme_reference<nvme_t>::ram_t;
     using node_id_t = typename ram_t::index_t::node_id_t;
     constexpr std::size_t samples_k = 32;
-    constexpr std::size_t noise_percent_k = 10;
+    constexpr std::size_t noise_percent_k = static_cast<std::size_t>(rewrite_recall_margin_k * 100);
     std::size_t const rows = 2 * dense_thread_nodes_k;
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
     std::size_t failures = 0;
@@ -611,7 +611,7 @@ std::size_t test_dense_vram_indexes_cut(u64_t seed, typename indexes_type_::exec
     using reference_t = typename ram_t::index_t;
     constexpr std::size_t samples_k = 32;
     constexpr std::size_t wanted_k = 10;
-    constexpr std::size_t noise_percent_k = 10;
+    constexpr std::size_t noise_percent_k = static_cast<std::size_t>(rewrite_recall_margin_k * 100);
     std::size_t const rows = 2 * dense_thread_nodes_k;
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
     std::size_t failures = 0;
@@ -709,8 +709,8 @@ std::size_t test_dense_vram_indexes_cut(u64_t seed, typename indexes_type_::exec
     return failures;
 }
 
-/** A reshard of several sources into several targets, or one naming a shard capacity, is refused
- *  and leaves the source whole: its size and the count of every key stay as inserted. */
+/** A reshard of several sources into targets naming one of them, or one naming a shard capacity, is
+ *  refused and leaves the source whole: its size and the count of every key stay as inserted. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
 std::size_t test_dense_vram_indexes_cut_refused(u64_t seed, typename indexes_type_::executor_t& placement) {
     using key_t = typename indexes_type_::key_t;
@@ -728,19 +728,18 @@ std::size_t test_dense_vram_indexes_cut_refused(u64_t seed, typename indexes_typ
     indexes_type_ source {kernel_, {dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
     indexes_type_ lone {kernel_, {dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
     indexes_type_ first {kernel_, {dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
-    indexes_type_ second {kernel_, {dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
-    for (indexes_type_* placed : {&source, &lone, &first, &second})
+    for (indexes_type_* placed : {&source, &lone, &first})
         failures += expect(succeeded(place_shards(*placed, placement)) && succeeded(place_shards(*placed, placement)));
     failures += expect_eq(source.reserve({rows}).status, status_t::success_k);
     failures += expect(
         succeeded(source.insert(std::span<key_t const> {keys.data(), rows}, vectors.view(), driver.executor).status));
 
     indexes_type_* const sources[2] = {&source, &lone};
-    indexes_type_* const targets[2] = {&first, &second};
+    indexes_type_* const targets[2] = {&first, &lone};
     failures += expect_eq(plan_reshard(std::span<indexes_type_* const> {sources},
                                        std::span<indexes_type_* const> {targets}, driver.executor)
                               .status,
-                          status_t::unsupported_k);
+                          status_t::config_mismatch_k);
     reshard_config_t capped;
     capped.shard_capacity = rows;
     failures += expect_eq(plan_reshard(std::span<indexes_type_* const> {sources}.first(1),

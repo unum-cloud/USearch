@@ -432,7 +432,7 @@ static std::size_t test_ram_indexes_recut(u64_t seed) {
     using scalar_t = typename indexes_type_::index_t::scalar_t;
     using key_t = typename indexes_type_::key_t;
     using distance_t = typename indexes_type_::distance_t;
-    constexpr std::size_t samples_k = 64, noise_percent_k = 10;
+    constexpr std::size_t samples_k = 64, noise_percent_k = static_cast<std::size_t>(rewrite_recall_margin_k * 100);
     std::size_t failures = 0;
     std::size_t const rows = dense_growth_nodes_k;
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
