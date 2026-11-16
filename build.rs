@@ -51,10 +51,7 @@ const ENGINE: Implementation = Implementation {
 };
 
 /// The engine with its CUDA backends compiled in.
-const ENGINE_CUDA: Implementation = Implementation {
-    feature: "cuda",
-    ..ENGINE
-};
+const ENGINE_CUDA: Implementation = Implementation { feature: "cuda", ..ENGINE };
 
 /// The brute-force stand-in, which answers the same verbs over the standard library alone.
 const STUB: Implementation = Implementation {
@@ -85,11 +82,7 @@ fn selected() -> Result<Implementation, String> {
              implementation of the C interface, so only one can answer a call. Cargo unions \
              features across the dependency graph, so this usually means a second crate asked \
              for the other one.",
-            named
-                .iter()
-                .map(|implementation| implementation.feature)
-                .collect::<Vec<_>>()
-                .join(" and ")
+            named.iter().map(|implementation| implementation.feature).collect::<Vec<_>>().join(" and ")
         )),
     }
 }
@@ -189,10 +182,7 @@ fn build_library(manifest: &Path, chosen: Implementation, target_os: &str) -> Re
     if target_os == "wasi" {
         println!("cargo:rerun-if-env-changed=WASI_SDK_PATH");
         println!("cargo:rerun-if-env-changed=CARGO_CFG_TARGET_FEATURE");
-        engine.define(
-            "CMAKE_TOOLCHAIN_FILE",
-            manifest.join("cmake/toolchain-wasm32-wasi.cmake"),
-        );
+        engine.define("CMAKE_TOOLCHAIN_FILE", manifest.join("cmake/toolchain-wasm32-wasi.cmake"));
         // An engine validates a module whole, so the SIMD tier is the one the Rust target declares; the flags
         // `cmake-rs` passes replace the toolchain's initial ones, so the tier and `-fno-exceptions` ride with them.
         let target_features = env::var("CARGO_CFG_TARGET_FEATURE").unwrap_or_default();
@@ -201,10 +191,7 @@ fn build_library(manifest: &Path, chosen: Implementation, target_os: &str) -> Re
             return Err("USearch on WebAssembly needs `-C target-feature=+simd128`".into());
         }
         // Declared relaxed SIMD narrows to the strict class, since its wasm64 class needs threads no WASI target has.
-        engine
-            .cflag("-msimd128")
-            .cxxflag("-msimd128")
-            .cxxflag("-fno-exceptions");
+        engine.cflag("-msimd128").cxxflag("-msimd128").cxxflag("-fno-exceptions");
     }
 
     // The CUDA code is the release set, or the one the environment names, like `USEARCH_CUDA_ARCH=100f`,
@@ -218,9 +205,7 @@ fn build_library(manifest: &Path, chosen: Implementation, target_os: &str) -> Re
     if !cuda_arch.is_empty() {
         println!("cargo:rerun-if-env-changed=CXX");
         if env::var_os("CXX").is_none() {
-            engine
-                .define("CMAKE_C_COMPILER", "clang")
-                .define("CMAKE_CXX_COMPILER", "clang++");
+            engine.define("CMAKE_C_COMPILER", "clang").define("CMAKE_CXX_COMPILER", "clang++");
         }
     }
     engine.define("USEARCH_CUDA_ARCH", cuda_arch);

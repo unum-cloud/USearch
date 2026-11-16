@@ -107,26 +107,7 @@ endif ()
 # `SOVERSION` carries the major alone, the only break the C ABI admits.
 set_target_properties(usearch_shared PROPERTIES VERSION ${PROJECT_VERSION} SOVERSION ${PROJECT_VERSION_MAJOR})
 
-# Each flavor joins an export set, so `find_package(usearch)` names them `usearch::shared` and `usearch::static`. The
-# preview SDK takes the shared one; the archive installs as a component of its own, which the Rust crate links from.
-if (USEARCH_BUILD_SHARED)
-    set_target_properties(usearch_shared PROPERTIES EXPORT_NAME shared)
-    set_target_properties(usearch_static PROPERTIES EXPORT_NAME static)
-    install(
-        TARGETS usearch_shared
-        EXPORT ${PROJECT_NAME}Targets
-        COMPONENT sdk
-        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-        INCLUDES
-        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-    )
-    install(
-        TARGETS usearch_static
-        EXPORT ${PROJECT_NAME}StaticTargets
-        COMPONENT static
-        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
-        INCLUDES
-        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-    )
-endif ()
+# Each flavor joins an export set, which the root's install lists name, so `find_package(usearch)` names them
+# `usearch::shared` and `usearch::static`.
+set_target_properties(usearch_shared PROPERTIES EXPORT_NAME shared)
+set_target_properties(usearch_static PROPERTIES EXPORT_NAME static)

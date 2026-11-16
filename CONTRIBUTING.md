@@ -288,35 +288,42 @@ Those per-thread buffers are the only buffers a predicate ever holds, and an eng
 
 ### Query Views
 
-A metric takes a batch of queries as one flat transparent view over a static extent, like a `std::array` of views sized by the batch's extent, never as a span of pointers it chases one query at a time.
-A query type that owns packed storage exposes a view of it, and the metric reads that view.
+A batched kernel takes its queries as one flat transparent view over a static extent, like a `std::array` of views sized by the batch's extent, never as a span of pointers it chases one query at a time.
+A query type that owns packed storage exposes a view of it, and the kernel reads that view.
 `.githooks/pre-commit` refuses a `std::span` of pointers to const under `include/`, except a span of C strings, which names things rather than batching queries.
 
 ### Planned Operations
 
 A long or multi-phase operation starts as a plan, like `plan_refine` or `plan_insert`, and its blocking verb is only a loop over a one-shot plan, on every residency.
-Each operation has one plan type and one finish, like `usearch_dense_refine_plan_t` and `usearch_dense_refine_plan_finish`, in every family that offers the operation, and no verb describes a plan.
+Each operation has one plan type and one finish, like `usearch_<family>_<op>_plan_t` and `usearch_<family>_<op>_plan_finish`, in every family that offers the operation, and no verb describes a plan.
 The plan is a lazy handle field on its verb: `NULL` runs the operation once, a `NULL` pointee opens a plan, and a live plan continues.
-Cursors are not plans, and keep their `init`, `next` and `free` verbs.
-An engine plan owns its input and output lists, and the glue opens each operation through its own plan-open table entry, with no `std::variant` and no opener callable.
-Every handle a call or a live plan names must outlive the call and the plan's finish; the headers say so, and nothing counts handles in flight.
+The finish frees the plan whatever it answers, and finishing a finished plan answers `invalid_argument`.
+Cursors are not plans, and keep their `init`, `next` and `free` verbs; `next` refuses a `NULL` cursor or a foreign handle, and `free(NULL)` does nothing.
+An engine plan owns its input and output lists, copying the `{count, handles}` pairs it was given, and the glue opens each operation through its own plan-open table entry, with no `std::variant` and no opener callable.
+A free waits for the calls naming its single handle, which the library counts on the handle, so a binding keeps no counts of its own.
+Every handle a list names, like a plan's sources and targets, must outlive the call and the plan's finish; the headers say so, and nothing counts the handles in a list.
+
 Its parts are named by kind, and the kinds never mix.
-A phase is a different kind of work, ended by an `advance()` barrier, like a refine round's health, heal, hubs, gather and restitch.
-Phases are one enum shared by every plan and mirrored by one C enum with a name function, like `phase_t`, `usearch_phase_t` and `usearch_phase_name`, the way a verdict is named.
-A repetition is the same work again, named for what repeats and counted, like a refine round, a health check's depth or a gather's nesting.
-A task is an independent unit of one phase that any thread runs in any order, ForkUnion's word; "step" names only sequential work, like `walk_step_t`.
+A phase is a different kind of work, ended by an `advance()` barrier.
+Phases are one `u8` enum shared by every plan, starting at `none_k = 0`, and mirrored by one C enum with `usearch_phase_name` and `usearch_phase_from_name`, with a `static_assert` per value where the glue casts it; progress reports `usearch_phase_progress_t{phase, ordinal, completed, total}` and no strings.
+A repetition is the same work again, named for what repeats and counted, like a round or a depth.
+A task is an independent unit of one phase that any thread runs in any order, ForkUnion's word; "step" names only sequential work.
 `tasks()` lists the current phase's tasks, `run(task, context)` runs any of them on the calling thread, `advance()` is the barrier answering whether another phase follows, and `finish()` publishes and releases.
-Planning claims and reserves everything a task writes, so a task never fails for lack of memory and a plan stopped between tasks leaves the index correct.
-Per-thread state lives in the traversal context `run` is handed, in buffers it already holds where they fit, as attention keeps its softmax states past the queries in `staged_queries`.
-An operation is a plan only when its work crosses a barrier between phases, runs long enough to stop and resume, or writes the index; a pass whose threads each finish their own share, like `search`, `multiply`, `attend` or MaxSim, is a direct verb over the caller's contexts.
+After the last phase, `advance()` keeps answering false and changes nothing.
+Planning claims and reserves everything a task writes, so a task never fails for lack of memory and a plan stopped between tasks leaves the data correct.
+Per-thread state lives in the traversal context `run` is handed.
+An operation is a plan only when its work crosses a barrier between phases, runs long enough to stop and resume, or writes stored data; a pass whose threads each finish their own share is a direct verb over the caller's contexts.
 A plan owns only what crosses its barriers: scratch belongs to the context, results land in the caller's outputs, named at planning, and whatever follows from other members is computed rather than stored.
 `run`, `advance` and `finish` never allocate.
+A report's verdict-like enum starts at `none = 0`, so a zeroed report never reads as progress.
 
 USearch has two long operations, refine and reshard, each with its plan in dense and in every modality.
+A refine round's phases are health, heal, hubs, gather and restitch.
 A reshard names its sources and its targets: several sources into one target is a gather, one source into several targets is a cut, and one handle as its own only source and target is recut in place.
 "Gather" names both the reshard of several sources into one target and the round's phase, which gathers entries into the neighborhoods under its hubs; both collect many into few, so they share the word.
 It moves entries first, in phases of its own that rewrite links only within the parts it moves, then runs rounds, and no phase walks to find what an entry links to.
 The phases are the values of `phase_t` in `utilities/types.hpp`, in order: copy, build, partition, scatter, health, heal, hubs, gather, restitch, write and done.
+`search`, `multiply`, `attend` and MaxSim are direct verbs over the caller's contexts, and attention keeps its softmax states past the queries in `staged_queries`.
 
 A member of a plan, cursor or walk names what it holds and when it holds it, like `picked_this_round_` or `visited_`.
 A pair that trades places shares one stem and differs in one word, like `picked_this_round_` and `picked_next_round_`, and the verb moving between them is named for the barrier it runs at, like `advance_round_`.
@@ -326,11 +333,111 @@ Two bit runs are two `growing_bitset_t` members, never one buffer with an index.
 
 ### Refusals
 
-A call the library cannot run answers one status, picked by what is wrong, in this order.
-A malformed list, one that is empty, `NULL` or names a handle twice, answers `invalid_argument`.
+A call the library cannot run answers one status, picked by what is wrong, in this order: `invalid_argument`, `read_only`, `config_mismatch`, `unsupported`, `contended`, `overflow`.
+A `NULL` handle the call operates on answers `uninitialized` before any of them.
+A malformed argument or list, one that is empty, `NULL` or names a handle twice, answers `invalid_argument`.
+A write to a handle opened read-only answers `read_only`.
 Handles of another kind, or of a geometry the call cannot join, answer `config_mismatch`.
-A well-formed case no tower implements yet, like a USearch reshard of several sources into several targets, answers `unsupported`.
-An option a tower cannot honour is refused with `unsupported`, never ignored.
+A well-formed case nothing implements yet, like USearch's recut in place of a VRAM index under a shard capacity, answers `unsupported`.
+An option the library cannot honour is refused with `unsupported`, never ignored.
+A handle another call holds answers `contended` rather than waiting, and a size past its counter answers `overflow`.
+A refusal moves nothing: every output and handle reads as it did before the call.
+Each header lists a verb's refusals under `@par Statuses` in this order and in these words, and the stub library answers every one of them.
+
+### Statuses
+
+Statuses 0 to 19 carry the same numbers and meanings in every Unum library: success 0, deferred 1, out_of_memory 2, shape_mismatch 3, unsupported_layout 4, unknown_kind 5, read_only 6, io 7, device 8, malformed 9, internal 10, overflow 11, uninitialized 12, config_mismatch 13, contended 14, cancelled 15, unsupported 16, invalid_argument 17, not_found 18, already_exists 19.
+A library leaves out the ones it cannot answer but never renumbers the rest, and numbers its own statuses from 20.
+Enums pass as enum types; only the metrics and dtypes the CLI parses have a `_from_name`.
+CPU and GPU class values are ABI: each class keeps the number USearch gives the same hardware, written explicitly, with unused numbers reserved rather than reused.
+
+### Compile-Time Choices
+
+Code picks between alternatives at compile time through three gates, each for one kind of choice.
+
+`#if` picks a toolchain or a platform, and nothing else.
+A feature the compiler or the operating system lacks is a `#if`; a choice between two algorithms is not.
+
+```cpp
+#if defined(_WIN32) // allowed: the platform decides
+using file_handle_t = void*;
+#else
+using file_handle_t = int;
+#endif
+```
+
+A `requires` clause picks an overload when a whole function differs.
+Every constrained overload has an unconstrained fallback beside it, so a type the constraint rejects still finds a function.
+
+```cpp
+template <typename index_type_>
+status_t run_plan(index_type_& index) noexcept requires is_nvme_index<index_type_> { /* NVMe rounds */ }
+
+template <typename index_type_>
+status_t run_plan(index_type_& index) noexcept { /* every other residency */ }
+```
+
+`if constexpr` branches on a named concept or a `constexpr bool`, one level deep.
+An `else if constexpr` chain is still one level.
+
+```cpp
+template <typename query_type_>
+concept hinted_query = requires(query_type_& query) { query.find_hinted(0u); };
+
+if constexpr (hinted_query<query_type_>) seeds = query.find_hinted(shard); // allowed: a named concept
+else if constexpr (serial_class_k) seeds = {};                            // allowed: one chain, one level
+```
+
+The hook refuses each of these, in the directories its `gated_source_directories` names:
+
+```cpp
+if constexpr (requires { query.find_hinted(0u); }) { /* ... */ }   // refused: name the probe as a concept
+
+if constexpr (is_ram_k) {
+    if constexpr (is_serial_k) { /* ... */ }                        // refused: a second choice inside the first
+}
+
+template <typename value_type_, typename = std::enable_if_t<std::is_integral_v<value_type_>>>
+value_type_ clamp(value_type_ value) noexcept;                      // refused: write `requires` on the overload
+
+struct sorted_tag_t {};
+void insert(entry_t entry, sorted_tag_t) noexcept;                  // refused: a tag that only picks an overload
+```
+
+Control flow nests at most three deep: `if`, `for`, `while`, `switch`, `do`, `try` and `catch` each count, and so does `if constexpr`.
+An `else` or `catch` body sits at its `if`'s or `try`'s depth, so an `else if` chain stays flat.
+A body without braces counts like a braced one, while a lambda or a plain block adds nothing.
+Both sides of a `#if` count from the depth the `#if` began at.
+
+```cpp
+for (shard_t& shard : shards)                       // 1
+    for (node_t node : shard.nodes)                 // 2
+        if (node.live)                              // 3
+            while (node.next != end) step(node);    // refused: 4 deep
+```
+
+To flatten, return early from failures, extract the inner loop into a function named for what it does, or split an overload per case.
+
+The checks are `check_constexpr_conditions_named`, `check_constexpr_branches_flat`, `check_enable_if_and_tags_absent` and `check_constexpr_nesting`.
+They judge only the lines a commit adds, so existing code flattens as it is touched.
+
+### Split String Literals
+
+A string literal split across lines by hand ends every fragment but the last with a trailing `//`.
+Without the pin, clang-format joins the fragments or restacks them into a staircase.
+This holds in C, C++, CUDA and HIP sources alike.
+
+```cpp
+char const help[] =                                 //
+    "Usage: probe [options]\n"                      // allowed: every fragment but the last is pinned
+    "Runs one probe.\n";
+
+char const help[] = "Usage: probe [options]\n"
+                    "Runs one probe.\n";            // refused: the first fragment is unpinned
+```
+
+The check is `check_split_string_literal_pinned`.
+A comment that explains the line pins it just as well, and a bare `//` on a member line is not taken for a member's documentation.
 
 ### Components
 
@@ -436,33 +543,36 @@ Templates carry no `_t` or `_k` suffix, whether class, alias or variable templat
 
 ### Vocabulary
 
-| Concept                                                                                             | Word                                                                                                            | Refused                                                               |
-| :-------------------------------------------------------------------------------------------------- | :-------------------------------------------------------------------------------------------------------------- | :-------------------------------------------------------------------- |
+| Concept                                                          | Word                                  | Refused                                       |
+| :--------------------------------------------------------------- | :------------------------------------ | :-------------------------------------------- |
+| a kind of work in a plan, ended by a barrier                     | phase                                 | stage, step, pass                             |
+| the same work again, counted                                     | repetition, named for what repeats: round, depth, nesting | phase, pass       |
+| an independent unit of one phase, run by any thread in any order | task                                 | step, chunk                                   |
+| sequential work                                                  | step                                  | task                                          |
+| a per-capability kernel bundle                                   | kit                                   | trait                                         |
+| a compiled alternative per class, dtype or residency             | variant                               | arm, cell                                     |
+| RAM, VRAM or NVMe                                                | residency                             | home, memory side                             |
+| an exported operation and its table entry                        | verb; trampoline                      | …                                             |
+| a fixed-shape collection a verb fills                            | outputs                               | landing, lander                               |
+| a member of a plan, cursor or walk                               | what it holds and when it holds it    | bits, current, state, data, flags, tmp, scratch |
 | `*_index` in prose                                                                                  | mono-index                                                                                                      | singular, mono, standalone, single                                    |
 | `*_indexes` in prose                                                                                | sharded index                                                                                                   | plural, group, collection, multi                                      |
 | a mono-index inside a sharded index                                                                 | shard                                                                                                           | …                                                                     |
 | one shard's graph in one file; several                                                              | monolith; parts under a manifest                                                                                | …                                                                     |
-| RAM, VRAM or NVMe                                                                                   | residency                                                                                                       | home, memory side                                                     |
 | which device or NUMA domain a shard sits on                                                         | placement                                                                                                       | …                                                                     |
 | a residency split by the vendor its VRAM needs, one compiled variant each                           | vendored residency                                                                                              | home, tower                                                           |
 | a stored item; its ID inside a shard; its ordinal in a batch                                        | entry; node; offset                                                                                             | row, value, member, item                                              |
 | a horizontal slice of a physical matrix                                                             | row                                                                                                             | …                                                                     |
 | one query and its results                                                                           | query                                                                                                           | row                                                                   |
 | a dedicated per-residency or per-vendor implementation; its C-facing side                           | tower; face                                                                                                     | backend, engine class                                                 |
-| a compiled alternative per class, dtype or residency                                                | variant                                                                                                         | arm, cell                                                             |
-| a per-capability kernel bundle                                                                      | kit                                                                                                             | trait                                                                 |
-| an exported operation and its table entry                                                           | verb; trampoline                                                                                                | …                                                                     |
 | the two long operations; the handles a reshard reads from and moves into                            | refine, reshard; sources, targets                                                                               | absorb, split, compact, compaction, merge, donor, receiver, recipient |
 | a reshard of several sources into one target; of one source into several; of one handle into itself | gather; cut; recut                                                                                              | pack, absorb, merge, split, compact                                   |
-| a fixed-shape collection a verb fills                                                               | outputs                                                                                                         | landing, lander                                                       |
 | a callback consuming intermediate results                                                           | sink                                                                                                            | landing                                                               |
 | the device fan-out's wait                                                                           | await                                                                                                           | join                                                                  |
 | the nodes a refinement round re-selects                                                             | picked                                                                                                          | dirty, seam, marked                                                   |
 | the nodes a walk has met and the ones it still has to expand                                        | visited, frontier                                                                                               | met, seen, queue                                                      |
 | the reachability check: its verb, its plan and its phase inside a refine; what it returns           | health; reachability                                                                                            | check, scan, sweep, audit                                             |
-| a kind of work in a plan, ended by a barrier                                                        | the same word in every plan: copy, build, partition, scatter, health, heal, hubs, gather, restitch, write, done | stage, audit, step, picking, sweeping, copying, reconnect, land       |
-| the same work again, counted                                                                        | round, depth, nesting                                                                                           | phase, pass                                                           |
-| an independent unit of one phase, run by any thread in any order                                    | task                                                                                                            | step, chunk                                                           |
+| the phases of a refine or a reshard                                                                 | the same word in every plan: copy, build, partition, scatter, health, heal, hubs, gather, restitch, write, done | stage, audit, step, picking, sweeping, copying, reconnect, land       |
 | what a sample returns; the points it starts from; the ones it keeps near                            | draws; shown; focus                                                                                             | pick, anchor, landmark, context, seed, pivot                          |
 | a strong component outside the root's; one nothing links into; one with no link out                 | island; unreached island; stranded island                                                                       | orphan, remainder                                                     |
 | an entry none of whose links is nearer to a target than itself                                      | dead end                                                                                                        | trap, local minimum, stall                                            |
@@ -473,8 +583,8 @@ Templates carry no `_t` or `_k` suffix, whether class, alias or variable templat
 | device row storage                                                                                  | flat matrix, flat column                                                                                        | plane                                                                 |
 | node ID width under `utilities/` and `basic/`                                                       | `node_id_type_`                                                                                                 | `node_id_t`, `u32_t node`                                             |
 | the candidates a walk keeps                                                                         | candidates                                                                                                      | pool                                                                  |
+| a bit run of a plan, cursor or walk | one `growing_bitset_t` member named for what it holds | bitset, buffer |
 | how a batch's entries are shared among shards                                                       | split_batch_into_shards, offsets                                                                                | seat, deal, landed                                                    |
-| a member of a plan, cursor or walk                                                                  | what it holds and when it holds it                                                                              | bits, current, state, data, flags, tmp, scratch, bitset, buffer       |
 
 ### Macro Naming
 
@@ -565,17 +675,24 @@ The resulting `libusearch_shared.so` can be used in Android projects by placing 
 ## Bindings
 
 Every binding is a thin layer over the C interface, and these rules hold in each of them.
-Typed bindings are those whose compiler checks callback signatures, and dynamic bindings are the rest; in USearch the typed ones are Rust, Swift, Go, Java, C#, Zig, Mojo and C++, and the dynamic ones are Python, JavaScript and Wolfram.
+Typed bindings are those whose compiler checks callback signatures, and dynamic bindings are the rest; in USearch the typed ones are Rust, Zig, Mojo, Swift, C#, Java, Kotlin and Scala, Go and C++, and the dynamic ones are Python, JavaScript and Wolfram.
 
 The C library decides what is valid.
 A binding forwards its status, turns each status into its language's error in one place, re-checks nothing the library refuses, and keeps no copy of state the library already holds.
+Name tables come from the library's `usearch_*_name` and `usearch_*_from_name` pairs, never from a switch written in the binding.
 
-Nothing in a binding takes a lock or sends a notification.
-The object that submitted a deferred call is the only one that polls its atomic outcome, so no other thread ever waits on it, and whatever a second caller asks, the library answers.
+One mechanism reports every outcome: `usearch_outcome_status` reads it without waiting, and `usearch_outcome_wait` parks until it is final.
+Nothing in a binding takes a lock, sends a notification or adds synchronization of its own.
+The object that submitted a deferred call is the only one that polls its outcome, so no other thread ever waits on it, and whatever a second caller asks, the library answers.
+A blocking `wait` calls `usearch_outcome_wait`.
+An asynchronous bridge never parks a thread: it reads `usearch_outcome_status` and, while the call is deferred, yields to its runtime.
+A runtime with a timer pauses between reads with a backoff growing from about 1 µs to 1 ms, like Python's `asyncio.sleep`, Swift's `Task.sleep`, JavaScript's `setTimeout` and C#'s `Task.Delay`.
+A Rust future yields only: `poll` reads the status and, while it is deferred, calls `wake_by_ref` and returns `Poll::Pending`, with no sleep and no timer thread.
 
 A callback never raises into the library.
 Its fault never unwinds through C frames and never waits in a latch for the call to end: typed bindings give their callback types no way to throw, like a `noexcept` C++ callback type, while dynamic bindings report the fault through their language's unraisable path, like Python's `sys.unraisablehook` and JavaScript's uncaught-exception handler, and the callback answers cancel.
-A binding that hands the library no callback of its own, like Wolfram, whose value lookup is C, has nothing to report.
+A Rust callback that panics aborts the process, as Rust does for any unwind reaching an `extern "C"` frame; nothing catches the unwind.
+A binding that hands the library no callback of its own has nothing to report.
 
 A view the library hands back lives until the next call on its arena.
 The library describes where the memory sits, and the caller checks it; the binding neither copies the view to be safe nor checks its residency on the caller's behalf.
@@ -587,12 +704,14 @@ Each verb has one body, which fills the C struct and calls the library with no l
 What it returns is read from the struct's output slot, a trampoline receives the handler itself as its state with no hub around it, and whether a call blocks or defers follows from the type of the receiver it is called on, never from a flag.
 Verbs are never shared through a base class; a trait whose default methods hold the one body per verb is fine, like Rust's and Mojo's, since each receiver supplies only its handle.
 
-A typed binding takes the scalar as a type parameter of each call, like `search::<f32>`, rather than letting the index type fix one.
+A typed binding takes the scalar as a type parameter of each call, like `search::<f32>`, rather than letting a handle's type fix one.
 A deferred Rust call owns what it lends the library until the call is final, since the borrow checker cannot see the library holding it.
 A C++ wrapper over the C interface is a full typed binding: it has a deferred receiver, `noexcept` callback types and per-call scalar templates.
 
 A dynamic binding publishes every field of every report the library fills.
-Tests never restate a struct's layout that the compiler already pins, while tests of how keys print and parse, and of an engine run again through the binding, stay.
+A type the binding hands to C by cast is a transparent wrapper over the C struct, like Rust's `#[repr(transparent)]` newtype, so the cast is sound by construction and nothing asserts its size or alignment.
+Tests never restate a struct's layout that the compiler already pins: no `offset_of!`, `size_of`, `MemoryLayout` or `Marshal.SizeOf` asserts against the C structs; `offsetof` tables that declare members are declarations, not tests.
+Tests of how names print and parse, and of an engine run again through the binding, stay.
 
 `.githooks/pre-commit` refuses locks in binding sources, throwing callback types, caught unwinds and kept exceptions.
 

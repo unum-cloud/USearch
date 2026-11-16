@@ -41,8 +41,8 @@ pub use dense_index::{
     DenseVectors, DenseVerbs, DenseViewNvmeConfig, Monolith, RefineReport, RefineVerdict, Sample, ValueLookup,
 };
 pub use types::{
-    capabilities_available, capabilities_compiled, keys_from_arrow, rows, version, Arena, ArenaDescription, ArrowArray,
-    ArrowColumn, ArrowDeviceArray, ArrowExport, ArrowRows, ArrowSchema, Blocking, CPUClass, Deferred, Deferring,
-    Distance, Element, Error, Executor, GPUClass, Key, Matches, Mood, On, Phase, PhaseProgress, Predicate,
-    ProgressCallback, QueryMatches, Residency, Result, Scalar, Status, Traversal, Wait,
+    Arena, ArenaDescription, ArrowArray, ArrowColumn, ArrowDeviceArray, ArrowExport, ArrowRows, ArrowSchema, Blocking,
+    CPUClass, Deferred, Deferring, Distance, Element, Error, Executor, GPUClass, Key, Matches, Mood, On, Phase,
+    PhaseProgress, Predicate, ProgressCallback, QueryMatches, Residency, Result, Scalar, Status, Traversal, Wait,
+    capabilities_available, capabilities_compiled, keys_from_arrow, rows, version,
 };

@@ -14,7 +14,7 @@
 // The C mirror keeps the C spelling of every name.
 #![allow(non_camel_case_types, non_upper_case_globals)]
 
-use core::ffi::{c_char, c_int, c_void, CStr};
+use core::ffi::{CStr, c_char, c_int, c_void};
 use core::fmt;
 use core::future::{Future, IntoFuture};
 use core::marker::PhantomData;
@@ -27,8 +27,8 @@ use core::task::{Context, Poll};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use numkong::{bf16, e2m3, e3m2, e4m3, e5m2, f16, i4x2, u1x8, u4x2};
 use numkong::{Allocator, Matrix, MatrixView, StorageElement, TensorRef};
+use numkong::{bf16, e2m3, e3m2, e4m3, e5m2, f16, i4x2, u1x8, u4x2};
 
 // region: Raw Declarations
 
@@ -46,19 +46,13 @@ pub struct usearch_bytes_view_t {
 impl From<&[u8]> for usearch_bytes_view_t {
     /// Borrows the bytes as the view the C interface accepts; it must not outlive them.
     fn from(bytes: &[u8]) -> Self {
-        usearch_bytes_view_t {
-            data: bytes.as_ptr(),
-            length: bytes.len(),
-        }
+        usearch_bytes_view_t { data: bytes.as_ptr(), length: bytes.len() }
     }
 }
 
 impl Default for usearch_bytes_view_t {
     fn default() -> Self {
-        usearch_bytes_view_t {
-            data: ptr::null(),
-            length: 0,
-        }
+        usearch_bytes_view_t { data: ptr::null(), length: 0 }
     }
 }
 
@@ -74,19 +68,13 @@ pub struct usearch_keys_view_t {
 impl usearch_keys_view_t {
     /// Borrows a packed slice as the view the C interface accepts.
     pub fn of(keys: &[Key]) -> Self {
-        usearch_keys_view_t {
-            data: keys.as_ptr(),
-            stride: core::mem::size_of::<usearch_key_t>(),
-        }
+        usearch_keys_view_t { data: keys.as_ptr(), stride: core::mem::size_of::<usearch_key_t>() }
     }
 }
 
 impl Default for usearch_keys_view_t {
     fn default() -> Self {
-        usearch_keys_view_t {
-            data: ptr::null(),
-            stride: 0,
-        }
+        usearch_keys_view_t { data: ptr::null(), stride: 0 }
     }
 }
 
@@ -105,10 +93,7 @@ pub struct usearch_outcome_t {
 
 impl Default for usearch_outcome_t {
     fn default() -> Self {
-        usearch_outcome_t {
-            status: usearch_status_success_k,
-            message: ptr::null(),
-        }
+        usearch_outcome_t { status: usearch_status_success_k, message: ptr::null() }
     }
 }
 
@@ -127,12 +112,7 @@ pub struct usearch_rows_view_t {
 
 impl Default for usearch_rows_view_t {
     fn default() -> Self {
-        usearch_rows_view_t {
-            data: ptr::null(),
-            stride: 0,
-            columns: 0,
-            scalar: 0,
-        }
+        usearch_rows_view_t { data: ptr::null(), stride: 0, columns: 0, scalar: 0 }
     }
 }
 
@@ -148,12 +128,7 @@ pub struct usearch_matches_view_t {
 
 impl Default for usearch_matches_view_t {
     fn default() -> Self {
-        usearch_matches_view_t {
-            keys: ptr::null(),
-            scores: ptr::null(),
-            counts: ptr::null(),
-            columns: 0,
-        }
+        usearch_matches_view_t { keys: ptr::null(), scores: ptr::null(), counts: ptr::null(), columns: 0 }
     }
 }
 
@@ -164,14 +139,16 @@ impl usearch_matches_view_t {
     /// # Safety
     /// The view must be a finished call's output, and `query` below its count.
     pub(crate) unsafe fn query<'arena>(&self, query: usize) -> QueryMatches<'arena> {
-        let written = match self.counts.is_null() {
-            true => 0,
-            false => (*self.counts.add(query)).min(self.columns),
-        };
-        let start = query * self.columns;
-        QueryMatches {
-            keys: arena_slice(self.keys.wrapping_add(start), written),
-            distances: arena_slice(self.scores.wrapping_add(start), written),
+        unsafe {
+            let written = match self.counts.is_null() {
+                true => 0,
+                false => (*self.counts.add(query)).min(self.columns),
+            };
+            let start = query * self.columns;
+            QueryMatches {
+                keys: arena_slice(self.keys.wrapping_add(start), written),
+                distances: arena_slice(self.scores.wrapping_add(start), written),
+            }
         }
     }
 }
@@ -188,11 +165,7 @@ pub struct usearch_matches_tape_view_t {
 
 impl Default for usearch_matches_tape_view_t {
     fn default() -> Self {
-        usearch_matches_tape_view_t {
-            keys: ptr::null(),
-            scores: ptr::null(),
-            offsets: ptr::null(),
-        }
+        usearch_matches_tape_view_t { keys: ptr::null(), scores: ptr::null(), offsets: ptr::null() }
     }
 }
 
@@ -203,13 +176,15 @@ impl usearch_matches_tape_view_t {
     /// # Safety
     /// The view must be a finished call's output, and `query` below its count.
     pub(crate) unsafe fn query<'arena>(&self, query: usize) -> QueryMatches<'arena> {
-        let (start, end) = match self.offsets.is_null() {
-            true => (0, 0),
-            false => (*self.offsets.add(query), *self.offsets.add(query + 1)),
-        };
-        QueryMatches {
-            keys: arena_slice(self.keys.wrapping_add(start), end - start),
-            distances: arena_slice(self.scores.wrapping_add(start), end - start),
+        unsafe {
+            let (start, end) = match self.offsets.is_null() {
+                true => (0, 0),
+                false => (*self.offsets.add(query), *self.offsets.add(query + 1)),
+            };
+            QueryMatches {
+                keys: arena_slice(self.keys.wrapping_add(start), end - start),
+                distances: arena_slice(self.scores.wrapping_add(start), end - start),
+            }
         }
     }
 }
@@ -225,10 +200,7 @@ pub struct usearch_keys_tape_view_t {
 
 impl Default for usearch_keys_tape_view_t {
     fn default() -> Self {
-        usearch_keys_tape_view_t {
-            keys: ptr::null(),
-            offsets: ptr::null(),
-        }
+        usearch_keys_tape_view_t { keys: ptr::null(), offsets: ptr::null() }
     }
 }
 
@@ -239,11 +211,13 @@ impl usearch_keys_tape_view_t {
     /// # Safety
     /// The view must be a finished call's output, and `entry` below its count.
     pub(crate) unsafe fn entry<'arena>(&self, entry: usize) -> &'arena [Key] {
-        let (start, end) = match self.offsets.is_null() {
-            true => (0, 0),
-            false => (*self.offsets.add(entry), *self.offsets.add(entry + 1)),
-        };
-        arena_slice(self.keys.wrapping_add(start), end - start)
+        unsafe {
+            let (start, end) = match self.offsets.is_null() {
+                true => (0, 0),
+                false => (*self.offsets.add(entry), *self.offsets.add(entry + 1)),
+            };
+            arena_slice(self.keys.wrapping_add(start), end - start)
+        }
     }
 }
 
@@ -388,7 +362,7 @@ pub struct usearch_executor_drain_t {
     pub mood: usearch_mood_t,
 }
 
-extern "C" {
+unsafe extern "C" {
     pub fn usearch_outcome_wait(outcome: *mut usearch_outcome_t) -> usearch_status_t;
     pub fn usearch_outcome_status(outcome: *mut usearch_outcome_t) -> usearch_status_t;
 
@@ -631,7 +605,9 @@ pub struct Error {
 }
 
 impl fmt::Display for Error {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result { formatter.write_str(self.message) }
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.message)
+    }
 }
 
 impl std::error::Error for Error {}
@@ -644,25 +620,26 @@ pub(crate) fn check(outcome: usearch_outcome_t) -> Result<()> {
     match Status::from_raw(outcome.status) {
         Ok(()) => Ok(()),
         Err(Status::Deferred) => Err(fail(Status::Internal, "the outcome was read before it was final")),
-        Err(status) => Err(Error {
-            status,
-            message: unsafe { static_string(outcome.message) },
-        }),
+        Err(status) => Err(Error { status, message: unsafe { static_string(outcome.message) } }),
     }
 }
 
 /// Reports a failure the binding caught before the call crossed the boundary, under the same
 /// status the engine would have used had the ABI let it see the same thing.
-pub(crate) fn fail(status: Status, message: &'static str) -> Error { Error { status, message } }
+pub(crate) fn fail(status: Status, message: &'static str) -> Error {
+    Error { status, message }
+}
 
 /// Borrows a static null-terminated string the library owns.
 ///
 /// Every such string is ASCII by construction, so its bytes are read as UTF-8 unchecked.
 pub(crate) unsafe fn static_string(raw: *const c_char) -> &'static str {
-    if raw.is_null() {
-        return "";
+    unsafe {
+        if raw.is_null() {
+            return "";
+        }
+        core::str::from_utf8_unchecked(CStr::from_ptr(raw).to_bytes())
     }
-    core::str::from_utf8_unchecked(CStr::from_ptr(raw).to_bytes())
 }
 
 /// Spells an enumerator through its C `usearch_*_name`.
@@ -701,13 +678,19 @@ pub(crate) fn read_named<Value>(
 }
 
 /// The version of the linked library.
-pub fn version() -> &'static str { unsafe { static_string(usearch_version_name()) } }
+pub fn version() -> &'static str {
+    unsafe { static_string(usearch_version_name()) }
+}
 
 /// Comma-separated hardware capabilities the library was compiled with.
-pub fn capabilities_compiled() -> &'static str { unsafe { static_string(usearch_capabilities_compiled()) } }
+pub fn capabilities_compiled() -> &'static str {
+    unsafe { static_string(usearch_capabilities_compiled()) }
+}
 
 /// Comma-separated hardware capabilities this machine offers at runtime.
-pub fn capabilities_available() -> &'static str { unsafe { static_string(usearch_capabilities_available()) } }
+pub fn capabilities_available() -> &'static str {
+    unsafe { static_string(usearch_capabilities_available()) }
+}
 
 // endregion: Errors and Introspection
 
@@ -734,22 +717,30 @@ impl Key {
 }
 
 impl From<u64> for Key {
-    fn from(value: u64) -> Self { Key::from(u128::from(value)) }
+    fn from(value: u64) -> Self {
+        Key::from(u128::from(value))
+    }
 }
 
 impl From<u128> for Key {
-    fn from(value: u128) -> Self { Key(value.to_be_bytes()) }
+    fn from(value: u128) -> Self {
+        Key(value.to_be_bytes())
+    }
 }
 
 impl From<Key> for u128 {
-    fn from(key: Key) -> Self { u128::from_be_bytes(key.0) }
+    fn from(key: Key) -> Self {
+        u128::from_be_bytes(key.0)
+    }
 }
 
 impl TryFrom<Key> for u64 {
     type Error = core::num::TryFromIntError;
 
     /// The integer identity in the low eight bytes, refused when the high eight are not zero.
-    fn try_from(key: Key) -> core::result::Result<Self, Self::Error> { u64::try_from(u128::from(key)) }
+    fn try_from(key: Key) -> core::result::Result<Self, Self::Error> {
+        u64::try_from(u128::from(key))
+    }
 }
 
 impl FromStr for Key {
@@ -794,7 +785,9 @@ impl fmt::Display for Key {
 }
 
 impl fmt::Debug for Key {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result { fmt::Display::fmt(self, formatter) }
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, formatter)
+    }
 }
 
 // endregion: Keys and Distances
@@ -971,10 +964,7 @@ fn packed_layout<Value: StorageElement>(values: usize, dimensions: usize) -> Res
         return Err(fail(Status::ShapeMismatch, "the slab is not a whole number of rows"));
     }
     let value_bytes = core::mem::size_of::<Value>() as isize;
-    Ok((
-        [values / values_per_row, dimensions],
-        [values_per_row as isize * value_bytes, value_bytes],
-    ))
+    Ok(([values / values_per_row, dimensions], [values_per_row as isize * value_bytes, value_bytes]))
 }
 
 /// Borrows a packed slab as a row-major matrix of `dimensions`-wide rows.
@@ -1018,11 +1008,7 @@ impl MatrixLayout {
         if pitch < 0 {
             return Err(fail(Status::UnsupportedLayout, "matrix rows must ascend in memory"));
         }
-        Ok(MatrixLayout {
-            rows,
-            columns,
-            stride_bytes: pitch as usize,
-        })
+        Ok(MatrixLayout { rows, columns, stride_bytes: pitch as usize })
     }
 }
 
@@ -1049,17 +1035,23 @@ fn batch_of<Value: Element>(matrix: &impl TensorRef<Value, 2>) -> Result<Batch> 
 
 impl<Value: Element, Alloc: Allocator> RowsView for MatrixView<'_, Value, Alloc> {
     type Value = Value;
-    fn batch(&self) -> Result<Batch> { batch_of(self) }
+    fn batch(&self) -> Result<Batch> {
+        batch_of(self)
+    }
 }
 
 impl<Value: Element, Alloc: Allocator> RowsView for Matrix<Value, Alloc> {
     type Value = Value;
-    fn batch(&self) -> Result<Batch> { batch_of(self) }
+    fn batch(&self) -> Result<Batch> {
+        batch_of(self)
+    }
 }
 
 impl<Rows: RowsView + ?Sized> RowsView for &Rows {
     type Value = Rows::Value;
-    fn batch(&self) -> Result<Batch> { (**self).batch() }
+    fn batch(&self) -> Result<Batch> {
+        (**self).batch()
+    }
 }
 
 // endregion: Matrix Views
@@ -1093,15 +1085,13 @@ unsafe impl Send for Matches<'_> {}
 impl<'arena> Matches<'arena> {
     /// An empty slot a call fills in `arena`.
     pub(crate) fn new(arena: &'arena Arena) -> Self {
-        Matches {
-            arena,
-            view: usearch_matches_view_t::default(),
-            queries: 0,
-        }
+        Matches { arena, view: usearch_matches_view_t::default(), queries: 0 }
     }
 
     /// Queries the call resolved.
-    pub fn queries(&self) -> usize { self.queries }
+    pub fn queries(&self) -> usize {
+        self.queries
+    }
 
     /// Matches written for one query, refused with [`Status::InvalidArgument`] when `query` is not
     /// below [`Matches::queries`].
@@ -1141,20 +1131,13 @@ impl<'arena> Matches<'arena> {
     /// # }
     /// ```
     pub fn keys_to_arrow(&self) -> Result<ArrowExport<'arena>> {
-        let keys = usearch_keys_view_t {
-            data: self.view.keys,
-            stride: core::mem::size_of::<usearch_key_t>(),
-        };
+        let keys = usearch_keys_view_t { data: self.view.keys, stride: core::mem::size_of::<usearch_key_t>() };
         let count = self.queries * self.view.columns;
         let mut schema = ArrowSchema::default();
         let mut array = ArrowDeviceArray::default();
         let status = unsafe { usearch_keys_view_to_arrow(keys, count, self.arena.handle, &mut schema, &mut array) };
         arrow_checked(status)?;
-        Ok(ArrowExport {
-            arena: PhantomData,
-            schema,
-            array,
-        })
+        Ok(ArrowExport { arena: PhantomData, schema, array })
     }
 
     /// Exports every query's padded distances as one Arrow `FixedSizeList` of `columns` `f64` per
@@ -1172,11 +1155,7 @@ impl<'arena> Matches<'arena> {
         let status =
             unsafe { usearch_rows_view_to_arrow(distances, self.queries, self.arena.handle, &mut schema, &mut array) };
         arrow_checked(status)?;
-        Ok(ArrowExport {
-            arena: PhantomData,
-            schema,
-            array,
-        })
+        Ok(ArrowExport { arena: PhantomData, schema, array })
     }
 }
 
@@ -1284,12 +1263,16 @@ impl ArrowSchema {
 
 impl ArrowArray {
     /// Rows the column holds.
-    pub fn length(&self) -> i64 { self.length }
+    pub fn length(&self) -> i64 {
+        self.length
+    }
 }
 
 impl ArrowDeviceArray {
     /// The column itself.
-    pub fn array(&self) -> &ArrowArray { &self.array }
+    pub fn array(&self) -> &ArrowArray {
+        &self.array
+    }
 }
 
 impl Drop for ArrowSchema {
@@ -1352,16 +1335,15 @@ impl<'column, Value: Element> ArrowRows<'column, Value> {
         if rows.scalar != Value::SCALAR as usearch_scalar_t {
             return Err(fail(Status::UnknownKind, "the Arrow rows hold another scalar"));
         }
-        Ok(ArrowRows {
-            batch: Batch { rows, count },
-            column: PhantomData,
-        })
+        Ok(ArrowRows { batch: Batch { rows, count }, column: PhantomData })
     }
 }
 
 impl<Value: Element> RowsView for ArrowRows<'_, Value> {
     type Value = Value;
-    fn batch(&self) -> Result<Batch> { Ok(self.batch) }
+    fn batch(&self) -> Result<Batch> {
+        Ok(self.batch)
+    }
 }
 
 /// Views the keys of one Arrow `fixed_size_binary(16)` column in place, tagged `arrow.uuid` or not,
@@ -1385,10 +1367,14 @@ pub struct ArrowExport<'arena> {
 
 impl ArrowExport<'_> {
     /// The column's type.
-    pub fn schema(&self) -> &ArrowSchema { &self.schema }
+    pub fn schema(&self) -> &ArrowSchema {
+        &self.schema
+    }
 
     /// The column's buffers and the device holding them.
-    pub fn array(&self) -> &ArrowDeviceArray { &self.array }
+    pub fn array(&self) -> &ArrowDeviceArray {
+        &self.array
+    }
 
     /// Hands the column over past the arena's borrow, for a consumer that takes the structures by
     /// value.
@@ -1397,7 +1383,9 @@ impl ArrowExport<'_> {
     ///
     /// The arena must outlive the parts and take no call until they are released, as nothing
     /// refuses one, and its buffers must be host memory.
-    pub unsafe fn into_parts(self) -> (ArrowSchema, ArrowArray) { (self.schema, self.array.array) }
+    pub unsafe fn into_parts(self) -> (ArrowSchema, ArrowArray) {
+        (self.schema, self.array.array)
+    }
 }
 
 // endregion: Arrow
@@ -1559,24 +1547,20 @@ pub type ProgressCallback<'a> = dyn FnMut(usize, usize) -> ControlFlow<()> + Sen
 /// # Safety
 /// `state` must address the `&mut ProgressCallback` lent to the call.
 unsafe extern "C" fn progress_trampoline(finished: usize, total: usize, state: *mut c_void) -> c_int {
-    let handler = &mut **state.cast::<&mut ProgressCallback>();
-    c_int::from(handler(finished, total).is_break())
+    unsafe {
+        let handler = &mut **state.cast::<&mut ProgressCallback>();
+        c_int::from(handler(finished, total).is_break())
+    }
 }
 
 /// Lends an optional handler and its step count as the progress every reporting verb takes, the
 /// state pointing at the handler itself; `None` lends nulls.
 pub(crate) fn lower_progress(handler: &mut Option<&mut ProgressCallback>, steps: usize) -> usearch_progress_t {
     match handler {
-        Some(handler) => usearch_progress_t {
-            callback: Some(progress_trampoline),
-            state: ptr::from_mut(handler).cast(),
-            steps,
-        },
-        None => usearch_progress_t {
-            callback: None,
-            state: ptr::null_mut(),
-            steps,
-        },
+        Some(handler) => {
+            usearch_progress_t { callback: Some(progress_trampoline), state: ptr::from_mut(handler).cast(), steps }
+        }
+        None => usearch_progress_t { callback: None, state: ptr::null_mut(), steps },
     }
 }
 
@@ -1587,11 +1571,13 @@ pub type Predicate<'a> = dyn Fn(Key) -> bool + Sync + 'a;
 /// `state` must address the `&Predicate` lent to the call, and `keys` and `admissions` must each
 /// address `count` elements.
 unsafe extern "C" fn admission_trampoline(keys: *const Key, admissions: *mut c_int, count: usize, state: *mut c_void) {
-    let predicate = *state.cast::<&Predicate>();
-    let keys = std::slice::from_raw_parts(keys, count);
-    let admissions = std::slice::from_raw_parts_mut(admissions, count);
-    for (key, admission) in keys.iter().zip(admissions) {
-        *admission = c_int::from(predicate(*key));
+    unsafe {
+        let predicate = *state.cast::<&Predicate>();
+        let keys = std::slice::from_raw_parts(keys, count);
+        let admissions = std::slice::from_raw_parts_mut(admissions, count);
+        for (key, admission) in keys.iter().zip(admissions) {
+            *admission = c_int::from(predicate(*key));
+        }
     }
 }
 
@@ -1604,11 +1590,7 @@ pub(crate) fn lower_predicate(predicate: &Option<&Predicate>) -> usearch_predica
             state: ptr::from_ref(predicate).cast_mut().cast(),
             cost: usearch_predicate_cost_cheap_k,
         },
-        None => usearch_predicate_t {
-            callback: None,
-            state: ptr::null_mut(),
-            cost: usearch_predicate_cost_cheap_k,
-        },
+        None => usearch_predicate_t { callback: None, state: ptr::null_mut(), cost: usearch_predicate_cost_cheap_k },
     }
 }
 
@@ -1685,7 +1667,9 @@ impl FromStr for Phase {
     type Err = Error;
 
     /// Reads a phase back from the name `Display` writes, refusing any other.
-    fn from_str(text: &str) -> Result<Self> { read_named(text, usearch_phase_from_name, Phase::from_raw) }
+    fn from_str(text: &str) -> Result<Self> {
+        read_named(text, usearch_phase_from_name, Phase::from_raw)
+    }
 }
 
 /// Where a plan stands: its phase, and that phase's own count.
@@ -1739,7 +1723,9 @@ impl FromStr for Mood {
     type Err = Error;
 
     /// Reads a mood back from the name `Display` writes, refusing any other.
-    fn from_str(text: &str) -> Result<Self> { read_named(text, usearch_mood_from_name, Mood::from_raw) }
+    fn from_str(text: &str) -> Result<Self> {
+        read_named(text, usearch_mood_from_name, Mood::from_raw)
+    }
 }
 
 /// Where an executor computes, and with it where the arenas it makes keep their memory.
@@ -1777,7 +1763,9 @@ impl FromStr for Residency {
     type Err = Error;
 
     /// Reads a residency back from the name `Display` writes, refusing any other.
-    fn from_str(text: &str) -> Result<Self> { read_named(text, usearch_residency_from_name, Residency::from_raw) }
+    fn from_str(text: &str) -> Result<Self> {
+        read_named(text, usearch_residency_from_name, Residency::from_raw)
+    }
 }
 
 /// How a search reaches the indexed entries it scores.
@@ -1813,7 +1801,9 @@ impl FromStr for Traversal {
     type Err = Error;
 
     /// Reads a traversal back from the name `Display` writes, refusing any other.
-    fn from_str(text: &str) -> Result<Self> { read_named(text, usearch_traversal_from_name, Traversal::from_raw) }
+    fn from_str(text: &str) -> Result<Self> {
+        read_named(text, usearch_traversal_from_name, Traversal::from_raw)
+    }
 }
 
 /// The host threads or device streams an [`On`] runs its calls on, and the traversal scratch each
@@ -1844,16 +1834,15 @@ pub struct Executor {
 unsafe impl Send for Executor {}
 
 impl Default for Executor {
-    fn default() -> Self { Executor::adopt(ptr::null_mut()) }
+    fn default() -> Self {
+        Executor::adopt(ptr::null_mut())
+    }
 }
 
 impl Executor {
     /// Owns the handle a constructor filled, which is null for the executor that owns nothing.
     fn adopt(handle: usearch_executor_t) -> Self {
-        Executor {
-            handle,
-            share: Arc::new(ExecutorShare(handle)),
-        }
+        Executor { handle, share: Arc::new(ExecutorShare(handle)) }
     }
 
     /// Spawns host workers for RAM-resident indexes, interleaved across the compute domains local
@@ -1884,16 +1873,18 @@ impl Executor {
     /// # Safety
     /// `pool` must address a live ForkUnion `fu_pool_t` that outlives the executor.
     pub unsafe fn on_pool(memory_domains: &[i32], cpu_class: Option<CPUClass>, pool: *mut c_void) -> Result<Self> {
-        let mut handle = ptr::null_mut();
-        let mut outcome = usearch_outcome_t::default();
-        usearch_executor_on_pool(&mut usearch_executor_on_pool_t {
-            executor: &mut handle,
-            outcome: &mut outcome,
-            ram: ram_options(memory_domains, cpu_class),
-            pool,
-        });
-        let executor = Executor::adopt(handle);
-        check(outcome).map(|()| executor)
+        unsafe {
+            let mut handle = ptr::null_mut();
+            let mut outcome = usearch_outcome_t::default();
+            usearch_executor_on_pool(&mut usearch_executor_on_pool_t {
+                executor: &mut handle,
+                outcome: &mut outcome,
+                ram: ram_options(memory_domains, cpu_class),
+                pool,
+            });
+            let executor = Executor::adopt(handle);
+            check(outcome).map(|()| executor)
+        }
     }
 
     /// Spawns host workers for NVMe-resident indexes, one submission ring apiece, across the
@@ -1939,24 +1930,26 @@ impl Executor {
         streams: &[*mut c_void],
         scratch_limit: usize,
     ) -> Result<Self> {
-        if !streams.is_empty() && streams.len() != devices.len() {
-            return Err(fail(Status::ShapeMismatch, "pass no streams or one per device"));
+        unsafe {
+            if !streams.is_empty() && streams.len() != devices.len() {
+                return Err(fail(Status::ShapeMismatch, "pass no streams or one per device"));
+            }
+            let mut handle = ptr::null_mut();
+            let mut outcome = usearch_outcome_t::default();
+            usearch_executor_for_vram(&mut usearch_executor_for_vram_t {
+                executor: &mut handle,
+                outcome: &mut outcome,
+                vram: vram_options(devices, gpu_class),
+                // The C side reads one stream per device from any non-null pointer.
+                streams: match streams.is_empty() {
+                    true => ptr::null(),
+                    false => streams.as_ptr(),
+                },
+                scratch_limit,
+            });
+            let executor = Executor::adopt(handle);
+            check(outcome).map(|()| executor)
         }
-        let mut handle = ptr::null_mut();
-        let mut outcome = usearch_outcome_t::default();
-        usearch_executor_for_vram(&mut usearch_executor_for_vram_t {
-            executor: &mut handle,
-            outcome: &mut outcome,
-            vram: vram_options(devices, gpu_class),
-            // The C side reads one stream per device from any non-null pointer.
-            streams: match streams.is_empty() {
-                true => ptr::null(),
-                false => streams.as_ptr(),
-            },
-            scratch_limit,
-        });
-        let executor = Executor::adopt(handle);
-        check(outcome).map(|()| executor)
     }
 
     /// Waits until no call holds this executor, then adopts `mood` until the next call; a failure
@@ -1983,7 +1976,9 @@ unsafe impl Send for ExecutorShare {}
 unsafe impl Sync for ExecutorShare {}
 
 impl Drop for ExecutorShare {
-    fn drop(&mut self) { unsafe { usearch_executor_free(self.0) } }
+    fn drop(&mut self) {
+        unsafe { usearch_executor_free(self.0) }
+    }
 }
 
 // endregion: Executors
@@ -2017,15 +2012,14 @@ unsafe impl Sync for Arena {}
 
 impl Arena {
     /// Makes an arena of host pages for calls on the calling thread.
-    pub fn new() -> Result<Self> { Arena::new_in(&Executor::default()) }
+    pub fn new() -> Result<Self> {
+        Arena::new_in(&Executor::default())
+    }
 
     /// Makes an arena where `executor` computes, serving the calls of its residency, or only those
     /// on `executor` itself for a GPU arena.
     pub fn new_in(executor: &Executor) -> Result<Self> {
-        let mut arena = Arena {
-            handle: ptr::null_mut(),
-            _executor: Arc::clone(&executor.share),
-        };
+        let mut arena = Arena { handle: ptr::null_mut(), _executor: Arc::clone(&executor.share) };
         let mut outcome = usearch_outcome_t::default();
         unsafe {
             usearch_arena_init(&mut usearch_arena_init_t {
@@ -2062,7 +2056,9 @@ impl Arena {
 }
 
 impl Drop for Arena {
-    fn drop(&mut self) { unsafe { usearch_arena_free(self.handle) } }
+    fn drop(&mut self) {
+        unsafe { usearch_arena_free(self.handle) }
+    }
 }
 
 /// Where an [`Arena`]'s outputs live.
@@ -2080,9 +2076,11 @@ pub struct ArenaDescription {
 /// # Safety
 /// `data` must address `length` initialized values that live as long as the arena borrow.
 pub(crate) unsafe fn arena_slice<'arena, Value>(data: *const Value, length: usize) -> &'arena [Value] {
-    match length {
-        0 => &[],
-        length => core::slice::from_raw_parts(data, length),
+    unsafe {
+        match length {
+            0 => &[],
+            length => core::slice::from_raw_parts(data, length),
+        }
     }
 }
 
@@ -2104,7 +2102,9 @@ pub struct On<'index, Index, Completion = Blocking> {
 }
 
 impl<Index, Completion> Clone for On<'_, Index, Completion> {
-    fn clone(&self) -> Self { *self }
+    fn clone(&self) -> Self {
+        *self
+    }
 }
 
 impl<Index, Completion> Copy for On<'_, Index, Completion> {}
@@ -2124,11 +2124,7 @@ impl Completion for Blocking {
         output: Output,
         submit: impl FnOnce(&mut Call<Inputs, Output>, usearch_completion_t) -> Result<()>,
     ) -> Result<Self::Answer<'index, Inputs, Output>> {
-        let mut call = Call {
-            outcome: usearch_outcome_t::default(),
-            inputs,
-            output,
-        };
+        let mut call = Call { outcome: usearch_outcome_t::default(), inputs, output };
         submit(&mut call, usearch_completion_blocking_k)?;
         check(call.outcome).map(|()| call.output)
     }
@@ -2151,18 +2147,11 @@ impl Completion for Deferring {
         output: Output,
         submit: impl FnOnce(&mut Call<Inputs, Output>, usearch_completion_t) -> Result<()>,
     ) -> Result<Deferred<'index, Inputs, Output>> {
-        let call = NonNull::from(Box::leak(Box::new(Call {
-            outcome: usearch_outcome_t::default(),
-            inputs,
-            output,
-        })));
+        let call = NonNull::from(Box::leak(Box::new(Call { outcome: usearch_outcome_t::default(), inputs, output })));
         // Safety: the box is reached through `call` alone, and a refusal comes before the library
         // sees it.
         match submit(unsafe { &mut *call.as_ptr() }, usearch_completion_deferred_k) {
-            Ok(()) => Ok(Deferred {
-                call,
-                receiver: PhantomData,
-            }),
+            Ok(()) => Ok(Deferred { call, receiver: PhantomData }),
             Err(refusal) => {
                 drop(unsafe { Box::from_raw(call.as_ptr()) });
                 Err(refusal)
@@ -2203,18 +2192,16 @@ impl<Inputs, Output> Deferred<'_, Inputs, Output> {
     }
 
     /// Blocks until the call is final, then hands back what it produced.
-    pub fn wait(self) -> Result<Output> { self.wait_with_inputs().0 }
+    pub fn wait(self) -> Result<Output> {
+        self.wait_with_inputs().0
+    }
 
     /// Blocks until the call is final, then hands back what it produced beside the inputs it owned,
     /// like a plan a stop left live.
     pub fn wait_with_inputs(self) -> (Result<Output>, Inputs) {
         let call = ManuallyDrop::new(self).call.as_ptr();
         // Safety: once the outcome is final the library touches the box no more, so it is freed here.
-        let Call {
-            outcome,
-            inputs,
-            output,
-        } = unsafe {
+        let Call { outcome, inputs, output } = unsafe {
             usearch_outcome_wait(ptr::addr_of_mut!((*call).outcome));
             *Box::from_raw(call)
         };
@@ -2246,7 +2233,9 @@ impl<'index, Inputs, Output> IntoFuture for Deferred<'index, Inputs, Output> {
     type Output = Result<Output>;
     type IntoFuture = Wait<'index, Inputs, Output>;
 
-    fn into_future(self) -> Wait<'index, Inputs, Output> { Wait(Some(self)) }
+    fn into_future(self) -> Wait<'index, Inputs, Output> {
+        Wait(Some(self))
+    }
 }
 
 /// A [`Deferred`] being awaited: every poll reads its status, and one not yet final asks to be polled again.
@@ -2447,10 +2436,7 @@ mod tests {
     /// An arena lives where the executor that made it computes, and keeps that executor alive.
     #[test]
     fn arenas_live_where_their_executor_computes() -> Result<()> {
-        let host = ArenaDescription {
-            residency: Residency::Ram,
-            device: None,
-        };
+        let host = ArenaDescription { residency: Residency::Ram, device: None };
         assert_eq!(Arena::new()?.describe()?, host);
 
         let executor = Executor::for_ram(&[], None, 1)?;
@@ -2464,13 +2450,7 @@ mod tests {
         let Ok(gpu) = Executor::for_vram(&[0], None, 0) else {
             return Ok(());
         };
-        assert_eq!(
-            Arena::new_in(&gpu)?.describe()?,
-            ArenaDescription {
-                residency: Residency::Vram,
-                device: Some(0)
-            }
-        );
+        assert_eq!(Arena::new_in(&gpu)?.describe()?, ArenaDescription { residency: Residency::Vram, device: Some(0) });
         Ok(())
     }
 
@@ -2503,19 +2483,13 @@ mod tests {
             Status::InvalidArgument,
         ];
         for status in failures {
-            let raw = usearch_outcome_t {
-                status: status as i32,
-                message: ptr::null(),
-            };
+            let raw = usearch_outcome_t { status: status as i32, message: ptr::null() };
             assert_eq!(check(raw).unwrap_err().status, status);
         }
         // A final outcome is never deferred, and a status this build has no name for is not
         // success either, so both read as the contract violation they are.
         for status in [Status::Deferred as i32, 4242] {
-            let raw = usearch_outcome_t {
-                status,
-                message: ptr::null(),
-            };
+            let raw = usearch_outcome_t { status, message: ptr::null() };
             assert_eq!(check(raw).unwrap_err().status, Status::Internal);
         }
     }
@@ -2539,8 +2513,16 @@ mod tests {
         assert_eq!(unsafe { (*drives.paths).length }, "/mnt/nvme0".len());
     }
 
-    unsafe extern "C" fn leave_schema(schema: *mut ArrowSchema) { (*schema).release = None; }
-    unsafe extern "C" fn leave_array(array: *mut ArrowArray) { (*array).release = None; }
+    unsafe extern "C" fn leave_schema(schema: *mut ArrowSchema) {
+        unsafe {
+            (*schema).release = None;
+        }
+    }
+    unsafe extern "C" fn leave_array(array: *mut ArrowArray) {
+        unsafe {
+            (*array).release = None;
+        }
+    }
 
     /// An Arrow column laid out by hand over `T`'s bytes, as a foreign producer hands one over:
     /// `width` of `format`'s values per row, or one value per row without an element.
@@ -2555,26 +2537,20 @@ mod tests {
 
     // Safety: the fields hold every node, and the borrow holds the bytes.
     unsafe impl ArrowColumn for HandMadeColumn<'_> {
-        fn schema(&self) -> *const ArrowSchema { &self.schema }
-        fn array(&self) -> *const ArrowArray { &self.array }
+        fn schema(&self) -> *const ArrowSchema {
+            &self.schema
+        }
+        fn array(&self) -> *const ArrowArray {
+            &self.array
+        }
     }
 
     fn hand_made_schema(format: &'static CStr) -> ArrowSchema {
-        ArrowSchema {
-            format: format.as_ptr(),
-            release: Some(leave_schema),
-            ..ArrowSchema::default()
-        }
+        ArrowSchema { format: format.as_ptr(), release: Some(leave_schema), ..ArrowSchema::default() }
     }
 
     fn hand_made_array(length: i64, buffers: *mut *const c_void) -> ArrowArray {
-        ArrowArray {
-            length,
-            n_buffers: 2,
-            buffers,
-            release: Some(leave_array),
-            ..ArrowArray::default()
-        }
+        ArrowArray { length, n_buffers: 2, buffers, release: Some(leave_array), ..ArrowArray::default() }
     }
 
     /// A `w:16` column of `keys`.
@@ -2624,10 +2600,7 @@ mod tests {
     /// A foreign producer's column inserts in place and answers at its own keys, past its offset.
     #[test]
     fn arrow_columns_insert_in_place() -> Result<()> {
-        let options = crate::DenseOptions {
-            dimensions: 4,
-            ..crate::DenseOptions::default()
-        };
+        let options = crate::DenseOptions { dimensions: 4, ..crate::DenseOptions::default() };
         let index = crate::DenseIndex::init_ram(&options, &[])?;
         let slab = [0.0f32, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0];
         let keys = [Key::from(7u64), Key::from(9u64)];
@@ -2639,20 +2612,14 @@ mod tests {
         let mut arena = Arena::new()?;
         let matches = index.search(&rows(&slab[8..], 4)?, 1, &mut arena)?;
         assert_eq!(matches.query(0)?.keys, &[Key::from(9u64)]);
-        assert_eq!(
-            ArrowRows::<f64>::new(&vectors).err().map(|error| error.status),
-            Some(Status::UnknownKind)
-        );
+        assert_eq!(ArrowRows::<f64>::new(&vectors).err().map(|error| error.status), Some(Status::UnknownKind));
         Ok(())
     }
 
     /// Padded matches export their keys and distances as two columns, one row per query.
     #[test]
     fn matches_export_keys_and_distances_apart() -> Result<()> {
-        let options = crate::DenseOptions {
-            dimensions: 4,
-            ..crate::DenseOptions::default()
-        };
+        let options = crate::DenseOptions { dimensions: 4, ..crate::DenseOptions::default() };
         let index = crate::DenseIndex::init_ram(&options, &[])?;
         let slab = [1.0f32, 0.0, 0.0, 0.0];
         index.insert([Key::from(3u64)], &rows(&slab, 4)?)?;

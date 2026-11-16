@@ -1,53 +1,46 @@
 # The sibling helper, the switches forwarded to the siblings, and the siblings themselves.
 
-# Sibling libraries build themselves: each ships a CMakeLists.txt handling its own ISA detection and dispatch. They
-# arrive as submodules in a recursive clone, and as pinned fetches otherwise - a plain `git clone` of USearch, or a
-# `FetchContent` of it from another project, still configures. Pins match the submodule commits. The siblings are the
-# engine rather than an option: every header reaches for them unguarded, so there is no build without them and no switch
-# pretending otherwise. Include directories are copied onto the interface target, because `usearch_setup_target` reads
-# `INTERFACE_INCLUDE_DIRECTORIES` directly - a genex that sees only what this target declares, not what its link
-# interface would carry - to keep the C++20 feature requirement off the pure-C targets. Every sibling is a system
-# dependency, so its own warnings never fail a USearch build under `USEARCH_WERROR`, and builds only what a USearch
-# target links. A defined @p override_, the sibling's `FETCHCONTENT_SOURCE_DIR_<NAME>`, outranks the submodule.
-function (usearch_sibling name_ override_ link_target_ repository_ tag_)
-    if (TARGET ${link_target_})
-        # A parent project that already added the sibling keeps its copy.
-    elseif (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${name_}/CMakeLists.txt" AND NOT DEFINED ${override_})
-        add_subdirectory(${name_} EXCLUDE_FROM_ALL SYSTEM)
-    else ()
-        message(STATUS "usearch: ${name_} submodule absent, fetching ${tag_}")
-        FetchContent_Declare(
-            ${name_}
-            GIT_REPOSITORY ${repository_}
-            GIT_TAG ${tag_}
-            EXCLUDE_FROM_ALL SYSTEM
-        )
-        FetchContent_MakeAvailable(${name_})
+include(FetchContent)
+
+# A sibling builds in place from its submodule when a recursive clone checked one out, or else from the commit that
+# submodule pins, fetched, so a plain clone or a `FetchContent` of USearch still configures.
+# The caller names the sibling's `FETCHCONTENT_SOURCE_DIR_<NAME>`, so nothing derives it.
+# A non-empty one points the sibling at a local checkout, as in a workspace keeping the siblings side by side, and
+# outranks the submodule.
+# A parent project that already added the sibling keeps its copy.
+# Every sibling is a system dependency that builds only what USearch's targets link, so its own warnings never fail a
+# build under USEARCH_WERROR.
+function (usearch_sibling name_ override_ repository_ tag_)
+    if (TARGET ${name_}::header)
+        return()
     endif ()
-
-    target_link_libraries(usearch_header INTERFACE ${link_target_})
-
-    # Collected for the export set: their interfaces carry a language level and `Threads::Threads`, which the paths
-    # copied below do not.
-    get_target_property(sibling_target_ ${link_target_} ALIASED_TARGET)
-    if (NOT sibling_target_)
-        set(sibling_target_ ${link_target_})
+    if (EXISTS "${PROJECT_SOURCE_DIR}/${name_}/CMakeLists.txt" AND NOT ${override_})
+        add_subdirectory("${PROJECT_SOURCE_DIR}/${name_}" "${PROJECT_BINARY_DIR}/${name_}" EXCLUDE_FROM_ALL SYSTEM)
+        return()
     endif ()
-    # Each sibling exports its header target as `header`, which would collide with ours under `usearch::`.
-    set_target_properties(${sibling_target_} PROPERTIES EXPORT_NAME ${name_}_header)
-    set(usearch_sibling_targets_
-        ${usearch_sibling_targets_} ${sibling_target_}
-        PARENT_SCOPE
+    message(STATUS "usearch: ${name_} from its local checkout, or else fetched at ${tag_}")
+    FetchContent_Declare(
+        ${name_}
+        GIT_REPOSITORY ${repository_}
+        GIT_TAG ${tag_}
+        EXCLUDE_FROM_ALL SYSTEM
     )
-
-    target_include_directories(
-        usearch_header SYSTEM INTERFACE $<TARGET_PROPERTY:${link_target_},INTERFACE_INCLUDE_DIRECTORIES>
-    )
+    FetchContent_MakeAvailable(${name_})
 endfunction ()
 
-# The siblings build for the floor, the build kind and the GPU codes USearch builds for.
+# The siblings build for the floor, the build kind and the sanitizer USearch builds for.
+# ThreadSanitizer then sees their barriers, and ForkUnion leaves out the instructions it cannot see.
+# A sibling this project never adds leaves its switches unread.
 foreach (sibling_ IN ITEMS NUMKONG STRINGZILLA FORKUNION SMASHTABLE)
-    foreach (switch_ IN ITEMS MARCH MULTIVERSIONED CUDA_ARCH ROCM_ARCH METAL_ARCH)
+    set(${sibling_}_MARCH "${USEARCH_MARCH}")
+    set(${sibling_}_MULTIVERSIONED "${USEARCH_MULTIVERSIONED}")
+    set(${sibling_}_BUILD_SANITIZERS "${USEARCH_BUILD_SANITIZERS}")
+endforeach ()
+
+# Everything below is this project's own: the siblings it builds on, at the commits their submodules pin.
+# The siblings build for the GPU codes USearch builds for, too.
+foreach (sibling_ IN ITEMS NUMKONG STRINGZILLA FORKUNION SMASHTABLE)
+    foreach (switch_ IN ITEMS CUDA_ARCH ROCM_ARCH METAL_ARCH)
         set(${sibling_}_${switch_} "${USEARCH_${switch_}}")
     endforeach ()
 endforeach ()
@@ -56,20 +49,39 @@ endforeach ()
 # ForkUnion: the thread pools, the memory topology, and the ISA-specific waiters and atomic references. StringZilla: the
 # string kits behind the sequence modality, from the Levenshtein steps to the overlaps. SmashTable: the Elias-Fano row
 # directories of the NVMe indexes.
+usearch_sibling(
+    numkong FETCHCONTENT_SOURCE_DIR_NUMKONG https://github.com/ashvardanian/NumKong
+    0d4115072efd2f8cb93c1c16e095742a9d5cccdf
+)
+usearch_sibling(
+    forkunion FETCHCONTENT_SOURCE_DIR_FORKUNION https://github.com/ashvardanian/ForkUnion
+    b9c6f4c4c3b417061c67859517b945716916bd51
+)
+usearch_sibling(
+    stringzilla FETCHCONTENT_SOURCE_DIR_STRINGZILLA https://github.com/ashvardanian/StringZilla
+    a01d3e34da6049b871e3d647333688e216325f1b
+)
+usearch_sibling(
+    smashtable FETCHCONTENT_SOURCE_DIR_SMASHTABLE https://github.com/ashvardanian/SmashTable
+    c2a4b7310423d671099ebd3e3f250383959cd413
+)
+
+# The siblings are the engine rather than an option: every header reaches for them unguarded, so `usearch_header`
+# carries them all. Include directories are copied onto it, because `usearch_setup_target` reads
+# `INTERFACE_INCLUDE_DIRECTORIES` directly, a genex that sees only what this target declares, to keep the C++20 feature
+# requirement off the pure-C targets. The export set collects them, as their interfaces carry a language level and
+# `Threads::Threads` the copied paths do not, and each sibling's `header` export takes a name that cannot collide with
+# ours under `usearch::`.
 set(usearch_sibling_targets_)
-usearch_sibling(
-    numkong FETCHCONTENT_SOURCE_DIR_NUMKONG numkong::header https://github.com/ashvardanian/NumKong
-    1febcfe4a62abc70a9b59d303f3632af1c8214ca
-)
-usearch_sibling(
-    forkunion FETCHCONTENT_SOURCE_DIR_FORKUNION forkunion::header https://github.com/ashvardanian/ForkUnion
-    625811b9446897342126a01674f5d548c6de7110
-)
-usearch_sibling(
-    stringzilla FETCHCONTENT_SOURCE_DIR_STRINGZILLA stringzilla::header https://github.com/ashvardanian/StringZilla
-    4ac15c46016516fd8d22bf453126c70d9a88bb81
-)
-usearch_sibling(
-    smashtable FETCHCONTENT_SOURCE_DIR_SMASHTABLE smashtable::header https://github.com/ashvardanian/SmashTable
-    30e349dcd1e582896386d959d4a36badce061787
-)
+foreach (sibling_ IN ITEMS numkong forkunion stringzilla smashtable)
+    target_link_libraries(usearch_header INTERFACE ${sibling_}::header)
+    target_include_directories(
+        usearch_header SYSTEM INTERFACE $<TARGET_PROPERTY:${sibling_}::header,INTERFACE_INCLUDE_DIRECTORIES>
+    )
+    get_target_property(sibling_target_ ${sibling_}::header ALIASED_TARGET)
+    if (NOT sibling_target_)
+        set(sibling_target_ ${sibling_}::header)
+    endif ()
+    set_target_properties(${sibling_target_} PROPERTIES EXPORT_NAME ${sibling_}_header)
+    list(APPEND usearch_sibling_targets_ ${sibling_target_})
+endforeach ()

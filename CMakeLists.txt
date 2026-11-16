@@ -1,7 +1,12 @@
 cmake_minimum_required(VERSION 3.28)
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" usearch_version_name_ LIMIT_COUNT 1)
+# `project()` takes the numeric core alone, so a candidate's suffix stays in the name.
+if (NOT usearch_version_name_ MATCHES "^([0-9]+\\.[0-9]+\\.[0-9]+)")
+    message(FATAL_ERROR "VERSION must start with MAJOR.MINOR.PATCH, not '${usearch_version_name_}'")
+endif ()
 project(
     usearch
-    VERSION 3.0.0
+    VERSION ${CMAKE_MATCH_1}
     LANGUAGES C CXX
     DESCRIPTION "One Proximity Graph for Search, Sparse Products & Attention, across RAM, VRAM & NVMe"
     HOMEPAGE_URL "https://www.unum.cloud/docs/usearch"
@@ -47,6 +52,11 @@ set(USEARCH_METAL_ARCH
 )
 option(USEARCH_WITH_LINUX_SPDK "Compile the SPDK engine into every target, finding SPDK through pkg-config" OFF)
 option(USEARCH_WERROR "Treat compiler warnings as errors" OFF)
+set(USEARCH_BUILD_SANITIZERS
+    "off"
+    CACHE STRING "Sanitizers for USearch's own targets: off, address (with leak and undefined) or thread"
+)
+set_property(CACHE USEARCH_BUILD_SANITIZERS PROPERTY STRINGS off address thread)
 
 # Seeded from the environment at the first configure, so `cargo`, `cmake-js` and `scikit-build-core` honour
 # `USEARCH_MARCH=native` and `USEARCH_MULTIVERSIONED=OFF`.
@@ -173,7 +183,16 @@ if (CMAKE_HOST_SYSTEM_NAME MATCHES "Darwin")
 endif ()
 find_package(Threads REQUIRED)
 
+include(cmake/usearch_flags.cmake)
 include(cmake/usearch_siblings.cmake)
+# The floor lands after the siblings, so MSVC's `native` reads which capabilities NumKong found this host runs. Each
+# class unit picks its own floor and the host-tuned suites override it, so every target applies the floor itself.
+set(usearch_native_probe_library_ numkong)
+set(usearch_native_probe_capabilities_ diamond skylake haswell neonbfdot neonsdot neonhalf)
+set(usearch_arch_per_target_ ON)
+include(cmake/usearch_platform.cmake)
+# Only `safegraphs_format.hpp` reaches for yyjson, and only a compiled target ever includes it, so the header-only target
+# stays consumable without it.
 include(cmake/yyjson.cmake)
 if (USEARCH_BUILD_TEST
     OR USEARCH_BUILD_BENCH
@@ -192,10 +211,6 @@ endif ()
 
 include(cmake/usearch_gpu.cmake)
 
-include(cmake/usearch_platform.cmake)
-
-include(cmake/usearch_flags.cmake)
-
 # Shared wiring for every target this project builds. Optimization and debug level are deliberately absent: they live in
 # `CMAKE_<LANG>_FLAGS_<CONFIG>`, where a preset or a command-line switch can move them. Only what the code actually
 # depends on - fast math, the diagnostics, the sanitizers - is pinned here, and only for the host languages, so a unit
@@ -207,20 +222,19 @@ function (usearch_setup_target target_)
     # https://cmake.org/cmake/help/latest/variable/CMAKE_LANG_COMPILER_ID.html
     if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
         target_compile_options(
-            ${target_}
-            PRIVATE $<$<COMPILE_LANGUAGE:C,CXX>:$<$<CONFIG:DEBUG>:${usearch_sanitizers_}> -ffast-math
-                    -fno-finite-math-only -fPIC -fmax-errors=${USEARCH_MAX_ERRORS} -fdiagnostics-color=always>
+            ${target_} PRIVATE $<$<COMPILE_LANGUAGE:C,CXX>:-ffast-math -fno-finite-math-only -fPIC
+                               -fmax-errors=${USEARCH_MAX_ERRORS} -fdiagnostics-color=always>
         )
-        target_link_options(${target_} PRIVATE $<$<CONFIG:DEBUG>:-g ${usearch_sanitizers_}> -fPIC)
+        target_link_options(${target_} PRIVATE $<$<CONFIG:DEBUG>:-g> -fPIC)
 
         target_link_libraries(${target_} PRIVATE Threads::Threads)
 
     elseif (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
         target_compile_options(
-            ${target_} PRIVATE $<$<COMPILE_LANGUAGE:C,CXX>:$<$<CONFIG:DEBUG>:${usearch_sanitizers_}> -ffast-math
-                               -fno-finite-math-only -fPIC -Wfatal-errors -fcolor-diagnostics>
+            ${target_} PRIVATE $<$<COMPILE_LANGUAGE:C,CXX>:-ffast-math -fno-finite-math-only -fPIC -Wfatal-errors
+                               -fcolor-diagnostics>
         )
-        target_link_options(${target_} PRIVATE $<$<CONFIG:DEBUG>:-g ${usearch_sanitizers_}> -fPIC)
+        target_link_options(${target_} PRIVATE $<$<CONFIG:DEBUG>:-g> -fPIC)
 
         if (CMAKE_HOST_SYSTEM_NAME MATCHES "Darwin")
             target_link_libraries(${target_} PRIVATE "-framework CoreFoundation" "-framework Security" Threads::Threads)
@@ -238,7 +252,7 @@ function (usearch_setup_target target_)
                                /DEBUG>
         )
     endif ()
-    target_link_libraries(${target_} PRIVATE $<BUILD_INTERFACE:usearch_warnings>)
+    target_link_libraries(${target_} PRIVATE $<BUILD_INTERFACE:usearch_warnings> $<BUILD_INTERFACE:usearch_sanitizers>)
 
     # One source of truth for header paths: whatever the interface target advertises, including what the dependencies
     # carry, without inheriting its compile features onto pure-C targets.
@@ -366,4 +380,86 @@ if (USEARCH_BUILD_NODE)
     add_subdirectory(javascript)
 endif ()
 
+# `find_package(usearch)` names the shared library `usearch::shared`, the preview SDK's, and the archive
+# `usearch::static`, a component of its own, which the Rust crate links from.
+if (USEARCH_BUILD_SHARED)
+    set(usearch_install_sdk_targets_ usearch_shared)
+    set(usearch_install_static_targets_ usearch_static)
+endif ()
 include(cmake/usearch_install.cmake)
+
+# The header-only core is a component of its own, with `usearchHeaderTargets`, which records the siblings without
+# headers, as each owns its own, so `usearch::header` names nothing a consumer cannot resolve. The export reads its set
+# as it stands when called, so it trails every target that belongs to it.
+if (USEARCH_INSTALL)
+    install(
+        DIRECTORY include/usearch
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+        COMPONENT core
+    )
+    install(
+        TARGETS usearch_core usearch_header
+        EXPORT ${PROJECT_NAME}HeaderTargets
+        FILE_SET HEADERS
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+        COMPONENT core
+        INCLUDES
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+    )
+    install(
+        TARGETS ${usearch_sibling_targets_}
+        EXPORT ${PROJECT_NAME}HeaderTargets
+        COMPONENT core
+    )
+    export(
+        TARGETS usearch_core usearch_header ${usearch_sibling_targets_}
+        NAMESPACE ${PROJECT_NAME}::
+        FILE "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}HeaderTargets.cmake"
+    )
+    install(
+        EXPORT ${PROJECT_NAME}HeaderTargets
+        NAMESPACE ${PROJECT_NAME}::
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/${PROJECT_NAME}
+        COMPONENT core
+    )
+endif ()
+
+# The C library as SwiftPM links it: an XCFramework on Apple platforms and an SE-0482 artifact bundle elsewhere, packed
+# by NumKong's script beside the C headers and their module map. Each build adds its target to the artifact in
+# USEARCH_SWIFT_DIRECTORY, so a release fills one artifact from a build per target.
+if (USEARCH_BUILD_SWIFT)
+    set(USEARCH_SWIFT_DIRECTORY
+        "${PROJECT_BINARY_DIR}"
+        CACHE PATH "Where the Swift artifact lands"
+    )
+    set(USEARCH_SWIFT_SDK
+        ""
+        CACHE STRING "The Apple SDK the archive targets, like `macosx` or `iphonesimulator`"
+    )
+    set(USEARCH_SWIFT_TRIPLES
+        "${CMAKE_SYSTEM_PROCESSOR}-unknown-linux-gnu"
+        CACHE STRING "Swift target triples the artifact bundle serves"
+    )
+    if (APPLE)
+        set(usearch_swift_target_ -D "NUMKONG_SWIFT_SDK=${USEARCH_SWIFT_SDK}" -D
+                                  "NUMKONG_SWIFT_ARCHITECTURE=${CMAKE_OSX_ARCHITECTURES}"
+        )
+    else ()
+        set(usearch_swift_target_ -D "NUMKONG_SWIFT_TRIPLES=$<JOIN:${USEARCH_SWIFT_TRIPLES},,>" -D
+                                  "NUMKONG_SWIFT_VERSION=${PROJECT_VERSION}"
+        )
+    endif ()
+    set(usearch_swift_headers_ "${PROJECT_BINARY_DIR}/swift_headers")
+    add_custom_target(
+        usearch_swift ALL
+        COMMAND "${CMAKE_COMMAND}" -E copy_directory "${PROJECT_SOURCE_DIR}/c/usearch"
+                "${usearch_swift_headers_}/usearch"
+        COMMAND "${CMAKE_COMMAND}" -E copy "${PROJECT_SOURCE_DIR}/include/module.modulemap" "${usearch_swift_headers_}"
+        COMMAND
+            "${CMAKE_COMMAND}" -D NUMKONG_SWIFT_MODULE=USearchC -D "NUMKONG_SWIFT_ARCHIVE=$<TARGET_FILE:usearch_static>"
+            -D "NUMKONG_SWIFT_HEADERS=${usearch_swift_headers_}" -D "NUMKONG_SWIFT_DIRECTORY=${USEARCH_SWIFT_DIRECTORY}"
+            ${usearch_swift_target_} -P "${numkong_SOURCE_DIR}/cmake/numkong_swift_artifact.cmake"
+        DEPENDS usearch_static
+        VERBATIM
+    )
+endif ()

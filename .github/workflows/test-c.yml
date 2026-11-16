@@ -37,8 +37,8 @@ jobs:
       - name: Test C and C++
         run: ctest --preset relwithdebinfo
 
-  test_ubuntu_debug:
-    name: Test Debug Build on Ubuntu
+  test_ubuntu_asan:
+    name: Test Debug Build under ASan on Ubuntu
     runs-on: ubuntu-26.04
     timeout-minutes: 60
     env:
@@ -54,10 +54,10 @@ jobs:
         run: |
           sudo apt update
           sudo apt install -y build-essential lld libjemalloc-dev libomp-dev
-          cmake --preset debug -D CMAKE_C_COMPILER=gcc -D CMAKE_CXX_COMPILER=g++
-          cmake --build --preset debug
+          cmake --preset asan -D CMAKE_C_COMPILER=gcc -D CMAKE_CXX_COMPILER=g++
+          cmake --build --preset asan
       - name: Test C/C++
-        run: ctest --preset debug
+        run: ctest --preset asan
 
   verify_models:
     name: Check Promela Models and GenMC Clients

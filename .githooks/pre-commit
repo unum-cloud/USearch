@@ -46,11 +46,11 @@ third_party_identifier_prefixes='vec_'
 identifier_words_refused="landing landed lander join seat deal pool home plane dirty met seen"
 member_names_refused="bits current state data flags tmp scratch bitset buffer"
 width_free_directories="include/usearch/utilities include/usearch/basic"
-rustfmt_command="cargo +nightly fmt"
+rustfmt_command="cargo +stable fmt"
 std_collections_baseline_paths=''
 # Uppercase non-cache CMake names this project publishes, and the third-party and toolchain inputs it sets.
 cmake_published_variables="USEARCH_PUNNED_LIBRARIES USEARCH_PUNNED_OBJECTS"
-cmake_third_party_variables="YYJSON_INSTALL THREADS_PREFER_PTHREAD_FLAG WASI_SDK_PATH WASI_SDK_PREFIX EMSCRIPTEN_SYSTEM_PROCESSOR \
+cmake_third_party_variables="YYJSON_INSTALL FMT_MODULE THREADS_PREFER_PTHREAD_FLAG WASI_SDK_PATH WASI_SDK_PREFIX EMSCRIPTEN_SYSTEM_PROCESSOR \
     CPACK_ARCHIVE_COMPONENT_INSTALL CPACK_COMPONENT_INCLUDE_TOPLEVEL_DIRECTORY CPACK_COMPONENTS_ALL CPACK_GENERATOR \
     CPACK_PACKAGE_NAME CPACK_STRIP_FILES"
 # The approved code-generation macro families are .clang-format's `StatementMacros`, from the staged copy so a
@@ -67,6 +67,33 @@ platform_predefines_refused=''
 minmax_helpers="min_of or max_of from utilities/types.hpp"
 # The one header whose helpers may call the device bit intrinsics, empty where the project has no device code.
 device_bit_helpers_path="include/usearch/utilities/vram_nvidia_device.cuh"
+# The libraries this one builds on, as an alternation of their macro prefixes, whose `_ARCH_` flags and GPU
+# generation targets belong to their own builds.
+library_macro_prefixes='NUMKONG|STRINGZILLA'
+# What a rejected owning container or string gives way to here.
+owning_replacements="st::vector or sz::string_t with their status verbs"
+# The short namespace alias a harness may declare, beside the full namespace and the include prefix.
+project_namespace_alias="us"
+# The test files that are harness and own stdout, as shell patterns.
+stdout_harness_paths="test/harness.hpp test/main.cpp test/dense_vram.cpp test/dense/vram_nvidia.cpp test/dense/vram_amd.hip test/dense/vram_apple.cpp"
+# The directories whose C and C++ sources the three gates and the nesting limit judge.
+gated_source_directories="include src src_stub"
+# The md5 of the lines between each pinned region's `# region` and `# endregion`, which every sibling hook
+# carrying that region holds word for word.
+shared_region_sums='Shared Helpers	0f47a409a3595919bb8c842cb2947d38
+Doxygen Blocks	3c4ea22c2b76e1efb437372fe0c03534
+Binding Docs	04e4b1b314779668c35d7aaf36b0258a
+Comments and Prose	3743ade0b3af9638562754bd144c6bc6
+C and C++ Idioms	111aa66ebe0c1bb35970f35874b958c8
+Formatters	96cf05c30af43a45b8335394dd276cff
+All Files	360816f6488a26caf0ef051b37f11a1e
+Shared Bindings	e27e86e6cbb77f1e378329f6c15e2872
+Shared Builds	9702e89c575420fe081a3d2c5a6800c5
+Shared Harnesses	b6e3dd5e32eddc53ac50ca87fd8c64c9
+Shared Gates	2b4869c38a66d2963ce0ba7df15c8f7a
+Shared Dispatch	db91e9b9670cfe52ddd3cb5702c100b4
+Parallel Judging	738b237daa7b91d37b6a535e0f073b9a
+Dispatch	6160e20a10117221086869a5ecdcd2c4'
 
 # endregion Project Settings
 
@@ -357,7 +384,9 @@ check_member_docs_not_trailing() {
 
 # Rejects a plain `//` or `/* */` comment trailing a field or enumerator, because hover shows only a
 # comment above the declaration; inside a struct, union or enum body, each gets its own `/** ... */`.
-# Type alias tables keep their aligned trailing comments.
+# Type alias tables keep their aligned trailing comments, and a bare `//` layout pin or a `vendor-boundary` or
+# `device-boundary` lint marker documents nothing, so it stays on the line it governs, as does a
+# preprocessor directive's comment.
 check_member_comments_above() {
     local trailing
     trailing=$(scan_staged_file_marking_added_lines '
@@ -369,8 +398,9 @@ check_member_comments_above() {
             gsub(/"([^"\\]|\\.)*"/, "\"\"", code)
             depth += gsub(/\{/, "{", code) - gsub(/\}/, "}", code)
             if (depth <= 0) { depth = 0; next }
-            if (code ~ /\\[[:space:]]*$/ || code ~ /^[[:space:]]*(\/\/|\/\*|\*|using[[:space:]])/) next
-            if ((FNR in added) && code ~ /[]A-Za-z0-9_);,][[:space:]]*(\/\/([^\/!]|$)|\/\*[^*])/) print "+" $0
+            if (code ~ /\\[[:space:]]*$/ || code ~ /^[[:space:]]*(\/\/|\/\*|\*|#|using[[:space:]])/) next
+            if ((FNR in added) && $0 !~ /(vendor|device)-boundary/ &&
+                code ~ /[]A-Za-z0-9_);,][[:space:]]*(\/\/[^\/!]|\/\*[^*])/) print "+" $0
         }' || true)
     [ -z "$trailing" ] || reject_with_reason "$trailing" \
         "$staged_path comments a field or enumerator on its own line's tail, which hover never shows;" \
@@ -2067,7 +2097,7 @@ check_abbreviations_spelled_out() {
                 if ((prose && token !~ /_/) || !(token in existing)) { print "    " token ": " original[FNR]; break }
             }
         }' <(printf '%s\n' "$previous_text") \
-        "$staged_code_path" \
+        "${staged_code_path:-/dev/null}" \
         <(printf '%s\n' "$staged_added_text") "$staged_added_unquoted_path" || true)
     [ -z "$abbreviated" ] || reject_with_reason "$abbreviated" \
         "$staged_path abbreviates a word this project spells out; write \`high\`, \`low\`, \`accumulator\`, and so on:"
@@ -2111,13 +2141,13 @@ check_template_parameter_names() {
         "$staged_path exposes a template parameter name; append an underscore and define public aliases inside:"
 }
 
-# Rejects a split string literal whose non-final fragment lacks a trailing `//`, because clang-format
-# restitches unpinned fragments into a staircase.
+# Rejects an added line that ends in a string literal before a line that starts with one, unless a trailing
+# `//` pins it, because clang-format restitches unpinned fragments into a staircase.
 check_split_string_literal_pinned() {
     local unpinned
     unpinned=$(scan_staged_file_marking_added_lines '
-        (FNR in added) && ((FNR - 1) in added) && previous ~ /"[[:space:]]*$/ && previous !~ /\/\/[[:space:]]*$/ &&
-            $0 ~ /^[[:space:]]*"/ { print FNR - 1 ": " previous }
+        ((FNR - 1) in added) && previous ~ /"[[:space:]]*$/ && previous !~ /\/\/[[:space:]]*$/ &&
+            $0 ~ /^[[:space:]]*(u8|[uUL])?R?"/ { print FNR - 1 ": " previous }
         { previous = $0 }')
     [ -z "$unpinned" ] || reject_with_reason "$unpinned" \
         "$staged_path splits a string literal without a trailing \`//\` pin;" \
@@ -2175,20 +2205,21 @@ check_filesystem_in_harnesses_only() {
 # Rejects the standard containers, owning strings, `std::pair` and `std::tuple` in the library, its bindings
 # and the tools, because the containers and strings allocate through the global heap behind the caller's back
 # and throw when it runs out, and a pair or a tuple hides what each member means behind `first` and `get<1>`;
-# views like `std::string_view` and `std::span` stay, and only the test and benchmark harnesses may use the rest.
+# views like `std::string_view` and `std::span` stay, a line marked `vendor-boundary` hands a third-party API
+# the type it demands, and only the test and benchmark harnesses may use the rest.
 check_std_collections_absent() {
     local reached baseline_path
     for baseline_path in $std_collections_baseline_paths; do
         [ "$staged_path" != "$baseline_path" ] || return 0
     done
     reached=$(printf '%s\n' "$staged_added_text" |
-        grep -vE "$added_comment_line_pattern" |
+        grep -vE "$added_comment_line_pattern" | grep -v 'vendor-boundary' |
         grep -E '\bstd::(vector|pair|tuple|deque|list|forward_list|map|multimap|set|multiset|unordered_map|unordered_multimap|unordered_set|unordered_multiset|queue|priority_queue|stack|valarray)\b|\bstd::(basic_|w|u8|u16|u32)?string\b|#[[:space:]]*include[[:space:]]*<(vector|deque|list|forward_list|map|set|unordered_map|unordered_set|queue|stack|valarray)>' ||
         true)
     [ -z "$reached" ] || reject_with_reason "$reached" \
         "$staged_path uses a standard container, an owning std::string, std::pair or std::tuple - name a struct," \
-        "            view the caller's bytes, take st::vector or sz::string_t with their status verbs, or move" \
-        "            the code to a test/ or bench/ harness:"
+        "            view the caller's bytes, take $owning_replacements, or move the code to a test/ or bench/" \
+        "            harness:"
 }
 
 # `_t` marks a materialized type and `_k` a materialized constant. A concept names a requirement
@@ -2421,8 +2452,8 @@ check_harness_namespace_matches_directory() {
         "            wrap its contents in the namespace its directory names, and open no other:"
 }
 
-# Rejects punctuation in a `#pragma region` name, because clang-format reflows the spacing around it and the
-# region stops pairing with its `endregion`. Words, digits and spaces survive.
+# Rejects punctuation in a `#pragma region` name, because clang-format reflows the spacing around it, and
+# then the region no longer pairs with its `endregion`. Words, digits and spaces survive.
 check_region_label_plain() {
     local punctuated
     punctuated=$(printf '%s\n' "$staged_added_text" |
@@ -2853,15 +2884,16 @@ check_editor_settings_sorted() {
         "            sort them case-insensitively"
 }
 
-# Rejects `zig fmt` drift on staged Zig files, because `zig fmt` is the law; it skips without zig.
+# Rejects `zig fmt` drift on staged Zig files, because `zig fmt` is the law; it reads the staged blobs, not
+# the working tree another edit may be changing, and skips without zig.
 check_zig_fmt_clean() {
     command -v zig > /dev/null 2>&1 || return 0
-    local staged_zig_paths=()
-    while IFS= read -r -d '' zig_path; do staged_zig_paths+=("$zig_path"); done \
-        < <(git diff --cached --name-only -z --find-renames --diff-filter=ACMR -- '*.zig')
-    [ ${#staged_zig_paths[@]} -gt 0 ] || return 0
-    zig fmt --check "${staged_zig_paths[@]}" > /dev/null 2>&1 && return 0
-    reject_with_reason "" "staged Zig changes are not zig-fmt clean;" "            run: zig fmt ${staged_zig_paths[*]}"
+    local drifted_zig_paths=()
+    while IFS= read -r -d '' zig_path; do
+        git show ":$zig_path" | zig fmt --stdin --check > /dev/null 2>&1 || drifted_zig_paths+=("$zig_path")
+    done < <(git diff --cached --name-only -z --find-renames --diff-filter=ACMR -- '*.zig')
+    [ ${#drifted_zig_paths[@]} -gt 0 ] || return 0
+    reject_with_reason "" "staged Zig changes are not zig-fmt clean;" "            run: zig fmt ${drifted_zig_paths[*]}"
 }
 
 # Rejects `mojo format` drift on a staged Mojo file; `mojo format` has no check mode, so a copy is formatted
@@ -2985,6 +3017,22 @@ check_single_space_between_sentences() {
         "$staged_path double-spaces between sentences;" "            use a single space after . ! or ?:"
 }
 
+# Rejects a pinned region of this hook whose text drifted from the sibling hooks' copy, because every sibling
+# hook carrying a pinned region edits it together; `shared_region_sums` in Project Settings holds the md5 of
+# the lines between each pinned region's opening and closing comment.
+check_shared_regions_match() {
+    local name expected actual drifted=""
+    while IFS=$'\t' read -r name expected; do
+        [ -n "$name" ] || continue
+        actual=$("$fastest_awk" -v name="$name" '$0 == "# endregion " name { inside = 0 } inside { print } $0 == "# region " name { inside = 1 }' \
+            "$staged_text_path" | { command -v md5sum > /dev/null 2>&1 && md5sum || md5; } | cut -d' ' -f1)
+        [ "$actual" = "$expected" ] || drifted="$drifted$name: $actual, pinned $expected"$'\n'
+    done <<< "$shared_region_sums"
+    [ -z "$drifted" ] || reject_with_reason "${drifted%$'\n'}" \
+        "$staged_path drifts from the sibling hooks' shared regions; edit a shared region in every sibling" \
+        "            hook together, and record the new sums in shared_region_sums:"
+}
+
 # endregion All Files
 
 # region Shared Bindings
@@ -3080,7 +3128,7 @@ check_binding_callbacks_never_raise() {
 # span of C strings names things rather than queries, so it stays.
 check_query_pointer_spans_absent() {
     local spans
-    spans=$(sed -E 's/span<[[:space:]]*(const[[:space:]]+)?char[[:space:]]+(const[[:space:]]*)?\*[[:space:]]*const[[:space:]]*>//g' \
+    spans=$(sed -E 's/span<[[:space:]]*(const[[:space:]]+)?char([[:space:]]+const)?[[:space:]]*\*[[:space:]]*const[[:space:]]*>//g' \
         "$staged_added_code_path" | grep -E '\bspan<[^;<>]*(<[^;<>]*>[^;<>]*)?const[[:space:]]*\*[[:space:]]*const[[:space:]]*(,[^;<>]*)?>' || true)
     [ -z "$spans" ] || reject_with_reason "$spans" \
         "$staged_path takes a span of pointers to const; pass the batch as a flat transparent query view over" \
@@ -3113,6 +3161,400 @@ run_binding_checks() {
 }
 
 # endregion Shared Bindings
+
+# region Shared Builds
+
+# CMake spells every target, source and flag it means at the call that means it. Deriving one by
+# replacing, slicing or matching out part of another string, or by editing a list in place, hides
+# what the build compiles: pass each name as an argument instead, under a keyword where several
+# kinds travel together. Building a list with `list(APPEND)` and testing a value with
+# `if (... MATCHES ...)` stay free.
+check_cmake_string_surgery() {
+    local surgery
+    surgery=$(printf '%s\n' "$staged_added_text" | grep -vE '^\+[[:space:]]*#' |
+        grep -iE '(^|[^A-Za-z0-9_])(string[[:space:]]*\([[:space:]]*(REPLACE|REGEX|SUBSTRING|STRIP|TOLOWER|TOUPPER)[[:space:]]|list[[:space:]]*\([[:space:]]*(TRANSFORM|FILTER|REMOVE_ITEM|REMOVE_AT|REMOVE_DUPLICATES|SUBLIST|POP_BACK|POP_FRONT|INSERT|JOIN|SORT|REVERSE)[[:space:]]|(get_filename_component|cmake_path)[[:space:]]*\()' ||
+        true)
+    [ -z "$surgery" ] || reject_with_reason "$surgery" \
+        "$staged_path derives a name or flag by editing a string or a list; spell each one out at its call and pass it as" \
+        "            an argument, under a keyword where several kinds travel together:"
+}
+
+# Rejects another library's `_ARCH_` flag, which says what compiles inside that library's own build; a
+# project reads the libraries' public `_TARGET_` switches and names its GPU class through
+# `${macro_prefix}_TARGET_<VENDOR>_<CLASS>`. `library_macro_prefixes` lists the libraries this one builds on.
+check_library_arch_flags_unnamed() {
+    [ -n "$library_macro_prefixes" ] || return 0
+    local named
+    named=$(printf '%s\n' "$staged_added_text" | grep -E "^\+.*($library_macro_prefixes)_ARCH_[A-Z0-9_]+" || true)
+    [ -z "$named" ] || reject_with_reason "$named" \
+        "$staged_path names another library's _ARCH_ flag, which only that library's own build may read;" \
+        "            test its public _TARGET_ switch, or ${macro_prefix}_TARGET_<VENDOR>_<CLASS> for a GPU class:"
+}
+
+# Rejects a CMake line raising another library's GPU generation target, because a class unit lowers the
+# library's floor target and names its own class through its project's `_TARGET_<VENDOR>_<CLASS>` switch.
+check_library_gpu_targets_unset() {
+    [ -n "$library_macro_prefixes" ] || return 0
+    local raised
+    raised=$(printf '%s\n' "$staged_added_text" | grep -vE '^\+?[[:space:]]*#' |
+        grep -E "($library_macro_prefixes)_TARGET_(AMPERE|ADA|HOPPER|BLACKWELL[A-Z]*|CDNA[0-9])=1" || true)
+    [ -z "$raised" ] || reject_with_reason "$raised" \
+        "$staged_path sets a library GPU generation target; class units write the floor target to 0 and name" \
+        "            their class with ${macro_prefix}_TARGET_<VENDOR>_<CLASS>:"
+}
+
+# A sibling's CMake pin, its submodule's gitlink and its Cargo git `rev` name the same commit, or a
+# recursive clone, a plain one and a crate build different code; a Cargo git dependency without a `rev`
+# follows the branch tip and drifts on its own. Every side is read from the index, so the comparison is
+# against what this commit records. Projects without `cmake/<prefix>_siblings.cmake` pin nothing.
+check_sibling_pins_agree() {
+    local pins=cmake/${project_include_prefix}_siblings.cmake pinned sibling pin recorded drifts=""
+    git diff --cached --quiet -- "$pins" Cargo.toml numkong stringzilla forkunion smashtable 2> /dev/null && return 0
+    pinned=$(git show ":$pins" 2> /dev/null | "$fastest_awk" -v call="${project_include_prefix}_sibling(" '
+        index($0, call) { inside = 1; record = ""; sub(/.*_sibling\(/, "") }
+        inside { record = record " " $0 }
+        inside && /\)/ {
+            sub(/\).*/, "", record)
+            count = split(record, fields, /[ \t]+/)
+            name = ""; pin = ""
+            for (field = 1; field <= count; ++field) {
+                if (fields[field] == "") continue
+                if (name == "") name = fields[field]
+                if (fields[field] ~ /^[0-9a-f]+$/ && length(fields[field]) == 40) pin = fields[field]
+            }
+            if (name != "" && pin != "") print name, pin
+            inside = 0
+        }')
+    [ -n "$pinned" ] || return 0
+    while read -r sibling pin; do
+        recorded=$(git ls-files --stage -- "$sibling" | "$fastest_awk" '$1 == "160000" { print $2 }')
+        [ -z "$recorded" ] || [ "$recorded" = "$pin" ] ||
+            drifts="$drifts$sibling: $pins says ${pin:0:12}, the submodule records ${recorded:0:12}"$'\n'
+    done <<< "$pinned"
+    drifts=$drifts$(git show :Cargo.toml 2> /dev/null | "$fastest_awk" -v pinned="$pinned" -v pins="$pins" '
+        BEGIN {
+            count = split(pinned, lines, "\n")
+            for (line = 1; line <= count; ++line) { split(lines[line], fields, " "); pin[fields[1]] = fields[2] }
+        }
+        match($0, /git[[:space:]]*=[[:space:]]*"[^"]*"/) {
+            name = substr($0, RSTART, RLENGTH); sub(/"$/, "", name); sub(/\.git$/, "", name); sub(/.*\//, "", name)
+            name = tolower(name)
+            if (!(name in pin)) next
+            if (!match($0, /rev[[:space:]]*=[[:space:]]*"[0-9a-f]+"/)) {
+                printf "%s: Cargo.toml takes it from git without a rev, %s says %s\n", name, pins, substr(pin[name], 1, 12)
+                next
+            }
+            rev = substr($0, RSTART, RLENGTH); sub(/^[^"]*"/, "", rev); sub(/"$/, "", rev)
+            if (rev != pin[name]) printf "%s: %s says %s, Cargo.toml says %s\n", name, pins, substr(pin[name], 1, 12), substr(rev, 1, 12)
+        }')
+    [ -z "$drifts" ] || reject_with_reason "${drifts%$'\n'}" \
+        "the sibling pins disagree; give the CMake pin, the submodule and the Cargo \`rev\` the same commit:"
+}
+
+# endregion Shared Builds
+
+# region Shared Harnesses
+
+# Inside `<namespace>::test::<dir>` or `<namespace>::bench::<dir>` the library's `<namespace>::<dir>` is
+# already visible through the directive the shared harness header opens, so spelling it, its short prefix
+# or `project_namespace_alias` there only repeats it; lines past the closing brace, like specializations
+# of library templates, still qualify. The whole staged file, since the namespace is context, reporting
+# only the lines the commit added.
+check_harness_library_qualified() {
+    grep -qE "^namespace $project_namespace::(test|bench)::[a-z_]+ \{" "$staged_text_path" || return 0
+    local spelled
+    spelled=$("$fastest_awk" -v path="$staged_path" -v space="$project_namespace" -v short="$project_include_prefix" \
+        -v alias="$project_namespace_alias" '
+        BEGIN { spellings = space "|" short; if (alias != "") spellings = spellings "|" alias }
+        NR == FNR { added[$1 + 0]; next }
+        index($0, "namespace " space "::") == 1 && $0 ~ /::(test|bench)::[a-z_]+ \{/ {
+            inside = $2; sub("^" space "::", "", inside)
+            directory = inside; sub(/^[a-z]+::/, "", directory)
+            next
+        }
+        /^\} \/\/ namespace / { inside = ""; next }
+        inside != "" && (FNR in added) && $0 !~ /^[[:space:]]*(\*|\/\/|\/\*)/ &&
+            (" " $0) ~ ("[^A-Za-z0-9_:](" spellings ")::" directory "::") {
+            printf "%s:%d: spells %s::%s:: inside %s\n", path, FNR, short, directory, inside
+        }' "$staged_lines_path" "$staged_text_path")
+    local first=${spelled%%$'\n'*}
+    [ -z "$spelled" ] || reject_with_reason "$spelled" "$staged_path ${first#*: }; the library namespace is already visible:"
+}
+
+# Rejects a print to stdout in a test body, because the harness owns stdout, and a test only reports
+# failures to stderr, so a passing run reads the same in every sibling. A file's own `main` is its
+# harness entry, and the patterns in `stdout_harness_paths` name the files that are harness.
+check_test_bodies_quiet() {
+    local harness_path prints
+    for harness_path in $stdout_harness_paths; do
+        case "$staged_path" in $harness_path) return 0 ;; esac
+    done
+    prints=$(scan_staged_file_marking_added_lines '
+        /^(int|auto)[[:space:]]+main[[:space:]]*\(/ { inside_main = 1 }
+        inside_main { if ($0 ~ /^\}/) inside_main = 0; next }
+        FNR in added { printf "%d:%s\n", FNR, $0 }' "$staged_code_path" |
+        grep -E '(^|[^A-Za-z0-9_])(print_line|fmt::println|fmt::print|printf|puts)[[:space:]]*\(|(^|[^A-Za-z0-9_])std::cout([^A-Za-z0-9_]|$)|(^|[^A-Za-z0-9_])fprintf[[:space:]]*\([[:space:]]*stdout([^A-Za-z0-9_]|$)' |
+        grep -vE '\([[:space:]]*stderr([^A-Za-z0-9_]|$)' || true)
+    [ -z "$prints" ] || reject_with_reason "$prints" \
+        "$staged_path prints to stdout from a test body; report failures to stderr and leave progress" \
+        "            to the harness:"
+}
+
+# endregion Shared Harnesses
+
+# region Shared Gates
+
+# The three gates of CONTRIBUTING.md's "Compile-Time Choices": `#if` picks a toolchain or a platform, a
+# `requires` clause picks an overload when a whole function differs, and `if constexpr` branches once on
+# a named concept or a `constexpr bool`. These checks read C and C++ sources under the directories
+# `gated_source_directories` names.
+
+# Reads a C or C++ file with its comments and literal contents blanked and prints one record per finding:
+# `D <line> <depth>` for a line whose control flow nests `limit` deep or more, `N <line>` for an `if
+# constexpr` inside another's branch, and `R <line> <condition-line>` for a `requires` inside an `if
+# constexpr` condition. An `if`, `for`, `while`, `switch`, `do`, `try` or `catch` body sits one level
+# deeper, braced or not; an `else` or `catch` body sits at its `if`'s or `try`'s level, so an `else if`
+# chain stays flat, and lambdas and plain braces add nothing. Every `#else` and `#elif` restarts from the
+# nesting its `#if` began with, so both sides of a platform switch are read.
+control_nesting_awk='
+    function push(kind, control, constant) {
+        ++top; frame_kind[top] = kind; frame_control[top] = control; frame_constant[top] = constant
+        state[top] = ""; closed[top] = ""; closed_constant[top] = 0; condition[top] = 0
+        depth += control; constant_depth += constant
+    }
+    function pop() {
+        depth -= frame_control[top]; constant_depth -= frame_constant[top]; conditions -= condition[top]
+        --top
+    }
+    function close_braceless(    kind, constant) {
+        while (top > 0 && frame_kind[top] == "braceless") {
+            kind = body_kind[top]; constant = frame_constant[top]; pop()
+            closed[top] = kind; closed_constant[top] = constant
+        }
+    }
+    function continues(token) {
+        return (token == "else" && closed[top] == "if") || (token == "catch" && closed[top] == "try") ||
+            (token == "while" && closed[top] == "do")
+    }
+    function close_braceless_before(token,    kind, constant) {
+        while (top > 0 && frame_kind[top] == "braceless" && !continues(token)) {
+            kind = body_kind[top]; constant = frame_constant[top]; pop()
+            closed[top] = kind; closed_constant[top] = constant
+        }
+    }
+    function open_body(braced,    constant, kind) {
+        constant = pending_constant[top]; kind = pending_kind[top]; state[top] = ""; closed[top] = ""
+        push(braced ? "control" : "braceless", 1, constant)
+        body_kind[top] = kind
+    }
+    function note() { if (depth > line_depth) line_depth = depth }
+    function word(token) {
+        if (state[top] == "armed" && pending_kind[top] == "else" && token == "if") {
+            state[top] = "await"; pending_kind[top] = "if"; settled = 0
+            return
+        }
+        if (state[top] == "armed") open_body(0)
+        note()
+        if (state[top] == "await" && pending_kind[top] == "if" && (token == "constexpr" || token == "consteval")) {
+            if (token == "constexpr") {
+                pending_constant[top] = 1
+                if (constant_depth > 0) print "N", FNR
+            }
+            return
+        }
+        if (token == "requires" && conditions > 0) print "R", FNR, condition_line
+        if (settled) close_braceless_before(token)
+        settled = 0
+        if (token == "else") {
+            if (closed[top] == "if") {
+                state[top] = "armed"; pending_kind[top] = "else"; pending_constant[top] = closed_constant[top]
+            }
+            closed[top] = ""
+            return
+        }
+        if (token == "catch") {
+            if (closed[top] == "try") { state[top] = "await"; pending_kind[top] = "try"; pending_constant[top] = 0 }
+            closed[top] = ""
+            return
+        }
+        if (token == "while" && closed[top] == "do") { state[top] = "tail"; closed[top] = ""; return }
+        closed[top] = ""
+        if (token == "if" || token == "for" || token == "while" || token == "switch") {
+            state[top] = "await"; pending_kind[top] = token == "if" ? "if" : "loop"; pending_constant[top] = 0
+        } else if (token == "do" || token == "try") {
+            state[top] = "armed"; pending_kind[top] = token; pending_constant[top] = 0
+        }
+    }
+    function punctuation(character,    header, kind, constant) {
+        if (character != "{" && state[top] == "armed") open_body(0)
+        if (settled && character != "}" && character != ";") { close_braceless(); settled = 0 }
+        if (character == "(") {
+            header = (state[top] == "await" || state[top] == "tail")
+            if (header) state[top] = state[top] == "await" ? "header" : "tail header"
+            note(); push("paren", 0, 0); frame_header[top] = header
+            if (header && state[top - 1] == "header" && pending_constant[top - 1]) {
+                condition[top] = 1; ++conditions; condition_line = FNR
+            }
+        } else if (character == ")") {
+            note()
+            while (top > 0 && frame_kind[top] != "paren") pop()
+            if (top > 0) {
+                header = frame_header[top]; pop()
+                if (header && state[top] == "header") state[top] = "armed"
+                else if (header && state[top] == "tail header") state[top] = ""
+            }
+        } else if (character == "{") {
+            note()
+            if (state[top] == "armed" || state[top] == "await") open_body(1)
+            else push("brace", 0, 0)
+            settled = 0
+        } else if (character == "}") {
+            close_braceless()
+            if (top > 0 && frame_kind[top] != "paren") {
+                kind = frame_kind[top] == "control" ? body_kind[top] : ""; constant = frame_constant[top]
+                pop(); closed[top] = kind; closed_constant[top] = constant; settled = kind != ""
+            }
+            note()
+        } else if (character == ";") {
+            note()
+            if (frame_kind[top] == "paren") return
+            state[top] = ""
+            if (frame_kind[top] == "braceless") {
+                kind = body_kind[top]; constant = frame_constant[top]; pop()
+                closed[top] = kind; closed_constant[top] = constant; settled = 1
+            }
+        } else note()
+    }
+    function save(level,    frame) {
+        saved_top[level] = top; saved_depth[level] = depth; saved_constant_depth[level] = constant_depth
+        saved_conditions[level] = conditions; saved_state[level, 0] = state[0]
+        for (frame = 1; frame <= top; ++frame) {
+            saved_kind[level, frame] = frame_kind[frame]; saved_control[level, frame] = frame_control[frame]
+            saved_constant[level, frame] = frame_constant[frame]; saved_state[level, frame] = state[frame]
+            saved_body[level, frame] = body_kind[frame]; saved_header[level, frame] = frame_header[frame]
+            saved_pending[level, frame] = pending_kind[frame]
+            saved_pending_constant[level, frame] = pending_constant[frame]
+            saved_condition[level, frame] = condition[frame]
+        }
+    }
+    function restore(level,    frame) {
+        top = saved_top[level]; depth = saved_depth[level]; constant_depth = saved_constant_depth[level]
+        conditions = saved_conditions[level]; state[0] = saved_state[level, 0]; settled = 0
+        for (frame = 1; frame <= top; ++frame) {
+            frame_kind[frame] = saved_kind[level, frame]; frame_control[frame] = saved_control[level, frame]
+            frame_constant[frame] = saved_constant[level, frame]; state[frame] = saved_state[level, frame]
+            body_kind[frame] = saved_body[level, frame]; frame_header[frame] = saved_header[level, frame]
+            pending_kind[frame] = saved_pending[level, frame]
+            pending_constant[frame] = saved_pending_constant[level, frame]
+            condition[frame] = saved_condition[level, frame]
+        }
+    }
+    continued { continued = $0 ~ /\\[[:space:]]*$/; next }
+    /^[[:space:]]*#/ {
+        continued = $0 ~ /\\[[:space:]]*$/
+        if ($0 ~ /^[[:space:]]*#[[:space:]]*if/) save(++levels)
+        else if ($0 ~ /^[[:space:]]*#[[:space:]]*el/ && levels) restore(levels)
+        else if ($0 ~ /^[[:space:]]*#[[:space:]]*endif/ && levels) --levels
+        next
+    }
+    {
+        line_depth = -1; text = $0
+        while (length(text)) {
+            if (match(text, /^[[:space:]]+/)) { text = substr(text, RLENGTH + 1); continue }
+            if (match(text, /^[A-Za-z_][A-Za-z0-9_]*/)) { word(substr(text, 1, RLENGTH)); text = substr(text, RLENGTH + 1); continue }
+            if (match(text, /^[0-9][A-Za-z0-9_.\047]*/)) { word("0"); text = substr(text, RLENGTH + 1); continue }
+            if (match(text, /^::/)) { word("::"); text = substr(text, 3); continue }
+            punctuation(substr(text, 1, 1)); text = substr(text, 2)
+        }
+        if (line_depth >= limit) print "D", FNR, line_depth
+    }'
+
+# Whether the staged path is a C or C++ source under one of the gated directories.
+in_gated_sources() {
+    local directory
+    case "$staged_path" in
+    *.h | *.hpp | *.c | *.cpp | *.cc | *.cu | *.cuh | *.hip | *.metal) ;;
+    *) return 1 ;;
+    esac
+    for directory in $gated_source_directories; do
+        case "$staged_path" in "$directory"/*) return 0 ;; esac
+    done
+    return 1
+}
+
+# Prints the staged file's nesting records once per path, kept beside its other split files for the checks
+# that share them.
+control_nesting_records() {
+    local records=$results_directory/$ordinal.nesting
+    [ -f "$records" ] || blank_c_comments_preserving_columns literals < "$staged_code_path" |
+        "$fastest_awk" -v limit=4 "$control_nesting_awk" > "$records"
+    cat "$records"
+}
+
+# Rejects a `requires` expression written inline in an `if constexpr` condition, because a probe that
+# picks code deserves a name: declare it as a concept and branch on that, or constrain an overload.
+check_constexpr_conditions_named() {
+    local inline_probes
+    inline_probes=$(control_nesting_records | "$fastest_awk" -v code="$staged_code_path" '
+        FILENAME == ARGV[1] { added[$1 + 0]; next }
+        FILENAME == code { text[FNR] = $0; next }
+        $1 == "R" && (($2 in added) || ($3 in added)) && !(($3) in shown) { shown[$3]; printf "line %d: %s\n", $3, text[$3] }' \
+        "$staged_lines_path" "$staged_code_path" - || true)
+    [ -z "$inline_probes" ] || reject_with_reason "$inline_probes" \
+        "$staged_path writes a requires expression inside an if constexpr condition; name it as a concept and" \
+        "            branch on the name, or constrain an overload with it:"
+}
+
+# Rejects an `if constexpr` inside another `if constexpr` branch, because a compile-time choice branches
+# once; an `else if constexpr` chain stays one level, and a second choice moves into its own overload.
+check_constexpr_branches_flat() {
+    local nested
+    nested=$(control_nesting_records | "$fastest_awk" -v code="$staged_code_path" '
+        FILENAME == ARGV[1] { added[$1 + 0]; next }
+        FILENAME == code { text[FNR] = $0; next }
+        $1 == "N" && ($2 in added) { printf "line %d: %s\n", $2, text[$2] }' \
+        "$staged_lines_path" "$staged_code_path" - || true)
+    [ -z "$nested" ] || reject_with_reason "$nested" \
+        "$staged_path nests an if constexpr inside another's branch; branch once, and move the inner choice" \
+        "            into a constrained overload or a named constexpr bool:"
+}
+
+# Rejects control flow nested 4 deep, because a reader holds three conditions at most: return early,
+# extract the inner loop into a function named for what it does, or split an overload per case.
+check_constexpr_nesting() {
+    local deep
+    deep=$(control_nesting_records | "$fastest_awk" -v code="$staged_code_path" '
+        FILENAME == ARGV[1] { added[$1 + 0]; next }
+        FILENAME == code { text[FNR] = $0; next }
+        $1 == "D" && ($2 in added) { printf "line %d, depth %d: %s\n", $2, $3, text[$2] }' \
+        "$staged_lines_path" "$staged_code_path" - || true)
+    [ -z "$deep" ] || reject_with_reason "$deep" \
+        "$staged_path nests control flow 4 deep; return early, extract the inner loop into a named function," \
+        "            or split an overload per case:"
+}
+
+# Rejects `std::enable_if` and tag-dispatch types, because a `requires` clause on the overload says the
+# same in the signature: a `*_tag` struct, or an unnamed `*_tag_t`, `std::true_type` or `std::false_type`
+# parameter, exists only to pick an overload and hides the choice in a type nobody reads.
+check_enable_if_and_tags_absent() {
+    local selectors
+    selectors=$(grep -nE '(^|[^A-Za-z0-9_])enable_if(_t)?([^A-Za-z0-9_]|$)|(^|[^A-Za-z0-9_])(struct|class)[[:space:]]+[A-Za-z0-9_]*_tag(_t)?[[:space:]]*(\{|;)|[(,][[:space:]]*(std::)?([A-Za-z_][A-Za-z0-9_:]*_tag_t|true_type|false_type)[[:space:]]*(const[[:space:]]*)?&?[[:space:]]*[,)]' \
+        "$staged_added_code_path" || true)
+    [ -z "$selectors" ] || reject_with_reason "$selectors" \
+        "$staged_path picks an overload through enable_if or a tag type; put a requires clause on the overload" \
+        "            and leave an unconstrained fallback:"
+}
+
+# Routes one staged file through the gates when it sits in a gated directory.
+run_gate_checks() {
+    in_gated_sources || return 0
+    check_constexpr_conditions_named
+    check_constexpr_branches_flat
+    check_constexpr_nesting
+    check_enable_if_and_tags_absent
+}
+
+# endregion Shared Gates
 
 # region Shared Dispatch
 
@@ -3233,6 +3675,27 @@ run_shared_checks() {
         ;;
     esac
     case "$staged_path" in
+    tools/*.c | tools/*.h | tools/*.cpp | tools/*.hpp | tools/*.cu | tools/*.cuh | tools/*.hip | tools/*.cc)
+        check_std_collections_absent
+        ;;
+    esac
+    case "$staged_path" in
+    .githooks/pre-commit) check_shared_regions_match ;;
+    *.c | *.h | *.hpp | *.cpp | *.cc | *.cu | *.cuh | *.hip | *.metal) check_library_arch_flags_unnamed ;;
+    CMakeLists.txt | */CMakeLists.txt | *.cmake)
+        check_cmake_string_surgery
+        check_library_gpu_targets_unset
+        ;;
+    esac
+    case "$staged_path" in
+    test/*.cpp | test/*.hpp | test/*.cu | test/*.cuh | test/*.hip)
+        check_test_bodies_quiet
+        check_harness_library_qualified
+        ;;
+    bench/*.cpp | bench/*.hpp | bench/*.cu | bench/*.cuh | bench/*.hip) check_harness_library_qualified ;;
+    esac
+    run_gate_checks
+    case "$staged_path" in
     *.md) check_markdown_tex_not_in_code_spans ;;
     esac
     case "$staged_path" in
@@ -3335,6 +3798,7 @@ run_tree_checks() {
     check_swift_format_clean
     check_zig_fmt_clean
     check_dprint_clean
+    check_sibling_pins_agree
 }
 
 # endregion Shared Dispatch
@@ -3726,30 +4190,6 @@ top_level_namespaces() { # top_level_namespaces < source
         }'
 }
 
-# Inside `unum::usearch::test::<dir>` or `unum::usearch::bench::<dir>` the library's
-# `unum::usearch::<dir>` is already visible through the directive the shared harness header opens,
-# so `usearch::<dir>::` or `us::<dir>::` there only repeats it; lines past the closing brace, like
-# specializations of library templates, still qualify. The whole staged file, since the namespace is
-# context, reporting only the lines the commit added.
-check_harness_library_qualified() {
-    grep -qE '^namespace unum::usearch::(test|bench)::[a-z_]+ \{' "$staged_text_path" || return 0
-    local spelled
-    spelled=$("$fastest_awk" -v path="$staged_path" '
-        NR == FNR { added[$1 + 0]; next }
-        /^namespace unum::usearch::(test|bench)::[a-z_]+ \{/ {
-            inside = $2; sub(/^unum::usearch::/, "", inside)
-            directory = inside; sub(/^[a-z]+::/, "", directory)
-            next
-        }
-        /^\} \/\/ namespace / { inside = ""; next }
-        inside != "" && (FNR in added) && $0 !~ /^[[:space:]]*(\*|\/\/|\/\*)/ &&
-            (" " $0) ~ ("[^A-Za-z0-9_:](unum::usearch|usearch|us)::" directory "::") {
-            printf "%s:%d: spells usearch::%s:: inside %s\n", path, FNR, directory, inside
-        }' "$staged_lines_path" "$staged_text_path")
-    local first=${spelled%%$'\n'*}
-    [ -z "$spelled" ] || reject_with_reason "$spelled" "$staged_path ${first#*: }; the library namespace is already visible:"
-}
-
 # A namespace opens once per file: closing it only to reopen it splits its body around whatever sits
 # between, usually an include that belongs in the preamble. The one gap allowed holds a `fmt::` or
 # `std::` specialization, which has to follow the type it formats or hashes and precede the first
@@ -3947,18 +4387,6 @@ check_partial_prints() {
     partial=$(printf '%s\n' "$staged_added_text" | grep -E 'fmt::print\(' | grep -vE '\\n"' | grep -vE 'fmt::print\("\\r' || true)
     [ -z "$partial" ] || reject_with_reason "$partial" \
         "$staged_path prints half a line; fold it into one fmt::println, with fmt::styled or fmt::join:"
-}
-
-# Rejects a print to stdout in a test body: the harness owns stdout, and a test only reports
-# failures to stderr, so a passing run reads the same in every sibling.
-check_test_bodies_quiet() {
-    local prints
-    prints=$(printf '%s\n' "$staged_added_text" | blank_c_comments_preserving_columns |
-        grep -nE '\b(print_line|fmt::println|fmt::print|printf|puts)[[:space:]]*\(|\bstd::cout\b|\bfprintf[[:space:]]*\([[:space:]]*stdout\b' |
-        grep -vE '\([[:space:]]*stderr\b' || true)
-    [ -z "$prints" ] || reject_with_reason "$prints" \
-        "$staged_path prints to stdout from a test body; report failures to stderr and leave progress" \
-        "            to the harness:"
 }
 
 # C++ iostreams, `std::cout`, `std::ifstream`, `std::ostringstream` and the rest of the
@@ -4266,21 +4694,6 @@ check_quotient_compared_to_zero() {
         "$staged_path compares an integer quotient against zero; write \`numerator < denominator\`:"
 }
 
-# CMake spells every target, source and flag it means at the call that means it. Deriving one by
-# replacing, slicing or matching out part of another string, or by editing a list in place, hides
-# what the build compiles: pass each name as an argument instead, under a keyword where several
-# kinds travel together. Building a list with `list(APPEND)` and testing a value with
-# `if (... MATCHES ...)` stay free.
-check_cmake_string_surgery() {
-    local surgery
-    surgery=$(printf '%s\n' "$staged_added_text" | grep -vE '^\+[[:space:]]*#' |
-        grep -iE '(^|[^A-Za-z0-9_])(string[[:space:]]*\([[:space:]]*(REPLACE|REGEX|SUBSTRING|STRIP|TOLOWER|TOUPPER)[[:space:]]|list[[:space:]]*\([[:space:]]*(TRANSFORM|FILTER|REMOVE_ITEM|REMOVE_AT|REMOVE_DUPLICATES|SUBLIST|POP_BACK|POP_FRONT|INSERT|JOIN|SORT|REVERSE)[[:space:]]|(get_filename_component|cmake_path)[[:space:]]*\()' ||
-        true)
-    [ -z "$surgery" ] || reject_with_reason "$surgery" \
-        "$staged_path derives a name or flag by editing a string or a list; spell each one out at its call and pass it as" \
-        "            an argument, as \`usearch_dense_dtype_sources(target BF16 a_bf16.cpp F16 a_f16.cpp)\` does:"
-}
-
 # The CPython bindings parse arguments and build results by hand: `PyArg_Parse*` and `Py_BuildValue`
 # interpret a format string at runtime, so a wrong specifier is a crash rather than a compile error,
 # and their error paths are the interpreter's rather than ours.
@@ -4548,6 +4961,7 @@ check_identifier_words() {
             while (match(rest, /[A-Za-z_][A-Za-z0-9_]*/)) {
                 token = substr(rest, RSTART, RLENGTH); rest = substr(rest, RSTART + RLENGTH)
                 if (token ~ /^fu_pool_/) continue # the ForkUnion C API spells its thread pools so
+                if (token ~ /^(usearch_executor_)?on_pool(_t)?$/) continue # the C executor verb that adopts a pool
                 total = split(tolower(token), parts, "_")
                 for (part = 1; part <= total; ++part) {
                     if (!(parts[part] in banned)) continue
@@ -4596,27 +5010,6 @@ check_utilities_vocabulary() {
     [ -z "$dense_words" ] || reject_with_reason "$dense_words" \
         "$staged_path speaks of rows, vectors, dimensions, norms or heads in a utility; the utilities know entries," \
         "            nodes, offsets and queries, and the dense words live in dense/:"
-}
-
-# The md5 of the lines between each pinned region's `# region` and `# endregion`, which every sibling
-# hook carrying that region holds word for word.
-shared_region_sums='Shared Helpers	0f47a409a3595919bb8c842cb2947d38
-All Files	53c26430146a2f3695eb5998e4b1dc4c
-Shared Dispatch	f8fc4e7bf5abf7361e4e17d17d720af4
-Parallel Judging	738b237daa7b91d37b6a535e0f073b9a'
-
-# Rejects a pinned region of this hook whose text drifted from the sibling hooks' copy, because a pinned
-# region is edited in every sibling hook carrying it together, and the sums above are what pins them.
-check_shared_regions_match() {
-    local name expected actual drifted=""
-    while IFS=$'\t' read -r name expected; do
-        actual=$("$fastest_awk" -v name="$name" '$0 == "# endregion " name { inside = 0 } inside { print } $0 == "# region " name { inside = 1 }' \
-            "$staged_text_path" | { command -v md5sum > /dev/null 2>&1 && md5sum || md5; } | cut -d' ' -f1)
-        [ "$actual" = "$expected" ] || drifted="$drifted$name: $actual, pinned $expected"$'\n'
-    done <<< "$shared_region_sums"
-    [ -z "$drifted" ] || reject_with_reason "${drifted%$'\n'}" \
-        "$staged_path drifts from the sibling hooks' shared regions; edit a shared region in every sibling" \
-        "            hook together, and record the new sums in shared_region_sums:"
 }
 
 # Rejects a refused identifier word or member name missing from the Vocabulary table of
@@ -4676,16 +5069,6 @@ staged_any() { # staged_any <glob>...
         done
     done
     return 1
-}
-
-# Rejects zig fmt drift on staged Zig sources; it skips without zig.
-check_zig_format_clean() {
-    command -v zig > /dev/null 2>&1 || return 0
-    local zig_path
-    while IFS= read -r -d '' zig_path; do
-        zig fmt --check "$zig_path" > /dev/null 2>&1 ||
-            reject_with_reason "" "$zig_path is not zig-fmt clean;" "            run: zig fmt $zig_path"
-    done < <(staged_matching '*.zig')
 }
 
 # Rejects mojo format drift; `mojo format` has no check mode, so the gate formats a copy and
@@ -4762,60 +5145,6 @@ check_dotnet_format_clean() {
             "            run: dotnet format whitespace csharp/Cloud.Unum.USearch.sln"
 }
 
-# A `usearch_sibling` pin, a Cargo git `rev` and the submodule's gitlink name the same commit, or a
-# recursive clone, a plain one and a crate build different code. Every side is read from the index,
-# so the comparison is against what this commit will actually record.
-check_sibling_pins_agree() {
-    git diff --cached --quiet -- CMakeLists.txt Cargo.toml numkong forkunion stringzilla smashtable 2> /dev/null && return 0
-    local sibling pinned source recorded
-    while read -r sibling pinned source; do
-        recorded=$(git ls-files --stage -- "$sibling" | "$fastest_awk" '$1 == "160000" { print $2 }')
-        [ -n "$recorded" ] || continue
-        [ "$recorded" = "$pinned" ] || reject_with_reason "" \
-            "$sibling pin has drifted; $source says ${pinned:0:12}, the submodule records ${recorded:0:12}"
-    done < <(
-        git show :CMakeLists.txt 2> /dev/null | "$fastest_awk" '
-        /usearch_sibling\(/ { inside = 1; record = ""; sub(/.*usearch_sibling\(/, "") }
-        inside { record = record " " $0 }
-        inside && /\)/ {
-            sub(/\).*/, "", record)
-            count = split(record, fields, /[ \t]+/)
-            name = ""; pin = ""
-            for (i = 1; i <= count; ++i) {
-                if (fields[i] == "") continue
-                if (name == "") name = fields[i]
-                if (fields[i] ~ /^[0-9a-f]{40}$/) pin = fields[i]
-            }
-            if (name != "" && pin != "") print name, pin, "CMakeLists.txt"
-            inside = 0
-        }'
-        git show :Cargo.toml 2> /dev/null | sed -nE \
-            's|.*git = "https://github.com/[^/"]+/([^/"]+)", rev = "([0-9a-f]{40})".*|\1 \2 Cargo.toml|p' |
-            "$fastest_awk" '{ print tolower($1), $2, $3 }'
-    )
-}
-
-# Rejects a NumKong or StringZilla `_ARCH_` flag, which says what compiles inside that library's own build; USearch
-# reads the libraries' public `_TARGET_` switches and names its GPU class through `USEARCH_TARGET_<VENDOR>_<CLASS>`.
-check_library_arch_flags_unnamed() {
-    local named
-    named=$(printf '%s\n' "$staged_added_text" | grep -E "^\+.*(NUMKONG|STRINGZILLA)_ARCH_[A-Z0-9_]+" || true)
-    [ -z "$named" ] || reject_with_reason "$named" \
-        "$staged_path names a NumKong or StringZilla _ARCH_ flag, which only that library's own build may read;" \
-        "            test its public _TARGET_ switch, or USEARCH_TARGET_<VENDOR>_<CLASS> for a GPU class:"
-}
-
-# Rejects a CMake line raising a NumKong or StringZilla GPU generation target, because a class unit lowers the
-# library's floor target and names its own class through its product's `_TARGET_<VENDOR>_<CLASS>` switch instead.
-check_library_gpu_targets_unset() {
-    local raised
-    raised=$(printf '%s\n' "$staged_added_text" | grep -vE '^\+?[[:space:]]*#' |
-        grep -E '(NUMKONG|STRINGZILLA)_TARGET_(AMPERE|ADA|HOPPER|BLACKWELL[A-Z]*|CDNA[0-9])=1' || true)
-    [ -z "$raised" ] || reject_with_reason "$raised" \
-        "$staged_path sets a library GPU generation target; class units write the floor target to 0 and name" \
-        "            their class with ${macro_prefix}_TARGET_<VENDOR>_<CLASS>:"
-}
-
 # Rejects a warp type calling a GPU generation's StringZilla step, because a warp carries its vendor and width
 # alone, and each generation's scans live in the scan kit its class unit names beside the warp.
 check_warps_carry_no_generation() {
@@ -4831,18 +5160,12 @@ check_warps_carry_no_generation() {
 
 # Routes one staged file through the checks only USearch has.
 run_project_checks() {
-    case "$staged_path" in
-    .githooks/pre-commit) check_shared_regions_match ;;
-    esac
     run_binding_checks
     case " $core_files " in
     *" $staged_path "*) check_dependency_free_core ;;
     esac
     case "$staged_path" in
     include/usearch/* | tools/*) check_layer_includes ;;
-    esac
-    case "$staged_path" in
-    tools/*.hpp | tools/*.cpp) check_std_collections_absent ;;
     esac
     case "$staged_path" in
     *.c | *.h | *.hpp | *.cpp | *.cc | *.cu | *.cuh | *.hip | *.metal)
@@ -4857,7 +5180,6 @@ run_project_checks() {
         check_trailing_returns
         check_iterator_laundering
         check_expected_bindings
-        check_library_arch_flags_unnamed
         ;;
     esac
     case "$staged_path" in
@@ -4910,7 +5232,6 @@ run_project_checks() {
     esac
     case "$staged_path" in
     test/*.hpp | test/*.cpp | test/*.cuh | test/*.cu | test/*.hip | bench/*.hpp | bench/*.cpp | bench/*.cuh | bench/*.cu | bench/*.hip)
-        check_harness_library_qualified
         check_namespace_reopened
         check_widened_accumulation
         ;;
@@ -4982,11 +5303,6 @@ run_project_checks() {
         esac
     done
     case "$staged_path" in
-    test/harness.hpp | test/main.cpp | test/dense_vram.cpp | test/dense/vram_nvidia.cpp | test/dense/vram_amd.hip | \
-        test/dense/vram_apple.cpp) ;;
-    test/*.cpp | test/*.hpp | test/*.cu | test/*.cuh | test/*.hip) check_test_bodies_quiet ;;
-    esac
-    case "$staged_path" in
     *vram* | *.cu | *.cuh | *.hip | *.metal) check_flat_storage_wording ;;
     esac
     case "$staged_path" in
@@ -5006,10 +5322,6 @@ run_project_checks() {
         check_substring_assertions
         ;;
     python/*.c | python/*.h) check_cpython_format_shortcuts ;;
-    CMakeLists.txt | */CMakeLists.txt | *.cmake)
-        check_cmake_string_surgery
-        check_library_gpu_targets_unset
-        ;;
     esac
     case "$staged_path" in
     *.rs)
@@ -5026,7 +5338,6 @@ run_tree_checks() {
     check_taplo_clean
     check_swift_format_clean
     check_dprint_clean
-    check_zig_format_clean
     check_mojo_format_clean
     check_java_format_clean
     check_prettier_clean

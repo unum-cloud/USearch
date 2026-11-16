@@ -8,8 +8,6 @@ set -euo pipefail
 version=$(cat VERSION)
 name=usearch_docs_$version out=build/usearch_docs_$version scratch=build/docs-scratch
 numkong=${FETCHCONTENT_SOURCE_DIR_NUMKONG:-numkong}
-# Rustdoc's JSON is unstable, and `rust-version` needs 1.100, which reaches stable on 2026-11-12.
-toolchain=${USEARCH_RUST_TOOLCHAIN:-beta-2026-10-18}
 rm -rf "$out" "$scratch" && mkdir -p "$out"/{doxygen,doxygen-java,doxygen-csharp,headers,python,rust,swift} \
     "$out"/{javascript,go,zig,wolfram,mojo} "$scratch"/{library,java,csharp}
 
@@ -31,9 +29,10 @@ griffe dump usearch --search python --no-inspection --docstyle google --full --o
 cp python/usearch/lib.pyi "$out/python/"
 
 # Rustdoc links nothing, so every crate with a native library is pointed at an empty directory instead of building it.
+# Stable 1.100 emits rustdoc's JSON only behind `-Z unstable-options`, so this one step bootstraps it.
 USEARCH_LIBRARY_DIR=$PWD/$scratch/library NUMKONG_LIBRARY_DIR=$PWD/$scratch/library \
     STRINGZILLA_LIBRARY_DIR=$PWD/$scratch/library RUSTC_BOOTSTRAP=1 \
-    cargo +"$toolchain" rustdoc --lib -- -Z unstable-options --output-format json
+    cargo rustdoc --lib -- -Z unstable-options --output-format json
 cp "${CARGO_TARGET_DIR:-target}/doc/usearch.json" "$out/rust/"
 
 swiftc -emit-module -emit-module-path "$scratch/NumKong.swiftmodule" -module-name NumKong -package-name NumKong \

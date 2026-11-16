@@ -91,8 +91,8 @@
         "base",
         "llvm"
       ],
-      "displayName": "Host Debug - unit tests with sanitizers",
-      "description": "Unoptimized C++ and C suites; the compiler wiring arms the leak sanitizer here.",
+      "displayName": "Host Debug - unoptimized unit tests",
+      "description": "Unoptimized C++ and C suites, with full DWARF for stepping through them; `asan` adds the sanitizers.",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "USEARCH_BUILD_TEST": "ON",
@@ -181,12 +181,21 @@
         "gcc"
       ],
       "displayName": "Host TSan - concurrency suites under ThreadSanitizer",
-      "description": "GCC & -fsanitize=thread over RelWithDebInfo - the Debug wiring arms ASan & LSan, which TSan cannot share a process with. -O1 keeps the instrumented suites tolerable, and the mutex annotations in sanitizers.hpp light up under this preset alone. Built with GCC: Clang here ships no compiler-rt.",
+      "description": "GCC & -fsanitize=thread over RelWithDebInfo, apart from `asan`, as TSan cannot share a process with ASan & LSan. -O1 keeps the instrumented suites tolerable, and the mutex annotations in sanitizers.hpp light up under this preset alone. Built with GCC: Clang here ships no compiler-rt.",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "CMAKE_C_FLAGS_RELWITHDEBINFO": "-O1 -g -DNDEBUG -fsanitize=thread -fno-omit-frame-pointer",
         "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O1 -g -DNDEBUG -fsanitize=thread -fno-omit-frame-pointer",
         "USEARCH_BUILD_TEST": "ON"
+      }
+    },
+    {
+      "name": "asan",
+      "inherits": "debug",
+      "displayName": "Host ASan - unit tests under AddressSanitizer",
+      "description": "The debug tree with AddressSanitizer, LeakSanitizer and the alignment and undefined checks over USearch's own targets; the siblings keep their own flags.",
+      "cacheVariables": {
+        "USEARCH_BUILD_SANITIZERS": "address"
       }
     },
     {
@@ -500,21 +509,35 @@
       }
     },
     {
+      "name": "cross",
+      "hidden": true,
+      "inherits": [
+        "base",
+        "linux"
+      ],
+      "description": "The C++ and C suites, cross-compiled; their tests run under the QEMU user-mode emulator the toolchain file names, over the cross C library.",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "USEARCH_BUILD_TEST": "ON",
+        "USEARCH_BUILD_SHARED": "ON"
+      }
+    },
+    {
       "name": "linux_arm64",
-      "inherits": "library",
-      "displayName": "Linux ARM64 Library - the C 99 library through Clang and LLD",
+      "inherits": "cross",
+      "displayName": "Linux ARM64 under QEMU through Clang and LLD",
       "toolchainFile": "${sourceDir}/cmake/toolchain-aarch64-llvm.cmake"
     },
     {
       "name": "linux_riscv64",
-      "inherits": "library",
-      "displayName": "Linux RISC-V 64 Library - the C 99 library through GCC",
+      "inherits": "cross",
+      "displayName": "Linux RISC-V 64 under QEMU through GCC 16",
       "toolchainFile": "${sourceDir}/cmake/toolchain-riscv64-gnu.cmake"
     },
     {
       "name": "linux_ppc64le",
-      "inherits": "library",
-      "displayName": "Linux POWER Library - the C 99 library through GCC",
+      "inherits": "cross",
+      "displayName": "Linux POWER under QEMU through GCC 15",
       "toolchainFile": "${sourceDir}/cmake/toolchain-ppc64le-gnu.cmake"
     },
     {
@@ -638,6 +661,11 @@
       "jobs": 0
     },
     {
+      "name": "asan",
+      "configurePreset": "asan",
+      "jobs": 0
+    },
+    {
       "name": "cuda",
       "configurePreset": "cuda",
       "jobs": 0
@@ -679,6 +707,14 @@
     {
       "name": "vera_rubin",
       "configurePreset": "vera_rubin",
+      "jobs": 0,
+      "targets": [
+        "usearch_shared"
+      ]
+    },
+    {
+      "name": "venice_mi450",
+      "configurePreset": "venice_mi450",
       "jobs": 0,
       "targets": [
         "usearch_shared"
@@ -814,9 +850,33 @@
       }
     },
     {
+      "name": "asan",
+      "inherits": "base",
+      "configurePreset": "asan",
+      "environment": {
+        "ASAN_OPTIONS": "detect_leaks=1 halt_on_error=1",
+        "UBSAN_OPTIONS": "halt_on_error=1 print_stacktrace=1"
+      }
+    },
+    {
       "name": "cuda",
       "inherits": "base",
       "configurePreset": "cuda"
+    },
+    {
+      "name": "linux_arm64",
+      "inherits": "base",
+      "configurePreset": "linux_arm64"
+    },
+    {
+      "name": "linux_riscv64",
+      "inherits": "base",
+      "configurePreset": "linux_riscv64"
+    },
+    {
+      "name": "linux_ppc64le",
+      "inherits": "base",
+      "configurePreset": "linux_ppc64le"
     },
     {
       "name": "wasm32_emscripten",

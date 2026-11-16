@@ -22,6 +22,12 @@ payload=$(grep -v '^#' "$1")
 subject=$(grep -m 1 -v '^[[:space:]]*$' <<< "$payload")
 failed=0
 
+# A manifest names the release on every line that opens with its version key, so a workspace and its package agree.
+stamped() { # stamped <path> <line-prefix> <line-suffix>
+    git show ":$1" 2>/dev/null | awk -v prefix="$2" -v line="$2$version$3" \
+        'index($0, prefix) == 1 { seen = 1; if ($0 != line) stale = 1 } END { exit !(seen && !stale) }'
+}
+
 case "$subject" in
 Merge* | "fixup!"* | "squash!"*) ;;
 # Releases are minted by hand, so this check is all that stands between a typo and a published package.
@@ -35,19 +41,17 @@ Release:*)
         core=${version%%-*} stale=""
         IFS=. read -r major minor patch <<< "$core"
         [ "$(git show :VERSION 2>/dev/null)" = "$version" ] || stale="$stale VERSION"
-        git show :package.json 2>/dev/null | grep -qxF "  \"version\": \"$version\"," || stale="$stale package.json"
-        git show :Cargo.toml 2>/dev/null | grep -qxF "version = \"$version\"" || stale="$stale Cargo.toml"
-        # Both the workspace and the package name the version.
-        [ "$(git show :pixi.toml 2>/dev/null | grep -cxF "version = \"$version\"")" = 2 ] || stale="$stale pixi.toml"
-        git show :mojo/pixi.toml 2>/dev/null | grep -qxF "version = \"$version\"" || stale="$stale mojo/pixi.toml"
+        stamped package.json '  "version": "' '",' || stale="$stale package.json"
+        for manifest in Cargo.toml pixi.toml mojo/pixi.toml; do
+            stamped "$manifest" 'version = "' '"' || stale="$stale $manifest"
+        done
         git show :build.zig.zon 2>/dev/null | grep -qxF "    .version = \"$version\"," || stale="$stale build.zig.zon"
         git show :java/README.md 2>/dev/null | grep -qF "def usearchVersion = '$version'" || stale="$stale java/README.md"
         git show :java/README.md 2>/dev/null | grep -qF "implementation name: 'usearch', version: '$version'," || stale="$stale java/README.md"
         git show :csharp/nuget/nuget-package.props 2>/dev/null | grep -qF "'\$(Version)' == ''\">$version</Version>" ||
             stale="$stale csharp/nuget/nuget-package.props"
         git show :Package.swift 2>/dev/null | grep -qF "/releases/download/v$version\"" || stale="$stale Package.swift"
-        # CMake's `project(VERSION)`, the C macros and the stub take numbers only, so a candidate keeps its core there.
-        git show :CMakeLists.txt 2>/dev/null | grep -qE "^[[:space:]]+VERSION ${core//./\\.}$" || stale="$stale CMakeLists.txt"
+        # The C macros and the stub take numbers only, so a candidate keeps its core there.
         for field in "MAJOR $major" "MINOR $minor" "PATCH $patch"; do
             git show :c/usearch/types.h 2>/dev/null | grep -qxF "#define USEARCH_VERSION_$field" ||
                 stale="$stale c/usearch/types.h:${field% *}"

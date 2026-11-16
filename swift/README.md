@@ -448,7 +448,7 @@ print(version(), capabilitiesCompiled(), capabilitiesAvailable())
 - __The receiver chooses, the verb stays.__
   The index runs a verb on the calling thread, `on(executor)` blocks on an executor, and `deferred(executor)` submits it, all with the same arguments.
 - __Deferred calls use the language's own idioms.__
-  `status` polls through `usearch_outcome_status`, `wait()` blocks through `usearch_outcome_wait`, and `try await call.value` runs that wait on a Dispatch thread, so an `async` caller suspends.
+  `status` polls through `usearch_outcome_status`, `wait()` blocks through `usearch_outcome_wait`, and `try await call.value` polls `status` between `Task.sleep` pauses growing from 1 µs to 1 ms, so an `async` caller suspends and no thread parks.
 - __No life of its own.__
   The binding starts no threads and keeps no queues; releasing a `Deferred` rides its `deinit`, which waits for the call first.
 - __Arenas are lent and reused, never shared.__

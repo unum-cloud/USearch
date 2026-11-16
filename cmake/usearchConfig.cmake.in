@@ -1,3 +1,5 @@
+@PACKAGE_INIT@
+
 include(FindPackageHandleStandardArgs)
 set(${CMAKE_FIND_PACKAGE_NAME}_CONFIG ${CMAKE_CURRENT_LIST_FILE})
 find_package_handle_standard_args(@PROJECT_NAME@ CONFIG_MODE)
