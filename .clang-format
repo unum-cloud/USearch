@@ -35,7 +35,7 @@ AlwaysBreakAfterReturnType: None
 PenaltyReturnTypeOnItsOwnLine: 200
 
 BreakBeforeBraces: Custom
-BreakAdjacentStringLiterals: false
+BreakAdjacentStringLiterals: true
 BraceWrapping:
   AfterCaseLabel: false
   AfterClass: false
@@ -80,14 +80,11 @@ BinPackLongBracedList: true
 BreakBeforeCloseBracketBracedList: false
 PenaltyBreakBeforeFirstCallParameter: 1
 
-# NumKong visibility macros treated as attributes so they don't confuse declarations.
+# The export macro the C interface puts before every declaration, read as an attribute.
 AttributeMacros:
-  - NUMKONG_API
-  - NUMKONG_CONSTEXPR
-  - NUMKONG_INLINE
-  - NUMKONG_DEVICE
+  - USEARCH_EXPORT
 
-# Align consecutive macro definitions (useful for NUMKONG_TARGET_* flags)
+# Align consecutive macro definitions, as the `*_TARGET_*` capability flags run in blocks
 AlignConsecutiveMacros:
   Enabled: true
   AcrossEmptyLines: false
@@ -96,7 +93,7 @@ AlignConsecutiveMacros:
 # Preprocessor directive indentation: None (flat), AfterHash (#  if), BeforeHash (  #if)
 IndentPPDirectives: None
 
-# USearch keeps C++ convention `int* x`, unlike NumKong's C-idiomatic `int *x`.
+# The C++ convention `int* x`, binding the pointer to the type.
 PointerAlignment: Left
 DerivePointerAlignment: false
 
