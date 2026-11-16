@@ -370,17 +370,6 @@ usearch_executor_t call_executor_for(punned_basic_index<traits_type_, residency_
     return &call_executor;
 }
 
-/** The device a basic GPU variant places on: USearch ordinal @p ordinal of the listing, on a vendor
- *  whose basic kernels this build carries; null once @p outcome records why not. */
-inline gpu_device_t const* basic_device_at(std::size_t ordinal, usearch_outcome_t* outcome) noexcept {
-    std::span<gpu_device_t const> const listed = gpu_devices();
-    if (ordinal >= listed.size())
-        return propagate_error(usearch_status_device_k, outcome, "A device ordinal is past the listing"), nullptr;
-    if (listed[ordinal].vendor != gpu_vendor_t::nvidia_k)
-        return propagate_error(usearch_status_device_k, outcome, "No basic GPU kernels serve this vendor yet"), nullptr;
-    return &listed[ordinal];
-}
-
 #pragma endregion Variant Tables
 
 #pragma region Sequence Traits

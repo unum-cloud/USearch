@@ -1518,15 +1518,24 @@ inline constexpr vendored_residency_t vendored_residency_of =
     : std::is_same_v<executor_type_, hip_executor_t>     ? vendored_residency_t::vram_amd_k
                                                          : vendored_residency_t::vram_apple_k;
 
+/** A set of GPU classes, one bit per C enum value. */
+using gpu_class_mask_t = u32_t;
+
+constexpr gpu_class_mask_t gpu_class_bit(gpu_class_t gpu_class) noexcept {
+    return gpu_class_mask_t {1} << static_cast<u32_t>(gpu_class);
+}
+
 /** The GPU side of the process, built at its first VRAM call: every vendor's driver, and every
  *  device they report, NVIDIA first, then AMD, then Apple, a device's position here being its
- *  USearch ordinal; a device no class runs on is listed too, and refuses work. */
+ *  USearch ordinal, beside the classes whose units its loader took; a device no class runs on is
+ *  listed too, and refuses work. */
 struct gpu_runtime_t {
     gpu_drivers_t drivers;
     gpu_device_t devices[3 * gpu_devices_capacity_k];
+    gpu_class_mask_t loaded[3 * gpu_devices_capacity_k] = {};
     std::size_t devices_count = 0;
 
-    gpu_runtime_t() noexcept { devices_count = list_gpu_devices(drivers, devices); }
+    gpu_runtime_t() noexcept;
 };
 
 /** The one runtime every VRAM call passes its drivers down from. */
@@ -1542,6 +1551,12 @@ inline gpu_drivers_t& gpu_drivers() noexcept { return gpu_runtime().drivers; }
 inline std::span<gpu_device_t const> gpu_devices() noexcept {
     gpu_runtime_t const& runtime = gpu_runtime();
     return {runtime.devices, runtime.devices_count};
+}
+
+/** The classes whose units load on each device @ref gpu_devices lists, asked once at listing. */
+inline std::span<gpu_class_mask_t const> gpu_classes_loaded() noexcept {
+    gpu_runtime_t const& runtime = gpu_runtime();
+    return {runtime.loaded, runtime.devices_count};
 }
 
 /** Whether the build compiled device code for @p gpu_class, as CMake decided and told the dispatch
@@ -1645,11 +1660,11 @@ constexpr u32_t apple_family_of(gpu_class_t gpu_class) noexcept {
     return gpu_class == gpu_class_t::apple_metal10_k ? 10 : gpu_class == gpu_class_t::apple_metal9_k ? 9 : 7;
 }
 
-/** Whether @p device runs @p gpu_class, as the loader answers: the driver loads the class's device
- *  code only where some code it holds runs there, and an Apple class runs from its family on. */
-inline bool gpu_class_serves(gpu_class_t gpu_class, gpu_device_t const& device) noexcept {
+/** Whether @p device runs @p gpu_class, as the loader of @p drivers answers: the driver loads a
+ *  class's device code only where some code it holds runs there, and an Apple class runs from the
+ *  Apple family it needs on. */
+inline bool gpu_class_serves(gpu_class_t gpu_class, gpu_device_t const& device, gpu_drivers_t const& drivers) noexcept {
     if (gpu_vendor_of(gpu_class) != device.vendor || !gpu_class_compiled(gpu_class)) return false;
-    gpu_drivers_t const& drivers = gpu_drivers();
     int const ordinal = static_cast<int>(device.vendor_ordinal);
     switch (device.vendor) {
     case gpu_vendor_t::nvidia_k:
@@ -1659,6 +1674,14 @@ inline bool gpu_class_serves(gpu_class_t gpu_class, gpu_device_t const& device) 
     case gpu_vendor_t::apple_k: return device.architecture_major >= apple_family_of(gpu_class);
     default: return false;
     }
+}
+
+inline gpu_runtime_t::gpu_runtime_t() noexcept {
+    devices_count = list_gpu_devices(drivers, devices);
+    for (std::size_t position = 0; position != devices_count; ++position)
+        for (usearch_gpu_class_t const gpu_class : gpu_classes_k)
+            if (gpu_class_serves(static_cast<gpu_class_t>(gpu_class), devices[position], drivers))
+                loaded[position] |= gpu_class_bit(static_cast<gpu_class_t>(gpu_class));
 }
 
 /** The class a GPU class extends, the next one down its own lineage, or @c unknown_k past the
@@ -1710,27 +1733,93 @@ template <typename multiversioned_ladder_type_>
 using basic_gpu_ladder = multiversioned_ladder_type_;
 #endif
 
-/** The newest class of @p ladder at or under @p pinned that serves @p device, or @c unknown_k. */
+/** The newest class of @p ladder at or under @p pinned among @p loaded, or @c unknown_k. */
 template <gpu_class_t... classes_>
-gpu_class_t pick_gpu_class(gpu_ladder<classes_...>, gpu_device_t const& device, usearch_gpu_class_t pinned) noexcept {
+gpu_class_t pick_gpu_class(gpu_ladder<classes_...>, gpu_class_mask_t loaded, usearch_gpu_class_t pinned) noexcept {
     gpu_class_t picked = gpu_class_t::unknown_k;
     auto rung = [&]<gpu_class_t class_>() noexcept {
-        if (picked == gpu_class_t::unknown_k && gpu_class_under_pin(class_, pinned) && gpu_class_serves(class_, device))
+        if (picked == gpu_class_t::unknown_k && gpu_class_under_pin(class_, pinned) && (loaded & gpu_class_bit(class_)))
             picked = class_;
     };
     (rung.template operator()<classes_>(), ...);
     return picked;
 }
 
-/** The class @p device takes under @p pinned, walking its own vendor's ladder; @c unknown_k when no
- *  unit this build carries runs on it, or none at or under the pin does. */
-inline gpu_class_t pick_gpu_class(gpu_device_t const& device, usearch_gpu_class_t pinned) noexcept {
-    switch (device.vendor) {
-    case gpu_vendor_t::nvidia_k: return pick_gpu_class(nvidia_ladder_t {}, device, pinned);
-    case gpu_vendor_t::amd_k: return pick_gpu_class(amd_ladder_t {}, device, pinned);
-    case gpu_vendor_t::apple_k: return pick_gpu_class(apple_ladder_t {}, device, pinned);
+/** The class a device of @p vendor whose loader took @p loaded takes under @p pinned, walking
+ *  its own vendor's ladder; @c unknown_k when no unit this build carries runs on it, or none at
+ *  or under the pin does. */
+inline gpu_class_t pick_gpu_class(gpu_vendor_t vendor, gpu_class_mask_t loaded, usearch_gpu_class_t pinned) noexcept {
+    switch (vendor) {
+    case gpu_vendor_t::nvidia_k: return pick_gpu_class(nvidia_ladder_t {}, loaded, pinned);
+    case gpu_vendor_t::amd_k: return pick_gpu_class(amd_ladder_t {}, loaded, pinned);
+    case gpu_vendor_t::apple_k: return pick_gpu_class(apple_ladder_t {}, loaded, pinned);
     default: return gpu_class_t::unknown_k;
     }
+}
+
+/** The class @p device takes under @p pinned, from what the listing entry of its vendor and
+ *  ordinal loaded. */
+inline gpu_class_t pick_gpu_class(gpu_device_t const& device, usearch_gpu_class_t pinned) noexcept {
+    std::span<gpu_device_t const> const devices = gpu_devices();
+    std::span<gpu_class_mask_t const> const loaded = gpu_classes_loaded();
+    for (std::size_t position = 0; position != devices.size(); ++position)
+        if (devices[position].vendor == device.vendor && devices[position].vendor_ordinal == device.vendor_ordinal)
+            return pick_gpu_class(device.vendor, loaded[position], pinned);
+    return gpu_class_t::unknown_k;
+}
+
+/** The devices one index places its shards on: their one vendor, the best class all of them load
+ *  under the pin, every class they all load, and their positions in the listing @c table. */
+struct gpu_placement_t {
+    gpu_vendor_t vendor = gpu_vendor_t::unknown_k;
+    gpu_class_t gpu_class = gpu_class_t::unknown_k;
+    gpu_class_mask_t loaded = 0;
+    std::span<gpu_device_t const> table;
+    std::span<std::int32_t const> positions;
+
+    gpu_device_t const& first() const noexcept { return table[static_cast<std::size_t>(positions[0])]; }
+};
+
+/**
+ *  @brief Resolves the devices @p vram names, device zero when it names none, against the listing
+ *      @p table, whose classes @p loaded holds as the loader answered at listing.
+ *
+ *  An index spans one vendor, since its shards merge through peer copies, and runs the best class
+ *  all its devices load, never above the pin, as a CPU executor runs what all its cores share.
+ *
+ *  @par Statuses:
+ *  - @c invalid_argument_k The pin is a value no class takes.
+ *  - @c device_error_k An ordinal is past the listing.
+ *  - @c config_mismatch_k The devices span vendors.
+ *  - @c unsupported_k The devices share no class this build carries at or under the pin.
+ */
+inline expected<gpu_placement_t> resolve_placement(std::span<gpu_device_t const> table,
+                                                   std::span<gpu_class_mask_t const> loaded,
+                                                   usearch_vram_options_t const& vram) noexcept {
+    static constexpr std::int32_t device_zero_k[] {0};
+    if (vram.gpu_class != usearch_gpu_class_unknown_k && !listed(gpu_classes_k, vram.gpu_class))
+        return {{}, status_t::invalid_argument_k};
+    gpu_placement_t placement;
+    placement.table = table, placement.loaded = ~gpu_class_mask_t {0};
+    placement.positions = vram.devices && vram.devices_count
+                              ? std::span<std::int32_t const> {vram.devices, vram.devices_count}
+                              : std::span<std::int32_t const> {device_zero_k};
+    for (std::int32_t const ordinal : placement.positions) {
+        std::size_t const position = static_cast<std::size_t>(ordinal);
+        if (ordinal < 0 || position >= table.size()) return {{}, status_t::device_error_k};
+        gpu_vendor_t const vendor = table[position].vendor;
+        if (placement.vendor != gpu_vendor_t::unknown_k && vendor != placement.vendor)
+            return {{}, status_t::config_mismatch_k};
+        placement.vendor = vendor, placement.loaded &= loaded[position];
+    }
+    placement.gpu_class = pick_gpu_class(placement.vendor, placement.loaded, vram.gpu_class);
+    if (placement.gpu_class == gpu_class_t::unknown_k) return {{}, status_t::unsupported_k};
+    return {placement, status_t::success_k};
+}
+
+/** Resolves the devices @p vram names against this process's listing. */
+inline expected<gpu_placement_t> resolve_placement(usearch_vram_options_t const& vram) noexcept {
+    return resolve_placement(gpu_devices(), gpu_classes_loaded(), vram);
 }
 
 /** The checkpoint in @p bytes and where it sits: on the NVIDIA or AMD device whose memory holds it,

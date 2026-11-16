@@ -967,9 +967,9 @@ typedef struct usearch_ram_options_t {
  *  Flat matrices are device-resident, never migratable: an index outgrowing the named devices
  *  fails rather than paging to the host, and the answer is to name more devices.
  *
- *  One index spans one vendor and one class, so naming devices of two vendors or two generations
- *  refuses with @c usearch_status_config_mismatch_k; separate indexes may sit on different vendors
- *  in one process.
+ *  One index spans one vendor and runs the best class all its devices load, never above
+ *  @c gpu_class; devices of two vendors, or with no class in common, refuse. Separate indexes may
+ *  sit on different vendors in one process.
  */
 typedef struct usearch_vram_options_t {
 

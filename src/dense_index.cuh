@@ -199,15 +199,16 @@ static dense_verbs<residency_> const* pick_cpu_variant(cpu_ladder<classes_...>, 
     return picked;
 }
 
-/** The device variant of @p dtype on the newest rung of @p ladder at or under @p picked whose unit
- *  runs on @p device, the class's own unit alone carrying kernels for it. */
+/** The device variant of @p dtype on the newest rung of @p ladder at or under the class of
+ *  @p placement whose unit every placed device loads, since only a class's own unit carries
+ *  the kernels it dispatches. */
 template <vendored_residency_t residency_, gpu_class_t... classes_>
 static dense_verbs<residency_> const* pick_gpu_variant(gpu_ladder<classes_...>, nk_dtype_t dtype,
-                                                       gpu_device_t const& device, gpu_class_t picked) noexcept {
+                                                       gpu_placement_t const& placement) noexcept {
     dense_verbs<residency_> const* verbs = nullptr;
     auto rung = [&]<gpu_class_t class_>() noexcept {
         if constexpr (gpu_class_compiled(class_))
-            if (!verbs && class_ <= picked && gpu_class_serves(class_, device))
+            if (!verbs && class_ <= placement.gpu_class && (placement.loaded & gpu_class_bit(class_)))
                 verbs = dense_class_tables<residency_, class_>::find(dtype);
     };
     (rung.template operator()<classes_>(), ...);
@@ -247,52 +248,28 @@ static usearch_dense_index_t make_index(usearch_dense_metadata_t const& geometry
     return make_dense_handle(geometry, nvme, *verbs, kernel, outcome);
 }
 
-/** The class every named device takes under @p vram 's pin, and the first of them: an index spans
- *  one vendor, since its shards merge through peer copies, and one class, since its variants run
- *  one class's kernels. Mixed vendors or classes refuse with @c config_mismatch_k, an unlisted
- *  ordinal with @c device_error_k, a value no class takes with @c invalid_argument_k, and a device
- *  no unit at or under the pin runs on with @c unsupported_k. */
-static expected<gpu_class_t> shared_gpu_class(usearch_vram_options_t const& vram, gpu_device_t& first) noexcept {
-    if (vram.gpu_class != usearch_gpu_class_unknown_k && !listed(gpu_classes_k, vram.gpu_class))
-        return {gpu_class_t::unknown_k, status_t::invalid_argument_k};
-    std::span<gpu_device_t const> const devices = gpu_devices();
-    gpu_class_t shared = gpu_class_t::unknown_k;
-    for (std::size_t position = 0; position != named_count(vram); ++position) {
-        std::size_t const ordinal = named_ordinal(vram, position);
-        if (ordinal >= devices.size()) return {gpu_class_t::unknown_k, status_t::device_error_k};
-        gpu_device_t const& device = devices[ordinal];
-        gpu_class_t const picked = pick_gpu_class(device, vram.gpu_class);
-        if (position && (device.vendor != first.vendor || picked != shared))
-            return {gpu_class_t::unknown_k, status_t::config_mismatch_k};
-        if (picked == gpu_class_t::unknown_k) return {gpu_class_t::unknown_k, status_t::unsupported_k};
-        if (!position) first = device, shared = picked;
-    }
-    return {shared, status_t::success_k};
-}
-
-/** The VRAM sibling of the RAM @ref make_index: the devices' class, picked by the unit each loads
- *  and narrowed to the pinned class when one is named, tops the vendor's ladder, whose first rung
- *  the devices run with a variant of the dtype serves; every dtype has a kit there, and
- *  @ref with_variant admits only the metrics its family scores by. */
+/** The VRAM sibling of the RAM @ref make_index: the best class every device loads, narrowed to
+ *  the pinned class when one is named, tops the vendor's ladder, whose first rung the devices run
+ *  with a variant of the dtype serves; every dtype has a kit there, and @ref with_variant admits
+ *  only the metrics its family scores by. */
 static usearch_dense_index_t make_index(usearch_dense_metadata_t const& geometry, usearch_vram_options_t const& vram,
                                         nk_dtype_t dtype, nk_kernel_kind_t kernel,
                                         usearch_outcome_t* outcome) noexcept {
-    gpu_device_t device;
-    auto const [gpu_class, status] = shared_gpu_class(vram, device);
+    auto const [placement, status] = resolve_placement(vram);
     if (status == status_t::config_mismatch_k)
-        return propagate_error(status, outcome, "One index spans one GPU vendor and class"), nullptr;
+        return propagate_error(status, outcome, "One index spans one GPU vendor"), nullptr;
     if (status == status_t::invalid_argument_k || status == status_t::unsupported_k)
-        return propagate_error(status, outcome, "The devices run no class this build carries under the pin"), nullptr;
+        return propagate_error(status, outcome, "The devices share no class this build carries under the pin"), nullptr;
     // Each ladder's rungs serve only their own vendor's devices, so at most one ladder answers.
     if (succeeded(status)) {
         if (dense_verbs<vendored_residency_t::vram_nvidia_k> const* const verbs =
-                pick_gpu_variant<vendored_residency_t::vram_nvidia_k>(nvidia_ladder_t {}, dtype, device, gpu_class))
+                pick_gpu_variant<vendored_residency_t::vram_nvidia_k>(nvidia_ladder_t {}, dtype, placement))
             return make_dense_handle(geometry, vram, *verbs, kernel, outcome);
         if (dense_verbs<vendored_residency_t::vram_amd_k> const* const verbs =
-                pick_gpu_variant<vendored_residency_t::vram_amd_k>(amd_ladder_t {}, dtype, device, gpu_class))
+                pick_gpu_variant<vendored_residency_t::vram_amd_k>(amd_ladder_t {}, dtype, placement))
             return make_dense_handle(geometry, vram, *verbs, kernel, outcome);
         if (dense_verbs<vendored_residency_t::vram_apple_k> const* const verbs =
-                pick_gpu_variant<vendored_residency_t::vram_apple_k>(apple_ladder_t {}, dtype, device, gpu_class))
+                pick_gpu_variant<vendored_residency_t::vram_apple_k>(apple_ladder_t {}, dtype, placement))
             return make_dense_handle(geometry, vram, *verbs, kernel, outcome);
     }
     return propagate_error(usearch_status_device_k, outcome,
@@ -1784,10 +1761,9 @@ USEARCH_EXPORT void usearch_executor_for_vram(usearch_executor_for_vram_t* argum
             return propagate_error(usearch_status_device_k, outcome, "A device ordinal is past the listing"), void();
         devices[shard] = listed[ordinal];
     }
-    gpu_device_t first;
-    auto const [gpu_class, shared_status] = shared_gpu_class(vram, first);
-    if (failed(shared_status) && shared_status != status_t::config_mismatch_k)
-        return propagate_error(shared_status, outcome, "The devices run no class this build carries under the pin"),
+    auto const [placement, placed_status] = resolve_placement(vram);
+    if (failed(placed_status) && placed_status != status_t::config_mismatch_k)
+        return propagate_error(placed_status, outcome, "The devices share no class this build carries under the pin"),
                void();
     auto [spawned, status] = spawn_gpu_executor(gpu_drivers(), devices, arguments->scratch_limit);
     if (status == status_t::config_mismatch_k)
@@ -1804,13 +1780,15 @@ USEARCH_EXPORT void usearch_executor_for_vram(usearch_executor_for_vram_t* argum
 USEARCH_EXPORT void usearch_gpu_devices(usearch_gpu_devices_t* arguments) {
     call_outcome_t outcome(*arguments);
     std::span<gpu_device_t const> const listed = gpu_devices();
+    std::span<gpu_class_mask_t const> const loaded = gpu_classes_loaded();
     std::size_t const copied = arguments->devices ? min_of(listed.size(), arguments->devices_capacity) : 0;
     for (std::size_t position = 0; position != copied; ++position) {
         gpu_device_t const& device = listed[position];
         usearch_gpu_device_t& entry = arguments->devices[position];
+        gpu_class_t const gpu_class = pick_gpu_class(device.vendor, loaded[position], usearch_gpu_class_unknown_k);
         entry = {static_cast<usearch_gpu_vendor_t>(device.vendor),
                  device.vendor_ordinal,
-                 static_cast<usearch_gpu_class_t>(pick_gpu_class(device, usearch_gpu_class_unknown_k)),
+                 static_cast<usearch_gpu_class_t>(gpu_class),
                  device.compute_units,
                  device.memory_bytes,
                  {}};

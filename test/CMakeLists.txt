@@ -162,6 +162,15 @@ if (USEARCH_CUDA_ARCH OR USEARCH_ROCM_ARCH)
     )
 endif ()
 
+# Placement over emulated machines: listings built from machine profiles, with no GPU or driver behind them.
+add_executable(usearch_test_placement placement.cpp)
+usearch_setup_target(usearch_test_placement HOST)
+target_include_directories(
+    usearch_test_placement PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/tools ${PROJECT_SOURCE_DIR}/src
+)
+target_link_libraries(usearch_test_placement PRIVATE fmt::fmt yyjson forkunion::static stringzilla::header)
+add_test(NAME usearch_test_placement COMMAND usearch_test_placement)
+
 # The command-line tools' suite: the Arrow export and import behind `usearch export` and `usearch import`,
 # round-tripping a checkpoint of every modality through the C interface, and the slots of a file standing as a raw
 # drive.
