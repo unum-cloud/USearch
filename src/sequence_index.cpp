@@ -40,8 +40,11 @@ USEARCH_EXPORT char const* usearch_sequence_metric_name(usearch_sequence_metric_
     // Every token is a string literal, so its data ends in a terminator.
     return token.empty() ? "unknown" : token.data();
 }
-USEARCH_EXPORT usearch_sequence_metric_t usearch_sequence_metric_from_name(usearch_bytes_view_t name) {
-    return sequence_metric_of(as_text(name));
+USEARCH_EXPORT usearch_status_t usearch_sequence_metric_from_name(usearch_bytes_view_t name,
+                                                                  usearch_sequence_metric_t* metric) {
+    usearch_sequence_metric_t const parsed = sequence_metric_of(as_text(name));
+    if (parsed == usearch_sequence_metric_unknown_k) return usearch_status_invalid_argument_k;
+    return *metric = parsed, usearch_status_success_k;
 }
 USEARCH_EXPORT void usearch_sequence_init_ram(usearch_sequence_init_ram_t* arguments) { basic_init_ram(arguments); }
 USEARCH_EXPORT void usearch_sequence_init_vram(usearch_sequence_init_vram_t* arguments) { basic_init_vram(arguments); }

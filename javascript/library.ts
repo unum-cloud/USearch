@@ -270,7 +270,7 @@ export interface CompiledIndexConstructor {
     connectivity: number | undefined,
     valuesPerKey: number | undefined,
     memoryDomains: number[] | undefined,
-    cpuClass: string | undefined,
+    cpuClassCeiling: string | undefined,
   ): CompiledIndex;
   initVram(
     dimensions: number,
@@ -279,49 +279,49 @@ export interface CompiledIndexConstructor {
     connectivity: number | undefined,
     valuesPerKey: number | undefined,
     devices: number[] | undefined,
-    gpuClass: string | undefined,
+    gpuClassCeiling: string | undefined,
   ): CompiledIndex;
   loadRam(
     path: string,
     executor: CompiledExecutor | undefined,
     memoryDomains: number[] | undefined,
     valuesPerKey: number | undefined,
-    cpuClass: string | undefined,
+    cpuClassCeiling: string | undefined,
   ): CompiledIndex;
   loadVram(
     path: string,
     executor: CompiledExecutor | undefined,
     devices: number[] | undefined,
     valuesPerKey: number | undefined,
-    gpuClass: string | undefined,
+    gpuClassCeiling: string | undefined,
   ): CompiledIndex;
   loadRamBuffer(
     buffer: ArrayBufferView,
     executor: CompiledExecutor | undefined,
     memoryDomains: number[] | undefined,
     valuesPerKey: number | undefined,
-    cpuClass: string | undefined,
+    cpuClassCeiling: string | undefined,
   ): CompiledIndex;
   loadVramBuffer(
     buffer: ArrayBufferView,
     executor: CompiledExecutor | undefined,
     devices: number[] | undefined,
     valuesPerKey: number | undefined,
-    gpuClass: string | undefined,
+    gpuClassCeiling: string | undefined,
   ): CompiledIndex;
   viewRam(path: string): CompiledIndex;
   viewNvme(
     path: string,
     executor: CompiledExecutor | undefined,
     paths: string[] | undefined,
-    cpuClass: string | undefined,
+    cpuClassCeiling: string | undefined,
     keyTableDomains: number[] | undefined,
   ): CompiledIndex;
   loadNvme(
     path: string,
     executor: CompiledExecutor | undefined,
     paths: string[] | undefined,
-    cpuClass: string | undefined,
+    cpuClassCeiling: string | undefined,
     keyTableDomains: number[] | undefined,
   ): CompiledIndex;
   metadataRead(path: string, executor: CompiledExecutor | undefined): CompiledMetadata;

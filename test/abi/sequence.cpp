@@ -188,7 +188,7 @@ std::size_t check_sequence_abi(settings_t const& settings) {
     if (settings.filter.selects("sequence metric names"))
         failures += report("sequence metric names", expect_metric_names<sequence_verbs_t>());
     for (sweep_cell_t const& cell : diagonal_sweep(usearch_scalar_unknown_k)) {
-        // The best class sweeps every metric, and a pinned class the first.
+        // The best class sweeps every metric, and a class set as the ceiling the first.
         std::size_t const metrics_count = cell.cpu_class == usearch_cpu_class_unknown_k ? metrics_k.size() : 1;
         for (std::size_t metric = 0; metric != metrics_count; ++metric) {
             std::string const name = fmt::format("sequence {} {}", name_of(cell), metric_names_k[metric]);

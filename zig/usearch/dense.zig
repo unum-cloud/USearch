@@ -94,7 +94,7 @@ pub const ValueLookup = struct {
 extern fn usearch_outcome_wait(outcome: *Outcome) Status;
 extern fn usearch_outcome_status(outcome: *Outcome) Status;
 extern fn usearch_dense_metric_name(metric: DenseMetric) [*:0]const u8;
-extern fn usearch_dense_metric_from_name(name: BytesView) DenseMetric;
+extern fn usearch_dense_metric_from_name(name: BytesView, metric: *DenseMetric) Status;
 extern fn usearch_refine_verdict_name(verdict: DenseRefineVerdict) [*:0]const u8;
 extern fn usearch_refine_verdict_from_name(name: BytesView, verdict: *DenseRefineVerdict) Status;
 
@@ -125,8 +125,8 @@ pub const DenseMetric = enum(c_int) {
 
     /// Reads a spelling back, or null when no kind spells it. Calls `usearch_dense_metric_from_name`.
     pub fn fromName(text: []const u8) ?DenseMetric {
-        const value = usearch_dense_metric_from_name(.of(text));
-        return if (std.mem.eql(u8, value.name(), text)) value else null;
+        var metric: DenseMetric = undefined;
+        return if (usearch_dense_metric_from_name(.of(text), &metric) == .success) metric else null;
     }
 };
 

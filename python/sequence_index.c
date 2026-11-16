@@ -291,10 +291,10 @@ static void options_release(sequence_options_t* options) {
     usearch_py_buffer_release(&options->weights.matrix);
 }
 
-/** The keyword a verb names its pinned class by: @c cpu_class for host placements, @c gpu_class
- *  for devices. */
-static char const* pinned_name(usearch_py_enum_t const* pinned_classes) {
-    return pinned_classes == &usearch_py_gpu_class ? "gpu_class" : "cpu_class";
+/** The keyword a verb names its class ceiling by: @c cpu_class_ceiling for host placements,
+ *  @c gpu_class_ceiling for devices. */
+static char const* ceiling_name(usearch_py_enum_t const* ceiling_classes) {
+    return ceiling_classes == &usearch_py_gpu_class ? "gpu_class_ceiling" : "cpu_class_ceiling";
 }
 
 /**
@@ -304,9 +304,9 @@ static char const* pinned_name(usearch_py_enum_t const* pinned_classes) {
  */
 static int options_parse(char const* verb, PyObject* const* args, Py_ssize_t positional_args_count,
                          PyObject* args_names_tuple, char const* arm_name, PyObject** arm,
-                         usearch_py_enum_t const* pinned_classes, int* pinned, sequence_options_t* options) {
+                         usearch_py_enum_t const* ceiling_classes, int* ceiling, sequence_options_t* options) {
     PyObject *metric_object, *matrix_object, *gap_object, *widths_object, *connectivity_object, *values_per_key_object;
-    PyObject* pinned_object;
+    PyObject* ceiling_object;
     usearch_py_argument_t const arguments[] = {
         {"metric", &metric_object},
         {"substitution_matrix", &matrix_object},
@@ -315,7 +315,7 @@ static int options_parse(char const* verb, PyObject* const* args, Py_ssize_t pos
         {"connectivity", &connectivity_object},
         {"values_per_key", &values_per_key_object},
         {arm_name, arm},
-        {pinned_name(pinned_classes), &pinned_object},
+        {ceiling_name(ceiling_classes), &ceiling_object},
     };
     memset(options, 0, sizeof(*options));
     int metric = usearch_sequence_metric_levenshtein_bytes_k;
@@ -325,7 +325,7 @@ static int options_parse(char const* verb, PyObject* const* args, Py_ssize_t pos
          usearch_py_enum_from_object(metric_object, "metric", &usearch_py_sequence_metric, &metric) != 0) ||
         usearch_py_size_from_object(connectivity_object, "connectivity", &options->connectivity) != 0 ||
         usearch_py_size_from_object(values_per_key_object, "values_per_key", &options->values_per_key) != 0 ||
-        usearch_py_class_from_object(pinned_object, pinned_name(pinned_classes), pinned_classes, pinned) != 0 ||
+        usearch_py_class_from_object(ceiling_object, ceiling_name(ceiling_classes), ceiling_classes, ceiling) != 0 ||
         widths_from_object(widths_object, &options->window_widths, &options->window_widths_count) != 0)
         return -1;
     if (weights_parse(matrix_object, gap_object, &options->weights, &options->passed_weights) != 0) {
@@ -360,29 +360,30 @@ static PyObject* SequenceIndex_tp_new(PyTypeObject* type, PyObject* args, PyObje
     return NULL;
 }
 
-static char const doc_SequenceIndex_init_ram[] =                                                        //
-    "``init_ram(metric=SequenceMetric.LEVENSHTEIN, *, substitution_matrix=None, gap=None,\n"            //
-    "window_widths=None, connectivity=0, values_per_key=0, memory_domains=None, cpu_class=None)\n"      //
-    "-> SequenceIndex``\n"                                                                              //
-    "\n"                                                                                                //
-    "Starts an empty, mutable graph in host memory, one shard per named NUMA node.\n"                   //
-    "Calls `usearch_sequence_init_ram`.\n"                                                              //
-    "\n"                                                                                                //
-    "Args:\n"                                                                                           //
-    "  metric (SequenceMetric, optional): How two sequences are scored.\n"                              //
-    "  substitution_matrix (buffer, optional): 256 × 256 signed byte scores the alignment kind\n"       //
-    "    reads; the Levenshtein kinds take none.\n"                                                     //
-    "  gap (int, optional): The cost of one unaligned symbol, beside the matrix.\n"                     //
-    "  window_widths (Sequence[int], optional): Window widths in bytes the overlap kind needs.\n"       //
-    "  connectivity (int, optional): Connections per node; 0 derives it.\n"                             //
-    "  values_per_key (int, optional): Entries sharing one key; 0 is unbounded.\n"                      //
-    "  memory_domains (Sequence[int], optional): NUMA node IDs to shard across; None derives\n"         //
-    "    every node.\n"                                                                                 //
-    "  cpu_class (CPUClass, optional): The class to dispatch as; None derives the CPU's own.\n"         //
-    "\n"                                                                                                //
-    "Example:\n"                                                                                        //
-    "  >>> index = usearch.SequenceIndex.init_ram(usearch.SequenceMetric.OVERLAP, window_widths=[3])\n" //
-    "  >>> index.describe().metadata.metric is usearch.SequenceMetric.OVERLAP\n"                        //
+static char const doc_SequenceIndex_init_ram[] =                                                           //
+    "``init_ram(metric=SequenceMetric.LEVENSHTEIN, *, substitution_matrix=None, gap=None,\n"               //
+    "window_widths=None, connectivity=0, values_per_key=0, memory_domains=None, cpu_class_ceiling=None)\n" //
+    "-> SequenceIndex``\n"                                                                                 //
+    "\n"                                                                                                   //
+    "Starts an empty, mutable graph in host memory, one shard per named NUMA node.\n"                      //
+    "Calls `usearch_sequence_init_ram`.\n"                                                                 //
+    "\n"                                                                                                   //
+    "Args:\n"                                                                                              //
+    "  metric (SequenceMetric, optional): How two sequences are scored.\n"                                 //
+    "  substitution_matrix (buffer, optional): 256 × 256 signed byte scores the alignment kind\n"          //
+    "    reads; the Levenshtein kinds take none.\n"                                                        //
+    "  gap (int, optional): The cost of one unaligned symbol, beside the matrix.\n"                        //
+    "  window_widths (Sequence[int], optional): Window widths in bytes the overlap kind needs.\n"          //
+    "  connectivity (int, optional): Connections per node; 0 derives it.\n"                                //
+    "  values_per_key (int, optional): Entries sharing one key; 0 is unbounded.\n"                         //
+    "  memory_domains (Sequence[int], optional): NUMA node IDs to shard across; None derives\n"            //
+    "    every node.\n"                                                                                    //
+    "  cpu_class_ceiling (CPUClass, optional): The newest class dispatch may pick, intersected\n"          //
+    "    with what the machine runs, so a class it lacks narrows; None means no ceiling.\n"                //
+    "\n"                                                                                                   //
+    "Example:\n"                                                                                           //
+    "  >>> index = usearch.SequenceIndex.init_ram(usearch.SequenceMetric.OVERLAP, window_widths=[3])\n"    //
+    "  >>> index.describe().metadata.metric is usearch.SequenceMetric.OVERLAP\n"                           //
     "  True";
 
 static PyObject* SequenceIndex_init_ram(PyTypeObject* type, PyObject* const* args, Py_ssize_t positional_args_count,
@@ -391,9 +392,9 @@ static PyObject* SequenceIndex_init_ram(PyTypeObject* type, PyObject* const* arg
     PyObject* memory_domains_object;
     int32_t* memory_domains = NULL;
     size_t memory_domains_count = 0;
-    int cpu_class = 0;
+    int cpu_class_ceiling = 0;
     if (options_parse("init_ram", args, positional_args_count, args_names_tuple, "memory_domains",
-                      &memory_domains_object, &usearch_py_cpu_class, &cpu_class, &options) != 0)
+                      &memory_domains_object, &usearch_py_cpu_class, &cpu_class_ceiling, &options) != 0)
         return NULL;
     if (usearch_py_ordinals_from_object(memory_domains_object, "memory_domains", &memory_domains,
                                         &memory_domains_count) != 0) {
@@ -412,7 +413,7 @@ static PyObject* SequenceIndex_init_ram(PyTypeObject* type, PyObject* const* arg
         .window_widths_count = options.window_widths_count,
         .connectivity = options.connectivity,
         .values_per_key = options.values_per_key,
-        .ram = {memory_domains, memory_domains_count, 0, (usearch_cpu_class_t)cpu_class},
+        .ram = {memory_domains, memory_domains_count, 0, (usearch_cpu_class_t)cpu_class_ceiling},
     };
     Py_BEGIN_ALLOW_THREADS;
     usearch_sequence_init_ram(&arguments);
@@ -422,26 +423,27 @@ static PyObject* SequenceIndex_init_ram(PyTypeObject* type, PyObject* const* arg
     return index_adopt(type, handle, &outcome);
 }
 
-static char const doc_SequenceIndex_init_vram[] =                                                  //
-    "``init_vram(metric=SequenceMetric.LEVENSHTEIN, *, substitution_matrix=None, gap=None,\n"      //
-    "window_widths=None, connectivity=0, values_per_key=0, devices=None, gpu_class=None)\n"        //
-    "-> SequenceIndex``\n"                                                                         //
-    "\n"                                                                                           //
-    "Starts an empty, mutable graph on GPU devices, one shard per named ordinal. Entries are\n"    //
-    "sharded and never replicated, and an index outgrowing them fails rather than paging to\n"     //
-    "the host.\n"                                                                                  //
-    "Calls `usearch_sequence_init_vram`.\n"                                                        //
-    "\n"                                                                                           //
-    "Args:\n"                                                                                      //
-    "  metric (SequenceMetric, optional): How two sequences are scored.\n"                         //
-    "  substitution_matrix (buffer, optional): 256 × 256 signed byte scores the alignment kind\n"  //
-    "    reads.\n"                                                                                 //
-    "  gap (int, optional): The cost of one unaligned symbol, beside the matrix.\n"                //
-    "  window_widths (Sequence[int], optional): Window widths in bytes the overlap kind needs.\n"  //
-    "  connectivity (int, optional): Connections per node; 0 derives it.\n"                        //
-    "  values_per_key (int, optional): Entries sharing one key; 0 is unbounded.\n"                 //
-    "  devices (Sequence[int], optional): GPU ordinals to shard across; None picks device zero.\n" //
-    "  gpu_class (GPUClass, optional): The class to dispatch as; None derives the devices' own.";
+static char const doc_SequenceIndex_init_vram[] =                                                   //
+    "``init_vram(metric=SequenceMetric.LEVENSHTEIN, *, substitution_matrix=None, gap=None,\n"       //
+    "window_widths=None, connectivity=0, values_per_key=0, devices=None, gpu_class_ceiling=None)\n" //
+    "-> SequenceIndex``\n"                                                                          //
+    "\n"                                                                                            //
+    "Starts an empty, mutable graph on GPU devices, one shard per named ordinal. Entries are\n"     //
+    "sharded and never replicated, and an index outgrowing them fails rather than paging to\n"      //
+    "the host.\n"                                                                                   //
+    "Calls `usearch_sequence_init_vram`.\n"                                                         //
+    "\n"                                                                                            //
+    "Args:\n"                                                                                       //
+    "  metric (SequenceMetric, optional): How two sequences are scored.\n"                          //
+    "  substitution_matrix (buffer, optional): 256 × 256 signed byte scores the alignment kind\n"   //
+    "    reads.\n"                                                                                  //
+    "  gap (int, optional): The cost of one unaligned symbol, beside the matrix.\n"                 //
+    "  window_widths (Sequence[int], optional): Window widths in bytes the overlap kind needs.\n"   //
+    "  connectivity (int, optional): Connections per node; 0 derives it.\n"                         //
+    "  values_per_key (int, optional): Entries sharing one key; 0 is unbounded.\n"                  //
+    "  devices (Sequence[int], optional): GPU ordinals to shard across; None picks device zero.\n"  //
+    "  gpu_class_ceiling (GPUClass, optional): The newest class dispatch may pick, capped below\n"  //
+    "    the best class every device loads, else unsupported; None means no ceiling.";
 
 static PyObject* SequenceIndex_init_vram(PyTypeObject* type, PyObject* const* args, Py_ssize_t positional_args_count,
                                          PyObject* args_names_tuple) {
@@ -449,9 +451,9 @@ static PyObject* SequenceIndex_init_vram(PyTypeObject* type, PyObject* const* ar
     PyObject* devices_object;
     int32_t* devices = NULL;
     size_t devices_count = 0;
-    int gpu_class = 0;
+    int gpu_class_ceiling = 0;
     if (options_parse("init_vram", args, positional_args_count, args_names_tuple, "devices", &devices_object,
-                      &usearch_py_gpu_class, &gpu_class, &options) != 0)
+                      &usearch_py_gpu_class, &gpu_class_ceiling, &options) != 0)
         return NULL;
     if (usearch_py_ordinals_from_object(devices_object, "devices", &devices, &devices_count) != 0) {
         options_release(&options);
@@ -469,7 +471,7 @@ static PyObject* SequenceIndex_init_vram(PyTypeObject* type, PyObject* const* ar
         .window_widths_count = options.window_widths_count,
         .connectivity = options.connectivity,
         .values_per_key = options.values_per_key,
-        .vram = {devices, devices_count, 0, (usearch_gpu_class_t)gpu_class},
+        .vram = {devices, devices_count, 0, (usearch_gpu_class_t)gpu_class_ceiling},
     };
     Py_BEGIN_ALLOW_THREADS;
     usearch_sequence_init_vram(&arguments);
@@ -1576,11 +1578,11 @@ static PyObject* SequenceIndex_save_buffer(PyObject* self, PyObject* const* args
  */
 static int load_parse(char const* verb, PyObject* const* args, Py_ssize_t positional_args_count,
                       PyObject* args_names_tuple, char const* source_name, PyObject** source, char const* arm_name,
-                      PyObject** arm, usearch_py_enum_t const* pinned_classes, int* pinned,
+                      PyObject** arm, usearch_py_enum_t const* ceiling_classes, int* ceiling,
                       usearch_executor_t* executor, size_t* values_per_key, weights_t* weights,
                       usearch_sequence_weights_t const** passed_weights, PyObject** progress, size_t* progress_steps) {
     PyObject *executor_object, *values_per_key_object, *matrix_object, *gap_object, *progress_object,
-        *progress_steps_object, *pinned_object;
+        *progress_steps_object, *ceiling_object;
     usearch_py_argument_t const arguments[] = {
         {source_name, source},
         {arm_name, arm},
@@ -1590,12 +1592,12 @@ static int load_parse(char const* verb, PyObject* const* args, Py_ssize_t positi
         {"gap", &gap_object},
         {"progress", &progress_object},
         {"progress_steps", &progress_steps_object},
-        {pinned_name(pinned_classes), &pinned_object},
+        {ceiling_name(ceiling_classes), &ceiling_object},
     };
     memset(weights, 0, sizeof(*weights));
     if (usearch_py_arguments_parse(verb, args, positional_args_count, args_names_tuple, 1, 1, arguments,
                                    usearch_py_table_size_(arguments)) != 0 ||
-        usearch_py_class_from_object(pinned_object, pinned_name(pinned_classes), pinned_classes, pinned) != 0 ||
+        usearch_py_class_from_object(ceiling_object, ceiling_name(ceiling_classes), ceiling_classes, ceiling) != 0 ||
         usearch_py_optional_executor_from_object(executor_object, executor) != 0 ||
         usearch_py_size_from_object(values_per_key_object, "values_per_key", values_per_key) != 0 ||
         usearch_py_size_from_object(progress_steps_object, "progress_steps", progress_steps) != 0 ||
@@ -1604,28 +1606,29 @@ static int load_parse(char const* verb, PyObject* const* args, Py_ssize_t positi
     return usearch_py_callable_from_object(progress_object, "progress", progress);
 }
 
-static char const doc_SequenceIndex_load_ram[] =                                                //
-    "``load_ram(path, /, *, memory_domains=None, executor=None, values_per_key=0,\n"            //
-    "substitution_matrix=None, gap=None, progress=None, progress_steps=0, cpu_class=None)\n"    //
-    "-> SequenceIndex``\n"                                                                      //
-    "\n"                                                                                        //
-    "Copies a checkpoint into a new, mutable index in host memory, its metric read from the\n"  //
-    "checkpoint's own headers. Name the `.safegraphs.json` manifest, never one of its parts.\n" //
-    "Calls `usearch_sequence_load_ram`.\n"                                                      //
-    "\n"                                                                                        //
-    "Args:\n"                                                                                   //
-    "  path (str | bytes | os.PathLike): The manifest, or a single monolith.\n"                 //
-    "  memory_domains (Sequence[int], optional): NUMA node IDs to place the parts on.\n"        //
-    "  executor (Executor, optional): The workers the read fans out over; None reads on the\n"  //
-    "    calling thread.\n"                                                                     //
-    "  values_per_key (int, optional): Entries sharing one key, which no checkpoint records.\n" //
-    "  substitution_matrix (buffer, optional): The scores an alignment checkpoint was built\n"  //
-    "    with; the Levenshtein kinds take none.\n"                                              //
-    "  gap (int, optional): The gap cost beside the matrix.\n"                                  //
-    "  progress (callable, optional): Called with (completed, total) parts; returning False\n"  //
-    "    stops the read and raises `CancelledError`, creating no index.\n"                      //
-    "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"     //
-    "  cpu_class (CPUClass, optional): The class to dispatch as; None derives the CPU's own.";
+static char const doc_SequenceIndex_load_ram[] =                                                     //
+    "``load_ram(path, /, *, memory_domains=None, executor=None, values_per_key=0,\n"                 //
+    "substitution_matrix=None, gap=None, progress=None, progress_steps=0, cpu_class_ceiling=None)\n" //
+    "-> SequenceIndex``\n"                                                                           //
+    "\n"                                                                                             //
+    "Copies a checkpoint into a new, mutable index in host memory, its metric read from the\n"       //
+    "checkpoint's own headers. Name the `.safegraphs.json` manifest, never one of its parts.\n"      //
+    "Calls `usearch_sequence_load_ram`.\n"                                                           //
+    "\n"                                                                                             //
+    "Args:\n"                                                                                        //
+    "  path (str | bytes | os.PathLike): The manifest, or a single monolith.\n"                      //
+    "  memory_domains (Sequence[int], optional): NUMA node IDs to place the parts on.\n"             //
+    "  executor (Executor, optional): The workers the read fans out over; None reads on the\n"       //
+    "    calling thread.\n"                                                                          //
+    "  values_per_key (int, optional): Entries sharing one key, which no checkpoint records.\n"      //
+    "  substitution_matrix (buffer, optional): The scores an alignment checkpoint was built\n"       //
+    "    with; the Levenshtein kinds take none.\n"                                                   //
+    "  gap (int, optional): The gap cost beside the matrix.\n"                                       //
+    "  progress (callable, optional): Called with (completed, total) parts; returning False\n"       //
+    "    stops the read and raises `CancelledError`, creating no index.\n"                           //
+    "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"          //
+    "  cpu_class_ceiling (CPUClass, optional): The newest class dispatch may pick, intersected\n"    //
+    "    with what the machine runs, so a class it lacks narrows; None means no ceiling.";
 
 static PyObject* SequenceIndex_load_ram(PyTypeObject* type, PyObject* const* args, Py_ssize_t positional_args_count,
                                         PyObject* args_names_tuple) {
@@ -1640,10 +1643,10 @@ static PyObject* SequenceIndex_load_ram(PyTypeObject* type, PyObject* const* arg
     int32_t* memory_domains = NULL;
     size_t memory_domains_count = 0;
     PyObject* result = NULL;
-    int cpu_class = 0;
+    int cpu_class_ceiling = 0;
     if (load_parse("load_ram", args, positional_args_count, args_names_tuple, "path", &path_object, "memory_domains",
-                   &memory_domains_object, &usearch_py_cpu_class, &cpu_class, &executor, &values_per_key, &weights,
-                   &passed_weights, &progress, &progress_steps) != 0 ||
+                   &memory_domains_object, &usearch_py_cpu_class, &cpu_class_ceiling, &executor, &values_per_key,
+                   &weights, &passed_weights, &progress, &progress_steps) != 0 ||
         usearch_py_path_from_object(path_object, &path, &decoded) != 0 ||
         usearch_py_ordinals_from_object(memory_domains_object, "memory_domains", &memory_domains,
                                         &memory_domains_count) != 0)
@@ -1655,7 +1658,7 @@ static PyObject* SequenceIndex_load_ram(PyTypeObject* type, PyObject* const* arg
         .executor = executor,
         .outcome = &outcome,
         .path = path,
-        .ram = {memory_domains, memory_domains_count, 0, (usearch_cpu_class_t)cpu_class},
+        .ram = {memory_domains, memory_domains_count, 0, (usearch_cpu_class_t)cpu_class_ceiling},
         .values_per_key = values_per_key,
         .weights = passed_weights,
         .progress = usearch_py_progress_registered(progress, progress_steps),
@@ -1673,26 +1676,27 @@ release:
     return result;
 }
 
-static char const doc_SequenceIndex_load_ram_buffer[] =                                        //
-    "``load_ram_buffer(buffer, /, *, memory_domains=None, executor=None, values_per_key=0,\n"  //
-    "substitution_matrix=None, gap=None, progress=None, progress_steps=0, cpu_class=None)\n"   //
-    "-> SequenceIndex``\n"                                                                     //
-    "\n"                                                                                       //
-    "Copies a checkpoint out of a buffer into a new, mutable index in host memory, as\n"       //
-    "`load_ram` does from a path.\n"                                                           //
-    "Calls `usearch_sequence_load_ram_buffer`.\n"                                              //
-    "\n"                                                                                       //
-    "Args:\n"                                                                                  //
-    "  buffer (buffer): One serialized checkpoint, such as `save_buffer` returns.\n"           //
-    "  memory_domains (Sequence[int], optional): NUMA node IDs to place shards on.\n"          //
-    "  executor (Executor, optional): The workers the copy fans out over.\n"                   //
-    "  values_per_key (int, optional): Entries sharing one key; 0 is unbounded.\n"             //
-    "  substitution_matrix (buffer, optional): The scores an alignment checkpoint was built\n" //
-    "    with.\n"                                                                              //
-    "  gap (int, optional): The gap cost beside the matrix.\n"                                 //
-    "  progress (callable, optional): Called with (completed, total) parts.\n"                 //
-    "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"    //
-    "  cpu_class (CPUClass, optional): The class to dispatch as; None derives the CPU's own.";
+static char const doc_SequenceIndex_load_ram_buffer[] =                                              //
+    "``load_ram_buffer(buffer, /, *, memory_domains=None, executor=None, values_per_key=0,\n"        //
+    "substitution_matrix=None, gap=None, progress=None, progress_steps=0, cpu_class_ceiling=None)\n" //
+    "-> SequenceIndex``\n"                                                                           //
+    "\n"                                                                                             //
+    "Copies a checkpoint out of a buffer into a new, mutable index in host memory, as\n"             //
+    "`load_ram` does from a path.\n"                                                                 //
+    "Calls `usearch_sequence_load_ram_buffer`.\n"                                                    //
+    "\n"                                                                                             //
+    "Args:\n"                                                                                        //
+    "  buffer (buffer): One serialized checkpoint, such as `save_buffer` returns.\n"                 //
+    "  memory_domains (Sequence[int], optional): NUMA node IDs to place shards on.\n"                //
+    "  executor (Executor, optional): The workers the copy fans out over.\n"                         //
+    "  values_per_key (int, optional): Entries sharing one key; 0 is unbounded.\n"                   //
+    "  substitution_matrix (buffer, optional): The scores an alignment checkpoint was built\n"       //
+    "    with.\n"                                                                                    //
+    "  gap (int, optional): The gap cost beside the matrix.\n"                                       //
+    "  progress (callable, optional): Called with (completed, total) parts.\n"                       //
+    "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"          //
+    "  cpu_class_ceiling (CPUClass, optional): The newest class dispatch may pick, intersected\n"    //
+    "    with what the machine runs, so a class it lacks narrows; None means no ceiling.";
 
 static PyObject* SequenceIndex_load_ram_buffer(PyTypeObject* type, PyObject* const* args,
                                                Py_ssize_t positional_args_count, PyObject* args_names_tuple) {
@@ -1707,9 +1711,9 @@ static PyObject* SequenceIndex_load_ram_buffer(PyTypeObject* type, PyObject* con
     int32_t* memory_domains = NULL;
     size_t memory_domains_count = 0;
     PyObject* result = NULL;
-    int cpu_class = 0;
+    int cpu_class_ceiling = 0;
     if (load_parse("load_ram_buffer", args, positional_args_count, args_names_tuple, "buffer", &buffer_object,
-                   "memory_domains", &memory_domains_object, &usearch_py_cpu_class, &cpu_class, &executor,
+                   "memory_domains", &memory_domains_object, &usearch_py_cpu_class, &cpu_class_ceiling, &executor,
                    &values_per_key, &weights, &passed_weights, &progress, &progress_steps) != 0 ||
         usearch_py_checkpoint_from_object(buffer_object, &backing) != 0 ||
         usearch_py_ordinals_from_object(memory_domains_object, "memory_domains", &memory_domains,
@@ -1722,7 +1726,7 @@ static PyObject* SequenceIndex_load_ram_buffer(PyTypeObject* type, PyObject* con
         .executor = executor,
         .outcome = &outcome,
         .buffer = {(uint8_t const*)backing.buffer.buf, (size_t)backing.buffer.len},
-        .ram = {memory_domains, memory_domains_count, 0, (usearch_cpu_class_t)cpu_class},
+        .ram = {memory_domains, memory_domains_count, 0, (usearch_cpu_class_t)cpu_class_ceiling},
         .values_per_key = values_per_key,
         .weights = passed_weights,
         .progress = usearch_py_progress_registered(progress, progress_steps),
@@ -1740,26 +1744,27 @@ release:
     return result;
 }
 
-static char const doc_SequenceIndex_load_vram[] =                                              //
-    "``load_vram(path, /, *, devices=None, executor=None, values_per_key=0,\n"                 //
-    "substitution_matrix=None, gap=None, progress=None, progress_steps=0, gpu_class=None)\n"   //
-    "-> SequenceIndex``\n"                                                                     //
-    "\n"                                                                                       //
-    "Copies a checkpoint into a new, mutable index on GPU devices, with the placement rules\n" //
-    "of `load_ram`.\n"                                                                         //
-    "Calls `usearch_sequence_load_vram`.\n"                                                    //
-    "\n"                                                                                       //
-    "Args:\n"                                                                                  //
-    "  path (str | bytes | os.PathLike): The manifest, or a single monolith.\n"                //
-    "  devices (Sequence[int], optional): GPU ordinals to place the parts on.\n"               //
-    "  executor (Executor, optional): The streams the upload runs on, one per device.\n"       //
-    "  values_per_key (int, optional): Zero alone, as a GPU index keeps no key lookup.\n"      //
-    "  substitution_matrix (buffer, optional): The scores an alignment checkpoint was built\n" //
-    "    with.\n"                                                                              //
-    "  gap (int, optional): The gap cost beside the matrix.\n"                                 //
-    "  progress (callable, optional): Called with (completed, total) parts.\n"                 //
-    "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"    //
-    "  gpu_class (GPUClass, optional): The class to dispatch as; None derives the devices' own.";
+static char const doc_SequenceIndex_load_vram[] =                                                    //
+    "``load_vram(path, /, *, devices=None, executor=None, values_per_key=0,\n"                       //
+    "substitution_matrix=None, gap=None, progress=None, progress_steps=0, gpu_class_ceiling=None)\n" //
+    "-> SequenceIndex``\n"                                                                           //
+    "\n"                                                                                             //
+    "Copies a checkpoint into a new, mutable index on GPU devices, with the placement rules\n"       //
+    "of `load_ram`.\n"                                                                               //
+    "Calls `usearch_sequence_load_vram`.\n"                                                          //
+    "\n"                                                                                             //
+    "Args:\n"                                                                                        //
+    "  path (str | bytes | os.PathLike): The manifest, or a single monolith.\n"                      //
+    "  devices (Sequence[int], optional): GPU ordinals to place the parts on.\n"                     //
+    "  executor (Executor, optional): The streams the upload runs on, one per device.\n"             //
+    "  values_per_key (int, optional): Zero alone, as a GPU index keeps no key lookup.\n"            //
+    "  substitution_matrix (buffer, optional): The scores an alignment checkpoint was built\n"       //
+    "    with.\n"                                                                                    //
+    "  gap (int, optional): The gap cost beside the matrix.\n"                                       //
+    "  progress (callable, optional): Called with (completed, total) parts.\n"                       //
+    "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"          //
+    "  gpu_class_ceiling (GPUClass, optional): The newest class dispatch may pick, capped below\n"   //
+    "    the best class every device loads, else unsupported; None means no ceiling.";
 
 static PyObject* SequenceIndex_load_vram(PyTypeObject* type, PyObject* const* args, Py_ssize_t positional_args_count,
                                          PyObject* args_names_tuple) {
@@ -1774,9 +1779,9 @@ static PyObject* SequenceIndex_load_vram(PyTypeObject* type, PyObject* const* ar
     int32_t* devices = NULL;
     size_t devices_count = 0;
     PyObject* result = NULL;
-    int gpu_class = 0;
+    int gpu_class_ceiling = 0;
     if (load_parse("load_vram", args, positional_args_count, args_names_tuple, "path", &path_object, "devices",
-                   &devices_object, &usearch_py_gpu_class, &gpu_class, &executor, &values_per_key, &weights,
+                   &devices_object, &usearch_py_gpu_class, &gpu_class_ceiling, &executor, &values_per_key, &weights,
                    &passed_weights, &progress, &progress_steps) != 0 ||
         usearch_py_path_from_object(path_object, &path, &decoded) != 0 ||
         usearch_py_ordinals_from_object(devices_object, "devices", &devices, &devices_count) != 0)
@@ -1788,7 +1793,7 @@ static PyObject* SequenceIndex_load_vram(PyTypeObject* type, PyObject* const* ar
         .executor = executor,
         .outcome = &outcome,
         .path = path,
-        .vram = {devices, devices_count, 0, (usearch_gpu_class_t)gpu_class},
+        .vram = {devices, devices_count, 0, (usearch_gpu_class_t)gpu_class_ceiling},
         .values_per_key = values_per_key,
         .weights = passed_weights,
         .progress = usearch_py_progress_registered(progress, progress_steps),
@@ -1806,25 +1811,26 @@ release:
     return result;
 }
 
-static char const doc_SequenceIndex_load_vram_buffer[] =                                       //
-    "``load_vram_buffer(buffer, /, *, devices=None, executor=None, values_per_key=0,\n"        //
-    "substitution_matrix=None, gap=None, progress=None, progress_steps=0, gpu_class=None)\n"   //
-    "-> SequenceIndex``\n"                                                                     //
-    "\n"                                                                                       //
-    "Copies a checkpoint out of a host buffer into a new, mutable index on GPU devices.\n"     //
-    "Calls `usearch_sequence_load_vram_buffer`.\n"                                             //
-    "\n"                                                                                       //
-    "Args:\n"                                                                                  //
-    "  buffer (buffer): One serialized checkpoint, such as `save_buffer` returns.\n"           //
-    "  devices (Sequence[int], optional): GPU ordinals to place shards on.\n"                  //
-    "  executor (Executor, optional): The streams the upload runs on, one per device.\n"       //
-    "  values_per_key (int, optional): Zero alone, as a GPU index keeps no key lookup.\n"      //
-    "  substitution_matrix (buffer, optional): The scores an alignment checkpoint was built\n" //
-    "    with.\n"                                                                              //
-    "  gap (int, optional): The gap cost beside the matrix.\n"                                 //
-    "  progress (callable, optional): Called with (completed, total) parts.\n"                 //
-    "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"    //
-    "  gpu_class (GPUClass, optional): The class to dispatch as; None derives the devices' own.";
+static char const doc_SequenceIndex_load_vram_buffer[] =                                             //
+    "``load_vram_buffer(buffer, /, *, devices=None, executor=None, values_per_key=0,\n"              //
+    "substitution_matrix=None, gap=None, progress=None, progress_steps=0, gpu_class_ceiling=None)\n" //
+    "-> SequenceIndex``\n"                                                                           //
+    "\n"                                                                                             //
+    "Copies a checkpoint out of a host buffer into a new, mutable index on GPU devices.\n"           //
+    "Calls `usearch_sequence_load_vram_buffer`.\n"                                                   //
+    "\n"                                                                                             //
+    "Args:\n"                                                                                        //
+    "  buffer (buffer): One serialized checkpoint, such as `save_buffer` returns.\n"                 //
+    "  devices (Sequence[int], optional): GPU ordinals to place shards on.\n"                        //
+    "  executor (Executor, optional): The streams the upload runs on, one per device.\n"             //
+    "  values_per_key (int, optional): Zero alone, as a GPU index keeps no key lookup.\n"            //
+    "  substitution_matrix (buffer, optional): The scores an alignment checkpoint was built\n"       //
+    "    with.\n"                                                                                    //
+    "  gap (int, optional): The gap cost beside the matrix.\n"                                       //
+    "  progress (callable, optional): Called with (completed, total) parts.\n"                       //
+    "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"          //
+    "  gpu_class_ceiling (GPUClass, optional): The newest class dispatch may pick, capped below\n"   //
+    "    the best class every device loads, else unsupported; None means no ceiling.";
 
 static PyObject* SequenceIndex_load_vram_buffer(PyTypeObject* type, PyObject* const* args,
                                                 Py_ssize_t positional_args_count, PyObject* args_names_tuple) {
@@ -1839,10 +1845,10 @@ static PyObject* SequenceIndex_load_vram_buffer(PyTypeObject* type, PyObject* co
     int32_t* devices = NULL;
     size_t devices_count = 0;
     PyObject* result = NULL;
-    int gpu_class = 0;
+    int gpu_class_ceiling = 0;
     if (load_parse("load_vram_buffer", args, positional_args_count, args_names_tuple, "buffer", &buffer_object,
-                   "devices", &devices_object, &usearch_py_gpu_class, &gpu_class, &executor, &values_per_key, &weights,
-                   &passed_weights, &progress, &progress_steps) != 0 ||
+                   "devices", &devices_object, &usearch_py_gpu_class, &gpu_class_ceiling, &executor, &values_per_key,
+                   &weights, &passed_weights, &progress, &progress_steps) != 0 ||
         usearch_py_checkpoint_from_object(buffer_object, &backing) != 0 ||
         usearch_py_ordinals_from_object(devices_object, "devices", &devices, &devices_count) != 0)
         goto release;
@@ -1853,7 +1859,7 @@ static PyObject* SequenceIndex_load_vram_buffer(PyTypeObject* type, PyObject* co
         .executor = executor,
         .outcome = &outcome,
         .buffer = {(uint8_t const*)backing.buffer.buf, (size_t)backing.buffer.len},
-        .vram = {devices, devices_count, 0, (usearch_gpu_class_t)gpu_class},
+        .vram = {devices, devices_count, 0, (usearch_gpu_class_t)gpu_class_ceiling},
         .values_per_key = values_per_key,
         .weights = passed_weights,
         .progress = usearch_py_progress_registered(progress, progress_steps),
@@ -1871,37 +1877,39 @@ release:
     return result;
 }
 
-static char const doc_SequenceIndex_view_ram[] =                                                //
-    "``view_ram(path, /, *, substitution_matrix=None, gap=None, cpu_class=None)\n"              //
-    "-> SequenceIndex``\n"                                                                      //
-    "\n"                                                                                        //
-    "Serves a checkpoint in place through a memory mapping, as a read-only index whose every\n" //
-    "mutating verb raises `ReadOnlyError`.\n"                                                   //
-    "Calls `usearch_sequence_view_ram`.\n"                                                      //
-    "\n"                                                                                        //
-    "Args:\n"                                                                                   //
-    "  path (str | bytes | os.PathLike): The manifest, or a single monolith.\n"                 //
-    "  substitution_matrix (buffer, optional): The scores an alignment checkpoint was built\n"  //
-    "    with.\n"                                                                               //
-    "  gap (int, optional): The gap cost beside the matrix.\n"                                  //
-    "  cpu_class (CPUClass, optional): The class to dispatch as; None derives the CPU's own.";
+static char const doc_SequenceIndex_view_ram[] =                                                  //
+    "``view_ram(path, /, *, substitution_matrix=None, gap=None, cpu_class_ceiling=None)\n"        //
+    "-> SequenceIndex``\n"                                                                        //
+    "\n"                                                                                          //
+    "Serves a checkpoint in place through a memory mapping, as a read-only index whose every\n"   //
+    "mutating verb raises `ReadOnlyError`.\n"                                                     //
+    "Calls `usearch_sequence_view_ram`.\n"                                                        //
+    "\n"                                                                                          //
+    "Args:\n"                                                                                     //
+    "  path (str | bytes | os.PathLike): The manifest, or a single monolith.\n"                   //
+    "  substitution_matrix (buffer, optional): The scores an alignment checkpoint was built\n"    //
+    "    with.\n"                                                                                 //
+    "  gap (int, optional): The gap cost beside the matrix.\n"                                    //
+    "  cpu_class_ceiling (CPUClass, optional): The newest class dispatch may pick, intersected\n" //
+    "    with what the machine runs, so a class it lacks narrows; None means no ceiling.";
 
 static PyObject* SequenceIndex_view_ram(PyTypeObject* type, PyObject* const* args, Py_ssize_t positional_args_count,
                                         PyObject* args_names_tuple) {
-    PyObject *path_object, *matrix_object, *gap_object, *cpu_class_object, *decoded = NULL, *result = NULL;
+    PyObject *path_object, *matrix_object, *gap_object, *cpu_class_ceiling_object, *decoded = NULL, *result = NULL;
     usearch_py_argument_t const arguments[] = {
         {"path", &path_object},
         {"substitution_matrix", &matrix_object},
         {"gap", &gap_object},
-        {"cpu_class", &cpu_class_object},
+        {"cpu_class_ceiling", &cpu_class_ceiling_object},
     };
     weights_t weights = {0};
     usearch_sequence_weights_t const* passed_weights = NULL;
     usearch_bytes_view_t path;
-    int cpu_class = 0;
+    int cpu_class_ceiling = 0;
     if (usearch_py_arguments_parse("view_ram", args, positional_args_count, args_names_tuple, 1, 1, arguments,
                                    usearch_py_table_size_(arguments)) != 0 ||
-        usearch_py_class_from_object(cpu_class_object, "cpu_class", &usearch_py_cpu_class, &cpu_class) != 0 ||
+        usearch_py_class_from_object(cpu_class_ceiling_object, "cpu_class_ceiling", &usearch_py_cpu_class,
+                                     &cpu_class_ceiling) != 0 ||
         weights_parse(matrix_object, gap_object, &weights, &passed_weights) != 0 ||
         usearch_py_path_from_object(path_object, &path, &decoded) != 0)
         goto release;
@@ -1913,7 +1921,7 @@ static PyObject* SequenceIndex_view_ram(PyTypeObject* type, PyObject* const* arg
         .outcome = &outcome,
         .path = path,
         .weights = passed_weights,
-        .ram = {NULL, 0, 0, (usearch_cpu_class_t)cpu_class},
+        .ram = {NULL, 0, 0, (usearch_cpu_class_t)cpu_class_ceiling},
     };
     Py_BEGIN_ALLOW_THREADS;
     usearch_sequence_view_ram(&view_arguments);
@@ -1926,43 +1934,45 @@ release:
     return result;
 }
 
-static char const doc_SequenceIndex_view_nvme[] =                                              //
-    "``view_nvme(path, /, *, paths=None, executor=None, substitution_matrix=None, gap=None,\n" //
-    "cpu_class=None) -> SequenceIndex``\n"                                                     //
-    "\n"                                                                                       //
-    "Serves a checkpoint in place from NVMe drives as a read-only index, every later call\n"   //
-    "reading it through its executor's engines.\n"                                             //
-    "Calls `usearch_sequence_view_nvme`.\n"                                                    //
-    "\n"                                                                                       //
-    "Args:\n"                                                                                  //
-    "  path (str | bytes | os.PathLike): The manifest, or a single monolith.\n"                //
-    "  paths (Sequence[str | bytes | PathLike], optional): Devices or directories to serve\n"  //
-    "    the parts from; None serves each where its manifest points.\n"                        //
-    "  executor (Executor, optional): The NVMe executor whose rings read the headers.\n"       //
-    "  substitution_matrix (buffer, optional): The scores an alignment checkpoint was built\n" //
-    "    with.\n"                                                                              //
-    "  gap (int, optional): The gap cost beside the matrix.\n"                                 //
-    "  cpu_class (CPUClass, optional): The class to dispatch as; None derives the CPU's own.";
+static char const doc_SequenceIndex_view_nvme[] =                                                 //
+    "``view_nvme(path, /, *, paths=None, executor=None, substitution_matrix=None, gap=None,\n"    //
+    "cpu_class_ceiling=None) -> SequenceIndex``\n"                                                //
+    "\n"                                                                                          //
+    "Serves a checkpoint in place from NVMe drives as a read-only index, every later call\n"      //
+    "reading it through its executor's engines.\n"                                                //
+    "Calls `usearch_sequence_view_nvme`.\n"                                                       //
+    "\n"                                                                                          //
+    "Args:\n"                                                                                     //
+    "  path (str | bytes | os.PathLike): The manifest, or a single monolith.\n"                   //
+    "  paths (Sequence[str | bytes | PathLike], optional): Devices or directories to serve\n"     //
+    "    the parts from; None serves each where its manifest points.\n"                           //
+    "  executor (Executor, optional): The NVMe executor whose rings read the headers.\n"          //
+    "  substitution_matrix (buffer, optional): The scores an alignment checkpoint was built\n"    //
+    "    with.\n"                                                                                 //
+    "  gap (int, optional): The gap cost beside the matrix.\n"                                    //
+    "  cpu_class_ceiling (CPUClass, optional): The newest class dispatch may pick, intersected\n" //
+    "    with what the machine runs, so a class it lacks narrows; None means no ceiling.";
 
 static PyObject* SequenceIndex_view_nvme(PyTypeObject* type, PyObject* const* args, Py_ssize_t positional_args_count,
                                          PyObject* args_names_tuple) {
-    PyObject *path_object, *paths_object, *executor_object, *matrix_object, *gap_object, *cpu_class_object;
+    PyObject *path_object, *paths_object, *executor_object, *matrix_object, *gap_object, *cpu_class_ceiling_object;
     PyObject *decoded = NULL, *result = NULL;
     usearch_py_argument_t const arguments[] = {
         {"path", &path_object},         {"paths", &paths_object},
         {"executor", &executor_object}, {"substitution_matrix", &matrix_object},
-        {"gap", &gap_object},           {"cpu_class", &cpu_class_object},
+        {"gap", &gap_object},           {"cpu_class_ceiling", &cpu_class_ceiling_object},
     };
     weights_t weights = {0};
     usearch_sequence_weights_t const* passed_weights = NULL;
     usearch_bytes_view_t path;
     usearch_py_paths_t paths = {0};
     usearch_executor_t executor = NULL;
-    int cpu_class = 0;
+    int cpu_class_ceiling = 0;
     if (usearch_py_arguments_parse("view_nvme", args, positional_args_count, args_names_tuple, 1, 1, arguments,
                                    usearch_py_table_size_(arguments)) != 0 ||
         usearch_py_optional_executor_from_object(executor_object, &executor) != 0 ||
-        usearch_py_class_from_object(cpu_class_object, "cpu_class", &usearch_py_cpu_class, &cpu_class) != 0 ||
+        usearch_py_class_from_object(cpu_class_ceiling_object, "cpu_class_ceiling", &usearch_py_cpu_class,
+                                     &cpu_class_ceiling) != 0 ||
         weights_parse(matrix_object, gap_object, &weights, &passed_weights) != 0 ||
         usearch_py_path_from_object(path_object, &path, &decoded) != 0 ||
         usearch_py_paths_from_object(paths_object, &paths) != 0)
@@ -1975,7 +1985,7 @@ static PyObject* SequenceIndex_view_nvme(PyTypeObject* type, PyObject* const* ar
         .executor = executor,
         .outcome = &outcome,
         .path = path,
-        .nvme = {paths.views, paths.count, (usearch_cpu_class_t)cpu_class},
+        .nvme = {paths.views, paths.count, (usearch_cpu_class_t)cpu_class_ceiling},
         .weights = passed_weights,
     };
     Py_BEGIN_ALLOW_THREADS;

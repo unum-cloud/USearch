@@ -271,8 +271,9 @@ typedef enum usearch_dense_metric_t {
  *  "inner"; the same lifts @c usearch_scalar_name and its kin provide for the shared sets. */
 USEARCH_EXPORT char const* usearch_dense_metric_name(usearch_dense_metric_t metric);
 
-/** Reads a metric kind back; @c usearch_dense_metric_unknown_k when unrecognized. */
-USEARCH_EXPORT usearch_dense_metric_t usearch_dense_metric_from_name(usearch_bytes_view_t name);
+/** Reads a metric kind back into @p metric, or fails with @c usearch_status_invalid_argument_k. */
+USEARCH_EXPORT usearch_status_t usearch_dense_metric_from_name(usearch_bytes_view_t name,
+                                                               usearch_dense_metric_t* metric);
 
 /**
  *  @brief The arguments of @c usearch_dense_init_ram - the geometry and metric the empty index
@@ -317,6 +318,7 @@ typedef struct usearch_dense_init_ram_t {
  *      without a reservation.
  *
  *  @par Statuses:
+ *  - @c usearch_status_invalid_argument_k A @c cpu_class_ceiling no class takes.
  *  - @c usearch_status_config_mismatch_k Zero @c dimensions, @c dimensions a packed
  *    quantization like @c usearch_scalar_u1x8_k leaves a storage value partly filled by, or a
  *    @c connectivity that is not a power of two.
@@ -357,6 +359,7 @@ typedef struct usearch_dense_init_vram_t {
  *      vectors without a reservation. @ref dense_index_gpu_acceleration
  *
  *  @par Statuses:
+ *  - @c usearch_status_invalid_argument_k A @c gpu_class_ceiling no class takes.
  *  - @c usearch_status_config_mismatch_k Zero @c dimensions, a @c connectivity that is not a
  *    power of two, or on NVIDIA and AMD a geometry whose walks cannot fit the device's shared
  *    memory.
@@ -414,14 +417,14 @@ typedef struct usearch_dense_load_ram_t {
  *  A cancelled or failed load reports its status and creates no handle.
  *
  *  @par Statuses:
- *  - @c usearch_status_invalid_argument_k An empty @c path, or a checkpoint or part path that
- *    does not parse.
+ *  - @c usearch_status_invalid_argument_k An empty @c path, a checkpoint or part path that does not
+ *    parse, or a @c cpu_class_ceiling no class takes.
  *  - @c usearch_status_malformed_k The checkpoint lists no part, or a part, its header or its key
  *    column does not parse, or its connectivity or dimensions are unusable.
  *  - @c usearch_status_unknown_kind_k An unknown quantization, a metric its quantization does not
  *    score, or a kernel a shard cannot finalize.
- *  - @c usearch_status_unsupported_k A quantization this build leaves out, or a pinned class the
- *    CPU does not admit.
+ *  - @c usearch_status_unsupported_k A quantization this build leaves out, or a
+ *    @c cpu_class_ceiling below every compiled class this CPU runs.
  *  - @c usearch_status_uninitialized_k No memory domain to place a shard on, or the executor holds
  *    no pool workers.
  *  - @c usearch_status_config_mismatch_k A memory domain refusing a shard, a @c connectivity
@@ -469,14 +472,14 @@ typedef struct usearch_dense_load_vram_t {
  *  @ref dense_index_serialization
  *
  *  @par Statuses:
- *  - @c usearch_status_invalid_argument_k An empty @c path, or a checkpoint or part path that
- *    does not parse.
+ *  - @c usearch_status_invalid_argument_k An empty @c path, a checkpoint or part path that does not
+ *    parse, or a @c gpu_class_ceiling no class takes.
  *  - @c usearch_status_malformed_k The checkpoint lists no part, or a part, its header or its key
  *    column does not parse, or its connectivity or dimensions are unusable.
  *  - @c usearch_status_unknown_kind_k An unknown quantization, a metric its quantization does not
  *    score, or a kernel a shard cannot finalize.
- *  - @c usearch_status_unsupported_k A quantization this build leaves out, or devices that do not
- *    run the pinned class.
+ *  - @c usearch_status_unsupported_k A quantization this build leaves out, or devices that load no
+ *    class under @c gpu_class_ceiling.
  *  - @c usearch_status_config_mismatch_k Devices of more than one vendor or generation, the
  *    executor driving no stream on some shard's device, or the checkpoint's geometry, dtypes or
  *    metric differing from the shards'.
@@ -527,13 +530,14 @@ typedef struct usearch_dense_load_ram_buffer_t {
  *  mapped file needs no copy into one.
  *
  *  @par Statuses:
- *  - @c usearch_status_invalid_argument_k An empty @c buffer.
+ *  - @c usearch_status_invalid_argument_k An empty @c buffer, or a @c cpu_class_ceiling
+ *    no class takes.
  *  - @c usearch_status_malformed_k The manifest lists no part, or a part, its header or its key
  *    column does not parse, or its connectivity or dimensions are unusable.
  *  - @c usearch_status_unknown_kind_k An unknown quantization, a metric its quantization does not
  *    score, or a kernel a shard cannot finalize.
- *  - @c usearch_status_unsupported_k A quantization this build leaves out, or a pinned class the
- *    CPU does not admit.
+ *  - @c usearch_status_unsupported_k A quantization this build leaves out, or a
+ *    @c cpu_class_ceiling below every compiled class this CPU runs.
  *  - @c usearch_status_uninitialized_k No memory domain to place a shard on, or the executor holds
  *    no pool workers.
  *  - @c usearch_status_config_mismatch_k A memory domain refusing a shard, a @c connectivity
@@ -577,17 +581,18 @@ typedef struct usearch_dense_load_vram_buffer_t {
 } usearch_dense_load_vram_buffer_t;
 
 /**
- *  Copies a checkpoint from a memory buffer into a new, mutable index in device memory, reporting
- *  and cancelling like @c usearch_dense_load_ram_buffer.
+ *  @brief Copies a checkpoint from a memory buffer into a new, mutable index in device memory,
+ *      reporting and cancelling like @c usearch_dense_load_ram_buffer.
  *
  *  @par Statuses:
- *  - @c usearch_status_invalid_argument_k An empty @c buffer.
+ *  - @c usearch_status_invalid_argument_k An empty @c buffer, or a @c gpu_class_ceiling
+ *    no class takes.
  *  - @c usearch_status_malformed_k The manifest lists no part, or a part, its header or its key
  *    column does not parse, or its connectivity or dimensions are unusable.
  *  - @c usearch_status_unknown_kind_k An unknown quantization, a metric its quantization does not
  *    score, or a kernel a shard cannot finalize.
- *  - @c usearch_status_unsupported_k A quantization this build leaves out, or devices that do not
- *    run the pinned class.
+ *  - @c usearch_status_unsupported_k A quantization this build leaves out, or devices that load no
+ *    class under @c gpu_class_ceiling.
  *  - @c usearch_status_config_mismatch_k Devices of more than one vendor or generation, the
  *    executor driving no stream on some shard's device, or the checkpoint's geometry, dtypes or
  *    metric differing from the shards'.
@@ -665,14 +670,15 @@ typedef struct usearch_dense_view_nvme_t {
  *
  *  @par Statuses:
  *  - @c usearch_status_device_k @c executor is not an NVMe executor.
- *  - @c usearch_status_invalid_argument_k @c ram without an @c executor to scan the keys on.
+ *  - @c usearch_status_invalid_argument_k @c ram without an @c executor to scan the keys on, or a
+ *    @c cpu_class_ceiling no class takes.
  *  - @c usearch_status_out_of_memory_k The key table passes @c ram->memory_limit.
  *  - @c usearch_status_invalid_argument_k An empty @c path, @c NULL paths for a nonzero count,
  *    or a path that does not parse or names a base off its medium's block.
  *  - @c usearch_status_config_mismatch_k Parts disagreeing with each other, with the scalar or
  *    with @c nvme.
- *  - @c usearch_status_unsupported_k A transport identifier in a build without SPDK, a
- *    quantization this build leaves out, or a pinned class the CPU does not admit.
+ *  - @c usearch_status_unsupported_k A transport identifier in a build without SPDK, a quantization
+ *    this build leaves out, or a @c cpu_class_ceiling below every compiled class this CPU runs.
  *  - @c usearch_status_malformed_k The manifest names no part, or a manifest or header does not
  *    parse.
  *  - @c usearch_status_unknown_kind_k An unknown quantization, a metric its quantization does not
@@ -735,11 +741,11 @@ typedef struct usearch_dense_load_nvme_t {
  *
  *  @par Statuses:
  *  - @c usearch_status_device_k @c executor is not an NVMe executor.
- *  - @c usearch_status_invalid_argument_k An empty @c path, a path that does not parse, or @c ram
- *    without an @c executor to scan the keys on.
+ *  - @c usearch_status_invalid_argument_k An empty @c path, a path that does not parse, @c ram
+ *    without an @c executor to scan the keys on, or a @c cpu_class_ceiling no class takes.
  *  - @c usearch_status_unsupported_k A lone monolith, which has no manifest to replace, so save it
  *    as a one-part manifest first; @c nvme naming paths; a transport identifier; a quantization
- *    this build leaves out, or a pinned class the CPU does not admit.
+ *    this build leaves out, or a @c cpu_class_ceiling below every compiled class this CPU runs.
  *  - @c usearch_status_contended_k Another writable handle holds the manifest's lock.
  *  - @c usearch_status_io_k A part or the manifest that cannot be opened for writing.
  *  - @c usearch_status_out_of_memory_k The key table passes @c ram->memory_limit.

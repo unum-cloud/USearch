@@ -473,7 +473,7 @@ struct Mood(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
 
 @fieldwise_init
 struct CPUClass(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
-    """The CPU family dispatch picks, or a placement pins - `usearch_cpu_class_t`."""
+    """The CPU family dispatch picks, or a placement caps - `usearch_cpu_class_t`."""
 
     var code: c_int
     """The raw `usearch_cpu_class_t` value the ABI exchanges."""
@@ -483,7 +483,7 @@ struct CPUClass(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
 
 @fieldwise_init
 struct GPUClass(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
-    """The GPU family dispatch picks, or a placement pins - `usearch_gpu_class_t`."""
+    """The GPU family dispatch picks, or a placement caps - `usearch_gpu_class_t`."""
 
     var code: c_int
     """The raw `usearch_gpu_class_t` value the ABI exchanges."""
@@ -1027,11 +1027,8 @@ comptime OutcomeStatus = def(Pointer[Outcome, MutAnyOrigin]) thin abi("C") -> c_
 comptime NameOf = def(c_int) thin abi("C") -> Optional[CString]
 """The `_name` family: an enumerator's static spelling."""
 
-comptime FromName = def(BytesView[ImmUntrackedOrigin]) thin abi("C") -> c_int
-"""The `_from_name` family: reads a spelling back into its enumerator."""
-
-comptime FromNameStatus = def(BytesView[ImmUntrackedOrigin], Pointer[c_int, MutAnyOrigin]) thin abi("C") -> c_int
-"""The `_from_name` readers that answer a status, writing the enumerator through their pointer."""
+comptime FromName = def(BytesView[ImmUntrackedOrigin], Pointer[c_int, MutAnyOrigin]) thin abi("C") -> c_int
+"""The `_from_name` family: reads a spelling back through its pointer, answering a status."""
 
 comptime ExecutorForRam = Verb[ExecutorForRamArguments]
 """`usearch_executor_for_ram`."""
@@ -1072,8 +1069,9 @@ struct RamOptions[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
     """How many ids the array holds; zero derives."""
     var shard_capacity: c_size_t
     """Entries one shard holds before the index opens another shard generation; zero derives."""
-    var cpu_class: CPUClass
-    """The class to dispatch as; `UNKNOWN` derives the CPU's own."""
+    var cpu_class_ceiling: CPUClass
+    """The newest class dispatch may pick, intersected with what the machine runs, so a class the machine
+    lacks narrows rather than refuses; `UNKNOWN` means no ceiling."""
     var memory_limit: c_size_t
     """Bytes an NVMe view's key tables may take on each named domain; zero sets no ceiling."""
 
@@ -1082,7 +1080,7 @@ struct RamOptions[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
         self.memory_domains = None
         self.memory_domains_count = c_size_t(0)
         self.shard_capacity = c_size_t(0)
-        self.cpu_class = CPUClass.UNKNOWN
+        self.cpu_class_ceiling = CPUClass.UNKNOWN
         self.memory_limit = c_size_t(0)
 
     @staticmethod
@@ -1112,7 +1110,7 @@ struct RamOptions[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
         if case .Some(domains) = self.memory_domains:
             memory_domains = domains.unsafe_origin_cast[ImmUntrackedOrigin]()
         return RamOptions[ImmUntrackedOrigin](
-            memory_domains, self.memory_domains_count, self.shard_capacity, self.cpu_class, self.memory_limit
+            memory_domains, self.memory_domains_count, self.shard_capacity, self.cpu_class_ceiling, self.memory_limit
         )
 
 
@@ -1134,15 +1132,16 @@ struct VramOptions[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
     """How many ordinals the array holds; zero derives."""
     var shard_capacity: c_size_t
     """Entries one shard holds before the index opens another shard generation; zero derives."""
-    var gpu_class: GPUClass
-    """The class to dispatch as; `UNKNOWN` derives the devices' own."""
+    var gpu_class_ceiling: GPUClass
+    """The newest class dispatch may pick, capped below the best class every named device loads; a ceiling
+    no named device loads is refused as unsupported; `UNKNOWN` means no ceiling."""
 
     def __init__(out self):
         """Derives one free device."""
         self.devices = None
         self.devices_count = c_size_t(0)
         self.shard_capacity = c_size_t(0)
-        self.gpu_class = GPUClass.UNKNOWN
+        self.gpu_class_ceiling = GPUClass.UNKNOWN
 
     @staticmethod
     def on[devices_origin: ImmOrigin, //](devices: Span[Int32, devices_origin]) -> VramOptions[devices_origin]:
@@ -1168,7 +1167,7 @@ struct VramOptions[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
         var devices: Optional[Pointer[Int32, ImmUntrackedOrigin]] = None
         if case .Some(ordinals) = self.devices:
             devices = ordinals.unsafe_origin_cast[ImmUntrackedOrigin]()
-        return VramOptions[ImmUntrackedOrigin](devices, self.devices_count, self.shard_capacity, self.gpu_class)
+        return VramOptions[ImmUntrackedOrigin](devices, self.devices_count, self.shard_capacity, self.gpu_class_ceiling)
 
 
 @fieldwise_init
@@ -1188,14 +1187,15 @@ struct NvmeOptions[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
     """The device or directory names; `None` leaves every shard where its manifest points."""
     var paths_count: c_size_t
     """How many paths the array holds; zero derives."""
-    var cpu_class: CPUClass
-    """The class to dispatch as; `UNKNOWN` derives the CPU's own."""
+    var cpu_class_ceiling: CPUClass
+    """The newest class dispatch may pick, intersected with what the machine runs, so a class the machine
+    lacks narrows rather than refuses; `UNKNOWN` means no ceiling."""
 
     def __init__(out self):
         """Leaves every shard where its own manifest points."""
         self.paths = None
         self.paths_count = c_size_t(0)
-        self.cpu_class = CPUClass.UNKNOWN
+        self.cpu_class_ceiling = CPUClass.UNKNOWN
 
     @staticmethod
     def on[
@@ -1223,7 +1223,7 @@ struct NvmeOptions[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
         var paths: Optional[Pointer[BytesView[ImmUntrackedOrigin], ImmUntrackedOrigin]] = None
         if case .Some(names) = self.paths:
             paths = names.unsafe_origin_cast[ImmUntrackedOrigin]()
-        return NvmeOptions[ImmUntrackedOrigin](paths, self.paths_count, self.cpu_class)
+        return NvmeOptions[ImmUntrackedOrigin](paths, self.paths_count, self.cpu_class_ceiling)
 
 
 # endregion Placement

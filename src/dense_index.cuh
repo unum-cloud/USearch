@@ -121,8 +121,8 @@ struct nvme_placement_t {
     std::string_view path;
     std::span<std::string_view const> paths;
 
-    /** The class the view dispatches as, @c usearch_cpu_class_unknown_k for the CPU's own. */
-    usearch_cpu_class_t cpu_class = usearch_cpu_class_unknown_k;
+    /** The newest class the view may dispatch as; @c usearch_cpu_class_unknown_k sets none. */
+    usearch_cpu_class_t cpu_class_ceiling = usearch_cpu_class_unknown_k;
 
     /** The RAM a key table may take, borrowed for the call; @c NULL holds none. */
     usearch_ram_options_t const* ram = nullptr;
@@ -142,8 +142,8 @@ static status_t place_shards(punned_dense_index<residency_> const& punned, nvme_
 struct nvme_load_placement_t {
     std::string_view path;
 
-    /** The class the index dispatches as, @c usearch_cpu_class_unknown_k for the CPU's own. */
-    usearch_cpu_class_t cpu_class = usearch_cpu_class_unknown_k;
+    /** The newest class the index may dispatch as; @c usearch_cpu_class_unknown_k sets none. */
+    usearch_cpu_class_t cpu_class_ceiling = usearch_cpu_class_unknown_k;
 
     /** The RAM a key table may take, borrowed for the call; @c NULL holds none. */
     usearch_ram_options_t const* ram = nullptr;
@@ -241,9 +241,9 @@ static dense_verbs<residency_> const* pick_gpu_variant(gpu_ladder<classes_...>, 
 static usearch_dense_index_t make_index(usearch_dense_metadata_t const& geometry, usearch_ram_options_t const& ram,
                                         nk_dtype_t dtype, nk_kernel_kind_t kernel,
                                         usearch_outcome_t* outcome) noexcept {
-    auto const [ceiling, pick_status] = pick_cpu_ceiling(ram.cpu_class);
+    auto const [ceiling, pick_status] = pick_cpu_ceiling(ram.cpu_class_ceiling);
     if (failed(pick_status))
-        return propagate_error(pick_status, outcome, "The CPU does not admit the pinned class"), nullptr;
+        return propagate_error(pick_status, outcome, "No compiled class fits under the CPU class ceiling"), nullptr;
     dense_verbs<vendored_residency_t::ram_k> const* const verbs = pick_cpu_variant<vendored_residency_t::ram_k>(
         cpu_ladder_t {}, dtype, ceiling);
     if (!verbs)
@@ -261,9 +261,9 @@ template <typename nvme_placement_type_>
 static usearch_dense_index_t make_index(usearch_dense_metadata_t const& geometry, nvme_placement_type_ const& nvme,
                                         nk_dtype_t dtype, nk_kernel_kind_t kernel,
                                         usearch_outcome_t* outcome) noexcept {
-    auto const [ceiling, pick_status] = pick_cpu_ceiling(nvme.cpu_class);
+    auto const [ceiling, pick_status] = pick_cpu_ceiling(nvme.cpu_class_ceiling);
     if (failed(pick_status))
-        return propagate_error(pick_status, outcome, "The CPU does not admit the pinned class"), nullptr;
+        return propagate_error(pick_status, outcome, "No compiled class fits under the CPU class ceiling"), nullptr;
     dense_verbs<vendored_residency_t::nvme_k> const* const verbs = pick_cpu_variant<vendored_residency_t::nvme_k>(
         cpu_ladder_t {}, dtype, ceiling);
     if (!verbs)
@@ -273,9 +273,9 @@ static usearch_dense_index_t make_index(usearch_dense_metadata_t const& geometry
 }
 
 /** The VRAM sibling of the RAM @ref make_index: the best class every device loads, narrowed to
- *  the pinned class when one is named, tops the vendor's ladder, whose first rung the devices run
- *  with a variant of the dtype serves; every dtype has a kit there, and @ref with_variant admits
- *  only the metrics its family scores by. */
+ *  the GPU class ceiling when one is named, tops the vendor's ladder, whose first rung the
+ *  devices run with a variant of the dtype serves; every dtype has a kit there, and
+ *  @ref with_variant admits only the metrics its family scores by. */
 static usearch_dense_index_t make_index(usearch_dense_metadata_t const& geometry, usearch_vram_options_t const& vram,
                                         nk_dtype_t dtype, nk_kernel_kind_t kernel,
                                         usearch_outcome_t* outcome) noexcept {
@@ -283,7 +283,8 @@ static usearch_dense_index_t make_index(usearch_dense_metadata_t const& geometry
     if (status == status_t::config_mismatch_k)
         return propagate_error(status, outcome, "One index spans one GPU vendor"), nullptr;
     if (status == status_t::invalid_argument_k || status == status_t::unsupported_k)
-        return propagate_error(status, outcome, "The devices share no class this build carries under the pin"), nullptr;
+        return propagate_error(status, outcome, "The devices share no class this build carries under the ceiling"),
+               nullptr;
     // Each ladder's rungs serve only their own vendor's devices, so at most one ladder answers.
     if (succeeded(status)) {
         if (dense_verbs<vendored_residency_t::vram_nvidia_k> const* const verbs =
@@ -709,7 +710,7 @@ USEARCH_EXPORT void usearch_dense_view_nvme(usearch_dense_view_nvme_t* arguments
     if (failed(read_status)) return propagate_error(read_status, outcome), void();
     usearch_dense_metadata_t geometry {};
     adopt_metadata(checkpoint, &geometry);
-    nvme_placement_t const placement {as_text(arguments->path), to_span(paths), nvme.cpu_class, arguments->ram,
+    nvme_placement_t const placement {as_text(arguments->path), to_span(paths), nvme.cpu_class_ceiling, arguments->ram,
                                       arguments->executor};
     usearch_dense_index_t const index = with_variant(geometry, placement, outcome);
     if (!index) return;
@@ -736,7 +737,8 @@ USEARCH_EXPORT void usearch_dense_load_nvme(usearch_dense_load_nvme_t* arguments
     if (failed(read_status)) return propagate_error(read_status, outcome), void();
     usearch_dense_metadata_t geometry {};
     adopt_metadata(checkpoint, &geometry);
-    nvme_load_placement_t const placement {path, arguments->nvme.cpu_class, arguments->ram, arguments->executor};
+    nvme_load_placement_t const placement {path, arguments->nvme.cpu_class_ceiling, arguments->ram,
+                                           arguments->executor};
     usearch_dense_index_t const index = with_variant(geometry, placement, outcome);
     if (!index) return;
     *arguments->index = index;
@@ -783,13 +785,13 @@ USEARCH_EXPORT char const* usearch_dense_metric_name(usearch_dense_metric_t metr
     }
 }
 
-USEARCH_EXPORT usearch_dense_metric_t usearch_dense_metric_from_name(usearch_bytes_view_t name) {
+USEARCH_EXPORT usearch_status_t usearch_dense_metric_from_name(usearch_bytes_view_t name,
+                                                               usearch_dense_metric_t* metric) {
     std::string_view const spelled {reinterpret_cast<char const*>(name.data), name.length};
-    for (int code = usearch_dense_metric_inner_k; code <= usearch_dense_metric_jaccard_k; ++code) {
-        usearch_dense_metric_t const metric = static_cast<usearch_dense_metric_t>(code);
-        if (spelled == usearch_dense_metric_name(metric)) return metric;
-    }
-    return usearch_dense_metric_unknown_k;
+    for (int code = usearch_dense_metric_inner_k; code <= usearch_dense_metric_jaccard_k; ++code)
+        if (spelled == usearch_dense_metric_name(static_cast<usearch_dense_metric_t>(code)))
+            return *metric = static_cast<usearch_dense_metric_t>(code), usearch_status_success_k;
+    return usearch_status_invalid_argument_k;
 }
 
 USEARCH_EXPORT void usearch_dense_describe(usearch_dense_describe_t* arguments) {
@@ -1587,9 +1589,9 @@ USEARCH_EXPORT void usearch_arena_describe(usearch_arena_describe_t* arguments) 
 USEARCH_EXPORT void usearch_executor_for_ram(usearch_executor_for_ram_t* arguments) {
     call_outcome_t outcome(*arguments);
     *arguments->executor = nullptr;
-    auto const [ceiling, pick_status] = pick_cpu_ceiling(arguments->ram.cpu_class);
+    auto const [ceiling, pick_status] = pick_cpu_ceiling(arguments->ram.cpu_class_ceiling);
     if (failed(pick_status))
-        return propagate_error(pick_status, outcome, "The CPU does not admit the pinned class"), void();
+        return propagate_error(pick_status, outcome, "No compiled class fits under the CPU class ceiling"), void();
     usearch_executor_t const executor = new (std::nothrow) usearch_executor_handle_t {};
     if (!executor)
         return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the executor"), void();
@@ -1625,7 +1627,8 @@ USEARCH_EXPORT void usearch_executor_for_vram(usearch_executor_for_vram_t* argum
     }
     auto const [placement, placed_status] = resolve_placement(vram);
     if (failed(placed_status) && placed_status != status_t::config_mismatch_k)
-        return propagate_error(placed_status, outcome, "The devices share no class this build carries under the pin"),
+        return propagate_error(placed_status, outcome,
+                               "The devices share no class this build carries under the ceiling"),
                void();
     auto [spawned, status] = spawn_gpu_executor(gpu_drivers(), devices, arguments->scratch_limit);
     if (status == status_t::config_mismatch_k)
@@ -1666,9 +1669,9 @@ USEARCH_EXPORT void usearch_executor_for_nvme(usearch_executor_for_nvme_t* argum
     *arguments->executor = nullptr;
     if (nvme.paths_count && !nvme.paths)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The paths must name storage"), void();
-    auto const [ceiling, pick_status] = pick_cpu_ceiling(nvme.cpu_class);
+    auto const [ceiling, pick_status] = pick_cpu_ceiling(nvme.cpu_class_ceiling);
     if (failed(pick_status))
-        return propagate_error(pick_status, outcome, "The CPU does not admit the pinned class"), void();
+        return propagate_error(pick_status, outcome, "No compiled class fits under the CPU class ceiling"), void();
 
     // A transport identifier names a namespace the kernel no longer owns, which only a userspace
     // engine reaches, so one executor serves either kernel paths or transport identifiers, never

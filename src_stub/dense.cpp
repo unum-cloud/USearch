@@ -419,17 +419,17 @@ char const* usearch_dense_metric_name(usearch_dense_metric_t metric) {
     }
 }
 
-usearch_dense_metric_t usearch_dense_metric_from_name(usearch_bytes_view_t name) {
-    for (int code = usearch_dense_metric_inner_k; code <= usearch_dense_metric_jaccard_k; ++code) {
-        usearch_dense_metric_t const metric = static_cast<usearch_dense_metric_t>(code);
-        if (named(name, usearch_dense_metric_name(metric))) return metric;
-    }
-    return usearch_dense_metric_unknown_k;
+usearch_status_t usearch_dense_metric_from_name(usearch_bytes_view_t name, usearch_dense_metric_t* metric) {
+    for (int code = usearch_dense_metric_inner_k; code <= usearch_dense_metric_jaccard_k; ++code)
+        if (named(name, usearch_dense_metric_name(static_cast<usearch_dense_metric_t>(code))))
+            return *metric = static_cast<usearch_dense_metric_t>(code), usearch_status_success_k;
+    return usearch_status_invalid_argument_k;
 }
 
 void usearch_dense_init_ram(usearch_dense_init_ram_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
+    if (reject_ceiling(arguments->ram.cpu_class_ceiling, outcome)) return;
     // Init freezes the geometry, so it refuses one the engine cannot store: no width, a packed
     // width leaving a storage value partly filled, or a connectivity off the powers of two.
     if (reject_if(!known_metric(arguments->metric), usearch_status_unknown_kind_k,
@@ -451,6 +451,7 @@ void usearch_dense_init_ram(usearch_dense_init_ram_t* arguments) {
 void usearch_dense_init_vram(usearch_dense_init_vram_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
+    if (reject_ceiling(arguments->vram.gpu_class_ceiling, outcome)) return;
     propagate_error(usearch_status_device_k, outcome, "This build carries no GPU backends");
 }
 
@@ -458,6 +459,7 @@ void usearch_dense_load_ram(usearch_dense_load_ram_t* arguments) {
     if (through_executor<usearch_dense_load_ram>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
+    if (reject_ceiling(arguments->ram.cpu_class_ceiling, outcome)) return;
     if (!keep_going(arguments->progress, 0, 1))
         return propagate_error(usearch_status_cancelled_k, outcome, "The caller's handler stopped the checkpoint");
     std::vector<std::byte> blob;
@@ -475,6 +477,7 @@ void usearch_dense_load_vram(usearch_dense_load_vram_t* arguments) {
     if (through_executor<usearch_dense_load_vram>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
+    if (reject_ceiling(arguments->vram.gpu_class_ceiling, outcome)) return;
     propagate_error(usearch_status_device_k, outcome, "This build carries no GPU backends");
 }
 
@@ -486,6 +489,7 @@ void usearch_dense_load_vram_buffer(usearch_dense_load_vram_buffer_t* arguments)
     if (through_executor<usearch_dense_load_vram_buffer>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
+    if (reject_ceiling(arguments->vram.gpu_class_ceiling, outcome)) return;
     propagate_error(usearch_status_device_k, outcome, "This build carries no GPU backends");
 }
 
@@ -508,6 +512,9 @@ void usearch_dense_view_nvme(usearch_dense_view_nvme_t* arguments) {
     if (through_executor<usearch_dense_view_nvme>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
+    if (reject_ceiling(arguments->nvme.cpu_class_ceiling, outcome) ||
+        (arguments->ram && reject_ceiling(arguments->ram->cpu_class_ceiling, outcome)))
+        return;
     mapped_file_t served = map_file(arguments->path, outcome);
     if (!served) return;
     // Serves the drives' checkpoint as the RAM view does, mirroring only the residency's refusals.
@@ -525,6 +532,9 @@ void usearch_dense_load_nvme(usearch_dense_load_nvme_t* arguments) {
     if (through_executor<usearch_dense_load_nvme>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
+    if (reject_ceiling(arguments->nvme.cpu_class_ceiling, outcome) ||
+        (arguments->ram && reject_ceiling(arguments->ram->cpu_class_ceiling, outcome)))
+        return;
     propagate_error(usearch_status_unsupported_k, outcome, "The stand-in copies parts in and has none to replace");
 }
 

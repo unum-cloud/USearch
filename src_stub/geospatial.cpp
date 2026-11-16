@@ -449,6 +449,7 @@ extern "C" {
 void usearch_geospatial_init_ram(usearch_geospatial_init_ram_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
+    if (reject_ceiling(arguments->ram.cpu_class_ceiling, outcome)) return;
     terrain_grid_t terrain;
     if (!adopt_terrain(terrain, arguments->terrain, outcome)) return;
     usearch_geospatial_index_handle_t* const index = new (std::nothrow) usearch_geospatial_index_handle_t();
@@ -463,6 +464,7 @@ void usearch_geospatial_init_ram(usearch_geospatial_init_ram_t* arguments) {
 void usearch_geospatial_init_vram(usearch_geospatial_init_vram_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
+    if (reject_ceiling(arguments->vram.gpu_class_ceiling, outcome)) return;
     propagate_error(usearch_status_device_k, outcome, "This build carries no GPU backends");
 }
 
@@ -470,6 +472,7 @@ void usearch_geospatial_load_ram(usearch_geospatial_load_ram_t* arguments) {
     if (through_executor<usearch_geospatial_load_ram>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
+    if (reject_ceiling(arguments->ram.cpu_class_ceiling, outcome)) return;
     terrain_grid_t terrain;
     if (!adopt_terrain(terrain, arguments->terrain, outcome)) return;
     if (!keep_going(arguments->progress, 0, 1))
@@ -502,6 +505,7 @@ void usearch_geospatial_load_vram(usearch_geospatial_load_vram_t* arguments) {
     if (through_executor<usearch_geospatial_load_vram>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
+    if (reject_ceiling(arguments->vram.gpu_class_ceiling, outcome)) return;
     propagate_error(usearch_status_device_k, outcome, "This build carries no GPU backends");
 }
 
@@ -509,12 +513,14 @@ void usearch_geospatial_load_vram_buffer(usearch_geospatial_load_vram_buffer_t* 
     if (through_executor<usearch_geospatial_load_vram_buffer>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
+    if (reject_ceiling(arguments->vram.gpu_class_ceiling, outcome)) return;
     propagate_error(usearch_status_device_k, outcome, "This build carries no GPU backends");
 }
 
 void usearch_geospatial_view_ram(usearch_geospatial_view_ram_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
+    if (reject_ceiling(arguments->ram.cpu_class_ceiling, outcome)) return;
     terrain_grid_t terrain;
     if (!adopt_terrain(terrain, arguments->terrain, outcome)) return;
     mapped_file_t served = map_file(arguments->path, outcome);
@@ -534,6 +540,7 @@ void usearch_geospatial_view_nvme(usearch_geospatial_view_nvme_t* arguments) {
     if (through_executor<usearch_geospatial_view_nvme>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
+    if (reject_ceiling(arguments->nvme.cpu_class_ceiling, outcome)) return;
     terrain_grid_t terrain;
     if (!adopt_terrain(terrain, arguments->terrain, outcome)) return;
     mapped_file_t served = map_file(arguments->path, outcome);

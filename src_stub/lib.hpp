@@ -177,6 +177,22 @@ inline bool reject_traversal(usearch_traversal_t traversal, usearch_outcome_t* o
                      usearch_status_unknown_kind_k, "Unknown traversal", outcome);
 }
 
+/** Refuses a CPU class ceiling that is a value no class takes, as the engine does; unknown sets no
+ *  ceiling, and any class narrows to the serial one this stand-in runs. */
+inline bool reject_ceiling(usearch_cpu_class_t ceiling, usearch_outcome_t* outcome) {
+    return reject_if(
+        ceiling != usearch_cpu_class_unknown_k && std::string_view(usearch_cpu_class_name(ceiling)) == "unknown",
+        usearch_status_invalid_argument_k, "The CPU class ceiling is a value no class takes", outcome);
+}
+
+/** Refuses a GPU class ceiling that is a value no class takes, as the engine does before it looks
+ *  for devices; unknown sets no ceiling. */
+inline bool reject_ceiling(usearch_gpu_class_t ceiling, usearch_outcome_t* outcome) {
+    return reject_if(
+        ceiling != usearch_gpu_class_unknown_k && std::string_view(usearch_gpu_class_name(ceiling)) == "unknown",
+        usearch_status_invalid_argument_k, "The GPU class ceiling is a value no class takes", outcome);
+}
+
 /** Zeroes the telemetry, which every header calls a pure output fully overwritten. */
 template <typename stats_>
 void reset(stats_* stats) {
@@ -2251,6 +2267,7 @@ void load_ram_buffer(arguments_* arguments, open_ const& open) {
     if (through_executor<verb_>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
+    if (reject_ceiling(arguments->ram.cpu_class_ceiling, outcome)) return;
     if (reject_if(!arguments->buffer.length, usearch_status_invalid_argument_k, "The checkpoint must not be empty",
                   outcome))
         return;

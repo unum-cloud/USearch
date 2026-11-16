@@ -8,6 +8,10 @@
 # The file names match what `c/` produces - `libusearch_shared` and `libusearch_static` - and sit in a directory of
 # their own, so a suite chooses an implementation with one `-L` and the two libraries can never shadow one another.
 set(usearch_stub_sources_ types.cpp dense.cpp sequence.cpp shapes.cpp geospatial.cpp)
+# `usearch_version_name` answers VERSION whole, a candidate's suffix included; the C macros keep its numbers.
+set_source_files_properties(
+    types.cpp PROPERTIES COMPILE_DEFINITIONS "USEARCH_VERSION_NAME=\"${usearch_version_name_}\""
+)
 
 find_package(Threads REQUIRED)
 

@@ -147,10 +147,10 @@ An index owns entries; an executor owns the threads or device streams a verb run
 There is a constructor per C one, each taking every argument its own hardware has:
 
 ```go
-usearch.ExecutorForRam(memoryDomains, cpuClass, threads)
-usearch.ExecutorOnPool(memoryDomains, cpuClass, forkUnionPool)    // shares the threads another library spawned
-usearch.ExecutorForVram(devices, gpuClass, streams, scratchLimit) // one host thread, a stream per device
-usearch.ExecutorForNvme(paths, cpuClass, threads)                 // one submission ring per thread
+usearch.ExecutorForRam(memoryDomains, cpuClassCeiling, threads)
+usearch.ExecutorOnPool(memoryDomains, cpuClassCeiling, forkUnionPool)    // shares the threads another library spawned
+usearch.ExecutorForVram(devices, gpuClassCeiling, streams, scratchLimit) // one host thread, a stream per device
+usearch.ExecutorForNvme(paths, cpuClassCeiling, threads)                 // one submission ring per thread
 ```
 
 Zero for any count derives it, and zero threads in `ExecutorForRam` takes 7/8 of the logical cores, since full occupancy starves the ordered publication path.

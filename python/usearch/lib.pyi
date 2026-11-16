@@ -288,7 +288,7 @@ class Phase(IntEnum):
     """The plan ended its round, and nothing more is pending."""
 
 class CPUClass(IntEnum):
-    """The CPU families dispatch picks from; a placement may pin one."""
+    """The CPU families dispatch picks from; a placement may cap dispatch at one."""
 
     SERIAL = 1
     """The portable floor: no SIMD assumptions."""
@@ -330,7 +330,7 @@ class CPUClass(IntEnum):
     """WebAssembly with relaxed SIMD, shared memory and 64-bit addressing."""
 
 class GPUClass(IntEnum):
-    """The GPU families dispatch picks from; a placement may pin one."""
+    """The GPU families dispatch picks from; a placement may cap dispatch at one."""
 
     NVIDIA_AMPERE = 1
     """Ampere-class NVIDIA and every NVIDIA GPU without a class of its own: A100, A10, RTX 30."""
@@ -458,7 +458,7 @@ class Executor:
         threads: int = 0,
         *,
         memory_domains: Sequence[int] | None = None,
-        cpu_class: CPUClass | None = None,
+        cpu_class_ceiling: CPUClass | None = None,
     ) -> Executor:
         """Spawns host worker threads for a RAM-resident index."""
         ...
@@ -470,13 +470,13 @@ class Executor:
         /,
         *,
         memory_domains: Sequence[int] | None = None,
-        cpu_class: CPUClass | None = None,
+        cpu_class_ceiling: CPUClass | None = None,
     ) -> Executor:
         """Drives RAM-resident indexes on a thread pool the caller owns."""
         ...
 
     @classmethod
-    def for_vram(cls, *, devices: Sequence[int] | None = None, gpu_class: GPUClass | None = None) -> Executor:
+    def for_vram(cls, *, devices: Sequence[int] | None = None, gpu_class_ceiling: GPUClass | None = None) -> Executor:
         """Opens one stream per device for a VRAM-resident index."""
         ...
 
@@ -487,7 +487,7 @@ class Executor:
         *,
         paths: Sequence[_PathLike] | None = None,
         nvme_class: NVMeClass | None = None,
-        cpu_class: CPUClass | None = None,
+        cpu_class_ceiling: CPUClass | None = None,
     ) -> Executor:
         """Opens one submission ring per worker for an NVMe-resident index."""
         ...
@@ -2700,7 +2700,7 @@ class DenseIndex:
         connectivity: int = 0,
         values_per_key: int = 0,
         memory_domains: Sequence[int] | None = None,
-        cpu_class: CPUClass | None = None,
+        cpu_class_ceiling: CPUClass | None = None,
     ) -> DenseIndex:
         """Starts an empty, mutable graph in host memory."""
         ...
@@ -2715,7 +2715,7 @@ class DenseIndex:
         connectivity: int = 0,
         values_per_key: int = 0,
         devices: Sequence[int] | None = None,
-        gpu_class: GPUClass | None = None,
+        gpu_class_ceiling: GPUClass | None = None,
     ) -> DenseIndex:
         """Starts an empty, mutable graph on CUDA devices."""
         ...
@@ -2731,7 +2731,7 @@ class DenseIndex:
         values_per_key: int = 0,
         progress: _Progress | None = None,
         progress_steps: int = 0,
-        cpu_class: CPUClass | None = None,
+        cpu_class_ceiling: CPUClass | None = None,
     ) -> DenseIndex:
         """Copies a checkpoint into a new, mutable index in host memory."""
         ...
@@ -2747,7 +2747,7 @@ class DenseIndex:
         values_per_key: int = 0,
         progress: _Progress | None = None,
         progress_steps: int = 0,
-        cpu_class: CPUClass | None = None,
+        cpu_class_ceiling: CPUClass | None = None,
     ) -> DenseIndex:
         """Copies a monolith out of a buffer into host memory."""
         ...
@@ -2763,7 +2763,7 @@ class DenseIndex:
         values_per_key: int = 0,
         progress: _Progress | None = None,
         progress_steps: int = 0,
-        gpu_class: GPUClass | None = None,
+        gpu_class_ceiling: GPUClass | None = None,
     ) -> DenseIndex:
         """Copies a checkpoint into a new, mutable index on CUDA devices."""
         ...
@@ -2779,7 +2779,7 @@ class DenseIndex:
         values_per_key: int = 0,
         progress: _Progress | None = None,
         progress_steps: int = 0,
-        gpu_class: GPUClass | None = None,
+        gpu_class_ceiling: GPUClass | None = None,
     ) -> DenseIndex:
         """Copies a monolith out of a buffer onto CUDA devices."""
         ...
@@ -2797,7 +2797,7 @@ class DenseIndex:
         *,
         paths: Sequence[_PathLike] | None = None,
         executor: Executor | None = None,
-        cpu_class: CPUClass | None = None,
+        cpu_class_ceiling: CPUClass | None = None,
         key_table_domains: Sequence[int] | None = None,
     ) -> DenseIndex:
         """Serves a checkpoint in place from NVMe drives, read-only."""
@@ -2811,7 +2811,7 @@ class DenseIndex:
         *,
         paths: Sequence[_PathLike] | None = None,
         executor: Executor | None = None,
-        cpu_class: CPUClass | None = None,
+        cpu_class_ceiling: CPUClass | None = None,
         key_table_domains: Sequence[int] | None = None,
     ) -> DenseIndex:
         """Opens a checkpoint's manifest from NVMe drives, writable by `refine` alone."""
@@ -3155,7 +3155,7 @@ class SequenceIndex:
         connectivity: int = 0,
         values_per_key: int = 0,
         memory_domains: Sequence[int] | None = None,
-        cpu_class: CPUClass | None = None,
+        cpu_class_ceiling: CPUClass | None = None,
     ) -> SequenceIndex:
         """Starts an empty, mutable graph in host memory."""
         ...
@@ -3171,7 +3171,7 @@ class SequenceIndex:
         connectivity: int = 0,
         values_per_key: int = 0,
         devices: Sequence[int] | None = None,
-        gpu_class: GPUClass | None = None,
+        gpu_class_ceiling: GPUClass | None = None,
     ) -> SequenceIndex:
         """Starts an empty, mutable graph on GPU devices."""
         ...
@@ -3189,7 +3189,7 @@ class SequenceIndex:
         gap: int | None = None,
         progress: _Progress | None = None,
         progress_steps: int = 0,
-        cpu_class: CPUClass | None = None,
+        cpu_class_ceiling: CPUClass | None = None,
     ) -> SequenceIndex:
         """Copies a checkpoint into a new, mutable index in host memory."""
         ...
@@ -3207,7 +3207,7 @@ class SequenceIndex:
         gap: int | None = None,
         progress: _Progress | None = None,
         progress_steps: int = 0,
-        cpu_class: CPUClass | None = None,
+        cpu_class_ceiling: CPUClass | None = None,
     ) -> SequenceIndex:
         """Copies a checkpoint out of a buffer into host memory."""
         ...
@@ -3225,7 +3225,7 @@ class SequenceIndex:
         gap: int | None = None,
         progress: _Progress | None = None,
         progress_steps: int = 0,
-        gpu_class: GPUClass | None = None,
+        gpu_class_ceiling: GPUClass | None = None,
     ) -> SequenceIndex:
         """Copies a checkpoint into a new, mutable index on GPU devices."""
         ...
@@ -3243,7 +3243,7 @@ class SequenceIndex:
         gap: int | None = None,
         progress: _Progress | None = None,
         progress_steps: int = 0,
-        gpu_class: GPUClass | None = None,
+        gpu_class_ceiling: GPUClass | None = None,
     ) -> SequenceIndex:
         """Copies a checkpoint out of a host buffer onto GPU devices."""
         ...
@@ -3256,7 +3256,7 @@ class SequenceIndex:
         *,
         substitution_matrix: Buffer | None = None,
         gap: int | None = None,
-        cpu_class: CPUClass | None = None,
+        cpu_class_ceiling: CPUClass | None = None,
     ) -> SequenceIndex:
         """Serves a checkpoint in place through a memory mapping, read-only."""
         ...
@@ -3271,7 +3271,7 @@ class SequenceIndex:
         executor: Executor | None = None,
         substitution_matrix: Buffer | None = None,
         gap: int | None = None,
-        cpu_class: CPUClass | None = None,
+        cpu_class_ceiling: CPUClass | None = None,
     ) -> SequenceIndex:
         """Serves a checkpoint in place from NVMe drives, read-only."""
         ...
@@ -3486,7 +3486,7 @@ class ShapesIndex:
         connectivity: int = 0,
         values_per_key: int = 0,
         memory_domains: Sequence[int] | None = None,
-        cpu_class: CPUClass | None = None,
+        cpu_class_ceiling: CPUClass | None = None,
     ) -> ShapesIndex:
         """Starts an empty, mutable graph in host memory."""
         ...
@@ -3501,7 +3501,7 @@ class ShapesIndex:
         connectivity: int = 0,
         values_per_key: int = 0,
         devices: Sequence[int] | None = None,
-        gpu_class: GPUClass | None = None,
+        gpu_class_ceiling: GPUClass | None = None,
     ) -> ShapesIndex:
         """Starts an empty, mutable graph on GPU devices."""
         ...
@@ -3517,7 +3517,7 @@ class ShapesIndex:
         values_per_key: int = 0,
         progress: _Progress | None = None,
         progress_steps: int = 0,
-        cpu_class: CPUClass | None = None,
+        cpu_class_ceiling: CPUClass | None = None,
     ) -> ShapesIndex:
         """Copies a checkpoint into a new, mutable index in host memory."""
         ...
@@ -3533,7 +3533,7 @@ class ShapesIndex:
         values_per_key: int = 0,
         progress: _Progress | None = None,
         progress_steps: int = 0,
-        cpu_class: CPUClass | None = None,
+        cpu_class_ceiling: CPUClass | None = None,
     ) -> ShapesIndex:
         """Copies a checkpoint out of a buffer into host memory."""
         ...
@@ -3549,7 +3549,7 @@ class ShapesIndex:
         values_per_key: int = 0,
         progress: _Progress | None = None,
         progress_steps: int = 0,
-        gpu_class: GPUClass | None = None,
+        gpu_class_ceiling: GPUClass | None = None,
     ) -> ShapesIndex:
         """Copies a checkpoint into a new, mutable index on GPU devices."""
         ...
@@ -3565,13 +3565,13 @@ class ShapesIndex:
         values_per_key: int = 0,
         progress: _Progress | None = None,
         progress_steps: int = 0,
-        gpu_class: GPUClass | None = None,
+        gpu_class_ceiling: GPUClass | None = None,
     ) -> ShapesIndex:
         """Copies a checkpoint out of a host buffer onto GPU devices."""
         ...
 
     @classmethod
-    def view_ram(cls, path: _PathLike, /, *, cpu_class: CPUClass | None = None) -> ShapesIndex:
+    def view_ram(cls, path: _PathLike, /, *, cpu_class_ceiling: CPUClass | None = None) -> ShapesIndex:
         """Serves a checkpoint in place through a memory mapping, read-only."""
         ...
 
@@ -3583,7 +3583,7 @@ class ShapesIndex:
         *,
         paths: Sequence[_PathLike] | None = None,
         executor: Executor | None = None,
-        cpu_class: CPUClass | None = None,
+        cpu_class_ceiling: CPUClass | None = None,
     ) -> ShapesIndex:
         """Serves a checkpoint in place from NVMe drives, read-only."""
         ...
@@ -3789,7 +3789,7 @@ class GeospatialIndex:
         connectivity: int = 0,
         values_per_key: int = 0,
         memory_domains: Sequence[int] | None = None,
-        cpu_class: CPUClass | None = None,
+        cpu_class_ceiling: CPUClass | None = None,
     ) -> GeospatialIndex:
         """Starts an empty, mutable graph in host memory."""
         ...
@@ -3801,7 +3801,7 @@ class GeospatialIndex:
         connectivity: int = 0,
         values_per_key: int = 0,
         devices: Sequence[int] | None = None,
-        gpu_class: GPUClass | None = None,
+        gpu_class_ceiling: GPUClass | None = None,
     ) -> GeospatialIndex:
         """Starts an empty, mutable graph on GPU devices."""
         ...
@@ -3817,7 +3817,7 @@ class GeospatialIndex:
         values_per_key: int = 0,
         progress: _Progress | None = None,
         progress_steps: int = 0,
-        cpu_class: CPUClass | None = None,
+        cpu_class_ceiling: CPUClass | None = None,
     ) -> GeospatialIndex:
         """Copies a checkpoint into a new, mutable index in host memory."""
         ...
@@ -3833,7 +3833,7 @@ class GeospatialIndex:
         values_per_key: int = 0,
         progress: _Progress | None = None,
         progress_steps: int = 0,
-        cpu_class: CPUClass | None = None,
+        cpu_class_ceiling: CPUClass | None = None,
     ) -> GeospatialIndex:
         """Copies a checkpoint out of a buffer into host memory."""
         ...
@@ -3849,7 +3849,7 @@ class GeospatialIndex:
         values_per_key: int = 0,
         progress: _Progress | None = None,
         progress_steps: int = 0,
-        gpu_class: GPUClass | None = None,
+        gpu_class_ceiling: GPUClass | None = None,
     ) -> GeospatialIndex:
         """Copies a checkpoint into a new, mutable index on GPU devices."""
         ...
@@ -3865,13 +3865,13 @@ class GeospatialIndex:
         values_per_key: int = 0,
         progress: _Progress | None = None,
         progress_steps: int = 0,
-        gpu_class: GPUClass | None = None,
+        gpu_class_ceiling: GPUClass | None = None,
     ) -> GeospatialIndex:
         """Copies a checkpoint out of a host buffer onto GPU devices."""
         ...
 
     @classmethod
-    def view_ram(cls, path: _PathLike, /, *, cpu_class: CPUClass | None = None) -> GeospatialIndex:
+    def view_ram(cls, path: _PathLike, /, *, cpu_class_ceiling: CPUClass | None = None) -> GeospatialIndex:
         """Serves a checkpoint in place through a memory mapping, read-only."""
         ...
 
@@ -3883,7 +3883,7 @@ class GeospatialIndex:
         *,
         paths: Sequence[_PathLike] | None = None,
         executor: Executor | None = None,
-        cpu_class: CPUClass | None = None,
+        cpu_class_ceiling: CPUClass | None = None,
     ) -> GeospatialIndex:
         """Serves a checkpoint in place from NVMe drives, read-only."""
         ...

@@ -635,9 +635,9 @@ typedef struct usearch_keys_tape_view_t {
     size_t const* offsets;
 } usearch_keys_tape_view_t;
 
-/** The CPU families USearch ships tuned variants for - dispatch reports its pick in
- *  this vocabulary, and callers may pin one. Each class bundles the compute features,
- *  wait instruction, and atomics its silicon generation guarantees. */
+/** The CPU families USearch ships tuned variants for - dispatch reports its pick in this
+ *  vocabulary, and callers may cap it with a ceiling. Each class bundles the compute features, wait
+ *  instruction, and atomics its silicon generation guarantees. */
 typedef enum usearch_cpu_class_t {
 
     /** No class detected. */
@@ -1064,9 +1064,9 @@ typedef struct usearch_ram_options_t {
      *  domains; zero, or anything past the 32-bit ID space, means 2^32 - 2. */
     size_t shard_capacity;
 
-    /** The class to dispatch as if the CPU were of it, admitting every rung whose features it
-     *  holds; @c usearch_cpu_class_unknown_k derives the CPU's own. */
-    usearch_cpu_class_t cpu_class;
+    /** The newest class dispatch may pick, intersected with what the CPU runs, so a class the CPU
+     *  lacks narrows the pick rather than refusing it; @c usearch_cpu_class_unknown_k sets none. */
+    usearch_cpu_class_t cpu_class_ceiling;
 
     /** Bytes an NVMe view's key table may hold, on the first named domain or the heap without one;
      *  zero sets no ceiling. */
@@ -1087,8 +1087,8 @@ typedef struct usearch_ram_options_t {
  *  fails rather than paging to the host, and the answer is to name more devices.
  *
  *  One index spans one vendor and runs the best class all its devices load, never above
- *  @c gpu_class; devices of two vendors, or with no class in common, refuse. Separate indexes may
- *  sit on different vendors in one process.
+ *  @c gpu_class_ceiling; devices of two vendors, or with no class in common, refuse. Separate
+ *  indexes may sit on different vendors in one process.
  */
 typedef struct usearch_vram_options_t {
 
@@ -1104,9 +1104,9 @@ typedef struct usearch_vram_options_t {
      *  2^32 - 2. */
     size_t shard_capacity;
 
-    /** The class to dispatch as if every named device were of it, admitting only a class the
-     *  devices run; @c usearch_gpu_class_unknown_k derives the devices' own. */
-    usearch_gpu_class_t gpu_class;
+    /** The newest class dispatch may pick, capping the best class every named device loads, so a
+     *  ceiling no named device loads is refused; @c usearch_gpu_class_unknown_k sets none. */
+    usearch_gpu_class_t gpu_class_ceiling;
 } usearch_vram_options_t;
 
 /**
@@ -1137,9 +1137,9 @@ typedef struct usearch_nvme_options_t {
     /** Number of entries in @c paths; zero derives. */
     size_t paths_count;
 
-    /** The class to dispatch as if the CPU were of it, admitting every rung whose features it
-     *  holds; @c usearch_cpu_class_unknown_k derives the CPU's own. */
-    usearch_cpu_class_t cpu_class;
+    /** The newest class dispatch may pick, intersected with what the CPU runs, so a class the CPU
+     *  lacks narrows the pick rather than refusing it; @c usearch_cpu_class_unknown_k sets none. */
+    usearch_cpu_class_t cpu_class_ceiling;
 } usearch_nvme_options_t;
 
 /** Whether a predicate admits one candidate key or passes over it. */
@@ -1332,6 +1332,9 @@ typedef struct usearch_executor_for_ram_t {
  *  the default stops at 7/8 of the cores because full occupancy starves the ordered publication
  *  path. A borrowed pool keeps its own threads and its lender's mood, so one machine runs one pool
  *  however many libraries schedule onto it.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_invalid_argument_k A @c cpu_class_ceiling no class takes.
  */
 USEARCH_EXPORT void usearch_executor_for_ram(usearch_executor_for_ram_t* arguments);
 
@@ -1393,6 +1396,7 @@ typedef struct usearch_executor_for_vram_t {
  *  GPU executor never changes process-wide device flags.
  *
  *  @par Statuses:
+ *  - @c usearch_status_invalid_argument_k A @c gpu_class_ceiling no class takes.
  *  - @c usearch_status_unsupported_k Borrowed @c streams, which are not wired yet.
  *  - @c usearch_status_device_k An ordinal past the listing, or no device named.
  *  - @c usearch_status_config_mismatch_k Devices of more than one vendor.
@@ -1484,8 +1488,8 @@ typedef struct usearch_executor_for_nvme_t {
  *  reads only to the thread that owns it, so deferred calls finish on those threads.
  *
  *  @par Statuses:
- *  - @c usearch_status_invalid_argument_k @c NULL paths for a nonzero count, or an unknown
- *    @c nvme_class.
+ *  - @c usearch_status_invalid_argument_k @c NULL paths for a nonzero count, an unknown
+ *    @c nvme_class, or a @c cpu_class_ceiling no class takes.
  *  - @c usearch_status_config_mismatch_k Kernel paths mixed with transport identifiers, SPDK
  *    pinned over kernel paths or a kernel engine over transport identifiers, or more threads than
  *    an SPDK controller granted I/O queue pairs.
@@ -1652,8 +1656,8 @@ USEARCH_EXPORT usearch_status_t usearch_status_from_name(usearch_bytes_view_t na
 /** The canonical spelling of a scalar kind, as @c usearch_scalar_f32_k spells "f32". */
 USEARCH_EXPORT char const* usearch_scalar_name(usearch_scalar_t scalar);
 
-/** Reads a scalar kind back; @c usearch_scalar_unknown_k when unrecognized. */
-USEARCH_EXPORT usearch_scalar_t usearch_scalar_from_name(usearch_bytes_view_t name);
+/** Reads a scalar kind back into @p scalar, or fails with @c usearch_status_invalid_argument_k. */
+USEARCH_EXPORT usearch_status_t usearch_scalar_from_name(usearch_bytes_view_t name, usearch_scalar_t* scalar);
 
 /** The canonical spelling of a residency, as @c usearch_residency_ram_k spells "ram". */
 USEARCH_EXPORT char const* usearch_residency_name(usearch_residency_t residency);
@@ -1705,8 +1709,9 @@ USEARCH_EXPORT usearch_status_t usearch_gpu_class_from_name(usearch_bytes_view_t
 /** The canonical spelling of an NVMe class, as the I/O engine ladder names its rungs. */
 USEARCH_EXPORT char const* usearch_nvme_class_name(usearch_nvme_class_t nvme_class);
 
-/** Reads an NVMe class back; @c usearch_nvme_class_unknown_k when unrecognized. */
-USEARCH_EXPORT usearch_nvme_class_t usearch_nvme_class_from_name(usearch_bytes_view_t name);
+/** Reads an NVMe class into @p nvme_class, or fails with @c usearch_status_invalid_argument_k. */
+USEARCH_EXPORT usearch_status_t usearch_nvme_class_from_name(usearch_bytes_view_t name,
+                                                             usearch_nvme_class_t* nvme_class);
 
 /**
  *  @brief Reports the version of the library this process linked, which may differ from the
@@ -1719,7 +1724,8 @@ USEARCH_EXPORT usearch_nvme_class_t usearch_nvme_class_from_name(usearch_bytes_v
  */
 USEARCH_EXPORT void usearch_version(int* major, int* minor, int* patch);
 
-/** The version of the library as a static null-terminated string, like "3.0.0". */
+/** The version of the library as a static null-terminated string, a candidate's suffix included,
+ *  like "3.0.0" or "3.0.0-rc.1". */
 USEARCH_EXPORT char const* usearch_version_name(void);
 
 /**

@@ -103,7 +103,7 @@ There is a constructor per residency, each taking only what its own hardware has
 ```rust
 let threads = Executor::for_ram(&[], None, 8)?;                        // eight workers, where zero takes 7/8 of the cores
 let domains = Executor::for_ram(&[0, 1], None, 0)?;                    // threads interleaved across two NUMA nodes
-let pinned = Executor::for_ram(&[], Some(CPUClass::IntelHaswell), 0)?; // waiters and atomics of one class
+let capped = Executor::for_ram(&[], Some(CPUClass::IntelHaswell), 0)?; // waiters and atomics no newer than Haswell
 let rings = Executor::for_nvme(&["/mnt/nvme0"], None, 4)?;             // one submission ring apiece
 let streams = Executor::for_vram(&[0, 1], None, 0)?;                   // one stream per device, scratch grown as asked
 let shared = unsafe { Executor::on_pool(&[], None, pool)? };           // shares the threads another library spawned

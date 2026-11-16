@@ -100,19 +100,6 @@ public struct USearchError: Swift.Error, CustomStringConvertible, Equatable, Sen
     }
 }
 
-/// Reads `name` through the library's spelling table, keeping only a value whose own spelling
-/// echoes it, since every table answers some default for a name it does not know.
-func parsed<Raw>(
-    _ name: String,
-    _ read: (usearch_bytes_view_t) -> Raw,
-    _ spell: (Raw) -> UnsafePointer<CChar>?
-) -> Raw? {
-    let raw = Array(name.utf8).withUnsafeBufferPointer {
-        read(usearch_bytes_view_t(data: $0.baseAddress, length: $0.count))
-    }
-    return spell(raw).map { String(cString: $0) } == name ? raw : nil
-}
-
 /// Reads `name` through a C reader that answers a status, and nil for a spelling it refuses.
 func parsed<Raw>(
     _ name: String,
@@ -307,7 +294,7 @@ public struct Scalar: Hashable, Sendable, CustomStringConvertible {
 
     /// Reads a spelling back, and nil for one no kind carries.
     public init?(name: String) {
-        guard let raw = parsed(name, usearch_scalar_from_name, usearch_scalar_name) else { return nil }
+        guard let raw = parsed(name, usearch_scalar_from_name, usearch_scalar_unknown_k) else { return nil }
         self.raw = raw
     }
 
@@ -774,7 +761,7 @@ extension Deferred {
 // MARK: - Classes
 
 /// A CPU family USearch ships tuned variants for; dispatch reports its pick in this vocabulary, and
-/// a RAM or NVMe placement or executor may pin one.
+/// a RAM or NVMe placement or executor may cap dispatch at one.
 public struct CPUClass: Hashable, Sendable, CustomStringConvertible {
     /// The engine's own value.
     let raw: usearch_cpu_class_t
@@ -832,7 +819,8 @@ public struct CPUClass: Hashable, Sendable, CustomStringConvertible {
     init(raw: usearch_cpu_class_t) { self.raw = raw }
 }
 
-/// A GPU family USearch ships tuned variants for; a VRAM placement or executor may pin one.
+/// A GPU family USearch ships tuned variants for; a VRAM placement or executor may cap dispatch
+/// at one.
 public struct GPUClass: Hashable, Sendable, CustomStringConvertible {
     /// The engine's own value.
     let raw: usearch_gpu_class_t
@@ -969,11 +957,11 @@ public final class Executor: @unchecked Sendable {
     /// domains local to `memoryDomains` - the very list the indexes were initialized with.
     ///
     /// Zero `threads` takes 7/8 of the cores those domains carry, since full occupancy starves the
-    /// ordered publication path. A `cpuClass` narrows the threads' waiters and atomics to that
-    /// class's; nil derives the CPU's own.
+    /// ordered publication path. A `cpuClassCeiling` intersects with what the machine runs, so a
+    /// class the machine lacks narrows rather than refuses; nil means no ceiling.
     public static func forRam(
         memoryDomains: [Int32] = [],
-        cpuClass: CPUClass? = nil,
+        cpuClassCeiling: CPUClass? = nil,
         threads: Int = 0
     ) throws(USearchError) -> Executor {
         let callState = CallState()
@@ -986,7 +974,7 @@ public final class Executor: @unchecked Sendable {
                     memory_domains: domains,
                     memory_domains_count: memoryDomains.count,
                     shard_capacity: 0,
-                    cpu_class: cpuClass?.raw ?? usearch_cpu_class_unknown_k,
+                    cpu_class_ceiling: cpuClassCeiling?.raw ?? usearch_cpu_class_unknown_k,
                     memory_limit: 0
                 ),
                 threads: threads
@@ -1002,7 +990,7 @@ public final class Executor: @unchecked Sendable {
     /// the executor, and keeps its lender's mood.
     public static func onPool(
         memoryDomains: [Int32] = [],
-        cpuClass: CPUClass? = nil,
+        cpuClassCeiling: CPUClass? = nil,
         pool: UnsafeMutableRawPointer
     ) throws(USearchError) -> Executor {
         let callState = CallState()
@@ -1015,7 +1003,7 @@ public final class Executor: @unchecked Sendable {
                     memory_domains: domains,
                     memory_domains_count: memoryDomains.count,
                     shard_capacity: 0,
-                    cpu_class: cpuClass?.raw ?? usearch_cpu_class_unknown_k,
+                    cpu_class_ceiling: cpuClassCeiling?.raw ?? usearch_cpu_class_unknown_k,
                     memory_limit: 0
                 ),
                 pool: pool
@@ -1032,12 +1020,12 @@ public final class Executor: @unchecked Sendable {
     /// Zero `threads` derives from those devices' queue capabilities.
     public static func forNvme(
         paths: [String] = [],
-        cpuClass: CPUClass? = nil,
+        cpuClassCeiling: CPUClass? = nil,
         threads: Int = 0
     ) throws(USearchError) -> Executor {
         let callState = CallState()
         let executor = callState.slots(usearch_executor_t?.none)
-        withPaths(paths, cpuClass) { nvme in
+        withPaths(paths, cpuClassCeiling) { nvme in
             var arguments = usearch_executor_for_nvme_t(
                 executor: executor,
                 outcome: callState.outcome,
@@ -1056,10 +1044,11 @@ public final class Executor: @unchecked Sendable {
     ///
     /// `streams` borrows the caller's CUDA streams, one per device in `devices` order, and nil
     /// creates the executor's own. A zero `scratchLimit` lets per-device scratch grow as geometry
-    /// asks. A `gpuClass` the devices do not run is refused with `unsupported`.
+    /// asks. A `gpuClassCeiling` no named device loads is refused with `unsupported`; nil means no
+    /// ceiling.
     public static func forVram(
         devices: [Int32] = [],
-        gpuClass: GPUClass? = nil,
+        gpuClassCeiling: GPUClass? = nil,
         streams: [UnsafeMutableRawPointer?]? = nil,
         scratchLimit: Int = 0
     ) throws(USearchError) -> Executor {
@@ -1078,7 +1067,7 @@ public final class Executor: @unchecked Sendable {
                         devices: lentDevices,
                         devices_count: devices.count,
                         shard_capacity: 0,
-                        gpu_class: gpuClass?.raw ?? usearch_gpu_class_unknown_k
+                        gpu_class_ceiling: gpuClassCeiling?.raw ?? usearch_gpu_class_unknown_k
                     ),
                     streams: streams == nil ? nil : lentStreams,
                     scratch_limit: scratchLimit
@@ -1102,11 +1091,11 @@ public final class Executor: @unchecked Sendable {
     }
 }
 
-/// Lends NVMe paths as the byte views the engine's NVMe options point at, beside the class they
-/// dispatch as, for one blocking call.
+/// Lends NVMe paths as the byte views the engine's NVMe options point at, beside the class
+/// ceiling, for one blocking call.
 func withPaths<Value>(
     _ paths: [String],
-    _ cpuClass: CPUClass?,
+    _ cpuClassCeiling: CPUClass?,
     _ body: (usearch_nvme_options_t) -> Value
 ) -> Value {
     let bytes = paths.flatMap(\.utf8)
@@ -1121,7 +1110,7 @@ func withPaths<Value>(
                 usearch_nvme_options_t(
                     paths: views.baseAddress,
                     paths_count: views.count,
-                    cpu_class: cpuClass?.raw ?? usearch_cpu_class_unknown_k
+                    cpu_class_ceiling: cpuClassCeiling?.raw ?? usearch_cpu_class_unknown_k
                 )
             )
         }

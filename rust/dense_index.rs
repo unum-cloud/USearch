@@ -34,14 +34,14 @@ use crate::types::{
     Accepts, Arena, ArrowDeviceArray, ArrowExport, ArrowSchema, Blocking, CPUClass, Completion, Deferring, Element,
     Error, Executor, GPUClass, Key, Matches, On, PhaseProgress, Predicate, ProgressCallback, QueryMatches, Residency,
     Result, RowsView, Scalar, Status, Traversal, arena_slice, arrow_checked, check, fail, lower_predicate,
-    lower_progress, nvme_options, output_slot, path_view, path_views, ram_options, read_named, read_spelling, spelling,
+    lower_progress, nvme_options, output_slot, path_view, path_views, ram_options, read_named, spelling,
     usearch_arena_t, usearch_bytes_view_t, usearch_completion_blocking_k, usearch_completion_t, usearch_cpu_class_name,
     usearch_cpu_class_t, usearch_executor_t, usearch_gpu_class_name, usearch_gpu_class_t, usearch_key_t,
     usearch_keys_tape_view_t, usearch_keys_view_t, usearch_load_path_name, usearch_load_path_t,
     usearch_matches_tape_view_t, usearch_matches_tape_view_to_arrow, usearch_matches_view_t, usearch_nvme_options_t,
     usearch_outcome_t, usearch_predicate_t, usearch_progress_t, usearch_ram_options_t,
     usearch_refine_verdict_from_name, usearch_refine_verdict_name, usearch_rows_view_t, usearch_rows_view_to_arrow,
-    usearch_scalar_t, usearch_traversal_t, usearch_vram_options_t, values_of, vram_options,
+    usearch_scalar_t, usearch_status_t, usearch_traversal_t, usearch_vram_options_t, values_of, vram_options,
 };
 
 // region: Raw Declarations
@@ -498,7 +498,10 @@ pub struct usearch_dense_maxsim_t {
 
 unsafe extern "C" {
     pub fn usearch_dense_metric_name(metric: usearch_dense_metric_t) -> *const c_char;
-    pub fn usearch_dense_metric_from_name(name: usearch_bytes_view_t) -> usearch_dense_metric_t;
+    pub fn usearch_dense_metric_from_name(
+        name: usearch_bytes_view_t,
+        metric: *mut usearch_dense_metric_t,
+    ) -> usearch_status_t;
 
     pub fn usearch_dense_init_ram(arguments: *mut usearch_dense_init_ram_t);
     pub fn usearch_dense_init_vram(arguments: *mut usearch_dense_init_vram_t);
@@ -600,7 +603,7 @@ impl FromStr for DenseMetric {
 
     /// Reads a metric back from the name `Display` writes, refusing any other.
     fn from_str(text: &str) -> Result<Self> {
-        read_spelling(text, usearch_dense_metric_from_name, usearch_dense_metric_name, DenseMetric::from_raw)
+        read_named(text, usearch_dense_metric_from_name, DenseMetric::from_raw)
     }
 }
 
@@ -621,10 +624,12 @@ pub struct DenseOptions {
     pub connectivity: usize,
     /// Upper bound on entries sharing one key; zero is unbounded.
     pub values_per_key: usize,
-    /// The class a host index dispatches as; `None` dispatches as the machine.
-    pub cpu_class: Option<CPUClass>,
-    /// The class a device index dispatches as; `None` dispatches as the devices.
-    pub gpu_class: Option<GPUClass>,
+    /// The newest class dispatch may pick, intersected with what the machine runs, so a class the
+    /// machine lacks narrows rather than refuses; `None` means no ceiling.
+    pub cpu_class_ceiling: Option<CPUClass>,
+    /// The newest class dispatch may pick, capped below the best class every named device loads; a
+    /// ceiling no named device loads is refused as unsupported; `None` means no ceiling.
+    pub gpu_class_ceiling: Option<GPUClass>,
 }
 
 impl Default for DenseOptions {
@@ -635,8 +640,8 @@ impl Default for DenseOptions {
             quantization: Scalar::BF16,
             connectivity: 0,
             values_per_key: 0,
-            cpu_class: None,
-            gpu_class: None,
+            cpu_class_ceiling: None,
+            gpu_class_ceiling: None,
         }
     }
 }
@@ -857,8 +862,9 @@ pub struct DenseLoadRamConfig<'config> {
     /// NUMA node IDs to place the parts on, part `p` loading whole into shard `p` modulo their
     /// count; empty derives every node the process may use.
     pub memory_domains: &'config [i32],
-    /// The class the index dispatches as; `None` dispatches as the machine.
-    pub cpu_class: Option<CPUClass>,
+    /// The newest class dispatch may pick, intersected with what the machine runs, so a class the
+    /// machine lacks narrows rather than refuses; `None` means no ceiling.
+    pub cpu_class_ceiling: Option<CPUClass>,
     /// Upper bound on entries sharing one key, which no checkpoint records; zero is unbounded.
     pub values_per_key: usize,
     /// Reports the shards placed and stops wherever it says to; a stopped load creates no index.
@@ -873,7 +879,7 @@ impl<'config, Location: AsRef<Path> + ?Sized> From<&'config Location> for DenseL
             path: path.as_ref(),
             executor: None,
             memory_domains: &[],
-            cpu_class: None,
+            cpu_class_ceiling: None,
             values_per_key: 0,
             progress: None,
             progress_steps: 0,
@@ -891,8 +897,9 @@ pub struct DenseLoadVramConfig<'config> {
     /// CUDA device ordinals to place the parts on, part `p` loading whole into device `p` modulo
     /// their count; empty derives one free device.
     pub devices: &'config [i32],
-    /// The class the index dispatches as; `None` dispatches as the devices.
-    pub gpu_class: Option<GPUClass>,
+    /// The newest class dispatch may pick, capped below the best class every named device loads; a
+    /// ceiling no named device loads is refused as unsupported; `None` means no ceiling.
+    pub gpu_class_ceiling: Option<GPUClass>,
     /// Upper bound on entries sharing one key, which no checkpoint records; zero is unbounded.
     pub values_per_key: usize,
     /// Reports the shards placed and stops wherever it says to; a stopped load creates no index.
@@ -907,7 +914,7 @@ impl<'config, Location: AsRef<Path> + ?Sized> From<&'config Location> for DenseL
             path: path.as_ref(),
             executor: None,
             devices: &[],
-            gpu_class: None,
+            gpu_class_ceiling: None,
             values_per_key: 0,
             progress: None,
             progress_steps: 0,
@@ -925,8 +932,9 @@ pub struct DenseLoadRamBufferConfig<'config> {
     /// NUMA node IDs to place shards on, the monolith loading whole into the first; empty derives
     /// every node the process may use.
     pub memory_domains: &'config [i32],
-    /// The class the index dispatches as; `None` dispatches as the machine.
-    pub cpu_class: Option<CPUClass>,
+    /// The newest class dispatch may pick, intersected with what the machine runs, so a class the
+    /// machine lacks narrows rather than refuses; `None` means no ceiling.
+    pub cpu_class_ceiling: Option<CPUClass>,
     /// Upper bound on entries sharing one key, which no checkpoint records; zero is unbounded.
     pub values_per_key: usize,
     /// Reports the bytes placed and stops wherever it says to; a stopped load creates no index.
@@ -941,7 +949,7 @@ impl<'config> From<&'config [u8]> for DenseLoadRamBufferConfig<'config> {
             buffer,
             executor: None,
             memory_domains: &[],
-            cpu_class: None,
+            cpu_class_ceiling: None,
             values_per_key: 0,
             progress: None,
             progress_steps: 0,
@@ -965,8 +973,9 @@ pub struct DenseLoadVramBufferConfig<'config> {
     /// CUDA device ordinals to place shards on, the monolith loading whole into the first; empty
     /// derives one free device.
     pub devices: &'config [i32],
-    /// The class the index dispatches as; `None` dispatches as the devices.
-    pub gpu_class: Option<GPUClass>,
+    /// The newest class dispatch may pick, capped below the best class every named device loads; a
+    /// ceiling no named device loads is refused as unsupported; `None` means no ceiling.
+    pub gpu_class_ceiling: Option<GPUClass>,
     /// Upper bound on entries sharing one key, which no checkpoint records; zero is unbounded.
     pub values_per_key: usize,
     /// Reports the bytes placed and stops wherever it says to; a stopped load creates no index.
@@ -981,7 +990,7 @@ impl<'config> From<&'config [u8]> for DenseLoadVramBufferConfig<'config> {
             buffer,
             executor: None,
             devices: &[],
-            gpu_class: None,
+            gpu_class_ceiling: None,
             values_per_key: 0,
             progress: None,
             progress_steps: 0,
@@ -1006,8 +1015,9 @@ pub struct DenseViewNvmeConfig<'config> {
     /// Devices or directories to serve the parts from; empty serves each where its manifest points,
     /// and [`DenseIndex::load_nvme`] admits no other.
     pub paths: &'config [&'config Path],
-    /// The class the index dispatches as; `None` dispatches as the machine.
-    pub cpu_class: Option<CPUClass>,
+    /// The newest class dispatch may pick, intersected with what the machine runs, so a class the
+    /// machine lacks narrows rather than refuses; `None` means no ceiling.
+    pub cpu_class_ceiling: Option<CPUClass>,
     /// Memory domains of a key table held in RAM, which `count`, `get`, `sample`, MaxSim and hinted
     /// searches read; `None` holds none.
     pub key_table_domains: Option<&'config [i32]>,
@@ -1019,7 +1029,7 @@ impl<'config, Location: AsRef<Path> + ?Sized> From<&'config Location> for DenseV
             path: path.as_ref(),
             executor: None,
             paths: &[],
-            cpu_class: None,
+            cpu_class_ceiling: None,
             key_table_domains: None,
         }
     }
@@ -1755,7 +1765,7 @@ impl DenseIndex {
                 dimensions: options.dimensions,
                 connectivity: options.connectivity,
                 values_per_key: options.values_per_key,
-                ram: ram_options(memory_domains, options.cpu_class),
+                ram: ram_options(memory_domains, options.cpu_class_ceiling),
             })
         };
         check(outcome).map(|()| index)
@@ -1775,7 +1785,7 @@ impl DenseIndex {
                 dimensions: options.dimensions,
                 connectivity: options.connectivity,
                 values_per_key: options.values_per_key,
-                vram: vram_options(devices, options.gpu_class),
+                vram: vram_options(devices, options.gpu_class_ceiling),
             })
         };
         check(outcome).map(|()| index)
@@ -1795,7 +1805,7 @@ impl DenseIndex {
                 outcome: &mut outcome,
                 completion: usearch_completion_blocking_k,
                 path: path_view(config.path)?,
-                ram: ram_options(config.memory_domains, config.cpu_class),
+                ram: ram_options(config.memory_domains, config.cpu_class_ceiling),
                 connectivity: 0,
                 values_per_key: config.values_per_key,
                 progress,
@@ -1818,7 +1828,7 @@ impl DenseIndex {
                 outcome: &mut outcome,
                 completion: usearch_completion_blocking_k,
                 path: path_view(config.path)?,
-                vram: vram_options(config.devices, config.gpu_class),
+                vram: vram_options(config.devices, config.gpu_class_ceiling),
                 values_per_key: config.values_per_key,
                 progress,
             })
@@ -1839,7 +1849,7 @@ impl DenseIndex {
                 outcome: &mut outcome,
                 completion: usearch_completion_blocking_k,
                 buffer: config.buffer.into(),
-                ram: ram_options(config.memory_domains, config.cpu_class),
+                ram: ram_options(config.memory_domains, config.cpu_class_ceiling),
                 connectivity: 0,
                 values_per_key: config.values_per_key,
                 progress,
@@ -1861,7 +1871,7 @@ impl DenseIndex {
                 outcome: &mut outcome,
                 completion: usearch_completion_blocking_k,
                 buffer: config.buffer.into(),
-                vram: vram_options(config.devices, config.gpu_class),
+                vram: vram_options(config.devices, config.gpu_class_ceiling),
                 values_per_key: config.values_per_key,
                 progress,
             })
@@ -1890,7 +1900,7 @@ impl DenseIndex {
     pub fn view_nvme<'config>(config: impl Into<DenseViewNvmeConfig<'config>>) -> Result<Self> {
         let config = config.into();
         let views = path_views(config.paths)?;
-        let key_table = config.key_table_domains.map(|domains| ram_options(domains, config.cpu_class));
+        let key_table = config.key_table_domains.map(|domains| ram_options(domains, config.cpu_class_ceiling));
         let mut index = DenseIndex::null();
         let mut outcome = usearch_outcome_t::default();
         unsafe {
@@ -1900,7 +1910,7 @@ impl DenseIndex {
                 outcome: &mut outcome,
                 completion: usearch_completion_blocking_k,
                 path: path_view(config.path)?,
-                nvme: nvme_options(&views, config.cpu_class),
+                nvme: nvme_options(&views, config.cpu_class_ceiling),
                 ram: key_table.as_ref().map_or(ptr::null(), |ram| ram),
             })
         };
@@ -1913,7 +1923,7 @@ impl DenseIndex {
     pub fn load_nvme<'config>(config: impl Into<DenseViewNvmeConfig<'config>>) -> Result<Self> {
         let config = config.into();
         let views = path_views(config.paths)?;
-        let key_table = config.key_table_domains.map(|domains| ram_options(domains, config.cpu_class));
+        let key_table = config.key_table_domains.map(|domains| ram_options(domains, config.cpu_class_ceiling));
         let mut index = DenseIndex::null();
         let mut outcome = usearch_outcome_t::default();
         unsafe {
@@ -1923,7 +1933,7 @@ impl DenseIndex {
                 outcome: &mut outcome,
                 completion: usearch_completion_blocking_k,
                 path: path_view(config.path)?,
-                nvme: nvme_options(&views, config.cpu_class),
+                nvme: nvme_options(&views, config.cpu_class_ceiling),
                 ram: key_table.as_ref().map_or(ptr::null(), |ram| ram),
             })
         };

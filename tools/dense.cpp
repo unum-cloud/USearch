@@ -437,8 +437,7 @@ static bool dense_insert_setup(world_t const& world, dense_settings_t const& set
 
     usearch_scalar_t quantization = source.scalar;
     if (!settings.stored_dtype.empty()) {
-        quantization = usearch_scalar_from_name(bytes_view(settings.stored_dtype));
-        if (quantization == usearch_scalar_unknown_k) {
+        if (usearch_scalar_from_name(bytes_view(settings.stored_dtype), &quantization) != usearch_status_success_k) {
             fmt::println(stderr, "{}--stored-dtype=\"{}\" names no scalar", rank, settings.stored_dtype);
             return false;
         }
@@ -554,8 +553,8 @@ int modality_insert(dense_verbs_t, world_t& world, int argc, char const* const* 
         if (speaks) fmt::println(stderr, "- is one pipe, which several ranks cannot share");
         return EXIT_FAILURE;
     }
-    usearch_dense_metric_t const metric = usearch_dense_metric_from_name(bytes_view(settings.metric));
-    if (metric == usearch_dense_metric_unknown_k) {
+    usearch_dense_metric_t metric = usearch_dense_metric_unknown_k;
+    if (usearch_dense_metric_from_name(bytes_view(settings.metric), &metric) != usearch_status_success_k) {
         if (speaks) fmt::println(stderr, "--metric=\"{}\" names no metric", settings.metric);
         return EXIT_FAILURE;
     }
@@ -779,8 +778,7 @@ int dense_get(world_t& world, int argc, char const* const* argv) {
     }
     usearch_scalar_t outputs = usearch_scalar_unknown_k;
     if (!outputs_dtype.empty()) {
-        outputs = usearch_scalar_from_name(bytes_view(outputs_dtype));
-        if (outputs == usearch_scalar_unknown_k) {
+        if (usearch_scalar_from_name(bytes_view(outputs_dtype), &outputs) != usearch_status_success_k) {
             fmt::println(stderr, "--outputs-dtype=\"{}\" names no scalar", outputs_dtype);
             return EXIT_FAILURE;
         }

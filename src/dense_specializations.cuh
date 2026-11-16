@@ -480,17 +480,19 @@ struct specialized_index {
         if constexpr (is_ram_index<index_type_>) {
             if (options.vram || options.nvme) return status_t::config_mismatch_k;
             if (options.ram && (options.ram->memory_domains_count || options.ram->memory_limit ||
-                                options.ram->cpu_class != usearch_cpu_class_unknown_k))
+                                options.ram->cpu_class_ceiling != usearch_cpu_class_unknown_k))
                 return status_t::unsupported_k;
         }
         else if constexpr (is_nvme_index<index_type_>) {
             if (options.ram || options.vram) return status_t::config_mismatch_k;
-            if (options.nvme && (options.nvme->paths_count || options.nvme->cpu_class != usearch_cpu_class_unknown_k))
+            if (options.nvme &&
+                (options.nvme->paths_count || options.nvme->cpu_class_ceiling != usearch_cpu_class_unknown_k))
                 return status_t::unsupported_k;
         }
         else {
             if (options.ram || options.nvme) return status_t::config_mismatch_k;
-            if (options.vram && (options.vram->devices_count || options.vram->gpu_class != usearch_gpu_class_unknown_k))
+            if (options.vram &&
+                (options.vram->devices_count || options.vram->gpu_class_ceiling != usearch_gpu_class_unknown_k))
                 return status_t::unsupported_k;
         }
         return status_t::success_k;

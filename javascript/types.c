@@ -16,15 +16,10 @@
 
 #pragma region Naming
 
-/**
- *  @brief Reads one of a closed set of names through the C name table that spells it.
- *
- *  The C reader answers a default for a name it does not know, so a name counts as read only when
- *  the C writer spells the answer back the same way - which is what refuses a misspelling rather
- *  than reading it as the default.
- */
+/** Reads one of a closed set of names through the C reader that parses it, which answers -1 for a
+ *  name the library refuses. */
 static bool usearch_js_name_from_value(napi_env env, napi_value value, char const* field, int (*parse)(char const*),
-                                       char const* (*spell)(int), int* result) {
+                                       int* result) {
     char name[usearch_js_name_capacity_k];
     size_t length = 0;
     napi_valuetype kind = napi_undefined;
@@ -32,7 +27,7 @@ static bool usearch_js_name_from_value(napi_env env, napi_value value, char cons
         napi_get_value_string_utf8(env, value, name, sizeof(name), &length) != napi_ok)
         return usearch_js_throw_field(env, field, "must be a string");
     *result = parse(name);
-    if (*result >= 0 && strcmp(spell(*result), name) == 0) return true;
+    if (*result >= 0) return true;
     char message[usearch_js_message_capacity_k];
     snprintf(message, sizeof(message), "The '%s' argument names nothing: '%s'", field, name);
     return usearch_js_throw(env, usearch_status_invalid_argument_k, message);
@@ -43,11 +38,9 @@ static usearch_bytes_view_t usearch_js_name_view(char const* name) {
 }
 
 static int usearch_js_metric_parse(char const* name) {
-    return (int)usearch_dense_metric_from_name(usearch_js_name_view(name));
-}
-
-static char const* usearch_js_metric_spell(int metric) {
-    return usearch_dense_metric_name((usearch_dense_metric_t)metric);
+    usearch_dense_metric_t metric = usearch_dense_metric_unknown_k;
+    return usearch_dense_metric_from_name(usearch_js_name_view(name), &metric) == usearch_status_success_k ? (int)metric
+                                                                                                           : -1;
 }
 
 static int usearch_js_mood_parse(char const* name) {
@@ -55,17 +48,11 @@ static int usearch_js_mood_parse(char const* name) {
     return usearch_mood_from_name(usearch_js_name_view(name), &mood) == usearch_status_success_k ? (int)mood : -1;
 }
 
-static char const* usearch_js_mood_spell(int mood) { return usearch_mood_name((usearch_mood_t)mood); }
-
 static int usearch_js_traversal_parse(char const* name) {
     usearch_traversal_t traversal = usearch_traversal_unknown_k;
     return usearch_traversal_from_name(usearch_js_name_view(name), &traversal) == usearch_status_success_k
                ? (int)traversal
                : -1;
-}
-
-static char const* usearch_js_traversal_spell(int traversal) {
-    return usearch_traversal_name((usearch_traversal_t)traversal);
 }
 
 static int usearch_js_cpu_class_parse(char const* name) {
@@ -75,10 +62,6 @@ static int usearch_js_cpu_class_parse(char const* name) {
                : -1;
 }
 
-static char const* usearch_js_cpu_class_spell(int cpu_class) {
-    return usearch_cpu_class_name((usearch_cpu_class_t)cpu_class);
-}
-
 static int usearch_js_gpu_class_parse(char const* name) {
     usearch_gpu_class_t gpu_class = usearch_gpu_class_unknown_k;
     return usearch_gpu_class_from_name(usearch_js_name_view(name), &gpu_class) == usearch_status_success_k
@@ -86,15 +69,10 @@ static int usearch_js_gpu_class_parse(char const* name) {
                : -1;
 }
 
-static char const* usearch_js_gpu_class_spell(int gpu_class) {
-    return usearch_gpu_class_name((usearch_gpu_class_t)gpu_class);
-}
-
 bool usearch_js_traversal_from_value(napi_env env, napi_value value, char const* field, usearch_traversal_t* result) {
     int traversal = usearch_traversal_walk_k;
     if (!usearch_js_value_absent(env, value) &&
-        !usearch_js_name_from_value(env, value, field, usearch_js_traversal_parse, usearch_js_traversal_spell,
-                                    &traversal))
+        !usearch_js_name_from_value(env, value, field, usearch_js_traversal_parse, &traversal))
         return false;
     *result = (usearch_traversal_t)traversal;
     return true;
@@ -103,8 +81,7 @@ bool usearch_js_traversal_from_value(napi_env env, napi_value value, char const*
 bool usearch_js_cpu_class_from_value(napi_env env, napi_value value, usearch_cpu_class_t* result) {
     int cpu_class = usearch_cpu_class_unknown_k;
     if (!usearch_js_value_absent(env, value) &&
-        !usearch_js_name_from_value(env, value, "cpuClass", usearch_js_cpu_class_parse, usearch_js_cpu_class_spell,
-                                    &cpu_class))
+        !usearch_js_name_from_value(env, value, "cpuClassCeiling", usearch_js_cpu_class_parse, &cpu_class))
         return false;
     *result = (usearch_cpu_class_t)cpu_class;
     return true;
@@ -113,8 +90,7 @@ bool usearch_js_cpu_class_from_value(napi_env env, napi_value value, usearch_cpu
 bool usearch_js_gpu_class_from_value(napi_env env, napi_value value, usearch_gpu_class_t* result) {
     int gpu_class = usearch_gpu_class_unknown_k;
     if (!usearch_js_value_absent(env, value) &&
-        !usearch_js_name_from_value(env, value, "gpuClass", usearch_js_gpu_class_parse, usearch_js_gpu_class_spell,
-                                    &gpu_class))
+        !usearch_js_name_from_value(env, value, "gpuClassCeiling", usearch_js_gpu_class_parse, &gpu_class))
         return false;
     *result = (usearch_gpu_class_t)gpu_class;
     return true;
@@ -122,8 +98,7 @@ bool usearch_js_gpu_class_from_value(napi_env env, napi_value value, usearch_gpu
 
 bool usearch_js_metric_from_value(napi_env env, napi_value value, char const* field, usearch_dense_metric_t* result) {
     int metric = usearch_dense_metric_unknown_k;
-    if (!usearch_js_name_from_value(env, value, field, usearch_js_metric_parse, usearch_js_metric_spell, &metric))
-        return false;
+    if (!usearch_js_name_from_value(env, value, field, usearch_js_metric_parse, &metric)) return false;
     *result = (usearch_dense_metric_t)metric;
     return true;
 }
@@ -681,7 +656,7 @@ static bool usearch_js_arguments(napi_env env, napi_callback_info info, size_t w
     return true;
 }
 
-/** <tt>forRam({memoryDomains, threads, cpuClass})</tt> → host workers over NUMA nodes. */
+/** <tt>forRam({memoryDomains, threads, cpuClassCeiling})</tt> → host workers over NUMA nodes. */
 static napi_value usearch_js_executor_for_ram(napi_env env, napi_callback_info info) {
     napi_value config = NULL;
     usearch_outcome_t outcome = {usearch_status_success_k, NULL};
@@ -690,7 +665,8 @@ static napi_value usearch_js_executor_for_ram(napi_env env, napi_callback_info i
     int32_t* ordinals = NULL;
     if (!usearch_js_arguments(env, info, 1, &config) ||
         !usearch_js_size_from_value(env, usearch_js_property(env, config, "threads"), "threads", &for_ram.threads) ||
-        !usearch_js_cpu_class_from_value(env, usearch_js_property(env, config, "cpuClass"), &for_ram.ram.cpu_class) ||
+        !usearch_js_cpu_class_from_value(env, usearch_js_property(env, config, "cpuClassCeiling"),
+                                         &for_ram.ram.cpu_class_ceiling) ||
         !usearch_js_ordinals_from_value(env, usearch_js_property(env, config, "memoryDomains"), "memoryDomains",
                                         &ordinals, &for_ram.ram.memory_domains_count))
         return NULL;
@@ -700,7 +676,7 @@ static napi_value usearch_js_executor_for_ram(napi_env env, napi_callback_info i
     return usearch_js_executor_adopt(env, &outcome, handle);
 }
 
-/** <tt>onPool(pool, {memoryDomains, cpuClass})</tt> → an executor borrowing a ForkUnion pool. */
+/** <tt>onPool(pool, {memoryDomains, cpuClassCeiling})</tt> → an executor borrowing a ForkUnion pool. */
 static napi_value usearch_js_executor_on_pool(napi_env env, napi_callback_info info) {
     napi_value arguments[2] = {NULL, NULL};
     usearch_outcome_t outcome = {usearch_status_success_k, NULL};
@@ -709,8 +685,8 @@ static napi_value usearch_js_executor_on_pool(napi_env env, napi_callback_info i
     int32_t* ordinals = NULL;
     if (!usearch_js_arguments(env, info, 2, arguments) ||
         !usearch_js_pointer_from_value(env, arguments[0], "pool", &on_pool.pool) ||
-        !usearch_js_cpu_class_from_value(env, usearch_js_property(env, arguments[1], "cpuClass"),
-                                         &on_pool.ram.cpu_class) ||
+        !usearch_js_cpu_class_from_value(env, usearch_js_property(env, arguments[1], "cpuClassCeiling"),
+                                         &on_pool.ram.cpu_class_ceiling) ||
         !usearch_js_ordinals_from_value(env, usearch_js_property(env, arguments[1], "memoryDomains"), "memoryDomains",
                                         &ordinals, &on_pool.ram.memory_domains_count))
         return NULL;
@@ -720,7 +696,7 @@ static napi_value usearch_js_executor_on_pool(napi_env env, napi_callback_info i
     return usearch_js_executor_adopt(env, &outcome, handle);
 }
 
-/** <tt>forVram({devices, streams, scratchLimit, gpuClass})</tt> → one stream per device. */
+/** <tt>forVram({devices, streams, scratchLimit, gpuClassCeiling})</tt> → one stream per device. */
 static napi_value usearch_js_executor_for_vram(napi_env env, napi_callback_info info) {
     napi_value config = NULL;
     usearch_outcome_t outcome = {usearch_status_success_k, NULL};
@@ -730,7 +706,8 @@ static napi_value usearch_js_executor_for_vram(napi_env env, napi_callback_info 
     if (!usearch_js_arguments(env, info, 1, &config) ||
         !usearch_js_size_from_value(env, usearch_js_property(env, config, "scratchLimit"), "scratchLimit",
                                     &for_vram.scratch_limit) ||
-        !usearch_js_gpu_class_from_value(env, usearch_js_property(env, config, "gpuClass"), &for_vram.vram.gpu_class) ||
+        !usearch_js_gpu_class_from_value(env, usearch_js_property(env, config, "gpuClassCeiling"),
+                                         &for_vram.vram.gpu_class_ceiling) ||
         !usearch_js_ordinals_from_value(env, usearch_js_property(env, config, "devices"), "devices", &ordinals,
                                         &for_vram.vram.devices_count))
         return NULL;
@@ -776,7 +753,7 @@ static napi_value usearch_js_executor_for_vram(napi_env env, napi_callback_info 
     return usearch_js_executor_adopt(env, &outcome, handle);
 }
 
-/** <tt>forNvme({paths, threads, cpuClass})</tt> → one submission ring per worker. */
+/** <tt>forNvme({paths, threads, cpuClassCeiling})</tt> → one submission ring per worker. */
 static napi_value usearch_js_executor_for_nvme(napi_env env, napi_callback_info info) {
     napi_value config = NULL;
     usearch_outcome_t outcome = {usearch_status_success_k, NULL};
@@ -785,10 +762,11 @@ static napi_value usearch_js_executor_for_nvme(napi_env env, napi_callback_info 
     usearch_js_paths_arena_t paths = {NULL, 0};
     if (!usearch_js_arguments(env, info, 1, &config) ||
         !usearch_js_size_from_value(env, usearch_js_property(env, config, "threads"), "threads", &for_nvme.threads) ||
-        !usearch_js_cpu_class_from_value(env, usearch_js_property(env, config, "cpuClass"), &for_nvme.nvme.cpu_class) ||
+        !usearch_js_cpu_class_from_value(env, usearch_js_property(env, config, "cpuClassCeiling"),
+                                         &for_nvme.nvme.cpu_class_ceiling) ||
         !usearch_js_paths_from_value(env, usearch_js_property(env, config, "paths"), "paths", &paths))
         return NULL;
-    for_nvme.nvme = (usearch_nvme_options_t) {paths.views, paths.count, for_nvme.nvme.cpu_class};
+    for_nvme.nvme = (usearch_nvme_options_t) {paths.views, paths.count, for_nvme.nvme.cpu_class_ceiling};
     usearch_executor_for_nvme(&for_nvme);
     usearch_js_paths_release(&paths);
     return usearch_js_executor_adopt(env, &outcome, handle);
@@ -803,7 +781,7 @@ static napi_value usearch_js_executor_drain(napi_env env, napi_callback_info inf
     if (!executor) return NULL;
     int mood = usearch_mood_parked_k;
     if (arguments_count && !usearch_js_value_absent(env, argument) &&
-        !usearch_js_name_from_value(env, argument, "mood", usearch_js_mood_parse, usearch_js_mood_spell, &mood))
+        !usearch_js_name_from_value(env, argument, "mood", usearch_js_mood_parse, &mood))
         return NULL;
     if (!executor->handle) {
         usearch_js_throw(env, usearch_status_uninitialized_k, "The Executor was already freed");

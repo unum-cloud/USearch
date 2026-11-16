@@ -51,13 +51,11 @@ Release:*)
         git show :csharp/nuget/nuget-package.props 2>/dev/null | grep -qF "'\$(Version)' == ''\">$version</Version>" ||
             stale="$stale csharp/nuget/nuget-package.props"
         git show :Package.swift 2>/dev/null | grep -qF "/releases/download/v$version\"" || stale="$stale Package.swift"
-        # The C macros and the stub take numbers only, so a candidate keeps its core there.
+        # The C macros take numbers only, so a candidate keeps its core there.
         for field in "MAJOR $major" "MINOR $minor" "PATCH $patch"; do
             git show :c/usearch/types.h 2>/dev/null | grep -qxF "#define USEARCH_VERSION_$field" ||
                 stale="$stale c/usearch/types.h:${field% *}"
         done
-        git show :src_stub/types.cpp 2>/dev/null | grep -qF "usearch_version_name(void) { return \"$core\"; }" ||
-            stale="$stale src_stub/types.cpp"
         if [ -n "$stale" ]; then
             echo "commit-msg: these staged files don't carry $version:$stale"
             failed=1

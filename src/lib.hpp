@@ -759,7 +759,7 @@ enum class gpu_class_t : u32_t {
 static_assert(usearch_cpu_class_serial_k == 1 && usearch_cpu_class_monoversioned_k == 2 &&
               usearch_cpu_class_ibm_power10_k == 18);
 
-/** Every CPU class the C enum names, in value order: the one table pins are checked against and
+/** Every CPU class the C enum names, in value order: the one table ceilings are checked against and
  *  names are read back from, so a value naming no class this build has is never one. */
 constexpr usearch_cpu_class_t cpu_classes_k[] {
     usearch_cpu_class_serial_k,          usearch_cpu_class_monoversioned_k,  usearch_cpu_class_intel_haswell_k,
@@ -1258,8 +1258,8 @@ constexpr cpu_class_t cpu_class_of(usearch_cpu_class_t cpu_class) noexcept {
     return static_cast<cpu_class_t>(cpu_class);
 }
 
-/** What one handle may use: the masks this machine runs when nothing is pinned, the pinned class's
- *  masks when it runs them. */
+/** What one handle may use: the masks this machine runs, intersected with a ceiling class's masks
+ *  when one is set. */
 struct cpu_ceiling_t {
     nk_capability_t compute = nk_cap_serial_k;
     sz_capability_t strings = sz_cap_serial_k;
@@ -1311,13 +1311,13 @@ using cpu_ladder_t =
 inline constexpr cpu_class_t cpu_ladder_floor_k = cpu_class_t::serial_k;
 #endif
 
-/** The ceiling of a handle pinned to @p pinned, the one caller of NumKong's, StringZilla's and
- *  ForkUnion's detection and of the AMX grant, whose refusal clears the AMX bits. Answers
- *  @c invalid_argument_k for a value no class takes, and @c unsupported_k when this machine lacks
- *  the pinned class's masks or the build compiled no class under the ceiling, as a monoversioned
- *  build on an older CPU or under a pin below its one class. */
-inline expected<cpu_ceiling_t> pick_cpu_ceiling(usearch_cpu_class_t pinned) noexcept {
-    if (pinned != usearch_cpu_class_unknown_k && !listed(cpu_classes_k, pinned))
+/** The ceiling of a handle capped at @p ceiling_class, the one caller of NumKong's, StringZilla's
+ *  and ForkUnion's detection and of the AMX grant, whose refusal clears the AMX bits. A class this
+ *  machine lacks narrows the ceiling to the masks both share rather than refusing. Answers
+ *  @c invalid_argument_k for a value no class takes, and @c unsupported_k when no compiled class
+ *  fits the ceiling, as on a monoversioned build under an older CPU or a lower ceiling. */
+inline expected<cpu_ceiling_t> pick_cpu_ceiling(usearch_cpu_class_t ceiling_class) noexcept {
+    if (ceiling_class != usearch_cpu_class_unknown_k && !listed(cpu_classes_k, ceiling_class))
         return {{}, status_t::invalid_argument_k};
     cpu_ceiling_t ceiling;
     if (nk_capabilities_detected_cpu(&ceiling.compute) != nk_success_k) ceiling.compute = nk_cap_serial_k;
@@ -1325,14 +1325,11 @@ inline expected<cpu_ceiling_t> pick_cpu_ceiling(usearch_cpu_class_t pinned) noex
     ceiling.sync = fu::cpu_capabilities();
     nk_capability_t const tiles = ceiling.compute & (nk_cap_sapphireamx_k | nk_cap_graniteamx_k | nk_cap_diamondamx_k);
     if (tiles && nk_configure_thread_cpu(tiles) != nk_success_k) ceiling.compute &= ~tiles;
-    if (pinned != usearch_cpu_class_unknown_k) {
-        cpu_class_t const pinned_class = cpu_class_of(pinned);
-        cpu_ceiling_t const wanted {numkong_capabilities_of(pinned_class), stringzilla_capabilities_of(pinned_class),
-                                    forkunion_capabilities_of(pinned_class)};
-        if ((ceiling.compute & wanted.compute) != wanted.compute ||
-            (ceiling.strings & wanted.strings) != wanted.strings || (ceiling.sync & wanted.sync) != wanted.sync)
-            return {ceiling, status_t::unsupported_k};
-        ceiling = wanted;
+    if (ceiling_class != usearch_cpu_class_unknown_k) {
+        cpu_class_t const capped = cpu_class_of(ceiling_class);
+        ceiling.compute &= numkong_capabilities_of(capped);
+        ceiling.strings = static_cast<sz_capability_t>(ceiling.strings & stringzilla_capabilities_of(capped));
+        ceiling.sync = static_cast<fu::capabilities_t>(ceiling.sync & forkunion_capabilities_of(capped));
     }
     bool const compiled = []<cpu_class_t... classes_>(cpu_ladder<classes_...>, cpu_ceiling_t under) noexcept {
         return ((cpu_class_compiled(classes_) && cpu_rung_fits(classes_, under)) || ...);
@@ -1749,11 +1746,11 @@ constexpr gpu_class_t parent_class_of(gpu_class_t gpu_class) noexcept {
     }
 }
 
-/** Whether @p gpu_class sits on the lineage of @p pinned, the pin or one of its ancestors, every
- *  class when nothing is pinned. */
-constexpr bool gpu_class_under_pin(gpu_class_t gpu_class, usearch_gpu_class_t pinned) noexcept {
-    if (pinned == usearch_gpu_class_unknown_k) return true;
-    for (gpu_class_t rung = static_cast<gpu_class_t>(pinned); rung != gpu_class_t::unknown_k;
+/** Whether @p gpu_class sits on the lineage of @p ceiling, the ceiling or one of its ancestors,
+ *  every class when no ceiling is set. */
+constexpr bool gpu_class_under_ceiling(gpu_class_t gpu_class, usearch_gpu_class_t ceiling) noexcept {
+    if (ceiling == usearch_gpu_class_unknown_k) return true;
+    for (gpu_class_t rung = static_cast<gpu_class_t>(ceiling); rung != gpu_class_t::unknown_k;
          rung = parent_class_of(rung))
         if (rung == gpu_class) return true;
     return false;
@@ -1781,43 +1778,44 @@ template <typename multiversioned_ladder_type_>
 using basic_gpu_ladder = multiversioned_ladder_type_;
 #endif
 
-/** The newest class of @p ladder at or under @p pinned among @p loaded, or @c unknown_k. */
+/** The newest class of @p ladder at or under @p ceiling among @p loaded, or @c unknown_k. */
 template <gpu_class_t... classes_>
-gpu_class_t pick_gpu_class(gpu_ladder<classes_...>, gpu_class_mask_t loaded, usearch_gpu_class_t pinned) noexcept {
+gpu_class_t pick_gpu_class(gpu_ladder<classes_...>, gpu_class_mask_t loaded, usearch_gpu_class_t ceiling) noexcept {
     gpu_class_t picked = gpu_class_t::unknown_k;
     auto rung = [&]<gpu_class_t class_>() noexcept {
-        if (picked == gpu_class_t::unknown_k && gpu_class_under_pin(class_, pinned) && (loaded & gpu_class_bit(class_)))
+        if (picked == gpu_class_t::unknown_k && gpu_class_under_ceiling(class_, ceiling) &&
+            (loaded & gpu_class_bit(class_)))
             picked = class_;
     };
     (rung.template operator()<classes_>(), ...);
     return picked;
 }
 
-/** The class a device of @p vendor whose loader took @p loaded takes under @p pinned, walking
+/** The class a device of @p vendor whose loader took @p loaded takes under @p ceiling, walking
  *  its own vendor's ladder; @c unknown_k when no unit this build carries runs on it, or none at
- *  or under the pin does. */
-inline gpu_class_t pick_gpu_class(gpu_vendor_t vendor, gpu_class_mask_t loaded, usearch_gpu_class_t pinned) noexcept {
+ *  or under the ceiling does. */
+inline gpu_class_t pick_gpu_class(gpu_vendor_t vendor, gpu_class_mask_t loaded, usearch_gpu_class_t ceiling) noexcept {
     switch (vendor) {
-    case gpu_vendor_t::nvidia_k: return pick_gpu_class(nvidia_ladder_t {}, loaded, pinned);
-    case gpu_vendor_t::amd_k: return pick_gpu_class(amd_ladder_t {}, loaded, pinned);
-    case gpu_vendor_t::apple_k: return pick_gpu_class(apple_ladder_t {}, loaded, pinned);
+    case gpu_vendor_t::nvidia_k: return pick_gpu_class(nvidia_ladder_t {}, loaded, ceiling);
+    case gpu_vendor_t::amd_k: return pick_gpu_class(amd_ladder_t {}, loaded, ceiling);
+    case gpu_vendor_t::apple_k: return pick_gpu_class(apple_ladder_t {}, loaded, ceiling);
     default: return gpu_class_t::unknown_k;
     }
 }
 
-/** The class @p device takes under @p pinned, from what the listing entry of its vendor and
+/** The class @p device takes under @p ceiling, from what the listing entry of its vendor and
  *  ordinal loaded. */
-inline gpu_class_t pick_gpu_class(gpu_device_t const& device, usearch_gpu_class_t pinned) noexcept {
+inline gpu_class_t pick_gpu_class(gpu_device_t const& device, usearch_gpu_class_t ceiling) noexcept {
     std::span<gpu_device_t const> const devices = gpu_devices();
     std::span<gpu_class_mask_t const> const loaded = gpu_classes_loaded();
     for (std::size_t position = 0; position != devices.size(); ++position)
         if (devices[position].vendor == device.vendor && devices[position].vendor_ordinal == device.vendor_ordinal)
-            return pick_gpu_class(device.vendor, loaded[position], pinned);
+            return pick_gpu_class(device.vendor, loaded[position], ceiling);
     return gpu_class_t::unknown_k;
 }
 
 /** The devices one index places its shards on: their one vendor, the best class all of them load
- *  under the pin, every class they all load, and their positions in the listing @c table. */
+ *  under the ceiling, every class they all load, and their positions in the listing @c table. */
 struct gpu_placement_t {
     gpu_vendor_t vendor = gpu_vendor_t::unknown_k;
     gpu_class_t gpu_class = gpu_class_t::unknown_k;
@@ -1833,19 +1831,19 @@ struct gpu_placement_t {
  *      @p table, whose classes @p loaded holds as the loader answered at listing.
  *
  *  An index spans one vendor, since its shards merge through peer copies, and runs the best class
- *  all its devices load, never above the pin, as a CPU executor runs what all its cores share.
+ *  all its devices load, never above the ceiling, as a CPU executor runs what all its cores share.
  *
  *  @par Statuses:
- *  - @c invalid_argument_k The pin is a value no class takes.
+ *  - @c invalid_argument_k The ceiling is a value no class takes.
  *  - @c device_error_k An ordinal is past the listing.
  *  - @c config_mismatch_k The devices span vendors.
- *  - @c unsupported_k The devices share no class this build carries at or under the pin.
+ *  - @c unsupported_k The devices share no class this build carries at or under the ceiling.
  */
 inline expected<gpu_placement_t> resolve_placement(std::span<gpu_device_t const> table,
                                                    std::span<gpu_class_mask_t const> loaded,
                                                    usearch_vram_options_t const& vram) noexcept {
     static constexpr std::int32_t device_zero_k[] {0};
-    if (vram.gpu_class != usearch_gpu_class_unknown_k && !listed(gpu_classes_k, vram.gpu_class))
+    if (vram.gpu_class_ceiling != usearch_gpu_class_unknown_k && !listed(gpu_classes_k, vram.gpu_class_ceiling))
         return {{}, status_t::invalid_argument_k};
     gpu_placement_t placement;
     placement.table = table, placement.loaded = ~gpu_class_mask_t {0};
@@ -1860,7 +1858,7 @@ inline expected<gpu_placement_t> resolve_placement(std::span<gpu_device_t const>
             return {{}, status_t::config_mismatch_k};
         placement.vendor = vendor, placement.loaded &= loaded[position];
     }
-    placement.gpu_class = pick_gpu_class(placement.vendor, placement.loaded, vram.gpu_class);
+    placement.gpu_class = pick_gpu_class(placement.vendor, placement.loaded, vram.gpu_class_ceiling);
     if (placement.gpu_class == gpu_class_t::unknown_k) return {{}, status_t::unsupported_k};
     return {placement, status_t::success_k};
 }

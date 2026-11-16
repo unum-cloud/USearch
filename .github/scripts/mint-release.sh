@@ -20,7 +20,7 @@ assets=$(mktemp -d)
 gh run download "$run" --name swift-xcframework --name swift-artifactbundle --dir "$assets"
 
 IFS=. read -r major minor patch <<< "$core"
-export version core major minor patch
+export version major minor patch
 echo "$version" > VERSION
 perl -pi -e 's/^(  "version": ")[^"]+/$1$ENV{version}/' package.json
 perl -pi -e 's/^(version = ")[^"]+/$1$ENV{version}/' Cargo.toml pixi.toml mojo/pixi.toml
@@ -28,7 +28,6 @@ perl -pi -e 's/^(    \.version = ")[^"]+/$1$ENV{version}/' build.zig.zon
 perl -pi -e 's/(def usearchVersion = \x27)[^\x27]+\x27/$1$ENV{version}\x27/; s/(implementation name: \x27usearch\x27, version: \x27)[^\x27]+\x27/$1$ENV{version}\x27/' java/README.md
 perl -pi -e 's/(<Version Condition=[^>]+>)[^<]+(<\/Version>)/$1$ENV{version}$2/' csharp/nuget/nuget-package.props
 perl -pi -e 's/^(#define USEARCH_VERSION_MAJOR )[0-9]+$/$1$ENV{major}/; s/^(#define USEARCH_VERSION_MINOR )[0-9]+$/$1$ENV{minor}/; s/^(#define USEARCH_VERSION_PATCH )[0-9]+$/$1$ENV{patch}/' c/usearch/types.h
-perl -pi -e 's/(usearch_version_name\(void\) \{ return ")[^"]+/$1$ENV{core}/' src_stub/types.cpp
 perl -pi -e 's#(releases/download/v)[^"]+#$1$ENV{version}#' Package.swift
 apple=$(sha256sum "$assets"/*/*.xcframework.zip | cut -c -64) portable=$(sha256sum "$assets"/*/*.artifactbundle.zip | cut -c -64)
 perl -pi -e "s/^let appleChecksum = .*/let appleChecksum = \"$apple\"/; s/^let portableChecksum = .*/let portableChecksum = \"$portable\"/" Package.swift

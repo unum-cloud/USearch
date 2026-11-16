@@ -115,10 +115,13 @@ type DenseOptions struct {
 	// ValuesPerKey bounds how many entries may share one key; zero is unbounded. Above one is
 	// what late interaction needs, a document being one key holding its token rows.
 	ValuesPerKey uint
-	// CPUClass is the class a host index dispatches as; the zero value derives the CPU's own.
-	CPUClass CPUClass
-	// GPUClass is the class a device index dispatches as; the zero value derives the devices' own.
-	GPUClass GPUClass
+	// CPUClassCeiling is the newest class dispatch may pick, intersected with what the machine runs,
+	// so a class the machine lacks narrows rather than refuses; the zero value means no ceiling.
+	CPUClassCeiling CPUClass
+	// GPUClassCeiling is the newest class dispatch may pick, capped below the best class every named
+	// device loads; a ceiling no named device loads is refused as unsupported; the zero value means no
+	// ceiling.
+	GPUClassCeiling GPUClass
 }
 
 // DefaultDenseOptions is an angular bf16 index, with every optional field derived.
@@ -313,8 +316,9 @@ type DenseLoadRamConfig struct {
 	// MemoryDomains are the NUMA node IDs to place the parts on, part p loading whole into shard p
 	// modulo their count; empty derives every node the process may use.
 	MemoryDomains []int32
-	// CPUClass is the class to dispatch as; the zero value derives the CPU's own.
-	CPUClass CPUClass
+	// CPUClassCeiling is the newest class dispatch may pick, intersected with what the machine runs,
+	// so a class the machine lacks narrows rather than refuses; the zero value means no ceiling.
+	CPUClassCeiling CPUClass
 	// ValuesPerKey bounds how many entries may share one key, which no checkpoint records; zero
 	// is unbounded.
 	ValuesPerKey uint
@@ -332,8 +336,10 @@ type DenseLoadVramConfig struct {
 	// Devices are the CUDA ordinals to place the parts on, part p loading whole onto device p modulo
 	// their count; empty derives one free device.
 	Devices []int32
-	// GPUClass is the class to dispatch as; the zero value derives the devices' own.
-	GPUClass GPUClass
+	// GPUClassCeiling is the newest class dispatch may pick, capped below the best class every named
+	// device loads; a ceiling no named device loads is refused as unsupported; the zero value means no
+	// ceiling.
+	GPUClassCeiling GPUClass
 	// ValuesPerKey bounds how many entries may share one key; zero is unbounded.
 	ValuesPerKey uint
 	// Progress reports the shards placed and stops wherever it says to.
@@ -349,8 +355,9 @@ type DenseLoadRamBufferConfig struct {
 	// MemoryDomains are the NUMA node IDs to place shards on, the monolith loading whole into the
 	// first; empty derives every node the process may use.
 	MemoryDomains []int32
-	// CPUClass is the class to dispatch as; the zero value derives the CPU's own.
-	CPUClass CPUClass
+	// CPUClassCeiling is the newest class dispatch may pick, intersected with what the machine runs,
+	// so a class the machine lacks narrows rather than refuses; the zero value means no ceiling.
+	CPUClassCeiling CPUClass
 	// ValuesPerKey bounds how many entries may share one key; zero is unbounded.
 	ValuesPerKey uint
 	// Progress reports the bytes placed and stops wherever it says to.
@@ -366,8 +373,10 @@ type DenseLoadVramBufferConfig struct {
 	// Devices are the CUDA ordinals to place shards on, the monolith loading whole onto the first;
 	// empty derives one free device.
 	Devices []int32
-	// GPUClass is the class to dispatch as; the zero value derives the devices' own.
-	GPUClass GPUClass
+	// GPUClassCeiling is the newest class dispatch may pick, capped below the best class every named
+	// device loads; a ceiling no named device loads is refused as unsupported; the zero value means no
+	// ceiling.
+	GPUClassCeiling GPUClass
 	// ValuesPerKey bounds how many entries may share one key; zero is unbounded.
 	ValuesPerKey uint
 	// Progress reports the bytes placed and stops wherever it says to.
@@ -384,8 +393,9 @@ type DenseViewNvmeConfig struct {
 	// Paths are the devices or directories to serve the parts from; empty serves each where its
 	// manifest points.
 	Paths []string
-	// CPUClass is the class to dispatch as; the zero value derives the CPU's own.
-	CPUClass CPUClass
+	// CPUClassCeiling is the newest class dispatch may pick, intersected with what the machine runs,
+	// so a class the machine lacks narrows rather than refuses; the zero value means no ceiling.
+	CPUClassCeiling CPUClass
 	// KeyTableDomains are the memory domains of a key table held in RAM, which Count, Get, Sample,
 	// MaxSim and hinted searches read; nil holds none, and an empty non-nil slice derives them.
 	KeyTableDomains []int32
@@ -843,7 +853,7 @@ func DenseInitRam(options DenseOptions, memoryDomains []int32) (*DenseIndex, err
 		dimensions:     C.size_t(options.Dimensions),
 		connectivity:   C.size_t(options.Connectivity),
 		values_per_key: C.size_t(options.ValuesPerKey),
-		ram:            lent.ram(memoryDomains, options.CPUClass),
+		ram:            lent.ram(memoryDomains, options.CPUClassCeiling),
 	})
 	return denseIndexOf(block(lent))
 }
@@ -860,7 +870,7 @@ func DenseInitVram(options DenseOptions, devices []int32) (*DenseIndex, error) {
 		dimensions:     C.size_t(options.Dimensions),
 		connectivity:   C.size_t(options.Connectivity),
 		values_per_key: C.size_t(options.ValuesPerKey),
-		vram:           lent.vram(devices, options.GPUClass),
+		vram:           lent.vram(devices, options.GPUClassCeiling),
 	})
 	return denseIndexOf(block(lent))
 }
@@ -881,7 +891,7 @@ func DenseLoadRam(path string, config *DenseLoadRamConfig) (*DenseIndex, error) 
 		executor:       executor,
 		outcome:        lent.outcome,
 		path:           lent.text(path),
-		ram:            lent.ram(config.MemoryDomains, config.CPUClass),
+		ram:            lent.ram(config.MemoryDomains, config.CPUClassCeiling),
 		values_per_key: C.size_t(config.ValuesPerKey),
 		progress:       lent.progress(config.Progress, config.ProgressSteps),
 	})
@@ -904,7 +914,7 @@ func DenseLoadVram(path string, config *DenseLoadVramConfig) (*DenseIndex, error
 		executor:       executor,
 		outcome:        lent.outcome,
 		path:           lent.text(path),
-		vram:           lent.vram(config.Devices, config.GPUClass),
+		vram:           lent.vram(config.Devices, config.GPUClassCeiling),
 		values_per_key: C.size_t(config.ValuesPerKey),
 		progress:       lent.progress(config.Progress, config.ProgressSteps),
 	})
@@ -927,7 +937,7 @@ func DenseLoadRamBuffer(buffer []byte, config *DenseLoadRamBufferConfig) (*Dense
 		executor:       executor,
 		outcome:        lent.outcome,
 		buffer:         lent.bytes(buffer),
-		ram:            lent.ram(config.MemoryDomains, config.CPUClass),
+		ram:            lent.ram(config.MemoryDomains, config.CPUClassCeiling),
 		values_per_key: C.size_t(config.ValuesPerKey),
 		progress:       lent.progress(config.Progress, config.ProgressSteps),
 	})
@@ -949,7 +959,7 @@ func DenseLoadVramBuffer(buffer []byte, config *DenseLoadVramBufferConfig) (*Den
 		executor:       executor,
 		outcome:        lent.outcome,
 		buffer:         lent.bytes(buffer),
-		vram:           lent.vram(config.Devices, config.GPUClass),
+		vram:           lent.vram(config.Devices, config.GPUClassCeiling),
 		values_per_key: C.size_t(config.ValuesPerKey),
 		progress:       lent.progress(config.Progress, config.ProgressSteps),
 	})
@@ -984,8 +994,8 @@ func DenseViewNvme(path string, config *DenseViewNvmeConfig) (*DenseIndex, error
 		executor: executor,
 		outcome:  lent.outcome,
 		path:     lent.text(path),
-		nvme:     lent.nvme(config.Paths, config.CPUClass),
-		ram:      lent.keyTable(config.KeyTableDomains, config.CPUClass),
+		nvme:     lent.nvme(config.Paths, config.CPUClassCeiling),
+		ram:      lent.keyTable(config.KeyTableDomains, config.CPUClassCeiling),
 	})
 	return denseIndexOf(block(lent))
 }
@@ -1007,18 +1017,18 @@ func DenseLoadNvme(path string, config *DenseViewNvmeConfig) (*DenseIndex, error
 		executor: executor,
 		outcome:  lent.outcome,
 		path:     lent.text(path),
-		nvme:     lent.nvme(config.Paths, config.CPUClass),
-		ram:      lent.keyTable(config.KeyTableDomains, config.CPUClass),
+		nvme:     lent.nvme(config.Paths, config.CPUClassCeiling),
+		ram:      lent.keyTable(config.KeyTableDomains, config.CPUClassCeiling),
 	})
 	return denseIndexOf(block(lent))
 }
 
 // keyTable lends the optional RAM placement of an NVMe handle's key table, nil holding none.
-func (call *call) keyTable(memoryDomains []int32, cpuClass CPUClass) *C.usearch_ram_options_t {
+func (call *call) keyTable(memoryDomains []int32, cpuClassCeiling CPUClass) *C.usearch_ram_options_t {
 	if memoryDomains == nil {
 		return nil
 	}
-	ram := call.ram(memoryDomains, cpuClass)
+	ram := call.ram(memoryDomains, cpuClassCeiling)
 	return pin(call, &ram)
 }
 

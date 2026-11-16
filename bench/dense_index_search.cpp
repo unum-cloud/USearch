@@ -3,7 +3,7 @@
  *  @author Ash Vardanian
  *  @date October 25, 2026
  *  @brief The dense search benchmark over the C interface: a RetriEval dataset built into one index
- *      of any residency, pinned to any CPU or GPU class, searched at every breadth and judged
+ *      of any residency, capped at any CPU or GPU class, searched at every breadth and judged
  *      against ground truth, against itself, or against an exact scan.
  *
  *  The index runs as users run it, through a session of the residency `--residency` names. An NVMe
@@ -159,9 +159,12 @@ int bench_dense_index_search(int argc, char const* const* argv) {
     usearch_scalar_t stored = base.scalar() == usearch_scalar_f32_k || base.scalar() == usearch_scalar_f64_k
                                   ? usearch_scalar_bf16_k
                                   : base.scalar();
-    if (!search.stored_dtype_name.empty()) stored = usearch_scalar_from_name(bytes_view(search.stored_dtype_name));
-    usearch_dense_metric_t const metric = usearch_dense_metric_from_name(bytes_view(search.metric_name));
-    if (stored == usearch_scalar_unknown_k || metric == usearch_dense_metric_unknown_k)
+    bool const stored_named = search.stored_dtype_name.empty() ||
+                              usearch_scalar_from_name(bytes_view(search.stored_dtype_name), &stored) ==
+                                  usearch_status_success_k;
+    usearch_dense_metric_t metric = usearch_dense_metric_unknown_k;
+    if (!stored_named ||
+        usearch_dense_metric_from_name(bytes_view(search.metric_name), &metric) != usearch_status_success_k)
         return fmt::println(stderr, "--stored-dtype=\"{}\" or --metric=\"{}\" names nothing", search.stored_dtype_name,
                             search.metric_name),
                1;
@@ -169,7 +172,7 @@ int bench_dense_index_search(int argc, char const* const* argv) {
                  base.columns(), usearch_scalar_name(base.scalar()), usearch_scalar_name(stored),
                  usearch_dense_metric_name(metric));
 
-    session_t session = open_session(settings, settings.cpu_class);
+    session_t session = open_session(settings, settings.cpu_class_ceiling);
     if (!session) return 1;
     // A checkpoint holding a graph reopens as it is, so class and thread sweeps share one build.
     usearch_dense_metadata_t saved {};

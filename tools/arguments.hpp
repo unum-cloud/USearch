@@ -301,20 +301,8 @@ inline usearch_bytes_view_t bytes_view(std::string_view text) noexcept {
     return {reinterpret_cast<usearch_byte_t const*>(text.data()), text.size()};
 }
 
-/** Writes the enumerator @p value spells into @p destination, read back by @p from_name and
- *  accepted only when @p name spells it the same way; the unknown enumerator at zero is no value a
- *  flag names, since leaving the flag out derives it. */
-template <typename enumeration_type_>
-[[nodiscard]] argument_status_t assign_named_(std::string_view value, enumeration_type_& destination,
-                                              enumeration_type_ (*from_name)(usearch_bytes_view_t),
-                                              char const* (*name)(enumeration_type_)) noexcept {
-    enumeration_type_ const parsed = from_name(bytes_view(value));
-    if (parsed == enumeration_type_ {} || value != name(parsed)) return argument_status_t::unknown_name_k;
-    destination = parsed;
-    return argument_status_t::parsed_k;
-}
-
-/** Writes the enumerator a status-answering @p from_name reads @p value as into @p destination. */
+/** Writes the enumerator @p from_name reads @p value as into @p destination, leaving it alone for a
+ *  name the library does not know. */
 template <typename enumeration_type_>
 [[nodiscard]] argument_status_t assign_named_(std::string_view value, enumeration_type_& destination,
                                               usearch_status_t (*from_name)(usearch_bytes_view_t,
@@ -361,7 +349,7 @@ template <typename enumeration_type_>
     if (usearch_gpu_class_t* const* gpu_class = std::get_if<usearch_gpu_class_t*>(&flag.destination))
         return assign_named_(value, **gpu_class, usearch_gpu_class_from_name);
     if (usearch_nvme_class_t* const* nvme_class = std::get_if<usearch_nvme_class_t*>(&flag.destination))
-        return assign_named_(value, **nvme_class, usearch_nvme_class_from_name, usearch_nvme_class_name);
+        return assign_named_(value, **nvme_class, usearch_nvme_class_from_name);
     if (usearch_traversal_t* const* traversal = std::get_if<usearch_traversal_t*>(&flag.destination))
         return assign_named_(value, **traversal, usearch_traversal_from_name);
     if (bytes_t* const* bytes = std::get_if<bytes_t*>(&flag.destination)) return parse_bytes(value, **bytes);

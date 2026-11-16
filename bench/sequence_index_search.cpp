@@ -190,8 +190,8 @@ int bench_sequence_index_search(int argc, char const* const* argv) {
     print(settings);
 
     std::string_view const metric_name = search.metric_name.empty() ? "levenshtein" : search.metric_name;
-    usearch_sequence_metric_t const metric = usearch_sequence_metric_from_name(bytes_view(metric_name));
-    if (metric == usearch_sequence_metric_unknown_k)
+    usearch_sequence_metric_t metric = usearch_sequence_metric_unknown_k;
+    if (usearch_sequence_metric_from_name(bytes_view(metric_name), &metric) != usearch_status_success_k)
         return fmt::println(
                    stderr,
                    "--metric=\"{}\" does not parse, expected levenshtein, levenshtein-utf8, overlap, needleman-wunsch",

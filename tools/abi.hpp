@@ -22,8 +22,8 @@
  *  USEARCH_NVME_PATHS  none             Comma-separated paths or transport IDs an NVMe view serves parts from
  *  --filter            none             Checks to run, overriding USEARCH_FILTER
  *  --residency         ram              Where an index lives: ram, vram or nvme
- *  --cpu-class         derived          The CPU class to dispatch as, like intel-icelake or serial
- *  --gpu-class         derived          The GPU class to dispatch as, like nvidia-ampere
+ *  --cpu-class-ceiling none             The newest CPU class to dispatch as, like intel-icelake or serial
+ *  --gpu-class-ceiling none             The newest GPU class to dispatch as, like nvidia-ampere
  *  --nvme-class        derived          The NVMe class to submit through, like posix, linux-uring or linux-spdk
  *  --threads           derived          Worker threads of a RAM or NVMe executor
  *  --shards            one per domain   Shards each index opens on, over the memory domains or the devices
@@ -218,11 +218,11 @@ struct settings_t {
      *  serves every shard where its checkpoint points. Override: @c USEARCH_NVME_PATHS. */
     st::vector<std::string_view> nvme_paths;
 
-    /** The CPU class to dispatch as; unknown derives the CPU's own. */
-    usearch_cpu_class_t cpu_class = usearch_cpu_class_unknown_k;
+    /** The newest CPU class to dispatch as, intersected with the CPU's own; unknown sets none. */
+    usearch_cpu_class_t cpu_class_ceiling = usearch_cpu_class_unknown_k;
 
-    /** The GPU class to dispatch as; unknown derives the devices'. */
-    usearch_gpu_class_t gpu_class = usearch_gpu_class_unknown_k;
+    /** The newest GPU class to dispatch as, capping the devices' own; unknown sets none. */
+    usearch_gpu_class_t gpu_class_ceiling = usearch_gpu_class_unknown_k;
 
     /** The NVMe class to submit through; unknown derives it. */
     usearch_nvme_class_t nvme_class = usearch_nvme_class_unknown_k;
@@ -280,10 +280,11 @@ inline std::array<flag_t, 11> settings_flags(settings_t& settings) noexcept {
     return {{
         {"--filter", "pattern", "checks to run, as a regex or a substring; every one by default", &settings.filter},
         session[0],
-        {"--cpu-class", "name", "CPU class to dispatch as, like intel-icelake or serial; derived by default",
-         &settings.cpu_class},
-        {"--gpu-class", "name", "GPU class to dispatch as, like nvidia-ampere; derived by default",
-         &settings.gpu_class},
+        {"--cpu-class-ceiling", "name",
+         "newest CPU class to dispatch as, like intel-icelake or serial, within what the CPU runs; none by default",
+         &settings.cpu_class_ceiling},
+        {"--gpu-class-ceiling", "name", "newest GPU class to dispatch as, like nvidia-ampere; none by default",
+         &settings.gpu_class_ceiling},
         session[1],
         session[2],
         {"--shards", "count", "shards per index; one per memory domain or device by default", &settings.shards},
@@ -395,11 +396,13 @@ inline void print_environment(settings_t const& settings) {
 inline void print(settings_t const& settings) {
     print_environment(settings);
     fmt::println("- Residency: {}", usearch_residency_name(settings.residency));
-    // Unpinned runs dispatch on the index, whose "- Index:" line names the class it picked.
-    fmt::println("- CPU class: {}", settings.cpu_class == usearch_cpu_class_unknown_k
-                                        ? "derived"
-                                        : usearch_cpu_class_name(settings.cpu_class));
-    fmt::println("- GPU class: {}", usearch_gpu_class_name(settings.gpu_class));
+    // The index's "- Index:" line names the class dispatch picked under these ceilings.
+    fmt::println("- CPU class ceiling: {}", settings.cpu_class_ceiling == usearch_cpu_class_unknown_k
+                                                ? "none"
+                                                : usearch_cpu_class_name(settings.cpu_class_ceiling));
+    fmt::println("- GPU class ceiling: {}", settings.gpu_class_ceiling == usearch_gpu_class_unknown_k
+                                                ? "none"
+                                                : usearch_gpu_class_name(settings.gpu_class_ceiling));
     fmt::println("- NVMe class: {}", usearch_nvme_class_name(settings.nvme_class));
 }
 
@@ -452,9 +455,9 @@ struct session_t {
     /** The seed every key this session's entries take is minted under, by @ref key_of_offset. */
     std::uint32_t seed = 0;
 
-    /** The class every index this session opens dispatches as. */
-    usearch_cpu_class_t cpu_class = usearch_cpu_class_unknown_k;
-    usearch_gpu_class_t gpu_class = usearch_gpu_class_unknown_k;
+    /** The newest classes every index this session opens may dispatch as. */
+    usearch_cpu_class_t cpu_class_ceiling = usearch_cpu_class_unknown_k;
+    usearch_gpu_class_t gpu_class_ceiling = usearch_gpu_class_unknown_k;
 
     /** The USearch device ordinals a VRAM index places shards on, in turn. */
     st::vector<std::int32_t> devices;
@@ -508,8 +511,9 @@ struct session_t {
     }
 
     void swap(session_t& other) noexcept {
-        std::swap(residency, other.residency), std::swap(seed, other.seed), std::swap(cpu_class, other.cpu_class);
-        std::swap(gpu_class, other.gpu_class), std::swap(devices, other.devices);
+        std::swap(residency, other.residency), std::swap(seed, other.seed);
+        std::swap(cpu_class_ceiling, other.cpu_class_ceiling), std::swap(gpu_class_ceiling, other.gpu_class_ceiling);
+        std::swap(devices, other.devices);
         std::swap(places, other.places), std::swap(served, other.served), std::swap(paths, other.paths);
         std::swap(memory_domains, other.memory_domains);
         std::swap(shard_capacity, other.shard_capacity), std::swap(executor, other.executor);
@@ -539,7 +543,7 @@ struct session_t {
         if (st::failed(domains.resize(shards))) exit_out_of_memory("the placement");
         for (std::size_t shard = 0; shard != shards; ++shard)
             domains[shard] = memory_domains[shard % memory_domains.size()];
-        return {domains.empty() ? nullptr : domains.data(), domains.size(), shard_capacity, cpu_class};
+        return {domains.empty() ? nullptr : domains.data(), domains.size(), shard_capacity, cpu_class_ceiling};
     }
 
     /** The VRAM placement of @p shards shards over the session's devices in turn, backed by
@@ -548,12 +552,12 @@ struct session_t {
         std::size_t const count = shards ? shards : devices.size();
         if (st::failed(ordinals.resize(count))) exit_out_of_memory("the placement");
         for (std::size_t shard = 0; shard != count; ++shard) ordinals[shard] = devices[shard % devices.size()];
-        return {ordinals.data(), ordinals.size(), shard_capacity, gpu_class};
+        return {ordinals.data(), ordinals.size(), shard_capacity, gpu_class_ceiling};
     }
 
     /** The NVMe placement views serve from. */
     usearch_nvme_options_t nvme_options() const noexcept {
-        return {paths.empty() ? nullptr : paths.data(), paths.size(), cpu_class};
+        return {paths.empty() ? nullptr : paths.data(), paths.size(), cpu_class_ceiling};
     }
 };
 
@@ -567,14 +571,14 @@ inline sz::string_t character_sibling(std::string_view address) noexcept {
 }
 
 /** Opens the executors and the arena of @p settings ' residency, every index of the session
- *  dispatching as @p pinned on the CPU; prints what failed and answers a session that tests
- *  false. */
-inline session_t open_session(settings_t const& settings, usearch_cpu_class_t pinned) {
+ *  dispatching on the CPU under @p cpu_class_ceiling; prints what failed and answers a session
+ *  that tests false. */
+inline session_t open_session(settings_t const& settings, usearch_cpu_class_t cpu_class_ceiling) {
     session_t session;
     session.residency = settings.residency;
     session.seed = settings.seed;
-    session.cpu_class = pinned;
-    session.gpu_class = settings.gpu_class;
+    session.cpu_class_ceiling = cpu_class_ceiling;
+    session.gpu_class_ceiling = settings.gpu_class_ceiling;
     session.shard_capacity = settings.shard_capacity.value;
     session.nvme_ram.memory_limit = settings.nvme_ram.value;
     fu_topology_t topology = nullptr;
@@ -620,7 +624,7 @@ inline session_t open_session(settings_t const& settings, usearch_cpu_class_t pi
     else {
         usearch_executor_for_ram_t placement {.executor = &session.executor,
                                               .outcome = &outcome,
-                                              .ram = {nullptr, 0, session.shard_capacity, pinned},
+                                              .ram = {nullptr, 0, session.shard_capacity, cpu_class_ceiling},
                                               .threads = settings.threads.value};
         usearch_executor_for_ram(&placement);
     }
@@ -767,8 +771,8 @@ struct dense_verbs_t {
         usearch_dense_metadata_read_buffer(&arguments);
     }
     static char const* metric_name(metric_t metric) noexcept { return usearch_dense_metric_name(metric); }
-    static metric_t metric_from_name(usearch_bytes_view_t name) noexcept {
-        return usearch_dense_metric_from_name(name);
+    static usearch_status_t metric_from_name(usearch_bytes_view_t name, metric_t* metric) noexcept {
+        return usearch_dense_metric_from_name(name, metric);
     }
     static void load_vram(index_t* index, usearch_executor_t executor, usearch_bytes_view_t path,
                           usearch_vram_options_t vram, geometry_t const&, usearch_outcome_t* outcome) noexcept {
@@ -1019,8 +1023,8 @@ struct sequence_verbs_t {
         usearch_sequence_metadata_read_buffer(&arguments);
     }
     static char const* metric_name(metric_t metric) noexcept { return usearch_sequence_metric_name(metric); }
-    static metric_t metric_from_name(usearch_bytes_view_t name) noexcept {
-        return usearch_sequence_metric_from_name(name);
+    static usearch_status_t metric_from_name(usearch_bytes_view_t name, metric_t* metric) noexcept {
+        return usearch_sequence_metric_from_name(name, metric);
     }
     static void load_vram(index_t* index, usearch_executor_t executor, usearch_bytes_view_t path,
                           usearch_vram_options_t vram, geometry_t const& geometry,
@@ -1218,8 +1222,8 @@ struct shapes_verbs_t {
         usearch_shapes_metadata_read_buffer(&arguments);
     }
     static char const* metric_name(metric_t metric) noexcept { return usearch_shapes_metric_name(metric); }
-    static metric_t metric_from_name(usearch_bytes_view_t name) noexcept {
-        return usearch_shapes_metric_from_name(name);
+    static usearch_status_t metric_from_name(usearch_bytes_view_t name, metric_t* metric) noexcept {
+        return usearch_shapes_metric_from_name(name, metric);
     }
     static void load_vram(index_t* index, usearch_executor_t executor, usearch_bytes_view_t path,
                           usearch_vram_options_t vram, geometry_t const&, usearch_outcome_t* outcome) noexcept {
@@ -2306,26 +2310,37 @@ usearch_outcome_t sweep_recall(handle<verbs_type_>& index, typename verbs_type_:
 
 #pragma region Sweeps
 
-/** Whether a dense index of @p scalar opens in @p residency, pinned to @p cpu_class, on device zero
- *  for VRAM; a probe of what the library compiled and this machine admits. */
-inline bool dense_opens(usearch_residency_t residency, usearch_scalar_t scalar,
-                        usearch_cpu_class_t cpu_class) noexcept {
+/** Whether a dense index of @p scalar opens in @p residency, on device zero for VRAM; a probe of
+ *  what the library compiled and this machine admits. */
+inline bool dense_opens(usearch_residency_t residency, usearch_scalar_t scalar) noexcept {
     usearch_dense_index_t index = nullptr;
     usearch_outcome_t outcome {};
     usearch_dense_metadata_t const geometry {usearch_dense_metric_inner_k, scalar, 64, 0};
     std::int32_t const device = 0;
     if (residency == usearch_residency_vram_k)
         dense_verbs_t::init_vram(&index, geometry, {&device, 1, 0, usearch_gpu_class_unknown_k}, &outcome);
-    else dense_verbs_t::init_ram(&index, geometry, {nullptr, 0, 0, cpu_class}, &outcome);
+    else dense_verbs_t::init_ram(&index, geometry, {}, &outcome);
     dense_verbs_t::free(index);
     return outcome.status == usearch_status_success_k;
+}
+
+/** The class a bf16 RAM index picks under @p cpu_class_ceiling, or unknown if it does not open. */
+inline usearch_cpu_class_t picked_class(usearch_cpu_class_t cpu_class_ceiling) noexcept {
+    usearch_dense_index_t index = nullptr;
+    usearch_outcome_t outcome {};
+    usearch_dense_index_description_t described {};
+    dense_verbs_t::init_ram(&index, {usearch_dense_metric_inner_k, usearch_scalar_bf16_k, 64, 0},
+                            {nullptr, 0, 0, cpu_class_ceiling}, &outcome);
+    if (index) dense_verbs_t::describe(index, nullptr, &described, &outcome);
+    dense_verbs_t::free(index);
+    return outcome.status == usearch_status_success_k ? described.cpu_class : usearch_cpu_class_unknown_k;
 }
 
 /** The residencies this build and machine serve: RAM and NVMe always, and VRAM when a GPU is
  *  listed. */
 inline st::vector<usearch_residency_t> compiled_residencies() noexcept {
     st::vector<usearch_residency_t> residencies;
-    bool const vram = !listed_devices().empty() && dense_opens(usearch_residency_vram_k, usearch_scalar_bf16_k, {});
+    bool const vram = !listed_devices().empty() && dense_opens(usearch_residency_vram_k, usearch_scalar_bf16_k);
     if (st::failed(residencies.push_back(usearch_residency_ram_k)) ||
         st::failed(residencies.push_back(usearch_residency_nvme_k)) ||
         (vram && st::failed(residencies.push_back(usearch_residency_vram_k))))
@@ -2339,43 +2354,38 @@ inline st::vector<usearch_scalar_t> compiled_scalars(usearch_residency_t residen
     st::vector<usearch_scalar_t> scalars;
     for (int code = usearch_scalar_f64_k; code <= usearch_scalar_u1x8_k; ++code) {
         usearch_scalar_t const scalar = static_cast<usearch_scalar_t>(code);
-        if (dense_opens(residency == usearch_residency_vram_k ? residency : usearch_residency_ram_k, scalar, {}) &&
+        if (dense_opens(residency == usearch_residency_vram_k ? residency : usearch_residency_ram_k, scalar) &&
             st::failed(scalars.push_back(usearch_scalar_t {scalar})))
             exit_out_of_memory("the scalars");
     }
     return scalars;
 }
 
-/** The CPU classes the library accepts as pins on this machine, from the portable floor to the last
- *  class the header declares, since a value past it is no @c usearch_cpu_class_t, and a gap in
- *  between spells its name "unknown". */
+/** The CPU classes this machine dispatches as when each is the ceiling, from the portable floor to
+ *  the last class the header declares, since a value past it is no @c usearch_cpu_class_t, and a
+ *  gap in between spells its name "unknown"; a class the machine lacks narrows to another one, so
+ *  the sweep leaves it out. */
 inline st::vector<usearch_cpu_class_t> admitted_classes() noexcept {
     st::vector<usearch_cpu_class_t> classes;
     for (int code = usearch_cpu_class_serial_k; code <= usearch_cpu_class_wasm64_extended_k; ++code) {
         usearch_cpu_class_t const cpu_class = static_cast<usearch_cpu_class_t>(code);
-        if (std::string_view(usearch_cpu_class_name(cpu_class)) != "unknown" &&
-            dense_opens(usearch_residency_ram_k, usearch_scalar_bf16_k, cpu_class) &&
+        if (std::string_view(usearch_cpu_class_name(cpu_class)) != "unknown" && picked_class(cpu_class) == cpu_class &&
             st::failed(classes.push_back(usearch_cpu_class_t {cpu_class})))
             exit_out_of_memory("the CPU classes");
     }
     return classes;
 }
 
-/** The class a pin names for the portable floor: serial, or the one class a monoversioned build
- *  compiles in its place, which an unpinned RAM index then describes. */
+/** The ceiling naming the portable floor: serial, or the one class a monoversioned build compiles
+ *  in its place, which a RAM index without a ceiling then describes. */
 inline usearch_cpu_class_t floor_class() {
-    usearch_dense_index_t index = nullptr;
-    usearch_outcome_t outcome {};
-    usearch_dense_index_description_t described {};
-    dense_verbs_t::init_ram(&index, {usearch_dense_metric_inner_k, usearch_scalar_bf16_k, 64, 0}, {}, &outcome);
-    if (index) dense_verbs_t::describe(index, nullptr, &described, &outcome);
-    dense_verbs_t::free(index);
-    return described.cpu_class == usearch_cpu_class_monoversioned_k ? usearch_cpu_class_monoversioned_k
-                                                                    : usearch_cpu_class_serial_k;
+    return picked_class(usearch_cpu_class_unknown_k) == usearch_cpu_class_monoversioned_k
+               ? usearch_cpu_class_monoversioned_k
+               : usearch_cpu_class_serial_k;
 }
 
-/** One cell of a suite's sweep: where its index lives, what it stores, the class it pins and how
- *  many shards it spans. */
+/** One cell of a suite's sweep: where its index lives, what it stores, the class it dispatches as,
+ *  set as its ceiling, and how many shards it spans. */
 struct sweep_cell_t {
     usearch_residency_t residency = usearch_residency_ram_k;
     usearch_scalar_t scalar = usearch_scalar_unknown_k;
@@ -2389,13 +2399,13 @@ struct sweep_cell_t {
  *      compiled residencies at one and at three shards.
  *
  *  A basic modality passes @c usearch_scalar_unknown_k, whose cells vary the class alone, so the
- *  suite runs its first metric at each and every metric at the best class. A VRAM cell pins no CPU
- *  class, as no CPU walks it.
+ *  suite runs its first metric at each and every metric at the best class. A VRAM cell sets no CPU
+ *  class ceiling, as no CPU walks it.
  */
 inline st::vector<sweep_cell_t> diagonal_sweep(usearch_scalar_t first) noexcept {
     st::vector<sweep_cell_t> cells;
     st::vector<usearch_cpu_class_t> const classes = admitted_classes();
-    usearch_cpu_class_t const pinned_floor = floor_class();
+    usearch_cpu_class_t const floor = floor_class();
     for (usearch_residency_t const residency : compiled_residencies()) {
         st::vector<usearch_scalar_t> scalars;
         if (first != usearch_scalar_unknown_k) scalars = compiled_scalars(residency);
@@ -2408,7 +2418,7 @@ inline st::vector<sweep_cell_t> diagonal_sweep(usearch_scalar_t first) noexcept 
             for (usearch_cpu_class_t const cpu_class : classes)
                 if (st::failed(cells.push_back({residency, first, cpu_class, shards}))) exit_out_of_memory("the sweep");
             for (usearch_scalar_t const scalar : scalars)
-                if (scalar != first && st::failed(cells.push_back({residency, scalar, pinned_floor, shards})))
+                if (scalar != first && st::failed(cells.push_back({residency, scalar, floor, shards})))
                     exit_out_of_memory("the sweep");
         }
     }
@@ -2431,8 +2441,8 @@ inline settings_t settings_of(settings_t const& settings, sweep_cell_t const& ce
         .residency = cell.residency,
         .devices = {},
         .nvme_paths = {},
-        .cpu_class = settings.cpu_class,
-        .gpu_class = settings.gpu_class,
+        .cpu_class_ceiling = settings.cpu_class_ceiling,
+        .gpu_class_ceiling = settings.gpu_class_ceiling,
         .nvme_class = settings.nvme_class,
         .threads = settings.threads,
         .shards = settings.shards,
@@ -2681,7 +2691,7 @@ int run_search_bench(settings_t const& settings, search_bench_settings_t const& 
                      typename verbs_type_::values_t entries, std::size_t base_count,
                      typename verbs_type_::queries_t queries, std::size_t queries_count, std::string_view checkpoint,
                      swept_type_&& on_swept = {}) {
-    session_t session = open_session(settings, settings.cpu_class);
+    session_t session = open_session(settings, settings.cpu_class_ceiling);
     if (!session) return 1;
     handle<verbs_type_> index = open_index<verbs_type_>(session, geometry, settings.shards.value);
     if (!index) return 1;

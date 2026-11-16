@@ -211,10 +211,10 @@ typedef struct shapes_geometry_t {
     size_t values_per_key;
 } shapes_geometry_t;
 
-/** The keyword a verb names its pinned class by: @c cpu_class for host placements, @c gpu_class
- *  for devices. */
-static char const* pinned_name(usearch_py_enum_t const* pinned_classes) {
-    return pinned_classes == &usearch_py_gpu_class ? "gpu_class" : "cpu_class";
+/** The keyword a verb names its class ceiling by: @c cpu_class_ceiling for host placements,
+ *  @c gpu_class_ceiling for devices. */
+static char const* ceiling_name(usearch_py_enum_t const* ceiling_classes) {
+    return ceiling_classes == &usearch_py_gpu_class ? "gpu_class_ceiling" : "cpu_class_ceiling";
 }
 
 /**
@@ -224,9 +224,9 @@ static char const* pinned_name(usearch_py_enum_t const* pinned_classes) {
  */
 static int geometry_parse(char const* verb, PyObject* const* args, Py_ssize_t positional_args_count,
                           PyObject* args_names_tuple, char const* arm_name, PyObject** arm,
-                          usearch_py_enum_t const* pinned_classes, int* pinned, shapes_geometry_t* geometry) {
+                          usearch_py_enum_t const* ceiling_classes, int* ceiling, shapes_geometry_t* geometry) {
     PyObject *metric_object, *quantization_object, *points_object, *connectivity_object, *values_per_key_object;
-    PyObject* pinned_object;
+    PyObject* ceiling_object;
     usearch_py_argument_t const arguments[] = {
         {"metric", &metric_object},
         {"quantization", &quantization_object},
@@ -234,7 +234,7 @@ static int geometry_parse(char const* verb, PyObject* const* args, Py_ssize_t po
         {"connectivity", &connectivity_object},
         {"values_per_key", &values_per_key_object},
         {arm_name, arm},
-        {pinned_name(pinned_classes), &pinned_object},
+        {ceiling_name(ceiling_classes), &ceiling_object},
     };
     memset(geometry, 0, sizeof(*geometry));
     int metric = usearch_shapes_metric_chamfer_k;
@@ -246,7 +246,7 @@ static int geometry_parse(char const* verb, PyObject* const* args, Py_ssize_t po
         usearch_py_size_from_object(points_object, "points", &geometry->points) != 0 ||
         usearch_py_size_from_object(connectivity_object, "connectivity", &geometry->connectivity) != 0 ||
         usearch_py_size_from_object(values_per_key_object, "values_per_key", &geometry->values_per_key) != 0 ||
-        usearch_py_class_from_object(pinned_object, pinned_name(pinned_classes), pinned_classes, pinned) != 0)
+        usearch_py_class_from_object(ceiling_object, ceiling_name(ceiling_classes), ceiling_classes, ceiling) != 0)
         return -1;
     geometry->metric = (usearch_shapes_metric_t)metric;
     if (geometry->quantization == usearch_scalar_unknown_k) geometry->quantization = usearch_scalar_f32_k;
@@ -279,7 +279,7 @@ static PyObject* ShapesIndex_tp_new(PyTypeObject* type, PyObject* args, PyObject
 
 static char const doc_ShapesIndex_init_ram[] =                                                         //
     "``init_ram(metric=ShapesMetric.CHAMFER, quantization=Scalar.F32, *, points=0, connectivity=0,\n"  //
-    "values_per_key=0, memory_domains=None, cpu_class=None) -> ShapesIndex``\n"                        //
+    "values_per_key=0, memory_domains=None, cpu_class_ceiling=None) -> ShapesIndex``\n"                //
     "\n"                                                                                               //
     "Starts an empty, mutable graph in host memory, one shard per named NUMA node.\n"                  //
     "Calls `usearch_shapes_init_ram`.\n"                                                               //
@@ -292,7 +292,8 @@ static char const doc_ShapesIndex_init_ram[] =                                  
     "  values_per_key (int, optional): Entries sharing one key; 0 is unbounded.\n"                     //
     "  memory_domains (Sequence[int], optional): NUMA node IDs to shard across; None derives\n"        //
     "    every node.\n"                                                                                //
-    "  cpu_class (CPUClass, optional): The class to dispatch as; None derives the CPU's own.\n"        //
+    "  cpu_class_ceiling (CPUClass, optional): The newest class dispatch may pick, intersected\n"      //
+    "    with what the machine runs, so a class it lacks narrows; None means no ceiling.\n"            //
     "\n"                                                                                               //
     "Example:\n"                                                                                       //
     "  >>> from array import array\n"                                                                  //
@@ -308,9 +309,9 @@ static PyObject* ShapesIndex_init_ram(PyTypeObject* type, PyObject* const* args,
     PyObject* memory_domains_object;
     int32_t* memory_domains = NULL;
     size_t memory_domains_count = 0;
-    int cpu_class = 0;
+    int cpu_class_ceiling = 0;
     if (geometry_parse("init_ram", args, positional_args_count, args_names_tuple, "memory_domains",
-                       &memory_domains_object, &usearch_py_cpu_class, &cpu_class, &geometry) != 0 ||
+                       &memory_domains_object, &usearch_py_cpu_class, &cpu_class_ceiling, &geometry) != 0 ||
         usearch_py_ordinals_from_object(memory_domains_object, "memory_domains", &memory_domains,
                                         &memory_domains_count) != 0)
         return NULL;
@@ -325,7 +326,7 @@ static PyObject* ShapesIndex_init_ram(PyTypeObject* type, PyObject* const* args,
         .points = geometry.points,
         .connectivity = geometry.connectivity,
         .values_per_key = geometry.values_per_key,
-        .ram = {memory_domains, memory_domains_count, 0, (usearch_cpu_class_t)cpu_class},
+        .ram = {memory_domains, memory_domains_count, 0, (usearch_cpu_class_t)cpu_class_ceiling},
     };
     Py_BEGIN_ALLOW_THREADS;
     usearch_shapes_init_ram(&arguments);
@@ -336,7 +337,7 @@ static PyObject* ShapesIndex_init_ram(PyTypeObject* type, PyObject* const* args,
 
 static char const doc_ShapesIndex_init_vram[] =                                                        //
     "``init_vram(metric=ShapesMetric.CHAMFER, quantization=Scalar.F32, *, points=0, connectivity=0,\n" //
-    "values_per_key=0, devices=None, gpu_class=None) -> ShapesIndex``\n"                               //
+    "values_per_key=0, devices=None, gpu_class_ceiling=None) -> ShapesIndex``\n"                       //
     "\n"                                                                                               //
     "Starts an empty, mutable graph on GPU devices, one shard per named ordinal.\n"                    //
     "Calls `usearch_shapes_init_vram`.\n"                                                              //
@@ -348,7 +349,8 @@ static char const doc_ShapesIndex_init_vram[] =                                 
     "  connectivity (int, optional): Connections per node; 0 derives it.\n"                            //
     "  values_per_key (int, optional): Entries sharing one key; 0 is unbounded.\n"                     //
     "  devices (Sequence[int], optional): GPU ordinals to shard across.\n"                             //
-    "  gpu_class (GPUClass, optional): The class to dispatch as; None derives the devices' own.";
+    "  gpu_class_ceiling (GPUClass, optional): The newest class dispatch may pick, capped below\n"     //
+    "    the best class every device loads, else unsupported; None means no ceiling.";
 
 static PyObject* ShapesIndex_init_vram(PyTypeObject* type, PyObject* const* args, Py_ssize_t positional_args_count,
                                        PyObject* args_names_tuple) {
@@ -356,9 +358,9 @@ static PyObject* ShapesIndex_init_vram(PyTypeObject* type, PyObject* const* args
     PyObject* devices_object;
     int32_t* devices = NULL;
     size_t devices_count = 0;
-    int gpu_class = 0;
+    int gpu_class_ceiling = 0;
     if (geometry_parse("init_vram", args, positional_args_count, args_names_tuple, "devices", &devices_object,
-                       &usearch_py_gpu_class, &gpu_class, &geometry) != 0 ||
+                       &usearch_py_gpu_class, &gpu_class_ceiling, &geometry) != 0 ||
         usearch_py_ordinals_from_object(devices_object, "devices", &devices, &devices_count) != 0)
         return NULL;
 
@@ -372,7 +374,7 @@ static PyObject* ShapesIndex_init_vram(PyTypeObject* type, PyObject* const* args
         .points = geometry.points,
         .connectivity = geometry.connectivity,
         .values_per_key = geometry.values_per_key,
-        .vram = {devices, devices_count, 0, (usearch_gpu_class_t)gpu_class},
+        .vram = {devices, devices_count, 0, (usearch_gpu_class_t)gpu_class_ceiling},
     };
     Py_BEGIN_ALLOW_THREADS;
     usearch_shapes_init_vram(&arguments);
@@ -1501,10 +1503,10 @@ static PyObject* ShapesIndex_save_buffer(PyObject* self, PyObject* const* args, 
  */
 static int load_parse(char const* verb, PyObject* const* args, Py_ssize_t positional_args_count,
                       PyObject* args_names_tuple, char const* source_name, PyObject** source, char const* arm_name,
-                      PyObject** arm, usearch_py_enum_t const* pinned_classes, int* pinned,
+                      PyObject** arm, usearch_py_enum_t const* ceiling_classes, int* ceiling,
                       usearch_executor_t* executor, size_t* values_per_key, PyObject** progress,
                       size_t* progress_steps) {
-    PyObject *executor_object, *values_per_key_object, *progress_object, *progress_steps_object, *pinned_object;
+    PyObject *executor_object, *values_per_key_object, *progress_object, *progress_steps_object, *ceiling_object;
     usearch_py_argument_t const arguments[] = {
         {source_name, source},
         {arm_name, arm},
@@ -1512,11 +1514,11 @@ static int load_parse(char const* verb, PyObject* const* args, Py_ssize_t positi
         {"values_per_key", &values_per_key_object},
         {"progress", &progress_object},
         {"progress_steps", &progress_steps_object},
-        {pinned_name(pinned_classes), &pinned_object},
+        {ceiling_name(ceiling_classes), &ceiling_object},
     };
     if (usearch_py_arguments_parse(verb, args, positional_args_count, args_names_tuple, 1, 1, arguments,
                                    usearch_py_table_size_(arguments)) != 0 ||
-        usearch_py_class_from_object(pinned_object, pinned_name(pinned_classes), pinned_classes, pinned) != 0 ||
+        usearch_py_class_from_object(ceiling_object, ceiling_name(ceiling_classes), ceiling_classes, ceiling) != 0 ||
         usearch_py_optional_executor_from_object(executor_object, executor) != 0 ||
         usearch_py_size_from_object(values_per_key_object, "values_per_key", values_per_key) != 0 ||
         usearch_py_size_from_object(progress_steps_object, "progress_steps", progress_steps) != 0)
@@ -1526,7 +1528,7 @@ static int load_parse(char const* verb, PyObject* const* args, Py_ssize_t positi
 
 static char const doc_ShapesIndex_load_ram[] =                                                      //
     "``load_ram(path, /, *, memory_domains=None, executor=None, values_per_key=0, progress=None,\n" //
-    "progress_steps=0, cpu_class=None) -> ShapesIndex``\n"                                          //
+    "progress_steps=0, cpu_class_ceiling=None) -> ShapesIndex``\n"                                  //
     "\n"                                                                                            //
     "Copies a checkpoint into a new, mutable index in host memory, its geometry read from the\n"    //
     "checkpoint's own headers, every shape turned onto its principal axes again. Name the\n"        //
@@ -1542,7 +1544,8 @@ static char const doc_ShapesIndex_load_ram[] =                                  
     "  progress (callable, optional): Called with (completed, total) parts; returning False\n"      //
     "    stops the read and raises `CancelledError`, creating no index.\n"                          //
     "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"         //
-    "  cpu_class (CPUClass, optional): The class to dispatch as; None derives the CPU's own.";
+    "  cpu_class_ceiling (CPUClass, optional): The newest class dispatch may pick, intersected\n"   //
+    "    with what the machine runs, so a class it lacks narrows; None means no ceiling.";
 
 static PyObject* ShapesIndex_load_ram(PyTypeObject* type, PyObject* const* args, Py_ssize_t positional_args_count,
                                       PyObject* args_names_tuple) {
@@ -1555,10 +1558,10 @@ static PyObject* ShapesIndex_load_ram(PyTypeObject* type, PyObject* const* args,
     int32_t* memory_domains = NULL;
     size_t memory_domains_count = 0;
     PyObject* result = NULL;
-    int cpu_class = 0;
+    int cpu_class_ceiling = 0;
     if (load_parse("load_ram", args, positional_args_count, args_names_tuple, "path", &path_object, "memory_domains",
-                   &memory_domains_object, &usearch_py_cpu_class, &cpu_class, &executor, &values_per_key, &progress,
-                   &progress_steps) != 0 ||
+                   &memory_domains_object, &usearch_py_cpu_class, &cpu_class_ceiling, &executor, &values_per_key,
+                   &progress, &progress_steps) != 0 ||
         usearch_py_path_from_object(path_object, &path, &decoded) != 0 ||
         usearch_py_ordinals_from_object(memory_domains_object, "memory_domains", &memory_domains,
                                         &memory_domains_count) != 0)
@@ -1570,7 +1573,7 @@ static PyObject* ShapesIndex_load_ram(PyTypeObject* type, PyObject* const* args,
         .executor = executor,
         .outcome = &outcome,
         .path = path,
-        .ram = {memory_domains, memory_domains_count, 0, (usearch_cpu_class_t)cpu_class},
+        .ram = {memory_domains, memory_domains_count, 0, (usearch_cpu_class_t)cpu_class_ceiling},
         .values_per_key = values_per_key,
         .progress = usearch_py_progress_registered(progress, progress_steps),
     };
@@ -1586,22 +1589,23 @@ release:
     return result;
 }
 
-static char const doc_ShapesIndex_load_ram_buffer[] =                                         //
-    "``load_ram_buffer(buffer, /, *, memory_domains=None, executor=None, values_per_key=0,\n" //
-    "progress=None, progress_steps=0, cpu_class=None) -> ShapesIndex``\n"                     //
-    "\n"                                                                                      //
-    "Copies a checkpoint out of a buffer into a new, mutable index in host memory, as\n"      //
-    "`load_ram` does from a path.\n"                                                          //
-    "Calls `usearch_shapes_load_ram_buffer`.\n"                                               //
-    "\n"                                                                                      //
-    "Args:\n"                                                                                 //
-    "  buffer (buffer): One serialized checkpoint, such as `save_buffer` returns.\n"          //
-    "  memory_domains (Sequence[int], optional): NUMA node IDs to place shards on.\n"         //
-    "  executor (Executor, optional): The workers the copy fans out over.\n"                  //
-    "  values_per_key (int, optional): Entries sharing one key; 0 is unbounded.\n"            //
-    "  progress (callable, optional): Called with (completed, total) parts.\n"                //
-    "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"   //
-    "  cpu_class (CPUClass, optional): The class to dispatch as; None derives the CPU's own.";
+static char const doc_ShapesIndex_load_ram_buffer[] =                                             //
+    "``load_ram_buffer(buffer, /, *, memory_domains=None, executor=None, values_per_key=0,\n"     //
+    "progress=None, progress_steps=0, cpu_class_ceiling=None) -> ShapesIndex``\n"                 //
+    "\n"                                                                                          //
+    "Copies a checkpoint out of a buffer into a new, mutable index in host memory, as\n"          //
+    "`load_ram` does from a path.\n"                                                              //
+    "Calls `usearch_shapes_load_ram_buffer`.\n"                                                   //
+    "\n"                                                                                          //
+    "Args:\n"                                                                                     //
+    "  buffer (buffer): One serialized checkpoint, such as `save_buffer` returns.\n"              //
+    "  memory_domains (Sequence[int], optional): NUMA node IDs to place shards on.\n"             //
+    "  executor (Executor, optional): The workers the copy fans out over.\n"                      //
+    "  values_per_key (int, optional): Entries sharing one key; 0 is unbounded.\n"                //
+    "  progress (callable, optional): Called with (completed, total) parts.\n"                    //
+    "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"       //
+    "  cpu_class_ceiling (CPUClass, optional): The newest class dispatch may pick, intersected\n" //
+    "    with what the machine runs, so a class it lacks narrows; None means no ceiling.";
 
 static PyObject* ShapesIndex_load_ram_buffer(PyTypeObject* type, PyObject* const* args,
                                              Py_ssize_t positional_args_count, PyObject* args_names_tuple) {
@@ -1614,9 +1618,9 @@ static PyObject* ShapesIndex_load_ram_buffer(PyTypeObject* type, PyObject* const
     int32_t* memory_domains = NULL;
     size_t memory_domains_count = 0;
     PyObject* result = NULL;
-    int cpu_class = 0;
+    int cpu_class_ceiling = 0;
     if (load_parse("load_ram_buffer", args, positional_args_count, args_names_tuple, "buffer", &buffer_object,
-                   "memory_domains", &memory_domains_object, &usearch_py_cpu_class, &cpu_class, &executor,
+                   "memory_domains", &memory_domains_object, &usearch_py_cpu_class, &cpu_class_ceiling, &executor,
                    &values_per_key, &progress, &progress_steps) != 0 ||
         usearch_py_checkpoint_from_object(buffer_object, &backing) != 0 ||
         usearch_py_ordinals_from_object(memory_domains_object, "memory_domains", &memory_domains,
@@ -1629,7 +1633,7 @@ static PyObject* ShapesIndex_load_ram_buffer(PyTypeObject* type, PyObject* const
         .executor = executor,
         .outcome = &outcome,
         .buffer = {(uint8_t const*)backing.buffer.buf, (size_t)backing.buffer.len},
-        .ram = {memory_domains, memory_domains_count, 0, (usearch_cpu_class_t)cpu_class},
+        .ram = {memory_domains, memory_domains_count, 0, (usearch_cpu_class_t)cpu_class_ceiling},
         .values_per_key = values_per_key,
         .progress = usearch_py_progress_registered(progress, progress_steps),
     };
@@ -1645,22 +1649,23 @@ release:
     return result;
 }
 
-static char const doc_ShapesIndex_load_vram[] =                                                //
-    "``load_vram(path, /, *, devices=None, executor=None, values_per_key=0, progress=None,\n"  //
-    "progress_steps=0, gpu_class=None) -> ShapesIndex``\n"                                     //
-    "\n"                                                                                       //
-    "Copies a checkpoint into a new, mutable index on GPU devices, with the placement rules\n" //
-    "of `load_ram`.\n"                                                                         //
-    "Calls `usearch_shapes_load_vram`.\n"                                                      //
-    "\n"                                                                                       //
-    "Args:\n"                                                                                  //
-    "  path (str | bytes | os.PathLike): The manifest, or a single monolith.\n"                //
-    "  devices (Sequence[int], optional): GPU ordinals to place the parts on.\n"               //
-    "  executor (Executor, optional): The streams the upload runs on, one per device.\n"       //
-    "  values_per_key (int, optional): Entries sharing one key; 0 is unbounded.\n"             //
-    "  progress (callable, optional): Called with (completed, total) parts.\n"                 //
-    "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"    //
-    "  gpu_class (GPUClass, optional): The class to dispatch as; None derives the devices' own.";
+static char const doc_ShapesIndex_load_vram[] =                                                    //
+    "``load_vram(path, /, *, devices=None, executor=None, values_per_key=0, progress=None,\n"      //
+    "progress_steps=0, gpu_class_ceiling=None) -> ShapesIndex``\n"                                 //
+    "\n"                                                                                           //
+    "Copies a checkpoint into a new, mutable index on GPU devices, with the placement rules\n"     //
+    "of `load_ram`.\n"                                                                             //
+    "Calls `usearch_shapes_load_vram`.\n"                                                          //
+    "\n"                                                                                           //
+    "Args:\n"                                                                                      //
+    "  path (str | bytes | os.PathLike): The manifest, or a single monolith.\n"                    //
+    "  devices (Sequence[int], optional): GPU ordinals to place the parts on.\n"                   //
+    "  executor (Executor, optional): The streams the upload runs on, one per device.\n"           //
+    "  values_per_key (int, optional): Entries sharing one key; 0 is unbounded.\n"                 //
+    "  progress (callable, optional): Called with (completed, total) parts.\n"                     //
+    "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"        //
+    "  gpu_class_ceiling (GPUClass, optional): The newest class dispatch may pick, capped below\n" //
+    "    the best class every device loads, else unsupported; None means no ceiling.";
 
 static PyObject* ShapesIndex_load_vram(PyTypeObject* type, PyObject* const* args, Py_ssize_t positional_args_count,
                                        PyObject* args_names_tuple) {
@@ -1673,9 +1678,9 @@ static PyObject* ShapesIndex_load_vram(PyTypeObject* type, PyObject* const* args
     int32_t* devices = NULL;
     size_t devices_count = 0;
     PyObject* result = NULL;
-    int gpu_class = 0;
+    int gpu_class_ceiling = 0;
     if (load_parse("load_vram", args, positional_args_count, args_names_tuple, "path", &path_object, "devices",
-                   &devices_object, &usearch_py_gpu_class, &gpu_class, &executor, &values_per_key, &progress,
+                   &devices_object, &usearch_py_gpu_class, &gpu_class_ceiling, &executor, &values_per_key, &progress,
                    &progress_steps) != 0 ||
         usearch_py_path_from_object(path_object, &path, &decoded) != 0 ||
         usearch_py_ordinals_from_object(devices_object, "devices", &devices, &devices_count) != 0)
@@ -1687,7 +1692,7 @@ static PyObject* ShapesIndex_load_vram(PyTypeObject* type, PyObject* const* args
         .executor = executor,
         .outcome = &outcome,
         .path = path,
-        .vram = {devices, devices_count, 0, (usearch_gpu_class_t)gpu_class},
+        .vram = {devices, devices_count, 0, (usearch_gpu_class_t)gpu_class_ceiling},
         .values_per_key = values_per_key,
         .progress = usearch_py_progress_registered(progress, progress_steps),
     };
@@ -1703,21 +1708,22 @@ release:
     return result;
 }
 
-static char const doc_ShapesIndex_load_vram_buffer[] =                                      //
-    "``load_vram_buffer(buffer, /, *, devices=None, executor=None, values_per_key=0,\n"     //
-    "progress=None, progress_steps=0, gpu_class=None) -> ShapesIndex``\n"                   //
-    "\n"                                                                                    //
-    "Copies a checkpoint out of a host buffer into a new, mutable index on GPU devices.\n"  //
-    "Calls `usearch_shapes_load_vram_buffer`.\n"                                            //
-    "\n"                                                                                    //
-    "Args:\n"                                                                               //
-    "  buffer (buffer): One serialized checkpoint, such as `save_buffer` returns.\n"        //
-    "  devices (Sequence[int], optional): GPU ordinals to place shards on.\n"               //
-    "  executor (Executor, optional): The streams the upload runs on, one per device.\n"    //
-    "  values_per_key (int, optional): Entries sharing one key; 0 is unbounded.\n"          //
-    "  progress (callable, optional): Called with (completed, total) parts.\n"              //
-    "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n" //
-    "  gpu_class (GPUClass, optional): The class to dispatch as; None derives the devices' own.";
+static char const doc_ShapesIndex_load_vram_buffer[] =                                             //
+    "``load_vram_buffer(buffer, /, *, devices=None, executor=None, values_per_key=0,\n"            //
+    "progress=None, progress_steps=0, gpu_class_ceiling=None) -> ShapesIndex``\n"                  //
+    "\n"                                                                                           //
+    "Copies a checkpoint out of a host buffer into a new, mutable index on GPU devices.\n"         //
+    "Calls `usearch_shapes_load_vram_buffer`.\n"                                                   //
+    "\n"                                                                                           //
+    "Args:\n"                                                                                      //
+    "  buffer (buffer): One serialized checkpoint, such as `save_buffer` returns.\n"               //
+    "  devices (Sequence[int], optional): GPU ordinals to place shards on.\n"                      //
+    "  executor (Executor, optional): The streams the upload runs on, one per device.\n"           //
+    "  values_per_key (int, optional): Entries sharing one key; 0 is unbounded.\n"                 //
+    "  progress (callable, optional): Called with (completed, total) parts.\n"                     //
+    "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"        //
+    "  gpu_class_ceiling (GPUClass, optional): The newest class dispatch may pick, capped below\n" //
+    "    the best class every device loads, else unsupported; None means no ceiling.";
 
 static PyObject* ShapesIndex_load_vram_buffer(PyTypeObject* type, PyObject* const* args,
                                               Py_ssize_t positional_args_count, PyObject* args_names_tuple) {
@@ -1730,10 +1736,10 @@ static PyObject* ShapesIndex_load_vram_buffer(PyTypeObject* type, PyObject* cons
     int32_t* devices = NULL;
     size_t devices_count = 0;
     PyObject* result = NULL;
-    int gpu_class = 0;
+    int gpu_class_ceiling = 0;
     if (load_parse("load_vram_buffer", args, positional_args_count, args_names_tuple, "buffer", &buffer_object,
-                   "devices", &devices_object, &usearch_py_gpu_class, &gpu_class, &executor, &values_per_key, &progress,
-                   &progress_steps) != 0 ||
+                   "devices", &devices_object, &usearch_py_gpu_class, &gpu_class_ceiling, &executor, &values_per_key,
+                   &progress, &progress_steps) != 0 ||
         usearch_py_checkpoint_from_object(buffer_object, &backing) != 0 ||
         usearch_py_ordinals_from_object(devices_object, "devices", &devices, &devices_count) != 0)
         goto release;
@@ -1744,7 +1750,7 @@ static PyObject* ShapesIndex_load_vram_buffer(PyTypeObject* type, PyObject* cons
         .executor = executor,
         .outcome = &outcome,
         .buffer = {(uint8_t const*)backing.buffer.buf, (size_t)backing.buffer.len},
-        .vram = {devices, devices_count, 0, (usearch_gpu_class_t)gpu_class},
+        .vram = {devices, devices_count, 0, (usearch_gpu_class_t)gpu_class_ceiling},
         .values_per_key = values_per_key,
         .progress = usearch_py_progress_registered(progress, progress_steps),
     };
@@ -1760,26 +1766,31 @@ release:
     return result;
 }
 
-static char const doc_ShapesIndex_view_ram[] =                                                  //
-    "``view_ram(path, /, *, cpu_class=None) -> ShapesIndex``\n"                                 //
-    "\n"                                                                                        //
-    "Serves a checkpoint in place through a memory mapping, as a read-only index whose every\n" //
-    "mutating verb raises `ReadOnlyError`.\n"                                                   //
-    "Calls `usearch_shapes_view_ram`.\n"                                                        //
-    "\n"                                                                                        //
-    "Args:\n"                                                                                   //
-    "  path (str | bytes | os.PathLike): The manifest, or a single monolith.\n"                 //
-    "  cpu_class (CPUClass, optional): The class to dispatch as; None derives the CPU's own.";
+static char const doc_ShapesIndex_view_ram[] =                                                    //
+    "``view_ram(path, /, *, cpu_class_ceiling=None) -> ShapesIndex``\n"                           //
+    "\n"                                                                                          //
+    "Serves a checkpoint in place through a memory mapping, as a read-only index whose every\n"   //
+    "mutating verb raises `ReadOnlyError`.\n"                                                     //
+    "Calls `usearch_shapes_view_ram`.\n"                                                          //
+    "\n"                                                                                          //
+    "Args:\n"                                                                                     //
+    "  path (str | bytes | os.PathLike): The manifest, or a single monolith.\n"                   //
+    "  cpu_class_ceiling (CPUClass, optional): The newest class dispatch may pick, intersected\n" //
+    "    with what the machine runs, so a class it lacks narrows; None means no ceiling.";
 
 static PyObject* ShapesIndex_view_ram(PyTypeObject* type, PyObject* const* args, Py_ssize_t positional_args_count,
                                       PyObject* args_names_tuple) {
-    PyObject *path_object, *cpu_class_object, *decoded = NULL;
-    usearch_py_argument_t const arguments[] = {{"path", &path_object}, {"cpu_class", &cpu_class_object}};
+    PyObject *path_object, *cpu_class_ceiling_object, *decoded = NULL;
+    usearch_py_argument_t const arguments[] = {
+        {"path", &path_object},
+        {"cpu_class_ceiling", &cpu_class_ceiling_object},
+    };
     usearch_bytes_view_t path;
-    int cpu_class = 0;
+    int cpu_class_ceiling = 0;
     if (usearch_py_arguments_parse("view_ram", args, positional_args_count, args_names_tuple, 1, 1, arguments,
                                    usearch_py_table_size_(arguments)) != 0 ||
-        usearch_py_class_from_object(cpu_class_object, "cpu_class", &usearch_py_cpu_class, &cpu_class) != 0 ||
+        usearch_py_class_from_object(cpu_class_ceiling_object, "cpu_class_ceiling", &usearch_py_cpu_class,
+                                     &cpu_class_ceiling) != 0 ||
         usearch_py_path_from_object(path_object, &path, &decoded) != 0)
         return NULL;
 
@@ -1789,7 +1800,7 @@ static PyObject* ShapesIndex_view_ram(PyTypeObject* type, PyObject* const* args,
         .index = &handle,
         .outcome = &outcome,
         .path = path,
-        .ram = {NULL, 0, 0, (usearch_cpu_class_t)cpu_class},
+        .ram = {NULL, 0, 0, (usearch_cpu_class_t)cpu_class_ceiling},
     };
     Py_BEGIN_ALLOW_THREADS;
     usearch_shapes_view_ram(&view_arguments);
@@ -1798,37 +1809,39 @@ static PyObject* ShapesIndex_view_ram(PyTypeObject* type, PyObject* const* args,
     return index_adopt(type, handle, &outcome);
 }
 
-static char const doc_ShapesIndex_view_nvme[] =                                               //
-    "``view_nvme(path, /, *, paths=None, executor=None, cpu_class=None) -> ShapesIndex``\n"   //
-    "\n"                                                                                      //
-    "Serves a checkpoint in place from NVMe drives as a read-only index, every later call\n"  //
-    "reading it through its executor's engines.\n"                                            //
-    "Calls `usearch_shapes_view_nvme`.\n"                                                     //
-    "\n"                                                                                      //
-    "Args:\n"                                                                                 //
-    "  path (str | bytes | os.PathLike): The manifest, or a single monolith.\n"               //
-    "  paths (Sequence[str | bytes | PathLike], optional): Devices or directories to serve\n" //
-    "    the parts from; None serves each where its manifest points.\n"                       //
-    "  executor (Executor, optional): The NVMe executor whose rings read the headers.\n"      //
-    "  cpu_class (CPUClass, optional): The class to dispatch as; None derives the CPU's own.";
+static char const doc_ShapesIndex_view_nvme[] =                                                     //
+    "``view_nvme(path, /, *, paths=None, executor=None, cpu_class_ceiling=None) -> ShapesIndex``\n" //
+    "\n"                                                                                            //
+    "Serves a checkpoint in place from NVMe drives as a read-only index, every later call\n"        //
+    "reading it through its executor's engines.\n"                                                  //
+    "Calls `usearch_shapes_view_nvme`.\n"                                                           //
+    "\n"                                                                                            //
+    "Args:\n"                                                                                       //
+    "  path (str | bytes | os.PathLike): The manifest, or a single monolith.\n"                     //
+    "  paths (Sequence[str | bytes | PathLike], optional): Devices or directories to serve\n"       //
+    "    the parts from; None serves each where its manifest points.\n"                             //
+    "  executor (Executor, optional): The NVMe executor whose rings read the headers.\n"            //
+    "  cpu_class_ceiling (CPUClass, optional): The newest class dispatch may pick, intersected\n"   //
+    "    with what the machine runs, so a class it lacks narrows; None means no ceiling.";
 
 static PyObject* ShapesIndex_view_nvme(PyTypeObject* type, PyObject* const* args, Py_ssize_t positional_args_count,
                                        PyObject* args_names_tuple) {
-    PyObject *path_object, *paths_object, *executor_object, *cpu_class_object, *decoded = NULL, *result = NULL;
+    PyObject *path_object, *paths_object, *executor_object, *cpu_class_ceiling_object, *decoded = NULL, *result = NULL;
     usearch_py_argument_t const arguments[] = {
         {"path", &path_object},
         {"paths", &paths_object},
         {"executor", &executor_object},
-        {"cpu_class", &cpu_class_object},
+        {"cpu_class_ceiling", &cpu_class_ceiling_object},
     };
     usearch_bytes_view_t path;
     usearch_py_paths_t paths = {0};
     usearch_executor_t executor = NULL;
-    int cpu_class = 0;
+    int cpu_class_ceiling = 0;
     if (usearch_py_arguments_parse("view_nvme", args, positional_args_count, args_names_tuple, 1, 1, arguments,
                                    usearch_py_table_size_(arguments)) != 0 ||
         usearch_py_optional_executor_from_object(executor_object, &executor) != 0 ||
-        usearch_py_class_from_object(cpu_class_object, "cpu_class", &usearch_py_cpu_class, &cpu_class) != 0 ||
+        usearch_py_class_from_object(cpu_class_ceiling_object, "cpu_class_ceiling", &usearch_py_cpu_class,
+                                     &cpu_class_ceiling) != 0 ||
         usearch_py_path_from_object(path_object, &path, &decoded) != 0 ||
         usearch_py_paths_from_object(paths_object, &paths) != 0)
         goto release;
@@ -1840,7 +1853,7 @@ static PyObject* ShapesIndex_view_nvme(PyTypeObject* type, PyObject* const* args
         .executor = executor,
         .outcome = &outcome,
         .path = path,
-        .nvme = {paths.views, paths.count, (usearch_cpu_class_t)cpu_class},
+        .nvme = {paths.views, paths.count, (usearch_cpu_class_t)cpu_class_ceiling},
     };
     Py_BEGIN_ALLOW_THREADS;
     usearch_shapes_view_nvme(&view_arguments);

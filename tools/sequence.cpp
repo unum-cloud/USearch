@@ -49,8 +49,8 @@ int modality_insert(sequence_verbs_t, world_t& world, int argc, char const* cons
         world, argc, argv, "usearch sequence insert <texts> --save <address> [flags]", flags,
         [&](std::string_view path,
             checkpoint_settings_t const& settings) -> std::optional<checkpoint_entries<sequence_verbs_t>> {
-            usearch_sequence_metric_t const metric = usearch_sequence_metric_from_name(bytes_view(metric_name));
-            if (metric == usearch_sequence_metric_unknown_k) {
+            usearch_sequence_metric_t metric = usearch_sequence_metric_unknown_k;
+            if (usearch_sequence_metric_from_name(bytes_view(metric_name), &metric) != usearch_status_success_k) {
                 fmt::println(stderr, "--metric=\"{}\" names no metric", metric_name);
                 return std::nullopt;
             }

@@ -42,8 +42,8 @@ int bench_shapes_index_search(int argc, char const* const* argv) {
     print(settings);
 
     std::string_view const metric_name = search.metric_name.empty() ? "chamfer" : search.metric_name;
-    usearch_shapes_metric_t const metric = usearch_shapes_metric_from_name(bytes_view(metric_name));
-    if (metric == usearch_shapes_metric_unknown_k)
+    usearch_shapes_metric_t metric = usearch_shapes_metric_unknown_k;
+    if (usearch_shapes_metric_from_name(bytes_view(metric_name), &metric) != usearch_status_success_k)
         return fmt::println(stderr, "--metric=\"{}\" names no shapes kind", metric_name), 1;
 
     point_clouds_t clouds;

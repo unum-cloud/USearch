@@ -404,7 +404,7 @@ The dense metric kinds are:
 - `usearch_dense_metric_hamming_k` - Hamming distance, $\sum_i a_i \oplus b_i$, over `usearch_scalar_u1x8_k` bit sets.
 - `usearch_dense_metric_jaccard_k` - Jaccard distance, $\frac{\sum_i a_i \oplus b_i}{\sum_i a_i \lor b_i}$, in $[0, 1]$, over `usearch_scalar_u1x8_k` bit sets.
 
-`usearch_scalar_name`, `usearch_dense_metric_name` and their `_from_name` inverses spell these sets the way every binding parses them.
+`usearch_scalar_name`, `usearch_dense_metric_name` and their `_from_name` inverses spell these sets the way every binding parses them; an inverse writes through its out-parameter and refuses a name it does not know with `usearch_status_invalid_argument_k`, leaving the output as it was.
 
 ### Search
 
@@ -739,6 +739,8 @@ usearch_dense_health(&(usearch_dense_health_t) {
 ```
 
 `usearch_capabilities_compiled` and `usearch_capabilities_available` name the SIMD and GPU capabilities the library was built with and the machine offers, and `description.cpu_class` or `description.gpu_class` names the class an index dispatched to, which `usearch_cpu_class_name` and `usearch_gpu_class_name` spell.
+`cpu_class_ceiling` in `usearch_ram_options_t` and `usearch_nvme_options_t` caps that pick: dispatch takes the newest compiled class whose capabilities fit both the ceiling and what the CPU runs, so a class the CPU lacks narrows the pick rather than refusing it.
+`gpu_class_ceiling` in `usearch_vram_options_t` caps the best class every named device loads, and a ceiling no named device loads answers `usearch_status_unsupported_k`.
 `usearch_version` reports the linked library's version, which may differ from the `USEARCH_VERSION_MAJOR` family of macros the caller compiled against.
 
 ## Sequence Indexes

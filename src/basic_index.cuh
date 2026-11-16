@@ -172,7 +172,7 @@ basic_verbs<traits_type_, vendored_residency_t::vram_nvidia_k> const* pick_basic
  *      @p handle_type_ the ladder picks, then hands it to @p fill, as
  *      <tt>fill(punned_basic_index) → bool</tt>; null once @p outcome records why not.
  *
- *  The variant's class is one the machine admits and @p ram 's pinned class holds, and it serves
+ *  The variant's class is one the machine runs under @p ram 's class ceiling, and it serves
  *  the geometry. A RAM variant places its shards as @p ram names.
  */
 template <typename handle_type_, vendored_residency_t residency_, typename arguments_type_, typename fill_type_>
@@ -181,9 +181,9 @@ handle_type_* make_basic_cpu_handle(typename handle_type_::traits_t::geometry_t&
                                     usearch_outcome_t* outcome, fill_type_&& fill) noexcept {
     using traits_t = typename handle_type_::traits_t;
     if (!traits_t::admits(geometry, arguments, outcome)) return nullptr;
-    auto const [ceiling, pick_status] = pick_cpu_ceiling(ram.cpu_class);
+    auto const [ceiling, pick_status] = pick_cpu_ceiling(ram.cpu_class_ceiling);
     if (failed(pick_status))
-        return propagate_error(pick_status, outcome, "The CPU does not admit the pinned class"), nullptr;
+        return propagate_error(pick_status, outcome, "No compiled class fits under the CPU class ceiling"), nullptr;
     basic_verbs<traits_t, residency_> const* const verbs = pick_basic_cpu_variant<traits_t, residency_>(
         cpu_ladder_t {}, geometry, ceiling);
     if (!verbs)
@@ -268,9 +268,9 @@ status_t place_shards(punned_basic_index<traits_type_, residency_> const& punned
  *      records why not, as for a geometry no device kit serves.
  *
  *  It calls <tt>fill(punned_basic_index) → bool</tt>. The variant is the first on the modality's GPU
- *  ladder at or under the best class every named device loads under the pin, whose unit they all
- *  load and which serves the geometry. The shards are placed once the variant holds its geometry,
- *  since each one is built as the geometry names.
+ *  ladder at or under the best class every named device loads under the ceiling, whose unit they
+ *  all load and which serves the geometry. The shards are placed once the variant holds its
+ *  geometry, since each one is built as the geometry names.
  */
 template <typename handle_type_, typename arguments_type_, typename fill_type_>
 handle_type_* make_basic_vram_handle(typename handle_type_::traits_t::geometry_t& geometry,
@@ -289,7 +289,8 @@ handle_type_* make_basic_vram_handle(typename handle_type_::traits_t::geometry_t
     if (placed_status == status_t::config_mismatch_k)
         return propagate_error(placed_status, outcome, "The devices must share one vendor"), nullptr;
     if (failed(placed_status))
-        return propagate_error(placed_status, outcome, "The devices share no class this build carries under the pin"),
+        return propagate_error(placed_status, outcome,
+                               "The devices share no class this build carries under the ceiling"),
                nullptr;
     basic_verbs<traits_t, vendored_residency_t::vram_nvidia_k> const* const verbs = pick_basic_gpu_variant<traits_t>(
         typename traits_t::gpu_ladder_t {}, geometry, placement);
@@ -401,7 +402,7 @@ void basic_view_ram(arguments_type_* arguments) noexcept {
         return propagate_error(punned.verbs.view(punned.variant, path, {}, nullptr), outcome);
     };
     usearch_ram_options_t pinned {};
-    pinned.cpu_class = arguments->ram.cpu_class;
+    pinned.cpu_class_ceiling = arguments->ram.cpu_class_ceiling;
     handle_t* const index = make_basic_cpu_handle<handle_t, vendored_residency_t::ram_k>(geometry, *arguments, pinned,
                                                                                          outcome, view);
     if (index) *arguments->index = index;
@@ -436,7 +437,7 @@ void basic_view_nvme(arguments_type_* arguments) noexcept {
         return executor && propagate_error(punned.verbs.view(punned.variant, path, to_span(paths), executor), outcome);
     };
     usearch_ram_options_t pinned {};
-    pinned.cpu_class = nvme.cpu_class;
+    pinned.cpu_class_ceiling = nvme.cpu_class_ceiling;
     handle_t* const index = make_basic_cpu_handle<handle_t, vendored_residency_t::nvme_k>(geometry, *arguments, pinned,
                                                                                           outcome, view);
     if (index) *arguments->index = index;

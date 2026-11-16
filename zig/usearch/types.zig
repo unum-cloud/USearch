@@ -28,7 +28,7 @@ extern fn usearch_arena_describe(arguments: *usearch_arena_describe_t) void;
 extern fn usearch_status_name(status: Status) [*:0]const u8;
 extern fn usearch_status_from_name(name: BytesView, status: *Status) Status;
 extern fn usearch_scalar_name(scalar: Scalar) [*:0]const u8;
-extern fn usearch_scalar_from_name(name: BytesView) Scalar;
+extern fn usearch_scalar_from_name(name: BytesView, scalar: *Scalar) Status;
 extern fn usearch_residency_name(residency: Residency) [*:0]const u8;
 extern fn usearch_residency_from_name(name: BytesView, residency: *Residency) Status;
 extern fn usearch_traversal_name(traversal: Traversal) [*:0]const u8;
@@ -43,9 +43,9 @@ extern fn usearch_version_name() [*:0]const u8;
 extern fn usearch_cpu_class_name(cpu_class: usearch_cpu_class_t) [*:0]const u8;
 extern fn usearch_gpu_class_name(gpu_class: usearch_gpu_class_t) [*:0]const u8;
 
-/// Mirrors `usearch_cpu_class_t`, whose zero derives the CPU's own class.
+/// Mirrors `usearch_cpu_class_t`, whose zero as a ceiling means none.
 const usearch_cpu_class_t = c_int;
-/// Mirrors `usearch_gpu_class_t`, whose zero derives the devices' own class.
+/// Mirrors `usearch_gpu_class_t`, whose zero as a ceiling means none.
 const usearch_gpu_class_t = c_int;
 /// Mirrors `usearch_nvme_class_t`, whose zero derives the devices' own class.
 const usearch_nvme_class_t = c_int;
@@ -200,12 +200,6 @@ pub fn refuseInto(diagnostics: ?*Outcome, status: Status, message: [*:0]const u8
     return refuse(status);
 }
 
-/// The value a C `_from_name` table read back, or null when its own spelling of it differs, since
-/// the tables answer a fallback rather than a refusal for text they do not know.
-fn spelled(comptime Enum: type, value: Enum, text: []const u8) ?Enum {
-    return if (std.mem.eql(u8, value.name(), text)) value else null;
-}
-
 /// Distance or similarity score between two entries, in the metric of the index that produced it.
 pub const Distance = f64;
 
@@ -356,7 +350,8 @@ pub const Scalar = enum(c_int) {
 
     /// Reads a spelling back, or null when no kind spells it. Calls `usearch_scalar_from_name`.
     pub fn fromName(text: []const u8) ?Scalar {
-        return spelled(Scalar, usearch_scalar_from_name(.of(text)), text);
+        var scalar: Scalar = undefined;
+        return if (usearch_scalar_from_name(.of(text), &scalar) == .success) scalar else null;
     }
 };
 
@@ -559,8 +554,9 @@ const usearch_ram_options_t = extern struct {
     memory_domains_count: usize = 0,
     /// Entries one shard holds before the index opens another shard generation; zero derives.
     shard_capacity: usize = 0,
-    /// The class to dispatch as; zero derives the CPU's own.
-    cpu_class: usearch_cpu_class_t = 0,
+    /// The newest class dispatch may pick, intersected with what the machine runs, so a class the
+    /// machine lacks narrows rather than refuses; zero means no ceiling.
+    cpu_class_ceiling: usearch_cpu_class_t = 0,
     /// Bytes an NVMe view's key tables may take on each named domain; zero sets no ceiling.
     memory_limit: usize = 0,
 
@@ -577,8 +573,9 @@ const usearch_vram_options_t = extern struct {
     devices_count: usize = 0,
     /// Entries one shard holds before the index opens another shard generation; zero derives.
     shard_capacity: usize = 0,
-    /// The class to dispatch as; zero derives the devices' own.
-    gpu_class: usearch_gpu_class_t = 0,
+    /// The newest class dispatch may pick, capped below the best class every named device loads; a
+    /// ceiling no named device loads is refused as unsupported; zero means no ceiling.
+    gpu_class_ceiling: usearch_gpu_class_t = 0,
 
     pub fn of(devices: []const i32) usearch_vram_options_t {
         return .{ .devices = devices.ptr, .devices_count = devices.len };
@@ -591,8 +588,9 @@ const usearch_nvme_options_t = extern struct {
     paths: ?[*]const BytesView = null,
     /// Entries in `paths`; zero derives.
     paths_count: usize = 0,
-    /// The class to dispatch as; zero derives the CPU's own.
-    cpu_class: usearch_cpu_class_t = 0,
+    /// The newest class dispatch may pick, intersected with what the machine runs, so a class the
+    /// machine lacks narrows rather than refuses; zero means no ceiling.
+    cpu_class_ceiling: usearch_cpu_class_t = 0,
 
     pub fn of(paths: []const BytesView) usearch_nvme_options_t {
         return .{ .paths = paths.ptr, .paths_count = paths.len };
@@ -1108,7 +1106,9 @@ fn expectSpellings(comptime Enum: type) !void {
         var dashed: [field.name.len]u8 = field.name[0..].*;
         std.mem.replaceScalar(u8, &dashed, '_', '-');
         try std.testing.expectEqualStrings(&dashed, value.name());
-        try std.testing.expectEqual(@as(?Enum, value), Enum.fromName(&dashed));
+        // "unknown" spells the zero enumerator, which the library refuses to read back.
+        const expected: ?Enum = if (comptime std.mem.eql(u8, field.name, "unknown")) null else value;
+        try std.testing.expectEqual(expected, Enum.fromName(&dashed));
     }
 }
 

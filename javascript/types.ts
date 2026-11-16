@@ -366,16 +366,18 @@ export interface ExecutorForRamConfig {
   memoryDomains?: number[];
   /** Workers to spawn; absent takes 7/8 of the cores the domains carry. */
   threads?: number;
-  /** The CPU class to dispatch as by its canonical name; absent dispatches as the machine. */
-  cpuClass?: string;
+  /** The newest CPU class dispatch may pick, by canonical name, intersected with what the machine
+   *  runs, so a class it lacks narrows rather than refuses; absent means no ceiling. */
+  cpuClassCeiling?: string;
 }
 
 /** Where the borrowed pool of a RAM executor is placed. */
 export interface ExecutorOnPoolConfig {
   /** NUMA node IDs of the indexes it will drive; absent derives every node. */
   memoryDomains?: number[];
-  /** The CPU class to dispatch as by its canonical name; absent dispatches as the machine. */
-  cpuClass?: string;
+  /** The newest CPU class dispatch may pick, by canonical name, intersected with what the machine
+   *  runs, so a class it lacks narrows rather than refuses; absent means no ceiling. */
+  cpuClassCeiling?: string;
 }
 
 /** Which devices a VRAM executor drives, and on which streams. */
@@ -386,8 +388,10 @@ export interface ExecutorForVramConfig {
   streams?: bigint[];
   /** Ceiling on scratch bytes per device; absent lets scratch grow as geometry asks. */
   scratchLimit?: number;
-  /** The GPU class to dispatch as by its canonical name; absent dispatches as the devices. */
-  gpuClass?: string;
+  /** The newest GPU class dispatch may pick, by canonical name, capped below the best class every
+   *  named device loads; a ceiling no named device loads is refused as unsupported; absent means
+   *  no ceiling. */
+  gpuClassCeiling?: string;
 }
 
 /** Where an NVMe executor submits its reads. */
@@ -396,8 +400,9 @@ export interface ExecutorForNvmeConfig {
   paths?: string[];
   /** Workers to spawn, one submission ring apiece; absent derives from the devices' queue capabilities. */
   threads?: number;
-  /** The CPU class to dispatch as by its canonical name; absent dispatches as the machine. */
-  cpuClass?: string;
+  /** The newest CPU class dispatch may pick, by canonical name, intersected with what the machine
+   *  runs, so a class it lacks narrows rather than refuses; absent means no ceiling. */
+  cpuClassCeiling?: string;
 }
 
 /** The workers a fanned-out verb runs on, shared across indexes.

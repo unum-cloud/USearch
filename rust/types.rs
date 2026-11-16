@@ -227,7 +227,7 @@ pub struct usearch_ram_options_t {
     pub memory_domains: *const i32,
     pub memory_domains_count: usize,
     pub shard_capacity: usize,
-    pub cpu_class: usearch_cpu_class_t,
+    pub cpu_class_ceiling: usearch_cpu_class_t,
     pub memory_limit: usize,
 }
 
@@ -237,7 +237,7 @@ pub struct usearch_vram_options_t {
     pub devices: *const i32,
     pub devices_count: usize,
     pub shard_capacity: usize,
-    pub gpu_class: usearch_gpu_class_t,
+    pub gpu_class_ceiling: usearch_gpu_class_t,
 }
 
 #[repr(C)]
@@ -245,13 +245,13 @@ pub struct usearch_vram_options_t {
 pub struct usearch_nvme_options_t {
     pub paths: *const usearch_bytes_view_t,
     pub paths_count: usize,
-    pub cpu_class: usearch_cpu_class_t,
+    pub cpu_class_ceiling: usearch_cpu_class_t,
 }
 
-/// The CPU class a placement dispatches as; zero derives the CPU's own.
+/// The CPU class a placement may dispatch as, or its ceiling; zero derives the CPU's own.
 pub type usearch_cpu_class_t = c_int;
 
-/// The GPU class a placement dispatches as; zero derives the devices' own.
+/// The GPU class a placement may dispatch as, or its ceiling; zero derives the devices' own.
 pub type usearch_gpu_class_t = c_int;
 
 /// The NVMe class an executor submits through; zero derives the fastest the host admits.
@@ -380,7 +380,7 @@ unsafe extern "C" {
     pub fn usearch_status_name(status: usearch_status_t) -> *const c_char;
     pub fn usearch_status_from_name(name: usearch_bytes_view_t, status: *mut usearch_status_t) -> usearch_status_t;
     pub fn usearch_scalar_name(scalar: usearch_scalar_t) -> *const c_char;
-    pub fn usearch_scalar_from_name(name: usearch_bytes_view_t) -> usearch_scalar_t;
+    pub fn usearch_scalar_from_name(name: usearch_bytes_view_t, scalar: *mut usearch_scalar_t) -> usearch_status_t;
     pub fn usearch_residency_name(residency: usearch_residency_t) -> *const c_char;
     pub fn usearch_residency_from_name(
         name: usearch_bytes_view_t,
@@ -413,7 +413,10 @@ unsafe extern "C" {
         gpu_class: *mut usearch_gpu_class_t,
     ) -> usearch_status_t;
     pub fn usearch_nvme_class_name(nvme_class: usearch_nvme_class_t) -> *const c_char;
-    pub fn usearch_nvme_class_from_name(name: usearch_bytes_view_t) -> usearch_nvme_class_t;
+    pub fn usearch_nvme_class_from_name(
+        name: usearch_bytes_view_t,
+        nvme_class: *mut usearch_nvme_class_t,
+    ) -> usearch_status_t;
 
     pub fn usearch_keys_view_from_arrow(
         schema: *const ArrowSchema,
@@ -647,22 +650,6 @@ pub(crate) fn spelling(name: unsafe extern "C" fn(c_int) -> *const c_char, value
     unsafe { static_string(name(value)) }
 }
 
-/// Reads a spelling back through its C `usearch_*_from_name`, refusing one the C table spells
-/// otherwise, since every such inverse answers a default for a name it does not know.
-pub(crate) fn read_spelling<Value>(
-    text: &str,
-    from_name: unsafe extern "C" fn(usearch_bytes_view_t) -> c_int,
-    name: unsafe extern "C" fn(c_int) -> *const c_char,
-    lift: fn(c_int) -> Option<Value>,
-) -> Result<Value> {
-    let value = unsafe { from_name(text.as_bytes().into()) };
-    match spelling(name, value) == text {
-        true => lift(value),
-        false => None,
-    }
-    .ok_or(fail(Status::InvalidArgument, "no enumerator is spelled that way"))
-}
-
 /// Reads `text` through a parser that answers a status, then lifts the enumerator it wrote.
 pub(crate) fn read_named<Value>(
     text: &str,
@@ -874,7 +861,7 @@ impl FromStr for Scalar {
 
     /// Reads a scalar back from the name `Display` writes, refusing any other.
     fn from_str(text: &str) -> Result<Self> {
-        read_spelling(text, usearch_scalar_from_name, usearch_scalar_name, Scalar::from_raw)
+        read_named(text, usearch_scalar_from_name, Scalar::from_raw)
     }
 }
 
@@ -1393,7 +1380,7 @@ impl ArrowExport<'_> {
 // region: Classes
 
 /// The CPU families USearch ships tuned variants for: dispatch reports its pick in this
-/// vocabulary, and a RAM or NVMe placement or executor may pin one.
+/// vocabulary, and a RAM or NVMe placement or executor may cap dispatch at one.
 #[repr(i32)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 #[non_exhaustive]
@@ -1449,7 +1436,7 @@ impl fmt::Display for CPUClass {
 }
 
 /// The GPU families USearch ships tuned variants for, the device twin of [`CPUClass`]: a VRAM
-/// placement or executor may pin one.
+/// placement or executor may cap dispatch at one.
 #[repr(i32)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 #[non_exhaustive]
@@ -1491,34 +1478,37 @@ impl fmt::Display for GPUClass {
 
 // region: Placements
 
-/// The memory domains a RAM placement or executor names, and the class it dispatches as.
-pub(crate) fn ram_options(memory_domains: &[i32], cpu_class: Option<CPUClass>) -> usearch_ram_options_t {
+/// The memory domains a RAM placement or executor names, and the ceiling on its class.
+pub(crate) fn ram_options(memory_domains: &[i32], cpu_class_ceiling: Option<CPUClass>) -> usearch_ram_options_t {
     usearch_ram_options_t {
         memory_domains: memory_domains.as_ptr(),
         memory_domains_count: memory_domains.len(),
         shard_capacity: 0,
-        cpu_class: cpu_class.map_or(0, |cpu_class| cpu_class as usearch_cpu_class_t),
+        cpu_class_ceiling: cpu_class_ceiling.map_or(0, |cpu_class_ceiling| cpu_class_ceiling as usearch_cpu_class_t),
         memory_limit: 0,
     }
 }
 
-/// The devices a VRAM placement or executor names, and the class it dispatches as.
-pub(crate) fn vram_options(devices: &[i32], gpu_class: Option<GPUClass>) -> usearch_vram_options_t {
+/// The devices a VRAM placement or executor names, and the ceiling on its class.
+pub(crate) fn vram_options(devices: &[i32], gpu_class_ceiling: Option<GPUClass>) -> usearch_vram_options_t {
     usearch_vram_options_t {
         devices: devices.as_ptr(),
         devices_count: devices.len(),
         shard_capacity: 0,
-        gpu_class: gpu_class.map_or(0, |gpu_class| gpu_class as usearch_gpu_class_t),
+        gpu_class_ceiling: gpu_class_ceiling.map_or(0, |gpu_class_ceiling| gpu_class_ceiling as usearch_gpu_class_t),
     }
 }
 
 /// The paths an NVMe placement or executor names, borrowing `views`, which must outlive the call,
-/// and the class it dispatches as.
-pub(crate) fn nvme_options(views: &[usearch_bytes_view_t], cpu_class: Option<CPUClass>) -> usearch_nvme_options_t {
+/// and the ceiling on the class it dispatches as.
+pub(crate) fn nvme_options(
+    views: &[usearch_bytes_view_t],
+    cpu_class_ceiling: Option<CPUClass>,
+) -> usearch_nvme_options_t {
     usearch_nvme_options_t {
         paths: views.as_ptr(),
         paths_count: views.len(),
-        cpu_class: cpu_class.map_or(0, |cpu_class| cpu_class as usearch_cpu_class_t),
+        cpu_class_ceiling: cpu_class_ceiling.map_or(0, |cpu_class_ceiling| cpu_class_ceiling as usearch_cpu_class_t),
     }
 }
 
@@ -1851,15 +1841,16 @@ impl Executor {
     /// Zero `threads` takes 7/8 of the cores those domains carry, since full occupancy starves
     /// the ordered publication path.
     ///
-    /// A pinned `cpu_class` narrows the threads' waiters and atomics to that class's.
-    pub fn for_ram(memory_domains: &[i32], cpu_class: Option<CPUClass>, threads: usize) -> Result<Self> {
+    /// A `cpu_class_ceiling` caps the class the threads' waiters and atomics dispatch as,
+    /// narrowing to what the machine runs.
+    pub fn for_ram(memory_domains: &[i32], cpu_class_ceiling: Option<CPUClass>, threads: usize) -> Result<Self> {
         let mut handle = ptr::null_mut();
         let mut outcome = usearch_outcome_t::default();
         unsafe {
             usearch_executor_for_ram(&mut usearch_executor_for_ram_t {
                 executor: &mut handle,
                 outcome: &mut outcome,
-                ram: ram_options(memory_domains, cpu_class),
+                ram: ram_options(memory_domains, cpu_class_ceiling),
                 threads,
             })
         };
@@ -1872,14 +1863,18 @@ impl Executor {
     ///
     /// # Safety
     /// `pool` must address a live ForkUnion `fu_pool_t` that outlives the executor.
-    pub unsafe fn on_pool(memory_domains: &[i32], cpu_class: Option<CPUClass>, pool: *mut c_void) -> Result<Self> {
+    pub unsafe fn on_pool(
+        memory_domains: &[i32],
+        cpu_class_ceiling: Option<CPUClass>,
+        pool: *mut c_void,
+    ) -> Result<Self> {
         unsafe {
             let mut handle = ptr::null_mut();
             let mut outcome = usearch_outcome_t::default();
             usearch_executor_on_pool(&mut usearch_executor_on_pool_t {
                 executor: &mut handle,
                 outcome: &mut outcome,
-                ram: ram_options(memory_domains, cpu_class),
+                ram: ram_options(memory_domains, cpu_class_ceiling),
                 pool,
             });
             let executor = Executor::adopt(handle);
@@ -1892,8 +1887,9 @@ impl Executor {
     ///
     /// Zero `threads` derives from those devices' queue capabilities.
     ///
-    /// A pinned `cpu_class` narrows the threads' waiters and atomics to that class's.
-    pub fn for_nvme(paths: &[impl AsRef<Path>], cpu_class: Option<CPUClass>, threads: usize) -> Result<Self> {
+    /// A `cpu_class_ceiling` caps the class the threads' waiters and atomics dispatch as,
+    /// narrowing to what the machine runs.
+    pub fn for_nvme(paths: &[impl AsRef<Path>], cpu_class_ceiling: Option<CPUClass>, threads: usize) -> Result<Self> {
         let views = path_views(paths)?;
         let mut handle = ptr::null_mut();
         let mut outcome = usearch_outcome_t::default();
@@ -1901,7 +1897,7 @@ impl Executor {
             usearch_executor_for_nvme(&mut usearch_executor_for_nvme_t {
                 executor: &mut handle,
                 outcome: &mut outcome,
-                nvme: nvme_options(&views, cpu_class),
+                nvme: nvme_options(&views, cpu_class_ceiling),
                 threads,
                 nvme_class: 0,
             })
@@ -1913,10 +1909,10 @@ impl Executor {
     /// Opens one submission stream on every named device, all of them driven by the one host
     /// thread that calls the verbs - which is why this takes no thread count.
     ///
-    /// Zero `scratch_limit` lets scratch grow as geometry asks. A pinned `gpu_class` the devices do
-    /// not run is refused with [`Status::Unsupported`].
-    pub fn for_vram(devices: &[i32], gpu_class: Option<GPUClass>, scratch_limit: usize) -> Result<Self> {
-        unsafe { Self::for_vram_on_streams(devices, gpu_class, &[], scratch_limit) }
+    /// Zero `scratch_limit` lets scratch grow as geometry asks. A `gpu_class_ceiling` no named
+    /// device loads is refused with [`Status::Unsupported`].
+    pub fn for_vram(devices: &[i32], gpu_class_ceiling: Option<GPUClass>, scratch_limit: usize) -> Result<Self> {
+        unsafe { Self::for_vram_on_streams(devices, gpu_class_ceiling, &[], scratch_limit) }
     }
 
     /// Borrows the caller's CUDA streams, one per device in `devices` order, as
@@ -1926,7 +1922,7 @@ impl Executor {
     /// Every stream must be a live CUDA stream on its device that outlives the executor.
     pub unsafe fn for_vram_on_streams(
         devices: &[i32],
-        gpu_class: Option<GPUClass>,
+        gpu_class_ceiling: Option<GPUClass>,
         streams: &[*mut c_void],
         scratch_limit: usize,
     ) -> Result<Self> {
@@ -1939,7 +1935,7 @@ impl Executor {
             usearch_executor_for_vram(&mut usearch_executor_for_vram_t {
                 executor: &mut handle,
                 outcome: &mut outcome,
-                vram: vram_options(devices, gpu_class),
+                vram: vram_options(devices, gpu_class_ceiling),
                 // The C side reads one stream per device from any non-null pointer.
                 streams: match streams.is_empty() {
                     true => ptr::null(),
@@ -2293,9 +2289,10 @@ mod tests {
     fn class_names_read_back() {
         type FromName = unsafe extern "C" fn(usearch_bytes_view_t, *mut c_int) -> usearch_status_t;
         type Name = unsafe extern "C" fn(c_int) -> *const c_char;
-        let classes: [(FromName, Name); 2] = [
+        let classes: [(FromName, Name); 3] = [
             (usearch_cpu_class_from_name, usearch_cpu_class_name),
             (usearch_gpu_class_from_name, usearch_gpu_class_name),
+            (usearch_nvme_class_from_name, usearch_nvme_class_name),
         ];
         // Classes keep their registry values forever; a class this build lacks spells "unknown".
         for (from_name, name) in classes {
@@ -2304,11 +2301,6 @@ mod tests {
                 assert_eq!(read_named(spelled, from_name, Some), Ok(code), "{spelled}");
             }
             assert!(read_named("unknown", from_name, Some).is_err());
-        }
-        for code in (1..=c_int::from(u8::MAX)).filter(|&code| spelling(usearch_nvme_class_name, code) != "unknown") {
-            let spelled = spelling(usearch_nvme_class_name, code);
-            let parsed = read_spelling(spelled, usearch_nvme_class_from_name, usearch_nvme_class_name, Some);
-            assert_eq!(parsed, Ok(code), "{spelled}");
         }
         assert_eq!(CPUClass::Serial.to_string(), "serial");
         assert_eq!(CPUClass::Monoversioned.to_string(), "monoversioned");
@@ -2498,18 +2490,18 @@ mod tests {
     fn placements_marshal_as_borrowed_lists() {
         let derived = ram_options(&[], None);
         assert_eq!(derived.memory_domains_count, 0, "an empty list derives");
-        assert_eq!(derived.cpu_class, 0, "no pin dispatches as the machine");
+        assert_eq!(derived.cpu_class_ceiling, 0, "no ceiling dispatches as the machine");
 
         let devices = [0, 1, 2, 3];
-        let pinned = vram_options(&devices, Some(GPUClass::NVIDIAHopper));
-        assert_eq!(pinned.devices_count, 4);
-        assert_eq!(unsafe { *pinned.devices.add(3) }, 3);
-        assert_eq!(pinned.gpu_class, 3, "a pin crosses as its C value");
+        let capped = vram_options(&devices, Some(GPUClass::NVIDIAHopper));
+        assert_eq!(capped.devices_count, 4);
+        assert_eq!(unsafe { *capped.devices.add(3) }, 3);
+        assert_eq!(capped.gpu_class_ceiling, 3, "a ceiling crosses as its C value");
 
         let views = path_views(&["/mnt/nvme0", "/mnt/nvme1"]).unwrap();
         let drives = nvme_options(&views, Some(CPUClass::IntelSkylake));
         assert_eq!(drives.paths_count, 2);
-        assert_eq!(drives.cpu_class, 5);
+        assert_eq!(drives.cpu_class_ceiling, 5);
         assert_eq!(unsafe { (*drives.paths).length }, "/mnt/nvme0".len());
     }
 

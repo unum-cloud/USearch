@@ -686,15 +686,16 @@ public final class Types {
          * Calls {@code usearch_executor_for_ram}.
          *
          * @param memoryDomains NUMA node ids to place shards on; an empty list derives every node.
-         * @param cpuClass the class whose waiters and atomics the workers use, or {@code null} for the
-         *     CPU's own.
+         * @param cpuClassCeiling the newest class dispatch may pick, intersected with what the
+         *     machine runs, so a class the machine lacks narrows rather than refuses; {@code null}
+         *     means no ceiling.
          * @param threads Workers to spawn; zero takes 7/8 of the cores those domains carry, since full
          *     occupancy starves the ordered publication path.
          * @throws USearchException OUT_OF_MEMORY when the scratch cannot be claimed.
          */
-        public static Executor forRam(int[] memoryDomains, @Nullable CPUClass cpuClass, long threads) {
+        public static Executor forRam(int[] memoryDomains, @Nullable CPUClass cpuClassCeiling, long threads) {
             return spawn(FOR_RAM, call -> {
-                call.ram(call.arguments, FOR_RAM_RAM, memoryDomains, cpuClass);
+                call.ram(call.arguments, FOR_RAM_RAM, memoryDomains, cpuClassCeiling);
                 call.size(FOR_RAM_THREADS, threads);
             });
         }
@@ -709,12 +710,13 @@ public final class Types {
          *
          * @param pool The {@code fu_pool_t} to borrow, which must outlive the executor.
          * @param memoryDomains NUMA node ids of the indexes it will drive; an empty list derives them.
-         * @param cpuClass the class whose waiters and atomics the pool's threads use, or {@code null}
-         *     for the CPU's own.
+         * @param cpuClassCeiling the newest class dispatch may pick, intersected with what the
+         *     machine runs, so a class the machine lacks narrows rather than refuses; {@code null}
+         *     means no ceiling.
          */
-        public static Executor onPool(MemorySegment pool, int[] memoryDomains, @Nullable CPUClass cpuClass) {
+        public static Executor onPool(MemorySegment pool, int[] memoryDomains, @Nullable CPUClass cpuClassCeiling) {
             return spawn(ON_POOL, call -> {
-                call.ram(call.arguments, ON_POOL_RAM, memoryDomains, cpuClass);
+                call.ram(call.arguments, ON_POOL_RAM, memoryDomains, cpuClassCeiling);
                 call.pointer(ON_POOL_POOL, pool);
             });
         }
@@ -728,8 +730,9 @@ public final class Types {
          * Calls {@code usearch_executor_for_vram}.
          *
          * @param devices CUDA device ordinals to place shards on; an empty list derives one free device.
-         * @param gpuClass a class the devices must run, refused with UNSUPPORTED otherwise, or
-         *     {@code null} for the devices' own.
+         * @param gpuClassCeiling the newest class dispatch may pick, capped below the best class
+         *     every named device loads; a ceiling no named device loads is refused as UNSUPPORTED;
+         *     {@code null} means no ceiling.
          * @param streams No streams, or one borrowed CUDA stream per device in {@code devices} order,
          *     each outliving the executor.
          * @param scratchLimit The ceiling on scratch bytes per device; zero lets scratch grow.
@@ -737,9 +740,9 @@ public final class Types {
          *     the scratch cannot be claimed.
          */
         public static Executor forVram(
-                int[] devices, @Nullable GPUClass gpuClass, MemorySegment[] streams, long scratchLimit) {
+                int[] devices, @Nullable GPUClass gpuClassCeiling, MemorySegment[] streams, long scratchLimit) {
             return spawn(FOR_VRAM, call -> {
-                call.vram(call.arguments, FOR_VRAM_VRAM, devices, gpuClass);
+                call.vram(call.arguments, FOR_VRAM_VRAM, devices, gpuClassCeiling);
                 if (streams.length != 0 && streams.length != devices.length)
                     throw new USearchException(Status.SHAPE_MISMATCH, "pass no streams or one per device");
                 if (streams.length != 0) {
@@ -763,14 +766,15 @@ public final class Types {
          *
          * @param paths Devices or directories to place shards on; an empty list leaves every shard
          *     where its manifest points.
-         * @param cpuClass the class whose waiters and atomics the workers use, or {@code null} for the
-         *     CPU's own.
+         * @param cpuClassCeiling the newest class dispatch may pick, intersected with what the
+         *     machine runs, so a class the machine lacks narrows rather than refuses; {@code null}
+         *     means no ceiling.
          * @param threads Workers to spawn; zero derives from those devices' queue capabilities.
          * @throws USearchException OUT_OF_MEMORY when the scratch cannot be claimed.
          */
-        public static Executor forNvme(String[] paths, @Nullable CPUClass cpuClass, long threads) {
+        public static Executor forNvme(String[] paths, @Nullable CPUClass cpuClassCeiling, long threads) {
             return spawn(FOR_NVME, call -> {
-                call.nvme(call.arguments, FOR_NVME_NVME, paths, cpuClass);
+                call.nvme(call.arguments, FOR_NVME_NVME, paths, cpuClassCeiling);
                 call.size(FOR_NVME_THREADS, threads);
             });
         }
@@ -1722,29 +1726,29 @@ public final class Types {
         }
 
         /** Fills a RAM placement at {@code at} of {@code struct}, leaving an empty run as the null C derives from. */
-        void ram(MemorySegment struct, long at, int[] domains, @Nullable CPUClass cpuClass) {
+        void ram(MemorySegment struct, long at, int[] domains, @Nullable CPUClass cpuClassCeiling) {
             if (domains.length != 0) {
                 Library.RAM_DATA.set(struct, at, memory.allocateFrom(ValueLayout.JAVA_INT, domains));
                 Library.RAM_COUNT.set(struct, at, (long) domains.length);
             }
-            if (cpuClass != null) {
-                Library.RAM_CPU_CLASS.set(struct, at, cpuClass.code());
+            if (cpuClassCeiling != null) {
+                Library.RAM_CPU_CLASS_CEILING.set(struct, at, cpuClassCeiling.code());
             }
         }
 
         /** Fills a VRAM placement at {@code at} of {@code struct}, leaving an empty run as the null C derives from. */
-        void vram(MemorySegment struct, long at, int[] devices, @Nullable GPUClass gpuClass) {
+        void vram(MemorySegment struct, long at, int[] devices, @Nullable GPUClass gpuClassCeiling) {
             if (devices.length != 0) {
                 Library.VRAM_DATA.set(struct, at, memory.allocateFrom(ValueLayout.JAVA_INT, devices));
                 Library.VRAM_COUNT.set(struct, at, (long) devices.length);
             }
-            if (gpuClass != null) {
-                Library.VRAM_GPU_CLASS.set(struct, at, gpuClass.code());
+            if (gpuClassCeiling != null) {
+                Library.VRAM_GPU_CLASS_CEILING.set(struct, at, gpuClassCeiling.code());
             }
         }
 
         /** Fills an NVMe placement at {@code at} of {@code struct}, leaving an empty run as the null C derives from. */
-        void nvme(MemorySegment struct, long at, String[] paths, @Nullable CPUClass cpuClass) {
+        void nvme(MemorySegment struct, long at, String[] paths, @Nullable CPUClass cpuClassCeiling) {
             if (paths.length != 0) {
                 MemorySegment views = memory.allocate(Library.BYTES_VIEW, paths.length);
                 for (int order = 0; order != paths.length; ++order) {
@@ -1756,8 +1760,8 @@ public final class Types {
                 Library.NVME_PATHS.set(struct, at, views);
                 Library.NVME_COUNT.set(struct, at, (long) paths.length);
             }
-            if (cpuClass != null) {
-                Library.NVME_CPU_CLASS.set(struct, at, cpuClass.code());
+            if (cpuClassCeiling != null) {
+                Library.NVME_CPU_CLASS_CEILING.set(struct, at, cpuClassCeiling.code());
             }
         }
 

@@ -135,29 +135,30 @@ final class Library {
                     POINTER.withName("keys"), POINTER.withName("scores"), POINTER.withName("offsets"))
             .withName("usearch_matches_tape_view_t");
 
-    /** @c usearch_ram_options_t - the memory domains shards go to, their capacity, the CPU class pinned,
-     *  and the bytes a view's key tables may take on each domain. */
+    /** @c usearch_ram_options_t - the memory domains shards go to, their capacity, the CPU class
+     *  ceiling, and the bytes a view's key tables may take on each domain. */
     static final StructLayout RAM_OPTIONS = MemoryLayout.structLayout(
                     POINTER.withName("data"),
                     SIZE.withName("count"),
                     SIZE.withName("shard_capacity"),
-                    ENUM.withName("cpu_class"),
+                    ENUM.withName("cpu_class_ceiling"),
                     padding(),
                     SIZE.withName("memory_limit"))
             .withName("usearch_ram_options_t");
 
-    /** @c usearch_vram_options_t - the devices shards go to, their capacity, and the GPU class pinned. */
+    /** @c usearch_vram_options_t - the devices shards go to, their capacity, and the GPU class
+     *  ceiling. */
     static final StructLayout VRAM_OPTIONS = MemoryLayout.structLayout(
                     POINTER.withName("data"),
                     SIZE.withName("count"),
                     SIZE.withName("shard_capacity"),
-                    ENUM.withName("gpu_class"),
+                    ENUM.withName("gpu_class_ceiling"),
                     padding())
             .withName("usearch_vram_options_t");
 
-    /** @c usearch_nvme_options_t - the paths shards serve from, and the CPU class pinned. */
+    /** @c usearch_nvme_options_t - the paths shards serve from, and the CPU class ceiling. */
     static final StructLayout NVME_OPTIONS = MemoryLayout.structLayout(
-                    POINTER.withName("data"), SIZE.withName("count"), ENUM.withName("cpu_class"), padding())
+                    POINTER.withName("data"), SIZE.withName("count"), ENUM.withName("cpu_class_ceiling"), padding())
             .withName("usearch_nvme_options_t");
 
     /** The placement layout a residency's verbs take, named @p residency : ram, vram or nvme. */
@@ -258,14 +259,14 @@ final class Library {
     static final VarHandle RAM_DATA = field(RAM_OPTIONS, "data");
     static final VarHandle RAM_COUNT = field(RAM_OPTIONS, "count");
     static final VarHandle RAM_SHARD_CAPACITY = field(RAM_OPTIONS, "shard_capacity");
-    static final VarHandle RAM_CPU_CLASS = field(RAM_OPTIONS, "cpu_class");
+    static final VarHandle RAM_CPU_CLASS_CEILING = field(RAM_OPTIONS, "cpu_class_ceiling");
     static final VarHandle VRAM_DATA = field(VRAM_OPTIONS, "data");
     static final VarHandle VRAM_COUNT = field(VRAM_OPTIONS, "count");
     static final VarHandle VRAM_SHARD_CAPACITY = field(VRAM_OPTIONS, "shard_capacity");
-    static final VarHandle VRAM_GPU_CLASS = field(VRAM_OPTIONS, "gpu_class");
+    static final VarHandle VRAM_GPU_CLASS_CEILING = field(VRAM_OPTIONS, "gpu_class_ceiling");
     static final VarHandle NVME_PATHS = field(NVME_OPTIONS, "data");
     static final VarHandle NVME_COUNT = field(NVME_OPTIONS, "count");
-    static final VarHandle NVME_CPU_CLASS = field(NVME_OPTIONS, "cpu_class");
+    static final VarHandle NVME_CPU_CLASS_CEILING = field(NVME_OPTIONS, "cpu_class_ceiling");
     static final VarHandle PREDICATE_CALLBACK = field(PREDICATE, "callback");
     static final VarHandle PROGRESS_CALLBACK = field(PROGRESS, "callback");
     static final VarHandle PHASE_PHASE = field(PHASE_PROGRESS, "phase");

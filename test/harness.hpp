@@ -921,8 +921,8 @@ std::size_t expect_buffer_round_trip(handle<verbs_type_>& index, typename verbs_
     return failures + expect_walk_recall(reloaded, queries, count, expansion, floor);
 }
 
-/** Every metric kind the modality spells reads back by its name, and "unknown" reads back as the
- *  unknown kind. */
+/** Every metric kind the modality spells reads back by its name, and "unknown" is refused with
+ *  @c invalid_argument, leaving the output alone. */
 template <typename verbs_type_>
 std::size_t expect_metric_names() {
     using metric_t = typename verbs_type_::metric_t;
@@ -930,11 +930,17 @@ std::size_t expect_metric_names() {
     for (u32_t kind = 1; std::string_view {verbs_type_::metric_name(static_cast<metric_t>(kind))} != "unknown";
          ++kind) {
         metric_t const metric = static_cast<metric_t>(kind);
-        misread += verbs_type_::metric_from_name(bytes_view(verbs_type_::metric_name(metric))) != metric;
+        metric_t parsed {};
+        misread += verbs_type_::metric_from_name(bytes_view(verbs_type_::metric_name(metric)), &parsed) !=
+                       usearch_status_success_k ||
+                   parsed != metric;
         ++spelled;
     }
+    metric_t untouched = static_cast<metric_t>(1);
     return check(spelled > 0) + check(misread == 0) +
-           check(verbs_type_::metric_from_name(bytes_view("unknown")) == metric_t {});
+           check(verbs_type_::metric_from_name(bytes_view("unknown"), &untouched) ==
+                 usearch_status_invalid_argument_k) +
+           check(untouched == static_cast<metric_t>(1));
 }
 
 /** The index round-trips through all residencies under @p stem, as @ref check_checkpoint_round_trip

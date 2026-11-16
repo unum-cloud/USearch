@@ -13,7 +13,6 @@
  *  A handle's own @c capabilities is a narrower question - what dispatch picked for the geometry
  *  that handle froze - and each modality answers that one for itself.
  */
-#include <cstdio> // `std::snprintf`
 
 #include <array>       // `std::array` - a capability list rendered once
 #include <string_view> // `std::string_view` - a name compared without a terminator
@@ -24,14 +23,10 @@
 
 #include "lib.hpp" // `cpu_ladder_t`, `numkong_capabilities_of`, `pick_cpu_ceiling`, `cpu_rung_fits`
 
-/** Rendered once on first use, so the pointer the C interface hands out stays valid. */
-static char const* rendered_version() {
-    static char rendered[32] = {0};
-    if (!rendered[0])
-        std::snprintf(rendered, sizeof(rendered), "%d.%d.%d", USEARCH_VERSION_MAJOR, USEARCH_VERSION_MINOR,
-                      USEARCH_VERSION_PATCH);
-    return rendered;
-}
+/* CMake reads the name off VERSION, so a candidate's suffix reaches it; the macros keep numbers. */
+#if !defined(USEARCH_VERSION_NAME)
+#error "USEARCH_VERSION_NAME comes from VERSION through the build"
+#endif
 
 /** The comma-separated names NumKong gives @p mask, terminated. */
 using capabilities_name_t = std::array<char, NUMKONG_CAPABILITIES_NAME_CAPACITY>;
@@ -54,7 +49,7 @@ USEARCH_EXPORT void usearch_version(int* major, int* minor, int* patch) {
     *major = USEARCH_VERSION_MAJOR, *minor = USEARCH_VERSION_MINOR, *patch = USEARCH_VERSION_PATCH;
 }
 
-USEARCH_EXPORT char const* usearch_version_name(void) { return rendered_version(); }
+USEARCH_EXPORT char const* usearch_version_name(void) { return USEARCH_VERSION_NAME; }
 
 USEARCH_EXPORT char const* usearch_capabilities_compiled(void) {
     static capabilities_name_t const rendered = render_capabilities(
@@ -130,7 +125,7 @@ USEARCH_EXPORT char const* usearch_scalar_name(usearch_scalar_t scalar_kind) {
     }
 }
 
-USEARCH_EXPORT usearch_scalar_t usearch_scalar_from_name(usearch_bytes_view_t name) {
+USEARCH_EXPORT usearch_status_t usearch_scalar_from_name(usearch_bytes_view_t name, usearch_scalar_t* scalar) {
     // The enumerators jump over the gaps their families leave, and every gap spells "unknown", so
     // a counted walk would read that spelling back as a code naming no scalar.
     usearch_scalar_t const kinds[] = {
@@ -140,8 +135,8 @@ USEARCH_EXPORT usearch_scalar_t usearch_scalar_from_name(usearch_bytes_view_t na
         usearch_scalar_u4x2_k, usearch_scalar_u1x8_k,
     };
     for (usearch_scalar_t const scalar_kind : kinds)
-        if (named(name, usearch_scalar_name(scalar_kind))) return scalar_kind;
-    return usearch_scalar_unknown_k;
+        if (named(name, usearch_scalar_name(scalar_kind))) return *scalar = scalar_kind, usearch_status_success_k;
+    return usearch_status_invalid_argument_k;
 }
 
 USEARCH_EXPORT char const* usearch_residency_name(usearch_residency_t residency) {
@@ -321,11 +316,12 @@ USEARCH_EXPORT char const* usearch_nvme_class_name(usearch_nvme_class_t nvme_cla
     }
 }
 
-USEARCH_EXPORT usearch_nvme_class_t usearch_nvme_class_from_name(usearch_bytes_view_t name) {
-    for (usearch_nvme_class_t const nvme_class : nvme_classes_k) {
-        if (named(name, usearch_nvme_class_name(nvme_class))) return nvme_class;
-    }
-    return usearch_nvme_class_unknown_k;
+USEARCH_EXPORT usearch_status_t usearch_nvme_class_from_name(usearch_bytes_view_t name,
+                                                             usearch_nvme_class_t* nvme_class) {
+    for (usearch_nvme_class_t const listed_class : nvme_classes_k)
+        if (named(name, usearch_nvme_class_name(listed_class)))
+            return *nvme_class = listed_class, usearch_status_success_k;
+    return usearch_status_invalid_argument_k;
 }
 
 } // extern "C"

@@ -110,9 +110,9 @@ def test_construction_reports_its_geometry(dimensions: int, metric: DenseMetric)
     assert description.cpu_class is index.cpu_class and description.gpu_class is None
 
 
-def test_construction_takes_a_pinned_class():
-    """A serial pin runs on every CPU, and the index it opens reports the pinned class and its entries."""
-    index = DenseIndex.init_ram(dimensions=8, cpu_class=CPUClass.SERIAL)
+def test_construction_takes_a_class_ceiling():
+    """A serial ceiling runs on every CPU, and the index it opens reports the class picked and its entries."""
+    index = DenseIndex.init_ram(dimensions=8, cpu_class_ceiling=CPUClass.SERIAL)
     index.reserve(2)
     index.insert([1, 2], np.ones((2, 8), dtype=np.float32))
     assert len(index) == 2 and index.cpu_class is CPUClass.SERIAL

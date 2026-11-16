@@ -516,17 +516,17 @@ char const* usearch_sequence_metric_name(usearch_sequence_metric_t metric) {
     }
 }
 
-usearch_sequence_metric_t usearch_sequence_metric_from_name(usearch_bytes_view_t name) {
-    for (int code = usearch_sequence_metric_levenshtein_bytes_k; code <= usearch_sequence_metric_overlap_k; ++code) {
-        usearch_sequence_metric_t const metric = static_cast<usearch_sequence_metric_t>(code);
-        if (named(name, usearch_sequence_metric_name(metric))) return metric;
-    }
-    return usearch_sequence_metric_unknown_k;
+usearch_status_t usearch_sequence_metric_from_name(usearch_bytes_view_t name, usearch_sequence_metric_t* metric) {
+    for (int code = usearch_sequence_metric_levenshtein_bytes_k; code <= usearch_sequence_metric_overlap_k; ++code)
+        if (named(name, usearch_sequence_metric_name(static_cast<usearch_sequence_metric_t>(code))))
+            return *metric = static_cast<usearch_sequence_metric_t>(code), usearch_status_success_k;
+    return usearch_status_invalid_argument_k;
 }
 
 void usearch_sequence_init_ram(usearch_sequence_init_ram_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
+    if (reject_ceiling(arguments->ram.cpu_class_ceiling, outcome)) return;
     usearch_sequence_metric_t const metric = arguments->metric;
     usearch_sequence_weights_t const* const weights = arguments->weights;
     if (reject_if(!known_metric(metric), usearch_status_unknown_kind_k, "The stand-in does not implement that metric",
@@ -560,6 +560,7 @@ void usearch_sequence_init_ram(usearch_sequence_init_ram_t* arguments) {
 void usearch_sequence_init_vram(usearch_sequence_init_vram_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
+    if (reject_ceiling(arguments->vram.gpu_class_ceiling, outcome)) return;
     propagate_error(usearch_status_device_k, outcome, "This build carries no GPU backends");
 }
 
@@ -567,6 +568,7 @@ void usearch_sequence_load_vram(usearch_sequence_load_vram_t* arguments) {
     if (through_executor<usearch_sequence_load_vram>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
+    if (reject_ceiling(arguments->vram.gpu_class_ceiling, outcome)) return;
     propagate_error(usearch_status_device_k, outcome, "This build carries no GPU backends");
 }
 
@@ -574,6 +576,7 @@ void usearch_sequence_load_ram(usearch_sequence_load_ram_t* arguments) {
     if (through_executor<usearch_sequence_load_ram>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
+    if (reject_ceiling(arguments->ram.cpu_class_ceiling, outcome)) return;
     if (!keep_going(arguments->progress, 0, 1))
         return propagate_error(usearch_status_cancelled_k, outcome, "The caller's handler stopped the checkpoint");
     std::vector<std::byte> blob;
@@ -600,12 +603,14 @@ void usearch_sequence_load_vram_buffer(usearch_sequence_load_vram_buffer_t* argu
     if (through_executor<usearch_sequence_load_vram_buffer>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
+    if (reject_ceiling(arguments->vram.gpu_class_ceiling, outcome)) return;
     propagate_error(usearch_status_device_k, outcome, "This build carries no GPU backends");
 }
 
 void usearch_sequence_view_ram(usearch_sequence_view_ram_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
+    if (reject_ceiling(arguments->ram.cpu_class_ceiling, outcome)) return;
     mapped_file_t served = map_file(arguments->path, outcome);
     if (!served) return;
     // Entries are still copied out of the mapping, so only the view's refusals are mirrored, not
@@ -625,6 +630,7 @@ void usearch_sequence_view_nvme(usearch_sequence_view_nvme_t* arguments) {
     if (through_executor<usearch_sequence_view_nvme>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
+    if (reject_ceiling(arguments->nvme.cpu_class_ceiling, outcome)) return;
     mapped_file_t served = map_file(arguments->path, outcome);
     if (!served) return;
     // Serves the drives' checkpoint as the RAM view does, mirroring only the residency's refusals.

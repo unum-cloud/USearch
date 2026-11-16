@@ -21,6 +21,11 @@
 
 #include "lib.hpp"
 
+/* CMake reads the name off VERSION, so a candidate's suffix reaches it; the macros keep numbers. */
+#if !defined(USEARCH_VERSION_NAME)
+#error "USEARCH_VERSION_NAME comes from VERSION through the build"
+#endif
+
 using namespace unum::usearch;
 using namespace unum::usearch::stub;
 
@@ -119,7 +124,7 @@ void usearch_version(int* major, int* minor, int* patch) {
     if (patch) *patch = USEARCH_VERSION_PATCH;
 }
 
-char const* usearch_version_name(void) { return "3.0.0"; }
+char const* usearch_version_name(void) { return USEARCH_VERSION_NAME; }
 char const* usearch_capabilities_compiled(void) { return "serial"; }
 char const* usearch_capabilities_available(void) { return "serial"; }
 
@@ -163,6 +168,7 @@ void usearch_arena_describe(usearch_arena_describe_t* arguments) {
 void usearch_executor_for_ram(usearch_executor_for_ram_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->executor = nullptr;
+    if (reject_ceiling(arguments->ram.cpu_class_ceiling, outcome)) return;
     usearch_executor_handle_t* const executor = new (std::nothrow) usearch_executor_handle_t {};
     if (reject_if(!executor, usearch_status_out_of_memory_k, "The executor could not be allocated", outcome)) return;
     if (arguments->threads) executor->threads = arguments->threads;
@@ -183,7 +189,8 @@ void usearch_executor_for_nvme(usearch_executor_for_nvme_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->executor = nullptr;
     if (reject_if(arguments->nvme.paths_count && !arguments->nvme.paths, usearch_status_invalid_argument_k,
-                  "The paths must name storage", outcome))
+                  "The paths must name storage", outcome) ||
+        reject_ceiling(arguments->nvme.cpu_class_ceiling, outcome))
         return;
     if (reject_if(arguments->nvme_class != usearch_nvme_class_unknown_k &&
                       std::ranges::count(nvme_classes_k, arguments->nvme_class) == 0,
@@ -202,6 +209,7 @@ void usearch_executor_for_nvme(usearch_executor_for_nvme_t* arguments) {
 void usearch_executor_for_vram(usearch_executor_for_vram_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->executor = nullptr;
+    if (reject_ceiling(arguments->vram.gpu_class_ceiling, outcome)) return;
     propagate_error(usearch_status_device_k, outcome, "This build carries no GPU backends");
 }
 
@@ -273,7 +281,7 @@ char const* usearch_scalar_name(usearch_scalar_t scalar_kind) {
     }
 }
 
-usearch_scalar_t usearch_scalar_from_name(usearch_bytes_view_t name) {
+usearch_status_t usearch_scalar_from_name(usearch_bytes_view_t name, usearch_scalar_t* scalar) {
     // The enumerators jump over the gaps their families leave, and every gap spells "unknown", so
     // a counted walk would read that spelling back as a code naming no scalar.
     usearch_scalar_t const kinds[] = {
@@ -283,8 +291,8 @@ usearch_scalar_t usearch_scalar_from_name(usearch_bytes_view_t name) {
         usearch_scalar_u4x2_k, usearch_scalar_u1x8_k,
     };
     for (usearch_scalar_t const scalar_kind : kinds)
-        if (named(name, usearch_scalar_name(scalar_kind))) return scalar_kind;
-    return usearch_scalar_unknown_k;
+        if (named(name, usearch_scalar_name(scalar_kind))) return *scalar = scalar_kind, usearch_status_success_k;
+    return usearch_status_invalid_argument_k;
 }
 
 char const* usearch_residency_name(usearch_residency_t residency) {
@@ -463,11 +471,11 @@ char const* usearch_nvme_class_name(usearch_nvme_class_t nvme_class) {
     }
 }
 
-usearch_nvme_class_t usearch_nvme_class_from_name(usearch_bytes_view_t name) {
-    for (usearch_nvme_class_t const nvme_class : nvme_classes_k) {
-        if (named(name, usearch_nvme_class_name(nvme_class))) return nvme_class;
-    }
-    return usearch_nvme_class_unknown_k;
+usearch_status_t usearch_nvme_class_from_name(usearch_bytes_view_t name, usearch_nvme_class_t* nvme_class) {
+    for (usearch_nvme_class_t const listed_class : nvme_classes_k)
+        if (named(name, usearch_nvme_class_name(listed_class)))
+            return *nvme_class = listed_class, usearch_status_success_k;
+    return usearch_status_invalid_argument_k;
 }
 
 #pragma endregion Vocabulary

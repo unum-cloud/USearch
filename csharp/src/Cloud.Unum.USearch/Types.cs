@@ -178,8 +178,10 @@ public static partial class Names
     /// <returns>True when the spelling names a scalar kind, false otherwise.</returns>
     public static bool TryParse(string name, out Scalar scalar)
     {
-        scalar = Read(name, static view => usearch_scalar_from_name(view));
-        return scalar.Name() == name;
+        Scalar parsed = default;
+        bool read = Read(name, view => usearch_scalar_from_name(view, out parsed)) == Status.Success;
+        scalar = parsed;
+        return read;
     }
 
     /// <summary>Reads a mood back from its spelling. Calls <c>usearch_mood_from_name</c>.</summary>
@@ -1188,11 +1190,12 @@ public sealed unsafe class Executor : IDisposable
     /// since full occupancy starves the ordered publication path.</param>
     /// <param name="memoryDomains">NUMA node IDs to place shards on; empty derives every node the
     /// process may allocate on.</param>
-    /// <param name="cpuClass">The class whose waiters and atomics the threads use; null derives the
-    /// CPU's own.</param>
+    /// <param name="cpuClassCeiling">The newest class dispatch may pick, intersected with what the
+    /// machine runs, so a class the machine lacks narrows rather than refuses; null means no
+    /// ceiling.</param>
     /// <returns>The spawned executor.</returns>
     public static Executor ForRam(
-        ulong threads = 0, ReadOnlySpan<int> memoryDomains = default, CPUClass? cpuClass = null)
+        ulong threads = 0, ReadOnlySpan<int> memoryDomains = default, CPUClass? cpuClassCeiling = null)
     {
         IntPtr spawned = IntPtr.Zero;
         NativeOutcome outcome = default;
@@ -1205,7 +1208,7 @@ public sealed unsafe class Executor : IDisposable
                 Ram = new NativeRamOptions
                 {
                     MemoryDomains = (IntPtr)domains, MemoryDomainsCount = (nuint)memoryDomains.Length,
-                    CpuClass = (int)(cpuClass ?? 0),
+                    CpuClassCeiling = (int)(cpuClassCeiling ?? 0),
                 },
                 Threads = (nuint)threads,
             };
@@ -1222,11 +1225,12 @@ public sealed unsafe class Executor : IDisposable
     /// <param name="pool">The borrowed <c>fu_pool_t</c>, which must outlive the executor and keeps
     /// its lender's mood.</param>
     /// <param name="memoryDomains">NUMA node IDs of the indexes it will drive; empty derives.</param>
-    /// <param name="cpuClass">The class whose waiters and atomics the threads use; null derives the
-    /// CPU's own.</param>
+    /// <param name="cpuClassCeiling">The newest class dispatch may pick, intersected with what the
+    /// machine runs, so a class the machine lacks narrows rather than refuses; null means no
+    /// ceiling.</param>
     /// <returns>The executor over that pool.</returns>
     public static Executor OnPool(
-        IntPtr pool, ReadOnlySpan<int> memoryDomains = default, CPUClass? cpuClass = null)
+        IntPtr pool, ReadOnlySpan<int> memoryDomains = default, CPUClass? cpuClassCeiling = null)
     {
         IntPtr spawned = IntPtr.Zero;
         NativeOutcome outcome = default;
@@ -1239,7 +1243,7 @@ public sealed unsafe class Executor : IDisposable
                 Ram = new NativeRamOptions
                 {
                     MemoryDomains = (IntPtr)domains, MemoryDomainsCount = (nuint)memoryDomains.Length,
-                    CpuClass = (int)(cpuClass ?? 0),
+                    CpuClassCeiling = (int)(cpuClassCeiling ?? 0),
                 },
                 Pool = pool,
             };
@@ -1257,11 +1261,12 @@ public sealed unsafe class Executor : IDisposable
     /// capabilities.</param>
     /// <param name="paths">Devices or directories to place shards on; empty leaves each shard where
     /// its manifest points.</param>
-    /// <param name="cpuClass">The class whose waiters and atomics the threads use; null derives the
-    /// CPU's own.</param>
+    /// <param name="cpuClassCeiling">The newest class dispatch may pick, intersected with what the
+    /// machine runs, so a class the machine lacks narrows rather than refuses; null means no
+    /// ceiling.</param>
     /// <returns>The spawned executor.</returns>
     public static Executor ForNvme(
-        ulong threads = 0, ReadOnlySpan<string> paths = default, CPUClass? cpuClass = null)
+        ulong threads = 0, ReadOnlySpan<string> paths = default, CPUClass? cpuClassCeiling = null)
     {
         IntPtr spawned = IntPtr.Zero;
         NativeOutcome outcome = default;
@@ -1274,7 +1279,7 @@ public sealed unsafe class Executor : IDisposable
                 Outcome = &outcome,
                 Nvme = new NativeNvmeOptions
                 {
-                    Paths = (IntPtr)views, PathsCount = (nuint)paths.Length, CpuClass = (int)(cpuClass ?? 0),
+                    Paths = (IntPtr)views, PathsCount = (nuint)paths.Length, CpuClassCeiling = (int)(cpuClassCeiling ?? 0),
                 },
                 Threads = (nuint)threads,
             };
@@ -1299,14 +1304,15 @@ public sealed unsafe class Executor : IDisposable
     /// own.</param>
     /// <param name="scratchLimit">The ceiling on scratch bytes per device; zero lets scratch grow as
     /// geometry asks.</param>
-    /// <param name="gpuClass">A class the devices must run, refused with
-    /// <see cref="Status.Unsupported"/> otherwise; null takes the devices' own.</param>
+    /// <param name="gpuClassCeiling">The newest class dispatch may pick, capped below the best
+    /// class every named device loads; a ceiling no named device loads is refused as <see
+    /// cref="Status.Unsupported"/>; null means no ceiling.</param>
     /// <returns>The opened executor.</returns>
     public static Executor ForVram(
         ReadOnlySpan<int> devices = default,
         ReadOnlySpan<IntPtr> streams = default,
         ulong scratchLimit = 0,
-        GPUClass? gpuClass = null)
+        GPUClass? gpuClassCeiling = null)
     {
         IntPtr spawned = IntPtr.Zero;
         NativeOutcome outcome = default;
@@ -1319,7 +1325,7 @@ public sealed unsafe class Executor : IDisposable
                 Outcome = &outcome,
                 Vram = new NativeVramOptions
                 {
-                    Devices = (IntPtr)ordinals, DevicesCount = (nuint)devices.Length, GpuClass = (int)(gpuClass ?? 0),
+                    Devices = (IntPtr)ordinals, DevicesCount = (nuint)devices.Length, GpuClassCeiling = (int)(gpuClassCeiling ?? 0),
                 },
                 Streams = (IntPtr)borrowed,
                 ScratchLimit = (nuint)scratchLimit,
@@ -1869,8 +1875,11 @@ internal struct NativeRamOptions
     public nuint MemoryDomainsCount;
     /// <summary>Entries one shard holds before another generation of shards opens; zero leaves it unbounded.</summary>
     public nuint ShardCapacity;
-    /// <summary>The CPU class to dispatch as; zero derives the CPU's own.</summary>
-    public int CpuClass;
+    /// <summary>
+    /// The newest CPU class dispatch may pick, intersected with what the machine runs; zero means
+    /// no ceiling.
+    /// </summary>
+    public int CpuClassCeiling;
     /// <summary>Bytes an NVMe view's key tables may take on each named domain; zero sets no ceiling.</summary>
     public nuint MemoryLimit;
 }
@@ -1885,8 +1894,11 @@ internal struct NativeVramOptions
     public nuint DevicesCount;
     /// <summary>Entries one shard holds before another generation of shards opens; zero leaves it unbounded.</summary>
     public nuint ShardCapacity;
-    /// <summary>The GPU class to dispatch as; zero derives the devices' own.</summary>
-    public int GpuClass;
+    /// <summary>
+    /// The newest GPU class dispatch may pick, capped below the best class every named device
+    /// loads; zero means no ceiling.
+    /// </summary>
+    public int GpuClassCeiling;
 }
 
 /// <summary>The devices an NVMe-resident index serves its shards from, one shard per named path.</summary>
@@ -1898,8 +1910,11 @@ internal struct NativeNvmeOptions
     public IntPtr Paths;
     /// <summary>How many paths the list holds; zero derives.</summary>
     public nuint PathsCount;
-    /// <summary>The CPU class to dispatch as; zero derives the CPU's own.</summary>
-    public int CpuClass;
+    /// <summary>
+    /// The newest CPU class dispatch may pick, intersected with what the machine runs; zero means
+    /// no ceiling.
+    /// </summary>
+    public int CpuClassCeiling;
 }
 
 /// <summary>How a long call reports its advance, laid out as <c>usearch_progress_t</c>.</summary>
@@ -2055,7 +2070,7 @@ internal static unsafe partial class NativeMethods
 
     [LibraryImport(LibraryName)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
-    internal static partial int usearch_nvme_class_from_name(NativeBytesView name);
+    internal static partial Status usearch_nvme_class_from_name(NativeBytesView name, out int nvmeClass);
 
     [LibraryImport(LibraryName)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
@@ -2071,7 +2086,7 @@ internal static unsafe partial class NativeMethods
 
     [LibraryImport(LibraryName)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
-    internal static partial Scalar usearch_scalar_from_name(NativeBytesView name);
+    internal static partial Status usearch_scalar_from_name(NativeBytesView name, out Scalar scalar);
 
     [LibraryImport(LibraryName)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]

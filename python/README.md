@@ -427,6 +427,7 @@ usearch.capabilities_available()  # the ones this machine can run
 ```
 
 `capacity`, `dimensions`, `connectivity` and `memory_usage` are properties read through `describe` as well.
+`cpu_class_ceiling=` and `gpu_class_ceiling=` on a constructor, `view_*` or `load_*` name the newest class dispatch may pick, intersected with what the machine runs, so a class it lacks narrows rather than refuses; the description reports the class actually picked.
 `health` audits how much of the graph a search reaches, and the entries it cannot reach wait for a `refine` to re-link them.
 Every docstring names the C symbol it calls, or says the method is Python-only.
 

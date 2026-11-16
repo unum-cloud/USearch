@@ -93,9 +93,11 @@ enum class checkpoints_modality_t { dense_k, sequence_k, shapes_k, geospatial_k 
 /** The modality whose engine records @p metric, as each modality reads its checkpoints' tokens;
  *  dense for the rest, whose tokens are NumKong's kernel names. */
 static checkpoints_modality_t checkpoints_modality_of(std::string_view metric) noexcept {
-    if (usearch_sequence_metric_from_name(bytes_view(metric)) != usearch_sequence_metric_unknown_k)
+    usearch_sequence_metric_t sequence_metric = usearch_sequence_metric_unknown_k;
+    if (usearch_sequence_metric_from_name(bytes_view(metric), &sequence_metric) == usearch_status_success_k)
         return checkpoints_modality_t::sequence_k;
-    if (usearch_shapes_metric_from_name(bytes_view(metric)) != usearch_shapes_metric_unknown_k)
+    usearch_shapes_metric_t shapes_metric = usearch_shapes_metric_unknown_k;
+    if (usearch_shapes_metric_from_name(bytes_view(metric), &shapes_metric) == usearch_status_success_k)
         return checkpoints_modality_t::shapes_k;
     // Geospatial indexes measure the one chord distance, so the interface names no metric to parse.
     if (metric == "chord") return checkpoints_modality_t::geospatial_k;

@@ -158,8 +158,8 @@ public final class DenseIndex implements AutoCloseable {
         private long dimensions = 0;
         private long connectivity = 0;
         private long valuesPerKey = 0;
-        private @Nullable CPUClass cpuClass = null;
-        private @Nullable GPUClass gpuClass = null;
+        private @Nullable CPUClass cpuClassCeiling = null;
+        private @Nullable GPUClass gpuClassCeiling = null;
 
         /** An angular BF16 index, with every optional field derived. */
         public DenseOptions() {}
@@ -197,15 +197,21 @@ public final class DenseIndex implements AutoCloseable {
             return this;
         }
 
-        /** The class a host index dispatches as; {@code null} derives the CPU's own. */
-        public DenseOptions cpuClass(@Nullable CPUClass cpuClass) {
-            this.cpuClass = cpuClass;
+        /**
+         * The newest class dispatch may pick, intersected with what the machine runs, so a class
+         * the machine lacks narrows rather than refuses; {@code null} means no ceiling.
+         */
+        public DenseOptions cpuClassCeiling(@Nullable CPUClass cpuClassCeiling) {
+            this.cpuClassCeiling = cpuClassCeiling;
             return this;
         }
 
-        /** The class a device index dispatches as; {@code null} derives the devices' own. */
-        public DenseOptions gpuClass(@Nullable GPUClass gpuClass) {
-            this.gpuClass = gpuClass;
+        /**
+         * The newest class dispatch may pick, capped below the best class every named device loads;
+         * a ceiling no named device loads is refused as unsupported; {@code null} means no ceiling.
+         */
+        public DenseOptions gpuClassCeiling(@Nullable GPUClass gpuClassCeiling) {
+            this.gpuClassCeiling = gpuClassCeiling;
             return this;
         }
 
@@ -2417,7 +2423,7 @@ public final class DenseIndex implements AutoCloseable {
     public static DenseIndex initRam(DenseOptions options, int[] memoryDomains) {
         return create(INIT_RAM, null, call -> {
             options.fill(call);
-            call.ram(call.arguments, INIT_RAM_RAM, memoryDomains, options.cpuClass);
+            call.ram(call.arguments, INIT_RAM_RAM, memoryDomains, options.cpuClassCeiling);
         });
     }
 
@@ -2432,7 +2438,7 @@ public final class DenseIndex implements AutoCloseable {
     public static DenseIndex initVram(DenseOptions options, int[] devices) {
         return create(INIT_VRAM, null, call -> {
             options.fill(call);
-            call.vram(call.arguments, INIT_VRAM_VRAM, devices, options.gpuClass);
+            call.vram(call.arguments, INIT_VRAM_VRAM, devices, options.gpuClassCeiling);
         });
     }
 
@@ -2454,7 +2460,9 @@ public final class DenseIndex implements AutoCloseable {
      *
      * @param executor the executor the read fans out over, or {@code null} for the caller's thread.
      * @param memoryDomains NUMA node ids to place the parts on; an empty list derives every node.
-     * @param cpuClass the class the index dispatches as, or {@code null} for the CPU's own.
+     * @param cpuClassCeiling the newest class dispatch may pick, intersected with what the machine
+     *     runs, so a class the machine lacks narrows rather than refuses; {@code null} means no
+     *     ceiling.
      * @param valuesPerKey the upper bound on entries sharing one key, which no checkpoint records;
      *     zero is unbounded.
      * @param progress hears each part read and may cancel the load, or {@code null} for none.
@@ -2465,12 +2473,12 @@ public final class DenseIndex implements AutoCloseable {
             String path,
             @Nullable Executor executor,
             int[] memoryDomains,
-            @Nullable CPUClass cpuClass,
+            @Nullable CPUClass cpuClassCeiling,
             long valuesPerKey,
             @Nullable Progress progress) {
         return create(LOAD_RAM, executor, call -> {
             call.path(LOAD_RAM_SOURCE, path);
-            call.ram(call.arguments, LOAD_RAM_RAM, memoryDomains, cpuClass);
+            call.ram(call.arguments, LOAD_RAM_RAM, memoryDomains, cpuClassCeiling);
             call.size(LOAD_RAM_VALUES_PER_KEY, valuesPerKey);
             call.progress(LOAD_RAM_PROGRESS, progress);
         });
@@ -2494,7 +2502,9 @@ public final class DenseIndex implements AutoCloseable {
      * @param executor the executor the upload runs on, or {@code null} for each device's default
      *     stream.
      * @param devices CUDA device ordinals to place the parts on; an empty list derives one free device.
-     * @param gpuClass the class the index dispatches as, or {@code null} for the devices' own.
+     * @param gpuClassCeiling the newest class dispatch may pick, capped below the best class every
+     *     named device loads; a ceiling no named device loads is refused as UNSUPPORTED; {@code
+     *     null} means no ceiling.
      * @param valuesPerKey the upper bound on entries sharing one key; zero is unbounded.
      * @param progress hears each part uploaded and may cancel the load, or {@code null} for none.
      * @throws USearchException DEVICE when no device answers, and the statuses a RAM load names.
@@ -2503,12 +2513,12 @@ public final class DenseIndex implements AutoCloseable {
             String path,
             @Nullable Executor executor,
             int[] devices,
-            @Nullable GPUClass gpuClass,
+            @Nullable GPUClass gpuClassCeiling,
             long valuesPerKey,
             @Nullable Progress progress) {
         return create(LOAD_VRAM, executor, call -> {
             call.path(LOAD_VRAM_SOURCE, path);
-            call.vram(call.arguments, LOAD_VRAM_VRAM, devices, gpuClass);
+            call.vram(call.arguments, LOAD_VRAM_VRAM, devices, gpuClassCeiling);
             call.size(LOAD_VRAM_VALUES_PER_KEY, valuesPerKey);
             call.progress(LOAD_VRAM_PROGRESS, progress);
         });
@@ -2537,12 +2547,12 @@ public final class DenseIndex implements AutoCloseable {
             MemorySegment buffer,
             @Nullable Executor executor,
             int[] memoryDomains,
-            @Nullable CPUClass cpuClass,
+            @Nullable CPUClass cpuClassCeiling,
             long valuesPerKey,
             @Nullable Progress progress) {
         return create(LOAD_RAM_BUFFER, executor, call -> {
             call.bytes(LOAD_RAM_SOURCE, buffer);
-            call.ram(call.arguments, LOAD_RAM_RAM, memoryDomains, cpuClass);
+            call.ram(call.arguments, LOAD_RAM_RAM, memoryDomains, cpuClassCeiling);
             call.size(LOAD_RAM_VALUES_PER_KEY, valuesPerKey);
             call.progress(LOAD_RAM_PROGRESS, progress);
         });
@@ -2571,12 +2581,12 @@ public final class DenseIndex implements AutoCloseable {
             MemorySegment buffer,
             @Nullable Executor executor,
             int[] devices,
-            @Nullable GPUClass gpuClass,
+            @Nullable GPUClass gpuClassCeiling,
             long valuesPerKey,
             @Nullable Progress progress) {
         return create(LOAD_VRAM_BUFFER, executor, call -> {
             call.bytes(LOAD_VRAM_SOURCE, buffer);
-            call.vram(call.arguments, LOAD_VRAM_VRAM, devices, gpuClass);
+            call.vram(call.arguments, LOAD_VRAM_VRAM, devices, gpuClassCeiling);
             call.size(LOAD_VRAM_VALUES_PER_KEY, valuesPerKey);
             call.progress(LOAD_VRAM_PROGRESS, progress);
         });
@@ -2612,7 +2622,9 @@ public final class DenseIndex implements AutoCloseable {
      *     thread.
      * @param paths devices or directories to serve the parts from; an empty list serves each where
      *     its manifest points.
-     * @param cpuClass the class the view dispatches as, or {@code null} for the CPU's own.
+     * @param cpuClassCeiling the newest class dispatch may pick, intersected with what the machine
+     *     runs, so a class the machine lacks narrows rather than refuses; {@code null} means no
+     *     ceiling.
      * @param keyTableDomains NUMA node IDs of a key table held in RAM, which counts, reads, samples,
      *     MaxSim and hinted searches need; an empty list derives them, and {@code null} holds none.
      * @throws USearchException IO when the checkpoint cannot be opened.
@@ -2621,9 +2633,9 @@ public final class DenseIndex implements AutoCloseable {
             String path,
             @Nullable Executor executor,
             String[] paths,
-            @Nullable CPUClass cpuClass,
+            @Nullable CPUClass cpuClassCeiling,
             int @Nullable [] keyTableDomains) {
-        return create(VIEW_NVME, executor, call -> serving(call, path, paths, cpuClass, keyTableDomains));
+        return create(VIEW_NVME, executor, call -> serving(call, path, paths, cpuClassCeiling, keyTableDomains));
     }
 
     /**
@@ -2639,9 +2651,9 @@ public final class DenseIndex implements AutoCloseable {
             String path,
             @Nullable Executor executor,
             String[] paths,
-            @Nullable CPUClass cpuClass,
+            @Nullable CPUClass cpuClassCeiling,
             int @Nullable [] keyTableDomains) {
-        return create(LOAD_NVME, executor, call -> serving(call, path, paths, cpuClass, keyTableDomains));
+        return create(LOAD_NVME, executor, call -> serving(call, path, paths, cpuClassCeiling, keyTableDomains));
     }
 
     /**
@@ -2713,11 +2725,15 @@ public final class DenseIndex implements AutoCloseable {
 
     /** Fills a view or a load of an NVMe checkpoint, with a key table in RAM unless its domains are {@code null}. */
     private static void serving(
-            Call call, String path, String[] paths, @Nullable CPUClass cpuClass, int @Nullable [] keyTableDomains) {
+            Call call,
+            String path,
+            String[] paths,
+            @Nullable CPUClass cpuClassCeiling,
+            int @Nullable [] keyTableDomains) {
         call.path(SERVE_NVME_PATH, path);
-        call.nvme(call.arguments, SERVE_NVME_NVME, paths, cpuClass);
+        call.nvme(call.arguments, SERVE_NVME_NVME, paths, cpuClassCeiling);
         if (keyTableDomains != null) {
-            call.ram(call.output(SERVE_NVME_RAM, Library.RAM_OPTIONS), 0, keyTableDomains, cpuClass);
+            call.ram(call.output(SERVE_NVME_RAM, Library.RAM_OPTIONS), 0, keyTableDomains, cpuClassCeiling);
         }
     }
 

@@ -170,7 +170,8 @@ public sealed class DenseIndexTests : IDisposable
                 NativeMethods.usearch_cpu_class_name),
             (view => NativeMethods.usearch_gpu_class_from_name(view, out int read) == Status.Success ? read : -1,
                 NativeMethods.usearch_gpu_class_name),
-            (NativeMethods.usearch_nvme_class_from_name, NativeMethods.usearch_nvme_class_name),
+            (view => NativeMethods.usearch_nvme_class_from_name(view, out int read) == Status.Success ? read : -1,
+                NativeMethods.usearch_nvme_class_name),
         ];
         // Classes keep their registry values forever, and a class this build lacks spells "unknown".
         foreach ((Func<NativeBytesView, int> parse, Func<int, IntPtr> spell) in classes)

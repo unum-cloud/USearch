@@ -187,7 +187,7 @@ static std::size_t expect_matches_round_trip(std::string const& stem, copied_mat
 /** Saves, exports, imports and reloads an index of two shards, as the file's docblock says. */
 template <typename verbs_type_>
 static std::size_t check_arrow_round_trip(settings_t const& settings) {
-    session_t session = open_session(settings, settings.cpu_class);
+    session_t session = open_session(settings, settings.cpu_class_ceiling);
     if (!session) return 1;
     arrow_fixture<verbs_type_> const fixture {settings.seed};
     handle<verbs_type_> index = open_index<verbs_type_>(session, fixture.geometry, arrow_parts_k);
@@ -269,7 +269,7 @@ static std::size_t report_arrow_round_trip(settings_t const& settings) {
  *  refuses like a live file. Saves bound themselves to slots on block devices alone, so one to this
  *  file is admitted as given. */
 static std::size_t check_slots_skip_foreign(settings_t const& settings) {
-    session_t session = open_session(settings, settings.cpu_class);
+    session_t session = open_session(settings, settings.cpu_class_ceiling);
     if (!session) return 1;
     arrow_fixture<dense_verbs_t> const fixture {settings.seed};
     handle<dense_verbs_t> index = open_index<dense_verbs_t>(session, fixture.geometry, 1);

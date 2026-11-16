@@ -405,11 +405,11 @@ int bench_dense_index_algebra(int argc, char const* const* argv) {
     usearch_scalar_t stored = base.scalar() == usearch_scalar_f32_k || base.scalar() == usearch_scalar_f64_k
                                   ? usearch_scalar_bf16_k
                                   : base.scalar();
-    if (!algebra.stored_dtype_name.empty()) stored = usearch_scalar_from_name(bytes_view(algebra.stored_dtype_name));
-    if (stored == usearch_scalar_unknown_k)
+    if (!algebra.stored_dtype_name.empty() &&
+        usearch_scalar_from_name(bytes_view(algebra.stored_dtype_name), &stored) != usearch_status_success_k)
         return fmt::println(stderr, "--stored-dtype=\"{}\" names nothing", algebra.stored_dtype_name), 1;
 
-    session_t session = open_session(settings, settings.cpu_class);
+    session_t session = open_session(settings, settings.cpu_class_ceiling);
     if (!session) return 1;
     usearch_dense_metadata_t const geometry {usearch_dense_metric_inner_k, stored, base.columns(),
                                              algebra.connectivity.value};

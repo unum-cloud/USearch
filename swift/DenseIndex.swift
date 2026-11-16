@@ -44,7 +44,7 @@ public struct DenseMetric: Hashable, Sendable, CustomStringConvertible {
 
     /// Reads a spelling back, and nil for one no metric carries.
     public init?(name: String) {
-        guard let raw = parsed(name, usearch_dense_metric_from_name, usearch_dense_metric_name) else { return nil }
+        guard let raw = parsed(name, usearch_dense_metric_from_name, usearch_dense_metric_unknown_k) else { return nil }
         self.raw = raw
     }
 
@@ -67,10 +67,12 @@ public struct DenseOptions: Sendable {
     public var connectivity: Int
     /// The bound on entries sharing one key; zero is unbounded.
     public var valuesPerKey: Int
-    /// The class a host index dispatches as; nil derives the CPU's own.
-    public var cpuClass: CPUClass?
-    /// The class a device index dispatches as; nil derives the devices' own.
-    public var gpuClass: GPUClass?
+    /// The newest class dispatch may pick, intersected with what the machine runs, so a class the
+    /// machine lacks narrows rather than refuses; nil means no ceiling.
+    public var cpuClassCeiling: CPUClass?
+    /// The newest class dispatch may pick, capped below the best class every named device loads; a
+    /// ceiling no named device loads is refused as `unsupported`; nil means no ceiling.
+    public var gpuClassCeiling: GPUClass?
 
     /// An angular bf16 index, with every optional field derived.
     public init(
@@ -79,16 +81,16 @@ public struct DenseOptions: Sendable {
         quantization: Scalar = .bf16,
         connectivity: Int = 0,
         valuesPerKey: Int = 0,
-        cpuClass: CPUClass? = nil,
-        gpuClass: GPUClass? = nil
+        cpuClassCeiling: CPUClass? = nil,
+        gpuClassCeiling: GPUClass? = nil
     ) {
         self.dimensions = dimensions
         self.metric = metric
         self.quantization = quantization
         self.connectivity = connectivity
         self.valuesPerKey = valuesPerKey
-        self.cpuClass = cpuClass
-        self.gpuClass = gpuClass
+        self.cpuClassCeiling = cpuClassCeiling
+        self.gpuClassCeiling = gpuClassCeiling
     }
 }
 
@@ -647,8 +649,9 @@ public struct DenseLoadRamConfig {
     /// The memory domains to place the parts on, part `p` loading into shard `p` modulo their
     /// count; empty derives every node the process may allocate on.
     public var memoryDomains: [Int32]
-    /// The class to dispatch as; nil derives the CPU's own.
-    public var cpuClass: CPUClass?
+    /// The newest class dispatch may pick, intersected with what the machine runs, so a class the
+    /// machine lacks narrows rather than refuses; nil means no ceiling.
+    public var cpuClassCeiling: CPUClass?
     /// The bound on entries sharing one key, which no checkpoint records; zero is unbounded.
     public var valuesPerKey: Int
     /// Called with shards placed.
@@ -659,14 +662,14 @@ public struct DenseLoadRamConfig {
     public init(
         executor: Executor? = nil,
         memoryDomains: [Int32] = [],
-        cpuClass: CPUClass? = nil,
+        cpuClassCeiling: CPUClass? = nil,
         valuesPerKey: Int = 0,
         progress: Progress? = nil,
         progressSteps: Int = 0
     ) {
         self.executor = executor
         self.memoryDomains = memoryDomains
-        self.cpuClass = cpuClass
+        self.cpuClassCeiling = cpuClassCeiling
         self.valuesPerKey = valuesPerKey
         self.progress = progress
         self.progressSteps = progressSteps
@@ -680,8 +683,9 @@ public struct DenseLoadVramConfig {
     /// The devices to place the parts on, part `p` loading onto device `p` modulo their count;
     /// empty derives one free device.
     public var devices: [Int32]
-    /// The class to dispatch as; nil derives the devices' own.
-    public var gpuClass: GPUClass?
+    /// The newest class dispatch may pick, capped below the best class every named device loads; a
+    /// ceiling no named device loads is refused as `unsupported`; nil means no ceiling.
+    public var gpuClassCeiling: GPUClass?
     /// The bound on entries sharing one key, which no checkpoint records; zero is unbounded.
     public var valuesPerKey: Int
     /// Called with shards placed.
@@ -692,14 +696,14 @@ public struct DenseLoadVramConfig {
     public init(
         executor: Executor? = nil,
         devices: [Int32] = [],
-        gpuClass: GPUClass? = nil,
+        gpuClassCeiling: GPUClass? = nil,
         valuesPerKey: Int = 0,
         progress: Progress? = nil,
         progressSteps: Int = 0
     ) {
         self.executor = executor
         self.devices = devices
-        self.gpuClass = gpuClass
+        self.gpuClassCeiling = gpuClassCeiling
         self.valuesPerKey = valuesPerKey
         self.progress = progress
         self.progressSteps = progressSteps
@@ -712,8 +716,9 @@ public struct DenseLoadRamBufferConfig {
     public var executor: Executor?
     /// The memory domains to place shards on; the monolith lands whole on the first.
     public var memoryDomains: [Int32]
-    /// The class to dispatch as; nil derives the CPU's own.
-    public var cpuClass: CPUClass?
+    /// The newest class dispatch may pick, intersected with what the machine runs, so a class the
+    /// machine lacks narrows rather than refuses; nil means no ceiling.
+    public var cpuClassCeiling: CPUClass?
     /// The bound on entries sharing one key, which no checkpoint records; zero is unbounded.
     public var valuesPerKey: Int
     /// Called with bytes placed.
@@ -724,14 +729,14 @@ public struct DenseLoadRamBufferConfig {
     public init(
         executor: Executor? = nil,
         memoryDomains: [Int32] = [],
-        cpuClass: CPUClass? = nil,
+        cpuClassCeiling: CPUClass? = nil,
         valuesPerKey: Int = 0,
         progress: Progress? = nil,
         progressSteps: Int = 0
     ) {
         self.executor = executor
         self.memoryDomains = memoryDomains
-        self.cpuClass = cpuClass
+        self.cpuClassCeiling = cpuClassCeiling
         self.valuesPerKey = valuesPerKey
         self.progress = progress
         self.progressSteps = progressSteps
@@ -744,8 +749,9 @@ public struct DenseLoadVramBufferConfig {
     public var executor: Executor?
     /// The devices to place shards on; the monolith lands whole on the first.
     public var devices: [Int32]
-    /// The class to dispatch as; nil derives the devices' own.
-    public var gpuClass: GPUClass?
+    /// The newest class dispatch may pick, capped below the best class every named device loads; a
+    /// ceiling no named device loads is refused as `unsupported`; nil means no ceiling.
+    public var gpuClassCeiling: GPUClass?
     /// The bound on entries sharing one key, which no checkpoint records; zero is unbounded.
     public var valuesPerKey: Int
     /// Called with bytes placed.
@@ -756,14 +762,14 @@ public struct DenseLoadVramBufferConfig {
     public init(
         executor: Executor? = nil,
         devices: [Int32] = [],
-        gpuClass: GPUClass? = nil,
+        gpuClassCeiling: GPUClass? = nil,
         valuesPerKey: Int = 0,
         progress: Progress? = nil,
         progressSteps: Int = 0
     ) {
         self.executor = executor
         self.devices = devices
-        self.gpuClass = gpuClass
+        self.gpuClassCeiling = gpuClassCeiling
         self.valuesPerKey = valuesPerKey
         self.progress = progress
         self.progressSteps = progressSteps
@@ -777,8 +783,9 @@ public struct DenseViewNvmeConfig {
     /// The devices the parts are served from - a filesystem path, a transport identifier, or a
     /// FUSE mount over object storage; empty serves each part where its manifest points.
     public var paths: [String]
-    /// The class to dispatch as; nil derives the CPU's own.
-    public var cpuClass: CPUClass?
+    /// The newest class dispatch may pick, intersected with what the machine runs, so a class the
+    /// machine lacks narrows rather than refuses; nil means no ceiling.
+    public var cpuClassCeiling: CPUClass?
     /// Memory domains of a key table held in RAM, which `count`, `get`, `sample`, MaxSim and hinted
     /// searches read; empty derives them, and nil holds none.
     public var keyTableDomains: [Int32]?
@@ -786,12 +793,12 @@ public struct DenseViewNvmeConfig {
     public init(
         executor: Executor? = nil,
         paths: [String] = [],
-        cpuClass: CPUClass? = nil,
+        cpuClassCeiling: CPUClass? = nil,
         keyTableDomains: [Int32]? = nil
     ) {
         self.executor = executor
         self.paths = paths
-        self.cpuClass = cpuClass
+        self.cpuClassCeiling = cpuClassCeiling
         self.keyTableDomains = keyTableDomains
     }
 }
@@ -1009,7 +1016,7 @@ public final class DenseIndex: @unchecked Sendable {
                     memory_domains: domains,
                     memory_domains_count: memoryDomains.count,
                     shard_capacity: 0,
-                    cpu_class: options.cpuClass?.raw ?? usearch_cpu_class_unknown_k,
+                    cpu_class_ceiling: options.cpuClassCeiling?.raw ?? usearch_cpu_class_unknown_k,
                     memory_limit: 0
                 )
             )
@@ -1036,7 +1043,7 @@ public final class DenseIndex: @unchecked Sendable {
                     devices: lentDevices,
                     devices_count: devices.count,
                     shard_capacity: 0,
-                    gpu_class: options.gpuClass?.raw ?? usearch_gpu_class_unknown_k
+                    gpu_class_ceiling: options.gpuClassCeiling?.raw ?? usearch_gpu_class_unknown_k
                 )
             )
             usearch_dense_init_vram(&arguments)
@@ -1068,7 +1075,7 @@ public final class DenseIndex: @unchecked Sendable {
                         memory_domains: domains,
                         memory_domains_count: config.memoryDomains.count,
                         shard_capacity: 0,
-                        cpu_class: config.cpuClass?.raw ?? usearch_cpu_class_unknown_k,
+                        cpu_class_ceiling: config.cpuClassCeiling?.raw ?? usearch_cpu_class_unknown_k,
                         memory_limit: 0
                     ),
                     connectivity: 0,
@@ -1102,7 +1109,7 @@ public final class DenseIndex: @unchecked Sendable {
                         devices: devices,
                         devices_count: config.devices.count,
                         shard_capacity: 0,
-                        gpu_class: config.gpuClass?.raw ?? usearch_gpu_class_unknown_k
+                        gpu_class_ceiling: config.gpuClassCeiling?.raw ?? usearch_gpu_class_unknown_k
                     ),
                     values_per_key: config.valuesPerKey,
                     progress: progress
@@ -1133,7 +1140,7 @@ public final class DenseIndex: @unchecked Sendable {
                         memory_domains: domains,
                         memory_domains_count: config.memoryDomains.count,
                         shard_capacity: 0,
-                        cpu_class: config.cpuClass?.raw ?? usearch_cpu_class_unknown_k,
+                        cpu_class_ceiling: config.cpuClassCeiling?.raw ?? usearch_cpu_class_unknown_k,
                         memory_limit: 0
                     ),
                     connectivity: 0,
@@ -1167,7 +1174,7 @@ public final class DenseIndex: @unchecked Sendable {
                         devices: devices,
                         devices_count: config.devices.count,
                         shard_capacity: 0,
-                        gpu_class: config.gpuClass?.raw ?? usearch_gpu_class_unknown_k
+                        gpu_class_ceiling: config.gpuClassCeiling?.raw ?? usearch_gpu_class_unknown_k
                     ),
                     values_per_key: config.valuesPerKey,
                     progress: progress
@@ -1205,11 +1212,11 @@ public final class DenseIndex: @unchecked Sendable {
                     memory_domains: domains,
                     memory_domains_count: keyTableDomains.count,
                     shard_capacity: 0,
-                    cpu_class: config.cpuClass?.raw ?? usearch_cpu_class_unknown_k,
+                    cpu_class_ceiling: config.cpuClassCeiling?.raw ?? usearch_cpu_class_unknown_k,
                     memory_limit: 0
                 )
                 withUnsafePointer(to: keyTable) { keyTable in
-                    withPaths(config.paths, config.cpuClass) { nvme in
+                    withPaths(config.paths, config.cpuClassCeiling) { nvme in
                         var arguments = usearch_dense_view_nvme_t(
                             index: index,
                             executor: config.executor?.raw,
@@ -1243,11 +1250,11 @@ public final class DenseIndex: @unchecked Sendable {
                     memory_domains: domains,
                     memory_domains_count: keyTableDomains.count,
                     shard_capacity: 0,
-                    cpu_class: config.cpuClass?.raw ?? usearch_cpu_class_unknown_k,
+                    cpu_class_ceiling: config.cpuClassCeiling?.raw ?? usearch_cpu_class_unknown_k,
                     memory_limit: 0
                 )
                 withUnsafePointer(to: keyTable) { keyTable in
-                    withPaths(config.paths, config.cpuClass) { nvme in
+                    withPaths(config.paths, config.cpuClassCeiling) { nvme in
                         var arguments = usearch_dense_load_nvme_t(
                             index: index,
                             executor: config.executor?.raw,
@@ -2196,7 +2203,7 @@ struct DenseCall {
                     memory_domains: callState.copied(domains),
                     memory_domains_count: domains.count,
                     shard_capacity: config.shardCapacity,
-                    cpu_class: usearch_cpu_class_unknown_k,
+                    cpu_class_ceiling: usearch_cpu_class_unknown_k,
                     memory_limit: 0
                 )
             )
@@ -2207,7 +2214,7 @@ struct DenseCall {
                     devices: callState.copied(devices),
                     devices_count: devices.count,
                     shard_capacity: config.shardCapacity,
-                    gpu_class: usearch_gpu_class_unknown_k
+                    gpu_class_ceiling: usearch_gpu_class_unknown_k
                 )
             )
         }
@@ -2222,7 +2229,7 @@ struct DenseCall {
                 usearch_nvme_options_t(
                     paths: callState.copied(views),
                     paths_count: views.count,
-                    cpu_class: usearch_cpu_class_unknown_k
+                    cpu_class_ceiling: usearch_cpu_class_unknown_k
                 )
             )
         }

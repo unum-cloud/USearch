@@ -83,7 +83,7 @@ static std::string format_as(outcome_t const& placed) {
 /** Resolves @p devices on @p machine, failing a placement that breaks what it promises as an
  *  internal error. */
 static outcome_t place(emulated_machine_t const& machine, std::initializer_list<std::int32_t> devices,
-                       usearch_gpu_class_t pinned = usearch_gpu_class_unknown_k) {
+                       usearch_gpu_class_t ceiling = usearch_gpu_class_unknown_k) {
     std::vector<gpu_device_t> table(machine.size());
     std::vector<gpu_class_mask_t> loaded(machine.size());
     for (std::size_t position = 0; position != machine.size(); ++position)
@@ -91,7 +91,7 @@ static outcome_t place(emulated_machine_t const& machine, std::initializer_list<
     usearch_vram_options_t vram {};
     vram.devices = devices.size() ? devices.begin() : nullptr;
     vram.devices_count = devices.size();
-    vram.gpu_class = pinned;
+    vram.gpu_class_ceiling = ceiling;
     auto const [placement, status] = resolve_placement(table, loaded, vram);
     if (failed(status)) return outcome(status);
     std::size_t broken = expect(devices.size() ? placement.positions.data() == devices.begin() &&

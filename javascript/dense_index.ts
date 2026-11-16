@@ -221,8 +221,9 @@ export interface DenseLoadRamConfig {
   executor?: Executor;
   /** NUMA node IDs to place the parts on; absent spreads them over every node. */
   memoryDomains?: number[];
-  /** The CPU class to dispatch as by its canonical name; absent dispatches as the machine. */
-  cpuClass?: string;
+  /** The newest CPU class dispatch may pick, by canonical name, intersected with what the machine
+   *  runs, so a class it lacks narrows rather than refuses; absent means no ceiling. */
+  cpuClassCeiling?: string;
   /** Entries one key may carry, which no checkpoint records; absent is unbounded. */
   valuesPerKey?: number;
 }
@@ -233,8 +234,10 @@ export interface DenseLoadVramConfig {
   executor?: Executor;
   /** CUDA ordinals to place the parts on; absent takes one free device. */
   devices?: number[];
-  /** The GPU class to dispatch as by its canonical name; absent dispatches as the devices. */
-  gpuClass?: string;
+  /** The newest GPU class dispatch may pick, by canonical name, capped below the best class every
+   *  named device loads; a ceiling no named device loads is refused as unsupported; absent means
+   *  no ceiling. */
+  gpuClassCeiling?: string;
   /** Entries one key may carry, which no checkpoint records; absent is unbounded. */
   valuesPerKey?: number;
 }
@@ -245,8 +248,9 @@ export interface DenseLoadRamBufferConfig {
   executor?: Executor;
   /** NUMA node IDs to place the shards on; the monolith lands whole on the first. */
   memoryDomains?: number[];
-  /** The CPU class to dispatch as by its canonical name; absent dispatches as the machine. */
-  cpuClass?: string;
+  /** The newest CPU class dispatch may pick, by canonical name, intersected with what the machine
+   *  runs, so a class it lacks narrows rather than refuses; absent means no ceiling. */
+  cpuClassCeiling?: string;
   /** Entries one key may carry, which no checkpoint records; absent is unbounded. */
   valuesPerKey?: number;
 }
@@ -257,8 +261,10 @@ export interface DenseLoadVramBufferConfig {
   executor?: Executor;
   /** CUDA ordinals to place the shards on; the monolith lands whole on the first. */
   devices?: number[];
-  /** The GPU class to dispatch as by its canonical name; absent dispatches as the devices. */
-  gpuClass?: string;
+  /** The newest GPU class dispatch may pick, by canonical name, capped below the best class every
+   *  named device loads; a ceiling no named device loads is refused as unsupported; absent means
+   *  no ceiling. */
+  gpuClassCeiling?: string;
   /** Entries one key may carry, which no checkpoint records; absent is unbounded. */
   valuesPerKey?: number;
 }
@@ -269,8 +275,9 @@ export interface DenseViewNvmeConfig {
   executor?: Executor;
   /** Devices or directories to serve the parts from; absent leaves each where its manifest points. */
   paths?: string[];
-  /** The CPU class to dispatch as by its canonical name; absent dispatches as the machine. */
-  cpuClass?: string;
+  /** The newest CPU class dispatch may pick, by canonical name, intersected with what the machine
+   *  runs, so a class it lacks narrows rather than refuses; absent means no ceiling. */
+  cpuClassCeiling?: string;
   /** NUMA node IDs of a key table held in RAM, which `count`, `get`, `sample`, `maxsim` and hinted
    *  searches read; empty derives them, and absent holds none. */
   keyTableDomains?: number[];
@@ -391,12 +398,13 @@ export interface DenseOptions {
   connectivity?: number;
   /** Entries one key may carry; absent is unbounded. */
   valuesPerKey?: number;
-  /** The CPU class a host index dispatches as by its canonical name; absent dispatches
-   *  as the machine. */
-  cpuClass?: string;
-  /** The GPU class a device index dispatches as by its canonical name; absent dispatches
-   *  as the devices. */
-  gpuClass?: string;
+  /** The newest CPU class dispatch may pick, by canonical name, intersected with what the machine
+   *  runs, so a class it lacks narrows rather than refuses; absent means no ceiling. */
+  cpuClassCeiling?: string;
+  /** The newest GPU class dispatch may pick, by canonical name, capped below the best class every
+   *  named device loads; a ceiling no named device loads is refused as unsupported; absent means
+   *  no ceiling. */
+  gpuClassCeiling?: string;
 }
 
 /** Resolves one scored key to its row of the values `attend` borrows, on the calling thread.
@@ -1499,7 +1507,7 @@ export class DenseIndex implements Disposable {
         options.connectivity,
         options.valuesPerKey,
         memoryDomains,
-        options.cpuClass,
+        options.cpuClassCeiling,
       ),
     );
   }
@@ -1522,7 +1530,7 @@ export class DenseIndex implements Disposable {
         options.connectivity,
         options.valuesPerKey,
         devices,
-        options.gpuClass,
+        options.gpuClassCeiling,
       ),
     );
   }
@@ -1538,7 +1546,13 @@ export class DenseIndex implements Disposable {
   static loadRam(path: string, config: DenseLoadRamConfig = {}): DenseIndex {
     return new DenseIndex(
       indexSeal,
-      compiled.CompiledIndex.loadRam(path, config.executor, config.memoryDomains, config.valuesPerKey, config.cpuClass),
+      compiled.CompiledIndex.loadRam(
+        path,
+        config.executor,
+        config.memoryDomains,
+        config.valuesPerKey,
+        config.cpuClassCeiling,
+      ),
     );
   }
 
@@ -1553,7 +1567,13 @@ export class DenseIndex implements Disposable {
   static loadVram(path: string, config: DenseLoadVramConfig = {}): DenseIndex {
     return new DenseIndex(
       indexSeal,
-      compiled.CompiledIndex.loadVram(path, config.executor, config.devices, config.valuesPerKey, config.gpuClass),
+      compiled.CompiledIndex.loadVram(
+        path,
+        config.executor,
+        config.devices,
+        config.valuesPerKey,
+        config.gpuClassCeiling,
+      ),
     );
   }
 
@@ -1573,7 +1593,7 @@ export class DenseIndex implements Disposable {
         config.executor,
         config.memoryDomains,
         config.valuesPerKey,
-        config.cpuClass,
+        config.cpuClassCeiling,
       ),
     );
   }
@@ -1594,7 +1614,7 @@ export class DenseIndex implements Disposable {
         config.executor,
         config.devices,
         config.valuesPerKey,
-        config.gpuClass,
+        config.gpuClassCeiling,
       ),
     );
   }
@@ -1621,7 +1641,13 @@ export class DenseIndex implements Disposable {
   static viewNvme(path: string, config: DenseViewNvmeConfig = {}): DenseIndex {
     return new DenseIndex(
       indexSeal,
-      compiled.CompiledIndex.viewNvme(path, config.executor, config.paths, config.cpuClass, config.keyTableDomains),
+      compiled.CompiledIndex.viewNvme(
+        path,
+        config.executor,
+        config.paths,
+        config.cpuClassCeiling,
+        config.keyTableDomains,
+      ),
     );
   }
 
@@ -1637,7 +1663,13 @@ export class DenseIndex implements Disposable {
   static loadNvme(path: string, config: DenseViewNvmeConfig = {}): DenseIndex {
     return new DenseIndex(
       indexSeal,
-      compiled.CompiledIndex.loadNvme(path, config.executor, config.paths, config.cpuClass, config.keyTableDomains),
+      compiled.CompiledIndex.loadNvme(
+        path,
+        config.executor,
+        config.paths,
+        config.cpuClassCeiling,
+        config.keyTableDomains,
+      ),
     );
   }
 

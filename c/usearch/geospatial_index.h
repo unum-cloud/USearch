@@ -281,13 +281,13 @@ typedef struct usearch_geospatial_init_ram_t {
 } usearch_geospatial_init_ram_t;
 
 /**
- *  Creates an empty, mutable geospatial index in host memory.
+ *  @brief Creates an empty, mutable geospatial index in host memory.
  *
  *  @par Statuses:
  *  - @c usearch_status_invalid_argument_k A terrain both borrowing @c heights and naming a
- *    @c callback.
- *  - @c usearch_status_unsupported_k A terrain @c path, which no residency reads yet, or a pinned
- *    class the CPU does not admit.
+ *    @c callback, or a @c cpu_class_ceiling no class takes.
+ *  - @c usearch_status_unsupported_k A terrain @c path, which no residency reads yet, or a
+ *    @c cpu_class_ceiling below every compiled class this CPU runs.
  *  - @c usearch_status_config_mismatch_k A terrain whose row or column step is not positive.
  */
 USEARCH_EXPORT void usearch_geospatial_init_ram(usearch_geospatial_init_ram_t* arguments);
@@ -316,13 +316,13 @@ typedef struct usearch_geospatial_init_vram_t {
 } usearch_geospatial_init_vram_t;
 
 /**
- *  Creates an empty, mutable geospatial index in device memory.
+ *  @brief Creates an empty, mutable geospatial index in device memory.
  *
  *  @par Statuses:
  *  - @c usearch_status_invalid_argument_k A terrain both borrowing @c heights and naming a
- *    @c callback.
+ *    @c callback, or a @c gpu_class_ceiling no class takes.
  *  - @c usearch_status_unsupported_k A terrain @c path or @c callback, a @c values_per_key bound,
- *    or devices that do not run the pinned class.
+ *    or devices that load no class under @c gpu_class_ceiling.
  *  - @c usearch_status_config_mismatch_k Devices of two classes, or a terrain whose row or column
  *    step is not positive.
  *  - @c usearch_status_device_k A device past the listing, one this build carries no kernels for,
@@ -370,11 +370,13 @@ typedef struct usearch_geospatial_load_ram_t {
  *  the placed ones open over those domains in turn.
  *
  *  @par Statuses:
- *  - @c usearch_status_invalid_argument_k An empty @c path, a checkpoint or part path that does
- *    not parse, or a terrain both borrowing @c heights and naming a @c callback.
+ *  - @c usearch_status_invalid_argument_k An empty @c path, a checkpoint or part path that does not
+ *    parse, a terrain both borrowing @c heights and naming a @c callback, or a @c cpu_class_ceiling
+ *    no class takes.
  *  - @c usearch_status_malformed_k The checkpoint lists no part, or a part, its header, columns or
  *    sums do not parse.
- *  - @c usearch_status_unsupported_k A terrain @c path, or a pinned class the CPU does not admit.
+ *  - @c usearch_status_unsupported_k A terrain @c path, or a @c cpu_class_ceiling below every
+ *    compiled class this CPU runs.
  *  - @c usearch_status_uninitialized_k The executor holds no pool workers.
  *  - @c usearch_status_config_mismatch_k A terrain whose row or column step is not positive, or
  *    the checkpoint's columns differ from the shards' in dtype, shape or key width.
@@ -423,11 +425,12 @@ typedef struct usearch_geospatial_load_ram_buffer_t {
  *  bytes through a mapping, so @c buffer needs no file behind it, and a mapped file no copy.
  *
  *  @par Statuses:
- *  - @c usearch_status_invalid_argument_k An empty @c buffer, or a terrain both borrowing
- *    @c heights and naming a @c callback.
+ *  - @c usearch_status_invalid_argument_k An empty @c buffer, a terrain both borrowing @c heights
+ *    and naming a @c callback, or a @c cpu_class_ceiling no class takes.
  *  - @c usearch_status_malformed_k The manifest lists no part, or a part, its header, columns or
  *    sums do not parse.
- *  - @c usearch_status_unsupported_k A terrain @c path, or a pinned class the CPU does not admit.
+ *  - @c usearch_status_unsupported_k A terrain @c path, or a @c cpu_class_ceiling below every
+ *    compiled class this CPU runs.
  *  - @c usearch_status_uninitialized_k The executor holds no pool workers.
  *  - @c usearch_status_config_mismatch_k A terrain whose row or column step is not positive, or
  *    the checkpoint's columns differ from the shards' in dtype, shape or key width.
@@ -474,12 +477,13 @@ typedef struct usearch_geospatial_load_vram_t {
  *      of @c usearch_geospatial_load_ram.
  *
  *  @par Statuses:
- *  - @c usearch_status_invalid_argument_k An empty @c path, a checkpoint or part path that does
- *    not parse, or a terrain both borrowing @c heights and naming a @c callback.
+ *  - @c usearch_status_invalid_argument_k An empty @c path, a checkpoint or part path that does not
+ *    parse, a terrain both borrowing @c heights and naming a @c callback, or a @c gpu_class_ceiling
+ *    no class takes.
  *  - @c usearch_status_malformed_k The checkpoint lists no part, or a part, its header, columns or
  *    sums do not parse.
  *  - @c usearch_status_unsupported_k A terrain @c path or @c callback, a @c values_per_key bound,
- *    or devices that do not run the pinned class.
+ *    or devices that load no class under @c gpu_class_ceiling.
  *  - @c usearch_status_config_mismatch_k Devices of two classes, a terrain whose row or column
  *    step is not positive, the executor driving no stream on some shard's device, or the
  *    checkpoint's columns differing from the shards' in dtype, shape or key width.
@@ -528,12 +532,13 @@ typedef struct usearch_geospatial_load_vram_buffer_t {
  *      reporting and cancelling like @c usearch_geospatial_load_vram.
  *
  *  @par Statuses:
- *  - @c usearch_status_invalid_argument_k An empty @c buffer, or a terrain both borrowing
- *    @c heights and naming a @c callback.
+ *  - @c usearch_status_invalid_argument_k An empty @c buffer, a terrain both borrowing @c heights
+ *    and naming a @c callback, or a @c gpu_class_ceiling no class takes.
  *  - @c usearch_status_malformed_k The manifest lists no part, or a part, its header, columns or
  *    sums do not parse.
  *  - @c usearch_status_unsupported_k A @c buffer in device memory, a terrain @c path or
- *    @c callback, a @c values_per_key bound, or devices that do not run the pinned class.
+ *    @c callback, a @c values_per_key bound, or devices that load no class under
+ *    @c gpu_class_ceiling.
  *  - @c usearch_status_config_mismatch_k Devices of two classes, a terrain whose row or column
  *    step is not positive, the executor driving no stream on some shard's device, or the
  *    checkpoint's columns differing from the shards' in dtype, shape or key width.
@@ -560,17 +565,18 @@ typedef struct usearch_geospatial_view_ram_t {
     usearch_geospatial_terrain_t terrain;
 
     /** The class to dispatch as; a view reads its shards from the checkpoint, so only
-     *  @c usearch_ram_options_t::cpu_class is read. */
+     *  @c usearch_ram_options_t::cpu_class_ceiling is read. */
     usearch_ram_options_t ram;
 } usearch_geospatial_view_ram_t;
 
 /**
- *  Serves a checkpoint in place through a memory mapping, as a read-only index whose mutating
- *  verbs report @c usearch_status_read_only_k.
+ *  @brief Serves a checkpoint in place through a memory mapping, as a read-only index whose
+ *      mutating verbs report @c usearch_status_read_only_k.
  *
  *  @par Statuses:
- *  - @c usearch_status_invalid_argument_k An empty @c path, a checkpoint or part path that does
- *    not parse, or a terrain both borrowing @c heights and naming a @c callback.
+ *  - @c usearch_status_invalid_argument_k An empty @c path, a checkpoint or part path that does not
+ *    parse, a terrain both borrowing @c heights and naming a @c callback, or a @c cpu_class_ceiling
+ *    no class takes.
  *  - @c usearch_status_malformed_k The checkpoint lists no part, or a part or its header does not
  *    parse.
  *  - @c usearch_status_config_mismatch_k A terrain whose row or column step is not positive.
@@ -614,13 +620,14 @@ typedef struct usearch_geospatial_view_nvme_t {
  *  @par Statuses:
  *  - @c usearch_status_device_k @c executor is not an NVMe executor.
  *  - @c usearch_status_invalid_argument_k An empty @c path, @c NULL paths for a nonzero count, a
- *    path that does not parse or names a base off its medium's block, or a terrain both borrowing
- *    @c heights and naming a @c callback.
+ *    path that does not parse or names a base off its medium's block, a terrain both borrowing
+ *    @c heights and naming a @c callback, or a @c cpu_class_ceiling no class takes.
  *  - @c usearch_status_malformed_k The manifest names no part, or a manifest, header or row
  *    directory does not parse.
  *  - @c usearch_status_config_mismatch_k Parts disagreeing with this index's values, keys, node
  *    IDs or metric, or with @c nvme, or a terrain whose row or column step is not positive.
- *  - @c usearch_status_unsupported_k A terrain @c path, or a pinned class the CPU does not admit.
+ *  - @c usearch_status_unsupported_k A terrain @c path, or a @c cpu_class_ceiling below every
+ *    compiled class this CPU runs.
  *  - @c usearch_status_uninitialized_k The executor holds no threads or pool workers.
  *  - @c usearch_status_contended_k Another call holds the executor, or its pool runs another
  *    dispatch.

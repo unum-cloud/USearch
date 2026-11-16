@@ -70,7 +70,6 @@ from usearch.types import (
     ExecutorForVram,
     ExecutorOnPool,
     FromName,
-    FromNameStatus,
     Mood,
     NameOf,
     Outcome,
@@ -143,7 +142,7 @@ struct Symbols:
     """`usearch_outcome_status`."""
     var status_name: NameOf
     """`usearch_status_name`."""
-    var status_from_name: FromNameStatus
+    var status_from_name: FromName
     """`usearch_status_from_name`."""
     var scalar_name: NameOf
     """`usearch_scalar_name`."""
@@ -151,23 +150,23 @@ struct Symbols:
     """`usearch_scalar_from_name`."""
     var residency_name: NameOf
     """`usearch_residency_name`."""
-    var residency_from_name: FromNameStatus
+    var residency_from_name: FromName
     """`usearch_residency_from_name`."""
     var traversal_name: NameOf
     """`usearch_traversal_name`."""
-    var traversal_from_name: FromNameStatus
+    var traversal_from_name: FromName
     """`usearch_traversal_from_name`."""
     var mood_name: NameOf
     """`usearch_mood_name`."""
-    var mood_from_name: FromNameStatus
+    var mood_from_name: FromName
     """`usearch_mood_from_name`."""
     var phase_name: NameOf
     """`usearch_phase_name`."""
-    var phase_from_name: FromNameStatus
+    var phase_from_name: FromName
     """`usearch_phase_from_name`."""
     var refine_verdict_name: NameOf
     """`usearch_refine_verdict_name`."""
-    var refine_verdict_from_name: FromNameStatus
+    var refine_verdict_from_name: FromName
     """`usearch_refine_verdict_from_name`."""
     var cpu_class_name: NameOf
     """`usearch_cpu_class_name`."""
@@ -290,19 +289,19 @@ struct Symbols:
         self.outcome_wait = _resolve[OutcomeStatus](handle, "usearch_outcome_wait")
         self.outcome_status = _resolve[OutcomeStatus](handle, "usearch_outcome_status")
         self.status_name = _resolve[NameOf](handle, "usearch_status_name")
-        self.status_from_name = _resolve[FromNameStatus](handle, "usearch_status_from_name")
+        self.status_from_name = _resolve[FromName](handle, "usearch_status_from_name")
         self.scalar_name = _resolve[NameOf](handle, "usearch_scalar_name")
         self.scalar_from_name = _resolve[FromName](handle, "usearch_scalar_from_name")
         self.residency_name = _resolve[NameOf](handle, "usearch_residency_name")
-        self.residency_from_name = _resolve[FromNameStatus](handle, "usearch_residency_from_name")
+        self.residency_from_name = _resolve[FromName](handle, "usearch_residency_from_name")
         self.traversal_name = _resolve[NameOf](handle, "usearch_traversal_name")
-        self.traversal_from_name = _resolve[FromNameStatus](handle, "usearch_traversal_from_name")
+        self.traversal_from_name = _resolve[FromName](handle, "usearch_traversal_from_name")
         self.mood_name = _resolve[NameOf](handle, "usearch_mood_name")
-        self.mood_from_name = _resolve[FromNameStatus](handle, "usearch_mood_from_name")
+        self.mood_from_name = _resolve[FromName](handle, "usearch_mood_from_name")
         self.phase_name = _resolve[NameOf](handle, "usearch_phase_name")
-        self.phase_from_name = _resolve[FromNameStatus](handle, "usearch_phase_from_name")
+        self.phase_from_name = _resolve[FromName](handle, "usearch_phase_from_name")
         self.refine_verdict_name = _resolve[NameOf](handle, "usearch_refine_verdict_name")
-        self.refine_verdict_from_name = _resolve[FromNameStatus](handle, "usearch_refine_verdict_from_name")
+        self.refine_verdict_from_name = _resolve[FromName](handle, "usearch_refine_verdict_from_name")
         self.cpu_class_name = _resolve[NameOf](handle, "usearch_cpu_class_name")
         self.gpu_class_name = _resolve[NameOf](handle, "usearch_gpu_class_name")
         self.dense_metric_name = _resolve[NameOf](handle, "usearch_dense_metric_name")
@@ -453,9 +452,9 @@ struct Library(ImplicitlyCopyable):
         """The engine's spelling of a scalar kind, as `F32` spells "f32". Calls `usearch_scalar_name`."""
         return text_at(self.symbols().scalar_name(scalar.code))
 
-    def scalar_from_name(self, name: StringSlice) -> ScalarKind:
-        """Reads a spelling back; `UNKNOWN` when unrecognized. Calls `usearch_scalar_from_name`."""
-        return ScalarKind(self.symbols().scalar_from_name(BytesView.of(name).arguments()))
+    def scalar_from_name(self, name: StringSlice) raises Error -> ScalarKind:
+        """Reads a spelling back, raising `INVALID_ARGUMENT` for one it refuses. Calls `usearch_scalar_from_name`."""
+        return ScalarKind(self._read_named(self.symbols().scalar_from_name, name, "usearch_scalar_from_name"))
 
     def residency_name(self, residency: Residency) -> String:
         """The engine's spelling of a residency, as `RAM` spells "ram". Calls `usearch_residency_name`."""
@@ -509,7 +508,7 @@ struct Library(ImplicitlyCopyable):
             self._read_named(self.symbols().refine_verdict_from_name, name, "usearch_refine_verdict_from_name")
         )
 
-    def _read_named(self, parse: FromNameStatus, name: StringSlice, symbol: StaticString) raises Error -> c_int:
+    def _read_named(self, parse: FromName, name: StringSlice, symbol: StaticString) raises Error -> c_int:
         """The enumerator a status-answering reader writes for `name`, or `INVALID_ARGUMENT` when it refuses."""
         var code = stack_allocation[1, c_int]().unsafe_origin_cast[MutAnyOrigin]()
         code[unsafe_offset=0] = c_int(0)
@@ -521,9 +520,12 @@ struct Library(ImplicitlyCopyable):
         """The engine's spelling of a metric kind, as `INNER` spells "inner". Calls `usearch_dense_metric_name`."""
         return text_at(self.symbols().dense_metric_name(metric.code))
 
-    def dense_metric_from_name(self, name: StringSlice) -> DenseMetric:
-        """Reads a spelling back; `UNKNOWN` when unrecognized. Calls `usearch_dense_metric_from_name`."""
-        return DenseMetric(self.symbols().dense_metric_from_name(BytesView.of(name).arguments()))
+    def dense_metric_from_name(self, name: StringSlice) raises Error -> DenseMetric:
+        """Reads a spelling back, raising `INVALID_ARGUMENT` for one it refuses. Calls
+        `usearch_dense_metric_from_name`."""
+        return DenseMetric(
+            self._read_named(self.symbols().dense_metric_from_name, name, "usearch_dense_metric_from_name")
+        )
 
     def _error(self, outcome: Outcome, symbol: StaticString) -> Error:
         """The failure a final outcome reports, its status spelled by the engine's own table."""

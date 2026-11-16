@@ -11,7 +11,7 @@ Every result is a throughput, a latency and a recall under one explicit configur
 ## The Suite
 
 The index benchmarks of `bench/CMakeLists.txt` drive the library through its C interface, as users and bindings do, beside one sparse probe and the kernel microbenchmark under [Kernels](#kernels).
-One binary serves every residency, CPU class and GPU class the library compiled, so `--residency`, `--cpu-class`, `--gpu-class` and `--nvme-class` choose what a run measures, and the report names the class dispatch picked.
+One binary serves every residency, CPU class and GPU class the library compiled, so `--residency`, `--cpu-class-ceiling`, `--gpu-class-ceiling` and `--nvme-class` choose what a run measures, and the report names the class dispatch picked.
 
 - `usearch_bench_dense_index_search` builds one dense index of any residency from a RetriEval dataset, searches it at every `--expansion-search` breadth and judges the hits against ground truth, against itself, or against an exact scan.
 - `usearch_bench_dense_index_algebra` builds one inner-product index the same way and measures the graph products `multiply` and the graph attention `attend` over it, attention judged against exact softmax attention.
@@ -56,8 +56,8 @@ build_release/usearch_bench_dense_index_search \
 Every binary over the C interface reads the same placement flags.
 
 - `--residency` defaults to `ram`: `ram`, `vram` over the `USEARCH_DEVICES` ordinals, or `nvme`, which builds in RAM, saves and searches a view.
-- `--cpu-class` defaults to the CPU's own: the class to dispatch as, like `intel-icelake` or `serial`, admitting every rung whose features it holds.
-- `--gpu-class` defaults to the devices' own: the GPU class to dispatch as, like `nvidia-ampere`.
+- `--cpu-class-ceiling` defaults to none: the newest class to dispatch as, like `intel-icelake` or `serial`, intersected with what the CPU runs, so a class the CPU lacks narrows the pick rather than failing the run.
+- `--gpu-class-ceiling` defaults to none: the newest GPU class to dispatch as, like `nvidia-ampere`, capping the best class every named device loads.
 - `--nvme-class` is derived by default: the NVMe class, `posix`, `linux-aio`, `linux-uring`, `linux-uring-passthrough`, `linux-spdk` or `windows-ioring`.
 - `--threads` defaults to the executor's own: the threads of a RAM executor, or of an NVMe one, which spawns no more than the fewest hardware queues of its drives.
 - `--shards` defaults to one per memory domain or device, or one per `USEARCH_NVME_PATHS` entry on NVMe: shards each index opens on, repeating the domains or devices named.

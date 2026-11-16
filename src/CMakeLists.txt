@@ -910,6 +910,10 @@ usearch_object_library(
 )
 # The GPU drivers open at first use, and glibc before 2.34 keeps `dlopen` in libdl.
 target_link_libraries(usearch_punned PUBLIC ${CMAKE_DL_LIBS})
+# `usearch_version_name` answers VERSION whole, a candidate's suffix included; the C macros keep its numbers.
+set_source_files_properties(
+    types.cpp PROPERTIES COMPILE_DEFINITIONS "USEARCH_VERSION_NAME=\"${usearch_version_name_}\""
+)
 
 # Objects never travel through another object library, so every consumer names the whole set: executables and shared
 # libraries link the targets and inherit their dependencies, an archive takes the objects themselves.

@@ -128,7 +128,7 @@ There is one factory per C constructor, and each takes every argument its C twin
 
 ```java
 Executor.forRam(new int[] {0, 1}, null, 16);                        // two NUMA nodes, sixteen workers
-Executor.forRam(new int[0], CPUClass.INTEL_HASWELL, 0);             // waiters and atomics of one class
+Executor.forRam(new int[0], CPUClass.INTEL_HASWELL, 0);             // ceiling at Haswell
 Executor.onPool(forkUnionPool, new int[0], null);                   // a thread pool the caller already runs
 Executor.forVram(new int[] {0, 1, 2, 3}, null, new MemorySegment[0], 0); // four devices, own streams
 Executor.forNvme(new String[] {"/mnt/a", "/mnt/b"}, null, 8);       // two drives, eight submission rings

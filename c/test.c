@@ -4718,7 +4718,10 @@ static int status_from_name(usearch_bytes_view_t name) {
     return usearch_status_from_name(name, &status) == usearch_status_success_k ? (int)status : -1;
 }
 static char const* scalar_name_of(int value) { return usearch_scalar_name((usearch_scalar_t)value); }
-static int scalar_from_name(usearch_bytes_view_t name) { return (int)usearch_scalar_from_name(name); }
+static int scalar_from_name(usearch_bytes_view_t name) {
+    usearch_scalar_t scalar = usearch_scalar_unknown_k;
+    return usearch_scalar_from_name(name, &scalar) == usearch_status_success_k ? (int)scalar : -1;
+}
 static char const* residency_name_of(int value) { return usearch_residency_name((usearch_residency_t)value); }
 static int residency_from_name(usearch_bytes_view_t name) {
     usearch_residency_t residency = (usearch_residency_t)0;
@@ -4755,9 +4758,15 @@ static int gpu_class_from_name(usearch_bytes_view_t name) {
     return usearch_gpu_class_from_name(name, &gpu_class) == usearch_status_success_k ? (int)gpu_class : -1;
 }
 static char const* nvme_class_name_of(int value) { return usearch_nvme_class_name((usearch_nvme_class_t)value); }
-static int nvme_class_from_name(usearch_bytes_view_t name) { return (int)usearch_nvme_class_from_name(name); }
+static int nvme_class_from_name(usearch_bytes_view_t name) {
+    usearch_nvme_class_t nvme_class = usearch_nvme_class_unknown_k;
+    return usearch_nvme_class_from_name(name, &nvme_class) == usearch_status_success_k ? (int)nvme_class : -1;
+}
 static char const* dense_metric_name_of(int value) { return usearch_dense_metric_name((usearch_dense_metric_t)value); }
-static int dense_metric_from_name(usearch_bytes_view_t name) { return (int)usearch_dense_metric_from_name(name); }
+static int dense_metric_from_name(usearch_bytes_view_t name) {
+    usearch_dense_metric_t metric = usearch_dense_metric_unknown_k;
+    return usearch_dense_metric_from_name(name, &metric) == usearch_status_success_k ? (int)metric : -1;
+}
 
 /** Every @c _name and @c _from_name pair against the spellings its enumerators carry. */
 void test_names(void) {
@@ -4861,8 +4870,7 @@ void test_names(void) {
     // Parsers answering a status read a refused spelling as -1, which no enumerator holds.
     expect_names("status", statuses, sizeof(statuses) / row_bytes, -1, "unrecognized", status_name_of,
                  status_from_name);
-    expect_names("scalar", scalars, sizeof(scalars) / row_bytes, usearch_scalar_unknown_k, "unknown", scalar_name_of,
-                 scalar_from_name);
+    expect_names("scalar", scalars, sizeof(scalars) / row_bytes, -1, "unknown", scalar_name_of, scalar_from_name);
     expect_names("residency", residencies, sizeof(residencies) / row_bytes, -1, "unknown", residency_name_of,
                  residency_from_name);
     expect_names("traversal", traversals, sizeof(traversals) / row_bytes, -1, "unknown", traversal_name_of,
@@ -4889,10 +4897,21 @@ void test_names(void) {
                  cpu_class_from_name);
     expect_names("GPU class", gpu_classes, sizeof(gpu_classes) / row_bytes, -1, "unknown", gpu_class_name_of,
                  gpu_class_from_name);
-    expect_names("NVMe class", nvme_classes, sizeof(nvme_classes) / row_bytes, usearch_nvme_class_unknown_k, "unknown",
-                 nvme_class_name_of, nvme_class_from_name);
-    expect_names("dense metric", dense_metrics, sizeof(dense_metrics) / row_bytes, usearch_dense_metric_unknown_k,
-                 "unknown", dense_metric_name_of, dense_metric_from_name);
+    expect_names("NVMe class", nvme_classes, sizeof(nvme_classes) / row_bytes, -1, "unknown", nvme_class_name_of,
+                 nvme_class_from_name);
+    expect_names("dense metric", dense_metrics, sizeof(dense_metrics) / row_bytes, -1, "unknown", dense_metric_name_of,
+                 dense_metric_from_name);
+    usearch_scalar_t scalar = usearch_scalar_f32_k;
+    usearch_nvme_class_t nvme_class = usearch_nvme_class_posix_k;
+    usearch_dense_metric_t dense_metric = usearch_dense_metric_inner_k;
+    expect_eq(usearch_scalar_from_name(bogus, &scalar), usearch_status_invalid_argument_k, "A bogus scalar is refused");
+    expect_eq(usearch_nvme_class_from_name(bogus, &nvme_class), usearch_status_invalid_argument_k,
+              "A bogus NVMe class is refused");
+    expect_eq(usearch_dense_metric_from_name(bogus, &dense_metric), usearch_status_invalid_argument_k,
+              "A bogus dense metric is refused");
+    expect(scalar == usearch_scalar_f32_k && nvme_class == usearch_nvme_class_posix_k &&
+               dense_metric == usearch_dense_metric_inner_k,
+           "A refused spelling leaves its output alone");
     printf("Test: Names - PASSED\n");
 }
 
@@ -4990,11 +5009,31 @@ void drain(usearch_executor_t executor, usearch_mood_t mood) {
     expect(!outcome.message, outcome.message);
 }
 
-/** A RAM index pinned to the floor class, serial or a monoversioned build's one class, opens on any
- *  CPU the build runs on and describes itself under that class and no GPU class, and an NVMe
- *  executor submits through the POSIX class it names. */
-void test_pins_and_fill(void) {
-    printf("Test: Pins and Fill\n");
+/** Opens a RAM index under @p ceiling and reports the class it picked, or the refusing status. */
+static usearch_status_t ceiling_picks(usearch_cpu_class_t ceiling, usearch_cpu_class_t* picked) {
+    usearch_outcome_t outcome = {0};
+    usearch_dense_index_t index = NULL;
+    usearch_dense_init_ram(&(usearch_dense_init_ram_t) {.index = &index,
+                                                        .outcome = &outcome,
+                                                        .metric = usearch_dense_metric_angular_k,
+                                                        .quantization = usearch_scalar_bf16_k,
+                                                        .dimensions = 8,
+                                                        .ram = {.cpu_class_ceiling = ceiling}});
+    if (outcome.status != usearch_status_success_k) return outcome.status;
+    usearch_dense_index_description_t description = {0};
+    usearch_dense_describe(
+        &(usearch_dense_describe_t) {.index = index, .outcome = &outcome, .description = &description});
+    usearch_dense_free(index);
+    *picked = description.cpu_class;
+    return outcome.status;
+}
+
+/** A RAM index capped at the floor class, serial or a monoversioned build's one class, opens on any
+ *  CPU the build runs on and describes itself under that class and no GPU class; a ceiling of
+ *  another architecture narrows to what both share rather than refusing, while a value no class
+ *  takes is refused; and an NVMe executor submits through the POSIX class it names. */
+void test_ceilings_and_fill(void) {
+    printf("Test: Ceilings and Fill\n");
     usearch_outcome_t outcome = {0};
     usearch_dense_index_t index = NULL;
     usearch_dense_index_description_t description = {0};
@@ -5008,17 +5047,17 @@ void test_pins_and_fill(void) {
         &(usearch_dense_describe_t) {.index = index, .outcome = &outcome, .description = &description});
     expect(!outcome.message, outcome.message);
     usearch_dense_free(index);
-    // A monoversioned build compiles its one class alone, so the serial floor is not there to pin.
-    usearch_cpu_class_t const pinned_class = description.cpu_class == usearch_cpu_class_monoversioned_k
-                                                 ? usearch_cpu_class_monoversioned_k
-                                                 : usearch_cpu_class_serial_k;
+    // A monoversioned build compiles its one class alone, so the serial floor is not there to pick.
+    usearch_cpu_class_t const ceiling = description.cpu_class == usearch_cpu_class_monoversioned_k
+                                            ? usearch_cpu_class_monoversioned_k
+                                            : usearch_cpu_class_serial_k;
     index = NULL;
     usearch_dense_init_ram(&(usearch_dense_init_ram_t) {.index = &index,
                                                         .outcome = &outcome,
                                                         .metric = usearch_dense_metric_angular_k,
                                                         .quantization = usearch_scalar_bf16_k,
                                                         .dimensions = 8,
-                                                        .ram = {.cpu_class = pinned_class}});
+                                                        .ram = {.cpu_class_ceiling = ceiling}});
     expect(!outcome.message, outcome.message);
     usearch_dense_reserve(&(usearch_dense_reserve_t) {.index = index, .outcome = &outcome, .capacity = 2});
     expect(!outcome.message, outcome.message);
@@ -5035,10 +5074,31 @@ void test_pins_and_fill(void) {
     expect(!outcome.message, outcome.message);
     expect(description.shards_count >= 1, "A fresh index spans at least one shard");
     expect_eq(description.size, (size_t)2, "The description counts the rows inserted");
-    expect(description.cpu_class == pinned_class, "A pin dispatches the pinned class");
+    expect(description.cpu_class == ceiling, "A floor ceiling dispatches the floor class");
     expect(description.gpu_class == usearch_gpu_class_unknown_k, "A RAM index names no GPU class");
     expect(description.load_path == usearch_load_path_none_k, "A RAM index names no load path");
     usearch_dense_free(index);
+
+    usearch_cpu_class_t best = usearch_cpu_class_unknown_k, picked = usearch_cpu_class_unknown_k;
+    expect_eq(ceiling_picks(usearch_cpu_class_unknown_k, &best), usearch_status_success_k, "No ceiling picks a class");
+    expect_eq(ceiling_picks(best, &picked), usearch_status_success_k, "The machine's own pick admits itself");
+    expect(picked == best, "A ceiling at the machine's own pick changes nothing");
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+    usearch_cpu_class_t const foreign = usearch_cpu_class_aws_g2_k;
+#else
+    usearch_cpu_class_t const foreign = usearch_cpu_class_intel_haswell_k;
+#endif
+    picked = usearch_cpu_class_unknown_k;
+    usearch_status_t const narrowed = ceiling_picks(foreign, &picked);
+    if (ceiling == usearch_cpu_class_monoversioned_k)
+        expect_eq(narrowed, usearch_status_unsupported_k, "A monoversioned build has no class under a foreign one");
+    else {
+        expect_eq(narrowed, usearch_status_success_k, "A ceiling the CPU lacks narrows rather than refuses");
+        expect(picked == usearch_cpu_class_serial_k, "A foreign ceiling narrows to the serial floor");
+    }
+    usearch_cpu_class_t const past_every_class = (usearch_cpu_class_t)(usearch_cpu_class_wasm64_extended_k + 1);
+    expect_eq(ceiling_picks(past_every_class, &picked), usearch_status_invalid_argument_k,
+              "A ceiling no class takes is refused");
 
     usearch_executor_t storage = NULL;
     usearch_executor_for_nvme(&(usearch_executor_for_nvme_t) {.executor = &storage,
@@ -5047,7 +5107,7 @@ void test_pins_and_fill(void) {
                                                               .nvme_class = usearch_nvme_class_posix_k});
     expect(!outcome.message, outcome.message);
     usearch_executor_free(storage);
-    printf("Test: Pins and Fill - PASSED\n");
+    printf("Test: Ceilings and Fill - PASSED\n");
 }
 
 /** A deferred search lands what a blocking one does, though its descriptor died at submission; one
@@ -5958,7 +6018,7 @@ int main(int argc, char* argv[]) {
     if (selected("nvme_view_narrow_keys")) test_nvme_view_narrow_keys();
     if (selected("vram_parts_share_a_device")) test_vram_parts_share_a_device(collection_sizes[1], dimension_counts[1]);
     if (selected("vram_scan")) test_vram_scan(collection_sizes[1], dimension_counts[1]);
-    if (selected("pins_and_fill")) test_pins_and_fill();
+    if (selected("ceilings_and_fill")) test_ceilings_and_fill();
     if (selected("deferred_search")) test_deferred_search();
     if (selected("deferred_polling")) test_deferred_polling();
     if (selected("contended_from_another_thread")) test_contended_from_another_thread();

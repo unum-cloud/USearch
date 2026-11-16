@@ -97,7 +97,7 @@ A thread count of zero derives from the hardware: 7/8 of the cores those memory 
 `forVram` takes no thread count at all: one host thread drives one stream per device, so there is no count to name.
 
 One call holds an executor at a time, and index handles stay freely shareable.
-`Executor.onPool(memoryDomains:cpuClass:pool:)` borrows an existing ForkUnion pool instead of spawning threads, and `drain(mood:)` waits until no call holds the executor and picks whether its threads park or spin once idle.
+`Executor.onPool(memoryDomains:cpuClassCeiling:pool:)` borrows an existing ForkUnion pool instead of spawning threads, and `drain(mood:)` waits until no call holds the executor and picks whether its threads park or spin once idle.
 
 ## Arenas
 

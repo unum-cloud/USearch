@@ -132,7 +132,7 @@ The CMakeLists.txt file has a number of options you can pass:
     Every class unit adds its class's flags over it, the tests and benchmarks drop their host tuning for it, and NumKong, StringZilla, ForkUnion and SmashTable take the same value.
   - `USEARCH_MULTIVERSIONED` - the build kind, `ON` by default and seeded from the environment too: a multiversioned build compiles every CPU class the toolchain compiles above the floor, picked at runtime, and with `OFF` a monoversioned build compiles one `monoversioned` class and no named class, `serial` included.
     The monoversioned class carries every capability NumKong, StringZilla and ForkUnion enabled: what the floor implies, plus what `-D <LIB>_TARGET_<CAP>=1` vouches for where no compiler macro reports it, like `FORKUNION_TARGET_ARM64_WFET=1` on Vera.
-    Each modality and residency compiles one unit for it, and a handle pinned below it, or run on a CPU lacking it, gets `usearch_status_unsupported_k`.
+    Each modality and residency compiles one unit for it, and a handle whose `cpu_class_ceiling` sits below it, or run on a CPU lacking it, gets `usearch_status_unsupported_k`.
     `-D USEARCH_MARCH=native -D USEARCH_MULTIVERSIONED=OFF` is the native build, and the siblings take the same build kind.
 - Which GPUs to target:
   - `USEARCH_CUDA_ARCH` - the NVIDIA code the library, tests and benchmarks compile for: `all` for the release set, `native` for each GPU `nvidia-smi` lists, mapped to its family code like `100f` on a B200 or B300, or one code like `90a`.
@@ -472,8 +472,9 @@ No template names a CPU class, an ISA instruction or a topology query, and capab
 
 ### Dispatch Classes
 
-The C enums give every class a fixed value, shared with UStore, UCall and UForm, so a pinned value means the same hardware in all four.
-CPU class 0 is `unknown`, which pins nothing so dispatch derives the CPU's own class, and GPU class 0 is `unknown`, which a device no class runs on reports.
+The C enums give every class a fixed value, shared with UStore, UCall and UForm, so a ceiling value means the same hardware in all four.
+CPU class 0 is `unknown`, which sets no ceiling so dispatch derives the CPU's own class, and GPU class 0 is `unknown`, which a device no class runs on reports.
+The `cpu_class_ceiling` and `gpu_class_ceiling` options name the newest class dispatch may pick, and a description's `cpu_class` and `gpu_class` report the class it picked.
 
 | Value | CPU class         | Adds over its parent                                                   |
 | ----: | ----------------- | ---------------------------------------------------------------------- |
@@ -522,13 +523,13 @@ Every compiled CPU class must advance past its parent for at least one dtype, an
 1. A value no class takes is refused with `invalid_argument`.
 2. The machine's masks are the libraries' detected ones: NumKong's, StringZilla's and `fu::cpu_capabilities()`.
 3. AMX is granted inside the pick, and a refused grant clears the AMX bits.
-4. A pinned class whose masks the machine lacks is refused with `unsupported`, and otherwise its masks become the ceiling.
-5. The ladder walk takes the newest compiled class whose masks fit the ceiling, and a ceiling no compiled class fits is refused with `unsupported`.
+4. A `cpu_class_ceiling` intersects its masks with the machine's, so a class the machine lacks narrows the ceiling rather than being refused.
+5. The ladder walk takes the newest compiled class whose masks fit the ceiling, and a ceiling no compiled class fits is refused with `unsupported`, as a monoversioned build on an older CPU is.
 
 `pick_gpu_class` picks a GPU class per device, walking its vendor's ladder newest first:
 
 1. The class must be built, as its gate `USEARCH_TARGET_<VENDOR>_<CLASS>` tells the dispatch units.
-2. It must sit at or under the pinned class.
+2. It must sit at or under the `gpu_class_ceiling`.
 3. The driver must load the class's device code on the device, as `cuModuleLoadData` and `hipModuleLoadData` answer for its first dense bundle, or the device's Apple family must reach the class's.
 
 Every device is listed, and one no class serves reports `unknown` and refuses work with `unsupported`.

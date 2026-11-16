@@ -187,18 +187,18 @@ typedef struct dense_geometry_t {
     size_t values_per_key;
 } dense_geometry_t;
 
-/** The keyword a verb names its pinned class by: `cpu_class` for host placements, `gpu_class` for
- *  devices. */
-static char const* pinned_name(usearch_py_enum_t const* pinned_classes) {
-    return pinned_classes == &usearch_py_gpu_class ? "gpu_class" : "cpu_class";
+/** The keyword a verb names its class ceiling by: @c cpu_class_ceiling for host placements,
+ *  @c gpu_class_ceiling for devices. */
+static char const* ceiling_name(usearch_py_enum_t const* ceiling_classes) {
+    return ceiling_classes == &usearch_py_gpu_class ? "gpu_class_ceiling" : "cpu_class_ceiling";
 }
 
-/** Reads the class a placement pins, a member of @p pinned_classes, leaving zero for none; returns
- *  0, or -1 with an exception set. */
-static int pinned_parse(PyObject* object, usearch_py_enum_t const* pinned_classes, int* pinned) {
-    *pinned = 0;
+/** Reads the class ceiling a placement names, a member of @p ceiling_classes, leaving zero for
+ *  none; returns 0, or -1 with an exception set. */
+static int ceiling_parse(PyObject* object, usearch_py_enum_t const* ceiling_classes, int* ceiling) {
+    *ceiling = 0;
     if (!object || object == Py_None) return 0;
-    return usearch_py_enum_from_object(object, pinned_name(pinned_classes), pinned_classes, pinned);
+    return usearch_py_enum_from_object(object, ceiling_name(ceiling_classes), ceiling_classes, ceiling);
 }
 
 /**
@@ -212,9 +212,9 @@ static int pinned_parse(PyObject* object, usearch_py_enum_t const* pinned_classe
  */
 static int geometry_parse(char const* verb, PyObject* const* args, Py_ssize_t positional_args_count,
                           PyObject* args_names_tuple, char const* arm_name, PyObject** arm,
-                          usearch_py_enum_t const* pinned_classes, int* pinned, dense_geometry_t* geometry) {
+                          usearch_py_enum_t const* ceiling_classes, int* ceiling, dense_geometry_t* geometry) {
     PyObject *dimensions_object, *metric_object, *quantization_object, *connectivity_object, *values_per_key_object;
-    PyObject* pinned_object;
+    PyObject* ceiling_object;
     usearch_py_argument_t const arguments[] = {
         {"dimensions", &dimensions_object},
         {"metric", &metric_object},
@@ -222,7 +222,7 @@ static int geometry_parse(char const* verb, PyObject* const* args, Py_ssize_t po
         {"connectivity", &connectivity_object},
         {"values_per_key", &values_per_key_object},
         {arm_name, arm},
-        {pinned_name(pinned_classes), &pinned_object},
+        {ceiling_name(ceiling_classes), &ceiling_object},
     };
     memset(geometry, 0, sizeof(*geometry));
     int metric = usearch_dense_metric_angular_k;
@@ -239,7 +239,7 @@ static int geometry_parse(char const* verb, PyObject* const* args, Py_ssize_t po
         usearch_py_scalar_from_object(quantization_object, "quantization", &geometry->quantization) != 0 ||
         usearch_py_size_from_object(connectivity_object, "connectivity", &geometry->connectivity) != 0 ||
         usearch_py_size_from_object(values_per_key_object, "values_per_key", &geometry->values_per_key) != 0 ||
-        pinned_parse(pinned_object, pinned_classes, pinned) != 0)
+        ceiling_parse(ceiling_object, ceiling_classes, ceiling) != 0)
         return -1;
     geometry->metric = (usearch_dense_metric_t)metric;
     if (geometry->quantization == usearch_scalar_unknown_k) geometry->quantization = usearch_scalar_bf16_k;
@@ -275,7 +275,7 @@ static PyObject* DenseIndex_tp_new(PyTypeObject* type, PyObject* args, PyObject*
 
 static char const doc_DenseIndex_init_ram[] =                                                            //
     "``init_ram(dimensions, metric=DenseMetric.ANGULAR, quantization=Scalar.BF16, *, connectivity=0,\n"  //
-    "values_per_key=0, memory_domains=None, cpu_class=None) -> DenseIndex``\n"                           //
+    "values_per_key=0, memory_domains=None, cpu_class_ceiling=None) -> DenseIndex``\n"                   //
     "\n"                                                                                                 //
     "Starts an empty, mutable graph in host memory, one shard per named NUMA node.\n"                    //
     "Calls `usearch_dense_init_ram`.\n"                                                                  //
@@ -288,7 +288,8 @@ static char const doc_DenseIndex_init_ram[] =                                   
     "  values_per_key (int, optional): Entries sharing one key; 0 is unbounded.\n"                       //
     "  memory_domains (Sequence[int], optional): NUMA node IDs to shard across, so a\n"                  //
     "    dual-socket box naming two gets two graphs; None derives every node.\n"                         //
-    "  cpu_class (CPUClass, optional): The class to dispatch as; None derives the CPU's own.\n"          //
+    "  cpu_class_ceiling (CPUClass, optional): The newest class dispatch may pick, intersected\n"        //
+    "    with what the machine runs, so a class it lacks narrows; None means no ceiling.\n"              //
     "\n"                                                                                                 //
     "Example:\n"                                                                                         //
     "  >>> index = usearch.DenseIndex.init_ram(256, usearch.DenseMetric.ANGULAR)\n"                      //
@@ -301,9 +302,9 @@ static PyObject* DenseIndex_init_ram(PyTypeObject* type, PyObject* const* args, 
     PyObject* memory_domains_object;
     int32_t* memory_domains = NULL;
     size_t memory_domains_count = 0;
-    int cpu_class = 0;
+    int cpu_class_ceiling = 0;
     if (geometry_parse("init_ram", args, positional_args_count, args_names_tuple, "memory_domains",
-                       &memory_domains_object, &usearch_py_cpu_class, &cpu_class, &geometry) != 0 ||
+                       &memory_domains_object, &usearch_py_cpu_class, &cpu_class_ceiling, &geometry) != 0 ||
         usearch_py_ordinals_from_object(memory_domains_object, "memory_domains", &memory_domains,
                                         &memory_domains_count) != 0)
         return NULL;
@@ -318,7 +319,7 @@ static PyObject* DenseIndex_init_ram(PyTypeObject* type, PyObject* const* args, 
         .dimensions = geometry.dimensions,
         .connectivity = geometry.connectivity,
         .values_per_key = geometry.values_per_key,
-        .ram = {memory_domains, memory_domains_count, 0, (usearch_cpu_class_t)cpu_class},
+        .ram = {memory_domains, memory_domains_count, 0, (usearch_cpu_class_t)cpu_class_ceiling},
     };
     Py_BEGIN_ALLOW_THREADS;
     usearch_dense_init_ram(&arguments);
@@ -329,7 +330,7 @@ static PyObject* DenseIndex_init_ram(PyTypeObject* type, PyObject* const* args, 
 
 static char const doc_DenseIndex_init_vram[] =                                                           //
     "``init_vram(dimensions, metric=DenseMetric.ANGULAR, quantization=Scalar.BF16, *, connectivity=0,\n" //
-    "values_per_key=0, devices=None, gpu_class=None) -> DenseIndex``\n"                                  //
+    "values_per_key=0, devices=None, gpu_class_ceiling=None) -> DenseIndex``\n"                          //
     "\n"                                                                                                 //
     "Starts an empty, mutable graph on CUDA devices, one shard per named ordinal.\n"                     //
     "Calls `usearch_dense_init_vram`.\n"                                                                 //
@@ -346,7 +347,8 @@ static char const doc_DenseIndex_init_vram[] =                                  
     "  values_per_key (int, optional): Entries sharing one key; 0 is unbounded.\n"                       //
     "  devices (Sequence[int], optional): CUDA ordinals to shard across; None derives one\n"             //
     "    free device.\n"                                                                                 //
-    "  gpu_class (GPUClass, optional): The class to dispatch as; None derives the devices' own.\n"       //
+    "  gpu_class_ceiling (GPUClass, optional): The newest class dispatch may pick, capped below\n"       //
+    "    the best class every device loads, else unsupported; None means no ceiling.\n"                  //
     "\n"                                                                                                 //
     "Example:\n"                                                                                         //
     "  >>> index = usearch.DenseIndex.init_vram(256, devices=[0, 1])   # doctest: +SKIP";
@@ -357,9 +359,9 @@ static PyObject* DenseIndex_init_vram(PyTypeObject* type, PyObject* const* args,
     PyObject* devices_object;
     int32_t* devices = NULL;
     size_t devices_count = 0;
-    int gpu_class = 0;
+    int gpu_class_ceiling = 0;
     if (geometry_parse("init_vram", args, positional_args_count, args_names_tuple, "devices", &devices_object,
-                       &usearch_py_gpu_class, &gpu_class, &geometry) != 0 ||
+                       &usearch_py_gpu_class, &gpu_class_ceiling, &geometry) != 0 ||
         usearch_py_ordinals_from_object(devices_object, "devices", &devices, &devices_count) != 0)
         return NULL;
 
@@ -373,7 +375,7 @@ static PyObject* DenseIndex_init_vram(PyTypeObject* type, PyObject* const* args,
         .dimensions = geometry.dimensions,
         .connectivity = geometry.connectivity,
         .values_per_key = geometry.values_per_key,
-        .vram = {devices, devices_count, 0, (usearch_gpu_class_t)gpu_class},
+        .vram = {devices, devices_count, 0, (usearch_gpu_class_t)gpu_class_ceiling},
     };
     Py_BEGIN_ALLOW_THREADS;
     usearch_dense_init_vram(&arguments);
@@ -2700,10 +2702,10 @@ static PyObject* DenseIndex_save_buffer(PyObject* self, PyObject* const* args, P
  */
 static int load_parse(char const* verb, PyObject* const* args, Py_ssize_t positional_args_count,
                       PyObject* args_names_tuple, char const* source_name, PyObject** source, char const* arm_name,
-                      PyObject** arm, usearch_py_enum_t const* pinned_classes, int* pinned,
+                      PyObject** arm, usearch_py_enum_t const* ceiling_classes, int* ceiling,
                       usearch_executor_t* executor, size_t* values_per_key, PyObject** progress,
                       size_t* progress_steps) {
-    PyObject *executor_object, *values_per_key_object, *progress_object, *progress_steps_object, *pinned_object;
+    PyObject *executor_object, *values_per_key_object, *progress_object, *progress_steps_object, *ceiling_object;
     usearch_py_argument_t const arguments[] = {
         {source_name, source},
         {arm_name, arm},
@@ -2711,11 +2713,11 @@ static int load_parse(char const* verb, PyObject* const* args, Py_ssize_t positi
         {"values_per_key", &values_per_key_object},
         {"progress", &progress_object},
         {"progress_steps", &progress_steps_object},
-        {pinned_name(pinned_classes), &pinned_object},
+        {ceiling_name(ceiling_classes), &ceiling_object},
     };
     if (usearch_py_arguments_parse(verb, args, positional_args_count, args_names_tuple, 1, 1, arguments,
                                    usearch_py_table_size_(arguments)) != 0 ||
-        pinned_parse(pinned_object, pinned_classes, pinned) != 0 ||
+        ceiling_parse(ceiling_object, ceiling_classes, ceiling) != 0 ||
         usearch_py_optional_executor_from_object(executor_object, executor) != 0 ||
         usearch_py_size_from_object(values_per_key_object, "values_per_key", values_per_key) != 0 ||
         usearch_py_size_from_object(progress_steps_object, "progress_steps", progress_steps) != 0)
@@ -2725,7 +2727,7 @@ static int load_parse(char const* verb, PyObject* const* args, Py_ssize_t positi
 
 static char const doc_DenseIndex_load_ram[] =                                                       //
     "``load_ram(path, /, *, memory_domains=None, executor=None, values_per_key=0, progress=None,\n" //
-    "progress_steps=0, cpu_class=None) -> DenseIndex``\n"                                           //
+    "progress_steps=0, cpu_class_ceiling=None) -> DenseIndex``\n"                                   //
     "\n"                                                                                            //
     "Copies a checkpoint into a new, mutable index in host memory, its geometry read from the\n"    //
     "checkpoint's own headers. Name the `.safegraphs.json` manifest, never one of the parts\n"      //
@@ -2736,7 +2738,8 @@ static char const doc_DenseIndex_load_ram[] =                                   
     "  path (str | bytes | os.PathLike): The manifest, or a single monolith.\n"                     //
     "  memory_domains (Sequence[int], optional): NUMA node IDs to place the parts on;\n"            //
     "    None derives every node.\n"                                                                //
-    "  cpu_class (CPUClass, optional): The class to dispatch as; None derives the CPU's own.\n"     //
+    "  cpu_class_ceiling (CPUClass, optional): The newest class dispatch may pick, intersected\n"   //
+    "    with what the machine runs, so a class it lacks narrows; None means no ceiling.\n"         //
     "  executor (Executor, optional): The workers the read fans out over, one shard per\n"          //
     "    thread; None reads on the calling thread.\n"                                               //
     "  values_per_key (int, optional): Entries sharing one key, which no checkpoint\n"              //
@@ -2756,10 +2759,10 @@ static PyObject* DenseIndex_load_ram(PyTypeObject* type, PyObject* const* args, 
     int32_t* memory_domains = NULL;
     size_t memory_domains_count = 0;
     PyObject* result = NULL;
-    int cpu_class = 0;
+    int cpu_class_ceiling = 0;
     if (load_parse("load_ram", args, positional_args_count, args_names_tuple, "path", &path_object, "memory_domains",
-                   &memory_domains_object, &usearch_py_cpu_class, &cpu_class, &executor, &values_per_key, &progress,
-                   &progress_steps) != 0 ||
+                   &memory_domains_object, &usearch_py_cpu_class, &cpu_class_ceiling, &executor, &values_per_key,
+                   &progress, &progress_steps) != 0 ||
         usearch_py_path_from_object(path_object, &path, &decoded) != 0 ||
         usearch_py_ordinals_from_object(memory_domains_object, "memory_domains", &memory_domains,
                                         &memory_domains_count) != 0)
@@ -2771,7 +2774,7 @@ static PyObject* DenseIndex_load_ram(PyTypeObject* type, PyObject* const* args, 
         .executor = executor,
         .outcome = &outcome,
         .path = path,
-        .ram = {memory_domains, memory_domains_count, 0, (usearch_cpu_class_t)cpu_class},
+        .ram = {memory_domains, memory_domains_count, 0, (usearch_cpu_class_t)cpu_class_ceiling},
         .values_per_key = values_per_key,
         .progress = usearch_py_progress_registered(progress, progress_steps),
     };
@@ -2787,23 +2790,24 @@ release:
     return result;
 }
 
-static char const doc_DenseIndex_load_ram_buffer[] =                                            //
-    "``load_ram_buffer(buffer, /, *, memory_domains=None, executor=None, values_per_key=0,\n"   //
-    "progress=None, progress_steps=0, cpu_class=None) -> DenseIndex``\n"                        //
-    "\n"                                                                                        //
-    "Copies a monolith out of a buffer into a new, mutable index in host memory, as\n"          //
-    "`load_ram` does from a path; the monolith lands whole on the first memory domain.\n"       //
-    "Calls `usearch_dense_load_ram_buffer`.\n"                                                  //
-    "\n"                                                                                        //
-    "Args:\n"                                                                                   //
-    "  buffer (buffer): One serialized monolith, such as `save_buffer` returns.\n"              //
-    "  memory_domains (Sequence[int], optional): NUMA node IDs to place shards on.\n"           //
-    "  cpu_class (CPUClass, optional): The class to dispatch as; None derives the CPU's own.\n" //
-    "  executor (Executor, optional): The workers the copy fans out over; None copies on\n"     //
-    "    the calling thread.\n"                                                                 //
-    "  values_per_key (int, optional): Entries sharing one key; 0 is unbounded.\n"              //
-    "  progress (callable, optional): Called with (completed, total) bytes; returning\n"        //
-    "    False stops the read and raises `CancelledError`, creating no index.\n"                //
+static char const doc_DenseIndex_load_ram_buffer[] =                                              //
+    "``load_ram_buffer(buffer, /, *, memory_domains=None, executor=None, values_per_key=0,\n"     //
+    "progress=None, progress_steps=0, cpu_class_ceiling=None) -> DenseIndex``\n"                  //
+    "\n"                                                                                          //
+    "Copies a monolith out of a buffer into a new, mutable index in host memory, as\n"            //
+    "`load_ram` does from a path; the monolith lands whole on the first memory domain.\n"         //
+    "Calls `usearch_dense_load_ram_buffer`.\n"                                                    //
+    "\n"                                                                                          //
+    "Args:\n"                                                                                     //
+    "  buffer (buffer): One serialized monolith, such as `save_buffer` returns.\n"                //
+    "  memory_domains (Sequence[int], optional): NUMA node IDs to place shards on.\n"             //
+    "  cpu_class_ceiling (CPUClass, optional): The newest class dispatch may pick, intersected\n" //
+    "    with what the machine runs, so a class it lacks narrows; None means no ceiling.\n"       //
+    "  executor (Executor, optional): The workers the copy fans out over; None copies on\n"       //
+    "    the calling thread.\n"                                                                   //
+    "  values_per_key (int, optional): Entries sharing one key; 0 is unbounded.\n"                //
+    "  progress (callable, optional): Called with (completed, total) bytes; returning\n"          //
+    "    False stops the read and raises `CancelledError`, creating no index.\n"                  //
     "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.";
 
 static PyObject* DenseIndex_load_ram_buffer(PyTypeObject* type, PyObject* const* args, Py_ssize_t positional_args_count,
@@ -2817,9 +2821,9 @@ static PyObject* DenseIndex_load_ram_buffer(PyTypeObject* type, PyObject* const*
     int32_t* memory_domains = NULL;
     size_t memory_domains_count = 0;
     PyObject* result = NULL;
-    int cpu_class = 0;
+    int cpu_class_ceiling = 0;
     if (load_parse("load_ram_buffer", args, positional_args_count, args_names_tuple, "buffer", &buffer_object,
-                   "memory_domains", &memory_domains_object, &usearch_py_cpu_class, &cpu_class, &executor,
+                   "memory_domains", &memory_domains_object, &usearch_py_cpu_class, &cpu_class_ceiling, &executor,
                    &values_per_key, &progress, &progress_steps) != 0 ||
         checkpoint_borrow(buffer_object, &backing) != 0 ||
         usearch_py_ordinals_from_object(memory_domains_object, "memory_domains", &memory_domains,
@@ -2832,7 +2836,7 @@ static PyObject* DenseIndex_load_ram_buffer(PyTypeObject* type, PyObject* const*
         .executor = executor,
         .outcome = &outcome,
         .buffer = {(uint8_t const*)backing.buffer.buf, (size_t)backing.buffer.len},
-        .ram = {memory_domains, memory_domains_count, 0, (usearch_cpu_class_t)cpu_class},
+        .ram = {memory_domains, memory_domains_count, 0, (usearch_cpu_class_t)cpu_class_ceiling},
         .values_per_key = values_per_key,
         .progress = usearch_py_progress_registered(progress, progress_steps),
     };
@@ -2850,7 +2854,7 @@ release:
 
 static char const doc_DenseIndex_load_vram[] =                                                     //
     "``load_vram(path, /, *, devices=None, executor=None, values_per_key=0, progress=None,\n"      //
-    "progress_steps=0, gpu_class=None) -> DenseIndex``\n"                                          //
+    "progress_steps=0, gpu_class_ceiling=None) -> DenseIndex``\n"                                  //
     "\n"                                                                                           //
     "Copies a checkpoint into a new, mutable index on CUDA devices, with the placement rules\n"    //
     "of `load_ram`: part `p` lands whole on device `p` modulo the device count.\n"                 //
@@ -2859,7 +2863,8 @@ static char const doc_DenseIndex_load_vram[] =                                  
     "Args:\n"                                                                                      //
     "  path (str | bytes | os.PathLike): The manifest, or a single monolith.\n"                    //
     "  devices (Sequence[int], optional): CUDA ordinals to place the parts on.\n"                  //
-    "  gpu_class (GPUClass, optional): The class to dispatch as; None derives the devices' own.\n" //
+    "  gpu_class_ceiling (GPUClass, optional): The newest class dispatch may pick, capped below\n" //
+    "    the best class every device loads, else unsupported; None means no ceiling.\n"            //
     "  executor (Executor, optional): The streams the upload runs on, one per device; None\n"      //
     "    uploads from the calling thread.\n"                                                       //
     "  values_per_key (int, optional): Entries sharing one key; 0 is unbounded.\n"                 //
@@ -2878,9 +2883,9 @@ static PyObject* DenseIndex_load_vram(PyTypeObject* type, PyObject* const* args,
     int32_t* devices = NULL;
     size_t devices_count = 0;
     PyObject* result = NULL;
-    int gpu_class = 0;
+    int gpu_class_ceiling = 0;
     if (load_parse("load_vram", args, positional_args_count, args_names_tuple, "path", &path_object, "devices",
-                   &devices_object, &usearch_py_gpu_class, &gpu_class, &executor, &values_per_key, &progress,
+                   &devices_object, &usearch_py_gpu_class, &gpu_class_ceiling, &executor, &values_per_key, &progress,
                    &progress_steps) != 0 ||
         usearch_py_path_from_object(path_object, &path, &decoded) != 0 ||
         usearch_py_ordinals_from_object(devices_object, "devices", &devices, &devices_count) != 0)
@@ -2892,7 +2897,7 @@ static PyObject* DenseIndex_load_vram(PyTypeObject* type, PyObject* const* args,
         .executor = executor,
         .outcome = &outcome,
         .path = path,
-        .vram = {devices, devices_count, 0, (usearch_gpu_class_t)gpu_class},
+        .vram = {devices, devices_count, 0, (usearch_gpu_class_t)gpu_class_ceiling},
         .values_per_key = values_per_key,
         .progress = usearch_py_progress_registered(progress, progress_steps),
     };
@@ -2910,7 +2915,7 @@ release:
 
 static char const doc_DenseIndex_load_vram_buffer[] =                                              //
     "``load_vram_buffer(buffer, /, *, devices=None, executor=None, values_per_key=0,\n"            //
-    "progress=None, progress_steps=0, gpu_class=None) -> DenseIndex``\n"                           //
+    "progress=None, progress_steps=0, gpu_class_ceiling=None) -> DenseIndex``\n"                   //
     "\n"                                                                                           //
     "Copies a monolith out of a host or device buffer into a new, mutable index on CUDA\n"         //
     "devices; the monolith lands whole on the first device.\n"                                     //
@@ -2919,7 +2924,8 @@ static char const doc_DenseIndex_load_vram_buffer[] =                           
     "Args:\n"                                                                                      //
     "  buffer (buffer): One serialized monolith.\n"                                                //
     "  devices (Sequence[int], optional): CUDA ordinals to place shards on.\n"                     //
-    "  gpu_class (GPUClass, optional): The class to dispatch as; None derives the devices' own.\n" //
+    "  gpu_class_ceiling (GPUClass, optional): The newest class dispatch may pick, capped below\n" //
+    "    the best class every device loads, else unsupported; None means no ceiling.\n"            //
     "  executor (Executor, optional): The streams the upload runs on, one per device; None\n"      //
     "    uploads from the calling thread.\n"                                                       //
     "  values_per_key (int, optional): Entries sharing one key; 0 is unbounded.\n"                 //
@@ -2938,10 +2944,10 @@ static PyObject* DenseIndex_load_vram_buffer(PyTypeObject* type, PyObject* const
     int32_t* devices = NULL;
     size_t devices_count = 0;
     PyObject* result = NULL;
-    int gpu_class = 0;
+    int gpu_class_ceiling = 0;
     if (load_parse("load_vram_buffer", args, positional_args_count, args_names_tuple, "buffer", &buffer_object,
-                   "devices", &devices_object, &usearch_py_gpu_class, &gpu_class, &executor, &values_per_key, &progress,
-                   &progress_steps) != 0 ||
+                   "devices", &devices_object, &usearch_py_gpu_class, &gpu_class_ceiling, &executor, &values_per_key,
+                   &progress, &progress_steps) != 0 ||
         checkpoint_borrow(buffer_object, &backing) != 0 ||
         usearch_py_ordinals_from_object(devices_object, "devices", &devices, &devices_count) != 0)
         goto release;
@@ -2952,7 +2958,7 @@ static PyObject* DenseIndex_load_vram_buffer(PyTypeObject* type, PyObject* const
         .executor = executor,
         .outcome = &outcome,
         .buffer = {(uint8_t const*)backing.buffer.buf, (size_t)backing.buffer.len},
-        .vram = {devices, devices_count, 0, (usearch_gpu_class_t)gpu_class},
+        .vram = {devices, devices_count, 0, (usearch_gpu_class_t)gpu_class_ceiling},
         .values_per_key = values_per_key,
         .progress = usearch_py_progress_registered(progress, progress_steps),
     };
@@ -2994,48 +3000,50 @@ static PyObject* DenseIndex_view_ram(PyTypeObject* type, PyObject* path_object) 
     return index_adopt(type, handle, &outcome);
 }
 
-static char const doc_DenseIndex_view_nvme[] =                                                  //
-    "``view_nvme(path, /, *, paths=None, executor=None, cpu_class=None,\n"                      //
-    "key_table_domains=None) -> DenseIndex``\n"                                                 //
-    "\n"                                                                                        //
-    "Serves a checkpoint in place from NVMe drives as a read-only index. External-memory\n"     //
-    "graphs are never modified in place, so bigger ones come from merging shards built in\n"    //
-    "RAM.\n"                                                                                    //
-    "Calls `usearch_dense_view_nvme`.\n"                                                        //
-    "\n"                                                                                        //
-    "Args:\n"                                                                                   //
-    "  path (str | bytes | os.PathLike): The manifest, or a single monolith.\n"                 //
-    "  paths (Sequence[str | bytes | PathLike], optional): Devices or directories to\n"         //
-    "    serve the parts from; None serves each where its manifest points. A path may\n"        //
-    "    name a kernel device, a transport identifier, or a FUSE mount.\n"                      //
-    "  executor (Executor, optional): The NVMe executor whose rings read the headers;\n"        //
-    "    None reads them on the calling thread.\n"                                              //
-    "  cpu_class (CPUClass, optional): The class to dispatch as; None derives the CPU's own.\n" //
-    "  key_table_domains (Sequence[int], optional): NUMA node IDs of a key table held in\n"     //
-    "    RAM, which `count`, `get`, `sample`, `maxsim` and hinted searches read; an empty\n"    //
+static char const doc_DenseIndex_view_nvme[] =                                                    //
+    "``view_nvme(path, /, *, paths=None, executor=None, cpu_class_ceiling=None,\n"                //
+    "key_table_domains=None) -> DenseIndex``\n"                                                   //
+    "\n"                                                                                          //
+    "Serves a checkpoint in place from NVMe drives as a read-only index. External-memory\n"       //
+    "graphs are never modified in place, so bigger ones come from merging shards built in\n"      //
+    "RAM.\n"                                                                                      //
+    "Calls `usearch_dense_view_nvme`.\n"                                                          //
+    "\n"                                                                                          //
+    "Args:\n"                                                                                     //
+    "  path (str | bytes | os.PathLike): The manifest, or a single monolith.\n"                   //
+    "  paths (Sequence[str | bytes | PathLike], optional): Devices or directories to\n"           //
+    "    serve the parts from; None serves each where its manifest points. A path may\n"          //
+    "    name a kernel device, a transport identifier, or a FUSE mount.\n"                        //
+    "  executor (Executor, optional): The NVMe executor whose rings read the headers;\n"          //
+    "    None reads them on the calling thread.\n"                                                //
+    "  cpu_class_ceiling (CPUClass, optional): The newest class dispatch may pick, intersected\n" //
+    "    with what the machine runs, so a class it lacks narrows; None means no ceiling.\n"       //
+    "  key_table_domains (Sequence[int], optional): NUMA node IDs of a key table held in\n"       //
+    "    RAM, which `count`, `get`, `sample`, `maxsim` and hinted searches read; an empty\n"      //
     "    sequence derives them, and None holds none.";
 
 static PyObject* DenseIndex_view_nvme(PyTypeObject* type, PyObject* const* args, Py_ssize_t positional_args_count,
                                       PyObject* args_names_tuple) {
-    PyObject *path_object, *paths_object, *executor_object, *cpu_class_object, *key_table_object, *decoded = NULL;
+    PyObject *path_object, *paths_object, *executor_object, *cpu_class_ceiling_object, *key_table_object,
+        *decoded = NULL;
     usearch_py_argument_t const arguments[] = {
         {"path", &path_object},
         {"paths", &paths_object},
         {"executor", &executor_object},
-        {"cpu_class", &cpu_class_object},
+        {"cpu_class_ceiling", &cpu_class_ceiling_object},
         {"key_table_domains", &key_table_object},
     };
     usearch_bytes_view_t path;
     usearch_py_paths_t paths = {0};
     usearch_executor_t executor = NULL;
-    int cpu_class = 0;
+    int cpu_class_ceiling = 0;
     int32_t* key_table_domains = NULL;
     size_t key_table_domains_count = 0;
     PyObject* result = NULL;
     if (usearch_py_arguments_parse("view_nvme", args, positional_args_count, args_names_tuple, 1, 1, arguments,
                                    usearch_py_table_size_(arguments)) != 0 ||
         usearch_py_optional_executor_from_object(executor_object, &executor) != 0 ||
-        pinned_parse(cpu_class_object, &usearch_py_cpu_class, &cpu_class) != 0 ||
+        ceiling_parse(cpu_class_ceiling_object, &usearch_py_cpu_class, &cpu_class_ceiling) != 0 ||
         usearch_py_path_from_object(path_object, &path, &decoded) != 0 ||
         usearch_py_paths_from_object(paths_object, &paths) != 0 ||
         usearch_py_ordinals_from_object(key_table_object, "key_table_domains", &key_table_domains,
@@ -3049,10 +3057,10 @@ static PyObject* DenseIndex_view_nvme(PyTypeObject* type, PyObject* const* args,
         .executor = executor,
         .outcome = &outcome,
         .path = path,
-        .nvme = {paths.views, paths.count, (usearch_cpu_class_t)cpu_class},
+        .nvme = {paths.views, paths.count, (usearch_cpu_class_t)cpu_class_ceiling},
     };
     usearch_ram_options_t const key_table = {key_table_domains, key_table_domains_count, 0,
-                                             (usearch_cpu_class_t)cpu_class};
+                                             (usearch_cpu_class_t)cpu_class_ceiling};
     if (key_table_object && key_table_object != Py_None) view_arguments.ram = &key_table;
     Py_BEGIN_ALLOW_THREADS;
     usearch_dense_view_nvme(&view_arguments);
@@ -3066,47 +3074,49 @@ release:
     return result;
 }
 
-static char const doc_DenseIndex_load_nvme[] =                                                  //
-    "``load_nvme(path, /, *, paths=None, executor=None, cpu_class=None,\n"                      //
-    "key_table_domains=None) -> DenseIndex``\n"                                                 //
-    "\n"                                                                                        //
-    "Opens a checkpoint's manifest from NVMe drives as a writable index: it answers every\n"    //
-    "read a view answers, and `refine` rewrites its parts one at a time, replacing the\n"       //
-    "manifest durably as each commits. A lone monolith has no manifest to replace and\n"        //
-    "raises `UnsupportedError`.\n"                                                              //
-    "Calls `usearch_dense_load_nvme`.\n"                                                        //
-    "\n"                                                                                        //
-    "Args:\n"                                                                                   //
-    "  path (str | bytes | os.PathLike): The manifest.\n"                                       //
-    "  paths (Sequence[str | bytes | PathLike], optional): Must name none, since the\n"         //
-    "    parts are served where the manifest points.\n"                                         //
-    "  executor (Executor, optional): The NVMe executor whose rings read the headers;\n"        //
-    "    None reads them on the calling thread.\n"                                              //
-    "  cpu_class (CPUClass, optional): The class to dispatch as; None derives the CPU's own.\n" //
-    "  key_table_domains (Sequence[int], optional): NUMA node IDs of a key table held in\n"     //
+static char const doc_DenseIndex_load_nvme[] =                                                    //
+    "``load_nvme(path, /, *, paths=None, executor=None, cpu_class_ceiling=None,\n"                //
+    "key_table_domains=None) -> DenseIndex``\n"                                                   //
+    "\n"                                                                                          //
+    "Opens a checkpoint's manifest from NVMe drives as a writable index: it answers every\n"      //
+    "read a view answers, and `refine` rewrites its parts one at a time, replacing the\n"         //
+    "manifest durably as each commits. A lone monolith has no manifest to replace and\n"          //
+    "raises `UnsupportedError`.\n"                                                                //
+    "Calls `usearch_dense_load_nvme`.\n"                                                          //
+    "\n"                                                                                          //
+    "Args:\n"                                                                                     //
+    "  path (str | bytes | os.PathLike): The manifest.\n"                                         //
+    "  paths (Sequence[str | bytes | PathLike], optional): Must name none, since the\n"           //
+    "    parts are served where the manifest points.\n"                                           //
+    "  executor (Executor, optional): The NVMe executor whose rings read the headers;\n"          //
+    "    None reads them on the calling thread.\n"                                                //
+    "  cpu_class_ceiling (CPUClass, optional): The newest class dispatch may pick, intersected\n" //
+    "    with what the machine runs, so a class it lacks narrows; None means no ceiling.\n"       //
+    "  key_table_domains (Sequence[int], optional): NUMA node IDs of a key table held in\n"       //
     "    RAM, as `view_nvme` takes them.";
 
 static PyObject* DenseIndex_load_nvme(PyTypeObject* type, PyObject* const* args, Py_ssize_t positional_args_count,
                                       PyObject* args_names_tuple) {
-    PyObject *path_object, *paths_object, *executor_object, *cpu_class_object, *key_table_object, *decoded = NULL;
+    PyObject *path_object, *paths_object, *executor_object, *cpu_class_ceiling_object, *key_table_object,
+        *decoded = NULL;
     usearch_py_argument_t const arguments[] = {
         {"path", &path_object},
         {"paths", &paths_object},
         {"executor", &executor_object},
-        {"cpu_class", &cpu_class_object},
+        {"cpu_class_ceiling", &cpu_class_ceiling_object},
         {"key_table_domains", &key_table_object},
     };
     usearch_bytes_view_t path;
     usearch_py_paths_t paths = {0};
     usearch_executor_t executor = NULL;
-    int cpu_class = 0;
+    int cpu_class_ceiling = 0;
     int32_t* key_table_domains = NULL;
     size_t key_table_domains_count = 0;
     PyObject* result = NULL;
     if (usearch_py_arguments_parse("load_nvme", args, positional_args_count, args_names_tuple, 1, 1, arguments,
                                    usearch_py_table_size_(arguments)) != 0 ||
         usearch_py_optional_executor_from_object(executor_object, &executor) != 0 ||
-        pinned_parse(cpu_class_object, &usearch_py_cpu_class, &cpu_class) != 0 ||
+        ceiling_parse(cpu_class_ceiling_object, &usearch_py_cpu_class, &cpu_class_ceiling) != 0 ||
         usearch_py_path_from_object(path_object, &path, &decoded) != 0 ||
         usearch_py_paths_from_object(paths_object, &paths) != 0 ||
         usearch_py_ordinals_from_object(key_table_object, "key_table_domains", &key_table_domains,
@@ -3120,10 +3130,10 @@ static PyObject* DenseIndex_load_nvme(PyTypeObject* type, PyObject* const* args,
         .executor = executor,
         .outcome = &outcome,
         .path = path,
-        .nvme = {paths.views, paths.count, (usearch_cpu_class_t)cpu_class},
+        .nvme = {paths.views, paths.count, (usearch_cpu_class_t)cpu_class_ceiling},
     };
     usearch_ram_options_t const key_table = {key_table_domains, key_table_domains_count, 0,
-                                             (usearch_cpu_class_t)cpu_class};
+                                             (usearch_cpu_class_t)cpu_class_ceiling};
     if (key_table_object && key_table_object != Py_None) load_arguments.ram = &key_table;
     Py_BEGIN_ALLOW_THREADS;
     usearch_dense_load_nvme(&load_arguments);

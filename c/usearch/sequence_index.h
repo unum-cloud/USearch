@@ -182,8 +182,9 @@ typedef enum usearch_sequence_metric_t {
  *  outside the set. */
 USEARCH_EXPORT char const* usearch_sequence_metric_name(usearch_sequence_metric_t metric);
 
-/** Reads a kind back from its spelling; @c usearch_sequence_metric_unknown_k when unrecognized. */
-USEARCH_EXPORT usearch_sequence_metric_t usearch_sequence_metric_from_name(usearch_bytes_view_t name);
+/** Reads a kind back into @p metric, or fails with @c usearch_status_invalid_argument_k. */
+USEARCH_EXPORT usearch_status_t usearch_sequence_metric_from_name(usearch_bytes_view_t name,
+                                                                  usearch_sequence_metric_t* metric);
 
 /**
  *  @brief The substitution matrix and gap costs an alignment kind scores with; the Levenshtein
@@ -238,18 +239,19 @@ typedef struct usearch_sequence_init_ram_t {
 } usearch_sequence_init_ram_t;
 
 /**
- *  Creates an empty, mutable sequence index in host memory, for the uniform edit distances or
- *  the weighted alignments alike.
+ *  @brief Creates an empty, mutable sequence index in host memory, for the uniform edit distances
+ *      or the weighted alignments alike.
  *
  *  @par Statuses:
- *  - @c usearch_status_invalid_argument_k @c NULL @c window_widths for a nonzero count, a zero
- *    window width, or @c weights without a substitution matrix.
+ *  - @c usearch_status_invalid_argument_k @c NULL @c window_widths for a nonzero count, a
+ *    zero window width, @c weights without a substitution matrix, or a @c cpu_class_ceiling
+ *    no class takes.
  *  - @c usearch_status_unknown_kind_k An unknown @c metric.
  *  - @c usearch_status_config_mismatch_k @c weights for a kind other than Needleman-Wunsch,
  *    Needleman-Wunsch without them, window widths missing for the overlap kind or given to
  *    another, or weights folding into more than 32 classes, a negative gap or a pair above its
  *    mean self-score.
- *  - @c usearch_status_unsupported_k A pinned class the CPU does not admit.
+ *  - @c usearch_status_unsupported_k A @c cpu_class_ceiling below every class compiled here.
  */
 USEARCH_EXPORT void usearch_sequence_init_ram(usearch_sequence_init_ram_t* arguments);
 
@@ -295,14 +297,14 @@ typedef struct usearch_sequence_init_vram_t {
  *
  *  @par Statuses:
  *  - @c usearch_status_invalid_argument_k @c NULL window widths for a nonzero count, a @c NULL
- *    substitution matrix, or an empty window.
+ *    substitution matrix, an empty window, or a @c gpu_class_ceiling no class takes.
  *  - @c usearch_status_unknown_kind_k A kind other than byte or UTF-8 Levenshtein, window overlap
  *    or Needleman-Wunsch.
  *  - @c usearch_status_config_mismatch_k Weights for a kind that does not align, an alignment
  *    kind without weights, window widths for any kind but overlap or none for overlap, or devices
  *    of two classes.
- *  - @c usearch_status_unsupported_k A @c values_per_key bound, or devices that do not run the
- *    pinned class.
+ *  - @c usearch_status_unsupported_k A @c values_per_key bound, or devices that load no class under
+ *    @c gpu_class_ceiling.
  *  - @c usearch_status_device_k A device past the listing, one whose vendor no kernel serves, or
  *    a build without GPU kernels.
  */
@@ -347,12 +349,12 @@ typedef struct usearch_sequence_load_ram_t {
  *  the placed ones open over those domains in turn.
  *
  *  @par Statuses:
- *  - @c usearch_status_invalid_argument_k An empty @c path, a checkpoint or part path that does
- *    not parse, or @c weights without a substitution matrix.
+ *  - @c usearch_status_invalid_argument_k An empty @c path, a checkpoint or part path that does not
+ *    parse, @c weights without a substitution matrix, or a @c cpu_class_ceiling no class takes.
  *  - @c usearch_status_malformed_k The checkpoint lists no part, or a part, its header, columns,
  *    sums or recorded costs do not parse.
  *  - @c usearch_status_unknown_kind_k A checkpoint of an unknown metric.
- *  - @c usearch_status_unsupported_k A pinned class the CPU does not admit.
+ *  - @c usearch_status_unsupported_k A @c cpu_class_ceiling below every class compiled here.
  *  - @c usearch_status_uninitialized_k The executor holds no pool workers.
  *  - @c usearch_status_config_mismatch_k @c weights for a checkpoint of another kind than
  *    Needleman-Wunsch or folding into more than 32 classes, a negative gap or a pair above its
@@ -403,12 +405,12 @@ typedef struct usearch_sequence_load_ram_buffer_t {
  *  bytes through a mapping, so @c buffer needs no file behind it, and a mapped file no copy.
  *
  *  @par Statuses:
- *  - @c usearch_status_invalid_argument_k An empty @c buffer, or @c weights without a
- *    substitution matrix.
+ *  - @c usearch_status_invalid_argument_k An empty @c buffer, @c weights without a substitution
+ *    matrix, or a @c cpu_class_ceiling no class takes.
  *  - @c usearch_status_malformed_k The manifest lists no part, or a part, its header, columns,
  *    sums or recorded costs do not parse.
  *  - @c usearch_status_unknown_kind_k A checkpoint of an unknown metric.
- *  - @c usearch_status_unsupported_k A pinned class the CPU does not admit.
+ *  - @c usearch_status_unsupported_k A @c cpu_class_ceiling below every class compiled here.
  *  - @c usearch_status_uninitialized_k The executor holds no pool workers.
  *  - @c usearch_status_config_mismatch_k @c weights or recorded costs @c usearch_sequence_load_ram
  *    refuses for the same reasons, or the checkpoint's columns differing from the shards' in
@@ -457,13 +459,13 @@ typedef struct usearch_sequence_load_vram_t {
  *      rules of @c usearch_sequence_load_ram.
  *
  *  @par Statuses:
- *  - @c usearch_status_invalid_argument_k An empty @c path, a checkpoint or part path that does
- *    not parse, or @c weights without a substitution matrix.
+ *  - @c usearch_status_invalid_argument_k An empty @c path, a checkpoint or part path that does not
+ *    parse, @c weights without a substitution matrix, or a @c gpu_class_ceiling no class takes.
  *  - @c usearch_status_malformed_k The checkpoint lists no part, or a part, its header, columns,
  *    sums or recorded costs do not parse.
  *  - @c usearch_status_unknown_kind_k A checkpoint of an unknown metric.
- *  - @c usearch_status_unsupported_k A @c values_per_key bound, or devices that do not run the
- *    pinned class.
+ *  - @c usearch_status_unsupported_k A @c values_per_key bound, or devices that load no class under
+ *    @c gpu_class_ceiling.
  *  - @c usearch_status_config_mismatch_k Devices of two classes, @c weights for a checkpoint of
  *    another kind than Needleman-Wunsch or folding into more than 32 classes, a negative gap or a
  *    pair above its mean self-score, a Needleman-Wunsch checkpoint recording no costs and given
@@ -515,13 +517,13 @@ typedef struct usearch_sequence_load_vram_buffer_t {
  *      reporting and cancelling like @c usearch_sequence_load_vram.
  *
  *  @par Statuses:
- *  - @c usearch_status_invalid_argument_k An empty @c buffer, or @c weights without a substitution
- *    matrix.
+ *  - @c usearch_status_invalid_argument_k An empty @c buffer, @c weights without a substitution
+ *    matrix, or a @c gpu_class_ceiling no class takes.
  *  - @c usearch_status_malformed_k The manifest lists no part, or a part, its header, columns, sums
  *    or recorded costs do not parse.
  *  - @c usearch_status_unknown_kind_k A checkpoint of an unknown metric.
  *  - @c usearch_status_unsupported_k A @c buffer in device memory, a @c values_per_key bound, or
- *    devices that do not run the pinned class.
+ *    devices that load no class under @c gpu_class_ceiling.
  *  - @c usearch_status_config_mismatch_k The mismatches @c usearch_sequence_load_vram lists.
  *  - @c usearch_status_device_k An ordinal past the listing, devices this build carries no kernels
  *    for, a build without GPU kernels, or an executor that is not a VRAM executor.
@@ -546,17 +548,17 @@ typedef struct usearch_sequence_view_ram_t {
     usearch_sequence_weights_t const* weights;
 
     /** The class to dispatch as; a view reads its shards from the checkpoint, so only
-     *  @c usearch_ram_options_t::cpu_class is read. */
+     *  @c usearch_ram_options_t::cpu_class_ceiling is read. */
     usearch_ram_options_t ram;
 } usearch_sequence_view_ram_t;
 
 /**
- *  Serves a checkpoint in place through a memory mapping, as a read-only index whose mutating
- *  verbs report @c usearch_status_read_only_k.
+ *  @brief Serves a checkpoint in place through a memory mapping, as a read-only index whose
+ *      mutating verbs report @c usearch_status_read_only_k.
  *
  *  @par Statuses:
- *  - @c usearch_status_invalid_argument_k An empty @c path, a checkpoint or part path that does
- *    not parse, or @c weights without a substitution matrix.
+ *  - @c usearch_status_invalid_argument_k An empty @c path, a checkpoint or part path that does not
+ *    parse, @c weights without a substitution matrix, or a @c cpu_class_ceiling no class takes.
  *  - @c usearch_status_malformed_k The checkpoint lists no part, or a part, its header or its
  *    recorded costs do not parse.
  *  - @c usearch_status_unknown_kind_k A checkpoint of an unknown metric.
@@ -603,8 +605,8 @@ typedef struct usearch_sequence_view_nvme_t {
  *  @par Statuses:
  *  - @c usearch_status_device_k @c executor is not an NVMe executor.
  *  - @c usearch_status_invalid_argument_k An empty @c path, @c NULL paths for a nonzero count, a
- *    path that does not parse or names a base off its medium's block, or @c weights without a
- *    substitution matrix.
+ *    path that does not parse or names a base off its medium's block, @c weights without a
+ *    substitution matrix, or a @c cpu_class_ceiling no class takes.
  *  - @c usearch_status_malformed_k The manifest names no part, or a manifest, header, row
  *    directory or the recorded costs do not parse.
  *  - @c usearch_status_unknown_kind_k A checkpoint of an unknown metric.
@@ -612,7 +614,7 @@ typedef struct usearch_sequence_view_nvme_t {
  *    IDs or metric, or with @c nvme, @c weights for a checkpoint of another kind than
  *    Needleman-Wunsch or folding into more than 32 classes, a negative gap or a pair above its
  *    mean self-score, or a Needleman-Wunsch checkpoint recording no costs and given no weights.
- *  - @c usearch_status_unsupported_k A pinned class the CPU does not admit.
+ *  - @c usearch_status_unsupported_k A @c cpu_class_ceiling below every class compiled here.
  *  - @c usearch_status_uninitialized_k The executor holds no threads or pool workers.
  *  - @c usearch_status_contended_k Another call holds the executor, or its pool runs another
  *    dispatch.

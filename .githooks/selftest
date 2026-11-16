@@ -4587,7 +4587,7 @@ stage_release_fixture() { # stage_release_fixture <version> [<relative-path> <se
     IFS=. read -r major minor patch <<< "$core"
     (
         cd "$fixture_directory" || exit 1
-        mkdir -p mojo java csharp/nuget c/usearch src_stub
+        mkdir -p mojo java csharp/nuget c/usearch
         printf '%s\n' "$version" > VERSION
         printf '{\n  "name": "usearch",\n  "version": "%s",\n}\n' "$version" > package.json
         printf '[package]\nname = "usearch"\nversion = "%s"\n' "$version" > Cargo.toml
@@ -4599,7 +4599,6 @@ stage_release_fixture() { # stage_release_fixture <version> [<relative-path> <se
         printf 'let release = "https://github.com/unum-cloud/USearch/releases/download/v%s"\n' "$version" > Package.swift
         printf '#define USEARCH_VERSION_MAJOR %s\n#define USEARCH_VERSION_MINOR %s\n#define USEARCH_VERSION_PATCH %s\n' \
             "$major" "$minor" "$patch" > c/usearch/types.h
-        printf 'char const* usearch_version_name(void) { return "%s"; }\n' "$core" > src_stub/types.cpp
         [ $# -lt 3 ] || { sed "$3" "$2" > "$2.edited" && mv "$2.edited" "$2"; }
         git add -A
     ) || exit 1
