@@ -47,9 +47,10 @@
 
 namespace unum::usearch::dense {
 
-/** Two halves or two brain floats, as the dot-of-pairs instructions take them. */
+/** Two halves, or the bit patterns of two brain floats in shorts, as the dot-of-pairs builtins
+ *  take them: Clang declares the brain-float dot's pairs as two shorts, not two brain floats. */
 using hip_f16x2_t = _Float16 __attribute__((ext_vector_type(2)));
-using hip_bf16x2_t = __bf16 __attribute__((ext_vector_type(2)));
+using hip_bf16x2_t = short __attribute__((ext_vector_type(2)));
 
 #pragma region Metrics
 
