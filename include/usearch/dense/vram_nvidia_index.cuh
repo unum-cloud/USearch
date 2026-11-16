@@ -23,7 +23,7 @@
 
 #include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the rows map's state
 
-#include <numkong/types.h>       // `NUMKONG_ARCH_CUDA_`, which the two below test before including it
+#include <numkong/types.h>       // the vendor detection the two below test before including it
 #include <numkong/cast/simt.cuh> // `nk_cast_unit_simt_` - the import and export casts' device body
 #include <numkong/each/cuda.cuh> // `nk_each_rmscast_e4m3_cuda_vectors_` & kin - the unit-RMS import's device bodies
 
@@ -352,7 +352,7 @@ __device__ __forceinline__ void cuda_scan(vram_search_view<kit_> const& view, vr
             typename kit_::norms_accumulator_t accumulator {};
             for (u32_t fragment = lane; fragment < storage.geometry.row_fragments; fragment += width_k)
                 accumulator = kit_::accumulate_norms(query_row[fragment], accumulator);
-            accumulator = vram_reduce_norms<cuda_warp_t>(accumulator);
+            accumulator = vram_reduce_norms<cuda_warp_t, ampere_scan_t>(accumulator);
             if (lane == 0) query_norms[local] = kit_::partials_to_norms(accumulator);
         }
         __syncthreads();
@@ -889,7 +889,8 @@ __global__ void __launch_bounds__(vram_warps_per_block_k * 32,
         cuda_gather_by_metric<kit_t>(vram_view<kit_t>(arguments.gather_neighborhoods));
     else if constexpr (kernel_ == vram_kernel_t::restitch_k)
         cuda_restitch<kit_t, schedule_t, resident_blocks>(vram_view<kit_t>(arguments.restitch));
-    else if constexpr (vram_health_kernel(kernel_)) vram_health_pass<kernel_, cuda_warp_t>(arguments.health);
+    else if constexpr (vram_health_kernel(kernel_))
+        vram_health_pass<kernel_, cuda_warp_t, ampere_scan_t>(arguments.health);
     else if constexpr (vram_split_kernel(kernel_)) vram_split_pass<kernel_, cuda_warp_t>(graph);
     else if constexpr (kernel_ == vram_kernel_t::gather_vectors_k) vram_gather_vectors<cuda_warp_t>(arguments.gather);
     else if constexpr (kernel_ == vram_kernel_t::sum_counts_k)
@@ -902,8 +903,9 @@ __global__ void __launch_bounds__(vram_warps_per_block_k * 32,
     }
     else if constexpr (kernel_ == vram_kernel_t::compact_products_k) {
         vram_multiply_t const& products = arguments.products;
-        vram_compact_products<cuda_warp_t>(vram_view(products.ranking), products.block_bytes, products.shards_count,
-                                           products.queries_count, products.tape, products.totals);
+        vram_compact_products<cuda_warp_t, ampere_scan_t>(vram_view(products.ranking), products.block_bytes,
+                                                          products.shards_count, products.queries_count, products.tape,
+                                                          products.totals);
     }
     else if constexpr (kernel_ == vram_kernel_t::nominate_keys_k) {
         vram_maxsim_t const& maxsim = arguments.maxsim;
@@ -989,7 +991,8 @@ __global__ void __launch_bounds__(vram_warps_per_block_k * 32,
     else if constexpr (kernel_ == vram_dense_kernel_t::fold_k)
         vram_fold<kit_t, schedule_t, resident_blocks>(vram_view<kit_t>(arguments.fold));
     else if constexpr (kernel_ == vram_dense_kernel_t::derive_norms_k)
-        vram_derive_norms<kit_t, warp_t>(vram_view<kit_t>(graph.storage), graph.first_id, graph.rows_count);
+        vram_derive_norms<kit_t, warp_t, typename schedule_t::scan_t>(vram_view<kit_t>(graph.storage), graph.first_id,
+                                                                      graph.rows_count);
     else if constexpr (kernel_ == vram_dense_kernel_t::cast_k) {
         nk_size_t const threads = static_cast<nk_size_t>(gridDim.x) * blockDim.x;
         for (nk_size_t unit = static_cast<nk_size_t>(blockIdx.x) * blockDim.x + threadIdx.x;

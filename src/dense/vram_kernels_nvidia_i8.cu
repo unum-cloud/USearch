@@ -4,7 +4,7 @@
  *  @date September 26, 2026
  *  @brief The i8 kernels of one NVIDIA class, under that class's ceiling.
  *
- *  NVCC compiles it device-only once per class, with the class's codes and NumKong target, into the
+ *  NVCC compiles it device-only once per class, with the class's codes and class target, into the
  *  class's i8 fatbin, which @c vram_variants_nvidia_<class>.cpp finds linked in beside its
  *  variants.
  */

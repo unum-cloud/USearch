@@ -15,7 +15,7 @@
  */
 #include <cstdio> // `std::snprintf`
 
-#include <array>       // `std::array` - a capability list rendered at compile time
+#include <array>       // `std::array` - a capability list rendered once
 #include <string_view> // `std::string_view` - a name compared without a terminator
 
 #include <numkong/numkong.h>
@@ -33,45 +33,15 @@ static char const* rendered_version() {
     return rendered;
 }
 
-/** The kernel families a capability mask can name, newest class last. */
-static constexpr struct {
-    nk_capability_t bit;
-    char const* name;
-} capability_names_k[] = {
-    {nk_cap_serial_k, "serial"},     {nk_cap_neon_k, "neon"},
-    {nk_cap_neonsdot_k, "neonsdot"}, {nk_cap_neonbfdot_k, "neonbfdot"},
-    {nk_cap_neonfhm_k, "neonfhm"},   {nk_cap_neonfp8_k, "neonfp8"},
-    {nk_cap_haswell_k, "haswell"},   {nk_cap_skylake_k, "skylake"},
-    {nk_cap_icelake_k, "icelake"},   {nk_cap_genoa_k, "genoa"},
-    {nk_cap_sapphire_k, "sapphire"}, {nk_cap_sapphireamx_k, "sapphireamx"},
-    {nk_cap_v128_k, "v128"},         {nk_cap_v128relaxed_k, "v128relaxed"},
-};
+/** The comma-separated names NumKong gives @p mask, terminated. */
+using capabilities_name_t = std::array<char, NUMKONG_CAPABILITIES_NAME_CAPACITY>;
 
-/** A comma-separated list of kernel families, terminated. */
-using capabilities_name_t = std::array<char, 256>;
-
-/** Composes @p mask as a comma-separated list of the families above, at compile time. */
-static constexpr capabilities_name_t render_capabilities(nk_capability_t mask) noexcept {
+/** Spells @p mask as NumKong names its capabilities. */
+static capabilities_name_t render_capabilities(nk_capability_t mask) noexcept {
     capabilities_name_t rendered {};
-    std::size_t length = 0;
-    for (auto const& named : capability_names_k) {
-        if (!(mask & named.bit)) continue;
-        if (length && length + 1 < rendered.size()) rendered[length++] = ',';
-        for (char const* name = named.name; *name && length + 1 < rendered.size();) rendered[length++] = *name++;
-    }
+    nk_capabilities_name(mask, rendered.data(), rendered.size());
     return rendered;
 }
-
-/** The families one CPU class's kits reach. */
-template <cpu_class_t cpu_class_>
-inline constexpr capabilities_name_t cpu_class_capabilities_name =
-    render_capabilities(numkong_capabilities_of(cpu_class_));
-
-/** The families every compiled CPU class's kits reach together. */
-static constexpr capabilities_name_t compiled_capabilities_name_k =
-    []<cpu_class_t... classes_>(cpu_ladder<classes_...>) noexcept {
-        return render_capabilities(((cpu_class_compiled(classes_) ? numkong_capabilities_of(classes_) : 0) | ...));
-    }(cpu_ladder_t {});
 
 /** @brief Whether @p name spells @p spelling exactly, with no terminator assumed on either side. */
 static bool named(usearch_bytes_view_t name, char const* spelling) noexcept {
@@ -86,18 +56,27 @@ USEARCH_EXPORT void usearch_version(int* major, int* minor, int* patch) {
 
 USEARCH_EXPORT char const* usearch_version_name(void) { return rendered_version(); }
 
-USEARCH_EXPORT char const* usearch_capabilities_compiled(void) { return compiled_capabilities_name_k.data(); }
+USEARCH_EXPORT char const* usearch_capabilities_compiled(void) {
+    static capabilities_name_t const rendered = render_capabilities(
+        []<cpu_class_t... classes_>(cpu_ladder<classes_...>) noexcept {
+            return ((cpu_class_compiled(classes_) ? numkong_capabilities_of(classes_) : nk_capability_t {0}) | ...);
+        }(cpu_ladder_t {}));
+    return rendered.data();
+}
 
 USEARCH_EXPORT char const* usearch_capabilities_available(void) {
-    cpu_ceiling_t const ceiling = pick_cpu_ceiling(usearch_cpu_class_unknown_k).value;
-    return []<cpu_class_t... classes_>(cpu_ladder<classes_...>, cpu_ceiling_t machine) noexcept {
-        char const* name = nullptr;
+    static capabilities_name_t const rendered = []<cpu_class_t... classes_>(cpu_ladder<classes_...>) noexcept {
+        auto const [ceiling, status] = pick_cpu_ceiling(usearch_cpu_class_unknown_k);
+        nk_capability_t mask = 0;
+        bool found = false;
         auto rung = [&]<cpu_class_t class_>() noexcept {
-            if (!name && cpu_rung_fits(class_, machine)) name = cpu_class_capabilities_name<class_>.data();
+            if (!found && cpu_class_compiled(class_) && cpu_rung_fits(class_, ceiling))
+                mask = numkong_capabilities_of(class_), found = true;
         };
-        (rung.template operator()<classes_>(), ...);
-        return name ? name : "";
-    }(cpu_ladder_t {}, ceiling);
+        if (succeeded(status)) (rung.template operator()<classes_>(), ...);
+        return render_capabilities(mask);
+    }(cpu_ladder_t {});
+    return rendered.data();
 }
 
 USEARCH_EXPORT char const* usearch_status_name(usearch_status_t status) {
@@ -243,11 +222,11 @@ USEARCH_EXPORT char const* usearch_cpu_class_name(usearch_cpu_class_t cpu_class)
     }
 }
 
-USEARCH_EXPORT usearch_cpu_class_t usearch_cpu_class_from_name(usearch_bytes_view_t name) {
-    for (usearch_cpu_class_t const cpu_class : cpu_classes_k) {
-        if (named(name, usearch_cpu_class_name(cpu_class))) return cpu_class;
-    }
-    return usearch_cpu_class_unknown_k;
+USEARCH_EXPORT usearch_status_t usearch_cpu_class_from_name(usearch_bytes_view_t name, usearch_cpu_class_t* cpu_class) {
+    for (usearch_cpu_class_t const listed_class : cpu_classes_k)
+        if (named(name, usearch_cpu_class_name(listed_class)))
+            return *cpu_class = listed_class, usearch_status_success_k;
+    return usearch_status_invalid_argument_k;
 }
 
 USEARCH_EXPORT char const* usearch_gpu_class_name(usearch_gpu_class_t gpu_class) {
@@ -268,11 +247,11 @@ USEARCH_EXPORT char const* usearch_gpu_class_name(usearch_gpu_class_t gpu_class)
     }
 }
 
-USEARCH_EXPORT usearch_gpu_class_t usearch_gpu_class_from_name(usearch_bytes_view_t name) {
-    for (usearch_gpu_class_t const gpu_class : gpu_classes_k) {
-        if (named(name, usearch_gpu_class_name(gpu_class))) return gpu_class;
-    }
-    return usearch_gpu_class_unknown_k;
+USEARCH_EXPORT usearch_status_t usearch_gpu_class_from_name(usearch_bytes_view_t name, usearch_gpu_class_t* gpu_class) {
+    for (usearch_gpu_class_t const listed_class : gpu_classes_k)
+        if (named(name, usearch_gpu_class_name(listed_class)))
+            return *gpu_class = listed_class, usearch_status_success_k;
+    return usearch_status_invalid_argument_k;
 }
 
 USEARCH_EXPORT char const* usearch_nvme_class_name(usearch_nvme_class_t nvme_class) {

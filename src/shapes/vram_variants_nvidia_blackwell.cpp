@@ -7,7 +7,8 @@
  *
  *  Clang compiles it host-only, where it defines the faces' members reading the kits and names the
  *  f16 fatbin, linked in beside it; NVCC compiles @c vram_kernels_nvidia_f16.cu device-only into
- *  that fatbin. f32 packs keep the vendor-wide unit's Ampere kit.
+ *  that fatbin. f32 packs keep the Ampere floor's kit, and a monoversioned build compiles its one
+ *  class through @c vram_variants_nvidia.cpp instead.
  */
 #include "shapes_specializations.cuh"
 #include "usearch/shapes/vram_nvidia_metric.cuh"

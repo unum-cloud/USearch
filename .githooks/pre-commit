@@ -2228,13 +2228,13 @@ check_type_suffixes() {
         }' "$staged_code_path" || true)
     [ -z "$templates" ] || reject_with_reason "$templates" \
         "$staged_path suffixes a class template with '_t' - the template stays bare and the alias that materializes it carries the suffix:"
-    variables=$(printf '%s\n' "$staged_added_text" | "$fastest_awk" '
+    variables=$(scan_staged_file_marking_added_lines '
         function suffixed(line) { return line ~ /constexpr[[:space:]][^=(]*[[:space:]][A-Za-z0-9_]*_[kt][[:space:]]*=/ }
-        /^\+[[:space:]]*template[[:space:]]*</ { if (suffixed($0)) print; else pending = 1; next }
-        pending && suffixed($0) { print; pending = 0; next }
+        /^[[:space:]]*template[[:space:]]*</ { opened = FNR in added; if (suffixed($0)) { if (opened) printf "line %d: %s\n", FNR, $0 } else pending = 1; next }
+        pending && suffixed($0) { if (opened || FNR in added) printf "line %d: %s\n", FNR, $0; pending = 0; next }
         pending && /\{[[:space:]]*$/ { pending = 0; next }
-        pending && /^\+[[:space:]]*(typename|class |std::|requires|[A-Za-z_]+ [A-Za-z_]+_|>)/ { next }
-        { pending = 0 }')
+        pending && /^[[:space:]]*(typename|class |std::|requires|[A-Za-z_]+ [A-Za-z_]+_|>)/ { next }
+        { pending = 0 }' "$staged_code_path")
     [ -z "$variables" ] || reject_with_reason "$variables" \
         "$staged_path suffixes a variable template with '_k' or '_t' - the template stays bare, like \`template <typename type_> constexpr bool bounded\`:"
 }
@@ -4654,6 +4654,40 @@ check_sibling_pins_agree() {
     )
 }
 
+# Rejects a NumKong or StringZilla `_ARCH_` flag, which says what compiles inside that library's own build; USearch
+# reads the libraries' public `_TARGET_` switches and names its GPU class through `USEARCH_TARGET_<VENDOR>_<CLASS>`.
+check_library_arch_flags_unnamed() {
+    local named
+    named=$(printf '%s\n' "$staged_added_text" | grep -E "^\+.*(NUMKONG|STRINGZILLA)_ARCH_[A-Z0-9_]+" || true)
+    [ -z "$named" ] || reject_with_reason "$named" \
+        "$staged_path names a NumKong or StringZilla _ARCH_ flag, which only that library's own build may read;" \
+        "            test its public _TARGET_ switch, or USEARCH_TARGET_<VENDOR>_<CLASS> for a GPU class:"
+}
+
+# Rejects a CMake line raising a NumKong or StringZilla GPU generation target, because a class unit lowers the
+# library's floor target and names its own class through its product's `_TARGET_<VENDOR>_<CLASS>` switch instead.
+check_library_gpu_targets_unset() {
+    local raised
+    raised=$(printf '%s\n' "$staged_added_text" | grep -vE '^\+?[[:space:]]*#' |
+        grep -E '(NUMKONG|STRINGZILLA)_TARGET_(AMPERE|ADA|HOPPER|BLACKWELL[A-Z]*|CDNA[0-9])=1' || true)
+    [ -z "$raised" ] || reject_with_reason "$raised" \
+        "$staged_path sets a library GPU generation target; class units write the floor target to 0 and name" \
+        "            their class with ${macro_prefix}_TARGET_<VENDOR>_<CLASS>:"
+}
+
+# Rejects a warp type calling a GPU generation's StringZilla step, because a warp carries its vendor and width
+# alone, and each generation's scans live in the scan kit its class unit names beside the warp.
+check_warps_carry_no_generation() {
+    local stepped
+    stepped=$("$fastest_awk" '
+        /struct [a-z_]*warp[a-z_]* [{]|struct hip_warp/ { in_warp = 1 }
+        in_warp && /sz_[a-z0-9_]+_(ampere|hopper|blackwell[a-z]*|cdna[0-9])_\(/ { print FNR ": " $0 }
+        /^};/ { in_warp = 0 }' "$staged_code_path")
+    [ -z "$stepped" ] || reject_with_reason "$stepped" \
+        "$staged_path calls a GPU generation's StringZilla step inside a warp type; a warp carries vendor and" \
+        "            width only, and the generation's scan kit beside it calls the step:"
+}
+
 # Routes one staged file through the checks only USearch has.
 run_project_checks() {
     case "$staged_path" in
@@ -4678,6 +4712,7 @@ run_project_checks() {
         check_trailing_returns
         check_iterator_laundering
         check_expected_bindings
+        check_library_arch_flags_unnamed
         ;;
     esac
     case "$staged_path" in
@@ -4713,6 +4748,9 @@ run_project_checks() {
         include/usearch/dense/vram_index.cuh | include/usearch/basic/vram_index.cuh)
         check_vendor_neutral
         ;;
+    esac
+    case "$staged_path" in
+    */vram_*_device.cuh | */vram_*_device.hip) check_warps_carry_no_generation ;;
     esac
     case "$staged_path" in
     src/*_index.*) check_residency_branches ;;
@@ -4820,7 +4858,10 @@ run_project_checks() {
         check_substring_assertions
         ;;
     python/*.c | python/*.h) check_cpython_format_shortcuts ;;
-    CMakeLists.txt | */CMakeLists.txt | *.cmake) check_cmake_string_surgery ;;
+    CMakeLists.txt | */CMakeLists.txt | *.cmake)
+        check_cmake_string_surgery
+        check_library_gpu_targets_unset
+        ;;
     esac
     case "$staged_path" in
     *.rs)

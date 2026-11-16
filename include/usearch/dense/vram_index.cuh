@@ -26,7 +26,7 @@
 #include <type_traits> // `std::conditional_t` - a builder's frontier by its rung
 
 #include <numkong/capabilities.h> // `nk_kernel_kind_t` - the views carry the metric
-#include <numkong/types.h>        // `NUMKONG_ARCH_CUDA_` & `NUMKONG_ARCH_ROCM_`, which the cast below tests
+#include <numkong/types.h>        // the vendor detection the cast below tests before including it
 #include <numkong/cast/simt.cuh>  // `nk_cast_unit_simt_` - a gathered row's cast
 
 #include "usearch/utilities/types.hpp"
@@ -109,14 +109,21 @@ __device__ __forceinline__ dot_type_ vram_reduce(dot_type_ partial, u32_t lanes_
     return partial;
 }
 
-/** Full-warp reduction of a two-component norms accumulator - {sum,sumsq} for the
- *  arithmetic kits, {popcount,popcount} for the binary ones. */
-template <typename warp_type_, typename pair_type_>
+/** Full-warp reduction of a two-component norms accumulator, {sum,sumsq} for the arithmetic kits
+ *  and {popcount,popcount} for the binary ones, in one step per component where the scan kit sums
+ *  its integers so. */
+template <typename warp_type_, typename scan_type_, typename pair_type_>
 __device__ __forceinline__ pair_type_ vram_reduce_norms(pair_type_ partial) noexcept {
+    if constexpr (requires { scan_type_::warp_sum(partial.x); }) {
+        partial.x = scan_type_::warp_sum(partial.x);
+        partial.y = scan_type_::warp_sum(partial.y);
+    }
+    else {
 #pragma unroll
-    for (u32_t offset = warp_type_::width_k / 2; offset; offset >>= 1) {
-        partial.x += warp_type_::shuffle_down(partial.x, offset);
-        partial.y += warp_type_::shuffle_down(partial.y, offset);
+        for (u32_t offset = warp_type_::width_k / 2; offset; offset >>= 1) {
+            partial.x += warp_type_::shuffle_down(partial.x, offset);
+            partial.y += warp_type_::shuffle_down(partial.y, offset);
+        }
     }
     return partial;
 }
@@ -417,7 +424,8 @@ __device__ __forceinline__ vram_scored_node<node_id_t> vram_score_batch( //
  *  many leading rows for every lane; every staged row is in place before the next staging.
  *  @c keep_diverse runs the greedy diversity prefix @ref unum::usearch::dense::vram_keep_diverse
  *  runs, on the kit's tensor-core tiles where the vendor has them. A schedule is one warp's state
- *  over its @c shared_t in static shared memory, picked by the class like the kit. */
+ *  over its @c shared_t in static shared memory, picked by the class like the kit, and names its
+ *  warp policy as @c warp_t and its generation's scan kit as @c scan_t. */
 template <typename schedule_, typename kit_>
 concept vram_schedule = requires(
     schedule_& schedule, u32_t rows, vram_flat_view<kit_> const& storage, typename kit_::fragment_t const* query_span,
@@ -428,6 +436,7 @@ concept vram_schedule = requires(
     vram_telemetry_t& telemetry) {
     typename schedule_::shared_t;
     typename schedule_::warp_t;
+    typename schedule_::scan_t;
     requires std::is_convertible_v<decltype(schedule_::stages_k), u32_t>;
     schedule.await_rows(rows);
     {
@@ -441,7 +450,7 @@ concept vram_schedule = requires(
 
 /** The schedule cascade, the twin of @c quads_ladder: each vendor specializes it under a constraint
  *  on @p caps_, naming the picked @c schedule_t and its @c picked_k. Schedules state their
- *  @c capability_k and @c compiled_k as kits do, and the first both admit wins. */
+ *  @c capability_k as kits do, and the first it admits wins. */
 template <nk_capability_t caps_>
 struct schedule_ladder;
 
@@ -993,7 +1002,7 @@ __device__ __forceinline__ void vram_insert_one( //
         query_span[fragment] = value;
         norms_accumulator = kit_::accumulate_norms(value, norms_accumulator);
     }
-    norms_accumulator = vram_reduce_norms<warp_t>(norms_accumulator);
+    norms_accumulator = vram_reduce_norms<warp_t, typename schedule_::scan_t>(norms_accumulator);
     norms_accumulator = vram_broadcast_norms<warp_t>(norms_accumulator);
     typename kit_::norms_t const new_norms = kit_::partials_to_norms(norms_accumulator);
     if (lane == 0 && storage.norms) storage.norm_ref_for(new_node_id) = new_norms;
@@ -1502,7 +1511,7 @@ __device__ __forceinline__ void vram_walk_one( //
         query_span[fragment] = value;
         norms_accumulator = kit_::accumulate_norms(value, norms_accumulator);
     }
-    norms_accumulator = vram_reduce_norms<warp_t>(norms_accumulator);
+    norms_accumulator = vram_reduce_norms<warp_t, typename schedule_::scan_t>(norms_accumulator);
     norms_accumulator = vram_broadcast_norms<warp_t>(norms_accumulator);
     typename kit_::norms_t const query_state = kit_::partials_to_norms(norms_accumulator);
     warp_t::sync();
@@ -1829,7 +1838,7 @@ __device__ __forceinline__ std::size_t vram_kept_pairs(vram_ranking_view const& 
  *  overlaps the rankings, whose rows a packed run of an earlier query could otherwise overwrite
  *  before they move. A ranking without scores packs its keys alone.
  */
-template <typename warp_type_>
+template <typename warp_type_, typename scan_type_>
 __device__ __forceinline__ void vram_compact_products(vram_ranking_view const& gathered, std::size_t block_bytes,
                                                       u32_t shards, u32_t queries_count,
                                                       vram_products_tape_t const& tape, std::size_t* totals) noexcept {
@@ -1846,10 +1855,7 @@ __device__ __forceinline__ void vram_compact_products(vram_ranking_view const& g
                     total += gathered.shifted(shard * block_bytes).counts[query];
                 totals[query] = total;
             }
-            for (u32_t delta = 1; delta < warp_type_::width_k; delta <<= 1) {
-                std::size_t const below = warp_type_::shuffle_up(kept, delta);
-                if (lane >= delta) kept += below;
-            }
+            kept = scan_type_::warp_inclusive_sum(kept, lane);
             if (query < queries_count) tape.offsets[query + 1] = carried + kept;
             carried += warp_type_::shuffle(kept, warp_type_::width_k - 1);
         }
@@ -2167,8 +2173,9 @@ __device__ __forceinline__ void vram_insert(vram_build_view<kit_> const& view) {
     typename kit_::norms_t* const candidate_norms = reinterpret_cast<typename kit_::norms_t*>(
         selection.end(selection_nodes));
     schedule_ schedule {schedule_states[warp], lane};
-    using frontier_t = std::conditional_t<candidate_slots_ == 0, vram_arena_frontier<warp_t, node_id_t>,
-                                          vram_register_frontier<candidate_slots_, warp_t, node_id_t>>;
+    using frontier_t =
+        std::conditional_t<candidate_slots_ == 0, vram_arena_frontier<warp_t, typename schedule_::scan_t, node_id_t>,
+                           vram_register_frontier<candidate_slots_, warp_t, node_id_t>>;
     while (true) {
         u32_t new_node_id = lane == 0 ? warp_t::fetch_add_relaxed(*view.assigned_nodes, 1u) : 0;
         new_node_id = view.first_id + warp_t::shuffle(new_node_id, 0);
@@ -2274,7 +2281,7 @@ __device__ __forceinline__ void vram_fold(vram_fold_view<kit_> const& view) {
 
 /** Rebuilds the norms column from the vectors matrix for rows @c [first_row,first_row+rows_count),
  *  one warp per row; norms are derived state, never serialized. */
-template <vram_quads_kit kit_, typename warp_type_>
+template <vram_quads_kit kit_, typename warp_type_, typename scan_type_>
 __device__ __forceinline__ void vram_derive_norms(vram_flat_view<kit_> const& storage, u32_t first_row,
                                                   u32_t rows_count) {
     using warp_t = warp_type_;
@@ -2283,7 +2290,7 @@ __device__ __forceinline__ void vram_derive_norms(vram_flat_view<kit_> const& st
         typename kit_::norms_accumulator_t accumulator {};
         for (u32_t fragment = warp.lane; fragment < storage.geometry.row_fragments; fragment += warp_t::width_k)
             accumulator = kit_::accumulate_norms(storage.vector_for(row, fragment), accumulator);
-        accumulator = vram_reduce_norms<warp_t>(accumulator);
+        accumulator = vram_reduce_norms<warp_t, scan_type_>(accumulator);
         if (warp.lane == 0) storage.norm_ref_for(row) = kit_::partials_to_norms(accumulator);
     }
 }
@@ -2607,7 +2614,7 @@ __device__ __forceinline__ void vram_walk_wide(vram_search_view<kit_> const& vie
 
     vram_warp_slice_t const slice = vram_carve_slice<warp_t, node_id_t>(view, dynamic_scratch);
     typename kit_::fragment_t* const query_span = reinterpret_cast<typename kit_::fragment_t*>(slice.scratch);
-    vram_arena_frontier<warp_t, node_id_t> frontier;
+    vram_arena_frontier<warp_t, typename schedule_::scan_t, node_id_t> frontier;
     frontier.tail_.entries_ = view.arena_shape.template tail_span<node_id_t>(view.arena, slice.warp_index);
     frontier.tail_.capacity_ = view.arena_shape.tail_entries;
     frontier.expansion_target_ = view.expansion;
@@ -3145,7 +3152,7 @@ __device__ __forceinline__ void vram_health_recheck(vram_health_t const& health)
 /** Writes the islands, the entries outside the root's component, in ascending order from one block
  *  walking the bitset words in order under a block-wide prefix sum, so ranks match RAM's; every
  *  island's columns start empty, its color its own rank, and the counters take the count. */
-template <typename warp_type_>
+template <typename warp_type_, typename scan_type_>
 __device__ __forceinline__ void vram_order_islands(vram_health_t const& health) {
     if (blockIdx.x) return;
     constexpr u32_t width_k = warp_type_::width_k;
@@ -3164,11 +3171,7 @@ __device__ __forceinline__ void vram_order_islands(vram_health_t const& health) 
                     visible_lanes;
         }
         u32_t const count = warp_type_::count(lanes);
-        u32_t inclusive = count;
-        for (u32_t delta = 1; delta < width_k; delta <<= 1) {
-            u32_t const below = warp_type_::shuffle_up(inclusive, delta);
-            if (lane >= delta) inclusive += below;
-        }
+        u32_t const inclusive = scan_type_::warp_inclusive_sum(count, lane);
         if (lane == width_k - 1) warp_totals[warp] = inclusive;
         __syncthreads();
         u32_t rank = carried + inclusive - count;
@@ -3562,11 +3565,11 @@ constexpr bool vram_health_kernel(vram_kernel_t kernel) noexcept {
 
 /** Runs the health check's pass @p kernel_ over @p health, as every vendor's kernel dispatches
  *  it. */
-template <vram_kernel_t kernel_, typename warp_type_>
+template <vram_kernel_t kernel_, typename warp_type_, typename scan_type_>
 __device__ __forceinline__ void vram_health_pass(vram_health_t const& health) noexcept {
     if constexpr (kernel_ == vram_kernel_t::health_expand_k) vram_health_expand<warp_type_>(health);
     else if constexpr (kernel_ == vram_kernel_t::health_recheck_k) vram_health_recheck<warp_type_>(health);
-    else if constexpr (kernel_ == vram_kernel_t::order_islands_k) vram_order_islands<warp_type_>(health);
+    else if constexpr (kernel_ == vram_kernel_t::order_islands_k) vram_order_islands<warp_type_, scan_type_>(health);
     else if constexpr (kernel_ == vram_kernel_t::health_islands_k) vram_health_islands<warp_type_>(health);
     else if constexpr (kernel_ == vram_kernel_t::island_components_k) vram_island_components<warp_type_>(health);
     else if constexpr (kernel_ == vram_kernel_t::health_count_links_k) vram_health_count_links<warp_type_>(health);
@@ -4284,7 +4287,7 @@ __device__ __forceinline__ void vram_split_tape(byte_t const* values, u64_t cons
  *  from the base at its first, the previous call's end; then every warp copies whole values,
  *  one lane after another.
  */
-template <typename warp_type_, typename node_id_type_>
+template <typename warp_type_, typename scan_type_, typename node_id_type_>
 __device__ __forceinline__ void vram_gather_tape(byte_t const* values, u64_t const* offsets,
                                                  node_id_type_ const* listed, u32_t listed_count, byte_t* outputs,
                                                  u64_t* output_offsets) noexcept {
@@ -4295,10 +4298,7 @@ __device__ __forceinline__ void vram_gather_tape(byte_t const* values, u64_t con
         for (u32_t base = 0; base < listed_count; base += warp_type_::width_k) { // Warp-uniform for the scan.
             u32_t const entry = base + lane;
             u64_t bytes = entry < listed_count ? offsets[listed[entry] + 1] - offsets[listed[entry]] : 0;
-            for (u32_t delta = 1; delta < warp_type_::width_k; delta <<= 1) {
-                u64_t const below = warp_type_::shuffle_up(bytes, delta);
-                if (lane >= delta) bytes += below;
-            }
+            bytes = scan_type_::warp_inclusive_sum(bytes, lane);
             if (entry < listed_count) output_offsets[entry + 1] = carried + bytes;
             carried += warp_type_::shuffle(bytes, warp_type_::width_k - 1);
         }

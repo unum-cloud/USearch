@@ -7,12 +7,12 @@
  *  A kit binds one storage dtype to one GPU generation, named like the CPU kits -
  *  @b dtype_generation_quads_kit_t. The generation slot names the oldest tier whose instructions
  *  the kit needs: @c ampere for the sm_80 floor, @c ada for the fp8 conversions, @c blackwell for
- *  the mixed-precision multiply-adds and the fp6 conversions. Each kit states the capability it
- *  runs under, @c capability_k, and whether this unit carries it, @c compiled_k, from NumKong's
- *  cumulative @c NUMKONG_ARCH_CUDA_* switches, so a Blackwell unit keeps the Ampere floor. A ladder
- *  picks the first kit both admit through @c highest_kit, and only the picked kit's instructions
- *  are emitted, so a unit compiled for one architecture carries no newer one's. The arithmetic
- *  lives in named device primitives; a kit binds them.
+ *  the mixed-precision multiply-adds and the fp6 conversions. Each kit states @c capability_k, the
+ *  classes whose masks admit it, and compiles in every unit, since NumKong's building blocks
+ *  compile wherever CUDA does. A ladder picks the first kit the class admits through
+ *  @c highest_kit, and only the picked kit's instructions are emitted, so a unit compiled for one
+ *  architecture carries no newer one's. Named device primitives hold the arithmetic, which each
+ *  kit binds to its dtype.
  *
  *  Kits stay pure arithmetic. How a warp's candidate rows reach shared memory is a separate
  *  @b schedule, picked by @c schedule_ladder the same way: @c cp.async commit groups through Ada,
@@ -203,7 +203,6 @@ __device__ __forceinline__ std::array<f32_t, 4> cuda_mma_bf16_ampere(uint4 a, ui
 /** f16 kit - the sm_80 floor. */
 struct f16_ampere_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
-    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_AMPERE_;
     using scalar_t = nk::f16_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -241,7 +240,6 @@ struct f16_ampere_quads_kit_t {
 /** bf16 kit - the sm_80 floor. */
 struct bf16_ampere_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
-    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_AMPERE_;
     using scalar_t = nk::bf16_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -320,7 +318,6 @@ __device__ __forceinline__ f32_t cuda_dot_bf16x8_blackwell(uint4 a, uint4 b, f32
 /** f16 kit - Blackwell, @c fma.rn.f32.f16. */
 struct f16_blackwell_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_blackwell_k | nk_cap_blackwellrtx_k;
-    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_BLACKWELL_ || NUMKONG_TARGET_BLACKWELLRTX;
     using scalar_t = nk::f16_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -358,7 +355,6 @@ struct f16_blackwell_quads_kit_t {
 /** bf16 kit - Blackwell, @c fma.rn.f32.bf16. */
 struct bf16_blackwell_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_blackwell_k | nk_cap_blackwellrtx_k;
-    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_BLACKWELL_ || NUMKONG_TARGET_BLACKWELLRTX;
     using scalar_t = nk::bf16_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -484,7 +480,6 @@ __device__ __forceinline__ std::array<u32_t, 4> cuda_mma_u8_ampere(uint4 a, uint
 /** i8 kit - the sm_80 floor. */
 struct i8_ampere_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
-    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_AMPERE_;
     using scalar_t = nk::i8_t;
     using fragment_t = uint4;
     using dot_t = int;
@@ -522,7 +517,6 @@ struct i8_ampere_quads_kit_t {
 /** u8 kit - the sm_80 floor. */
 struct u8_ampere_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
-    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_AMPERE_;
     using scalar_t = nk::u8_t;
     using fragment_t = uint4;
     using dot_t = u32_t;
@@ -785,7 +779,6 @@ __device__ __forceinline__ std::array<f32_t, 16> cuda_weighted_e2m3x16_ampere( /
 /** e5m2 kit - the sm_80 floor, widening by shifts. */
 struct e5m2_ampere_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
-    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_AMPERE_;
     using scalar_t = nk::e5m2_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -819,7 +812,6 @@ struct e5m2_ampere_quads_kit_t {
 /** e4m3 kit - the sm_80 floor, widening by hand. */
 struct e4m3_ampere_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
-    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_AMPERE_;
     using scalar_t = nk::e4m3_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -853,7 +845,6 @@ struct e4m3_ampere_quads_kit_t {
 /** e3m2 kit - the sm_80 floor, widening by hand. */
 struct e3m2_ampere_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
-    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_AMPERE_;
     using scalar_t = nk::e3m2_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -887,7 +878,6 @@ struct e3m2_ampere_quads_kit_t {
 /** e2m3 kit - the sm_80 floor, widening by hand. */
 struct e2m3_ampere_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
-    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_AMPERE_;
     using scalar_t = nk::e2m3_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -1057,7 +1047,6 @@ __device__ __forceinline__ std::array<f32_t, 4> cuda_mma_e4m3_ada(uint4 a, uint2
 /** e5m2 kit - Ada, widening through the conversion. */
 struct e5m2_ada_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ada_k;
-    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_ADA_;
     using scalar_t = nk::e5m2_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -1095,7 +1084,6 @@ struct e5m2_ada_quads_kit_t {
 /** e4m3 kit - Ada, widening through the conversion. */
 struct e4m3_ada_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ada_k;
-    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_ADA_;
     using scalar_t = nk::e4m3_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -1268,7 +1256,6 @@ __device__ __forceinline__ std::array<f32_t, 16> cuda_weighted_e2m3x16_blackwell
 /** e5m2 kit - Blackwell, converted halves through @c fma.rn.f32.f16. */
 struct e5m2_blackwell_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_blackwell_k | nk_cap_blackwellrtx_k;
-    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_BLACKWELL_ || NUMKONG_TARGET_BLACKWELLRTX;
     using scalar_t = nk::e5m2_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -1306,7 +1293,6 @@ struct e5m2_blackwell_quads_kit_t {
 /** e4m3 kit - Blackwell, converted halves through @c fma.rn.f32.f16. */
 struct e4m3_blackwell_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_blackwell_k | nk_cap_blackwellrtx_k;
-    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_BLACKWELL_ || NUMKONG_TARGET_BLACKWELLRTX;
     using scalar_t = nk::e4m3_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -1344,7 +1330,6 @@ struct e4m3_blackwell_quads_kit_t {
 /** e3m2 kit - Blackwell, the one-instruction conversion into @c fma.rn.f32.f16. */
 struct e3m2_blackwell_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_blackwell_k | nk_cap_blackwellrtx_k;
-    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_BLACKWELL_ || NUMKONG_TARGET_BLACKWELLRTX;
     using scalar_t = nk::e3m2_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -1378,7 +1363,6 @@ struct e3m2_blackwell_quads_kit_t {
 /** e2m3 kit - Blackwell, the one-instruction conversion into @c fma.rn.f32.f16. */
 struct e2m3_blackwell_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_blackwell_k | nk_cap_blackwellrtx_k;
-    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_BLACKWELL_ || NUMKONG_TARGET_BLACKWELLRTX;
     using scalar_t = nk::e2m3_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -1516,7 +1500,6 @@ __device__ __forceinline__ std::array<f32_t, 32> cuda_weighted_u4x32_ampere( //
 /** i4x2 kit - the sm_80 floor, the byte engine over unpacked nibbles. */
 struct i4x2_ampere_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
-    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_AMPERE_;
     using scalar_t = nk::i4x2_t;
     using fragment_t = uint4;
     using dot_t = int;
@@ -1550,7 +1533,6 @@ struct i4x2_ampere_quads_kit_t {
 /** u4x2 kit - the sm_80 floor, the byte engine over unpacked nibbles. */
 struct u4x2_ampere_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
-    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_AMPERE_;
     using scalar_t = nk::u4x2_t;
     using fragment_t = uint4;
     using dot_t = u32_t;
@@ -1619,7 +1601,6 @@ __device__ __forceinline__ std::array<u32_t, 4> cuda_mma_u1_ampere(uint4 a, uint
  *  row's set-bit count, the currency of Jaccard's union, mirrored into both fields. */
 struct u1x8_ampere_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
-    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_AMPERE_;
     using scalar_t = nk::u1x8_t;
     using fragment_t = uint4;
     using dot_t = u32_t;
@@ -2000,8 +1981,8 @@ __device__ __forceinline__ u32_t cuda_keep_diverse( //
  */
 struct ampere_cp_async_schedule_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
-    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_AMPERE_;
     using warp_t = cuda_warp_t;
+    using scan_t = ampere_scan_t;
     inline static constexpr u32_t stages_k = 2;
     inline static constexpr u32_t fragments_per_load_k = 1;
 
@@ -2277,9 +2258,8 @@ __device__ __forceinline__ vram_scored_node<node_id_t> cuda_tma_gather_quads( //
  *  fragment at once. */
 struct hopper_tma_schedule_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_hopper_k;
-    inline static constexpr bool compiled_k = NUMKONG_TARGET_HOPPER || NUMKONG_ARCH_CUDA_BLACKWELL_ ||
-                                              NUMKONG_TARGET_BLACKWELLRTX;
     using warp_t = cuda_warp_t;
+    using scan_t = ampere_scan_t;
     inline static constexpr u32_t stages_k = 2;
     inline static constexpr u32_t fragments_per_load_k = 1;
 
@@ -2356,8 +2336,8 @@ struct hopper_tma_schedule_t {
  */
 struct blackwell_tma_schedule_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_blackwell_k;
-    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_BLACKWELL_;
     using warp_t = cuda_warp_t;
+    using scan_t = ampere_scan_t;
     inline static constexpr u32_t stages_k = 2;
     inline static constexpr u32_t fragments_per_load_k = 2;
 
@@ -2477,8 +2457,8 @@ struct blackwell_tma_schedule_t {
  *  once, whose 256-bit loads serve the random row gathers better. */
 struct blackwellrtx_tma_schedule_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_blackwellrtx_k;
-    inline static constexpr bool compiled_k = NUMKONG_TARGET_BLACKWELLRTX;
     using warp_t = cuda_warp_t;
+    using scan_t = ampere_scan_t;
     inline static constexpr u32_t stages_k = 2;
     inline static constexpr u32_t fragments_per_load_k = 2;
 

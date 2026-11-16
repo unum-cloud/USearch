@@ -356,9 +356,9 @@ template <typename enumeration_type_>
     if (usearch_residency_t* const* residency = std::get_if<usearch_residency_t*>(&flag.destination))
         return assign_named_(value, **residency, usearch_residency_from_name);
     if (usearch_cpu_class_t* const* cpu_class = std::get_if<usearch_cpu_class_t*>(&flag.destination))
-        return assign_named_(value, **cpu_class, usearch_cpu_class_from_name, usearch_cpu_class_name);
+        return assign_named_(value, **cpu_class, usearch_cpu_class_from_name);
     if (usearch_gpu_class_t* const* gpu_class = std::get_if<usearch_gpu_class_t*>(&flag.destination))
-        return assign_named_(value, **gpu_class, usearch_gpu_class_from_name, usearch_gpu_class_name);
+        return assign_named_(value, **gpu_class, usearch_gpu_class_from_name);
     if (usearch_nvme_class_t* const* nvme_class = std::get_if<usearch_nvme_class_t*>(&flag.destination))
         return assign_named_(value, **nvme_class, usearch_nvme_class_from_name, usearch_nvme_class_name);
     if (usearch_traversal_t* const* traversal = std::get_if<usearch_traversal_t*>(&flag.destination))

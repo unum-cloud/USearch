@@ -30,9 +30,14 @@ __device__ inline void const* vram_value_row(value_lookup_t const& lookup, us::u
 /** What each shard of a VRAM attend resolves rows through: the C lookup behind the shard's keys. */
 using vram_attend_lookup_t = dense::vram_keyed_lookup<us::utilities::uuid128_t, value_lookup_t>;
 
-/** The ceiling an AMD device pass instantiates: its class's, read off the one NumKong target the
- *  class compiles under. */
+/** The ceiling an AMD device pass instantiates: its class's, the one its CMake row sets
+ *  @c USEARCH_TARGET_AMD_<CLASS> for. */
 inline constexpr nk_capability_t amd_class_capabilities_k = numkong_capabilities_of(
-    NUMKONG_TARGET_CDNA5   ? gpu_class_t::amd_cdna5_k
-    : NUMKONG_TARGET_CDNA4 ? gpu_class_t::amd_cdna4_k
-                           : gpu_class_t::amd_cdna3_k);
+#if USEARCH_TARGET_AMD_CDNA5
+    gpu_class_t::amd_cdna5_k
+#elif USEARCH_TARGET_AMD_CDNA4
+    gpu_class_t::amd_cdna4_k
+#else
+    gpu_class_t::amd_cdna3_k
+#endif
+);

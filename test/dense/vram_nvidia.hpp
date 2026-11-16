@@ -16,7 +16,7 @@
 #include "usearch/dense/vram_nvidia_indexes.hpp"
 
 #include "dense.cuh"
-#include "lib.hpp" // `gpu_class_t`, `nvidia_class_of` - the class the library picks a unit by
+#include "lib.hpp" // `gpu_class_t`, `pick_gpu_class` - the class the library picks a unit by
 
 /** The bounds of every dtype's fatbin of one NVIDIA class, in pairs in the library's dtype ladder,
  *  defined in that class's @c src/dense/vram_variants_nvidia_<class>.cpp unit; an unnamed class's
@@ -26,18 +26,14 @@ std::span<us::utilities::byte_t const* const> bundle_bounds() noexcept;
 
 namespace unum::usearch::test::dense {
 
-/** The newest NVIDIA class the build names, by the @c NUMKONG_TARGET_* switches its architectures
- *  set; the cells run only on a device of that class. */
-inline constexpr gpu_class_t dense_nvidia_class_k = NUMKONG_TARGET_HOPPER         ? gpu_class_t::nvidia_hopper_k
-                                                    : NUMKONG_TARGET_BLACKWELL    ? gpu_class_t::nvidia_blackwell_k
-                                                    : NUMKONG_TARGET_BLACKWELLRTX ? gpu_class_t::nvidia_blackwellrtx_k
-                                                    : NUMKONG_TARGET_ADA          ? gpu_class_t::nvidia_ada_k
-                                                                                  : gpu_class_t::nvidia_ampere_k;
+/** The newest NVIDIA class the build keeps, the one its class gates name; the cells run only on a
+ *  device the library picks that class for. */
+inline constexpr gpu_class_t dense_nvidia_class_k = cuda_class_k;
 
-/** Whether a device of compute capability @p major. @p minor runs the cells of
- *  @ref dense_nvidia_class_k, as the library would pick its unit. */
-constexpr bool dense_nvidia_runs(u32_t major, u32_t minor) noexcept {
-    return nvidia_class_of(cuda_arch_of(major, minor)) == dense_nvidia_class_k;
+/** Whether @p device runs the cells of @ref dense_nvidia_class_k, as the library would pick its
+ *  unit. */
+inline bool dense_nvidia_runs(gpu_device_t const& device) noexcept {
+    return pick_gpu_class(device, usearch_gpu_class_unknown_k) == dense_nvidia_class_k;
 }
 
 /** The library's fatbin of @p dtype_ 's kernels for @ref dense_nvidia_class_k, under the ceiling
@@ -45,14 +41,7 @@ constexpr bool dense_nvidia_runs(u32_t major, u32_t minor) noexcept {
 template <nk_dtype_t dtype_>
 struct dense_nvidia_fatbin {
     static_assert(dtype_ == nk_bf16_k, "the rung cells run bf16, which leads the library's dtype ladder");
-    inline static constexpr nk_capability_t capability_k =
-        dense_nvidia_class_k == gpu_class_t::nvidia_ampere_k
-            ? nk_cap_cuda_k | nk_cap_ampere_k
-            : nk_cap_cuda_k | nk_cap_ampere_k | nk_cap_ada_k |
-                  (dense_nvidia_class_k == gpu_class_t::nvidia_hopper_k         ? nk_cap_hopper_k
-                   : dense_nvidia_class_k == gpu_class_t::nvidia_blackwell_k    ? nk_cap_blackwell_k
-                   : dense_nvidia_class_k == gpu_class_t::nvidia_blackwellrtx_k ? nk_cap_blackwellrtx_k
-                                                                                : 0);
+    inline static constexpr nk_capability_t capability_k = cuda_class_capabilities_k;
     static bytes_view_t bytes() noexcept {
         std::span<byte_t const* const> const bounds = bundle_bounds<dense_nvidia_class_k>();
         return bytes_view_t {bounds[0], bounds[1]};

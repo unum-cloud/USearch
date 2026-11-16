@@ -1190,12 +1190,13 @@ struct geospatial_vram_nvidia_build_t {
     }
 };
 
-/** The geospatial alternative on one NVIDIA GPU: the basic VRAM shards over observations under the
- *  squared chord with 32-bit node IDs, and the kernel judging each walk's candidates under a
- *  search's relation, lines of sight over a borrowed terrain included. A batch encodes its
- *  observations on the host, as the RAM variants do, standing those without an altitude on the
- *  terrain. The judging kernel and the terrain sit on one device, so a search judges the shards
- *  placed there. */
+/** The geospatial alternative on one NVIDIA GPU of @p gpu_class_ : the basic VRAM shards over
+ *  observations under the squared chord with 32-bit node IDs, and the kernel judging each walk's
+ *  candidates under a search's relation, lines of sight over a borrowed terrain included. A batch
+ *  encodes its observations on the host, as the RAM variants do, standing those without an altitude
+ *  on the terrain. The judging kernel and the terrain sit on one device, so a search judges the
+ *  shards placed there. */
+template <gpu_class_t gpu_class_>
 struct geospatial_vram_nvidia_variant {
     using executor_t = cuda_executor_t;
     using face_t = geospatial_vram_nvidia_build_t::face_t;
@@ -1203,7 +1204,7 @@ struct geospatial_vram_nvidia_variant {
     using refine_plan_t = index_t::refine_plan_t;
     using value_t = us::geospatial::earth_observation_t;
     using node_id_t = face_t::node_id_t;
-    static constexpr gpu_class_t gpu_class_k = gpu_class_t::nvidia_ampere_k;
+    static constexpr gpu_class_t gpu_class_k = gpu_class_;
 
     index_t index;
 
@@ -1219,7 +1220,7 @@ struct geospatial_vram_nvidia_variant {
 
     /** The terrain lines of sight run over, packed on the host, where it stands the observations
      *  recording no altitude on the ground. */
-    geospatial_terrain<cpu_class_t::serial_k> host_terrain;
+    geospatial_terrain<cpu_ladder_floor_k> host_terrain;
 
     /** The terrain's heights and its pack on the index's device, where the judging kernel reads
      *  them; empty for none. */
@@ -1408,10 +1409,12 @@ struct geospatial_vram_nvidia_variant {
     }
 };
 
-inline expected<traversal_stats_t> geospatial_vram_nvidia_variant::insert(usearch_keys_view_t keys,
-                                                                          observations_view_t observations,
-                                                                          insert_config_t config, executor_t& executor,
-                                                                          progress_ticks_t& ticks) noexcept {
+template <gpu_class_t gpu_class_>
+expected<traversal_stats_t> geospatial_vram_nvidia_variant<gpu_class_>::insert(usearch_keys_view_t keys,
+                                                                               observations_view_t observations,
+                                                                               insert_config_t config,
+                                                                               executor_t& executor,
+                                                                               progress_ticks_t& ticks) noexcept {
     std::size_t const count = observations.size();
     // The batch's own pages, since batches routed to disjoint shards may land at once.
     growing_arena<forkunion_allocator_t> staging {forkunion_allocator_t {no_memory_domain_k}};
@@ -1426,7 +1429,8 @@ inline expected<traversal_stats_t> geospatial_vram_nvidia_variant::insert(usearc
     return inserted;
 }
 
-inline expected<traversal_stats_t> geospatial_vram_nvidia_variant::search(
+template <gpu_class_t gpu_class_>
+expected<traversal_stats_t> geospatial_vram_nvidia_variant<gpu_class_>::search(
     geospatial_queries_t query_batch, matches_outputs_t& outputs, search_config_t search,
     growing_arena<forkunion_allocator_t>& pages, executor_t& executor, progress_ticks_t& ticks) noexcept {
     std::size_t const count = query_batch.observations.size(), wanted = outputs.wanted,
@@ -1513,7 +1517,8 @@ inline expected<traversal_stats_t> geospatial_vram_nvidia_variant::search(
             status_t::success_k};
 }
 
-inline expected<traversal_stats_t> geospatial_vram_nvidia_variant::within(
+template <gpu_class_t gpu_class_>
+expected<traversal_stats_t> geospatial_vram_nvidia_variant<gpu_class_>::within(
     geospatial_queries_t query_batch, within_outputs_t& outputs, search_config_t search, predicate_t const&,
     growing_arena<forkunion_allocator_t>& pages, executor_t& executor, progress_ticks_t& ticks) noexcept {
     std::size_t const count = query_batch.observations.size(), shards = index.live_shards_count();
@@ -1684,10 +1689,15 @@ template <auto class_>
 struct geospatial_variants_of<vendored_residency_t::nvme_k, class_> {
     using type = type_list<geospatial_nvme_variant<class_>>;
 };
-#if USEARCH_ARCH_CUDA_
+#if USEARCH_ARCH_CUDA_ && USEARCH_TARGET_MONOVERSIONED
+template <auto class_>
+struct geospatial_variants_of<vendored_residency_t::vram_nvidia_k, class_> {
+    using type = type_list<geospatial_vram_nvidia_variant<class_>>;
+};
+#elif USEARCH_ARCH_CUDA_
 template <>
 struct geospatial_variants_of<vendored_residency_t::vram_nvidia_k, gpu_class_t::nvidia_ampere_k> {
-    using type = type_list<geospatial_vram_nvidia_variant>;
+    using type = type_list<geospatial_vram_nvidia_variant<gpu_class_t::nvidia_ampere_k>>;
 };
 #endif
 
@@ -1749,7 +1759,8 @@ struct variant_bodies<geospatial_traits_t> {
 
     /** Takes @p geometry into the GPU @p variant, its connectivity rounded up to the power of two a
      *  GPU neighbor row takes, loads its judging kernel, and copies the terrain to its device. */
-    static status_t adopt(geospatial_vram_nvidia_variant& variant, geometry_t const& geometry,
+    template <gpu_class_t gpu_class_>
+    static status_t adopt(geospatial_vram_nvidia_variant<gpu_class_>& variant, geometry_t const& geometry,
                           geometry_extras_t const& terrain) noexcept {
         variant.geometry.connectivity = std::bit_ceil(connectivity_of(geometry));
         if (status_t const loaded = variant.load_admit(); failed(loaded)) return loaded;

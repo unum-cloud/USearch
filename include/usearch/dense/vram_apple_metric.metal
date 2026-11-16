@@ -9,10 +9,10 @@
  *  accumulates the dot of two 16-byte fragments, a fragment's {sum, sum of squares} norms and its
  *  weighted values, and finalizes a distance "through the dot" exactly as the CUDA kits do, so a
  *  graph saved on one GPU reads back on another with the same norms. Each kit states the capability
- *  it runs under, @c capability_k, and @c compiled_k, and @c quads_ladder picks one per dtype
- *  through @c highest_kit, leaving room for Apple9 and Apple10 rungs above the floor. No Apple GPU
- *  this runtime reaches has fp8 or fp6 arithmetic, so the minifloats widen to @c half per byte, as
- *  NumKong's @c apple10.metal does.
+ *  it runs under, @c capability_k, and @c quads_ladder picks one per dtype through @c highest_kit,
+ *  leaving room for Apple9 and Apple10 rungs above the floor. No Apple GPU this runtime reaches has
+ *  fp8 or fp6 arithmetic, so the minifloats widen to @c half per byte, as NumKong's
+ *  @c apple10.metal does.
  *
  *  The host compiles one library per dtype and Apple class from @c vram_apple_shared.h, a prelude
  *  spelling NumKong's dtypes and capabilities with the @c metal_dtype_k and @c metal_capability_k
@@ -27,8 +27,8 @@ namespace unum::usearch::dense {
  *  @brief Picks the first of @p kits_ this library compiled and @p caps_ runs, else @p floor_ - a
  *      ladder's one closing @c ::type, the host's @c highest_kit with a typed capability set.
  *
- *  Every kit states its own needs: @c capability_k, the capability it runs under, and
- *  @c compiled_k, whether this library carries its body.
+ *  Every kit states @c capability_k, the capability it runs under; the library compiles every kit
+ *  from source on the device, so none is a stub.
  */
 template <nk_capability_t caps_, typename floor_, typename... kits_>
 struct highest_kit {
@@ -37,8 +37,8 @@ struct highest_kit {
 
 template <nk_capability_t caps_, typename floor_, typename head_, typename... tail_>
 struct highest_kit<caps_, floor_, head_, tail_...> {
-    using type = conditional_t<head_::compiled_k && (caps_ & head_::capability_k) != 0, head_,
-                               typename highest_kit<caps_, floor_, tail_...>::type>;
+    using type =
+        conditional_t<(caps_ & head_::capability_k) != 0, head_, typename highest_kit<caps_, floor_, tail_...>::type>;
 };
 
 /**
@@ -203,7 +203,6 @@ inline float4 metal_e2m3x4_to_f32x4(uint word) {
 /** Brain floats, two per word, widened to @c float by their bits. */
 struct bf16_metal_quads_kit_t {
     static constexpr constant nk_capability_t capability_k = nk_cap_metal_k;
-    static constexpr constant bool compiled_k = true;
     using fragment_t = uint4;
     using dot_t = float;
     using weighted_t = array<float, 8>;
@@ -240,7 +239,6 @@ struct bf16_metal_quads_kit_t {
 /** IEEE halves, two per word. */
 struct f16_metal_quads_kit_t {
     static constexpr constant nk_capability_t capability_k = nk_cap_metal_k;
-    static constexpr constant bool compiled_k = true;
     using fragment_t = uint4;
     using dot_t = float;
     using weighted_t = array<float, 8>;
@@ -277,7 +275,6 @@ struct f16_metal_quads_kit_t {
 /** E5M2 bytes, four per word, widened through @c half. */
 struct e5m2_metal_quads_kit_t {
     static constexpr constant nk_capability_t capability_k = nk_cap_metal_k;
-    static constexpr constant bool compiled_k = true;
     using fragment_t = uint4;
     using dot_t = float;
     using weighted_t = array<float, 16>;
@@ -313,7 +310,6 @@ struct e5m2_metal_quads_kit_t {
 /** E4M3FN bytes, four per word, widened through @c half. */
 struct e4m3_metal_quads_kit_t {
     static constexpr constant nk_capability_t capability_k = nk_cap_metal_k;
-    static constexpr constant bool compiled_k = true;
     using fragment_t = uint4;
     using dot_t = float;
     using weighted_t = array<float, 16>;
@@ -349,7 +345,6 @@ struct e4m3_metal_quads_kit_t {
 /** E3M2 bytes, four per word, widened through @c half. */
 struct e3m2_metal_quads_kit_t {
     static constexpr constant nk_capability_t capability_k = nk_cap_metal_k;
-    static constexpr constant bool compiled_k = true;
     using fragment_t = uint4;
     using dot_t = float;
     using weighted_t = array<float, 16>;
@@ -385,7 +380,6 @@ struct e3m2_metal_quads_kit_t {
 /** E2M3 bytes, four per word, widened through @c half. */
 struct e2m3_metal_quads_kit_t {
     static constexpr constant nk_capability_t capability_k = nk_cap_metal_k;
-    static constexpr constant bool compiled_k = true;
     using fragment_t = uint4;
     using dot_t = float;
     using weighted_t = array<float, 16>;
@@ -421,7 +415,6 @@ struct e2m3_metal_quads_kit_t {
 /** Signed bytes: integer products accumulate exactly. */
 struct i8_metal_quads_kit_t {
     static constexpr constant nk_capability_t capability_k = nk_cap_metal_k;
-    static constexpr constant bool compiled_k = true;
     using fragment_t = uint4;
     using dot_t = int;
     using weighted_t = array<float, 16>;
@@ -461,7 +454,6 @@ struct i8_metal_quads_kit_t {
  *  the weighted columns put a byte's high nibble first, as the CUDA kit does. */
 struct i4x2_metal_quads_kit_t {
     static constexpr constant nk_capability_t capability_k = nk_cap_metal_k;
-    static constexpr constant bool compiled_k = true;
     using fragment_t = uint4;
     using dot_t = int;
     using weighted_t = array<float, 32>;
@@ -498,7 +490,6 @@ struct i4x2_metal_quads_kit_t {
 /** Unsigned bytes, accumulating in unsigned words with defined wrapping, as the CUDA kit does. */
 struct u8_metal_quads_kit_t {
     static constexpr constant nk_capability_t capability_k = nk_cap_metal_k;
-    static constexpr constant bool compiled_k = true;
     using fragment_t = uint4;
     using dot_t = uint;
     using weighted_t = array<float, 16>;
@@ -537,7 +528,6 @@ struct u8_metal_quads_kit_t {
 /** Unsigned nibbles, the weighted columns ordered as the signed kit's. */
 struct u4x2_metal_quads_kit_t {
     static constexpr constant nk_capability_t capability_k = nk_cap_metal_k;
-    static constexpr constant bool compiled_k = true;
     using fragment_t = uint4;
     using dot_t = uint;
     using weighted_t = array<float, 32>;
@@ -575,7 +565,6 @@ struct u4x2_metal_quads_kit_t {
  *  fields, the currency of Jaccard's union; the weighted columns take each byte's most significant bit first. */
 struct u1x8_metal_quads_kit_t {
     static constexpr constant nk_capability_t capability_k = nk_cap_metal_k;
-    static constexpr constant bool compiled_k = true;
     using fragment_t = uint4;
     using dot_t = uint;
     using weighted_t = array<float, 128>;
