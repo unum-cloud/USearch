@@ -119,6 +119,17 @@ def test_init_ram_keeps_the_metric():
     assert ShapesIndex.init_ram(ShapesMetric.HAUSDORFF).describe().metadata.metric is ShapesMetric.HAUSDORFF
 
 
+def test_modality_enums_carry_the_library_spellings():
+    """Every member is named by the library's dash-separated spelling of its value, in value order."""
+    spellings = {
+        SequenceMetric: "levenshtein levenshtein-utf8 needleman-wunsch overlap",
+        ShapesMetric: "chamfer hausdorff gromov-wasserstein wasserstein-procrustes",
+    }
+    for enum, spelled in spellings.items():
+        assert sorted(enum, key=int) == list(enum)
+        assert {member.name for member in enum} == {name.upper().replace("-", "_") for name in spelled.split()}
+
+
 @pytest.mark.parametrize("modality", MODALITIES, ids=attrgetter("__name__"))
 def test_init_vram_surfaces_the_library_status(modality: type):
     """A VRAM index either opens on a GPU or raises the status the library answered, never one of the binding's."""

@@ -3,7 +3,9 @@
 USearch indexes dense embeddings in a navigable graph and answers approximate nearest-neighbor
 queries over it, with SIMD kernels dispatched to the machine it runs on. This package binds the
 dense modality: the index, its cursor, its search stream, and the three linear-algebra verbs
-that read products, attention, and late-interaction scores off the same walk.
+that read products, attention, and late-interaction scores off the same walk. Beside it sit the
+sequence, shape and geospatial indexes, whose variable-size entries cross as Apache Arrow tapes
+or as the library's own observation records, under the same receivers, plans and arenas.
 
 The engine is reached by `dlopen`, so a consumer builds with no linker flags at all:
 
@@ -133,4 +135,86 @@ from .dense import (
     dense_reshard_deferred,
     dense_reshard_plan_finish,
     dense_reshard_plan_finish_deferred,
+)
+
+# basic
+from .basic import Tape, TapeEntries, TapeLayout, TapeView
+
+# sequence
+from .sequence import (
+    SequenceCursor,
+    SequenceIndex,
+    SequenceIndexDeferredOn,
+    SequenceIndexDescription,
+    SequenceIndexOn,
+    SequenceKeyStats,
+    SequenceMetadata,
+    SequenceMetric,
+    SequenceOptions,
+    SequenceRefineConfig,
+    SequenceRefinePlan,
+    SequenceReshardConfig,
+    SequenceReshardPlan,
+    SequenceVerbs,
+    SequenceWeights,
+    sequence_metadata_read,
+    sequence_metadata_read_buffer,
+    sequence_reshard,
+    sequence_reshard_deferred,
+    sequence_reshard_plan_finish,
+    sequence_reshard_plan_finish_deferred,
+)
+
+# shapes
+from .shapes import (
+    ShapesCursor,
+    ShapesIndex,
+    ShapesIndexDeferredOn,
+    ShapesIndexDescription,
+    ShapesIndexOn,
+    ShapesKeyStats,
+    ShapesMetadata,
+    ShapesMetric,
+    ShapesOptions,
+    ShapesRefineConfig,
+    ShapesRefinePlan,
+    ShapesReshardConfig,
+    ShapesReshardPlan,
+    ShapesVerbs,
+    shapes_metadata_read,
+    shapes_metadata_read_buffer,
+    shapes_reshard,
+    shapes_reshard_deferred,
+    shapes_reshard_plan_finish,
+    shapes_reshard_plan_finish_deferred,
+)
+
+# geospatial
+from .geospatial import (
+    GeospatialCursor,
+    GeospatialIndex,
+    GeospatialIndexDeferredOn,
+    GeospatialIndexDescription,
+    GeospatialIndexOn,
+    GeospatialKeyStats,
+    GeospatialMatches,
+    GeospatialMetadata,
+    GeospatialObservation,
+    GeospatialObservations,
+    GeospatialOptions,
+    GeospatialRefineConfig,
+    GeospatialRefinePlan,
+    GeospatialRelation,
+    GeospatialReshardConfig,
+    GeospatialReshardPlan,
+    GeospatialSearchConfig,
+    GeospatialTerrain,
+    GeospatialVerbs,
+    GeospatialWithinConfig,
+    geospatial_metadata_read,
+    geospatial_metadata_read_buffer,
+    geospatial_reshard,
+    geospatial_reshard_deferred,
+    geospatial_reshard_plan_finish,
+    geospatial_reshard_plan_finish_deferred,
 )

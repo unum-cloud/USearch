@@ -347,9 +347,347 @@ export interface CompiledIndexConstructor {
   planProgress(plan: ArrayBuffer): CompiledPhaseProgress;
 }
 
+/** A ragged run of sequences or shapes a retrieval wrote, viewed inside its arena. */
+export interface CompiledTape {
+  data: ArrayBufferView;
+  offsets: BigUint64Array | Uint32Array;
+  entries: number;
+}
+
+/** One ragged batch as it crosses: its elements, their Apache Arrow offsets, its scalar code. */
+export type CompiledTapeRows = [data: ArrayBufferView, offsets: Uint32Array | BigUint64Array, scalar: number];
+
+/** The verbs every basic modality's handle shares, its inputs, outputs and lifecycle aside. */
+interface CompiledBasicIndex<Description, KeyStats> {
+  free(): void;
+  describe(...on: On): Description | CompiledDeferred;
+  health(...on: On): CompiledReachability | CompiledDeferred;
+  clear(...on: On): undefined | CompiledDeferred;
+  count(...arguments_: [...On, key: Uint8Array]): KeyStats | CompiledDeferred;
+  refine(
+    ...arguments_: [
+      ...On,
+      expansion: number | undefined,
+      memoryLimit: number | undefined,
+      stats: CompiledStats | undefined,
+      plan: ArrayBuffer | undefined,
+    ]
+  ): CompiledRefineReport | CompiledDeferred;
+  refinePlanFinish(...arguments_: [...On, plan: ArrayBuffer]): CompiledRefineReport | CompiledDeferred;
+  sample(
+    ...arguments_: [
+      ...On,
+      arena: CompiledArena,
+      wanted: number,
+      shown: Uint8Array | BigUint64Array | undefined,
+      ...shownCoordinates: CompiledRows | [undefined, undefined, undefined, undefined, undefined],
+      focus: Uint8Array | BigUint64Array | undefined,
+      seed: number | bigint | undefined,
+      expansion: number | undefined,
+    ]
+  ): CompiledDraws | CompiledDeferred;
+  save(...arguments_: [...On, path: string]): undefined | CompiledDeferred;
+  saveBuffer(...arguments_: [...On, arena: CompiledArena]): Uint8Array | CompiledDeferred;
+  cursor(executor: CompiledExecutor | undefined, starts: Uint8Array | BigUint64Array | undefined): CompiledCursor;
+}
+
+/** The lifecycle and reshard verbs every basic modality's class shares, its creation aside. */
+interface CompiledBasicIndexConstructor<Index, Metadata> {
+  metadataRead(path: string, executor: CompiledExecutor | undefined): Metadata;
+  metadataReadBuffer(buffer: ArrayBufferView, executor: CompiledExecutor | undefined): Metadata;
+  reshard(
+    ...arguments_: [
+      ...On,
+      sources: Index[],
+      targets: Index[],
+      seed: number | bigint | undefined,
+      expansion: number | undefined,
+      memoryLimit: number | undefined,
+      stats: CompiledStats | undefined,
+      plan: ArrayBuffer | undefined,
+    ]
+  ): CompiledRefineReport | CompiledDeferred;
+  reshardPlanFinish(...arguments_: [...On, plan: ArrayBuffer]): CompiledRefineReport | CompiledDeferred;
+}
+
+/** The metric and connectivity a sequence checkpoint froze. */
+export interface CompiledSequenceMetadata {
+  metric: string;
+  connectivity: number;
+}
+
+/** A sequence index's frozen metadata and current counters. */
+export type CompiledSequenceDescription = Omit<CompiledDescription, "metadata"> & {
+  metadata: CompiledSequenceMetadata;
+};
+
+/** The entries under one key and the bytes they hold. */
+export interface CompiledSequenceKeyStats {
+  entries: number;
+  totalBytes: number;
+  largestBytes: number;
+}
+
+/** One sequence index handle. */
+export interface CompiledSequenceIndex extends CompiledBasicIndex<
+  CompiledSequenceDescription,
+  CompiledSequenceKeyStats
+> {
+  reserve(...arguments_: [...On, entries: number, payloadBytes: number | undefined]): undefined | CompiledDeferred;
+  insert(
+    ...arguments_: [
+      ...On,
+      keys: Uint8Array | BigUint64Array,
+      ...sequences: CompiledTapeRows,
+      expansion: number | undefined,
+      stats: CompiledStats | undefined,
+    ]
+  ): undefined | CompiledDeferred;
+  search(
+    ...arguments_: [
+      ...On,
+      ...queries: CompiledTapeRows,
+      arena: CompiledArena,
+      wanted: number,
+      expansion: number | undefined,
+      traversal: string | undefined,
+      stats: CompiledStats | undefined,
+    ]
+  ): CompiledMatches | CompiledDeferred;
+  get(...arguments_: [...On, key: Uint8Array, arena: CompiledArena]): CompiledTape | CompiledDeferred;
+}
+
+/** The weights an alignment kind scores with, as they cross. */
+type CompiledWeights = [substitutionMatrix: Int8Array | undefined, gap: number | undefined];
+
+/** The sequence index class. */
+export interface CompiledSequenceIndexConstructor extends CompiledBasicIndexConstructor<
+  CompiledSequenceIndex,
+  CompiledSequenceMetadata
+> {
+  initRam(
+    metric: string,
+    ...arguments_: [
+      ...CompiledWeights,
+      windowWidths: number[] | undefined,
+      connectivity: number | undefined,
+      valuesPerKey: number | undefined,
+      memoryDomains: number[] | undefined,
+      cpuClassCeiling: string | undefined,
+    ]
+  ): CompiledSequenceIndex;
+  initVram(
+    metric: string,
+    ...arguments_: [
+      ...CompiledWeights,
+      windowWidths: number[] | undefined,
+      connectivity: number | undefined,
+      valuesPerKey: number | undefined,
+      devices: number[] | undefined,
+      gpuClassCeiling: string | undefined,
+    ]
+  ): CompiledSequenceIndex;
+  loadRam(...arguments_: [path: string, ...CompiledLoad, ...CompiledWeights]): CompiledSequenceIndex;
+  loadVram(...arguments_: [path: string, ...CompiledLoad, ...CompiledWeights]): CompiledSequenceIndex;
+  loadRamBuffer(...arguments_: [buffer: ArrayBufferView, ...CompiledLoad, ...CompiledWeights]): CompiledSequenceIndex;
+  loadVramBuffer(...arguments_: [buffer: ArrayBufferView, ...CompiledLoad, ...CompiledWeights]): CompiledSequenceIndex;
+  viewRam(path: string, cpuClassCeiling: string | undefined, ...weights: CompiledWeights): CompiledSequenceIndex;
+  viewNvme(
+    ...arguments_: [
+      path: string,
+      executor: CompiledExecutor | undefined,
+      paths: string[] | undefined,
+      cpuClassCeiling: string | undefined,
+      ...CompiledWeights,
+    ]
+  ): CompiledSequenceIndex;
+}
+
+/** What every basic load takes last: executor, placement, key bound and class ceiling. */
+type CompiledLoad = [
+  executor: CompiledExecutor | undefined,
+  placement: number[] | undefined,
+  valuesPerKey: number | undefined,
+  classCeiling: string | undefined,
+];
+
+/** The geometry and metric a shapes checkpoint froze. */
+export interface CompiledShapesMetadata {
+  metric: string;
+  quantization: string;
+  points: number;
+  connectivity: number;
+}
+
+/** A shapes index's frozen metadata and current counters. */
+export type CompiledShapesDescription = Omit<CompiledDescription, "metadata"> & {
+  metadata: CompiledShapesMetadata;
+  totalPoints: number;
+};
+
+/** The entries under one key and the points they hold. */
+export interface CompiledShapesKeyStats {
+  entries: number;
+  totalPoints: number;
+  largestPoints: number;
+}
+
+/** One shapes index handle. */
+export interface CompiledShapesIndex extends CompiledBasicIndex<CompiledShapesDescription, CompiledShapesKeyStats> {
+  reserve(...arguments_: [...On, entries: number, points: number | undefined]): undefined | CompiledDeferred;
+  insert(
+    ...arguments_: [
+      ...On,
+      keys: Uint8Array | BigUint64Array,
+      ...shapes: CompiledTapeRows,
+      expansion: number | undefined,
+      stats: CompiledStats | undefined,
+    ]
+  ): undefined | CompiledDeferred;
+  search(
+    ...arguments_: [
+      ...On,
+      ...queries: CompiledTapeRows,
+      arena: CompiledArena,
+      wanted: number,
+      expansion: number | undefined,
+      traversal: string | undefined,
+      stats: CompiledStats | undefined,
+    ]
+  ): CompiledMatches | CompiledDeferred;
+  get(...arguments_: [...On, key: Uint8Array, scalar: number, arena: CompiledArena]): CompiledTape | CompiledDeferred;
+}
+
+/** The shapes index class. */
+export interface CompiledShapesIndexConstructor extends CompiledBasicIndexConstructor<
+  CompiledShapesIndex,
+  CompiledShapesMetadata
+> {
+  initRam(
+    metric: string,
+    quantization: number,
+    points: number | undefined,
+    connectivity: number | undefined,
+    valuesPerKey: number | undefined,
+    memoryDomains: number[] | undefined,
+    cpuClassCeiling: string | undefined,
+  ): CompiledShapesIndex;
+  initVram(
+    metric: string,
+    quantization: number,
+    points: number | undefined,
+    connectivity: number | undefined,
+    valuesPerKey: number | undefined,
+    devices: number[] | undefined,
+    gpuClassCeiling: string | undefined,
+  ): CompiledShapesIndex;
+  loadRam(path: string, ...load: CompiledLoad): CompiledShapesIndex;
+  loadVram(path: string, ...load: CompiledLoad): CompiledShapesIndex;
+  loadRamBuffer(buffer: ArrayBufferView, ...load: CompiledLoad): CompiledShapesIndex;
+  loadVramBuffer(buffer: ArrayBufferView, ...load: CompiledLoad): CompiledShapesIndex;
+  viewRam(path: string, cpuClassCeiling: string | undefined): CompiledShapesIndex;
+  viewNvme(
+    path: string,
+    executor: CompiledExecutor | undefined,
+    paths: string[] | undefined,
+    cpuClassCeiling: string | undefined,
+  ): CompiledShapesIndex;
+}
+
+/** The connectivity a geospatial checkpoint froze. */
+export interface CompiledGeospatialMetadata {
+  connectivity: number;
+}
+
+/** A geospatial index's frozen metadata and current counters. */
+export type CompiledGeospatialDescription = Omit<CompiledDescription, "metadata"> & {
+  metadata: CompiledGeospatialMetadata;
+};
+
+/** The entries under one key. */
+export interface CompiledGeospatialKeyStats {
+  entries: number;
+}
+
+/** The relation, radius and time slack a geospatial query crosses with. */
+type CompiledRelation = [relation: number, metres: number | undefined, seconds: number | undefined];
+
+/** One geospatial index handle. */
+export interface CompiledGeospatialIndex extends CompiledBasicIndex<
+  CompiledGeospatialDescription,
+  CompiledGeospatialKeyStats
+> {
+  reserve(...arguments_: [...On, entries: number]): undefined | CompiledDeferred;
+  insert(
+    ...arguments_: [
+      ...On,
+      keys: Uint8Array | BigUint64Array,
+      observations: Float64Array,
+      expansion: number | undefined,
+      stats: CompiledStats | undefined,
+    ]
+  ): undefined | CompiledDeferred;
+  search(
+    ...arguments_: [
+      ...On,
+      queries: Float64Array,
+      ...CompiledRelation,
+      arena: CompiledArena,
+      wanted: number,
+      expansion: number | undefined,
+      traversal: string | undefined,
+      stats: CompiledStats | undefined,
+    ]
+  ): CompiledMatches | CompiledDeferred;
+  within(
+    ...arguments_: [
+      ...On,
+      queries: Float64Array,
+      ...CompiledRelation,
+      arena: CompiledArena,
+      traversal: string | undefined,
+      stats: CompiledStats | undefined,
+    ]
+  ): CompiledProducts | CompiledDeferred;
+  get(...arguments_: [...On, key: Uint8Array, arena: CompiledArena]): Float64Array | CompiledDeferred;
+}
+
+/** The geospatial index class. */
+export interface CompiledGeospatialIndexConstructor extends CompiledBasicIndexConstructor<
+  CompiledGeospatialIndex,
+  CompiledGeospatialMetadata
+> {
+  initRam(
+    connectivity: number | undefined,
+    valuesPerKey: number | undefined,
+    memoryDomains: number[] | undefined,
+    cpuClassCeiling: string | undefined,
+  ): CompiledGeospatialIndex;
+  initVram(
+    connectivity: number | undefined,
+    valuesPerKey: number | undefined,
+    devices: number[] | undefined,
+    gpuClassCeiling: string | undefined,
+  ): CompiledGeospatialIndex;
+  loadRam(path: string, ...load: CompiledLoad): CompiledGeospatialIndex;
+  loadVram(path: string, ...load: CompiledLoad): CompiledGeospatialIndex;
+  loadRamBuffer(buffer: ArrayBufferView, ...load: CompiledLoad): CompiledGeospatialIndex;
+  loadVramBuffer(buffer: ArrayBufferView, ...load: CompiledLoad): CompiledGeospatialIndex;
+  viewRam(path: string, cpuClassCeiling: string | undefined): CompiledGeospatialIndex;
+  viewNvme(
+    path: string,
+    executor: CompiledExecutor | undefined,
+    paths: string[] | undefined,
+    cpuClassCeiling: string | undefined,
+  ): CompiledGeospatialIndex;
+}
+
 /** Everything the native addon publishes. */
 export interface Compiled {
   CompiledIndex: CompiledIndexConstructor;
+  CompiledSequenceIndex: CompiledSequenceIndexConstructor;
+  CompiledShapesIndex: CompiledShapesIndexConstructor;
+  CompiledGeospatialIndex: CompiledGeospatialIndexConstructor;
   Executor: unknown;
   Arena: new (executor?: CompiledExecutor) => CompiledArena;
   scalars: Readonly<Record<string, number>>;

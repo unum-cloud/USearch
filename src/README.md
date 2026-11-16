@@ -152,6 +152,6 @@ Sequence, shapes and geospatial compile the same classes, each into a RAM and an
 - `insert` builds the batch's values on every thread from the index's allocator, sizes every thread's context and metric, and only then plans the batch, so nothing fails after the dispense.
 - `search` writes each query's nearest from the walk's candidates, narrowed by the predicate a quad of keys at a time.
 - Overlap distances are reported as the share of missed windows, from zero to one, rather than the kernels' fixed point.
-- Checkpoints are one SafeGraphs monolith for a lone live shard, or one part per live shard beside a `.json` manifest, whose metric token is `levenshtein`, `levenshtein-utf8`, `needleman_wunsch`, `overlap`, `chamfer`, `hausdorff`, `gromov_wasserstein` or `wasserstein_procrustes`, with `connectivity`, `window_widths` and `points` in the provenance.
+- Checkpoints are one SafeGraphs monolith for a lone live shard, or one part per live shard beside a `.json` manifest, whose metric token is `levenshtein`, `levenshtein-utf8`, `needleman-wunsch`, `overlap`, `chamfer`, `hausdorff`, `gromov-wasserstein` or `wasserstein-procrustes`, with `connectivity`, `window_widths` and `points` in the provenance.
 
 `refine` and `reshard` run rounds on RAM and NVIDIA indexes, `sample` serves RAM ones, and a cursor opens at start keys and reports links there, while `view_ram` answers `usearch_status_unsupported_k`.

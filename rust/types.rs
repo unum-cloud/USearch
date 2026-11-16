@@ -24,6 +24,7 @@ use core::pin::Pin;
 use core::ptr::{self, NonNull};
 use core::str::FromStr;
 use core::task::{Context, Poll};
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -217,6 +218,53 @@ impl usearch_keys_tape_view_t {
                 false => (*self.offsets.add(entry), *self.offsets.add(entry + 1)),
             };
             arena_slice(self.keys.wrapping_add(start), end - start)
+        }
+    }
+}
+
+pub type usearch_tape_layout_t = c_int;
+
+pub const usearch_tape_u32_k: usearch_tape_layout_t = 0;
+pub const usearch_tape_u64_k: usearch_tape_layout_t = 1;
+
+/// A ragged batch as Apache Arrow lays one out - elements end to end, and one more offset than
+/// entries - borrowed as an input or written into an arena as an output; `offsets` is the C
+/// union, read as wide as `layout` says.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct usearch_tape_view_t {
+    pub data: *const c_void,
+    pub layout: usearch_tape_layout_t,
+    pub offsets: *const c_void,
+    pub scalar: usearch_scalar_t,
+}
+
+impl Default for usearch_tape_view_t {
+    fn default() -> Self {
+        usearch_tape_view_t { data: ptr::null(), layout: usearch_tape_u64_k, offsets: ptr::null(), scalar: 0 }
+    }
+}
+
+impl usearch_tape_view_t {
+    /// Entry `entry`'s elements, spanning its two offsets; a call with nothing to report leaves
+    /// null offsets, which read as no elements.
+    ///
+    /// # Safety
+    /// The view must be a finished call's output of `Element`s, and `entry` below its count.
+    pub(crate) unsafe fn entry<'arena, Element>(&self, entry: usize) -> &'arena [Element] {
+        unsafe {
+            let (start, end) = match (self.offsets.is_null(), self.layout) {
+                (true, _) => (0, 0),
+                (false, usearch_tape_u32_k) => {
+                    let offsets = self.offsets.cast::<u32>();
+                    (*offsets.add(entry) as usize, *offsets.add(entry + 1) as usize)
+                }
+                (false, _) => {
+                    let offsets = self.offsets.cast::<u64>();
+                    (*offsets.add(entry) as usize, *offsets.add(entry + 1) as usize)
+                }
+            };
+            arena_slice(self.data.cast::<Element>().wrapping_add(start), end - start)
         }
     }
 }
@@ -1042,6 +1090,132 @@ impl<Rows: RowsView + ?Sized> RowsView for &Rows {
 }
 
 // endregion: Matrix Views
+
+// region: Tapes
+
+/// The width of a tape's offsets, which the library reads as the tape's `layout`.
+///
+/// Rust-only.
+///
+/// # Safety
+/// The layout must name exactly this type's width.
+pub unsafe trait TapeOffset: Copy + 'static {
+    /// The layout the library reads these offsets under.
+    const LAYOUT: usearch_tape_layout_t;
+}
+
+unsafe impl TapeOffset for u32 {
+    const LAYOUT: usearch_tape_layout_t = usearch_tape_u32_k;
+}
+
+unsafe impl TapeOffset for u64 {
+    const LAYOUT: usearch_tape_layout_t = usearch_tape_u64_k;
+}
+
+/// A ragged batch laid out as Apache Arrow lays one out: elements end to end, and `count + 1`
+/// non-decreasing offsets around them, so entry `i` spans `offsets[i]` up to `offsets[i + 1]`.
+///
+/// An element is a byte of a sequence or a point of a shape. Both runs are borrowed or owned, and
+/// a deferred call takes only an owned, `'static` tape.
+///
+/// Rust-only.
+#[derive(Clone, Debug)]
+pub struct Tape<'data, Element: Clone, Offset: Clone = u64> {
+    /// Every entry's elements, end to end.
+    pub elements: Cow<'data, [Element]>,
+    /// One more offset than entries, counted in elements.
+    pub offsets: Cow<'data, [Offset]>,
+}
+
+impl<'data, Element: Clone, Offset: TapeOffset> Tape<'data, Element, Offset> {
+    /// Borrows an Arrow-shaped pair of runs, as a `Binary` or `List` column holds them.
+    pub fn new(elements: &'data [Element], offsets: &'data [Offset]) -> Self {
+        Tape { elements: Cow::Borrowed(elements), offsets: Cow::Borrowed(offsets) }
+    }
+
+    /// Entries the tape spans, one fewer than its offsets.
+    pub fn count(&self) -> usize {
+        self.offsets.len().saturating_sub(1)
+    }
+
+    /// Lends the tape as the view the C interface reads, its elements tagged `scalar`.
+    pub(crate) fn view(&self, scalar: Scalar) -> usearch_tape_view_t {
+        usearch_tape_view_t {
+            data: self.elements.as_ptr().cast(),
+            layout: Offset::LAYOUT,
+            offsets: self.offsets.as_ptr().cast(),
+            scalar: scalar as usearch_scalar_t,
+        }
+    }
+}
+
+impl<Element: Clone> Tape<'static, Element, u64> {
+    /// Packs separate entries into one owned tape, copying them end to end.
+    pub fn of<Entry: AsRef<[Element]>>(entries: impl IntoIterator<Item = Entry>) -> Self {
+        let (mut elements, mut offsets) = (Vec::new(), vec![0u64]);
+        for entry in entries {
+            elements.extend_from_slice(entry.as_ref());
+            offsets.push(elements.len() as u64);
+        }
+        Tape { elements: Cow::Owned(elements), offsets: Cow::Owned(offsets) }
+    }
+}
+
+impl<Element: Clone + 'static, Offset: Clone + 'static> Accepts<Tape<'static, Element, Offset>> for Deferring {}
+
+/// The tapes a `get` wrote into the arena it borrows, one entry per value stored under its key,
+/// in insertion order.
+///
+/// Rust-only.
+pub struct TapeEntries<'arena, Element> {
+    pub(crate) arena: PhantomData<&'arena Arena>,
+    pub(crate) view: usearch_tape_view_t,
+    pub(crate) written: usize,
+    pub(crate) element: PhantomData<Element>,
+}
+
+// Safety: the view points into the arena borrowed beside it, which is `Sync`.
+unsafe impl<Element> Send for TapeEntries<'_, Element> {}
+
+impl<'arena, Element: 'arena> TapeEntries<'arena, Element> {
+    /// An empty slot a call fills in an arena.
+    pub(crate) fn new() -> Self {
+        TapeEntries { arena: PhantomData, view: usearch_tape_view_t::default(), written: 0, element: PhantomData }
+    }
+
+    /// Entries the call wrote; zero for an absent key.
+    pub fn written(&self) -> usize {
+        self.written
+    }
+
+    /// One entry's elements, refused with [`Status::InvalidArgument`] when `entry` is not below
+    /// [`TapeEntries::written`].
+    pub fn entry(&self, entry: usize) -> Result<&'arena [Element]> {
+        match entry < self.written {
+            // Safety: the arena holds a finished call's output.
+            true => Ok(unsafe { self.view.entry(entry) }),
+            false => Err(fail(Status::InvalidArgument, "the entry is not below the call's count")),
+        }
+    }
+
+    /// Every entry, in insertion order.
+    pub fn iter(&self) -> impl Iterator<Item = &'arena [Element]> + '_ {
+        // Safety: the arena holds a finished call's output.
+        (0..self.written).map(move |entry| unsafe { self.view.entry(entry) })
+    }
+}
+
+/// The source and target handles a reshard lends, laid out as the library reads them.
+#[doc(hidden)]
+pub struct ReshardHandles {
+    pub(crate) sources: Vec<*mut c_void>,
+    pub(crate) targets: Vec<*mut c_void>,
+}
+
+// Safety: the handles belong to borrowed indexes, which are `Sync`.
+unsafe impl Send for ReshardHandles {}
+
+// endregion: Tapes
 
 // region: Matches
 

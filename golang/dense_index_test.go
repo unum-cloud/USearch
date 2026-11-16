@@ -287,6 +287,7 @@ func TestEnumeratorsSpellTheLibrarysNames(t *testing.T) {
 		{PhaseRestitch, "restitch"},
 		{DenseRefineStalled, "stalled"},
 		{LoadPathCuFile, "cufile"},
+		{ShapesMetricGromovWasserstein, "gromov-wasserstein"},
 		{ScalarBF16, "bf16"},
 		{ScalarU1x8, "u1x8"},
 		{ScalarI32, "i32"},
@@ -302,6 +303,20 @@ func TestEnumeratorsSpellTheLibrarysNames(t *testing.T) {
 	failure := error(fail(StatusReadOnly, "a view"))
 	if !errors.Is(failure, StatusReadOnly) || errors.Is(failure, StatusIO) {
 		t.Errorf("%v matched the wrong status", failure)
+	}
+}
+
+// Every dense metric reads back from its own spelling, and a spelling no metric carries is refused.
+func TestDenseMetricsReadBackFromTheirNames(t *testing.T) {
+	t.Parallel()
+	for _, metric := range []DenseMetric{DenseMetricInner, DenseMetricAngular, DenseMetricEuclidean,
+		DenseMetricHamming, DenseMetricJaccard} {
+		if read, err := DenseMetricFromName(metric.String()); err != nil || read != metric {
+			t.Errorf("%q reads back as %v: %v", metric.String(), read, err)
+		}
+	}
+	if _, err := DenseMetricFromName("cosine-ish"); !errors.Is(err, StatusInvalidArgument) {
+		t.Errorf("a misspelled dense metric reads back with %v", err)
 	}
 }
 

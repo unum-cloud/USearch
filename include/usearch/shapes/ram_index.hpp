@@ -14,7 +14,7 @@
  *
  *  Checkpoints are SafeGraphs monoliths, written by @c safegraphs_write_index and read by
  *  @c safegraphs_read_index with @ref unum::usearch::shapes::codec, under the kernel's token:
- *  @c chamfer, @c hausdorff, @c wasserstein_procrustes or @c gromov_wasserstein. The value column
+ *  @c chamfer, @c hausdorff, @c wasserstein-procrustes or @c gromov-wasserstein. The value column
  *  is a ragged @c f16 or @c f32 matrix of one @b [points,3] slice per node, holding each cloud in
  *  its inserted pose within one storage rounding. A load packs every cloud again, so distances
  *  after a reload agree with those before it to the storage precision, rather than bit for bit.

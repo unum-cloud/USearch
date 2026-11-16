@@ -29,6 +29,9 @@
 #![warn(missing_docs)]
 
 mod dense_index;
+mod geospatial_index;
+mod sequence_index;
+mod shapes_index;
 mod types;
 
 // The C mirror items are public within their modules, so only these names leave the crate.
@@ -40,9 +43,29 @@ pub use dense_index::{
     DenseSearchConfig, DenseSearchStream, DenseSearchStreamInitConfig, DenseSoftmaxState, DenseTraversalStats,
     DenseVectors, DenseVerbs, DenseViewNvmeConfig, Monolith, RefineReport, RefineVerdict, Sample, ValueLookup,
 };
+pub use geospatial_index::{
+    GeospatialCursor, GeospatialIndex, GeospatialIndexDescription, GeospatialInsertConfig, GeospatialKeyStats,
+    GeospatialLoadRamBufferConfig, GeospatialLoadRamConfig, GeospatialLoadVramBufferConfig, GeospatialLoadVramConfig,
+    GeospatialMatches, GeospatialMetadata, GeospatialObservation, GeospatialObservations, GeospatialOptions,
+    GeospatialRefineConfig, GeospatialRefinePlan, GeospatialRelation, GeospatialReshardConfig, GeospatialReshardPlan,
+    GeospatialSearchConfig, GeospatialTerrain, GeospatialTerrainFill, GeospatialVerbs, GeospatialViewNvmeConfig,
+    GeospatialWithinConfig,
+};
+pub use sequence_index::{
+    SequenceCursor, SequenceIndex, SequenceIndexDescription, SequenceInsertConfig, SequenceKeyStats,
+    SequenceLoadRamBufferConfig, SequenceLoadRamConfig, SequenceLoadVramBufferConfig, SequenceLoadVramConfig,
+    SequenceMetadata, SequenceMetric, SequenceOptions, SequenceRefineConfig, SequenceRefinePlan, SequenceReshardConfig,
+    SequenceReshardPlan, SequenceSearchConfig, SequenceVerbs, SequenceViewNvmeConfig, SequenceWeights,
+};
+pub use shapes_index::{
+    ShapesCursor, ShapesIndex, ShapesIndexDescription, ShapesInsertConfig, ShapesKeyStats, ShapesLoadRamBufferConfig,
+    ShapesLoadRamConfig, ShapesLoadVramBufferConfig, ShapesLoadVramConfig, ShapesMetadata, ShapesMetric, ShapesOptions,
+    ShapesRefineConfig, ShapesRefinePlan, ShapesReshardConfig, ShapesReshardPlan, ShapesSearchConfig, ShapesVerbs,
+    ShapesViewNvmeConfig,
+};
 pub use types::{
     Arena, ArenaDescription, ArrowArray, ArrowColumn, ArrowDeviceArray, ArrowExport, ArrowRows, ArrowSchema, Blocking,
     CPUClass, Deferred, Deferring, Distance, Element, Error, Executor, GPUClass, Key, Matches, Mood, On, Phase,
-    PhaseProgress, Predicate, ProgressCallback, QueryMatches, Residency, Result, Scalar, Status, Traversal, Wait,
-    capabilities_available, capabilities_compiled, keys_from_arrow, rows, version,
+    PhaseProgress, Predicate, ProgressCallback, QueryMatches, Residency, Result, Scalar, Status, Tape, TapeEntries,
+    TapeOffset, Traversal, Wait, capabilities_available, capabilities_compiled, keys_from_arrow, rows, version,
 };

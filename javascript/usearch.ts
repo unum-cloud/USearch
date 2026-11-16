@@ -20,6 +20,7 @@ export {
   RowsView,
   Scalar,
   Status,
+  Tape,
   Traversal,
   formatKey,
   integerFromKey,
@@ -88,6 +89,74 @@ export type {
   ValueRowOf,
 } from "./dense_index";
 
+export {
+  SequenceIndex,
+  SequenceIndexDeferredOn,
+  SequenceIndexOn,
+  SequenceMetric,
+  SequenceRefinePlan,
+  SequenceReshardPlan,
+} from "./sequence_index";
+export type {
+  SequenceIndexDescription,
+  SequenceKeyStats,
+  SequenceLoadConfig,
+  SequenceMetadata,
+  SequenceOptions,
+  SequencePhaseProgress,
+  SequenceRefineConfig,
+  SequenceReshardConfig,
+  SequenceViewNvmeConfig,
+  SequenceWeights,
+  SequencesLike,
+} from "./sequence_index";
+
+export {
+  ShapesIndex,
+  ShapesIndexDeferredOn,
+  ShapesIndexOn,
+  ShapesMetric,
+  ShapesRefinePlan,
+  ShapesReshardPlan,
+} from "./shapes_index";
+export type {
+  ShapesGetConfig,
+  ShapesIndexDescription,
+  ShapesKeyStats,
+  ShapesLike,
+  ShapesLoadConfig,
+  ShapesMetadata,
+  ShapesOptions,
+  ShapesPhaseProgress,
+  ShapesRefineConfig,
+  ShapesReshardConfig,
+  ShapesViewNvmeConfig,
+} from "./shapes_index";
+
+export {
+  GeospatialIndex,
+  GeospatialIndexDeferredOn,
+  GeospatialIndexOn,
+  GeospatialRefinePlan,
+  GeospatialRelation,
+  GeospatialReshardPlan,
+  observationsOf,
+} from "./geospatial_index";
+export type {
+  GeospatialIndexDescription,
+  GeospatialKeyStats,
+  GeospatialLoadConfig,
+  GeospatialMetadata,
+  GeospatialObservation,
+  GeospatialOptions,
+  GeospatialPhaseProgress,
+  GeospatialRefineConfig,
+  GeospatialReshardConfig,
+  GeospatialSearchConfig,
+  GeospatialViewNvmeConfig,
+  GeospatialWithinConfig,
+} from "./geospatial_index";
+
 import { compiled } from "./library";
 import {
   Arena,
@@ -101,6 +170,7 @@ import {
   RowsView,
   Scalar,
   Status,
+  Tape,
   Traversal,
   formatKey,
   integerFromKey,
@@ -125,6 +195,31 @@ import {
   DenseTraversalStats,
   DenseVectors,
 } from "./dense_index";
+import {
+  SequenceIndex,
+  SequenceIndexDeferredOn,
+  SequenceIndexOn,
+  SequenceMetric,
+  SequenceRefinePlan,
+  SequenceReshardPlan,
+} from "./sequence_index";
+import {
+  ShapesIndex,
+  ShapesIndexDeferredOn,
+  ShapesIndexOn,
+  ShapesMetric,
+  ShapesRefinePlan,
+  ShapesReshardPlan,
+} from "./shapes_index";
+import {
+  GeospatialIndex,
+  GeospatialIndexDeferredOn,
+  GeospatialIndexOn,
+  GeospatialRefinePlan,
+  GeospatialRelation,
+  GeospatialReshardPlan,
+  observationsOf,
+} from "./geospatial_index";
 
 /** The library's version, as the release tooling stamped it. */
 export function version(): string {
@@ -159,14 +254,33 @@ const usearch = {
   DenseTraversalStats,
   DenseVectors,
   Executor,
+  GeospatialIndex,
+  GeospatialIndexDeferredOn,
+  GeospatialIndexOn,
+  GeospatialRefinePlan,
+  GeospatialRelation,
+  GeospatialReshardPlan,
   Matches,
-  QueryMatches,
   Monolith,
   Mood,
+  QueryMatches,
   Residency,
   RowsView,
   Scalar,
+  SequenceIndex,
+  SequenceIndexDeferredOn,
+  SequenceIndexOn,
+  SequenceMetric,
+  SequenceRefinePlan,
+  SequenceReshardPlan,
+  ShapesIndex,
+  ShapesIndexDeferredOn,
+  ShapesIndexOn,
+  ShapesMetric,
+  ShapesRefinePlan,
+  ShapesReshardPlan,
   Status,
+  Tape,
   Traversal,
   capabilitiesAvailable,
   capabilitiesCompiled,
@@ -175,6 +289,7 @@ const usearch = {
   keyAt,
   keyBytes,
   keyFromInteger,
+  observationsOf,
   parseKey,
   version,
 };

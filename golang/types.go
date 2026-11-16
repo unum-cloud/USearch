@@ -1177,4 +1177,179 @@ func (call *call) keys(keys []Key) C.usearch_keys_view_t {
 	}
 }
 
+// points lends places in three dimensions as the f32 rows a sampling verb reads.
+func (call *call) points(points [][3]float32) C.usearch_rows_view_t {
+	return C.usearch_rows_view_t{
+		data:    unsafe.Pointer(lend(call, points)),
+		stride:  C.size_t(unsafe.Sizeof([3]float32{})),
+		columns: 3,
+		scalar:  C.usearch_scalar_t(ScalarF32),
+	}
+}
+
 // endregion: Helpers
+
+// region: Tapes
+
+// Tape borrows a ragged batch as Apache Arrow lays one out: elements end to end, and one more
+// offset than entries around them, entry i spanning offsets[i] up to offsets[i+1]. An element is
+// a byte of a sequence or a point of a shape, three scalars wide.
+//
+// Like a RowsView, a Tape borrows and never owns, and the binding pins both slices until each call
+// it crosses is final.
+type Tape struct {
+	pointer unsafe.Pointer
+	offsets []uint64
+	scalar  Scalar
+}
+
+// SequencesTape views bytes end to end around len(offsets) - 1 sequences.
+//
+// Panics when the offsets overrun the bytes, which names a caller's arithmetic mistake rather
+// than a condition the library could report.
+func SequencesTape(data []byte, offsets []uint64) Tape {
+	return tapeOf(data, offsets, 1)
+}
+
+// SequencesOf packs sequences end to end into a fresh Tape, one entry apiece.
+func SequencesOf(sequences ...[]byte) Tape {
+	offsets := make([]uint64, len(sequences)+1)
+	for position, sequence := range sequences {
+		offsets[position+1] = offsets[position] + uint64(len(sequence))
+	}
+	data := make([]byte, 0, offsets[len(sequences)])
+	for _, sequence := range sequences {
+		data = append(data, sequence...)
+	}
+	return tapeOf(data, offsets, 1)
+}
+
+// ShapesTape views points end to end, x, y and z interleaved, around len(offsets) - 1 shapes
+// whose offsets count points.
+//
+// Panics when the offsets overrun the points.
+func ShapesTape[Value Element](data []Value, offsets []uint64) Tape {
+	return tapeOf(data, offsets, 3)
+}
+
+// ShapesOf packs shapes end to end into a fresh Tape, one entry apiece, each holding its points
+// with x, y and z interleaved.
+//
+// Panics on a shape whose scalars do not divide into whole points.
+func ShapesOf[Value Element](shapes ...[]Value) Tape {
+	offsets := make([]uint64, len(shapes)+1)
+	for position, shape := range shapes {
+		if len(shape)%3 != 0 {
+			panic(fmt.Sprintf("usearch: %d scalars do not divide into points of three", len(shape)))
+		}
+		offsets[position+1] = offsets[position] + uint64(len(shape)/3)
+	}
+	data := make([]Value, 0, offsets[len(shapes)]*3)
+	for _, shape := range shapes {
+		data = append(data, shape...)
+	}
+	return tapeOf(data, offsets, 3)
+}
+
+// tapeOf views data as elements of width scalars around offsets.
+func tapeOf[Value Element](data []Value, offsets []uint64, width uint64) Tape {
+	if len(offsets) == 0 {
+		panic("usearch: a tape needs one more offset than entries")
+	}
+	if last := offsets[len(offsets)-1]; last*width > uint64(len(data)) {
+		panic(fmt.Sprintf("usearch: offsets ending at %d overrun %d scalars", last, len(data)))
+	}
+	return Tape{pointer: unsafe.Pointer(unsafe.SliceData(data)), offsets: offsets, scalar: scalarOf[Value]()}
+}
+
+// Entries reports how many entries the tape spans.
+func (tape Tape) Entries() uint { return uint(len(tape.offsets)) - 1 }
+
+// Scalar reports the scalar type the elements hold.
+func (tape Tape) Scalar() Scalar { return tape.scalar }
+
+// lower lends the tape as the batch view a verb reads, with 64-bit offsets.
+func (tape Tape) lower(call *call) C.usearch_tape_view_t {
+	if tape.pointer != nil {
+		call.pinner.Pin(tape.pointer)
+	}
+	view := C.usearch_tape_view_t{data: tape.pointer, layout: C.usearch_tape_u64_k, scalar: C.usearch_scalar_t(tape.scalar)}
+	*(**C.uint64_t)(unsafe.Pointer(&view.offsets)) = (*C.uint64_t)(unsafe.Pointer(lend(call, tape.offsets)))
+	return view
+}
+
+// TapeView is a ragged batch a call wrote into its arena, readable until the arena serves another
+// call: Get's entries sharing a key.
+type TapeView struct {
+	raw     C.usearch_tape_view_t
+	written uint
+	width   uint
+}
+
+// Written reports how many entries the call wrote; zero when the key is absent.
+func (tape TapeView) Written() uint { return tape.written }
+
+// Scalar reports the scalar type the elements were written as.
+func (tape TapeView) Scalar() Scalar { return Scalar(tape.raw.scalar) }
+
+// span reports where entry starts and ends, in elements.
+func (tape TapeView) span(entry uint) (uint, uint) {
+	if tape.raw.layout == C.usearch_tape_u32_k {
+		offsets := unsafe.Slice(*(**uint32)(unsafe.Pointer(&tape.raw.offsets)), tape.written+1)
+		return uint(offsets[entry]), uint(offsets[entry+1])
+	}
+	offsets := unsafe.Slice(*(**uint64)(unsafe.Pointer(&tape.raw.offsets)), tape.written+1)
+	return uint(offsets[entry]), uint(offsets[entry+1])
+}
+
+// TapeEntry borrows one entry's scalars from the arena - a sequence's bytes, or a shape's points
+// with x, y and z interleaved - refused with StatusInvalidArgument when Value is not the scalar
+// type they were written as; entry must be below Written.
+func TapeEntry[Value Element](tape TapeView, entry uint) ([]Value, error) {
+	if scalar := scalarOf[Value](); scalar != tape.Scalar() {
+		return nil, fail(StatusInvalidArgument, "elements written as "+tape.Scalar().String()+" cannot be read as "+scalar.String())
+	}
+	begin, end := tape.span(entry)
+	if begin == end {
+		return nil, nil
+	}
+	var element Value
+	first := unsafe.Add(tape.raw.data, begin*tape.width*uint(unsafe.Sizeof(element)))
+	return unsafe.Slice((*Value)(first), (end-begin)*tape.width), nil
+}
+
+// endregion: Tapes
+
+// region: Plans
+
+// livePlan is one long operation kept live across calls: the handle the library opens on the first
+// call naming it, and where the last such call stopped. Every modality's refine and reshard plan is
+// one, each over its own handle type.
+type livePlan[Handle comparable] struct {
+	// Phase is where the last call naming the plan stopped, PhaseDone once its rounds ended.
+	Phase  PhaseProgress
+	handle Handle
+}
+
+// lower lends the plan's handle and phase to a call, both nil for no plan.
+func (plan *livePlan[Handle]) lower(call *call) (*Handle, *C.usearch_phase_progress_t) {
+	if plan == nil {
+		return nil, nil
+	}
+	pin(call, plan)
+	return &plan.handle, (*C.usearch_phase_progress_t)(unsafe.Pointer(&plan.Phase))
+}
+
+// take hands the plan's handle to its finish, leaving the plan fresh; a nil plan hands none, which
+// the library refuses.
+func (plan *livePlan[Handle]) take() Handle {
+	var none Handle
+	if plan == nil {
+		return none
+	}
+	handle := plan.handle
+	plan.handle = none
+	return handle
+}
+
+// endregion: Plans

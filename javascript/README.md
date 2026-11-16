@@ -2,7 +2,7 @@
 
 This package binds the C ABI in `include/usearch/` through a Node-API addon written in plain C over `<node_api.h>`, with no C++ wrapper in between.
 It needs Node.js 22 or newer, ships prebuilt addons for Linux and macOS on x86-64 and Arm64 and for Windows on x86-64, and loads as CommonJS or an ES module, with TypeScript declarations.
-It exposes dense indexes; sequence, matrix and geospatial indexes follow as the C library ships them.
+It exposes dense, sequence, shape and geospatial indexes, each with the same receivers, plans and cursors.
 
 ## Installation
 
@@ -491,13 +491,75 @@ usearch.capabilitiesAvailable();
 
 `health` audits from the search landmarks, and entries it misses stay unfound until a `refine` re-links them; its `depthFromRoot` counts the depths the check took to converge.
 
+## Sequence Indexes
+
+`SequenceIndex` searches byte strings, UTF-8 text, DNA, RNA and proteins under edit distances and alignments.
+Its verbs and receivers are the dense ones, and its sequences cross as one Apache Arrow `Tape`, bytes end to end around their offsets: text and `Uint8Array` lists are packed by `Tape.ofSequences`, and a packed `Tape` is borrowed in place.
+
+```js
+const { Arena, SequenceIndex, SequenceMetric, integerFromKey } = require("usearch");
+
+const words = SequenceIndex.initRam({ metric: SequenceMetric.LevenshteinUtf8 });
+words.insert([1n, 2n, 3n], ["kitten", "sitting", "mitten"]);
+const matches = words.search(["sitting"], 1, new Arena());
+console.log(integerFromKey(matches.get(0).keys), matches.get(0).scores[0]); // 2n 0
+console.log(new TextDecoder().decode(words.get(2n, new Arena()).get(0))); // "sitting"
+```
+
+`SequenceMetric.NeedlemanWunsch` takes a `substitutionMatrix`, an `Int8Array` of 256 × 256 scores, and a `gap` cost, borrowed for the call; `SequenceMetric.Overlap` takes `windowWidths` in bytes.
+A checkpoint records neither weight, so `loadRam`, `loadVram`, their `Buffer` forms and the views take them again.
+`count` answers `{entries, totalBytes, largestBytes}`, and `get` answers a `Tape` viewed inside its arena.
+
+## Shape Indexes
+
+`ShapesIndex` searches 3D point clouds of any size, like molecules, conformers and protein backbones, with Chamfer, Hausdorff, Gromov-Wasserstein and Wasserstein-Procrustes, all invariant to rotation, reflection, translation and point order.
+A shape is one `Float32Array`, `Float64Array` or `Float16Array` of `x, y, z` interleaved, and `Tape.ofShapes` packs a list into one tape whose offsets count points.
+
+```js
+const { Arena, ShapesIndex, ShapesMetric, integerFromKey } = require("usearch");
+
+const random = () => Math.random();
+const shapes = [5, 9, 13].map((points) => Float32Array.from({ length: 3 * points }, random));
+const conformers = ShapesIndex.initRam({ metric: ShapesMetric.Hausdorff });
+conformers.insert([1n, 2n, 3n], shapes);
+console.log(conformers.describe().totalPoints); // 27
+const matches = conformers.search([shapes[2]], 1, new Arena());
+console.log(integerFromKey(matches.get(0).keys)); // 3n
+```
+
+A non-zero `points` option freezes the count every shape holds, and `quantization` picks `f16` or `f32` storage.
+`get` converts the points to its `scalar`, `f32` by default, and returns each shape in the pose it was inserted in; `count` answers `{entries, totalPoints, largestPoints}`.
+
+## Geospatial Indexes
+
+`GeospatialIndex` searches observations on and above the Earth, like photos, video frames and sensor fixes, under nearness and view cones.
+An observation is eleven doubles in natural units, NaN wherever nothing was recorded, and `observationsOf` packs objects naming the fields into the `Float64Array` every verb borrows.
+
+```js
+const { Arena, GeospatialIndex, GeospatialRelation, observationsOf } = require("usearch");
+
+const stops = observationsOf([
+  { latitudeDegrees: 48.8566, longitudeDegrees: 2.3522 },
+  { latitudeDegrees: 48.8656, longitudeDegrees: 2.3522 },
+  { latitudeDegrees: 52.52, longitudeDegrees: 13.405 },
+]);
+const places = GeospatialIndex.initRam();
+places.insert([1n, 2n, 3n], stops);
+const nearby = places.within(stops.subarray(0, 11), GeospatialRelation.Near, 2000, new Arena());
+console.log(nearby.get(0).count); // 2: the two Paris stops, a kilometre apart
+```
+
+`search` ranks the `wanted` nearest entries a relation admits, in chord metres, and `within` reports every entry inside the radius as one ragged run per query; a config's `seconds` widen each query's time interval.
+`GeospatialRelation` holds the C enumerator values, since the library names no spelling for them.
+No handle here carries a terrain, so `Visible` is refused, and `get` returns observations within the stored rounding.
+
 ## What This Binding Does Not Expose
 
 A JavaScript callback runs only on the thread owning the JavaScript context, and an executor's threads never are.
 A thread-safe function would queue onto a loop that sits blocked inside the verb, so the callback could never run.
 That is why `attend` runs on the calling thread alone, where its `rowOf` can, and no executor receiver offers it.
 It is also why a search `predicate`, a per-candidate callback the engine calls from the threads it fanned out over, is not exposed at all; pull through `searchStream` instead and filter in JavaScript.
-The same reasoning excludes the progress handlers every long verb takes.
+The same reasoning excludes the progress handlers every long verb takes, and the terrain callback a geospatial index fills its heights through.
 
 ## Design
 

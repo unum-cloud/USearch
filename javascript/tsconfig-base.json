@@ -1,7 +1,16 @@
 {
   "compileOnSave": false,
   "exclude": ["node_modules", "dist"],
-  "include": ["node-gyp-build.d.ts", "library.ts", "types.ts", "dense_index.ts", "usearch.ts"],
+  "include": [
+    "node-gyp-build.d.ts",
+    "library.ts",
+    "types.ts",
+    "dense_index.ts",
+    "sequence_index.ts",
+    "shapes_index.ts",
+    "geospatial_index.ts",
+    "usearch.ts"
+  ],
   "compilerOptions": {
     "allowJs": true,
     "allowSyntheticDefaultImports": true,

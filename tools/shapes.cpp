@@ -29,7 +29,7 @@ int modality_insert(shapes_verbs_t, world_t& world, int argc, char const* const*
     std::string_view counts_path, metric_name = "chamfer";
     std::array<flag_t, 2> const flags {{
         {"--counts", "path", "required: points per cloud, an .ibin of 1 column", &counts_path},
-        {"--metric", "name", "defaults to chamfer: chamfer, hausdorff, gromov_wasserstein or wasserstein_procrustes",
+        {"--metric", "name", "defaults to chamfer: chamfer, hausdorff, gromov-wasserstein or wasserstein-procrustes",
          &metric_name},
     }};
     point_clouds_t clouds;

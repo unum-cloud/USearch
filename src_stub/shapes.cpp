@@ -388,8 +388,8 @@ char const* usearch_shapes_metric_name(usearch_shapes_metric_t metric) {
     switch (metric) {
     case usearch_shapes_metric_chamfer_k: return "chamfer";
     case usearch_shapes_metric_hausdorff_k: return "hausdorff";
-    case usearch_shapes_metric_gromov_wasserstein_k: return "gromov_wasserstein";
-    case usearch_shapes_metric_wasserstein_procrustes_k: return "wasserstein_procrustes";
+    case usearch_shapes_metric_gromov_wasserstein_k: return "gromov-wasserstein";
+    case usearch_shapes_metric_wasserstein_procrustes_k: return "wasserstein-procrustes";
     default: return "unknown";
     }
 }

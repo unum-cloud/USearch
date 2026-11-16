@@ -546,9 +546,9 @@ std::size_t check_shapes(settings_t const& settings) {
     failures += test_basic_scenarios<chamfer_fixture_t>(settings.seed);
     failures += test_basic_scenarios<procrustes_fixture_t>(settings.seed);
     failures += test_basic_safegraphs_roundtrip<chamfer_fixture_t>(settings.seed, "uuid", "chamfer");
-    failures += test_basic_safegraphs_roundtrip<procrustes_fixture_t>(settings.seed, "uuid", "wasserstein_procrustes");
+    failures += test_basic_safegraphs_roundtrip<procrustes_fixture_t>(settings.seed, "uuid", "wasserstein-procrustes");
     failures += test_basic_safegraphs_hostile<chamfer_fixture_t>(settings.seed, "chamfer");
-    failures += test_basic_safegraphs_hostile<procrustes_fixture_t>(settings.seed, "wasserstein_procrustes");
+    failures += test_basic_safegraphs_hostile<procrustes_fixture_t>(settings.seed, "wasserstein-procrustes");
     failures += check_shapes_kernels<chamfer_fixture_t>(settings.seed);
     failures += check_shapes_kernels<procrustes_fixture_t>(settings.seed);
     failures += check_shapes_codec<chamfer_fixture_t>(settings.seed);

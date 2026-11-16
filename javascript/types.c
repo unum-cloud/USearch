@@ -69,6 +69,36 @@ static int usearch_js_gpu_class_parse(char const* name) {
                : -1;
 }
 
+static int usearch_js_sequence_metric_parse(char const* name) {
+    usearch_sequence_metric_t metric = usearch_sequence_metric_unknown_k;
+    return usearch_sequence_metric_from_name(usearch_js_name_view(name), &metric) == usearch_status_success_k
+               ? (int)metric
+               : -1;
+}
+
+static int usearch_js_shapes_metric_parse(char const* name) {
+    usearch_shapes_metric_t metric = usearch_shapes_metric_unknown_k;
+    return usearch_shapes_metric_from_name(usearch_js_name_view(name), &metric) == usearch_status_success_k
+               ? (int)metric
+               : -1;
+}
+
+bool usearch_js_sequence_metric_from_value(napi_env env, napi_value value, char const* field,
+                                           usearch_sequence_metric_t* result) {
+    int metric = usearch_sequence_metric_unknown_k;
+    if (!usearch_js_name_from_value(env, value, field, usearch_js_sequence_metric_parse, &metric)) return false;
+    *result = (usearch_sequence_metric_t)metric;
+    return true;
+}
+
+bool usearch_js_shapes_metric_from_value(napi_env env, napi_value value, char const* field,
+                                         usearch_shapes_metric_t* result) {
+    int metric = usearch_shapes_metric_unknown_k;
+    if (!usearch_js_name_from_value(env, value, field, usearch_js_shapes_metric_parse, &metric)) return false;
+    *result = (usearch_shapes_metric_t)metric;
+    return true;
+}
+
 bool usearch_js_traversal_from_value(napi_env env, napi_value value, char const* field, usearch_traversal_t* result) {
     int traversal = usearch_traversal_walk_k;
     if (!usearch_js_value_absent(env, value) &&
@@ -430,6 +460,36 @@ bool usearch_js_rows_from_value(napi_env env, napi_value const* arguments, char 
     if (!usearch_js_rows_fit(*count, view->stride, usearch_js_row_bytes(view->scalar, view->columns), bytes))
         return usearch_js_throw(env, usearch_status_shape_mismatch_k, "The rows reach past the end of their array");
     view->data = data;
+    return true;
+}
+
+bool usearch_js_tape_from_value(napi_env env, napi_value const* arguments, char const* field,
+                                size_t scalars_per_element, size_t* count, usearch_tape_view_t* view) {
+    void* data = NULL;
+    void* offsets = NULL;
+    size_t bytes = 0, offsets_count = 0;
+    napi_typedarray_type type = napi_int8_array;
+    bool is_typedarray = false;
+    if (!usearch_js_bytes_from_value(env, arguments[0], field, &data, &bytes) ||
+        !usearch_js_scalar_from_value(env, arguments[2], "scalar", &view->scalar))
+        return false;
+    if (napi_is_typedarray(env, arguments[1], &is_typedarray) != napi_ok || !is_typedarray ||
+        napi_get_typedarray_info(env, arguments[1], &type, &offsets_count, &offsets, NULL, NULL) != napi_ok ||
+        (type != napi_uint32_array && type != napi_biguint64_array) || !offsets_count)
+        return usearch_js_throw_field(env, "offsets", "must be a non-empty Uint32Array or BigUint64Array");
+    bool const wide = type == napi_biguint64_array;
+    uint64_t const* const offsets_u64 = (uint64_t const*)offsets;
+    uint32_t const* const offsets_u32 = (uint32_t const*)offsets;
+    uint64_t const last = wide ? offsets_u64[offsets_count - 1] : offsets_u32[offsets_count - 1];
+    size_t const element_bytes = usearch_js_row_bytes(view->scalar, scalars_per_element);
+    // The tape carries no length, so only this side can see its last offset overrun the array.
+    if (!element_bytes || last > bytes / element_bytes)
+        return usearch_js_throw(env, usearch_status_shape_mismatch_k, "The offsets reach past the end of their array");
+    view->data = data;
+    view->layout = wide ? usearch_tape_u64_k : usearch_tape_u32_k;
+    if (wide) view->offsets.u64 = offsets_u64;
+    else view->offsets.u32 = offsets_u32;
+    *count = offsets_count - 1;
     return true;
 }
 
@@ -997,6 +1057,33 @@ napi_value usearch_js_arena_view(napi_env env, napi_value arena, napi_typedarray
         return NULL;
     }
     return array;
+}
+
+napi_value usearch_js_finish_tape(napi_env env, usearch_js_call_t* call, napi_value const* slots) {
+    usearch_js_index_call_t const* const index_call = (usearch_js_index_call_t const*)call;
+    usearch_tape_view_t const* const tape = &index_call->tape;
+    napi_value const arena = slots[usearch_js_slot_arena_k];
+    size_t const entries = index_call->written;
+    bool const wide = tape->layout == usearch_tape_u64_k;
+    void const* const offsets = wide ? (void const*)tape->offsets.u64 : (void const*)tape->offsets.u32;
+    size_t const offsets_count = offsets ? entries + 1 : 0;
+    size_t const elements = !offsets_count ? 0
+                            : wide         ? (size_t)tape->offsets.u64[entries]
+                                           : (size_t)tape->offsets.u32[entries];
+    size_t unit_bytes = 1;
+    napi_typedarray_type const type = usearch_js_typedarray_of(index_call->scalar, &unit_bytes);
+    size_t const scalars = elements * index_call->count;
+    napi_value const data = usearch_js_arena_view(env, arena, type, (void*)tape->data,
+                                                  usearch_js_row_bytes(index_call->scalar, scalars),
+                                                  usearch_js_row_bytes(index_call->scalar, scalars) / unit_bytes);
+    napi_value const offsets_view =
+        data ? usearch_js_arena_view(env, arena, wide ? napi_biguint64_array : napi_uint32_array, (void*)offsets,
+                                     offsets_count * (wide ? sizeof(uint64_t) : sizeof(uint32_t)), offsets_count)
+             : NULL;
+    if (!offsets_view) return NULL;
+    static char const* const names[] = {"data", "offsets", "entries"};
+    napi_value const values[] = {data, offsets_view, usearch_js_number(env, entries)};
+    return usearch_js_object(env, usearch_js_table_size_(names), names, values);
 }
 
 napi_value usearch_js_arena_define(napi_env env) {

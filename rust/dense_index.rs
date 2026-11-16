@@ -1542,8 +1542,8 @@ impl<'arena> DenseProducts<'arena> {
 ///
 /// Rust-only.
 pub struct Monolith<'arena> {
-    arena: PhantomData<&'arena Arena>,
-    monolith: usearch_bytes_view_t,
+    pub(crate) arena: PhantomData<&'arena Arena>,
+    pub(crate) monolith: usearch_bytes_view_t,
 }
 
 impl<'arena> Monolith<'arena> {
@@ -1558,12 +1558,12 @@ impl<'arena> Monolith<'arena> {
 ///
 /// Rust-only.
 pub struct Sample<'arena> {
-    arena: &'arena Arena,
-    keys: usearch_keys_view_t,
-    entry_ordinals: *const usize,
-    parents: usearch_matches_view_t,
-    coordinates: usearch_rows_view_t,
-    written: usize,
+    pub(crate) arena: &'arena Arena,
+    pub(crate) keys: usearch_keys_view_t,
+    pub(crate) entry_ordinals: *const usize,
+    pub(crate) parents: usearch_matches_view_t,
+    pub(crate) coordinates: usearch_rows_view_t,
+    pub(crate) written: usize,
 }
 
 impl<'arena> Sample<'arena> {
@@ -1602,10 +1602,10 @@ impl<'arena> Sample<'arena> {
 ///
 /// Rust-only.
 pub struct DenseBatch<'arena> {
-    arena: PhantomData<&'arena Arena>,
-    keys: usearch_keys_view_t,
-    links: Option<usearch_keys_tape_view_t>,
-    written: usize,
+    pub(crate) arena: PhantomData<&'arena Arena>,
+    pub(crate) keys: usearch_keys_view_t,
+    pub(crate) links: Option<usearch_keys_tape_view_t>,
+    pub(crate) written: usize,
 }
 
 impl<'arena> DenseBatch<'arena> {

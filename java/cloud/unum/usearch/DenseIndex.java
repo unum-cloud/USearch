@@ -1539,37 +1539,7 @@ public final class DenseIndex implements AutoCloseable {
         }
 
         private DenseBatch pull(long wanted, boolean linked, Arena arena) {
-            return Call.block(CURSOR_NEXT, index.handle, executor, call -> {
-                call.lease(CURSOR_NEXT_CURSOR, handle);
-                MemorySegment keys = call.output(CURSOR_NEXT_KEYS, Library.KEYS_VIEW);
-                MemorySegment tape =
-                        linked ? call.output(CURSOR_NEXT_LINKS, Library.KEYS_TAPE_VIEW) : MemorySegment.NULL;
-                MemorySegment written = call.output(CURSOR_NEXT_WRITTEN, Library.SIZE);
-                call.arena(CURSOR_NEXT_ARENA, arena);
-                call.size(CURSOR_NEXT_WANTED, wanted);
-                return () -> {
-                    long count = written.get(Library.SIZE, 0);
-                    long stride = (long) Library.KEYS_STRIDE.get(keys, 0L);
-                    MemorySegment offsets = null;
-                    MemorySegment linkKeys = MemorySegment.NULL;
-                    if (linked) {
-                        offsets = call.reach(
-                                (MemorySegment) Library.KEYS_TAPE_OFFSETS.get(tape, 0L), (count + 1) * Long.BYTES);
-                        long total = count == 0 ? 0 : offsets.getAtIndex(ValueLayout.JAVA_LONG, count);
-                        linkKeys = call.reach(
-                                (MemorySegment) Library.KEYS_TAPE_KEYS.get(tape, 0L),
-                                Types.Extents.product(total, Key.BYTES, "the links"));
-                    }
-                    return new DenseBatch(
-                            call.reach(
-                                    (MemorySegment) Library.KEYS_DATA.get(keys, 0L),
-                                    Types.Extents.product(count, stride, "the keys")),
-                            stride,
-                            count,
-                            offsets,
-                            linkKeys);
-                };
-            });
+            return pulling(CURSOR_NEXT, index.handle, executor, handle, wanted, linked, arena);
         }
 
         /**
@@ -1581,6 +1551,51 @@ public final class DenseIndex implements AutoCloseable {
         public void close() {
             handle.close();
         }
+    }
+
+    /**
+     * Pulls one batch out of {@code cursor} through {@code verb}, the cursor pull of any family whose
+     * structure is the dense one's, blocking on {@code executor} or the calling thread.
+     */
+    static DenseBatch pulling(
+            Verb verb,
+            Handle index,
+            @Nullable Executor executor,
+            Handle cursor,
+            long wanted,
+            boolean linked,
+            Arena arena) {
+        return Call.block(verb, index, executor, call -> {
+            call.lease(CURSOR_NEXT_CURSOR, cursor);
+            MemorySegment keys = call.output(CURSOR_NEXT_KEYS, Library.KEYS_VIEW);
+            MemorySegment tape =
+                    linked ? call.output(CURSOR_NEXT_LINKS, Library.KEYS_TAPE_VIEW) : MemorySegment.NULL;
+            MemorySegment written = call.output(CURSOR_NEXT_WRITTEN, Library.SIZE);
+            call.arena(CURSOR_NEXT_ARENA, arena);
+            call.size(CURSOR_NEXT_WANTED, wanted);
+            return () -> {
+                long count = written.get(Library.SIZE, 0);
+                long stride = (long) Library.KEYS_STRIDE.get(keys, 0L);
+                MemorySegment offsets = null;
+                MemorySegment linkKeys = MemorySegment.NULL;
+                if (linked) {
+                    offsets = call.reach(
+                            (MemorySegment) Library.KEYS_TAPE_OFFSETS.get(tape, 0L), (count + 1) * Long.BYTES);
+                    long total = count == 0 ? 0 : offsets.getAtIndex(ValueLayout.JAVA_LONG, count);
+                    linkKeys = call.reach(
+                            (MemorySegment) Library.KEYS_TAPE_KEYS.get(tape, 0L),
+                            Types.Extents.product(total, Key.BYTES, "the links"));
+                }
+                return new DenseBatch(
+                        call.reach(
+                                (MemorySegment) Library.KEYS_DATA.get(keys, 0L),
+                                Types.Extents.product(count, stride, "the keys")),
+                        stride,
+                        count,
+                        offsets,
+                        linkKeys);
+            };
+        });
     }
 
     /**
@@ -2844,26 +2859,34 @@ public final class DenseIndex implements AutoCloseable {
     static final StructLayout SOFTMAX_STATE = MemoryLayout.structLayout(
             ValueLayout.JAVA_FLOAT.withName("maximum_score"), ValueLayout.JAVA_FLOAT.withName("partition"));
 
+    /**
+     * The fields {@code usearch_dense_init_ram_t} and its VRAM twin share, at equal offsets. The
+     * handles address it, as a RAM structure's handle refuses the shorter VRAM one.
+     */
+    private static final StructLayout INIT_SHARED = MemoryLayout.structLayout(
+            Library.POINTER.withName("index"),
+            Library.POINTER.withName("outcome"),
+            Library.ENUM.withName("metric"),
+            Library.ENUM.withName("quantization"),
+            Library.SIZE.withName("dimensions"),
+            Library.SIZE.withName("connectivity"),
+            Library.SIZE.withName("values_per_key"));
+
     /** {@code usearch_dense_init_ram_t} or its VRAM twin, whose placement field is named {@code placement}. */
     private static StructLayout initializing(String placement) {
-        return MemoryLayout.structLayout(
-                Library.POINTER.withName("index"),
-                Library.POINTER.withName("outcome"),
-                Library.ENUM.withName("metric"),
-                Library.ENUM.withName("quantization"),
-                Library.SIZE.withName("dimensions"),
-                Library.SIZE.withName("connectivity"),
-                Library.SIZE.withName("values_per_key"),
-                Library.placement(placement));
+        MemoryLayout[] members = INIT_SHARED.memberLayouts()
+                .toArray(new MemoryLayout[INIT_SHARED.memberLayouts().size() + 1]);
+        members[members.length - 1] = Library.placement(placement);
+        return MemoryLayout.structLayout(members);
     }
 
     static final Verb INIT_RAM = new Verb("usearch_dense_init_ram", initializing("ram"));
     static final Verb INIT_VRAM = new Verb("usearch_dense_init_vram", initializing("vram"));
-    static final VarHandle INIT_METRIC = INIT_RAM.field("metric");
-    static final VarHandle INIT_QUANTIZATION = INIT_RAM.field("quantization");
-    static final VarHandle INIT_DIMENSIONS = INIT_RAM.field("dimensions");
-    static final VarHandle INIT_CONNECTIVITY = INIT_RAM.field("connectivity");
-    static final VarHandle INIT_VALUES_PER_KEY = INIT_RAM.field("values_per_key");
+    static final VarHandle INIT_METRIC = Library.field(INIT_SHARED, "metric");
+    static final VarHandle INIT_QUANTIZATION = Library.field(INIT_SHARED, "quantization");
+    static final VarHandle INIT_DIMENSIONS = Library.field(INIT_SHARED, "dimensions");
+    static final VarHandle INIT_CONNECTIVITY = Library.field(INIT_SHARED, "connectivity");
+    static final VarHandle INIT_VALUES_PER_KEY = Library.field(INIT_SHARED, "values_per_key");
     static final long INIT_RAM_RAM = INIT_RAM.at("ram");
     static final long INIT_VRAM_VRAM = INIT_VRAM.at("vram");
 

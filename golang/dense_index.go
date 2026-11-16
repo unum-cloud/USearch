@@ -100,6 +100,18 @@ func (metric DenseMetric) String() string {
 	return C.GoString(C.usearch_dense_metric_name(C.usearch_dense_metric_t(metric)))
 }
 
+// DenseMetricFromName reads a metric back from the spelling String gives it, through
+// usearch_dense_metric_from_name; a name the library does not spell fails with
+// StatusInvalidArgument.
+func DenseMetricFromName(name string) (DenseMetric, error) {
+	metric := C.usearch_dense_metric_t(DenseMetricUnknown)
+	view := C.usearch_bytes_view_t{data: (*C.uint8_t)(unsafe.Pointer(unsafe.StringData(name))), length: C.size_t(len(name))}
+	if status := C.usearch_dense_metric_from_name(view, &metric); status != C.usearch_status_success_k {
+		return DenseMetricUnknown, fail(Status(status), "no dense metric is spelled \""+name+"\"")
+	}
+	return DenseMetric(metric), nil
+}
+
 // DenseOptions holds the construction options of a dense index, the fields DenseInitRam and
 // DenseInitVram share.
 type DenseOptions struct {
@@ -1803,31 +1815,26 @@ func (receiver denseReceiver) sample(completion C.usearch_completion_t, wanted u
 		return lent.refuse(fail(StatusShapeMismatch, "the shown keys and coordinates disagree in length"))
 	}
 	C.usearch_dense_sample(&C.usearch_dense_sample_t{
-		index:       index,
-		executor:    executor,
-		outcome:     lent.outcome,
-		completion:  completion,
-		shown_count: C.size_t(len(config.Shown)),
-		shown:       lent.keys(config.Shown),
-		shown_coordinates: C.usearch_rows_view_t{
-			data:    unsafe.Pointer(lend(&lent.call, config.ShownCoordinates)),
-			stride:  C.size_t(unsafe.Sizeof([3]float32{})),
-			columns: 3,
-			scalar:  C.usearch_scalar_t(ScalarF32),
-		},
-		focus_count:      C.size_t(len(config.Focus)),
-		focus:            lent.keys(config.Focus),
-		keys:             &lent.result.keys,
-		entry_ordinals:   &lent.result.entryOrdinals,
-		parents:          &lent.result.parents,
-		coordinates:      &lent.result.coordinates,
-		written:          (*C.size_t)(unsafe.Pointer(&lent.result.written)),
-		arena:            arena.lower(),
-		wanted:           C.size_t(wanted),
-		seed:             C.uint64_t(config.Seed),
-		expansion_factor: C.size_t(config.ExpansionFactor),
-		progress:         lent.progress(config.Progress, config.ProgressSteps),
-		stats:            lent.stats(config.Stats),
+		index:             index,
+		executor:          executor,
+		outcome:           lent.outcome,
+		completion:        completion,
+		shown_count:       C.size_t(len(config.Shown)),
+		shown:             lent.keys(config.Shown),
+		shown_coordinates: lent.points(config.ShownCoordinates),
+		focus_count:       C.size_t(len(config.Focus)),
+		focus:             lent.keys(config.Focus),
+		keys:              &lent.result.keys,
+		entry_ordinals:    &lent.result.entryOrdinals,
+		parents:           &lent.result.parents,
+		coordinates:       &lent.result.coordinates,
+		written:           (*C.size_t)(unsafe.Pointer(&lent.result.written)),
+		arena:             arena.lower(),
+		wanted:            C.size_t(wanted),
+		seed:              C.uint64_t(config.Seed),
+		expansion_factor:  C.size_t(config.ExpansionFactor),
+		progress:          lent.progress(config.Progress, config.ProgressSteps),
+		stats:             lent.stats(config.Stats),
 	})
 	return lent
 }

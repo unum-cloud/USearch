@@ -3,7 +3,7 @@
 The Mojo package binds the C ABI in `c/usearch/`, opening the engine's shared library with `dlopen` rather than linking it, so a consumer builds with no linker flags of its own.
 It needs Mojo 1.2 through pixi, on Linux x86-64, Linux AArch64 or macOS on Apple silicon.
 On Linux it needs glibc 2.39 or newer, the first conda-forge sysroot whose kernel headers carry the `io_uring` flags the NVMe engine sets.
-It exposes dense indexes, Vector Search over equidimensional embeddings; sequence, matrix and geospatial indexes follow as the C library ships them.
+It exposes dense, sequence, shape and geospatial indexes.
 
 ## Installation
 
@@ -419,12 +419,79 @@ print(library.version_name(), library.capabilities_available())
 
 `health` measures how much of the graph a search reaches from the root; entries it misses stay unfound until a `refine` re-links them.
 
+## Sequence Indexes
+
+A `SequenceIndex` searches byte strings, UTF-8 text, DNA, RNA and proteins under edit distances and alignments.
+Its sequences cross as a `TapeView`, the Apache Arrow `Binary` layout of bytes end to end around one more offset than entries: a `Tape` packs separate entries, and `TapeView.of` borrows the two runs of an Arrow column as they are.
+
+```mojo
+var index = SequenceIndex.init_ram(library, SequenceOptions(SequenceMetric.LEVENSHTEIN_UTF8))
+var words = Tape[DType.uint8]()
+for word in ["kitten", "sitting", "mitten"]:
+    words.append(word)
+index.insert([Key(integer=1), Key(integer=2), Key(integer=3)], words.view())
+
+var query = Tape[DType.uint8]()
+query.append("sittin")
+var matches = index.search(query.view(), 1, arena)
+print(matches.query_keys(0)[0], matches.query_distances(0)[0])  # 2, one edit away
+```
+
+`SequenceMetric.NEEDLEMAN_WUNSCH` takes `SequenceWeights`, a 256 × 256 substitution matrix with a gap cost, and `SequenceMetric.OVERLAP` takes `window_widths`; every load and view names the weights again, since no checkpoint records them.
+`get` writes a key's sequences into an arena as `TapeEntries`, and `count` reports a key's entries with their total and largest byte lengths.
+The verbs come from `SequenceVerbs`, and the receivers, reports and plans work as the dense ones do: `refine` and `sequence_reshard` take a `SequenceRefinePlan` or a `SequenceReshardPlan` and answer a `DenseRefineReport`.
+
+## Shape Indexes
+
+A `ShapesIndex` searches 3D point clouds of any size, like molecules, conformers and protein backbones, invariant to rotation, reflection, translation and point order.
+Its tape holds `x`, `y` and `z` of every point end to end, with offsets that count points, as an Arrow `List` column lays them out:
+
+```mojo
+var index = ShapesIndex.init_ram(library)  # Chamfer over f32 points
+var clouds = Tape[DType.float32, 3]()
+clouds.append([Float32(0), 0, 0, 1.1, 0, 0])
+clouds.append([Float32(0), 0, 0, 1.5, 0, 0, 0, 1.5, 0])
+index.insert([Key(integer=1), Key(integer=2)], clouds.view())
+
+var probe = Tape[DType.float32, 3]()
+probe.append([Float32(0), 0, 0, 1, 0, 0])
+print(index.search(probe.view(), 1, arena).query_keys(0)[0])  # 1
+```
+
+The metrics are Chamfer, Hausdorff, Gromov-Wasserstein and Wasserstein-Procrustes, over `F16` or `F32` storage, whatever scalar the points arrive in.
+A non-zero `points` in `ShapesOptions` freezes every shape's point count.
+`get[DType.float32]` converts each shape to the scalar it is asked for and returns it in its inserted pose, and `count` reports a key's total and largest point counts.
+
+## Geospatial Indexes
+
+A `GeospatialIndex` searches observations on and above the Earth, like photos, video frames, drone footage and sensor fixes.
+`GeospatialObservation` is the library's own eleven doubles, so a span of them crosses with no copy; a field no device recorded stays NaN, which only widens the tests that read it, and `GeospatialObservation(latitude, longitude)` leaves every other field that way:
+
+```mojo
+var index = GeospatialIndex.init_ram(library)
+var stops = [
+    GeospatialObservation(48.8566, 2.3522),
+    GeospatialObservation(48.8656, 2.3522),  # a kilometre north
+    GeospatialObservation(52.52, 13.405),
+]
+index.insert([Key(integer=1), Key(integer=2), Key(integer=3)], stops)
+
+var nearby = index.within(Span(stops)[0:1], 2000, arena)
+print(len(nearby.query_keys(0)))  # 2: both Paris stops within two kilometres, in chord metres
+```
+
+`within` reports every entry the relation admits inside the radius, however many, while `search` ranks the `wanted` nearest, a zero `metres` ranking by distance alone.
+The relation is a field of each call's config: `NEAR` widens the radius by both positions' accuracies, `SEES` and `SEEN` test the view cones, and `VISIBLE` tests a line of sight over the `GeospatialTerrain` the handle was built with, borrowed whole by `GeospatialTerrain.of` or filled on demand by `GeospatialTerrain.filled`.
+`get` returns a key's observations within the stored rounding.
+
 ## What This Binding Does Not Expose
 
 - __Progress on loads and saves.__
   Their entry points take no config, so those calls run without a handler.
 - __Deferred cursors and streams.__
-  `DenseIndexDeferredOn` offers neither, since their pulls block.
+  `DenseIndexDeferredOn` and the deferred receivers of the other modalities offer neither, since their pulls block.
+- __Terrain datasets on disk.__
+  `GeospatialTerrain` borrows heights or fills them, and never names a dataset path, which every residency refuses.
 
 ## Design
 

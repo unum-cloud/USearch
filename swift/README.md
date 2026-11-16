@@ -2,7 +2,7 @@
 
 The Swift package binds the C ABI in `c/usearch/` through `USearchC`, a Clang module map over its headers, and links the `libusearch_static` engine CMake builds.
 It requires Swift 6.4 or newer, on macOS 15, iOS 18, tvOS 18, watchOS 11, visionOS 2, or Linux, and takes its matrix views and low-precision scalars from NumKong.
-It exposes dense indexes; sequence, matrix and geospatial indexes follow as the C library ships them.
+It exposes dense indexes over vectors, sequence indexes over strings, shape indexes over 3D point clouds and geospatial indexes over observations of the Earth, each with the same receivers, plans and reports.
 
 ## Installation
 
@@ -436,10 +436,69 @@ print(version(), capabilitiesCompiled(), capabilitiesAvailable())
 
 `health` measures how much of the graph a search reaches from the root; entries it misses stay unfound until a `refine` re-links them.
 
+## Sequence Indexes
+
+A `SequenceIndex` searches byte strings, UTF-8 text, DNA, RNA and proteins under Levenshtein over bytes or code points, Needleman-Wunsch with `SequenceWeights`, or window overlap with `windowWidths`.
+A sequence is a `[UInt8]`, and a batch crosses as one Apache Arrow tape the binding packs:
+
+```swift
+let index = try SequenceIndex.initRam(SequenceOptions(metric: .levenshteinUTF8))
+let words = ["kitten", "sitting", "mitten"].map { Array($0.utf8) }
+try index.insert(keys: [1, 2, 3], sequences: words)
+
+let matches = try index.search([Array("sitten".utf8)], wanted: 3, arena: try Arena())
+print(matches[0][0].key, matches[0][0].distance) // one edit away
+```
+
+The verbs, receivers and plans are the dense ones: `refine` and `reshard` take a `SequenceRefinePlan` or `SequenceReshardPlan` in their configs, `get` answers each stored sequence in place as `TapeEntries<UInt8>`, and `count` reports a key's entries with their total and largest byte lengths.
+
+## Shape Indexes
+
+A `ShapesIndex` searches 3D point clouds of any size, like molecules, conformers and protein backbones, under Chamfer, Hausdorff, Gromov-Wasserstein or Wasserstein-Procrustes, each blind to rotation, reflection, translation and point order.
+A shape is its coordinates, `x`, `y` and `z` of each point in turn, in any `ScalarValue`, and point counts may differ between shapes:
+
+```swift
+let index = try ShapesIndex.initRam(ShapesOptions(metric: .hausdorff))
+let water: [Float] = [0, 0, 0, 0.96, 0, 0, -0.24, 0.93, 0]
+let methane: [Float] = [0, 0, 0, 0.63, 0.63, 0.63, -0.63, -0.63, 0.63, -0.63, 0.63, -0.63, 0.63, -0.63, -0.63]
+try index.insert(keys: [1, 2], shapes: [water, methane])
+
+let matches = try index.search([methane], wanted: 1, arena: try Arena())
+print(matches[0][0].key) // methane finds itself
+```
+
+`ShapesOptions` freezes `f16` or `f32` storage, and a non-zero `points` refuses shapes of any other count with `shapeMismatch`.
+`get(key:as:arena:)` converts to the scalar asked for and returns each shape in its inserted pose, and `count` reports a key's total and largest point counts.
+
+## Geospatial Indexes
+
+A `GeospatialIndex` searches observations on and above the Earth, like photos, video frames, drone footage and sensor fixes.
+A `GeospatialObservation` holds eleven doubles in natural units, and every field left out is NaN, which only widens the tests that read it:
+
+```swift
+let index = try GeospatialIndex.initRam()
+let stops = [
+    GeospatialObservation(latitudeDegrees: 51.5308, longitudeDegrees: -0.1238, accuracyMetres: 5),
+    GeospatialObservation(latitudeDegrees: 51.5320, longitudeDegrees: -0.1233, accuracyMetres: 5),
+    GeospatialObservation(latitudeDegrees: 51.5033, longitudeDegrees: -0.1196, accuracyMetres: 5),
+]
+try index.insert(keys: [1, 2, 3], observations: stops)
+
+let station = GeospatialObservation(latitudeDegrees: 51.5308, longitudeDegrees: -0.1238)
+let nearby = try index.within([station], tolerance: GeospatialTolerance(metres: 500), arena: try Arena())
+print(nearby[0].map(\.key)) // the two stops within 500 metres
+```
+
+`within` reports every entry a `GeospatialRelation` admits, however many, while `search` ranks the `wanted` nearest, both scored by the chord between positions in metres.
+`.near` widens the radius by both positions' accuracies, `.visible` needs a clear line of sight over the handle's `GeospatialTerrain`, and `.sees` and `.seen` test the entry's or the query's view cone.
+The terrain is a grid of `f32` heights in a `RowsView`, which the index borrows for its lifetime and keeps alive when built over a `Tensor`; a checkpoint never carries it, so every load and view names it again.
+
 ## What This Binding Does Not Expose
 
 - `cursor` and `searchStream` pull blocking, so a `DenseIndexDeferredOn` lacks them; `contains` is a test over `count`, so the deferred receiver offers `count` alone.
 - The constructors address no index yet, so no receiver offers them.
+- A geospatial terrain filled on demand by a callback: the library calls it from the executor's threads for every sight line, so the binding lends only a grid of heights or a dataset path.
+- `searchStream`, `maxsim`, `multiply` and `attend` exist for dense indexes alone, as in the C library.
 
 ## Design
 
@@ -456,4 +515,4 @@ print(version(), capabilitiesCompiled(), capabilitiesAvailable())
 - __Nothing costs anything until it is used.__
   Submitting a call allocates nothing, and an arena allocates only when a call writes into it.
 - __Every wrapper names its C symbol.__
-  Each wrapper's documentation names the C function it calls or says it is binding-only, and a verb's argument structure becomes its `Dense*Config`.
+  Each wrapper's documentation names the C function it calls or says it is binding-only, and a verb's argument structure becomes its `Dense*Config`, or a `Basic*Config` shared by the other three modalities.

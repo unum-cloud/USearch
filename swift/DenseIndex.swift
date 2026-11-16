@@ -2404,7 +2404,7 @@ private let admissionTrampoline: usearch_predicate_callback_t = { keys, admissio
 
 extension CallState {
     /// Lends an optional predicate as the struct a search takes; nil lends nulls.
-    fileprivate func lend(_ predicate: (@Sendable (Key) -> Bool)?) -> usearch_predicate_t {
+    func lend(_ predicate: (@Sendable (Key) -> Bool)?) -> usearch_predicate_t {
         guard let predicate else { return usearch_predicate_t() }
         return usearch_predicate_t(
             callback: admissionTrampoline,
@@ -2539,7 +2539,7 @@ public final class DenseSearchStream {
 
 extension usearch_bytes_view_t {
     /// Views a byte buffer as the pointer-and-length pair every buffer argument takes.
-    fileprivate init(_ bytes: UnsafeRawBufferPointer) {
+    init(_ bytes: UnsafeRawBufferPointer) {
         self.init(data: bytes.baseAddress?.assumingMemoryBound(to: UInt8.self), length: bytes.count)
     }
 }

@@ -676,31 +676,37 @@ export class DenseReshardPlan {
   }
 }
 
-/** One verb's native call, given the completion its receiver picks, and how its answer lifts. */
-interface DenseCall<Answered> {
+/** One verb's native call, given the completion its receiver picks, and how its answer lifts; every
+ *  modality's receivers share it. @internal */
+export interface DenseCall<Answered> {
   readonly run: (completion: Completion) => unknown;
   readonly answer: (raw: never) => Answered;
 }
 
-/** Runs a call to its end on the receiver's thread or executor, answering its lifted result. */
-function block<Answered>(call: DenseCall<Answered>): Answered {
+/** Runs a call to its end on the receiver's thread or executor, answering its lifted result.
+ *  @internal */
+export function block<Answered>(call: DenseCall<Answered>): Answered {
   return (call.answer as (raw: unknown) => Answered)(call.run(0));
 }
 
-/** Submits a call to the receiver's executor, answering the {@link Deferred} that owns it. */
-function defer<Answered>(call: DenseCall<Answered>): Deferred<Answered> {
+/** Submits a call to the receiver's executor, answering the {@link Deferred} that owns it.
+ *  @internal */
+export function defer<Answered>(call: DenseCall<Answered>): Deferred<Answered> {
   return new Deferred(call.run(1) as CompiledDeferred, call.answer);
 }
 
-function denseCall<Raw, Answered>(
+/** Pairs a native call with how its answer lifts. @internal */
+export function denseCall<Raw, Answered>(
   run: (completion: Completion) => unknown,
   answer: (raw: Raw) => Answered,
 ): DenseCall<Answered> {
   return { run, answer };
 }
 
-const answerNothing = (): void => undefined;
-const answerReport = (report: CompiledRefineReport): DenseRefineReport => report as DenseRefineReport;
+/** Lifts a verb that answers nothing. @internal */
+export const answerNothing = (): void => undefined;
+/** Lifts a refine or reshard report. @internal */
+export const answerReport = (report: CompiledRefineReport): DenseRefineReport => report as DenseRefineReport;
 
 function denseReserve(index: CompiledIndex, executor: Executor | undefined, capacity: number): DenseCall<void> {
   return denseCall((completion) => index.reserve(executor, completion, capacity), answerNothing);

@@ -2,7 +2,7 @@
 
 The Go package binds the C ABI in `c/usearch/` through cgo, linking the pre-instantiated C library, so nothing but the vocabulary below crosses the boundary.
 It needs Go 1.24 or newer with cgo enabled and a C toolchain, on Linux, macOS or Windows.
-It exposes dense indexes; sequence, matrix and geospatial indexes follow as the C library ships them.
+It exposes dense, sequence, shape and geospatial indexes, each with the same receivers, plans and reports.
 
 ## Installation
 
@@ -616,10 +616,79 @@ fmt.Println(usearch.Version(), usearch.CapabilitiesCompiled(), usearch.Capabilit
 
 `Health` measures how much of the graph a search reaches from the root; entries it misses stay unfound until a `Refine` re-links them.
 
+## Sequence Indexes
+
+A sequence index searches byte strings, UTF-8 text, DNA and proteins under edit distances and alignments.
+Variable-length entries cross as a `Tape`, the Apache Arrow layout: elements end to end and one more offset than entries, which `SequencesOf` packs and `SequencesTape` borrows from an Arrow column as it is:
+
+```go
+index, _ := usearch.SequenceInitRam(usearch.SequenceOptions{Metric: usearch.SequenceMetricLevenshteinUTF8}, nil)
+defer index.Close()
+
+words := usearch.SequencesOf([]byte("kitten"), []byte("sitting"), []byte("mitten"))
+keys := []usearch.Key{usearch.KeyFromUint64(1), usearch.KeyFromUint64(2), usearch.KeyFromUint64(3)}
+_ = index.Insert(keys, words, nil)
+
+matches, _ := index.Search(usearch.SequencesOf([]byte("sittin")), 1, arena, nil)
+found, distances := matches.Query(0) // key 2, one edit away
+```
+
+`SequenceMetricNeedlemanWunsch` takes `SequenceWeights`, a 256 × 256 substitution matrix with a gap cost, and `SequenceMetricOverlap` takes `WindowWidths`; every load names the weights again, since no checkpoint records them.
+`Get` writes a key's sequences into an arena as a `TapeView`, read with `TapeEntry[byte]`, and `Count` reports a key's total and largest byte lengths.
+The verbs, receivers, plans and reports are the dense ones: `Refine`, `Reshard` and their `SequenceRefinePlan` and `SequenceReshardPlan`, cursors and `Sample`, all reporting through `DenseRefineReport` and `DenseTraversalStats`.
+
+## Shape Indexes
+
+A shape index searches 3D point clouds of any size, like molecules and conformers, invariant to rotation, reflection, translation and point order.
+Its tape holds points end to end, `x`, `y` and `z` interleaved, with offsets that count points:
+
+```go
+index, _ := usearch.ShapesInitRam(usearch.DefaultShapesOptions(), nil) // Chamfer over f32 points
+defer index.Close()
+
+// A 2-atom and a 3-atom molecule.
+molecules := usearch.ShapesOf([]float32{0, 0, 0, 1.1, 0, 0}, []float32{0, 0, 0, 1.5, 0, 0, 0, 1.5, 0})
+keys := []usearch.Key{usearch.KeyFromUint64(1), usearch.KeyFromUint64(2)}
+_ = index.Insert(keys, molecules, nil)
+
+matches, _ := index.Search(usearch.ShapesOf([]float32{0, 0, 0, 1.0, 0, 0}), 1, arena, nil)
+found, _ := matches.Query(0) // key 1
+```
+
+The metrics are Chamfer, Hausdorff, Gromov-Wasserstein and Wasserstein-Procrustes, over `f16` or `f32` storage, whatever scalar the points arrive in.
+A non-zero `Points` freezes every shape's point count.
+`Get` converts each shape to the scalar it is asked for and returns it in its inserted pose, and `Count` reports a key's total and largest point counts.
+
+## Geospatial Indexes
+
+A geospatial index searches observations on and above the Earth, like photos, video frames and sensor fixes.
+`GeospatialObservation` is the library's own eleven doubles, so a slice of them crosses with no copy; a field no device recorded stays NaN, which only widens the tests that read it, and `GeospatialAt` fills every field but the position that way:
+
+```go
+index, _ := usearch.GeospatialInitRam(usearch.GeospatialOptions{}, nil)
+defer index.Close()
+
+stops := []usearch.GeospatialObservation{
+	usearch.GeospatialAt(51.5308, -0.1238),
+	usearch.GeospatialAt(51.5320, -0.1233),
+	usearch.GeospatialAt(51.5033, -0.1196),
+}
+keys := []usearch.Key{usearch.KeyFromUint64(1), usearch.KeyFromUint64(2), usearch.KeyFromUint64(3)}
+_ = index.Insert(keys, stops, nil)
+
+nearby, _ := index.Within(stops[:1], usearch.GeospatialRelationNear, 500, arena, nil)
+found, chords := nearby.Query(0) // both stops within 500 metres, in chord metres
+```
+
+`Within` reports every entry the relation admits inside the radius, however many, while `Search` ranks the `wanted` nearest, a zero `Metres` ranking by distance alone.
+The relation is an argument of each call: `Near` widens the radius by both positions' accuracies, `Sees` and `Seen` test the view cones, and `Visible` needs a terrain, which this binding does not bind.
+`Get` returns a key's observations within the stored rounding.
+
 ## What This Binding Does Not Expose
 
 - __Deferred cursor and stream pulls.__ The C interface takes a deferred completion on `usearch_dense_cursor_next` and `usearch_dense_search_stream_next`, while every pull here blocks on the receiver's executor.
 - __Name parsers.__ The `usearch_*_from_name` functions are left out, since enums are never read from strings.
+- __Terrain.__ `usearch_geospatial_terrain_t` stays unset, so every geospatial handle answers the visible relation with `StatusUnsupported`; its heights would have to outlive the handle, which no call can pin.
 - __Class names and the numeric version.__ `usearch_cpu_class_name`, `usearch_gpu_class_name` and `usearch_version` are unbound; `Version` answers the version's name.
 
 ## Design
@@ -630,4 +699,4 @@ fmt.Println(usearch.Version(), usearch.CapabilitiesCompiled(), usearch.Capabilit
 - __No life of its own.__ The binding starts no goroutines and keeps no queues; releasing a `Deferred` rides `Close`, which waits for the call first, or the collector's cleanup, which frees it only once final.
 - __Arenas are lent and reused, never shared.__ Every output whose length scales with the call lands in an arena the caller passes, and its views end at the arena's next call.
 - __Nothing costs anything until it is used.__ Submitting a call allocates nothing, and an arena allocates only when a call writes into it.
-- __Types and configs are the header's.__ Every type is its C name without `usearch_` and `_t`, a verb's argument structure becomes its `Dense*Config`, and every wrapper's documentation names the C symbol it calls or says it is binding-only.
+- __Types and configs are the header's.__ Every type is its C name without `usearch_` and `_t`, a verb's argument structure becomes its `Dense*Config`, which the other modalities share wherever their fields agree, and every wrapper's documentation names the C symbol it calls or says it is binding-only.

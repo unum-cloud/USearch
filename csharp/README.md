@@ -2,7 +2,7 @@
 
 The C# binding calls the flat C interface in `include/usearch/` through source-generated `[LibraryImport]` stubs over `libusearch_shared`, so it compiles no native shim of its own.
 It requires .NET 10, and the package carries the native library for Linux x64 and macOS Arm64.
-It exposes dense indexes; sequence, matrix and geospatial indexes follow as the C library ships them.
+It exposes dense, sequence, shape and geospatial indexes.
 
 ## Installation
 
@@ -392,6 +392,72 @@ string kernels = USearchCapabilities.CapabilitiesAvailable();
 
 `Health` measures how much of the graph a search reaches from the root; entries it misses stay unfound until a refinement re-links them.
 `USearchCapabilities` also reports the linked library's `Version()` and the `CapabilitiesCompiled()` into it, tied to no index.
+
+## Sequence Indexes
+
+A sequence index searches byte strings, UTF-8 text, DNA and proteins under edit distances and alignments.
+Variable-length entries cross as a `TapeView<TElement>`, the Apache Arrow layout: elements end to end and one more offset than entries, which `Tape.Utf8` and `Tape.Bytes` pack and `Tape.Of` borrows from an Arrow column as it is:
+
+```csharp
+using SequenceIndex index = SequenceIndex.InitRam(
+    SequenceOptions.Default with { Metric = SequenceMetric.LevenshteinUtf8 });
+Key[] keys = [1UL, 2UL, 3UL];
+index.Insert(keys, Tape.Utf8("kitten", "sitting", "mitten"));
+
+Matches found = index.Search(Tape.Utf8("sittin"), wanted: 1, arena);
+Key nearest = found[0].Keys[0];                   // Key 2, one edit away
+double distance = found[0].Distances[0];          // 1
+```
+
+`SequenceMetric.NeedlemanWunsch` takes `SequenceWeights`, a 256 × 256 substitution matrix with a gap cost, and `SequenceMetric.Overlap` takes `WindowWidths`; every load names the weights again, since no checkpoint records them.
+`Get` writes a key's sequences into an arena as `TapeEntries`, read with `Entry<byte>`, and `Count` reports a key's total and largest byte lengths.
+The verbs, receivers, plans and reports are the dense ones: `Refine`, `Reshard` and their `SequenceRefinePlan` and `SequenceReshardPlan`, cursors and `Sample`, all reporting through `RefineReport` and `DenseTraversalStats`.
+
+## Shape Indexes
+
+A shape index searches 3D point clouds of any size, like molecules and conformers, invariant to rotation, reflection, translation and point order.
+Its tape holds points end to end, `x`, `y` and `z` interleaved, with offsets that count points:
+
+```csharp
+using ShapesIndex index = ShapesIndex.InitRam(ShapesOptions.Default);   // Chamfer over F32 points
+Key[] keys = [1UL, 2UL];
+float[] pair = [0, 0, 0, 1.1f, 0, 0];
+float[] triple = [0, 0, 0, 1.5f, 0, 0, 0, 1.5f, 0];
+index.Insert(keys, Tape.Points(pair, triple));    // A 2-atom and a 3-atom molecule
+
+float[] query = [0, 0, 0, 1.0f, 0, 0];
+Matches found = index.Search(Tape.Points(query), wanted: 1, arena);
+Key nearest = found[0].Keys[0];                   // Key 1
+```
+
+The metrics are Chamfer, Hausdorff, Gromov-Wasserstein and Wasserstein-Procrustes, over `F16` or `F32` storage, whatever scalar the points arrive in.
+A non-zero `Points` freezes every shape's point count.
+`Get<TScalar>` converts each shape to the scalar it names and returns it in its inserted pose, and `Count` reports a key's total and largest point counts.
+
+## Geospatial Indexes
+
+A geospatial index searches observations on and above the Earth, like photos, video frames and sensor fixes.
+`GeospatialObservation` is the library's own eleven doubles, so an array of them crosses with no copy; a field no device recorded stays NaN, which only widens the tests that read it, and `GeospatialObservation.At` fills every field but the position that way:
+
+```csharp
+using GeospatialIndex index = GeospatialIndex.InitRam(new GeospatialOptions());
+GeospatialObservation[] stops =
+[
+    GeospatialObservation.At(51.5308, -0.1238),
+    GeospatialObservation.At(51.5320, -0.1233),
+    GeospatialObservation.At(51.5033, -0.1196),
+];
+Key[] keys = [1UL, 2UL, 3UL];
+index.Insert(keys, stops);
+
+DenseProducts nearby = index.Within(stops.AsMemory(0, 1), arena, new GeospatialTolerance(Metres: 500));
+ReadOnlySpan<Key> found = nearby.Keys(0);         // Keys 1 and 2, the stops within 500 metres
+ReadOnlySpan<double> chords = nearby.Scores(0);   // In chord metres
+```
+
+`Within` reports every entry the relation admits inside the radius, however many, while `Search` ranks the `wanted` nearest, a zero `Metres` ranking by distance alone.
+The relation is an argument of each call: `Near` widens the radius by both positions' accuracies, `Sees` and `Seen` test the view cones, and `Visible` needs the `GeospatialTerrain` the handle was built over, which no checkpoint carries, so every load names it again.
+`Get` returns a key's observations within the stored rounding, and `Count` reports how many a key holds.
 
 ## Interop
 

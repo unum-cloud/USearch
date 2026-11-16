@@ -283,7 +283,7 @@ Beyond those, the other verbs take only what they move:
 The other modalities' `insert` takes the flags `dense insert` does but `--keys`, `--stored-dtype` and `--metric`, keys every entry by its number in the file, and reads its entries as the modality's benchmark does:
 
 - `sequence insert <texts>` reads one entry per line, a carriage return before a newline dropped, under `--metric` `levenshtein`, `levenshtein-utf8` or `overlap` with its `--window-widths`; `sequence search` takes `--query-texts`, and `sequence reshard --parts` takes the `--window-widths` an overlap checkpoint was built with.
-- `shapes insert <points> --counts <path>` reads every cloud's points end to end, an `.fbin` or `.f16bin` of 3 columns, and the points per cloud, an `.ibin` of 1 column, under `--metric` `chamfer`, `hausdorff`, `gromov_wasserstein` or `wasserstein_procrustes`; `shapes search` takes `--query-points` and `--query-counts`.
+- `shapes insert <points> --counts <path>` reads every cloud's points end to end, an `.fbin` or `.f16bin` of 3 columns, and the points per cloud, an `.ibin` of 1 column, under `--metric` `chamfer`, `hausdorff`, `gromov-wasserstein` or `wasserstein-procrustes`; `shapes search` takes `--query-points` and `--query-counts`.
 - `geospatial insert <observations>` reads an `.f64bin` of eleven columns per observation, and builds without a terrain; `geospatial search` takes `--query-observations`, `--relation` `near`, `sees` or `seen`, and `--radius` in metres.
 
 Every flag also reads its default from a `RETRIEVAL_` variable named after it, as the benchmarks do, so `--entries` defaults to `RETRIEVAL_ENTRIES`.

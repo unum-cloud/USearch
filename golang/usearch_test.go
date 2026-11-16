@@ -182,4 +182,96 @@ func ExampleDenseIndex_Deferred() {
 	// Output: 00000000-0000-0000-0000-000000000003
 }
 
+// Mirrors the Sequence Indexes snippet of golang/README.md, adding the arena it borrows and the
+// checks it skips.
+func ExampleSequenceIndex() {
+	index, err := usearch.SequenceInitRam(usearch.SequenceOptions{Metric: usearch.SequenceMetricLevenshteinUTF8}, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer index.Close()
+
+	words := usearch.SequencesOf([]byte("kitten"), []byte("sitting"), []byte("mitten"))
+	keys := []usearch.Key{usearch.KeyFromUint64(1), usearch.KeyFromUint64(2), usearch.KeyFromUint64(3)}
+	if err := index.Insert(keys, words, nil); err != nil {
+		log.Fatal(err)
+	}
+
+	arena, err := usearch.NewArena(nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer arena.Close()
+	matches, err := index.Search(usearch.SequencesOf([]byte("sittin")), 1, arena, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	found, distances := matches.Query(0)
+	fmt.Println(found[0], distances[0])
+	// Output: 00000000-0000-0000-0000-000000000002 1
+}
+
+// Mirrors the Shape Indexes snippet of golang/README.md, adding the arena it borrows and the checks
+// it skips.
+func ExampleShapesIndex() {
+	index, err := usearch.ShapesInitRam(usearch.DefaultShapesOptions(), nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer index.Close()
+
+	// A 2-atom and a 3-atom molecule, x, y and z interleaved.
+	molecules := usearch.ShapesOf([]float32{0, 0, 0, 1.1, 0, 0}, []float32{0, 0, 0, 1.5, 0, 0, 0, 1.5, 0})
+	keys := []usearch.Key{usearch.KeyFromUint64(1), usearch.KeyFromUint64(2)}
+	if err := index.Insert(keys, molecules, nil); err != nil {
+		log.Fatal(err)
+	}
+
+	arena, err := usearch.NewArena(nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer arena.Close()
+	matches, err := index.Search(usearch.ShapesOf([]float32{0, 0, 0, 1.0, 0, 0}), 1, arena, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	found, _ := matches.Query(0)
+	fmt.Println(found[0])
+	// Output: 00000000-0000-0000-0000-000000000001
+}
+
+// Mirrors the Geospatial Indexes snippet of golang/README.md, adding the arena it borrows and the
+// checks it skips.
+func ExampleGeospatialIndex() {
+	index, err := usearch.GeospatialInitRam(usearch.GeospatialOptions{}, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer index.Close()
+
+	stops := []usearch.GeospatialObservation{
+		usearch.GeospatialAt(51.5308, -0.1238), // every other field unrecorded, NaN
+		usearch.GeospatialAt(51.5320, -0.1233),
+		usearch.GeospatialAt(51.5033, -0.1196),
+	}
+	keys := []usearch.Key{usearch.KeyFromUint64(1), usearch.KeyFromUint64(2), usearch.KeyFromUint64(3)}
+	if err := index.Insert(keys, stops, nil); err != nil {
+		log.Fatal(err)
+	}
+
+	arena, err := usearch.NewArena(nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer arena.Close()
+	nearby, err := index.Within(stops[:1], usearch.GeospatialRelationNear, 500, arena, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	found, _ := nearby.Query(0) // every entry within 500 metres, with its chord metres
+	fmt.Println(len(found))
+	// Output: 2
+}
+
 // endregion: Examples

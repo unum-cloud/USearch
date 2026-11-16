@@ -21,6 +21,9 @@ static void usearch_js_addon_finalize(napi_env env, void* data, void* hint) {
     if (!addon) return;
     if (addon->executor_class) napi_delete_reference(env, addon->executor_class);
     if (addon->index_class) napi_delete_reference(env, addon->index_class);
+    if (addon->sequence_index_class) napi_delete_reference(env, addon->sequence_index_class);
+    if (addon->shapes_index_class) napi_delete_reference(env, addon->shapes_index_class);
+    if (addon->geospatial_index_class) napi_delete_reference(env, addon->geospatial_index_class);
     if (addon->arena_class) napi_delete_reference(env, addon->arena_class);
     if (addon->deferred_class) napi_delete_reference(env, addon->deferred_class);
     if (addon->seal) napi_delete_reference(env, addon->seal);
@@ -56,6 +59,12 @@ NAPI_MODULE_INIT() {
     if (!executor_class) return NULL;
     napi_value const index_class = usearch_js_index_define(env);
     if (!index_class) return NULL;
+    napi_value const sequence_index_class = usearch_js_sequence_index_define(env);
+    if (!sequence_index_class) return NULL;
+    napi_value const shapes_index_class = usearch_js_shapes_index_define(env);
+    if (!shapes_index_class) return NULL;
+    napi_value const geospatial_index_class = usearch_js_geospatial_index_define(env);
+    if (!geospatial_index_class) return NULL;
     napi_value const arena_class = usearch_js_arena_define(env);
     if (!arena_class) return NULL;
     napi_value const deferred_class = usearch_js_deferred_define(env);
@@ -63,6 +72,9 @@ NAPI_MODULE_INIT() {
 
     if (napi_create_reference(env, executor_class, 1, &addon->executor_class) != napi_ok ||
         napi_create_reference(env, index_class, 1, &addon->index_class) != napi_ok ||
+        napi_create_reference(env, sequence_index_class, 1, &addon->sequence_index_class) != napi_ok ||
+        napi_create_reference(env, shapes_index_class, 1, &addon->shapes_index_class) != napi_ok ||
+        napi_create_reference(env, geospatial_index_class, 1, &addon->geospatial_index_class) != napi_ok ||
         napi_create_reference(env, arena_class, 1, &addon->arena_class) != napi_ok ||
         napi_create_reference(env, deferred_class, 1, &addon->deferred_class) != napi_ok) {
         usearch_js_throw(env, usearch_status_internal_k, "Could not register the addon classes");
@@ -72,6 +84,9 @@ NAPI_MODULE_INIT() {
     if (napi_define_properties(env, exports, usearch_js_table_size_(module_properties), module_properties) != napi_ok ||
         napi_set_named_property(env, exports, "Executor", executor_class) != napi_ok ||
         napi_set_named_property(env, exports, "CompiledIndex", index_class) != napi_ok ||
+        napi_set_named_property(env, exports, "CompiledSequenceIndex", sequence_index_class) != napi_ok ||
+        napi_set_named_property(env, exports, "CompiledShapesIndex", shapes_index_class) != napi_ok ||
+        napi_set_named_property(env, exports, "CompiledGeospatialIndex", geospatial_index_class) != napi_ok ||
         napi_set_named_property(env, exports, "Arena", arena_class) != napi_ok ||
         !(scalars = usearch_js_scalars(env)) || napi_set_named_property(env, exports, "scalars", scalars) != napi_ok) {
         usearch_js_throw(env, usearch_status_internal_k, "Could not publish the addon exports");

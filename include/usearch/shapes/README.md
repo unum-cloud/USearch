@@ -18,8 +18,8 @@ Each shape is centred and turned onto its principal axes once, when stored; ever
 
 - `chamfer`: the mean distance from each point to its nearest partner, both directions; the cheapest, and lenient to a stray point.
 - `hausdorff`: the worst such distance; the same cost, and one stray point decides.
-- `wasserstein_procrustes`: Kabsch without a known correspondence, alternating an exact transport plan with the best rotation or reflection; the default for conformers and pockets.
-- `gromov_wasserstein`: compares each side's internal distances and never the coordinates; the best ranker and the costliest, sized for molecules rather than thousands of points.
+- `wasserstein-procrustes`: Kabsch without a known correspondence, alternating an exact transport plan with the best rotation or reflection; the default for conformers and pockets.
+- `gromov-wasserstein`: compares each side's internal distances and never the coordinates; the best ranker and the costliest, sized for molecules rather than thousands of points.
 
 Store points as `f16` to halve memory, or `f32` for clouds spanning hundreds of ångströms, where `f16` steps grow past a tenth of one.
 Set `points` only when every entry has one count, like a fixed-length backbone or a landmark set.
@@ -92,4 +92,4 @@ Descriptor methods like USR and USRCAT reduce a conformer to 12 or 60 moment sta
 Those fixed-length vectors belong to the dense modality, while this one keeps every point and compares the clouds themselves.
 
 RMSD after Kabsch alignment, as in RDKit's `GetBestRMS` or PyMOL's `align`, needs an atom mapping and equal counts.
-`wasserstein_procrustes` needs neither, never exceeds the Kabsch RMSD of a known atom order on equal counts, and equals it where that order is an optimal matching, so it can stand in as an index-friendly RMSD.
+`wasserstein-procrustes` needs neither, never exceeds the Kabsch RMSD of a known atom order on equal counts, and equals it where that order is an optimal matching, so it can stand in as an index-friendly RMSD.

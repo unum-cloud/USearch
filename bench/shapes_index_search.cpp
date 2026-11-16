@@ -14,7 +14,7 @@
  *  Flag            Default   Meaning
  *  --base-points   required  Every shape's points end to end, `.fbin` or `.f16bin` with 3 columns
  *  --base-counts   required  Points per shape, `.ibin` with 1 column
- *  --metric        chamfer   chamfer, hausdorff, gromov_wasserstein or wasserstein_procrustes
+ *  --metric        chamfer   chamfer, hausdorff, gromov-wasserstein or wasserstein-procrustes
  *  @endverbatim
  */
 #include <array>       // `std::array` - the flags

@@ -1,0 +1,2155 @@
+//! Sequence Search over byte strings, UTF-8 text, DNA, RNA and proteins, under edit distances and
+//! alignments.
+//!
+//! Sequences cross as one [`Tape`]: their bytes end to end, and one more offset than entries, as
+//! an Apache Arrow `Binary` or `LargeBinary` column lays them out. Every verb comes from
+//! [`SequenceVerbs`], written once over the receiver: a [`SequenceIndex`] blocks on the calling
+//! thread, `index.on(&executor)` blocks on an executor, and `index.deferred(&executor)` answers a
+//! [`Deferred`](crate::Deferred) from the same verbs given owned arguments.
+//!
+//! File: rust/sequence_index.rs
+//! Author: Ash Vardanian
+//! Date: November 16, 2026
+
+// The C mirror keeps the C spelling of every name.
+#![allow(non_camel_case_types)]
+
+use core::borrow::BorrowMut;
+use core::ffi::{c_char, c_int, c_void};
+use core::fmt;
+use core::marker::PhantomData;
+use core::ops::Deref;
+use core::ptr;
+use core::str::FromStr;
+use std::path::Path;
+
+use crate::dense_index::{
+    DenseBatch, DenseReachability, DenseSampleConfig, DenseSaveBufferConfig, DenseSaveConfig, DenseTraversalStats,
+    Monolith, RefineReport, Sample, usearch_phase_progress_t, usearch_reachability_t, usearch_refine_options_t,
+    usearch_refine_report_t, usearch_traversal_stats_t,
+};
+use crate::types::{
+    Accepts, Arena, Blocking, CPUClass, Completion, Deferring, Error, Executor, GPUClass, Key, Matches, On,
+    PhaseProgress, Predicate, ProgressCallback, ReshardHandles, Result, Scalar, Status, Tape, TapeEntries, TapeOffset,
+    Traversal, check, lower_predicate, lower_progress, nvme_options, output_slot, path_view, path_views, ram_options,
+    read_named, spelling, usearch_arena_t, usearch_bytes_view_t, usearch_completion_blocking_k, usearch_completion_t,
+    usearch_cpu_class_name, usearch_cpu_class_t, usearch_executor_t, usearch_gpu_class_name, usearch_gpu_class_t,
+    usearch_key_t, usearch_keys_tape_view_t, usearch_keys_view_t, usearch_load_path_name, usearch_load_path_t,
+    usearch_matches_view_t, usearch_nvme_options_t, usearch_outcome_t, usearch_predicate_t, usearch_progress_t,
+    usearch_ram_options_t, usearch_rows_view_t, usearch_status_t, usearch_tape_view_t, usearch_traversal_t,
+    usearch_vram_options_t, vram_options,
+};
+
+// region: Raw Declarations
+
+pub type usearch_sequence_index_t = *mut c_void;
+pub type usearch_sequence_cursor_t = *mut c_void;
+pub type usearch_sequence_refine_plan_t = *mut c_void;
+pub type usearch_sequence_reshard_plan_t = *mut c_void;
+pub type usearch_sequence_metric_t = c_int;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct usearch_sequence_weights_t {
+    pub substitution_matrix: *const i8,
+    pub gap: i8,
+}
+
+#[repr(C)]
+pub struct usearch_sequence_init_ram_t {
+    pub index: *mut usearch_sequence_index_t,
+    pub outcome: *mut usearch_outcome_t,
+    pub metric: usearch_sequence_metric_t,
+    pub weights: *const usearch_sequence_weights_t,
+    pub window_widths: *const usize,
+    pub window_widths_count: usize,
+    pub connectivity: usize,
+    pub values_per_key: usize,
+    pub ram: usearch_ram_options_t,
+}
+
+#[repr(C)]
+pub struct usearch_sequence_init_vram_t {
+    pub index: *mut usearch_sequence_index_t,
+    pub outcome: *mut usearch_outcome_t,
+    pub metric: usearch_sequence_metric_t,
+    pub weights: *const usearch_sequence_weights_t,
+    pub window_widths: *const usize,
+    pub window_widths_count: usize,
+    pub connectivity: usize,
+    pub values_per_key: usize,
+    pub vram: usearch_vram_options_t,
+}
+
+#[repr(C)]
+pub struct usearch_sequence_load_ram_t {
+    pub index: *mut usearch_sequence_index_t,
+    pub executor: usearch_executor_t,
+    pub outcome: *mut usearch_outcome_t,
+    pub completion: usearch_completion_t,
+    pub path: usearch_bytes_view_t,
+    pub ram: usearch_ram_options_t,
+    pub values_per_key: usize,
+    pub weights: *const usearch_sequence_weights_t,
+    pub progress: usearch_progress_t,
+}
+
+#[repr(C)]
+pub struct usearch_sequence_load_ram_buffer_t {
+    pub index: *mut usearch_sequence_index_t,
+    pub executor: usearch_executor_t,
+    pub outcome: *mut usearch_outcome_t,
+    pub completion: usearch_completion_t,
+    pub buffer: usearch_bytes_view_t,
+    pub ram: usearch_ram_options_t,
+    pub values_per_key: usize,
+    pub weights: *const usearch_sequence_weights_t,
+    pub progress: usearch_progress_t,
+}
+
+#[repr(C)]
+pub struct usearch_sequence_load_vram_t {
+    pub index: *mut usearch_sequence_index_t,
+    pub executor: usearch_executor_t,
+    pub outcome: *mut usearch_outcome_t,
+    pub completion: usearch_completion_t,
+    pub path: usearch_bytes_view_t,
+    pub vram: usearch_vram_options_t,
+    pub values_per_key: usize,
+    pub weights: *const usearch_sequence_weights_t,
+    pub progress: usearch_progress_t,
+}
+
+#[repr(C)]
+pub struct usearch_sequence_load_vram_buffer_t {
+    pub index: *mut usearch_sequence_index_t,
+    pub executor: usearch_executor_t,
+    pub outcome: *mut usearch_outcome_t,
+    pub completion: usearch_completion_t,
+    pub buffer: usearch_bytes_view_t,
+    pub vram: usearch_vram_options_t,
+    pub values_per_key: usize,
+    pub weights: *const usearch_sequence_weights_t,
+    pub progress: usearch_progress_t,
+}
+
+#[repr(C)]
+pub struct usearch_sequence_view_ram_t {
+    pub index: *mut usearch_sequence_index_t,
+    pub outcome: *mut usearch_outcome_t,
+    pub path: usearch_bytes_view_t,
+    pub weights: *const usearch_sequence_weights_t,
+    pub ram: usearch_ram_options_t,
+}
+
+#[repr(C)]
+pub struct usearch_sequence_view_nvme_t {
+    pub index: *mut usearch_sequence_index_t,
+    pub executor: usearch_executor_t,
+    pub outcome: *mut usearch_outcome_t,
+    pub completion: usearch_completion_t,
+    pub path: usearch_bytes_view_t,
+    pub nvme: usearch_nvme_options_t,
+    pub weights: *const usearch_sequence_weights_t,
+}
+
+#[repr(C)]
+pub struct usearch_sequence_reserve_t {
+    pub index: usearch_sequence_index_t,
+    pub executor: usearch_executor_t,
+    pub outcome: *mut usearch_outcome_t,
+    pub completion: usearch_completion_t,
+    pub entries: usize,
+    pub payload_bytes: usize,
+}
+
+#[repr(C)]
+pub struct usearch_sequence_clear_t {
+    pub index: usearch_sequence_index_t,
+    pub executor: usearch_executor_t,
+    pub outcome: *mut usearch_outcome_t,
+    pub completion: usearch_completion_t,
+}
+
+#[repr(C)]
+pub struct usearch_sequence_insert_t {
+    pub index: usearch_sequence_index_t,
+    pub executor: usearch_executor_t,
+    pub outcome: *mut usearch_outcome_t,
+    pub completion: usearch_completion_t,
+    pub count: usize,
+    pub keys: usearch_keys_view_t,
+    pub sequences: usearch_tape_view_t,
+    pub expansion_factor: usize,
+    pub progress: usearch_progress_t,
+    pub stats: *mut usearch_traversal_stats_t,
+}
+
+#[repr(C)]
+pub struct usearch_sequence_refine_t {
+    pub index: usearch_sequence_index_t,
+    pub executor: usearch_executor_t,
+    pub outcome: *mut usearch_outcome_t,
+    pub completion: usearch_completion_t,
+    pub report: *mut usearch_refine_report_t,
+    pub refine: usearch_refine_options_t,
+    pub progress: usearch_progress_t,
+    pub stats: *mut usearch_traversal_stats_t,
+    pub plan: *mut usearch_sequence_refine_plan_t,
+    pub phase: *mut usearch_phase_progress_t,
+}
+
+#[repr(C)]
+pub struct usearch_sequence_refine_plan_finish_t {
+    pub index: usearch_sequence_index_t,
+    pub executor: usearch_executor_t,
+    pub outcome: *mut usearch_outcome_t,
+    pub completion: usearch_completion_t,
+    pub plan: usearch_sequence_refine_plan_t,
+    pub report: *mut usearch_refine_report_t,
+}
+
+#[repr(C)]
+pub struct usearch_sequence_health_t {
+    pub index: usearch_sequence_index_t,
+    pub executor: usearch_executor_t,
+    pub outcome: *mut usearch_outcome_t,
+    pub completion: usearch_completion_t,
+    pub reachability: *mut usearch_reachability_t,
+}
+
+#[repr(C)]
+pub struct usearch_sequence_search_t {
+    pub index: usearch_sequence_index_t,
+    pub executor: usearch_executor_t,
+    pub outcome: *mut usearch_outcome_t,
+    pub completion: usearch_completion_t,
+    pub count: usize,
+    pub queries: usearch_tape_view_t,
+    pub matches: *mut usearch_matches_view_t,
+    pub arena: usearch_arena_t,
+    pub wanted: usize,
+    pub expansion_factor: usize,
+    pub traversal: usearch_traversal_t,
+    pub predicate: usearch_predicate_t,
+    pub progress: usearch_progress_t,
+    pub stats: *mut usearch_traversal_stats_t,
+}
+
+pub type usearch_sequence_key_stats_t = SequenceKeyStats;
+
+#[repr(C)]
+pub struct usearch_sequence_count_t {
+    pub index: usearch_sequence_index_t,
+    pub executor: usearch_executor_t,
+    pub outcome: *mut usearch_outcome_t,
+    pub completion: usearch_completion_t,
+    pub key: usearch_key_t,
+    pub key_stats: *mut usearch_sequence_key_stats_t,
+}
+
+#[repr(C)]
+pub struct usearch_sequence_get_t {
+    pub index: usearch_sequence_index_t,
+    pub executor: usearch_executor_t,
+    pub outcome: *mut usearch_outcome_t,
+    pub completion: usearch_completion_t,
+    pub key: usearch_key_t,
+    pub sequences: *mut usearch_tape_view_t,
+    pub written: *mut usize,
+    pub arena: usearch_arena_t,
+}
+
+#[repr(C)]
+pub struct usearch_sequence_reshard_t {
+    pub sources_count: usize,
+    pub sources: *const usearch_sequence_index_t,
+    pub targets_count: usize,
+    pub targets: *const usearch_sequence_index_t,
+    pub executor: usearch_executor_t,
+    pub outcome: *mut usearch_outcome_t,
+    pub completion: usearch_completion_t,
+    pub report: *mut usearch_refine_report_t,
+    pub refine: usearch_refine_options_t,
+    pub seed: u64,
+    pub progress: usearch_progress_t,
+    pub stats: *mut usearch_traversal_stats_t,
+    pub plan: *mut usearch_sequence_reshard_plan_t,
+    pub phase: *mut usearch_phase_progress_t,
+}
+
+#[repr(C)]
+pub struct usearch_sequence_reshard_plan_finish_t {
+    pub executor: usearch_executor_t,
+    pub outcome: *mut usearch_outcome_t,
+    pub completion: usearch_completion_t,
+    pub plan: usearch_sequence_reshard_plan_t,
+    pub report: *mut usearch_refine_report_t,
+}
+
+#[repr(C)]
+pub struct usearch_sequence_cursor_init_t {
+    pub index: usearch_sequence_index_t,
+    pub outcome: *mut usearch_outcome_t,
+    pub starts_count: usize,
+    pub starts: *const usearch_key_t,
+    pub cursor: *mut usearch_sequence_cursor_t,
+}
+
+#[repr(C)]
+pub struct usearch_sequence_cursor_next_t {
+    pub index: usearch_sequence_index_t,
+    pub executor: usearch_executor_t,
+    pub outcome: *mut usearch_outcome_t,
+    pub completion: usearch_completion_t,
+    pub cursor: usearch_sequence_cursor_t,
+    pub keys: *mut usearch_keys_view_t,
+    pub links: *mut usearch_keys_tape_view_t,
+    pub written: *mut usize,
+    pub arena: usearch_arena_t,
+    pub wanted: usize,
+}
+
+#[repr(C)]
+pub struct usearch_sequence_sample_t {
+    pub index: usearch_sequence_index_t,
+    pub executor: usearch_executor_t,
+    pub outcome: *mut usearch_outcome_t,
+    pub completion: usearch_completion_t,
+    pub shown_count: usize,
+    pub shown: usearch_keys_view_t,
+    pub shown_coordinates: usearch_rows_view_t,
+    pub focus_count: usize,
+    pub focus: usearch_keys_view_t,
+    pub keys: *mut usearch_keys_view_t,
+    pub entry_ordinals: *mut *const usize,
+    pub parents: *mut usearch_matches_view_t,
+    pub coordinates: *mut usearch_rows_view_t,
+    pub written: *mut usize,
+    pub arena: usearch_arena_t,
+    pub wanted: usize,
+    pub seed: u64,
+    pub expansion_factor: usize,
+    pub progress: usearch_progress_t,
+    pub stats: *mut usearch_traversal_stats_t,
+}
+
+#[repr(C)]
+pub struct usearch_sequence_save_t {
+    pub index: usearch_sequence_index_t,
+    pub executor: usearch_executor_t,
+    pub outcome: *mut usearch_outcome_t,
+    pub completion: usearch_completion_t,
+    pub path: usearch_bytes_view_t,
+    pub progress: usearch_progress_t,
+}
+
+#[repr(C)]
+pub struct usearch_sequence_save_buffer_t {
+    pub index: usearch_sequence_index_t,
+    pub executor: usearch_executor_t,
+    pub outcome: *mut usearch_outcome_t,
+    pub completion: usearch_completion_t,
+    pub monolith: *mut usearch_bytes_view_t,
+    pub arena: usearch_arena_t,
+    pub progress: usearch_progress_t,
+}
+
+pub type usearch_sequence_metadata_t = SequenceMetadata;
+
+#[repr(C)]
+pub struct usearch_sequence_metadata_read_t {
+    pub executor: usearch_executor_t,
+    pub outcome: *mut usearch_outcome_t,
+    pub completion: usearch_completion_t,
+    pub path: usearch_bytes_view_t,
+    pub metadata: *mut usearch_sequence_metadata_t,
+}
+
+#[repr(C)]
+pub struct usearch_sequence_metadata_read_buffer_t {
+    pub executor: usearch_executor_t,
+    pub outcome: *mut usearch_outcome_t,
+    pub completion: usearch_completion_t,
+    pub buffer: usearch_bytes_view_t,
+    pub metadata: *mut usearch_sequence_metadata_t,
+}
+
+pub type usearch_sequence_index_description_t = SequenceIndexDescription;
+
+#[repr(C)]
+pub struct usearch_sequence_describe_t {
+    pub index: usearch_sequence_index_t,
+    pub executor: usearch_executor_t,
+    pub outcome: *mut usearch_outcome_t,
+    pub completion: usearch_completion_t,
+    pub description: *mut usearch_sequence_index_description_t,
+}
+
+unsafe extern "C" {
+    pub fn usearch_sequence_metric_name(metric: usearch_sequence_metric_t) -> *const c_char;
+    pub fn usearch_sequence_metric_from_name(
+        name: usearch_bytes_view_t,
+        metric: *mut usearch_sequence_metric_t,
+    ) -> usearch_status_t;
+
+    pub fn usearch_sequence_init_ram(arguments: *mut usearch_sequence_init_ram_t);
+    pub fn usearch_sequence_init_vram(arguments: *mut usearch_sequence_init_vram_t);
+    pub fn usearch_sequence_load_ram(arguments: *mut usearch_sequence_load_ram_t);
+    pub fn usearch_sequence_load_ram_buffer(arguments: *mut usearch_sequence_load_ram_buffer_t);
+    pub fn usearch_sequence_load_vram(arguments: *mut usearch_sequence_load_vram_t);
+    pub fn usearch_sequence_load_vram_buffer(arguments: *mut usearch_sequence_load_vram_buffer_t);
+    pub fn usearch_sequence_view_ram(arguments: *mut usearch_sequence_view_ram_t);
+    pub fn usearch_sequence_view_nvme(arguments: *mut usearch_sequence_view_nvme_t);
+    pub fn usearch_sequence_free(index: usearch_sequence_index_t);
+
+    pub fn usearch_sequence_reserve(arguments: *mut usearch_sequence_reserve_t);
+    pub fn usearch_sequence_clear(arguments: *mut usearch_sequence_clear_t);
+    pub fn usearch_sequence_insert(arguments: *mut usearch_sequence_insert_t);
+    pub fn usearch_sequence_refine(arguments: *mut usearch_sequence_refine_t);
+    pub fn usearch_sequence_refine_plan_finish(arguments: *mut usearch_sequence_refine_plan_finish_t);
+    pub fn usearch_sequence_health(arguments: *mut usearch_sequence_health_t);
+    pub fn usearch_sequence_search(arguments: *mut usearch_sequence_search_t);
+    pub fn usearch_sequence_count(arguments: *mut usearch_sequence_count_t);
+    pub fn usearch_sequence_get(arguments: *mut usearch_sequence_get_t);
+    pub fn usearch_sequence_reshard(arguments: *mut usearch_sequence_reshard_t);
+    pub fn usearch_sequence_reshard_plan_finish(arguments: *mut usearch_sequence_reshard_plan_finish_t);
+    pub fn usearch_sequence_sample(arguments: *mut usearch_sequence_sample_t);
+
+    pub fn usearch_sequence_cursor_init(arguments: *mut usearch_sequence_cursor_init_t);
+    pub fn usearch_sequence_cursor_next(arguments: *mut usearch_sequence_cursor_next_t);
+    pub fn usearch_sequence_cursor_free(cursor: usearch_sequence_cursor_t);
+
+    pub fn usearch_sequence_save(arguments: *mut usearch_sequence_save_t);
+    pub fn usearch_sequence_save_buffer(arguments: *mut usearch_sequence_save_buffer_t);
+    pub fn usearch_sequence_metadata_read(arguments: *mut usearch_sequence_metadata_read_t);
+    pub fn usearch_sequence_metadata_read_buffer(arguments: *mut usearch_sequence_metadata_read_buffer_t);
+    pub fn usearch_sequence_describe(arguments: *mut usearch_sequence_describe_t);
+}
+
+// endregion: Raw Declarations
+
+// region: Geometry
+
+/// The sequence kinds: edit distances over bytes or code points, a weighted alignment, and the
+/// overlap of fixed-width windows.
+#[repr(i32)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Hash)]
+#[non_exhaustive]
+pub enum SequenceMetric {
+    /// Edits between two byte strings, each insertion, deletion or substitution counting one.
+    #[default]
+    LevenshteinBytes = 1,
+    /// Edits between two UTF-8 strings, counted over code points rather than bytes.
+    LevenshteinUtf8 = 2,
+    /// The global alignment score under [`SequenceWeights`], reported as a distance.
+    NeedlemanWunsch = 3,
+    /// The share of one side's fixed-width windows the other side misses.
+    Overlap = 4,
+}
+
+impl SequenceMetric {
+    fn from_raw(value: usearch_sequence_metric_t) -> Option<Self> {
+        let metric = match value {
+            1 => SequenceMetric::LevenshteinBytes,
+            2 => SequenceMetric::LevenshteinUtf8,
+            3 => SequenceMetric::NeedlemanWunsch,
+            4 => SequenceMetric::Overlap,
+            _ => return None,
+        };
+        Some(metric)
+    }
+}
+
+impl fmt::Display for SequenceMetric {
+    /// Writes the metric's name, which `from_str` reads back.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(spelling(usearch_sequence_metric_name, *self as c_int))
+    }
+}
+
+impl FromStr for SequenceMetric {
+    type Err = Error;
+
+    /// Reads a metric back from the name `Display` writes, refusing any other.
+    fn from_str(text: &str) -> Result<Self> {
+        read_named(text, usearch_sequence_metric_from_name, SequenceMetric::from_raw)
+    }
+}
+
+/// The weights [`SequenceMetric::NeedlemanWunsch`] scores with; the Levenshtein kinds refuse any.
+#[derive(Clone, Copy, Debug)]
+pub struct SequenceWeights<'matrix> {
+    /// Signed scores of every byte against every byte, row-major.
+    pub substitution_matrix: &'matrix [[i8; 256]; 256],
+    /// Cost of one unaligned symbol.
+    pub gap: i8,
+}
+
+impl SequenceWeights<'_> {
+    fn lower(&self) -> usearch_sequence_weights_t {
+        usearch_sequence_weights_t { substitution_matrix: self.substitution_matrix.as_ptr().cast(), gap: self.gap }
+    }
+}
+
+/// Lowers optional weights into `slot`, answering the pointer a call reads them through.
+fn weights_slot(
+    weights: Option<&SequenceWeights>,
+    slot: &mut usearch_sequence_weights_t,
+) -> *const usearch_sequence_weights_t {
+    match weights {
+        Some(weights) => {
+            *slot = weights.lower();
+            slot
+        }
+        None => ptr::null(),
+    }
+}
+
+/// Construction options of a sequence index; [`SequenceIndex::init_ram`] and
+/// [`SequenceIndex::init_vram`] both take it.
+#[derive(Clone, Debug, Default)]
+pub struct SequenceOptions<'options> {
+    /// The kind every pair is scored under.
+    pub metric: SequenceMetric,
+    /// The weights an alignment kind needs; `None` for the Levenshtein kinds, which refuse any.
+    pub weights: Option<SequenceWeights<'options>>,
+    /// Window widths in bytes for the overlap kind, which needs at least one; every other kind
+    /// refuses any.
+    pub window_widths: &'options [usize],
+    /// Graph links per node; zero derives it.
+    pub connectivity: usize,
+    /// Upper bound on entries sharing one key; zero is unbounded.
+    pub values_per_key: usize,
+    /// The newest class dispatch may pick, intersected with what the machine runs, so a class the
+    /// machine lacks narrows rather than refuses; `None` means no ceiling.
+    pub cpu_class_ceiling: Option<CPUClass>,
+    /// The newest class dispatch may pick on the devices; `None` means no ceiling.
+    pub gpu_class_ceiling: Option<GPUClass>,
+}
+
+/// The kind and graph a checkpoint froze - everything a reader learns without opening it.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Hash)]
+#[non_exhaustive]
+pub struct SequenceMetadata {
+    /// The kind the checkpoint scores with.
+    pub metric: SequenceMetric,
+    /// Connections per node the graph was built with.
+    pub connectivity: usize,
+}
+
+/// A live index's frozen metadata and current counters, each read once, so under concurrent
+/// insertions they may come from slightly different moments.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Hash)]
+#[non_exhaustive]
+pub struct SequenceIndexDescription {
+    /// The frozen metric and connectivity, as a checkpoint reports them.
+    pub metadata: SequenceMetadata,
+    /// Stored entries.
+    pub size: usize,
+    /// Entries hosted without growing again.
+    pub capacity: usize,
+    /// Bytes the handle holds, payload storage included; traversal scratch is the executor's.
+    pub memory_usage: usize,
+    /// The CPU class dispatch picked, spelled by [`SequenceIndexDescription::cpu_class`].
+    cpu_class: usearch_cpu_class_t,
+    /// The GPU class dispatch picked, spelled by [`SequenceIndexDescription::gpu_class`].
+    gpu_class: usearch_gpu_class_t,
+    /// Live shards.
+    pub shards_count: usize,
+    /// How the last load read the parts, spelled by [`SequenceIndexDescription::load_path`].
+    load_path: usearch_load_path_t,
+}
+
+impl SequenceIndexDescription {
+    /// The CPU class dispatch picked on this machine, as [`CPUClass`] spells it.
+    pub fn cpu_class(&self) -> &'static str {
+        spelling(usearch_cpu_class_name, self.cpu_class)
+    }
+
+    /// The GPU class dispatch picked on the index's devices; "unknown" for a host index.
+    pub fn gpu_class(&self) -> &'static str {
+        spelling(usearch_gpu_class_name, self.gpu_class)
+    }
+
+    /// How the last load from a path read the parts: "none", "host-copy" or "cufile".
+    pub fn load_path(&self) -> &'static str {
+        spelling(usearch_load_path_name, self.load_path)
+    }
+}
+
+/// What one key holds: its entries, and their byte lengths in total and at most.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Hash)]
+#[non_exhaustive]
+pub struct SequenceKeyStats {
+    /// Entries stored under the key; zero means the index holds none.
+    pub entries: usize,
+    /// Bytes across those entries.
+    pub total_bytes: usize,
+    /// Bytes of the longest of them.
+    pub largest_bytes: usize,
+}
+
+// endregion: Geometry
+
+// region: Configs
+
+/// A checkpoint path and how it is copied into a new index in host memory; see
+/// [`SequenceIndex::load_ram`].
+pub struct SequenceLoadRamConfig<'config> {
+    /// A `.safegraphs` monolith or a `.safegraphs.json` manifest.
+    pub path: &'config Path,
+    /// The executor the read fans out over; `None` reads on the calling thread.
+    pub executor: Option<&'config Executor>,
+    /// NUMA node IDs to place the parts on; empty derives every node the process may use.
+    pub memory_domains: &'config [i32],
+    /// The newest class dispatch may pick, intersected with what the machine runs, so a class the
+    /// machine lacks narrows rather than refuses; `None` means no ceiling.
+    pub cpu_class_ceiling: Option<CPUClass>,
+    /// Upper bound on entries sharing one key, which no checkpoint records; zero is unbounded.
+    pub values_per_key: usize,
+    /// The weights an alignment kind needs, which no checkpoint records.
+    pub weights: Option<SequenceWeights<'config>>,
+    /// Reports the shards placed and stops wherever it says to; a stopped load creates no index.
+    pub progress: Option<&'config mut ProgressCallback<'config>>,
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    pub progress_steps: usize,
+}
+
+impl<'config, Location: AsRef<Path> + ?Sized> From<&'config Location> for SequenceLoadRamConfig<'config> {
+    fn from(path: &'config Location) -> Self {
+        SequenceLoadRamConfig {
+            path: path.as_ref(),
+            executor: None,
+            memory_domains: &[],
+            cpu_class_ceiling: None,
+            values_per_key: 0,
+            weights: None,
+            progress: None,
+            progress_steps: 0,
+        }
+    }
+}
+
+/// A checkpoint path and how it is uploaded into a new index on devices; see
+/// [`SequenceIndex::load_vram`].
+pub struct SequenceLoadVramConfig<'config> {
+    /// A `.safegraphs` monolith or a `.safegraphs.json` manifest.
+    pub path: &'config Path,
+    /// The executor the upload fans out over; `None` reads on the calling thread.
+    pub executor: Option<&'config Executor>,
+    /// CUDA device ordinals to place the parts on; empty derives one free device.
+    pub devices: &'config [i32],
+    /// The newest class dispatch may pick on the devices; `None` means no ceiling.
+    pub gpu_class_ceiling: Option<GPUClass>,
+    /// Upper bound on entries sharing one key, which no checkpoint records; zero is unbounded.
+    pub values_per_key: usize,
+    /// The weights an alignment kind needs, which no checkpoint records.
+    pub weights: Option<SequenceWeights<'config>>,
+    /// Reports the shards placed and stops wherever it says to; a stopped load creates no index.
+    pub progress: Option<&'config mut ProgressCallback<'config>>,
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    pub progress_steps: usize,
+}
+
+impl<'config, Location: AsRef<Path> + ?Sized> From<&'config Location> for SequenceLoadVramConfig<'config> {
+    fn from(path: &'config Location) -> Self {
+        SequenceLoadVramConfig {
+            path: path.as_ref(),
+            executor: None,
+            devices: &[],
+            gpu_class_ceiling: None,
+            values_per_key: 0,
+            weights: None,
+            progress: None,
+            progress_steps: 0,
+        }
+    }
+}
+
+/// A serialized monolith and how it is copied into a new index in host memory; see
+/// [`SequenceIndex::load_ram_buffer`].
+pub struct SequenceLoadRamBufferConfig<'config> {
+    /// One serialized monolith, or a manifest leading its parts.
+    pub buffer: &'config [u8],
+    /// The executor the read fans out over; `None` reads on the calling thread.
+    pub executor: Option<&'config Executor>,
+    /// NUMA node IDs to place shards on; empty derives every node the process may use.
+    pub memory_domains: &'config [i32],
+    /// The newest class dispatch may pick, intersected with what the machine runs, so a class the
+    /// machine lacks narrows rather than refuses; `None` means no ceiling.
+    pub cpu_class_ceiling: Option<CPUClass>,
+    /// Upper bound on entries sharing one key, which no checkpoint records; zero is unbounded.
+    pub values_per_key: usize,
+    /// The weights an alignment kind needs, which no checkpoint records.
+    pub weights: Option<SequenceWeights<'config>>,
+    /// Reports the bytes placed and stops wherever it says to; a stopped load creates no index.
+    pub progress: Option<&'config mut ProgressCallback<'config>>,
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    pub progress_steps: usize,
+}
+
+impl<'config> From<&'config [u8]> for SequenceLoadRamBufferConfig<'config> {
+    fn from(buffer: &'config [u8]) -> Self {
+        SequenceLoadRamBufferConfig {
+            buffer,
+            executor: None,
+            memory_domains: &[],
+            cpu_class_ceiling: None,
+            values_per_key: 0,
+            weights: None,
+            progress: None,
+            progress_steps: 0,
+        }
+    }
+}
+
+impl<'config, Bytes: Deref<Target = [u8]>> From<&'config Bytes> for SequenceLoadRamBufferConfig<'config> {
+    fn from(bytes: &'config Bytes) -> Self {
+        SequenceLoadRamBufferConfig::from(&**bytes)
+    }
+}
+
+/// A serialized monolith and how it is uploaded into a new index on devices; see
+/// [`SequenceIndex::load_vram_buffer`].
+pub struct SequenceLoadVramBufferConfig<'config> {
+    /// One serialized monolith, or a manifest leading its parts.
+    pub buffer: &'config [u8],
+    /// The executor the upload fans out over; `None` reads on the calling thread.
+    pub executor: Option<&'config Executor>,
+    /// CUDA device ordinals to place shards on; empty derives one free device.
+    pub devices: &'config [i32],
+    /// The newest class dispatch may pick on the devices; `None` means no ceiling.
+    pub gpu_class_ceiling: Option<GPUClass>,
+    /// Upper bound on entries sharing one key, which no checkpoint records; zero is unbounded.
+    pub values_per_key: usize,
+    /// The weights an alignment kind needs, which no checkpoint records.
+    pub weights: Option<SequenceWeights<'config>>,
+    /// Reports the bytes placed and stops wherever it says to; a stopped load creates no index.
+    pub progress: Option<&'config mut ProgressCallback<'config>>,
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    pub progress_steps: usize,
+}
+
+impl<'config> From<&'config [u8]> for SequenceLoadVramBufferConfig<'config> {
+    fn from(buffer: &'config [u8]) -> Self {
+        SequenceLoadVramBufferConfig {
+            buffer,
+            executor: None,
+            devices: &[],
+            gpu_class_ceiling: None,
+            values_per_key: 0,
+            weights: None,
+            progress: None,
+            progress_steps: 0,
+        }
+    }
+}
+
+impl<'config, Bytes: Deref<Target = [u8]>> From<&'config Bytes> for SequenceLoadVramBufferConfig<'config> {
+    fn from(bytes: &'config Bytes) -> Self {
+        SequenceLoadVramBufferConfig::from(&**bytes)
+    }
+}
+
+/// A checkpoint path and the drives it is served from in place; see [`SequenceIndex::view_nvme`].
+pub struct SequenceViewNvmeConfig<'config> {
+    /// A `.safegraphs` monolith or a `.safegraphs.json` manifest.
+    pub path: &'config Path,
+    /// The executor the open fans out over; `None` opens on the calling thread.
+    pub executor: Option<&'config Executor>,
+    /// Devices or directories to serve the parts from; empty serves each where its manifest points.
+    pub paths: &'config [&'config Path],
+    /// The newest class dispatch may pick, intersected with what the machine runs, so a class the
+    /// machine lacks narrows rather than refuses; `None` means no ceiling.
+    pub cpu_class_ceiling: Option<CPUClass>,
+    /// The weights an alignment kind needs, which no checkpoint records.
+    pub weights: Option<SequenceWeights<'config>>,
+}
+
+impl<'config, Location: AsRef<Path> + ?Sized> From<&'config Location> for SequenceViewNvmeConfig<'config> {
+    fn from(path: &'config Location) -> Self {
+        SequenceViewNvmeConfig {
+            path: path.as_ref(),
+            executor: None,
+            paths: &[],
+            cpu_class_ceiling: None,
+            weights: None,
+        }
+    }
+}
+
+/// The sequences an insertion adds and the knobs of its walks; see [`SequenceVerbs::insert`].
+pub struct SequenceInsertConfig<'config, Offset: Clone = u64> {
+    /// One entry per key, its bytes end to end.
+    pub sequences: Tape<'config, u8, Offset>,
+    /// The breadth of the candidates the walk explores; zero derives it.
+    pub expansion_factor: usize,
+    /// Reports the entries inserted; every entry is claimed before the first report, so a `Break`
+    /// is ignored.
+    pub progress: Option<&'config mut ProgressCallback<'config>>,
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    pub progress_steps: usize,
+    /// Where the traversal telemetry lands, overwritten by the call.
+    pub stats: Option<&'config mut DenseTraversalStats>,
+}
+
+impl<'config, Offset: Clone> From<Tape<'config, u8, Offset>> for SequenceInsertConfig<'config, Offset> {
+    fn from(sequences: Tape<'config, u8, Offset>) -> Self {
+        SequenceInsertConfig { sequences, expansion_factor: 0, progress: None, progress_steps: 0, stats: None }
+    }
+}
+
+/// The matches a search keeps and the knobs of its walk; see [`SequenceVerbs::search`].
+pub struct SequenceSearchConfig<'config> {
+    /// Matches kept per query.
+    pub wanted: usize,
+    /// The breadth of the candidates the walk explores; zero derives it.
+    pub expansion_factor: usize,
+    /// Walks the graph by default; [`Traversal::Scan`] scores every entry exactly.
+    pub traversal: Traversal,
+    /// Admits only the keys it approves; the rest still route the walk.
+    pub predicate: Option<&'config Predicate<'config>>,
+    /// Reports the queries resolved and stops wherever it says to.
+    pub progress: Option<&'config mut ProgressCallback<'config>>,
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    pub progress_steps: usize,
+    /// Where the traversal telemetry lands, overwritten by the call.
+    pub stats: Option<&'config mut DenseTraversalStats>,
+}
+
+impl From<usize> for SequenceSearchConfig<'_> {
+    fn from(wanted: usize) -> Self {
+        SequenceSearchConfig {
+            wanted,
+            expansion_factor: 0,
+            traversal: Traversal::Walk,
+            predicate: None,
+            progress: None,
+            progress_steps: 0,
+            stats: None,
+        }
+    }
+}
+
+/// How [`SequenceVerbs::refine`] runs; a blocking call borrows its plan, a deferred one owns it.
+pub struct SequenceRefineConfig<'config, Plan = &'config mut SequenceRefinePlan> {
+    /// The breadth of any walk beside the round; zero derives it.
+    pub expansion_factor: usize,
+    /// Bytes a loaded NVMe handle holds for the one part it rewrites; zero derives it.
+    pub memory_limit: usize,
+    /// Reports every phase's units at its barriers and stops wherever it says to.
+    pub progress: Option<&'config mut ProgressCallback<'config>>,
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    pub progress_steps: usize,
+    /// Where the traversal telemetry lands, overwritten by the call.
+    pub stats: Option<&'config mut DenseTraversalStats>,
+    /// A plan a stop leaves live and the next call continues, opened when fresh; `None` runs one
+    /// round to its end.
+    pub plan: Option<Plan>,
+    /// Where the call stopped, [`Phase::Done`](crate::Phase::Done) once its round ended.
+    pub phase: Option<&'config mut PhaseProgress>,
+}
+
+impl Default for SequenceRefineConfig<'_> {
+    fn default() -> Self {
+        SequenceRefineConfig::with_plan(None)
+    }
+}
+
+impl From<SequenceRefinePlan> for SequenceRefineConfig<'_, SequenceRefinePlan> {
+    /// A deferred call owning `plan`, with every other knob derived.
+    fn from(plan: SequenceRefinePlan) -> Self {
+        SequenceRefineConfig::with_plan(Some(plan))
+    }
+}
+
+impl<Plan> SequenceRefineConfig<'_, Plan> {
+    fn with_plan(plan: Option<Plan>) -> Self {
+        SequenceRefineConfig {
+            expansion_factor: 0,
+            memory_limit: 0,
+            progress: None,
+            progress_steps: 0,
+            stats: None,
+            plan,
+            phase: None,
+        }
+    }
+}
+
+/// The handles a reshard moves between and its knobs; see [`SequenceVerbs::reshard`].
+pub struct SequenceReshardConfig<'config, Plan = &'config mut SequenceReshardPlan> {
+    /// The handles whose entries move, each named once.
+    pub sources: &'config [&'config SequenceIndex],
+    /// The handles the entries move into, each a source itself or empty.
+    pub targets: &'config [&'config SequenceIndex],
+    /// The breadth of any walk beside the closing rounds; zero derives it.
+    pub expansion_factor: usize,
+    /// Bytes a loaded NVMe target holds for the one part it rewrites; zero derives it.
+    pub memory_limit: usize,
+    /// Picks the part roots of a source cut among several targets.
+    pub seed: u64,
+    /// Reports the closing rounds' phases and stops them wherever it says to, never a move.
+    pub progress: Option<&'config mut ProgressCallback<'config>>,
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    pub progress_steps: usize,
+    /// Where the traversal telemetry lands, overwritten by the call.
+    pub stats: Option<&'config mut DenseTraversalStats>,
+    /// A plan a stop leaves live and the next call continues, opened when fresh; `None` moves and
+    /// runs to the end.
+    pub plan: Option<Plan>,
+    /// Where the call stopped, [`Phase::Done`](crate::Phase::Done) once its rounds ended.
+    pub phase: Option<&'config mut PhaseProgress>,
+}
+
+impl Default for SequenceReshardConfig<'_> {
+    fn default() -> Self {
+        SequenceReshardConfig::with_plan(None)
+    }
+}
+
+impl From<SequenceReshardPlan> for SequenceReshardConfig<'_, SequenceReshardPlan> {
+    /// A deferred call owning `plan`, naming no handle, since a live plan already holds them.
+    fn from(plan: SequenceReshardPlan) -> Self {
+        SequenceReshardConfig::with_plan(Some(plan))
+    }
+}
+
+impl<Plan> SequenceReshardConfig<'_, Plan> {
+    fn with_plan(plan: Option<Plan>) -> Self {
+        SequenceReshardConfig {
+            sources: &[],
+            targets: &[],
+            expansion_factor: 0,
+            memory_limit: 0,
+            seed: 0,
+            progress: None,
+            progress_steps: 0,
+            stats: None,
+            plan,
+            phase: None,
+        }
+    }
+}
+
+/// A refine in flight between calls, which [`SequenceVerbs::refine_plan_finish`] closes.
+#[derive(Debug)]
+pub struct SequenceRefinePlan {
+    handle: usearch_sequence_refine_plan_t,
+}
+
+/// A reshard in flight between calls, which [`SequenceVerbs::reshard_plan_finish`] closes.
+#[derive(Debug)]
+pub struct SequenceReshardPlan {
+    handle: usearch_sequence_reshard_plan_t,
+}
+
+impl Default for SequenceRefinePlan {
+    /// A fresh plan, which the first call holding it opens.
+    fn default() -> Self {
+        SequenceRefinePlan { handle: ptr::null_mut() }
+    }
+}
+
+impl Default for SequenceReshardPlan {
+    /// A fresh plan, which the first call holding it opens.
+    fn default() -> Self {
+        SequenceReshardPlan { handle: ptr::null_mut() }
+    }
+}
+
+// Safety: a plan is driven by one call at a time, which the `&mut` holding it enforces.
+unsafe impl Send for SequenceRefinePlan {}
+unsafe impl Send for SequenceReshardPlan {}
+
+impl<Offset: Clone + 'static> Accepts<SequenceInsertConfig<'static, Offset>> for Deferring {}
+impl Accepts<SequenceSearchConfig<'static>> for Deferring {}
+impl<Plan: 'static> Accepts<SequenceRefineConfig<'static, Plan>> for Deferring {}
+impl<Plan: 'static> Accepts<SequenceReshardConfig<'static, Plan>> for Deferring {}
+
+// endregion: Configs
+
+// region: Sequence Index
+
+/// Sequence Search Index over byte strings under edit distances and alignments, whose verbs come
+/// from [`SequenceVerbs`]. [`SequenceIndex::clear`] alone takes `&mut self`.
+///
+/// ```no_run
+/// use usearch::*;
+///
+/// let index = SequenceIndex::init_ram(&SequenceOptions::default(), &[])?;
+/// index.insert([Key::from(1u64), Key::from(2u64)], Tape::of(["kitten", "sitting"]))?;
+/// let mut arena = Arena::new()?;
+/// let matches = index.search(Tape::of(["sitten"]), 1, &mut arena)?;
+/// assert_eq!(matches.query(0)?.keys, [Key::from(1u64)]);
+/// # Ok::<(), usearch::Error>(())
+/// ```
+///
+/// Dropping it waits for every deferred call naming the index, then frees it.
+#[derive(Debug)]
+pub struct SequenceIndex {
+    handle: usearch_sequence_index_t,
+}
+
+// Safety: the library documents a handle as shareable across threads.
+unsafe impl Send for SequenceIndex {}
+unsafe impl Sync for SequenceIndex {}
+
+impl Drop for SequenceIndex {
+    fn drop(&mut self) {
+        unsafe { usearch_sequence_free(self.handle) }
+    }
+}
+
+impl SequenceIndex {
+    /// An index whose handle a constructor is about to fill.
+    fn null() -> Self {
+        SequenceIndex { handle: ptr::null_mut() }
+    }
+
+    /// The receiver whose verbs block on `executor`, contended while another call holds it.
+    ///
+    /// Rust-only.
+    pub fn on<'index>(&'index self, executor: &'index Executor) -> On<'index, SequenceIndex> {
+        On { index: self, executor, completion: PhantomData }
+    }
+
+    /// The receiver whose verbs submit their calls to `executor`, answering a
+    /// [`Deferred`](crate::Deferred) from the same verbs given owned arguments.
+    ///
+    /// Rust-only.
+    pub fn deferred<'index>(&'index self, executor: &'index Executor) -> On<'index, SequenceIndex, Deferring> {
+        On { index: self, executor, completion: PhantomData }
+    }
+
+    /// Erases all entries on the calling thread, keeping the reserved capacity and frozen kind.
+    pub fn clear(&mut self) -> Result<()> {
+        let mut outcome = usearch_outcome_t::default();
+        unsafe {
+            usearch_sequence_clear(&mut usearch_sequence_clear_t {
+                index: self.handle,
+                executor: ptr::null_mut(),
+                outcome: &mut outcome,
+                completion: usearch_completion_blocking_k,
+            })
+        };
+        check(outcome)
+    }
+
+    /// Creates an empty, mutable index in host memory, one shard per NUMA node `memory_domains`
+    /// names; empty derives every node the process may use.
+    pub fn init_ram(options: &SequenceOptions, memory_domains: &[i32]) -> Result<Self> {
+        let mut index = SequenceIndex::null();
+        let mut outcome = usearch_outcome_t::default();
+        let mut weights = usearch_sequence_weights_t { substitution_matrix: ptr::null(), gap: 0 };
+        unsafe {
+            usearch_sequence_init_ram(&mut usearch_sequence_init_ram_t {
+                index: &mut index.handle,
+                outcome: &mut outcome,
+                metric: options.metric as usearch_sequence_metric_t,
+                weights: weights_slot(options.weights.as_ref(), &mut weights),
+                window_widths: options.window_widths.as_ptr(),
+                window_widths_count: options.window_widths.len(),
+                connectivity: options.connectivity,
+                values_per_key: options.values_per_key,
+                ram: ram_options(memory_domains, options.cpu_class_ceiling),
+            })
+        };
+        check(outcome).map(|()| index)
+    }
+
+    /// Creates an empty, mutable index in device memory, one shard per device; empty derives one
+    /// free device.
+    pub fn init_vram(options: &SequenceOptions, devices: &[i32]) -> Result<Self> {
+        let mut index = SequenceIndex::null();
+        let mut outcome = usearch_outcome_t::default();
+        let mut weights = usearch_sequence_weights_t { substitution_matrix: ptr::null(), gap: 0 };
+        unsafe {
+            usearch_sequence_init_vram(&mut usearch_sequence_init_vram_t {
+                index: &mut index.handle,
+                outcome: &mut outcome,
+                metric: options.metric as usearch_sequence_metric_t,
+                weights: weights_slot(options.weights.as_ref(), &mut weights),
+                window_widths: options.window_widths.as_ptr(),
+                window_widths_count: options.window_widths.len(),
+                connectivity: options.connectivity,
+                values_per_key: options.values_per_key,
+                vram: vram_options(devices, options.gpu_class_ceiling),
+            })
+        };
+        check(outcome).map(|()| index)
+    }
+
+    /// Copies a checkpoint into a new, mutable index in host memory, shard by shard.
+    pub fn load_ram<'config>(config: impl Into<SequenceLoadRamConfig<'config>>) -> Result<Self> {
+        let mut config = config.into();
+        let mut index = SequenceIndex::null();
+        let mut outcome = usearch_outcome_t::default();
+        let mut weights = usearch_sequence_weights_t { substitution_matrix: ptr::null(), gap: 0 };
+        let progress = lower_progress(&mut config.progress, config.progress_steps);
+        unsafe {
+            usearch_sequence_load_ram(&mut usearch_sequence_load_ram_t {
+                index: &mut index.handle,
+                executor: config.executor.map_or(ptr::null_mut(), |executor| executor.handle),
+                outcome: &mut outcome,
+                completion: usearch_completion_blocking_k,
+                path: path_view(config.path)?,
+                ram: ram_options(config.memory_domains, config.cpu_class_ceiling),
+                values_per_key: config.values_per_key,
+                weights: weights_slot(config.weights.as_ref(), &mut weights),
+                progress,
+            })
+        };
+        check(outcome).map(|()| index)
+    }
+
+    /// Uploads a checkpoint into a new index on devices, part by part.
+    pub fn load_vram<'config>(config: impl Into<SequenceLoadVramConfig<'config>>) -> Result<Self> {
+        let mut config = config.into();
+        let mut index = SequenceIndex::null();
+        let mut outcome = usearch_outcome_t::default();
+        let mut weights = usearch_sequence_weights_t { substitution_matrix: ptr::null(), gap: 0 };
+        let progress = lower_progress(&mut config.progress, config.progress_steps);
+        unsafe {
+            usearch_sequence_load_vram(&mut usearch_sequence_load_vram_t {
+                index: &mut index.handle,
+                executor: config.executor.map_or(ptr::null_mut(), |executor| executor.handle),
+                outcome: &mut outcome,
+                completion: usearch_completion_blocking_k,
+                path: path_view(config.path)?,
+                vram: vram_options(config.devices, config.gpu_class_ceiling),
+                values_per_key: config.values_per_key,
+                weights: weights_slot(config.weights.as_ref(), &mut weights),
+                progress,
+            })
+        };
+        check(outcome).map(|()| index)
+    }
+
+    /// Copies a serialized monolith into a new, mutable index in host memory.
+    pub fn load_ram_buffer<'config>(config: impl Into<SequenceLoadRamBufferConfig<'config>>) -> Result<Self> {
+        let mut config = config.into();
+        let mut index = SequenceIndex::null();
+        let mut outcome = usearch_outcome_t::default();
+        let mut weights = usearch_sequence_weights_t { substitution_matrix: ptr::null(), gap: 0 };
+        let progress = lower_progress(&mut config.progress, config.progress_steps);
+        unsafe {
+            usearch_sequence_load_ram_buffer(&mut usearch_sequence_load_ram_buffer_t {
+                index: &mut index.handle,
+                executor: config.executor.map_or(ptr::null_mut(), |executor| executor.handle),
+                outcome: &mut outcome,
+                completion: usearch_completion_blocking_k,
+                buffer: config.buffer.into(),
+                ram: ram_options(config.memory_domains, config.cpu_class_ceiling),
+                values_per_key: config.values_per_key,
+                weights: weights_slot(config.weights.as_ref(), &mut weights),
+                progress,
+            })
+        };
+        check(outcome).map(|()| index)
+    }
+
+    /// Uploads a serialized monolith into a new index on devices.
+    pub fn load_vram_buffer<'config>(config: impl Into<SequenceLoadVramBufferConfig<'config>>) -> Result<Self> {
+        let mut config = config.into();
+        let mut index = SequenceIndex::null();
+        let mut outcome = usearch_outcome_t::default();
+        let mut weights = usearch_sequence_weights_t { substitution_matrix: ptr::null(), gap: 0 };
+        let progress = lower_progress(&mut config.progress, config.progress_steps);
+        unsafe {
+            usearch_sequence_load_vram_buffer(&mut usearch_sequence_load_vram_buffer_t {
+                index: &mut index.handle,
+                executor: config.executor.map_or(ptr::null_mut(), |executor| executor.handle),
+                outcome: &mut outcome,
+                completion: usearch_completion_blocking_k,
+                buffer: config.buffer.into(),
+                vram: vram_options(config.devices, config.gpu_class_ceiling),
+                values_per_key: config.values_per_key,
+                weights: weights_slot(config.weights.as_ref(), &mut weights),
+                progress,
+            })
+        };
+        check(outcome).map(|()| index)
+    }
+
+    /// Serves a checkpoint in place through a memory mapping, read-only; the files must stay
+    /// unmodified while it lives.
+    pub fn view_ram(path: impl AsRef<Path>, weights: Option<&SequenceWeights>) -> Result<Self> {
+        let mut index = SequenceIndex::null();
+        let mut outcome = usearch_outcome_t::default();
+        let mut lowered = usearch_sequence_weights_t { substitution_matrix: ptr::null(), gap: 0 };
+        unsafe {
+            usearch_sequence_view_ram(&mut usearch_sequence_view_ram_t {
+                index: &mut index.handle,
+                outcome: &mut outcome,
+                path: path_view(path.as_ref())?,
+                weights: weights_slot(weights, &mut lowered),
+                ram: ram_options(&[], None),
+            })
+        };
+        check(outcome).map(|()| index)
+    }
+
+    /// Serves a checkpoint in place from NVMe drives, read-only and sized past RAM.
+    pub fn view_nvme<'config>(config: impl Into<SequenceViewNvmeConfig<'config>>) -> Result<Self> {
+        let config = config.into();
+        let views = path_views(config.paths)?;
+        let mut index = SequenceIndex::null();
+        let mut outcome = usearch_outcome_t::default();
+        let mut weights = usearch_sequence_weights_t { substitution_matrix: ptr::null(), gap: 0 };
+        unsafe {
+            usearch_sequence_view_nvme(&mut usearch_sequence_view_nvme_t {
+                index: &mut index.handle,
+                executor: config.executor.map_or(ptr::null_mut(), |executor| executor.handle),
+                outcome: &mut outcome,
+                completion: usearch_completion_blocking_k,
+                path: path_view(config.path)?,
+                nvme: nvme_options(&views, config.cpu_class_ceiling),
+                weights: weights_slot(config.weights.as_ref(), &mut weights),
+            })
+        };
+        check(outcome).map(|()| index)
+    }
+
+    /// Reads a checkpoint's kind and graph without loading it.
+    pub fn metadata(path: impl AsRef<Path>) -> Result<SequenceMetadata> {
+        let path = path_view(path.as_ref())?;
+        let mut metadata = SequenceMetadata::default();
+        let mut outcome = usearch_outcome_t::default();
+        unsafe {
+            usearch_sequence_metadata_read(&mut usearch_sequence_metadata_read_t {
+                executor: ptr::null_mut(),
+                outcome: &mut outcome,
+                completion: usearch_completion_blocking_k,
+                path,
+                metadata: &mut metadata,
+            })
+        };
+        check(outcome).map(|()| metadata)
+    }
+
+    /// Reads a checkpoint's kind and graph out of a serialized monolith buffer.
+    pub fn metadata_buffer(buffer: &[u8]) -> Result<SequenceMetadata> {
+        let mut metadata = SequenceMetadata::default();
+        let mut outcome = usearch_outcome_t::default();
+        unsafe {
+            usearch_sequence_metadata_read_buffer(&mut usearch_sequence_metadata_read_buffer_t {
+                executor: ptr::null_mut(),
+                outcome: &mut outcome,
+                completion: usearch_completion_blocking_k,
+                buffer: buffer.into(),
+                metadata: &mut metadata,
+            })
+        };
+        check(outcome).map(|()| metadata)
+    }
+}
+
+/// What a verb answers through `Receiver`: its output, or a [`Deferred`](crate::Deferred).
+type Answer<'index, Receiver, Inputs, Output> =
+    <<Receiver as SequenceVerbs<'index>>::Completion as Completion>::Answer<'index, Inputs, Output>;
+
+/// Every sequence verb, written once for every receiver: `&SequenceIndex` blocks on the calling
+/// thread, and the [`On`] that [`SequenceIndex::on`] or [`SequenceIndex::deferred`] makes runs on
+/// an executor.
+///
+/// Rust-only.
+pub trait SequenceVerbs<'index>: Copy {
+    /// [`Blocking`] or [`Deferring`].
+    type Completion: Completion;
+
+    /// The index this receiver reaches and the executor its calls run on.
+    #[doc(hidden)]
+    fn handles(&self) -> (usearch_sequence_index_t, usearch_executor_t);
+
+    /// Reserves room for `entries` entries and `payload_bytes` bytes across them, a hint, since
+    /// insertions grow the index on demand.
+    fn reserve(self, entries: usize, payload_bytes: usize) -> Result<Answer<'index, Self, (), ()>> {
+        let (index, executor) = self.handles();
+        Self::Completion::answer((), (), |call, completion| {
+            unsafe {
+                usearch_sequence_reserve(&mut usearch_sequence_reserve_t {
+                    index,
+                    executor,
+                    outcome: &mut call.outcome,
+                    completion,
+                    entries,
+                    payload_bytes,
+                })
+            };
+            Ok(())
+        })
+    }
+
+    /// Reports the frozen metadata and the current counters in one call.
+    fn describe(self) -> Result<Answer<'index, Self, (), SequenceIndexDescription>> {
+        let (index, executor) = self.handles();
+        Self::Completion::answer((), SequenceIndexDescription::default(), |call, completion| {
+            unsafe {
+                usearch_sequence_describe(&mut usearch_sequence_describe_t {
+                    index,
+                    executor,
+                    outcome: &mut call.outcome,
+                    completion,
+                    description: &mut call.output,
+                })
+            };
+            Ok(())
+        })
+    }
+
+    /// The entries stored under `key`, with their total and largest byte lengths.
+    fn count(self, key: Key) -> Result<Answer<'index, Self, (), SequenceKeyStats>> {
+        let (index, executor) = self.handles();
+        Self::Completion::answer((), SequenceKeyStats::default(), |call, completion| {
+            unsafe {
+                usearch_sequence_count(&mut usearch_sequence_count_t {
+                    index,
+                    executor,
+                    outcome: &mut call.outcome,
+                    completion,
+                    key,
+                    key_stats: &mut call.output,
+                })
+            };
+            Ok(())
+        })
+    }
+
+    /// Whether the index holds at least one entry under `key`.
+    ///
+    /// Rust-only.
+    fn contains(self, key: Key) -> Result<bool>
+    where
+        Self: SequenceVerbs<'index, Completion = Blocking>,
+    {
+        Ok(self.count(key)?.entries != 0)
+    }
+
+    /// Retrieves every sequence stored under `key` into `arena`, which the result borrows; an
+    /// absent key yields none.
+    fn get<'arena>(
+        self,
+        key: Key,
+        arena: &'arena mut Arena,
+    ) -> Result<Answer<'index, Self, (), TapeEntries<'arena, u8>>> {
+        let (index, executor) = self.handles();
+        let arena_handle = arena.handle;
+        Self::Completion::answer((), TapeEntries::new(), |call, completion| {
+            let sequences = &mut call.output;
+            unsafe {
+                usearch_sequence_get(&mut usearch_sequence_get_t {
+                    index,
+                    executor,
+                    outcome: &mut call.outcome,
+                    completion,
+                    key,
+                    sequences: &mut sequences.view,
+                    written: &mut sequences.written,
+                    arena: arena_handle,
+                })
+            };
+            Ok(())
+        })
+    }
+
+    /// Adds a tape of sequences under their keys, all-or-nothing and visible at once.
+    fn insert<'config, Keys: AsRef<[Key]>, Offset: TapeOffset>(
+        self,
+        keys: Keys,
+        config: impl Into<SequenceInsertConfig<'config, Offset>>,
+    ) -> Result<Answer<'index, Self, (Keys, SequenceInsertConfig<'config, Offset>), ()>>
+    where
+        Self::Completion: Accepts<Keys> + Accepts<SequenceInsertConfig<'config, Offset>>,
+    {
+        let (index, executor) = self.handles();
+        Self::Completion::answer((keys, config.into()), (), |call, completion| {
+            let (keys, config) = &mut call.inputs;
+            let keys = keys.as_ref();
+            // The keys view carries no count, so only this side can see the two disagree.
+            if config.sequences.count() != keys.len() {
+                return Err(crate::types::fail(
+                    Status::ShapeMismatch,
+                    "the key count does not match the tape's entries",
+                ));
+            }
+            unsafe {
+                usearch_sequence_insert(&mut usearch_sequence_insert_t {
+                    index,
+                    executor,
+                    outcome: &mut call.outcome,
+                    completion,
+                    count: keys.len(),
+                    keys: usearch_keys_view_t::of(keys),
+                    sequences: config.sequences.view(Scalar::U8),
+                    expansion_factor: config.expansion_factor,
+                    progress: lower_progress(&mut config.progress, config.progress_steps),
+                    stats: output_slot(&mut config.stats),
+                })
+            };
+            Ok(())
+        })
+    }
+
+    /// Runs one refine round over the whole graph, answering a [`RefineReport`].
+    fn refine<'config, Plan: BorrowMut<SequenceRefinePlan>>(
+        self,
+        config: SequenceRefineConfig<'config, Plan>,
+    ) -> Result<Answer<'index, Self, SequenceRefineConfig<'config, Plan>, RefineReport>>
+    where
+        Self::Completion: Accepts<SequenceRefineConfig<'config, Plan>>,
+    {
+        let (index, executor) = self.handles();
+        Self::Completion::answer(config, RefineReport::default(), |call, completion| {
+            let config = &mut call.inputs;
+            unsafe {
+                usearch_sequence_refine(&mut usearch_sequence_refine_t {
+                    index,
+                    executor,
+                    outcome: &mut call.outcome,
+                    completion,
+                    report: &mut call.output,
+                    refine: usearch_refine_options_t {
+                        expansion_factor: config.expansion_factor,
+                        memory_limit: config.memory_limit,
+                    },
+                    progress: lower_progress(&mut config.progress, config.progress_steps),
+                    stats: output_slot(&mut config.stats),
+                    plan: config.plan.as_mut().map_or(ptr::null_mut(), |plan| &mut plan.borrow_mut().handle),
+                    phase: output_slot(&mut config.phase),
+                })
+            };
+            Ok(())
+        })
+    }
+
+    /// Closes a refine plan, whatever the call answers, and answers what the whole plan did.
+    fn refine_plan_finish(self, plan: SequenceRefinePlan) -> Result<Answer<'index, Self, (), RefineReport>> {
+        let (index, executor) = self.handles();
+        Self::Completion::answer((), RefineReport::default(), |call, completion| {
+            unsafe {
+                usearch_sequence_refine_plan_finish(&mut usearch_sequence_refine_plan_finish_t {
+                    index,
+                    executor,
+                    outcome: &mut call.outcome,
+                    completion,
+                    plan: plan.handle,
+                    report: &mut call.output,
+                })
+            };
+            Ok(())
+        })
+    }
+
+    /// Measures how much of the graph a search reaches from the root.
+    fn health(self) -> Result<Answer<'index, Self, (), DenseReachability>> {
+        let (index, executor) = self.handles();
+        Self::Completion::answer((), DenseReachability::default(), |call, completion| {
+            unsafe {
+                usearch_sequence_health(&mut usearch_sequence_health_t {
+                    index,
+                    executor,
+                    outcome: &mut call.outcome,
+                    completion,
+                    reachability: &mut call.output,
+                })
+            };
+            Ok(())
+        })
+    }
+
+    /// Resolves a tape of queries into up to `wanted` nearest matches apiece, writing them into
+    /// `arena` as [`Matches`].
+    fn search<'config, 'arena, Offset: TapeOffset>(
+        self,
+        queries: Tape<'config, u8, Offset>,
+        config: impl Into<SequenceSearchConfig<'config>>,
+        arena: &'arena mut Arena,
+    ) -> Result<Answer<'index, Self, (Tape<'config, u8, Offset>, SequenceSearchConfig<'config>), Matches<'arena>>>
+    where
+        Self::Completion: Accepts<Tape<'config, u8, Offset>> + Accepts<SequenceSearchConfig<'config>>,
+    {
+        let (index, executor) = self.handles();
+        Self::Completion::answer((queries, config.into()), Matches::new(arena), |call, completion| {
+            let (queries, config) = &mut call.inputs;
+            call.output.queries = queries.count();
+            unsafe {
+                usearch_sequence_search(&mut usearch_sequence_search_t {
+                    index,
+                    executor,
+                    outcome: &mut call.outcome,
+                    completion,
+                    count: queries.count(),
+                    queries: queries.view(Scalar::U8),
+                    matches: &mut call.output.view,
+                    arena: call.output.arena.handle,
+                    wanted: config.wanted,
+                    expansion_factor: config.expansion_factor,
+                    traversal: config.traversal as usearch_traversal_t,
+                    predicate: lower_predicate(&config.predicate),
+                    progress: lower_progress(&mut config.progress, config.progress_steps),
+                    stats: output_slot(&mut config.stats),
+                })
+            };
+            Ok(())
+        })
+    }
+
+    /// Moves the entries of the sources into the targets, keeping their links, then runs a round
+    /// on every target that took entries: several sources into one target gather, one source into
+    /// several targets cuts, and one handle as its only source and target recuts in place.
+    fn reshard<'config, Plan: BorrowMut<SequenceReshardPlan>>(
+        self,
+        config: SequenceReshardConfig<'config, Plan>,
+    ) -> Result<Answer<'index, Self, (SequenceReshardConfig<'config, Plan>, ReshardHandles), RefineReport>>
+    where
+        Self::Completion: Accepts<SequenceReshardConfig<'config, Plan>>,
+    {
+        let (_, executor) = self.handles();
+        let handles = |named: &[&SequenceIndex]| named.iter().map(|named| named.handle).collect();
+        let lists = ReshardHandles { sources: handles(config.sources), targets: handles(config.targets) };
+        Self::Completion::answer((config, lists), RefineReport::default(), |call, completion| {
+            let (config, lists) = &mut call.inputs;
+            unsafe {
+                usearch_sequence_reshard(&mut usearch_sequence_reshard_t {
+                    sources_count: lists.sources.len(),
+                    sources: lists.sources.as_ptr(),
+                    targets_count: lists.targets.len(),
+                    targets: lists.targets.as_ptr(),
+                    executor,
+                    outcome: &mut call.outcome,
+                    completion,
+                    report: &mut call.output,
+                    refine: usearch_refine_options_t {
+                        expansion_factor: config.expansion_factor,
+                        memory_limit: config.memory_limit,
+                    },
+                    seed: config.seed,
+                    progress: lower_progress(&mut config.progress, config.progress_steps),
+                    stats: output_slot(&mut config.stats),
+                    plan: config.plan.as_mut().map_or(ptr::null_mut(), |plan| &mut plan.borrow_mut().handle),
+                    phase: output_slot(&mut config.phase),
+                })
+            };
+            Ok(())
+        })
+    }
+
+    /// Closes a reshard plan, whatever the call answers, and answers what the whole plan did.
+    fn reshard_plan_finish(self, plan: SequenceReshardPlan) -> Result<Answer<'index, Self, (), RefineReport>> {
+        let (_, executor) = self.handles();
+        Self::Completion::answer((), RefineReport::default(), |call, completion| {
+            unsafe {
+                usearch_sequence_reshard_plan_finish(&mut usearch_sequence_reshard_plan_finish_t {
+                    executor,
+                    outcome: &mut call.outcome,
+                    completion,
+                    plan: plan.handle,
+                    report: &mut call.output,
+                })
+            };
+            Ok(())
+        })
+    }
+
+    /// Draws keys around the focus, or across the whole index, writing up to `wanted` of them
+    /// into `arena` as a [`Sample`].
+    fn sample<'config, 'arena>(
+        self,
+        wanted: usize,
+        arena: &'arena mut Arena,
+        config: DenseSampleConfig<'config>,
+    ) -> Result<Answer<'index, Self, DenseSampleConfig<'config>, Sample<'arena>>>
+    where
+        Self::Completion: Accepts<DenseSampleConfig<'config>>,
+    {
+        // Two slices name the shown keys and their places, so only this side sees them disagree.
+        if config.shown.len() != config.shown_coordinates.len() {
+            return Err(crate::types::fail(Status::InvalidArgument, "every shown key needs its coordinates"));
+        }
+        let (index, executor) = self.handles();
+        let sample = Sample {
+            arena,
+            keys: usearch_keys_view_t::default(),
+            entry_ordinals: ptr::null(),
+            parents: usearch_matches_view_t::default(),
+            coordinates: usearch_rows_view_t::default(),
+            written: 0,
+        };
+        Self::Completion::answer(config, sample, |call, completion| {
+            let (config, sample) = (&mut call.inputs, &mut call.output);
+            unsafe {
+                usearch_sequence_sample(&mut usearch_sequence_sample_t {
+                    index,
+                    executor,
+                    outcome: &mut call.outcome,
+                    completion,
+                    shown_count: config.shown.len(),
+                    shown: usearch_keys_view_t::of(config.shown),
+                    shown_coordinates: usearch_rows_view_t {
+                        data: config.shown_coordinates.as_ptr().cast(),
+                        stride: core::mem::size_of::<[f32; 3]>(),
+                        columns: 3,
+                        scalar: Scalar::F32 as crate::types::usearch_scalar_t,
+                    },
+                    focus_count: config.focus.len(),
+                    focus: usearch_keys_view_t::of(config.focus),
+                    keys: &mut sample.keys,
+                    entry_ordinals: &mut sample.entry_ordinals,
+                    parents: &mut sample.parents,
+                    coordinates: &mut sample.coordinates,
+                    written: &mut sample.written,
+                    arena: sample.arena.handle,
+                    wanted,
+                    seed: config.seed,
+                    expansion_factor: config.expansion_factor,
+                    progress: lower_progress(&mut config.progress, config.progress_steps),
+                    stats: output_slot(&mut config.stats),
+                })
+            };
+            Ok(())
+        })
+    }
+
+    /// Saves the index in the layout the path extension picks - one `.safegraphs` monolith, or a
+    /// `.safegraphs.json` manifest beside its shards.
+    fn save<'config, Location: AsRef<Path>>(
+        self,
+        config: impl Into<DenseSaveConfig<'config, Location>>,
+    ) -> Result<Answer<'index, Self, DenseSaveConfig<'config, Location>, ()>>
+    where
+        Self::Completion: Accepts<DenseSaveConfig<'config, Location>>,
+    {
+        let (index, executor) = self.handles();
+        Self::Completion::answer(config.into(), (), |call, completion| {
+            let config = &mut call.inputs;
+            let path = path_view(config.path.as_ref())?;
+            unsafe {
+                usearch_sequence_save(&mut usearch_sequence_save_t {
+                    index,
+                    executor,
+                    outcome: &mut call.outcome,
+                    completion,
+                    path,
+                    progress: lower_progress(&mut config.progress, config.progress_steps),
+                })
+            };
+            Ok(())
+        })
+    }
+
+    /// Saves the index as one monolith into the arena its config carries.
+    #[allow(clippy::type_complexity)]
+    fn save_buffer<'config, 'arena>(
+        self,
+        config: impl Into<DenseSaveBufferConfig<'config, 'arena>>,
+    ) -> Result<Answer<'index, Self, (Option<&'config mut ProgressCallback<'config>>, usize), Monolith<'arena>>>
+    where
+        Self::Completion: Accepts<DenseSaveBufferConfig<'config, 'arena>>,
+    {
+        let (index, executor) = self.handles();
+        let DenseSaveBufferConfig { arena, progress, progress_steps } = config.into();
+        let arena_handle = arena.handle;
+        let monolith = Monolith { arena: PhantomData, monolith: usearch_bytes_view_t::default() };
+        Self::Completion::answer((progress, progress_steps), monolith, |call, completion| {
+            let (progress, progress_steps) = &mut call.inputs;
+            unsafe {
+                usearch_sequence_save_buffer(&mut usearch_sequence_save_buffer_t {
+                    index,
+                    executor,
+                    outcome: &mut call.outcome,
+                    completion,
+                    monolith: &mut call.output.monolith,
+                    arena: arena_handle,
+                    progress: lower_progress(progress, *progress_steps),
+                })
+            };
+            Ok(())
+        })
+    }
+
+    /// Opens a walk over the current contents, pulled blocking on this receiver's executor:
+    /// without `starts` every entry as stored, with them the start keys' entries first, then the
+    /// entries those link to breadth-first.
+    fn cursor(self, starts: &[Key]) -> Result<SequenceCursor<'index>>
+    where
+        Self: SequenceVerbs<'index, Completion = Blocking>,
+    {
+        let (index, executor) = self.handles();
+        let mut cursor = SequenceCursor { handle: ptr::null_mut(), index, executor, receiver: PhantomData };
+        let mut outcome = usearch_outcome_t::default();
+        unsafe {
+            usearch_sequence_cursor_init(&mut usearch_sequence_cursor_init_t {
+                index,
+                outcome: &mut outcome,
+                starts_count: starts.len(),
+                starts: starts.as_ptr(),
+                cursor: &mut cursor.handle,
+            })
+        };
+        check(outcome).map(|()| cursor)
+    }
+}
+
+impl<'index> SequenceVerbs<'index> for &'index SequenceIndex {
+    type Completion = Blocking;
+
+    fn handles(&self) -> (usearch_sequence_index_t, usearch_executor_t) {
+        (self.handle, ptr::null_mut())
+    }
+}
+
+impl<'index, Completion: crate::types::Completion> SequenceVerbs<'index> for On<'index, SequenceIndex, Completion> {
+    type Completion = Completion;
+
+    fn handles(&self) -> (usearch_sequence_index_t, usearch_executor_t) {
+        (self.index.handle, self.executor.handle)
+    }
+}
+
+/// A walk over the index contents; see [`SequenceVerbs::cursor`].
+///
+/// Dropping it waits for every deferred call naming the cursor, then releases it.
+#[derive(Debug)]
+pub struct SequenceCursor<'index> {
+    handle: usearch_sequence_cursor_t,
+    index: usearch_sequence_index_t,
+    executor: usearch_executor_t,
+    receiver: PhantomData<On<'index, SequenceIndex>>,
+}
+
+impl SequenceCursor<'_> {
+    /// Copies up to `wanted` next keys into `arena`; an empty batch means the walk is exhausted.
+    pub fn next_keys<'arena>(&mut self, wanted: usize, arena: &'arena mut Arena) -> Result<DenseBatch<'arena>> {
+        self.next(false, wanted, arena)
+    }
+
+    /// Copies up to `wanted` next keys into `arena`, each with the keys it links to.
+    pub fn next_links<'arena>(&mut self, wanted: usize, arena: &'arena mut Arena) -> Result<DenseBatch<'arena>> {
+        self.next(true, wanted, arena)
+    }
+
+    fn next<'arena>(&mut self, linked: bool, wanted: usize, arena: &'arena mut Arena) -> Result<DenseBatch<'arena>> {
+        let mut batch = DenseBatch {
+            arena: PhantomData,
+            keys: usearch_keys_view_t::default(),
+            links: linked.then(usearch_keys_tape_view_t::default),
+            written: 0,
+        };
+        let mut outcome = usearch_outcome_t::default();
+        unsafe {
+            usearch_sequence_cursor_next(&mut usearch_sequence_cursor_next_t {
+                index: self.index,
+                executor: self.executor,
+                outcome: &mut outcome,
+                completion: usearch_completion_blocking_k,
+                cursor: self.handle,
+                keys: &mut batch.keys,
+                links: batch.links.as_mut().map_or(ptr::null_mut(), ptr::from_mut),
+                written: &mut batch.written,
+                arena: arena.handle,
+                wanted,
+            })
+        };
+        check(outcome).map(|()| batch)
+    }
+}
+
+impl Drop for SequenceCursor<'_> {
+    fn drop(&mut self) {
+        unsafe { usearch_sequence_cursor_free(self.handle) }
+    }
+}
+
+// endregion: Sequence Index
+
+// region: Tests
+
+#[cfg(test)]
+mod tests {
+    use core::ops::ControlFlow;
+    use std::path::PathBuf;
+
+    use rand::{RngExt, SeedableRng};
+
+    use super::*;
+    use crate::types::Phase;
+
+    // region: Helpers
+
+    /// One executor per test, since an executor runs one call at a time.
+    fn executor() -> Executor {
+        Executor::for_ram(&[], None, 0).expect("the executor must spawn")
+    }
+
+    fn keys(first: u64, count: usize) -> Vec<Key> {
+        (first..first + count as u64).map(Key::from).collect()
+    }
+
+    /// Random lowercase words of 8 to 16 letters, the same for the same seed.
+    fn words(count: usize, seed: u64) -> Vec<Vec<u8>> {
+        let mut generator = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
+        (0..count)
+            .map(|_| {
+                let length = generator.random_range(8..17);
+                (0..length).map(|_| generator.random_range(b'a'..=b'z')).collect()
+            })
+            .collect()
+    }
+
+    /// A host index holding `count` random words under consecutive keys from `first`.
+    fn populated_index(count: usize, first: u64, seed: u64) -> Result<SequenceIndex> {
+        let index = SequenceIndex::init_ram(&SequenceOptions::default(), &[])?;
+        if count != 0 {
+            index.on(&executor()).insert(keys(first, count), Tape::of(words(count, seed)))?;
+        }
+        Ok(index)
+    }
+
+    fn size(index: &SequenceIndex) -> Result<usize> {
+        Ok(index.describe()?.size)
+    }
+
+    fn refused(answer: Result<impl Sized>, status: Status) -> bool {
+        matches!(answer, Err(Error { status: answered, .. }) if answered == status)
+    }
+
+    /// A checkpoint path scoped by test name and process, never the working directory.
+    fn scratch_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("usearch-rust-sequence-{name}-{}.safegraphs", std::process::id()))
+    }
+
+    fn remove_quietly(path: &Path) {
+        let _ = std::fs::remove_file(path);
+    }
+
+    // endregion: Helpers
+
+    // region: Construction
+
+    #[test]
+    fn init_ram_starts_empty_and_keeps_the_metric() -> Result<()> {
+        let options = SequenceOptions { metric: SequenceMetric::LevenshteinUtf8, ..SequenceOptions::default() };
+        let described = SequenceIndex::init_ram(&options, &[])?.describe()?;
+        assert_eq!(described.size, 0);
+        assert_eq!(described.metadata.metric, SequenceMetric::LevenshteinUtf8);
+        assert_eq!(described.gpu_class(), "unknown", "a host index names no GPU class");
+        Ok(())
+    }
+
+    #[test]
+    fn spells_every_metric_back() {
+        for metric in [
+            SequenceMetric::LevenshteinBytes,
+            SequenceMetric::LevenshteinUtf8,
+            SequenceMetric::NeedlemanWunsch,
+            SequenceMetric::Overlap,
+        ] {
+            assert_eq!(metric.to_string().parse(), Ok(metric), "the library spells it back");
+        }
+        assert!("hamming".parse::<SequenceMetric>().is_err());
+    }
+
+    /// A VRAM index either opens on a GPU or answers the library's own refusal.
+    #[test]
+    fn init_vram_surfaces_the_library_status() {
+        match SequenceIndex::init_vram(&SequenceOptions::default(), &[]) {
+            Ok(index) => assert_ne!(index.describe().unwrap().gpu_class(), "unknown"),
+            Err(error) => assert_ne!(error.status, Status::Deferred, "a refusal is final"),
+        }
+    }
+
+    // endregion: Construction
+
+    // region: Ingest and Retrieval
+
+    /// Mirrors the Sequence Indexes snippet of rust/README.md line by line; only the function
+    /// around it and its closing `Ok(())` differ.
+    #[test]
+    fn readme_sequence_indexes() -> Result<()> {
+        let options = SequenceOptions { metric: SequenceMetric::LevenshteinUtf8, ..SequenceOptions::default() };
+        let index = SequenceIndex::init_ram(&options, &[])?;
+        let words = Tape::of(["kitten", "sitting", "mitten"]);
+        index.insert([Key::from(1u64), Key::from(2u64), Key::from(3u64)], words)?;
+
+        let mut arena = Arena::new()?;
+        let matches = index.search(Tape::of(["sittin"]), 1, &mut arena)?;
+        assert_eq!(matches.query(0)?.keys, [Key::from(2u64)]);
+        assert_eq!(matches.query(0)?.distances[0], 1.0); // one edit away
+        Ok(())
+    }
+
+    /// Every sequence searched for comes back first under its own key, at distance zero.
+    #[test]
+    fn finds_the_inserted_entry() -> Result<()> {
+        let index = SequenceIndex::init_ram(&SequenceOptions::default(), &[])?;
+        index.insert(keys(1, 3), Tape::of(["kitten", "sitting", "mitten"]))?;
+        assert_eq!(size(&index)?, 3);
+
+        let mut arena = Arena::new()?;
+        let matches = index.search(Tape::of(["sitting"]), 1, &mut arena)?;
+        let best = matches.query(0)?;
+        assert_eq!((best.keys, best.distances[0]), (&[Key::from(2u64)][..], 0.0));
+        Ok(())
+    }
+
+    #[test]
+    fn gets_and_counts_every_entry_under_a_key() -> Result<()> {
+        let index = SequenceIndex::init_ram(&SequenceOptions::default(), &[])?;
+        let shared = Key::from(7u64);
+        index.insert([shared, shared], Tape::of(["kitten", "sitting"]))?;
+
+        let stats = index.count(shared)?;
+        assert_eq!((stats.entries, stats.total_bytes, stats.largest_bytes), (2, 13, 7));
+        assert!(index.contains(shared)? && !index.contains(Key::from(8u64))?);
+
+        let mut arena = Arena::new()?;
+        let stored = index.get(shared, &mut arena)?;
+        assert_eq!(stored.iter().collect::<Vec<_>>(), [&b"kitten"[..], &b"sitting"[..]]);
+        assert_eq!(index.get(Key::from(8u64), &mut arena)?.written(), 0, "an absent key yields none");
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_mismatched_key_and_entry_counts() -> Result<()> {
+        let index = SequenceIndex::init_ram(&SequenceOptions::default(), &[])?;
+        assert!(refused(index.insert(keys(0, 3), Tape::of(["kitten"])), Status::ShapeMismatch));
+        assert_eq!(size(&index)?, 0);
+        Ok(())
+    }
+
+    // endregion: Ingest and Retrieval
+
+    // region: Serialization
+
+    #[test]
+    fn saves_and_loads_a_file() -> Result<()> {
+        let path = scratch_path("saves_and_loads_a_file");
+        let index = populated_index(32, 0, 0)?;
+        index.on(&executor()).save(&path)?;
+
+        assert_eq!(SequenceIndex::metadata(&path)?.metric, SequenceMetric::LevenshteinBytes);
+        let restored = SequenceIndex::load_ram(&path)?;
+        assert_eq!(size(&restored)?, 32);
+        assert!(restored.contains(Key::from(17u64))?);
+
+        // A view serves the checkpoint in place and refuses changes, where RAM serves views at all.
+        match SequenceIndex::view_ram(&path, None) {
+            Ok(viewed) => {
+                assert_eq!(size(&viewed)?, 32);
+                assert!(refused(viewed.reserve(64, 0), Status::ReadOnly));
+            }
+            Err(error) => assert_eq!(error.status, Status::Unsupported),
+        }
+        remove_quietly(&path);
+        Ok(())
+    }
+
+    #[test]
+    fn saves_and_loads_a_buffer() -> Result<()> {
+        let index = populated_index(32, 0, 0)?;
+        let mut arena = Arena::new()?;
+        let saved = index.save_buffer(&mut arena)?;
+        let monolith = saved.view();
+        assert!(!monolith.is_empty());
+
+        assert_eq!(SequenceIndex::metadata_buffer(monolith)?.metric, SequenceMetric::LevenshteinBytes);
+        assert_eq!(size(&SequenceIndex::load_ram_buffer(monolith)?)?, 32);
+        assert!(
+            SequenceIndex::load_ram_buffer(&monolith[..monolith.len() - 1]).is_err(),
+            "a short buffer must not be read"
+        );
+        Ok(())
+    }
+
+    // endregion: Serialization
+
+    // region: Refinement
+
+    /// A round reports what it did, its closing audit judging every entry, and leaves each entry
+    /// findable.
+    #[test]
+    fn refine_reports_a_round_over_every_entry() -> Result<()> {
+        let index = populated_index(64, 0, 0)?;
+        let report = index.on(&executor()).refine(SequenceRefineConfig::default())?;
+        assert!(report.changed <= report.reselected);
+        assert_eq!(report.reachability.audited, 64);
+        assert!(index.contains(Key::from(17u64))?);
+        Ok(())
+    }
+
+    /// A plan keeps a stopped round live for the next call, and its finish reports the whole plan.
+    #[test]
+    fn a_refine_plan_resumes_and_finishes() -> Result<()> {
+        let index = populated_index(64, 0, 0)?;
+        let executor = executor();
+        let (mut plan, mut phase) = (SequenceRefinePlan::default(), PhaseProgress::default());
+        let stopped = index.on(&executor).refine(SequenceRefineConfig {
+            progress: Some(&mut |_, _| ControlFlow::Break(())),
+            plan: Some(&mut plan),
+            phase: Some(&mut phase),
+            ..SequenceRefineConfig::default()
+        });
+        if let Err(failure) = stopped {
+            assert_eq!(failure.status, Status::Cancelled);
+            assert!(phase.phase != Phase::Done && phase.completed <= phase.total);
+            index.on(&executor).refine(SequenceRefineConfig {
+                plan: Some(&mut plan),
+                phase: Some(&mut phase),
+                ..SequenceRefineConfig::default()
+            })?;
+        }
+        assert_eq!(phase.phase, Phase::Done);
+        assert_eq!(index.on(&executor).refine_plan_finish(plan)?.reachability.audited, 64);
+        Ok(())
+    }
+
+    /// A plan lives across calls on one executor, so a call on the calling thread cannot open one.
+    #[test]
+    fn a_refine_plan_needs_an_executor() -> Result<()> {
+        let index = populated_index(0, 0, 0)?;
+        let mut plan = SequenceRefinePlan::default();
+        let refined = index.refine(SequenceRefineConfig { plan: Some(&mut plan), ..SequenceRefineConfig::default() });
+        assert!(refused(refined, Status::InvalidArgument));
+        Ok(())
+    }
+
+    // endregion: Refinement
+
+    // region: Resharding
+
+    /// Several sources into one target gather every entry there, and the other sources end empty
+    /// and live.
+    #[test]
+    fn gathers_several_sources_into_one_target() -> Result<()> {
+        let first = populated_index(32, 0, 0)?;
+        let (second, third) = (populated_index(32, 32, 1)?, populated_index(32, 64, 2)?);
+        first.on(&executor()).reshard(SequenceReshardConfig {
+            sources: &[&first, &second, &third],
+            targets: &[&first],
+            ..SequenceReshardConfig::default()
+        })?;
+        assert_eq!(size(&first)?, 96);
+        assert!(first.contains(Key::from(40u64))? && first.contains(Key::from(80u64))?);
+        assert_eq!((size(&second)?, size(&third)?), (0, 0));
+        Ok(())
+    }
+
+    /// A stop cuts only the closing rounds, so every entry has moved; the plan it leaves live
+    /// continues where it stopped, and a deferred receiver closes it.
+    #[test]
+    fn a_stopped_gather_continues_through_its_plan() -> Result<()> {
+        let first = populated_index(16, 0, 0)?;
+        let second = populated_index(16, 16, 1)?;
+        let executor = executor();
+        let (mut plan, mut phase) = (SequenceReshardPlan::default(), PhaseProgress::default());
+        let stopped = first.on(&executor).reshard(SequenceReshardConfig {
+            sources: &[&first, &second],
+            targets: &[&first],
+            progress: Some(&mut |_, _| ControlFlow::Break(())),
+            plan: Some(&mut plan),
+            phase: Some(&mut phase),
+            ..SequenceReshardConfig::default()
+        });
+        if let Err(failure) = stopped {
+            assert_eq!(failure.status, Status::Cancelled);
+            assert_ne!(phase.phase, Phase::Done, "a stop names the phase it stopped in");
+        }
+        assert_eq!(size(&first)?, 32);
+
+        // A deferred call owns the plan it continues and hands it back once final.
+        let continued = first.deferred(&executor).reshard(SequenceReshardConfig::from(plan))?;
+        let (finished, (config, _)) = continued.wait_with_inputs();
+        finished?;
+        let plan = config.plan.expect("the call hands its plan back");
+        let report = first.deferred(&executor).reshard_plan_finish(plan)?.wait()?;
+        assert!(report.changed <= report.reselected);
+        Ok(())
+    }
+
+    /// One source into several targets cuts it between them, and the source stays live but empty.
+    #[test]
+    fn reshards_one_source_into_several_targets() -> Result<()> {
+        let source = populated_index(64, 0, 0)?;
+        let targets = [populated_index(0, 0, 0)?, populated_index(0, 0, 0)?];
+        let report = source.on(&executor()).reshard(SequenceReshardConfig {
+            sources: &[&source],
+            targets: &[&targets[0], &targets[1]],
+            seed: 7,
+            ..SequenceReshardConfig::default()
+        })?;
+        assert!(report.changed <= report.reselected);
+        let (left, right) = (size(&targets[0])?, size(&targets[1])?);
+        assert!(left != 0 && right != 0 && left + right == 64);
+        assert_eq!(size(&source)?, 0);
+        Ok(())
+    }
+
+    /// A cut a stop interrupts keeps every entry moved, the next call naming the plan ends its
+    /// rounds, and a deferred receiver closes it.
+    #[test]
+    fn reshards_one_source_into_several_targets_through_a_plan() -> Result<()> {
+        let source = populated_index(64, 0, 0)?;
+        let targets = [populated_index(0, 0, 0)?, populated_index(0, 0, 0)?];
+        let executor = executor();
+        let (mut plan, mut phase) = (SequenceReshardPlan::default(), PhaseProgress::default());
+        let stopped = source.on(&executor).reshard(SequenceReshardConfig {
+            sources: &[&source],
+            targets: &[&targets[0], &targets[1]],
+            progress: Some(&mut |_, _| ControlFlow::Break(())),
+            plan: Some(&mut plan),
+            phase: Some(&mut phase),
+            ..SequenceReshardConfig::default()
+        });
+        assert_eq!(size(&targets[0])? + size(&targets[1])?, 64);
+        if stopped.is_err() {
+            source.on(&executor).reshard(SequenceReshardConfig {
+                plan: Some(&mut plan),
+                phase: Some(&mut phase),
+                ..SequenceReshardConfig::default()
+            })?;
+        }
+        assert_eq!(phase.phase, Phase::Done);
+        source.deferred(&executor).reshard_plan_finish(plan)?.wait()?;
+        Ok(())
+    }
+
+    /// One index as its only source and target has a single shard to recut, which the library
+    /// refuses.
+    #[test]
+    fn a_recut_of_one_handle_is_unsupported() -> Result<()> {
+        let index = populated_index(16, 0, 0)?;
+        let recut = index.on(&executor()).reshard(SequenceReshardConfig {
+            sources: &[&index],
+            targets: &[&index],
+            ..SequenceReshardConfig::default()
+        });
+        assert!(refused(recut, Status::Unsupported));
+        assert_eq!(size(&index)?, 16);
+        Ok(())
+    }
+
+    /// Empty or repeated lists are malformed and a target holding foreign entries mismatches;
+    /// every refusal leaves the entries where they were.
+    #[test]
+    fn refuses_malformed_lists_and_moves_nothing() -> Result<()> {
+        let (first, second) = (populated_index(8, 0, 0)?, populated_index(8, 8, 1)?);
+        let executor = executor();
+        let reshard = |sources: &[&SequenceIndex], targets: &[&SequenceIndex]| {
+            first.on(&executor).reshard(SequenceReshardConfig { sources, targets, ..SequenceReshardConfig::default() })
+        };
+        assert!(refused(reshard(&[], &[&first]), Status::InvalidArgument));
+        assert!(refused(reshard(&[&first, &first], &[&first]), Status::InvalidArgument));
+        assert!(refused(reshard(&[&first], &[&second]), Status::ConfigMismatch));
+        assert_eq!((size(&first)?, size(&second)?), (8, 8));
+        Ok(())
+    }
+
+    // endregion: Resharding
+}
+
+// endregion: Tests

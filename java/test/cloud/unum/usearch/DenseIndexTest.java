@@ -121,6 +121,16 @@ public class DenseIndexTest {
     }
 
     @Test
+    public void initVramSurfacesTheLibraryStatus() {
+        try (DenseIndex index = DenseIndex.initVram(twoDimensional(), new int[0])) {
+            assertNotEquals("unknown", index.describe().gpuClass());
+        } catch (USearchException refused) {
+            assertNotEquals(Status.SUCCESS, refused.status());
+            assertNotEquals(Status.DEFERRED, refused.status());
+        }
+    }
+
+    @Test
     public void keyRendersAsDashedUuid() {
         assertEquals("00000000-0000-0000-0000-00000000002a", Key.of(42).toString());
         assertEquals(Key.NIL, Key.of(0));

@@ -64,8 +64,11 @@ let package = Package(
             name: "USearch",
             dependencies: libraryDependencies + [.product(name: "NumKong", package: "numkong")],
             path: "swift",
-            exclude: ["README.md", "Test.swift"],
-            sources: ["Types.swift", "DenseIndex.swift"],
+            exclude: ["README.md", "Test.swift", "ModalitiesTest.swift"],
+            sources: [
+                "Types.swift", "DenseIndex.swift", "BasicIndexes.swift", "SequenceIndex.swift", "ShapesIndex.swift",
+                "GeospatialIndex.swift",
+            ],
             linkerSettings: [
                 // The engine is C++, and Apple SDKs ship only libc++ - there is no libstdc++ to name.
                 .linkedLibrary("c++", .when(platforms: [.macOS, .iOS, .tvOS, .watchOS, .visionOS])),
@@ -76,8 +79,11 @@ let package = Package(
             name: "USearchTestsSwift",
             dependencies: ["USearch", .product(name: "NumKong", package: "numkong")],
             path: "swift",
-            exclude: ["README.md", "Types.swift", "DenseIndex.swift"],
-            sources: ["Test.swift"]
+            exclude: [
+                "README.md", "Types.swift", "DenseIndex.swift", "BasicIndexes.swift", "SequenceIndex.swift",
+                "ShapesIndex.swift", "GeospatialIndex.swift",
+            ],
+            sources: ["Test.swift", "ModalitiesTest.swift"]
         ),
     ]
 )

@@ -14,6 +14,19 @@ from std.time import perf_counter_ns
 
 from usearch import (
     Admission,
+    CPUClass,
+    GPUClass,
+    SequenceIndex,
+    SequenceMetric,
+    SequenceOptions,
+    SequenceRefineConfig,
+    SequenceRefinePlan,
+    SequenceReshardConfig,
+    SequenceReshardPlan,
+    Tape,
+    sequence_metadata_read_buffer,
+    sequence_reshard,
+    sequence_reshard_plan_finish_deferred,
     Arena,
     Continuation,
     DenseAttendConfig,
@@ -49,6 +62,24 @@ from usearch import (
     dense_metadata_read_buffer,
     dense_reshard,
     dense_reshard_plan_finish_deferred,
+    GeospatialIndex,
+    GeospatialObservation,
+    GeospatialOptions,
+    GeospatialRefineConfig,
+    GeospatialRefinePlan,
+    GeospatialRelation,
+    GeospatialSearchConfig,
+    GeospatialTerrain,
+    ShapesIndex,
+    ShapesMetric,
+    ShapesOptions,
+    ShapesRefineConfig,
+    ShapesRefinePlan,
+    TapeView,
+    geospatial_metadata_read_buffer,
+    geospatial_reshard,
+    shapes_metadata_read_buffer,
+    shapes_reshard,
 )
 from usearch.types import Address, NULL_ADDRESS
 
@@ -964,6 +995,595 @@ def test_attend_is_exact_attention_over_every_key() raises:
 # endregion Linear Algebra
 
 
+# region Sequences
+
+
+def _words(count: Int, seed: Int) -> Tape[DType.uint8]:
+    """`count` lowercase words of 8 to 16 letters, drawn from a fixed linear congruential stream."""
+    var tape = Tape[DType.uint8]()
+    var state = UInt64(seed * 2654435761 + 1)
+    for _ in range(count):
+        state = state * 6364136223846793005 + 1442695040888963407
+        var letters = List[UInt8]()
+        for _ in range(8 + Int((state >> 33) % 9)):
+            state = state * 6364136223846793005 + 1442695040888963407
+            letters.append(UInt8(97 + Int((state >> 33) % 26)))
+        try:
+            tape.append(Span(letters))
+        except:
+            pass
+    return tape^
+
+
+def _keys(first: Int, count: Int) -> List[Key]:
+    """`count` consecutive integer keys from `first`."""
+    var keys = List[Key]()
+    for key in range(first, first + count):
+        keys.append(Key(integer=UInt64(key)))
+    return keys^
+
+
+def _sequences(library: Library, executor: Executor, count: Int, first: Int = 0, seed: Int = 0) raises -> SequenceIndex:
+    """A host sequence index holding `count` random words under consecutive keys from `first`."""
+    var index = SequenceIndex.init_ram(library)
+    if count != 0:
+        var tape = _words(count, seed)
+        index.on(executor).insert(_keys(first, count), tape.view())
+    return index^
+
+
+def _stop_at_once(completed: Int, total: Int, mut reports: Int) -> Continuation:
+    """Stops the call at its first report."""
+    reports += 1
+    return Continuation.CANCEL
+
+
+def test_sequence_index_starts_empty_and_keeps_its_metric() raises:
+    """A fresh host index is empty, on a CPU class, and reads back the kind it froze, spelled by the engine."""
+    if not _engine_is_present():
+        print("skipped: libusearch_shared is not on the loader path")
+        return
+    var library = Library()
+    var index = SequenceIndex.init_ram(library, SequenceOptions(SequenceMetric.LEVENSHTEIN_UTF8))
+    var described = index.describe()
+    assert_equal(Int(described.size), 0, "a fresh index is empty")
+    assert_true(described.cpu_class != CPUClass.UNKNOWN and described.gpu_class == GPUClass.UNKNOWN, "on a CPU")
+    assert_true(described.metadata.metric == SequenceMetric.LEVENSHTEIN_UTF8, "the frozen kind reads back")
+    var spelled = library.sequence_metric_name(SequenceMetric.LEVENSHTEIN_UTF8)
+    assert_true(library.sequence_metric_from_name(spelled) == SequenceMetric.LEVENSHTEIN_UTF8, "names round-trip")
+    var status = Status.SUCCESS
+    try:
+        _ = SequenceIndex.init_ram(library, SequenceOptions(SequenceMetric.OVERLAP))
+    except error:
+        status = error.status
+    assert_true(status == Status.CONFIG_MISMATCH, "the overlap kind without window widths is the engine's refusal")
+
+
+def test_sequence_search_get_and_count() raises:
+    """Every word searched for comes back first under its own key at distance zero, and reads back whole."""
+    if not _engine_is_present():
+        print("skipped: libusearch_shared is not on the loader path")
+        return
+    var library = Library()
+    var index = SequenceIndex.init_ram(library)
+    var words = Tape[DType.uint8]()
+    words.append("kitten")
+    words.append("sitting")
+    words.append("mitten")
+    index.insert(_keys(1, 3), words.view())
+    assert_equal(Int(index.describe().size), 3, "three words stored")
+
+    var query = Tape[DType.uint8]()
+    query.append("sitting")
+    var arena = Arena(library)
+    var matches = index.search(query.view(), 1, arena)
+    assert_true(matches.query_keys(0)[0] == Key(integer=2), "the word finds itself first")
+    assert_equal(matches.query_distances(0)[0], 0, "at distance zero")
+
+    var stats = index.count(Key(integer=2))
+    assert_equal(Int(stats.entries), 1, "one entry under the key")
+    assert_equal(Int(stats.total_bytes), 7, "seven bytes long")
+    var exported = index.get(Key(integer=2), arena)
+    assert_equal(len(exported), 1, "one sequence exported")
+    assert_equal(String(StringSlice(unsafe_from_utf8=exported[0])), "sitting", "byte for byte")
+    assert_equal(len(index.get(Key(integer=9), arena)), 0, "an absent key exports nothing")
+
+
+def test_sequence_checkpoints_round_trip() raises:
+    """A monolith saved into an arena loads back with every entry, and its header reads without loading."""
+    if not _engine_is_present():
+        print("skipped: libusearch_shared is not on the loader path")
+        return
+    var library = Library()
+    var executor = Executor.for_ram(library, threads=2)
+    var index = _sequences(library, executor, 16)
+    var arena = Arena(executor)
+    var monolith = index.on(executor).save_buffer(arena)
+    var frozen = sequence_metadata_read_buffer(executor, monolith.bytes())
+    assert_true(frozen.metric == SequenceMetric.LEVENSHTEIN_BYTES, "the header names the kind")
+    var restored = SequenceIndex.load_ram_buffer(executor, monolith.bytes())
+    assert_equal(Int(restored.describe().size), 16, "every entry loads back")
+
+
+def test_sequence_refine_plan_resumes_and_finishes() raises:
+    """A stopped round stays live in its plan, the next call ends it, and the plan finishes exactly once."""
+    if not _engine_is_present():
+        print("skipped: libusearch_shared is not on the loader path")
+        return
+    var library = Library()
+    var executor = Executor.for_ram(library, threads=2)
+    var index = _sequences(library, executor, 32)
+    var round = index.on(executor).refine()
+    assert_equal(Int(round.reachability.audited), 32, "a round audits every entry")
+    assert_true(round.changed <= round.reselected, "and changes only what it re-selected")
+
+    var plan = SequenceRefinePlan()
+    var progress = PhaseProgress()
+    var reports = stack_allocation[1, Int]().unsafe_origin_cast[MutAnyOrigin]()
+    reports[unsafe_offset=0] = 0
+    var status = Status.SUCCESS
+    try:
+        _ = index.on(executor).refine(
+            SequenceRefineConfig(
+                progress=ProgressArguments.of[_stop_at_once](reports),
+                plan=Pointer(to=plan),
+                phase=Pointer(to=progress),
+            )
+        )
+    except error:
+        status = error.status
+    assert_true(status == Status.CANCELLED, "the handler stops the round")
+    assert_true(progress.phase != Phase.DONE, "short of its end")
+    _ = index.on(executor).refine(SequenceRefineConfig(plan=Pointer(to=plan), phase=Pointer(to=progress)))
+    assert_true(progress.phase == Phase.DONE, "the next call ends it")
+    var whole = index.on(executor).refine_plan_finish(plan^)
+    assert_equal(Int(whole.reachability.audited), 32, "the whole plan reports every entry")
+    status = Status.SUCCESS
+    try:
+        _ = index.on(executor).refine_plan_finish(SequenceRefinePlan())
+    except error:
+        status = error.status
+    assert_true(status == Status.INVALID_ARGUMENT, "a plan no refine opened, or one finished, is refused")
+
+    var inline = SequenceRefinePlan()
+    status = Status.SUCCESS
+    try:
+        _ = index.refine(SequenceRefineConfig(plan=Pointer(to=inline)))
+    except error:
+        status = error.status
+    assert_true(status == Status.INVALID_ARGUMENT, "a plan lives on an executor, so the calling thread opens none")
+
+
+def test_sequence_reshard_gathers_cuts_and_refuses() raises:
+    """Sources gather into a target, a source cuts into targets through a plan, and malformed lists move
+    nothing."""
+    if not _engine_is_present():
+        print("skipped: libusearch_shared is not on the loader path")
+        return
+    var library = Library()
+    var executor = Executor.for_ram(library, threads=2)
+    var parts = List[SequenceIndex]()
+    for seed in range(3):
+        parts.append(_sequences(library, executor, 16, 16 * seed, seed))
+    var report = sequence_reshard(executor, parts, Span(parts)[0:1])
+    assert_true(report.changed <= report.reselected, "the closing round changes only what it re-selected")
+    assert_equal(Int(parts[0].describe().size), 48, "every entry gathers into the target")
+    assert_equal(Int(parts[0].count(Key(integer=40)).entries), 1, "under its own key")
+    assert_equal(Int(parts[1].describe().size + parts[2].describe().size), 0, "the other sources end empty")
+
+    var cut = List[SequenceIndex]()
+    cut.append(_sequences(library, executor, 32))
+    cut.append(SequenceIndex.init_ram(library))
+    cut.append(SequenceIndex.init_ram(library))
+    var plan = SequenceReshardPlan()
+    var progress = PhaseProgress()
+    var reports = stack_allocation[1, Int]().unsafe_origin_cast[MutAnyOrigin]()
+    reports[unsafe_offset=0] = 0
+    try:
+        _ = sequence_reshard(
+            executor,
+            Span(cut)[0:1],
+            Span(cut)[1:3],
+            SequenceReshardConfig(
+                seed=7,
+                progress=ProgressArguments.of[_stop_at_once](reports),
+                plan=Pointer(to=plan),
+                phase=Pointer(to=progress),
+            ),
+        )
+    except error:
+        assert_true(error.status == Status.CANCELLED, "only the handler stops the cut")
+    assert_equal(Int(cut[1].describe().size + cut[2].describe().size), 32, "a stop keeps every entry moved")
+    _ = sequence_reshard(
+        executor,
+        Span(cut)[0:1],
+        Span(cut)[1:3],
+        SequenceReshardConfig(plan=Pointer(to=plan), phase=Pointer(to=progress)),
+    )
+    assert_true(progress.phase == Phase.DONE, "the next call naming the plan ends its rounds")
+    var finished = sequence_reshard_plan_finish_deferred(executor, plan^)
+    _ = finished.wait()
+    assert_equal(Int(cut[0].describe().size), 0, "the source is left empty and live")
+
+    var first = _sequences(library, executor, 8)
+    var pair = List[SequenceIndex]()
+    pair.append(first^)
+    pair.append(_sequences(library, executor, 8, 8, 1))
+    var status = Status.SUCCESS
+    try:
+        _ = sequence_reshard(executor, Span(pair)[0:1], Span(pair)[0:1])
+    except error:
+        status = error.status
+    assert_true(status == Status.UNSUPPORTED, "one index as its only source and target has nothing to recut")
+    status = Status.SUCCESS
+    try:
+        _ = sequence_reshard(executor, Span(pair)[0:0], Span(pair)[0:1])
+    except error:
+        status = error.status
+    assert_true(status == Status.INVALID_ARGUMENT, "an empty list is malformed")
+    status = Status.SUCCESS
+    try:
+        _ = sequence_reshard(executor, Span(pair)[0:1], Span(pair)[1:2])
+    except error:
+        status = error.status
+    assert_true(status == Status.CONFIG_MISMATCH, "a target holding foreign entries mismatches")
+    assert_equal(Int(pair[0].describe().size + pair[1].describe().size), 16, "every refusal moves nothing")
+    _ = cut^
+    _ = parts^
+
+
+# endregion Sequences
+
+# region Shapes
+
+
+def _clouds(count: Int, seed: Int) -> Tape[DType.float32, 3]:
+    """`count` point clouds of 4 to 12 points in the unit cube, drawn from a fixed linear congruential stream."""
+    var tape = Tape[DType.float32, 3]()
+    var state = UInt64(seed * 2654435761 + 1)
+    for _ in range(count):
+        state = state * 6364136223846793005 + 1442695040888963407
+        var scalars = List[Float32]()
+        for _ in range(3 * (4 + Int((state >> 33) % 9))):
+            state = state * 6364136223846793005 + 1442695040888963407
+            scalars.append(Float32(Int((state >> 33) % 1000)) / 1000)
+        try:
+            tape.append(Span(scalars))
+        except:
+            pass
+    return tape^
+
+
+def _shapes(library: Library, executor: Executor, count: Int, first: Int = 0, seed: Int = 0) raises -> ShapesIndex:
+    """A host shape index holding `count` random clouds under consecutive keys from `first`."""
+    var index = ShapesIndex.init_ram(library)
+    if count != 0:
+        var tape = _clouds(count, seed)
+        index.on(executor).insert(_keys(first, count), tape.view())
+    return index^
+
+
+def test_shapes_index_starts_empty_and_keeps_its_metric() raises:
+    """A fresh host index is empty, on a CPU class, and reads back the kind it froze, spelled by the engine."""
+    if not _engine_is_present():
+        print("skipped: libusearch_shared is not on the loader path")
+        return
+    var library = Library()
+    var index = ShapesIndex.init_ram(library, ShapesOptions(ShapesMetric.HAUSDORFF))
+    var described = index.describe()
+    assert_equal(Int(described.size), 0, "a fresh index is empty")
+    assert_true(described.cpu_class != CPUClass.UNKNOWN and described.gpu_class == GPUClass.UNKNOWN, "on a CPU")
+    assert_true(described.metadata.metric == ShapesMetric.HAUSDORFF, "the frozen kind reads back")
+    assert_true(described.metadata.quantization == ScalarKind.F32, "over f32 points by default")
+    var spelled = library.shapes_metric_name(ShapesMetric.WASSERSTEIN_PROCRUSTES)
+    assert_true(library.shapes_metric_from_name(spelled) == ShapesMetric.WASSERSTEIN_PROCRUSTES, "names round-trip")
+    var status = Status.SUCCESS
+    try:
+        _ = ShapesIndex.init_ram(library, ShapesOptions(quantization=ScalarKind.F64))
+    except error:
+        status = error.status
+    assert_true(status == Status.UNSUPPORTED, "storage other than f16 or f32 is the engine's refusal")
+
+
+def test_shapes_search_get_and_count() raises:
+    """Clouds of different point counts share one tape, each finds itself first, and reads back in its pose."""
+    if not _engine_is_present():
+        print("skipped: libusearch_shared is not on the loader path")
+        return
+    var library = Library()
+    var executor = Executor.for_ram(library, threads=2)
+    var clouds = Tape[DType.float32, 3]()
+    for points in [5, 9, 13]:
+        var scalars = List[Float32]()
+        for scalar in range(3 * points):
+            scalars.append(Float32((scalar * 7 + points) % 11) / 11)
+        clouds.append(Span(scalars))
+    var index = ShapesIndex.init_ram(library)
+    index.on(executor).reserve(3, 27)
+    index.on(executor).insert(_keys(1, 3), clouds.view())
+    var described = index.describe()
+    assert_equal(Int(described.size), 3, "three clouds stored")
+    assert_equal(Int(described.total_points), 27, "with every point counted")
+
+    var arena = Arena(executor)
+    var query = TapeView.of[width=3](Span(clouds.elements), Span(clouds.offsets)[2:4])
+    var matches = index.on(executor).search(query, 1, arena)
+    assert_true(matches.query_keys(0)[0] == Key(integer=3), "the cloud finds itself first")
+
+    var stats = index.count(Key(integer=3))
+    assert_equal(Int(stats.entries), 1, "one entry under the key")
+    assert_equal(Int(stats.total_points), 13, "thirteen points")
+    var exported = index.on(executor).get[DType.float32](Key(integer=3), arena)
+    assert_equal(len(exported), 1, "one cloud exported")
+    assert_equal(len(exported[0]), 39, "three scalars per point")
+    assert_almost_equal(exported[0][4], clouds.elements[14 * 3 + 4], atol=1e-6, msg="in the pose it was inserted in")
+    assert_equal(len(index.get[DType.float32](Key(integer=9), arena)), 0, "an absent key exports nothing")
+
+    var cursor = index.on(executor).cursor(_keys(2, 1))
+    assert_true(cursor.next_links(8, arena).keys()[0] == Key(integer=2), "a walk from a start key yields it first")
+    var sampled = index.deferred(executor).sample(2, arena)
+    assert_true(len(sampled.wait()) <= 2, "a deferred sample draws at most what it wants")
+
+
+def test_shapes_checkpoints_refine_and_reshard() raises:
+    """A monolith round-trips, a stopped round resumes in its plan, sources gather, and malformed lists move
+    nothing."""
+    if not _engine_is_present():
+        print("skipped: libusearch_shared is not on the loader path")
+        return
+    var library = Library()
+    var executor = Executor.for_ram(library, threads=2)
+    var index = _shapes(library, executor, 16)
+    var arena = Arena(executor)
+    var monolith = index.on(executor).save_buffer(arena)
+    var frozen = shapes_metadata_read_buffer(executor, monolith.bytes())
+    assert_true(frozen.metric == ShapesMetric.CHAMFER and frozen.quantization == ScalarKind.F32, "the header")
+    var restored = ShapesIndex.load_ram_buffer(executor, monolith.bytes())
+    assert_equal(Int(restored.describe().total_points), Int(index.describe().total_points), "every point loads back")
+
+    var plan = ShapesRefinePlan()
+    var progress = PhaseProgress()
+    var reports = stack_allocation[1, Int]().unsafe_origin_cast[MutAnyOrigin]()
+    reports[unsafe_offset=0] = 0
+    try:
+        _ = index.on(executor).refine(
+            ShapesRefineConfig(
+                progress=ProgressArguments.of[_stop_at_once](reports), plan=Pointer(to=plan), phase=Pointer(to=progress)
+            )
+        )
+    except error:
+        assert_true(error.status == Status.CANCELLED, "only the handler stops the round")
+    _ = index.on(executor).refine(ShapesRefineConfig(plan=Pointer(to=plan), phase=Pointer(to=progress)))
+    assert_true(progress.phase == Phase.DONE, "the next call ends it")
+    assert_equal(Int(index.on(executor).refine_plan_finish(plan^).reachability.audited), 16, "the plan saw all")
+
+    var parts = List[ShapesIndex]()
+    for seed in range(2):
+        parts.append(_shapes(library, executor, 8, 8 * seed, seed))
+    _ = shapes_reshard(executor, parts, Span(parts)[0:1])
+    assert_equal(Int(parts[0].describe().size), 16, "every entry gathers into the target")
+    assert_equal(Int(parts[1].describe().size), 0, "the other source ends empty")
+    var status = Status.SUCCESS
+    try:
+        _ = shapes_reshard(executor, Span(parts)[0:1], Span(parts)[0:1])
+    except error:
+        status = error.status
+    assert_true(status == Status.UNSUPPORTED, "one index as its only source and target has nothing to recut")
+    status = Status.SUCCESS
+    try:
+        _ = shapes_reshard(executor, Span(parts)[0:0], Span(parts)[0:1])
+    except error:
+        status = error.status
+    assert_true(status == Status.INVALID_ARGUMENT, "an empty list is malformed")
+    parts[1].on(executor).insert(_keys(64, 1), _clouds(1, 9).view())
+    status = Status.SUCCESS
+    try:
+        _ = shapes_reshard(executor, Span(parts)[0:1], Span(parts)[1:2])
+    except error:
+        status = error.status
+    assert_true(status == Status.CONFIG_MISMATCH, "a target holding foreign entries mismatches")
+    assert_equal(Int(parts[0].describe().size + parts[1].describe().size), 17, "every refusal moves nothing")
+
+
+# endregion Shapes
+
+# region Geospatial
+
+
+def _stops(count: Int, seed: Int) -> List[GeospatialObservation]:
+    """`count` positions spread over the inhabited latitudes, drawn from a fixed linear congruential stream."""
+    var stops = List[GeospatialObservation]()
+    var state = UInt64(seed * 2654435761 + 1)
+    for _ in range(count):
+        state = state * 6364136223846793005 + 1442695040888963407
+        var latitude = Float64(Int((state >> 33) % 120000)) / 1000 - 60
+        state = state * 6364136223846793005 + 1442695040888963407
+        stops.append(GeospatialObservation(latitude, Float64(Int((state >> 33) % 360000)) / 1000 - 180))
+    return stops^
+
+
+def _places(library: Library, executor: Executor, count: Int, first: Int = 0, seed: Int = 0) raises -> GeospatialIndex:
+    """A host geospatial index holding `count` random positions under consecutive keys from `first`."""
+    var index = GeospatialIndex.init_ram(library)
+    if count != 0:
+        index.on(executor).insert(_keys(first, count), _stops(count, seed))
+    return index^
+
+
+def test_geospatial_index_starts_empty_and_refuses_what_it_lacks() raises:
+    """A fresh host index is empty on a CPU class; sight lines need a terrain, and a terrain needs its steps."""
+    if not _engine_is_present():
+        print("skipped: libusearch_shared is not on the loader path")
+        return
+    var library = Library()
+    var index = GeospatialIndex.init_ram(library)
+    var described = index.describe()
+    assert_equal(Int(described.size), 0, "a fresh index is empty")
+    assert_true(described.cpu_class != CPUClass.UNKNOWN and described.gpu_class == GPUClass.UNKNOWN, "on a CPU")
+    var stops = [GeospatialObservation(48.8566, 2.3522)]
+    index.insert(_keys(1, 1), stops)
+    var arena = Arena(library)
+    var status = Status.SUCCESS
+    try:
+        _ = index.search(stops, 1, arena, GeospatialSearchConfig(relation=GeospatialRelation.VISIBLE))
+    except error:
+        status = error.status
+    assert_true(status == Status.UNSUPPORTED, "a line of sight over no terrain is refused")
+
+    var heights = [Float32(35), 35, 35, 35]
+    status = Status.SUCCESS
+    try:
+        _ = GeospatialIndex.init_ram(
+            library, GeospatialOptions(GeospatialTerrain.of(2, 2, 48.86, 2.35, -0.01, 0.01, Span(heights)))
+        )
+    except error:
+        status = error.status
+    assert_true(status == Status.CONFIG_MISMATCH, "a terrain whose rows step north mismatches")
+    var hilly = GeospatialIndex.init_ram(
+        library, GeospatialOptions(GeospatialTerrain.of(2, 2, 48.86, 2.35, 0.01, 0.01, Span(heights)))
+    )
+    hilly.insert(_keys(1, 1), stops)
+    _ = hilly.search(stops, 1, arena, GeospatialSearchConfig(relation=GeospatialRelation.VISIBLE))
+
+
+def test_geospatial_search_within_get_and_count() raises:
+    """An observation finds itself at zero chord metres, a radius reports only its neighbors, and it reads
+    back within the stored rounding."""
+    if not _engine_is_present():
+        print("skipped: libusearch_shared is not on the loader path")
+        return
+    var library = Library()
+    var executor = Executor.for_ram(library, threads=2)
+    var stops = [
+        GeospatialObservation(48.8566, 2.3522),
+        GeospatialObservation(48.8656, 2.3522),
+        GeospatialObservation(52.52, 13.405),
+    ]
+    var index = GeospatialIndex.init_ram(library)
+    index.on(executor).reserve(3)
+    index.on(executor).insert(_keys(1, 3), stops)
+    assert_equal(Int(index.describe().size), 3, "three observations stored")
+
+    var arena = Arena(executor)
+    var matches = index.on(executor).search(Span(stops)[1:2], 1, arena)
+    assert_true(matches.query_keys(0)[0] == Key(integer=2), "the observation finds itself first")
+    assert_equal(matches.query_distances(0)[0], 0, "at zero chord metres")
+
+    var nearby = index.on(executor).within(Span(stops)[0:1], 2000, arena)
+    assert_equal(len(nearby.query_keys(0)), 2, "a kilometre away falls inside two, Berlin does not")
+    assert_equal(nearby.written, 2, "and the report counts both")
+    var deferred = index.deferred(executor).within(Span(stops)[2:3], 2000, arena)
+    assert_true(deferred.wait().query_keys(0)[0] == Key(integer=3), "a deferred radius finds Berlin alone")
+
+    assert_equal(Int(index.count(Key(integer=1)).entries), 1, "one observation under the key")
+    var exported = index.get(Key(integer=1), arena)
+    assert_equal(len(exported), 1, "one observation exported")
+    assert_almost_equal(exported.view()[0].latitude_degrees, 48.8566, atol=1e-6, msg="within centimetres")
+    assert_equal(len(index.get(Key(integer=9), arena)), 0, "an absent key exports nothing")
+
+
+def test_geospatial_checkpoints_refine_and_reshard() raises:
+    """A monolith round-trips, a stopped round resumes in its plan, sources gather, and malformed lists move
+    nothing."""
+    if not _engine_is_present():
+        print("skipped: libusearch_shared is not on the loader path")
+        return
+    var library = Library()
+    var executor = Executor.for_ram(library, threads=2)
+    var index = _places(library, executor, 16)
+    var arena = Arena(executor)
+    var monolith = index.on(executor).save_buffer(arena)
+    assert_true(Int(geospatial_metadata_read_buffer(executor, monolith.bytes()).connectivity) > 0, "the header")
+    var restored = GeospatialIndex.load_ram_buffer(executor, monolith.bytes())
+    assert_equal(Int(restored.describe().size), 16, "every entry loads back")
+
+    var plan = GeospatialRefinePlan()
+    var progress = PhaseProgress()
+    var reports = stack_allocation[1, Int]().unsafe_origin_cast[MutAnyOrigin]()
+    reports[unsafe_offset=0] = 0
+    try:
+        _ = index.on(executor).refine(
+            GeospatialRefineConfig(
+                progress=ProgressArguments.of[_stop_at_once](reports), plan=Pointer(to=plan), phase=Pointer(to=progress)
+            )
+        )
+    except error:
+        assert_true(error.status == Status.CANCELLED, "only the handler stops the round")
+    _ = index.on(executor).refine(GeospatialRefineConfig(plan=Pointer(to=plan), phase=Pointer(to=progress)))
+    assert_true(progress.phase == Phase.DONE, "the next call ends it")
+    assert_equal(Int(index.on(executor).refine_plan_finish(plan^).reachability.audited), 16, "the plan saw all")
+
+    var parts = List[GeospatialIndex]()
+    for seed in range(2):
+        parts.append(_places(library, executor, 8, 8 * seed, seed))
+    _ = geospatial_reshard(executor, parts, Span(parts)[0:1])
+    assert_equal(Int(parts[0].describe().size), 16, "every entry gathers into the target")
+    assert_equal(Int(parts[1].describe().size), 0, "the other source ends empty")
+    var status = Status.SUCCESS
+    try:
+        _ = geospatial_reshard(executor, Span(parts)[0:1], Span(parts)[0:1])
+    except error:
+        status = error.status
+    assert_true(status == Status.UNSUPPORTED, "one index as its only source and target has nothing to recut")
+    status = Status.SUCCESS
+    try:
+        _ = geospatial_reshard(executor, Span(parts)[0:0], Span(parts)[0:1])
+    except error:
+        status = error.status
+    assert_true(status == Status.INVALID_ARGUMENT, "an empty list is malformed")
+    parts[1].on(executor).insert(_keys(64, 1), _stops(1, 9))
+    status = Status.SUCCESS
+    try:
+        _ = geospatial_reshard(executor, Span(parts)[0:1], Span(parts)[1:2])
+    except error:
+        status = error.status
+    assert_true(status == Status.CONFIG_MISMATCH, "a target holding foreign entries mismatches")
+    assert_equal(Int(parts[0].describe().size + parts[1].describe().size), 17, "every refusal moves nothing")
+
+
+def test_basic_readme_examples_hold() raises:
+    """The sequence, shape and geospatial examples of `mojo/README.md`, line for line, with the library and
+    arena they assume made first."""
+    if not _engine_is_present():
+        print("skipped: libusearch_shared is not on the loader path")
+        return
+    var library = Library()
+    var arena = Arena(library)
+
+    var sequences = SequenceIndex.init_ram(library, SequenceOptions(SequenceMetric.LEVENSHTEIN_UTF8))
+    var words = Tape[DType.uint8]()
+    for word in ["kitten", "sitting", "mitten"]:
+        words.append(word)
+    sequences.insert([Key(integer=1), Key(integer=2), Key(integer=3)], words.view())
+    var query = Tape[DType.uint8]()
+    query.append("sittin")
+    var matches = sequences.search(query.view(), 1, arena)
+    assert_true(matches.query_keys(0)[0] == Key(integer=2), "the nearest word")
+    assert_equal(matches.query_distances(0)[0], 1, "one edit away")
+
+    var shapes = ShapesIndex.init_ram(library)
+    var clouds = Tape[DType.float32, 3]()
+    clouds.append([Float32(0), 0, 0, 1.1, 0, 0])
+    clouds.append([Float32(0), 0, 0, 1.5, 0, 0, 0, 1.5, 0])
+    shapes.insert([Key(integer=1), Key(integer=2)], clouds.view())
+    var probe = Tape[DType.float32, 3]()
+    probe.append([Float32(0), 0, 0, 1, 0, 0])
+    assert_true(shapes.search(probe.view(), 1, arena).query_keys(0)[0] == Key(integer=1), "the nearer pair")
+
+    var places = GeospatialIndex.init_ram(library)
+    var stops = [
+        GeospatialObservation(48.8566, 2.3522),
+        GeospatialObservation(48.8656, 2.3522),
+        GeospatialObservation(52.52, 13.405),
+    ]
+    places.insert([Key(integer=1), Key(integer=2), Key(integer=3)], stops)
+    var nearby = places.within(Span(stops)[0:1], 2000, arena)
+    assert_equal(len(nearby.query_keys(0)), 2, "both Paris stops within two kilometres")
+
+
+# endregion Geospatial
+
+
 def main() raises:
     var suite = TestSuite()
     suite.test[test_scalar_widths_round_sub_byte_rows_up]()
@@ -1000,4 +1620,16 @@ def main() raises:
     suite.test[test_multiply_reports_every_scored_pair]()
     suite.test[test_maxsim_scores_over_documents_rather_than_rows]()
     suite.test[test_attend_is_exact_attention_over_every_key]()
+    suite.test[test_sequence_index_starts_empty_and_keeps_its_metric]()
+    suite.test[test_sequence_search_get_and_count]()
+    suite.test[test_sequence_checkpoints_round_trip]()
+    suite.test[test_sequence_refine_plan_resumes_and_finishes]()
+    suite.test[test_sequence_reshard_gathers_cuts_and_refuses]()
+    suite.test[test_shapes_index_starts_empty_and_keeps_its_metric]()
+    suite.test[test_shapes_search_get_and_count]()
+    suite.test[test_shapes_checkpoints_refine_and_reshard]()
+    suite.test[test_geospatial_index_starts_empty_and_refuses_what_it_lacks]()
+    suite.test[test_geospatial_search_within_get_and_count]()
+    suite.test[test_geospatial_checkpoints_refine_and_reshard]()
+    suite.test[test_basic_readme_examples_hold]()
     suite^.run()

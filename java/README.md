@@ -3,7 +3,7 @@
 The Java SDK binds the flat C interface in `include/usearch/` through the FFM API, so it compiles no JNI shim and ships no native artifact of its own to cross-compile.
 It instantiates no index template: every verb is a downcall into the pre-instantiated `libusearch_shared`, so one compiled engine serves every language binding.
 Java 25 or newer is required, and the runtime needs `--enable-native-access` for the module or class path the SDK loads from.
-It exposes dense indexes; sequence, matrix and geospatial indexes follow as the C library ships them.
+It exposes dense, sequence, shape and geospatial indexes.
 
 ## Installation
 
@@ -49,6 +49,7 @@ One source file mirrors one header.
 `Types.java` carries the shared vocabulary: `Key`, `Status`, `Scalar`, `Residency`, `Traversal`, `Executor`, `Arena`, `Mood`, `Deferred`, `USearchException`, `RowsView`, and the arena-backed `Matches` and `Monolith`.
 `DenseIndex.java` carries the dense modality: the index itself, its `On` and `DeferredOn` receivers, `DenseOptions`, `DenseMetric`, `DenseMetadata`, `DenseIndexDescription`, `DenseReachability`, `DenseTraversalStats`, the `Dense*Config` knobs, `ValueLookup`, the arena-backed `DenseVectors`, `DenseProducts` and `DenseBatch`, and the `DenseCursor` and `DenseSearchStream` scans.
 `DenseCalls.java` writes each verb's body once, and the index, `On` and `DeferredOn` each run it blocking or deferred.
+`SequenceIndex.java`, `ShapesIndex.java` and `GeospatialIndex.java` carry the other modalities, `Tape.java` the ragged batch the first two take, and `BasicCalls.java` the verbs all three spell alike.
 `Library.java` loads the shared object and links every verb against it.
 Both vocabularies are nested types, and a nested type imports directly, so every call site below spells the bare name:
 
@@ -472,6 +473,73 @@ System.out.println(Types.version() + " built for " + Types.capabilitiesCompiled(
 `describe` reports the frozen `DenseMetadata` with the size, capacity, memory usage and dispatched capabilities in one call.
 `health` audits how much of the graph a search reaches from its landmarks; entries it misses stay unfound until a `refine` re-links them.
 `Types.capabilitiesCompiled` lists the hardware capabilities the linked binary was compiled with, and `Types.capabilitiesAvailable` those the current machine offers.
+
+## Sequence Indexes
+
+A sequence index searches byte strings, UTF-8 text, DNA and proteins under edit distances and alignments.
+Variable-length entries cross as a `Tape`, the Apache Arrow layout: elements end to end and one more offset than entries, which `Tape.ofStrings` and `Tape.ofBytes` pack and `Tape.of` borrows from a native segment in place:
+
+```java
+try (Executor pool = Executor.forRam(new int[0], null, 0);
+        SequenceIndex words = SequenceIndex.initRam(
+                new SequenceOptions().metric(SequenceMetric.LEVENSHTEIN_UTF8), new int[0]);
+        Arena arena = new Arena(pool)) {
+    Key[] keys = {Key.of(1), Key.of(2), Key.of(3)};
+    words.on(pool).insert(keys, Tape.ofStrings("kitten", "sitting", "mitten"));
+    Matches matches = words.on(pool).search(Tape.ofStrings("sitting"), 1, arena);
+    SequenceKeyStats stats = words.count(Key.of(2));
+    System.out.println(matches.key(0, 0) + " at " + matches.score(0, 0) + ", " + stats.totalBytes() + " bytes");
+}
+```
+
+`NEEDLEMAN_WUNSCH` takes `SequenceWeights`, a 256 × 256 substitution matrix with a gap cost, and `OVERLAP` takes `windowWidths`; every load names the weights again, since no checkpoint records them.
+`get` writes a key's sequences into an arena as a `Tape`, and `count` reports a key's total and largest byte lengths.
+`SequenceMetric.fromName` reads back the spelling `toString` gives, refusing any other with `Status.INVALID_ARGUMENT`.
+The verbs, receivers, plans and reports are the dense ones: `refine`, `reshard` and their `SequenceRefinePlan` and `SequenceReshardPlan`, cursors and `sample`, all reporting through `RefineReport` and `DenseTraversalStats`.
+
+## Shape Indexes
+
+A shape index searches 3D point clouds of any size, like molecules and conformers, invariant to rotation, reflection, translation and point order.
+Its tape holds points end to end, `x`, `y` and `z` interleaved, with offsets that count points:
+
+```java
+try (Executor pool = Executor.forRam(new int[0], null, 0);
+        ShapesIndex molecules =
+                ShapesIndex.initRam(new ShapesOptions().metric(ShapesMetric.HAUSDORFF), new int[0]);
+        Arena arena = new Arena(pool)) {
+    Tape atoms = Tape.ofPoints(new float[] {0, 0, 0, 1.1f, 0, 0}, new float[] {0, 0, 0, 1.5f, 0, 0, 0, 1.5f, 0});
+    molecules.on(pool).insert(new Key[] {Key.of(1), Key.of(2)}, atoms);
+    Tape stored = molecules.on(pool).get(Key.of(2), Scalar.F32, arena);
+    System.out.println(stored.count() + " entry of " + stored.points(0).length / 3 + " points");
+}
+```
+
+The metrics are Chamfer, Hausdorff, Gromov-Wasserstein and Wasserstein-Procrustes, over `F16` or `F32` storage, whatever scalar the points arrive in, and `ShapesMetric.fromName` reads one back from its spelling.
+A non-zero `points` freezes every shape's point count.
+`get` converts each shape to the scalar it is asked for and returns it in its inserted pose, and `count` reports a key's total and largest point counts.
+
+## Geospatial Indexes
+
+A geospatial index searches observations on and above the Earth, like photos, video frames and sensor fixes.
+An `Observation` is the library's own eleven doubles; a field no device recorded stays NaN, which only widens the tests that read it, and `Observation.at` fills every field but the position that way:
+
+```java
+try (Executor pool = Executor.forRam(new int[0], null, 0);
+        GeospatialIndex places = GeospatialIndex.initRam(new GeospatialOptions(), new int[0]);
+        Arena arena = new Arena(pool)) {
+    Observation[] stops = {
+        Observation.at(51.5308, -0.1238), Observation.at(51.5320, -0.1233), Observation.at(51.5033, -0.1196)
+    };
+    places.on(pool).insert(new Key[] {Key.of(1), Key.of(2), Key.of(3)}, stops);
+    Observation[] station = {Observation.at(51.5308, -0.1238)};
+    DenseProducts nearby = places.on(pool).within(station, GeospatialRelation.NEAR, new Tolerance(500, 0), arena);
+    System.out.println(nearby.count(0) + " stops within 500 m");
+}
+```
+
+`within` reports every entry the relation admits inside the radius, however many, while `search` ranks the `wanted` nearest, a zero `Tolerance.metres` ranking by distance alone.
+The relation is an argument of each call: `NEAR` widens the radius by both positions' accuracies, `SEES` and `SEEN` test the view cones, and `VISIBLE` needs the terrain `GeospatialOptions.terrain` lends, refusing without one.
+`get` returns a key's observations within the stored rounding.
 
 ## Kotlin & Scala
 

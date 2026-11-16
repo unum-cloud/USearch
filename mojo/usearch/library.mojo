@@ -56,6 +56,87 @@ from usearch.dense import (
     Phase,
     RefineVerdict,
 )
+from usearch.geospatial import (
+    GeospatialClear,
+    GeospatialCount,
+    GeospatialCursorInit,
+    GeospatialCursorNext,
+    GeospatialDescribe,
+    GeospatialGet,
+    GeospatialHealth,
+    GeospatialInitRam,
+    GeospatialInitVram,
+    GeospatialInsert,
+    GeospatialLoadRam,
+    GeospatialLoadVram,
+    GeospatialMetadataRead,
+    GeospatialRefine,
+    GeospatialRefinePlanFinish,
+    GeospatialReserve,
+    GeospatialReshard,
+    GeospatialReshardPlanFinish,
+    GeospatialSample,
+    GeospatialSave,
+    GeospatialSaveBuffer,
+    GeospatialSearch,
+    GeospatialViewNvme,
+    GeospatialViewRam,
+    GeospatialWithin,
+)
+from usearch.sequence import (
+    SequenceClear,
+    SequenceCount,
+    SequenceCursorInit,
+    SequenceCursorNext,
+    SequenceDescribe,
+    SequenceGet,
+    SequenceHealth,
+    SequenceInitRam,
+    SequenceInitVram,
+    SequenceInsert,
+    SequenceLoadRam,
+    SequenceLoadVram,
+    SequenceMetadataRead,
+    SequenceMetric,
+    SequenceRefine,
+    SequenceRefinePlanFinish,
+    SequenceReserve,
+    SequenceReshard,
+    SequenceReshardPlanFinish,
+    SequenceSample,
+    SequenceSave,
+    SequenceSaveBuffer,
+    SequenceSearch,
+    SequenceViewNvme,
+    SequenceViewRam,
+)
+from usearch.shapes import (
+    ShapesClear,
+    ShapesCount,
+    ShapesCursorInit,
+    ShapesCursorNext,
+    ShapesDescribe,
+    ShapesGet,
+    ShapesHealth,
+    ShapesInitRam,
+    ShapesInitVram,
+    ShapesInsert,
+    ShapesLoadRam,
+    ShapesLoadVram,
+    ShapesMetadataRead,
+    ShapesMetric,
+    ShapesRefine,
+    ShapesRefinePlanFinish,
+    ShapesReserve,
+    ShapesReshard,
+    ShapesReshardPlanFinish,
+    ShapesSample,
+    ShapesSave,
+    ShapesSaveBuffer,
+    ShapesSearch,
+    ShapesViewNvme,
+    ShapesViewRam,
+)
 from usearch.types import (
     ArenaDescribe,
     ArenaInit,
@@ -273,6 +354,193 @@ struct Symbols:
     var dense_maxsim: DenseMaxsim
     """`usearch_dense_maxsim`."""
 
+    var sequence_metric_name: NameOf
+    """`usearch_sequence_metric_name`."""
+    var sequence_metric_from_name: FromName
+    """`usearch_sequence_metric_from_name`."""
+    var sequence_init_ram: SequenceInitRam
+    """`usearch_sequence_init_ram`."""
+    var sequence_init_vram: SequenceInitVram
+    """`usearch_sequence_init_vram`."""
+    var sequence_load_ram: SequenceLoadRam
+    """`usearch_sequence_load_ram`."""
+    var sequence_load_ram_buffer: SequenceLoadRam
+    """`usearch_sequence_load_ram_buffer`."""
+    var sequence_load_vram: SequenceLoadVram
+    """`usearch_sequence_load_vram`."""
+    var sequence_load_vram_buffer: SequenceLoadVram
+    """`usearch_sequence_load_vram_buffer`."""
+    var sequence_view_ram: SequenceViewRam
+    """`usearch_sequence_view_ram`."""
+    var sequence_view_nvme: SequenceViewNvme
+    """`usearch_sequence_view_nvme`."""
+    var sequence_free: Release
+    """`usearch_sequence_free`."""
+    var sequence_reserve: SequenceReserve
+    """`usearch_sequence_reserve`."""
+    var sequence_clear: SequenceClear
+    """`usearch_sequence_clear`."""
+    var sequence_describe: SequenceDescribe
+    """`usearch_sequence_describe`."""
+    var sequence_insert: SequenceInsert
+    """`usearch_sequence_insert`."""
+    var sequence_refine: SequenceRefine
+    """`usearch_sequence_refine`."""
+    var sequence_refine_plan_finish: SequenceRefinePlanFinish
+    """`usearch_sequence_refine_plan_finish`."""
+    var sequence_health: SequenceHealth
+    """`usearch_sequence_health`."""
+    var sequence_reshard: SequenceReshard
+    """`usearch_sequence_reshard`."""
+    var sequence_reshard_plan_finish: SequenceReshardPlanFinish
+    """`usearch_sequence_reshard_plan_finish`."""
+    var sequence_sample: SequenceSample
+    """`usearch_sequence_sample`."""
+    var sequence_search: SequenceSearch
+    """`usearch_sequence_search`."""
+    var sequence_count: SequenceCount
+    """`usearch_sequence_count`."""
+    var sequence_get: SequenceGet
+    """`usearch_sequence_get`."""
+    var sequence_cursor_init: SequenceCursorInit
+    """`usearch_sequence_cursor_init`."""
+    var sequence_cursor_next: SequenceCursorNext
+    """`usearch_sequence_cursor_next`."""
+    var sequence_cursor_free: Release
+    """`usearch_sequence_cursor_free`."""
+    var sequence_save: SequenceSave
+    """`usearch_sequence_save`."""
+    var sequence_save_buffer: SequenceSaveBuffer
+    """`usearch_sequence_save_buffer`."""
+    var sequence_metadata_read: SequenceMetadataRead
+    """`usearch_sequence_metadata_read`."""
+    var sequence_metadata_read_buffer: SequenceMetadataRead
+    """`usearch_sequence_metadata_read_buffer`."""
+
+    var shapes_metric_name: NameOf
+    """`usearch_shapes_metric_name`."""
+    var shapes_metric_from_name: FromName
+    """`usearch_shapes_metric_from_name`."""
+    var shapes_init_ram: ShapesInitRam
+    """`usearch_shapes_init_ram`."""
+    var shapes_init_vram: ShapesInitVram
+    """`usearch_shapes_init_vram`."""
+    var shapes_load_ram: ShapesLoadRam
+    """`usearch_shapes_load_ram`."""
+    var shapes_load_ram_buffer: ShapesLoadRam
+    """`usearch_shapes_load_ram_buffer`."""
+    var shapes_load_vram: ShapesLoadVram
+    """`usearch_shapes_load_vram`."""
+    var shapes_load_vram_buffer: ShapesLoadVram
+    """`usearch_shapes_load_vram_buffer`."""
+    var shapes_view_ram: ShapesViewRam
+    """`usearch_shapes_view_ram`."""
+    var shapes_view_nvme: ShapesViewNvme
+    """`usearch_shapes_view_nvme`."""
+    var shapes_free: Release
+    """`usearch_shapes_free`."""
+    var shapes_reserve: ShapesReserve
+    """`usearch_shapes_reserve`."""
+    var shapes_clear: ShapesClear
+    """`usearch_shapes_clear`."""
+    var shapes_describe: ShapesDescribe
+    """`usearch_shapes_describe`."""
+    var shapes_insert: ShapesInsert
+    """`usearch_shapes_insert`."""
+    var shapes_refine: ShapesRefine
+    """`usearch_shapes_refine`."""
+    var shapes_refine_plan_finish: ShapesRefinePlanFinish
+    """`usearch_shapes_refine_plan_finish`."""
+    var shapes_health: ShapesHealth
+    """`usearch_shapes_health`."""
+    var shapes_reshard: ShapesReshard
+    """`usearch_shapes_reshard`."""
+    var shapes_reshard_plan_finish: ShapesReshardPlanFinish
+    """`usearch_shapes_reshard_plan_finish`."""
+    var shapes_sample: ShapesSample
+    """`usearch_shapes_sample`."""
+    var shapes_search: ShapesSearch
+    """`usearch_shapes_search`."""
+    var shapes_count: ShapesCount
+    """`usearch_shapes_count`."""
+    var shapes_get: ShapesGet
+    """`usearch_shapes_get`."""
+    var shapes_cursor_init: ShapesCursorInit
+    """`usearch_shapes_cursor_init`."""
+    var shapes_cursor_next: ShapesCursorNext
+    """`usearch_shapes_cursor_next`."""
+    var shapes_cursor_free: Release
+    """`usearch_shapes_cursor_free`."""
+    var shapes_save: ShapesSave
+    """`usearch_shapes_save`."""
+    var shapes_save_buffer: ShapesSaveBuffer
+    """`usearch_shapes_save_buffer`."""
+    var shapes_metadata_read: ShapesMetadataRead
+    """`usearch_shapes_metadata_read`."""
+    var shapes_metadata_read_buffer: ShapesMetadataRead
+    """`usearch_shapes_metadata_read_buffer`."""
+
+    var geospatial_init_ram: GeospatialInitRam
+    """`usearch_geospatial_init_ram`."""
+    var geospatial_init_vram: GeospatialInitVram
+    """`usearch_geospatial_init_vram`."""
+    var geospatial_load_ram: GeospatialLoadRam
+    """`usearch_geospatial_load_ram`."""
+    var geospatial_load_ram_buffer: GeospatialLoadRam
+    """`usearch_geospatial_load_ram_buffer`."""
+    var geospatial_load_vram: GeospatialLoadVram
+    """`usearch_geospatial_load_vram`."""
+    var geospatial_load_vram_buffer: GeospatialLoadVram
+    """`usearch_geospatial_load_vram_buffer`."""
+    var geospatial_view_ram: GeospatialViewRam
+    """`usearch_geospatial_view_ram`."""
+    var geospatial_view_nvme: GeospatialViewNvme
+    """`usearch_geospatial_view_nvme`."""
+    var geospatial_free: Release
+    """`usearch_geospatial_free`."""
+    var geospatial_reserve: GeospatialReserve
+    """`usearch_geospatial_reserve`."""
+    var geospatial_clear: GeospatialClear
+    """`usearch_geospatial_clear`."""
+    var geospatial_describe: GeospatialDescribe
+    """`usearch_geospatial_describe`."""
+    var geospatial_insert: GeospatialInsert
+    """`usearch_geospatial_insert`."""
+    var geospatial_refine: GeospatialRefine
+    """`usearch_geospatial_refine`."""
+    var geospatial_refine_plan_finish: GeospatialRefinePlanFinish
+    """`usearch_geospatial_refine_plan_finish`."""
+    var geospatial_health: GeospatialHealth
+    """`usearch_geospatial_health`."""
+    var geospatial_reshard: GeospatialReshard
+    """`usearch_geospatial_reshard`."""
+    var geospatial_reshard_plan_finish: GeospatialReshardPlanFinish
+    """`usearch_geospatial_reshard_plan_finish`."""
+    var geospatial_sample: GeospatialSample
+    """`usearch_geospatial_sample`."""
+    var geospatial_search: GeospatialSearch
+    """`usearch_geospatial_search`."""
+    var geospatial_within: GeospatialWithin
+    """`usearch_geospatial_within`."""
+    var geospatial_count: GeospatialCount
+    """`usearch_geospatial_count`."""
+    var geospatial_get: GeospatialGet
+    """`usearch_geospatial_get`."""
+    var geospatial_cursor_init: GeospatialCursorInit
+    """`usearch_geospatial_cursor_init`."""
+    var geospatial_cursor_next: GeospatialCursorNext
+    """`usearch_geospatial_cursor_next`."""
+    var geospatial_cursor_free: Release
+    """`usearch_geospatial_cursor_free`."""
+    var geospatial_save: GeospatialSave
+    """`usearch_geospatial_save`."""
+    var geospatial_save_buffer: GeospatialSaveBuffer
+    """`usearch_geospatial_save_buffer`."""
+    var geospatial_metadata_read: GeospatialMetadataRead
+    """`usearch_geospatial_metadata_read`."""
+    var geospatial_metadata_read_buffer: GeospatialMetadataRead
+    """`usearch_geospatial_metadata_read_buffer`."""
+
     def __init__(out self, ref handle: OwnedDLHandle) raises Error:
         """Resolves every entry point at once, so no call ever pays for a `dlsym`.
 
@@ -359,6 +627,115 @@ struct Symbols:
         self.dense_multiply = _resolve[DenseMultiply](handle, "usearch_dense_multiply")
         self.dense_attend = _resolve[DenseAttend](handle, "usearch_dense_attend")
         self.dense_maxsim = _resolve[DenseMaxsim](handle, "usearch_dense_maxsim")
+
+        self.sequence_metric_name = _resolve[NameOf](handle, "usearch_sequence_metric_name")
+        self.sequence_metric_from_name = _resolve[FromName](handle, "usearch_sequence_metric_from_name")
+        self.sequence_init_ram = _resolve[SequenceInitRam](handle, "usearch_sequence_init_ram")
+        self.sequence_init_vram = _resolve[SequenceInitVram](handle, "usearch_sequence_init_vram")
+        self.sequence_load_ram = _resolve[SequenceLoadRam](handle, "usearch_sequence_load_ram")
+        self.sequence_load_ram_buffer = _resolve[SequenceLoadRam](handle, "usearch_sequence_load_ram_buffer")
+        self.sequence_load_vram = _resolve[SequenceLoadVram](handle, "usearch_sequence_load_vram")
+        self.sequence_load_vram_buffer = _resolve[SequenceLoadVram](handle, "usearch_sequence_load_vram_buffer")
+        self.sequence_view_ram = _resolve[SequenceViewRam](handle, "usearch_sequence_view_ram")
+        self.sequence_view_nvme = _resolve[SequenceViewNvme](handle, "usearch_sequence_view_nvme")
+        self.sequence_free = _resolve[Release](handle, "usearch_sequence_free")
+        self.sequence_reserve = _resolve[SequenceReserve](handle, "usearch_sequence_reserve")
+        self.sequence_clear = _resolve[SequenceClear](handle, "usearch_sequence_clear")
+        self.sequence_describe = _resolve[SequenceDescribe](handle, "usearch_sequence_describe")
+        self.sequence_insert = _resolve[SequenceInsert](handle, "usearch_sequence_insert")
+        self.sequence_refine = _resolve[SequenceRefine](handle, "usearch_sequence_refine")
+        self.sequence_refine_plan_finish = _resolve[SequenceRefinePlanFinish](
+            handle, "usearch_sequence_refine_plan_finish"
+        )
+        self.sequence_health = _resolve[SequenceHealth](handle, "usearch_sequence_health")
+        self.sequence_reshard = _resolve[SequenceReshard](handle, "usearch_sequence_reshard")
+        self.sequence_reshard_plan_finish = _resolve[SequenceReshardPlanFinish](
+            handle, "usearch_sequence_reshard_plan_finish"
+        )
+        self.sequence_sample = _resolve[SequenceSample](handle, "usearch_sequence_sample")
+        self.sequence_search = _resolve[SequenceSearch](handle, "usearch_sequence_search")
+        self.sequence_count = _resolve[SequenceCount](handle, "usearch_sequence_count")
+        self.sequence_get = _resolve[SequenceGet](handle, "usearch_sequence_get")
+        self.sequence_cursor_init = _resolve[SequenceCursorInit](handle, "usearch_sequence_cursor_init")
+        self.sequence_cursor_next = _resolve[SequenceCursorNext](handle, "usearch_sequence_cursor_next")
+        self.sequence_cursor_free = _resolve[Release](handle, "usearch_sequence_cursor_free")
+        self.sequence_save = _resolve[SequenceSave](handle, "usearch_sequence_save")
+        self.sequence_save_buffer = _resolve[SequenceSaveBuffer](handle, "usearch_sequence_save_buffer")
+        self.sequence_metadata_read = _resolve[SequenceMetadataRead](handle, "usearch_sequence_metadata_read")
+        self.sequence_metadata_read_buffer = _resolve[SequenceMetadataRead](
+            handle, "usearch_sequence_metadata_read_buffer"
+        )
+
+        self.shapes_metric_name = _resolve[NameOf](handle, "usearch_shapes_metric_name")
+        self.shapes_metric_from_name = _resolve[FromName](handle, "usearch_shapes_metric_from_name")
+        self.shapes_init_ram = _resolve[ShapesInitRam](handle, "usearch_shapes_init_ram")
+        self.shapes_init_vram = _resolve[ShapesInitVram](handle, "usearch_shapes_init_vram")
+        self.shapes_load_ram = _resolve[ShapesLoadRam](handle, "usearch_shapes_load_ram")
+        self.shapes_load_ram_buffer = _resolve[ShapesLoadRam](handle, "usearch_shapes_load_ram_buffer")
+        self.shapes_load_vram = _resolve[ShapesLoadVram](handle, "usearch_shapes_load_vram")
+        self.shapes_load_vram_buffer = _resolve[ShapesLoadVram](handle, "usearch_shapes_load_vram_buffer")
+        self.shapes_view_ram = _resolve[ShapesViewRam](handle, "usearch_shapes_view_ram")
+        self.shapes_view_nvme = _resolve[ShapesViewNvme](handle, "usearch_shapes_view_nvme")
+        self.shapes_free = _resolve[Release](handle, "usearch_shapes_free")
+        self.shapes_reserve = _resolve[ShapesReserve](handle, "usearch_shapes_reserve")
+        self.shapes_clear = _resolve[ShapesClear](handle, "usearch_shapes_clear")
+        self.shapes_describe = _resolve[ShapesDescribe](handle, "usearch_shapes_describe")
+        self.shapes_insert = _resolve[ShapesInsert](handle, "usearch_shapes_insert")
+        self.shapes_refine = _resolve[ShapesRefine](handle, "usearch_shapes_refine")
+        self.shapes_refine_plan_finish = _resolve[ShapesRefinePlanFinish](handle, "usearch_shapes_refine_plan_finish")
+        self.shapes_health = _resolve[ShapesHealth](handle, "usearch_shapes_health")
+        self.shapes_reshard = _resolve[ShapesReshard](handle, "usearch_shapes_reshard")
+        self.shapes_reshard_plan_finish = _resolve[ShapesReshardPlanFinish](
+            handle, "usearch_shapes_reshard_plan_finish"
+        )
+        self.shapes_sample = _resolve[ShapesSample](handle, "usearch_shapes_sample")
+        self.shapes_search = _resolve[ShapesSearch](handle, "usearch_shapes_search")
+        self.shapes_count = _resolve[ShapesCount](handle, "usearch_shapes_count")
+        self.shapes_get = _resolve[ShapesGet](handle, "usearch_shapes_get")
+        self.shapes_cursor_init = _resolve[ShapesCursorInit](handle, "usearch_shapes_cursor_init")
+        self.shapes_cursor_next = _resolve[ShapesCursorNext](handle, "usearch_shapes_cursor_next")
+        self.shapes_cursor_free = _resolve[Release](handle, "usearch_shapes_cursor_free")
+        self.shapes_save = _resolve[ShapesSave](handle, "usearch_shapes_save")
+        self.shapes_save_buffer = _resolve[ShapesSaveBuffer](handle, "usearch_shapes_save_buffer")
+        self.shapes_metadata_read = _resolve[ShapesMetadataRead](handle, "usearch_shapes_metadata_read")
+        self.shapes_metadata_read_buffer = _resolve[ShapesMetadataRead](handle, "usearch_shapes_metadata_read_buffer")
+
+        self.geospatial_init_ram = _resolve[GeospatialInitRam](handle, "usearch_geospatial_init_ram")
+        self.geospatial_init_vram = _resolve[GeospatialInitVram](handle, "usearch_geospatial_init_vram")
+        self.geospatial_load_ram = _resolve[GeospatialLoadRam](handle, "usearch_geospatial_load_ram")
+        self.geospatial_load_ram_buffer = _resolve[GeospatialLoadRam](handle, "usearch_geospatial_load_ram_buffer")
+        self.geospatial_load_vram = _resolve[GeospatialLoadVram](handle, "usearch_geospatial_load_vram")
+        self.geospatial_load_vram_buffer = _resolve[GeospatialLoadVram](handle, "usearch_geospatial_load_vram_buffer")
+        self.geospatial_view_ram = _resolve[GeospatialViewRam](handle, "usearch_geospatial_view_ram")
+        self.geospatial_view_nvme = _resolve[GeospatialViewNvme](handle, "usearch_geospatial_view_nvme")
+        self.geospatial_free = _resolve[Release](handle, "usearch_geospatial_free")
+        self.geospatial_reserve = _resolve[GeospatialReserve](handle, "usearch_geospatial_reserve")
+        self.geospatial_clear = _resolve[GeospatialClear](handle, "usearch_geospatial_clear")
+        self.geospatial_describe = _resolve[GeospatialDescribe](handle, "usearch_geospatial_describe")
+        self.geospatial_insert = _resolve[GeospatialInsert](handle, "usearch_geospatial_insert")
+        self.geospatial_refine = _resolve[GeospatialRefine](handle, "usearch_geospatial_refine")
+        self.geospatial_refine_plan_finish = _resolve[GeospatialRefinePlanFinish](
+            handle, "usearch_geospatial_refine_plan_finish"
+        )
+        self.geospatial_health = _resolve[GeospatialHealth](handle, "usearch_geospatial_health")
+        self.geospatial_reshard = _resolve[GeospatialReshard](handle, "usearch_geospatial_reshard")
+        self.geospatial_reshard_plan_finish = _resolve[GeospatialReshardPlanFinish](
+            handle, "usearch_geospatial_reshard_plan_finish"
+        )
+        self.geospatial_sample = _resolve[GeospatialSample](handle, "usearch_geospatial_sample")
+        self.geospatial_search = _resolve[GeospatialSearch](handle, "usearch_geospatial_search")
+        self.geospatial_within = _resolve[GeospatialWithin](handle, "usearch_geospatial_within")
+        self.geospatial_count = _resolve[GeospatialCount](handle, "usearch_geospatial_count")
+        self.geospatial_get = _resolve[GeospatialGet](handle, "usearch_geospatial_get")
+        self.geospatial_cursor_init = _resolve[GeospatialCursorInit](handle, "usearch_geospatial_cursor_init")
+        self.geospatial_cursor_next = _resolve[GeospatialCursorNext](handle, "usearch_geospatial_cursor_next")
+        self.geospatial_cursor_free = _resolve[Release](handle, "usearch_geospatial_cursor_free")
+        self.geospatial_save = _resolve[GeospatialSave](handle, "usearch_geospatial_save")
+        self.geospatial_save_buffer = _resolve[GeospatialSaveBuffer](handle, "usearch_geospatial_save_buffer")
+        self.geospatial_metadata_read = _resolve[GeospatialMetadataRead](handle, "usearch_geospatial_metadata_read")
+        self.geospatial_metadata_read_buffer = _resolve[GeospatialMetadataRead](
+            handle, "usearch_geospatial_metadata_read_buffer"
+        )
 
 
 struct _Loaded:
@@ -525,6 +902,30 @@ struct Library(ImplicitlyCopyable):
         `usearch_dense_metric_from_name`."""
         return DenseMetric(
             self._read_named(self.symbols().dense_metric_from_name, name, "usearch_dense_metric_from_name")
+        )
+
+    def sequence_metric_name(self, metric: SequenceMetric) -> String:
+        """The engine's spelling of a sequence kind, as `LEVENSHTEIN_BYTES` spells "levenshtein". Calls
+        `usearch_sequence_metric_name`."""
+        return text_at(self.symbols().sequence_metric_name(metric.code))
+
+    def sequence_metric_from_name(self, name: StringSlice) raises Error -> SequenceMetric:
+        """Reads a spelling back, raising `INVALID_ARGUMENT` for one it refuses. Calls
+        `usearch_sequence_metric_from_name`."""
+        return SequenceMetric(
+            self._read_named(self.symbols().sequence_metric_from_name, name, "usearch_sequence_metric_from_name")
+        )
+
+    def shapes_metric_name(self, metric: ShapesMetric) -> String:
+        """The engine's spelling of a shapes kind, as `CHAMFER` spells "chamfer". Calls
+        `usearch_shapes_metric_name`."""
+        return text_at(self.symbols().shapes_metric_name(metric.code))
+
+    def shapes_metric_from_name(self, name: StringSlice) raises Error -> ShapesMetric:
+        """Reads a spelling back, raising `INVALID_ARGUMENT` for one it refuses. Calls
+        `usearch_shapes_metric_from_name`."""
+        return ShapesMetric(
+            self._read_named(self.symbols().shapes_metric_from_name, name, "usearch_shapes_metric_from_name")
         )
 
     def _error(self, outcome: Outcome, symbol: StaticString) -> Error:

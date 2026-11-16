@@ -44,8 +44,11 @@
 
 #include <node_api.h>
 
-#include <usearch/dense_index.h>
-#include <usearch/types.h>
+#include "usearch/dense_index.h"
+#include "usearch/geospatial_index.h"
+#include "usearch/sequence_index.h"
+#include "usearch/shapes_index.h"
+#include "usearch/types.h"
 
 #pragma region Vocabulary
 
@@ -75,8 +78,17 @@ typedef struct usearch_js_addon_t {
     /** The @c Executor constructor, kept alive for @c napi_instanceof. */
     napi_ref executor_class;
 
-    /** The @c CompiledIndex constructor, which every lifecycle verb wraps its handle in. */
+    /** The @c CompiledIndex constructor, which every dense lifecycle verb wraps its handle in. */
     napi_ref index_class;
+
+    /** The @c CompiledSequenceIndex constructor, wrapping each handle a sequence verb opens. */
+    napi_ref sequence_index_class;
+
+    /** The @c CompiledShapesIndex constructor, wrapping each handle a shapes verb opens. */
+    napi_ref shapes_index_class;
+
+    /** The @c CompiledGeospatialIndex constructor, wrapping each handle a geospatial verb opens. */
+    napi_ref geospatial_index_class;
 
     /** The @c Arena constructor, kept alive for @c napi_instanceof. */
     napi_ref arena_class;
@@ -114,11 +126,11 @@ typedef struct usearch_js_arena_t {
     napi_ref executor_reference;
 } usearch_js_arena_t;
 
-/** An owned index handle, one per @c CompiledIndex instance. */
+/** An owned index handle, one per instance of a modality's compiled index class. */
 typedef struct usearch_js_index_t {
 
-    /** The engine handle, freed by @c free or the collector. */
-    usearch_dense_index_t handle;
+    /** The engine handle of the modality its class wraps, freed by @c free or the collector. */
+    void* handle;
 } usearch_js_index_t;
 
 /**
@@ -196,6 +208,128 @@ typedef struct usearch_js_call_t {
     usearch_traversal_stats_t stats;
 } usearch_js_call_t;
 
+/**
+ *  @brief An index call: the shared header, then every output an index verb of any modality lands
+ *      before its answer.
+ *
+ *  The modalities share one layout, so one finisher serves the verbs whose outputs agree: a report,
+ *  an audit, a ranked run, a ragged run, a sample, a cursor pull and a monolith.
+ */
+typedef struct usearch_js_index_call_t {
+
+    /** The outcome, the answer builder, the held values and the telemetry every modality shares. */
+    usearch_js_call_t call;
+
+    /** The audit @c health reports. */
+    usearch_reachability_t reachability;
+
+    /** What a refine or a reshard did to the graph. */
+    usearch_refine_report_t report;
+
+    /** The report @c describe fills, in the modality's own shape. */
+    union {
+        usearch_dense_index_description_t dense;
+        usearch_sequence_index_description_t sequence;
+        usearch_shapes_index_description_t shapes;
+        usearch_geospatial_index_description_t geospatial;
+    } description;
+
+    /** The extent of a key's entries a basic modality's @c count reports. */
+    union {
+        usearch_sequence_key_stats_t sequence;
+        usearch_shapes_key_stats_t shapes;
+        usearch_geospatial_key_stats_t geospatial;
+    } key_stats;
+
+    /** The rows on a verb's batch axis. */
+    size_t count;
+
+    /** Entries under a key or a cursor pull wrote, nodes a refinement changed, or the rows or
+     *  pairs a call wrote. */
+    size_t written;
+
+    /** Pairs a product scored before its bound cut any, or keys a late interaction wrote. */
+    size_t required;
+
+    /** The ranked run a search or a stream pull wrote into its arena. */
+    usearch_matches_view_t matches;
+
+    /** The pairs a product, the keys a late-interaction scoring, or the entries a containment walk
+     *  wrote into its arena. */
+    usearch_matches_tape_view_t products;
+
+    /** The rows a retrieval, a cursor pull or an attention wrote into its arena. */
+    usearch_rows_view_t vectors;
+
+    /** The sequences or shapes a basic retrieval wrote into its arena. */
+    usearch_tape_view_t tape;
+
+    /** The observations a geospatial retrieval wrote into its arena. */
+    usearch_geospatial_observation_t const* observations;
+
+    /** The identities a cursor pull or a sample wrote into its arena. */
+    usearch_keys_view_t keys;
+
+    /** Which of its key's entries each draw of a sample is, inside its arena. */
+    size_t const* entry_ordinals;
+
+    /** The keys each of a cursor pull's entries links to, inside its arena. */
+    usearch_keys_tape_view_t links;
+
+    /** A monolith inside its arena. */
+    usearch_bytes_view_t monolith;
+
+    /** The kind the rows were asked in, which picks their element type even with none written. */
+    usearch_scalar_t scalar;
+
+    /** The placements a reshard lends, over the ordinals and paths in the call's owned blocks. */
+    usearch_ram_options_t ram;
+    usearch_vram_options_t vram;
+    usearch_nvme_options_t nvme;
+} usearch_js_index_call_t;
+
+/** A plan's storage, which the library writes in place: its handle, and where it stopped. */
+typedef struct usearch_js_plan_t {
+
+    /** The refine plan a refine opened; @c NULL before the first call and once finished. */
+    union {
+        usearch_dense_refine_plan_t dense;
+        usearch_sequence_refine_plan_t sequence;
+        usearch_shapes_refine_plan_t shapes;
+        usearch_geospatial_refine_plan_t geospatial;
+    } refine;
+
+    /** The reshard plan a reshard opened; @c NULL before the first call and once finished. */
+    union {
+        usearch_dense_reshard_plan_t dense;
+        usearch_sequence_reshard_plan_t sequence;
+        usearch_shapes_reshard_plan_t shapes;
+        usearch_geospatial_reshard_plan_t geospatial;
+    } reshard;
+
+    /** Where the last call stopped. */
+    usearch_phase_progress_t progress;
+} usearch_js_plan_t;
+
+/** Where a load reads its checkpoint from. */
+typedef enum usearch_js_source_t {
+    usearch_js_source_path_k,
+    usearch_js_source_buffer_k,
+} usearch_js_source_t;
+
+/** A cursor walk or a resumable search, and the index and executor every pull names again. */
+typedef struct usearch_js_walk_t {
+
+    /** The engine cursor or stream, @c NULL once released. */
+    void* handle;
+
+    /** A strong reference to the compiled index, so the index outlives the walk it borrows. */
+    napi_ref index;
+
+    /** A strong reference to the @c Executor every pull runs on; @c NULL for the calling thread. */
+    napi_ref executor;
+} usearch_js_walk_t;
+
 #pragma endregion Vocabulary
 
 #pragma region Argument Parsing
@@ -241,6 +375,14 @@ bool usearch_js_stats_from_value(napi_env env, napi_value sink, usearch_js_call_
 
 /** Reads a metric kind from its canonical spelling, through the C name tables. */
 bool usearch_js_metric_from_value(napi_env env, napi_value value, char const* field, usearch_dense_metric_t* result);
+
+/** Reads a sequence scoring kind from its canonical spelling, through the C name tables. */
+bool usearch_js_sequence_metric_from_value(napi_env env, napi_value value, char const* field,
+                                           usearch_sequence_metric_t* result);
+
+/** Reads a shape scoring kind from its canonical spelling, through the C name tables. */
+bool usearch_js_shapes_metric_from_value(napi_env env, napi_value value, char const* field,
+                                         usearch_shapes_metric_t* result);
 
 /** Reads a CPU class ceiling from its canonical spelling through the C name tables; absent sets
  *  none. */
@@ -305,6 +447,20 @@ bool usearch_js_bytes_from_value(napi_env env, napi_value value, char const* fie
  */
 bool usearch_js_rows_from_value(napi_env env, napi_value const* arguments, char const* field, size_t* count,
                                 usearch_rows_view_t* view);
+
+/**
+ *  @brief Borrows a ragged batch as three values: the elements' @c TypedArray, its Apache Arrow
+ *      offsets as a @c Uint32Array or a @c BigUint64Array, and the elements' scalar kind.
+ *  @param[in] scalars_per_element Scalars one element holds: one byte of a sequence, three
+ *      coordinates of a point.
+ *  @param[out] count The entries the tape holds, one fewer than its offsets.
+ *  @return @c true on success, @c false with an exception pending otherwise.
+ *
+ *  The engine reads up to the last offset, so it is checked against the bytes the array holds here,
+ *  the one side that sees both.
+ */
+bool usearch_js_tape_from_value(napi_env env, napi_value const* arguments, char const* field,
+                                size_t scalars_per_element, size_t* count, usearch_tape_view_t* view);
 
 /** The scalar kind a @c TypedArray's elements spell on their own; unknown for byte carriers. */
 usearch_scalar_t usearch_js_scalar_from_typedarray(napi_typedarray_type type);
@@ -421,5 +577,114 @@ napi_value usearch_js_capabilities_compiled(napi_env env, napi_callback_info inf
 napi_value usearch_js_capabilities_available(napi_env env, napi_callback_info info);
 
 #pragma endregion Classes and Probes
+
+#pragma region Index Verbs
+
+/** Defines the @c CompiledSequenceIndex class and its cursors. */
+napi_value usearch_js_sequence_index_define(napi_env env);
+
+/** Defines the @c CompiledShapesIndex class and its cursors. */
+napi_value usearch_js_shapes_index_define(napi_env env);
+
+/** Defines the @c CompiledGeospatialIndex class and its cursors. */
+napi_value usearch_js_geospatial_index_define(napi_env env);
+
+/** Reads the receiver and @p wanted arguments beside it, missing ones reading as @c undefined; a
+ *  freed handle throws @c uninitialized. */
+usearch_js_index_t* usearch_js_index_self(napi_env env, napi_callback_info info, size_t wanted, napi_value* arguments,
+                                          napi_value* self);
+
+/** Reads @p wanted arguments of a static verb, which has no receiver to unwrap. */
+bool usearch_js_static_arguments(napi_env env, napi_callback_info info, size_t wanted, napi_value* arguments);
+
+/**
+ *  @brief Opens the call every instance verb runs through, reading the executor and the completion.
+ *  @return The call, or @c NULL with an exception pending.
+ */
+usearch_js_index_call_t* usearch_js_index_open(napi_env env, napi_value const* arguments,
+                                               usearch_js_index_call_t* local, usearch_executor_t* executor,
+                                               usearch_completion_t* completion);
+
+/** Reads the @c ArrayBuffer a plan lives in; an absent one reads as @c NULL. */
+bool usearch_js_plan_from_value(napi_env env, napi_value value, usearch_js_plan_t** plan);
+
+/** Reads the length of an array of indexes, or throws naming @p field. */
+bool usearch_js_handles_count(napi_env env, napi_value value, char const* field, uint32_t* count);
+
+/** Unwraps every instance of the class @p index_class holds in the array @p value into @p handles;
+ *  a freed one reads as @c NULL, for the library to refuse. */
+bool usearch_js_handles_from_value(napi_env env, napi_value value, char const* field, uint32_t count,
+                                   napi_ref index_class, void** handles);
+
+/** Views a run of keys in place, gathering only integer keys into block @p block of @p call; an
+ *  absent run reads as none. */
+bool usearch_js_optional_keys(napi_env env, napi_value value, char const* field, usearch_js_call_t* call, size_t block,
+                              usearch_keys_view_t* view, size_t* count);
+
+/** Builds an object of @p count named values, or answers @c NULL with an exception pending. */
+napi_value usearch_js_object(napi_env env, size_t count, char const* const* names, napi_value const* values);
+
+/** Views a ranked run of @p count queries inside @p arena as @c {keys, scores, counts, columns}. */
+napi_value usearch_js_matches_object(napi_env env, napi_value arena, usearch_matches_view_t const* matches,
+                                     size_t count);
+
+/** The @c TypedArray a kind reads back as; kinds JavaScript spells no element for stay bytes. */
+napi_typedarray_type usearch_js_typedarray_of(usearch_scalar_t scalar, size_t* unit_bytes);
+
+/** Wraps one reachability audit. */
+napi_value usearch_js_reachability_object(napi_env env, usearch_reachability_t const* reachability);
+
+/** Answers @c undefined. */
+napi_value usearch_js_finish_nothing(napi_env env, usearch_js_call_t* call, napi_value const* slots);
+
+/** Answers the count the call wrote. */
+napi_value usearch_js_finish_written(napi_env env, usearch_js_call_t* call, napi_value const* slots);
+
+/** Wraps what a refine or a reshard did to the graph. */
+napi_value usearch_js_finish_report(napi_env env, usearch_js_call_t* call, napi_value const* slots);
+
+/** Wraps the audit a health check took. */
+napi_value usearch_js_finish_health(napi_env env, usearch_js_call_t* call, napi_value const* slots);
+
+/** Views the ranked run a search wrote inside its arena. */
+napi_value usearch_js_finish_matches(napi_env env, usearch_js_call_t* call, napi_value const* slots);
+
+/** Views a ragged run of pairs and its Arrow offsets inside the arena, as
+ *  @c {offsets, keys, scores, required}. */
+napi_value usearch_js_finish_multiply(napi_env env, usearch_js_call_t* call, napi_value const* slots);
+
+/** Views the draws a sample wrote as @c {keys, entryOrdinals, parents, coordinates, draws}. */
+napi_value usearch_js_finish_sample(napi_env env, usearch_js_call_t* call, napi_value const* slots);
+
+/** Views the tape a sequence or shape retrieval wrote as @c {data, offsets, entries}, its elements
+ *  @c count scalars of the call's kind apiece. */
+napi_value usearch_js_finish_tape(napi_env env, usearch_js_call_t* call, napi_value const* slots);
+
+/** Views the monolith inside its arena. */
+napi_value usearch_js_finish_save_buffer(napi_env env, usearch_js_call_t* call, napi_value const* slots);
+
+/** Views the keys a cursor pull wrote as @c {keys, entries}. */
+napi_value usearch_js_finish_cursor_keys(napi_env env, usearch_js_call_t* call, napi_value const* slots);
+
+/** Views the keys and links a cursor pull wrote as @c {keys, entries, links: {offsets, keys}}. */
+napi_value usearch_js_finish_cursor_links(napi_env env, usearch_js_call_t* call, napi_value const* slots);
+
+/** Releases the engine walk through @p release, then the references keeping its index and executor
+ *  alive. */
+void usearch_js_walk_release(napi_env env, usearch_js_walk_t* walk, void (*release)(void*));
+
+/** Reads the walk behind the receiver, and the index handle and executor its pull names. */
+usearch_js_walk_t* usearch_js_walk_self(napi_env env, napi_callback_info info, size_t wanted, napi_value* arguments,
+                                        void** index, usearch_executor_t* executor);
+
+/**
+ *  @brief Wraps an engine walk into an object exposing @p next, @c free and @c [Symbol.dispose],
+ *      holding the index the walk borrows and the executor every pull runs on.
+ *  @return The object, or @c NULL with an exception pending and the walk released.
+ */
+napi_value usearch_js_walk_object(napi_env env, void* handle, napi_value index, napi_value executor, napi_callback next,
+                                  napi_callback free_method, napi_finalize finalize, void (*release)(void*));
+
+#pragma endregion Index Verbs
 
 #endif // UNUM_USEARCH_JAVASCRIPT_LIB_H

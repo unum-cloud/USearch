@@ -46,6 +46,10 @@
 
 const types = @import("usearch/types.zig");
 const dense = @import("usearch/dense.zig");
+const basic = @import("usearch/basic.zig");
+const sequence = @import("usearch/sequence.zig");
+const shapes = @import("usearch/shapes.zig");
+const geospatial = @import("usearch/geospatial.zig");
 
 // types
 pub const Status = types.Status;
@@ -58,6 +62,9 @@ pub const Residency = types.Residency;
 pub const Traversal = types.Traversal;
 pub const BytesView = types.BytesView;
 pub const RowsView = types.RowsView;
+pub const TapeLayout = basic.TapeLayout;
+pub const TapeView = basic.TapeView;
+pub const TapeEntries = basic.TapeEntries;
 pub const Matches = types.Matches;
 pub const QueryMatches = types.QueryMatches;
 pub const Admission = types.Admission;
@@ -119,9 +126,81 @@ pub const Monolith = dense.Monolith;
 pub const DenseCursor = dense.DenseCursor;
 pub const DenseSearchStream = dense.DenseSearchStream;
 
+// sequence
+pub const SequenceMetric = sequence.SequenceMetric;
+pub const SequenceWeights = sequence.SequenceWeights;
+pub const SequenceOptions = sequence.SequenceOptions;
+pub const SequenceMetadata = sequence.SequenceMetadata;
+pub const SequenceIndexDescription = sequence.SequenceIndexDescription;
+pub const SequenceKeyStats = sequence.SequenceKeyStats;
+pub const SequenceRefinePlan = sequence.SequenceRefinePlan;
+pub const SequenceReshardPlan = sequence.SequenceReshardPlan;
+pub const SequenceLoadRamConfig = sequence.SequenceLoadRamConfig;
+pub const SequenceLoadVramConfig = sequence.SequenceLoadVramConfig;
+pub const SequenceLoadRamBufferConfig = sequence.SequenceLoadRamBufferConfig;
+pub const SequenceLoadVramBufferConfig = sequence.SequenceLoadVramBufferConfig;
+pub const SequenceViewNvmeConfig = sequence.SequenceViewNvmeConfig;
+pub const SequenceInsertConfig = sequence.SequenceInsertConfig;
+pub const SequenceRefineConfig = sequence.SequenceRefineConfig;
+pub const SequenceSearchConfig = sequence.SequenceSearchConfig;
+pub const SequenceReshardConfig = sequence.SequenceReshardConfig;
+pub const SequenceIndex = sequence.SequenceIndex;
+pub const SequenceCursor = sequence.SequenceCursor;
+
+// shapes
+pub const ShapesMetric = shapes.ShapesMetric;
+pub const ShapesOptions = shapes.ShapesOptions;
+pub const ShapesMetadata = shapes.ShapesMetadata;
+pub const ShapesIndexDescription = shapes.ShapesIndexDescription;
+pub const ShapesKeyStats = shapes.ShapesKeyStats;
+pub const ShapesRefinePlan = shapes.ShapesRefinePlan;
+pub const ShapesReshardPlan = shapes.ShapesReshardPlan;
+pub const ShapesLoadRamConfig = shapes.ShapesLoadRamConfig;
+pub const ShapesLoadVramConfig = shapes.ShapesLoadVramConfig;
+pub const ShapesLoadRamBufferConfig = shapes.ShapesLoadRamBufferConfig;
+pub const ShapesLoadVramBufferConfig = shapes.ShapesLoadVramBufferConfig;
+pub const ShapesViewNvmeConfig = shapes.ShapesViewNvmeConfig;
+pub const ShapesInsertConfig = shapes.ShapesInsertConfig;
+pub const ShapesRefineConfig = shapes.ShapesRefineConfig;
+pub const ShapesSearchConfig = shapes.ShapesSearchConfig;
+pub const ShapesReshardConfig = shapes.ShapesReshardConfig;
+pub const ShapesIndex = shapes.ShapesIndex;
+pub const ShapesCursor = shapes.ShapesCursor;
+
+// geospatial
+pub const GeospatialObservation = geospatial.GeospatialObservation;
+pub const GeospatialRelation = geospatial.GeospatialRelation;
+pub const TerrainFunction = geospatial.TerrainFunction;
+pub const GeospatialTerrainFill = geospatial.GeospatialTerrainFill;
+pub const GeospatialTerrain = geospatial.GeospatialTerrain;
+pub const GeospatialOptions = geospatial.GeospatialOptions;
+pub const GeospatialMetadata = geospatial.GeospatialMetadata;
+pub const GeospatialIndexDescription = geospatial.GeospatialIndexDescription;
+pub const GeospatialKeyStats = geospatial.GeospatialKeyStats;
+pub const GeospatialRefinePlan = geospatial.GeospatialRefinePlan;
+pub const GeospatialReshardPlan = geospatial.GeospatialReshardPlan;
+pub const GeospatialLoadRamConfig = geospatial.GeospatialLoadRamConfig;
+pub const GeospatialLoadVramConfig = geospatial.GeospatialLoadVramConfig;
+pub const GeospatialLoadRamBufferConfig = geospatial.GeospatialLoadRamBufferConfig;
+pub const GeospatialLoadVramBufferConfig = geospatial.GeospatialLoadVramBufferConfig;
+pub const GeospatialViewNvmeConfig = geospatial.GeospatialViewNvmeConfig;
+pub const GeospatialInsertConfig = geospatial.GeospatialInsertConfig;
+pub const GeospatialRefineConfig = geospatial.GeospatialRefineConfig;
+pub const GeospatialSearchConfig = geospatial.GeospatialSearchConfig;
+pub const GeospatialWithinConfig = geospatial.GeospatialWithinConfig;
+pub const GeospatialReshardConfig = geospatial.GeospatialReshardConfig;
+pub const GeospatialIndex = geospatial.GeospatialIndex;
+pub const GeospatialObservations = geospatial.GeospatialObservations;
+pub const GeospatialMatches = geospatial.GeospatialMatches;
+pub const GeospatialCursor = geospatial.GeospatialCursor;
+
 test { // pull each module's tests into `zig build test`
     _ = @import("usearch/types.zig");
     _ = @import("usearch/dense.zig");
+    _ = @import("usearch/basic.zig");
+    _ = @import("usearch/sequence.zig");
+    _ = @import("usearch/shapes.zig");
+    _ = @import("usearch/geospatial.zig");
     // Every re-export above, so one that outlives the declaration it names fails here rather
     // than in a dependent - an unreferenced `pub const` is otherwise never analyzed.
     @import("std").testing.refAllDecls(@This());

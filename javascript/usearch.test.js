@@ -1253,3 +1253,248 @@ test("Reachability audits", () => {
   assert(health.depthFromRoot >= 1, "a health check reaches at least one depth");
   assert.deepEqual([health.unreachedIslands, health.components], [0, 1], "two linked entries form one component");
 });
+
+// region Modalities
+
+/** A seeded generator, so every modality's random batch repeats run to run. */
+function seeded(seed) {
+  let state = seed >>> 0 || 1;
+  return () => (state = (Math.imul(state, 1664525) + 1013904223) >>> 0) / 2 ** 32;
+}
+
+/** The three basic modalities, each with its plans and a way to fill a batch of random entries. */
+const MODALITIES = {
+  SequenceIndex: {
+    type: usearch.SequenceIndex,
+    plans: [usearch.SequenceRefinePlan, usearch.SequenceReshardPlan],
+    entries(count, seed) {
+      const random = seeded(seed);
+      return Array.from({ length: count }, () =>
+        Uint8Array.from({ length: 8 + Math.floor(random() * 9) }, () => 97 + Math.floor(random() * 26)),
+      );
+    },
+  },
+  ShapesIndex: {
+    type: usearch.ShapesIndex,
+    plans: [usearch.ShapesRefinePlan, usearch.ShapesReshardPlan],
+    entries(count, seed) {
+      const random = seeded(seed);
+      return Array.from({ length: count }, () =>
+        Float32Array.from({ length: 3 * (4 + Math.floor(random() * 9)) }, () => random()),
+      );
+    },
+  },
+  GeospatialIndex: {
+    type: usearch.GeospatialIndex,
+    plans: [usearch.GeospatialRefinePlan, usearch.GeospatialReshardPlan],
+    entries(count, seed) {
+      const random = seeded(seed);
+      return usearch.observationsOf(
+        Array.from({ length: count }, () => ({
+          latitudeDegrees: random() * 120 - 60,
+          longitudeDegrees: random() * 360 - 180,
+        })),
+      );
+    },
+  },
+};
+
+/** A host index of `modality` with `count` random entries under consecutive keys from `first`. */
+function built(modality, count, first = 0, seed = 0) {
+  const index = modality.type.initRam();
+  if (count) {
+    const keys = BigUint64Array.from({ length: count }, (_, position) => BigInt(first + position));
+    index.on(EXECUTOR).insert(keys, modality.entries(count, seed + 1));
+  }
+  return index;
+}
+
+for (const [name, modality] of Object.entries(MODALITIES)) {
+  test(`${name}: direct construction is refused`, () => {
+    assert.throws(() => new modality.type(), { code: Status.InvalidArgument });
+  });
+
+  test(`${name}: a fresh host index starts empty on a CPU class`, () => {
+    const described = modality.type.initRam().describe();
+    assert.equal(described.size, 0);
+    assert.notEqual(described.cpuClass, "unknown");
+    assert.equal(described.gpuClass, "unknown");
+  });
+
+  test(`${name}: a VRAM index opens or surfaces the library's status`, () => {
+    try {
+      assert.notEqual(modality.type.initVram().describe().gpuClass, "unknown");
+    } catch (error) {
+      assert(Object.values(Status).includes(error.code), "the refusal carries a library status");
+      assert.notEqual(error.code, Status.Success);
+    }
+  });
+
+  test(`${name}: counts, contains and gets what it holds`, () => {
+    const index = built(modality, 8);
+    assert.equal(index.count(3n).entries, 1);
+    assert.equal(index.contains(3n), true);
+    assert.equal(index.contains(99n), false);
+    assert.equal(index.deferred(EXECUTOR).count(3n).wait().entries, 1, "a deferred count lands the same");
+  });
+
+  test(`${name}: a checkpoint round-trips through a path and through memory`, () => {
+    const index = built(modality, 16);
+    const file = path.join(os.tmpdir(), `usearch.test.${name}.safegraphs`);
+    try {
+      index.on(EXECUTOR).save(file);
+      const loaded = modality.type.loadRam(file);
+      assert.equal(loaded.describe().size, 16);
+      assert.equal(loaded.count(5n).entries, 1);
+      assert.equal(modality.type.metadataRead(file).connectivity, index.describe().metadata.connectivity);
+      // The engine maps no basic checkpoint in place yet, and says so.
+      if (served(() => modality.type.viewRam(file).free())) {
+        const viewed = modality.type.viewRam(file);
+        assert.equal(viewed.describe().size, 16, "a view serves the same entries");
+        assert.throws(() => viewed.clear(), { code: Status.ReadOnly });
+      }
+    } finally {
+      fs.unlinkSync(file);
+    }
+    const monolith = index.on(EXECUTOR).saveBuffer(new Arena());
+    assert.equal(modality.type.loadRamBuffer(monolith).describe().size, 16);
+    assert.equal(modality.type.metadataReadBuffer(monolith).connectivity, index.describe().metadata.connectivity);
+  });
+
+  test(`${name}: a refine reports a round over every entry`, () => {
+    const index = built(modality, 64);
+    const report = index.on(EXECUTOR).refine();
+    assert(VERDICTS.includes(report.verdict));
+    assert(report.changed <= report.reselected);
+    assert.equal(report.reachability.audited, 64);
+    assert(index.contains(17n));
+    assert.equal(index.on(EXECUTOR).health().audited, 64);
+  });
+
+  test(`${name}: a refine plan runs to its end and finishes once`, () => {
+    const index = built(modality, 64);
+    const plan = new modality.plans[0]();
+    assert.equal(plan.phase, "none");
+    index.on(EXECUTOR).refine({ plan });
+    assert.equal(plan.phase, "done");
+    assert.equal(index.on(EXECUTOR).refinePlanFinish(plan).reachability.audited, 64);
+    assert.throws(() => index.on(EXECUTOR).refinePlanFinish(plan), { code: Status.InvalidArgument });
+  });
+
+  test(`${name}: a refine plan needs an executor`, () => {
+    const index = built(modality, 0);
+    assert.throws(() => index.refine({ plan: new modality.plans[0]() }), { code: Status.InvalidArgument });
+  });
+
+  test(`${name}: a reshard gathers every source into the target`, () => {
+    const first = built(modality, 32);
+    const donors = [1, 2].map((seed) => built(modality, 32, 32 * seed, seed));
+    const report = first.on(EXECUTOR).reshard([first, ...donors], [first]);
+    assert(VERDICTS.includes(report.verdict));
+    assert.equal(first.describe().size, 96);
+    assert.deepEqual([first.contains(40n), first.contains(80n)], [true, true]);
+    assert.deepEqual(
+      donors.map((donor) => donor.describe().size),
+      [0, 0],
+    );
+  });
+
+  test(`${name}: a reshard cuts one source into several targets`, () => {
+    const source = built(modality, 64);
+    const targets = [0, 1].map(() => modality.type.initRam());
+    source.on(EXECUTOR).reshard([source], targets, { seed: 7 });
+    const sizes = targets.map((target) => target.describe().size);
+    assert.equal(sizes[0] + sizes[1], 64);
+    assert(
+      sizes.every((size) => size > 0),
+      "every target takes a part",
+    );
+    assert.equal(source.describe().size, 0);
+  });
+
+  test(`${name}: a cut runs through a plan and a deferred finish`, () => {
+    const source = built(modality, 64);
+    const targets = [0, 1].map(() => modality.type.initRam());
+    const plan = new modality.plans[1]();
+    source.on(EXECUTOR).reshard([source], targets, { plan });
+    assert.equal(plan.phase, "done");
+    assert.equal(targets[0].describe().size + targets[1].describe().size, 64);
+    assert(VERDICTS.includes(source.deferred(EXECUTOR).reshardPlanFinish(plan).wait().verdict));
+  });
+
+  test(`${name}: a recut of one handle is unsupported`, () => {
+    const index = built(modality, 16);
+    assert.throws(() => index.on(EXECUTOR).reshard([index], [index]), { code: Status.Unsupported });
+    assert.equal(index.describe().size, 16);
+  });
+
+  test(`${name}: malformed lists are refused and move nothing`, () => {
+    const first = built(modality, 8);
+    const second = built(modality, 8, 8, 1);
+    assert.throws(() => first.on(EXECUTOR).reshard([], [first]), { code: Status.InvalidArgument });
+    assert.throws(() => first.on(EXECUTOR).reshard([first, first], [first]), { code: Status.InvalidArgument });
+    assert.throws(() => first.on(EXECUTOR).reshard([first], [second]), { code: Status.ConfigMismatch });
+    assert.throws(() => first.on(EXECUTOR).reshard([first, EXECUTOR], [first]), { code: Status.InvalidArgument });
+    assert.deepEqual([first.describe().size, second.describe().size], [8, 8]);
+  });
+}
+
+test("SequenceIndex: each sequence finds itself, and comes back as it went in", () => {
+  const index = usearch.SequenceIndex.initRam({ metric: usearch.SequenceMetric.LevenshteinUtf8 });
+  assert.equal(index.describe().metadata.metric, usearch.SequenceMetric.LevenshteinUtf8);
+  index.insert([1n, 2n, 3n], ["kitten", new TextEncoder().encode("sitting"), "mitten"]);
+  assert.equal(index.describe().size, 3);
+  const matches = index.search(["sitting"], 1, new Arena());
+  assert.equal(usearch.integerFromKey(matches.get(0).keys), 2n);
+  assert.equal(matches.get(0).scores[0], 0);
+  const stored = index.get(2n, new Arena());
+  assert.equal(stored.entries, 1);
+  assert.equal(new TextDecoder().decode(stored.get(0)), "sitting");
+  assert.deepEqual(index.count(2n), { entries: 1, totalBytes: 7, largestBytes: 7 });
+});
+
+test("ShapesIndex: shapes of different point counts share a batch, and each finds itself", () => {
+  const random = seeded(42);
+  const shapes = [5, 9, 13].map((points) => Float32Array.from({ length: 3 * points }, () => random()));
+  const index = usearch.ShapesIndex.initRam({ metric: usearch.ShapesMetric.Hausdorff });
+  assert.equal(index.describe().metadata.metric, usearch.ShapesMetric.Hausdorff);
+  assert.deepEqual(Object.values(usearch.ShapesMetric), [
+    "chamfer",
+    "hausdorff",
+    "gromov-wasserstein",
+    "wasserstein-procrustes",
+  ]);
+  index.insert([1n, 2n, 3n], shapes);
+  assert.equal(index.describe().totalPoints, 27);
+  const matches = index.search([shapes[2]], 1, new Arena());
+  assert.equal(usearch.integerFromKey(matches.get(0).keys), 3n);
+  const stored = index.get(3n, new Arena());
+  assert.equal(stored.get(0).length, 39, "a shape comes back with every point");
+  assertAlmostEqual(stored.get(0)[4], shapes[2][4], 1e-6);
+});
+
+test("GeospatialIndex: an observation finds itself, and the radius holds only the near ones", () => {
+  const { GeospatialIndex, GeospatialRelation, observationsOf } = usearch;
+  const places = observationsOf([
+    { latitudeDegrees: 48.8566, longitudeDegrees: 2.3522 },
+    { latitudeDegrees: 48.8656, longitudeDegrees: 2.3522 },
+    { latitudeDegrees: 52.52, longitudeDegrees: 13.405 },
+  ]);
+  const index = GeospatialIndex.initRam();
+  index.insert([1n, 2n, 3n], places);
+  const matches = index.search(places.subarray(22, 33), GeospatialRelation.Near, 1, new Arena());
+  assert.equal(usearch.integerFromKey(matches.get(0).keys), 3n);
+  assert.equal(matches.get(0).scores[0], 0);
+  const within = index.within(places.subarray(0, 11), GeospatialRelation.Near, 2000, new Arena());
+  const near = within.get(0);
+  const found = [];
+  for (let match = 0; match < near.scores.length; match++)
+    found.push(usearch.integerFromKey(near.keys.subarray(match * 16, match * 16 + 16)));
+  assert.deepEqual(found.sort(), [1n, 2n]);
+  const stored = index.get(3n, new Arena());
+  assert.equal(stored.length, 11);
+  assertAlmostEqual(stored[0], 52.52, 1e-4);
+  assert.throws(() => index.search(places, 0, 1, new Arena()), { code: Status.UnknownKind });
+});
+
+// endregion Modalities

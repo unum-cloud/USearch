@@ -4833,6 +4833,20 @@ static int dense_metric_from_name(usearch_bytes_view_t name) {
     usearch_dense_metric_t metric = usearch_dense_metric_unknown_k;
     return usearch_dense_metric_from_name(name, &metric) == usearch_status_success_k ? (int)metric : -1;
 }
+static char const* sequence_metric_name_of(int value) {
+    return usearch_sequence_metric_name((usearch_sequence_metric_t)value);
+}
+static int sequence_metric_from_name(usearch_bytes_view_t name) {
+    usearch_sequence_metric_t metric = usearch_sequence_metric_unknown_k;
+    return usearch_sequence_metric_from_name(name, &metric) == usearch_status_success_k ? (int)metric : -1;
+}
+static char const* shapes_metric_name_of(int value) {
+    return usearch_shapes_metric_name((usearch_shapes_metric_t)value);
+}
+static int shapes_metric_from_name(usearch_bytes_view_t name) {
+    usearch_shapes_metric_t metric = usearch_shapes_metric_unknown_k;
+    return usearch_shapes_metric_from_name(name, &metric) == usearch_status_success_k ? (int)metric : -1;
+}
 
 /** Every @c _name and @c _from_name pair against the spellings its enumerators carry. */
 void test_names(void) {
@@ -4932,6 +4946,18 @@ void test_names(void) {
         {usearch_dense_metric_euclidean_k, "euclidean"}, {usearch_dense_metric_hamming_k, "hamming"},
         {usearch_dense_metric_jaccard_k, "jaccard"},
     };
+    named_value_t const sequence_metrics[] = {
+        {usearch_sequence_metric_levenshtein_bytes_k, "levenshtein"},
+        {usearch_sequence_metric_levenshtein_utf8_k, "levenshtein-utf8"},
+        {usearch_sequence_metric_needleman_wunsch_k, "needleman-wunsch"},
+        {usearch_sequence_metric_overlap_k, "overlap"},
+    };
+    named_value_t const shapes_metrics[] = {
+        {usearch_shapes_metric_chamfer_k, "chamfer"},
+        {usearch_shapes_metric_hausdorff_k, "hausdorff"},
+        {usearch_shapes_metric_gromov_wasserstein_k, "gromov-wasserstein"},
+        {usearch_shapes_metric_wasserstein_procrustes_k, "wasserstein-procrustes"},
+    };
     size_t const row_bytes = sizeof(named_value_t);
     // Parsers answering a status read a refused spelling as -1, which no enumerator holds.
     expect_names("status", statuses, sizeof(statuses) / row_bytes, -1, "unrecognized", status_name_of,
@@ -4967,6 +4993,10 @@ void test_names(void) {
                  nvme_class_from_name);
     expect_names("dense metric", dense_metrics, sizeof(dense_metrics) / row_bytes, -1, "unknown", dense_metric_name_of,
                  dense_metric_from_name);
+    expect_names("sequence metric", sequence_metrics, sizeof(sequence_metrics) / row_bytes, -1, "unknown",
+                 sequence_metric_name_of, sequence_metric_from_name);
+    expect_names("shapes metric", shapes_metrics, sizeof(shapes_metrics) / row_bytes, -1, "unknown",
+                 shapes_metric_name_of, shapes_metric_from_name);
     usearch_scalar_t scalar = usearch_scalar_f32_k;
     usearch_nvme_class_t nvme_class = usearch_nvme_class_posix_k;
     usearch_dense_metric_t dense_metric = usearch_dense_metric_inner_k;
@@ -4978,6 +5008,10 @@ void test_names(void) {
     expect(scalar == usearch_scalar_f32_k && nvme_class == usearch_nvme_class_posix_k &&
                dense_metric == usearch_dense_metric_inner_k,
            "A refused spelling leaves its output alone");
+    usearch_shapes_metric_t shapes_metric = usearch_shapes_metric_hausdorff_k;
+    expect_eq(usearch_shapes_metric_from_name(text_view("gromov_wasserstein", 18), &shapes_metric),
+              usearch_status_invalid_argument_k, "An underscored shapes metric is refused");
+    expect(shapes_metric == usearch_shapes_metric_hausdorff_k, "A refused spelling leaves its output alone");
     printf("Test: Names - PASSED\n");
 }
 

@@ -2,7 +2,7 @@
 
 The Zig SDK binds the stable C ABI in `c/usearch/` with hand-written `extern fn` declarations rather than `@cImport`, so a dependent needs no include path of its own, only the library.
 It requires Zig 0.16 or later and links the engine's shared library, built by CMake.
-It exposes dense indexes; sequence, matrix and geospatial indexes follow as the C library ships them.
+It exposes dense indexes, and the sequence, shape and geospatial indexes beside them, each with the same receivers, plans and arenas.
 
 ## Installation
 
@@ -491,9 +491,77 @@ std.debug.print("{d} of {d} entries reachable\n", .{ reachability.reachable, rea
 
 `health` measures how much of the graph a search reaches from the root; entries it misses stay unfound until a `refine` re-links them.
 
+## Sequence Indexes
+
+A `SequenceIndex` searches byte strings, UTF-8 text, DNA, RNA and proteins under edit distances and alignments.
+Its sequences cross as one `TapeView`, the Apache Arrow `Binary` layout of bytes end to end around one more offset than entries, so the two buffers of an Arrow column feed it as they are, with `u32` or `u64` offsets.
+
+```zig
+var index = try usearch.SequenceIndex.initRam(.{ .metric = .levenshtein_utf8 }, &.{});
+defer index.deinit();
+const keys = [_]usearch.Key{ .fromInteger(1), .fromInteger(2), .fromInteger(3) };
+const offsets = [_]u64{ 0, 6, 13, 19 };
+try index.insert(&keys, try .of(u8, u64, "kittensittingmitten", &offsets), .{});
+
+var arena = try usearch.Arena.init(null);
+defer arena.deinit();
+const query = [_]u64{ 0, 6 };
+const matches = try index.search(try .of(u8, u64, "sittin", &query), 1, &arena, .{});
+std.debug.assert(matches.query(0).scores[0] == 1); // one edit away from "sitting"
+```
+
+`.needleman_wunsch` takes `SequenceWeights`, a 256 × 256 substitution matrix with a gap cost, and `.overlap` takes `window_widths`; every load and view names the weights again, since no checkpoint records them.
+`get` writes a key's sequences into an arena as `TapeEntries(u8)`, and `count` answers a `SequenceKeyStats` with the key's entries and their total and largest byte lengths.
+Offsets that reach past the elements are refused with `Error.ShapeMismatch` before the call crosses, since the C interface reads no element count to catch them.
+The receivers, reports and plans work as the dense ones do: `refine` and `reshard` take a `SequenceRefinePlan` or a `SequenceReshardPlan` and answer a `DenseRefineReport`.
+`reshard` gathers several sources into one target or cuts one source into several, while one handle as its only source and target answers `Error.Unsupported`, as these indexes take no placement to recut into.
+
+## Shape Indexes
+
+A `ShapesIndex` searches 3D point clouds of any size, like molecules, conformers and protein backbones, invariant to rotation, reflection, translation and point order.
+Its tape holds `[3]` points end to end, with offsets that count points, as an Arrow `List` column lays them out:
+
+```zig
+var index = try usearch.ShapesIndex.initRam(.{}, &.{}); // Chamfer over f32 points
+defer index.deinit();
+const points = [_][3]f32{ .{ 0, 0, 0 }, .{ 1.1, 0, 0 }, .{ 0, 0, 0 }, .{ 1.5, 0, 0 }, .{ 0, 1.5, 0 } };
+const offsets = [_]u64{ 0, 2, 5 };
+try index.insert(&.{ .fromInteger(1), .fromInteger(2) }, try .of([3]f32, u64, &points, &offsets), .{});
+
+const probe = [_][3]f32{ .{ 0, 0, 0 }, .{ 1, 0, 0 } };
+const matches = try index.search(try .of([3]f32, u64, &probe, &.{ 0, 2 }), 1, &arena, .{});
+const pair = try index.get(f32, matches.query(0).keys[0], &arena); // `TapeEntries([3]f32)`
+```
+
+The metrics are `.chamfer`, `.hausdorff`, `.gromov_wasserstein` and `.wasserstein_procrustes`, over `.f16` or `.f32` storage, whatever scalar the points arrive in.
+A non-zero `points` in `ShapesOptions` freezes every shape's point count, and `reserve` takes the points to expect beside the entries.
+`get` converts each shape to the element type it names and returns it in its inserted pose, within the stored rounding, and `count` reports a key's total and largest point counts.
+
+## Geospatial Indexes
+
+A `GeospatialIndex` searches observations on and above the Earth, like photos, video frames, drone footage and sensor fixes.
+`GeospatialObservation` is the library's own eleven doubles, so a slice of them crosses with no copy; a field no device recorded stays NaN, which only widens the tests that read it, and `GeospatialObservation.at` leaves every field but the position that way:
+
+```zig
+var index = try usearch.GeospatialIndex.initRam(.{}, &.{});
+defer index.deinit();
+const stops = [_]usearch.GeospatialObservation{ .at(51.5308, -0.1238), .at(51.5320, -0.1233), .at(51.5033, -0.1196) };
+try index.insert(&.{ .fromInteger(1), .fromInteger(2), .fromInteger(3) }, &stops, .{});
+
+const nearby = try index.within(stops[0..1], 500, &arena, .{}); // every stop within 500 metres
+std.debug.assert(nearby.query(0).keys.len == 2);
+const ranked = try index.search(stops[0..1], 1, &arena, .{ .relation = .near }); // chord metres
+```
+
+`within` reports every entry the relation admits inside the radius, however many, as a ragged `GeospatialMatches` with Arrow offsets, while `search` ranks the `wanted` nearest, a zero `metres` ranking by distance alone.
+The relation is a field of each call's config: `.near` widens the radius by both positions' accuracies, `.sees` and `.seen` test the view cones, and `.visible` tests a line of sight over the `GeospatialTerrain` the handle was built with, refused with `Error.Unsupported` on a handle without one.
+A terrain borrows its heights for the handle's lifetime or fills windows of them on demand through `GeospatialTerrainFill.of`, a trampoline generated per call site that runs on the executor's threads; no checkpoint carries it, so every load and view names it again.
+`get` returns a key's observations within the stored rounding.
+
 ## What This Binding Does Not Expose
 
-- The sequence, matrix and geospatial indexes the C library declares, which this module does not bind yet.
+- The `hints` of a dense or shape search, which the C argument structures carry and this module leaves null.
+- An NVMe `load`, search streams, and the sparse verbs, for the sequence, shape and geospatial indexes, since the C library declares none for them.
 - The numeric `usearch_version` triple; `usearch.version()` answers the library's version string instead.
 
 ## Design

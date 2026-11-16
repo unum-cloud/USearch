@@ -2,7 +2,7 @@
 
 The crate links the pre-instantiated C library and calls the stable C ABI in `c/usearch/` through `extern "C"` declarations, so no index template is instantiated in your build.
 It needs Rust 1.100 or newer, CMake 3.28 and a C++20 compiler.
-It exposes dense indexes; sequence, matrix and geospatial indexes follow as the C library ships them.
+It exposes dense, sequence, shape and geospatial indexes.
 Detailed symbol documentation lives on [docs.rs](https://docs.rs/usearch).
 
 ## Installation
@@ -545,6 +545,74 @@ println!("{} entries under {key}, contained: {}", index.count(key)?, index.conta
 `describe` reads the frozen metadata and the counters once each, so under concurrent insertions they may come from slightly different moments, and `memory_usage` excludes the executor's scratch.
 `health` measures how much of the graph a search reaches from the root; entries it misses stay unfound until a `refine` re-links them.
 `contains` is the blocking shorthand for a nonzero `count`.
+
+## Sequence Indexes
+
+A `SequenceIndex` searches byte strings, UTF-8 text, DNA, RNA and proteins under edit distances and alignments.
+Its sequences cross as one `Tape`, the Apache Arrow `Binary` layout of bytes end to end around one more offset than entries: `Tape::of` packs separate entries, and `Tape::new` borrows the two runs of an Arrow column as they are.
+
+```rust
+let options = SequenceOptions {
+    metric: SequenceMetric::LevenshteinUtf8,
+    ..SequenceOptions::default()
+};
+let index = SequenceIndex::init_ram(&options, &[])?;
+let words = Tape::of(["kitten", "sitting", "mitten"]);
+index.insert([Key::from(1u64), Key::from(2u64), Key::from(3u64)], words)?;
+
+let mut arena = Arena::new()?;
+let matches = index.search(Tape::of(["sittin"]), 1, &mut arena)?;
+assert_eq!(matches.query(0)?.keys, [Key::from(2u64)]);
+assert_eq!(matches.query(0)?.distances[0], 1.0); // one edit away
+```
+
+`SequenceMetric::NeedlemanWunsch` takes `SequenceWeights`, a 256 × 256 substitution matrix with a gap cost, and `SequenceMetric::Overlap` takes `window_widths`; every load and view names the weights again, since no checkpoint records them.
+`get` writes a key's sequences into an arena as `TapeEntries`, and `count` reports a key's entries with their total and largest byte lengths.
+The verbs come from `SequenceVerbs`, and the receivers, reports and plans work as the dense ones do: `refine` and `reshard` take a `SequenceRefinePlan` or a `SequenceReshardPlan` and answer a `RefineReport`.
+
+## Shape Indexes
+
+A `ShapesIndex` searches 3D point clouds of any size, like molecules, conformers and protein backbones, invariant to rotation, reflection, translation and point order.
+Its tape holds `[x, y, z]` points end to end, with offsets that count points, as an Arrow `List` column lays them out:
+
+```rust
+let index = ShapesIndex::init_ram(&ShapesOptions::default(), &[])?; // Chamfer over f32 points
+let pair: [[f32; 3]; 2] = [[0.0, 0.0, 0.0], [1.1, 0.0, 0.0]];
+let triple: [[f32; 3]; 3] = [[0.0, 0.0, 0.0], [1.5, 0.0, 0.0], [0.0, 1.5, 0.0]];
+index.insert([Key::from(1u64), Key::from(2u64)], Tape::of([&pair[..], &triple[..]]))?;
+
+let probe: [[f32; 3]; 2] = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
+let mut arena = Arena::new()?;
+let matches = index.search(Tape::of([&probe[..]]), 1, &mut arena)?;
+assert_eq!(matches.query(0)?.keys, [Key::from(1u64)]);
+```
+
+The metrics are Chamfer, Hausdorff, Gromov-Wasserstein and Wasserstein-Procrustes, over `f16` or `f32` storage, whatever scalar the points arrive in.
+A non-zero `points` in `ShapesOptions` freezes every shape's point count.
+`get::<Value>` converts each shape to the scalar it is asked for and returns it in its inserted pose, and `count` reports a key's total and largest point counts.
+
+## Geospatial Indexes
+
+A `GeospatialIndex` searches observations on and above the Earth, like photos, video frames, drone footage and sensor fixes.
+`GeospatialObservation` is the library's own eleven doubles, so a slice of them crosses with no copy; a field no device recorded stays NaN, which only widens the tests that read it, and `GeospatialObservation::at` leaves every field but the position that way:
+
+```rust
+let index = GeospatialIndex::init_ram(&GeospatialOptions::default(), &[])?;
+let stops = [
+    GeospatialObservation::at(51.5308, -0.1238), // every other field unrecorded, NaN
+    GeospatialObservation::at(51.5320, -0.1233),
+    GeospatialObservation::at(51.5033, -0.1196),
+];
+index.insert([Key::from(1u64), Key::from(2u64), Key::from(3u64)], &stops)?;
+
+let mut arena = Arena::new()?;
+let nearby = index.within(&stops[..1], 500.0, &mut arena)?;
+assert_eq!(nearby.query(0)?.keys.len(), 2); // both stops within 500 metres, in chord metres
+```
+
+`within` reports every entry the relation admits inside the radius, however many, while `search` ranks the `wanted` nearest, a zero `metres` ranking by distance alone.
+The relation is a field of each call's config: `Near` widens the radius by both positions' accuracies, `Sees` and `Seen` test the view cones, and `Visible` tests a line of sight over the `GeospatialTerrain` the handle was built with.
+`get` returns a key's observations within the stored rounding.
 
 ## What This Binding Does Not Expose
 

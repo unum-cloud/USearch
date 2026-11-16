@@ -6,7 +6,7 @@
  *      executor whose threads a fanned-out verb runs on, the arena every scaling output lands in,
  *      the ranked run viewed inside it, and the deferred call a deferred receiver answers.
  */
-import { CompiledDeferred, CompiledMatches, CompiledRows, compiled } from "./library";
+import { CompiledDeferred, CompiledMatches, CompiledRows, CompiledTapeRows, compiled } from "./library";
 
 /** What went wrong, one member per failure the library reports, spelled as its canonical name.
  *  Every error the library or this binding throws carries one as its `code`, so a caller branches
@@ -672,4 +672,96 @@ export class Deferred<T> implements PromiseLike<T>, Disposable {
     if ("error" in outcome) throw outcome.error;
     return outcome.value;
   }
+}
+
+/** A ragged batch as Apache Arrow lays one out: elements end to end, and one more offset than
+ *  entries around them, entry `i` spanning elements `offsets[i]` up to `offsets[i + 1]`.
+ *
+ *  An element is a byte of a sequence or a point of a shape, three coordinates wide. As an input
+ *  it is borrowed in place for the call; as a retrieval's output it is viewed inside its arena. */
+export class Tape {
+  /** Every element's scalars, end to end. */
+  readonly data: Vector;
+  /** One more offset than there are entries, non-decreasing, counted in elements. */
+  readonly offsets: Uint32Array | BigUint64Array;
+  /** The scalar kind of `data`. */
+  readonly scalar: Scalar;
+  /** Scalars per element: one for a sequence byte, three for a point. */
+  readonly width: number;
+
+  /**
+   *  Wraps elements and their offsets without copying.
+   *
+   *  @param data - Every element's scalars, end to end.
+   *  @param offsets - The Arrow offsets, 32- or 64-bit.
+   *  @param scalar - The kind `data` holds; absent derives it from the array's element type.
+   *  @param width - Scalars per element; absent is one.
+   */
+  constructor(data: Vector, offsets: Uint32Array | BigUint64Array, scalar?: Scalar, width = 1) {
+    this.data = data;
+    this.offsets = offsets;
+    this.scalar = scalar ?? scalarOf(data);
+    this.width = width;
+  }
+
+  /** Entries the tape holds. */
+  get entries(): number {
+    return Math.max(this.offsets.length - 1, 0);
+  }
+
+  /**
+   *  Borrows one entry's scalars, without copying. Binding-only.
+   *
+   *  @param entry - Which entry to read.
+   *  @returns The scalars of that entry's elements, end to end.
+   */
+  get(entry: number): Vector {
+    if (!Number.isInteger(entry) || entry < 0 || entry >= this.entries)
+      throw fail(Status.InvalidArgument, `No entry ${entry} in a tape of ${this.entries}.`);
+    const begin = Number(this.offsets[entry]) * this.width;
+    const end = Number(this.offsets[entry + 1]) * this.width;
+    return this.data.subarray(begin, end) as Vector;
+  }
+
+  /**
+   *  Packs byte strings end to end, encoding text as UTF-8. Binding-only.
+   *
+   *  @param sequences - The sequences, each text or bytes.
+   *  @returns One tape holding them all, with 64-bit offsets.
+   */
+  static ofSequences(sequences: ReadonlyArray<string | Uint8Array>): Tape {
+    const encoder = new TextEncoder();
+    const parts = sequences.map((sequence) => (typeof sequence === "string" ? encoder.encode(sequence) : sequence));
+    const offsets = new BigUint64Array(parts.length + 1);
+    parts.forEach((part, position) => (offsets[position + 1] = offsets[position] + BigInt(part.length)));
+    const data = new Uint8Array(Number(offsets[parts.length]));
+    parts.forEach((part, position) => data.set(part, Number(offsets[position])));
+    return new Tape(data, offsets, Scalar.U8, 1);
+  }
+
+  /**
+   *  Packs point clouds end to end, three coordinates per point, every cloud of one array type.
+   *  Binding-only.
+   *
+   *  @param shapes - The clouds, each `x, y, z` interleaved.
+   *  @returns One tape holding them all, with 64-bit offsets counting points.
+   */
+  static ofShapes(shapes: ReadonlyArray<Float64Array | Float32Array | Float16Array>): Tape {
+    if (shapes.length === 0) return new Tape(new Float32Array(0), new BigUint64Array(1), Scalar.F32, 3);
+    const offsets = new BigUint64Array(shapes.length + 1);
+    shapes.forEach((shape, position) => {
+      if (shape.length % 3 !== 0 || shape.constructor !== shapes[0].constructor)
+        throw fail(Status.ShapeMismatch, `Shape ${position} is not whole points of the first shape's type.`);
+      offsets[position + 1] = offsets[position] + BigInt(shape.length / 3);
+    });
+    const Typed = shapes[0].constructor as new (length: number) => Float64Array | Float32Array | Float16Array;
+    const data = new Typed(Number(offsets[shapes.length]) * 3);
+    shapes.forEach((shape, position) => data.set(shape as never, Number(offsets[position]) * 3));
+    return new Tape(data, offsets, scalarOf(shapes[0]), 3);
+  }
+}
+
+/** One tape as it crosses into a verb. */
+export function tapeCrossing(tape: Tape): CompiledTapeRows {
+  return [tape.data, tape.offsets, scalarCodes[tape.scalar]];
 }

@@ -69,7 +69,12 @@ final class DenseCalls {
     }
 
     static Request<Void> clearing() {
-        return new Request<>(DenseIndex.CLEAR, call -> NOTHING);
+        return clearing(DenseIndex.CLEAR);
+    }
+
+    /** Clears through {@code verb}, the clear of any family whose structure is the dense one's. */
+    static Request<Void> clearing(Verb verb) {
+        return new Request<>(verb, call -> NOTHING);
     }
 
     static Request<DenseIndexDescription> describing() {
@@ -137,7 +142,12 @@ final class DenseCalls {
     }
 
     static Request<DenseReachability> auditing() {
-        return new Request<>(DenseIndex.HEALTH, call -> {
+        return auditing(DenseIndex.HEALTH);
+    }
+
+    /** Audits through {@code verb}, the health check of any family whose structure is the dense one's. */
+    static Request<DenseReachability> auditing(Verb verb) {
+        return new Request<>(verb, call -> {
             MemorySegment reachability = call.output(DenseIndex.HEALTH_REACHABILITY, DenseIndex.REACHABILITY);
             return () -> DenseReachability.lift(reachability);
         });
@@ -287,7 +297,12 @@ final class DenseCalls {
     }
 
     static Request<Sample> sampling(long wanted, Arena arena, DenseSampleConfig config) {
-        return new Request<>(DenseIndex.SAMPLE, call -> {
+        return sampling(DenseIndex.SAMPLE, wanted, arena, config);
+    }
+
+    /** Samples through {@code verb}, the sample of any family whose structure is the dense one's. */
+    static Request<Sample> sampling(Verb verb, long wanted, Arena arena, DenseSampleConfig config) {
+        return new Request<>(verb, call -> {
             call.size(DenseIndex.SAMPLE_SHOWN_COUNT, config.shown.length);
             call.keys(DenseIndex.SAMPLE_SHOWN, config.shown);
             call.rows(DenseIndex.SAMPLE_SHOWN_COORDINATES, RowsView.of(config.shownCoordinates, 3));
@@ -309,7 +324,12 @@ final class DenseCalls {
     }
 
     static Request<Void> saving(String path, @Nullable Progress progress) {
-        return new Request<>(DenseIndex.SAVE, call -> {
+        return saving(DenseIndex.SAVE, path, progress);
+    }
+
+    /** Saves through {@code verb}, the save of any family whose structure is the dense one's. */
+    static Request<Void> saving(Verb verb, String path, @Nullable Progress progress) {
+        return new Request<>(verb, call -> {
             call.path(DenseIndex.SAVE_PATH, path);
             call.progress(DenseIndex.SAVE_PROGRESS, progress);
             return NOTHING;
@@ -317,7 +337,12 @@ final class DenseCalls {
     }
 
     static Request<Monolith> serializing(Arena arena, @Nullable Progress progress) {
-        return new Request<>(DenseIndex.SAVE_BUFFER, call -> {
+        return serializing(DenseIndex.SAVE_BUFFER, arena, progress);
+    }
+
+    /** Serializes through {@code verb}, the buffer save of any family whose structure is the dense one's. */
+    static Request<Monolith> serializing(Verb verb, Arena arena, @Nullable Progress progress) {
+        return new Request<>(verb, call -> {
             MemorySegment monolith = call.output(DenseIndex.SAVE_BUFFER_MONOLITH, Library.BYTES_VIEW);
             call.arena(DenseIndex.SAVE_BUFFER_ARENA, arena);
             call.progress(DenseIndex.SAVE_BUFFER_PROGRESS, progress);

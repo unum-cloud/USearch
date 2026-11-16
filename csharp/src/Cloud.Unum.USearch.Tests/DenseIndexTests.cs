@@ -142,6 +142,10 @@ public sealed class DenseIndexTests : IDisposable
         Assert.True(Names.TryParse("converged", out RefineVerdict verdict));
         Assert.Equal(RefineVerdict.Converged, verdict);
         Assert.False(Names.TryParse("settled", out RefineVerdict _));
+        Assert.Equal("gromov-wasserstein", ShapesMetric.GromovWasserstein.Name());
+        Assert.True(Names.TryParse("wasserstein-procrustes", out ShapesMetric shapesMetric));
+        Assert.Equal(ShapesMetric.WassersteinProcrustes, shapesMetric);
+        Assert.False(Names.TryParse("gromov_wasserstein", out ShapesMetric _));
 
         USearchException failure = new(Status.ReadOnly, "detail");
         Assert.Equal("usearch: read-only: detail", failure.Message);

@@ -12,7 +12,8 @@ if (NOT CMAKE_JS_INC)
 endif ()
 
 # `CMAKE_JS_SRC` is the Windows delay-load hook and empty everywhere else.
-add_library(usearch_node SHARED lib.c types.c dense_index.c ${CMAKE_JS_SRC})
+add_library(usearch_node SHARED lib.c types.c dense_index.c sequence_index.c shapes_index.c geospatial_index.c
+                            ${CMAKE_JS_SRC})
 
 # The loader resolves the addon by file name, so the `.node` suffix and the bare stem are part of the interface rather
 # than a platform convention.
