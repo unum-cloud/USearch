@@ -30,7 +30,8 @@
 template <typename traits_type_>
 using basic_variant_tables = std::variant<basic_verbs<traits_type_, vendored_residency_t::ram_k> const*,
                                           basic_verbs<traits_type_, vendored_residency_t::nvme_k> const*,
-                                          basic_verbs<traits_type_, vendored_residency_t::vram_nvidia_k> const*>;
+                                          basic_verbs<traits_type_, vendored_residency_t::vram_nvidia_k> const*,
+                                          basic_verbs<traits_type_, vendored_residency_t::vram_apple_k> const*>;
 
 /**
  *  @brief The one dynamically-typed index of a modality every binding consumes: the variant picked
@@ -151,17 +152,18 @@ basic_verbs<traits_type_, residency_> const* pick_basic_cpu_variant(cpu_ladder<c
     return picked;
 }
 
-/** The NVIDIA variant of @p traits_type_ serving @p geometry on the newest rung of @p ladder at or
- *  under the class of @p placement whose unit every placed device loads. */
-template <typename traits_type_, gpu_class_t... classes_>
-basic_verbs<traits_type_, vendored_residency_t::vram_nvidia_k> const* pick_basic_gpu_variant(
-    gpu_ladder<classes_...>, typename traits_type_::geometry_t const& geometry,
-    gpu_placement_t const& placement) noexcept {
-    basic_verbs<traits_type_, vendored_residency_t::vram_nvidia_k> const* picked = nullptr;
+/** The @p residency_ variant of @p traits_type_ serving @p geometry on the newest rung of @p ladder
+ *  at or under the class of @p placement whose unit every placed device loads; a vendor's ladder
+ *  holds only its own classes, so it answers null for another vendor's devices. */
+template <typename traits_type_, vendored_residency_t residency_, gpu_class_t... classes_>
+basic_verbs<traits_type_, residency_> const* pick_basic_gpu_variant(gpu_ladder<classes_...>,
+                                                                    typename traits_type_::geometry_t const& geometry,
+                                                                    gpu_placement_t const& placement) noexcept {
+    basic_verbs<traits_type_, residency_> const* picked = nullptr;
     auto rung = [&]<gpu_class_t class_>() noexcept {
         if constexpr (gpu_class_compiled(class_))
             if (!picked && class_ <= placement.gpu_class && (placement.loaded & gpu_class_bit(class_)))
-                picked = basic_class_tables<traits_type_, vendored_residency_t::vram_nvidia_k, class_>::find(geometry);
+                picked = basic_class_tables<traits_type_, residency_, class_>::find(geometry);
     };
     (rung.template operator()<classes_>(), ...);
     return picked;
@@ -244,7 +246,7 @@ bool basic_load_variant(punned_basic_index<traits_type_, residency_> punned, che
     return propagate_error(loaded, outcome);
 }
 
-#if USEARCH_ARCH_CUDA_
+#if USEARCH_ARCH_CUDA_ || USEARCH_ARCH_METAL_
 
 /** Bounds every shard of a GPU variant at @p vram 's shard capacity, then places one shard per
  *  named device, on that device's vendor ordinal; the caller checked every named ordinal against
@@ -267,10 +269,12 @@ status_t place_shards(punned_basic_index<traits_type_, residency_> const& punned
  *      past it, one shard on every device they name, then hands it to @p fill; null once @p outcome
  *      records why not, as for a geometry no device kit serves.
  *
- *  It calls <tt>fill(punned_basic_index) → bool</tt>. The variant is the first on the modality's GPU
- *  ladder at or under the best class every named device loads under the ceiling, whose unit they
- *  all load and which serves the geometry. The shards are placed once the variant holds its
- *  geometry, since each one is built as the geometry names.
+ *  The variant is the first on the modality's ladder of the devices' vendor at or under the best
+ *  class every named device loads under the ceiling, whose unit they all load and which serves the
+ *  geometry. Devices this build carries a class for but no variant of the geometry are refused with
+ *  @c unsupported_k, as Apple GPUs are for geospatial and f32 shapes, short of their contract. The
+ *  shards are placed once the variant holds its geometry, since each is built as it names; then the
+ *  variant goes to <tt>fill(punned_basic_index) → bool</tt>.
  */
 template <typename handle_type_, typename arguments_type_, typename fill_type_>
 handle_type_* make_basic_vram_handle(typename handle_type_::traits_t::geometry_t& geometry,
@@ -292,24 +296,33 @@ handle_type_* make_basic_vram_handle(typename handle_type_::traits_t::geometry_t
         return propagate_error(placed_status, outcome,
                                "The devices share no class this build carries under the ceiling"),
                nullptr;
-    basic_verbs<traits_t, vendored_residency_t::vram_nvidia_k> const* const verbs = pick_basic_gpu_variant<traits_t>(
-        typename traits_t::gpu_ladder_t {}, geometry, placement);
-    if (!verbs)
-        return propagate_error(usearch_status_device_k, outcome, "This build carries no kernels for the device"),
-               nullptr;
-    auto const [created, create_status] = verbs->create(std::move(geometry), traits_t::geometry_extras_of(arguments),
-                                                        vram_residency(placement.first().vendor_ordinal),
-                                                        host_allocator_of(vram));
-    if (failed(create_status)) return propagate_error(create_status, outcome), nullptr;
-    handle_type_* const index = new (std::nothrow) handle_type_ {{verbs, created}};
-    if (!index)
-        return verbs->destroy(created),
-               propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the index"), nullptr;
-    punned_basic_index<traits_t, vendored_residency_t::vram_nvidia_k> const punned {*verbs, created};
-    if (status_t const placed = place_shards(punned, vram); failed(placed))
-        return propagate_error(placed, outcome), delete index, nullptr;
-    if (!fill(punned)) return delete index, nullptr;
-    return index;
+    // Each vendor's ladder serves only its own devices, so at most one of them picks a variant.
+    handle_type_* index = nullptr;
+    bool picked = false;
+    auto on_vendor = [&]<vendored_residency_t residency_>(auto ladder) noexcept {
+        basic_verbs<traits_t, residency_> const* const verbs =
+            picked ? nullptr : pick_basic_gpu_variant<traits_t, residency_>(ladder, geometry, placement);
+        if (!verbs) return;
+        picked = true;
+        auto const [created, create_status] = verbs->create(
+            std::move(geometry), traits_t::geometry_extras_of(arguments),
+            vram_residency(placement.first().vendor_ordinal), host_allocator_of(vram));
+        if (failed(create_status)) return propagate_error(create_status, outcome), void();
+        index = new (std::nothrow) handle_type_ {{verbs, created}};
+        if (!index)
+            return verbs->destroy(created),
+                   propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the index"), void();
+        punned_basic_index<traits_t, residency_> const punned {*verbs, created};
+        if (status_t const placed = place_shards(punned, vram); failed(placed))
+            return propagate_error(placed, outcome), delete std::exchange(index, nullptr), void();
+        if (!fill(punned)) delete std::exchange(index, nullptr);
+    };
+    on_vendor.template operator()<vendored_residency_t::vram_nvidia_k>(typename traits_t::nvidia_gpu_ladder_t {});
+    on_vendor.template operator()<vendored_residency_t::vram_apple_k>(typename traits_t::apple_gpu_ladder_t {});
+    if (picked) return index;
+    return propagate_error(usearch_status_unsupported_k, outcome,
+                           "No kernel this build carries serves the geometry on the devices"),
+           nullptr;
 }
 
 #endif
@@ -319,7 +332,7 @@ template <typename arguments_type_>
 void basic_init_vram(arguments_type_* arguments) noexcept {
     call_outcome_t outcome(*arguments);
     *arguments->index = nullptr;
-#if USEARCH_ARCH_CUDA_
+#if USEARCH_ARCH_CUDA_ || USEARCH_ARCH_METAL_
     using handle_t = handle_of<arguments_type_>;
     typename handle_t::traits_t::geometry_t geometry;
     if (!handle_t::traits_t::state(*arguments, geometry, outcome)) return;
@@ -370,7 +383,7 @@ void basic_load_vram(arguments_type_* arguments, [[maybe_unused]] checkpoint_typ
     if (submitted<verb_>(arguments)) return;
     call_outcome_t outcome(*arguments);
     *arguments->index = nullptr;
-#if USEARCH_ARCH_CUDA_
+#if USEARCH_ARCH_CUDA_ || USEARCH_ARCH_METAL_
     using handle_t = handle_of<arguments_type_>;
     if (checkpoint.empty())
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The checkpoint must not be empty"), void();

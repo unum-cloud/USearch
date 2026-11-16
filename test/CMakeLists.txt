@@ -94,7 +94,17 @@ if (USEARCH_ROCM_ARCH)
     )
 endif ()
 if (USEARCH_METAL_ARCH)
-    usearch_test_vram_shards(apple USEARCH_ARCH_METAL_ ENTRY dense/vram_apple.cpp)
+    usearch_test_vram_shards(
+        apple USEARCH_ARCH_METAL_
+        ENTRY dense/vram_apple.cpp
+        SOURCES sequence/vram_index.cpp shapes/vram_index.cpp geospatial/vram_index.cpp
+        DEFINITIONS ${usearch_gpu_gates_} "STRINGZILLA_ARCH_METAL_=1" "NUMKONG_ARCH_METAL_=1"
+    )
+    # The faces splice StringZilla's and NumKong's Metal sources, which those headers embed by their include paths.
+    target_compile_options(
+        usearch_test_vram_shards_apple PRIVATE "--embed-dir=${stringzilla_SOURCE_DIR}/include"
+                                               "--embed-dir=${numkong_SOURCE_DIR}/include"
+    )
 endif ()
 
 # The engine suite: the dense behavior cells, one per mechanism, with each storage dtype's cells in a unit of its own

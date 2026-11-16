@@ -2,9 +2,9 @@
  *  @file test/sequence/vram_index.cpp
  *  @author Ash Vardanian
  *  @date October 15, 2026
- *  @brief The sequence VRAM cell: byte and rune Levenshtein and window overlap on an NVIDIA GPU
- *      beside the RAM index on the same data, judged by recall against exact neighbors, every
- *      reported distance against the serial kit the RAM suite checks against its oracle.
+ *  @brief The sequence VRAM cell: byte and rune Levenshtein and window overlap on an NVIDIA or
+ *      Apple GPU beside the RAM index on the same data, judged by recall against exact neighbors,
+ *      every reported distance against the serial kit the RAM suite checks against its oracle.
  *
  *  Sequences are planted templates over the nucleotides with an eighth of their symbols edited, so
  *  neighbors cluster by template while the bytes differ. One collection keeps to the two-word kit,
@@ -33,6 +33,9 @@
 #include "usearch/sequence/vram_nvidia_metric.cuh"
 #include "usearch/basic/vram_nvidia_indexes.hpp"
 #endif
+#if USEARCH_ARCH_METAL_
+#include "usearch/sequence/vram_apple_index.hpp"
+#endif
 
 #include "harness.hpp"
 
@@ -50,7 +53,7 @@ struct sequence_nvidia_fatbin {
 namespace unum::usearch::test::sequence {
 using namespace unum::usearch::sequence;
 
-#if USEARCH_ARCH_CUDA_
+#if USEARCH_ARCH_CUDA_ || USEARCH_ARCH_METAL_
 
 /** Draws @p count strings of about @p length nucleotides from eight templates, an eighth of every
  *  string's symbols substituted, inserted or erased. */
@@ -147,15 +150,51 @@ static auto make_sequence_metric(std::size_t staging, std::size_t& failures) {
     }
 }
 
-/** The kit the GPU scores @p metric_ with, its ladder's pick at the CUDA floor. */
-template <usearch_sequence_metric_t metric_>
+/** The kit the GPU scores @p metric_ with, its ladder's pick at @p capability_ , the CUDA floor
+ *  unless named, or Metal's. */
+template <usearch_sequence_metric_t metric_, sz_capability_t capability_ = sz_cap_cuda_k>
 using vram_kit_of = std::conditional_t<
-    metric_ == usearch_sequence_metric_overlap_k, typename overlap_ladder<sz_cap_cuda_k>::kit_t,
+    metric_ == usearch_sequence_metric_overlap_k, typename overlap_ladder<capability_>::kit_t,
     std::conditional_t<
-        metric_ == usearch_sequence_metric_needleman_wunsch_k, typename needleman_wunsch_ladder<sz_cap_cuda_k>::kit_t,
+        metric_ == usearch_sequence_metric_needleman_wunsch_k, typename needleman_wunsch_ladder<capability_>::kit_t,
         typename levenshtein_ladder<metric_ == usearch_sequence_metric_levenshtein_utf8_k ? sz_levenshtein_runes_k
                                                                                           : sz_levenshtein_bytes_k,
-                                    sz_cap_cuda_k>::kit_t>>;
+                                    capability_>::kit_t>>;
+
+#if USEARCH_ARCH_CUDA_
+
+/** What the NVIDIA collections build on: the executor, the face over the CUDA floor's kits and the
+ *  library's fatbins, its storage and the contexts carved from the executor's run. */
+struct vram_cells_t {
+    using executor_t = cuda_executor_t;
+    template <usearch_sequence_metric_t metric_, typename node_id_type_>
+    using index_t = vram_nvidia_index<vram_kit_of<metric_>, node_id_type_, sequence_nvidia_fatbin<metric_>>;
+
+    static cuda_virtual_memory_allocator<byte_t> storage(executor_t& executor, int device) noexcept {
+        return cuda_virtual_memory_allocator<byte_t> {executor.api(), device};
+    }
+    static cuda_arena_allocator_t arena(executor_t& executor) noexcept {
+        return cuda_arena_allocator_t {executor.stream(0).arena, executor.stream(0)};
+    }
+};
+
+#endif
+#if USEARCH_ARCH_METAL_ && !USEARCH_ARCH_CUDA_
+
+/** What the Apple collections build on: the executor, the face over Metal's kits, its storage and
+ *  the contexts over its stream. */
+struct vram_cells_t {
+    using executor_t = metal_executor_t;
+    template <usearch_sequence_metric_t metric_, typename node_id_type_>
+    using index_t = vram_apple_index<vram_kit_of<metric_, sz_cap_metal_k>, node_id_type_>;
+
+    static metal_shared_allocator_t storage(executor_t& executor, int) noexcept {
+        return metal_shared_allocator_t {executor.stream(0).handle};
+    }
+    static metal_stream_t arena(executor_t& executor) noexcept { return executor.stream(0).handle.share(); }
+};
+
+#endif
 
 /** Matches, of @p wanted at most, whose distances reach no further than the @p wanted -th exact
  *  one: ties make the IDs ambiguous, the distances never. */
@@ -182,11 +221,11 @@ enum class recall_reference_t {
  *  take a twentieth.
  */
 template <usearch_sequence_metric_t metric_, typename node_id_type_ = u32_t>
-static std::size_t check_sequence_vram_collection(u64_t seed, cuda_executor_t& executor, std::size_t count,
+static std::size_t check_sequence_vram_collection(u64_t seed, vram_cells_t::executor_t& executor, std::size_t count,
                                                   std::size_t length, std::size_t queries_count,
                                                   recall_reference_t reference = recall_reference_t::ram_index_k) {
     using ram_index_t = ram_index<us::utilities::uuid128_t, u32_t>;
-    using vram_index_t = vram_nvidia_index<vram_kit_of<metric_>, node_id_type_, sequence_nvidia_fatbin<metric_>>;
+    using vram_index_t = typename vram_cells_t::template index_t<metric_, node_id_type_>;
     constexpr std::size_t wanted_k = 10, expansion_k = 64, batches_k = 3, origin_k = 3;
     std::size_t failures = 0;
 
@@ -238,7 +277,7 @@ static std::size_t check_sequence_vram_collection(u64_t seed, cuda_executor_t& e
 
     // The GPU index, in three batches, each over a context carved from the executor's run.
     int const device = executor.device(0);
-    vram_index_t vram_index {cuda_virtual_memory_allocator<byte_t> {executor.api(), device}};
+    vram_index_t vram_index {vram_cells_t::storage(executor, device)};
     if constexpr (metric_ == usearch_sequence_metric_overlap_k) {
         u32_t widths[std::size(vram_overlap_widths_k)];
         for (std::size_t window = 0; window != std::size(widths); ++window)
@@ -255,11 +294,10 @@ static std::size_t check_sequence_vram_collection(u64_t seed, cuda_executor_t& e
     for (std::size_t batch = 0; batch != batches_k && !failures; ++batch) {
         std::size_t const first = count * batch / batches_k, bound = count * (batch + 1) / batches_k;
         std::span<std::size_t const> const batch_offsets {offsets.data() + first, bound - first + 1};
-        failures += expect_eq(
-            executor.reserve(vram_index.traversal_memory_usage({tape_bytes, batch_offsets}, insert_config)),
-            status_t::success_k);
-        typename vram_index_t::traversal_context_t context {
-            cuda_arena_allocator_t {executor.stream(0).arena, executor.stream(0)}};
+        failures += expect_eq(executor.reserve(vram_index.traversal_memory_usage(
+                                  tape_view<byte_t const> {tape_bytes, batch_offsets}, insert_config)),
+                              status_t::success_k);
+        typename vram_index_t::traversal_context_t context {vram_cells_t::arena(executor)};
         auto const [inserted, status] = vram_index.insert({keys.data() + first, bound - first},
                                                           {tape_bytes, batch_offsets}, context, insert_config);
         failures += expect_eq(status, status_t::success_k);
@@ -273,11 +311,10 @@ static std::size_t check_sequence_vram_collection(u64_t seed, cuda_executor_t& e
     std::vector<f32_t> distances(queries_count * wanted_k);
     std::span<std::size_t const> const query_offsets {offsets.data() + count, queries_count + 1};
     typename vram_index_t::search_config_t const search_config {expansion_k, wanted_k};
-    failures += expect_eq(
-        executor.reserve(vram_index.traversal_memory_usage({tape_bytes, query_offsets}, search_config)),
-        status_t::success_k);
-    typename vram_index_t::traversal_context_t context {
-        cuda_arena_allocator_t {executor.stream(0).arena, executor.stream(0)}};
+    failures += expect_eq(executor.reserve(vram_index.traversal_memory_usage(
+                              tape_view<byte_t const> {tape_bytes, query_offsets}, search_config)),
+                          status_t::success_k);
+    typename vram_index_t::traversal_context_t context {vram_cells_t::arena(executor)};
     if (!failures)
         failures += expect_eq(vram_index
                                   .search({tape_bytes, query_offsets}, {ids.data(), {queries_count, wanted_k}},
@@ -315,6 +352,10 @@ static std::size_t check_sequence_vram_collection(u64_t seed, cuda_executor_t& e
     return failures + expect_errors("vram sequence distances", comparison_family_t::approximate_k,
                                     comparison_verdict_t::assert_k, distance_errors, 0);
 }
+
+#endif // USEARCH_ARCH_CUDA_ || USEARCH_ARCH_METAL_
+
+#if USEARCH_ARCH_CUDA_
 
 /** Builds the byte Levenshtein shards of a sharded index, unreserved, on the device it names. */
 struct sequence_vram_shards_t {
@@ -731,6 +772,50 @@ std::size_t check_sequence_vram(settings_t const& settings, gpu_device_t const& 
         // The C interface names devices by their place in the listing, which `device` belongs to.
         return check_sequence_vram_get(stream_key(settings.seed, "get"),
                                        static_cast<std::int32_t>(&device - test::gpu_devices().data()));
+    });
+    return failures;
+}
+
+#elif USEARCH_ARCH_METAL_
+
+/** The Apple cells: every kind the NVIDIA collections check, on the same data, judged the same. */
+std::size_t check_sequence_vram(settings_t const& settings, gpu_device_t const& device) {
+    if (device.vendor != gpu_vendor_t::apple_k) return 0;
+    std::size_t failures = 0;
+    int const ordinal = static_cast<int>(device.vendor_ordinal);
+    auto [executor, spawn_status] = metal_executor_t::spawn(test::gpu_drivers().metal_contexts,
+                                                            std::span<int const> {&ordinal, 1});
+    if (failed(spawn_status)) return fmt::println(stderr, "- Metal: device #{} opens no stream", ordinal), 1;
+    auto const run = [&](char const* name, auto&& check) {
+        if (settings.filter.selects(name)) failures += report(name, check());
+    };
+    constexpr usearch_sequence_metric_t bytes_k = usearch_sequence_metric_levenshtein_bytes_k;
+    constexpr usearch_sequence_metric_t runes_k = usearch_sequence_metric_levenshtein_utf8_k;
+    constexpr usearch_sequence_metric_t overlap_k = usearch_sequence_metric_overlap_k;
+    constexpr usearch_sequence_metric_t aligned_k = usearch_sequence_metric_needleman_wunsch_k;
+    run("sequence_vram 100 nt", [&] {
+        return check_sequence_vram_collection<bytes_k>(stream_key(settings.seed, "short"), executor, 2048, 100, 128);
+    });
+    run("sequence_vram 200 nt", [&] {
+        return check_sequence_vram_collection<bytes_k>(stream_key(settings.seed, "long"), executor, 512, 200, 64);
+    });
+    run("sequence_vram 1100 nt", [&] {
+        return check_sequence_vram_collection<bytes_k>(stream_key(settings.seed, "block"), executor, 256, 1100, 32);
+    });
+    run("sequence_vram 200 runes", [&] {
+        return check_sequence_vram_collection<runes_k>(stream_key(settings.seed, "runes"), executor, 512, 200, 64);
+    });
+    run("sequence_vram 200 nt overlap", [&] {
+        return check_sequence_vram_collection<overlap_k>(stream_key(settings.seed, "overlap"), executor, 512, 200, 64);
+    });
+    run("sequence_vram 200 nt needleman-wunsch", [&] {
+        return check_sequence_vram_collection<aligned_k>(stream_key(settings.seed, "aligned"), executor, 512, 200, 64);
+    });
+    // Strided alignments past one tile only need to match the exact costs; a host index over them
+    // would spend its minutes on diversity pruning.
+    run("sequence_vram 1100 nt needleman-wunsch", [&] {
+        return check_sequence_vram_collection<aligned_k>(stream_key(settings.seed, "aligned_stripes"), executor, 256,
+                                                         1100, 8, recall_reference_t::exact_distances_k);
     });
     return failures;
 }

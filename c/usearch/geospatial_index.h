@@ -322,7 +322,8 @@ typedef struct usearch_geospatial_init_vram_t {
  *  - @c usearch_status_invalid_argument_k A terrain both borrowing @c heights and naming a
  *    @c callback, or a @c gpu_class_ceiling no class takes.
  *  - @c usearch_status_unsupported_k A terrain @c path or @c callback, a @c values_per_key bound,
- *    or devices that load no class under @c gpu_class_ceiling.
+ *    devices that load no class under @c gpu_class_ceiling, or an Apple GPU, which no geospatial
+ *    kernel serves to the f64 contract.
  *  - @c usearch_status_config_mismatch_k Devices of two classes, or a terrain whose row or column
  *    step is not positive.
  *  - @c usearch_status_device_k A device past the listing, one this build carries no kernels for,
@@ -483,7 +484,8 @@ typedef struct usearch_geospatial_load_vram_t {
  *  - @c usearch_status_malformed_k The checkpoint lists no part, or a part, its header, columns or
  *    sums do not parse.
  *  - @c usearch_status_unsupported_k A terrain @c path or @c callback, a @c values_per_key bound,
- *    or devices that load no class under @c gpu_class_ceiling.
+ *    devices that load no class under @c gpu_class_ceiling, or an Apple GPU, which no geospatial
+ *    kernel serves to the f64 contract.
  *  - @c usearch_status_config_mismatch_k Devices of two classes, a terrain whose row or column
  *    step is not positive, the executor driving no stream on some shard's device, or the
  *    checkpoint's columns differing from the shards' in dtype, shape or key width.
@@ -537,8 +539,8 @@ typedef struct usearch_geospatial_load_vram_buffer_t {
  *  - @c usearch_status_malformed_k The manifest lists no part, or a part, its header, columns or
  *    sums do not parse.
  *  - @c usearch_status_unsupported_k A @c buffer in device memory, a terrain @c path or
- *    @c callback, a @c values_per_key bound, or devices that load no class under
- *    @c gpu_class_ceiling.
+ *    @c callback, a @c values_per_key bound, devices that load no class under
+ *    @c gpu_class_ceiling, or an Apple GPU, which no geospatial kernel serves to the f64 contract.
  *  - @c usearch_status_config_mismatch_k Devices of two classes, a terrain whose row or column
  *    step is not positive, the executor driving no stream on some shard's device, or the
  *    checkpoint's columns differing from the shards' in dtype, shape or key width.

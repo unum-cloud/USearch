@@ -897,6 +897,24 @@ else ()
     usearch_variants(geospatial vram nvidia ${usearch_nvidia_kept_})
     usearch_variants(basic vram nvidia ${usearch_nvidia_kept_})
 endif ()
+# On Apple GPUs the sequence and f16 shapes kits need nothing past the Apple7 floor, so both compile for it alone, and a
+# monoversioned build keeping a newer Apple class carries none; geospatial and f32 shapes have no Apple kernel meeting
+# their numerics contract. The units splice StringZilla's and NumKong's Metal sources, which those headers embed by their
+# include paths.
+usearch_variants(
+    sequence vram apple apple_metal7
+    DEFINITIONS "STRINGZILLA_HEADER_ONLY=1" "STRINGZILLA_ARCH_METAL_=1"
+    LIBRARIES stringzilla::header
+)
+usearch_variants(shapes vram apple apple_metal7 DEFINITIONS "NUMKONG_ARCH_METAL_=1" LIBRARIES stringzilla::header)
+foreach (modality_ IN ITEMS sequence shapes)
+    if (TARGET usearch_${modality_}_vram_variants_apple)
+        target_compile_options(
+            usearch_${modality_}_vram_variants_apple PRIVATE "--embed-dir=${stringzilla_SOURCE_DIR}/include"
+                                                             "--embed-dir=${numkong_SOURCE_DIR}/include"
+        )
+    endif ()
+endforeach ()
 
 # The type-erased implementations behind the C interface: the dispatch units visit the variants through their explicitly
 # instantiated views and compile at the baseline, since they inline no kernel, gated per CPU and GPU class and told

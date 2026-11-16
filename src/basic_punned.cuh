@@ -449,8 +449,10 @@ struct sequence_traits_t {
     template <vendored_residency_t residency_, auto class_>
     using variants = typename sequence_variants_of<residency_, class_>::type;
 
-    /** The GPU classes with a unit of sequence kits, newest first. */
-    using gpu_ladder_t = basic_gpu_ladder<gpu_ladder<gpu_class_t::nvidia_ampere_k>>;
+    /** The GPU classes with a unit of sequence kits on each vendor, newest first: the NVIDIA and
+     *  Apple floors. */
+    using nvidia_gpu_ladder_t = basic_gpu_ladder<gpu_ladder<gpu_class_t::nvidia_ampere_k>>;
+    using apple_gpu_ladder_t = gpu_ladder<gpu_class_t::apple_metal7_k>;
 
     /** Takes the kind, widths and connectivity an init states, keeping the widths; false once
      *  @p outcome records why not. */
@@ -651,9 +653,11 @@ struct shapes_traits_t {
     template <vendored_residency_t residency_, auto class_>
     using variants = typename shapes_variants_of<residency_, class_>::type;
 
-    /** The GPU classes with a unit of shapes kits, newest first: datacenter Blackwell's packed f16
-     *  kit, then the Ampere floor. */
-    using gpu_ladder_t = basic_gpu_ladder<gpu_ladder<gpu_class_t::nvidia_blackwell_k, gpu_class_t::nvidia_ampere_k>>;
+    /** The GPU classes with a unit of shapes kits on each vendor, newest first: on NVIDIA,
+     *  datacenter Blackwell's packed f16 kit, then the Ampere floor; on Apple, the floor alone. */
+    using nvidia_gpu_ladder_t =
+        basic_gpu_ladder<gpu_ladder<gpu_class_t::nvidia_blackwell_k, gpu_class_t::nvidia_ampere_k>>;
+    using apple_gpu_ladder_t = gpu_ladder<gpu_class_t::apple_metal7_k>;
 
     template <typename arguments_type_>
     static bool state(arguments_type_ const& arguments, geometry_t& geometry, usearch_outcome_t*) noexcept {
@@ -842,8 +846,10 @@ struct geospatial_traits_t {
     template <vendored_residency_t residency_, auto class_>
     using variants = typename geospatial_variants_of<residency_, class_>::type;
 
-    /** The GPU classes with a unit of the geospatial kit, newest first. */
-    using gpu_ladder_t = basic_gpu_ladder<gpu_ladder<gpu_class_t::nvidia_ampere_k>>;
+    /** The GPU classes with a unit of the geospatial kit on each vendor, newest first: none on
+     *  Apple, whose GPUs hold no f64 to the contract the kit keeps. */
+    using nvidia_gpu_ladder_t = basic_gpu_ladder<gpu_ladder<gpu_class_t::nvidia_ampere_k>>;
+    using apple_gpu_ladder_t = gpu_ladder<>;
 
     template <typename arguments_type_>
     static bool state(arguments_type_ const& arguments, geometry_t& geometry, usearch_outcome_t*) noexcept {

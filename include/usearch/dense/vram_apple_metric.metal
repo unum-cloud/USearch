@@ -14,7 +14,7 @@
  *  fp8 or fp6 arithmetic, so the minifloats widen to @c half per byte, as NumKong's
  *  @c apple10.metal does.
  *
- *  The host compiles one library per dtype and Apple class from @c vram_apple_shared.h, a prelude
+ *  The host compiles one library per dtype and Apple class from @c vram_apple_shared.hpp, a prelude
  *  spelling NumKong's dtypes and capabilities with the @c metal_dtype_k and @c metal_capability_k
  *  of that library, this file, then @c vram_apple_index.metal.
  */
@@ -39,109 +39,6 @@ template <nk_capability_t caps_, typename floor_, typename head_, typename... ta
 struct highest_kit<caps_, floor_, head_, tail_...> {
     using type =
         conditional_t<(caps_ & head_::capability_k) != 0, head_, typename highest_kit<caps_, floor_, tail_...>::type>;
-};
-
-/**
- *  @brief The Apple warp policy the kernels are written against: 32-lane simdgroups with 32-bit lane
- *      masks and device-scope atomics.
- *
- *  Metal's atomics are relaxed, so acquire and release are spelled as a relaxed access beside a
- *  device-scope fence, and it has no value matching, so lanes collapse equal values through a
- *  shuffle loop.
- */
-struct metal_warp_t {
-    using mask_t = uint;
-    static constexpr constant uint width_k = metal_simdgroup_width_k;
-
-    static mask_t ballot(bool predicate) { return mask_t(simd_vote::vote_t(simd_ballot(predicate))); }
-
-    /** The lanes strictly below @p lane. */
-    static mask_t below(uint lane) { return (1u << lane) - 1u; }
-    static void sync() { simdgroup_barrier(mem_flags::mem_device); }
-
-    /** Lanes are 32-bit everywhere, as on the CUDA and HIP policies; Metal takes 16-bit ones. */
-    template <typename value_type_>
-    static value_type_ shuffle(value_type_ value, uint source_lane) {
-        return simd_shuffle(value, ushort(source_lane));
-    }
-    template <typename value_type_>
-    static value_type_ shuffle_xor(value_type_ value, uint lane_mask) {
-        return simd_shuffle_xor(value, ushort(lane_mask));
-    }
-
-    /** Metal shuffles no 64-bit word, so a scored node moves as its two halves. */
-    static ulong shuffle(ulong value, uint source_lane) {
-        return as_type<ulong>(simd_shuffle(as_type<uint2>(value), ushort(source_lane)));
-    }
-    static ulong shuffle_xor(ulong value, uint lane_mask) {
-        return as_type<ulong>(simd_shuffle_xor(as_type<uint2>(value), ushort(lane_mask)));
-    }
-
-    /** The lanes holding the same @p value as this one: every lane meets every other. */
-    static mask_t match_any(uint value) {
-        mask_t peers = 0;
-        for (uint lane = 0; lane != width_k; ++lane) peers |= mask_t(shuffle(value, lane) == value) << lane;
-        return peers;
-    }
-
-    static void fence() { atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device); }
-    static uint load_acquire(device uint* word) {
-        uint const value = atomic_load_explicit(atomic_(word), memory_order_relaxed);
-        fence();
-        return value;
-    }
-    static void store_relaxed(device uint* word, uint value) {
-        atomic_store_explicit(atomic_(word), value, memory_order_relaxed);
-    }
-    static void store_release(device uint* word, uint value) {
-        fence();
-        atomic_store_explicit(atomic_(word), value, memory_order_relaxed);
-    }
-    static uint exchange_acquire(device uint* word, uint value) {
-        uint const previous = atomic_exchange_explicit(atomic_(word), value, memory_order_relaxed);
-        fence();
-        return previous;
-    }
-    static uint load_relaxed(device uint* word) { return atomic_load_explicit(atomic_(word), memory_order_relaxed); }
-
-    /** Byte @p index of @p column, which other lanes write byte by byte; Metal has no byte atomics,
-     *  so it loads the word holding it, which needs the column on a word boundary. */
-    static uint load_relaxed(device uchar* column, uint index) {
-        uint const word = atomic_load_explicit(atomic_((device uint*)column + (index >> 2)), memory_order_relaxed);
-        return (word >> ((index & 3u) * 8u)) & 0xFFu;
-    }
-    static uint exchange_relaxed(device uint* word, uint value) {
-        return atomic_exchange_explicit(atomic_(word), value, memory_order_relaxed);
-    }
-    static uint fetch_add_relaxed(device uint* word, uint value) {
-        return atomic_fetch_add_explicit(atomic_(word), value, memory_order_relaxed);
-    }
-    static uint fetch_min_relaxed(device uint* word, uint value) {
-        return atomic_fetch_min_explicit(atomic_(word), value, memory_order_relaxed);
-    }
-    static uint fetch_or_relaxed(device uint* word, uint value) {
-        return atomic_fetch_or_explicit(atomic_(word), value, memory_order_relaxed);
-    }
-    static uint fetch_and_relaxed(device uint* word, uint value) {
-        return atomic_fetch_and_explicit(atomic_(word), value, memory_order_relaxed);
-    }
-    static bool compare_exchange_relaxed(device uint* word, uint expected, uint desired) {
-        return atomic_compare_exchange_weak_explicit(atomic_(word), &expected, desired, memory_order_relaxed,
-                                                     memory_order_relaxed);
-    }
-
-    static uint reduce_add(uint value) { return simd_sum(value); }
-    static uint reduce_min(uint value) { return simd_min(value); }
-    static ulong reduce_min(ulong value) {
-        for (uint mask = width_k / 2; mask; mask >>= 1) {
-            ulong const other = shuffle_xor(value, mask);
-            value = other < value ? other : value;
-        }
-        return value;
-    }
-
-  private:
-    static device atomic_uint* atomic_(device uint* word) { return (device atomic_uint*)word; }
 };
 
 /** The four bytes of @p word as the codes a minifloat widening takes. */

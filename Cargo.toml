@@ -30,9 +30,9 @@ path = "rust/lib.rs"
 [dependencies]
 # Each `rev` is the one `cmake/usearch_siblings.cmake` pins, so the crates and the C library carry one
 # copy of every sibling; CMake builds each crate's tree in place of downloading it again.
-forkunion = { version = "4.0.0-rc.1", git = "https://github.com/ashvardanian/ForkUnion", rev = "b9c6f4c4c3b417061c67859517b945716916bd51", default-features = false }
+forkunion = { version = "4.0.0-rc.1", git = "https://github.com/ashvardanian/ForkUnion", rev = "7fe655aa759804b6c3a5ceef517650a5fceee02e", default-features = false }
 numkong = { version = "8.0.0-rc.1", git = "https://github.com/ashvardanian/NumKong", rev = "0d4115072efd2f8cb93c1c16e095742a9d5cccdf" }
-smashtable = { version = "1.0.0-rc.1", git = "https://github.com/ashvardanian/SmashTable", rev = "c2a4b7310423d671099ebd3e3f250383959cd413" }
+smashtable = { version = "1.0.0-rc.1", git = "https://github.com/ashvardanian/SmashTable", rev = "09caec7b2084dd20a6563c8f0e87448eebf90d43" }
 stringzilla = { version = "6.0.0-rc.1", git = "https://github.com/ashvardanian/StringZilla", rev = "a01d3e34da6049b871e3d647333688e216325f1b", default-features = false }
 
 # Which implementation of the C interface gets linked. Each is a whole implementation rather than

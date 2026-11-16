@@ -806,7 +806,7 @@ typedef struct usearch_sequence_refine_t {
  *  - @c usearch_status_invalid_argument_k A @c plan without an executor, or a live @c plan opened
  *    on another index or executor.
  *  - @c usearch_status_read_only_k The handle is an NVMe view.
- *  - @c usearch_status_unsupported_k An AMD or Apple GPU handle, which no basic tower serves.
+ *  - @c usearch_status_unsupported_k An AMD GPU handle, which no basic tower serves.
  *  - @c usearch_status_contended_k An insertion or another refinement holds the handle.
  */
 USEARCH_EXPORT void usearch_sequence_refine(usearch_sequence_refine_t* arguments);
@@ -1141,7 +1141,7 @@ typedef struct usearch_sequence_reshard_t {
  *    geometry than the first source, a target neither a source nor empty, or a source cut into
  *    targets that include it.
  *  - @c usearch_status_unsupported_k One handle as its only source and target, since a handle of
- *    one shard has nothing to recut, or a handle on an AMD or Apple GPU, which no tower serves.
+ *    one shard has nothing to recut, or a handle on an AMD GPU, which no tower serves.
  *  - @c usearch_status_contended_k An insertion or refinement in flight on a handle named; nothing
  *    moves.
  *  - @c usearch_status_overflow_k A part passes a target shard's ceiling.

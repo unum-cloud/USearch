@@ -1,12 +1,12 @@
 /**
- *  @file include/usearch/dense/vram_apple_shared.h
+ *  @file include/usearch/dense/vram_apple_shared.hpp
  *  @author Ash Vardanian
  *  @date October 16, 2026
  *  @brief The vocabulary the dense Apple index and its Metal kernels share: the launch arguments,
  *      the metrics, the buffer slots and the arena spans of a walk.
  *
  *  Written in the C++ that MSL shares with every host compiler, as plain enums and one struct, and
- *  read after @c utilities/vram_apple_shared.h, whose extents and counter words it builds on: the
+ *  read after @c utilities/vram_apple_shared.hpp, whose extents and counter words it builds on: the
  *  host includes both in that order, and @c vram_apple_index.hpp embeds both in that order ahead of
  *  the Metal sources, which cannot include, so the two sides read one definition of every word.
  */

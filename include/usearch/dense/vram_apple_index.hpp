@@ -49,8 +49,8 @@
 #include "usearch/utilities/vram_walks.hpp"  // `gpu_arena_shape`, `gpu_walk_visits`, `gpu_candidate_slots`
 #include "usearch/dense/types.hpp"
 #include "usearch/dense/ram_metric.hpp" // `import_row` - rows cross into the shared staging in the stored scalar
-#include "usearch/utilities/vram_apple_shared.h" // `metal_counter_t`, `metal_extent_t` - read before the dense words
-#include "usearch/dense/vram_apple_shared.h"     // `metal_arguments_t`, `metal_buffer_index_t`, `metal_metric_t`
+#include "usearch/utilities/vram_apple_shared.hpp" // `metal_counter_t`, `metal_extent_t` - read before the dense words
+#include "usearch/dense/vram_apple_shared.hpp"     // `metal_arguments_t`, `metal_buffer_index_t`, `metal_metric_t`
 
 namespace unum::usearch::dense {
 
@@ -65,7 +65,7 @@ static_assert(metal_max_gathers_in_flight_k == vram_max_gathers_in_flight_k, "Th
 
 /** The vocabulary the dense index and its kernels share, spliced after the contexts'. */
 inline constexpr char metal_shared_source_k[] = {
-#embed "vram_apple_shared.h" suffix(, 0)
+#embed "vram_apple_shared.hpp" suffix(, 0)
 };
 
 /** The MSL kits, embedded so the kernels compile on the device without a Metal toolchain. */

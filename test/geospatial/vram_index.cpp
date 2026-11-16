@@ -459,6 +459,28 @@ std::size_t check_geospatial_vram(settings_t const& settings, gpu_device_t const
     return failures;
 }
 
+#elif USEARCH_ARCH_METAL_
+
+/** The Apple cell: no geospatial kernel serves Apple GPUs to the f64 contract, so placing an index
+ *  on one is refused with @c usearch_status_unsupported_k. */
+std::size_t check_geospatial_vram(settings_t const& settings, gpu_device_t const& device) {
+    if (device.vendor != gpu_vendor_t::apple_k || !settings.filter.selects("geospatial_vram")) return 0;
+    // The C interface names devices by their place in the listing, which `device` belongs to.
+    std::int32_t const devices[] = {static_cast<std::int32_t>(&device - test::gpu_devices().data())};
+    return report("geospatial_vram apple refused", [&] {
+        usearch_outcome_t outcome {};
+        usearch_geospatial_index_t index = nullptr;
+        usearch_geospatial_init_vram_t init {};
+        init.index = &index;
+        init.outcome = &outcome;
+        init.vram = {devices, 1};
+        usearch_geospatial_init_vram(&init);
+        std::size_t const refused = expect(outcome.status == usearch_status_unsupported_k) + expect(!index);
+        usearch_geospatial_free(index);
+        return refused;
+    }());
+}
+
 #else
 
 std::size_t check_geospatial_vram(settings_t const&, gpu_device_t const&) { return 0; }

@@ -318,8 +318,8 @@ typedef struct usearch_shapes_init_vram_t {
  *  - @c usearch_status_invalid_argument_k A @c gpu_class_ceiling no class takes.
  *  - @c usearch_status_unknown_kind_k An unknown @c metric.
  *  - @c usearch_status_unsupported_k A kind other than Chamfer or Hausdorff, a @c quantization
- *    other than @c f16 or @c f32, a @c values_per_key bound, or devices that load no class under
- *    @c gpu_class_ceiling.
+ *    other than @c f16 or @c f32, a @c values_per_key bound, devices that load no class under
+ *    @c gpu_class_ceiling, or @c f32 on Apple GPUs, short of the f32 contract.
  *  - @c usearch_status_config_mismatch_k Devices of two classes.
  *  - @c usearch_status_device_k A device past the listing, one this build carries no kernels for,
  *    or a build without GPU kernels.
@@ -471,8 +471,8 @@ typedef struct usearch_shapes_load_vram_t {
  *    sums do not parse.
  *  - @c usearch_status_unknown_kind_k A checkpoint of an unknown metric.
  *  - @c usearch_status_unsupported_k A checkpoint of a kind other than Chamfer or Hausdorff or
- *    storing points other than @c f16 or @c f32, a @c values_per_key bound, or devices that load no
- *    class under @c gpu_class_ceiling.
+ *    storing points other than @c f16 or @c f32, a @c values_per_key bound, devices that load no
+ *    class under @c gpu_class_ceiling, or @c f32 points on Apple GPUs, short of the f32 contract.
  *  - @c usearch_status_config_mismatch_k Devices of two classes, the executor driving no stream on
  *    some shard's device, or the checkpoint's columns differing from the shards' in dtype, shape
  *    or key width.
@@ -524,7 +524,7 @@ typedef struct usearch_shapes_load_vram_buffer_t {
  *  - @c usearch_status_unknown_kind_k A checkpoint of an unknown metric.
  *  - @c usearch_status_unsupported_k A @c buffer in device memory, a checkpoint of a kind other
  *    than Chamfer or Hausdorff or storing points other than @c f16 or @c f32, a @c values_per_key
- *    bound, or devices that load no class under @c gpu_class_ceiling.
+ *    bound, devices that load no class under @c gpu_class_ceiling, or @c f32 points on Apple GPUs.
  *  - @c usearch_status_config_mismatch_k Devices of two classes, the executor driving no stream on
  *    some shard's device, or the checkpoint's columns differing from the shards' in dtype, shape
  *    or key width.
@@ -800,7 +800,7 @@ typedef struct usearch_shapes_refine_t {
  *  - @c usearch_status_invalid_argument_k A @c plan without an executor, or a live @c plan opened
  *    on another index or executor.
  *  - @c usearch_status_read_only_k The handle is an NVMe view.
- *  - @c usearch_status_unsupported_k An AMD or Apple GPU handle, which no basic tower serves.
+ *  - @c usearch_status_unsupported_k An AMD GPU handle, which no basic tower serves.
  *  - @c usearch_status_contended_k An insertion or another refinement holds the handle.
  */
 USEARCH_EXPORT void usearch_shapes_refine(usearch_shapes_refine_t* arguments);
@@ -1152,7 +1152,7 @@ typedef struct usearch_shapes_reshard_t {
  *    geometry than the first source, a target neither a source nor empty, or a source cut into
  *    targets that include it.
  *  - @c usearch_status_unsupported_k One handle as its only source and target, since a handle of
- *    one shard has nothing to recut, or a handle on an AMD or Apple GPU, which no tower serves.
+ *    one shard has nothing to recut, or a handle on an AMD GPU, which no tower serves.
  *  - @c usearch_status_contended_k An insertion or refinement in flight on a handle named; nothing
  *    moves.
  *  - @c usearch_status_overflow_k A part passes a target shard's ceiling.

@@ -2,9 +2,9 @@
  *  @file test/shapes/vram_index.cpp
  *  @author Ash Vardanian
  *  @date October 15, 2026
- *  @brief The shapes VRAM cell: Chamfer and Hausdorff on an NVIDIA GPU beside the RAM index on the
- *      same clouds, judged by recall against exact neighbors, every reported distance against
- *      NumKong's serial kernels.
+ *  @brief The shapes VRAM cell: Chamfer and Hausdorff on an NVIDIA or Apple GPU beside the RAM
+ *      index on the same clouds, judged by recall against exact neighbors, every reported distance
+ *      against NumKong's serial kernels.
  *
  *  Collections hold 10 to 60 points a cloud: random points; coincident points, which pack to one
  *  point and tie every pair at zero; collinear points, whose packs degenerate on two axes; and
@@ -24,6 +24,9 @@
 #if USEARCH_ARCH_CUDA_
 #include "usearch/shapes/vram_nvidia_index.hpp"
 #endif
+#if USEARCH_ARCH_METAL_
+#include "usearch/shapes/vram_apple_index.hpp"
+#endif
 
 #include "harness.hpp"
 #include "lib.hpp" // `gpu_class_t`, `pick_gpu_class` - the class the library picks a unit by
@@ -42,7 +45,7 @@ struct shapes_nvidia_fatbin {
 namespace unum::usearch::test::shapes {
 using namespace unum::usearch::shapes;
 
-#if USEARCH_ARCH_CUDA_
+#if USEARCH_ARCH_CUDA_ || USEARCH_ARCH_METAL_
 
 /** How a collection draws its clouds, as the file's docblock describes. */
 enum class cloud_kind_t { random_k, coincident_k, collinear_k, molecular_k };
@@ -111,19 +114,48 @@ static std::size_t matched_count(std::span<f64_t const> found, std::vector<dista
     return min_of(matched, wanted);
 }
 
+#if USEARCH_ARCH_CUDA_
+
+/** What the NVIDIA collections build on: the executor, the face's storage and the contexts carved
+ *  from the executor's run. */
+struct vram_cells_t {
+    using executor_t = cuda_executor_t;
+
+    static cuda_virtual_memory_allocator<byte_t> storage(executor_t& executor, int device) noexcept {
+        return cuda_virtual_memory_allocator<byte_t> {executor.api(), device};
+    }
+    static cuda_arena_allocator_t arena(executor_t& executor) noexcept {
+        return cuda_arena_allocator_t {executor.stream(0).arena, executor.stream(0)};
+    }
+};
+
+#else
+
+/** What the Apple collections build on: the executor, the face's storage and the contexts over its
+ *  stream. */
+struct vram_cells_t {
+    using executor_t = metal_executor_t;
+
+    static metal_shared_allocator_t storage(executor_t& executor, int) noexcept {
+        return metal_shared_allocator_t {executor.stream(0).handle};
+    }
+    static metal_stream_t arena(executor_t& executor) noexcept { return executor.stream(0).handle.share(); }
+};
+
+#endif
+
 /**
  *  @brief One collection of @p count clouds of @p kind and @p queries_count held-out queries of
- *      @p scalar_type_, built on the GPU under the kits of @p gpu_class_, whose capabilities are
- *      @p capabilities_, and in RAM under the kits of @p kernel alike.
+ *      @p scalar_type_, built on the GPU in the face @p vram_index_type_, and in RAM under the kits
+ *      of @p kernel alike.
  *
  *  Every match the GPU reports must carry the pair's serial distance, ascending, and the GPU's
  *  recall at ten must reach the RAM index's at the same breadth, give or take a twentieth.
  */
-template <typename scalar_type_, gpu_class_t gpu_class_, nk_capability_t capabilities_>
-static std::size_t check_shapes_vram_collection(u64_t seed, cuda_executor_t& executor, nk_kernel_kind_t kernel,
+template <typename scalar_type_, typename vram_index_type_>
+static std::size_t check_shapes_vram_collection(u64_t seed, vram_cells_t::executor_t& executor, nk_kernel_kind_t kernel,
                                                 cloud_kind_t kind, std::size_t count, std::size_t queries_count) {
-    using vram_index_t =
-        vram_nvidia_index<scalar_type_, u32_t, capabilities_, shapes_nvidia_fatbin<gpu_class_, scalar_type_::dtype()>>;
+    using vram_index_t = vram_index_type_;
     using kit_t = typename shapes_ladder<scalar_type_, nk_cap_any_k>::kit_t;
     using serial_kit_t = typename shapes_ladder<scalar_type_, nk_cap_serial_k>::kit_t;
     using ram_index_t = ram_index<kit_t>;
@@ -187,7 +219,7 @@ static std::size_t check_shapes_vram_collection(u64_t seed, cuda_executor_t& exe
     }
 
     int const device = executor.device(0);
-    vram_index_t vram_index {kernel, cuda_virtual_memory_allocator<byte_t> {executor.api(), device}};
+    vram_index_t vram_index {kernel, vram_cells_t::storage(executor, device)};
     failures += expect_eq(vram_index.reserve({count, connectivity_32_k, offsets[count] - offsets[0]}).status,
                           status_t::success_k);
     typename vram_index_t::insert_config_t const insert_config {expansion_k};
@@ -196,11 +228,10 @@ static std::size_t check_shapes_vram_collection(u64_t seed, cuda_executor_t& exe
     for (std::size_t batch = 0; batch != batches_k && !failures; ++batch) {
         std::size_t const first = count * batch / batches_k, bound = count * (batch + 1) / batches_k;
         std::span<std::size_t const> const batch_offsets {offsets.data() + first, bound - first + 1};
-        failures += expect_eq(
-            executor.reserve(vram_index.traversal_memory_usage({tape.data(), batch_offsets}, insert_config)),
-            status_t::success_k);
-        typename vram_index_t::traversal_context_t context {
-            cuda_arena_allocator_t {executor.stream(0).arena, executor.stream(0)}};
+        failures += expect_eq(executor.reserve(vram_index.traversal_memory_usage(
+                                  tape_view<byte_t const> {tape.data(), batch_offsets}, insert_config)),
+                              status_t::success_k);
+        typename vram_index_t::traversal_context_t context {vram_cells_t::arena(executor)};
         auto const [inserted, status] = vram_index.insert({keys.data() + first, bound - first},
                                                           {tape.data(), batch_offsets}, context, insert_config);
         failures += expect_eq(status, status_t::success_k);
@@ -213,11 +244,10 @@ static std::size_t check_shapes_vram_collection(u64_t seed, cuda_executor_t& exe
     std::vector<f32_t> distances(queries_count * wanted_k);
     std::span<std::size_t const> const query_offsets {offsets.data() + count, queries_count + 1};
     typename vram_index_t::search_config_t const search_config {expansion_k, wanted_k};
-    failures += expect_eq(
-        executor.reserve(vram_index.traversal_memory_usage({tape.data(), query_offsets}, search_config)),
-        status_t::success_k);
-    typename vram_index_t::traversal_context_t context {
-        cuda_arena_allocator_t {executor.stream(0).arena, executor.stream(0)}};
+    failures += expect_eq(executor.reserve(vram_index.traversal_memory_usage(
+                              tape_view<byte_t const> {tape.data(), query_offsets}, search_config)),
+                          status_t::success_k);
+    typename vram_index_t::traversal_context_t context {vram_cells_t::arena(executor)};
     if (!failures)
         failures += expect_eq(vram_index
                                   .search({tape.data(), query_offsets}, {ids.data(), {queries_count, wanted_k}},
@@ -250,6 +280,15 @@ static std::size_t check_shapes_vram_collection(u64_t seed, cuda_executor_t& exe
                                     comparison_verdict_t::assert_k, distance_errors, 0);
 }
 
+#endif // USEARCH_ARCH_CUDA_ || USEARCH_ARCH_METAL_
+#if USEARCH_ARCH_CUDA_
+
+/** The NVIDIA face over packs of @p scalar_type_ under the kits of @p gpu_class_, whose
+ *  capabilities are @p capabilities_. */
+template <typename scalar_type_, gpu_class_t gpu_class_, nk_capability_t capabilities_>
+using nvidia_face_t =
+    vram_nvidia_index<scalar_type_, u32_t, capabilities_, shapes_nvidia_fatbin<gpu_class_, scalar_type_::dtype()>>;
+
 /** Every collection under the kits of @p gpu_class_, whose capabilities are @p capabilities_: the
  *  F16 ones, and the F32 one on the vendor-wide floor, which alone builds F32 packs. */
 template <gpu_class_t gpu_class_, nk_capability_t capabilities_>
@@ -268,13 +307,13 @@ static std::size_t check_shapes_vram_class(settings_t const& settings, cuda_exec
     std::size_t failures = 0;
     for (cell_t const& cell : cells)
         failures += report(fmt::format("shapes_vram {} {}", tier, cell.name).c_str(),
-                           check_shapes_vram_collection<nk::f16_t, gpu_class_, capabilities_>(
+                           check_shapes_vram_collection<nk::f16_t, nvidia_face_t<nk::f16_t, gpu_class_, capabilities_>>(
                                stream_key(settings.seed, cell.name), executor, cell.kernel, cell.kind, cell.count,
                                cell.queries_count));
     if constexpr (gpu_class_ == gpu_class_t::nvidia_ampere_k)
         failures += report(
             fmt::format("shapes_vram {} f32", tier).c_str(),
-            check_shapes_vram_collection<nk::f32_t, gpu_class_, capabilities_>(
+            check_shapes_vram_collection<nk::f32_t, nvidia_face_t<nk::f32_t, gpu_class_, capabilities_>>(
                 stream_key(settings.seed, "f32"), executor, chamfer_k, cloud_kind_t::molecular_k, 1024, 64));
     return failures;
 }
@@ -296,6 +335,52 @@ std::size_t check_shapes_vram(settings_t const& settings, gpu_device_t const& de
         if (pick_gpu_class(device, usearch_gpu_class_unknown_k) == gpu_class_t::nvidia_blackwell_k)
             failures += check_shapes_vram_class<gpu_class_t::nvidia_blackwell_k, blackwell_k>(settings, executor,
                                                                                               "blackwell");
+    return failures;
+}
+
+#elif USEARCH_ARCH_METAL_
+
+/** The Apple cells: the F16 collections the NVIDIA floor checks, on the same clouds, judged the
+ *  same, and the refusal of F32 clouds, which no Metal kernel scores to the F32 contract. */
+std::size_t check_shapes_vram(settings_t const& settings, gpu_device_t const& device) {
+    if (device.vendor != gpu_vendor_t::apple_k || !settings.filter.selects("shapes_vram")) return 0;
+    int const ordinal = static_cast<int>(device.vendor_ordinal);
+    auto [executor, spawn_status] = metal_executor_t::spawn(test::gpu_drivers().metal_contexts,
+                                                            std::span<int const> {&ordinal, 1});
+    if (failed(spawn_status)) return fmt::println(stderr, "- Metal: device #{} opens no stream", ordinal), 1;
+    constexpr nk_kernel_kind_t chamfer_k = nk_kernel_chamfers_packed_k, hausdorff_k = nk_kernel_hausdorffs_packed_k;
+    struct cell_t {
+        char const* name;
+        nk_kernel_kind_t kernel;
+        cloud_kind_t kind;
+        std::size_t count, queries_count;
+    };
+    cell_t const cells[] = {{"random", chamfer_k, cloud_kind_t::random_k, 1024, 64},
+                            {"coincident", hausdorff_k, cloud_kind_t::coincident_k, 256, 16},
+                            {"collinear", chamfer_k, cloud_kind_t::collinear_k, 1024, 64},
+                            {"molecular", hausdorff_k, cloud_kind_t::molecular_k, 1024, 64}};
+    std::size_t failures = 0;
+    for (cell_t const& cell : cells)
+        failures += report(fmt::format("shapes_vram apple {}", cell.name).c_str(),
+                           check_shapes_vram_collection<nk::f16_t, vram_apple_index<nk::f16_t, u32_t>>(
+                               stream_key(settings.seed, cell.name), executor, cell.kernel, cell.kind, cell.count,
+                               cell.queries_count));
+    // The C interface names devices by their place in the listing, which `device` belongs to.
+    std::int32_t const devices[] = {static_cast<std::int32_t>(&device - test::gpu_devices().data())};
+    failures += report("shapes_vram apple f32 refused", [&] {
+        usearch_outcome_t outcome {};
+        usearch_shapes_index_t index = nullptr;
+        usearch_shapes_init_vram_t init {};
+        init.index = &index;
+        init.outcome = &outcome;
+        init.metric = usearch_shapes_metric_chamfer_k;
+        init.quantization = usearch_scalar_f32_k;
+        init.vram = {devices, 1};
+        usearch_shapes_init_vram(&init);
+        std::size_t const refused = expect(outcome.status == usearch_status_unsupported_k) + expect(!index);
+        usearch_shapes_free(index);
+        return refused;
+    }());
     return failures;
 }
 

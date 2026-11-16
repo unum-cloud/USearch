@@ -28,6 +28,9 @@
 #if USEARCH_ARCH_CUDA_
 #include "usearch/sequence/vram_nvidia_metric.cuh"
 #endif
+#if USEARCH_ARCH_METAL_
+#include "usearch/sequence/vram_apple_index.hpp"
+#endif
 
 #include "basic_specializations.cuh"
 
@@ -382,7 +385,10 @@ inline constexpr usearch_distance_t distance_unit<us::sequence::vram_nvidia_inde
     sequence_nvidia_kit<usearch_sequence_metric_overlap_k>, node_id_type_, kernels_type_>> =
     1.0 / us::sequence::overlap_resolution_k;
 
-/** The parameters a sequence kit scores with on NVIDIA, from the frozen @p geometry and @p costs:
+#endif
+#if USEARCH_ARCH_CUDA_ || USEARCH_ARCH_METAL_
+
+/** The parameters a sequence kit scores with on a GPU, from the frozen @p geometry and @p costs:
  *  none for Levenshtein, the window widths narrowed into @p widths for overlap, which refuses one
  *  past 32 bits with @c config_mismatch_k, and the folded costs for Needleman-Wunsch. */
 inline expected<std::monostate> parameters_of(std::type_identity<std::monostate>, sequence_geometry_t const&,
@@ -406,6 +412,9 @@ inline expected<us::sequence::needleman_wunsch_costs_t> parameters_of(
     us::sequence::needleman_wunsch_costs_t const& costs, growing_buffer<u32_t, std::allocator<byte_t>>&) noexcept {
     return {costs, status_t::success_k};
 }
+
+#endif
+#if USEARCH_ARCH_CUDA_
 
 /** Builds one shard of the sequence kind @p metric_ on a CUDA device, holding its kit's parameters
  *  from the variant's frozen @c geometry and costs, uploaded at its first reservation. */
@@ -502,13 +511,127 @@ struct sequence_vram_nvidia_variant {
 };
 
 #endif
+#if USEARCH_ARCH_METAL_
+
+/** The kit each sequence kind scores with on Apple GPUs, its ladder's pick at Metal's
+ *  capability. */
+template <usearch_sequence_metric_t metric_>
+using sequence_apple_kit = std::conditional_t<
+    metric_ == usearch_sequence_metric_overlap_k, typename us::sequence::overlap_ladder<sz_cap_metal_k>::kit_t,
+    std::conditional_t<
+        metric_ == usearch_sequence_metric_needleman_wunsch_k,
+        typename us::sequence::needleman_wunsch_ladder<sz_cap_metal_k>::kit_t,
+        std::conditional_t<metric_ == usearch_sequence_metric_levenshtein_utf8_k,
+                           typename us::sequence::levenshtein_ladder<sz_levenshtein_runes_k, sz_cap_metal_k>::kit_t,
+                           typename us::sequence::levenshtein_ladder<sz_levenshtein_bytes_k, sz_cap_metal_k>::kit_t>>>;
+
+/** A GPU overlap index on Apple scores in the same fixed point as the RAM metric. */
+template <typename node_id_type_>
+inline constexpr usearch_distance_t
+    distance_unit<us::sequence::vram_apple_index<us::sequence::apple_overlap_kit_t, node_id_type_>> =
+        1.0 / us::sequence::overlap_resolution_k;
+
+/** Builds one shard of the sequence kind @p metric_ on an Apple device, holding its kit's
+ *  parameters from the variant's frozen @c geometry and costs, uploaded at its first reserve. */
+template <usearch_sequence_metric_t metric_>
+struct sequence_vram_apple_build {
+    using face_t = us::sequence::vram_apple_index<sequence_apple_kit<metric_>, u32_t>;
+
+    /** The geometry and costs of the variant holding the shards, frozen before the first is
+     *  placed. */
+    sequence_geometry_t const* geometry = nullptr;
+    us::sequence::needleman_wunsch_costs_t const* costs = nullptr;
+
+    std::unique_ptr<face_t> operator()(int device) const noexcept {
+        metal_context_t* const context = gpu_drivers().metal_contexts.context(device);
+        if (!context) return {};
+        std::unique_ptr<face_t> face {new (std::nothrow)
+                                          face_t(metal_shared_allocator_t {metal_stream_t {*context, device}})};
+        growing_buffer<u32_t, std::allocator<byte_t>> widths {std::allocator<byte_t> {}};
+        auto const [parameters, parameters_status] = parameters_of(std::type_identity<typename face_t::parameters_t> {},
+                                                                   *geometry, *costs, widths);
+        if (face && (failed(parameters_status) || failed(face->parameters(parameters)))) face.reset();
+        return face;
+    }
+};
+
+/** The sequence alternative on Apple GPUs of @p gpu_class_ or newer: the basic Apple shards under
+ *  the sequence kind @p metric_, with 32-bit node IDs, as @c sequence_vram_nvidia_variant. */
+template <usearch_sequence_metric_t metric_, gpu_class_t gpu_class_>
+struct sequence_vram_apple_variant {
+    using executor_t = metal_executor_t;
+    using build_t = sequence_vram_apple_build<metric_>;
+    using face_t = typename build_t::face_t;
+    using index_t = basic::vram_apple_indexes<face_t, us::utilities::uuid128_t, build_t>;
+    using refine_plan_t = typename index_t::refine_plan_t;
+    static constexpr usearch_sequence_metric_t metric_k = metric_;
+    static constexpr gpu_class_t gpu_class_k = gpu_class_;
+
+    sequence_geometry_t geometry;
+    us::sequence::needleman_wunsch_costs_t costs {};
+    index_t index;
+
+    /** Holds no shard until the handle places them; their kind is the template's, and their window
+     *  widths and costs the geometry's. */
+    sequence_vram_apple_variant(int, sequence_geometry_t const&) noexcept
+        : index(forkunion_allocator_t {no_memory_domain_k}, build_t {&geometry, &costs}) {}
+
+    status_t reserve(reserve_capacity_t capacity) noexcept {
+        return vram_apple_reserve(index, capacity.entries, geometry.connectivity, capacity.bytes);
+    }
+
+    expected<traversal_stats_t> insert(usearch_keys_view_t keys, caller_tape_t sequences, insert_config_t config,
+                                       metal_executor_t& executor, progress_ticks_t& ticks) noexcept {
+        // The batch's own pages, since batches routed to disjoint shards may land at once.
+        growing_arena<forkunion_allocator_t> staging {forkunion_allocator_t {no_memory_domain_k}};
+        auto const [entries, lower_status] = counted_tape_of(sequences.tape, sequences.count, staging);
+        if (failed(lower_status)) return {{}, lower_status};
+        return vram_apple_insert(index, keys, bytes_tape_of(entries), geometry.connectivity, config.expansion_factor,
+                                 ticks, executor);
+    }
+
+    /** A device walk takes no host predicate. */
+    expected<traversal_stats_t> search(counted_tape_t queries, matches_outputs_t& outputs, search_config_t config,
+                                       metal_executor_t& executor, progress_ticks_t& ticks) noexcept {
+        return vram_apple_search(index, bytes_tape_of(queries), outputs.wanted, config.expansion_factor, outputs, ticks,
+                                 executor);
+    }
+
+    /** Writes the strings as the RAM variants write them. */
+    status_t save(std::string_view path, metal_executor_t& executor, progress_ticks_t& ticks) noexcept {
+        return with_sequence_provenance(geometry, costs, [&](save_config_t const& config) noexcept {
+            return vram_apple_save(index, path, us::sequence::codec_t {}, config, token_of(geometry.metric), executor,
+                                   ticks);
+        });
+    }
+
+    /** Reads a checkpoint any residency wrote, at a path or in host memory, into the placed shards,
+     *  one part per shard. */
+    template <typename checkpoint_type_>
+    status_t load(checkpoint_type_ checkpoint, metal_executor_t& executor, progress_ticks_t& ticks) noexcept {
+        return index.load(checkpoint, us::sequence::codec_t {}, executor, load_config_t {},
+                          static_cast<connectivity_t>(geometry.connectivity), ticks);
+    }
+
+    /** Empties the index, retiring every shard behind a fresh shard generation on the same
+     *  devices. */
+    status_t clear() noexcept { return index.clear(); }
+
+    /** Sampling answers @c unsupported_k until the shards sample on their devices. */
+    expected<sample_result_t> sample(basic_sample_inputs_t, basic_sample_outputs_t, sample_config_t,
+                                     executor_t&) noexcept {
+        return {{}, status_t::unsupported_k};
+    }
+};
+
+#endif
 
 #pragma endregion Sequence Variants
 
 #pragma region Sequence Bodies
 
 /** The sequence variants each class unit compiles: one per CPU class on the host and on storage,
- *  and one per kind on an NVIDIA GPU. */
+ *  and one per kind on an NVIDIA or Apple GPU. */
 template <auto class_>
 struct sequence_variants_of<vendored_residency_t::ram_k, class_> {
     using type = type_list<sequence_ram_variant<class_>>;
@@ -533,6 +656,16 @@ struct sequence_variants_of<vendored_residency_t::vram_nvidia_k, gpu_class_t::nv
         sequence_vram_nvidia_variant<usearch_sequence_metric_levenshtein_utf8_k, gpu_class_t::nvidia_ampere_k>,
         sequence_vram_nvidia_variant<usearch_sequence_metric_overlap_k, gpu_class_t::nvidia_ampere_k>,
         sequence_vram_nvidia_variant<usearch_sequence_metric_needleman_wunsch_k, gpu_class_t::nvidia_ampere_k>>;
+};
+#endif
+#if USEARCH_ARCH_METAL_
+template <>
+struct sequence_variants_of<vendored_residency_t::vram_apple_k, gpu_class_t::apple_metal7_k> {
+    using type =
+        type_list<sequence_vram_apple_variant<usearch_sequence_metric_levenshtein_bytes_k, gpu_class_t::apple_metal7_k>,
+                  sequence_vram_apple_variant<usearch_sequence_metric_levenshtein_utf8_k, gpu_class_t::apple_metal7_k>,
+                  sequence_vram_apple_variant<usearch_sequence_metric_overlap_k, gpu_class_t::apple_metal7_k>,
+                  sequence_vram_apple_variant<usearch_sequence_metric_needleman_wunsch_k, gpu_class_t::apple_metal7_k>>;
 };
 #endif
 

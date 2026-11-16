@@ -85,7 +85,7 @@ Doxygen Blocks	3c4ea22c2b76e1efb437372fe0c03534
 Binding Docs	04e4b1b314779668c35d7aaf36b0258a
 Comments and Prose	3743ade0b3af9638562754bd144c6bc6
 C and C++ Idioms	111aa66ebe0c1bb35970f35874b958c8
-Formatters	96cf05c30af43a45b8335394dd276cff
+Formatters	ed9dd7f3c1c587e4db673f14e96782ab
 All Files	360816f6488a26caf0ef051b37f11a1e
 Shared Bindings	e27e86e6cbb77f1e378329f6c15e2872
 Shared Builds	9702e89c575420fe081a3d2c5a6800c5
@@ -2703,7 +2703,7 @@ check_gofmt_clean() {
 }
 
 # Rejects rustfmt drift in the Rust files as staged, not as they sit in the working tree, because `rustfmt.toml`
-# is the law; `rustfmt_command` names the toolchain that understands it, as in `cargo +nightly fmt`, and the
+# is the law; `rustfmt_command` names the toolchain that understands it, as in `cargo +stable fmt`, and the
 # check skips without that toolchain or a crate.
 check_rustfmt_clean() {
     local toolchain=${rustfmt_command#cargo }

@@ -28,7 +28,7 @@
 #include "usearch/utilities/blocking_files.hpp" // `shared_library_t` - Metal opened at first use
 #include "usearch/utilities/ram_buffers.hpp"    // `growing_buffer` - an executor's streams and the pipeline registry
 #include "usearch/utilities/types.hpp"
-#include "usearch/utilities/vram_apple_shared.h" // `metal_counter_t` - the words a context reads its telemetry from
+#include "usearch/utilities/vram_apple_shared.hpp" // `metal_counter_t` - the words a context reads its telemetry from
 
 namespace unum::usearch::utilities {
 
@@ -39,10 +39,11 @@ namespace unum::usearch::utilities {
 
 #if USEARCH_ARCH_METAL_
 
-/** The vocabulary every Apple context and its kernels share, which each MSL source starts with,
- *  since MSL cannot include. */
+/** The vocabulary and the walk queue every Apple context and its kernels share, which each MSL
+ *  source starts with, since MSL cannot include. */
 inline constexpr char metal_context_source_k[] = {
-#embed "vram_apple_shared.h" suffix(, 0)
+#embed "vram_apple_shared.hpp" suffix(, '\n', )
+#embed "vram_queue.metal" suffix(, 0)
 };
 #else
 // A unit without Metal compiles no pipeline, and NVCC's front end knows no `#embed`.

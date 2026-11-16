@@ -1,5 +1,5 @@
 /**
- *  @file include/usearch/utilities/vram_apple_shared.h
+ *  @file include/usearch/utilities/vram_apple_shared.hpp
  *  @author Ash Vardanian
  *  @date October 16, 2026
  *  @brief The vocabulary every Apple traversal context and its Metal kernels share: the walk's

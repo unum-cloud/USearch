@@ -3,7 +3,7 @@
  *  @author Ash Vardanian
  *  @date October 11, 2026
  *  @brief The Apple suite's entry for the one VRAM runner: selects the device, then runs the dense
- *      rung cells the settings select over the Apple index.
+ *      rung cells the settings select over the Apple index and the basic modalities' cells.
  */
 
 #include <fmt/format.h>
@@ -20,7 +20,11 @@ std::size_t check_vram_apple(settings_t const& settings, gpu_device_t const& dev
     auto [executor, spawn_status] = metal_executor_t::spawn(gpu_drivers().metal_contexts,
                                                             std::span<int const> {&ordinal, 1});
     if (failed(spawn_status)) return fmt::println("- Metal: device #{} opens no queue", ordinal), 1;
-    return check_vram_indexes(settings, executor);
+    std::size_t failures_count = check_vram_indexes(settings, executor);
+    failures_count += test::sequence::check_sequence_vram(settings, device);
+    failures_count += test::shapes::check_shapes_vram(settings, device);
+    failures_count += test::geospatial::check_geospatial_vram(settings, device);
+    return failures_count;
 }
 
 static bool const vram_apple_registered = (registered_suites({gpu_vendor_t::apple_k, &check_vram_apple}), true);
