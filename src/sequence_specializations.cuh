@@ -31,6 +31,9 @@
 #if USEARCH_ARCH_METAL_
 #include "usearch/sequence/vram_apple_index.hpp"
 #endif
+#if USEARCH_ARCH_ROCM_
+#include "usearch/sequence/vram_amd_metric.hip"
+#endif
 
 #include "basic_specializations.cuh"
 
@@ -386,7 +389,7 @@ inline constexpr usearch_distance_t distance_unit<us::sequence::vram_nvidia_inde
     1.0 / us::sequence::overlap_resolution_k;
 
 #endif
-#if USEARCH_ARCH_CUDA_ || USEARCH_ARCH_METAL_
+#if USEARCH_ARCH_CUDA_ || USEARCH_ARCH_ROCM_ || USEARCH_ARCH_METAL_
 
 /** The parameters a sequence kit scores with on a GPU, from the frozen @p geometry and @p costs:
  *  none for Levenshtein, the window widths narrowed into @p widths for overlap, which refuses one
@@ -626,6 +629,151 @@ struct sequence_vram_apple_variant {
 
 #endif
 
+#if USEARCH_ARCH_ROCM_
+
+/** One kind's sequence kits as the code object of the AMD class @p gpu_class_, defined in
+ *  @c src/sequence/vram_variants_amd.hip beside the bytes it embeds, for its class alone. */
+template <usearch_sequence_metric_t metric_, gpu_class_t gpu_class_>
+struct sequence_amd_code_object {
+    inline static constexpr nk_capability_t capability_k = numkong_capabilities_of(gpu_class_);
+    static bytes_view_t bytes() noexcept;
+};
+
+/** The capabilities the sequence kits compile under on AMD: StringZilla's tiers of the class this
+ *  unit compiles as. */
+inline constexpr sz_capability_t sequence_amd_capabilities_k = stringzilla_capabilities_of(hip_class_k);
+
+/** The kit each sequence kind scores with on AMD, its ladder's pick at the class's tiers. */
+template <usearch_sequence_metric_t metric_>
+using sequence_amd_kit = std::conditional_t<
+    metric_ == usearch_sequence_metric_overlap_k,
+    typename us::sequence::overlap_ladder<sequence_amd_capabilities_k>::kit_t,
+    std::conditional_t<
+        metric_ == usearch_sequence_metric_needleman_wunsch_k,
+        typename us::sequence::needleman_wunsch_ladder<sequence_amd_capabilities_k>::kit_t,
+        std::conditional_t<
+            metric_ == usearch_sequence_metric_levenshtein_utf8_k,
+            typename us::sequence::levenshtein_ladder<sz_levenshtein_runes_k, sequence_amd_capabilities_k>::kit_t,
+            typename us::sequence::levenshtein_ladder<sz_levenshtein_bytes_k, sequence_amd_capabilities_k>::kit_t>>>;
+
+/*  The faces' members reading the kits, defined in @c src/sequence/vram_variants_amd.hip for its
+ *  class. */
+extern template struct us::sequence::vram_amd_index<
+    sequence_amd_kit<usearch_sequence_metric_levenshtein_bytes_k>, u32_t,
+    sequence_amd_code_object<usearch_sequence_metric_levenshtein_bytes_k, hip_class_k>>;
+extern template struct us::sequence::vram_amd_index<
+    sequence_amd_kit<usearch_sequence_metric_levenshtein_utf8_k>, u32_t,
+    sequence_amd_code_object<usearch_sequence_metric_levenshtein_utf8_k, hip_class_k>>;
+extern template struct us::sequence::vram_amd_index<
+    sequence_amd_kit<usearch_sequence_metric_overlap_k>, u32_t,
+    sequence_amd_code_object<usearch_sequence_metric_overlap_k, hip_class_k>>;
+extern template struct us::sequence::vram_amd_index<
+    sequence_amd_kit<usearch_sequence_metric_needleman_wunsch_k>, u32_t,
+    sequence_amd_code_object<usearch_sequence_metric_needleman_wunsch_k, hip_class_k>>;
+
+/** A GPU overlap index scores in the same fixed point as the RAM metric. */
+template <typename node_id_type_, typename kernels_type_>
+inline constexpr usearch_distance_t distance_unit<
+    us::sequence::vram_amd_index<sequence_amd_kit<usearch_sequence_metric_overlap_k>, node_id_type_, kernels_type_>> =
+    1.0 / us::sequence::overlap_resolution_k;
+
+/** Builds one shard of the sequence kind @p metric_ on an AMD device of @p gpu_class_, holding the
+ *  kit's parameters from the frozen @c geometry and costs of the variant, which the first
+ *  reservation uploads to the device. */
+template <usearch_sequence_metric_t metric_, gpu_class_t gpu_class_>
+struct sequence_vram_amd_build {
+    using face_t =
+        us::sequence::vram_amd_index<sequence_amd_kit<metric_>, u32_t, sequence_amd_code_object<metric_, gpu_class_>>;
+
+    /** The geometry and costs of the variant holding the shards, frozen before the first is
+     *  placed. */
+    sequence_geometry_t const* geometry = nullptr;
+    us::sequence::needleman_wunsch_costs_t const* costs = nullptr;
+
+    std::unique_ptr<face_t> operator()(int device) const noexcept {
+        std::unique_ptr<face_t> face {new (std::nothrow)
+                                          face_t(hip_virtual_memory_allocator<byte_t> {gpu_drivers().hip, device})};
+        growing_buffer<u32_t, std::allocator<byte_t>> widths {std::allocator<byte_t> {}};
+        auto const [parameters, parameters_status] = parameters_of(std::type_identity<typename face_t::parameters_t> {},
+                                                                   *geometry, *costs, widths);
+        if (face && (failed(parameters_status) || failed(face->parameters(parameters)))) face.reset();
+        return face;
+    }
+};
+
+/** The sequence alternative on AMD GPUs of @p gpu_class_ : the basic VRAM shards under the sequence
+ *  kind @p metric_ - Levenshtein over bytes or UTF-8 runes, overlap, or Needleman-Wunsch - with
+ *  32-bit node IDs. */
+template <usearch_sequence_metric_t metric_, gpu_class_t gpu_class_>
+struct sequence_vram_amd_variant {
+    using executor_t = hip_executor_t;
+    using build_t = sequence_vram_amd_build<metric_, gpu_class_>;
+    using face_t = typename build_t::face_t;
+    using index_t = basic::vram_amd_indexes<face_t, us::utilities::uuid128_t, build_t>;
+    using refine_plan_t = typename index_t::refine_plan_t;
+    static constexpr usearch_sequence_metric_t metric_k = metric_;
+    static constexpr gpu_class_t gpu_class_k = gpu_class_;
+
+    sequence_geometry_t geometry;
+    us::sequence::needleman_wunsch_costs_t costs {};
+    index_t index;
+
+    /** Holds no shard until the handle places them; their kind is the template's, and their window
+     *  widths and costs the geometry's. */
+    sequence_vram_amd_variant(int, sequence_geometry_t const&) noexcept
+        : index(forkunion_allocator_t {no_memory_domain_k}, build_t {&geometry, &costs}) {}
+
+    status_t reserve(reserve_capacity_t capacity) noexcept {
+        return vram_amd_reserve(index, capacity.entries, geometry.connectivity, capacity.bytes);
+    }
+
+    expected<traversal_stats_t> insert(usearch_keys_view_t keys, caller_tape_t sequences, insert_config_t config,
+                                       hip_executor_t& executor, progress_ticks_t& ticks) noexcept {
+        // The batch's own pages, since batches routed to disjoint shards may land at once.
+        growing_arena<forkunion_allocator_t> staging {forkunion_allocator_t {no_memory_domain_k}};
+        auto const [entries, lower_status] = counted_tape_of(sequences.tape, sequences.count, staging);
+        if (failed(lower_status)) return {{}, lower_status};
+        return vram_amd_insert(index, keys, bytes_tape_of(entries), geometry.connectivity, config.expansion_factor,
+                               ticks, executor);
+    }
+
+    /** A device walk takes no host predicate. */
+    expected<traversal_stats_t> search(counted_tape_t queries, matches_outputs_t& outputs, search_config_t config,
+                                       hip_executor_t& executor, progress_ticks_t& ticks) noexcept {
+        return vram_amd_search(index, bytes_tape_of(queries), outputs.wanted, config.expansion_factor, outputs, ticks,
+                               executor);
+    }
+
+    /** Writes the strings as the RAM variants write them: a lone live shard's monolith, or one per
+     *  live shard beside the manifest the path names. */
+    status_t save(std::string_view path, hip_executor_t& executor, progress_ticks_t& ticks) noexcept {
+        return with_sequence_provenance(geometry, costs, [&](save_config_t const& config) noexcept {
+            return vram_amd_save(index, path, us::sequence::codec_t {}, config, token_of(geometry.metric), executor,
+                                 ticks);
+        });
+    }
+
+    /** Reads a checkpoint any residency wrote, at a path or in host memory, into the placed shards,
+     *  one part per shard. */
+    template <typename checkpoint_type_>
+    status_t load(checkpoint_type_ checkpoint, hip_executor_t& executor, progress_ticks_t& ticks) noexcept {
+        return index.load(checkpoint, us::sequence::codec_t {}, executor, load_config_t {},
+                          static_cast<connectivity_t>(geometry.connectivity), ticks);
+    }
+
+    /** Empties the index, retiring every shard behind a fresh shard generation on the same
+     *  devices. */
+    status_t clear() noexcept { return index.clear(); }
+
+    /** Sampling answers @c unsupported_k until the shards sample on their devices. */
+    expected<sample_result_t> sample(basic_sample_inputs_t, basic_sample_outputs_t, sample_config_t,
+                                     executor_t&) noexcept {
+        return {{}, status_t::unsupported_k};
+    }
+};
+
+#endif
+
 #pragma endregion Sequence Variants
 
 #pragma region Sequence Bodies
@@ -666,6 +814,40 @@ struct sequence_variants_of<vendored_residency_t::vram_apple_k, gpu_class_t::app
                   sequence_vram_apple_variant<usearch_sequence_metric_levenshtein_utf8_k, gpu_class_t::apple_metal7_k>,
                   sequence_vram_apple_variant<usearch_sequence_metric_overlap_k, gpu_class_t::apple_metal7_k>,
                   sequence_vram_apple_variant<usearch_sequence_metric_needleman_wunsch_k, gpu_class_t::apple_metal7_k>>;
+};
+#endif
+#if USEARCH_ARCH_ROCM_ && USEARCH_TARGET_MONOVERSIONED
+template <auto class_>
+struct sequence_variants_of<vendored_residency_t::vram_amd_k, class_> {
+    using type = type_list<sequence_vram_amd_variant<usearch_sequence_metric_levenshtein_bytes_k, class_>,
+                           sequence_vram_amd_variant<usearch_sequence_metric_levenshtein_utf8_k, class_>,
+                           sequence_vram_amd_variant<usearch_sequence_metric_overlap_k, class_>,
+                           sequence_vram_amd_variant<usearch_sequence_metric_needleman_wunsch_k, class_>>;
+};
+#elif USEARCH_ARCH_ROCM_
+template <>
+struct sequence_variants_of<vendored_residency_t::vram_amd_k, gpu_class_t::amd_cdna3_k> {
+    using type =
+        type_list<sequence_vram_amd_variant<usearch_sequence_metric_levenshtein_bytes_k, gpu_class_t::amd_cdna3_k>,
+                  sequence_vram_amd_variant<usearch_sequence_metric_levenshtein_utf8_k, gpu_class_t::amd_cdna3_k>,
+                  sequence_vram_amd_variant<usearch_sequence_metric_overlap_k, gpu_class_t::amd_cdna3_k>,
+                  sequence_vram_amd_variant<usearch_sequence_metric_needleman_wunsch_k, gpu_class_t::amd_cdna3_k>>;
+};
+template <>
+struct sequence_variants_of<vendored_residency_t::vram_amd_k, gpu_class_t::amd_cdna4_k> {
+    using type =
+        type_list<sequence_vram_amd_variant<usearch_sequence_metric_levenshtein_bytes_k, gpu_class_t::amd_cdna4_k>,
+                  sequence_vram_amd_variant<usearch_sequence_metric_levenshtein_utf8_k, gpu_class_t::amd_cdna4_k>,
+                  sequence_vram_amd_variant<usearch_sequence_metric_overlap_k, gpu_class_t::amd_cdna4_k>,
+                  sequence_vram_amd_variant<usearch_sequence_metric_needleman_wunsch_k, gpu_class_t::amd_cdna4_k>>;
+};
+template <>
+struct sequence_variants_of<vendored_residency_t::vram_amd_k, gpu_class_t::amd_cdna5_k> {
+    using type =
+        type_list<sequence_vram_amd_variant<usearch_sequence_metric_levenshtein_bytes_k, gpu_class_t::amd_cdna5_k>,
+                  sequence_vram_amd_variant<usearch_sequence_metric_levenshtein_utf8_k, gpu_class_t::amd_cdna5_k>,
+                  sequence_vram_amd_variant<usearch_sequence_metric_overlap_k, gpu_class_t::amd_cdna5_k>,
+                  sequence_vram_amd_variant<usearch_sequence_metric_needleman_wunsch_k, gpu_class_t::amd_cdna5_k>>;
 };
 #endif
 

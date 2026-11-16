@@ -83,12 +83,16 @@ __device__ __forceinline__ void cuda_shapes_load_values(basic::vram_load<node_id
 /** Chamfer and Hausdorff between f16 packs in f32 math, a warp to a shape. */
 struct f16_ampere_shapes_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
+
+    /** The kit's identity in kernel symbols. */
+    inline static constexpr char name_k[] = "f16_ampere_shapes_kit_t";
     inline static constexpr u32_t lanes_per_entry_k = 32;
 
     using warp_t = cuda_warp_t;
     using scan_t = ampere_scan_t;
     using query_t = vram_pack_query_t;
     using selector_t = basic::vram_keep_diverse_t;
+    using scalar_t = nk::f16_t;
 
     static constexpr bool serves(std::size_t) noexcept { return true; }
 
@@ -129,12 +133,16 @@ struct f16_ampere_shapes_kit_t {
  *  the Ampere kit's distances bit for bit. */
 struct f16_blackwell_shapes_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_blackwell_k;
+
+    /** The kit's identity in kernel symbols. */
+    inline static constexpr char name_k[] = "f16_blackwell_shapes_kit_t";
     inline static constexpr u32_t lanes_per_entry_k = 32;
 
     using warp_t = cuda_warp_t;
     using scan_t = ampere_scan_t;
     using query_t = vram_pack_query_t;
     using selector_t = basic::vram_keep_diverse_t;
+    using scalar_t = nk::f16_t;
 
     static constexpr bool serves(std::size_t) noexcept { return true; }
 
@@ -168,12 +176,16 @@ struct f16_blackwell_shapes_kit_t {
 /** Chamfer and Hausdorff between f32 packs in f64 math, a warp to a shape. */
 struct f32_ampere_shapes_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
+
+    /** The kit's identity in kernel symbols. */
+    inline static constexpr char name_k[] = "f32_ampere_shapes_kit_t";
     inline static constexpr u32_t lanes_per_entry_k = 32;
 
     using warp_t = cuda_warp_t;
     using scan_t = ampere_scan_t;
     using query_t = vram_pack_query_t;
     using selector_t = basic::vram_keep_diverse_t;
+    using scalar_t = nk::f32_t;
 
     static constexpr bool serves(std::size_t) noexcept { return true; }
 
@@ -209,64 +221,68 @@ template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cuda_k) != 0)
 struct shapes_ladder<nk::f16_t, caps_> {
     using kit_t = typename highest_kit<caps_, f16_ampere_shapes_kit_t, f16_blackwell_shapes_kit_t>::type;
-    static constexpr nk_capability_t picked_k = caps_ & kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cuda_k) != 0)
 struct shapes_ladder<nk::f32_t, caps_> {
     using kit_t = typename highest_kit<caps_, f32_ampere_shapes_kit_t>::type;
-    static constexpr nk_capability_t picked_k = caps_ & kit_t::capability_k;
 };
 
 #pragma endregion Kits
 
 #pragma region Face
 
-template <nk::shapes_dtype scalar_, typename node_id_type_, nk_capability_t capability_, typename kernels_type_>
-std::size_t vram_nvidia_kits<scalar_, node_id_type_, capability_, kernels_type_>::rung_serving_(
-    std::size_t longest) noexcept {
-    using kit_t = typename shapes_ladder<scalar_, capability_>::kit_t;
-    return kit_t::serves(longest) ? 0 : rungs_k;
+/** Spells a shapes kit into a kernel's symbol by its name, inside the kernel's own scope, @c S1_,
+ *  as @c vram_kernel_symbol documents. */
+template <typename kit_type_>
+    requires requires { kit_type_::name_k; }
+void append_itanium_argument(vram_kernel_symbol_t& symbol, itanium_type<kit_type_>) noexcept {
+    symbol.append("NS1_");
+    symbol.append_name(kit_type_::name_k);
+    symbol.append("E");
 }
 
-template <nk::shapes_dtype scalar_, typename node_id_type_, nk_capability_t capability_, typename kernels_type_>
-u32_t vram_nvidia_kits<scalar_, node_id_type_, capability_, kernels_type_>::lanes_per_entry_(std::size_t) noexcept {
-    using kit_t = typename shapes_ladder<scalar_, capability_>::kit_t;
-    return kit_t::lanes_per_entry_k;
+template <typename kit_type_, typename node_id_type_, typename kernels_type_>
+std::size_t vram_nvidia_kits<kit_type_, node_id_type_, kernels_type_>::rung_serving_(std::size_t longest) noexcept {
+    return kit_type_::serves(longest) ? 0 : rungs_k;
 }
 
-template <nk::shapes_dtype scalar_, typename node_id_type_, nk_capability_t capability_, typename kernels_type_>
-std::size_t vram_nvidia_kits<scalar_, node_id_type_, capability_, kernels_type_>::span_bytes_(
-    byte_t const* data, std::size_t bytes) noexcept {
-    using kit_t = typename shapes_ladder<scalar_, capability_>::kit_t;
-    return kit_t::span_bytes(data, bytes);
+template <typename kit_type_, typename node_id_type_, typename kernels_type_>
+u32_t vram_nvidia_kits<kit_type_, node_id_type_, kernels_type_>::lanes_per_entry_(std::size_t) noexcept {
+    return kit_type_::lanes_per_entry_k;
 }
 
-template <nk::shapes_dtype scalar_, typename node_id_type_, nk_capability_t capability_, typename kernels_type_>
-expected<std::size_t> vram_nvidia_kits<scalar_, node_id_type_, capability_, kernels_type_>::saved_bytes_(
+template <typename kit_type_, typename node_id_type_, typename kernels_type_>
+std::size_t vram_nvidia_kits<kit_type_, node_id_type_, kernels_type_>::span_bytes_(byte_t const* data,
+                                                                                   std::size_t bytes) noexcept {
+    return kit_type_::span_bytes(data, bytes);
+}
+
+template <typename kit_type_, typename node_id_type_, typename kernels_type_>
+expected<std::size_t> vram_nvidia_kits<kit_type_, node_id_type_, kernels_type_>::saved_bytes_(
     bytes_view_t stored) noexcept {
-    using pack_kit_t = typename shapes_ladder<scalar_, nk_cap_serial_k>::kit_t;
+    using pack_kit_t = typename shapes_ladder<typename kit_type_::scalar_t, nk_cap_serial_k>::kit_t;
     nk_size_t points = 0;
     if (status_t const read = status_of(
             pack_kit_t::packed_shape(stored.data(), &points, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr));
         failed(read))
         return {0, read};
-    return {points * 3 * sizeof(typename scalar_::raw_t), status_t::success_k};
+    return {points * 3 * sizeof(typename kit_type_::scalar_t::raw_t), status_t::success_k};
 }
 
-template <nk::shapes_dtype scalar_, typename node_id_type_, nk_capability_t capability_, typename kernels_type_>
-status_t vram_nvidia_kits<scalar_, node_id_type_, capability_, kernels_type_>::save_value_(
-    bytes_view_t stored, bytes_span_t saved) noexcept {
-    using pack_kit_t = typename shapes_ladder<scalar_, nk_cap_serial_k>::kit_t;
+template <typename kit_type_, typename node_id_type_, typename kernels_type_>
+status_t vram_nvidia_kits<kit_type_, node_id_type_, kernels_type_>::save_value_(bytes_view_t stored,
+                                                                                bytes_span_t saved) noexcept {
+    using pack_kit_t = typename shapes_ladder<typename kit_type_::scalar_t, nk_cap_serial_k>::kit_t;
     return codec<pack_kit_t>::save_pack(stored, saved);
 }
 
-template <nk::shapes_dtype scalar_, typename node_id_type_, nk_capability_t capability_, typename kernels_type_>
-expected<std::size_t> vram_nvidia_kits<scalar_, node_id_type_, capability_, kernels_type_>::stored_bytes_(
+template <typename kit_type_, typename node_id_type_, typename kernels_type_>
+expected<std::size_t> vram_nvidia_kits<kit_type_, node_id_type_, kernels_type_>::stored_bytes_(
     std::size_t saved) noexcept {
-    using pack_kit_t = typename shapes_ladder<scalar_, nk_cap_serial_k>::kit_t;
-    constexpr std::size_t point_bytes_k = 3 * sizeof(typename scalar_::raw_t);
+    using pack_kit_t = typename shapes_ladder<typename kit_type_::scalar_t, nk_cap_serial_k>::kit_t;
+    constexpr std::size_t point_bytes_k = 3 * sizeof(typename kit_type_::scalar_t::raw_t);
     if (saved % point_bytes_k) return {0, status_t::malformed_k};
     nk_size_t bytes = 0;
     if (status_t const sized = status_of(pack_kit_t::pack_size(saved / point_bytes_k, &bytes)); failed(sized))
@@ -274,40 +290,37 @@ expected<std::size_t> vram_nvidia_kits<scalar_, node_id_type_, capability_, kern
     return {bytes, status_t::success_k};
 }
 
-template <nk::shapes_dtype scalar_, typename node_id_type_, nk_capability_t capability_, typename kernels_type_>
-void vram_nvidia_kits<scalar_, node_id_type_, capability_, kernels_type_>::spell_kits_kernel_(
+template <typename kit_type_, typename node_id_type_, typename kernels_type_>
+void vram_nvidia_kits<kit_type_, node_id_type_, kernels_type_>::spell_kits_kernel_(
     vram_kernel_symbol_t& symbol, std::size_t, basic::cuda_rung_t instantiated) noexcept {
-    vram_kernel_symbol(symbol, "shapes", "cuda_kernel", {"vram_arguments", 3, itanium_scope_t::basic_k},
-                       instantiated.kernel, capability_, scalar_::dtype(), itanium_type<node_id_type_> {},
+    vram_kernel_symbol(symbol, "shapes", "cuda_kernel", {"vram_arguments", 2, itanium_scope_t::basic_k},
+                       instantiated.kernel, itanium_type<kit_type_> {}, itanium_type<node_id_type_> {},
                        instantiated.slots);
 }
 
-/** Every NVIDIA shapes kernel: @p kernel_ picks the walk, @p capability_ and @p dtype_ the kit
- *  through @c shapes_ladder, @p node_id_type_ the IDs of the records, and @p slots_ the register
- *  rung. */
-template <vram_kernel_t kernel_, nk_capability_t capability_, nk_dtype_t dtype_, typename node_id_type_, u32_t slots_>
+/** Every NVIDIA shapes kernel: @p kernel_ picks the walk, @p kit_type_ scores, @p node_id_type_
+ *  names the IDs of the records, and @p slots_ the register rung. */
+template <vram_kernel_t kernel_, typename kit_type_, typename node_id_type_, u32_t slots_>
 __global__ void __launch_bounds__(vram_warps_per_block_k * 32, basic::cuda_resident_blocks(kernel_, slots_))
     cuda_kernel(basic::vram_arguments<node_id_type_> arguments) {
-    using kit_t = typename shapes_ladder<typename nk::type_for<dtype_>::type, capability_>::kit_t;
-    basic::cuda_kernel_body<kernel_, kit_t, 0, slots_>(arguments);
+    basic::cuda_kernel_body<kernel_, kit_type_, 0, slots_>(arguments);
 }
 
-template <nk_capability_t capability_, nk_dtype_t dtype_, typename node_id_type_, std::size_t... rungs_>
+template <typename kit_type_, typename node_id_type_, std::size_t... rungs_>
 __device__ void cuda_instantiate_rungs(std::index_sequence<rungs_...>) noexcept {
-    (static_cast<void>(&cuda_kernel<basic::cuda_rungs[rungs_].kernel, capability_, dtype_, node_id_type_,
-                                    basic::cuda_rungs[rungs_].slots>),
+    (static_cast<void>(
+         &cuda_kernel<basic::cuda_rungs[rungs_].kernel, kit_type_, node_id_type_, basic::cuda_rungs[rungs_].slots>),
      ...);
 }
 
-/** Instantiates every kernel over packs of @p dtype_ under @p capability_ with @p node_id_type_
- *  IDs; the unit compiling the fatbin names it once per dtype and node-ID type. Taking the kernels'
- *  addresses in device code makes NVCC emit them, while a host-only pass emits no launch stub. */
-template <nk_capability_t capability_, nk_dtype_t dtype_, typename node_id_type_>
+/** Instantiates every kernel of @p kit_type_ with @p node_id_type_ IDs; the unit compiling the
+ *  fatbin names it once per kit and node-ID type. Taking the kernels' addresses in device code
+ *  makes NVCC emit them, while a host-only pass emits no launch stub. */
+template <typename kit_type_, typename node_id_type_>
 __device__ void cuda_instantiate() noexcept {
-    cuda_instantiate_rungs<capability_, dtype_, node_id_type_>(
-        std::make_index_sequence<std::size(basic::cuda_rungs)> {});
-    static_cast<void>(&cuda_kernel<vram_kernel_t::load_values_k, capability_, dtype_, node_id_type_, 0>);
-    static_cast<void>(&cuda_kernel<vram_kernel_t::size_spans_k, capability_, dtype_, node_id_type_, 0>);
+    cuda_instantiate_rungs<kit_type_, node_id_type_>(std::make_index_sequence<std::size(basic::cuda_rungs)> {});
+    static_cast<void>(&cuda_kernel<vram_kernel_t::load_values_k, kit_type_, node_id_type_, 0>);
+    static_cast<void>(&cuda_kernel<vram_kernel_t::size_spans_k, kit_type_, node_id_type_, 0>);
 }
 
 #pragma endregion Face

@@ -260,28 +260,24 @@ template <sz_capability_t caps_>
     requires((caps_ & sz_cap_metal_k) != 0)
 struct levenshtein_ladder<sz_levenshtein_bytes_k, caps_> {
     using kit_t = apple_levenshtein_bytes_kit_t;
-    static constexpr sz_capability_t picked_k = caps_ & sz_cap_metal_k;
 };
 
 template <sz_capability_t caps_>
     requires((caps_ & sz_cap_metal_k) != 0)
 struct levenshtein_ladder<sz_levenshtein_runes_k, caps_> {
     using kit_t = apple_levenshtein_utf8_kit_t;
-    static constexpr sz_capability_t picked_k = caps_ & sz_cap_metal_k;
 };
 
 template <sz_capability_t caps_>
     requires((caps_ & sz_cap_metal_k) != 0)
 struct overlap_ladder<caps_> {
     using kit_t = apple_overlap_kit_t;
-    static constexpr sz_capability_t picked_k = caps_ & sz_cap_metal_k;
 };
 
 template <sz_capability_t caps_>
     requires((caps_ & sz_cap_metal_k) != 0)
 struct needleman_wunsch_ladder<caps_> {
     using kit_t = apple_needleman_wunsch_kit_t;
-    static constexpr sz_capability_t picked_k = caps_ & sz_cap_metal_k;
 };
 
 #pragma endregion Kits

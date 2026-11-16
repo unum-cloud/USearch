@@ -21,9 +21,9 @@ std::size_t check_vram_apple(settings_t const& settings, gpu_device_t const& dev
                                                             std::span<int const> {&ordinal, 1});
     if (failed(spawn_status)) return fmt::println("- Metal: device #{} opens no queue", ordinal), 1;
     std::size_t failures_count = check_vram_indexes(settings, executor);
-    failures_count += test::sequence::check_sequence_vram(settings, device);
-    failures_count += test::shapes::check_shapes_vram(settings, device);
-    failures_count += test::geospatial::check_geospatial_vram(settings, device);
+    failures_count += test::sequence::check_sequence_vram<metal_executor_t>(settings, device);
+    failures_count += test::shapes::check_shapes_vram<metal_executor_t>(settings, device);
+    failures_count += test::geospatial::check_geospatial_vram<metal_executor_t>(settings, device);
     return failures_count;
 }
 

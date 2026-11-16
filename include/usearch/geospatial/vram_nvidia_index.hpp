@@ -27,9 +27,9 @@ namespace unum::usearch::geospatial {
 using namespace unum::usearch::utilities;
 
 /** The kit hooks a geospatial graph on NVIDIA GPUs reads, and the fatbin @p kernels_type_ names
- *  once loaded: the squared chord the kit @c geospatial_ladder picks under @p capability_ scores,
- *  over node IDs of @p node_id_type_. */
-template <typename node_id_type_, nk_capability_t capability_, typename kernels_type_>
+ *  once loaded: the squared chord between observations that @p kit_type_ scores, over node IDs of
+ *  @p node_id_type_ in every row. */
+template <typename kit_type_, typename node_id_type_, typename kernels_type_>
 struct vram_nvidia_kits {
 
     /** Rungs of the kit's kernels: one, serving every observation. */
@@ -99,15 +99,15 @@ struct vram_nvidia_kits {
 template <typename node_id_type_>
 struct cuda_admit_arguments;
 
-/** Similarity Search over observations on NVIDIA GPUs, under the squared chord the kit
- *  @c geospatial_ladder picks under @p capability_ scores: a lane scores each candidate, a warp
- *  walks each query, and nodes keep their neighbors by tangent-plane cone. Node IDs are
- *  @p node_id_type_, and @p kernels_type_ names the fatbin. It owns a @c basic::vram_ragged_graph
- *  over its kits and forwards its verbs, types and constants, which that graph documents. */
-template <typename node_id_type_, nk_capability_t capability_, typename kernels_type_>
+/** Similarity Search over observations on NVIDIA GPUs, under the squared chord the kit @p kit_type_
+ *  scores: a lane scores each candidate, a warp walks each query, and nodes keep their neighbors by
+ *  tangent-plane cone. Node IDs are @p node_id_type_, and @p kernels_type_ names the fatbin. It
+ *  owns a @c basic::vram_ragged_graph over its kits and forwards its verbs, types and constants,
+ *  which that graph documents. */
+template <typename kit_type_, typename node_id_type_, typename kernels_type_>
 struct vram_nvidia_index {
     /* Components */
-    using kits_t = vram_nvidia_kits<node_id_type_, capability_, kernels_type_>;
+    using kits_t = vram_nvidia_kits<kit_type_, node_id_type_, kernels_type_>;
     using graph_t = basic::vram_ragged_graph<node_id_type_, kits_t>;
     using traversal_context_t = typename graph_t::traversal_context_t;
 
@@ -292,7 +292,7 @@ struct vram_nvidia_index {
         auto const [kits, kits_status] = graph_t::kits_kernels_(context);
         if (failed(kits_status)) return kits_status;
         vram_kernel_symbol_t symbol;
-        vram_kernel_symbol(symbol, "geospatial", "cuda_within", {"cuda_admit_arguments", 1}, capability_,
+        vram_kernel_symbol(symbol, "geospatial", "cuda_within", {"cuda_admit_arguments", 1}, itanium_type<kit_type_> {},
                            itanium_type<node_id_type_> {}, kernel);
         cuda_function_handle_t const function = graph_t::kits_symbol_function_(*kits, symbol.text);
         if (!function) return status_t::unsupported_k;

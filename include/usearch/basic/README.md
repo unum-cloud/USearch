@@ -19,8 +19,8 @@ Only they narrow the choice, to 32-bit shards whose nodes a shard table locates 
 - `nvme_index.hpp`: the read-only index of one saved part on block storage, opened from its `persisted_columns_t` and walked through the same storage engines as the dense tier.
 - `nvme_indexes.hpp`: the read-only view of a saved checkpoint, one part per shard; both walk their parts through `nvme_parts_catalog`, a component over spans of the media and parts each owns.
 - `vram_nvidia_index.hpp` and `vram_nvidia_index.cuh`: `basic::vram_ragged_graph`, the NVIDIA component every modality's face owns as a member and forwards its verbs to, in plain C++, and the kernel body every modality's kernels run with the kit their ladder picks.
+- `vram_amd_index.hpp` and `vram_amd_index.hip`: `basic::vram_amd_ragged_graph`, the AMD twin of the NVIDIA component, over HIP and the wavefront of each AMD class, 64 lanes on CDNA3 and CDNA4 and 32 on CDNA5.
 - `vram_index.cuh`: the vendor-neutral device bodies for the walk, the diversity selection, insertion and re-selection, which NVCC and HIP-Clang share.
-  Only the NVIDIA host face exists so far, and AMD and Apple have no basic index yet.
 
 ## Metrics
 

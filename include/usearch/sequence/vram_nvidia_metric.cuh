@@ -380,14 +380,12 @@ template <sz_capability_t caps_>
     requires((caps_ & sz_cap_cuda_k) != 0)
 struct levenshtein_ladder<sz_levenshtein_bytes_k, caps_> {
     using kit_t = typename highest_kit<caps_, u8_ampere_levenshtein_kit_t>::type;
-    static constexpr sz_capability_t picked_k = caps_ & kit_t::capability_k;
 };
 
 template <sz_capability_t caps_>
     requires((caps_ & sz_cap_cuda_k) != 0)
 struct levenshtein_ladder<sz_levenshtein_runes_k, caps_> {
     using kit_t = typename highest_kit<caps_, utf8_ampere_levenshtein_kit_t>::type;
-    static constexpr sz_capability_t picked_k = caps_ & kit_t::capability_k;
 };
 
 /**
@@ -502,7 +500,6 @@ template <sz_capability_t caps_>
     requires((caps_ & sz_cap_cuda_k) != 0)
 struct overlap_ladder<caps_> {
     using kit_t = typename highest_kit<caps_, u8_ampere_overlap_kit_t>::type;
-    static constexpr sz_capability_t picked_k = caps_ & kit_t::capability_k;
 };
 
 /** Bytes of a Needleman-Wunsch profile stripe: a 64-bit word of costs per class and lane. */
@@ -541,7 +538,7 @@ struct cuda_needleman_wunsch_query_t {
     u8_t rows_per_lane;
 
     /** Bits a packed code takes. */
-    u8_t code_bits;
+    u8_t bits_per_code;
 
     /** Cost of one code facing a gap. */
     u8_t gap;
@@ -553,7 +550,7 @@ __device__ __forceinline__ cuda_needleman_wunsch_query_t cuda_needleman_wunsch_p
     byte_t const* parameters, basic::vram_entry_t sequence, byte_t* span, u32_t lane) noexcept {
     needleman_wunsch_costs_t const& costs = *reinterpret_cast<needleman_wunsch_costs_t const*>(parameters);
     cuda_needleman_wunsch_query_t query;
-    query.span = span, query.code_bits = costs.code_bits, query.gap = costs.gap;
+    query.span = span, query.bits_per_code = costs.code_bits, query.gap = costs.gap;
     query.codes = static_cast<u32_t>(packed_codes_count(sequence.data, sequence.bytes, costs.code_bits));
     query.rows_per_lane = static_cast<u8_t>(cuda_needleman_wunsch_rows_per_lane(query.codes));
     u32_t const stripes = cuda_needleman_wunsch_stripes(query.codes);
@@ -594,7 +591,7 @@ __device__ __noinline__ distance_t cuda_needleman_wunsch_score_ampere(cuda_needl
     using warp_t = cuda_warp_t;
     constexpr u32_t lanes_k = warp_t::width_k;
     u32_t const gap = query.gap, rows = query.codes, rows_per_lane = query.rows_per_lane;
-    u32_t const columns = static_cast<u32_t>(packed_codes_count(sequence.data, sequence.bytes, query.code_bits));
+    u32_t const columns = static_cast<u32_t>(packed_codes_count(sequence.data, sequence.bytes, query.bits_per_code));
     if (!rows || !columns) return static_cast<distance_t>((rows + columns) * gap);
     u32_t const stripe_rows = lanes_k * rows_per_lane, stripes = cuda_needleman_wunsch_stripes(rows);
     u64_t const* const profile = reinterpret_cast<u64_t const*>(query.span);
@@ -615,13 +612,13 @@ __device__ __noinline__ distance_t cuda_needleman_wunsch_score_ampere(cuda_needl
         auto const load_columns = [&](u32_t first_column) noexcept {
             u32_t const column = first_column + lane;
             u32_t const top = column > columns ? 0u : stripe ? boundary[column] : column * gap;
-            u32_t const next_code = column < columns ? packed_code_at(sequence.data, column, query.code_bits) : 0u;
+            u32_t const next_code = column < columns ? packed_code_at(sequence.data, column, query.bits_per_code) : 0u;
             return top << 5 | next_code;
         };
         // A cell rides one word with the code its receiver scores a step later, the cell in the
         // high bits, as far as 2^27 reaches; so each step loads the next step's costs before its
         // own cells.
-        u32_t const first_code = packed_code_at(sequence.data, 0, query.code_bits);
+        u32_t const first_code = packed_code_at(sequence.data, 0, query.bits_per_code);
         u32_t handed = lane == 0 ? first_code : 0u, loaded = load_columns(1);
         u64_t costs_word = stripe_profile[first_code * lanes_k];
         u32_t diagonal_above = lane_first * gap, bottom_minimum = (stripe + 1) * stripe_rows * gap;
@@ -733,7 +730,8 @@ struct packed_ampere_needleman_wunsch_kit_t {
     /** Every code one side holds past the other's length faces a gap. */
     static __device__ __forceinline__ distance_t lower_bound(nk_kernel_kind_t, query_t const& query,
                                                              basic::vram_entry_t sequence) noexcept {
-        u32_t const columns = static_cast<u32_t>(packed_codes_count(sequence.data, sequence.bytes, query.code_bits));
+        u32_t const columns = static_cast<u32_t>(
+            packed_codes_count(sequence.data, sequence.bytes, query.bits_per_code));
         u32_t const difference = columns > query.codes ? columns - query.codes : query.codes - columns;
         return static_cast<distance_t>(difference * query.gap);
     }
@@ -749,7 +747,6 @@ template <sz_capability_t caps_>
     requires((caps_ & sz_cap_cuda_k) != 0)
 struct needleman_wunsch_ladder<caps_> {
     using kit_t = typename highest_kit<caps_, packed_ampere_needleman_wunsch_kit_t>::type;
-    static constexpr sz_capability_t picked_k = caps_ & kit_t::capability_k;
 };
 
 /** Spells a sequence kit into a kernel's symbol by its name, inside the kernel's own scope, @c S1_,

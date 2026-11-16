@@ -501,67 +501,56 @@ struct quads_ladder;
 template <nk_capability_t caps_>
 struct quads_ladder<nk_bf16_k, caps_> {
     using kit_t = typename highest_kit<caps_, bf16_metal_quads_kit_t>::type;
-    static constexpr constant nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
 struct quads_ladder<nk_f16_k, caps_> {
     using kit_t = typename highest_kit<caps_, f16_metal_quads_kit_t>::type;
-    static constexpr constant nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
 struct quads_ladder<nk_e5m2_k, caps_> {
     using kit_t = typename highest_kit<caps_, e5m2_metal_quads_kit_t>::type;
-    static constexpr constant nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
 struct quads_ladder<nk_e4m3_k, caps_> {
     using kit_t = typename highest_kit<caps_, e4m3_metal_quads_kit_t>::type;
-    static constexpr constant nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
 struct quads_ladder<nk_e3m2_k, caps_> {
     using kit_t = typename highest_kit<caps_, e3m2_metal_quads_kit_t>::type;
-    static constexpr constant nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
 struct quads_ladder<nk_e2m3_k, caps_> {
     using kit_t = typename highest_kit<caps_, e2m3_metal_quads_kit_t>::type;
-    static constexpr constant nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
 struct quads_ladder<nk_i8_k, caps_> {
     using kit_t = typename highest_kit<caps_, i8_metal_quads_kit_t>::type;
-    static constexpr constant nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
 struct quads_ladder<nk_i4_k, caps_> {
     using kit_t = typename highest_kit<caps_, i4x2_metal_quads_kit_t>::type;
-    static constexpr constant nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
 struct quads_ladder<nk_u8_k, caps_> {
     using kit_t = typename highest_kit<caps_, u8_metal_quads_kit_t>::type;
-    static constexpr constant nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
 struct quads_ladder<nk_u4_k, caps_> {
     using kit_t = typename highest_kit<caps_, u4x2_metal_quads_kit_t>::type;
-    static constexpr constant nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
 struct quads_ladder<nk_u1_k, caps_> {
     using kit_t = typename highest_kit<caps_, u1x8_metal_quads_kit_t>::type;
-    static constexpr constant nk_capability_t picked_k = kit_t::capability_k;
 };
 
 #pragma endregion Ladders

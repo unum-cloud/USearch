@@ -297,7 +297,6 @@ struct levenshtein_ladder<sz_levenshtein_bytes_k, caps_> {
         u8_neon_levenshtein_kit_t,      //
         u8_powervsx_levenshtein_kit_t   //
         >::type;
-    static constexpr sz_capability_t picked_k = kit_t::capability_k;
 };
 
 template <sz_capability_t caps_>
@@ -312,7 +311,6 @@ struct levenshtein_ladder<sz_levenshtein_runes_k, caps_> {
         utf8_neon_levenshtein_kit_t,    //
         utf8_powervsx_levenshtein_kit_t //
         >::type;
-    static constexpr sz_capability_t picked_k = kit_t::capability_k;
 };
 
 #pragma endregion Levenshtein Kernels
@@ -416,7 +414,6 @@ struct overlap_ladder<caps_> {
         u8_neon_overlap_kit_t,          //
         u8_powervsx_overlap_kit_t       //
         >::type;
-    static constexpr sz_capability_t picked_k = kit_t::capability_k;
 };
 
 #pragma endregion Overlap Kernels
@@ -1588,7 +1585,6 @@ struct needleman_wunsch_ladder<caps_> {
         packed_neon_needleman_wunsch_kit_t,    //
         packed_powervsx_needleman_wunsch_kit_t //
         >::type;
-    static constexpr sz_capability_t picked_k = kit_t::capability_k;
 };
 
 #pragma endregion Needleman Wunsch Kernels

@@ -2527,8 +2527,8 @@ struct blackwellrtx_tma_schedule_t {
 #pragma region Ladders
 
 /*  Each ladder lists the newest kit first. The Blackwell kits serve datacenter and RTX Blackwell
- *  alike, so their @c capability_k names both bits, and @c picked_k keeps the one the class
- *  carries; each Blackwell has its own schedule. */
+ *  alike, so their @c capability_k names both bits, and a reader masks it with the class's
+ *  ceiling to keep the one the class carries; each Blackwell has its own schedule. */
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cuda_k) != 0)
@@ -2538,7 +2538,6 @@ struct quads_ladder<nk::f16_t, caps_> {
         f16_ampere_quads_kit_t,         //
         f16_blackwell_quads_kit_t       //
         >::type;
-    static constexpr nk_capability_t picked_k = caps_ & kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
@@ -2549,21 +2548,18 @@ struct quads_ladder<nk::bf16_t, caps_> {
         bf16_ampere_quads_kit_t,        //
         bf16_blackwell_quads_kit_t      //
         >::type;
-    static constexpr nk_capability_t picked_k = caps_ & kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cuda_k) != 0)
 struct quads_ladder<nk::i8_t, caps_> {
     using kit_t = typename highest_kit<caps_, i8_ampere_quads_kit_t>::type;
-    static constexpr nk_capability_t picked_k = caps_ & kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cuda_k) != 0)
 struct quads_ladder<nk::u8_t, caps_> {
     using kit_t = typename highest_kit<caps_, u8_ampere_quads_kit_t>::type;
-    static constexpr nk_capability_t picked_k = caps_ & kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
@@ -2575,7 +2571,6 @@ struct quads_ladder<nk::e5m2_t, caps_> {
         e5m2_blackwell_quads_kit_t,     //
         e5m2_ada_quads_kit_t            //
         >::type;
-    static constexpr nk_capability_t picked_k = caps_ & kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
@@ -2587,7 +2582,6 @@ struct quads_ladder<nk::e4m3_t, caps_> {
         e4m3_blackwell_quads_kit_t,     //
         e4m3_ada_quads_kit_t            //
         >::type;
-    static constexpr nk_capability_t picked_k = caps_ & kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
@@ -2598,7 +2592,6 @@ struct quads_ladder<nk::e3m2_t, caps_> {
         e3m2_ampere_quads_kit_t,        //
         e3m2_blackwell_quads_kit_t      //
         >::type;
-    static constexpr nk_capability_t picked_k = caps_ & kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
@@ -2609,28 +2602,24 @@ struct quads_ladder<nk::e2m3_t, caps_> {
         e2m3_ampere_quads_kit_t,        //
         e2m3_blackwell_quads_kit_t      //
         >::type;
-    static constexpr nk_capability_t picked_k = caps_ & kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cuda_k) != 0)
 struct quads_ladder<nk::i4x2_t, caps_> {
     using kit_t = typename highest_kit<caps_, i4x2_ampere_quads_kit_t>::type;
-    static constexpr nk_capability_t picked_k = caps_ & kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cuda_k) != 0)
 struct quads_ladder<nk::u4x2_t, caps_> {
     using kit_t = typename highest_kit<caps_, u4x2_ampere_quads_kit_t>::type;
-    static constexpr nk_capability_t picked_k = caps_ & kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cuda_k) != 0)
 struct quads_ladder<nk::u1x8_t, caps_> {
     using kit_t = typename highest_kit<caps_, u1x8_ampere_quads_kit_t>::type;
-    static constexpr nk_capability_t picked_k = caps_ & kit_t::capability_k;
 };
 
 /** The staging schedule under @p caps_: whole-row Tensor Memory Accelerator copies on every class
@@ -2646,7 +2635,6 @@ struct schedule_ladder<caps_> {
         blackwellrtx_tma_schedule_t,         //
         hopper_tma_schedule_t                //
         >::type;
-    static constexpr nk_capability_t picked_k = caps_ & schedule_t::capability_k;
 };
 
 #pragma endregion Ladders

@@ -4962,6 +4962,7 @@ check_identifier_words() {
                 token = substr(rest, RSTART, RLENGTH); rest = substr(rest, RSTART + RLENGTH)
                 if (token ~ /^fu_pool_/) continue # the ForkUnion C API spells its thread pools so
                 if (token ~ /^(usearch_executor_)?on_pool(_t)?$/) continue # the C executor verb that adopts a pool
+                if (token == "seen_k") continue # the C++ twin of usearch_geospatial_relation_seen_k, a C ABI value
                 total = split(tolower(token), parts, "_")
                 for (part = 1; part <= total; ++part) {
                     if (!(parts[part] in banned)) continue

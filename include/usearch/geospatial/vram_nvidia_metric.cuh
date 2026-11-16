@@ -143,6 +143,9 @@ struct vram_keep_octants_t {
  *  tangent-plane cone. */
 struct i32_ampere_geospatial_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
+
+    /** The kit's identity in kernel symbols. */
+    inline static constexpr char name_k[] = "i32_ampere_geospatial_kit_t";
     inline static constexpr u32_t lanes_per_entry_k = 1;
 
     using warp_t = cuda_warp_t;
@@ -177,33 +180,40 @@ template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cuda_k) != 0)
 struct geospatial_ladder<caps_> {
     using kit_t = typename highest_kit<caps_, i32_ampere_geospatial_kit_t>::type;
-    static constexpr nk_capability_t picked_k = caps_ & kit_t::capability_k;
 };
 
-template <typename node_id_type_, nk_capability_t capability_, typename kernels_type_>
-std::size_t vram_nvidia_kits<node_id_type_, capability_, kernels_type_>::rung_serving_(std::size_t longest) noexcept {
-    using kit_t = typename geospatial_ladder<capability_>::kit_t;
-    return kit_t::serves(longest) ? 0 : rungs_k;
+template <typename kit_type_, typename node_id_type_, typename kernels_type_>
+std::size_t vram_nvidia_kits<kit_type_, node_id_type_, kernels_type_>::rung_serving_(std::size_t longest) noexcept {
+    return kit_type_::serves(longest) ? 0 : rungs_k;
 }
 
-template <typename node_id_type_, nk_capability_t capability_, typename kernels_type_>
-u32_t vram_nvidia_kits<node_id_type_, capability_, kernels_type_>::lanes_per_entry_(std::size_t) noexcept {
-    using kit_t = typename geospatial_ladder<capability_>::kit_t;
-    return kit_t::lanes_per_entry_k;
+template <typename kit_type_, typename node_id_type_, typename kernels_type_>
+u32_t vram_nvidia_kits<kit_type_, node_id_type_, kernels_type_>::lanes_per_entry_(std::size_t) noexcept {
+    return kit_type_::lanes_per_entry_k;
 }
 
-template <typename node_id_type_, nk_capability_t capability_, typename kernels_type_>
-std::size_t vram_nvidia_kits<node_id_type_, capability_, kernels_type_>::span_bytes_(byte_t const* data,
-                                                                                     std::size_t bytes) noexcept {
-    using kit_t = typename geospatial_ladder<capability_>::kit_t;
-    return kit_t::span_bytes(data, bytes);
+template <typename kit_type_, typename node_id_type_, typename kernels_type_>
+std::size_t vram_nvidia_kits<kit_type_, node_id_type_, kernels_type_>::span_bytes_(byte_t const* data,
+                                                                                   std::size_t bytes) noexcept {
+    return kit_type_::span_bytes(data, bytes);
 }
 
-template <typename node_id_type_, nk_capability_t capability_, typename kernels_type_>
-void vram_nvidia_kits<node_id_type_, capability_, kernels_type_>::spell_kits_kernel_(
+template <typename kit_type_, typename node_id_type_, typename kernels_type_>
+void vram_nvidia_kits<kit_type_, node_id_type_, kernels_type_>::spell_kits_kernel_(
     vram_kernel_symbol_t& symbol, std::size_t, basic::cuda_rung_t instantiated) noexcept {
     vram_kernel_symbol(symbol, "geospatial", "cuda_kernel", {"vram_arguments", 2, itanium_scope_t::basic_k},
-                       instantiated.kernel, capability_, itanium_type<node_id_type_> {}, instantiated.slots);
+                       instantiated.kernel, itanium_type<kit_type_> {}, itanium_type<node_id_type_> {},
+                       instantiated.slots);
+}
+
+/** Spells a geospatial kit into a kernel's symbol by its name, inside the kernel's own scope,
+ *  @c S1_, as @c vram_kernel_symbol documents. */
+template <typename kit_type_>
+    requires requires { kit_type_::name_k; }
+void append_itanium_argument(vram_kernel_symbol_t& symbol, itanium_type<kit_type_>) noexcept {
+    symbol.append("NS1_");
+    symbol.append_name(kit_type_::name_k);
+    symbol.append("E");
 }
 
 #pragma endregion Kits
@@ -392,10 +402,10 @@ __device__ __forceinline__ void cuda_judge_walks(cuda_admit_arguments<node_id_ty
 /** One warp per query keeps, in rank order, the candidates the relation admits, a warp-width of
  *  ranks at a time, until @c wanted arrived or the candidates ran out; past @c near, a sight line
  *  must also clear the terrain when one is given. */
-template <nk_capability_t capability_, typename node_id_type_>
+template <typename kit_type_, typename node_id_type_>
 __global__ void __launch_bounds__(vram_warps_per_block_k * 32)
     cuda_admit(cuda_admit_arguments<node_id_type_> arguments) {
-    using warp_t = typename geospatial_ladder<capability_>::kit_t::warp_t;
+    using warp_t = typename kit_type_::warp_t;
     cuda_judge_walks<warp_t>(arguments, [&](u32_t query_index, u32_t lane, auto&& judge) noexcept {
         node_id_type_* const matched_ids = arguments.matched_ids + u64_t {query_index} * arguments.wanted;
         f64_t* const matched_metres = arguments.matched_metres + u64_t {query_index} * arguments.wanted;
@@ -425,10 +435,10 @@ __global__ void __launch_bounds__(vram_warps_per_block_k * 32)
  *  @c matched_offsets holds first, which each warp sums for its own query, so no warp waits on
  *  another, and files the offset one past it.
  */
-template <nk_capability_t capability_, typename node_id_type_, vram_kernel_t kernel_>
+template <typename kit_type_, typename node_id_type_, vram_kernel_t kernel_>
 __global__ void __launch_bounds__(vram_warps_per_block_k * 32)
     cuda_within(cuda_admit_arguments<node_id_type_> arguments) {
-    using warp_t = typename geospatial_ladder<capability_>::kit_t::warp_t;
+    using warp_t = typename kit_type_::warp_t;
     cuda_judge_walks<warp_t>(arguments, [&](u32_t query_index, u32_t lane, auto&& judge) noexcept {
         u64_t start = 0;
         if constexpr (kernel_ == vram_kernel_t::within_write_k) {
@@ -458,34 +468,32 @@ __global__ void __launch_bounds__(vram_warps_per_block_k * 32)
     });
 }
 
-/** Every NVIDIA geospatial kernel: @p kernel_ picks the walk, @p capability_ the kit through
- *  @c geospatial_ladder, @p node_id_type_ the IDs of the records, and @p slots_ the register
- *  rung. */
-template <vram_kernel_t kernel_, nk_capability_t capability_, typename node_id_type_, u32_t slots_>
+/** Every NVIDIA geospatial kernel: @p kernel_ picks the walk, @p kit_type_ scores, @p node_id_type_
+ *  names the IDs of the records, and @p slots_ the register rung. */
+template <vram_kernel_t kernel_, typename kit_type_, typename node_id_type_, u32_t slots_>
 __global__ void __launch_bounds__(vram_warps_per_block_k * 32, basic::cuda_resident_blocks(kernel_, slots_))
     cuda_kernel(basic::vram_arguments<node_id_type_> arguments) {
-    using kit_t = typename geospatial_ladder<capability_>::kit_t;
-    basic::cuda_kernel_body<kernel_, kit_t, 0, slots_>(arguments);
+    basic::cuda_kernel_body<kernel_, kit_type_, 0, slots_>(arguments);
 }
 
-template <nk_capability_t capability_, typename node_id_type_, std::size_t... rungs_>
+template <typename kit_type_, typename node_id_type_, std::size_t... rungs_>
 __device__ void cuda_instantiate_rungs(std::index_sequence<rungs_...>) noexcept {
     (static_cast<void>(
-         &cuda_kernel<basic::cuda_rungs[rungs_].kernel, capability_, node_id_type_, basic::cuda_rungs[rungs_].slots>),
+         &cuda_kernel<basic::cuda_rungs[rungs_].kernel, kit_type_, node_id_type_, basic::cuda_rungs[rungs_].slots>),
      ...);
 }
 
-/** Instantiates every kernel under @p capability_ with @p node_id_type_ IDs, the judging ones too;
- *  the unit compiling the fatbin names it once per node-ID type. Taking the kernels' addresses in
- *  device code makes NVCC emit them, while a host-only pass emits no launch stub. */
-template <nk_capability_t capability_, typename node_id_type_>
+/** Instantiates every kernel of @p kit_type_ with @p node_id_type_ IDs, the judging ones too; the
+ *  unit compiling the fatbin names it once per kit and node-ID type. Taking the kernels' addresses
+ *  in device code makes NVCC emit them, while a host-only pass emits no launch stub. */
+template <typename kit_type_, typename node_id_type_>
 __device__ void cuda_instantiate() noexcept {
-    cuda_instantiate_rungs<capability_, node_id_type_>(std::make_index_sequence<std::size(basic::cuda_rungs)> {});
-    static_cast<void>(&cuda_kernel<vram_kernel_t::load_values_k, capability_, node_id_type_, 0>);
-    static_cast<void>(&cuda_kernel<vram_kernel_t::size_spans_k, capability_, node_id_type_, 0>);
-    static_cast<void>(&cuda_admit<capability_, node_id_type_>);
-    static_cast<void>(&cuda_within<capability_, node_id_type_, vram_kernel_t::within_count_k>);
-    static_cast<void>(&cuda_within<capability_, node_id_type_, vram_kernel_t::within_write_k>);
+    cuda_instantiate_rungs<kit_type_, node_id_type_>(std::make_index_sequence<std::size(basic::cuda_rungs)> {});
+    static_cast<void>(&cuda_kernel<vram_kernel_t::load_values_k, kit_type_, node_id_type_, 0>);
+    static_cast<void>(&cuda_kernel<vram_kernel_t::size_spans_k, kit_type_, node_id_type_, 0>);
+    static_cast<void>(&cuda_admit<kit_type_, node_id_type_>);
+    static_cast<void>(&cuda_within<kit_type_, node_id_type_, vram_kernel_t::within_count_k>);
+    static_cast<void>(&cuda_within<kit_type_, node_id_type_, vram_kernel_t::within_write_k>);
 }
 
 #pragma endregion Kernels

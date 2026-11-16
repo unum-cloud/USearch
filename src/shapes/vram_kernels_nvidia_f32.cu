@@ -10,4 +10,5 @@
 #include "shapes_specializations.cuh"
 #include "usearch/shapes/vram_nvidia_metric.cuh"
 
-template __device__ void us::shapes::cuda_instantiate<cuda_class_capabilities_k, nk_f32_k, u32_t>();
+template __device__ void
+us::shapes::cuda_instantiate<us::shapes::shapes_ladder<nk::f32_t, cuda_class_capabilities_k>::kit_t, u32_t>();

@@ -20,11 +20,12 @@ bytes_view_t shapes_nvidia_fatbin<gpu_class_t::nvidia_blackwell_k, nk_f16_k>::by
         shapes_nvidia_blackwell_f16_bundle_start,
         static_cast<std::size_t>(shapes_nvidia_blackwell_f16_bundle_end - shapes_nvidia_blackwell_f16_bundle_start)};
 }
-template struct us::shapes::vram_nvidia_index<nk::f16_t, u32_t,
-                                              numkong_capabilities_of(gpu_class_t::nvidia_blackwell_k),
-                                              shapes_nvidia_fatbin<gpu_class_t::nvidia_blackwell_k, nk_f16_k>>;
-template struct us::shapes::vram_nvidia_kits<nk::f16_t, u32_t, numkong_capabilities_of(gpu_class_t::nvidia_blackwell_k),
-                                             shapes_nvidia_fatbin<gpu_class_t::nvidia_blackwell_k, nk_f16_k>>;
+template struct us::shapes::vram_nvidia_index<
+    typename us::shapes::shapes_ladder<nk::f16_t, numkong_capabilities_of(gpu_class_t::nvidia_blackwell_k)>::kit_t,
+    u32_t, shapes_nvidia_fatbin<gpu_class_t::nvidia_blackwell_k, nk_f16_k>>;
+template struct us::shapes::vram_nvidia_kits<
+    typename us::shapes::shapes_ladder<nk::f16_t, numkong_capabilities_of(gpu_class_t::nvidia_blackwell_k)>::kit_t,
+    u32_t, shapes_nvidia_fatbin<gpu_class_t::nvidia_blackwell_k, nk_f16_k>>;
 
 template struct basic_class_tables<shapes_traits_t, vendored_residency_t::vram_nvidia_k,
                                    gpu_class_t::nvidia_blackwell_k>;

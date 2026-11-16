@@ -72,8 +72,9 @@ function (usearch_test_vram_shards vendor_ architecture_macro_)
 endfunction ()
 
 # One row per vendor: NVIDIA's cells run the newest class the build keeps, on the devices the library picks it for, and
-# AMD compiles for the listed processors of the CDNA3 class, which CDNA3 and CDNA4 run. Neither defines a NumKong or
-# StringZilla kernel, as the library's class units define none.
+# AMD compiles for the listed processors of the CDNA3 class, which CDNA3 and CDNA4 run, its sequence and shapes cells
+# running that class's library code objects. Neither defines a NumKong or StringZilla kernel, as the library's class
+# units define none.
 set(usearch_test_vram_shards_)
 if (USEARCH_CUDA_ARCH)
     usearch_test_vram_shards(
@@ -89,7 +90,8 @@ if (USEARCH_ROCM_ARCH)
         amd USEARCH_ARCH_ROCM_
         ENTRY dense/vram_amd.hip
         DEVICE dense/vram_kernels_amd.hip
-        DEFINITIONS "NUMKONG_TARGET_ROCM=0" "STRINGZILLA_TARGET_ROCM=0"
+        SOURCES sequence/vram_index.cpp shapes/vram_index.cpp geospatial/vram_index.cpp
+        DEFINITIONS ${usearch_gpu_gates_} "NUMKONG_TARGET_ROCM=0" "STRINGZILLA_TARGET_ROCM=0"
         CODES ${usearch_test_rocm_codes_}
     )
 endif ()

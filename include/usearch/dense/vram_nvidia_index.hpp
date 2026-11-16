@@ -1204,7 +1204,7 @@ struct vram_nvidia_index {
     /** The capability of the quads kit the ladder picked under the fatbin's, surfaced in the
      *  bench reports; read only where the NVIDIA kits are visible, as its initializer is. */
     inline static constexpr nk_capability_t picked_quads_capability_k =
-        quads_ladder<scalar_t, kernels_t::capability_k>::picked_k;
+        kernels_t::capability_k & quads_ladder<scalar_t, kernels_t::capability_k>::kit_t::capability_k;
 
     /** The @p kernel and @p geometry every row keeps, the device storage's allocators, and the
      *  host allocator the keys and the key map sit on, as the core takes them. */

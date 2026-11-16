@@ -570,16 +570,28 @@ std::size_t check_meshes(settings_t const& settings);
 
 namespace sequence {
 std::size_t check_sequence(settings_t const& settings);
+
+/** The sequence VRAM cells on the vendor of @p executor_type_ , which each vendor's units
+ *  specialize. */
+template <typename executor_type_>
 std::size_t check_sequence_vram(settings_t const& settings, gpu_device_t const& device);
 } // namespace sequence
 
 namespace shapes {
 std::size_t check_shapes(settings_t const& settings);
+
+/** The shapes VRAM cells on the vendor of @p executor_type_ , which each vendor's units
+ *  specialize. */
+template <typename executor_type_>
 std::size_t check_shapes_vram(settings_t const& settings, gpu_device_t const& device);
 } // namespace shapes
 
 namespace geospatial {
 std::size_t check_geospatial(settings_t const& settings);
+
+/** The geospatial VRAM cells on the vendor of @p executor_type_ , which each vendor's units
+ *  specialize. */
+template <typename executor_type_>
 std::size_t check_geospatial_vram(settings_t const& settings, gpu_device_t const& device);
 } // namespace geospatial
 

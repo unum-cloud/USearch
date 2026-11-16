@@ -2,7 +2,7 @@
  *  @file test/sequence/vram_index.cpp
  *  @author Ash Vardanian
  *  @date October 15, 2026
- *  @brief The sequence VRAM cell: byte and rune Levenshtein and window overlap on an NVIDIA or
+ *  @brief The sequence VRAM cell: byte and rune Levenshtein and window overlap on an NVIDIA, AMD or
  *      Apple GPU beside the RAM index on the same data, judged by recall against exact neighbors,
  *      every reported distance against the serial kit the RAM suite checks against its oracle.
  *
@@ -33,6 +33,11 @@
 #include "usearch/sequence/vram_nvidia_metric.cuh"
 #include "usearch/basic/vram_nvidia_indexes.hpp"
 #endif
+#if USEARCH_ARCH_ROCM_
+#include "usearch/sequence/vram_amd_metric.hip"
+#include "usearch/basic/vram_amd_indexes.hpp"
+#include "lib.hpp" // `gpu_class_t`, `stringzilla_capabilities_of` - the class the AMD cells run
+#endif
 #if USEARCH_ARCH_METAL_
 #include "usearch/sequence/vram_apple_index.hpp"
 #endif
@@ -49,11 +54,22 @@ struct sequence_nvidia_fatbin {
 };
 
 #endif
+#if USEARCH_ARCH_ROCM_
+
+/** The library's code object of one kind's sequence kits for one AMD class, defined in that class's
+ *  @c src/sequence/vram_variants_amd.hip. */
+template <usearch_sequence_metric_t metric_, gpu_class_t gpu_class_>
+struct sequence_amd_code_object {
+    inline static constexpr nk_capability_t capability_k = numkong_capabilities_of(gpu_class_);
+    static us::utilities::bytes_view_t bytes() noexcept;
+};
+
+#endif
 
 namespace unum::usearch::test::sequence {
 using namespace unum::usearch::sequence;
 
-#if USEARCH_ARCH_CUDA_ || USEARCH_ARCH_METAL_
+#if USEARCH_ARCH_CUDA_ || USEARCH_ARCH_ROCM_ || USEARCH_ARCH_METAL_
 
 /** Draws @p count strings of about @p length nucleotides from eight templates, an eighth of every
  *  string's symbols substituted, inserted or erased. */
@@ -176,6 +192,48 @@ struct vram_cells_t {
     static cuda_arena_allocator_t arena(executor_t& executor) noexcept {
         return cuda_arena_allocator_t {executor.stream(0).arena, executor.stream(0)};
     }
+
+    /** The sharded collections' shards, their storage on a device alone, and the runtime opening
+     *  the executor. */
+    template <typename index_type_, typename build_type_>
+    using indexes_t = us::basic::vram_nvidia_indexes<index_type_, us::utilities::uuid128_t, build_type_>;
+    static cuda_virtual_memory_allocator<byte_t> storage(int device) noexcept {
+        return cuda_virtual_memory_allocator<byte_t> {test::gpu_drivers().cuda, device};
+    }
+    static cuda_api_t const& api() noexcept { return test::gpu_drivers().cuda; }
+    inline static constexpr gpu_vendor_t vendor_k = gpu_vendor_t::nvidia_k;
+    inline static constexpr char runtime_k[] = "CUDA";
+};
+
+#endif
+#if USEARCH_ARCH_ROCM_
+
+/** What the AMD collections build on: the executor, the face over the CDNA3 class's kits, whose
+ *  64-lane wavefronts CDNA3 and CDNA4 run, and the library's code objects, its storage and the
+ *  contexts carved from the executor's run. */
+struct vram_cells_t {
+    using executor_t = hip_executor_t;
+    template <usearch_sequence_metric_t metric_, typename node_id_type_>
+    using index_t = vram_amd_index<vram_kit_of<metric_, stringzilla_capabilities_of(gpu_class_t::amd_cdna3_k)>,
+                                   node_id_type_, sequence_amd_code_object<metric_, gpu_class_t::amd_cdna3_k>>;
+
+    static hip_virtual_memory_allocator<byte_t> storage(executor_t& executor, int device) noexcept {
+        return hip_virtual_memory_allocator<byte_t> {executor.api(), device};
+    }
+    static hip_arena_allocator_t arena(executor_t& executor) noexcept {
+        return hip_arena_allocator_t {executor.stream(0).arena, executor.stream(0)};
+    }
+
+    /** The sharded collections' shards, their storage on a device alone, and the runtime opening
+     *  the executor. */
+    template <typename index_type_, typename build_type_>
+    using indexes_t = us::basic::vram_amd_indexes<index_type_, us::utilities::uuid128_t, build_type_>;
+    static hip_virtual_memory_allocator<byte_t> storage(int device) noexcept {
+        return hip_virtual_memory_allocator<byte_t> {test::gpu_drivers().hip, device};
+    }
+    static hip_api_t const& api() noexcept { return test::gpu_drivers().hip; }
+    inline static constexpr gpu_vendor_t vendor_k = gpu_vendor_t::amd_k;
+    inline static constexpr char runtime_k[] = "ROCm";
 };
 
 #endif
@@ -353,18 +411,16 @@ static std::size_t check_sequence_vram_collection(u64_t seed, vram_cells_t::exec
                                     comparison_verdict_t::assert_k, distance_errors, 0);
 }
 
-#endif // USEARCH_ARCH_CUDA_ || USEARCH_ARCH_METAL_
+#endif // USEARCH_ARCH_CUDA_ || USEARCH_ARCH_ROCM_ || USEARCH_ARCH_METAL_
 
-#if USEARCH_ARCH_CUDA_
+#if USEARCH_ARCH_CUDA_ || USEARCH_ARCH_ROCM_
 
 /** Builds the byte Levenshtein shards of a sharded index, unreserved, on the device it names. */
 struct sequence_vram_shards_t {
-    using index_t = vram_nvidia_index<vram_kit_of<usearch_sequence_metric_levenshtein_bytes_k>, u32_t,
-                                      sequence_nvidia_fatbin<usearch_sequence_metric_levenshtein_bytes_k>>;
+    using index_t = vram_cells_t::index_t<usearch_sequence_metric_levenshtein_bytes_k, u32_t>;
 
     std::unique_ptr<index_t> operator()(int device) const noexcept {
-        cuda_virtual_memory_allocator<byte_t> const allocator {test::gpu_drivers().cuda, device};
-        return std::unique_ptr<index_t>(new (std::nothrow) index_t {allocator});
+        return std::unique_ptr<index_t>(new (std::nothrow) index_t {vram_cells_t::storage(device)});
     }
 };
 
@@ -372,7 +428,7 @@ struct sequence_vram_shards_t {
  *  values converted on the device, keeps every key, and saves again byte for byte. */
 template <typename indexes_type_>
 static std::size_t check_sequence_vram_reloaded(indexes_type_& saved, std::size_t shard_capacity,
-                                                cuda_executor_t& executor, u64_t seed) {
+                                                vram_cells_t::executor_t& executor, u64_t seed) {
     std::size_t failures = 0;
     std::string const first_path = fmt::format("/tmp/usearch-sequence-{:016x}-saved.safegraphs", seed);
     std::string const second_path = fmt::format("/tmp/usearch-sequence-{:016x}-resaved.safegraphs", seed);
@@ -412,9 +468,9 @@ static std::size_t check_sequence_vram_reloaded(indexes_type_& saved, std::size_
  *  two more generations of two: every key counts once across the six shards, and the merged recall
  *  at ten reaches one unbounded shard's, give or take a twentieth. That shard reserves no capacity,
  *  so its keys cover as its nodes map, and each counts once in it too. */
-static std::size_t check_sequence_vram_sharded(u64_t seed, cuda_executor_t& executor) {
+static std::size_t check_sequence_vram_sharded(u64_t seed, vram_cells_t::executor_t& executor) {
     using index_t = sequence_vram_shards_t::index_t;
-    using indexes_t = us::basic::vram_nvidia_indexes<index_t, us::utilities::uuid128_t, sequence_vram_shards_t>;
+    using indexes_t = vram_cells_t::indexes_t<index_t, sequence_vram_shards_t>;
     constexpr std::size_t entries_k = 5000, shard_capacity_k = 1000, queries_k = 64, wanted_k = 10, expansion_k = 64;
     std::size_t failures = 0;
 
@@ -473,14 +529,13 @@ static std::size_t check_sequence_vram_sharded(u64_t seed, cuda_executor_t& exec
         sharded_matched += matched_count(found, exact[query], wanted_k);
     }
 
-    index_t single {cuda_virtual_memory_allocator<byte_t> {executor.api(), executor.device(0)}};
+    index_t single {vram_cells_t::storage(executor, executor.device(0))};
     failures += expect_eq(single.reserve({0, connectivity_32_k, 0}).status, status_t::success_k);
     typename index_t::insert_config_t const insert_config {expansion_k};
     failures += expect_eq(executor.reserve(max_of(single.traversal_memory_usage(sequences, insert_config),
                                                   single.traversal_memory_usage(queries, search_config))),
                           status_t::success_k);
-    typename index_t::traversal_context_t context {
-        cuda_arena_allocator_t {executor.stream(0).arena, executor.stream(0)}};
+    typename index_t::traversal_context_t context {vram_cells_t::arena(executor)};
     failures += expect_eq(single.insert(keys, sequences, context, insert_config).status, status_t::success_k);
     for (us::utilities::uuid128_t const& key : keys) miscounted += single.count(key) != 1;
     failures += expect_eq(miscounted, std::size_t {0});
@@ -510,9 +565,9 @@ static std::size_t check_sequence_vram_sharded(u64_t seed, cuda_executor_t& exec
  *  exactly once and every source ending empty, after refusals left every index whole: empty or
  *  repeated lists, a shard capacity, one other index that is neither a gather into this one nor a
  *  cut of it, and a target of one shard, refused before the other source moves in. */
-static std::size_t check_sequence_vram_rounds(u64_t seed, cuda_executor_t& executor) {
+static std::size_t check_sequence_vram_rounds(u64_t seed, vram_cells_t::executor_t& executor) {
     using index_t = sequence_vram_shards_t::index_t;
-    using indexes_t = us::basic::vram_nvidia_indexes<index_t, us::utilities::uuid128_t, sequence_vram_shards_t>;
+    using indexes_t = vram_cells_t::indexes_t<index_t, sequence_vram_shards_t>;
     constexpr std::size_t entries_k = 512, lone_k = 64, expansion_k = 64;
     std::size_t failures = 0;
 
@@ -610,9 +665,9 @@ static std::size_t check_sequence_vram_rounds(u64_t seed, cuda_executor_t& execu
 
 /** A reshard of the sharded index into one other index, neither a gather into it nor a cut of it,
  *  is refused and leaves it whole: its size and the count of every key stay as inserted. */
-static std::size_t check_sequence_vram_cut_refused(u64_t seed, cuda_executor_t& executor) {
+static std::size_t check_sequence_vram_cut_refused(u64_t seed, vram_cells_t::executor_t& executor) {
     using index_t = sequence_vram_shards_t::index_t;
-    using indexes_t = us::basic::vram_nvidia_indexes<index_t, us::utilities::uuid128_t, sequence_vram_shards_t>;
+    using indexes_t = vram_cells_t::indexes_t<index_t, sequence_vram_shards_t>;
     constexpr std::size_t entries_k = 256, expansion_k = 64;
     std::size_t failures = 0;
 
@@ -724,13 +779,20 @@ static std::size_t check_sequence_vram_get(u64_t seed, std::int32_t ordinal) {
     return failures;
 }
 
-std::size_t check_sequence_vram(settings_t const& settings, gpu_device_t const& device) {
-    if (device.vendor != gpu_vendor_t::nvidia_k) return 0;
+template <>
+std::size_t check_sequence_vram<vram_cells_t::executor_t>(settings_t const& settings, gpu_device_t const& device) {
+    if (device.vendor != vram_cells_t::vendor_k) return 0;
+    // The AMD cells' kits run the CDNA3 class's 64-lane wavefronts, which a CDNA5 device lacks.
+    if (vram_cells_t::vendor_k == gpu_vendor_t::amd_k && device.warp_lanes != 64) return 0;
+#if USEARCH_ARCH_ROCM_ && !USEARCH_TARGET_AMD_CDNA3
+    return 0;
+#else
     std::size_t failures = 0;
     int const ordinal = static_cast<int>(device.vendor_ordinal);
-    auto [executor, spawn_status] = cuda_executor_t::spawn(test::gpu_drivers().cuda,
-                                                           std::span<int const> {&ordinal, 1});
-    if (failed(spawn_status)) return fmt::println(stderr, "- CUDA: device #{} opens no stream", ordinal), 1;
+    auto [executor, spawn_status] = vram_cells_t::executor_t::spawn(vram_cells_t::api(),
+                                                                    std::span<int const> {&ordinal, 1});
+    if (failed(spawn_status))
+        return fmt::println(stderr, "- {}: device #{} opens no stream", vram_cells_t::runtime_k, ordinal), 1;
     auto const run = [&](char const* name, auto&& check) {
         if (settings.filter.selects(name)) failures += report(name, check());
     };
@@ -774,12 +836,14 @@ std::size_t check_sequence_vram(settings_t const& settings, gpu_device_t const& 
                                        static_cast<std::int32_t>(&device - test::gpu_devices().data()));
     });
     return failures;
+#endif
 }
 
 #elif USEARCH_ARCH_METAL_
 
 /** The Apple cells: every kind the NVIDIA collections check, on the same data, judged the same. */
-std::size_t check_sequence_vram(settings_t const& settings, gpu_device_t const& device) {
+template <>
+std::size_t check_sequence_vram<metal_executor_t>(settings_t const& settings, gpu_device_t const& device) {
     if (device.vendor != gpu_vendor_t::apple_k) return 0;
     std::size_t failures = 0;
     int const ordinal = static_cast<int>(device.vendor_ordinal);
@@ -820,10 +884,6 @@ std::size_t check_sequence_vram(settings_t const& settings, gpu_device_t const& 
     return failures;
 }
 
-#else
-
-std::size_t check_sequence_vram(settings_t const&, gpu_device_t const&) { return 0; }
-
-#endif
+#endif // USEARCH_ARCH_CUDA_ || USEARCH_ARCH_ROCM_
 
 } // namespace unum::usearch::test::sequence

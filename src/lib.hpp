@@ -1923,12 +1923,16 @@ constexpr nk_capability_t numkong_capabilities_of(gpu_class_t gpu_class) noexcep
     return nk_cap_serial_k;
 }
 
-/** Lowers one NVIDIA class onto StringZilla's GPU capabilities: every class reaches @c ampere , and
- *  the tiers past it start at compute capability 9.0 for @c hopper and 10.0 for @c blackwell ,
- *  consumer Blackwell and Rubin included. */
+/** Lowers one NVIDIA or AMD class onto StringZilla's GPU capabilities: every NVIDIA class reaches
+ *  @c ampere , and the tiers past it start at compute capability 9.0 for @c hopper and 10.0 for
+ *  @c blackwell , consumer Blackwell and Rubin included; each AMD class is its own CDNA tier, as
+ *  StringZilla detects gfx942, gfx950 and gfx1250. */
 constexpr sz_capability_t stringzilla_capabilities_of(gpu_class_t gpu_class) noexcept {
     sz_capability_t const ampere = sz_cap_cuda_k | sz_cap_ampere_k, hopper = ampere | sz_cap_hopper_k;
     switch (gpu_class) {
+    case gpu_class_t::amd_cdna3_k: return sz_cap_rocm_k | sz_cap_cdna3_k;
+    case gpu_class_t::amd_cdna4_k: return sz_cap_rocm_k | sz_cap_cdna3_k | sz_cap_cdna4_k;
+    case gpu_class_t::amd_cdna5_k: return sz_cap_rocm_k | sz_cap_cdna5_k;
     case gpu_class_t::nvidia_ampere_k:
     case gpu_class_t::nvidia_ada_k: return ampere;
     case gpu_class_t::nvidia_hopper_k: return hopper;
@@ -1956,6 +1960,17 @@ inline constexpr gpu_class_t cuda_class_k =
 
 /** The ceiling an NVIDIA device pass instantiates: its class's. */
 inline constexpr nk_capability_t cuda_class_capabilities_k = numkong_capabilities_of(cuda_class_k);
+
+/** The AMD class a class unit and its device passes compile as, the one its CMake row sets
+ *  @c USEARCH_TARGET_AMD_<CLASS> for; where gates name several, the newest. */
+inline constexpr gpu_class_t hip_class_k =
+#if USEARCH_TARGET_AMD_CDNA5
+    gpu_class_t::amd_cdna5_k;
+#elif USEARCH_TARGET_AMD_CDNA4
+    gpu_class_t::amd_cdna4_k;
+#else
+    gpu_class_t::amd_cdna3_k;
+#endif
 
 /** Devices @p vram names, one when it names none. */
 inline std::size_t named_count(usearch_vram_options_t const& vram) noexcept {

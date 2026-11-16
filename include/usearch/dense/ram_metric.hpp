@@ -2523,7 +2523,6 @@ struct quads_ladder<nk::bf16_t, caps_> {
         >::type;
 
     /** The capability bit of the rung that won - compare against the requested ceiling. */
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
@@ -2541,7 +2540,6 @@ struct quads_ladder<nk::f16_t, caps_> {
         >::type;
 
     /** The capability bit of the rung that won - compare against the requested ceiling. */
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
@@ -2560,7 +2558,6 @@ struct quads_ladder<nk::e5m2_t, caps_> {
         >::type;
 
     /** The capability bit of the rung that won - compare against the requested ceiling. */
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
@@ -2579,7 +2576,6 @@ struct quads_ladder<nk::e4m3_t, caps_> {
         >::type;
 
     /** The capability bit of the rung that won - compare against the requested ceiling. */
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
@@ -2596,7 +2592,6 @@ struct quads_ladder<nk::e3m2_t, caps_> {
         >::type;
 
     /** The capability bit of the rung that won - compare against the requested ceiling. */
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
@@ -2615,7 +2610,6 @@ struct quads_ladder<nk::e2m3_t, caps_> {
         >::type;
 
     /** The capability bit of the rung that won - compare against the requested ceiling. */
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
@@ -2635,7 +2629,6 @@ struct quads_ladder<nk::i8_t, caps_> {
         >::type;
 
     /** The capability bit of the rung that won - compare against the requested ceiling. */
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
@@ -2655,7 +2648,6 @@ struct quads_ladder<nk::u8_t, caps_> {
         >::type;
 
     /** The capability bit of the rung that won - compare against the requested ceiling. */
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
@@ -2671,7 +2663,6 @@ struct quads_ladder<nk::u4x2_t, caps_> {
         >::type;
 
     /** The capability bit of the rung that won - compare against the requested ceiling. */
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
@@ -2687,7 +2678,6 @@ struct quads_ladder<nk::i4x2_t, caps_> {
         >::type;
 
     /** The capability bit of the rung that won - compare against the requested ceiling. */
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
@@ -2704,7 +2694,6 @@ struct quads_ladder<nk::u1x8_t, caps_> {
         >::type;
 
     /** The capability bit of the rung that won - compare against the requested ceiling. */
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 /** Widens value rows to @c f32, weighs them by base-2 exponentials and folds them into a running sum, with the
@@ -2897,7 +2886,6 @@ struct elementwise_ladder {
         v128relaxed_elementwise_kit_t,  //
         powervsx_elementwise_kit_t      //
         >::type;
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 /** The empty rmscast kit: the scalar has no narrowing kit, or keeps f32's exponent range as bf16
@@ -2911,7 +2899,6 @@ struct no_rmscast_kit_t {
 template <typename scalar_type_, nk_capability_t caps_>
 struct rmscast_ladder {
     using kit_t = no_rmscast_kit_t;
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 struct f16_serial_rmscast_kit_t {
@@ -2995,7 +2982,6 @@ struct rmscast_ladder<nk::f16_t, caps_> {
         f16_serial_rmscast_kit_t,       //
         f16_neon_rmscast_kit_t          //
         >::type;
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
@@ -3007,25 +2993,21 @@ struct rmscast_ladder<nk::e4m3_t, caps_> {
         e4m3_haswell_rmscast_kit_t,     //
         e4m3_neon_rmscast_kit_t         //
         >::type;
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
 struct rmscast_ladder<nk::e5m2_t, caps_> {
     using kit_t = e5m2_serial_rmscast_kit_t;
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
 struct rmscast_ladder<nk::e2m3_t, caps_> {
     using kit_t = e2m3_serial_rmscast_kit_t;
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
 struct rmscast_ladder<nk::e3m2_t, caps_> {
     using kit_t = e3m2_serial_rmscast_kit_t;
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 /** Writes row @p row of @p source into @p target in @p scalar_type_: a byte move when the scalars
@@ -4301,7 +4283,6 @@ struct u8_powermma_tiles_kit_t {
 template <nk::numeric_dtype scalar_, nk_capability_t caps_>
 struct tiles_ladder {
     using kit_t = no_tiles_kit_t;
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
     static constexpr bool has_tiles_k = false;
 };
 
@@ -4315,7 +4296,6 @@ struct tiles_ladder<nk::bf16_t, caps_> {
         bf16_sapphireamx_tiles_kit_t,   //
         bf16_powermma_tiles_kit_t       //
         >::type;
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
     static constexpr bool has_tiles_k = !std::is_same_v<kit_t, no_tiles_kit_t>;
 };
 
@@ -4327,7 +4307,6 @@ struct tiles_ladder<nk::u1x8_t, caps_> {
         no_tiles_kit_t,                 //
         u1x8_smebi32_tiles_kit_t        //
         >::type;
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
     static constexpr bool has_tiles_k = !std::is_same_v<kit_t, no_tiles_kit_t>;
 };
 
@@ -4341,7 +4320,6 @@ struct tiles_ladder<nk::i8_t, caps_> {
         i8_sapphireamx_tiles_kit_t,     //
         i8_powermma_tiles_kit_t         //
         >::type;
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
     static constexpr bool has_tiles_k = !std::is_same_v<kit_t, no_tiles_kit_t>;
 };
 
@@ -4354,7 +4332,6 @@ struct tiles_ladder<nk::e4m3_t, caps_> {
         e4m3_sme_tiles_kit_t,           //
         e4m3_sapphireamx_tiles_kit_t    //
         >::type;
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
     static constexpr bool has_tiles_k = !std::is_same_v<kit_t, no_tiles_kit_t>;
 };
 
@@ -4368,7 +4345,6 @@ struct tiles_ladder<nk::f16_t, caps_> {
         f16_graniteamx_tiles_kit_t,     //
         f16_powermma_tiles_kit_t        //
         >::type;
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
     static constexpr bool has_tiles_k = !std::is_same_v<kit_t, no_tiles_kit_t>;
 };
 
@@ -4382,7 +4358,6 @@ struct tiles_ladder<nk::u8_t, caps_> {
         u8_sapphireamx_tiles_kit_t,     //
         u8_powermma_tiles_kit_t         //
         >::type;
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
     static constexpr bool has_tiles_k = !std::is_same_v<kit_t, no_tiles_kit_t>;
 };
 
@@ -4396,7 +4371,6 @@ struct tiles_ladder<nk::e5m2_t, caps_> {
         e5m2_graniteamx_tiles_kit_t,    //
         e5m2_sapphireamx_tiles_kit_t    //
         >::type;
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
     static constexpr bool has_tiles_k = !std::is_same_v<kit_t, no_tiles_kit_t>;
 };
 
@@ -4408,7 +4382,6 @@ struct tiles_ladder<nk::i4x2_t, caps_> {
         no_tiles_kit_t,                 //
         i4x2_sme_tiles_kit_t            //
         >::type;
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
     static constexpr bool has_tiles_k = !std::is_same_v<kit_t, no_tiles_kit_t>;
 };
 
@@ -4420,7 +4393,6 @@ struct tiles_ladder<nk::u4x2_t, caps_> {
         no_tiles_kit_t,                 //
         u4x2_sme_tiles_kit_t            //
         >::type;
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
     static constexpr bool has_tiles_k = !std::is_same_v<kit_t, no_tiles_kit_t>;
 };
 
@@ -4433,7 +4405,6 @@ struct tiles_ladder<nk::e3m2_t, caps_> {
         e3m2_sme_tiles_kit_t,           //
         e3m2_sapphireamx_tiles_kit_t    //
         >::type;
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
     static constexpr bool has_tiles_k = !std::is_same_v<kit_t, no_tiles_kit_t>;
 };
 
@@ -4446,7 +4417,6 @@ struct tiles_ladder<nk::e2m3_t, caps_> {
         e2m3_sme_tiles_kit_t,           //
         e2m3_sapphireamx_tiles_kit_t    //
         >::type;
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
     static constexpr bool has_tiles_k = !std::is_same_v<kit_t, no_tiles_kit_t>;
 };
 

@@ -698,6 +698,9 @@ struct hip_device_allocator {
 
     hip_device_allocator() noexcept = default;
 
+    /** Rides the null stream of the current device through @p api. */
+    explicit hip_device_allocator(hip_api_t const& api) noexcept : api_(&api) {}
+
     /** Rides the executor's @p stream on the device it names; a template only because that
      *  @c stream_t holds a run of this allocator, so it is declared after it. */
     template <typename stream_type_>

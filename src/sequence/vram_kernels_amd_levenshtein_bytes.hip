@@ -1,0 +1,12 @@
+/**
+ *  @file src/sequence/vram_kernels_amd_levenshtein_bytes.hip
+ *  @author Ash Vardanian
+ *  @date November 16, 2026
+ *  @brief The byte Levenshtein sequence kernels of one AMD class, under its class's kit.
+ *
+ *  HIP-Clang compiles it device-only, once per class with that class's processors, into its
+ *  levenshtein_bytes code object, which @c vram_variants_amd.hip finds linked in beside it.
+ */
+#include "sequence_specializations.cuh"
+
+template void us::sequence::amd_instantiate<sequence_amd_kit<usearch_sequence_metric_levenshtein_bytes_k>, u32_t>();

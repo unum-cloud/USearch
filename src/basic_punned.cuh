@@ -452,6 +452,9 @@ struct sequence_traits_t {
     /** The GPU classes with a unit of sequence kits on each vendor, newest first: the NVIDIA and
      *  Apple floors. */
     using nvidia_gpu_ladder_t = basic_gpu_ladder<gpu_ladder<gpu_class_t::nvidia_ampere_k>>;
+
+    /** Every AMD class, each with a unit of its own over its wavefront. */
+    using amd_gpu_ladder_t = amd_ladder_t;
     using apple_gpu_ladder_t = gpu_ladder<gpu_class_t::apple_metal7_k>;
 
     /** Takes the kind, widths and connectivity an init states, keeping the widths; false once
@@ -657,6 +660,9 @@ struct shapes_traits_t {
      *  datacenter Blackwell's packed f16 kit, then the Ampere floor; on Apple, the floor alone. */
     using nvidia_gpu_ladder_t =
         basic_gpu_ladder<gpu_ladder<gpu_class_t::nvidia_blackwell_k, gpu_class_t::nvidia_ampere_k>>;
+
+    /** Every AMD class, each with a unit of its own over its wavefront. */
+    using amd_gpu_ladder_t = amd_ladder_t;
     using apple_gpu_ladder_t = gpu_ladder<gpu_class_t::apple_metal7_k>;
 
     template <typename arguments_type_>
@@ -849,6 +855,9 @@ struct geospatial_traits_t {
     /** The GPU classes with a unit of the geospatial kit on each vendor, newest first: none on
      *  Apple, whose GPUs hold no f64 to the contract the kit keeps. */
     using nvidia_gpu_ladder_t = basic_gpu_ladder<gpu_ladder<gpu_class_t::nvidia_ampere_k>>;
+
+    /** Every AMD class, each with a unit of its own over its wavefront. */
+    using amd_gpu_ladder_t = amd_ladder_t;
     using apple_gpu_ladder_t = gpu_ladder<>;
 
     template <typename arguments_type_>

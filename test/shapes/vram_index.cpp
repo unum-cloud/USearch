@@ -2,7 +2,7 @@
  *  @file test/shapes/vram_index.cpp
  *  @author Ash Vardanian
  *  @date October 15, 2026
- *  @brief The shapes VRAM cell: Chamfer and Hausdorff on an NVIDIA or Apple GPU beside the RAM
+ *  @brief The shapes VRAM cell: Chamfer and Hausdorff on an NVIDIA, AMD or Apple GPU beside the RAM
  *      index on the same clouds, judged by recall against exact neighbors, every reported distance
  *      against NumKong's serial kernels.
  *
@@ -22,7 +22,10 @@
 #include "usearch/shapes_index.h"
 #include "usearch/shapes/ram_index.hpp"
 #if USEARCH_ARCH_CUDA_
-#include "usearch/shapes/vram_nvidia_index.hpp"
+#include "usearch/shapes/vram_nvidia_metric.cuh"
+#endif
+#if USEARCH_ARCH_ROCM_
+#include "usearch/shapes/vram_amd_metric.hip"
 #endif
 #if USEARCH_ARCH_METAL_
 #include "usearch/shapes/vram_apple_index.hpp"
@@ -41,11 +44,22 @@ struct shapes_nvidia_fatbin {
 };
 
 #endif
+#if USEARCH_ARCH_ROCM_
+
+/** The library's code object of one AMD class's shapes kits over one dtype, defined in that class's
+ *  @c src/shapes/vram_variants_amd.hip unit. */
+template <gpu_class_t gpu_class_, nk_dtype_t dtype_>
+struct shapes_amd_code_object {
+    inline static constexpr nk_capability_t capability_k = numkong_capabilities_of(gpu_class_);
+    static us::utilities::bytes_view_t bytes() noexcept;
+};
+
+#endif
 
 namespace unum::usearch::test::shapes {
 using namespace unum::usearch::shapes;
 
-#if USEARCH_ARCH_CUDA_ || USEARCH_ARCH_METAL_
+#if USEARCH_ARCH_CUDA_ || USEARCH_ARCH_ROCM_ || USEARCH_ARCH_METAL_
 
 /** How a collection draws its clouds, as the file's docblock describes. */
 enum class cloud_kind_t { random_k, coincident_k, collinear_k, molecular_k };
@@ -127,6 +141,27 @@ struct vram_cells_t {
     static cuda_arena_allocator_t arena(executor_t& executor) noexcept {
         return cuda_arena_allocator_t {executor.stream(0).arena, executor.stream(0)};
     }
+    static cuda_api_t const& api() noexcept { return test::gpu_drivers().cuda; }
+    inline static constexpr gpu_vendor_t vendor_k = gpu_vendor_t::nvidia_k;
+    inline static constexpr char runtime_k[] = "CUDA";
+};
+
+#elif USEARCH_ARCH_ROCM_
+
+/** What the AMD collections build on: the executor, the face's storage and the contexts carved from
+ *  the executor's run. */
+struct vram_cells_t {
+    using executor_t = hip_executor_t;
+
+    static hip_virtual_memory_allocator<byte_t> storage(executor_t& executor, int device) noexcept {
+        return hip_virtual_memory_allocator<byte_t> {executor.api(), device};
+    }
+    static hip_arena_allocator_t arena(executor_t& executor) noexcept {
+        return hip_arena_allocator_t {executor.stream(0).arena, executor.stream(0)};
+    }
+    static hip_api_t const& api() noexcept { return test::gpu_drivers().hip; }
+    inline static constexpr gpu_vendor_t vendor_k = gpu_vendor_t::amd_k;
+    inline static constexpr char runtime_k[] = "ROCm";
 };
 
 #else
@@ -156,7 +191,7 @@ template <typename scalar_type_, typename vram_index_type_>
 static std::size_t check_shapes_vram_collection(u64_t seed, vram_cells_t::executor_t& executor, nk_kernel_kind_t kernel,
                                                 cloud_kind_t kind, std::size_t count, std::size_t queries_count) {
     using vram_index_t = vram_index_type_;
-    using kit_t = typename shapes_ladder<scalar_type_, nk_cap_any_k>::kit_t;
+    using kit_t = typename shapes_ladder<scalar_type_, nk_cap_cpus_k>::kit_t;
     using serial_kit_t = typename shapes_ladder<scalar_type_, nk_cap_serial_k>::kit_t;
     using ram_index_t = ram_index<kit_t>;
     using value_t = typename ram_index_t::value_t;
@@ -286,13 +321,25 @@ static std::size_t check_shapes_vram_collection(u64_t seed, vram_cells_t::execut
 /** The NVIDIA face over packs of @p scalar_type_ under the kits of @p gpu_class_, whose
  *  capabilities are @p capabilities_. */
 template <typename scalar_type_, gpu_class_t gpu_class_, nk_capability_t capabilities_>
-using nvidia_face_t =
-    vram_nvidia_index<scalar_type_, u32_t, capabilities_, shapes_nvidia_fatbin<gpu_class_, scalar_type_::dtype()>>;
+using vram_face_t = vram_nvidia_index<typename shapes_ladder<scalar_type_, capabilities_>::kit_t, u32_t,
+                                      shapes_nvidia_fatbin<gpu_class_, scalar_type_::dtype()>>;
+
+#elif USEARCH_ARCH_ROCM_
+
+/** The AMD face over packs of @p scalar_type_ under the kits of @p gpu_class_, whose capabilities
+ *  are @p capabilities_. */
+template <typename scalar_type_, gpu_class_t gpu_class_, nk_capability_t capabilities_>
+using vram_face_t = vram_amd_index<typename shapes_ladder<scalar_type_, capabilities_>::kit_t, u32_t,
+                                   shapes_amd_code_object<gpu_class_, scalar_type_::dtype()>>;
+
+#endif
+#if USEARCH_ARCH_CUDA_ || USEARCH_ARCH_ROCM_
 
 /** Every collection under the kits of @p gpu_class_, whose capabilities are @p capabilities_: the
  *  F16 ones, and the F32 one on the vendor-wide floor, which alone builds F32 packs. */
 template <gpu_class_t gpu_class_, nk_capability_t capabilities_>
-static std::size_t check_shapes_vram_class(settings_t const& settings, cuda_executor_t& executor, char const* tier) {
+static std::size_t check_shapes_vram_class(settings_t const& settings, vram_cells_t::executor_t& executor,
+                                           char const* tier) {
     constexpr nk_kernel_kind_t chamfer_k = nk_kernel_chamfers_packed_k, hausdorff_k = nk_kernel_hausdorffs_packed_k;
     struct cell_t {
         char const* name;
@@ -307,25 +354,28 @@ static std::size_t check_shapes_vram_class(settings_t const& settings, cuda_exec
     std::size_t failures = 0;
     for (cell_t const& cell : cells)
         failures += report(fmt::format("shapes_vram {} {}", tier, cell.name).c_str(),
-                           check_shapes_vram_collection<nk::f16_t, nvidia_face_t<nk::f16_t, gpu_class_, capabilities_>>(
+                           check_shapes_vram_collection<nk::f16_t, vram_face_t<nk::f16_t, gpu_class_, capabilities_>>(
                                stream_key(settings.seed, cell.name), executor, cell.kernel, cell.kind, cell.count,
                                cell.queries_count));
-    if constexpr (gpu_class_ == gpu_class_t::nvidia_ampere_k)
+    if constexpr (gpu_class_ == gpu_class_t::nvidia_ampere_k || gpu_class_ == gpu_class_t::amd_cdna3_k)
         failures += report(
             fmt::format("shapes_vram {} f32", tier).c_str(),
-            check_shapes_vram_collection<nk::f32_t, nvidia_face_t<nk::f32_t, gpu_class_, capabilities_>>(
+            check_shapes_vram_collection<nk::f32_t, vram_face_t<nk::f32_t, gpu_class_, capabilities_>>(
                 stream_key(settings.seed, "f32"), executor, chamfer_k, cloud_kind_t::molecular_k, 1024, 64));
     return failures;
 }
 
 /** Every class the device runs, as the dispatch ladder would admit it: the floor on any NVIDIA
- *  GPU, and datacenter Blackwell's packed kits on one. */
-std::size_t check_shapes_vram(settings_t const& settings, gpu_device_t const& device) {
-    if (device.vendor != gpu_vendor_t::nvidia_k || !settings.filter.selects("shapes_vram")) return 0;
+ *  GPU, and datacenter Blackwell's packed kits on one; the CDNA3 floor on a 64-lane AMD GPU. */
+template <>
+std::size_t check_shapes_vram<vram_cells_t::executor_t>(settings_t const& settings, gpu_device_t const& device) {
+    if (device.vendor != vram_cells_t::vendor_k || !settings.filter.selects("shapes_vram")) return 0;
     int const ordinal = static_cast<int>(device.vendor_ordinal);
-    auto [executor, spawn_status] = cuda_executor_t::spawn(test::gpu_drivers().cuda,
-                                                           std::span<int const> {&ordinal, 1});
-    if (failed(spawn_status)) return fmt::println(stderr, "- CUDA: device #{} opens no stream", ordinal), 1;
+    auto [executor, spawn_status] = vram_cells_t::executor_t::spawn(vram_cells_t::api(),
+                                                                    std::span<int const> {&ordinal, 1});
+    if (failed(spawn_status))
+        return fmt::println(stderr, "- {}: device #{} opens no stream", vram_cells_t::runtime_k, ordinal), 1;
+#if USEARCH_ARCH_CUDA_
     constexpr nk_capability_t ampere_k = nk_cap_cuda_k | nk_cap_ampere_k;
     constexpr nk_capability_t blackwell_k = ampere_k | nk_cap_ada_k | nk_cap_blackwell_k;
     std::size_t failures = check_shapes_vram_class<gpu_class_t::nvidia_ampere_k, ampere_k>(settings, executor,
@@ -335,6 +385,15 @@ std::size_t check_shapes_vram(settings_t const& settings, gpu_device_t const& de
         if (pick_gpu_class(device, usearch_gpu_class_unknown_k) == gpu_class_t::nvidia_blackwell_k)
             failures += check_shapes_vram_class<gpu_class_t::nvidia_blackwell_k, blackwell_k>(settings, executor,
                                                                                               "blackwell");
+#else
+    // The AMD cells run the CDNA3 class's kits over 64-lane wavefronts, which CDNA3 and CDNA4 run.
+    if (device.warp_lanes != 64) return 0;
+    constexpr nk_capability_t cdna3_k = numkong_capabilities_of(gpu_class_t::amd_cdna3_k);
+    std::size_t failures = 0;
+    // A build that keeps no CDNA3 class compiles no CDNA3 shapes kits to link against.
+    if constexpr (USEARCH_TARGET_AMD_CDNA3)
+        failures = check_shapes_vram_class<gpu_class_t::amd_cdna3_k, cdna3_k>(settings, executor, "cdna3");
+#endif
     return failures;
 }
 
@@ -342,7 +401,8 @@ std::size_t check_shapes_vram(settings_t const& settings, gpu_device_t const& de
 
 /** The Apple cells: the F16 collections the NVIDIA floor checks, on the same clouds, judged the
  *  same, and the refusal of F32 clouds, which no Metal kernel scores to the F32 contract. */
-std::size_t check_shapes_vram(settings_t const& settings, gpu_device_t const& device) {
+template <>
+std::size_t check_shapes_vram<metal_executor_t>(settings_t const& settings, gpu_device_t const& device) {
     if (device.vendor != gpu_vendor_t::apple_k || !settings.filter.selects("shapes_vram")) return 0;
     int const ordinal = static_cast<int>(device.vendor_ordinal);
     auto [executor, spawn_status] = metal_executor_t::spawn(test::gpu_drivers().metal_contexts,
@@ -384,10 +444,6 @@ std::size_t check_shapes_vram(settings_t const& settings, gpu_device_t const& de
     return failures;
 }
 
-#else
-
-std::size_t check_shapes_vram(settings_t const&, gpu_device_t const&) { return 0; }
-
-#endif
+#endif // USEARCH_ARCH_CUDA_ || USEARCH_ARCH_ROCM_
 
 } // namespace unum::usearch::test::shapes

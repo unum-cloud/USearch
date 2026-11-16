@@ -1713,7 +1713,6 @@ struct quads_ladder<nk::f16_t, caps_> {
         f16_rocm_quads_kit_t,           //
         f16_cdna3_quads_kit_t           //
         >::type;
-    static constexpr nk_capability_t picked_k = caps_ & kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
@@ -1724,7 +1723,6 @@ struct quads_ladder<nk::bf16_t, caps_> {
         bf16_rocm_quads_kit_t,          //
         bf16_cdna4_quads_kit_t          //
         >::type;
-    static constexpr nk_capability_t picked_k = caps_ & kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
@@ -1736,14 +1734,12 @@ struct quads_ladder<nk::i8_t, caps_> {
         i8_cdna5_quads_kit_t,           //
         i8_cdna3_quads_kit_t            //
         >::type;
-    static constexpr nk_capability_t picked_k = caps_ & kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_rocm_k) != 0)
 struct quads_ladder<nk::u8_t, caps_> {
     using kit_t = typename highest_kit<caps_, u8_rocm_quads_kit_t>::type;
-    static constexpr nk_capability_t picked_k = caps_ & kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
@@ -1754,7 +1750,6 @@ struct quads_ladder<nk::e5m2_t, caps_> {
         e5m2_rocm_quads_kit_t,          //
         e5m2_cdna4_quads_kit_t          //
         >::type;
-    static constexpr nk_capability_t picked_k = caps_ & kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
@@ -1765,21 +1760,18 @@ struct quads_ladder<nk::e4m3_t, caps_> {
         e4m3_rocm_quads_kit_t,          //
         e4m3_cdna4_quads_kit_t          //
         >::type;
-    static constexpr nk_capability_t picked_k = caps_ & kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_rocm_k) != 0)
 struct quads_ladder<nk::e3m2_t, caps_> {
     using kit_t = typename highest_kit<caps_, e3m2_rocm_quads_kit_t>::type;
-    static constexpr nk_capability_t picked_k = caps_ & kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_rocm_k) != 0)
 struct quads_ladder<nk::e2m3_t, caps_> {
     using kit_t = typename highest_kit<caps_, e2m3_rocm_quads_kit_t>::type;
-    static constexpr nk_capability_t picked_k = caps_ & kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
@@ -1791,21 +1783,18 @@ struct quads_ladder<nk::i4x2_t, caps_> {
         i4x2_cdna5_quads_kit_t,         //
         i4x2_cdna3_quads_kit_t          //
         >::type;
-    static constexpr nk_capability_t picked_k = caps_ & kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_rocm_k) != 0)
 struct quads_ladder<nk::u4x2_t, caps_> {
     using kit_t = typename highest_kit<caps_, u4x2_rocm_quads_kit_t>::type;
-    static constexpr nk_capability_t picked_k = caps_ & kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_rocm_k) != 0)
 struct quads_ladder<nk::u1x8_t, caps_> {
     using kit_t = typename highest_kit<caps_, u1x8_rocm_quads_kit_t>::type;
-    static constexpr nk_capability_t picked_k = caps_ & kit_t::capability_k;
 };
 
 /** The staging schedule under @p caps_: the register copies on MI400 and every ROCm device below
@@ -1820,7 +1809,6 @@ struct schedule_ladder<caps_> {
         cdna4_lds_schedule_t,                //
         cdna3_lds_schedule_t                 //
         >::type;
-    static constexpr nk_capability_t picked_k = caps_ & schedule_t::capability_k;
 };
 
 #pragma endregion Ladders

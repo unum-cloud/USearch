@@ -24,10 +24,13 @@
 
 #include "usearch/shapes/ram_index.hpp"
 #if USEARCH_ARCH_CUDA_
-#include "usearch/shapes/vram_nvidia_index.hpp"
+#include "usearch/shapes/vram_nvidia_metric.cuh"
 #endif
 #if USEARCH_ARCH_METAL_
 #include "usearch/shapes/vram_apple_index.hpp"
+#endif
+#if USEARCH_ARCH_ROCM_
+#include "usearch/shapes/vram_amd_metric.hip"
 #endif
 
 #include "basic_specializations.cuh"
@@ -421,23 +424,24 @@ struct shapes_nvidia_fatbin {
     static bytes_view_t bytes() noexcept;
 };
 
-/** The faces' members reading the kits, defined in each class unit. */
-extern template struct us::shapes::vram_nvidia_index<nk::f16_t, u32_t,
-                                                     numkong_capabilities_of(gpu_class_t::nvidia_ampere_k),
-                                                     shapes_nvidia_fatbin<gpu_class_t::nvidia_ampere_k, nk_f16_k>>;
-extern template struct us::shapes::vram_nvidia_index<nk::f32_t, u32_t,
-                                                     numkong_capabilities_of(gpu_class_t::nvidia_ampere_k),
-                                                     shapes_nvidia_fatbin<gpu_class_t::nvidia_ampere_k, nk_f32_k>>;
-extern template struct us::shapes::vram_nvidia_index<nk::f16_t, u32_t,
-                                                     numkong_capabilities_of(gpu_class_t::nvidia_blackwell_k),
-                                                     shapes_nvidia_fatbin<gpu_class_t::nvidia_blackwell_k, nk_f16_k>>;
+/* The faces' members reading the kits, defined in each class unit. */
+extern template struct us::shapes::vram_nvidia_index<
+    typename us::shapes::shapes_ladder<nk::f16_t, numkong_capabilities_of(gpu_class_t::nvidia_ampere_k)>::kit_t, u32_t,
+    shapes_nvidia_fatbin<gpu_class_t::nvidia_ampere_k, nk_f16_k>>;
+extern template struct us::shapes::vram_nvidia_index<
+    typename us::shapes::shapes_ladder<nk::f32_t, numkong_capabilities_of(gpu_class_t::nvidia_ampere_k)>::kit_t, u32_t,
+    shapes_nvidia_fatbin<gpu_class_t::nvidia_ampere_k, nk_f32_k>>;
+extern template struct us::shapes::vram_nvidia_index<
+    typename us::shapes::shapes_ladder<nk::f16_t, numkong_capabilities_of(gpu_class_t::nvidia_blackwell_k)>::kit_t,
+    u32_t, shapes_nvidia_fatbin<gpu_class_t::nvidia_blackwell_k, nk_f16_k>>;
 
 /** Builds one shard of the shapes face over packs of @p scalar_type_ for @p gpu_class_ on a CUDA
  *  device, scoring under the kernel the variant's frozen geometry names. */
 template <nk::shapes_dtype scalar_type_, gpu_class_t gpu_class_>
 struct shapes_vram_nvidia_build {
-    using face_t = us::shapes::vram_nvidia_index<scalar_type_, u32_t, numkong_capabilities_of(gpu_class_),
-                                                 shapes_nvidia_fatbin<gpu_class_, scalar_type_::dtype()>>;
+    using face_t = us::shapes::vram_nvidia_index<
+        typename us::shapes::shapes_ladder<scalar_type_, numkong_capabilities_of(gpu_class_)>::kit_t, u32_t,
+        shapes_nvidia_fatbin<gpu_class_, scalar_type_::dtype()>>;
 
     /** The kernel every shard scores under. */
     nk_kernel_kind_t kernel = nk_kernel_unknown_k;
@@ -814,6 +818,227 @@ struct shapes_vram_apple_variant {
 
 #endif
 
+#if USEARCH_ARCH_ROCM_
+
+/** One class's shapes kits over one dtype as a code object, defined in its class unit,
+ *  @c src/shapes/vram_variants_amd.hip, beside the bytes it embeds. */
+template <gpu_class_t gpu_class_, nk_dtype_t dtype_>
+struct shapes_amd_code_object {
+    inline static constexpr nk_capability_t capability_k = numkong_capabilities_of(gpu_class_);
+    static bytes_view_t bytes() noexcept;
+};
+
+/* The faces' members reading the kits, defined in the class unit this one compiles as. */
+extern template struct us::shapes::vram_amd_index<
+    typename us::shapes::shapes_ladder<nk::f16_t, numkong_capabilities_of(hip_class_k)>::kit_t, u32_t,
+    shapes_amd_code_object<hip_class_k, nk_f16_k>>;
+extern template struct us::shapes::vram_amd_index<
+    typename us::shapes::shapes_ladder<nk::f32_t, numkong_capabilities_of(hip_class_k)>::kit_t, u32_t,
+    shapes_amd_code_object<hip_class_k, nk_f32_k>>;
+
+/** Builds one shard of the shapes face over packs of @p scalar_type_ for @p gpu_class_ on a HIP
+ *  device, scoring under the kernel the variant's frozen geometry names. */
+template <nk::shapes_dtype scalar_type_, gpu_class_t gpu_class_>
+struct shapes_vram_amd_build {
+    using face_t = us::shapes::vram_amd_index<
+        typename us::shapes::shapes_ladder<scalar_type_, numkong_capabilities_of(gpu_class_)>::kit_t, u32_t,
+        shapes_amd_code_object<gpu_class_, scalar_type_::dtype()>>;
+
+    /** The kernel every shard scores under. */
+    nk_kernel_kind_t kernel = nk_kernel_unknown_k;
+
+    std::unique_ptr<face_t> operator()(int device) const noexcept {
+        return std::unique_ptr<face_t> {
+            new (std::nothrow) face_t(kernel, hip_virtual_memory_allocator<byte_t> {gpu_drivers().hip, device})};
+    }
+};
+
+/** The shapes alternative on AMD GPUs of @p gpu_class_ : the basic VRAM shards over packs of
+ *  @p scalar_type_, scoring Chamfer or Hausdorff as the geometry names, with 32-bit node IDs. A
+ *  batch packs its clouds on the host end to end through the CPU floor's kit, the same way every
+ *  RAM variant packs them. */
+template <nk::shapes_dtype scalar_type_, gpu_class_t gpu_class_>
+struct shapes_vram_amd_variant {
+    using executor_t = hip_executor_t;
+    using build_t = shapes_vram_amd_build<scalar_type_, gpu_class_>;
+    using face_t = typename build_t::face_t;
+    using index_t = basic::vram_amd_indexes<face_t, us::utilities::uuid128_t, build_t>;
+    using refine_plan_t = typename index_t::refine_plan_t;
+    using scalar_t = scalar_type_;
+    using pack_kit_t =
+        typename us::shapes::shapes_ladder<scalar_type_, numkong_capabilities_of(cpu_ladder_floor_k)>::kit_t;
+    static constexpr nk_dtype_t dtype_k = scalar_type_::dtype();
+    static constexpr gpu_class_t gpu_class_k = gpu_class_;
+
+    index_t index;
+
+    /** Holds no shard until the handle places them, each scoring under the kernel @p frozen
+     *  names. */
+    shapes_vram_amd_variant(int, shapes_geometry_t const& frozen) noexcept
+        : index(forkunion_allocator_t {no_memory_domain_k},
+                build_t {frozen.metric == usearch_shapes_metric_hausdorff_k ? nk_kernel_hausdorffs_packed_k
+                                                                            : nk_kernel_chamfers_packed_k}) {}
+
+    shapes_geometry_t geometry;
+
+    /** Points across every stored entry, added to by insertions through @c atomic_ref. */
+    std::size_t total_points = 0;
+
+    /** Reserves the entries and points @p capacity names, a pack taking a header and a partial
+     *  alignment line per axis past its points. */
+    status_t reserve(reserve_capacity_t capacity) noexcept {
+        nk_size_t header = 0;
+        if (status_t const sized = us::shapes::status_of(pack_kit_t::pack_size(0, &header)); failed(sized))
+            return sized;
+        std::size_t const pack_overhead = header + 3 * nk_default_alignment_k;
+        std::size_t const bytes = capacity.entries * pack_overhead +
+                                  capacity.points * 3 * sizeof(typename scalar_type_::raw_t);
+        return vram_amd_reserve(index, capacity.entries, geometry.connectivity, bytes);
+    }
+
+    expected<traversal_stats_t> insert(usearch_keys_view_t keys, caller_tape_t shapes, insert_config_t config,
+                                       hip_executor_t& executor, progress_ticks_t& ticks) noexcept;
+
+    /** Packs the queries into @p pages, the call arena's host pages, where the matches land too. A
+     *  device walk takes no host predicate. */
+    expected<traversal_stats_t> search(counted_tape_t queries, matches_outputs_t& outputs, search_config_t config,
+                                       growing_arena<forkunion_allocator_t>& pages, hip_executor_t& executor,
+                                       progress_ticks_t& ticks) noexcept;
+
+    /** Writes the clouds as the RAM variants write them: a lone live shard's monolith, or one per
+     *  live shard beside the manifest the path names. */
+    status_t save(std::string_view path, hip_executor_t& executor, progress_ticks_t& ticks) noexcept;
+
+    /** Reads a checkpoint any residency wrote into the placed shards, one part per shard. */
+    template <typename checkpoint_type_>
+    status_t load(checkpoint_type_ checkpoint, hip_executor_t& executor, progress_ticks_t& ticks) noexcept;
+
+    /** Empties the index and its point count, retiring every shard behind a fresh shard generation
+     *  on the same devices. */
+    status_t clear() noexcept {
+        status_t const cleared = index.clear();
+        if (succeeded(cleared)) fu::standard_atomic_ref<std::size_t>(total_points).store(0, std::memory_order_relaxed);
+        return cleared;
+    }
+
+    /** Takes over the points of an emptied @p source, whose nodes this index now holds. */
+    void count_packed_source(shapes_vram_amd_variant& source) noexcept {
+        std::size_t const points =
+            fu::standard_atomic_ref<std::size_t>(source.total_points).exchange(0, std::memory_order_relaxed);
+        fu::standard_atomic_ref<std::size_t>(total_points).store_add(points, std::memory_order_relaxed);
+    }
+
+    /** Sampling answers @c unsupported_k until the shards sample on their devices. */
+    expected<sample_result_t> sample(basic_sample_inputs_t, basic_sample_outputs_t, sample_config_t,
+                                     executor_t&) noexcept {
+        return {{}, status_t::unsupported_k};
+    }
+
+  private:
+
+    /** The wire format every residency's checkpoints share: each cloud's points, unpacked. */
+    using codec_t = us::shapes::codec<pack_kit_t>;
+
+    /** The clouds of @p tape packed end to end on @p pages, cast to the stored scalar where the
+     *  caller's differs; refuses a count other than a frozen one. */
+    expected<tape_view<byte_t const>> pack_(counted_tape_t const& tape,
+                                            growing_arena<forkunion_allocator_t>& pages) const noexcept;
+};
+
+template <nk::shapes_dtype scalar_type_, gpu_class_t gpu_class_>
+expected<tape_view<byte_t const>> shapes_vram_amd_variant<scalar_type_, gpu_class_>::pack_(
+    counted_tape_t const& tape, growing_arena<forkunion_allocator_t>& pages) const noexcept {
+    using raw_t = typename scalar_type_::raw_t;
+    std::size_t const count = tape.count();
+    nk_dtype_t const from = nk_dtype_of(tape.scalar);
+    std::size_t const from_bytes = nk_dtype_bits(from) / 8;
+    std::size_t* const offsets = carve<std::size_t>(pages, count + 1);
+    if (!offsets) return {{}, status_t::bad_alloc_k};
+    offsets[0] = 0;
+    std::size_t largest = 0;
+    for (std::size_t offset = 0; offset != count; ++offset) {
+        std::size_t const cloud = tape.offsets[offset + 1] - tape.offsets[offset];
+        if (geometry.points && cloud != geometry.points) return {{}, status_t::shape_mismatch_k};
+        largest = max_of(largest, cloud);
+        nk_size_t bytes = 0;
+        if (status_t const sized = us::shapes::status_of(pack_kit_t::pack_size(cloud, &bytes)); failed(sized))
+            return {{}, sized};
+        offsets[offset + 1] = offsets[offset] + bytes;
+    }
+    byte_t* const packed = carve<byte_t>(pages, offsets[count]);
+    raw_t* const converted = from == dtype_k ? nullptr : carve<raw_t>(pages, largest * 3);
+    if (!packed || (from != dtype_k && !converted)) return {{}, status_t::bad_alloc_k};
+    for (std::size_t offset = 0; offset != count; ++offset) {
+        std::size_t const cloud = tape.offsets[offset + 1] - tape.offsets[offset];
+        void const* const coordinates = static_cast<byte_t const*>(tape.elements) +
+                                        tape.offsets[offset] * 3 * from_bytes;
+        raw_t const* cloud_points = static_cast<raw_t const*>(coordinates);
+        if (from != dtype_k) {
+            if (status_t const cast = us::shapes::status_of(
+                    nk_cast_serial(coordinates, from, converted, dtype_k, cloud * 3, nullptr));
+                failed(cast))
+                return {{}, cast};
+            cloud_points = converted;
+        }
+        if (status_t const made = us::shapes::status_of(
+                pack_kit_t::pack(cloud_points, cloud, packed + offsets[offset], nullptr));
+            failed(made))
+            return {{}, made};
+    }
+    return {{packed, {offsets, count + 1}}, status_t::success_k};
+}
+
+template <nk::shapes_dtype scalar_type_, gpu_class_t gpu_class_>
+expected<traversal_stats_t> shapes_vram_amd_variant<scalar_type_, gpu_class_>::insert(
+    usearch_keys_view_t keys, caller_tape_t shapes, insert_config_t config, hip_executor_t& executor,
+    progress_ticks_t& ticks) noexcept {
+    // The batch's own pages, since batches routed to disjoint shards may land at once.
+    growing_arena<forkunion_allocator_t> staging {forkunion_allocator_t {no_memory_domain_k}};
+    auto const [entries, lower_status] = counted_tape_of(shapes.tape, shapes.count, staging);
+    if (failed(lower_status)) return {{}, lower_status};
+    auto const [packs, pack_status] = pack_(entries, staging);
+    if (failed(pack_status)) return {{}, pack_status};
+    expected<traversal_stats_t> const inserted = vram_amd_insert(index, keys, packs, geometry.connectivity,
+                                                                 config.expansion_factor, ticks, executor);
+    if (failed(inserted.status)) return inserted;
+    fu::standard_atomic_ref<std::size_t>(total_points).store_add(elements_in(shapes), std::memory_order_relaxed);
+    return inserted;
+}
+
+template <nk::shapes_dtype scalar_type_, gpu_class_t gpu_class_>
+status_t shapes_vram_amd_variant<scalar_type_, gpu_class_>::save(std::string_view path, hip_executor_t& executor,
+                                                                 progress_ticks_t& ticks) noexcept {
+    return with_shapes_provenance(geometry, [&](save_config_t const& config) noexcept {
+        return vram_amd_save(index, path, codec_t {}, config, token_of(geometry.metric), executor, ticks);
+    });
+}
+
+template <nk::shapes_dtype scalar_type_, gpu_class_t gpu_class_>
+template <typename checkpoint_type_>
+status_t shapes_vram_amd_variant<scalar_type_, gpu_class_>::load(checkpoint_type_ checkpoint, hip_executor_t& executor,
+                                                                 progress_ticks_t& ticks) noexcept {
+    if (status_t const loaded = index.load(checkpoint, codec_t {}, executor, load_config_t {},
+                                           static_cast<connectivity_t>(geometry.connectivity), ticks);
+        failed(loaded))
+        return loaded;
+    // The value columns hold three scalars per point, summed over every part.
+    auto const [metadata, status] = safegraphs_read_index_metadata(checkpoint);
+    if (failed(status)) return status;
+    total_points += metadata.value_bytes / (3 * sizeof(typename scalar_type_::raw_t));
+    return status_t::success_k;
+}
+
+template <nk::shapes_dtype scalar_type_, gpu_class_t gpu_class_>
+expected<traversal_stats_t> shapes_vram_amd_variant<scalar_type_, gpu_class_>::search(
+    counted_tape_t queries, matches_outputs_t& outputs, search_config_t config,
+    growing_arena<forkunion_allocator_t>& pages, hip_executor_t& executor, progress_ticks_t& ticks) noexcept {
+    auto const [packs, pack_status] = pack_(queries, pages);
+    if (failed(pack_status)) return {{}, pack_status};
+    return vram_amd_search(index, packs, outputs.wanted, config.expansion_factor, outputs, ticks, executor);
+}
+
+#endif
+
 #pragma endregion Shapes Variants
 
 #pragma region Shapes Bodies
@@ -849,6 +1074,12 @@ struct shapes_variants_of<vendored_residency_t::vram_nvidia_k, gpu_class_t::nvid
 template <>
 struct shapes_variants_of<vendored_residency_t::vram_apple_k, gpu_class_t::apple_metal7_k> {
     using type = type_list<shapes_vram_apple_variant<nk::f16_t, gpu_class_t::apple_metal7_k>>;
+};
+#endif
+#if USEARCH_ARCH_ROCM_
+template <auto class_>
+struct shapes_variants_of<vendored_residency_t::vram_amd_k, class_> {
+    using type = type_list<shapes_vram_amd_variant<nk::f32_t, class_>, shapes_vram_amd_variant<nk::f16_t, class_>>;
 };
 #endif
 

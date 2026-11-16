@@ -191,7 +191,6 @@ struct geospatial_ladder<caps_> {
         i32_powervsx_geospatial_kit_t,   //
         i32_v128relaxed_geospatial_kit_t //
         >::type;
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 #pragma endregion Kits

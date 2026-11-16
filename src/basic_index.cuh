@@ -31,6 +31,7 @@ template <typename traits_type_>
 using basic_variant_tables = std::variant<basic_verbs<traits_type_, vendored_residency_t::ram_k> const*,
                                           basic_verbs<traits_type_, vendored_residency_t::nvme_k> const*,
                                           basic_verbs<traits_type_, vendored_residency_t::vram_nvidia_k> const*,
+                                          basic_verbs<traits_type_, vendored_residency_t::vram_amd_k> const*,
                                           basic_verbs<traits_type_, vendored_residency_t::vram_apple_k> const*>;
 
 /**
@@ -246,7 +247,7 @@ bool basic_load_variant(punned_basic_index<traits_type_, residency_> punned, che
     return propagate_error(loaded, outcome);
 }
 
-#if USEARCH_ARCH_CUDA_ || USEARCH_ARCH_METAL_
+#if USEARCH_ARCH_CUDA_ || USEARCH_ARCH_ROCM_ || USEARCH_ARCH_METAL_
 
 /** Bounds every shard of a GPU variant at @p vram 's shard capacity, then places one shard per
  *  named device, on that device's vendor ordinal; the caller checked every named ordinal against
@@ -318,6 +319,7 @@ handle_type_* make_basic_vram_handle(typename handle_type_::traits_t::geometry_t
         if (!fill(punned)) delete std::exchange(index, nullptr);
     };
     on_vendor.template operator()<vendored_residency_t::vram_nvidia_k>(typename traits_t::nvidia_gpu_ladder_t {});
+    on_vendor.template operator()<vendored_residency_t::vram_amd_k>(typename traits_t::amd_gpu_ladder_t {});
     on_vendor.template operator()<vendored_residency_t::vram_apple_k>(typename traits_t::apple_gpu_ladder_t {});
     if (picked) return index;
     return propagate_error(usearch_status_unsupported_k, outcome,
@@ -332,7 +334,7 @@ template <typename arguments_type_>
 void basic_init_vram(arguments_type_* arguments) noexcept {
     call_outcome_t outcome(*arguments);
     *arguments->index = nullptr;
-#if USEARCH_ARCH_CUDA_ || USEARCH_ARCH_METAL_
+#if USEARCH_ARCH_CUDA_ || USEARCH_ARCH_ROCM_ || USEARCH_ARCH_METAL_
     using handle_t = handle_of<arguments_type_>;
     typename handle_t::traits_t::geometry_t geometry;
     if (!handle_t::traits_t::state(*arguments, geometry, outcome)) return;
@@ -383,7 +385,7 @@ void basic_load_vram(arguments_type_* arguments, [[maybe_unused]] checkpoint_typ
     if (submitted<verb_>(arguments)) return;
     call_outcome_t outcome(*arguments);
     *arguments->index = nullptr;
-#if USEARCH_ARCH_CUDA_ || USEARCH_ARCH_METAL_
+#if USEARCH_ARCH_CUDA_ || USEARCH_ARCH_ROCM_ || USEARCH_ARCH_METAL_
     using handle_t = handle_of<arguments_type_>;
     if (checkpoint.empty())
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The checkpoint must not be empty"), void();

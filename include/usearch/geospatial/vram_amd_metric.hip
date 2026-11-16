@@ -1,0 +1,543 @@
+/**
+ *  @file include/usearch/geospatial/vram_amd_metric.hip
+ *  @author Ash Vardanian
+ *  @date November 16, 2026
+ *  @brief The device kits on AMD GPUs, their ladder, the octant selector, the relation tests, the
+ *      kernels, and the members of @c vram_amd_index.hpp reading the kit: the GPU twins of
+ *      @c ram_metric.hpp and of @c ram_index.hpp's selector and @c admits.
+ *
+ *  A stored entry is one @c earth_observation_t, and a lane scores a candidate alone: the squared
+ *  chord from the three 64-bit products of centimetre differences, exact in integers as the CPU and
+ *  NVIDIA kits score it, rounded once to the walk's distance. A kit per wavefront width: @c cdna3
+ *  on the 64 lanes of gfx942 and gfx950, @c cdna5 on the 32 of gfx1250 and gfx1251. An entry
+ *  prepares into no span at all, since its position is its query. Only the modality's AMD unit
+ *  compiles this file, so dispatch never names the kit.
+ */
+#pragma once
+
+#include <cstddef> // `std::size_t`
+
+#include <iterator> // `std::size` - every rung's kernels
+#include <limits>   // `std::numeric_limits` - an unknown pitch, field or range
+#include <utility>  // `std::index_sequence` - every rung's kernels, `std::swap` - the cone winners
+
+#include <numkong/geospatial.h> // `nk_clearance_f32_rocm_`, `nk_sqrt_f64_rocm_` and kin - with its ROCm backend
+
+#include "usearch/utilities/types.hpp"
+#include "usearch/utilities/vram_device.hpp"     // `vram_kernel_symbol` - a kernel's symbol
+#include "usearch/utilities/vram_amd_device.hip" // `hip_warp`, `cdna3_scan_t`, `cdna5_scan_t`
+#include "usearch/basic/vram_index.cuh"
+#include "usearch/basic/vram_amd_index.hip" // `basic::hip_kernel_body`
+#include "usearch/geospatial/ram_index.hpp"
+#include "usearch/geospatial/ram_metric.hpp"     // `geospatial_ladder`
+#include "usearch/geospatial/vram_amd_index.hpp" // `hip_admit_arguments` - the judging kernel's record
+
+namespace unum::usearch::geospatial {
+using namespace unum::usearch::utilities;
+
+#pragma region Kits
+
+/** The integer tangent frame at @p base, as @c tangent_frame builds it on the host, in scalars so
+ *  that no axis spills to the stack. */
+__device__ __forceinline__ tangent_frame_t hip_tangent_frame(earth_fixed_t base) noexcept {
+    f64_t const x = base.x_centimetres, y = base.y_centimetres, z = base.z_centimetres;
+    f64_t const norm = nk_sqrt_f64_rocm_(x * x + y * y + z * z);
+    f64_t east_x = 1, east_y = 0, east_z = 0, north_x = 0, north_y = 1, north_z = 0;
+    if (norm != 0) {
+        f64_t const up_x = x / norm, up_y = y / norm, up_z = z / norm;
+        // The axis least aligned with the position keeps the cross product's length above 0.816.
+        f64_t const magnitude_x = std::fabs(up_x), magnitude_y = std::fabs(up_y), magnitude_z = std::fabs(up_z);
+        bool const along_y = magnitude_y < magnitude_x;
+        bool const along_z = magnitude_z < (along_y ? magnitude_y : magnitude_x);
+        f64_t const axis_x = !along_y && !along_z, axis_y = along_y && !along_z, axis_z = along_z;
+        east_x = axis_y * up_z - axis_z * up_y;
+        east_y = axis_z * up_x - axis_x * up_z;
+        east_z = axis_x * up_y - axis_y * up_x;
+        f64_t const east_norm = nk_sqrt_f64_rocm_(east_x * east_x + east_y * east_y + east_z * east_z);
+        east_x /= east_norm, east_y /= east_norm, east_z /= east_norm;
+        north_x = up_y * east_z - up_z * east_y;
+        north_y = up_z * east_x - up_x * east_z;
+        north_z = up_x * east_y - up_y * east_x;
+    }
+    constexpr f64_t scale_k = static_cast<f64_t>(frame_scale_k);
+    auto const quantized = [](f64_t component) noexcept {
+        return static_cast<i32_t>(__double2ll_rn(component * scale_k));
+    };
+    return {{quantized(east_x), quantized(east_y), quantized(east_z)},
+            {quantized(north_x), quantized(north_y), quantized(north_z)}};
+}
+
+/**
+ *  @brief The rule of the CPU's @c surface_keep_octants_t: the nearest candidate in each of eight
+ *      tangent-plane cones around the node, then the farthest of the rest, until the row holds its
+ *      connectivity's worth.
+ *
+ *  Each lane classifies a candidate by @c octant_of, two integer dot products against the node's
+ *  frame, so no distance between candidates is scored. Candidates arrive ascending, so the first
+ *  one a cone sees is its nearest, and the kept positions go out ascending.
+ *  The long links are the rule itself, as on the CPU, so a restitch keeps them too and no refill
+ *  flag changes it.
+ */
+struct vram_keep_octants_t {
+
+    template <basic::vram_basic_kit kit_, typename schedule_, typename node_id_type_>
+    static __device__ __forceinline__ u32_t select( //
+        basic::vram_ragged_view<node_id_type_> const& storage, schedule_&, typename kit_::query_t const& query, byte_t*,
+        node_id_type_ const* candidate_ids, f32_t const*, u32_t candidates_count, u32_t* kept_positions,
+        vram_telemetry_t&, u32_t lane, bool = true) noexcept {
+
+        using warp_t = typename kit_::warp_t;
+        constexpr u32_t cones_k = static_cast<u32_t>(surface_keep_octants_t::cones_k);
+        tangent_frame_t const frame = hip_tangent_frame(query);
+        // A cone's first candidate is its nearest, so at most a winner per cone, ascending once
+        // sorted; every lane holds the same ones.
+        u32_t winners[cones_k];
+        u32_t winners_count = 0, taken_cones = 0;
+        for (u32_t base = 0; base < candidates_count; base += warp_t::width_k) { // Warp-uniform bounds.
+            u32_t const position = base + lane;
+            u32_t const cone = position < candidates_count
+                                   ? octant_of(frame, query,
+                                               kit_::prepare(storage.entry(candidate_ids[position]), nullptr, lane))
+                                   : cones_k;
+            for (u32_t candidate_cone = 0; candidate_cone != cones_k; ++candidate_cone) {
+                typename warp_t::mask_t const in_cone = warp_t::ballot(cone == candidate_cone);
+                if (!in_cone || (taken_cones >> candidate_cone) & 1u) continue;
+                winners[winners_count++] = base + warp_t::first(in_cone);
+                taken_cones |= 1u << candidate_cone;
+            }
+        }
+        for (u32_t sorted = 1; sorted < winners_count; ++sorted)
+            for (u32_t index = sorted; index && winners[index - 1] > winners[index]; --index)
+                std::swap(winners[index - 1], winners[index]);
+        auto const won = [&](u32_t position) noexcept {
+            for (u32_t index = 0; index != winners_count; ++index)
+                if (winners[index] == position) return true;
+            return false;
+        };
+
+        // The farthest non-winners fill the rest of the row, as the CPU's long links do: every
+        // position from the lowest of them on that no cone won.
+        u32_t const budget = min_of(storage.connectivity, candidates_count);
+        u32_t retained = budget > winners_count ? budget - winners_count : 0;
+        u32_t first_long = candidates_count;
+        while (retained && first_long)
+            if (!won(--first_long)) --retained;
+
+        // Winners and long links merge ascending, the long links being every unwon position from
+        // the first on.
+        u32_t kept_count = 0;
+        if (lane == 0) {
+            u32_t next_winner = 0;
+            for (u32_t position = 0; position != candidates_count && kept_count != storage.connectivity; ++position) {
+                bool const winner = next_winner != winners_count && winners[next_winner] == position;
+                next_winner += winner;
+                if (winner || position >= first_long) kept_positions[kept_count++] = position;
+            }
+        }
+        kept_count = warp_t::shuffle(kept_count, 0);
+        warp_t::sync();
+        return kept_count;
+    }
+};
+
+/** Squared chords between stored observations on the 64-lane wavefronts of CDNA3 and CDNA4, a
+ *  lane to a candidate; nodes keep their neighbors by tangent-plane cone. */
+struct i32_cdna3_geospatial_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_cdna3_k;
+
+    /** The kit's identity in kernel symbols. */
+    inline static constexpr char name_k[] = "i32_cdna3_geospatial_kit_t";
+    inline static constexpr u32_t lanes_per_entry_k = 1;
+
+    using warp_t = hip_warp<64>;
+    using scan_t = cdna3_scan_t;
+    using query_t = earth_fixed_t;
+    using selector_t = vram_keep_octants_t;
+
+    static constexpr bool serves(std::size_t bytes) noexcept { return bytes <= sizeof(earth_observation_t); }
+
+    /** A position is its own query, so an entry prepares into no span. */
+    static constexpr std::size_t span_bytes(byte_t const*, std::size_t) noexcept { return 0; }
+
+    /** The position at the front of the entry, in one 16-byte load. */
+    static __device__ __forceinline__ query_t prepare(basic::vram_entry_t entry, byte_t*, u32_t) noexcept {
+        int4 const words = *reinterpret_cast<int4 const*>(entry.data);
+        return {words.x, words.y, words.z};
+    }
+
+    /** No header bounds a chord. */
+    static __device__ __forceinline__ distance_t lower_bound(nk_kernel_kind_t, query_t const&,
+                                                             basic::vram_entry_t) noexcept {
+        return 0;
+    }
+
+    static __device__ __forceinline__ distance_t score(nk_kernel_kind_t, query_t const& query,
+                                                       basic::vram_entry_t entry, distance_t, u32_t lane) noexcept {
+        return static_cast<distance_t>(chord_squared(query, prepare(entry, nullptr, lane)));
+    }
+};
+
+/** Squared chords between stored observations on the 32-lane wavefronts of CDNA5, a lane to a
+ *  candidate; nodes keep their neighbors by tangent-plane cone. */
+struct i32_cdna5_geospatial_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_cdna5_k;
+
+    /** The kit's identity in kernel symbols. */
+    inline static constexpr char name_k[] = "i32_cdna5_geospatial_kit_t";
+    inline static constexpr u32_t lanes_per_entry_k = 1;
+
+    using warp_t = hip_warp<32>;
+    using scan_t = cdna5_scan_t;
+    using query_t = earth_fixed_t;
+    using selector_t = vram_keep_octants_t;
+
+    static constexpr bool serves(std::size_t bytes) noexcept { return bytes <= sizeof(earth_observation_t); }
+
+    /** A position is its own query, so an entry prepares into no span. */
+    static constexpr std::size_t span_bytes(byte_t const*, std::size_t) noexcept { return 0; }
+
+    /** The position at the front of the entry, in one 16-byte load. */
+    static __device__ __forceinline__ query_t prepare(basic::vram_entry_t entry, byte_t*, u32_t) noexcept {
+        int4 const words = *reinterpret_cast<int4 const*>(entry.data);
+        return {words.x, words.y, words.z};
+    }
+
+    /** No header bounds a chord. */
+    static __device__ __forceinline__ distance_t lower_bound(nk_kernel_kind_t, query_t const&,
+                                                             basic::vram_entry_t) noexcept {
+        return 0;
+    }
+
+    static __device__ __forceinline__ distance_t score(nk_kernel_kind_t, query_t const& query,
+                                                       basic::vram_entry_t entry, distance_t, u32_t lane) noexcept {
+        return static_cast<distance_t>(chord_squared(query, prepare(entry, nullptr, lane)));
+    }
+};
+
+template <nk_capability_t caps_>
+    requires((caps_ & nk_cap_rocm_k) != 0)
+struct geospatial_ladder<caps_> {
+    using kit_t = typename highest_kit<caps_, i32_cdna3_geospatial_kit_t, i32_cdna5_geospatial_kit_t>::type;
+};
+
+template <typename kit_type_, typename node_id_type_, typename kernels_type_>
+std::size_t vram_amd_kits<kit_type_, node_id_type_, kernels_type_>::rung_serving_(std::size_t longest) noexcept {
+    return kit_type_::serves(longest) ? 0 : rungs_k;
+}
+
+template <typename kit_type_, typename node_id_type_, typename kernels_type_>
+u32_t vram_amd_kits<kit_type_, node_id_type_, kernels_type_>::lanes_per_entry_(std::size_t) noexcept {
+    return kit_type_::lanes_per_entry_k;
+}
+
+template <typename kit_type_, typename node_id_type_, typename kernels_type_>
+std::size_t vram_amd_kits<kit_type_, node_id_type_, kernels_type_>::span_bytes_(byte_t const* data,
+                                                                                std::size_t bytes) noexcept {
+    return kit_type_::span_bytes(data, bytes);
+}
+
+template <typename kit_type_, typename node_id_type_, typename kernels_type_>
+void vram_amd_kits<kit_type_, node_id_type_, kernels_type_>::spell_kits_kernel_(
+    vram_kernel_symbol_t& symbol, std::size_t, basic::amd_rung_t instantiated) noexcept {
+    vram_kernel_symbol(symbol, "geospatial", "amd_kernel", {"vram_arguments", 2, itanium_scope_t::basic_k},
+                       instantiated.kernel, itanium_type<kit_type_> {}, itanium_type<node_id_type_> {},
+                       instantiated.slots);
+}
+
+/** Spells a geospatial kit into a kernel's symbol by its name, inside the kernel's own scope,
+ *  @c S1_, as @c vram_kernel_symbol documents. */
+template <typename kit_type_>
+    requires requires { kit_type_::name_k; }
+void append_itanium_argument(vram_kernel_symbol_t& symbol, itanium_type<kit_type_>) noexcept {
+    symbol.append("NS1_");
+    symbol.append_name(kit_type_::name_k);
+    symbol.append("E");
+}
+
+#pragma endregion Kits
+
+#pragma region Kernels
+
+/** Whether @p target lies inside the view cone of @p viewer, as @c within_view tests it on the
+ *  host: the offset turns into the viewer's east, north and up by its geodetic latitude and
+ *  longitude, taken from Bowring's closed form through ratios alone. */
+__device__ __forceinline__ bool hip_within_view(earth_observation_t const& viewer,
+                                                earth_observation_t const& target) noexcept {
+    constexpr f64_t nan_k = std::numeric_limits<f64_t>::quiet_NaN();
+    constexpr f64_t equatorial_k = NUMKONG_EARTH_ELLIPSOID_EQUATORIAL_RADIUS * centimetres_per_metre_k;
+    constexpr f64_t polar_k = wgs84_semi_minor_axis_k * centimetres_per_metre_k;
+    f64_t const x = viewer.position.x_centimetres, y = viewer.position.y_centimetres, z = viewer.position.z_centimetres;
+    f64_t const offset_x = static_cast<f64_t>(target.position.x_centimetres) - x;
+    f64_t const offset_y = static_cast<f64_t>(target.position.y_centimetres) - y;
+    f64_t const offset_z = static_cast<f64_t>(target.position.z_centimetres) - z;
+    f64_t const horizontal = nk_sqrt_f64_rocm_(x * x + y * y);
+    f64_t const cos_longitude = horizontal > 0 ? x / horizontal : 1,
+                sin_longitude = horizontal > 0 ? y / horizontal : 0;
+    f64_t const parametric_sine = z * equatorial_k, parametric_cosine = horizontal * polar_k;
+    f64_t const parametric_norm = nk_sqrt_f64_rocm_(parametric_sine * parametric_sine +
+                                                    parametric_cosine * parametric_cosine);
+    f64_t const sin_parametric = parametric_norm > 0 ? parametric_sine / parametric_norm : 0;
+    f64_t const cos_parametric = parametric_norm > 0 ? parametric_cosine / parametric_norm : 1;
+    f64_t const latitude_sine = z + wgs84_second_eccentricity_squared_k * polar_k * sin_parametric * sin_parametric *
+                                        sin_parametric;
+    f64_t const latitude_cosine = horizontal - wgs84_eccentricity_squared_k * equatorial_k * cos_parametric *
+                                                   cos_parametric * cos_parametric;
+    f64_t const latitude_norm = nk_sqrt_f64_rocm_(latitude_sine * latitude_sine + latitude_cosine * latitude_cosine);
+    f64_t const sin_latitude = latitude_norm > 0 ? latitude_sine / latitude_norm : 0;
+    f64_t const cos_latitude = latitude_norm > 0 ? latitude_cosine / latitude_norm : 1;
+    f64_t const east = -sin_longitude * offset_x + cos_longitude * offset_y;
+    f64_t const north = -sin_latitude * cos_longitude * offset_x - sin_latitude * sin_longitude * offset_y +
+                        cos_latitude * offset_z;
+    f64_t const up = cos_latitude * cos_longitude * offset_x + cos_latitude * sin_longitude * offset_y +
+                     sin_latitude * offset_z;
+    constexpr f64_t turn_k = 2 * 3.14159265358979323846;
+    bool const limited = viewer.range_metres != (std::numeric_limits<u16_t>::max)();
+    bool const pitched = viewer.elevation != (std::numeric_limits<i8_t>::min)();
+    return !nk_terrain_outside_view_f32_rocm_(east, north, up,
+                                              viewer.field ? viewer.azimuth * turn_k / azimuth_steps_k : nan_k,
+                                              pitched ? viewer.elevation * turn_k / elevation_steps_k : nan_k,
+                                              viewer.field ? viewer.field * turn_k / elevation_steps_k : nan_k,
+                                              limited ? viewer.range_metres * centimetres_per_metre_k : nan_k);
+}
+
+/** Whether @p entry, @p chord square centimetres from @p query, matches it under @p relation short
+ *  of any line of sight, as @c admits tests it on the host. */
+__device__ __forceinline__ bool hip_admits(relation_t relation, f64_t radius_metres, f64_t slack_milliseconds,
+                                           earth_observation_t const& query, earth_observation_t const& entry,
+                                           i64_t chord) noexcept {
+    constexpr i64_t timeless_k = (std::numeric_limits<i64_t>::min)();
+    constexpr u32_t open_ended_k = (std::numeric_limits<u32_t>::max)();
+    constexpr f64_t infinity_k = std::numeric_limits<f64_t>::infinity();
+    if (query.begin_milliseconds != timeless_k && entry.begin_milliseconds != timeless_k) {
+        f64_t const query_begin = static_cast<f64_t>(query.begin_milliseconds);
+        f64_t const query_end = query.duration_milliseconds == open_ended_k ? infinity_k
+                                                                            : query_begin + query.duration_milliseconds;
+        f64_t const entry_begin = static_cast<f64_t>(entry.begin_milliseconds);
+        f64_t const entry_end = entry.duration_milliseconds == open_ended_k ? infinity_k
+                                                                            : entry_begin + entry.duration_milliseconds;
+        if (entry_begin > query_end + slack_milliseconds || entry_end < query_begin - slack_milliseconds) return false;
+    }
+    if (radius_metres > 0) {
+        f64_t const deviations = nk_sqrt_f64_rocm_(static_cast<f64_t>(query.deviation_metres) * query.deviation_metres +
+                                                   static_cast<f64_t>(entry.deviation_metres) * entry.deviation_metres);
+        f64_t const reach = (radius_metres + 3 * deviations) * centimetres_per_metre_k;
+        if (static_cast<f64_t>(chord) > reach * reach) return false;
+    }
+    if (relation == relation_t::sees_k) return hip_within_view(entry, query);
+    if (relation == relation_t::seen_k) return hip_within_view(query, entry);
+    return true;
+}
+
+/** Where @p position falls on the terrain of @p arguments, into @p point: its fractional column and
+ *  row, and its height above the ellipsoid, as @c terrain_t::grid_point places it on the host
+ *  through @c to_geodetic. */
+template <typename node_id_type_>
+__device__ __forceinline__ void hip_grid_point(hip_admit_arguments<node_id_type_> const& arguments,
+                                               earth_fixed_t position, f32_t* point) noexcept {
+    constexpr f64_t radians_to_degrees_k = 180.0 / 3.14159265358979323846;
+    constexpr f64_t equatorial_k = NUMKONG_EARTH_ELLIPSOID_EQUATORIAL_RADIUS;
+    f64_t const x = position.x_centimetres / centimetres_per_metre_k;
+    f64_t const y = position.y_centimetres / centimetres_per_metre_k;
+    f64_t const z = position.z_centimetres / centimetres_per_metre_k;
+    f64_t const horizontal = std::sqrt(x * x + y * y);
+    f64_t const parametric = std::atan2(z * equatorial_k, horizontal * wgs84_semi_minor_axis_k);
+    f64_t const sin_parametric = std::sin(parametric), cos_parametric = std::cos(parametric);
+    f64_t const latitude = std::atan2(
+        z + wgs84_second_eccentricity_squared_k * wgs84_semi_minor_axis_k * sin_parametric * sin_parametric *
+                sin_parametric,
+        horizontal - wgs84_eccentricity_squared_k * equatorial_k * cos_parametric * cos_parametric * cos_parametric);
+    f64_t const longitude = std::atan2(y, x);
+    f64_t const sin_latitude = std::sin(latitude), cos_latitude = std::cos(latitude);
+    f64_t const prime_vertical = equatorial_k /
+                                 std::sqrt(1.0 - wgs84_eccentricity_squared_k * sin_latitude * sin_latitude);
+    // Straight above a pole the horizontal component vanishes; altitude reads off the polar axis.
+    f64_t const altitude = horizontal > 1.0 ? horizontal / cos_latitude - prime_vertical
+                                            : std::fabs(z) - wgs84_semi_minor_axis_k;
+    point[0] = static_cast<f32_t>((longitude * radians_to_degrees_k - arguments.west_longitude_degrees) /
+                                  arguments.column_step_degrees);
+    point[1] = static_cast<f32_t>((arguments.north_latitude_degrees - latitude * radians_to_degrees_k) /
+                                  arguments.row_step_degrees);
+    point[2] = static_cast<f32_t>(altitude);
+}
+
+/** Whether the sight line from @p viewpoint to @p target clears the terrain of @p grid, as the host
+ *  tests it: a negative clearance is an obstruction, and NaN leaves the grid, where no terrain
+ *  blocks the line. */
+template <typename node_id_type_>
+__device__ __forceinline__ bool hip_clears(nk_terrain_grid_rocm_t const& grid,
+                                           hip_admit_arguments<node_id_type_> const& arguments, f32_t const* viewpoint,
+                                           f32_t const* target) noexcept {
+    nk_clearances_arguments_rocm_t sight {};
+    sight.packed = arguments.terrain_pack;
+    sight.viewpoints = viewpoint, sight.targets = target;
+    sight.drop_scale = arguments.drop_scale;
+    return !(nk_clearance_f32_rocm_(&grid, &sight, 0, 0) < 0);
+}
+
+/** Whether a relation's walks judge sight lines over the terrain, or admit on the chord alone. */
+enum class line_of_sight_t : bool { chord_alone_k, over_terrain_k };
+
+/** Whether the candidate @p node_id of the walk answering @p query is admitted under @p arguments,
+ *  its chord to the query in square centimetres written to @p chord. Past @c near, when
+ *  @p line_of_sight is @c over_terrain_k, its sight line from or to @p query_point must also clear
+ *  the terrain of @p grid. */
+template <typename node_id_type_>
+__device__ __forceinline__ bool hip_admits_over_terrain(hip_admit_arguments<node_id_type_> const& arguments,
+                                                        nk_terrain_grid_rocm_t const& grid,
+                                                        line_of_sight_t line_of_sight, earth_observation_t const& query,
+                                                        f32_t const* query_point, node_id_type_ node_id,
+                                                        i64_t& chord) noexcept {
+    earth_observation_t const entry = *reinterpret_cast<earth_observation_t const*>(arguments.storage.values +
+                                                                                    arguments.storage.offsets[node_id]);
+    chord = chord_squared(query.position, entry.position);
+    if (!hip_admits(arguments.relation, arguments.radius_metres, arguments.slack_milliseconds, query, entry, chord))
+        return false;
+    if (line_of_sight == line_of_sight_t::chord_alone_k) return true;
+    f32_t entry_point[3];
+    hip_grid_point(arguments, entry.position, entry_point);
+    // Under `sees` the entry looks at the query, otherwise the query at the entry.
+    return arguments.relation == relation_t::sees_k ? hip_clears(grid, arguments, entry_point, query_point)
+                                                    : hip_clears(grid, arguments, query_point, entry_point);
+}
+
+/**
+ *  @brief Judges every walk's candidates in rank order, a warp-width of ranks at a time, one warp
+ *      per query, handing @p on_round each round's lanes: the candidate, whether it was admitted,
+ *      the chord, and the round's admitted mask; the warp stops once @p on_round answers false.
+ *
+ *  Every warp reads the shape of the terrain's pyramid, which one thread fills per block, so every
+ *  thread of the block reaches the barrier before any warp judges.
+ */
+template <typename warp_type_, typename node_id_type_, typename on_query_type_>
+__device__ __forceinline__ void hip_judge_walks(hip_admit_arguments<node_id_type_> const& arguments,
+                                                on_query_type_&& on_query) noexcept {
+    __shared__ nk_terrain_grid_rocm_t grid;
+    line_of_sight_t const line_of_sight = arguments.terrain_heights && arguments.relation != relation_t::near_k
+                                              ? line_of_sight_t::over_terrain_k
+                                              : line_of_sight_t::chord_alone_k;
+    if (line_of_sight == line_of_sight_t::over_terrain_k && threadIdx.x == 0)
+        nk_terrain_grid_f32_rocm_(arguments.terrain_heights, arguments.terrain_pack, &grid);
+    __syncthreads();
+    u32_t const lane = threadIdx.x % warp_type_::width_k;
+    u32_t const warps = gridDim.x * vram_warps_per_block_k;
+    for (u32_t query_index = blockIdx.x * vram_warps_per_block_k + threadIdx.x / warp_type_::width_k;
+         query_index < arguments.queries_count; query_index += warps) {
+        earth_observation_t const query = arguments.queries[query_index];
+        f32_t query_point[3];
+        if (line_of_sight == line_of_sight_t::over_terrain_k) hip_grid_point(arguments, query.position, query_point);
+        node_id_type_ const* const candidate_ids = arguments.candidate_ids +
+                                                   u64_t {query_index} * arguments.candidates_count;
+        auto judge = [&](u32_t rank, i64_t& chord) noexcept {
+            constexpr node_id_type_ unknown_k = (std::numeric_limits<node_id_type_>::max)();
+            node_id_type_ const node_id = rank < arguments.candidates_count ? candidate_ids[rank] : unknown_k;
+            return node_id != unknown_k &&
+                   hip_admits_over_terrain(arguments, grid, line_of_sight, query, query_point, node_id, chord);
+        };
+        on_query(query_index, lane, judge);
+    }
+}
+
+/** One warp per query keeps, in rank order, the candidates the relation admits, a warp-width of
+ *  ranks at a time, until @c wanted arrived or the candidates ran out; past @c near, a sight line
+ *  must also clear the terrain when one is given. */
+template <typename kit_type_, typename node_id_type_>
+__global__ void __launch_bounds__(vram_warps_per_block_k* kit_type_::warp_t::width_k)
+    amd_admit(hip_admit_arguments<node_id_type_> arguments) {
+    using warp_t = typename kit_type_::warp_t;
+    hip_judge_walks<warp_t>(arguments, [&](u32_t query_index, u32_t lane, auto&& judge) noexcept {
+        node_id_type_* const matched_ids = arguments.matched_ids + u64_t {query_index} * arguments.wanted;
+        f64_t* const matched_metres = arguments.matched_metres + u64_t {query_index} * arguments.wanted;
+        u32_t written = 0;
+        for (u32_t base = 0; base < arguments.candidates_count && written < arguments.wanted; base += warp_t::width_k) {
+            i64_t chord = 0;
+            bool const admitted = judge(base + lane, chord);
+            typename warp_t::mask_t const admitted_mask = warp_t::ballot(admitted);
+            u32_t const position = written + warp_t::count(admitted_mask & warp_t::below(lane));
+            if (admitted && position < arguments.wanted) {
+                matched_ids[position] =
+                    arguments.candidate_ids[u64_t {query_index} * arguments.candidates_count + base + lane];
+                matched_metres[position] = nk_sqrt_f64_rocm_(static_cast<f64_t>(chord)) / centimetres_per_metre_k;
+            }
+            written += warp_t::count(admitted_mask);
+        }
+        if (lane == 0) arguments.matched_counts[query_index] = min_of(written, arguments.wanted);
+    });
+}
+
+/**
+ *  @brief One pass of a radius walk's judging, one warp per query over every candidate its walk
+ *      found: @c within_count_k counts the admitted ones into @c matched_counts, and
+ *      @c within_write_k writes them, in rank order, from the query's offset on.
+ *
+ *  The writing pass places each query past every earlier one's count, from the base
+ *  @c matched_offsets holds first, which each warp sums for its own query, so no warp waits on
+ *  another, and files the offset one past it.
+ */
+template <typename kit_type_, typename node_id_type_, vram_kernel_t kernel_>
+__global__ void __launch_bounds__(vram_warps_per_block_k* kit_type_::warp_t::width_k)
+    amd_within(hip_admit_arguments<node_id_type_> arguments) {
+    using warp_t = typename kit_type_::warp_t;
+    hip_judge_walks<warp_t>(arguments, [&](u32_t query_index, u32_t lane, auto&& judge) noexcept {
+        u64_t start = 0;
+        if constexpr (kernel_ == vram_kernel_t::within_write_k) {
+            for (u32_t earlier = lane; earlier < query_index; earlier += warp_t::width_k)
+                start += arguments.matched_counts[earlier];
+            for (u32_t mask = warp_t::width_k / 2; mask; mask >>= 1) start += warp_t::shuffle_xor(start, mask);
+            start += arguments.matched_offsets[0];
+            if (lane == 0) arguments.matched_offsets[query_index + 1] = start + arguments.matched_counts[query_index];
+        }
+        u64_t written = 0;
+        for (u32_t base = 0; base < arguments.candidates_count; base += warp_t::width_k) {
+            i64_t chord = 0;
+            bool const admitted = judge(base + lane, chord);
+            typename warp_t::mask_t const admitted_mask = warp_t::ballot(admitted);
+            if constexpr (kernel_ == vram_kernel_t::within_write_k)
+                if (admitted) {
+                    u64_t const position = start + written + warp_t::count(admitted_mask & warp_t::below(lane));
+                    arguments.matched_ids[position] =
+                        arguments.candidate_ids[u64_t {query_index} * arguments.candidates_count + base + lane];
+                    arguments.matched_metres[position] = nk_sqrt_f64_rocm_(static_cast<f64_t>(chord)) /
+                                                         centimetres_per_metre_k;
+                }
+            written += warp_t::count(admitted_mask);
+        }
+        if constexpr (kernel_ == vram_kernel_t::within_count_k)
+            if (lane == 0) arguments.matched_counts[query_index] = written;
+    });
+}
+
+/** Every AMD geospatial kernel: @p kernel_ picks the walk, @p kit_type_ scores, @p node_id_type_
+ *  names the IDs of the records, and @p slots_ the register rung. A block is
+ *  @c vram_warps_per_block_k of the kit's wavefronts. */
+template <vram_kernel_t kernel_, typename kit_type_, typename node_id_type_, u32_t slots_>
+__global__ void __launch_bounds__(vram_warps_per_block_k* kit_type_::warp_t::width_k,
+                                  basic::hip_resident_blocks(kernel_, slots_) * vram_warps_per_block_k / 4)
+    amd_kernel(basic::vram_arguments<node_id_type_> arguments) {
+    basic::hip_kernel_body<kernel_, kit_type_, 0, slots_>(arguments);
+}
+
+template <typename kit_type_, typename node_id_type_, std::size_t... rungs_>
+void amd_instantiate_rungs(std::index_sequence<rungs_...>) noexcept {
+    (static_cast<void>(
+         &amd_kernel<basic::amd_rungs[rungs_].kernel, kit_type_, node_id_type_, basic::amd_rungs[rungs_].slots>),
+     ...);
+}
+
+/** Instantiates every kernel of @p kit_type_ with @p node_id_type_ IDs, the judging ones too; the
+ *  unit compiling the code object names it once per kit and node-ID type. It takes the addresses on
+ *  the host, since HIP-Clang refuses a kernel's address in device code while a host reference still
+ *  makes the device pass emit it; only the unit's device pass names it, so the host pass emits no
+ *  launch stub at all. */
+template <typename kit_type_, typename node_id_type_>
+void amd_instantiate() noexcept {
+    amd_instantiate_rungs<kit_type_, node_id_type_>(std::make_index_sequence<std::size(basic::amd_rungs)> {});
+    static_cast<void>(&amd_kernel<vram_kernel_t::load_values_k, kit_type_, node_id_type_, 0>);
+    static_cast<void>(&amd_kernel<vram_kernel_t::size_spans_k, kit_type_, node_id_type_, 0>);
+    static_cast<void>(&amd_admit<kit_type_, node_id_type_>);
+    static_cast<void>(&amd_within<kit_type_, node_id_type_, vram_kernel_t::within_count_k>);
+    static_cast<void>(&amd_within<kit_type_, node_id_type_, vram_kernel_t::within_write_k>);
+}
+
+#pragma endregion Kernels
+
+} // namespace unum::usearch::geospatial

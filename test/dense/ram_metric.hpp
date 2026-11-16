@@ -128,9 +128,9 @@ static int check_quads(std::size_t dim) noexcept {
     // With a single capability bit requested, exactly one cascade row can match, so the
     // winner is either that tier or the serial fallback. Anything else means a row names
     // a kit from another backend - numerically indistinguishable, hence the static check.
-    static_assert(
-        quads_ladder<scalar_, caps_>::picked_k == caps_ || quads_ladder<scalar_, caps_>::picked_k == nk_cap_serial_k,
-        "Capability cascade selected a tier that was never requested");
+    static_assert(quads_ladder<scalar_, caps_>::kit_t::capability_k == caps_ ||
+                      quads_ladder<scalar_, caps_>::kit_t::capability_k == nk_cap_serial_k,
+                  "Capability cascade selected a tier that was never requested");
     using quads_kit_t = typename quads_ladder<scalar_, caps_>::kit_t;
 
     auto query = nk::vector<scalar_>::zeros(dim).value;

@@ -34,9 +34,14 @@ bytes_view_t geospatial_nvidia_fatbin_t::bytes() noexcept {
     return {bounds[0], bounds[1]};
 }
 
-template struct us::geospatial::vram_nvidia_index<u32_t, geospatial_nvidia_capabilities_k, geospatial_nvidia_fatbin_t>;
-template struct us::geospatial::vram_nvidia_kits<u32_t, geospatial_nvidia_capabilities_k, geospatial_nvidia_fatbin_t>;
+template struct us::geospatial::vram_nvidia_index<
+    typename us::geospatial::geospatial_ladder<geospatial_nvidia_capabilities_k>::kit_t, u32_t,
+    geospatial_nvidia_fatbin_t>;
+template struct us::geospatial::vram_nvidia_kits<
+    typename us::geospatial::geospatial_ladder<geospatial_nvidia_capabilities_k>::kit_t, u32_t,
+    geospatial_nvidia_fatbin_t>;
 
-template __device__ void us::geospatial::cuda_instantiate<geospatial_nvidia_capabilities_k, u32_t>();
+template __device__ void
+us::geospatial::cuda_instantiate<us::geospatial::geospatial_ladder<geospatial_nvidia_capabilities_k>::kit_t, u32_t>();
 
 template struct basic_class_tables<geospatial_traits_t, vendored_residency_t::vram_nvidia_k, cuda_class_k>;

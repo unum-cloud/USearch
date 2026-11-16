@@ -449,8 +449,8 @@ concept vram_schedule = requires(
 };
 
 /** The schedule cascade, the twin of @c quads_ladder: each vendor specializes it under a constraint
- *  on @p caps_, naming the picked @c schedule_t and its @c picked_k. Schedules state their
- *  @c capability_k as kits do, and the first it admits wins. */
+ *  on @p caps_, naming the picked @c schedule_t. Schedules state their @c capability_k as kits do,
+ *  and the first it admits wins. */
 template <nk_capability_t caps_>
 struct schedule_ladder;
 

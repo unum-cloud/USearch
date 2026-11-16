@@ -540,7 +540,6 @@ struct shapes_ladder<nk::f16_t, caps_> {
         f16_powervsx_shapes_kit_t,      //
         f16_v128relaxed_shapes_kit_t    //
         >::type;
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
@@ -556,7 +555,6 @@ struct shapes_ladder<nk::f32_t, caps_> {
         f32_powervsx_shapes_kit_t,      //
         f32_v128relaxed_shapes_kit_t    //
         >::type;
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 #pragma endregion Kits

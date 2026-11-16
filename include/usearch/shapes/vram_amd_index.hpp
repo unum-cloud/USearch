@@ -1,0 +1,252 @@
+/**
+ *  @file include/usearch/shapes/vram_amd_index.hpp
+ *  @author Ash Vardanian
+ *  @date November 16, 2026
+ *  @brief Similarity Search over 3D point clouds on AMD GPUs: the basic VRAM index under the
+ *      Chamfer and Hausdorff kits @c shapes_ladder picks in @c vram_amd_metric.hip.
+ *
+ *  Plain C++, so the host classes build with any compiler: the members reading the kits, which size
+ *  a launch's spans, are defined beside the kits in the metric, which only the modality's AMD unit
+ *  compiles. Shapes are NumKong packs end to end, as @c nk::shapes_pack lays them out, in the
+ *  caller's tape and in the index.
+ */
+#pragma once
+
+#include <cstddef> // `std::size_t`
+
+#include <span> // `std::span` - a batch's offsets and a reshard's sources and targets
+
+#include <numkong/capabilities.h> // `nk_kernel_chamfers_packed_k` & kin - the metric a kit scores under
+
+#include "usearch/utilities/types.hpp"
+#include "usearch/basic/vram_amd_index.hpp"
+
+namespace unum::usearch::shapes {
+using namespace unum::usearch::utilities;
+
+/** The kit hooks a shapes graph on AMD GPUs reads, and the code object @p kernels_type_ names once
+ *  loaded: the Chamfer and Hausdorff kit @p kit_type_ over clouds of its @c scalar_t, and over node
+ *  IDs of @p node_id_type_. */
+template <typename kit_type_, typename node_id_type_, typename kernels_type_>
+struct vram_amd_kits {
+
+    /** The ceiling the kits compile under, which names the class's shared graph kernels too. */
+    inline static constexpr nk_capability_t capability_k = kernels_type_::capability_k;
+
+    /** Rungs of the kits' kernels: one, serving every cloud. */
+    inline static constexpr std::size_t rungs_k = 1;
+
+  private:
+    template <typename, typename, typename, typename>
+    friend struct basic::vram_amd_ragged_graph;
+
+    /** The rung serving shapes of @p longest bytes, or @c rungs_k when none does. Defined in
+     *  @c vram_amd_metric.hip, as are the members below reading the kit. */
+    static std::size_t rung_serving_(std::size_t longest) noexcept;
+
+    /** Lanes the kit scores a shape with on @p rung. */
+    static u32_t lanes_per_entry_(std::size_t rung) noexcept;
+
+    /** Bytes the @p bytes long pack at @p data takes once prepared, a multiple of 16. */
+    static std::size_t span_bytes_(byte_t const* data, std::size_t bytes) noexcept;
+
+    /** Bytes any loaded pack of up to @p longest bytes takes once prepared. */
+    static std::size_t span_bytes_(std::size_t longest) noexcept { return span_bytes_(nullptr, longest); }
+
+    /** Bytes the @p stored pack saves into: its cloud unpacked, @b [points,3] scalars, as the RAM
+     *  codec saves a cloud. */
+    static expected<std::size_t> saved_bytes_(bytes_view_t stored) noexcept;
+
+    /**
+     *  @brief Unpacks the @p stored pack into @p saved.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The @p saved bytes hold other than the pack's points.
+     */
+    static status_t save_value_(bytes_view_t stored, bytes_span_t saved) noexcept;
+
+    /** Bytes a cloud of @p saved bytes stores into once packed; @c malformed_k unless it holds
+     *  whole points. */
+    static expected<std::size_t> stored_bytes_(std::size_t saved) noexcept;
+
+    /** Packs a step's clouds on the device, a warp per cloud: the one kit whose stored bytes
+     *  differ from the saved ones, and whose spans follow from length, sized at planning. */
+    status_t queue_load_values_(basic::vram_amd_load_step<node_id_type_> const& step) const noexcept {
+        return step.launch_kits(vram_kernel_t::load_values_k);
+    }
+
+    /** The code object holding the kits' kernels. */
+    static bytes_view_t fatbin_() noexcept { return kernels_type_::bytes(); }
+
+    /** Spells into @p symbol the kits' kernel @p instantiated on kit rung @p rung, as the code
+     *  object exports it. */
+    static void spell_kits_kernel_(vram_kernel_symbol_t& symbol, std::size_t rung,
+                                   basic::amd_rung_t instantiated) noexcept;
+
+    /** The kits read no parameters on the device, so none upload. */
+    static status_t upload_parameters_(hip_api_t const&) noexcept { return status_t::success_k; }
+
+    /** The kits read no parameters on the device. */
+    byte_t const* parameters_() const noexcept { return nullptr; }
+};
+
+/** Similarity Search over 3D point clouds on AMD GPUs, under Chamfer or Hausdorff as the kernel
+ *  kind it is built with names, scored by the kit @p kit_type_ over clouds of its @c scalar_t: a
+ *  block walks each query, a team of 32 lanes scoring each candidate. Node IDs are
+ *  @p node_id_type_, and @p kernels_type_ names the code object. It owns a
+ *  @c basic::vram_amd_ragged_graph over its kits and forwards its verbs, types and constants, which
+ *  that graph documents. */
+template <typename kit_type_, typename node_id_type_, typename kernels_type_>
+struct vram_amd_index {
+    /* Components */
+    using kits_t = vram_amd_kits<kit_type_, node_id_type_, kernels_type_>;
+    using graph_t = basic::vram_amd_ragged_graph<node_id_type_, kits_t>;
+    using traversal_context_t = typename graph_t::traversal_context_t;
+
+    /* IDs and Keys */
+    using node_id_t = typename graph_t::node_id_t;
+    using key_t = typename graph_t::key_t;
+    using keyed_t = typename graph_t::keyed_t;
+    using distance_t = typename graph_t::distance_t;
+    using candidates_count_t = typename graph_t::candidates_count_t;
+
+    /* Configs and Results */
+    using reserve_capacity_t = typename graph_t::reserve_capacity_t;
+    using insert_config_t = typename graph_t::insert_config_t;
+    using insert_result_t = typename graph_t::insert_result_t;
+    using insert_plan_t = typename graph_t::insert_plan_t;
+    using search_config_t = typename graph_t::search_config_t;
+    using search_result_t = typename graph_t::search_result_t;
+    using refine_config_t = typename graph_t::refine_config_t;
+    using reshard_config_t = typename graph_t::reshard_config_t;
+    using refine_report_t = typename graph_t::refine_report_t;
+    using reachability_t = typename graph_t::reachability_t;
+
+    /* Plans */
+    using refine_plan_t = typename graph_t::refine_plan_t;
+    using reshard_plan_t = typename graph_t::reshard_plan_t;
+    using save_plan_t = typename graph_t::save_plan_t;
+    using load_plan_t = typename graph_t::load_plan_t;
+
+    inline static constexpr std::size_t max_node_count_k = graph_t::max_node_count_k;
+    inline static constexpr synchronization_t synchronization_ceiling_k = graph_t::synchronization_ceiling_k;
+
+    /** Pins the index to the storage allocator's device, scoring under @p kernel,
+     *  @c nk_kernel_chamfers_packed_k or @c nk_kernel_hausdorffs_packed_k. */
+    explicit vram_amd_index(nk_kernel_kind_t kernel,
+                            hip_virtual_memory_allocator<byte_t> const& allocator = {}) noexcept
+        : graph_(kernel, allocator) {}
+
+    std::size_t size() const noexcept { return graph_.size(); }
+    status_t status() const noexcept { return graph_.status(); }
+    std::size_t connectivity() const noexcept { return graph_.connectivity(); }
+    std::size_t capacity() const noexcept { return graph_.capacity(); }
+    std::size_t bytes_capacity() const noexcept { return graph_.bytes_capacity(); }
+    std::size_t memory_usage() const noexcept { return graph_.memory_usage(); }
+    hip_device_specs_t const& device_specs() const noexcept { return graph_.device_specs(); }
+    hip_api_t const& api() const noexcept { return graph_.api(); }
+    nk_kernel_kind_t kernel() const noexcept { return graph_.kernel(); }
+    basic::vram_ragged_storage<node_id_t> storage() const noexcept { return graph_.storage(); }
+    expected<std::size_t> reserve(reserve_capacity_t config) noexcept { return graph_.reserve(config); }
+
+    std::size_t traversal_memory_usage(tape_view<byte_t const> tape, insert_config_t config = {}) const noexcept {
+        return graph_.traversal_memory_usage(tape, config);
+    }
+    expected<insert_plan_t> plan_insert(std::size_t entries) noexcept { return graph_.plan_insert(entries); }
+    expected<insert_result_t> insert(std::span<key_t const> keys, tape_view<byte_t const> tape,
+                                     traversal_context_t& context, insert_config_t config = {}) noexcept {
+        return graph_.insert(keys, tape, context, config);
+    }
+    std::size_t traversal_memory_usage(tape_view<byte_t const> queries, search_config_t config) const noexcept {
+        return graph_.traversal_memory_usage(queries, config);
+    }
+    expected<search_result_t> search(tape_view<byte_t const> queries, nk::matrix_span<node_id_t> result_ids,
+                                     nk::matrix_span<distance_t> result_distances, search_config_t config,
+                                     traversal_context_t& context) noexcept {
+        return graph_.search(queries, result_ids, result_distances, config, context);
+    }
+
+    std::size_t traversal_memory_usage(refine_config_t config, std::size_t entries) const noexcept {
+        return graph_.traversal_memory_usage(config, entries);
+    }
+    std::size_t traversal_memory_usage(refine_config_t config, std::size_t entries,
+                                       std::size_t targets) const noexcept {
+        return graph_.traversal_memory_usage(config, entries, targets);
+    }
+    expected<refine_plan_t> plan_refine(refine_config_t config, traversal_context_t& context) noexcept {
+        return graph_.plan_refine(config, context);
+    }
+    expected<refine_report_t> refine(refine_config_t config, traversal_context_t& context) noexcept {
+        return graph_.refine(config, context);
+    }
+    expected<reshard_plan_t> plan_reshard(std::span<vram_amd_index* const> sources,
+                                          std::span<vram_amd_index* const> targets, reshard_config_t config,
+                                          traversal_context_t& context) noexcept {
+        return graph_.plan_reshard(sources, targets, &vram_amd_index::graph_, config, context);
+    }
+    expected<refine_report_t> reshard(std::span<vram_amd_index* const> sources,
+                                      std::span<vram_amd_index* const> targets, reshard_config_t config,
+                                      traversal_context_t& context) noexcept {
+        return graph_.reshard(sources, targets, &vram_amd_index::graph_, config, context);
+    }
+    expected<reachability_t> health(traversal_context_t& context) noexcept { return graph_.health(context); }
+
+    expected<basic::columns_extents_t> columns_extents(traversal_context_t& context) noexcept {
+        return graph_.columns_extents(context);
+    }
+    expected<save_plan_t> plan_save(basic::columns<key_t, node_id_t, byte_t, u64_t> columns,
+                                    traversal_context_t& context) noexcept {
+        return graph_.plan_save(columns, context);
+    }
+    status_t save(basic::columns<key_t, node_id_t, byte_t, u64_t> columns, traversal_context_t& context) noexcept {
+        return graph_.save(columns, context);
+    }
+    expected<load_plan_t> plan_load(safegraphs_saved_columns<node_id_t> const& saved,
+                                    traversal_context_t& context) noexcept {
+        return graph_.plan_load(saved, context);
+    }
+    status_t load(safegraphs_saved_columns<node_id_t> const& saved, traversal_context_t& context) noexcept {
+        return graph_.load(saved, context);
+    }
+
+    keyed_t const& keys() const noexcept { return graph_.keys(); }
+    expected<key_t> key_of(node_id_t node) const noexcept { return graph_.key_of(node); }
+    template <typename callback_type_>
+    void find_each(key_t const& key, callback_type_&& callback) const noexcept {
+        graph_.find_each(key, callback);
+    }
+    status_t neighbors(node_id_t first, std::span<node_id_t> rows) const noexcept {
+        return graph_.neighbors(first, rows);
+    }
+    std::size_t count(key_t const& key) const noexcept { return graph_.count(key); }
+    bool contains(key_t const& key) const noexcept { return graph_.contains(key); }
+
+    /** Copies on @p context 's stream the values of the @p listed nodes back to back into
+     *  @p outputs, their offsets into @p output_offsets from the base its first holds, as the
+     *  graph's gather does. */
+    status_t launch_gather_tape_(std::span<node_id_t const> listed, byte_t* outputs, std::span<u64_t> output_offsets,
+                                 traversal_context_t const& context) noexcept {
+        return graph_.launch_gather_tape_(listed, outputs, output_offsets, context);
+    }
+
+  private:
+
+    /** A sharded index's shard table measures, closes and reopens the graph's claims. */
+    template <typename, template <typename> class atomic_ref_template_, typename>
+    friend struct utilities::shard_set;
+
+    /** A sharded index walks the graph below its snapshot and publishes its batches inside one
+     *  commit. */
+    template <typename index_type_, typename, typename, typename, typename>
+        requires std::same_as<typename index_type_::node_id_t, u32_t>
+    friend struct basic::vram_amd_indexes;
+
+    std::size_t claimed_() const noexcept { return graph_.claimed_(); }
+    status_t close_() noexcept { return graph_.close_(); }
+    void reopen_() noexcept { graph_.reopen_(); }
+    void retire_() noexcept { graph_.retire_(); }
+
+    graph_t graph_;
+};
+
+} // namespace unum::usearch::shapes

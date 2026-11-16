@@ -1,0 +1,73 @@
+/**
+ *  @file src/sequence/vram_variants_amd.hip
+ *  @author Ash Vardanian
+ *  @date November 16, 2026
+ *  @brief The AMD unit of the sequence kits: Levenshtein over bytes and UTF-8 runes, window overlap
+ *      and Needleman-Wunsch need nothing past each class's wavefront and lane shifts, so one unit
+ *      serves every AMD class, compiled once per class it is kept for.
+ *
+ *  HIP-Clang compiles it host-only, where it defines the faces' members reading the kits and names
+ *  each kind's code object, linked in beside it; HIP-Clang compiles every
+ *  @c vram_kernels_amd_<kind>.hip device-only into those code objects, once per class.
+ */
+#include "sequence_specializations.cuh"
+
+/** The bounds of each kind's code object, linked in as raw bytes, from the table CMake writes for
+ *  the class this unit compiles as; the other classes' tables stay unreferenced. */
+extern "C" byte_t const* const sequence_amd_cdna3_bundles[];
+extern "C" byte_t const* const sequence_amd_cdna4_bundles[];
+extern "C" byte_t const* const sequence_amd_cdna5_bundles[];
+template <gpu_class_t gpu_class_>
+byte_t const* const* sequence_bundles() noexcept {
+    if constexpr (gpu_class_ == gpu_class_t::amd_cdna5_k) return sequence_amd_cdna5_bundles;
+    else if constexpr (gpu_class_ == gpu_class_t::amd_cdna4_k) return sequence_amd_cdna4_bundles;
+    else return sequence_amd_cdna3_bundles;
+}
+
+template <>
+bytes_view_t sequence_amd_code_object<usearch_sequence_metric_levenshtein_bytes_k, hip_class_k>::bytes() noexcept {
+    byte_t const* const* const bounds = sequence_bundles<hip_class_k>();
+    return {bounds[0], bounds[1]};
+}
+template struct us::sequence::vram_amd_index<
+    sequence_amd_kit<usearch_sequence_metric_levenshtein_bytes_k>, u32_t,
+    sequence_amd_code_object<usearch_sequence_metric_levenshtein_bytes_k, hip_class_k>>;
+template struct us::sequence::vram_amd_kits<
+    sequence_amd_kit<usearch_sequence_metric_levenshtein_bytes_k>, u32_t,
+    sequence_amd_code_object<usearch_sequence_metric_levenshtein_bytes_k, hip_class_k>>;
+
+template <>
+bytes_view_t sequence_amd_code_object<usearch_sequence_metric_levenshtein_utf8_k, hip_class_k>::bytes() noexcept {
+    byte_t const* const* const bounds = sequence_bundles<hip_class_k>();
+    return {bounds[2], bounds[3]};
+}
+template struct us::sequence::vram_amd_index<
+    sequence_amd_kit<usearch_sequence_metric_levenshtein_utf8_k>, u32_t,
+    sequence_amd_code_object<usearch_sequence_metric_levenshtein_utf8_k, hip_class_k>>;
+template struct us::sequence::vram_amd_kits<
+    sequence_amd_kit<usearch_sequence_metric_levenshtein_utf8_k>, u32_t,
+    sequence_amd_code_object<usearch_sequence_metric_levenshtein_utf8_k, hip_class_k>>;
+
+template <>
+bytes_view_t sequence_amd_code_object<usearch_sequence_metric_overlap_k, hip_class_k>::bytes() noexcept {
+    byte_t const* const* const bounds = sequence_bundles<hip_class_k>();
+    return {bounds[4], bounds[5]};
+}
+template struct us::sequence::vram_amd_index<sequence_amd_kit<usearch_sequence_metric_overlap_k>, u32_t,
+                                             sequence_amd_code_object<usearch_sequence_metric_overlap_k, hip_class_k>>;
+template struct us::sequence::vram_amd_kits<sequence_amd_kit<usearch_sequence_metric_overlap_k>, u32_t,
+                                            sequence_amd_code_object<usearch_sequence_metric_overlap_k, hip_class_k>>;
+
+template <>
+bytes_view_t sequence_amd_code_object<usearch_sequence_metric_needleman_wunsch_k, hip_class_k>::bytes() noexcept {
+    byte_t const* const* const bounds = sequence_bundles<hip_class_k>();
+    return {bounds[6], bounds[7]};
+}
+template struct us::sequence::vram_amd_index<
+    sequence_amd_kit<usearch_sequence_metric_needleman_wunsch_k>, u32_t,
+    sequence_amd_code_object<usearch_sequence_metric_needleman_wunsch_k, hip_class_k>>;
+template struct us::sequence::vram_amd_kits<
+    sequence_amd_kit<usearch_sequence_metric_needleman_wunsch_k>, u32_t,
+    sequence_amd_code_object<usearch_sequence_metric_needleman_wunsch_k, hip_class_k>>;
+
+template struct basic_class_tables<sequence_traits_t, vendored_residency_t::vram_amd_k, hip_class_k>;

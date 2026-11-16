@@ -843,7 +843,7 @@ typedef struct usearch_geospatial_refine_t {
  *  - @c usearch_status_invalid_argument_k A @c plan without an executor, or a live @c plan opened
  *    on another index or executor.
  *  - @c usearch_status_read_only_k The handle is an NVMe view.
- *  - @c usearch_status_unsupported_k An AMD or Apple GPU handle, which no basic tower serves.
+ *  - @c usearch_status_unsupported_k An Apple GPU handle, which no basic tower serves.
  *  - @c usearch_status_contended_k An insertion or another refinement holds the handle.
  */
 USEARCH_EXPORT void usearch_geospatial_refine(usearch_geospatial_refine_t* arguments);

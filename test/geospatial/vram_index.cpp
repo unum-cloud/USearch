@@ -2,9 +2,9 @@
  *  @file test/geospatial/vram_index.cpp
  *  @author Ash Vardanian
  *  @date October 15, 2026
- *  @brief The geospatial VRAM cell: observations on an NVIDIA GPU beside the RAM index on the same
- *      observations, both through the C interface, judged by recall against the exact matches of
- *      each relation, and every reported chord against the exact one.
+ *  @brief The geospatial VRAM cell: observations on an NVIDIA or AMD GPU beside the RAM index on
+ *      the same observations, both through the C interface, judged by recall against the exact
+ *      matches of each relation, and every reported chord against the exact one.
  *
  *  Collections are uniform over the globe, a dense square kilometre of one city, or that city's
  *  cameras with a heading, a field of view and a range each, which the @c sees and @c seen
@@ -33,6 +33,20 @@ namespace unum::usearch::test::geospatial {
 using namespace unum::usearch::geospatial;
 
 #if USEARCH_ARCH_CUDA_
+
+/** The NVIDIA cells, whose shards the C interface places on CUDA devices. */
+using vram_executor_t = cuda_executor_t;
+inline constexpr gpu_vendor_t vram_vendor_k = gpu_vendor_t::nvidia_k;
+
+#elif USEARCH_ARCH_ROCM_
+
+/** The AMD cells, whose shards the C interface places on ROCm devices. */
+using vram_executor_t = hip_executor_t;
+inline constexpr gpu_vendor_t vram_vendor_k = gpu_vendor_t::amd_k;
+
+#endif
+
+#if USEARCH_ARCH_CUDA_ || USEARCH_ARCH_ROCM_
 
 /** How a collection draws its observations, as the file's docblock describes. */
 enum class observations_kind_t { global_k, city_k, cameras_k };
@@ -420,8 +434,9 @@ static std::size_t check_geospatial_vram_within(u64_t seed, std::int32_t ordinal
     return failures;
 }
 
-std::size_t check_geospatial_vram(settings_t const& settings, gpu_device_t const& device) {
-    if (device.vendor != gpu_vendor_t::nvidia_k || !settings.filter.selects("geospatial_vram")) return 0;
+template <>
+std::size_t check_geospatial_vram<vram_executor_t>(settings_t const& settings, gpu_device_t const& device) {
+    if (device.vendor != vram_vendor_k || !settings.filter.selects("geospatial_vram")) return 0;
     // The C interface names devices by their place in the listing, which `device` belongs to.
     std::int32_t const ordinal = static_cast<std::int32_t>(&device - test::gpu_devices().data());
     std::size_t failures = 0;
@@ -463,7 +478,8 @@ std::size_t check_geospatial_vram(settings_t const& settings, gpu_device_t const
 
 /** The Apple cell: no geospatial kernel serves Apple GPUs to the f64 contract, so placing an index
  *  on one is refused with @c usearch_status_unsupported_k. */
-std::size_t check_geospatial_vram(settings_t const& settings, gpu_device_t const& device) {
+template <>
+std::size_t check_geospatial_vram<metal_executor_t>(settings_t const& settings, gpu_device_t const& device) {
     if (device.vendor != gpu_vendor_t::apple_k || !settings.filter.selects("geospatial_vram")) return 0;
     // The C interface names devices by their place in the listing, which `device` belongs to.
     std::int32_t const devices[] = {static_cast<std::int32_t>(&device - test::gpu_devices().data())};
@@ -480,10 +496,6 @@ std::size_t check_geospatial_vram(settings_t const& settings, gpu_device_t const
         return refused;
     }());
 }
-
-#else
-
-std::size_t check_geospatial_vram(settings_t const&, gpu_device_t const&) { return 0; }
 
 #endif
 

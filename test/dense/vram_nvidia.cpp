@@ -42,9 +42,9 @@ std::size_t check_vram_nvidia(settings_t const& settings, gpu_device_t const& de
     else
         fmt::println("- CUDA: dense rung cells skipped, the build names {} for them",
                      usearch_gpu_class_name(static_cast<usearch_gpu_class_t>(dense_nvidia_class_k)));
-    failures_count += test::sequence::check_sequence_vram(settings, device);
-    failures_count += test::shapes::check_shapes_vram(settings, device);
-    failures_count += test::geospatial::check_geospatial_vram(settings, device);
+    failures_count += test::sequence::check_sequence_vram<cuda_executor_t>(settings, device);
+    failures_count += test::shapes::check_shapes_vram<cuda_executor_t>(settings, device);
+    failures_count += test::geospatial::check_geospatial_vram<cuda_executor_t>(settings, device);
     return failures_count;
 }
 

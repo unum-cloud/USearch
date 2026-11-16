@@ -125,8 +125,8 @@ constexpr nk_capability_t dense_oracle_capability() noexcept {
 template <nk_dtype_t dtype_, nk_capability_t caps_>
 concept dense_cell_compiled =
     caps_ == nk_cap_serial_k ||
-    std::bit_floor(caps_) == quads_ladder<typename nk::type_for<dtype_>::type, caps_>::picked_k ||
-    std::bit_floor(caps_) == tiles_ladder<typename nk::type_for<dtype_>::type, caps_>::picked_k;
+    std::bit_floor(caps_) == quads_ladder<typename nk::type_for<dtype_>::type, caps_>::kit_t::capability_k ||
+    std::bit_floor(caps_) == tiles_ladder<typename nk::type_for<dtype_>::type, caps_>::kit_t::capability_k;
 
 /** Gate: a cell runs once its serial kit finalizes the kernel and its requested ceiling picked a
  *  kit. */

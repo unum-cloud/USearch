@@ -4374,6 +4374,11 @@ inline void probe(int await_count, int picked_count) {
 }
 FIXTURE
 
+assert_accepts "the C++ twin of a C relation value" include/usearch/probe.hpp <<'FIXTURE'
+/** Whether @p relation is the C relation that keeps the entries a query is visible to. */
+inline bool probe(relation_t relation) { return relation == relation_t::seen_k; }
+FIXTURE
+
 assert_rejects "member named by a role word alone" "names a member by its type or a role word alone" include/usearch/probe.hpp <<'FIXTURE'
 struct probe_t {
     std::size_t state = 0;

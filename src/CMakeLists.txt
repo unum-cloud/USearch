@@ -664,9 +664,10 @@ endfunction ()
 # and links the dynamic loader its runtime opens through. A modality naming its `KERNELS`, the dtypes or metrics its
 # kernels specialize on, keeps the host variants in the class unit, `.cpp` on NVIDIA and `.hip` on AMD, and compiles
 # each from `<modality>/<residency>_kernels_<backend>_<kernel>` into a bundle of its own, once per class, dense taking
-# only its first `USEARCH_DENSE_DTYPES`; the others compile their one `.cu` class unit both ways. A CPU row naming its
-# `GATE` tells its dispatch unit `<modality>_index.cpp` which listed classes it compiled, as
-# `USEARCH_TARGET_<GATE>_<CLASS>`, 1 or 0, since an ancestor it compiles for a kept class may be no kept class itself.
+# only its first `USEARCH_DENSE_DTYPES`; the others compile their one class unit both ways, `.cu` on NVIDIA and `.hip`
+# on AMD, whose unit splits its passes on `__HIP_DEVICE_COMPILE__`. A CPU row naming its `GATE` tells its dispatch unit
+# `<modality>_index.cpp` which listed classes it compiled, as `USEARCH_TARGET_<GATE>_<CLASS>`, 1 or 0, since an ancestor
+# it compiles for a kept class may be no kept class itself.
 function (usearch_variants modality_ residency_ backend_)
     cmake_parse_arguments(PARSE_ARGV 3 arg "" "GATE" "DEFINITIONS;LIBRARIES;KERNELS")
     set(library_ usearch_${modality_}_${residency_}_variants)
@@ -725,8 +726,10 @@ function (usearch_variants modality_ residency_ backend_)
     else ()
         foreach (class_ IN LISTS classes_)
             set(target_ ${library_}_${class_})
-            if (NOT arg_KERNELS)
+            if (NOT arg_KERNELS AND backend_ STREQUAL "nvidia")
                 set(unit_extension_ cu)
+            elseif (NOT arg_KERNELS)
+                set(unit_extension_ hip)
             elseif (backend_ STREQUAL "nvidia")
                 set(unit_extension_ cpp)
                 set(extension_ cu)
@@ -897,6 +900,17 @@ else ()
     usearch_variants(geospatial vram nvidia ${usearch_nvidia_kept_})
     usearch_variants(basic vram nvidia ${usearch_nvidia_kept_})
 endif ()
+# On AMD every class bundles its own kernels over its own wavefront, 64 lanes on CDNA3 and CDNA4 and 32 on CDNA5, so
+# every kept class compiles every modality, multiversioned or not.
+usearch_variants(
+    sequence vram amd ${usearch_amd_classes_}
+    KERNELS levenshtein_bytes levenshtein_utf8 overlap needleman_wunsch
+    DEFINITIONS "STRINGZILLA_HEADER_ONLY=1"
+    LIBRARIES stringzilla::header
+)
+usearch_variants(shapes vram amd ${usearch_amd_classes_} KERNELS f16 f32)
+usearch_variants(geospatial vram amd ${usearch_amd_classes_})
+usearch_variants(basic vram amd ${usearch_amd_classes_})
 # On Apple GPUs the sequence and f16 shapes kits need nothing past the Apple7 floor, so both compile for it alone, and a
 # monoversioned build keeping a newer Apple class carries none; geospatial and f32 shapes have no Apple kernel meeting
 # their numerics contract. The units splice StringZilla's and NumKong's Metal sources, which those headers embed by their

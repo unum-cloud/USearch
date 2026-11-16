@@ -17,7 +17,6 @@
 #include <span> // `std::span` - a batch's offsets and a reshard's sources and targets
 
 #include <numkong/capabilities.h> // `nk_kernel_chamfers_packed_k` & kin - the metric a kit scores under
-#include <numkong/shapes.hpp>     // `nk::shapes_dtype` - the scalars a kit stores
 
 #include "usearch/utilities/types.hpp"
 #include "usearch/basic/vram_nvidia_index.hpp"
@@ -26,9 +25,9 @@ namespace unum::usearch::shapes {
 using namespace unum::usearch::utilities;
 
 /** The kit hooks a shapes graph on NVIDIA GPUs reads, and the fatbin @p kernels_type_ names once
- *  loaded: the Chamfer and Hausdorff kits @c shapes_ladder picks under @p capability_ for clouds of
- *  @p scalar_, over node IDs of @p node_id_type_. */
-template <nk::shapes_dtype scalar_, typename node_id_type_, nk_capability_t capability_, typename kernels_type_>
+ *  loaded: the Chamfer and Hausdorff kit @p kit_type_ over clouds of its @c scalar_t, and over node
+ *  IDs of @p node_id_type_. */
+template <typename kit_type_, typename node_id_type_, typename kernels_type_>
 struct vram_nvidia_kits {
 
     /** Rungs of the kits' kernels: one, serving every cloud. */
@@ -88,15 +87,15 @@ struct vram_nvidia_kits {
     byte_t const* parameters_() const noexcept { return nullptr; }
 };
 
-/** Similarity Search over 3D point clouds of @p scalar_ on NVIDIA GPUs, under Chamfer or Hausdorff
- *  as the kernel kind it is built with names, scored by the kit @c shapes_ladder picks under
- *  @p capability_: a block walks each query, a warp scoring each candidate. Node IDs are
- *  @p node_id_type_, and @p kernels_type_ names the fatbin. It owns a @c basic::vram_ragged_graph
- *  over its kits and forwards its verbs, types and constants, which that graph documents. */
-template <nk::shapes_dtype scalar_, typename node_id_type_, nk_capability_t capability_, typename kernels_type_>
+/** Similarity Search over 3D point clouds on NVIDIA GPUs, under Chamfer or Hausdorff as the kernel
+ *  kind it is built with names, scored by the kit @p kit_type_ over clouds of its @c scalar_t: a
+ *  block walks each query, a warp scoring each candidate. Node IDs are @p node_id_type_, and
+ *  @p kernels_type_ names the fatbin. It owns a @c basic::vram_ragged_graph over its kits and
+ *  forwards its verbs, types and constants, which that graph documents. */
+template <typename kit_type_, typename node_id_type_, typename kernels_type_>
 struct vram_nvidia_index {
     /* Components */
-    using kits_t = vram_nvidia_kits<scalar_, node_id_type_, capability_, kernels_type_>;
+    using kits_t = vram_nvidia_kits<kit_type_, node_id_type_, kernels_type_>;
     using graph_t = basic::vram_ragged_graph<node_id_type_, kits_t>;
     using traversal_context_t = typename graph_t::traversal_context_t;
 
