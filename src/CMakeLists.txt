@@ -283,20 +283,30 @@ function (usearch_gpu_bundle target_ vendor_ name_ source_)
         )
         # Clang's CUDA mode adds the toolkit's `include` alone, while CUDA 13 keeps `cuda/atomic` in CCCL's own.
         target_include_directories(${target_} SYSTEM PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
+        set(dependencies_ -MD -MF ${bundle_}.d)
+        set(dependencies_only_)
     else ()
         set(device_only_ "${CMAKE_CXX_COMPILER};-x;hip;--cuda-device-only;-c")
         set(optimization_ "$<$<CONFIG:Debug>:-O0>" "$<$<NOT:$<CONFIG:Debug>>:-O3>")
         set(host_only_ "-xhip;--cuda-host-only;-nogpulib")
+        # ROCm's Clang ignores `-MF` under `--cuda-device-only`, so a preprocessing pass writes the depfile first.
+        set(dependencies_)
+        set(dependencies_only_ COMMAND ${CMAKE_CXX_COMPILER} -x hip -M -MT ${bundle_} -MF ${bundle_}.d)
     endif ()
     set_source_files_properties(${source_} PROPERTIES LANGUAGE CXX COMPILE_OPTIONS "${host_only_}")
     if (arg_UNPARSED_ARGUMENTS)
+        set(includes_ "-I$<JOIN:$<TARGET_PROPERTY:${target_},INCLUDE_DIRECTORIES>,$<SEMICOLON>-I>")
+        set(definitions_ "-D$<JOIN:$<TARGET_PROPERTY:${target_},COMPILE_DEFINITIONS>,$<SEMICOLON>-D>")
+        if (dependencies_only_)
+            list(APPEND dependencies_only_ -std=c++20 ${arg_UNPARSED_ARGUMENTS} ${includes_} ${definitions_}
+                 ${device_source_}
+            )
+        endif ()
         add_custom_command(
             OUTPUT ${bundle_}
-            COMMAND
-                ${device_only_} -std=c++20 ${optimization_} ${arg_UNPARSED_ARGUMENTS}
-                "-I$<JOIN:$<TARGET_PROPERTY:${target_},INCLUDE_DIRECTORIES>,;-I>"
-                "-D$<JOIN:$<TARGET_PROPERTY:${target_},COMPILE_DEFINITIONS>,;-D>" ${device_flags_} -MD -MF ${bundle_}.d
-                ${device_source_} -o ${bundle_}
+            ${dependencies_only_}
+            COMMAND ${device_only_} -std=c++20 ${optimization_} ${arg_UNPARSED_ARGUMENTS} ${includes_} ${definitions_}
+                    ${device_flags_} ${dependencies_} ${device_source_} -o ${bundle_}
             DEPENDS ${device_source_}
             DEPFILE ${bundle_}.d
             COMMENT "Compiling the ${name_} kernels"
