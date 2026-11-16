@@ -7,10 +7,8 @@
 using System;
 using System.Buffers;
 using System.Runtime.CompilerServices;
-using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using System.Text;
-using System.Threading;
 using System.Threading.Tasks;
 
 using static Cloud.Unum.USearch.NativeMethods;
@@ -589,6 +587,112 @@ internal static class ScalarKinds
     }
 }
 
+/// <summary>A scalar kind named as a type, so a call picks the kind it writes by type parameter, as
+/// <c>index.Get&lt;F32&gt;(key, arena)</c> does.</summary>
+public interface IScalar
+{
+    /// <summary>The kind the type names.</summary>
+    static abstract Scalar Kind { get; }
+}
+
+/// <summary>Names <see cref="Scalar.F64"/>.</summary>
+public readonly struct F64 : IScalar
+{
+    /// <inheritdoc/>
+    public static Scalar Kind => Scalar.F64;
+}
+
+/// <summary>Names <see cref="Scalar.F32"/>.</summary>
+public readonly struct F32 : IScalar
+{
+    /// <inheritdoc/>
+    public static Scalar Kind => Scalar.F32;
+}
+
+/// <summary>Names <see cref="Scalar.BF16"/>.</summary>
+public readonly struct BF16 : IScalar
+{
+    /// <inheritdoc/>
+    public static Scalar Kind => Scalar.BF16;
+}
+
+/// <summary>Names <see cref="Scalar.F16"/>.</summary>
+public readonly struct F16 : IScalar
+{
+    /// <inheritdoc/>
+    public static Scalar Kind => Scalar.F16;
+}
+
+/// <summary>Names <see cref="Scalar.E5M2"/>.</summary>
+public readonly struct E5M2 : IScalar
+{
+    /// <inheritdoc/>
+    public static Scalar Kind => Scalar.E5M2;
+}
+
+/// <summary>Names <see cref="Scalar.E4M3"/>.</summary>
+public readonly struct E4M3 : IScalar
+{
+    /// <inheritdoc/>
+    public static Scalar Kind => Scalar.E4M3;
+}
+
+/// <summary>Names <see cref="Scalar.E3M2"/>.</summary>
+public readonly struct E3M2 : IScalar
+{
+    /// <inheritdoc/>
+    public static Scalar Kind => Scalar.E3M2;
+}
+
+/// <summary>Names <see cref="Scalar.E2M3"/>.</summary>
+public readonly struct E2M3 : IScalar
+{
+    /// <inheritdoc/>
+    public static Scalar Kind => Scalar.E2M3;
+}
+
+/// <summary>Names <see cref="Scalar.I8"/>.</summary>
+public readonly struct I8 : IScalar
+{
+    /// <inheritdoc/>
+    public static Scalar Kind => Scalar.I8;
+}
+
+/// <summary>Names <see cref="Scalar.I4x2"/>.</summary>
+public readonly struct I4x2 : IScalar
+{
+    /// <inheritdoc/>
+    public static Scalar Kind => Scalar.I4x2;
+}
+
+/// <summary>Names <see cref="Scalar.I32"/>.</summary>
+public readonly struct I32 : IScalar
+{
+    /// <inheritdoc/>
+    public static Scalar Kind => Scalar.I32;
+}
+
+/// <summary>Names <see cref="Scalar.U8"/>.</summary>
+public readonly struct U8 : IScalar
+{
+    /// <inheritdoc/>
+    public static Scalar Kind => Scalar.U8;
+}
+
+/// <summary>Names <see cref="Scalar.U4x2"/>.</summary>
+public readonly struct U4x2 : IScalar
+{
+    /// <inheritdoc/>
+    public static Scalar Kind => Scalar.U4x2;
+}
+
+/// <summary>Names <see cref="Scalar.U1x8"/>.</summary>
+public readonly struct U1x8 : IScalar
+{
+    /// <inheritdoc/>
+    public static Scalar Kind => Scalar.U1x8;
+}
+
 #endregion Scalars
 
 #region Rows
@@ -653,13 +757,14 @@ public readonly struct RowsView
     {
         int rowBytes = CheckedRowBytes<TScalar>(dimensions, scalar);
         long bytes = (long)data.Length * sizeof(TScalar);
-        if (bytes % rowBytes != 0)
+        if (rowBytes != 0 && bytes % rowBytes != 0)
         {
             throw new USearchException(
                 Status.ShapeMismatch, $"{bytes} bytes do not divide into rows of {rowBytes}");
         }
 
-        return new RowsView(new Slab<TScalar>(data), (int)(bytes / rowBytes), dimensions, rowBytes, scalar);
+        int rows = rowBytes == 0 ? 0 : (int)(bytes / rowBytes);
+        return new RowsView(new Slab<TScalar>(data), rows, dimensions, rowBytes, scalar);
     }
 
     /// <summary>
@@ -721,11 +826,6 @@ public readonly struct RowsView
 
     private static unsafe int CheckedRowBytes<TScalar>(int dimensions, Scalar scalar) where TScalar : unmanaged
     {
-        if (dimensions <= 0)
-        {
-            throw new USearchException(Status.ShapeMismatch, "a row cannot be zero dimensions wide");
-        }
-
         int valueBytes = scalar.ValueBytes();
         if (valueBytes != sizeof(TScalar))
         {
@@ -767,21 +867,15 @@ public readonly struct RowsView
 /// <see cref="Columns"/> keys, each paired with its distance. Mirrors <c>usearch_matches_view_t</c>.
 /// </summary>
 /// <remarks>
-/// A view by value over the arena, readable until that arena's next call or disposal, after which
-/// every accessor refuses with <see cref="Status.Uninitialized"/>; over device memory they refuse
-/// with <see cref="Status.Device"/>. A span an accessor lends escapes that check, so it is read before
-/// the arena's next call.
+/// A view by value over the arena, readable until that arena's next call or disposal; over device
+/// memory, which <see cref="Arena.Describe"/> reports, it is for device code alone.
 /// </remarks>
 public readonly unsafe struct Matches
 {
-    private readonly Arena _arena;
     private readonly NativeMatchesView _view;
-    private readonly int _generation;
 
-    internal Matches(Arena arena, int generation, NativeMatchesView view, int queries)
+    internal Matches(NativeMatchesView view, int queries)
     {
-        this._arena = arena;
-        this._generation = generation;
         this._view = view;
         this.Queries = queries;
     }
@@ -805,9 +899,7 @@ public readonly unsafe struct Matches
             }
 
             nuint first = (nuint)query * this._view.Columns;
-            return new QueryMatches(
-                this._arena, this._generation, this._view.Keys + first, this._view.Scores + first,
-                this._view.Counts + query);
+            return new QueryMatches(this._view.Keys + first, this._view.Scores + first, this._view.Counts + query);
         }
     }
 }
@@ -816,30 +908,19 @@ public readonly unsafe struct Matches
 /// <see cref="DenseSearchStream"/>, read in place from the arena.</summary>
 public readonly unsafe struct QueryMatches
 {
-    private readonly Arena _arena;
-    private readonly int _generation;
     private readonly Key* _keys;
     private readonly double* _distances;
     private readonly nuint* _count;
 
-    internal QueryMatches(Arena arena, int generation, Key* keys, double* distances, nuint* count)
+    internal QueryMatches(Key* keys, double* distances, nuint* count)
     {
-        this._arena = arena;
-        this._generation = generation;
         this._keys = keys;
         this._distances = distances;
         this._count = count;
     }
 
     /// <summary>How many matches the call wrote for the query.</summary>
-    public int Count
-    {
-        get
-        {
-            Arena.Readable(this._arena, this._generation);
-            return (int)*this._count;
-        }
-    }
+    public int Count => (int)*this._count;
 
     /// <summary>The keys the query matched, nearest first.</summary>
     public ReadOnlySpan<Key> Keys => new(this._keys, this.Count);
@@ -850,7 +931,7 @@ public readonly unsafe struct QueryMatches
 
 #endregion Results
 
-#region Filtering
+#region Callbacks
 
 /// <summary>Whether a filtered search admits one candidate key or passes over it, as the C
 /// predicate answers.</summary>
@@ -871,7 +952,85 @@ internal enum PredicateCost : int
     Expensive = 1,
 }
 
-#endregion Filtering
+/// <summary>Whether a watched call carries on or unwinds, as a progress handler answers.</summary>
+internal enum Continuation : int
+{
+    /// <summary>Carry on to the next unit of work.</summary>
+    Continue = 0,
+    /// <summary>Stop and report <see cref="Status.Cancelled"/>.</summary>
+    Cancel = 1,
+}
+
+/// <summary>
+/// Hears a long call's advance in whatever units it consumes, and may stop it: answering false
+/// cancels the call with <see cref="Status.Cancelled"/>.
+/// </summary>
+/// <remarks>
+/// It is never called concurrently and never after the call is final, so it needs no synchronization
+/// of its own. It runs on the engine's threads and must not throw: an exception escaping it
+/// terminates the process.
+/// </remarks>
+/// <param name="completed">Units finished so far, never decreasing across one call's reports.</param>
+/// <param name="total">Units the call finishes unless cancelled.</param>
+/// <returns>True to carry on, false to cancel.</returns>
+public delegate bool Progress(ulong completed, ulong total);
+
+/// <summary>
+/// The handle a native callback's state names, so its trampoline reaches the handler itself; one
+/// call holds it until final.
+/// </summary>
+internal unsafe struct Registration
+{
+    private GCHandle _handle;
+
+    /// <summary>Holds the handler for the call, answering the state its trampoline reads.</summary>
+    /// <param name="handler">The managed handler.</param>
+    /// <returns>The opaque state pointer.</returns>
+    internal IntPtr Lend(object handler)
+    {
+        this._handle = GCHandle.Alloc(handler);
+        return GCHandle.ToIntPtr(this._handle);
+    }
+
+    /// <summary>Lowers a progress handler; null skips every report.</summary>
+    /// <param name="progress">The handler, if any.</param>
+    /// <returns>The C struct the call names.</returns>
+    internal NativeProgress Progress(Progress? progress) => progress is null
+        ? default
+        : new NativeProgress { Callback = &Proceed, State = this.Lend(progress) };
+
+    /// <summary>Lowers an admission predicate; null admits every key.</summary>
+    /// <param name="predicate">The handler, if any.</param>
+    /// <returns>The C struct the call names.</returns>
+    internal NativePredicate Predicate(Func<Key, bool>? predicate) => predicate is null
+        ? default
+        : new NativePredicate { Callback = &Admit, State = this.Lend(predicate) };
+
+    /// <summary>Lets the handler go once the call is final; a second free does nothing.</summary>
+    internal void Free()
+    {
+        if (this._handle.IsAllocated)
+        {
+            this._handle.Free();
+        }
+    }
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    private static Continuation Proceed(nuint completed, nuint total, IntPtr state) =>
+        ((Progress)GCHandle.FromIntPtr(state).Target!)(completed, total) ? Continuation.Continue : Continuation.Cancel;
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    private static void Admit(Key* keys, Admission* admissions, nuint count, IntPtr state)
+    {
+        Func<Key, bool> admits = (Func<Key, bool>)GCHandle.FromIntPtr(state).Target!;
+        for (nuint position = 0; position != count; ++position)
+        {
+            admissions[position] = admits(keys[position]) ? Admission.Admit : Admission.Reject;
+        }
+    }
+}
+
+#endregion Callbacks
 
 #region Executors
 
@@ -1149,12 +1308,6 @@ public sealed unsafe class Executor : IDisposable
         ulong scratchLimit = 0,
         GPUClass? gpuClass = null)
     {
-        // The library reads one stream per device from the pointer alone, so only this side sees a short list.
-        if (!streams.IsEmpty && streams.Length != devices.Length)
-        {
-            throw new USearchException(Status.ShapeMismatch, "the borrowed streams do not pair one per device");
-        }
-
         IntPtr spawned = IntPtr.Zero;
         NativeOutcome outcome = default;
         fixed (int* ordinals = devices)
@@ -1212,11 +1365,11 @@ public sealed unsafe class Executor : IDisposable
 /// <remarks>
 /// The executor it is made for places it where it computes, host pages or its GPU's memory, decided
 /// once, and nothing is allocated until a call writes into it. Every call given it rewinds it, so
-/// the views the previous call answered refuse with <see cref="Status.Uninitialized"/> from then on,
-/// as they do once it is disposed. An arena serves one call at a time: a blocking call borrows it
-/// until it returns, a deferred one until final, and a second call naming it meanwhile finishes
-/// with <see cref="Status.Contended"/>. A <see cref="Residency.Vram"/> arena holds device
-/// memory, which no view lends to the host, so their accessors refuse with <see cref="Status.Device"/>.
+/// the views the previous call answered end there, as they do once it is disposed. An arena serves
+/// one call at a time: a blocking call borrows it until it returns, a deferred one until final, and
+/// a second call naming it meanwhile finishes with <see cref="Status.Contended"/>. A
+/// <see cref="Residency.Vram"/> arena holds device memory, as <see cref="Describe"/> reports, which
+/// its views lend to device code alone.
 /// It grows, fills and frees on its executor's first stream, so it serves only calls on that executor
 /// and holds it open until disposed, which defers freeing an executor disposed first; a host arena
 /// may outlive its executor.
@@ -1224,7 +1377,6 @@ public sealed unsafe class Executor : IDisposable
 public sealed unsafe class Arena : IDisposable
 {
     private readonly NativeArenaHandle _handle;
-    private int _generation;
 
     /// <summary>Makes an empty arena where <paramref name="executor"/> computes. Calls
     /// <c>usearch_arena_init</c>.</summary>
@@ -1263,37 +1415,9 @@ public sealed unsafe class Arena : IDisposable
     public void Dispose() => this._handle.Dispose();
 
     /// <summary>Leases the arena for the length of one C call, as every handle is leased.</summary>
-    /// <param name="arena">The arena the caller lent; a null one is refused.</param>
+    /// <param name="arena">The arena the caller lent; null lends none.</param>
     /// <returns>The lease, whose pointer the call names.</returns>
-    internal static Lease Lend(Arena? arena) => arena is null
-        ? throw new USearchException(Status.InvalidArgument, "the arena must not be null")
-        : Lease.Of(arena._handle, "arena");
-
-    /// <summary>Retires the views of every earlier call, unless this one was refused for naming a busy
-    /// arena, which leaves the arena as the busy call has it.</summary>
-    /// <param name="arena">The arena the call named.</param>
-    /// <param name="outcome">The outcome the C verb wrote on return.</param>
-    /// <returns>The generation the call's views belong to.</returns>
-    internal static int Rewound(Arena arena, NativeOutcome* outcome) =>
-        usearch_outcome_status(outcome) == Status.Contended
-            ? Volatile.Read(ref arena._generation)
-            : Interlocked.Increment(ref arena._generation);
-
-    /// <summary>Refuses a view the arena has since rewound or freed, or one over device memory.</summary>
-    /// <param name="arena">The arena the view reads; null for a default view.</param>
-    /// <param name="generation">The generation the view recorded.</param>
-    internal static void Readable(Arena? arena, int generation)
-    {
-        if (arena is null || arena._handle.IsClosed || Volatile.Read(ref arena._generation) != generation)
-        {
-            throw new USearchException(Status.Uninitialized, "the arena was rewound or freed since this view");
-        }
-
-        if (arena.Describe().Residency == Residency.Vram)
-        {
-            throw new USearchException(Status.Device, "the view is device memory");
-        }
-    }
+    internal static Lease Lend(Arena? arena) => Lease.Of(arena?._handle, "arena");
 }
 
 /// <summary>Where an arena's outputs live, as <see cref="Arena.Describe"/> reports it. Mirrors
@@ -1317,7 +1441,12 @@ public readonly record struct ArenaDescription(Residency Residency, int? Device)
 /// raises its failure, and <c>await</c> runs that wait on the thread pool. Disposing one nobody waited
 /// for waits for it, then discards what it produced and lets its arena serve the next call.
 /// <para>
-/// Every wait after the first answers the same result or raises the same failure, and
+/// A deferred call has one owner at a time: its polls, waits and disposal never overlap, and handing
+/// it to another thread hands that thread the whole of it.
+/// </para>
+/// <para>
+/// Every wait reads the result again from the outputs the call wrote, so a later one answers the
+/// same result or raises a failure of the same status, and
 /// <see cref="Status"/> keeps reading the final status. One left unfinished and unreachable is
 /// released by the first collection that finds it final, rather than freeing memory the library
 /// still reads and writes.
@@ -1329,7 +1458,6 @@ public class Deferred : IDisposable
     private readonly CallOutputs[] _outputs;
 
     private bool _settled;
-    private ExceptionDispatchInfo? _failure;
 
     internal Deferred(ICall call, CallOutputs[] outputs)
     {
@@ -1345,10 +1473,10 @@ public class Deferred : IDisposable
     public unsafe Status Status => usearch_outcome_status(&this.Pinned->Outcome);
 
     /// <summary>Blocks until the call is final, then raises its failure. Calls <c>usearch_outcome_wait</c>.</summary>
-    public void Wait()
+    public unsafe void Wait()
     {
         this.Settle();
-        this._failure?.Throw();
+        this._call.Finish(this.Pinned);
     }
 
     /// <summary>Waits on the thread pool, so <c>await</c> suspends the caller rather than blocking it.
@@ -1384,37 +1512,19 @@ public class Deferred : IDisposable
         this._call.Release(this.Pinned);
     }
 
-    /// <summary>Waits until the call is final, then releases what it holds and keeps what it built or
-    /// raised, the first time only.</summary>
-    /// <returns>True for the one settle that did so.</returns>
-    private protected unsafe bool Settle()
+    /// <summary>Waits until the call is final, then releases what it holds, the first time only.</summary>
+    private unsafe void Settle()
     {
-        lock (this._outputs)
+        if (this._settled)
         {
-            if (this._settled)
-            {
-                return false;
-            }
-
-            CallOutputs* outputs = this.Pinned;
-            usearch_outcome_wait(&outputs->Outcome);
-            this._call.Release(outputs);
-            GC.SuppressFinalize(this);
-            try
-            {
-                this._call.Finish(outputs);
-            }
-            // Every exception is caught on purpose, so each later wait raises the same one.
-#pragma warning disable CA1031
-            catch (Exception failure)
-#pragma warning restore CA1031
-            {
-                this._failure = ExceptionDispatchInfo.Capture(failure);
-            }
-
-            this._settled = true;
-            return true;
+            return;
         }
+
+        CallOutputs* outputs = this.Pinned;
+        usearch_outcome_wait(&outputs->Outcome);
+        this._call.Release(outputs);
+        GC.SuppressFinalize(this);
+        this._settled = true;
     }
 
     private unsafe CallOutputs* Pinned =>
@@ -1466,7 +1576,7 @@ internal unsafe struct CallOutputs
     public nuint Written;
     public nuint Required;
     public fixed ulong View[4];
-    public fixed ulong Report[12];
+    public fixed ulong Report[33];
 }
 
 /// <summary>
@@ -1480,7 +1590,7 @@ internal unsafe interface ICall
     /// Throws only before the C verb is called.</summary>
     void Submit(CallOutputs* outputs, Completion completion);
 
-    /// <summary>Settles what the call handed over - donors it consumed - then unpins what it lent, once
+    /// <summary>Settles what the call handed over, then unpins what it lent, once
     /// the call is final.</summary>
     void Release(CallOutputs* outputs);
 
@@ -1602,19 +1712,6 @@ public static class USearchCapabilities
 /// <summary>The UTF-8 runs every path argument crosses as.</summary>
 internal static unsafe class Paths
 {
-    /// <summary>Encodes one path, refusing an empty one.</summary>
-    /// <param name="path">The path to encode.</param>
-    /// <returns>Its UTF-8 bytes, never null-terminated.</returns>
-    internal static byte[] Encode(string path)
-    {
-        if (string.IsNullOrEmpty(path))
-        {
-            throw new USearchException(Status.InvalidArgument, "the path is empty");
-        }
-
-        return Encoding.UTF8.GetBytes(path);
-    }
-
     /// <summary>Encodes a list of paths into one native block: the views, then the bytes they name.</summary>
     /// <param name="paths">The paths to encode.</param>
     /// <returns>The views, which the caller frees with <see cref="NativeMemory.Free"/>.</returns>
@@ -1774,10 +1871,10 @@ internal struct NativeNvmeOptions
 
 /// <summary>How a long call reports its advance, laid out as <c>usearch_progress_t</c>.</summary>
 [StructLayout(LayoutKind.Sequential)]
-internal struct NativeProgress
+internal unsafe struct NativeProgress
 {
     /// <summary>The optional handler; null skips every report.</summary>
-    public IntPtr Callback;
+    public delegate* unmanaged[Cdecl]<nuint, nuint, IntPtr, Continuation> Callback;
     /// <summary>Opaque pointer forwarded into every handler call.</summary>
     public IntPtr State;
     /// <summary>Reports a call makes at most, the last at completion; zero derives to ten.</summary>

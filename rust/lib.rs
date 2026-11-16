@@ -33,16 +33,16 @@ mod types;
 
 // The C mirror items are public within their modules, so only these names leave the crate.
 pub use dense_index::{
-    DenseAbsorbConfig, DenseAttendConfig, DenseBatch, DenseCursor, DenseIndex, DenseIndexDescription,
-    DenseInsertConfig, DenseLoadRamBufferConfig, DenseLoadRamConfig, DenseLoadVramBufferConfig, DenseLoadVramConfig,
-    DenseMaxsimConfig, DenseMetadata, DenseMetric, DenseMultiplyConfig, DenseOptions, DenseProducts, DenseReachability,
-    DenseRefineConfig, DenseSampleConfig, DenseSaveBufferConfig, DenseSaveConfig, DenseSearchConfig, DenseSearchStream,
-    DenseSearchStreamInitConfig, DenseSoftmaxState, DenseSplitConfig, DenseTraversalStats, DenseVectors, DenseVerbs,
-    DenseViewNvmeConfig, Monolith, RefineReport, Sample, ValueLookup,
+    DenseAttendConfig, DenseBatch, DenseCursor, DenseIndex, DenseIndexDescription, DenseInsertConfig,
+    DenseLoadRamBufferConfig, DenseLoadRamConfig, DenseLoadVramBufferConfig, DenseLoadVramConfig, DenseMaxsimConfig,
+    DenseMetadata, DenseMetric, DenseMultiplyConfig, DenseOptions, DenseProducts, DenseReachability, DenseRefineConfig,
+    DenseRefinePlan, DenseReshardConfig, DenseReshardPlan, DenseSampleConfig, DenseSaveBufferConfig, DenseSaveConfig,
+    DenseSearchConfig, DenseSearchStream, DenseSearchStreamInitConfig, DenseSoftmaxState, DenseTraversalStats,
+    DenseVectors, DenseVerbs, DenseViewNvmeConfig, Monolith, RefineReport, RefineVerdict, Sample, ValueLookup,
 };
 pub use types::{
     capabilities_available, capabilities_compiled, keys_from_arrow, rows, version, Arena, ArenaDescription, ArrowArray,
     ArrowColumn, ArrowDeviceArray, ArrowExport, ArrowRows, ArrowSchema, Blocking, CPUClass, Deferred, Deferring,
-    Distance, Element, Error, Executor, GPUClass, Key, Matches, Mood, On, Predicate, ProgressCallback, QueryMatches,
-    Residency, Result, Scalar, Status, Traversal, Wait,
+    Distance, Element, Error, Executor, GPUClass, Key, Matches, Mood, On, Phase, PhaseProgress, Predicate,
+    ProgressCallback, QueryMatches, Residency, Result, Scalar, Status, Traversal, Wait,
 };

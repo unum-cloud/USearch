@@ -28,6 +28,7 @@ const Matches = types.Matches;
 const QueryMatches = types.QueryMatches;
 const Outcome = types.Outcome;
 const Predicate = types.Predicate;
+const PhaseProgress = types.PhaseProgress;
 const PredicateFunction = types.PredicateFunction;
 const ProgressCallback = types.ProgressCallback;
 const ProgressFunction = types.ProgressFunction;
@@ -36,7 +37,6 @@ const Scalar = types.Scalar;
 const Status = types.Status;
 const Traversal = types.Traversal;
 const outputSlice = types.outputSlice;
-const refuse = types.refuse;
 const refuseInto = types.refuseInto;
 const usearch_keys_view_t = types.abi.keys_view_t;
 const usearch_matches_tape_view_t = types.abi.matches_tape_view_t;
@@ -95,6 +95,8 @@ extern fn usearch_outcome_wait(outcome: *Outcome) Status;
 extern fn usearch_outcome_status(outcome: *Outcome) Status;
 extern fn usearch_dense_metric_name(metric: DenseMetric) [*:0]const u8;
 extern fn usearch_dense_metric_from_name(name: BytesView) DenseMetric;
+extern fn usearch_refine_verdict_name(verdict: DenseRefineVerdict) [*:0]const u8;
+extern fn usearch_refine_verdict_from_name(name: BytesView, verdict: *DenseRefineVerdict) Status;
 
 /// The dense metric kinds shipped out of the box, all derived from one inner-product kernel with
 /// pre-computed magnitudes. The bit-level pair reads its rows as `Scalar.u1x8` and refuses any
@@ -166,21 +168,38 @@ pub const DenseMetadata = extern struct {
 /// A live index's state, reported by `DenseIndex.describe`. Each counter is read once, so under
 /// concurrent insertions they may come from slightly different moments.
 /// Mirrors `usearch_dense_index_description_t`.
-pub const DenseIndexDescription = struct {
+pub const DenseIndexDescription = extern struct {
     /// The frozen metric, quantization, dimensions and connectivity.
-    metadata: DenseMetadata,
+    metadata: DenseMetadata = .{},
     /// Stored entries.
-    size: usize,
+    size: usize = 0,
     /// Entries hosted without growing again.
-    capacity: usize,
+    capacity: usize = 0,
     /// Bytes the handle holds; traversal scratch is the executor's.
-    memory_usage: usize,
-    /// The CPU class dispatch picked on this machine, as `usearch_cpu_class_name` spells it.
-    cpu_class: [:0]const u8,
-    /// The GPU class dispatch picked on the index's devices; "unknown" for a host index.
-    gpu_class: [:0]const u8,
+    memory_usage: usize = 0,
+    /// The CPU class dispatch picked on this machine.
+    cpu_class: types.abi.cpu_class_t = 0,
+    /// The GPU class dispatch picked on the index's devices; zero for a host index.
+    gpu_class: types.abi.gpu_class_t = 0,
     /// Live shards.
-    shards_count: usize,
+    shards_count: usize = 0,
+    /// How the last load from a path read the parts.
+    load_path: types.abi.load_path_t = 0,
+
+    /// The CPU class's spelling. Calls `usearch_cpu_class_name`.
+    pub fn cpuClassName(self: DenseIndexDescription) [:0]const u8 {
+        return std.mem.span(types.abi.cpu_class_name(self.cpu_class));
+    }
+
+    /// The GPU class's spelling, "unknown" for a host index. Calls `usearch_gpu_class_name`.
+    pub fn gpuClassName(self: DenseIndexDescription) [:0]const u8 {
+        return std.mem.span(types.abi.gpu_class_name(self.gpu_class));
+    }
+
+    /// The load path's spelling: "none", "host-copy" or "cufile". Calls `usearch_load_path_name`.
+    pub fn loadPathName(self: DenseIndexDescription) [:0]const u8 {
+        return std.mem.span(types.abi.load_path_name(self.load_path));
+    }
 };
 
 /// Traversal telemetry, fully overwritten by the call it is passed to.
@@ -201,25 +220,92 @@ pub const DenseTraversalStats = extern struct {
 pub const DenseReachability = extern struct {
     /// Entries published when the audit started; compare `reachable` against this, never a later size.
     audited: usize = 0,
-    /// Of those, the entries a search reaches from the landmarks; the rest wait for a `refine`.
+    /// Of those, the entries a search reaches from the root; the rest wait for a `refine`.
     reachable: usize = 0,
-    /// Levels the sweep took to converge.
-    sweeps: usize = 0,
-    /// Levels the sweep back toward the entry point took, where an audit sweeps both ways.
-    back_sweeps: usize = 0,
+    /// Depths the walk from the root took to converge; the deepest shard's on a sharded handle.
+    depth_from_root: usize = 0,
+    /// Depths the walk back toward the root took, where a health check walks both ways; the deepest
+    /// shard's on a sharded handle.
+    depth_to_root: usize = 0,
+    /// Entries no reached entry links to.
+    unlinked: usize = 0,
+    /// Entries linked to by fewer entries than they link to.
+    underlinked: usize = 0,
+    /// Entries deeper than the depth holding the most entries.
+    beyond_most_populated_depth: usize = 0,
+    /// Islands no entry outside them links into.
+    unreached_islands: usize = 0,
+    /// Islands with no link out.
+    stranded_islands: usize = 0,
+    /// Components when direction is ignored.
+    components: usize = 0,
 };
 
-/// What one `refine`, `absorb` or `split` did to the graph. Mirrors `usearch_refine_report_t`.
+/// What a round concluded, so no caller picks a change rate. Mirrors `usearch_refine_verdict_t`.
+///
+/// Non-exhaustive, so a verdict a newer engine reports arrives intact rather than coerced.
+pub const DenseRefineVerdict = enum(c_int) {
+    /// No round concluded: a report no round filled yet.
+    none = 0,
+    /// The round changed some entry's link set, so another round can help.
+    improved = 1,
+    /// The round changed no entry's link set.
+    converged = 2,
+    /// The round lowered nothing while something stands, as full entries leave no slot.
+    stalled = 3,
+    /// The caller stopped the round; the phase names where.
+    stopped = 4,
+    _,
+
+    /// The canonical spelling, as `.converged` spells "converged".
+    /// Calls `usearch_refine_verdict_name`.
+    pub fn name(self: DenseRefineVerdict) [:0]const u8 {
+        return std.mem.span(usearch_refine_verdict_name(self));
+    }
+
+    /// Reads a spelling back, or null when no verdict spells it.
+    /// Calls `usearch_refine_verdict_from_name`.
+    pub fn fromName(text: []const u8) ?DenseRefineVerdict {
+        var verdict: DenseRefineVerdict = undefined;
+        return if (usearch_refine_verdict_from_name(.of(text), &verdict) == .success) verdict else null;
+    }
+};
+
+/// A refine a cancel left live, which the next `refine` naming it continues and
+/// `refinePlanFinish` closes. Mirrors `usearch_dense_refine_plan_t`; the default holds none.
+pub const DenseRefinePlan = extern struct {
+    handle: ?*anyopaque = null,
+};
+
+/// A reshard a cancel left live, which the next `reshard` naming it continues and
+/// `reshardPlanFinish` closes. Mirrors `usearch_dense_reshard_plan_t`; the default holds none.
+pub const DenseReshardPlan = extern struct {
+    handle: ?*anyopaque = null,
+};
+
+/// What one `refine` or `reshard` did to the graph. Mirrors `usearch_refine_report_t`.
 pub const DenseRefineReport = extern struct {
     /// Entries whose neighbors were selected again, the islands of every heal round included.
     reselected: usize = 0,
-    /// Of those, the entries whose neighbor set gained a member it lacked.
+    /// Of those, the entries whose neighbor set changed; never above `reselected`.
     changed: usize = 0,
-    /// Entries the first audit found not reached both ways.
+    /// Entries the first audit found not reached both ways, counted once.
     islands_found: usize = 0,
     /// Links written between an island and an entry the audit reached both ways.
     islands_reconnected: usize = 0,
-    /// The audit closing the heal, as a fresh `health` right after would take it.
+    /// Neighborhoods the round re-stitched.
+    neighborhoods: usize = 0,
+    /// Entries of the widest neighborhood.
+    widest_neighborhood: usize = 0,
+    /// Links the round added.
+    added_links: usize = 0,
+    /// Links the round dropped.
+    dropped_links: usize = 0,
+    /// What the round concluded.
+    verdict: DenseRefineVerdict = .none,
+    /// The health check opening the round.
+    opening: DenseReachability = .{},
+    /// The health check closing the heal, as a fresh `health` right after would take it.
     reachability: DenseReachability = .{},
 };
 
@@ -299,12 +385,15 @@ pub const DenseLoadVramBufferConfig = struct {
     diagnostics: ?*Outcome = null,
 };
 
-/// Optional settings of `DenseIndex.viewNvme`.
+/// Optional settings of `DenseIndex.viewNvme` and `DenseIndex.loadNvme`.
 pub const DenseViewNvmeConfig = struct {
     /// The NVMe executor whose rings read the checkpoint's headers; null reads synchronously.
     executor: ?Executor = null,
     /// The devices the parts are served from; empty serves each where its manifest points.
     paths: []const BytesView = &.{},
+    /// Memory domains of a key table held in RAM, which `count`, `get`, `sample`, MaxSim and hinted
+    /// searches read; empty derives them, and null holds none.
+    key_table_domains: ?[]const i32 = null,
     /// Where the call's final outcome, its static message included, is copied; null copies nothing.
     diagnostics: ?*Outcome = null,
 };
@@ -340,11 +429,20 @@ pub const DenseInsertConfig = struct {
 pub const DenseRefineConfig = struct {
     /// The breadth of the candidates the re-selection walk explores; zero derives.
     expansion_factor: usize = 0,
-    /// Called with nodes swept; a stop is a time budget rather than a failure.
+    /// Bytes a loaded NVMe handle holds for the one part it rewrites; zero derives what rounds the
+    /// part in RAM, and RAM and VRAM handles never read it.
+    memory_limit: usize = 0,
+    /// Called at every barrier of every phase with that phase's units; a stop answers
+    /// `Error.Cancelled`.
     progress: ProgressCallback = .{},
     /// Reports the call makes at most, the last at completion; zero derives to ten.
     progress_steps: usize = 0,
     stats: ?*DenseTraversalStats = null,
+    /// Null runs one round to its end; an empty plan opens one a cancel leaves live, and a live
+    /// one continues.
+    plan: ?*DenseRefinePlan = null,
+    /// Where the call stopped, `.done` once its round ended; null skips it.
+    phase: ?*PhaseProgress = null,
 };
 
 /// Optional settings of `DenseIndex.search`.
@@ -362,25 +460,34 @@ pub const DenseSearchConfig = struct {
     stats: ?*DenseTraversalStats = null,
 };
 
-/// Optional settings of `DenseIndex.absorb`.
-pub const DenseAbsorbConfig = struct {
-    /// Called with donors absorbed; a stop between donors keeps those already absorbed.
-    progress: ProgressCallback = .{},
-    /// Reports the call makes at most, the last at completion; zero derives to ten.
-    progress_steps: usize = 0,
-};
-
-/// Optional settings of `DenseIndex.split`.
-pub const DenseSplitConfig = struct {
-    /// Picks the part roots: equal seeds over an unchanged index split equally.
-    seed: u64 = 0,
-    /// The breadth of the candidates of the closing refines' walks; zero derives.
+/// Optional placements and settings of `DenseIndex.reshard`; a null placement keeps the
+/// handle's own.
+pub const DenseReshardConfig = struct {
+    /// NUMA node IDs of a RAM placement recut in place.
+    memory_domains: ?[]const i32 = null,
+    /// CUDA ordinals of a VRAM placement recut in place.
+    devices: ?[]const i32 = null,
+    /// Drives of an NVMe placement recut in place.
+    paths: ?[]const BytesView = null,
+    /// Entries per shard of the RAM or VRAM placement; zero keeps the handle's own bound.
+    shard_capacity: usize = 0,
+    /// The breadth of the candidates of the closing rounds; zero derives.
     expansion_factor: usize = 0,
-    /// Called with nodes the closing refines re-selected; a stop never undoes a move.
+    /// Bytes a loaded NVMe target holds for the one part it rewrites; zero derives what rounds the
+    /// part in RAM, and RAM and VRAM targets never read it.
+    memory_limit: usize = 0,
+    /// Picks the part roots of a source split among several targets: equal seeds split equally.
+    seed: u64 = 0,
+    /// Called at every barrier of the closing rounds' phases; a stop never undoes a move.
     progress: ProgressCallback = .{},
     /// Reports the call makes at most, the last at completion; zero derives to ten.
     progress_steps: usize = 0,
     stats: ?*DenseTraversalStats = null,
+    /// Null moves and runs to the end; an empty plan opens one a cancel leaves live, and a live
+    /// one continues.
+    plan: ?*DenseReshardPlan = null,
+    /// Where the call stopped, `.done` once its rounds ended; null skips it.
+    phase: ?*PhaseProgress = null,
 };
 
 /// Optional settings of `DenseIndex.sample`.
@@ -420,8 +527,6 @@ pub const DenseAttendConfig = struct {
     head_count: usize = 0,
     /// The softmax state, one per query row, lent rather than written in the arena; null skips it.
     carry: ?[]DenseSoftmaxState = null,
-    /// The scalar type the attended rows land as; `.unknown` takes the queries' own.
-    outputs_scalar: Scalar = .unknown,
     /// The breadth of the candidates; zero derives. Wider candidates walk further, folding more of the tail.
     expansion_factor: usize = 0,
     /// The logit scale, conventionally the inverse square root of the head dimensionality; zero
@@ -551,6 +656,16 @@ const usearch_dense_view_nvme_t = extern struct {
     ram: ?*const usearch_ram_options_t = null,
 };
 
+const usearch_dense_load_nvme_t = extern struct {
+    index: *?*anyopaque,
+    executor: ?*anyopaque,
+    outcome: *Outcome,
+    completion: Completion,
+    path: BytesView,
+    nvme: usearch_nvme_options_t,
+    ram: ?*const usearch_ram_options_t = null,
+};
+
 const usearch_dense_reserve_t = extern struct {
     index: ?*anyopaque,
     executor: ?*anyopaque,
@@ -593,6 +708,17 @@ const usearch_dense_refine_t = extern struct {
     refine: usearch_refine_options_t,
     progress: usearch_progress_t,
     stats: ?*DenseTraversalStats,
+    plan: ?*?*anyopaque,
+    phase: ?*PhaseProgress,
+};
+
+const usearch_dense_refine_plan_finish_t = extern struct {
+    index: ?*anyopaque,
+    executor: ?*anyopaque,
+    outcome: *Outcome,
+    completion: Completion,
+    plan: ?*anyopaque,
+    report: ?*DenseRefineReport,
 };
 
 const usearch_dense_health_t = extern struct {
@@ -642,31 +768,32 @@ const usearch_dense_get_t = extern struct {
     outputs_scalar: Scalar,
 };
 
-const usearch_dense_absorb_t = extern struct {
-    index: ?*anyopaque,
+const usearch_dense_reshard_t = extern struct {
+    sources_count: usize,
+    sources: [*]const ?*anyopaque,
+    targets_count: usize,
+    targets: [*]const ?*anyopaque,
     executor: ?*anyopaque,
     outcome: *Outcome,
     completion: Completion,
-    count: usize,
-    donors: [*]?*anyopaque,
-    report: ?*DenseRefineReport,
-    refine: usearch_refine_options_t,
-    progress: usearch_progress_t,
-    stats: ?*DenseTraversalStats,
-};
-
-const usearch_dense_split_t = extern struct {
-    index: ?*anyopaque,
-    executor: ?*anyopaque,
-    outcome: *Outcome,
-    completion: Completion,
-    count: usize,
-    receivers: [*]const ?*anyopaque,
+    ram: ?*const usearch_ram_options_t,
+    vram: ?*const usearch_vram_options_t,
+    nvme: ?*const usearch_nvme_options_t,
     report: ?*DenseRefineReport,
     refine: usearch_refine_options_t,
     seed: u64,
     progress: usearch_progress_t,
     stats: ?*DenseTraversalStats,
+    plan: ?*?*anyopaque,
+    phase: ?*PhaseProgress,
+};
+
+const usearch_dense_reshard_plan_finish_t = extern struct {
+    executor: ?*anyopaque,
+    outcome: *Outcome,
+    completion: Completion,
+    plan: ?*anyopaque,
+    report: ?*DenseRefineReport,
 };
 
 const usearch_dense_sample_t = extern struct {
@@ -767,23 +894,12 @@ const usearch_dense_metadata_read_buffer_t = extern struct {
     metadata: *DenseMetadata,
 };
 
-const usearch_dense_index_description_t = extern struct {
-    metadata: DenseMetadata = .{},
-    size: usize = 0,
-    capacity: usize = 0,
-    memory_usage: usize = 0,
-    cpu_class: types.abi.cpu_class_t = 0,
-    gpu_class: types.abi.gpu_class_t = 0,
-    shards_count: usize = 0,
-    load_path: c_int = 0,
-};
-
 const usearch_dense_describe_t = extern struct {
     index: ?*anyopaque,
     executor: ?*anyopaque,
     outcome: *Outcome,
     completion: Completion,
-    description: *usearch_dense_index_description_t,
+    description: *DenseIndexDescription,
 };
 
 const usearch_dense_multiply_t = extern struct {
@@ -857,6 +973,7 @@ extern fn usearch_dense_load_ram_buffer(arguments: *usearch_dense_load_ram_buffe
 extern fn usearch_dense_load_vram_buffer(arguments: *usearch_dense_load_vram_buffer_t) void;
 extern fn usearch_dense_view_ram(arguments: *usearch_dense_view_ram_t) void;
 extern fn usearch_dense_view_nvme(arguments: *usearch_dense_view_nvme_t) void;
+extern fn usearch_dense_load_nvme(arguments: *usearch_dense_load_nvme_t) void;
 extern fn usearch_dense_free(index: ?*anyopaque) void;
 extern fn usearch_dense_reserve(arguments: *usearch_dense_reserve_t) void;
 extern fn usearch_dense_clear(arguments: *usearch_dense_clear_t) void;
@@ -866,8 +983,9 @@ extern fn usearch_dense_health(arguments: *usearch_dense_health_t) void;
 extern fn usearch_dense_search(arguments: *usearch_dense_search_t) void;
 extern fn usearch_dense_count(arguments: *usearch_dense_count_t) void;
 extern fn usearch_dense_get(arguments: *usearch_dense_get_t) void;
-extern fn usearch_dense_absorb(arguments: *usearch_dense_absorb_t) void;
-extern fn usearch_dense_split(arguments: *usearch_dense_split_t) void;
+extern fn usearch_dense_refine_plan_finish(arguments: *usearch_dense_refine_plan_finish_t) void;
+extern fn usearch_dense_reshard(arguments: *usearch_dense_reshard_t) void;
+extern fn usearch_dense_reshard_plan_finish(arguments: *usearch_dense_reshard_plan_finish_t) void;
 extern fn usearch_dense_sample(arguments: *usearch_dense_sample_t) void;
 extern fn usearch_dense_cursor_init(arguments: *usearch_dense_cursor_init_t) void;
 extern fn usearch_dense_cursor_next(arguments: *usearch_dense_cursor_next_t) void;
@@ -905,7 +1023,7 @@ extern fn usearch_dense_maxsim(arguments: *usearch_dense_maxsim_t) void;
 /// var arena = try usearch.Arena.init(null);
 /// defer arena.deinit();
 /// const matches = try index.search(try .ofRow(f32, &query), 10, &arena, .{});
-/// const nearest = (try matches.query(0)).keys[0];
+/// const nearest = matches.query(0).keys[0];
 /// ```
 pub const DenseIndex = extern struct {
     /// The opaque `usearch_dense_index_t` the ABI hands back.
@@ -914,10 +1032,10 @@ pub const DenseIndex = extern struct {
     /// Every verb of the index, blocking on an executor, refused while another call holds it.
     pub const On = Receiver(.blocking, void);
 
-    /// Every verb of the index, submitted to an executor into a `Deferred(Call)` the caller holds,
-    /// borrowing the arena a verb lands in as a blocking call does; only the verb `Call` describes compiles.
-    pub fn DeferredOn(comptime Call: type) type {
-        return Receiver(.deferred, Call);
+    /// Every verb of the index, submitted to an executor into a `Deferred(Result)` the caller
+    /// holds; only the verbs answering `Result` compile.
+    pub fn DeferredOn(comptime Result: type) type {
+        return Receiver(.deferred, Result);
     }
 
     /// Runs every verb on `executor`, whose kind must match the index's residency. Binding-only.
@@ -925,9 +1043,9 @@ pub const DenseIndex = extern struct {
         return .{ .index = self.handle, .executor = executor.handle, .into = {}, .diagnostics = null };
     }
 
-    /// Submits a verb to `executor`, holding it in `call` - a `*Deferred(Call)` the caller places
+    /// Submits a verb to `executor`, holding it in `call`, a `*Deferred(Result)` the caller places
     /// anywhere, which stays put until its `deinit`. Binding-only.
-    pub fn deferred(self: DenseIndex, executor: Executor, call: anytype) DeferredOn(@FieldType(@TypeOf(call.*), "call")) {
+    pub fn deferred(self: DenseIndex, executor: Executor, call: anytype) DeferredOn(@FieldType(@TypeOf(call.*), "result")) {
         return .{ .index = self.handle, .executor = executor.handle, .into = call, .diagnostics = {} };
     }
 
@@ -1070,11 +1188,12 @@ pub const DenseIndex = extern struct {
         return adopt(handle, outcome, null);
     }
 
-    /// Serves a checkpoint in place from NVMe drives, read-only and sized past RAM; until NVMe
-    /// checkpoints carry keys it answers `Error.Unsupported`. Calls `usearch_dense_view_nvme`.
+    /// Serves a checkpoint in place from NVMe drives, read-only and sized past RAM. Calls
+    /// `usearch_dense_view_nvme`.
     pub fn viewNvme(path: []const u8, config: DenseViewNvmeConfig) Error!DenseIndex {
         var handle: ?*anyopaque = null;
         var outcome: Outcome = .{};
+        const key_table: ?usearch_ram_options_t = if (config.key_table_domains) |domains| .of(domains) else null;
         var arguments: usearch_dense_view_nvme_t = .{
             .index = &handle,
             .executor = handleOf(config.executor),
@@ -1082,8 +1201,30 @@ pub const DenseIndex = extern struct {
             .completion = .blocking,
             .path = .of(path),
             .nvme = .of(config.paths),
+            .ram = if (key_table) |*ram| ram else null,
         };
         usearch_dense_view_nvme(&arguments);
+        return adopt(handle, outcome, config.diagnostics);
+    }
+
+    /// Opens a checkpoint's manifest from NVMe drives as a writable index: it answers every read a
+    /// view answers, and `refine` rewrites its parts one at a time. A lone monolith has no
+    /// manifest to replace and answers `Error.Unsupported`, as do `paths` naming any.
+    /// Calls `usearch_dense_load_nvme`.
+    pub fn loadNvme(path: []const u8, config: DenseViewNvmeConfig) Error!DenseIndex {
+        var handle: ?*anyopaque = null;
+        var outcome: Outcome = .{};
+        const key_table: ?usearch_ram_options_t = if (config.key_table_domains) |domains| .of(domains) else null;
+        var arguments: usearch_dense_load_nvme_t = .{
+            .index = &handle,
+            .executor = handleOf(config.executor),
+            .outcome = &outcome,
+            .completion = .blocking,
+            .path = .of(path),
+            .nvme = .of(config.paths),
+            .ram = if (key_table) |*ram| ram else null,
+        };
+        usearch_dense_load_nvme(&arguments);
         return adopt(handle, outcome, config.diagnostics);
     }
 
@@ -1160,10 +1301,10 @@ pub const DenseIndex = extern struct {
         return self.here().contains(key);
     }
 
-    /// Every vector stored under `key` as `scalar`, one packed row per entry in insertion order,
+    /// Every vector stored under `key` as `Element`, one packed row per entry in insertion order,
     /// written in `arena`; an absent key yields no rows. Calls `usearch_dense_get`.
-    pub fn get(self: DenseIndex, key: Key, scalar: Scalar, arena: *Arena) Error!DenseVectors {
-        return self.here().get(key, scalar, arena);
+    pub fn get(self: DenseIndex, comptime Element: type, key: Key, arena: *Arena) Error!DenseVectors(Element) {
+        return self.here().get(Element, key, arena);
     }
 
     /// Adds a run of vectors under their keys - the native batch operation, one key per row.
@@ -1176,18 +1317,24 @@ pub const DenseIndex = extern struct {
         return self.here().insert(keys, vectors, config);
     }
 
-    /// Re-selects the neighbors of every stored entry against the finished graph, reporting the
-    /// entries re-selected and changed and the islands healed; zero `changed` means settled.
+    /// Runs one round over the finished graph: a health check, a heal of its islands, and a gather
+    /// and restitch of every neighborhood, closed by a second health check, reporting what changed.
     ///
-    /// A build step rather than a repair: a cheap insertion pass followed by one refinement
-    /// reaches a better graph, in less total time, than one expensive insertion pass - so a wide
-    /// expansion factor belongs here rather than in `insert`. A stopped sweep leaves the graph
-    /// correct and merely less improved, and reports no `Error.Cancelled`. Calls `usearch_dense_refine`.
+    /// A build step rather than a repair: a cheap insertion pass followed by refinement reaches a
+    /// better graph, in less total time, than one expensive insertion pass. A stop at a barrier
+    /// answers `Error.Cancelled`, and a `plan` in the config keeps the round to continue later.
+    /// Calls `usearch_dense_refine`.
     pub fn refine(self: DenseIndex, config: DenseRefineConfig) Error!DenseRefineReport {
         return self.here().refine(config);
     }
 
-    /// Audits how much of the graph a search reaches from its landmarks; the entries it misses stay
+    /// Closes a live refine plan, reporting what the whole plan did; the plan is freed and emptied
+    /// whatever the call answers. Calls `usearch_dense_refine_plan_finish`.
+    pub fn refinePlanFinish(self: DenseIndex, plan: *DenseRefinePlan) Error!DenseRefineReport {
+        return self.here().refinePlanFinish(plan);
+    }
+
+    /// Measures how much of the graph a search reaches from the root; the entries it misses stay
     /// unfound until a `refine` re-links them. Calls `usearch_dense_health`.
     pub fn health(self: DenseIndex) Error!DenseReachability {
         return self.here().health();
@@ -1201,26 +1348,6 @@ pub const DenseIndex = extern struct {
     /// Calls `usearch_dense_search`.
     pub fn search(self: DenseIndex, queries: RowsView, wanted: usize, arena: *Arena, config: DenseSearchConfig) Error!Matches {
         return self.here().search(queries, wanted, arena, config);
-    }
-
-    /// Absorbs every donor into the index, one after another, keeping their graphs rather than
-    /// re-inserting their vectors: each donor's entries append shard by shard, then a refinement links
-    /// them across the appended part. Donors must share the index's residency, scalar, metric and
-    /// geometry, or the call answers `Error.ConfigMismatch`.
-    ///
-    /// Each donor it absorbs is consumed and nulled in place, so `deinit` on every donor afterwards
-    /// frees only those a stop between donors or a failure left live. Readers of a RAM index keep
-    /// searching throughout; a VRAM one admits no overlapping search. Calls `usearch_dense_absorb`.
-    pub fn absorb(self: DenseIndex, donors: []DenseIndex, config: DenseAbsorbConfig) Error!DenseRefineReport {
-        return self.here().absorb(donors, config);
-    }
-
-    /// Splits the index into `receivers`, the inverse of `absorb`: graph-local parts keeping their
-    /// edges, one per receiver, leaving this index empty but live. Receivers must be empty and
-    /// share the index's residency, scalar, class, metric, geometry and shard count, or the call
-    /// answers `Error.ConfigMismatch`, and a refusal moves nothing. Calls `usearch_dense_split`.
-    pub fn split(self: DenseIndex, receivers: []const DenseIndex, config: DenseSplitConfig) Error!DenseRefineReport {
-        return self.here().split(receivers, config);
     }
 
     /// Draws up to `wanted` keys around `config.focus`, or across the whole index, each hanging
@@ -1281,11 +1408,12 @@ pub const DenseIndex = extern struct {
     ///
     /// One walk per token serves its `config.head_count` heads, rows `t · head_count + h`. The
     /// index stores no values: `value_lookup` resolves the keys of every scored batch to their
-    /// rows, a host function on RAM and a device one on VRAM. The attended rows land in `arena` as wide as the keys and divided by the partition,
-    /// and `carry` is worth asking for only to fold this branch into another over the same
-    /// queries. Runs on the inner-product kind only. Calls `usearch_dense_attend`.
-    pub fn attend(self: DenseIndex, queries: RowsView, value_lookup: ValueLookup, arena: *Arena, config: DenseAttendConfig) Error!DenseVectors {
-        return self.here().attend(queries, value_lookup, arena, config);
+    /// rows, a host function on RAM and NVMe and a device one on VRAM. The attended rows land in
+    /// `arena` as `Element`, as wide as the keys and divided by the partition, and `carry` is worth
+    /// asking for only to fold this branch into another over the same queries. Runs on the
+    /// inner-product kind only. Calls `usearch_dense_attend`.
+    pub fn attend(self: DenseIndex, comptime Element: type, queries: RowsView, value_lookup: ValueLookup, arena: *Arena, config: DenseAttendConfig) Error!DenseVectors(Element) {
+        return self.here().attend(Element, queries, value_lookup, arena, config);
     }
 
     /// Late-interaction scoring of multi-row queries against multi-vector documents: every query
@@ -1298,6 +1426,24 @@ pub const DenseIndex = extern struct {
     pub fn maxsim(self: DenseIndex, queries: RowsView, rows_per_query: usize, wanted: usize, arena: *Arena, config: DenseMaxsimConfig) Error!DenseProducts {
         return self.here().maxsim(queries, rows_per_query, wanted, arena, config);
     }
+
+    /// Moves the entries of `sources` into `targets` on the calling thread, keeping their links
+    /// rather than re-inserting their vectors, then runs a round on every target that took entries.
+    ///
+    /// Several sources into one target, itself among them, gather into it; one source into
+    /// several targets cuts it into graph-local parts; one handle as its only source and target
+    /// recuts its own shards in place. A source the targets do not name ends empty and live, and
+    /// every handle stays the caller's. Calls `usearch_dense_reshard`.
+    pub fn reshard(sources: []const DenseIndex, targets: []const DenseIndex, config: DenseReshardConfig) Error!DenseRefineReport {
+        return (DenseIndex{ .handle = null }).here().reshard(sources, targets, config);
+    }
+
+    /// Closes a live reshard plan on the calling thread, reporting what the whole plan did; the
+    /// plan is freed and emptied whatever the call answers.
+    /// Calls `usearch_dense_reshard_plan_finish`.
+    pub fn reshardPlanFinish(plan: *DenseReshardPlan) Error!DenseRefineReport {
+        return (DenseIndex{ .handle = null }).here().reshardPlanFinish(plan);
+    }
 };
 
 fn handleOf(executor: ?Executor) ?*anyopaque {
@@ -1305,8 +1451,8 @@ fn handleOf(executor: ?Executor) ?*anyopaque {
 }
 
 /// The verbs of `DenseIndex` once more, for a receiver that completes them as `completion` says:
-/// blocking answers the result, deferred submits the verb `Into` describes into the caller's
-/// `Deferred(Into)`. Each verb is written once.
+/// blocking answers the result, deferred submits into the caller's `Deferred(Into)`. Each verb is
+/// written once, filling its C structure with the result as its output slot.
 fn Receiver(comptime completion: Completion, comptime Into: type) type {
     return struct {
         const Self = @This();
@@ -1318,30 +1464,23 @@ fn Receiver(comptime completion: Completion, comptime Into: type) type {
         /// Where a blocking call copies its final outcome; a `Deferred` keeps its own instead.
         diagnostics: if (completion == .blocking) ?*Outcome else void,
 
-        fn Answer(comptime Call: type) type {
-            return if (completion == .deferred) Error!void else Error!Call.Result;
+        fn Answer(comptime Result: type) type {
+            return if (completion == .deferred) Error!void else Error!Result;
         }
 
-        fn answer(self: Self, call: anytype) Answer(@TypeOf(call)) {
-            return self.answerIn(call, {});
+        /// The storage a call reports into until final: the caller's `Deferred`, or `local`.
+        fn hold(self: Self, local: anytype, result: @TypeOf(local.result)) @TypeOf(local) {
+            const held = if (completion == .deferred) self.into else local;
+            held.* = .{ .result = result };
+            return held;
         }
 
-        /// Runs or submits `call` writing into `arena`, which a verb without outputs passes as `{}`.
-        fn answerIn(self: Self, call: anytype, arena: anytype) Answer(@TypeOf(call)) {
-            var local = call;
-            if (@TypeOf(arena) != void) local.stamp.arena = arena;
-            switch (completion) {
-                .blocking => {
-                    local.launch(self.index, self.executor, .blocking);
-                    if (@TypeOf(arena) != void) local.stamp = types.served(arena, local.outcome.status);
-                    if (self.diagnostics) |lent| lent.* = local.outcome;
-                    return local.finish();
-                },
-                .deferred => {
-                    self.into.submit(local, self.index, self.executor);
-                    if (@TypeOf(arena) != void) self.into.call.stamp = types.served(arena, self.into.status());
-                },
-            }
+        /// The result of a blocking call, final on return; nothing for a submitted one.
+        fn end(self: Self, held: anytype) Answer(@TypeOf(held.result)) {
+            if (completion == .deferred) return;
+            if (self.diagnostics) |lent| lent.* = held.outcome;
+            try held.outcome.check();
+            return held.result;
         }
 
         /// Fails a call the binding refused before it crossed, as `refuseInto` does.
@@ -1366,895 +1505,561 @@ fn Receiver(comptime completion: Completion, comptime Into: type) type {
         }
 
         /// See `DenseIndex.reserve`. Calls `usearch_dense_reserve`.
-        pub fn reserve(self: Self, capacity: usize) Answer(DenseReserve) {
-            return self.answer(DenseReserve{ .capacity = capacity });
+        pub fn reserve(self: Self, capacity: usize) Answer(void) {
+            var local: Deferred(void) = undefined;
+            const held = self.hold(&local, {});
+            var arguments: usearch_dense_reserve_t = .{ .index = self.index, .executor = self.executor, .outcome = &held.outcome, .completion = completion, .capacity = capacity };
+            usearch_dense_reserve(&arguments);
+            return self.end(held);
         }
 
         /// See `DenseIndex.clear`. Calls `usearch_dense_clear`.
-        pub fn clear(self: Self) Answer(DenseClear) {
-            return self.answer(DenseClear{});
+        pub fn clear(self: Self) Answer(void) {
+            var local: Deferred(void) = undefined;
+            const held = self.hold(&local, {});
+            var arguments: usearch_dense_clear_t = .{ .index = self.index, .executor = self.executor, .outcome = &held.outcome, .completion = completion };
+            usearch_dense_clear(&arguments);
+            return self.end(held);
         }
 
         /// See `DenseIndex.describe`. Calls `usearch_dense_describe`.
-        pub fn describe(self: Self) Answer(DenseDescribe) {
-            return self.answer(DenseDescribe{});
+        pub fn describe(self: Self) Answer(DenseIndexDescription) {
+            var local: Deferred(DenseIndexDescription) = undefined;
+            const held = self.hold(&local, .{});
+            var arguments: usearch_dense_describe_t = .{ .index = self.index, .executor = self.executor, .outcome = &held.outcome, .completion = completion, .description = &held.result };
+            usearch_dense_describe(&arguments);
+            return self.end(held);
         }
 
         /// See `DenseIndex.count`. Calls `usearch_dense_count`.
-        pub fn count(self: Self, key: Key) Answer(DenseCount) {
-            return self.answer(DenseCount{ .key = key });
+        pub fn count(self: Self, key: Key) Answer(usize) {
+            var local: Deferred(usize) = undefined;
+            const held = self.hold(&local, 0);
+            var arguments: usearch_dense_count_t = .{ .index = self.index, .executor = self.executor, .outcome = &held.outcome, .completion = completion, .key = key, .entries = &held.result };
+            usearch_dense_count(&arguments);
+            return self.end(held);
         }
 
         /// See `DenseIndex.get`. Calls `usearch_dense_get`.
-        pub fn get(self: Self, key: Key, scalar: Scalar, arena: *Arena) Answer(DenseGet) {
-            return self.answerIn(DenseGet{ .key = key, .scalar = scalar }, arena);
+        pub fn get(self: Self, comptime Element: type, key: Key, arena: *Arena) Answer(DenseVectors(Element)) {
+            var local: Deferred(DenseVectors(Element)) = undefined;
+            const held = self.hold(&local, .{});
+            var arguments: usearch_dense_get_t = .{
+                .index = self.index,
+                .executor = self.executor,
+                .outcome = &held.outcome,
+                .completion = completion,
+                .key = key,
+                .vectors = &held.result.view,
+                .written = &held.result.rows,
+                .arena = arena.handle,
+                .outputs_scalar = comptime Scalar.of(Element),
+            };
+            usearch_dense_get(&arguments);
+            return self.end(held);
         }
 
         /// See `DenseIndex.insert`. Calls `usearch_dense_insert`.
-        pub fn insert(self: Self, keys: []const Key, vectors: RowsView, config: DenseInsertConfig) Answer(DenseInsert) {
+        pub fn insert(self: Self, keys: []const Key, vectors: RowsView, config: DenseInsertConfig) Answer(void) {
             // C takes one count for both runs, so only the binding sees the two lengths disagree.
             if (keys.len != vectors.rows) return self.refused(.shape_mismatch, "The key run and the rows disagree in length");
-            return self.answer(DenseInsert{ .keys = keys, .vectors = vectors, .config = config });
+            var local: Deferred(void) = undefined;
+            const held = self.hold(&local, {});
+            var arguments: usearch_dense_insert_t = .{
+                .index = self.index,
+                .executor = self.executor,
+                .outcome = &held.outcome,
+                .completion = completion,
+                .count = vectors.rows,
+                .keys = .of(keys),
+                .vectors = .of(vectors),
+                .expansion_factor = config.expansion_factor,
+                .progress = .of(config.progress, config.progress_steps),
+                .stats = config.stats,
+            };
+            usearch_dense_insert(&arguments);
+            return self.end(held);
         }
 
         /// See `DenseIndex.refine`. Calls `usearch_dense_refine`.
-        pub fn refine(self: Self, config: DenseRefineConfig) Answer(DenseRefine) {
-            return self.answer(DenseRefine{ .config = config });
+        pub fn refine(self: Self, config: DenseRefineConfig) Answer(DenseRefineReport) {
+            var local: Deferred(DenseRefineReport) = undefined;
+            const held = self.hold(&local, .{});
+            var arguments: usearch_dense_refine_t = .{
+                .index = self.index,
+                .executor = self.executor,
+                .outcome = &held.outcome,
+                .completion = completion,
+                .report = &held.result,
+                .refine = .{ .expansion_factor = config.expansion_factor, .memory_limit = config.memory_limit },
+                .progress = .of(config.progress, config.progress_steps),
+                .stats = config.stats,
+                .plan = if (config.plan) |plan| &plan.handle else null,
+                .phase = config.phase,
+            };
+            usearch_dense_refine(&arguments);
+            return self.end(held);
+        }
+
+        /// See `DenseIndex.refinePlanFinish`. Calls `usearch_dense_refine_plan_finish`.
+        pub fn refinePlanFinish(self: Self, plan: *DenseRefinePlan) Answer(DenseRefineReport) {
+            var local: Deferred(DenseRefineReport) = undefined;
+            const held = self.hold(&local, .{});
+            var arguments: usearch_dense_refine_plan_finish_t = .{
+                .index = self.index,
+                .executor = self.executor,
+                .outcome = &held.outcome,
+                .completion = completion,
+                .plan = plan.handle,
+                .report = &held.result,
+            };
+            plan.* = .{};
+            usearch_dense_refine_plan_finish(&arguments);
+            return self.end(held);
         }
 
         /// See `DenseIndex.health`. Calls `usearch_dense_health`.
-        pub fn health(self: Self) Answer(DenseHealth) {
-            return self.answer(DenseHealth{});
+        pub fn health(self: Self) Answer(DenseReachability) {
+            var local: Deferred(DenseReachability) = undefined;
+            const held = self.hold(&local, .{});
+            var arguments: usearch_dense_health_t = .{ .index = self.index, .executor = self.executor, .outcome = &held.outcome, .completion = completion, .reachability = &held.result };
+            usearch_dense_health(&arguments);
+            return self.end(held);
         }
 
         /// See `DenseIndex.search`. Calls `usearch_dense_search`.
-        pub fn search(self: Self, queries: RowsView, wanted: usize, arena: *Arena, config: DenseSearchConfig) Answer(DenseSearch) {
-            return self.answerIn(DenseSearch{ .queries = queries, .wanted = wanted, .config = config }, arena);
+        pub fn search(self: Self, queries: RowsView, wanted: usize, arena: *Arena, config: DenseSearchConfig) Answer(Matches) {
+            var local: Deferred(Matches) = undefined;
+            const held = self.hold(&local, .{ .queries = queries.rows });
+            var arguments: usearch_dense_search_t = .{
+                .index = self.index,
+                .executor = self.executor,
+                .outcome = &held.outcome,
+                .completion = completion,
+                .count = queries.rows,
+                .queries = .of(queries),
+                .matches = &held.result.view,
+                .arena = arena.handle,
+                .wanted = wanted,
+                .expansion_factor = config.expansion_factor,
+                .traversal = config.traversal,
+                .predicate = config.predicate,
+                .progress = .of(config.progress, config.progress_steps),
+                .stats = config.stats,
+            };
+            usearch_dense_search(&arguments);
+            return self.end(held);
         }
 
-        /// See `DenseIndex.absorb`. Calls `usearch_dense_absorb`.
-        pub fn absorb(self: Self, donors: []DenseIndex, config: DenseAbsorbConfig) Answer(DenseAbsorb) {
-            return self.answer(DenseAbsorb{ .donors = donors, .config = config });
+        /// See `DenseIndex.reshard`; the handles come from the two lists, the executor and the
+        /// completion from this receiver. Calls `usearch_dense_reshard`.
+        pub fn reshard(self: Self, sources: []const DenseIndex, targets: []const DenseIndex, config: DenseReshardConfig) Answer(DenseRefineReport) {
+            var local: Deferred(DenseRefineReport) = undefined;
+            const held = self.hold(&local, .{});
+            if (config.memory_domains) |domains| held.placements.ram = .of(domains);
+            if (config.devices) |devices| held.placements.vram = .of(devices);
+            if (config.paths) |paths| held.placements.nvme = .of(paths);
+            held.placements.ram.shard_capacity = config.shard_capacity;
+            held.placements.vram.shard_capacity = config.shard_capacity;
+            var arguments: usearch_dense_reshard_t = .{
+                .sources_count = sources.len,
+                .sources = @ptrCast(sources.ptr),
+                .targets_count = targets.len,
+                .targets = @ptrCast(targets.ptr),
+                .executor = self.executor,
+                .outcome = &held.outcome,
+                .completion = completion,
+                .ram = if (config.memory_domains != null) &held.placements.ram else null,
+                .vram = if (config.devices != null) &held.placements.vram else null,
+                .nvme = if (config.paths != null) &held.placements.nvme else null,
+                .report = &held.result,
+                .refine = .{ .expansion_factor = config.expansion_factor, .memory_limit = config.memory_limit },
+                .seed = config.seed,
+                .progress = .of(config.progress, config.progress_steps),
+                .stats = config.stats,
+                .plan = if (config.plan) |plan| &plan.handle else null,
+                .phase = config.phase,
+            };
+            usearch_dense_reshard(&arguments);
+            return self.end(held);
         }
 
-        /// See `DenseIndex.split`. Calls `usearch_dense_split`.
-        pub fn split(self: Self, receivers: []const DenseIndex, config: DenseSplitConfig) Answer(DenseSplit) {
-            return self.answer(DenseSplit{ .receivers = receivers, .config = config });
+        /// See `DenseIndex.reshardPlanFinish`. Calls `usearch_dense_reshard_plan_finish`.
+        pub fn reshardPlanFinish(self: Self, plan: *DenseReshardPlan) Answer(DenseRefineReport) {
+            var local: Deferred(DenseRefineReport) = undefined;
+            const held = self.hold(&local, .{});
+            var arguments: usearch_dense_reshard_plan_finish_t = .{
+                .executor = self.executor,
+                .outcome = &held.outcome,
+                .completion = completion,
+                .plan = plan.handle,
+                .report = &held.result,
+            };
+            plan.* = .{};
+            usearch_dense_reshard_plan_finish(&arguments);
+            return self.end(held);
         }
 
         /// See `DenseIndex.sample`. Calls `usearch_dense_sample`.
-        pub fn sample(self: Self, wanted: usize, arena: *Arena, config: DenseSampleConfig) Answer(DenseSample) {
+        pub fn sample(self: Self, wanted: usize, arena: *Arena, config: DenseSampleConfig) Answer(DenseDraws) {
             // C reads one count for both runs, so only the binding sees the two lengths disagree.
             if (config.shown.len != config.shown_coordinates.len) return self.refused(.shape_mismatch, "The shown keys and coordinates disagree in length");
-            return self.answerIn(DenseSample{ .wanted = wanted, .config = config }, arena);
+            var local: Deferred(DenseDraws) = undefined;
+            const held = self.hold(&local, .{});
+            var arguments: usearch_dense_sample_t = .{
+                .index = self.index,
+                .executor = self.executor,
+                .outcome = &held.outcome,
+                .completion = completion,
+                .shown_count = config.shown.len,
+                .shown = .of(config.shown),
+                .shown_coordinates = .{ .data = config.shown_coordinates.ptr, .stride = @sizeOf([3]f32), .columns = 3, .scalar = .f32 },
+                .focus_count = config.focus.len,
+                .focus = .of(config.focus),
+                .keys = &held.result.keys_view,
+                .entry_ordinals = &held.result.entry_ordinals_view,
+                .parents = &held.result.parents_view,
+                .coordinates = &held.result.coordinates_view,
+                .written = &held.result.written,
+                .arena = arena.handle,
+                .wanted = wanted,
+                .seed = config.seed,
+                .expansion_factor = config.expansion_factor,
+                .progress = .of(config.progress, config.progress_steps),
+                .stats = config.stats,
+            };
+            usearch_dense_sample(&arguments);
+            return self.end(held);
         }
 
         /// See `DenseIndex.cursorNext`. Calls `usearch_dense_cursor_next`.
-        pub fn cursorNext(self: Self, cursor: DenseCursor, wanted: usize, links: bool, arena: *Arena) Answer(DenseCursorNext) {
-            return self.answerIn(DenseCursorNext{ .cursor = cursor, .wanted = wanted, .links = links }, arena);
+        pub fn cursorNext(self: Self, cursor: DenseCursor, wanted: usize, links: bool, arena: *Arena) Answer(DenseCursorBatch) {
+            var local: Deferred(DenseCursorBatch) = undefined;
+            const held = self.hold(&local, .{});
+            var arguments: usearch_dense_cursor_next_t = .{
+                .index = self.index,
+                .executor = self.executor,
+                .outcome = &held.outcome,
+                .completion = completion,
+                .cursor = cursor.handle,
+                .keys = &held.result.keys_view,
+                .links = if (links) &held.result.links_view else null,
+                .written = &held.result.written,
+                .arena = arena.handle,
+                .wanted = wanted,
+            };
+            usearch_dense_cursor_next(&arguments);
+            return self.end(held);
         }
 
         /// See `DenseIndex.searchStreamNext`. Calls `usearch_dense_search_stream_next`.
-        pub fn searchStreamNext(self: Self, stream: DenseSearchStream, wanted: usize, arena: *Arena) Answer(DenseSearchStreamNext) {
-            return self.answerIn(DenseSearchStreamNext{ .stream = stream, .wanted = wanted }, arena);
+        pub fn searchStreamNext(self: Self, stream: DenseSearchStream, wanted: usize, arena: *Arena) Answer(Matches) {
+            var local: Deferred(Matches) = undefined;
+            const held = self.hold(&local, .{ .queries = 1 });
+            var arguments: usearch_dense_search_stream_next_t = .{
+                .index = self.index,
+                .executor = self.executor,
+                .outcome = &held.outcome,
+                .completion = completion,
+                .stream = stream.handle,
+                .matches = &held.result.view,
+                .arena = arena.handle,
+                .wanted = wanted,
+            };
+            usearch_dense_search_stream_next(&arguments);
+            return self.end(held);
         }
 
         /// See `DenseIndex.save`. Calls `usearch_dense_save`.
-        pub fn save(self: Self, path: []const u8, config: DenseSaveConfig) Answer(DenseSave) {
-            return self.answer(DenseSave{ .path = path, .config = config });
+        pub fn save(self: Self, path: []const u8, config: DenseSaveConfig) Answer(void) {
+            var local: Deferred(void) = undefined;
+            const held = self.hold(&local, {});
+            var arguments: usearch_dense_save_t = .{
+                .index = self.index,
+                .executor = self.executor,
+                .outcome = &held.outcome,
+                .completion = completion,
+                .path = .of(path),
+                .progress = .of(config.progress, config.progress_steps),
+            };
+            usearch_dense_save(&arguments);
+            return self.end(held);
         }
 
         /// See `DenseIndex.saveBuffer`. Calls `usearch_dense_save_buffer`.
-        pub fn saveBuffer(self: Self, arena: *Arena, config: DenseSaveBufferConfig) Answer(DenseSaveBuffer) {
-            return self.answerIn(DenseSaveBuffer{ .config = config }, arena);
+        pub fn saveBuffer(self: Self, arena: *Arena, config: DenseSaveBufferConfig) Answer(Monolith) {
+            var local: Deferred(Monolith) = undefined;
+            const held = self.hold(&local, .{});
+            var arguments: usearch_dense_save_buffer_t = .{
+                .index = self.index,
+                .executor = self.executor,
+                .outcome = &held.outcome,
+                .completion = completion,
+                .monolith = &held.result.view,
+                .arena = arena.handle,
+                .progress = .of(config.progress, config.progress_steps),
+            };
+            usearch_dense_save_buffer(&arguments);
+            return self.end(held);
         }
 
         /// See `DenseIndex.multiply`. Calls `usearch_dense_multiply`.
-        pub fn multiply(self: Self, left: RowsView, arena: *Arena, config: DenseMultiplyConfig) Answer(DenseMultiply) {
-            return self.answerIn(DenseMultiply{ .left = left, .config = config }, arena);
+        pub fn multiply(self: Self, left: RowsView, arena: *Arena, config: DenseMultiplyConfig) Answer(DenseProducts) {
+            var local: Deferred(DenseProducts) = undefined;
+            const held = self.hold(&local, .{ .queries = left.rows });
+            var arguments: usearch_dense_multiply_t = .{
+                .index = self.index,
+                .executor = self.executor,
+                .outcome = &held.outcome,
+                .completion = completion,
+                .count = left.rows,
+                .left = .of(left),
+                .products = &held.result.view,
+                .written = &held.result.written,
+                .required = &held.result.required,
+                .arena = arena.handle,
+                .wanted = config.wanted,
+                .expansion_factor = config.expansion_factor,
+                .progress = .of(config.progress, config.progress_steps),
+                .stats = config.stats,
+            };
+            usearch_dense_multiply(&arguments);
+            return self.end(held);
         }
 
         /// See `DenseIndex.attend`. Calls `usearch_dense_attend`.
-        pub fn attend(self: Self, queries: RowsView, value_lookup: ValueLookup, arena: *Arena, config: DenseAttendConfig) Answer(DenseAttend) {
+        pub fn attend(self: Self, comptime Element: type, queries: RowsView, value_lookup: ValueLookup, arena: *Arena, config: DenseAttendConfig) Answer(DenseVectors(Element)) {
             // C reads one carry per query and has no length to check it against.
             if (config.carry) |carry| if (carry.len < queries.rows)
                 return self.refused(.shape_mismatch, "The carry holds fewer states than there are query rows");
-            return self.answerIn(DenseAttend{ .queries = queries, .value_lookup = value_lookup, .config = config }, arena);
+            var local: Deferred(DenseVectors(Element)) = undefined;
+            const held = self.hold(&local, .{ .rows = queries.rows });
+            var arguments: usearch_dense_attend_t = .{
+                .index = self.index,
+                .executor = self.executor,
+                .outcome = &held.outcome,
+                .completion = completion,
+                .count = queries.rows,
+                .queries = .of(queries),
+                .head_count = config.head_count,
+                .value_lookup = value_lookup.callback,
+                .value_lookup_state = value_lookup.state,
+                .carry = if (config.carry) |carry| carry.ptr else null,
+                .outputs = &held.result.view,
+                .arena = arena.handle,
+                .outputs_scalar = comptime Scalar.of(Element),
+                .expansion_factor = config.expansion_factor,
+                .score_scale = config.score_scale,
+                .progress = .of(config.progress, config.progress_steps),
+                .stats = config.stats,
+            };
+            usearch_dense_attend(&arguments);
+            return self.end(held);
         }
 
         /// See `DenseIndex.maxsim`. Calls `usearch_dense_maxsim`.
-        pub fn maxsim(self: Self, queries: RowsView, rows_per_query: usize, wanted: usize, arena: *Arena, config: DenseMaxsimConfig) Answer(DenseMaxsim) {
+        pub fn maxsim(self: Self, queries: RowsView, rows_per_query: usize, wanted: usize, arena: *Arena, config: DenseMaxsimConfig) Answer(DenseProducts) {
             // C sees only the query count, never the rows left over from dividing by it.
             if (rows_per_query == 0 or queries.rows % rows_per_query != 0)
                 return self.refused(.shape_mismatch, "The rows do not divide into queries of `rows_per_query`");
-            return self.answerIn(DenseMaxsim{ .queries = queries, .rows_per_query = rows_per_query, .wanted = wanted, .config = config }, arena);
+            var local: Deferred(DenseProducts) = undefined;
+            const held = self.hold(&local, .{ .queries = queries.rows / rows_per_query });
+            var arguments: usearch_dense_maxsim_t = .{
+                .index = self.index,
+                .executor = self.executor,
+                .outcome = &held.outcome,
+                .completion = completion,
+                .count = queries.rows / rows_per_query,
+                .queries = .of(queries),
+                .rows_per_query = rows_per_query,
+                .matches = &held.result.view,
+                .written = &held.result.written,
+                .required = &held.result.required,
+                .arena = arena.handle,
+                .wanted = wanted,
+                .expansion_factor = config.expansion_factor,
+                .progress = .of(config.progress, config.progress_steps),
+                .stats = config.stats,
+            };
+            usearch_dense_maxsim(&arguments);
+            return self.end(held);
         }
     };
 }
 
+/// The placements a reshard lends until its call is final.
+const Placements = struct {
+    ram: usearch_ram_options_t = .{},
+    vram: usearch_vram_options_t = .{},
+    nvme: usearch_nvme_options_t = .{},
+};
+
 /// A submitted call, held in storage the caller places - on the stack, in a struct, or from an
-/// allocator - which owns its outcome until the call is final, while the arena, the handles and the
-/// slices it was handed stay borrowed until then.
+/// allocator - which owns its outcome and result slot until the call is final, while the arena,
+/// the handles and the slices it was handed stay borrowed until then.
 ///
 /// `status` polls without blocking, `wait` blocks until the call is final and answers its result or
-/// error - the same one however often it is asked - and `deinit` waits the same way. A submitted
-/// `Deferred` stays put until `deinit`, and has one owner: `wait` and `deinit` never run on two
-/// threads at once, while `status` reads from any.
-pub fn Deferred(comptime Call: type) type {
+/// error, and `deinit` waits the same way. A submitted `Deferred` stays put until `deinit`, and has
+/// one owner, while `status` reads from any thread.
+pub fn Deferred(comptime Result: type) type {
     return struct {
         const Self = @This();
 
-        call: Call,
-        answer: ?(Error!Call.Result) = null,
-
-        /// Copies `call` into `self`, which stays put until final, and submits it. Binding-only.
-        pub fn submit(self: *Self, call: Call, index: ?*anyopaque, executor: ?*anyopaque) void {
-            self.* = .{ .call = call };
-            self.call.launch(index, executor, .deferred);
-        }
+        outcome: Outcome = .{},
+        result: Result,
+        placements: if (Result == DenseRefineReport) Placements else void = if (Result == DenseRefineReport) .{} else {},
 
         /// `.deferred` until the call is final, then its final status.
+        /// Calls `usearch_outcome_status`.
         pub fn status(self: *Self) Status {
-            return usearch_outcome_status(&self.call.outcome);
+            return usearch_outcome_status(&self.outcome);
         }
 
         /// The static detail of the final status; empty until the call is final, and on success.
         pub fn message(self: *Self) [:0]const u8 {
-            return if (self.status() == .deferred) "" else self.call.outcome.text();
+            return if (self.status() == .deferred) "" else self.outcome.text();
         }
 
         /// Blocks until the call is final, then answers its result, the same views a blocking call
-        /// answers over the arena it borrowed. One thread waits at a time.
-        pub fn wait(self: *Self) Error!Call.Result {
-            if (self.answer) |answer| return answer;
-            _ = usearch_outcome_wait(&self.call.outcome);
-            self.answer = self.call.finish();
-            return self.answer.?;
+        /// answers over the arena it borrowed. Calls `usearch_outcome_wait`.
+        pub fn wait(self: *Self) Error!Result {
+            _ = usearch_outcome_wait(&self.outcome);
+            try self.outcome.check();
+            return self.result;
         }
 
         /// Blocks until the call is final; the storage is reusable afterwards, and the result's
-        /// views stay as valid as the arena keeps them. Calls `usearch_outcome_wait`.
+        /// views stay valid until the arena's next call. Calls `usearch_outcome_wait`.
         pub fn deinit(self: *Self) void {
-            _ = self.wait() catch {};
-            self.call = undefined;
-            self.answer = null;
+            _ = usearch_outcome_wait(&self.outcome);
+            self.* = undefined;
         }
     };
 }
 
-/// One `DenseIndex.reserve`, as a `Deferred` holds it.
-pub const DenseReserve = struct {
-    pub const Result = void;
-    capacity: usize,
-    outcome: Outcome = .{},
+/// Rows a call wrote packed into an arena as `Element` - `get` one per entry under the key,
+/// `attend` one per query - `view.stride` bytes apiece, which sub-byte kinds round up to whole
+/// bytes, readable until the arena's next call. Mirrors `usearch_rows_view_t`.
+pub fn DenseVectors(comptime Element: type) type {
+    return struct {
+        const Self = @This();
 
-    fn launch(self: *DenseReserve, index: ?*anyopaque, executor: ?*anyopaque, completion: Completion) void {
-        var arguments: usearch_dense_reserve_t = .{ .index = index, .executor = executor, .outcome = &self.outcome, .completion = completion, .capacity = self.capacity };
-        usearch_dense_reserve(&arguments);
-    }
+        view: usearch_rows_view_t = .{},
+        /// Rows written.
+        rows: usize = 0,
 
-    fn finish(self: *DenseReserve) Error!void {
-        return self.outcome.check();
-    }
-};
+        /// One row, `position` below `rows`.
+        pub fn row(self: Self, position: usize) []const Element {
+            std.debug.assert(position < self.rows);
+            const base: [*]const u8 = @ptrCast(self.view.data.?);
+            const first: [*]const Element = @ptrCast(@alignCast(base + position * self.view.stride));
+            return first[0 .. self.view.stride / @sizeOf(Element)];
+        }
 
-/// One `DenseIndex.clear`, as a `Deferred` holds it.
-pub const DenseClear = struct {
-    pub const Result = void;
-    outcome: Outcome = .{},
+        /// Every row, back to back.
+        pub fn bytes(self: Self) []const u8 {
+            return outputSlice(u8, @ptrCast(self.view.data), 0, self.rows * self.view.stride);
+        }
+    };
+}
 
-    fn launch(self: *DenseClear, index: ?*anyopaque, executor: ?*anyopaque, completion: Completion) void {
-        var arguments: usearch_dense_clear_t = .{ .index = index, .executor = executor, .outcome = &self.outcome, .completion = completion };
-        usearch_dense_clear(&arguments);
-    }
-
-    fn finish(self: *DenseClear) Error!void {
-        return self.outcome.check();
-    }
-};
-
-/// One `DenseIndex.describe`, as a `Deferred` holds it.
-pub const DenseDescribe = struct {
-    pub const Result = DenseIndexDescription;
-    description: usearch_dense_index_description_t = .{},
-    outcome: Outcome = .{},
-
-    fn launch(self: *DenseDescribe, index: ?*anyopaque, executor: ?*anyopaque, completion: Completion) void {
-        var arguments: usearch_dense_describe_t = .{ .index = index, .executor = executor, .outcome = &self.outcome, .completion = completion, .description = &self.description };
-        usearch_dense_describe(&arguments);
-    }
-
-    fn finish(self: *DenseDescribe) Error!DenseIndexDescription {
-        try self.outcome.check();
-        const raw = self.description;
-        return .{
-            .metadata = raw.metadata,
-            .size = raw.size,
-            .capacity = raw.capacity,
-            .memory_usage = raw.memory_usage,
-            .cpu_class = std.mem.span(types.abi.cpu_class_name(raw.cpu_class)),
-            .gpu_class = std.mem.span(types.abi.gpu_class_name(raw.gpu_class)),
-            .shards_count = raw.shards_count,
-        };
-    }
-};
-
-/// One `DenseIndex.count`, as a `Deferred` holds it.
-pub const DenseCount = struct {
-    pub const Result = usize;
-    key: Key,
-    entries: usize = 0,
-    outcome: Outcome = .{},
-
-    fn launch(self: *DenseCount, index: ?*anyopaque, executor: ?*anyopaque, completion: Completion) void {
-        var arguments: usearch_dense_count_t = .{ .index = index, .executor = executor, .outcome = &self.outcome, .completion = completion, .key = self.key, .entries = &self.entries };
-        usearch_dense_count(&arguments);
-    }
-
-    fn finish(self: *DenseCount) Error!usize {
-        try self.outcome.check();
-        return self.entries;
-    }
-};
-
-/// One `DenseIndex.get`, as a `Deferred` holds it.
-pub const DenseGet = struct {
-    pub const Result = DenseVectors;
-    key: Key,
-    scalar: Scalar,
-    /// The call the borrowed arena serves, which every view over the outputs carries.
-    stamp: Arena.Stamp = undefined,
-    vectors: usearch_rows_view_t = .{},
-    written: usize = 0,
-    outcome: Outcome = .{},
-
-    fn launch(self: *DenseGet, index: ?*anyopaque, executor: ?*anyopaque, completion: Completion) void {
-        var arguments: usearch_dense_get_t = .{
-            .index = index,
-            .executor = executor,
-            .outcome = &self.outcome,
-            .completion = completion,
-            .key = self.key,
-            .vectors = &self.vectors,
-            .written = &self.written,
-            .arena = self.stamp.arena.handle,
-            .outputs_scalar = self.scalar,
-        };
-        usearch_dense_get(&arguments);
-    }
-
-    fn finish(self: *DenseGet) Error!DenseVectors {
-        try self.outcome.check();
-        return .of(self.stamp, self.vectors, self.written);
-    }
-};
-
-/// One `DenseIndex.insert`, as a `Deferred` holds it.
-pub const DenseInsert = struct {
-    pub const Result = void;
-    keys: []const Key,
-    vectors: RowsView,
-    config: DenseInsertConfig,
-    outcome: Outcome = .{},
-
-    fn launch(self: *DenseInsert, index: ?*anyopaque, executor: ?*anyopaque, completion: Completion) void {
-        var arguments: usearch_dense_insert_t = .{
-            .index = index,
-            .executor = executor,
-            .outcome = &self.outcome,
-            .completion = completion,
-            .count = self.vectors.rows,
-            .keys = .of(self.keys),
-            .vectors = .of(self.vectors),
-            .expansion_factor = self.config.expansion_factor,
-            .progress = .of(self.config.progress, self.config.progress_steps),
-            .stats = self.config.stats,
-        };
-        usearch_dense_insert(&arguments);
-    }
-
-    fn finish(self: *DenseInsert) Error!void {
-        return self.outcome.check();
-    }
-};
-
-/// One `DenseIndex.refine`, as a `Deferred` holds it.
-pub const DenseRefine = struct {
-    pub const Result = DenseRefineReport;
-    config: DenseRefineConfig,
-    report: DenseRefineReport = .{},
-    outcome: Outcome = .{},
-
-    fn launch(self: *DenseRefine, index: ?*anyopaque, executor: ?*anyopaque, completion: Completion) void {
-        var arguments: usearch_dense_refine_t = .{
-            .index = index,
-            .executor = executor,
-            .outcome = &self.outcome,
-            .completion = completion,
-            .report = &self.report,
-            .refine = .{ .expansion_factor = self.config.expansion_factor, .memory_limit = 0 },
-            .progress = .of(self.config.progress, self.config.progress_steps),
-            .stats = self.config.stats,
-        };
-        usearch_dense_refine(&arguments);
-    }
-
-    fn finish(self: *DenseRefine) Error!DenseRefineReport {
-        try self.outcome.check();
-        return self.report;
-    }
-};
-
-/// One `DenseIndex.health`, as a `Deferred` holds it.
-pub const DenseHealth = struct {
-    pub const Result = DenseReachability;
-    reachability: DenseReachability = .{},
-    outcome: Outcome = .{},
-
-    fn launch(self: *DenseHealth, index: ?*anyopaque, executor: ?*anyopaque, completion: Completion) void {
-        var arguments: usearch_dense_health_t = .{ .index = index, .executor = executor, .outcome = &self.outcome, .completion = completion, .reachability = &self.reachability };
-        usearch_dense_health(&arguments);
-    }
-
-    fn finish(self: *DenseHealth) Error!DenseReachability {
-        try self.outcome.check();
-        return self.reachability;
-    }
-};
-
-/// One `DenseIndex.search`, as a `Deferred` holds it.
-pub const DenseSearch = struct {
-    pub const Result = Matches;
-    queries: RowsView,
-    wanted: usize,
-    config: DenseSearchConfig,
-    /// The call the borrowed arena serves, which every view over the outputs carries.
-    stamp: Arena.Stamp = undefined,
-    matches: usearch_matches_view_t = .{},
-    outcome: Outcome = .{},
-
-    fn launch(self: *DenseSearch, index: ?*anyopaque, executor: ?*anyopaque, completion: Completion) void {
-        var arguments: usearch_dense_search_t = .{
-            .index = index,
-            .executor = executor,
-            .outcome = &self.outcome,
-            .completion = completion,
-            .count = self.queries.rows,
-            .queries = .of(self.queries),
-            .matches = &self.matches,
-            .arena = self.stamp.arena.handle,
-            .wanted = self.wanted,
-            .expansion_factor = self.config.expansion_factor,
-            .traversal = self.config.traversal,
-            .predicate = self.config.predicate,
-            .progress = .of(self.config.progress, self.config.progress_steps),
-            .stats = self.config.stats,
-        };
-        usearch_dense_search(&arguments);
-    }
-
-    fn finish(self: *DenseSearch) Error!Matches {
-        try self.outcome.check();
-        return .{ .stamp = self.stamp, .view = self.matches, .queries = self.queries.rows };
-    }
-};
-
-/// One `DenseIndex.absorb`, as a `Deferred` holds it.
-pub const DenseAbsorb = struct {
-    pub const Result = DenseRefineReport;
-    donors: []DenseIndex,
-    config: DenseAbsorbConfig,
-    report: DenseRefineReport = .{},
-    outcome: Outcome = .{},
-
-    fn launch(self: *DenseAbsorb, index: ?*anyopaque, executor: ?*anyopaque, completion: Completion) void {
-        var arguments: usearch_dense_absorb_t = .{
-            .index = index,
-            .executor = executor,
-            .outcome = &self.outcome,
-            .completion = completion,
-            .count = self.donors.len,
-            .donors = @ptrCast(self.donors.ptr),
-            .report = &self.report,
-            .refine = .{ .expansion_factor = 0, .memory_limit = 0 },
-            .progress = .of(self.config.progress, self.config.progress_steps),
-            .stats = null,
-        };
-        usearch_dense_absorb(&arguments);
-    }
-
-    fn finish(self: *DenseAbsorb) Error!DenseRefineReport {
-        try self.outcome.check();
-        return self.report;
-    }
-};
-
-/// One `DenseIndex.split`, as a `Deferred` holds it.
-pub const DenseSplit = struct {
-    pub const Result = DenseRefineReport;
-    receivers: []const DenseIndex,
-    config: DenseSplitConfig,
-    report: DenseRefineReport = .{},
-    outcome: Outcome = .{},
-
-    fn launch(self: *DenseSplit, index: ?*anyopaque, executor: ?*anyopaque, completion: Completion) void {
-        var arguments: usearch_dense_split_t = .{
-            .index = index,
-            .executor = executor,
-            .outcome = &self.outcome,
-            .completion = completion,
-            .count = self.receivers.len,
-            .receivers = @ptrCast(self.receivers.ptr),
-            .report = &self.report,
-            .refine = .{ .expansion_factor = self.config.expansion_factor, .memory_limit = 0 },
-            .seed = self.config.seed,
-            .progress = .of(self.config.progress, self.config.progress_steps),
-            .stats = self.config.stats,
-        };
-        usearch_dense_split(&arguments);
-    }
-
-    fn finish(self: *DenseSplit) Error!DenseRefineReport {
-        try self.outcome.check();
-        return self.report;
-    }
-};
-
-/// One `DenseIndex.sample`, as a `Deferred` holds it.
-pub const DenseSample = struct {
-    pub const Result = DenseDraws;
-    wanted: usize,
-    config: DenseSampleConfig,
-    /// The call the borrowed arena serves, which every view over the outputs carries.
-    stamp: Arena.Stamp = undefined,
-    keys: usearch_keys_view_t = .{},
-    entry_ordinals: ?[*]const usize = null,
-    parents: usearch_matches_view_t = .{},
-    coordinates: usearch_rows_view_t = .{},
-    written: usize = 0,
-    outcome: Outcome = .{},
-
-    fn launch(self: *DenseSample, index: ?*anyopaque, executor: ?*anyopaque, completion: Completion) void {
-        const coordinates = self.config.shown_coordinates;
-        var arguments: usearch_dense_sample_t = .{
-            .index = index,
-            .executor = executor,
-            .outcome = &self.outcome,
-            .completion = completion,
-            .shown_count = self.config.shown.len,
-            .shown = .of(self.config.shown),
-            .shown_coordinates = .{ .data = coordinates.ptr, .stride = @sizeOf([3]f32), .columns = 3, .scalar = .f32 },
-            .focus_count = self.config.focus.len,
-            .focus = .of(self.config.focus),
-            .keys = &self.keys,
-            .entry_ordinals = &self.entry_ordinals,
-            .parents = &self.parents,
-            .coordinates = &self.coordinates,
-            .written = &self.written,
-            .arena = self.stamp.arena.handle,
-            .wanted = self.wanted,
-            .seed = self.config.seed,
-            .expansion_factor = self.config.expansion_factor,
-            .progress = .of(self.config.progress, self.config.progress_steps),
-            .stats = self.config.stats,
-        };
-        usearch_dense_sample(&arguments);
-    }
-
-    fn finish(self: *DenseSample) Error!DenseDraws {
-        try self.outcome.check();
-        return .{
-            .stamp = self.stamp,
-            .written = self.written,
-            .keys_data = self.keys.data,
-            .entry_ordinals_data = self.entry_ordinals,
-            .parents = .{ .stamp = self.stamp, .view = self.parents, .queries = self.written },
-            .coordinates = .of(self.stamp, self.coordinates, self.written),
-        };
-    }
-};
-
-/// One `DenseIndex.cursorNext`, as a `Deferred` holds it.
-pub const DenseCursorNext = struct {
-    pub const Result = DenseCursorBatch;
-    cursor: DenseCursor,
-    wanted: usize,
-    links: bool,
-    /// The call the borrowed arena serves, which every view over the outputs carries.
-    stamp: Arena.Stamp = undefined,
-    keys: usearch_keys_view_t = .{},
-    linked: usearch_keys_tape_view_t = .{},
-    written: usize = 0,
-    outcome: Outcome = .{},
-
-    fn launch(self: *DenseCursorNext, index: ?*anyopaque, executor: ?*anyopaque, completion: Completion) void {
-        var arguments: usearch_dense_cursor_next_t = .{
-            .index = index,
-            .executor = executor,
-            .outcome = &self.outcome,
-            .completion = completion,
-            .cursor = self.cursor.handle,
-            .keys = &self.keys,
-            .links = if (self.links) &self.linked else null,
-            .written = &self.written,
-            .arena = self.stamp.arena.handle,
-            .wanted = self.wanted,
-        };
-        usearch_dense_cursor_next(&arguments);
-    }
-
-    fn finish(self: *DenseCursorNext) Error!DenseCursorBatch {
-        try self.outcome.check();
-        return .{
-            .stamp = self.stamp,
-            .data = self.keys.data,
-            .written = self.written,
-            .linked = if (self.links) self.linked else null,
-        };
-    }
-};
-
-/// One `DenseIndex.searchStreamNext`, as a `Deferred` holds it.
-pub const DenseSearchStreamNext = struct {
-    pub const Result = Matches;
-    stream: DenseSearchStream,
-    wanted: usize,
-    /// The call the borrowed arena serves, which every view over the outputs carries.
-    stamp: Arena.Stamp = undefined,
-    matches: usearch_matches_view_t = .{},
-    outcome: Outcome = .{},
-
-    fn launch(self: *DenseSearchStreamNext, index: ?*anyopaque, executor: ?*anyopaque, completion: Completion) void {
-        var arguments: usearch_dense_search_stream_next_t = .{
-            .index = index,
-            .executor = executor,
-            .outcome = &self.outcome,
-            .completion = completion,
-            .stream = self.stream.handle,
-            .matches = &self.matches,
-            .arena = self.stamp.arena.handle,
-            .wanted = self.wanted,
-        };
-        usearch_dense_search_stream_next(&arguments);
-    }
-
-    fn finish(self: *DenseSearchStreamNext) Error!Matches {
-        try self.outcome.check();
-        return .{ .stamp = self.stamp, .view = self.matches, .queries = 1 };
-    }
-};
-
-/// One `DenseIndex.save`, as a `Deferred` holds it.
-pub const DenseSave = struct {
-    pub const Result = void;
-    path: []const u8,
-    config: DenseSaveConfig,
-    outcome: Outcome = .{},
-
-    fn launch(self: *DenseSave, index: ?*anyopaque, executor: ?*anyopaque, completion: Completion) void {
-        var arguments: usearch_dense_save_t = .{
-            .index = index,
-            .executor = executor,
-            .outcome = &self.outcome,
-            .completion = completion,
-            .path = .of(self.path),
-            .progress = .of(self.config.progress, self.config.progress_steps),
-        };
-        usearch_dense_save(&arguments);
-    }
-
-    fn finish(self: *DenseSave) Error!void {
-        return self.outcome.check();
-    }
-};
-
-/// One `DenseIndex.saveBuffer`, as a `Deferred` holds it.
-pub const DenseSaveBuffer = struct {
-    pub const Result = Monolith;
-    config: DenseSaveBufferConfig,
-    /// The call the borrowed arena serves, which every view over the outputs carries.
-    stamp: Arena.Stamp = undefined,
-    monolith: BytesView = .{ .data = null, .length = 0 },
-    outcome: Outcome = .{},
-
-    fn launch(self: *DenseSaveBuffer, index: ?*anyopaque, executor: ?*anyopaque, completion: Completion) void {
-        var arguments: usearch_dense_save_buffer_t = .{
-            .index = index,
-            .executor = executor,
-            .outcome = &self.outcome,
-            .completion = completion,
-            .monolith = &self.monolith,
-            .arena = self.stamp.arena.handle,
-            .progress = .of(self.config.progress, self.config.progress_steps),
-        };
-        usearch_dense_save_buffer(&arguments);
-    }
-
-    fn finish(self: *DenseSaveBuffer) Error!Monolith {
-        try self.outcome.check();
-        return .{ .stamp = self.stamp, .view = self.monolith };
-    }
-};
-
-/// One `DenseIndex.multiply`, as a `Deferred` holds it.
-pub const DenseMultiply = struct {
-    pub const Result = DenseProducts;
-    left: RowsView,
-    config: DenseMultiplyConfig,
-    /// The call the borrowed arena serves, which every view over the outputs carries.
-    stamp: Arena.Stamp = undefined,
-    products: usearch_matches_tape_view_t = .{},
-    written: usize = 0,
-    required: usize = 0,
-    outcome: Outcome = .{},
-
-    fn launch(self: *DenseMultiply, index: ?*anyopaque, executor: ?*anyopaque, completion: Completion) void {
-        var arguments: usearch_dense_multiply_t = .{
-            .index = index,
-            .executor = executor,
-            .outcome = &self.outcome,
-            .completion = completion,
-            .count = self.left.rows,
-            .left = .of(self.left),
-            .products = &self.products,
-            .written = &self.written,
-            .required = &self.required,
-            .arena = self.stamp.arena.handle,
-            .wanted = self.config.wanted,
-            .expansion_factor = self.config.expansion_factor,
-            .progress = .of(self.config.progress, self.config.progress_steps),
-            .stats = self.config.stats,
-        };
-        usearch_dense_multiply(&arguments);
-    }
-
-    fn finish(self: *DenseMultiply) Error!DenseProducts {
-        try self.outcome.check();
-        return .{
-            .stamp = self.stamp,
-            .view = self.products,
-            .queries = self.left.rows,
-            .written = self.written,
-            .required = self.required,
-        };
-    }
-};
-
-/// One `DenseIndex.attend`, as a `Deferred` holds it.
-pub const DenseAttend = struct {
-    pub const Result = DenseVectors;
-    queries: RowsView,
-    value_lookup: ValueLookup,
-    config: DenseAttendConfig,
-    /// The call the borrowed arena serves, which every view over the outputs carries.
-    stamp: Arena.Stamp = undefined,
-    outputs: usearch_rows_view_t = .{},
-    outcome: Outcome = .{},
-
-    fn launch(self: *DenseAttend, index: ?*anyopaque, executor: ?*anyopaque, completion: Completion) void {
-        var arguments: usearch_dense_attend_t = .{
-            .index = index,
-            .executor = executor,
-            .outcome = &self.outcome,
-            .completion = completion,
-            .count = self.queries.rows,
-            .queries = .of(self.queries),
-            .head_count = self.config.head_count,
-            .value_lookup = self.value_lookup.callback,
-            .value_lookup_state = self.value_lookup.state,
-            .carry = if (self.config.carry) |carry| carry.ptr else null,
-            .outputs = &self.outputs,
-            .arena = self.stamp.arena.handle,
-            .outputs_scalar = self.config.outputs_scalar,
-            .expansion_factor = self.config.expansion_factor,
-            .score_scale = self.config.score_scale,
-            .progress = .of(self.config.progress, self.config.progress_steps),
-            .stats = self.config.stats,
-        };
-        usearch_dense_attend(&arguments);
-    }
-
-    fn finish(self: *DenseAttend) Error!DenseVectors {
-        try self.outcome.check();
-        return .of(self.stamp, self.outputs, self.queries.rows);
-    }
-};
-
-/// One `DenseIndex.maxsim`, as a `Deferred` holds it.
-pub const DenseMaxsim = struct {
-    pub const Result = DenseProducts;
-    queries: RowsView,
-    rows_per_query: usize,
-    wanted: usize,
-    config: DenseMaxsimConfig,
-    /// The call the borrowed arena serves, which every view over the outputs carries.
-    stamp: Arena.Stamp = undefined,
-    matches: usearch_matches_tape_view_t = .{},
-    written: usize = 0,
-    required: usize = 0,
-    outcome: Outcome = .{},
-
-    fn launch(self: *DenseMaxsim, index: ?*anyopaque, executor: ?*anyopaque, completion: Completion) void {
-        var arguments: usearch_dense_maxsim_t = .{
-            .index = index,
-            .executor = executor,
-            .outcome = &self.outcome,
-            .completion = completion,
-            .count = self.queries.rows / self.rows_per_query,
-            .queries = .of(self.queries),
-            .rows_per_query = self.rows_per_query,
-            .matches = &self.matches,
-            .written = &self.written,
-            .required = &self.required,
-            .arena = self.stamp.arena.handle,
-            .wanted = self.wanted,
-            .expansion_factor = self.config.expansion_factor,
-            .progress = .of(self.config.progress, self.config.progress_steps),
-            .stats = self.config.stats,
-        };
-        usearch_dense_maxsim(&arguments);
-    }
-
-    fn finish(self: *DenseMaxsim) Error!DenseProducts {
-        try self.outcome.check();
-        const queries = self.queries.rows / self.rows_per_query;
-        return .{ .stamp = self.stamp, .view = self.matches, .queries = queries, .written = self.written, .required = self.required };
-    }
-};
-
-/// Rows a call wrote packed into an arena - `get` one per entry under the key, `attend` one per
-/// query, a cursor pull one per entry - `stride` bytes apiece, which sub-byte kinds round up to
-/// whole bytes. Mirrors `usearch_rows_view_t`.
-///
-/// It reads the arena, so every read is refused once that arena serves another call or is freed.
-pub const DenseVectors = struct {
-    stamp: Arena.Stamp,
-    data: ?[*]const u8,
-    /// Rows written.
-    rows: usize,
-    /// Bytes per row, as the call reported them.
-    stride: usize,
-    /// Dimensions per row, as the call reported them.
-    columns: usize,
-    /// The scalar type the rows were written as.
-    scalar: Scalar,
-
-    fn of(stamp: Arena.Stamp, view: usearch_rows_view_t, rows: usize) DenseVectors {
-        return .{ .stamp = stamp, .data = @ptrCast(view.data), .rows = rows, .stride = view.stride, .columns = view.columns, .scalar = view.scalar };
-    }
-
-    /// One row as a run of `Element`, the type the rows were written as; any other type and a
-    /// `position` past `rows` are refused with `Error.InvalidArgument`, a stale view with
-    /// `Error.Uninitialized`, and device memory with `Error.Device`.
-    pub fn row(self: DenseVectors, comptime Element: type, position: usize) Error![]const Element {
-        try self.stamp.check();
-        if (Scalar.of(Element) != self.scalar or position >= self.rows) return refuse(.invalid_argument);
-        const first: [*]const Element = @ptrCast(@alignCast(self.data.? + position * self.stride));
-        return first[0 .. self.stride / @sizeOf(Element)];
-    }
-
-    /// Every row, back to back, refused as `row` refuses a stale view or device memory.
-    pub fn bytes(self: DenseVectors) Error![]const u8 {
-        try self.stamp.check();
-        return outputSlice(u8, self.data, 0, self.rows * self.stride);
-    }
-};
-
-/// The monolith `DenseIndex.saveBuffer` serialized into an arena.
-///
-/// It reads the arena, so every read is refused once that arena serves another call or is freed.
+/// The monolith `DenseIndex.saveBuffer` serialized into an arena, readable until its next call.
 pub const Monolith = struct {
-    stamp: Arena.Stamp,
-    view: BytesView,
+    view: BytesView = .{ .data = null, .length = 0 },
 
-    /// The serialized bytes, refusing a stale view with `Error.Uninitialized` and device memory with `Error.Device`.
-    pub fn bytes(self: Monolith) Error![]const u8 {
-        try self.stamp.check();
+    /// The serialized bytes.
+    pub fn bytes(self: Monolith) []const u8 {
         return outputSlice(u8, self.view.data, 0, self.view.length);
     }
 };
 
 /// The ragged output of `DenseIndex.multiply` or `DenseIndex.maxsim` in an arena, laid out as
 /// Apache Arrow does: query `i` spans pairs `offsets[i]` up to `offsets[i + 1]` of `keys` and
-/// `scores`.
-/// Mirrors `usearch_matches_tape_view_t`.
-///
-/// It reads the arena, so every read is refused once that arena serves another call or is freed.
+/// `scores`, readable until the arena's next call. Mirrors `usearch_matches_tape_view_t`.
 pub const DenseProducts = struct {
-    stamp: Arena.Stamp,
-    view: usearch_matches_tape_view_t,
+    view: usearch_matches_tape_view_t = .{},
     /// Left-hand rows the call multiplied, or queries it scored.
     queries: usize,
     /// Pairs written across every query.
-    written: usize,
+    written: usize = 0,
     /// Pairs scored across every left row, or keys across every query for a `maxsim`, before
     /// `wanted` cut any.
-    required: usize,
+    required: usize = 0,
 
     /// The pairs of one left row in traversal order, or one query's keys largest first for a
-    /// `maxsim`, refusing a `position` past `queries` with `Error.InvalidArgument`, a stale view
-    /// with `Error.Uninitialized`, and device memory with `Error.Device`.
-    pub fn query(self: DenseProducts, position: usize) Error!QueryMatches {
-        try self.stamp.check();
-        if (position >= self.queries) return refuse(.invalid_argument);
-        const begin = self.view.offsets.?[position];
-        const length = self.view.offsets.?[position + 1] - begin;
+    /// `maxsim`, `position` below `queries`.
+    pub fn query(self: DenseProducts, position: usize) QueryMatches {
+        const tape = self.offsets();
+        const begin = tape[position];
+        const length = tape[position + 1] - begin;
         return .{ .keys = outputSlice(Key, self.view.keys, begin, length), .scores = outputSlice(Distance, self.view.scores, begin, length) };
     }
 
-    /// The `queries + 1` offsets, refused as `query` refuses a stale view or device memory.
-    pub fn offsets(self: DenseProducts) Error![]const usize {
-        try self.stamp.check();
+    /// The `queries + 1` offsets.
+    pub fn offsets(self: DenseProducts) []const usize {
         return outputSlice(usize, self.view.offsets, 0, self.queries + 1);
     }
 
-    /// Every pair's indexed key, end to end, refused as `query` refuses a stale view or device memory.
-    pub fn keys(self: DenseProducts) Error![]const Key {
-        try self.stamp.check();
+    /// Every pair's indexed key, end to end.
+    pub fn keys(self: DenseProducts) []const Key {
         return outputSlice(Key, self.view.keys, 0, self.written);
     }
 
-    /// Every pair's product, positionally paired with `keys`, refused as `keys` is.
-    pub fn scores(self: DenseProducts) Error![]const Distance {
-        try self.stamp.check();
+    /// Every pair's product, positionally paired with `keys`.
+    pub fn scores(self: DenseProducts) []const Distance {
         return outputSlice(Distance, self.view.scores, 0, self.written);
     }
 };
 
 /// One batch a `DenseCursor` pull wrote into an arena: the keys, and the keys each links to where
-/// asked for; the vectors themselves come from `DenseIndex.get`.
-///
-/// It reads the arena, so every read is refused once that arena serves another call or is freed.
+/// asked for, readable until the arena's next call; the vectors come from `DenseIndex.get`.
 pub const DenseCursorBatch = struct {
-    stamp: Arena.Stamp,
-    data: ?[*]const Key,
+    keys_view: usearch_keys_view_t = .{},
+    links_view: usearch_keys_tape_view_t = .{},
     /// Entries the pull wrote; zero once the walk is exhausted.
-    written: usize,
-    /// The keys each entry links to, or null where the pull exported keys alone.
-    linked: ?usearch_keys_tape_view_t,
+    written: usize = 0,
 
-    /// The keys, refusing a stale view with `Error.Uninitialized` and device memory with `Error.Device`.
-    pub fn keys(self: DenseCursorBatch) Error![]const Key {
-        try self.stamp.check();
-        return outputSlice(Key, self.data, 0, self.written);
+    /// The keys.
+    pub fn keys(self: DenseCursorBatch) []const Key {
+        return outputSlice(Key, self.keys_view.data, 0, self.written);
     }
 
-    /// The keys one entry links to, refusing a `position` past `written` or a pull that exported
-    /// no links with `Error.InvalidArgument`, and a stale view or device memory as `keys` does.
-    pub fn links(self: DenseCursorBatch, position: usize) Error![]const Key {
-        try self.stamp.check();
-        const tape = self.linked orelse return refuse(.invalid_argument);
-        if (position >= self.written) return refuse(.invalid_argument);
-        const begin = tape.offsets.?[position];
-        return outputSlice(Key, tape.keys, begin, tape.offsets.?[position + 1] - begin);
+    /// The keys one entry links to, `position` below `written`, of a pull that asked for links.
+    pub fn links(self: DenseCursorBatch, position: usize) []const Key {
+        const offsets = self.links_view.offsets.?[0 .. self.written + 1];
+        return outputSlice(Key, self.links_view.keys, offsets[position], offsets[position + 1] - offsets[position]);
     }
 };
 
 /// The draws `DenseIndex.sample` wrote in an arena, one per draw: its key, which of that key's
-/// entries it is, the shown or earlier draw it hangs from, and where it is placed.
-///
-/// It reads the arena, so every read is refused once that arena serves another call or is freed.
+/// entries it is, the shown or earlier draw it hangs from, and where it is placed, readable until
+/// the arena's next call.
 pub const DenseDraws = struct {
-    stamp: Arena.Stamp,
+    keys_view: usearch_keys_view_t = .{},
+    entry_ordinals_view: ?[*]const usize = null,
+    parents_view: usearch_matches_view_t = .{},
+    coordinates_view: usearch_rows_view_t = .{},
     /// Draws written; fewer than `wanted` only once the region is exhausted.
-    written: usize,
-    keys_data: ?[*]const Key,
-    entry_ordinals_data: ?[*]const usize,
-    /// Each draw's parent and its distance, as a one-column run per draw; a root holds none.
-    parents: Matches,
-    /// Where each draw is placed, one row of three `f32` apiece.
-    coordinates: DenseVectors,
+    written: usize = 0,
 
-    /// The keys drawn, refusing a stale view with `Error.Uninitialized` and device memory with `Error.Device`.
-    pub fn keys(self: DenseDraws) Error![]const Key {
-        try self.stamp.check();
-        return outputSlice(Key, self.keys_data, 0, self.written);
+    /// The keys drawn.
+    pub fn keys(self: DenseDraws) []const Key {
+        return outputSlice(Key, self.keys_view.data, 0, self.written);
     }
 
-    /// Which of its key's entries each draw is, in the order `get` writes them, refused as `keys` is.
-    pub fn entryOrdinals(self: DenseDraws) Error![]const usize {
-        try self.stamp.check();
-        return outputSlice(usize, self.entry_ordinals_data, 0, self.written);
+    /// Which of its key's entries each draw is, in the order `get` writes them.
+    pub fn entryOrdinals(self: DenseDraws) []const usize {
+        return outputSlice(usize, self.entry_ordinals_view, 0, self.written);
+    }
+
+    /// Each draw's parent and its distance, as a one-column run per draw; a root holds none.
+    pub fn parents(self: DenseDraws) Matches {
+        return .{ .view = self.parents_view, .queries = self.written };
+    }
+
+    /// Where each draw is placed, three `f32` apiece.
+    pub fn coordinates(self: DenseDraws) []const [3]f32 {
+        return outputSlice([3]f32, @ptrCast(@alignCast(self.coordinates_view.data)), 0, self.written);
     }
 };
 
@@ -2361,13 +2166,16 @@ test "left alone, an index is an angular one quantized to bf16" {
     try std.testing.expectEqual(Traversal.walk, (DenseSearchConfig{}).traversal);
 }
 
-test "metrics keep the values the linked library spells them by" {
+test "metrics and verdicts keep the values the linked library spells them by" {
     inline for (.{ "inner", "angular", "euclidean", "hamming", "jaccard" }, 1..) |spelling, value| {
         const metric: DenseMetric = @enumFromInt(value);
         try std.testing.expectEqualStrings(spelling, metric.name());
         try std.testing.expectEqual(@as(?DenseMetric, metric), DenseMetric.fromName(spelling));
     }
     try std.testing.expectEqual(@as(?DenseMetric, null), DenseMetric.fromName("cosine"));
+    try std.testing.expectEqualStrings("converged", DenseRefineVerdict.converged.name());
+    try std.testing.expectEqual(@as(?DenseRefineVerdict, .stopped), DenseRefineVerdict.fromName("stopped"));
+    try std.testing.expectEqual(@as(?DenseRefineVerdict, null), DenseRefineVerdict.fromName("settled"));
 }
 
 test "callbacks wrap with and without a context" {
@@ -2430,15 +2238,13 @@ test { // analyze every declaration, the methods on each handle included
     std.testing.refAllDecls(DenseIndex);
     std.testing.refAllDecls(DenseIndex.On);
     inline for (.{
-        DenseReserve,  DenseClear,  DenseDescribe, DenseCount,      DenseGet,              DenseInsert,
-        DenseRefine,   DenseHealth, DenseSearch,   DenseAbsorb,     DenseSave,             DenseSaveBuffer,
-        DenseMultiply, DenseAttend, DenseMaxsim,   DenseCursorNext, DenseSearchStreamNext, DenseSplit,
-        DenseSample,
-    }) |Call| std.testing.refAllDecls(Deferred(Call));
+        void,              usize,         DenseIndexDescription, DenseReachability, DenseRefineReport, Matches,
+        DenseVectors(f32), DenseProducts, DenseCursorBatch,      DenseDraws,        Monolith,
+    }) |Result| std.testing.refAllDecls(Deferred(Result));
     std.testing.refAllDecls(DenseCursor);
     std.testing.refAllDecls(DenseSearchStream);
     std.testing.refAllDecls(DenseProducts);
-    std.testing.refAllDecls(DenseVectors);
+    std.testing.refAllDecls(DenseVectors(f32));
     std.testing.refAllDecls(DenseCursorBatch);
     std.testing.refAllDecls(DenseDraws);
     std.testing.refAllDecls(Monolith);
@@ -2476,19 +2282,16 @@ test "a batch crosses the ABI and comes back as views over the arena it lands in
     defer arena.deinit();
     try std.testing.expectEqual(types.ArenaDescription{ .residency = .ram, .device = null }, try arena.describe());
     const matches = try index.on(executor).search(try .ofRow(f32, slab[0..dimensions]), 2, &arena, .{ .stats = &stats });
-    try std.testing.expectEqual(@as(usize, 2), (try matches.query(0)).keys.len);
-    try std.testing.expectEqual(keys[0], (try matches.query(0)).keys[0]);
-    try std.testing.expectError(Error.InvalidArgument, matches.query(1));
+    try std.testing.expectEqual(@as(usize, 2), matches.query(0).keys.len);
+    try std.testing.expectEqual(keys[0], matches.query(0).keys[0]);
 
-    // The caller's own thread answers the same search, and its call rewinds the arena, so the
-    // previous view refuses rather than reads what the next call wrote.
+    // The caller's own thread answers the same search.
     const again = try index.search(try .ofRow(f32, slab[0..dimensions]), 2, &arena, .{});
-    try std.testing.expectError(Error.Uninitialized, matches.query(0));
-    try std.testing.expectEqual(keys[0], (try again.query(0)).keys[0]);
+    try std.testing.expectEqual(keys[0], again.query(0).keys[0]);
 
     // A zero `wanted` lands the counts alone, so a row reads empty rather than through absent keys.
     const none = try index.search(try .ofRow(f32, slab[0..dimensions]), 0, &arena, .{});
-    try std.testing.expectEqual(@as(usize, 0), (try none.query(0)).keys.len);
+    try std.testing.expectEqual(@as(usize, 0), none.query(0).keys.len);
 
     // A predicate narrows the matches, and still finds the admitted row behind rejected ones.
     const Only = struct {
@@ -2501,32 +2304,22 @@ test "a batch crosses the ABI and comes back as views over the arena it lands in
     const admitted = try index.on(executor).search(try .ofRow(f32, slab[0..dimensions]), 2, &arena, .{
         .predicate = .of(&only, Only.admits),
     });
-    try std.testing.expectEqualSlices(Key, keys[2..3], (try admitted.query(0)).keys);
+    try std.testing.expectEqualSlices(Key, keys[2..3], admitted.query(0).keys);
 
-    const exported = try index.on(executor).get(keys[1], .f32, &arena);
-    try std.testing.expectEqualSlices(f32, &.{ 0, 1, 0 }, try exported.row(f32, 0));
+    const exported = try index.on(executor).get(f32, keys[1], &arena);
+    try std.testing.expectEqualSlices(f32, &.{ 0, 1, 0 }, exported.row(0));
     try std.testing.expectEqual(@as(usize, 1), exported.rows);
-    try std.testing.expectEqual(@as(usize, dimensions), exported.columns);
+    try std.testing.expectEqual(@as(usize, dimensions), exported.view.columns);
     try std.testing.expectEqual(@as(usize, 1), try index.count(keys[1]));
     try std.testing.expectEqual(true, try index.contains(keys[1]));
     try std.testing.expectEqual(false, try index.on(executor).contains(.fromInteger(99)));
-    // Rows exported as one kind are never reinterpreted as another.
-    try std.testing.expectError(Error.InvalidArgument, exported.row(f16, 0));
-    try std.testing.expectError(Error.InvalidArgument, exported.row(f32, 1));
-    const absent = try index.get(.fromInteger(99), .f32, &arena);
+    const absent = try index.get(f32, .fromInteger(99), &arena);
     try std.testing.expectEqual(@as(usize, 0), absent.rows);
-    try std.testing.expectEqual(@as(usize, 0), (try absent.bytes()).len);
+    try std.testing.expectEqual(@as(usize, 0), absent.bytes().len);
 
-    // A failed call rewinds the arena too, and leaves it the caller's, ready for the next one.
+    // A failed call leaves the arena the caller's, ready for the next one.
     try std.testing.expectError(Error.ConfigMismatch, index.multiply(try .ofRow(f32, slab[0..dimensions]), &arena, .{}));
-    try std.testing.expectError(Error.Uninitialized, absent.bytes());
-    try std.testing.expectEqualSlices(f32, &.{ 0, 0, 1 }, try (try index.get(keys[2], .f32, &arena)).row(f32, 0));
-
-    // A freed arena leaves its views refusing.
-    var short: Arena = try .init(null);
-    const doomed = try index.get(keys[1], .f32, &short);
-    short.deinit();
-    try std.testing.expectError(Error.Uninitialized, doomed.row(f32, 0));
+    try std.testing.expectEqualSlices(f32, &.{ 0, 0, 1 }, (try index.get(f32, keys[2], &arena)).row(0));
 
     // The width travels with the rows, and the engine refuses one the geometry disagrees with.
     const narrow = [_]f32{ 1, 0 };
@@ -2549,42 +2342,71 @@ test "a batch crosses the ABI and comes back as views over the arena it lands in
         var stream = opened;
         defer stream.deinit();
         const pulled = try index.on(executor).searchStreamNext(stream, 2, &arena);
-        try std.testing.expectEqualSlices(Key, keys[0..2], (try pulled.query(0)).keys);
-        try std.testing.expectEqual(@as(usize, 1), (try (try index.searchStreamNext(stream, 2, &arena)).query(0)).keys.len);
+        try std.testing.expectEqualSlices(Key, keys[0..2], pulled.query(0).keys);
+        try std.testing.expectEqual(@as(usize, 1), (try index.searchStreamNext(stream, 2, &arena)).query(0).keys.len);
         // A drained walk answers an empty row, as a pull of zero does.
-        try std.testing.expectEqual(@as(usize, 0), (try (try index.searchStreamNext(stream, 2, &arena)).query(0)).keys.len);
+        try std.testing.expectEqual(@as(usize, 0), (try index.searchStreamNext(stream, 2, &arena)).query(0).keys.len);
     } else |failure| try std.testing.expectEqual(Error.Unsupported, failure);
 
     // A cursor walks the keys, `wanted` at a time, and exports their links only when asked.
     var walk = try DenseCursor.init(index, &.{});
     defer walk.deinit();
     const batch = try index.on(executor).cursorNext(walk, 2, false, &arena);
-    try std.testing.expectEqualSlices(Key, keys[0..2], try batch.keys());
-    try std.testing.expectError(Error.InvalidArgument, batch.links(0));
+    try std.testing.expectEqualSlices(Key, keys[0..2], batch.keys());
     const rest = try index.cursorNext(walk, 2, false, &arena);
-    try std.testing.expectEqualSlices(Key, keys[2..3], try rest.keys());
+    try std.testing.expectEqualSlices(Key, keys[2..3], rest.keys());
     const drained = try index.cursorNext(walk, 2, false, &arena);
-    try std.testing.expectEqual(@as(usize, 0), (try drained.keys()).len);
+    try std.testing.expectEqual(@as(usize, 0), drained.keys().len);
 
     // A monolith round-trips through memory, and its metadata reads without loading it.
-    const monolith = try (try index.on(executor).saveBuffer(&arena, .{})).bytes();
+    const monolith = (try index.on(executor).saveBuffer(&arena, .{})).bytes();
     try std.testing.expectEqual(frozen, try DenseIndex.metadataReadBuffer(monolith, .{ .executor = executor }));
     var copy = try DenseIndex.loadRamBuffer(monolith, .{ .executor = executor });
     defer copy.deinit();
     try std.testing.expectEqual(@as(usize, 3), (try copy.describe()).size);
 
-    // A cancel stops only the closing refinement, so every donor is consumed and nulled in place,
-    // and freeing them afterwards is a no-op.
-    var donors = [_]DenseIndex{ try DenseIndex.loadRamBuffer(monolith, .{}), try DenseIndex.loadRamBuffer(monolith, .{}) };
-    defer for (&donors) |*donor| donor.deinit();
+    // A recut in place keeps every entry, and the one shard left saves as a monolith.
+    _ = try index.on(executor).reshard(&.{index}, &.{index}, .{ .memory_domains = &.{}, .shard_capacity = 8 });
+    try std.testing.expectEqual(@as(usize, 3), (try index.describe()).size);
+
+    // An NVMe view resolves keys only through the key table it was opened with.
+    const checkpoint = ".zig-cache/usearch-zig-nvme.safegraphs";
+    try index.on(executor).save(checkpoint, .{});
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, checkpoint) catch {};
+    var drives = try Executor.forNvme(.{ .threads = 1 });
+    defer drives.deinit();
+    var keyed = try DenseIndex.viewNvme(checkpoint, .{ .executor = drives, .key_table_domains = &.{} });
+    defer keyed.deinit();
+    try std.testing.expectEqual(@as(usize, 1), try keyed.on(drives).count(keys[0]));
+    var keyless = try DenseIndex.viewNvme(checkpoint, .{ .executor = drives });
+    defer keyless.deinit();
+    try std.testing.expectError(Error.Unsupported, keyless.on(drives).count(keys[0]));
+
+    // A lone monolith has no manifest a loaded handle could replace.
+    try std.testing.expectError(Error.Unsupported, DenseIndex.loadNvme(checkpoint, .{ .executor = drives }));
+
+    // A cancel stops only the closing round, so every source has moved and ends empty and live;
+    // the plan it leaves closes with the whole gather's report.
+    var shards = [_]DenseIndex{ try DenseIndex.loadRamBuffer(monolith, .{}), try DenseIndex.loadRamBuffer(monolith, .{}) };
+    defer for (&shards) |*shard| shard.deinit();
     const Stop = struct {
         fn afterFirst(_: void, completed: usize, _: usize) types.Continuation {
             return if (completed == 0) .@"continue" else .cancel;
         }
     };
-    try std.testing.expectError(Error.Cancelled, copy.on(executor).absorb(&donors, .{ .progress = .of({}, Stop.afterFirst) }));
-    for (donors) |donor| try std.testing.expectEqual(DenseIndex{ .handle = null }, donor);
+    var gathering: DenseReshardPlan = .{};
+    var stopped: types.PhaseProgress = .{};
+    try std.testing.expectError(Error.Cancelled, copy.on(executor).reshard(&.{ copy, shards[0], shards[1] }, &.{copy}, .{
+        .progress = .of({}, Stop.afterFirst),
+        .plan = &gathering,
+        .phase = &stopped,
+    }));
+    try std.testing.expect(gathering.handle != null);
+    try std.testing.expect(stopped.phase != .none and stopped.phase != .done);
+    for (shards) |shard| try std.testing.expectEqual(@as(usize, 0), (try shard.describe()).size);
     try std.testing.expectEqual(@as(usize, 3), try copy.count(keys[0]));
+    _ = try copy.on(executor).reshardPlanFinish(&gathering);
+    try std.testing.expectEqual(DenseReshardPlan{}, gathering);
 
     const reachability = try index.on(executor).health();
     try std.testing.expectEqual([2]usize{ 3, 3 }, [2]usize{ reachability.audited, reachability.reachable });
@@ -2594,19 +2416,19 @@ test "a batch crosses the ABI and comes back as views over the arena it lands in
     try std.testing.expect(report.changed <= report.reselected);
     try std.testing.expectEqual(@as(usize, 9), report.reachability.audited);
 
-    // A split hands every entry to the receivers and leaves the source empty but live.
+    // One source into several targets hands them every entry, leaving the source empty but live.
     var receivers = [_]DenseIndex{ try DenseIndex.loadRamBuffer(monolith, .{}), try DenseIndex.loadRamBuffer(monolith, .{}) };
     defer for (&receivers) |*receiver| receiver.deinit();
     for (receivers) |receiver| try receiver.clear();
-    _ = try copy.on(executor).split(&receivers, .{ .seed = 7 });
+    _ = try copy.on(executor).reshard(&.{copy}, &receivers, .{ .seed = 7 });
     try std.testing.expectEqual(@as(usize, 0), (try copy.describe()).size);
     try std.testing.expectEqual(@as(usize, 9), (try receivers[0].describe()).size + (try receivers[1].describe()).size);
 
     // A sample draws held keys, each placed in three dimensions, and refuses shown keys without places.
     const draws = try index.on(executor).sample(2, &arena, .{ .seed = 42 });
     try std.testing.expect(draws.written <= 2);
-    for (try draws.keys()) |drawn| try std.testing.expect(drawn.asInteger().? >= 1 and drawn.asInteger().? <= 3);
-    if (draws.written != 0) try std.testing.expectEqual(@as(usize, 3), (try draws.coordinates.row(f32, 0)).len);
+    for (draws.keys()) |drawn| try std.testing.expect(drawn.asInteger().? >= 1 and drawn.asInteger().? <= 3);
+    try std.testing.expectEqual(draws.written, draws.coordinates().len);
     try std.testing.expectError(Error.ShapeMismatch, index.sample(2, &arena, .{ .shown = keys[0..1] }));
 }
 
@@ -2622,13 +2444,13 @@ test "a scan scores every entry, so every query finds itself first" {
     var arena: Arena = try .init(null);
     defer arena.deinit();
     const matches = try index.search(try .of(f32, &slab, dimensions), 1, &arena, .{ .traversal = .scan });
-    for (keys, 0..) |key, query| try std.testing.expectEqual(key, (try matches.query(query)).keys[0]);
+    for (keys, 0..) |key, query| try std.testing.expectEqual(key, matches.query(query).keys[0]);
 
     // Sub-byte rows report their own stride, so no width arithmetic happens here.
-    const nibbles = try index.get(keys[3], .u4x2, &arena);
-    try std.testing.expectEqual(@as(usize, 2), nibbles.stride);
-    try std.testing.expectEqual(@as(usize, dimensions), nibbles.columns);
-    try std.testing.expectEqual(@as(usize, 2), (try nibbles.row(Scalar.U4x2, 0)).len);
+    const nibbles = try index.get(Scalar.U4x2, keys[3], &arena);
+    try std.testing.expectEqual(@as(usize, 2), nibbles.view.stride);
+    try std.testing.expectEqual(@as(usize, dimensions), nibbles.view.columns);
+    try std.testing.expectEqual(@as(usize, 2), nibbles.row(0).len);
 }
 
 test "a deferred call is the same verb, final once waited on" {
@@ -2639,13 +2461,13 @@ test "a deferred call is the same verb, final once waited on" {
     defer index.deinit();
 
     // One call holds the executor at a time, so each is waited on before the next is submitted.
-    var reserving: Deferred(DenseReserve) = undefined;
+    var reserving: Deferred(void) = undefined;
     try index.deferred(executor, &reserving).reserve(4);
     defer reserving.deinit();
     try reserving.wait();
     const slab = [_]f32{ 1, 0, 0, 1 };
     const keys = [_]Key{ .fromInteger(1), .fromInteger(2) };
-    var inserting: Deferred(DenseInsert) = undefined;
+    var inserting: Deferred(void) = undefined;
     try index.deferred(executor, &inserting).insert(&keys, try .of(f32, &slab, dimensions), .{});
     defer inserting.deinit();
     try inserting.wait();
@@ -2655,15 +2477,15 @@ test "a deferred call is the same verb, final once waited on" {
     // Waiting again answers the same result rather than a second call's.
     var arena: Arena = try .init(executor);
     defer arena.deinit();
-    var getting: Deferred(DenseGet) = undefined;
-    try index.deferred(executor, &getting).get(keys[1], .f32, &arena);
+    var getting: Deferred(DenseVectors(f32)) = undefined;
+    try index.deferred(executor, &getting).get(f32, keys[1], &arena);
     defer getting.deinit();
     const vectors = try getting.wait();
-    try std.testing.expectEqualSlices(f32, &.{ 0, 1 }, try vectors.row(f32, 0));
+    try std.testing.expectEqualSlices(f32, &.{ 0, 1 }, vectors.row(0));
     try std.testing.expectEqual(vectors, try getting.wait());
 
     // The arena is borrowed as a blocking call borrows it, so a second call while one holds it is
-    // refused as contended and leaves the holder's views alone, and the next call retires them.
+    // refused as contended and leaves the holder's views alone.
     // The search waits at its last report until released, so the test meets it holding the arena.
     const Gate = struct {
         entered: std.atomic.Value(bool) = .init(false),
@@ -2683,29 +2505,26 @@ test "a deferred call is the same verb, final once waited on" {
         }
     };
     var gate: Gate = .{};
-    var holding: Deferred(DenseSearch) = undefined;
+    var holding: Deferred(Matches) = undefined;
     try index.deferred(executor, &holding).search(try .ofRow(f32, slab[0..dimensions]), 1, &arena, .{
         .progress = .of(&gate, Gate.holdUntilReleased),
         .progress_steps = 1,
     });
     defer holding.deinit();
-    try std.testing.expectError(Error.Uninitialized, vectors.row(f32, 0));
     try std.testing.expect(Gate.awaitSoon(&gate.entered));
-    try std.testing.expectError(Error.Contended, index.get(keys[1], .f32, &arena));
-    var contending: Deferred(DenseGet) = undefined;
-    try index.deferred(executor, &contending).get(keys[1], .f32, &arena);
+    try std.testing.expectError(Error.Contended, index.get(f32, keys[1], &arena));
+    var contending: Deferred(DenseVectors(f32)) = undefined;
+    try index.deferred(executor, &contending).get(f32, keys[1], &arena);
     defer contending.deinit();
     try std.testing.expectEqual(types.Status.contended, contending.status());
     try std.testing.expectError(Error.Contended, contending.wait());
     gate.released.store(true, .release);
     const held = try holding.wait();
-    try std.testing.expectEqualSlices(Key, keys[0..1], (try held.query(0)).keys);
-    _ = try index.get(keys[1], .f32, &arena);
-    try std.testing.expectError(Error.Uninitialized, held.query(0));
+    try std.testing.expectEqualSlices(Key, keys[0..1], held.query(0).keys);
 
     // Storage is the caller's, so a batch of calls is an array and a reused slot is resubmitted;
     // an executor runs one call at a time, so each call running at once takes its own.
-    var counting: [2]Deferred(DenseCount) = undefined;
+    var counting: [2]Deferred(usize) = undefined;
     var executors: [2]Executor = .{ try Executor.forRam(.{}), try Executor.forRam(.{}) };
     defer for (&executors) |*own| own.deinit();
     for (&counting, &executors, keys) |*slot, own, key| try index.deferred(own, slot).count(key);
@@ -2717,7 +2536,7 @@ test "a deferred call is the same verb, final once waited on" {
 
     // A failure the engine reports arrives through the same wait, as often as it is asked.
     const narrow = [_]f32{1};
-    var refused: Deferred(DenseSearch) = undefined;
+    var refused: Deferred(Matches) = undefined;
     try index.deferred(executor, &refused).search(try .ofRow(f32, &narrow), 1, &arena, .{});
     defer refused.deinit();
     try std.testing.expectError(Error.ShapeMismatch, refused.wait());
@@ -2729,7 +2548,7 @@ test "a deferred call is the same verb, final once waited on" {
     try std.testing.expectEqualStrings(outcome.text(), refused.message());
 
     // A shape only the binding sees is refused before anything is submitted.
-    var mismatched: Deferred(DenseInsert) = undefined;
+    var mismatched: Deferred(void) = undefined;
     try std.testing.expectError(Error.ShapeMismatch, index.deferred(executor, &mismatched).insert(keys[0..1], try .of(f32, &slab, dimensions), .{}));
 }
 
@@ -2747,19 +2566,19 @@ test "a product lands ragged, and a softmax weighs every key the walk scores" {
     var arena: Arena = try .init(null);
     defer arena.deinit();
     const products = try index.multiply(try .of(f32, &left, dimensions), &arena, .{});
-    const offsets = try products.offsets();
+    const offsets = products.offsets();
     try std.testing.expectEqual(products.written, offsets[2]);
-    try std.testing.expectEqual(products.written, (try products.keys()).len);
-    try std.testing.expectEqual(products.written, (try products.scores()).len);
-    try std.testing.expectEqual(offsets[2] - offsets[1], (try products.query(1)).keys.len);
+    try std.testing.expectEqual(products.written, products.keys().len);
+    try std.testing.expectEqual(products.written, products.scores().len);
+    try std.testing.expectEqual(offsets[2] - offsets[1], products.query(1).keys.len);
     try std.testing.expect(products.required >= products.written);
 
     // A second arena keeps the first product alive past the next one.
     var second: Arena = try .init(null);
     defer second.deinit();
     const cut = try index.multiply(try .of(f32, &left, dimensions), &second, .{ .wanted = 1 });
-    try std.testing.expectEqualSlices(usize, &.{ 0, 1, 2 }, try cut.offsets());
-    try std.testing.expect((try products.keys()).len >= (try cut.keys()).len);
+    try std.testing.expectEqualSlices(usize, &.{ 0, 1, 2 }, cut.offsets());
+    try std.testing.expect(products.keys().len >= cut.keys().len);
 
     // A graph this small walks every key, so attention is exact over all of them, whether the two
     // query rows are two tokens of one head or one token of two; a key without a row refuses.
@@ -2778,7 +2597,7 @@ test "a product lands ragged, and a softmax weighs every key the walk scores" {
     var table: Table = .{ .rows = &stored, .resolvable = keys.len };
     var carry: [2]DenseSoftmaxState = undefined;
     for ([_]usize{ 1, 2 }) |head_count| {
-        const outputs = try index.attend(try .of(f32, &left, dimensions), .of(Scalar.BF16, &table, Table.resolve), &arena, .{
+        const outputs = try index.attend(f32, try .of(f32, &left, dimensions), .of(Scalar.BF16, &table, Table.resolve), &arena, .{
             .head_count = head_count,
             .carry = &carry,
             .expansion_factor = 8,
@@ -2798,7 +2617,7 @@ test "a product lands ragged, and a softmax weighs every key the walk scores" {
                 partition += weight;
                 for (&mixed, 0..) |*column, position| column.* += weight * values[key * dimensions + position];
             }
-            const attended = try outputs.row(f32, query);
+            const attended = outputs.row(query);
             for (mixed, attended) |column, attended_column|
                 try std.testing.expectApproxEqAbs(column / partition, attended_column, 1e-3 * @max(@abs(column / partition), 1));
             try std.testing.expectApproxEqAbs(maximum, carry[query].maximum_score, 1e-3 * @max(@abs(maximum), 1));
@@ -2806,7 +2625,7 @@ test "a product lands ragged, and a softmax weighs every key the walk scores" {
         }
     }
     table.resolvable = keys.len - 1;
-    try std.testing.expectError(Error.ShapeMismatch, index.attend(try .of(f32, &left, dimensions), .of(Scalar.BF16, &table, Table.resolve), &arena, .{}));
+    try std.testing.expectError(Error.ShapeMismatch, index.attend(f32, try .of(f32, &left, dimensions), .of(Scalar.BF16, &table, Table.resolve), &arena, .{}));
     // A lookup over another kind than the index stores answers no row, which the call refuses alike.
     table.resolvable = keys.len;
     const Halves = struct {
@@ -2814,12 +2633,12 @@ test "a product lands ragged, and a softmax weighs every key the walk scores" {
             return &.{ 1, 2 };
         }
     };
-    try std.testing.expectError(Error.ShapeMismatch, index.attend(try .of(f32, &left, dimensions), .of(f16, {}, Halves.resolve), &arena, .{}));
+    try std.testing.expectError(Error.ShapeMismatch, index.attend(f32, try .of(f32, &left, dimensions), .of(f16, {}, Halves.resolve), &arena, .{}));
 
     const documents = try index.maxsim(try .of(f32, &left, dimensions), 2, 4, &arena, .{});
-    try std.testing.expect((try documents.query(0)).keys.len != 0);
+    try std.testing.expect(documents.query(0).keys.len != 0);
     const every = try index.maxsim(try .of(f32, &left, dimensions), 2, 0, &second, .{});
-    try std.testing.expect((try every.query(0)).keys.len >= (try documents.query(0)).keys.len);
+    try std.testing.expect(every.query(0).keys.len >= documents.query(0).keys.len);
     try std.testing.expectError(Error.ShapeMismatch, index.maxsim(try .of(f32, &left, dimensions), 3, 4, &arena, .{}));
 }
 
@@ -2866,9 +2685,19 @@ test "a reporting batch counts what it published, and a stopped sweep answers th
     try index.on(executor).insert(&more, try .of(f32, &slab, dimensions), .{ .progress = .of(&ignored, Watch.stop) });
     try std.testing.expectEqual(@as(usize, 6), (try index.on(executor).describe()).size);
 
-    // A stopped sweep still heals what it re-selected, and answers the cancel.
+    // A stopped round answers the cancel; with a plan it stays live, the next call ends its round,
+    // and finishing reports the whole plan.
     var swept: Watch = .{};
     try std.testing.expectError(Error.Cancelled, index.on(executor).refine(.{ .progress = .of(&swept, Watch.stop) }));
     try std.testing.expect(swept.ordered);
-    try std.testing.expectEqual(@as(usize, 6), swept.total);
+    try std.testing.expect(swept.total != 0);
+    var plan: DenseRefinePlan = .{};
+    var phase: types.PhaseProgress = .{};
+    try std.testing.expectError(Error.Cancelled, index.on(executor).refine(.{ .progress = .of(&swept, Watch.stop), .plan = &plan, .phase = &phase }));
+    try std.testing.expect(plan.handle != null and phase.phase != .done);
+    _ = try index.on(executor).refine(.{ .plan = &plan, .phase = &phase });
+    try std.testing.expectEqual(types.Phase.done, phase.phase);
+    const whole = try index.on(executor).refinePlanFinish(&plan);
+    try std.testing.expectEqual(DenseRefinePlan{}, plan);
+    try std.testing.expect(whole.changed <= whole.reselected);
 }

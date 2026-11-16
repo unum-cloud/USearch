@@ -12,16 +12,16 @@
  *  Every verb is written once and reached through three receivers: the index runs it on the
  *  calling thread, an @c On from @c index.on(executor) blocks on that executor, and a @c DeferredOn
  *  from @c index.deferred(executor) submits it and answers a @c Deferred. A verb fills one call
- *  structure that the receiver keeps on the stack or inside the @c Deferred, so the same body serves
- *  every completion. Every call detaches the thread state; the predicate, progress and value-lookup
- *  callbacks re-enter Python from the library's own threads, so their trampolines take the GIL back
- *  for each report.
+ *  record that the receiver keeps on the stack or inside the @c Deferred, and opens its result as
+ *  the slot the library writes into, so the same body serves every completion. Every call detaches
+ *  the thread state; the predicate, progress and value-lookup callbacks re-enter Python from the
+ *  library's own threads, so their trampolines take the GIL back for each report.
  */
 #include "lib.h"
 
 #pragma region Handles
 
-/** An owned index handle, nulled once another index absorbs it. */
+/** An owned index handle. */
 typedef struct DenseIndex {
     PyObject ob_base;
     usearch_dense_index_t handle;
@@ -32,7 +32,7 @@ typedef struct DenseCursor {
     PyObject ob_base;
 
     /** The engine cursor, reading each shard's watermark as it enters that shard; NULL once closed. */
-    usearch_dense_cursor_t handle;
+    _Atomic(usearch_dense_cursor_t) handle;
 
     /** The index or @c On that opened the cursor, held, which every step runs through. */
     PyObject* receiver;
@@ -53,42 +53,66 @@ typedef struct DenseBatch {
 typedef struct DenseSearchStream {
     PyObject ob_base;
 
-    /** The engine stream; NULL once drained or closed. */
-    usearch_dense_search_stream_t handle;
+    /** The engine stream; NULL once closed. */
+    _Atomic(usearch_dense_search_stream_t) handle;
 
     /** The index or @c On that opened the stream, held, which every pull runs through. */
     PyObject* receiver;
 } DenseSearchStream;
 
-/** Traversal telemetry a caller passes into a walking verb to have overwritten. */
-typedef struct DenseTraversalStats {
+/** A live index's frozen metadata and current counters, the slot @c describe writes them into. */
+typedef struct DenseIndexDescription {
     PyObject ob_base;
-    usearch_traversal_stats_t stats;
-} DenseTraversalStats;
+    usearch_dense_index_description_t description;
+} DenseIndexDescription;
 
-/** The handle of @p index, read under its critical section since another index may absorb it from
- *  another thread. */
-static usearch_dense_index_t index_handle(DenseIndex* index) {
-    usearch_dense_index_t handle = NULL;
-    usearch_py_critical_section_begin_((PyObject*)index);
-    handle = index->handle;
-    usearch_py_critical_section_end_();
-    if (!handle) usearch_py_raise(usearch_status_uninitialized_k, "the index handle was absorbed into another index");
-    return handle;
-}
+/** The draws one @c sample call wrote into an arena, the slot of its outputs. */
+typedef struct Sample {
+    PyObject ob_base;
+    PyObject* arena;
+    usearch_keys_view_t keys;
+    size_t const* entry_ordinals;
+    usearch_matches_view_t parents;
+    usearch_rows_view_t coordinates;
+    size_t written;
+} Sample;
+
+/** A refine or a reshard in flight, continued by every call naming it until its finish verb. */
+typedef struct DensePlan {
+    PyObject ob_base;
+
+    /** The engine plan, NULL until a call opens it and once its finish verb closed it. */
+    union {
+        usearch_dense_refine_plan_t refine;
+        usearch_dense_reshard_plan_t reshard;
+    } handle;
+
+    /** Where the last call naming the plan stopped. */
+    usearch_phase_progress_t progress;
+} DensePlan;
+
+/** The holds every dense call keeps in the same slots. */
+enum {
+    progress_slot_k = 0,
+    stats_slot_k = 1,
+    callback_slot_k = 2,
+    sources_slot_k = 3,
+    targets_slot_k = 4,
+};
 
 /**
- *  @brief The live handle @p self addresses and how its verbs run there, refusing a receiver over another modality.
- *  @return The handle, or NULL with an exception set.
+ *  @brief Reads what @p self names and its live handle, refusing a receiver over another modality.
+ *  @return 0 on success, -1 with an exception set otherwise.
  */
-static usearch_dense_index_t receiver_from_object(PyObject* self, usearch_py_receiver_t* receiver) {
-    if (usearch_py_receiver_from_object(self, receiver) != 0) return NULL;
+static int receiver_from_object(PyObject* self, usearch_py_receiver_t* receiver, usearch_dense_index_t* handle) {
+    if (usearch_py_receiver_from_object(self, receiver) != 0) return -1;
     if (!Py_IS_TYPE(receiver->index, &DenseIndexType)) {
         PyErr_Format(PyExc_TypeError, "expected a receiver over a DenseIndex, got one over %S",
                      Py_TYPE(receiver->index));
-        return NULL;
+        return -1;
     }
-    return index_handle((DenseIndex*)receiver->index);
+    *handle = ((DenseIndex*)receiver->index)->handle;
+    return 0;
 }
 
 /** The rows a borrowed matrix holds, as a verb's batch input reads them. */
@@ -97,56 +121,35 @@ static usearch_rows_view_t rows_of(usearch_matrix_view_t const* matrix) {
     return rows;
 }
 
-/** Reads an optional `executor`: NULL or @c None runs on the calling thread. Returns 0 or -1 with an exception set. */
-static int executor_optional(PyObject* object, usearch_executor_t* executor) {
-    *executor = NULL;
-    return !object || object == Py_None ? 0 : usearch_py_executor_from_object(object, executor);
-}
-
-/** What a traversal reports beside its answer: progress to its handler, telemetry to a caller's stats. */
-typedef struct walk_reports_t {
-
-    /** The progress handler, or an empty callback when the caller passed none. */
-    usearch_py_callback_t progress;
-
-    /** The telemetry the library writes. */
-    usearch_traversal_stats_t stats;
-
-    /** The @c DenseTraversalStats the telemetry is copied into once the call succeeds, held, or NULL. */
-    PyObject* stats_object;
-} walk_reports_t;
-
-/** Reads the `progress` and `stats` arguments into @p reports; returns 0 or -1 with an exception set. */
-static int walk_reports_fill(walk_reports_t* reports, usearch_py_call_t* call, PyObject* progress_object,
-                             PyObject* stats_object) {
-    if (usearch_py_callback_from_object(progress_object, "progress", call, &reports->progress) != 0) return -1;
-    reports->stats_object = NULL;
+/** Holds the progress handler and the telemetry a walking verb overwrites in @p call; returns 0 or
+ *  -1 with an exception set. */
+static int walk_parse(usearch_py_call_t* call, PyObject* progress_object, PyObject* stats_object) {
+    if (usearch_py_callable_from_object(progress_object, "progress", &call->holds[progress_slot_k]) != 0) return -1;
     if (!stats_object || stats_object == Py_None) return 0;
     if (!Py_IS_TYPE(stats_object, &DenseTraversalStatsType)) {
         PyErr_Format(PyExc_TypeError, "the 'stats' option must be a DenseTraversalStats or None, got %S",
                      Py_TYPE(stats_object));
         return -1;
     }
-    reports->stats_object = Py_NewRef(stats_object);
+    call->holds[stats_slot_k] = Py_NewRef(stats_object);
     return 0;
 }
 
-/** Copies the telemetry into the caller's stats, fenced against a concurrent `+=`; a caller who passed none skips. */
-static void walk_reports_answer(walk_reports_t const* reports) {
-    if (!reports->stats_object) return;
-    usearch_py_critical_section_begin_(reports->stats_object);
-    ((DenseTraversalStats*)reports->stats_object)->stats = reports->stats;
-    usearch_py_critical_section_end_();
+/** The telemetry the library overwrites for @p call, NULL when the caller passed none. */
+static usearch_traversal_stats_t* walk_stats(usearch_py_call_t const* call) {
+    PyObject* const stats = call->holds[stats_slot_k];
+    return stats ? &((DenseTraversalStats*)stats)->stats : NULL;
 }
 
-static void walk_reports_release(walk_reports_t* reports) {
-    Py_CLEAR(reports->progress.callable);
-    Py_CLEAR(reports->stats_object);
-}
-
-static int walk_reports_traverse(walk_reports_t const* reports, visitproc visit, void* arg) {
-    Py_VISIT(reports->progress.callable);
-    Py_VISIT(reports->stats_object);
+/** Holds the @p plan of @p type a call continues or closes in @p call; NULL or None names none.
+ *  Returns 0 or -1 with an exception set. */
+static int plan_parse(usearch_py_call_t* call, PyObject* plan, PyTypeObject* type) {
+    if (!plan || plan == Py_None) return 0;
+    if (!Py_IS_TYPE(plan, type)) {
+        PyErr_Format(PyExc_TypeError, "the 'plan' option must be a %s or None, got %S", type->tp_name, Py_TYPE(plan));
+        return -1;
+    }
+    call->holds[callback_slot_k] = Py_NewRef(plan);
     return 0;
 }
 
@@ -263,21 +266,10 @@ static PyObject* index_adopt(PyTypeObject* type, usearch_dense_index_t handle, u
     return (PyObject*)instance;
 }
 
-/** Adopts the handle a factory produced, a progress handler's own exception outranking the outcome. */
-static PyObject* index_loaded(PyTypeObject* type, usearch_dense_index_t handle, usearch_py_call_t* call) {
-    if (call->raised) {
-        usearch_dense_free(handle);
-        PyErr_SetRaisedException(call->raised);
-        call->raised = NULL;
-        return NULL;
-    }
-    return index_adopt(type, handle, &call->outcome);
-}
-
 static PyObject* DenseIndex_tp_new(PyTypeObject* type, PyObject* args, PyObject* keywords) {
-    PyErr_SetString(
-        PyExc_TypeError,
-        "DenseIndex is built through init_ram(), init_vram(), load_ram*(), load_vram*(), view_ram() or view_nvme()");
+    PyErr_SetString(PyExc_TypeError,
+                    "DenseIndex is built through init_ram(), init_vram(), load_ram*(), load_vram*(), load_nvme(), " //
+                    "view_ram() or view_nvme()");
     return NULL;
 }
 
@@ -446,6 +438,7 @@ static char const doc_DenseTraversalStats[] =                                   
     "  visited_members (int): Entries whose neighborhoods the walk expanded.\n" //
     "  computed_distances (int): Distance evaluations the walk paid for.\n"     //
     "  restarts (int): Times the walk fell back to a fresh entry point.\n"      //
+    "  missing_hints (int): Hint keys no shard held an entry under.\n"          //
     "\n"                                                                        //
     "Example:\n"                                                                //
     "  >>> total = usearch.DenseTraversalStats()\n"                             //
@@ -464,39 +457,33 @@ static PyObject* DenseTraversalStats_tp_new(PyTypeObject* type, PyObject* args, 
 static void DenseTraversalStats_dealloc(DenseTraversalStats* self) { Py_TYPE(self)->tp_free((PyObject*)self); }
 
 static PyObject* DenseTraversalStats_repr(DenseTraversalStats* self) {
-    char const* const format = "DenseTraversalStats(visited_members=%zu, computed_distances=%zu, restarts=%zu)";
+    char const* const format =
+        "DenseTraversalStats(visited_members=%zu, computed_distances=%zu, restarts=%zu, missing_hints=%zu)";
     return PyUnicode_FromFormat(format, self->stats.visited_members, self->stats.computed_distances,
-                                self->stats.restarts);
+                                self->stats.restarts, self->stats.missing_hints);
 }
 
-/** Adds another reading's counters into this one, fenced like the overwrite a verb performs. */
+/** Adds another reading's counters into this one. */
 static PyObject* DenseTraversalStats_inplace_add(PyObject* self, PyObject* other) {
     if (!Py_IS_TYPE(other, &DenseTraversalStatsType)) Py_RETURN_NOTIMPLEMENTED;
-    usearch_traversal_stats_t addend;
-    usearch_py_critical_section_begin_(other);
-    addend = ((DenseTraversalStats*)other)->stats;
-    usearch_py_critical_section_end_();
-    DenseTraversalStats* const total = (DenseTraversalStats*)self;
-    usearch_py_critical_section_begin_(self);
-    total->stats.visited_members += addend.visited_members;
-    total->stats.computed_distances += addend.computed_distances;
-    total->stats.restarts += addend.restarts;
-    usearch_py_critical_section_end_();
+    usearch_traversal_stats_t const addend = ((DenseTraversalStats*)other)->stats;
+    usearch_traversal_stats_t* const total = &((DenseTraversalStats*)self)->stats;
+    total->visited_members += addend.visited_members;
+    total->computed_distances += addend.computed_distances;
+    total->restarts += addend.restarts;
+    total->missing_hints += addend.missing_hints;
     return Py_NewRef(self);
 }
 
-/** Reads the @c size_t counter at the byte offset @p closure names inside the telemetry. */
-static PyObject* DenseTraversalStats_get_counter(DenseTraversalStats* self, void* closure) {
-    return PyLong_FromSize_t(*(size_t const*)((char const*)&self->stats + (size_t)closure));
-}
-
 static PyGetSetDef DenseTraversalStats_getset[] = {
-    {"visited_members", (getter)DenseTraversalStats_get_counter, NULL, "Entries whose neighborhoods the walk expanded.",
-     (void*)offsetof(usearch_traversal_stats_t, visited_members)},
-    {"computed_distances", (getter)DenseTraversalStats_get_counter, NULL, "Distance evaluations the walk paid for.",
-     (void*)offsetof(usearch_traversal_stats_t, computed_distances)},
-    {"restarts", (getter)DenseTraversalStats_get_counter, NULL, "Times the walk fell back to a fresh entry point.",
-     (void*)offsetof(usearch_traversal_stats_t, restarts)},
+    {"visited_members", usearch_py_size_getter, NULL, "Entries whose neighborhoods the walk expanded.",
+     (void*)offsetof(DenseTraversalStats, stats.visited_members)},
+    {"computed_distances", usearch_py_size_getter, NULL, "Distance evaluations the walk paid for.",
+     (void*)offsetof(DenseTraversalStats, stats.computed_distances)},
+    {"restarts", usearch_py_size_getter, NULL, "Times the walk fell back to a fresh entry point.",
+     (void*)offsetof(DenseTraversalStats, stats.restarts)},
+    {"missing_hints", usearch_py_size_getter, NULL, "Hint keys no shard held an entry under.",
+     (void*)offsetof(DenseTraversalStats, stats.missing_hints)},
     {NULL, NULL, NULL, NULL, NULL},
 };
 
@@ -529,94 +516,6 @@ PyStructSequence_Desc usearch_py_dense_metadata_desc = {
 
 PyTypeObject DenseMetadataType;
 
-static PyStructSequence_Field DenseIndexDescription_fields[] = {
-    {"metadata", "The frozen `DenseMetadata`, as a checkpoint reports it."},
-    {"size", "Stored entries."},
-    {"capacity", "Entries hosted without growing again."},
-    {"memory_usage", "Bytes the handle holds; traversal scratch is the executor's."},
-    {"cpu_class", "The `CPUClass` dispatch picked on this machine, or None."},
-    {"gpu_class", "The `GPUClass` dispatch picked on the index's devices, or None for a host index."},
-    {"shards_count", "Live shards."},
-    {"load_path", "How the last load from a path read the parts onto the devices: none, host-copy or cufile."},
-    {NULL, NULL},
-};
-
-PyStructSequence_Desc usearch_py_dense_index_description_desc = {
-    "usearch.DenseIndexDescription",
-    "A live index's frozen metadata and current counters, as `usearch_dense_index_description_t` holds them.",
-    DenseIndexDescription_fields, 8};
-
-PyTypeObject DenseIndexDescriptionType;
-
-static PyStructSequence_Field DenseReachability_fields[] = {
-    {"audited", "Entries published when the audit started, the population it judged."},
-    {"reachable", "Of those, the entries a search reaches; the rest wait for a `refine` to re-link them."},
-    {"sweeps", "Levels the sweep took to converge."},
-    {"back_sweeps", "Levels the sweep back toward the entry point took, where an audit sweeps both ways."},
-    {NULL, NULL},
-};
-
-PyStructSequence_Desc usearch_py_dense_reachability_desc = {
-    "usearch.DenseReachability", "One reachability audit, as `usearch_reachability_t` holds it.",
-    DenseReachability_fields, 4};
-
-PyTypeObject DenseReachabilityType;
-
-static PyStructSequence_Field RefineReport_fields[] = {
-    {"reselected", "Entries whose neighbors were selected again, islands of every heal round included."},
-    {"changed", "Of those, the entries whose neighbor set gained a member it lacked; zero means settled."},
-    {"islands_found", "Entries the first audit found not reached both ways."},
-    {"islands_reconnected", "Links written between an island and an entry reached both ways."},
-    {"reachability", "The `DenseReachability` audit closing the heal, as `health` would take it right after."},
-    {NULL, NULL},
-};
-
-PyStructSequence_Desc usearch_py_refine_report_desc = {
-    "usearch.RefineReport", "What one refine-family call did to the graph, as `usearch_refine_report_t` counts it.",
-    RefineReport_fields, 5};
-
-PyTypeObject RefineReportType;
-
-static PyStructSequence_Field Sample_fields[] = {
-    {"keys", "(written, 16) identities drawn, most significant byte first."},
-    {"entry_ordinals", "(written,) which of its key's entries each draw is, in the order `get` writes them."},
-    {"parents", "`Matches` of one column: the shown or earlier draw each draw hangs from, and its distance."},
-    {"coordinates", "(written, 3) float32 places of the draws, beside the shown keys."},
-    {NULL, NULL},
-};
-
-PyStructSequence_Desc usearch_py_sample_desc = {
-    "usearch.Sample", "The draws one `sample` call wrote into an `Arena`, viewing it until it rewinds.", Sample_fields,
-    4};
-
-PyTypeObject SampleType;
-
-/** A new member of @p mirrored for @p value, or None for the zero value the enumeration calls
- *  unknown. */
-static PyObject* class_to_object(usearch_py_enum_t const* mirrored, int value) {
-    return value ? usearch_py_enum_to_object(mirrored, value) : Py_NewRef(Py_None);
-}
-
-/** A new @c DenseReachability of @p reachability, or NULL with an exception set. */
-static PyObject* reachability_to_object(usearch_reachability_t const* reachability) {
-    PyObject* fields[4] = {NULL, NULL, NULL, NULL};
-    (void)((fields[0] = PyLong_FromSize_t(reachability->audited)) &&
-           (fields[1] = PyLong_FromSize_t(reachability->reachable)) &&
-           (fields[2] = PyLong_FromSize_t(reachability->sweeps)) &&
-           (fields[3] = PyLong_FromSize_t(reachability->back_sweeps)));
-    return usearch_py_struct_sequence_steal(&DenseReachabilityType, fields, 4);
-}
-
-/** A new @c RefineReport of @p report, or NULL with an exception set. */
-static PyObject* refine_report_to_object(usearch_refine_report_t const* report) {
-    PyObject* fields[5] = {NULL, NULL, NULL, NULL, NULL};
-    (void)((fields[0] = PyLong_FromSize_t(report->reselected)) && (fields[1] = PyLong_FromSize_t(report->changed)) &&
-           (fields[2] = PyLong_FromSize_t(report->islands_found)) &&
-           (fields[3] = PyLong_FromSize_t(report->islands_reconnected)) &&
-           (fields[4] = reachability_to_object(&report->reachability)));
-    return usearch_py_struct_sequence_steal(&RefineReportType, fields, 5);
-}
-
 /** A new @c DenseMetadata of @p metadata, or NULL with an exception set. */
 static PyObject* metadata_to_object(usearch_dense_metadata_t const* metadata) {
     PyObject* fields[4] = {NULL, NULL, NULL, NULL};
@@ -626,6 +525,122 @@ static PyObject* metadata_to_object(usearch_dense_metadata_t const* metadata) {
            (fields[3] = PyLong_FromSize_t(metadata->connectivity)));
     return usearch_py_struct_sequence_steal(&DenseMetadataType, fields, 4);
 }
+
+static char const doc_DenseIndexDescription[] =                                             //
+    "DenseIndexDescription\n"                                                               //
+    "\n"                                                                                    //
+    "A live index's frozen metadata and current counters, as `describe` read them in one\n" //
+    "call.";
+
+static PyObject* DenseIndexDescription_get_metadata(DenseIndexDescription* self, void* closure) {
+    return metadata_to_object(&self->description.metadata);
+}
+
+static PyObject* DenseIndexDescription_get_cpu_class(DenseIndexDescription* self, void* closure) {
+    return usearch_py_class_to_object(&usearch_py_cpu_class, (int)self->description.cpu_class);
+}
+
+static PyObject* DenseIndexDescription_get_gpu_class(DenseIndexDescription* self, void* closure) {
+    return usearch_py_class_to_object(&usearch_py_gpu_class, (int)self->description.gpu_class);
+}
+
+static PyObject* DenseIndexDescription_get_load_path(DenseIndexDescription* self, void* closure) {
+    return PyUnicode_FromString(usearch_load_path_name(self->description.load_path));
+}
+
+static PyGetSetDef DenseIndexDescription_getset[] = {
+    {"metadata", (getter)DenseIndexDescription_get_metadata, NULL,
+     "The frozen `DenseMetadata`, as a checkpoint reports it.", NULL},
+    {"size", usearch_py_size_getter, NULL, "Stored entries.", (void*)offsetof(DenseIndexDescription, description.size)},
+    {"capacity", usearch_py_size_getter, NULL, "Entries hosted without growing again.",
+     (void*)offsetof(DenseIndexDescription, description.capacity)},
+    {"memory_usage", usearch_py_size_getter, NULL, "Bytes the handle holds; traversal scratch is the executor's.",
+     (void*)offsetof(DenseIndexDescription, description.memory_usage)},
+    {"cpu_class", (getter)DenseIndexDescription_get_cpu_class, NULL,
+     "The `CPUClass` dispatch picked on this machine, or None.", NULL},
+    {"gpu_class", (getter)DenseIndexDescription_get_gpu_class, NULL,
+     "The `GPUClass` dispatch picked on the index's devices, or None for a host index.", NULL},
+    {"shards_count", usearch_py_size_getter, NULL, "Live shards.",
+     (void*)offsetof(DenseIndexDescription, description.shards_count)},
+    {"load_path", (getter)DenseIndexDescription_get_load_path, NULL,
+     "How the last load from a path read the parts onto the devices: none, host-copy or cufile.", NULL},
+    {NULL, NULL, NULL, NULL, NULL},
+};
+
+static PyObject* DenseIndexDescription_repr(DenseIndexDescription* self) {
+    return PyUnicode_FromFormat("DenseIndexDescription(dimensions=%zu, size=%zu, capacity=%zu)",
+                                self->description.metadata.dimensions, self->description.size,
+                                self->description.capacity);
+}
+
+PyTypeObject DenseIndexDescriptionType = {
+    PyVarObject_HEAD_INIT(NULL, 0) //
+        .tp_name = "usearch.DenseIndexDescription",
+    .tp_doc = doc_DenseIndexDescription,
+    .tp_basicsize = sizeof(DenseIndexDescription),
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_repr = (reprfunc)DenseIndexDescription_repr,
+    .tp_getset = DenseIndexDescription_getset,
+};
+
+static char const doc_Sample[] =                                                             //
+    "Sample\n"                                                                               //
+    "\n"                                                                                     //
+    "The draws one `sample` call wrote into an `Arena`, viewing it until it rewinds.\n"      //
+    "\n"                                                                                     //
+    "Attributes:\n"                                                                          //
+    "  keys (buffer): Identities drawn, `(written, 16)`, most significant byte first.\n"     //
+    "  entry_ordinals (buffer): Which of its key's entries each draw is, `(written,)`, in\n" //
+    "    the order `get` writes them.\n"                                                     //
+    "  parents (Matches): One column naming the shown or earlier draw each draw hangs\n"     //
+    "    from, and its distance.\n"                                                          //
+    "  coordinates (buffer): Float32 places of the draws, `(written, 3)`, beside the shown keys.";
+
+static void Sample_dealloc(Sample* self) {
+    Py_XDECREF(self->arena);
+    Py_TYPE(self)->tp_free((PyObject*)self);
+}
+
+static PyObject* Sample_get_keys(Sample* self, void* closure) {
+    Py_ssize_t const shape[2] = {(Py_ssize_t)self->written, (Py_ssize_t)sizeof(usearch_key_t)};
+    return usearch_py_arena_buffer(&ArenaBufferType, self->arena, self->keys.data, "B", 1, shape, 2);
+}
+
+static PyObject* Sample_get_entry_ordinals(Sample* self, void* closure) {
+    Py_ssize_t const shape[1] = {(Py_ssize_t)self->written};
+    return usearch_py_arena_buffer(&ArenaBufferType, self->arena, self->entry_ordinals, "N", sizeof(size_t), shape, 1);
+}
+
+static PyObject* Sample_get_parents(Sample* self, void* closure) {
+    return usearch_py_matches_new(self->arena, &self->parents, self->written);
+}
+
+static PyObject* Sample_get_coordinates(Sample* self, void* closure) {
+    Py_ssize_t const shape[2] = {(Py_ssize_t)self->written, 3};
+    return usearch_py_arena_buffer(&ArenaBufferType, self->arena, self->coordinates.data, "f", sizeof(float), shape, 2);
+}
+
+static PyGetSetDef Sample_getset[] = {
+    {"keys", (getter)Sample_get_keys, NULL, "(written, 16) identities drawn, most significant byte first.", NULL},
+    {"entry_ordinals", (getter)Sample_get_entry_ordinals, NULL,
+     "(written,) which of its key's entries each draw is, in the order `get` writes them.", NULL},
+    {"parents", (getter)Sample_get_parents, NULL,
+     "`Matches` of one column: the shown or earlier draw each draw hangs from, and its distance.", NULL},
+    {"coordinates", (getter)Sample_get_coordinates, NULL,
+     "(written, 3) float32 places of the draws, beside the shown keys.", NULL},
+    {NULL, NULL, NULL, NULL, NULL},
+};
+
+PyTypeObject SampleType = {
+    PyVarObject_HEAD_INIT(NULL, 0) //
+        .tp_name = "usearch.Sample",
+    .tp_doc = doc_Sample,
+    .tp_basicsize = sizeof(Sample),
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_new = NULL, // Returned by `sample`, never constructed by name.
+    .tp_dealloc = (destructor)Sample_dealloc,
+    .tp_getset = Sample_getset,
+};
 
 #pragma endregion Reports
 
@@ -656,45 +671,25 @@ static char const doc_DenseIndex_describe[] =                                   
     "  >>> usearch.DenseIndex.init_ram(256).describe().metadata.dimensions\n"                //
     "  256";
 
-/** A @c usearch_dense_describe call and the description it lands. */
-typedef struct describe_call_t {
-    usearch_py_call_t call;
-    usearch_dense_describe_t arguments;
-    usearch_dense_index_description_t description;
-} describe_call_t;
-
-static void describe_submit(void* call) { usearch_dense_describe(&((describe_call_t*)call)->arguments); }
-
-static PyObject* describe_answer(void* erased) {
-    usearch_dense_index_description_t const* const description = &((describe_call_t*)erased)->description;
-    PyObject* fields[8] = {NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL};
-    (void)((fields[0] = metadata_to_object(&description->metadata)) &&
-           (fields[1] = PyLong_FromSize_t(description->size)) &&
-           (fields[2] = PyLong_FromSize_t(description->capacity)) &&
-           (fields[3] = PyLong_FromSize_t(description->memory_usage)) &&
-           (fields[4] = class_to_object(&usearch_py_cpu_class, (int)description->cpu_class)) &&
-           (fields[5] = class_to_object(&usearch_py_gpu_class, (int)description->gpu_class)) &&
-           (fields[6] = PyLong_FromSize_t(description->shards_count)) &&
-           (fields[7] = PyUnicode_FromString(usearch_load_path_name(description->load_path))));
-    return usearch_py_struct_sequence_steal(&DenseIndexDescriptionType, fields, 8);
-}
-
-static usearch_py_verb_t const describe_verb = {sizeof(describe_call_t), describe_submit, describe_answer,
-                                                usearch_py_call_release};
-
 static PyObject* DenseIndex_describe(PyObject* self, PyObject* unused) {
     usearch_py_receiver_t receiver;
-    usearch_dense_index_t const handle = receiver_from_object(self, &receiver);
-    if (!handle) return NULL;
-    describe_call_t stack;
-    describe_call_t* const call = usearch_py_call_open(&receiver, &describe_verb, &stack);
-    if (!call) return NULL;
-    call->arguments = (usearch_dense_describe_t) {.index = handle,
-                                                  .executor = receiver.executor,
-                                                  .outcome = &call->call.outcome,
-                                                  .completion = receiver.completion,
-                                                  .description = &call->description};
-    return usearch_py_call_run(&receiver, &describe_verb, call);
+    usearch_dense_index_t handle = NULL;
+    usearch_py_call_t stack;
+    usearch_py_call_t* call = NULL;
+    if (receiver_from_object(self, &receiver, &handle) != 0 || !(call = usearch_py_call_open(&receiver, &stack)))
+        return NULL;
+    DenseIndexDescription* const description = usearch_py_call_result(call, &DenseIndexDescriptionType);
+    if (!description) return usearch_py_call_discard(&receiver, call);
+    usearch_dense_describe_t* const arguments = (usearch_dense_describe_t*)call->arguments;
+    *arguments = (usearch_dense_describe_t) {.index = handle,
+                                             .executor = receiver.executor,
+                                             .outcome = &call->outcome,
+                                             .completion = receiver.completion,
+                                             .description = &description->description};
+    Py_BEGIN_ALLOW_THREADS;
+    usearch_dense_describe(arguments);
+    Py_END_ALLOW_THREADS;
+    return usearch_py_call_finish(&receiver, call);
 }
 
 static char const doc_DenseIndex_health[] =                                                    //
@@ -713,40 +708,31 @@ static char const doc_DenseIndex_health[] =                                     
     "  >>> health.reachable == health.audited == 1\n"                                          //
     "  True";
 
-/** A @c usearch_dense_health call and the reachability it lands. */
-typedef struct health_call_t {
-    usearch_py_call_t call;
-    usearch_dense_health_t arguments;
-    usearch_reachability_t reachability;
-} health_call_t;
-
-static void health_submit(void* call) { usearch_dense_health(&((health_call_t*)call)->arguments); }
-
-static PyObject* health_answer(void* erased) { return reachability_to_object(&((health_call_t*)erased)->reachability); }
-
-static usearch_py_verb_t const health_verb = {sizeof(health_call_t), health_submit, health_answer,
-                                              usearch_py_call_release};
-
 static PyObject* DenseIndex_health(PyObject* self, PyObject* unused) {
     usearch_py_receiver_t receiver;
-    usearch_dense_index_t const handle = receiver_from_object(self, &receiver);
-    if (!handle) return NULL;
-    health_call_t stack;
-    health_call_t* const call = usearch_py_call_open(&receiver, &health_verb, &stack);
-    if (!call) return NULL;
-    call->arguments = (usearch_dense_health_t) {.index = handle,
-                                                .executor = receiver.executor,
-                                                .outcome = &call->call.outcome,
-                                                .completion = receiver.completion,
-                                                .reachability = &call->reachability};
-    return usearch_py_call_run(&receiver, &health_verb, call);
+    usearch_dense_index_t handle = NULL;
+    usearch_py_call_t stack;
+    usearch_py_call_t* call = NULL;
+    if (receiver_from_object(self, &receiver, &handle) != 0 || !(call = usearch_py_call_open(&receiver, &stack)))
+        return NULL;
+    DenseReachability* const audit = usearch_py_call_result(call, &DenseReachabilityType);
+    if (!audit) return usearch_py_call_discard(&receiver, call);
+    usearch_dense_health_t* const arguments = (usearch_dense_health_t*)call->arguments;
+    *arguments = (usearch_dense_health_t) {.index = handle,
+                                           .executor = receiver.executor,
+                                           .outcome = &call->outcome,
+                                           .completion = receiver.completion,
+                                           .reachability = &audit->reachability};
+    Py_BEGIN_ALLOW_THREADS;
+    usearch_dense_health(arguments);
+    Py_END_ALLOW_THREADS;
+    return usearch_py_call_finish(&receiver, call);
 }
 
 /** Reads the @c size_t counter at the byte offset @p closure names inside a description. */
 static PyObject* DenseIndex_get_counter(DenseIndex* self, void* closure) {
     usearch_dense_index_description_t description;
-    usearch_dense_index_t const handle = index_handle(self);
-    if (!handle || index_describe(handle, &description) != 0) return NULL;
+    if (index_describe(self->handle, &description) != 0) return NULL;
     return PyLong_FromSize_t(*(size_t const*)((char const*)&description + (size_t)closure));
 }
 
@@ -764,27 +750,23 @@ static char const doc_DenseIndex_shards_count[] = "Live shards. Calls `usearch_d
 
 static PyObject* DenseIndex_get_cpu_class(DenseIndex* self, void* closure) {
     usearch_dense_index_description_t description;
-    usearch_dense_index_t const handle = index_handle(self);
-    if (!handle || index_describe(handle, &description) != 0) return NULL;
-    return class_to_object(&usearch_py_cpu_class, (int)description.cpu_class);
+    if (index_describe(self->handle, &description) != 0) return NULL;
+    return usearch_py_class_to_object(&usearch_py_cpu_class, (int)description.cpu_class);
 }
 
 static PyObject* DenseIndex_get_gpu_class(DenseIndex* self, void* closure) {
     usearch_dense_index_description_t description;
-    usearch_dense_index_t const handle = index_handle(self);
-    if (!handle || index_describe(handle, &description) != 0) return NULL;
-    return class_to_object(&usearch_py_gpu_class, (int)description.gpu_class);
+    if (index_describe(self->handle, &description) != 0) return NULL;
+    return usearch_py_class_to_object(&usearch_py_gpu_class, (int)description.gpu_class);
 }
 
 static Py_ssize_t DenseIndex_length(DenseIndex* self) {
     usearch_dense_index_description_t description;
-    usearch_dense_index_t const handle = index_handle(self);
-    if (!handle || index_describe(handle, &description) != 0) return -1;
+    if (index_describe(self->handle, &description) != 0) return -1;
     return (Py_ssize_t)description.size;
 }
 
 static PyObject* DenseIndex_repr(DenseIndex* self) {
-    if (!self->handle) return PyUnicode_FromString("DenseIndex(<consumed>)");
     // No exception is raised here: `tp_repr` runs inside `PyErr_Format("%R", ...)` chains, where
     // raising would destroy the caller's.
     usearch_dense_index_description_t description = {0};
@@ -812,31 +794,26 @@ static char const doc_DenseIndex_reserve[] =                         //
     "Args:\n"                                                        //
     "  capacity (int): Entries the index must accept without growing again.";
 
-/** A @c usearch_dense_reserve call. */
-typedef struct reserve_call_t {
-    usearch_py_call_t call;
-    usearch_dense_reserve_t arguments;
-} reserve_call_t;
-
-static void reserve_submit(void* call) { usearch_dense_reserve(&((reserve_call_t*)call)->arguments); }
-
-static usearch_py_verb_t const reserve_verb = {sizeof(reserve_call_t), reserve_submit, usearch_py_call_answer_none,
-                                               usearch_py_call_release};
-
 static PyObject* DenseIndex_reserve(PyObject* self, PyObject* capacity_object) {
     usearch_py_receiver_t receiver;
-    usearch_dense_index_t const handle = receiver_from_object(self, &receiver);
+    usearch_dense_index_t handle = NULL;
     size_t capacity = 0;
-    if (!handle || usearch_py_size_from_object(capacity_object, "capacity", &capacity) != 0) return NULL;
-    reserve_call_t stack;
-    reserve_call_t* const call = usearch_py_call_open(&receiver, &reserve_verb, &stack);
-    if (!call) return NULL;
-    call->arguments = (usearch_dense_reserve_t) {.index = handle,
-                                                 .executor = receiver.executor,
-                                                 .outcome = &call->call.outcome,
-                                                 .completion = receiver.completion,
-                                                 .capacity = capacity};
-    return usearch_py_call_run(&receiver, &reserve_verb, call);
+    usearch_py_call_t stack;
+    usearch_py_call_t* call = NULL;
+    if (receiver_from_object(self, &receiver, &handle) != 0 ||
+        usearch_py_size_from_object(capacity_object, "capacity", &capacity) != 0 ||
+        !(call = usearch_py_call_open(&receiver, &stack)))
+        return NULL;
+    usearch_dense_reserve_t* const arguments = (usearch_dense_reserve_t*)call->arguments;
+    *arguments = (usearch_dense_reserve_t) {.index = handle,
+                                            .executor = receiver.executor,
+                                            .outcome = &call->outcome,
+                                            .completion = receiver.completion,
+                                            .capacity = capacity};
+    Py_BEGIN_ALLOW_THREADS;
+    usearch_dense_reserve(arguments);
+    Py_END_ALLOW_THREADS;
+    return usearch_py_call_finish(&receiver, call);
 }
 
 static char const doc_DenseIndex_clear[] =                               //
@@ -845,29 +822,22 @@ static char const doc_DenseIndex_clear[] =                               //
     "Drops every entry, keeping the capacity and the frozen geometry.\n" //
     "Calls `usearch_dense_clear`.";
 
-/** A @c usearch_dense_clear call. */
-typedef struct clear_call_t {
-    usearch_py_call_t call;
-    usearch_dense_clear_t arguments;
-} clear_call_t;
-
-static void clear_submit(void* call) { usearch_dense_clear(&((clear_call_t*)call)->arguments); }
-
-static usearch_py_verb_t const clear_verb = {sizeof(clear_call_t), clear_submit, usearch_py_call_answer_none,
-                                             usearch_py_call_release};
-
 static PyObject* DenseIndex_clear(PyObject* self, PyObject* unused) {
     usearch_py_receiver_t receiver;
-    usearch_dense_index_t const handle = receiver_from_object(self, &receiver);
-    if (!handle) return NULL;
-    clear_call_t stack;
-    clear_call_t* const call = usearch_py_call_open(&receiver, &clear_verb, &stack);
-    if (!call) return NULL;
-    call->arguments = (usearch_dense_clear_t) {.index = handle,
-                                               .executor = receiver.executor,
-                                               .outcome = &call->call.outcome,
-                                               .completion = receiver.completion};
-    return usearch_py_call_run(&receiver, &clear_verb, call);
+    usearch_dense_index_t handle = NULL;
+    usearch_py_call_t stack;
+    usearch_py_call_t* call = NULL;
+    if (receiver_from_object(self, &receiver, &handle) != 0 || !(call = usearch_py_call_open(&receiver, &stack)))
+        return NULL;
+    usearch_dense_clear_t* const arguments = (usearch_dense_clear_t*)call->arguments;
+    *arguments = (usearch_dense_clear_t) {.index = handle,
+                                          .executor = receiver.executor,
+                                          .outcome = &call->outcome,
+                                          .completion = receiver.completion};
+    Py_BEGIN_ALLOW_THREADS;
+    usearch_dense_clear(arguments);
+    Py_END_ALLOW_THREADS;
+    return usearch_py_call_finish(&receiver, call);
 }
 
 static char const doc_DenseIndex_insert[] =                                                     //
@@ -890,7 +860,7 @@ static char const doc_DenseIndex_insert[] =                                     
     "    must be as wide as the buffer's items.\n"                                              //
     "  progress (callable, optional): Called with (completed, total) entries. It reports and\n" //
     "    cannot stop the batch, every entry being claimed before the first report; what it\n"   //
-    "    raises surfaces once the batch has finished. Reports are serialized.\n"                //
+    "    raises goes to `sys.unraisablehook`. Reports are serialized.\n"                        //
     "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"     //
     "  stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.\n"        //
     "\n"                                                                                        //
@@ -901,37 +871,6 @@ static char const doc_DenseIndex_insert[] =                                     
     "  >>> index.insert([1], array('d', [0.1, 0.2, 0.3, 0.4]))\n"                               //
     "  >>> len(index)\n"                                                                        //
     "  1";
-
-/** A @c usearch_dense_insert call and the inputs it borrows until it is final. */
-typedef struct insert_call_t {
-    usearch_py_call_t call;
-    usearch_dense_insert_t arguments;
-    usearch_py_buffer_backing_t vectors;
-    usearch_py_keys_t keys;
-    walk_reports_t reports;
-} insert_call_t;
-
-static void insert_submit(void* call) { usearch_dense_insert(&((insert_call_t*)call)->arguments); }
-
-static PyObject* insert_answer(void* erased) {
-    walk_reports_answer(&((insert_call_t*)erased)->reports);
-    Py_RETURN_NONE;
-}
-
-static void insert_release(void* erased) {
-    insert_call_t* const call = (insert_call_t*)erased;
-    usearch_py_keys_release(&call->keys);
-    usearch_py_buffer_release(&call->vectors);
-    walk_reports_release(&call->reports);
-    usearch_py_call_release(&call->call);
-}
-
-static int insert_traverse(void* call, visitproc visit, void* arg) {
-    return walk_reports_traverse(&((insert_call_t*)call)->reports, visit, arg);
-}
-
-static usearch_py_verb_t const insert_verb = {sizeof(insert_call_t), insert_submit, insert_answer, insert_release,
-                                              insert_traverse};
 
 static PyObject* DenseIndex_insert(PyObject* self, PyObject* const* args, Py_ssize_t positional_args_count,
                                    PyObject* args_names_tuple) {
@@ -946,140 +885,135 @@ static PyObject* DenseIndex_insert(PyObject* self, PyObject* const* args, Py_ssi
     usearch_dense_index_t handle = NULL;
     size_t expansion_factor = 0, progress_steps = 0;
     usearch_scalar_t dtype = usearch_scalar_unknown_k;
+    usearch_py_call_t stack;
+    usearch_py_call_t* call = NULL;
     if (usearch_py_arguments_parse("insert", args, positional_args_count, args_names_tuple, 2, 2, arguments,
                                    usearch_py_table_size_(arguments)) != 0 ||
-        !(handle = receiver_from_object(self, &receiver)) ||
+        receiver_from_object(self, &receiver, &handle) != 0 ||
         usearch_py_size_from_object(expansion_object, "expansion_factor", &expansion_factor) != 0 ||
         usearch_py_size_from_object(progress_steps_object, "progress_steps", &progress_steps) != 0 ||
-        usearch_py_scalar_from_object(dtype_object, "dtype", &dtype) != 0)
+        usearch_py_scalar_from_object(dtype_object, "dtype", &dtype) != 0 ||
+        !(call = usearch_py_call_open(&receiver, &stack)))
         return NULL;
 
-    insert_call_t stack;
-    insert_call_t* const call = usearch_py_call_open(&receiver, &insert_verb, &stack);
-    if (!call) return NULL;
     usearch_matrix_view_t vectors;
-    if (usearch_py_matrix_from_object(vectors_object, dtype, &vectors, &call->vectors) != 0 ||
-        usearch_py_keys_from_object(keys_object, vectors.rows, &call->keys) != 0 ||
-        walk_reports_fill(&call->reports, &call->call, progress_object, stats_object) != 0)
-        return usearch_py_call_discard(&receiver, &insert_verb, call);
+    if (usearch_py_matrix_from_object(vectors_object, dtype, &vectors, &call->buffers[0]) != 0 ||
+        usearch_py_keys_from_object(keys_object, vectors.rows, &call->keys[0]) != 0 ||
+        walk_parse(call, progress_object, stats_object) != 0)
+        return usearch_py_call_discard(&receiver, call);
 
-    call->arguments = (usearch_dense_insert_t) {
+    usearch_dense_insert_t* const insert = (usearch_dense_insert_t*)call->arguments;
+    *insert = (usearch_dense_insert_t) {
         .index = handle,
         .executor = receiver.executor,
-        .outcome = &call->call.outcome,
+        .outcome = &call->outcome,
         .completion = receiver.completion,
         .count = vectors.rows,
-        .keys = {call->keys.keys, sizeof(usearch_key_t)},
+        .keys = {call->keys[0].keys, sizeof(usearch_key_t)},
         .vectors = rows_of(&vectors),
         .expansion_factor = expansion_factor,
-        .progress = usearch_py_progress_registered(&call->reports.progress, progress_steps),
-        .stats = &call->reports.stats,
+        .progress = usearch_py_progress_registered(call->holds[progress_slot_k], progress_steps),
+        .stats = walk_stats(call),
     };
-    return usearch_py_call_run(&receiver, &insert_verb, call);
+    Py_BEGIN_ALLOW_THREADS;
+    usearch_dense_insert(insert);
+    Py_END_ALLOW_THREADS;
+    return usearch_py_call_finish(&receiver, call);
 }
 
-static char const doc_DenseIndex_refine[] =                                                  //
-    "refine(*, expansion_factor=0, progress=None, progress_steps=0, stats=None)\n"           //
-    "    -> RefineReport\n"                                                                  //
-    "\n"                                                                                     //
-    "Re-selects the neighbors of every stored entry against the finished graph, improving\n" //
-    "edges that were chosen when the graph around them was still incomplete.\n"              //
-    "\n"                                                                                     //
-    "A build step rather than a repair: a cheap insertion pass followed by one refinement\n" //
-    "reaches a better graph, in less total time, than one expensive insertion pass - so a\n" //
-    "wide `expansion_factor` belongs here rather than in `insert`. Searches may run\n"       //
-    "throughout on a RAM handle but not on a VRAM one, and a caller loops until the\n"       //
-    "report's `changed` falls below whatever change rate they consider settled.\n"           //
-    "\n"                                                                                     //
-    "Stopping is safe: re-selecting edges claims no identity, so a stopped sweep still\n"    //
-    "re-links its islands, leaves the graph correct and merely less improved, and raises\n"  //
-    "`CancelledError`. A handler is therefore how a sweep is put under a time budget.\n"     //
-    "Calls `usearch_dense_refine`.\n"                                                        //
-    "\n"                                                                                     //
-    "Args:\n"                                                                                //
-    "  expansion_factor (int, optional): Breadth of the candidates; 0 derives it.\n"         //
-    "  progress (callable, optional): Called with (completed, total) nodes; returning\n"     //
-    "    False ends the sweep, None carries on.\n"                                           //
-    "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"  //
-    "  stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.\n"     //
-    "\n"                                                                                     //
-    "Returns:\n"                                                                             //
-    "  RefineReport: Entries re-selected and changed, the islands found and reconnected,\n"  //
-    "    and the audit closing the heal; `changed` at zero means the graph has settled.\n"   //
-    "\n"                                                                                     //
-    "Example:\n"                                                                             //
-    "  >>> from array import array\n"                                                        //
-    "  >>> index = usearch.DenseIndex.init_ram(dimensions=4)\n"                              //
-    "  >>> index.reserve(1)\n"                                                               //
-    "  >>> index.insert([1], array('d', [0.1, 0.2, 0.3, 0.4]))\n"                            //
-    "  >>> index.refine().changed\n"                                                         //
-    "  0";
-
-/** A @c usearch_dense_refine call and the report it lands. */
-typedef struct refine_call_t {
-    usearch_py_call_t call;
-    usearch_dense_refine_t arguments;
-    walk_reports_t reports;
-    usearch_refine_report_t report;
-} refine_call_t;
-
-static void refine_submit(void* call) { usearch_dense_refine(&((refine_call_t*)call)->arguments); }
-
-static PyObject* refine_answer(void* erased) {
-    refine_call_t* const call = (refine_call_t*)erased;
-    walk_reports_answer(&call->reports);
-    return refine_report_to_object(&call->report);
-}
-
-static void refine_release(void* erased) {
-    refine_call_t* const call = (refine_call_t*)erased;
-    walk_reports_release(&call->reports);
-    usearch_py_call_release(&call->call);
-}
-
-static int refine_traverse(void* call, visitproc visit, void* arg) {
-    return walk_reports_traverse(&((refine_call_t*)call)->reports, visit, arg);
-}
-
-static usearch_py_verb_t const refine_verb = {sizeof(refine_call_t), refine_submit, refine_answer, refine_release,
-                                              refine_traverse};
+static char const doc_DenseIndex_refine[] =                                                    //
+    "``refine(*, expansion_factor=0, memory_limit=0, progress=None, progress_steps=0,\n"       //
+    "stats=None, plan=None) -> RefineReport``\n"                                               //
+    "\n"                                                                                       //
+    "Re-selects the neighbors of every stored entry against the finished graph, improving\n"   //
+    "edges that were chosen when the graph around them was still incomplete.\n"                //
+    "\n"                                                                                       //
+    "A build step rather than a repair: a cheap insertion pass followed by one refinement\n"   //
+    "reaches a better graph, in less total time, than one expensive insertion pass - so a\n"   //
+    "wide `expansion_factor` belongs here rather than in `insert`. Searches may run\n"         //
+    "throughout on a RAM handle but not on a VRAM one, and a caller loops until the\n"         //
+    "report's `verdict` is no longer `RefineVerdict.IMPROVED`.\n"                              //
+    "\n"                                                                                       //
+    "Stopping is safe: re-selecting edges claims no identity, so a stopped sweep still\n"      //
+    "re-links its islands, leaves the graph correct and merely less improved, and raises\n"    //
+    "`CancelledError`. A handler is therefore how a sweep is put under a time budget. With\n"  //
+    "a `plan`, a stop leaves it live and the next call naming it continues the round;\n"       //
+    "`refine_plan_finish(plan)` closes it.\n"                                                  //
+    "Calls `usearch_dense_refine`.\n"                                                          //
+    "\n"                                                                                       //
+    "Args:\n"                                                                                  //
+    "  expansion_factor (int, optional): Breadth of the candidates; 0 derives it.\n"           //
+    "  memory_limit (int, optional): Bytes a loaded NVMe handle holds for the part it\n"       //
+    "    rewrites; 0 derives what rounds that part in RAM.\n"                                  //
+    "  progress (callable, optional): Called with (completed, total) units of each phase;\n"   //
+    "    returning False stops the round, None carries on.\n"                                  //
+    "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"    //
+    "  stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.\n"       //
+    "  plan (DenseRefinePlan, optional): The round to open or continue; None runs one round\n" //
+    "    to its end.\n"                                                                        //
+    "\n"                                                                                       //
+    "Returns:\n"                                                                               //
+    "  RefineReport: Entries re-selected and changed, the islands found and reconnected,\n"    //
+    "    the neighborhoods, links added and dropped, the `RefineVerdict`, and the health\n"    //
+    "    checks opening the round and closing the heal.\n"                                     //
+    "\n"                                                                                       //
+    "Example:\n"                                                                               //
+    "  >>> from array import array\n"                                                          //
+    "  >>> index = usearch.DenseIndex.init_ram(dimensions=4)\n"                                //
+    "  >>> index.reserve(1)\n"                                                                 //
+    "  >>> index.insert([1], array('d', [0.1, 0.2, 0.3, 0.4]))\n"                              //
+    "  >>> index.refine().verdict\n"                                                           //
+    "  <RefineVerdict.CONVERGED: 2>";
 
 static PyObject* DenseIndex_refine(PyObject* self, PyObject* const* args, Py_ssize_t positional_args_count,
                                    PyObject* args_names_tuple) {
-    PyObject *expansion_object, *progress_object, *progress_steps_object, *stats_object;
+    PyObject *expansion_object, *memory_limit_object, *progress_object, *progress_steps_object, *stats_object,
+        *plan_object;
     usearch_py_argument_t const arguments[] = {
         {"expansion_factor", &expansion_object},
+        {"memory_limit", &memory_limit_object},
         {"progress", &progress_object},
         {"progress_steps", &progress_steps_object},
         {"stats", &stats_object},
+        {"plan", &plan_object},
     };
     usearch_py_receiver_t receiver;
     usearch_dense_index_t handle = NULL;
-    size_t expansion_factor = 0, progress_steps = 0;
+    size_t expansion_factor = 0, memory_limit = 0, progress_steps = 0;
+    usearch_py_call_t stack;
+    usearch_py_call_t* call = NULL;
     if (usearch_py_arguments_parse("refine", args, positional_args_count, args_names_tuple, 0, 0, arguments,
                                    usearch_py_table_size_(arguments)) != 0 ||
-        !(handle = receiver_from_object(self, &receiver)) ||
+        receiver_from_object(self, &receiver, &handle) != 0 ||
         usearch_py_size_from_object(expansion_object, "expansion_factor", &expansion_factor) != 0 ||
-        usearch_py_size_from_object(progress_steps_object, "progress_steps", &progress_steps) != 0)
+        usearch_py_size_from_object(memory_limit_object, "memory_limit", &memory_limit) != 0 ||
+        usearch_py_size_from_object(progress_steps_object, "progress_steps", &progress_steps) != 0 ||
+        !(call = usearch_py_call_open(&receiver, &stack)))
         return NULL;
 
-    refine_call_t stack;
-    refine_call_t* const call = usearch_py_call_open(&receiver, &refine_verb, &stack);
-    if (!call) return NULL;
-    if (walk_reports_fill(&call->reports, &call->call, progress_object, stats_object) != 0)
-        return usearch_py_call_discard(&receiver, &refine_verb, call);
+    RefineReport* const report = usearch_py_call_result(call, &RefineReportType);
+    if (!report || walk_parse(call, progress_object, stats_object) != 0 ||
+        plan_parse(call, plan_object, &DenseRefinePlanType) != 0)
+        return usearch_py_call_discard(&receiver, call);
 
-    call->arguments = (usearch_dense_refine_t) {
+    DensePlan* const plan = (DensePlan*)call->holds[callback_slot_k];
+    usearch_dense_refine_t* const refine = (usearch_dense_refine_t*)call->arguments;
+    *refine = (usearch_dense_refine_t) {
         .index = handle,
         .executor = receiver.executor,
-        .outcome = &call->call.outcome,
+        .outcome = &call->outcome,
         .completion = receiver.completion,
-        .report = &call->report,
-        .refine = {.expansion_factor = expansion_factor},
-        .progress = usearch_py_progress_registered(&call->reports.progress, progress_steps),
-        .stats = &call->reports.stats,
+        .report = &report->report,
+        .refine = {.expansion_factor = expansion_factor, .memory_limit = memory_limit},
+        .progress = usearch_py_progress_registered(call->holds[progress_slot_k], progress_steps),
+        .stats = walk_stats(call),
+        .plan = plan ? &plan->handle.refine : NULL,
+        .phase = plan ? &plan->progress : NULL,
     };
-    return usearch_py_call_run(&receiver, &refine_verb, call);
+    Py_BEGIN_ALLOW_THREADS;
+    usearch_dense_refine(refine);
+    Py_END_ALLOW_THREADS;
+    return usearch_py_call_finish(&receiver, call);
 }
 
 #pragma endregion Ingest
@@ -1104,7 +1038,8 @@ static char const doc_DenseIndex_search[] =                                     
     "  dtype (Scalar, optional): Names the query scalar type when the buffer cannot.\n"        //
     "  predicate (callable, optional): Admits a Key when it returns truthy. Non-matching\n"    //
     "    entries still route the traversal, so recall survives low selectivity. The\n"         //
-    "    callback re-enters Python, so it runs under the GIL and serializes the walk.\n"       //
+    "    callback re-enters Python, so it runs under the GIL and serializes the walk; what\n"  //
+    "    it raises goes to `sys.unraisablehook`, and the key is rejected.\n"                   //
     "  progress (callable, optional): Called with (completed, total) queries; returning\n"     //
     "    False stops the batch and raises `CancelledError`, None carries on.\n"                //
     "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"    //
@@ -1123,42 +1058,6 @@ static char const doc_DenseIndex_search[] =                                     
     "  >>> key, distance = index.search(query, 1, usearch.Arena())[0][0]\n"                    //
     "  >>> int(key)\n"                                                                         //
     "  7";
-
-/** A @c usearch_dense_search call, the inputs it borrows until it is final, and the matches it
- *  lands. */
-typedef struct search_call_t {
-    usearch_py_call_t call;
-    usearch_dense_search_t arguments;
-    usearch_py_buffer_backing_t queries;
-    usearch_py_callback_t predicate;
-    walk_reports_t reports;
-    usearch_matches_view_t matches;
-} search_call_t;
-
-static void search_submit(void* call) { usearch_dense_search(&((search_call_t*)call)->arguments); }
-
-static PyObject* search_answer(void* erased) {
-    search_call_t* const call = (search_call_t*)erased;
-    walk_reports_answer(&call->reports);
-    return usearch_py_matches_new(call->call.arena, &call->matches, call->arguments.count);
-}
-
-static void search_release(void* erased) {
-    search_call_t* const call = (search_call_t*)erased;
-    usearch_py_buffer_release(&call->queries);
-    Py_CLEAR(call->predicate.callable);
-    walk_reports_release(&call->reports);
-    usearch_py_call_release(&call->call);
-}
-
-static int search_traverse(void* erased, visitproc visit, void* arg) {
-    search_call_t* const call = (search_call_t*)erased;
-    Py_VISIT(call->predicate.callable);
-    return walk_reports_traverse(&call->reports, visit, arg);
-}
-
-static usearch_py_verb_t const search_verb = {sizeof(search_call_t), search_submit, search_answer, search_release,
-                                              search_traverse};
 
 static PyObject* DenseIndex_search(PyObject* self, PyObject* const* args, Py_ssize_t positional_args_count,
                                    PyObject* args_names_tuple) {
@@ -1181,46 +1080,50 @@ static PyObject* DenseIndex_search(PyObject* self, PyObject* const* args, Py_ssi
     size_t wanted = 0, expansion_factor = 0, progress_steps = 0;
     int traversal = usearch_traversal_walk_k;
     usearch_scalar_t dtype = usearch_scalar_unknown_k;
+    usearch_py_call_t stack;
+    usearch_py_call_t* call = NULL;
     if (usearch_py_arguments_parse("search", args, positional_args_count, args_names_tuple, 3, 3, arguments,
                                    usearch_py_table_size_(arguments)) != 0 ||
-        !(handle = receiver_from_object(self, &receiver)) ||
+        receiver_from_object(self, &receiver, &handle) != 0 ||
         usearch_py_size_from_object(wanted_object, "wanted", &wanted) != 0 ||
         usearch_py_size_from_object(expansion_object, "expansion_factor", &expansion_factor) != 0 ||
         usearch_py_size_from_object(progress_steps_object, "progress_steps", &progress_steps) != 0 ||
         (traversal_object &&
          usearch_py_enum_from_object(traversal_object, "traversal", &usearch_py_traversal, &traversal) != 0) ||
-        usearch_py_scalar_from_object(dtype_object, "dtype", &dtype) != 0)
+        usearch_py_scalar_from_object(dtype_object, "dtype", &dtype) != 0 ||
+        !(call = usearch_py_call_open(&receiver, &stack)))
         return NULL;
 
-    search_call_t stack;
-    search_call_t* const call = usearch_py_call_open(&receiver, &search_verb, &stack);
-    if (!call) return NULL;
     usearch_matrix_view_t queries;
-    Py_ssize_t extent = 0;
-    if (usearch_py_matrix_from_object(queries_object, dtype, &queries, &call->queries) != 0 ||
-        usearch_py_matrix_bytes(queries.rows, wanted, sizeof(usearch_key_t), &extent) != 0 ||
-        usearch_py_callback_from_object(predicate_object, "predicate", &call->call, &call->predicate) != 0 ||
-        walk_reports_fill(&call->reports, &call->call, progress_object, stats_object) != 0 ||
-        usearch_py_arena_claim(arena_object, &call->call.arena) != 0)
-        return usearch_py_call_discard(&receiver, &search_verb, call);
+    Matches* matches = NULL;
+    if (usearch_py_matrix_from_object(queries_object, dtype, &queries, &call->buffers[0]) != 0 ||
+        usearch_py_callable_from_object(predicate_object, "predicate", &call->holds[callback_slot_k]) != 0 ||
+        walk_parse(call, progress_object, stats_object) != 0 ||
+        !(matches = usearch_py_call_arena(call, arena_object, &MatchesType)))
+        return usearch_py_call_discard(&receiver, call);
 
-    call->arguments = (usearch_dense_search_t) {
+    matches->queries = queries.rows;
+    usearch_dense_search_t* const search = (usearch_dense_search_t*)call->arguments;
+    *search = (usearch_dense_search_t) {
         .index = handle,
         .executor = receiver.executor,
-        .outcome = &call->call.outcome,
+        .outcome = &call->outcome,
         .completion = receiver.completion,
         .count = queries.rows,
         .queries = rows_of(&queries),
-        .matches = &call->matches,
-        .arena = ((Arena*)call->call.arena)->handle,
+        .matches = &matches->view,
+        .arena = usearch_py_arena_handle(call->arena),
         .wanted = wanted,
         .expansion_factor = expansion_factor,
         .traversal = (usearch_traversal_t)traversal,
-        .predicate = usearch_py_predicate_registered(&call->predicate),
-        .progress = usearch_py_progress_registered(&call->reports.progress, progress_steps),
-        .stats = &call->reports.stats,
+        .predicate = usearch_py_predicate_registered(call->holds[callback_slot_k]),
+        .progress = usearch_py_progress_registered(call->holds[progress_slot_k], progress_steps),
+        .stats = walk_stats(call),
     };
-    return usearch_py_call_run(&receiver, &search_verb, call);
+    Py_BEGIN_ALLOW_THREADS;
+    usearch_dense_search(search);
+    Py_END_ALLOW_THREADS;
+    return usearch_py_call_finish(&receiver, call);
 }
 
 #pragma endregion Search
@@ -1246,34 +1149,37 @@ static char const doc_DenseIndex_count[] =                             //
     "  >>> index.count(7)\n"                                           //
     "  2";
 
-/** A @c usearch_dense_count call and the count it lands. */
+/** A @c usearch_dense_count call and the count it lands, inside the record's arguments. */
 typedef struct count_call_t {
-    usearch_py_call_t call;
     usearch_dense_count_t arguments;
     size_t entries;
 } count_call_t;
 
-static void count_submit(void* call) { usearch_dense_count(&((count_call_t*)call)->arguments); }
-
-static PyObject* count_answer(void* call) { return PyLong_FromSize_t(((count_call_t*)call)->entries); }
-
-static usearch_py_verb_t const count_verb = {sizeof(count_call_t), count_submit, count_answer, usearch_py_call_release};
+static PyObject* count_answer(usearch_py_call_t* call) {
+    return PyLong_FromSize_t(((count_call_t const*)call->arguments)->entries);
+}
 
 static PyObject* DenseIndex_count(PyObject* self, PyObject* key_object) {
     usearch_py_receiver_t receiver;
-    usearch_dense_index_t const handle = receiver_from_object(self, &receiver);
+    usearch_dense_index_t handle = NULL;
     usearch_key_t key;
-    if (!handle || usearch_py_key_from_object(key_object, &key) != 0) return NULL;
-    count_call_t stack;
-    count_call_t* const call = usearch_py_call_open(&receiver, &count_verb, &stack);
-    if (!call) return NULL;
-    call->arguments = (usearch_dense_count_t) {.index = handle,
-                                               .executor = receiver.executor,
-                                               .outcome = &call->call.outcome,
-                                               .completion = receiver.completion,
-                                               .key = key,
-                                               .entries = &call->entries};
-    return usearch_py_call_run(&receiver, &count_verb, call);
+    usearch_py_call_t stack;
+    usearch_py_call_t* call = NULL;
+    if (receiver_from_object(self, &receiver, &handle) != 0 || usearch_py_key_from_object(key_object, &key) != 0 ||
+        !(call = usearch_py_call_open(&receiver, &stack)))
+        return NULL;
+    count_call_t* const count = (count_call_t*)call->arguments;
+    call->answer = count_answer;
+    count->arguments = (usearch_dense_count_t) {.index = handle,
+                                                .executor = receiver.executor,
+                                                .outcome = &call->outcome,
+                                                .completion = receiver.completion,
+                                                .key = key,
+                                                .entries = &count->entries};
+    Py_BEGIN_ALLOW_THREADS;
+    usearch_dense_count(&count->arguments);
+    Py_END_ALLOW_THREADS;
+    return usearch_py_call_finish(&receiver, call);
 }
 
 static int DenseIndex_contains(PyObject* self, PyObject* key_object) {
@@ -1301,23 +1207,12 @@ static char const doc_DenseIndex_get[] =                                        
     "    `bf16` among them, leave as a (count, row_bytes) run of 'B' instead. Empty, so falsy,\n" //
     "    when the index holds no entry under `key`.";
 
-/** A @c usearch_dense_get call and the rows it lands in the claimed arena. */
-typedef struct get_call_t {
-    usearch_py_call_t call;
-    usearch_dense_get_t arguments;
-    usearch_rows_view_t vectors;
-    size_t written;
-} get_call_t;
-
-static void get_submit(void* call) { usearch_dense_get(&((get_call_t*)call)->arguments); }
-
-static PyObject* get_answer(void* erased) {
-    get_call_t* const call = (get_call_t*)erased;
-    call->vectors.scalar = call->arguments.outputs_scalar; // An absent key leaves the view zeroed.
-    return usearch_py_rows_new(call->call.arena, &call->vectors, call->written);
+/** Answers the rows a get wrote, typed as asked even when an absent key left the view zeroed. */
+static PyObject* get_answer(usearch_py_call_t* call) {
+    ArenaBuffer* const vectors = (ArenaBuffer*)call->result;
+    if (!vectors->count) vectors->rows.scalar = ((usearch_dense_get_t const*)call->arguments)->outputs_scalar;
+    return usearch_py_rows_answer(call);
 }
-
-static usearch_py_verb_t const get_verb = {sizeof(get_call_t), get_submit, get_answer, usearch_py_call_release};
 
 static PyObject* DenseIndex_get(PyObject* self, PyObject* const* args, Py_ssize_t positional_args_count,
                                 PyObject* args_names_tuple) {
@@ -1329,30 +1224,34 @@ static PyObject* DenseIndex_get(PyObject* self, PyObject* const* args, Py_ssize_
     usearch_dense_index_t handle = NULL;
     usearch_scalar_t outputs_kind = usearch_scalar_unknown_k;
     usearch_key_t key;
+    usearch_py_call_t stack;
+    usearch_py_call_t* call = NULL;
     if (usearch_py_arguments_parse("get", args, positional_args_count, args_names_tuple, 2, 2, arguments,
                                    usearch_py_table_size_(arguments)) != 0 ||
-        !(handle = receiver_from_object(self, &receiver)) ||
+        receiver_from_object(self, &receiver, &handle) != 0 ||
         usearch_py_scalar_from_object(outputs_dtype_object, "outputs_dtype", &outputs_kind) != 0 ||
-        usearch_py_key_from_object(key_object, &key) != 0)
+        usearch_py_key_from_object(key_object, &key) != 0 || !(call = usearch_py_call_open(&receiver, &stack)))
         return NULL;
 
-    get_call_t stack;
-    get_call_t* const call = usearch_py_call_open(&receiver, &get_verb, &stack);
-    if (!call) return NULL;
-    if (usearch_py_arena_claim(arena_object, &call->call.arena) != 0)
-        return usearch_py_call_discard(&receiver, &get_verb, call);
-    call->arguments = (usearch_dense_get_t) {
+    ArenaBuffer* const vectors = usearch_py_call_arena(call, arena_object, &DenseVectorsType);
+    if (!vectors) return usearch_py_call_discard(&receiver, call);
+    call->answer = get_answer;
+    usearch_dense_get_t* const get = (usearch_dense_get_t*)call->arguments;
+    *get = (usearch_dense_get_t) {
         .index = handle,
         .executor = receiver.executor,
-        .outcome = &call->call.outcome,
+        .outcome = &call->outcome,
         .completion = receiver.completion,
         .key = key,
-        .vectors = &call->vectors,
-        .written = &call->written,
-        .arena = ((Arena*)call->call.arena)->handle,
+        .vectors = &vectors->rows,
+        .written = &vectors->count,
+        .arena = usearch_py_arena_handle(call->arena),
         .outputs_scalar = outputs_kind == usearch_scalar_unknown_k ? usearch_scalar_f32_k : outputs_kind,
     };
-    return usearch_py_call_run(&receiver, &get_verb, call);
+    Py_BEGIN_ALLOW_THREADS;
+    usearch_dense_get(get);
+    Py_END_ALLOW_THREADS;
+    return usearch_py_call_finish(&receiver, call);
 }
 
 #pragma endregion Retrieval
@@ -1388,40 +1287,6 @@ static char const doc_DenseIndex_multiply[] =                                   
     "    indexed entry; `scores`, the (pairs,) float64 products; and `required`, the pairs\n"   //
     "    scored before `wanted` cut any. All of them live in the arena.";
 
-/** A @c usearch_dense_multiply call and the ragged pairs it lands in the claimed arena. */
-typedef struct multiply_call_t {
-    usearch_py_call_t call;
-    usearch_dense_multiply_t arguments;
-    usearch_py_buffer_backing_t rows;
-    walk_reports_t reports;
-    usearch_matches_tape_view_t products;
-    size_t written;
-    size_t required;
-} multiply_call_t;
-
-static void multiply_submit(void* call) { usearch_dense_multiply(&((multiply_call_t*)call)->arguments); }
-
-static PyObject* multiply_answer(void* erased) {
-    multiply_call_t* const call = (multiply_call_t*)erased;
-    walk_reports_answer(&call->reports);
-    return usearch_py_products_new(call->call.arena, &call->products, call->arguments.count, call->written,
-                                   call->required);
-}
-
-static void multiply_release(void* erased) {
-    multiply_call_t* const call = (multiply_call_t*)erased;
-    usearch_py_buffer_release(&call->rows);
-    walk_reports_release(&call->reports);
-    usearch_py_call_release(&call->call);
-}
-
-static int multiply_traverse(void* call, visitproc visit, void* arg) {
-    return walk_reports_traverse(&((multiply_call_t*)call)->reports, visit, arg);
-}
-
-static usearch_py_verb_t const multiply_verb = {sizeof(multiply_call_t), multiply_submit, multiply_answer,
-                                                multiply_release, multiply_traverse};
-
 static PyObject* DenseIndex_multiply(PyObject* self, PyObject* const* args, Py_ssize_t positional_args_count,
                                      PyObject* args_names_tuple) {
     PyObject *rows_object, *wanted_object, *arena_object, *expansion_object, *dtype_object, *progress_object,
@@ -1440,41 +1305,47 @@ static PyObject* DenseIndex_multiply(PyObject* self, PyObject* const* args, Py_s
     usearch_dense_index_t handle = NULL;
     size_t wanted = 0, expansion_factor = 0, progress_steps = 0;
     usearch_scalar_t dtype = usearch_scalar_unknown_k;
+    usearch_py_call_t stack;
+    usearch_py_call_t* call = NULL;
     if (usearch_py_arguments_parse("multiply", args, positional_args_count, args_names_tuple, 3, 3, arguments,
                                    usearch_py_table_size_(arguments)) != 0 ||
-        !(handle = receiver_from_object(self, &receiver)) ||
+        receiver_from_object(self, &receiver, &handle) != 0 ||
         usearch_py_size_from_object(wanted_object, "wanted", &wanted) != 0 ||
         usearch_py_size_from_object(expansion_object, "expansion_factor", &expansion_factor) != 0 ||
         usearch_py_size_from_object(progress_steps_object, "progress_steps", &progress_steps) != 0 ||
-        usearch_py_scalar_from_object(dtype_object, "dtype", &dtype) != 0)
+        usearch_py_scalar_from_object(dtype_object, "dtype", &dtype) != 0 ||
+        !(call = usearch_py_call_open(&receiver, &stack)))
         return NULL;
 
-    multiply_call_t stack;
-    multiply_call_t* const call = usearch_py_call_open(&receiver, &multiply_verb, &stack);
-    if (!call) return NULL;
     usearch_matrix_view_t rows;
-    if (usearch_py_matrix_from_object(rows_object, dtype, &rows, &call->rows) != 0 ||
-        walk_reports_fill(&call->reports, &call->call, progress_object, stats_object) != 0 ||
-        usearch_py_arena_claim(arena_object, &call->call.arena) != 0)
-        return usearch_py_call_discard(&receiver, &multiply_verb, call);
+    DenseProducts* products = NULL;
+    if (usearch_py_matrix_from_object(rows_object, dtype, &rows, &call->buffers[0]) != 0 ||
+        walk_parse(call, progress_object, stats_object) != 0 ||
+        !(products = usearch_py_call_arena(call, arena_object, &DenseProductsType)))
+        return usearch_py_call_discard(&receiver, call);
 
-    call->arguments = (usearch_dense_multiply_t) {
+    products->queries = rows.rows;
+    usearch_dense_multiply_t* const multiply = (usearch_dense_multiply_t*)call->arguments;
+    *multiply = (usearch_dense_multiply_t) {
         .index = handle,
         .executor = receiver.executor,
-        .outcome = &call->call.outcome,
+        .outcome = &call->outcome,
         .completion = receiver.completion,
         .count = rows.rows,
         .left = rows_of(&rows),
-        .products = &call->products,
-        .written = &call->written,
-        .required = &call->required,
-        .arena = ((Arena*)call->call.arena)->handle,
+        .products = &products->view,
+        .written = &products->pairs,
+        .required = &products->required,
+        .arena = usearch_py_arena_handle(call->arena),
         .wanted = wanted,
         .expansion_factor = expansion_factor,
-        .progress = usearch_py_progress_registered(&call->reports.progress, progress_steps),
-        .stats = &call->reports.stats,
+        .progress = usearch_py_progress_registered(call->holds[progress_slot_k], progress_steps),
+        .stats = walk_stats(call),
     };
-    return usearch_py_call_run(&receiver, &multiply_verb, call);
+    Py_BEGIN_ALLOW_THREADS;
+    usearch_dense_multiply(multiply);
+    Py_END_ALLOW_THREADS;
+    return usearch_py_call_finish(&receiver, call);
 }
 
 static char const doc_DenseIndex_attend[] =                                                      //
@@ -1495,9 +1366,10 @@ static char const doc_DenseIndex_attend[] =                                     
     "    of token `t`.\n"                                                                        //
     "  values (buffer): An (N, dimensions) matrix of value rows, as wide as the keys and\n"      //
     "    stored in the index's quantization, borrowed until the call is final.\n"                //
-    "  row_of (callable): Called with each scored Key, answers its row of `values`. None, or\n"  //
-    "    a row outside them, refuses the call with `ShapeMismatchError`, as do values of\n"      //
-    "    another width or scalar type. It re-enters Python from the library's threads, so it\n"  //
+    "  row_of (callable): Called with each scored Key, answers its row of `values`. None, a\n"   //
+    "    row outside them or an exception, which goes to `sys.unraisablehook`, refuses the\n"    //
+    "    call with `ShapeMismatchError`, as do values of another width or scalar type. It\n"     //
+    "    re-enters Python from the library's threads, so it\n"                                   //
     "    runs under the GIL and serializes the walk. A VRAM walk resolves values on the\n"       //
     "    device, where no Python callable runs, so a VRAM arena raises `DeviceError`.\n"         //
     "  arena (Arena): Where the attended rows land, rewound by the call.\n"                      //
@@ -1526,85 +1398,42 @@ static char const doc_DenseIndex_attend[] =                                     
     "  DenseVectors: The (Q, dimensions) attended rows in the arena, already divided by the\n"   //
     "    partition; kinds `memoryview` cannot format leave as a (Q, row_bytes) run of 'B'.";
 
-/** What one attention call hands its value-lookup trampoline: the values it borrows and the
- *  key-to-row callable. */
-typedef struct value_rows_t {
+/** A @c usearch_dense_attend call and what its value lookup reads, in the record's arguments. */
+typedef struct attend_call_t {
+    usearch_dense_attend_t arguments;
 
-    /** The caller's `row_of`, and the call its failure latches into. */
-    usearch_py_callback_t row_of;
+    /** The caller's value lookup, held among the call's holds. */
+    PyObject* row_of;
 
     /** The caller's value rows, exported until the call is final. */
     usearch_matrix_view_t values;
-} value_rows_t;
+} attend_call_t;
 
 /**
  *  @brief Re-enters Python for the rows of one scored batch, from whichever library thread walks.
  *
  *  Values of another scalar type or width than the library reads resolve no row. A key whose
- *  `row_of` answers None, a row outside the values, or an exception leaves its row and the rest
- *  NULL, which refuses the call; an exception is latched into the call for its answer to raise, as
- *  the predicate's is.
+ *  lookup answers None, a row outside the values, or an exception, which goes to the unraisable
+ *  hook, leaves its row and the rest NULL, which refuses the call.
  */
 static void value_rows_trampoline(void* state, usearch_key_t const* keys, size_t count, usearch_scalar_t scalar,
                                   size_t columns, void const** rows) {
-    value_rows_t const* const lookup = (value_rows_t const*)state;
+    attend_call_t const* const lookup = (attend_call_t const*)state;
     for (size_t position = 0; position != count; ++position) rows[position] = NULL;
-    if (lookup->values.scalar != scalar || lookup->values.columns != columns ||
-        usearch_py_callback_raised(lookup->row_of.call))
-        return;
+    if (lookup->values.scalar != scalar || lookup->values.columns != columns) return;
     PyGILState_STATE const gil_state = PyGILState_Ensure();
     for (size_t position = 0; position != count; ++position) {
         PyObject* const key = usearch_py_key_to_object(keys[position]);
-        PyObject* const answered = key ? PyObject_CallOneArg(lookup->row_of.callable, key) : NULL;
+        PyObject* const answered = key ? PyObject_CallOneArg(lookup->row_of, key) : NULL;
         Py_XDECREF(key);
         Py_ssize_t const row = answered && answered != Py_None ? PyNumber_AsSsize_t(answered, PyExc_IndexError) : -1;
         Py_XDECREF(answered);
         if (row < 0 || (size_t)row >= lookup->values.rows) break;
         rows[position] = (char const*)lookup->values.data + (size_t)row * lookup->values.stride;
     }
-    if (PyErr_Occurred()) usearch_py_callback_latch(lookup->row_of.call);
+    if (PyErr_Occurred()) PyErr_WriteUnraisable(lookup->row_of);
     PyGILState_Release(gil_state);
 }
-
-/** A @c usearch_dense_attend call, the inputs it borrows until it is final, and the rows it lands
- *  in the arena. */
-typedef struct attend_call_t {
-    usearch_py_call_t call;
-    usearch_dense_attend_t arguments;
-    usearch_py_buffer_backing_t queries;
-    usearch_py_buffer_backing_t values;
-    usearch_py_buffer_backing_t carry;
-    value_rows_t lookup;
-    walk_reports_t reports;
-    usearch_rows_view_t outputs;
-} attend_call_t;
-
-static void attend_submit(void* call) { usearch_dense_attend(&((attend_call_t*)call)->arguments); }
-
-static PyObject* attend_answer(void* erased) {
-    attend_call_t* const call = (attend_call_t*)erased;
-    walk_reports_answer(&call->reports);
-    return usearch_py_rows_new(call->call.arena, &call->outputs, call->arguments.count);
-}
-
-static void attend_release(void* erased) {
-    attend_call_t* const call = (attend_call_t*)erased;
-    usearch_py_buffer_release(&call->queries);
-    usearch_py_buffer_release(&call->values);
-    usearch_py_buffer_release(&call->carry);
-    Py_CLEAR(call->lookup.row_of.callable);
-    walk_reports_release(&call->reports);
-    usearch_py_call_release(&call->call);
-}
-
-static int attend_traverse(void* erased, visitproc visit, void* arg) {
-    attend_call_t* const call = (attend_call_t*)erased;
-    Py_VISIT(call->lookup.row_of.callable);
-    return walk_reports_traverse(&call->reports, visit, arg);
-}
-
-static usearch_py_verb_t const attend_verb = {sizeof(attend_call_t), attend_submit, attend_answer, attend_release,
-                                              attend_traverse};
 
 static PyObject* DenseIndex_attend(PyObject* self, PyObject* const* args, Py_ssize_t positional_args_count,
                                    PyObject* args_names_tuple) {
@@ -1633,67 +1462,70 @@ static PyObject* DenseIndex_attend(PyObject* self, PyObject* const* args, Py_ssi
     double score_scale = 0;
     usearch_scalar_t dtype = usearch_scalar_unknown_k, values_kind = usearch_scalar_unknown_k,
                      outputs_kind = usearch_scalar_unknown_k;
+    usearch_py_call_t stack;
+    usearch_py_call_t* call = NULL;
     if (usearch_py_arguments_parse("attend", args, positional_args_count, args_names_tuple, 4, 4, arguments,
                                    usearch_py_table_size_(arguments)) != 0 ||
-        !(handle = receiver_from_object(self, &receiver)) ||
+        receiver_from_object(self, &receiver, &handle) != 0 ||
         usearch_py_size_from_object(head_count_object, "head_count", &head_count) != 0 ||
         usearch_py_size_from_object(expansion_object, "expansion_factor", &expansion_factor) != 0 ||
         usearch_py_size_from_object(progress_steps_object, "progress_steps", &progress_steps) != 0 ||
         (scale_object && (score_scale = PyFloat_AsDouble(scale_object)) == -1.0 && PyErr_Occurred()) ||
         usearch_py_scalar_from_object(dtype_object, "dtype", &dtype) != 0 ||
         usearch_py_scalar_from_object(values_dtype_object, "values_dtype", &values_kind) != 0 ||
-        usearch_py_scalar_from_object(outputs_dtype_object, "outputs_dtype", &outputs_kind) != 0)
+        usearch_py_scalar_from_object(outputs_dtype_object, "outputs_dtype", &outputs_kind) != 0 ||
+        !(call = usearch_py_call_open(&receiver, &stack)))
         return NULL;
-    if (!PyCallable_Check(row_of_object)) {
-        PyErr_Format(PyExc_TypeError, "the 'row_of' argument must be callable, got %S", Py_TYPE(row_of_object));
-        return NULL;
-    }
-    attend_call_t stack;
-    attend_call_t* const call = usearch_py_call_open(&receiver, &attend_verb, &stack);
-    if (!call) return NULL;
+
+    attend_call_t* const attend = (attend_call_t*)call->arguments;
     usearch_matrix_view_t queries;
     Py_ssize_t carry_bytes = 0;
     void* carry = NULL;
-    if (usearch_py_matrix_from_object(queries_object, dtype, &queries, &call->queries) != 0 ||
-        usearch_py_matrix_from_object(values_object, values_kind, &call->lookup.values, &call->values) != 0 ||
-        usearch_py_callback_from_object(row_of_object, "row_of", &call->call, &call->lookup.row_of) != 0 ||
-        walk_reports_fill(&call->reports, &call->call, progress_object, stats_object) != 0)
-        return usearch_py_call_discard(&receiver, &attend_verb, call);
-    if (carry_object && carry_object != Py_None &&
-        (usearch_py_matrix_bytes(queries.rows, sizeof(usearch_dense_softmax_state_t), 1, &carry_bytes) != 0 ||
-         usearch_py_output_from_object(carry_object, "carry", carry_bytes, &call->carry, &carry) != 0))
-        return usearch_py_call_discard(&receiver, &attend_verb, call);
-    if (usearch_py_arena_claim(arena_object, &call->call.arena) != 0)
-        return usearch_py_call_discard(&receiver, &attend_verb, call);
-    // A VRAM walk calls its value lookup on the device, which no Python callable can serve.
+    ArenaBuffer* outputs = NULL;
     usearch_arena_description_t placed = {0};
-    if (usearch_py_arena_describe(call->call.arena, &placed) != 0)
-        return usearch_py_call_discard(&receiver, &attend_verb, call);
+    if (usearch_py_matrix_from_object(queries_object, dtype, &queries, &call->buffers[0]) != 0 ||
+        usearch_py_matrix_from_object(values_object, values_kind, &attend->values, &call->buffers[1]) != 0 ||
+        usearch_py_callable_from_object(row_of_object, "row_of", &call->holds[callback_slot_k]) != 0 ||
+        walk_parse(call, progress_object, stats_object) != 0 ||
+        (carry_object && carry_object != Py_None &&
+         (usearch_py_matrix_bytes(queries.rows, sizeof(usearch_dense_softmax_state_t), 1, &carry_bytes) != 0 ||
+          usearch_py_output_from_object(carry_object, "carry", carry_bytes, &call->buffers[2], &carry) != 0)) ||
+        !(outputs = usearch_py_call_arena(call, arena_object, &DenseVectorsType)))
+        return usearch_py_call_discard(&receiver, call);
+    // A VRAM walk calls its value lookup on the device, which no Python callable can serve.
+    if (call->arena && usearch_py_arena_describe(call->arena, &placed) != 0)
+        return usearch_py_call_discard(&receiver, call);
     if (placed.residency == usearch_residency_vram_k) {
         usearch_py_raise(usearch_status_device_k, "a VRAM walk needs a device-callable value lookup");
-        return usearch_py_call_discard(&receiver, &attend_verb, call);
+        return usearch_py_call_discard(&receiver, call);
     }
 
-    call->arguments = (usearch_dense_attend_t) {
+    call->answer = usearch_py_rows_answer;
+    attend->row_of = call->holds[callback_slot_k];
+    attend->arguments = (usearch_dense_attend_t) {
         .index = handle,
         .executor = receiver.executor,
-        .outcome = &call->call.outcome,
+        .outcome = &call->outcome,
         .completion = receiver.completion,
         .count = queries.rows,
         .queries = rows_of(&queries),
         .head_count = head_count,
-        .value_lookup = value_rows_trampoline,
-        .value_lookup_state = &call->lookup,
+        .value_lookup = attend->row_of ? value_rows_trampoline : NULL,
+        .value_lookup_state = attend,
         .carry = (usearch_dense_softmax_state_t*)carry,
-        .outputs = &call->outputs,
-        .arena = ((Arena*)call->call.arena)->handle,
+        .outputs = &outputs->rows,
+        .arena = usearch_py_arena_handle(call->arena),
         .outputs_scalar = outputs_kind,
         .expansion_factor = expansion_factor,
         .score_scale = (float)score_scale,
-        .progress = usearch_py_progress_registered(&call->reports.progress, progress_steps),
-        .stats = &call->reports.stats,
+        .progress = usearch_py_progress_registered(call->holds[progress_slot_k], progress_steps),
+        .stats = walk_stats(call),
     };
-    return usearch_py_call_run(&receiver, &attend_verb, call);
+    outputs->count = queries.rows;
+    Py_BEGIN_ALLOW_THREADS;
+    usearch_dense_attend(&attend->arguments);
+    Py_END_ALLOW_THREADS;
+    return usearch_py_call_finish(&receiver, call);
 }
 
 static char const doc_DenseIndex_maxsim[] =                                                      //
@@ -1736,45 +1568,6 @@ static char const doc_DenseIndex_maxsim[] =                                     
     "    identities; `scores`, their (documents,) summed maxima; and `required`, the\n"          //
     "    documents scored before `wanted` cut any. All of them live in the arena.";
 
-/** A @c usearch_dense_maxsim call, the queries it borrows, and the ragged matches it lands in the
- *  arena. */
-typedef struct maxsim_call_t {
-    usearch_py_call_t call;
-    usearch_dense_maxsim_t arguments;
-    usearch_py_buffer_backing_t queries;
-    usearch_py_callback_t predicate;
-    walk_reports_t reports;
-    usearch_matches_tape_view_t matches;
-    size_t written;
-    size_t required;
-} maxsim_call_t;
-
-static void maxsim_submit(void* call) { usearch_dense_maxsim(&((maxsim_call_t*)call)->arguments); }
-
-static PyObject* maxsim_answer(void* erased) {
-    maxsim_call_t* const call = (maxsim_call_t*)erased;
-    walk_reports_answer(&call->reports);
-    return usearch_py_products_new(call->call.arena, &call->matches, call->arguments.count, call->written,
-                                   call->required);
-}
-
-static void maxsim_release(void* erased) {
-    maxsim_call_t* const call = (maxsim_call_t*)erased;
-    usearch_py_buffer_release(&call->queries);
-    Py_CLEAR(call->predicate.callable);
-    walk_reports_release(&call->reports);
-    usearch_py_call_release(&call->call);
-}
-
-static int maxsim_traverse(void* erased, visitproc visit, void* arg) {
-    maxsim_call_t* const call = (maxsim_call_t*)erased;
-    Py_VISIT(call->predicate.callable);
-    return walk_reports_traverse(&call->reports, visit, arg);
-}
-
-static usearch_py_verb_t const maxsim_verb = {sizeof(maxsim_call_t), maxsim_submit, maxsim_answer, maxsim_release,
-                                              maxsim_traverse};
-
 static PyObject* DenseIndex_maxsim(PyObject* self, PyObject* const* args, Py_ssize_t positional_args_count,
                                    PyObject* args_names_tuple) {
     PyObject *queries_object, *rows_per_query_object, *wanted_object, *arena_object, *expansion_object,
@@ -1797,333 +1590,240 @@ static PyObject* DenseIndex_maxsim(PyObject* self, PyObject* const* args, Py_ssi
     size_t rows_per_query = 0, wanted = 0, expansion_factor = 0, progress_steps = 0;
     int traversal = usearch_traversal_walk_k;
     usearch_scalar_t dtype = usearch_scalar_unknown_k;
+    usearch_py_call_t stack;
+    usearch_py_call_t* call = NULL;
     if (usearch_py_arguments_parse("maxsim", args, positional_args_count, args_names_tuple, 4, 4, arguments,
                                    usearch_py_table_size_(arguments)) != 0 ||
-        !(handle = receiver_from_object(self, &receiver)) ||
+        receiver_from_object(self, &receiver, &handle) != 0 ||
         usearch_py_size_from_object(rows_per_query_object, "rows_per_query", &rows_per_query) != 0 ||
         usearch_py_size_from_object(wanted_object, "wanted", &wanted) != 0 ||
         usearch_py_size_from_object(expansion_object, "expansion_factor", &expansion_factor) != 0 ||
         usearch_py_size_from_object(progress_steps_object, "progress_steps", &progress_steps) != 0 ||
         (traversal_object &&
          usearch_py_enum_from_object(traversal_object, "traversal", &usearch_py_traversal, &traversal) != 0) ||
-        usearch_py_scalar_from_object(dtype_object, "dtype", &dtype) != 0)
+        usearch_py_scalar_from_object(dtype_object, "dtype", &dtype) != 0 ||
+        !(call = usearch_py_call_open(&receiver, &stack)))
         return NULL;
 
-    maxsim_call_t stack;
-    maxsim_call_t* const call = usearch_py_call_open(&receiver, &maxsim_verb, &stack);
-    if (!call) return NULL;
     usearch_matrix_view_t queries;
-    if (usearch_py_matrix_from_object(queries_object, dtype, &queries, &call->queries) != 0)
-        return usearch_py_call_discard(&receiver, &maxsim_verb, call);
+    if (usearch_py_matrix_from_object(queries_object, dtype, &queries, &call->buffers[0]) != 0)
+        return usearch_py_call_discard(&receiver, call);
+    // The library takes a query count, which only the rows of this matrix can tell.
     if (rows_per_query == 0 || queries.rows % rows_per_query != 0) {
         usearch_py_raise(usearch_status_shape_mismatch_k, "the %zu query rows are not a whole multiple of %zu",
                          queries.rows, rows_per_query);
-        return usearch_py_call_discard(&receiver, &maxsim_verb, call);
+        return usearch_py_call_discard(&receiver, call);
     }
-    size_t const queries_count = queries.rows / rows_per_query;
-    if (usearch_py_callback_from_object(predicate_object, "predicate", &call->call, &call->predicate) != 0 ||
-        walk_reports_fill(&call->reports, &call->call, progress_object, stats_object) != 0 ||
-        usearch_py_arena_claim(arena_object, &call->call.arena) != 0)
-        return usearch_py_call_discard(&receiver, &maxsim_verb, call);
+    DenseProducts* matches = NULL;
+    if (usearch_py_callable_from_object(predicate_object, "predicate", &call->holds[callback_slot_k]) != 0 ||
+        walk_parse(call, progress_object, stats_object) != 0 ||
+        !(matches = usearch_py_call_arena(call, arena_object, &DenseProductsType)))
+        return usearch_py_call_discard(&receiver, call);
 
-    call->arguments = (usearch_dense_maxsim_t) {
+    matches->queries = queries.rows / rows_per_query;
+    usearch_dense_maxsim_t* const maxsim = (usearch_dense_maxsim_t*)call->arguments;
+    *maxsim = (usearch_dense_maxsim_t) {
         .index = handle,
         .executor = receiver.executor,
-        .outcome = &call->call.outcome,
+        .outcome = &call->outcome,
         .completion = receiver.completion,
-        .count = queries_count,
+        .count = matches->queries,
         .queries = rows_of(&queries),
         .rows_per_query = rows_per_query,
-        .matches = &call->matches,
-        .written = &call->written,
-        .required = &call->required,
-        .arena = ((Arena*)call->call.arena)->handle,
+        .matches = &matches->view,
+        .written = &matches->pairs,
+        .required = &matches->required,
+        .arena = usearch_py_arena_handle(call->arena),
         .wanted = wanted,
         .expansion_factor = expansion_factor,
         .traversal = (usearch_traversal_t)traversal,
-        .predicate = usearch_py_predicate_registered(&call->predicate),
-        .progress = usearch_py_progress_registered(&call->reports.progress, progress_steps),
-        .stats = &call->reports.stats,
+        .predicate = usearch_py_predicate_registered(call->holds[callback_slot_k]),
+        .progress = usearch_py_progress_registered(call->holds[progress_slot_k], progress_steps),
+        .stats = walk_stats(call),
     };
-    return usearch_py_call_run(&receiver, &maxsim_verb, call);
+    Py_BEGIN_ALLOW_THREADS;
+    usearch_dense_maxsim(maxsim);
+    Py_END_ALLOW_THREADS;
+    return usearch_py_call_finish(&receiver, call);
 }
 
 #pragma endregion Linear Algebra
 
 #pragma region Composition
 
-static char const doc_DenseIndex_absorb[] =                                                     //
-    "absorb(*donors, progress=None, progress_steps=0) -> RefineReport\n"                        //
-    "\n"                                                                                        //
-    "Absorbs every donor into this index, one after another, keeping their graphs rather\n"     //
-    "than re-inserting their vectors, and linking each in by walks across the appended\n"       //
-    "part. Each donor handle is consumed and every verb on it afterwards raises. Readers\n"     //
-    "of a RAM index may keep searching throughout, while a VRAM one admits no overlapping\n"    //
-    "search.\n"                                                                                 //
-    "\n"                                                                                        //
-    "Cancellation stops the closing refinement alone: every donor is still consumed, the\n"     //
-    "islands still re-linked, and the call raises `CancelledError`. A donor whose absorption\n" //
-    "fails, and every later one, stays a live handle its caller still owns, though the\n"       //
-    "entries of the one it struck may already have moved into this index.\n"                    //
-    "Calls `usearch_dense_absorb`.\n"                                                           //
-    "\n"                                                                                        //
-    "Args:\n"                                                                                   //
-    "  donors (DenseIndex): The indexes to absorb.\n"                                           //
-    "  progress (callable, optional): Called with (completed, total) nodes the closing\n"       //
-    "    refinement re-selected; returning False stops it, None carries on.\n"                  //
-    "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"     //
-    "\n"                                                                                        //
-    "Returns:\n"                                                                                //
-    "  RefineReport: What the closing refinement did to the graph.";
+static char const doc_DenseIndex_reshard[] =                                                     //
+    "``reshard(sources, targets, /, *, memory_domains=None, devices=None, paths=None,\n"         //
+    "shard_capacity=0, expansion_factor=0, memory_limit=0, seed=0, progress=None,\n"             //
+    "progress_steps=0, stats=None, plan=None) -> RefineReport``\n"                               //
+    "\n"                                                                                         //
+    "Moves the entries of `sources` into `targets`, keeping their links rather than\n"           //
+    "re-inserting their vectors, then runs a round on every target that took entries. Several\n" //
+    "sources into one target, itself among them, gather into it; one source into several\n"      //
+    "targets cuts it into one graph-local part per target; one index as its only source and\n"   //
+    "target recuts its own shards in place under the placement's `shard_capacity`. Every\n"      //
+    "index stays the caller's, and a source the targets do not name ends empty and live. The\n"  //
+    "receiver names where the call runs, and need not be among them. Readers of a RAM target\n"  //
+    "keep searching throughout, while a VRAM target admits no overlapping search.\n"             //
+    "\n"                                                                                         //
+    "The handler stops the closing rounds alone, never a move: a stop raises `CancelledError`\n" //
+    "with every entry moved, or, with a `plan`, leaves it live for the next call naming it to\n" //
+    "continue, until `reshard_plan_finish(plan)` closes it. Calls `usearch_dense_reshard`.\n"    //
+    "\n"                                                                                         //
+    "A live plan holds no index, so each index it names must outlive its finish.\n"              //
+    "\n"                                                                                         //
+    "Args:\n"                                                                                    //
+    "  sources (Sequence[DenseIndex]): The indexes whose entries move, each named once.\n"       //
+    "  targets (Sequence[DenseIndex]): The indexes they move into, each a source or empty.\n"    //
+    "  memory_domains (Sequence[int], optional): NUMA node IDs of a RAM placement recut in\n"    //
+    "    place; None keeps the placement.\n"                                                     //
+    "  devices (Sequence[int], optional): Device ordinals of a VRAM placement; None keeps it.\n" //
+    "  paths (Sequence[str | bytes | PathLike], optional): Drives of an NVMe placement;\n"       //
+    "    None keeps it.\n"                                                                       //
+    "  shard_capacity (int, optional): Entries per shard of the RAM or VRAM placement; 0\n"      //
+    "    keeps the handle's own bound.\n"                                                        //
+    "  expansion_factor (int, optional): Breadth of any walk beside the rounds; 0 derives it.\n" //
+    "  memory_limit (int, optional): Bytes a loaded NVMe handle holds for the part it\n"         //
+    "    rewrites; 0 derives what rounds that part in RAM.\n"                                    //
+    "  seed (int, optional): Picks the part roots of a cut; equal seeds cut equally.\n"          //
+    "  progress (callable, optional): Called with (completed, total) units of each phase of\n"   //
+    "    the closing rounds; returning False stops them, None carries on.\n"                     //
+    "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"      //
+    "  stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.\n"         //
+    "  plan (DenseReshardPlan, optional): The reshard to open or continue; None runs it to\n"    //
+    "    its end.\n"                                                                             //
+    "\n"                                                                                         //
+    "Returns:\n"                                                                                 //
+    "  RefineReport: What the closing rounds did to the graph, across the targets.\n"            //
+    "\n"                                                                                         //
+    "Example:\n"                                                                                 //
+    "  >>> from array import array\n"                                                            //
+    "  >>> base, donor = usearch.DenseIndex.init_ram(2), usearch.DenseIndex.init_ram(2)\n"       //
+    "  >>> base.reserve(1)\n"                                                                    //
+    "  >>> donor.reserve(1)\n"                                                                   //
+    "  >>> base.insert([1], array('d', [0.1, 0.2]))\n"                                           //
+    "  >>> donor.insert([2], array('d', [0.3, 0.4]))\n"                                          //
+    "  >>> pool = usearch.Executor.for_ram(threads=2)\n"                                         //
+    "  >>> _ = base.on(pool).reshard([base, donor], [base])\n"                                   //
+    "  >>> len(base), len(donor)\n"                                                              //
+    "  (2, 0)";
 
-/** A @c usearch_dense_absorb call, holding the donors whose handles it took until the call is
- *  final. */
-typedef struct absorb_call_t {
-    usearch_py_call_t call;
-    usearch_dense_absorb_t arguments;
-    usearch_py_callback_t progress;
+/** A @c usearch_dense_reshard call and the placements it lends, inside the record's arguments. */
+typedef struct reshard_call_t {
+    usearch_dense_reshard_t arguments;
+    usearch_ram_options_t ram;
+    usearch_vram_options_t vram;
+    usearch_nvme_options_t nvme;
+} reshard_call_t;
 
-    /** The tuple of @c DenseIndex donors, held, or NULL before the fill gathered it. */
-    PyObject* donors;
-
-    /** The slots the library reads the donors from, and nulls as it consumes them; NULL where
-     *  nothing was taken. */
-    usearch_dense_index_t* donated;
-
-    usearch_refine_report_t report;
-} absorb_call_t;
-
-static void absorb_submit(void* call) { usearch_dense_absorb(&((absorb_call_t*)call)->arguments); }
-
-static PyObject* absorb_answer(void* call) { return refine_report_to_object(&((absorb_call_t*)call)->report); }
-
-static void absorb_release(void* erased) {
-    absorb_call_t* const call = (absorb_call_t*)erased;
-    // The library nulls the slot of every donor it consumed, so whatever it left there is a
-    // handle the wrapper still owns, whichever way the absorb ended.
-    for (Py_ssize_t position = 0; call->donated && position != PyTuple_GET_SIZE(call->donors); ++position) {
-        if (!call->donated[position]) continue;
-        PyObject* const donor = PyTuple_GET_ITEM(call->donors, position);
-        usearch_py_critical_section_begin_(donor);
-        ((DenseIndex*)donor)->handle = call->donated[position];
-        usearch_py_critical_section_end_();
+/**
+ *  @brief Holds the sequence of indexes @p object names in @p held and lends their handles as one
+ *      block in @p handles.
+ *  @return 0 on success, -1 with an exception set otherwise.
+ */
+static int indexes_from_object(PyObject* object, char const* field, PyObject** held, void** handles, size_t* count) {
+    PyObject* const sequence = PySequence_Fast(object, "expected a sequence of indexes");
+    if (!sequence) return usearch_py_raise_from_cause(PyExc_TypeError, "the '%s' argument must be a sequence", field);
+    *held = sequence;
+    Py_ssize_t const length = PySequence_Fast_GET_SIZE(sequence);
+    usearch_dense_index_t* const block = PyMem_Malloc((length ? (size_t)length : 1) * sizeof(usearch_dense_index_t));
+    if (!block) return PyErr_NoMemory(), -1;
+    *handles = block;
+    for (Py_ssize_t position = 0; position != length; ++position) {
+        PyObject* const index = PySequence_Fast_GET_ITEM(sequence, position);
+        if (!Py_IS_TYPE(index, &DenseIndexType)) {
+            PyErr_Format(PyExc_TypeError, "the '%s' argument must hold DenseIndex objects, got %S", field,
+                         Py_TYPE(index));
+            return -1;
+        }
+        block[position] = ((DenseIndex*)index)->handle;
     }
-    PyMem_Free(call->donated);
-    call->donated = NULL;
-    Py_CLEAR(call->donors);
-    Py_CLEAR(call->progress.callable);
-    usearch_py_call_release(&call->call);
-}
-
-static int absorb_traverse(void* erased, visitproc visit, void* arg) {
-    absorb_call_t* const call = (absorb_call_t*)erased;
-    Py_VISIT(call->donors);
-    Py_VISIT(call->progress.callable);
+    *count = (size_t)length;
     return 0;
 }
 
-static usearch_py_verb_t const absorb_verb = {sizeof(absorb_call_t), absorb_submit, absorb_answer, absorb_release,
-                                              absorb_traverse};
-
-static PyObject* DenseIndex_absorb(PyObject* self, PyObject* const* args, Py_ssize_t positional_args_count,
-                                   PyObject* args_names_tuple) {
-    PyObject *progress_object, *progress_steps_object;
-    usearch_py_argument_t const arguments[] = {{"progress", &progress_object},
-                                               {"progress_steps", &progress_steps_object}};
-    usearch_py_receiver_t receiver;
-    usearch_dense_index_t handle = NULL;
-    size_t progress_steps = 0;
-    // Every positional argument is a donor, so only the keywords go through the table.
-    if (usearch_py_arguments_parse("absorb", args + positional_args_count, 0, args_names_tuple, 0, 0, arguments,
-                                   usearch_py_table_size_(arguments)) != 0 ||
-        !(handle = receiver_from_object(self, &receiver)) ||
-        usearch_py_size_from_object(progress_steps_object, "progress_steps", &progress_steps) != 0)
-        return NULL;
-    for (Py_ssize_t position = 0; position != positional_args_count; ++position) {
-        if (!PyObject_TypeCheck(args[position], &DenseIndexType)) {
-            PyErr_Format(PyExc_TypeError, "expected DenseIndex donors, got %S", Py_TYPE(args[position]));
-            return NULL;
-        }
-        if (args[position] == receiver.index) {
-            usearch_py_raise(usearch_status_config_mismatch_k, "an index cannot absorb itself");
-            return NULL;
-        }
-    }
-
-    absorb_call_t stack;
-    absorb_call_t* const call = usearch_py_call_open(&receiver, &absorb_verb, &stack);
-    if (!call) return NULL;
-    if (usearch_py_callback_from_object(progress_object, "progress", &call->call, &call->progress) != 0 ||
-        !(call->donors = PyTuple_New(positional_args_count)))
-        return usearch_py_call_discard(&receiver, &absorb_verb, call);
-    for (Py_ssize_t position = 0; position != positional_args_count; ++position)
-        PyTuple_SET_ITEM(call->donors, position, Py_NewRef(args[position]));
-    call->donated = (usearch_dense_index_t*)PyMem_Calloc(positional_args_count ? positional_args_count : 1,
-                                                         sizeof(usearch_dense_index_t));
-    if (!call->donated) {
-        PyErr_NoMemory();
-        return usearch_py_call_discard(&receiver, &absorb_verb, call);
-    }
-
-    // The library consumes the donors and takes the array mutably, so each wrapper's claim is
-    // surrendered before the call rather than after: a failure that still consumed one must not
-    // leave two owners, and a concurrent verb on a donor sees it consumed meanwhile.
-    for (Py_ssize_t position = 0; position != positional_args_count; ++position) {
-        DenseIndex* const donor = (DenseIndex*)args[position];
-        usearch_py_critical_section_begin_(args[position]);
-        call->donated[position] = donor->handle;
-        donor->handle = NULL;
-        usearch_py_critical_section_end_();
-        if (!call->donated[position]) {
-            usearch_py_raise(usearch_status_uninitialized_k, "a donor handle was already absorbed");
-            return usearch_py_call_discard(&receiver, &absorb_verb, call);
-        }
-    }
-
-    call->arguments = (usearch_dense_absorb_t) {
-        .index = handle,
-        .executor = receiver.executor,
-        .outcome = &call->call.outcome,
-        .completion = receiver.completion,
-        .count = (size_t)positional_args_count,
-        .donors = call->donated,
-        .report = &call->report,
-        .progress = usearch_py_progress_registered(&call->progress, progress_steps),
-    };
-    return usearch_py_call_run(&receiver, &absorb_verb, call);
-}
-
-static char const doc_DenseIndex_split[] =                                                    //
-    "``split(*receivers, expansion_factor=0, seed=0, progress=None, progress_steps=0,\n"      //
-    "stats=None) -> RefineReport``\n"                                                         //
-    "\n"                                                                                      //
-    "Splits this index into the empty receivers, the inverse of `absorb`: the entries are\n"  //
-    "partitioned along the graph, each part lands in one receiver with its edges kept, and\n" //
-    "a closing refinement re-links every receiver. This index is left empty and live.\n"      //
-    "Receivers match its residency, scalar, metric, geometry and shard count.\n"              //
-    "Calls `usearch_dense_split`.\n"                                                          //
-    "\n"                                                                                      //
-    "Args:\n"                                                                                 //
-    "  receivers (DenseIndex): At least two empty indexes, one per part.\n"                   //
-    "  expansion_factor (int, optional): Breadth of the closing walks; 0 derives it.\n"       //
-    "  seed (int, optional): Picks the part roots; equal seeds split equally.\n"              //
-    "  progress (callable, optional): Called with (completed, total) nodes the closing\n"     //
-    "    refinements re-selected; returning False stops them, None carries on.\n"             //
-    "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"   //
-    "  stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.\n"      //
-    "\n"                                                                                      //
-    "Returns:\n"                                                                              //
-    "  RefineReport: What the closing refinements did, across the receivers.";
-
-/** Reads an optional @c seed, leaving @p seed alone when @p object is NULL; returns 0 or -1 with an
- *  exception set. */
-static int seed_from_object(PyObject* object, uint64_t* seed) {
-    if (!object) return 0;
-    unsigned long long const value = PyLong_AsUnsignedLongLong(object);
-    if (value == (unsigned long long)-1 && PyErr_Occurred()) return -1;
-    *seed = (uint64_t)value;
-    return 0;
-}
-
-/** A @c usearch_dense_split call, holding the receivers it borrows until the call is final. */
-typedef struct split_call_t {
-    usearch_py_call_t call;
-    usearch_dense_split_t arguments;
-    walk_reports_t reports;
-
-    /** The tuple of @c DenseIndex receivers, held, or NULL before the fill gathered it. */
-    PyObject* receivers;
-
-    /** The receivers' handles, as the library reads them. */
-    usearch_dense_index_t* handles;
-
-    usearch_refine_report_t report;
-} split_call_t;
-
-static void split_submit(void* call) { usearch_dense_split(&((split_call_t*)call)->arguments); }
-
-static PyObject* split_answer(void* erased) {
-    split_call_t* const call = (split_call_t*)erased;
-    walk_reports_answer(&call->reports);
-    return refine_report_to_object(&call->report);
-}
-
-static void split_release(void* erased) {
-    split_call_t* const call = (split_call_t*)erased;
-    PyMem_Free(call->handles);
-    call->handles = NULL;
-    Py_CLEAR(call->receivers);
-    walk_reports_release(&call->reports);
-    usearch_py_call_release(&call->call);
-}
-
-static int split_traverse(void* erased, visitproc visit, void* arg) {
-    split_call_t* const call = (split_call_t*)erased;
-    Py_VISIT(call->receivers);
-    return walk_reports_traverse(&call->reports, visit, arg);
-}
-
-static usearch_py_verb_t const split_verb = {sizeof(split_call_t), split_submit, split_answer, split_release,
-                                             split_traverse};
-
-static PyObject* DenseIndex_split(PyObject* self, PyObject* const* args, Py_ssize_t positional_args_count,
-                                  PyObject* args_names_tuple) {
-    PyObject *expansion_object, *seed_object, *progress_object, *progress_steps_object, *stats_object;
+static PyObject* DenseIndex_reshard(PyObject* self, PyObject* const* args, Py_ssize_t positional_args_count,
+                                    PyObject* args_names_tuple) {
+    PyObject *sources_object, *targets_object, *memory_domains_object, *devices_object, *paths_object,
+        *shard_capacity_object, *expansion_object, *memory_limit_object, *seed_object, *progress_object,
+        *progress_steps_object, *stats_object, *plan_object;
     usearch_py_argument_t const arguments[] = {
-        {"expansion_factor", &expansion_object},    {"seed", &seed_object},   {"progress", &progress_object},
-        {"progress_steps", &progress_steps_object}, {"stats", &stats_object},
+        {"sources", &sources_object},
+        {"targets", &targets_object},
+        {"memory_domains", &memory_domains_object},
+        {"devices", &devices_object},
+        {"paths", &paths_object},
+        {"shard_capacity", &shard_capacity_object},
+        {"expansion_factor", &expansion_object},
+        {"memory_limit", &memory_limit_object},
+        {"seed", &seed_object},
+        {"progress", &progress_object},
+        {"progress_steps", &progress_steps_object},
+        {"stats", &stats_object},
+        {"plan", &plan_object},
     };
     usearch_py_receiver_t receiver;
     usearch_dense_index_t handle = NULL;
-    size_t expansion_factor = 0, progress_steps = 0;
+    size_t shard_capacity = 0, expansion_factor = 0, memory_limit = 0, progress_steps = 0;
     uint64_t seed = 0;
-    // Every positional argument is a receiver, so only the keywords go through the table.
-    if (usearch_py_arguments_parse("split", args + positional_args_count, 0, args_names_tuple, 0, 0, arguments,
+    usearch_py_call_t stack;
+    usearch_py_call_t* call = NULL;
+    if (usearch_py_arguments_parse("reshard", args, positional_args_count, args_names_tuple, 2, 2, arguments,
                                    usearch_py_table_size_(arguments)) != 0 ||
-        !(handle = receiver_from_object(self, &receiver)) ||
+        receiver_from_object(self, &receiver, &handle) != 0 ||
+        usearch_py_size_from_object(shard_capacity_object, "shard_capacity", &shard_capacity) != 0 ||
         usearch_py_size_from_object(expansion_object, "expansion_factor", &expansion_factor) != 0 ||
+        usearch_py_size_from_object(memory_limit_object, "memory_limit", &memory_limit) != 0 ||
         usearch_py_size_from_object(progress_steps_object, "progress_steps", &progress_steps) != 0 ||
-        seed_from_object(seed_object, &seed) != 0)
+        usearch_py_seed_from_object(seed_object, &seed) != 0 || !(call = usearch_py_call_open(&receiver, &stack)))
         return NULL;
-    for (Py_ssize_t position = 0; position != positional_args_count; ++position) {
-        if (!PyObject_TypeCheck(args[position], &DenseIndexType)) {
-            PyErr_Format(PyExc_TypeError, "expected DenseIndex receivers, got %S", Py_TYPE(args[position]));
-            return NULL;
-        }
-    }
 
-    split_call_t stack;
-    split_call_t* const call = usearch_py_call_open(&receiver, &split_verb, &stack);
-    if (!call) return NULL;
-    if (walk_reports_fill(&call->reports, &call->call, progress_object, stats_object) != 0 ||
-        !(call->receivers = PyTuple_New(positional_args_count)))
-        return usearch_py_call_discard(&receiver, &split_verb, call);
-    call->handles = (usearch_dense_index_t*)PyMem_Calloc(positional_args_count ? positional_args_count : 1,
-                                                         sizeof(usearch_dense_index_t));
-    if (!call->handles) {
-        PyErr_NoMemory();
-        return usearch_py_call_discard(&receiver, &split_verb, call);
-    }
-    for (Py_ssize_t position = 0; position != positional_args_count; ++position) {
-        PyTuple_SET_ITEM(call->receivers, position, Py_NewRef(args[position]));
-        if (!(call->handles[position] = index_handle((DenseIndex*)args[position])))
-            return usearch_py_call_discard(&receiver, &split_verb, call);
-    }
+    reshard_call_t* const reshard = (reshard_call_t*)call->arguments;
+    size_t sources_count = 0, targets_count = 0, memory_domains_count = 0, devices_count = 0;
+    RefineReport* const report = usearch_py_call_result(call, &RefineReportType);
+    if (!report ||
+        indexes_from_object(sources_object, "sources", &call->holds[sources_slot_k], &call->blocks[0],
+                            &sources_count) != 0 ||
+        indexes_from_object(targets_object, "targets", &call->holds[targets_slot_k], &call->blocks[1],
+                            &targets_count) != 0 ||
+        usearch_py_ordinals_from_object(memory_domains_object, "memory_domains", (int32_t**)&call->blocks[2],
+                                        &memory_domains_count) != 0 ||
+        usearch_py_ordinals_from_object(devices_object, "devices", (int32_t**)&call->blocks[3], &devices_count) != 0 ||
+        usearch_py_paths_from_object(paths_object, &call->paths) != 0 ||
+        walk_parse(call, progress_object, stats_object) != 0 ||
+        plan_parse(call, plan_object, &DenseReshardPlanType) != 0)
+        return usearch_py_call_discard(&receiver, call);
 
-    call->arguments = (usearch_dense_split_t) {
-        .index = handle,
+    DensePlan* const plan = (DensePlan*)call->holds[callback_slot_k];
+    reshard->ram = (usearch_ram_options_t) {.memory_domains = call->blocks[2],
+                                            .memory_domains_count = memory_domains_count,
+                                            .shard_capacity = shard_capacity};
+    reshard->vram = (usearch_vram_options_t) {.devices = call->blocks[3],
+                                              .devices_count = devices_count,
+                                              .shard_capacity = shard_capacity};
+    reshard->nvme = (usearch_nvme_options_t) {.paths = call->paths.views, .paths_count = call->paths.count};
+    reshard->arguments = (usearch_dense_reshard_t) {
+        .sources_count = sources_count,
+        .sources = call->blocks[0],
+        .targets_count = targets_count,
+        .targets = call->blocks[1],
         .executor = receiver.executor,
-        .outcome = &call->call.outcome,
+        .outcome = &call->outcome,
         .completion = receiver.completion,
-        .count = (size_t)positional_args_count,
-        .receivers = call->handles,
-        .report = &call->report,
-        .refine = {.expansion_factor = expansion_factor},
+        .ram = memory_domains_object && memory_domains_object != Py_None ? &reshard->ram : NULL,
+        .vram = devices_object && devices_object != Py_None ? &reshard->vram : NULL,
+        .nvme = paths_object && paths_object != Py_None ? &reshard->nvme : NULL,
+        .report = &report->report,
+        .refine = {.expansion_factor = expansion_factor, .memory_limit = memory_limit},
         .seed = seed,
-        .progress = usearch_py_progress_registered(&call->reports.progress, progress_steps),
-        .stats = &call->reports.stats,
+        .progress = usearch_py_progress_registered(call->holds[progress_slot_k], progress_steps),
+        .stats = walk_stats(call),
+        .plan = plan ? &plan->handle.reshard : NULL,
+        .phase = plan ? &plan->progress : NULL,
     };
-    return usearch_py_call_run(&receiver, &split_verb, call);
+    Py_BEGIN_ALLOW_THREADS;
+    usearch_dense_reshard(&reshard->arguments);
+    Py_END_ALLOW_THREADS;
+    return usearch_py_call_finish(&receiver, call);
 }
 
 #pragma endregion Composition
@@ -2159,57 +1859,6 @@ static char const doc_DenseIndex_sample[] =                                     
     "  Sample: The keys, entry ordinals, parents and coordinates of the draws, fewer than\n"         //
     "    `wanted` only once the region is exhausted.";
 
-/** A @c usearch_dense_sample call and the draws it writes into the claimed arena. */
-typedef struct sample_call_t {
-    usearch_py_call_t call;
-    usearch_dense_sample_t arguments;
-    walk_reports_t reports;
-    usearch_py_keys_t shown;
-    usearch_py_buffer_backing_t shown_coordinates;
-    usearch_py_keys_t focus;
-    usearch_keys_view_t keys;
-    size_t const* entry_ordinals;
-    usearch_matches_view_t parents;
-    usearch_rows_view_t coordinates;
-    size_t written;
-} sample_call_t;
-
-static void sample_submit(void* call) { usearch_dense_sample(&((sample_call_t*)call)->arguments); }
-
-static PyObject* sample_answer(void* erased) {
-    sample_call_t* const call = (sample_call_t*)erased;
-    walk_reports_answer(&call->reports);
-    PyObject* const arena = call->call.arena;
-    Py_ssize_t const written = (Py_ssize_t)call->written;
-    Py_ssize_t const keys_shape[2] = {written, (Py_ssize_t)sizeof(usearch_key_t)};
-    Py_ssize_t const entry_ordinals_shape[1] = {written};
-    Py_ssize_t const coordinates_shape[2] = {written, 3};
-    PyObject* fields[4] = {NULL, NULL, NULL, NULL};
-    (void)((fields[0] = usearch_py_arena_buffer(&ArenaBufferType, arena, call->keys.data, "B", 1, keys_shape, 2)) &&
-           (fields[1] = usearch_py_arena_buffer(&ArenaBufferType, arena, call->entry_ordinals, "N", sizeof(size_t),
-                                                entry_ordinals_shape, 1)) &&
-           (fields[2] = usearch_py_matches_new(arena, &call->parents, call->written)) &&
-           (fields[3] = usearch_py_arena_buffer(&ArenaBufferType, arena, call->coordinates.data, "f", sizeof(float),
-                                                coordinates_shape, 2)));
-    return usearch_py_struct_sequence_steal(&SampleType, fields, 4);
-}
-
-static void sample_release(void* erased) {
-    sample_call_t* const call = (sample_call_t*)erased;
-    usearch_py_keys_release(&call->shown);
-    usearch_py_buffer_release(&call->shown_coordinates);
-    usearch_py_keys_release(&call->focus);
-    walk_reports_release(&call->reports);
-    usearch_py_call_release(&call->call);
-}
-
-static int sample_traverse(void* call, visitproc visit, void* arg) {
-    return walk_reports_traverse(&((sample_call_t*)call)->reports, visit, arg);
-}
-
-static usearch_py_verb_t const sample_verb = {sizeof(sample_call_t), sample_submit, sample_answer, sample_release,
-                                              sample_traverse};
-
 /** Gathers the optional keys @p object names into @p keys; None or NULL leaves them empty. Returns
  *  0 or -1 with an exception set. */
 static int optional_keys_from_object(PyObject* object, size_t* count, usearch_py_keys_t* keys) {
@@ -2241,60 +1890,245 @@ static PyObject* DenseIndex_sample(PyObject* self, PyObject* const* args, Py_ssi
     usearch_dense_index_t handle = NULL;
     size_t wanted = 0, expansion_factor = 0, progress_steps = 0;
     uint64_t seed = 0;
+    usearch_py_call_t stack;
+    usearch_py_call_t* call = NULL;
     if (usearch_py_arguments_parse("sample", args, positional_args_count, args_names_tuple, 2, 2, arguments,
                                    usearch_py_table_size_(arguments)) != 0 ||
-        !(handle = receiver_from_object(self, &receiver)) ||
+        receiver_from_object(self, &receiver, &handle) != 0 ||
         usearch_py_size_from_object(wanted_object, "wanted", &wanted) != 0 ||
         usearch_py_size_from_object(expansion_object, "expansion_factor", &expansion_factor) != 0 ||
         usearch_py_size_from_object(progress_steps_object, "progress_steps", &progress_steps) != 0 ||
-        seed_from_object(seed_object, &seed) != 0)
+        usearch_py_seed_from_object(seed_object, &seed) != 0 || !(call = usearch_py_call_open(&receiver, &stack)))
         return NULL;
 
-    sample_call_t stack;
-    sample_call_t* const call = usearch_py_call_open(&receiver, &sample_verb, &stack);
-    if (!call) return NULL;
     usearch_matrix_view_t coordinates = {0};
     size_t shown_count = 0, focus_count = 0;
+    Sample* sample = NULL;
     if ((coordinates_object && coordinates_object != Py_None &&
-         usearch_py_matrix_from_object(coordinates_object, usearch_scalar_f32_k, &coordinates,
-                                       &call->shown_coordinates) != 0) ||
-        optional_keys_from_object(shown_object, &shown_count, &call->shown) != 0 ||
-        optional_keys_from_object(focus_object, &focus_count, &call->focus) != 0 ||
-        walk_reports_fill(&call->reports, &call->call, progress_object, stats_object) != 0 ||
-        usearch_py_arena_claim(arena_object, &call->call.arena) != 0)
-        return usearch_py_call_discard(&receiver, &sample_verb, call);
+         usearch_py_matrix_from_object(coordinates_object, usearch_scalar_f32_k, &coordinates, &call->buffers[0]) !=
+             0) ||
+        optional_keys_from_object(shown_object, &shown_count, &call->keys[0]) != 0 ||
+        optional_keys_from_object(focus_object, &focus_count, &call->keys[1]) != 0 ||
+        walk_parse(call, progress_object, stats_object) != 0 ||
+        !(sample = usearch_py_call_arena(call, arena_object, &SampleType)))
+        return usearch_py_call_discard(&receiver, call);
+    // The library reads as many coordinates as shown keys, which only these two arguments can tell.
     if (shown_count != coordinates.rows) {
         PyErr_Format(PyExc_ValueError, "%zu shown keys need as many coordinates, got %zu", shown_count,
                      coordinates.rows);
-        return usearch_py_call_discard(&receiver, &sample_verb, call);
+        return usearch_py_call_discard(&receiver, call);
     }
 
-    call->arguments = (usearch_dense_sample_t) {
+    usearch_dense_sample_t* const arguments_sample = (usearch_dense_sample_t*)call->arguments;
+    *arguments_sample = (usearch_dense_sample_t) {
         .index = handle,
         .executor = receiver.executor,
-        .outcome = &call->call.outcome,
+        .outcome = &call->outcome,
         .completion = receiver.completion,
         .shown_count = shown_count,
-        .shown = {call->shown.keys, sizeof(usearch_key_t)},
+        .shown = {call->keys[0].keys, sizeof(usearch_key_t)},
         .shown_coordinates = rows_of(&coordinates),
         .focus_count = focus_count,
-        .focus = {call->focus.keys, sizeof(usearch_key_t)},
-        .keys = &call->keys,
-        .entry_ordinals = &call->entry_ordinals,
-        .parents = &call->parents,
-        .coordinates = &call->coordinates,
-        .written = &call->written,
-        .arena = ((Arena*)call->call.arena)->handle,
+        .focus = {call->keys[1].keys, sizeof(usearch_key_t)},
+        .keys = &sample->keys,
+        .entry_ordinals = &sample->entry_ordinals,
+        .parents = &sample->parents,
+        .coordinates = &sample->coordinates,
+        .written = &sample->written,
+        .arena = usearch_py_arena_handle(call->arena),
         .wanted = wanted,
         .seed = seed,
         .expansion_factor = expansion_factor,
-        .progress = usearch_py_progress_registered(&call->reports.progress, progress_steps),
-        .stats = &call->reports.stats,
+        .progress = usearch_py_progress_registered(call->holds[progress_slot_k], progress_steps),
+        .stats = walk_stats(call),
     };
-    return usearch_py_call_run(&receiver, &sample_verb, call);
+    Py_BEGIN_ALLOW_THREADS;
+    usearch_dense_sample(arguments_sample);
+    Py_END_ALLOW_THREADS;
+    return usearch_py_call_finish(&receiver, call);
 }
 
 #pragma endregion Sampling
+
+#pragma region Plans
+
+static char const doc_DenseRefinePlan[] =                                                          //
+    "DenseRefinePlan()\n"                                                                          //
+    "\n"                                                                                           //
+    "A refine in flight: the round in hand, and the root every round's health checks share.\n"     //
+    "\n"                                                                                           //
+    "Passed as `plan=` to `refine`, the first call opens it and a stop leaves it live, so the\n"   //
+    "next call naming it continues the round where it stopped, or starts the next, and\n"          //
+    "`refine_plan_finish` closes it. Until then the index admits no insertion and no save, and\n"  //
+    "every call names the index and executor it was opened through. A plan dropped unfinished\n"   //
+    "leaks and keeps the index closed to insertion.\n"                                             //
+    "\n"                                                                                           //
+    "Attributes:\n"                                                                                //
+    "  phase (Phase): Where the last call naming it stopped, `Phase.DONE` once its round ended.\n" //
+    "  ordinal (int): That phase's position among the ones the plan runs.\n"                       //
+    "  completed (int): Units of that phase done, entries or islands.\n"                           //
+    "  total (int): Units of that phase in all.\n"                                                 //
+    "\n"                                                                                           //
+    "Example:\n"                                                                                   //
+    "  >>> from array import array\n"                                                              //
+    "  >>> index = usearch.DenseIndex.init_ram(dimensions=2)\n"                                    //
+    "  >>> index.reserve(1)\n"                                                                     //
+    "  >>> index.insert([1], array('d', [0.1, 0.2]))\n"                                            //
+    "  >>> pool, plan = usearch.Executor.for_ram(threads=2), usearch.DenseRefinePlan()\n"          //
+    "  >>> _ = index.on(pool).refine(plan=plan)\n"                                                 //
+    "  >>> plan.phase\n"                                                                           //
+    "  <Phase.DONE: 11>\n"                                                                         //
+    "  >>> index.on(pool).refine_plan_finish(plan).verdict\n"                                      //
+    "  <RefineVerdict.CONVERGED: 2>";
+
+static char const doc_DenseReshardPlan[] =                                                          //
+    "DenseReshardPlan()\n"                                                                          //
+    "\n"                                                                                            //
+    "A reshard in flight: its own sources and targets, the entries still to move, then the\n"       //
+    "rounds of every target that took entries.\n"                                                   //
+    "\n"                                                                                            //
+    "Passed as `plan=` to `reshard`, the first call opens it and a stop leaves it live, so the\n"   //
+    "next call naming it moves what is still pending and continues the rounds, reading its own\n"   //
+    "sources, targets and placement rather than the call's, and `reshard_plan_finish` closes\n"     //
+    "it. Until then every index it names admits no insertion and no save, and every call names\n"   //
+    "the executor it was opened with. A plan dropped unfinished leaks and keeps its indexes\n"      //
+    "closed to insertion.\n"                                                                        //
+    "\n"                                                                                            //
+    "Attributes:\n"                                                                                 //
+    "  phase (Phase): Where the last call naming it stopped, `Phase.DONE` once its rounds ended.\n" //
+    "  ordinal (int): That phase's position among the ones the plan runs.\n"                        //
+    "  completed (int): Units of that phase done, entries or islands.\n"                            //
+    "  total (int): Units of that phase in all.";
+
+static PyObject* DensePlan_tp_new(PyTypeObject* type, PyObject* args, PyObject* keywords) {
+    if (PyTuple_GET_SIZE(args) != 0 || (keywords && PyDict_Size(keywords) != 0)) {
+        PyErr_Format(PyExc_TypeError, "%s() takes no arguments", type->tp_name + sizeof("usearch.") - 1);
+        return NULL;
+    }
+    return type->tp_alloc(type, 0);
+}
+
+static PyObject* DensePlan_get_phase(DensePlan* self, void* closure) {
+    return usearch_py_enum_to_object(&usearch_py_phase, (int)self->progress.phase);
+}
+
+static PyGetSetDef DensePlan_getset[] = {
+    {"phase", (getter)DensePlan_get_phase, NULL, "Where the last call naming the plan stopped, as a `Phase`.", NULL},
+    {"ordinal", usearch_py_size_getter, NULL, "That phase's position among the ones the plan runs.",
+     (void*)offsetof(DensePlan, progress.ordinal)},
+    {"completed", usearch_py_size_getter, NULL, "Units of that phase done, entries or islands.",
+     (void*)offsetof(DensePlan, progress.completed)},
+    {"total", usearch_py_size_getter, NULL, "Units of that phase in all.", (void*)offsetof(DensePlan, progress.total)},
+    {NULL, NULL, NULL, NULL, NULL},
+};
+
+PyTypeObject DenseRefinePlanType = {
+    PyVarObject_HEAD_INIT(NULL, 0) //
+        .tp_name = "usearch.DenseRefinePlan",
+    .tp_doc = doc_DenseRefinePlan,
+    .tp_basicsize = sizeof(DensePlan),
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_new = DensePlan_tp_new,
+    .tp_getset = DensePlan_getset,
+};
+
+PyTypeObject DenseReshardPlanType = {
+    PyVarObject_HEAD_INIT(NULL, 0) //
+        .tp_name = "usearch.DenseReshardPlan",
+    .tp_doc = doc_DenseReshardPlan,
+    .tp_basicsize = sizeof(DensePlan),
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_new = DensePlan_tp_new,
+    .tp_getset = DensePlan_getset,
+};
+
+static char const doc_DenseIndex_refine_plan_finish[] =                                         //
+    "refine_plan_finish(plan) -> RefineReport\n"                                                //
+    "\n"                                                                                        //
+    "Closes a `DenseRefinePlan` on this index and the receiver's executor, the ones it was\n"   //
+    "opened with, and frees it whatever the call answers; a round a stop left open closes as\n" //
+    "a stop at that barrier would. Calls `usearch_dense_refine_plan_finish`.\n"                 //
+    "\n"                                                                                        //
+    "Returns:\n"                                                                                //
+    "  RefineReport: What the whole plan did to the graph.";
+
+static char const doc_DenseIndex_reshard_plan_finish[] =                                         //
+    "reshard_plan_finish(plan) -> RefineReport\n"                                                //
+    "\n"                                                                                         //
+    "Closes a `DenseReshardPlan` on the receiver's executor, the one it was opened with, and\n"  //
+    "frees it whatever the call answers, reopening every index it names; a plan whose entries\n" //
+    "have not all moved runs no round and reports zeros. Calls\n"                                //
+    "`usearch_dense_reshard_plan_finish`.\n"                                                     //
+    "\n"                                                                                         //
+    "Returns:\n"                                                                                 //
+    "  RefineReport: What the whole plan did to the graph.";
+
+/** Opens a finish of the plan @p plan_object of @p type through @p self: the report it writes into,
+ *  the plan held, and its handle taken, since the library frees it whatever the call answers. */
+static usearch_py_call_t* plan_finish_open(PyObject* self, PyObject* plan_object, PyTypeObject* type,
+                                           usearch_py_receiver_t* receiver, usearch_dense_index_t* handle,
+                                           usearch_py_call_t* stack, RefineReport** report) {
+    usearch_py_call_t* call = NULL;
+    if (receiver_from_object(self, receiver, handle) != 0 || !(call = usearch_py_call_open(receiver, stack)))
+        return NULL;
+    if (!plan_object || plan_object == Py_None) {
+        PyErr_Format(PyExc_TypeError, "expected a %s, got None", type->tp_name);
+        usearch_py_call_discard(receiver, call);
+        return NULL;
+    }
+    if (plan_parse(call, plan_object, type) != 0 || !(*report = usearch_py_call_result(call, &RefineReportType))) {
+        usearch_py_call_discard(receiver, call);
+        return NULL;
+    }
+    return call;
+}
+
+static PyObject* DenseIndex_refine_plan_finish(PyObject* self, PyObject* plan_object) {
+    usearch_py_receiver_t receiver;
+    usearch_dense_index_t handle = NULL;
+    usearch_py_call_t stack;
+    RefineReport* report = NULL;
+    usearch_py_call_t* const call = plan_finish_open(self, plan_object, &DenseRefinePlanType, &receiver, &handle,
+                                                     &stack, &report);
+    if (!call) return NULL;
+    DensePlan* const plan = (DensePlan*)plan_object;
+    usearch_dense_refine_plan_finish_t* const finish = (usearch_dense_refine_plan_finish_t*)call->arguments;
+    *finish = (usearch_dense_refine_plan_finish_t) {.index = handle,
+                                                    .executor = receiver.executor,
+                                                    .outcome = &call->outcome,
+                                                    .completion = receiver.completion,
+                                                    .plan = plan->handle.refine,
+                                                    .report = &report->report};
+    plan->handle.refine = NULL;
+    Py_BEGIN_ALLOW_THREADS;
+    usearch_dense_refine_plan_finish(finish);
+    Py_END_ALLOW_THREADS;
+    return usearch_py_call_finish(&receiver, call);
+}
+
+static PyObject* DenseIndex_reshard_plan_finish(PyObject* self, PyObject* plan_object) {
+    usearch_py_receiver_t receiver;
+    usearch_dense_index_t handle = NULL;
+    usearch_py_call_t stack;
+    RefineReport* report = NULL;
+    usearch_py_call_t* const call = plan_finish_open(self, plan_object, &DenseReshardPlanType, &receiver, &handle,
+                                                     &stack, &report);
+    if (!call) return NULL;
+    DensePlan* const plan = (DensePlan*)plan_object;
+    usearch_dense_reshard_plan_finish_t* const finish = (usearch_dense_reshard_plan_finish_t*)call->arguments;
+    *finish = (usearch_dense_reshard_plan_finish_t) {.executor = receiver.executor,
+                                                     .outcome = &call->outcome,
+                                                     .completion = receiver.completion,
+                                                     .plan = plan->handle.reshard,
+                                                     .report = &report->report};
+    plan->handle.reshard = NULL;
+    Py_BEGIN_ALLOW_THREADS;
+    usearch_dense_reshard_plan_finish(finish);
+    Py_END_ALLOW_THREADS;
+    return usearch_py_call_finish(&receiver, call);
+}
+
+#pragma endregion Plans
 
 #pragma region Iteration
 
@@ -2303,36 +2137,21 @@ static char const doc_DenseCursor[] =                                           
     "\n"                                                                                      //
     "Each shard's publication watermark is read as the scan enters that shard, so an entry\n" //
     "once passed is never revisited, while a later shard may still carry entries inserted\n"  //
-    "after the cursor opened. One step runs at a time; an overlapping step or `close()`\n"    //
-    "raises `ContendedError`. `close()`, or the end of a `with` block, releases the scan\n"   //
-    "before the cursor is collected.";
+    "after the cursor opened. One step runs at a time; an overlapping step raises\n"          //
+    "`ContendedError`. `close()`, or the end of a `with` block, releases the scan before\n"   //
+    "the cursor is collected.";
 
-/** Stands in the handle slot of a cursor or a stream while one step holds its handle, refusing a
- *  second step or a close until the step gives it back. */
-static char handle_lent;
-
-/**
- *  @brief Releases the engine cursor of @p self once, fenced against a concurrent close and refused
- *      during a step.
- *  @return 0 on success, -1 with a @c ContendedError set while a step holds the handle.
- */
-static int cursor_close(DenseCursor* self) {
-    usearch_dense_cursor_t const lent = (usearch_dense_cursor_t)(void*)&handle_lent;
-    usearch_dense_cursor_t handle = NULL;
-    usearch_py_critical_section_begin_((PyObject*)self);
-    handle = self->handle;
-    if (handle != lent) self->handle = NULL;
-    usearch_py_critical_section_end_();
-    if (handle == lent) return usearch_py_raise(usearch_status_contended_k, "a step of this cursor is still running");
-    if (!handle) return 0;
+/** Releases the engine cursor of @p self once, whichever thread closes it first. */
+static void cursor_close(DenseCursor* self) {
+    usearch_dense_cursor_t const handle = atomic_exchange(&self->handle, NULL);
+    if (!handle) return;
     Py_BEGIN_ALLOW_THREADS;
     usearch_dense_cursor_free(handle);
     Py_END_ALLOW_THREADS;
-    return 0;
 }
 
 static void DenseCursor_dealloc(DenseCursor* self) {
-    cursor_close(self); // No step can hold the handle, since every step holds the cursor.
+    cursor_close(self);
     Py_XDECREF(self->receiver);
     Py_TYPE(self)->tp_free((PyObject*)self);
 }
@@ -2407,40 +2226,6 @@ PyTypeObject DenseBatchType = {
     .tp_members = DenseBatch_members,
 };
 
-/** Runs one step of @p self over the engine cursor @p handle it took out of the slot. */
-static PyObject* cursor_step(DenseCursor* self, usearch_dense_cursor_t handle, size_t wanted, PyObject* arena_object,
-                             int with_links) {
-    usearch_py_receiver_t receiver;
-    usearch_dense_index_t const index = receiver_from_object(self->receiver, &receiver);
-    PyObject* arena = NULL;
-    if (!index || usearch_py_arena_claim(arena_object, &arena) != 0) return NULL;
-
-    usearch_keys_view_t keys = {0};
-    usearch_keys_tape_view_t links = {0};
-    size_t written = 0;
-    usearch_outcome_t outcome = {0};
-    usearch_dense_cursor_next_t arguments = {
-        .index = index,
-        .executor = receiver.executor,
-        .outcome = &outcome,
-        .cursor = handle,
-        .keys = &keys,
-        .links = with_links ? &links : NULL,
-        .written = &written,
-        .arena = ((Arena*)arena)->handle,
-        .wanted = wanted,
-    };
-    Py_BEGIN_ALLOW_THREADS;
-    usearch_dense_cursor_next(&arguments);
-    Py_END_ALLOW_THREADS;
-
-    PyObject* batch = NULL;
-    if (usearch_py_raise_on_outcome(&outcome) == 0)
-        batch = batch_answer(arena, &keys, with_links && links.offsets ? &links : NULL, written);
-    usearch_py_arena_unclaim(arena);
-    return batch;
-}
-
 static char const doc_DenseCursor_next[] =                                                       //
     "``next(wanted, arena, /, *, links=False) -> DenseBatch``\n"                                 //
     "\n"                                                                                         //
@@ -2456,7 +2241,7 @@ static char const doc_DenseCursor_next[] =                                      
     "    come from `get`.\n"                                                                     //
     "\n"                                                                                         //
     "Raises:\n"                                                                                  //
-    "  UninitializedError: When the cursor was closed.";
+    "  InvalidArgumentError: When the cursor was closed.";
 
 static PyObject* DenseCursor_next(DenseCursor* self, PyObject* const* args, Py_ssize_t positional_args_count,
                                   PyObject* args_names_tuple) {
@@ -2466,37 +2251,43 @@ static PyObject* DenseCursor_next(DenseCursor* self, PyObject* const* args, Py_s
         {"arena", &arena_object},
         {"links", &links_object},
     };
+    usearch_py_receiver_t receiver;
+    usearch_dense_index_t index = NULL;
+    usearch_arena_t arena = NULL;
     size_t wanted = 0;
     int with_links = 0;
     if (usearch_py_arguments_parse("next", args, positional_args_count, args_names_tuple, 2, 2, arguments,
                                    usearch_py_table_size_(arguments)) != 0 ||
         usearch_py_size_from_object(wanted_object, "wanted", &wanted) != 0 ||
-        (links_object && (with_links = PyObject_IsTrue(links_object)) < 0))
+        (links_object && (with_links = PyObject_IsTrue(links_object)) < 0) ||
+        receiver_from_object(self->receiver, &receiver, &index) != 0 ||
+        usearch_py_arena_from_object(arena_object, &arena) != 0)
         return NULL;
 
-    usearch_dense_cursor_t const lent = (usearch_dense_cursor_t)(void*)&handle_lent;
-    usearch_dense_cursor_t handle = NULL;
-    usearch_py_critical_section_begin_((PyObject*)self);
-    handle = self->handle;
-    if (handle) self->handle = lent;
-    usearch_py_critical_section_end_();
-    if (!handle) {
-        usearch_py_raise(usearch_status_uninitialized_k, "the cursor was closed");
-        return NULL;
-    }
-    if (handle == lent) {
-        usearch_py_raise(usearch_status_contended_k, "another step of this cursor is running");
-        return NULL;
-    }
-    PyObject* const batch = cursor_step(self, handle, wanted, arena_object, with_links);
-    usearch_py_critical_section_begin_((PyObject*)self);
-    self->handle = handle;
-    usearch_py_critical_section_end_();
-    return batch;
+    usearch_keys_view_t keys = {0};
+    usearch_keys_tape_view_t links = {0};
+    size_t written = 0;
+    usearch_outcome_t outcome = {0};
+    usearch_dense_cursor_next_t step = {
+        .index = index,
+        .executor = receiver.executor,
+        .outcome = &outcome,
+        .cursor = atomic_load(&self->handle),
+        .keys = &keys,
+        .links = with_links ? &links : NULL,
+        .written = &written,
+        .arena = arena,
+        .wanted = wanted,
+    };
+    Py_BEGIN_ALLOW_THREADS;
+    usearch_dense_cursor_next(&step);
+    Py_END_ALLOW_THREADS;
+    if (usearch_py_raise_on_outcome(&outcome) != 0) return NULL;
+    return batch_answer(arena_object, &keys, with_links && links.offsets ? &links : NULL, written);
 }
 
 static PyObject* DenseCursor_close(PyObject* self, PyObject* unused) {
-    if (cursor_close((DenseCursor*)self) != 0) return NULL;
+    cursor_close((DenseCursor*)self);
     Py_RETURN_NONE;
 }
 
@@ -2557,7 +2348,7 @@ static PyObject* DenseIndex_cursor(PyObject* self, PyObject* const* args, Py_ssi
     usearch_dense_index_t handle = NULL;
     if (usearch_py_arguments_parse("cursor", args, positional_args_count, args_names_tuple, 0, 1, arguments,
                                    usearch_py_table_size_(arguments)) != 0 ||
-        !(handle = receiver_from_object(self, &receiver)))
+        receiver_from_object(self, &receiver, &handle) != 0)
         return NULL;
 
     usearch_py_keys_t starts = {0};
@@ -2586,70 +2377,31 @@ static PyObject* DenseIndex_cursor(PyObject* self, PyObject* const* args, Py_ssi
         usearch_dense_cursor_free(cursor_handle);
         return NULL;
     }
-    cursor->handle = cursor_handle;
+    atomic_init(&cursor->handle, cursor_handle);
     cursor->receiver = Py_NewRef(self);
     return (PyObject*)cursor;
 }
 
-static char const doc_DenseSearchStream[] =                                                //
-    "A resumable best-first stream of matches for one query, pulled by `next`.\n"          //
-    "\n"                                                                                   //
-    "Ordering beyond the expansion horizon is best-effort nearest, not globally exact.\n"  //
-    "One pull runs at a time; an overlapping pull or `close()` raises `ContendedError`.\n" //
-    "`close()`, or the end of a `with` block, releases the walk before the stream is\n"    //
-    "collected.";
+static char const doc_DenseSearchStream[] =                                                 //
+    "A resumable best-first stream of matches for one query, pulled by `next`.\n"           //
+    "\n"                                                                                    //
+    "Ordering beyond the expansion horizon is best-effort nearest, not globally exact.\n"   //
+    "One pull runs at a time; an overlapping pull raises `ContendedError`. `close()`, or\n" //
+    "the end of a `with` block, releases the walk before the stream is collected.";
 
-/**
- *  @brief Releases the engine stream of @p self once, fenced against a concurrent close and refused
- *      during a pull.
- *  @return 0 on success, -1 with a @c ContendedError set while a pull holds the handle.
- */
-static int stream_close(DenseSearchStream* self) {
-    usearch_dense_search_stream_t const lent = (usearch_dense_search_stream_t)(void*)&handle_lent;
-    usearch_dense_search_stream_t handle = NULL;
-    usearch_py_critical_section_begin_((PyObject*)self);
-    handle = self->handle;
-    if (handle != lent) self->handle = NULL;
-    usearch_py_critical_section_end_();
-    if (handle == lent) return usearch_py_raise(usearch_status_contended_k, "a pull of this stream is still running");
-    if (!handle) return 0;
+/** Releases the engine stream of @p self once, whichever thread closes it first. */
+static void stream_close(DenseSearchStream* self) {
+    usearch_dense_search_stream_t const handle = atomic_exchange(&self->handle, NULL);
+    if (!handle) return;
     Py_BEGIN_ALLOW_THREADS;
     usearch_dense_search_stream_free(handle);
     Py_END_ALLOW_THREADS;
-    return 0;
 }
 
 static void DenseSearchStream_dealloc(DenseSearchStream* self) {
-    stream_close(self); // No pull can hold the handle, since every pull holds the stream.
+    stream_close(self);
     Py_XDECREF(self->receiver);
     Py_TYPE(self)->tp_free((PyObject*)self);
-}
-
-/** Pulls the next matches of @p self from the engine stream @p handle it took out of the slot. */
-static PyObject* stream_pull(DenseSearchStream* self, usearch_dense_search_stream_t handle, size_t wanted,
-                             PyObject* arena_object) {
-    usearch_py_receiver_t receiver;
-    usearch_dense_index_t const index = receiver_from_object(self->receiver, &receiver);
-    PyObject* arena = NULL;
-    if (!index || usearch_py_arena_claim(arena_object, &arena) != 0) return NULL;
-    usearch_matches_view_t matches = {0};
-    usearch_outcome_t outcome = {0};
-    usearch_dense_search_stream_next_t arguments = {
-        .index = index,
-        .executor = receiver.executor,
-        .outcome = &outcome,
-        .stream = handle,
-        .matches = &matches,
-        .arena = ((Arena*)arena)->handle,
-        .wanted = wanted,
-    };
-    Py_BEGIN_ALLOW_THREADS;
-    usearch_dense_search_stream_next(&arguments);
-    Py_END_ALLOW_THREADS;
-    PyObject* const pulled = usearch_py_raise_on_outcome(&outcome) == 0 ? usearch_py_matches_new(arena, &matches, 1)
-                                                                        : NULL;
-    usearch_py_arena_unclaim(arena);
-    return pulled;
 }
 
 static char const doc_DenseSearchStream_next[] =                                                //
@@ -2665,41 +2417,43 @@ static char const doc_DenseSearchStream_next[] =                                
     "  arena (Arena): Where the matches land, rewound by the pull.\n"                           //
     "\n"                                                                                        //
     "Raises:\n"                                                                                 //
-    "  UninitializedError: When the stream was closed.";
+    "  InvalidArgumentError: When the stream was closed.";
 
 static PyObject* DenseSearchStream_next(DenseSearchStream* self, PyObject* const* args,
                                         Py_ssize_t positional_args_count, PyObject* args_names_tuple) {
     PyObject *wanted_object, *arena_object;
     usearch_py_argument_t const arguments[] = {{"wanted", &wanted_object}, {"arena", &arena_object}};
+    usearch_py_receiver_t receiver;
+    usearch_dense_index_t index = NULL;
+    usearch_arena_t arena = NULL;
     size_t wanted = 0;
     if (usearch_py_arguments_parse("next", args, positional_args_count, args_names_tuple, 2, 2, arguments,
                                    usearch_py_table_size_(arguments)) != 0 ||
-        usearch_py_size_from_object(wanted_object, "wanted", &wanted) != 0)
+        usearch_py_size_from_object(wanted_object, "wanted", &wanted) != 0 ||
+        receiver_from_object(self->receiver, &receiver, &index) != 0 ||
+        usearch_py_arena_from_object(arena_object, &arena) != 0)
         return NULL;
 
-    usearch_dense_search_stream_t const lent = (usearch_dense_search_stream_t)(void*)&handle_lent;
-    usearch_dense_search_stream_t handle = NULL;
-    usearch_py_critical_section_begin_((PyObject*)self);
-    handle = self->handle;
-    if (handle) self->handle = lent;
-    usearch_py_critical_section_end_();
-    if (!handle) {
-        usearch_py_raise(usearch_status_uninitialized_k, "the stream was closed");
-        return NULL;
-    }
-    if (handle == lent) {
-        usearch_py_raise(usearch_status_contended_k, "another pull of this stream is running");
-        return NULL;
-    }
-    PyObject* const pulled = stream_pull(self, handle, wanted, arena_object);
-    usearch_py_critical_section_begin_((PyObject*)self);
-    self->handle = handle;
-    usearch_py_critical_section_end_();
-    return pulled;
+    usearch_matches_view_t matches = {0};
+    usearch_outcome_t outcome = {0};
+    usearch_dense_search_stream_next_t pull = {
+        .index = index,
+        .executor = receiver.executor,
+        .outcome = &outcome,
+        .stream = atomic_load(&self->handle),
+        .matches = &matches,
+        .arena = arena,
+        .wanted = wanted,
+    };
+    Py_BEGIN_ALLOW_THREADS;
+    usearch_dense_search_stream_next(&pull);
+    Py_END_ALLOW_THREADS;
+    if (usearch_py_raise_on_outcome(&outcome) != 0) return NULL;
+    return usearch_py_matches_new(arena_object, &matches, 1);
 }
 
 static PyObject* DenseSearchStream_close(PyObject* self, PyObject* unused) {
-    if (stream_close((DenseSearchStream*)self) != 0) return NULL;
+    stream_close((DenseSearchStream*)self);
     Py_RETURN_NONE;
 }
 
@@ -2767,7 +2521,7 @@ static PyObject* DenseIndex_search_stream(PyObject* self, PyObject* const* args,
     usearch_scalar_t dtype = usearch_scalar_unknown_k;
     if (usearch_py_arguments_parse("search_stream", args, positional_args_count, args_names_tuple, 1, 1, arguments,
                                    usearch_py_table_size_(arguments)) != 0 ||
-        !(handle = receiver_from_object(self, &receiver)) ||
+        receiver_from_object(self, &receiver, &handle) != 0 ||
         usearch_py_size_from_object(expansion_object, "expansion_factor", &expansion_factor) != 0 ||
         usearch_py_scalar_from_object(dtype_object, "dtype", &dtype) != 0)
         return NULL;
@@ -2775,11 +2529,6 @@ static PyObject* DenseIndex_search_stream(PyObject* self, PyObject* const* args,
     usearch_matrix_view_t query;
     usearch_py_buffer_backing_t backing;
     if (usearch_py_matrix_from_object(query_object, dtype, &query, &backing) != 0) return NULL;
-    if (query.rows != 1) {
-        usearch_py_buffer_release(&backing);
-        usearch_py_raise(usearch_status_shape_mismatch_k, "a search stream takes exactly one query row");
-        return NULL;
-    }
 
     usearch_dense_search_stream_t stream_handle = NULL;
     usearch_outcome_t outcome = {0};
@@ -2801,7 +2550,7 @@ static PyObject* DenseIndex_search_stream(PyObject* self, PyObject* const* args,
         usearch_dense_search_stream_free(stream_handle);
         return NULL;
     }
-    stream->handle = stream_handle;
+    atomic_init(&stream->handle, stream_handle);
     stream->receiver = Py_NewRef(self);
     return (PyObject*)stream;
 }
@@ -2833,33 +2582,6 @@ static char const doc_DenseIndex_save[] =                                       
     "    reader accepts and whatever parts it already wrote for the caller to remove.\n"    //
     "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.";
 
-/** A @c usearch_dense_save call and the encoded path it borrows. */
-typedef struct save_call_t {
-    usearch_py_call_t call;
-    usearch_dense_save_t arguments;
-    usearch_py_callback_t progress;
-
-    /** The encoded path the arguments point into, held. */
-    PyObject* decoded;
-} save_call_t;
-
-static void save_submit(void* call) { usearch_dense_save(&((save_call_t*)call)->arguments); }
-
-static void save_release(void* erased) {
-    save_call_t* const call = (save_call_t*)erased;
-    Py_CLEAR(call->decoded);
-    Py_CLEAR(call->progress.callable);
-    usearch_py_call_release(&call->call);
-}
-
-static int save_traverse(void* call, visitproc visit, void* arg) {
-    Py_VISIT(((save_call_t*)call)->progress.callable);
-    return 0;
-}
-
-static usearch_py_verb_t const save_verb = {sizeof(save_call_t), save_submit, usearch_py_call_answer_none, save_release,
-                                            save_traverse};
-
 static PyObject* DenseIndex_save(PyObject* self, PyObject* const* args, Py_ssize_t positional_args_count,
                                  PyObject* args_names_tuple) {
     PyObject *path_object, *progress_object, *progress_steps_object;
@@ -2869,28 +2591,32 @@ static PyObject* DenseIndex_save(PyObject* self, PyObject* const* args, Py_ssize
     usearch_py_receiver_t receiver;
     usearch_dense_index_t handle = NULL;
     size_t progress_steps = 0;
+    usearch_py_call_t stack;
+    usearch_py_call_t* call = NULL;
     if (usearch_py_arguments_parse("save", args, positional_args_count, args_names_tuple, 1, 1, arguments,
                                    usearch_py_table_size_(arguments)) != 0 ||
-        !(handle = receiver_from_object(self, &receiver)) ||
-        usearch_py_size_from_object(progress_steps_object, "progress_steps", &progress_steps) != 0)
+        receiver_from_object(self, &receiver, &handle) != 0 ||
+        usearch_py_size_from_object(progress_steps_object, "progress_steps", &progress_steps) != 0 ||
+        !(call = usearch_py_call_open(&receiver, &stack)))
         return NULL;
 
-    save_call_t stack;
-    save_call_t* const call = usearch_py_call_open(&receiver, &save_verb, &stack);
-    if (!call) return NULL;
     usearch_bytes_view_t path;
-    if (usearch_py_path_from_object(path_object, &path, &call->decoded) != 0 ||
-        usearch_py_callback_from_object(progress_object, "progress", &call->call, &call->progress) != 0)
-        return usearch_py_call_discard(&receiver, &save_verb, call);
-    call->arguments = (usearch_dense_save_t) {
+    if (usearch_py_path_from_object(path_object, &path, &call->holds[callback_slot_k]) != 0 ||
+        usearch_py_callable_from_object(progress_object, "progress", &call->holds[progress_slot_k]) != 0)
+        return usearch_py_call_discard(&receiver, call);
+    usearch_dense_save_t* const save = (usearch_dense_save_t*)call->arguments;
+    *save = (usearch_dense_save_t) {
         .index = handle,
         .executor = receiver.executor,
-        .outcome = &call->call.outcome,
+        .outcome = &call->outcome,
         .completion = receiver.completion,
         .path = path,
-        .progress = usearch_py_progress_registered(&call->progress, progress_steps),
+        .progress = usearch_py_progress_registered(call->holds[progress_slot_k], progress_steps),
     };
-    return usearch_py_call_run(&receiver, &save_verb, call);
+    Py_BEGIN_ALLOW_THREADS;
+    usearch_dense_save(save);
+    Py_END_ALLOW_THREADS;
+    return usearch_py_call_finish(&receiver, call);
 }
 
 static char const doc_DenseIndex_save_buffer[] =                                             //
@@ -2916,35 +2642,17 @@ static char const doc_DenseIndex_save_buffer[] =                                
     "  >>> usearch.DenseIndex.metadata_read_buffer(checkpoint).dimensions\n"                 //
     "  4";
 
-/** A @c usearch_dense_save_buffer call and the monolith it lands in the claimed arena. */
+/** A @c usearch_dense_save_buffer call and the monolith it lands, inside the record's arguments. */
 typedef struct save_buffer_call_t {
-    usearch_py_call_t call;
     usearch_dense_save_buffer_t arguments;
-    usearch_py_callback_t progress;
     usearch_bytes_view_t monolith;
 } save_buffer_call_t;
 
-static void save_buffer_submit(void* call) { usearch_dense_save_buffer(&((save_buffer_call_t*)call)->arguments); }
-
-static PyObject* save_buffer_answer(void* erased) {
-    save_buffer_call_t* const call = (save_buffer_call_t*)erased;
-    Py_ssize_t const shape[1] = {(Py_ssize_t)call->monolith.length};
-    return usearch_py_arena_buffer(&MonolithType, call->call.arena, call->monolith.data, "B", 1, shape, 1);
+static PyObject* save_buffer_answer(usearch_py_call_t* call) {
+    usearch_bytes_view_t const monolith = ((save_buffer_call_t const*)call->arguments)->monolith;
+    Py_ssize_t const shape[1] = {(Py_ssize_t)monolith.length};
+    return usearch_py_arena_buffer(&MonolithType, call->arena, monolith.data, "B", 1, shape, 1);
 }
-
-static void save_buffer_release(void* erased) {
-    save_buffer_call_t* const call = (save_buffer_call_t*)erased;
-    Py_CLEAR(call->progress.callable);
-    usearch_py_call_release(&call->call);
-}
-
-static int save_buffer_traverse(void* call, visitproc visit, void* arg) {
-    Py_VISIT(((save_buffer_call_t*)call)->progress.callable);
-    return 0;
-}
-
-static usearch_py_verb_t const save_buffer_verb = {sizeof(save_buffer_call_t), save_buffer_submit, save_buffer_answer,
-                                                   save_buffer_release, save_buffer_traverse};
 
 static PyObject* DenseIndex_save_buffer(PyObject* self, PyObject* const* args, Py_ssize_t positional_args_count,
                                         PyObject* args_names_tuple) {
@@ -2955,28 +2663,33 @@ static PyObject* DenseIndex_save_buffer(PyObject* self, PyObject* const* args, P
     usearch_py_receiver_t receiver;
     usearch_dense_index_t handle = NULL;
     size_t progress_steps = 0;
+    usearch_py_call_t stack;
+    usearch_py_call_t* call = NULL;
     if (usearch_py_arguments_parse("save_buffer", args, positional_args_count, args_names_tuple, 1, 1, arguments,
                                    usearch_py_table_size_(arguments)) != 0 ||
-        !(handle = receiver_from_object(self, &receiver)) ||
-        usearch_py_size_from_object(progress_steps_object, "progress_steps", &progress_steps) != 0)
+        receiver_from_object(self, &receiver, &handle) != 0 ||
+        usearch_py_size_from_object(progress_steps_object, "progress_steps", &progress_steps) != 0 ||
+        !(call = usearch_py_call_open(&receiver, &stack)))
         return NULL;
 
-    save_buffer_call_t stack;
-    save_buffer_call_t* const call = usearch_py_call_open(&receiver, &save_buffer_verb, &stack);
-    if (!call) return NULL;
-    if (usearch_py_callback_from_object(progress_object, "progress", &call->call, &call->progress) != 0 ||
-        usearch_py_arena_claim(arena_object, &call->call.arena) != 0)
-        return usearch_py_call_discard(&receiver, &save_buffer_verb, call);
-    call->arguments = (usearch_dense_save_buffer_t) {
+    if (usearch_py_callable_from_object(progress_object, "progress", &call->holds[progress_slot_k]) != 0 ||
+        usearch_py_call_hold_arena(call, arena_object) != 0)
+        return usearch_py_call_discard(&receiver, call);
+    save_buffer_call_t* const save = (save_buffer_call_t*)call->arguments;
+    call->answer = save_buffer_answer;
+    save->arguments = (usearch_dense_save_buffer_t) {
         .index = handle,
         .executor = receiver.executor,
-        .outcome = &call->call.outcome,
+        .outcome = &call->outcome,
         .completion = receiver.completion,
-        .monolith = &call->monolith,
-        .arena = ((Arena*)call->call.arena)->handle,
-        .progress = usearch_py_progress_registered(&call->progress, progress_steps),
+        .monolith = &save->monolith,
+        .arena = usearch_py_arena_handle(call->arena),
+        .progress = usearch_py_progress_registered(call->holds[progress_slot_k], progress_steps),
     };
-    return usearch_py_call_run(&receiver, &save_buffer_verb, call);
+    Py_BEGIN_ALLOW_THREADS;
+    usearch_dense_save_buffer(&save->arguments);
+    Py_END_ALLOW_THREADS;
+    return usearch_py_call_finish(&receiver, call);
 }
 
 /**
@@ -2988,8 +2701,8 @@ static PyObject* DenseIndex_save_buffer(PyObject* self, PyObject* const* args, P
 static int load_parse(char const* verb, PyObject* const* args, Py_ssize_t positional_args_count,
                       PyObject* args_names_tuple, char const* source_name, PyObject** source, char const* arm_name,
                       PyObject** arm, usearch_py_enum_t const* pinned_classes, int* pinned,
-                      usearch_executor_t* executor, size_t* values_per_key, usearch_py_call_t* call,
-                      usearch_py_callback_t* progress, size_t* progress_steps) {
+                      usearch_executor_t* executor, size_t* values_per_key, PyObject** progress,
+                      size_t* progress_steps) {
     PyObject *executor_object, *values_per_key_object, *progress_object, *progress_steps_object, *pinned_object;
     usearch_py_argument_t const arguments[] = {
         {source_name, source},
@@ -3002,11 +2715,12 @@ static int load_parse(char const* verb, PyObject* const* args, Py_ssize_t positi
     };
     if (usearch_py_arguments_parse(verb, args, positional_args_count, args_names_tuple, 1, 1, arguments,
                                    usearch_py_table_size_(arguments)) != 0 ||
-        pinned_parse(pinned_object, pinned_classes, pinned) != 0 || executor_optional(executor_object, executor) != 0 ||
+        pinned_parse(pinned_object, pinned_classes, pinned) != 0 ||
+        usearch_py_optional_executor_from_object(executor_object, executor) != 0 ||
         usearch_py_size_from_object(values_per_key_object, "values_per_key", values_per_key) != 0 ||
         usearch_py_size_from_object(progress_steps_object, "progress_steps", progress_steps) != 0)
         return -1;
-    return usearch_py_callback_from_object(progress_object, "progress", call, progress);
+    return usearch_py_callable_from_object(progress_object, "progress", progress);
 }
 
 static char const doc_DenseIndex_load_ram[] =                                                       //
@@ -3034,8 +2748,8 @@ static char const doc_DenseIndex_load_ram[] =                                   
 static PyObject* DenseIndex_load_ram(PyTypeObject* type, PyObject* const* args, Py_ssize_t positional_args_count,
                                      PyObject* args_names_tuple) {
     PyObject *path_object, *memory_domains_object, *decoded = NULL;
-    usearch_py_call_t call = {0};
-    usearch_py_callback_t progress = {0};
+    usearch_outcome_t outcome = {0};
+    PyObject* progress = NULL;
     usearch_executor_t executor = NULL;
     size_t values_per_key = 0, progress_steps = 0;
     usearch_bytes_view_t path;
@@ -3044,8 +2758,8 @@ static PyObject* DenseIndex_load_ram(PyTypeObject* type, PyObject* const* args, 
     PyObject* result = NULL;
     int cpu_class = 0;
     if (load_parse("load_ram", args, positional_args_count, args_names_tuple, "path", &path_object, "memory_domains",
-                   &memory_domains_object, &usearch_py_cpu_class, &cpu_class, &executor, &values_per_key, &call,
-                   &progress, &progress_steps) != 0 ||
+                   &memory_domains_object, &usearch_py_cpu_class, &cpu_class, &executor, &values_per_key, &progress,
+                   &progress_steps) != 0 ||
         usearch_py_path_from_object(path_object, &path, &decoded) != 0 ||
         usearch_py_ordinals_from_object(memory_domains_object, "memory_domains", &memory_domains,
                                         &memory_domains_count) != 0)
@@ -3055,21 +2769,21 @@ static PyObject* DenseIndex_load_ram(PyTypeObject* type, PyObject* const* args, 
     usearch_dense_load_ram_t arguments = {
         .index = &handle,
         .executor = executor,
-        .outcome = &call.outcome,
+        .outcome = &outcome,
         .path = path,
         .ram = {memory_domains, memory_domains_count, 0, (usearch_cpu_class_t)cpu_class},
         .values_per_key = values_per_key,
-        .progress = usearch_py_progress_registered(&progress, progress_steps),
+        .progress = usearch_py_progress_registered(progress, progress_steps),
     };
     Py_BEGIN_ALLOW_THREADS;
     usearch_dense_load_ram(&arguments);
     Py_END_ALLOW_THREADS;
-    result = index_loaded(type, handle, &call);
+    result = index_adopt(type, handle, &outcome);
 
 release:
     PyMem_Free(memory_domains);
     Py_XDECREF(decoded);
-    Py_XDECREF(progress.callable);
+    Py_XDECREF(progress);
     return result;
 }
 
@@ -3095,8 +2809,8 @@ static char const doc_DenseIndex_load_ram_buffer[] =                            
 static PyObject* DenseIndex_load_ram_buffer(PyTypeObject* type, PyObject* const* args, Py_ssize_t positional_args_count,
                                             PyObject* args_names_tuple) {
     PyObject *buffer_object, *memory_domains_object;
-    usearch_py_call_t call = {0};
-    usearch_py_callback_t progress = {0};
+    usearch_outcome_t outcome = {0};
+    PyObject* progress = NULL;
     usearch_py_buffer_backing_t backing = {0};
     usearch_executor_t executor = NULL;
     size_t values_per_key = 0, progress_steps = 0;
@@ -3106,7 +2820,7 @@ static PyObject* DenseIndex_load_ram_buffer(PyTypeObject* type, PyObject* const*
     int cpu_class = 0;
     if (load_parse("load_ram_buffer", args, positional_args_count, args_names_tuple, "buffer", &buffer_object,
                    "memory_domains", &memory_domains_object, &usearch_py_cpu_class, &cpu_class, &executor,
-                   &values_per_key, &call, &progress, &progress_steps) != 0 ||
+                   &values_per_key, &progress, &progress_steps) != 0 ||
         checkpoint_borrow(buffer_object, &backing) != 0 ||
         usearch_py_ordinals_from_object(memory_domains_object, "memory_domains", &memory_domains,
                                         &memory_domains_count) != 0)
@@ -3116,21 +2830,21 @@ static PyObject* DenseIndex_load_ram_buffer(PyTypeObject* type, PyObject* const*
     usearch_dense_load_ram_buffer_t arguments = {
         .index = &handle,
         .executor = executor,
-        .outcome = &call.outcome,
+        .outcome = &outcome,
         .buffer = {(uint8_t const*)backing.buffer.buf, (size_t)backing.buffer.len},
         .ram = {memory_domains, memory_domains_count, 0, (usearch_cpu_class_t)cpu_class},
         .values_per_key = values_per_key,
-        .progress = usearch_py_progress_registered(&progress, progress_steps),
+        .progress = usearch_py_progress_registered(progress, progress_steps),
     };
     Py_BEGIN_ALLOW_THREADS;
     usearch_dense_load_ram_buffer(&arguments);
     Py_END_ALLOW_THREADS;
-    result = index_loaded(type, handle, &call);
+    result = index_adopt(type, handle, &outcome);
 
 release:
     PyMem_Free(memory_domains);
     usearch_py_buffer_release(&backing);
-    Py_XDECREF(progress.callable);
+    Py_XDECREF(progress);
     return result;
 }
 
@@ -3156,8 +2870,8 @@ static char const doc_DenseIndex_load_vram[] =                                  
 static PyObject* DenseIndex_load_vram(PyTypeObject* type, PyObject* const* args, Py_ssize_t positional_args_count,
                                       PyObject* args_names_tuple) {
     PyObject *path_object, *devices_object, *decoded = NULL;
-    usearch_py_call_t call = {0};
-    usearch_py_callback_t progress = {0};
+    usearch_outcome_t outcome = {0};
+    PyObject* progress = NULL;
     usearch_executor_t executor = NULL;
     size_t values_per_key = 0, progress_steps = 0;
     usearch_bytes_view_t path;
@@ -3166,7 +2880,7 @@ static PyObject* DenseIndex_load_vram(PyTypeObject* type, PyObject* const* args,
     PyObject* result = NULL;
     int gpu_class = 0;
     if (load_parse("load_vram", args, positional_args_count, args_names_tuple, "path", &path_object, "devices",
-                   &devices_object, &usearch_py_gpu_class, &gpu_class, &executor, &values_per_key, &call, &progress,
+                   &devices_object, &usearch_py_gpu_class, &gpu_class, &executor, &values_per_key, &progress,
                    &progress_steps) != 0 ||
         usearch_py_path_from_object(path_object, &path, &decoded) != 0 ||
         usearch_py_ordinals_from_object(devices_object, "devices", &devices, &devices_count) != 0)
@@ -3176,21 +2890,21 @@ static PyObject* DenseIndex_load_vram(PyTypeObject* type, PyObject* const* args,
     usearch_dense_load_vram_t arguments = {
         .index = &handle,
         .executor = executor,
-        .outcome = &call.outcome,
+        .outcome = &outcome,
         .path = path,
         .vram = {devices, devices_count, 0, (usearch_gpu_class_t)gpu_class},
         .values_per_key = values_per_key,
-        .progress = usearch_py_progress_registered(&progress, progress_steps),
+        .progress = usearch_py_progress_registered(progress, progress_steps),
     };
     Py_BEGIN_ALLOW_THREADS;
     usearch_dense_load_vram(&arguments);
     Py_END_ALLOW_THREADS;
-    result = index_loaded(type, handle, &call);
+    result = index_adopt(type, handle, &outcome);
 
 release:
     PyMem_Free(devices);
     Py_XDECREF(decoded);
-    Py_XDECREF(progress.callable);
+    Py_XDECREF(progress);
     return result;
 }
 
@@ -3216,8 +2930,8 @@ static char const doc_DenseIndex_load_vram_buffer[] =                           
 static PyObject* DenseIndex_load_vram_buffer(PyTypeObject* type, PyObject* const* args,
                                              Py_ssize_t positional_args_count, PyObject* args_names_tuple) {
     PyObject *buffer_object, *devices_object;
-    usearch_py_call_t call = {0};
-    usearch_py_callback_t progress = {0};
+    usearch_outcome_t outcome = {0};
+    PyObject* progress = NULL;
     usearch_py_buffer_backing_t backing = {0};
     usearch_executor_t executor = NULL;
     size_t values_per_key = 0, progress_steps = 0;
@@ -3226,8 +2940,8 @@ static PyObject* DenseIndex_load_vram_buffer(PyTypeObject* type, PyObject* const
     PyObject* result = NULL;
     int gpu_class = 0;
     if (load_parse("load_vram_buffer", args, positional_args_count, args_names_tuple, "buffer", &buffer_object,
-                   "devices", &devices_object, &usearch_py_gpu_class, &gpu_class, &executor, &values_per_key, &call,
-                   &progress, &progress_steps) != 0 ||
+                   "devices", &devices_object, &usearch_py_gpu_class, &gpu_class, &executor, &values_per_key, &progress,
+                   &progress_steps) != 0 ||
         checkpoint_borrow(buffer_object, &backing) != 0 ||
         usearch_py_ordinals_from_object(devices_object, "devices", &devices, &devices_count) != 0)
         goto release;
@@ -3236,21 +2950,21 @@ static PyObject* DenseIndex_load_vram_buffer(PyTypeObject* type, PyObject* const
     usearch_dense_load_vram_buffer_t arguments = {
         .index = &handle,
         .executor = executor,
-        .outcome = &call.outcome,
+        .outcome = &outcome,
         .buffer = {(uint8_t const*)backing.buffer.buf, (size_t)backing.buffer.len},
         .vram = {devices, devices_count, 0, (usearch_gpu_class_t)gpu_class},
         .values_per_key = values_per_key,
-        .progress = usearch_py_progress_registered(&progress, progress_steps),
+        .progress = usearch_py_progress_registered(progress, progress_steps),
     };
     Py_BEGIN_ALLOW_THREADS;
     usearch_dense_load_vram_buffer(&arguments);
     Py_END_ALLOW_THREADS;
-    result = index_loaded(type, handle, &call);
+    result = index_adopt(type, handle, &outcome);
 
 release:
     PyMem_Free(devices);
     usearch_py_buffer_release(&backing);
-    Py_XDECREF(progress.callable);
+    Py_XDECREF(progress);
     return result;
 }
 
@@ -3280,43 +2994,52 @@ static PyObject* DenseIndex_view_ram(PyTypeObject* type, PyObject* path_object) 
     return index_adopt(type, handle, &outcome);
 }
 
-static char const doc_DenseIndex_view_nvme[] =                                               //
-    "``view_nvme(path, /, *, paths=None, executor=None, cpu_class=None) -> DenseIndex``\n"   //
-    "\n"                                                                                     //
-    "Serves a checkpoint in place from NVMe drives as a read-only index. External-memory\n"  //
-    "graphs are never modified in place, so bigger ones come from merging shards built in\n" //
-    "RAM.\n"                                                                                 //
-    "Calls `usearch_dense_view_nvme`.\n"                                                     //
-    "\n"                                                                                     //
-    "Args:\n"                                                                                //
-    "  path (str | bytes | os.PathLike): The manifest, or a single monolith.\n"              //
-    "  paths (Sequence[str | bytes | PathLike], optional): Devices or directories to\n"      //
-    "    serve the parts from; None serves each where its manifest points. A path may\n"     //
-    "    name a kernel device, a transport identifier, or a FUSE mount.\n"                   //
-    "  executor (Executor, optional): The NVMe executor whose rings read the headers;\n"     //
-    "    None reads them on the calling thread.\n"                                           //
-    "  cpu_class (CPUClass, optional): The class to dispatch as; None derives the CPU's own.";
+static char const doc_DenseIndex_view_nvme[] =                                                  //
+    "``view_nvme(path, /, *, paths=None, executor=None, cpu_class=None,\n"                      //
+    "key_table_domains=None) -> DenseIndex``\n"                                                 //
+    "\n"                                                                                        //
+    "Serves a checkpoint in place from NVMe drives as a read-only index. External-memory\n"     //
+    "graphs are never modified in place, so bigger ones come from merging shards built in\n"    //
+    "RAM.\n"                                                                                    //
+    "Calls `usearch_dense_view_nvme`.\n"                                                        //
+    "\n"                                                                                        //
+    "Args:\n"                                                                                   //
+    "  path (str | bytes | os.PathLike): The manifest, or a single monolith.\n"                 //
+    "  paths (Sequence[str | bytes | PathLike], optional): Devices or directories to\n"         //
+    "    serve the parts from; None serves each where its manifest points. A path may\n"        //
+    "    name a kernel device, a transport identifier, or a FUSE mount.\n"                      //
+    "  executor (Executor, optional): The NVMe executor whose rings read the headers;\n"        //
+    "    None reads them on the calling thread.\n"                                              //
+    "  cpu_class (CPUClass, optional): The class to dispatch as; None derives the CPU's own.\n" //
+    "  key_table_domains (Sequence[int], optional): NUMA node IDs of a key table held in\n"     //
+    "    RAM, which `count`, `get`, `sample`, `maxsim` and hinted searches read; an empty\n"    //
+    "    sequence derives them, and None holds none.";
 
 static PyObject* DenseIndex_view_nvme(PyTypeObject* type, PyObject* const* args, Py_ssize_t positional_args_count,
                                       PyObject* args_names_tuple) {
-    PyObject *path_object, *paths_object, *executor_object, *cpu_class_object, *decoded = NULL;
+    PyObject *path_object, *paths_object, *executor_object, *cpu_class_object, *key_table_object, *decoded = NULL;
     usearch_py_argument_t const arguments[] = {
         {"path", &path_object},
         {"paths", &paths_object},
         {"executor", &executor_object},
         {"cpu_class", &cpu_class_object},
+        {"key_table_domains", &key_table_object},
     };
     usearch_bytes_view_t path;
     usearch_py_paths_t paths = {0};
     usearch_executor_t executor = NULL;
     int cpu_class = 0;
+    int32_t* key_table_domains = NULL;
+    size_t key_table_domains_count = 0;
     PyObject* result = NULL;
     if (usearch_py_arguments_parse("view_nvme", args, positional_args_count, args_names_tuple, 1, 1, arguments,
                                    usearch_py_table_size_(arguments)) != 0 ||
-        executor_optional(executor_object, &executor) != 0 ||
+        usearch_py_optional_executor_from_object(executor_object, &executor) != 0 ||
         pinned_parse(cpu_class_object, &usearch_py_cpu_class, &cpu_class) != 0 ||
         usearch_py_path_from_object(path_object, &path, &decoded) != 0 ||
-        usearch_py_paths_from_object(paths_object, &paths) != 0)
+        usearch_py_paths_from_object(paths_object, &paths) != 0 ||
+        usearch_py_ordinals_from_object(key_table_object, "key_table_domains", &key_table_domains,
+                                        &key_table_domains_count) != 0)
         goto release;
 
     usearch_dense_index_t handle = NULL;
@@ -3328,12 +3051,87 @@ static PyObject* DenseIndex_view_nvme(PyTypeObject* type, PyObject* const* args,
         .path = path,
         .nvme = {paths.views, paths.count, (usearch_cpu_class_t)cpu_class},
     };
+    usearch_ram_options_t const key_table = {key_table_domains, key_table_domains_count, 0,
+                                             (usearch_cpu_class_t)cpu_class};
+    if (key_table_object && key_table_object != Py_None) view_arguments.ram = &key_table;
     Py_BEGIN_ALLOW_THREADS;
     usearch_dense_view_nvme(&view_arguments);
     Py_END_ALLOW_THREADS;
     result = index_adopt(type, handle, &outcome);
 
 release:
+    PyMem_Free(key_table_domains);
+    usearch_py_paths_release(&paths);
+    Py_XDECREF(decoded);
+    return result;
+}
+
+static char const doc_DenseIndex_load_nvme[] =                                                  //
+    "``load_nvme(path, /, *, paths=None, executor=None, cpu_class=None,\n"                      //
+    "key_table_domains=None) -> DenseIndex``\n"                                                 //
+    "\n"                                                                                        //
+    "Opens a checkpoint's manifest from NVMe drives as a writable index: it answers every\n"    //
+    "read a view answers, and `refine` rewrites its parts one at a time, replacing the\n"       //
+    "manifest durably as each commits. A lone monolith has no manifest to replace and\n"        //
+    "raises `UnsupportedError`.\n"                                                              //
+    "Calls `usearch_dense_load_nvme`.\n"                                                        //
+    "\n"                                                                                        //
+    "Args:\n"                                                                                   //
+    "  path (str | bytes | os.PathLike): The manifest.\n"                                       //
+    "  paths (Sequence[str | bytes | PathLike], optional): Must name none, since the\n"         //
+    "    parts are served where the manifest points.\n"                                         //
+    "  executor (Executor, optional): The NVMe executor whose rings read the headers;\n"        //
+    "    None reads them on the calling thread.\n"                                              //
+    "  cpu_class (CPUClass, optional): The class to dispatch as; None derives the CPU's own.\n" //
+    "  key_table_domains (Sequence[int], optional): NUMA node IDs of a key table held in\n"     //
+    "    RAM, as `view_nvme` takes them.";
+
+static PyObject* DenseIndex_load_nvme(PyTypeObject* type, PyObject* const* args, Py_ssize_t positional_args_count,
+                                      PyObject* args_names_tuple) {
+    PyObject *path_object, *paths_object, *executor_object, *cpu_class_object, *key_table_object, *decoded = NULL;
+    usearch_py_argument_t const arguments[] = {
+        {"path", &path_object},
+        {"paths", &paths_object},
+        {"executor", &executor_object},
+        {"cpu_class", &cpu_class_object},
+        {"key_table_domains", &key_table_object},
+    };
+    usearch_bytes_view_t path;
+    usearch_py_paths_t paths = {0};
+    usearch_executor_t executor = NULL;
+    int cpu_class = 0;
+    int32_t* key_table_domains = NULL;
+    size_t key_table_domains_count = 0;
+    PyObject* result = NULL;
+    if (usearch_py_arguments_parse("load_nvme", args, positional_args_count, args_names_tuple, 1, 1, arguments,
+                                   usearch_py_table_size_(arguments)) != 0 ||
+        usearch_py_optional_executor_from_object(executor_object, &executor) != 0 ||
+        pinned_parse(cpu_class_object, &usearch_py_cpu_class, &cpu_class) != 0 ||
+        usearch_py_path_from_object(path_object, &path, &decoded) != 0 ||
+        usearch_py_paths_from_object(paths_object, &paths) != 0 ||
+        usearch_py_ordinals_from_object(key_table_object, "key_table_domains", &key_table_domains,
+                                        &key_table_domains_count) != 0)
+        goto release;
+
+    usearch_dense_index_t handle = NULL;
+    usearch_outcome_t outcome = {0};
+    usearch_dense_load_nvme_t load_arguments = {
+        .index = &handle,
+        .executor = executor,
+        .outcome = &outcome,
+        .path = path,
+        .nvme = {paths.views, paths.count, (usearch_cpu_class_t)cpu_class},
+    };
+    usearch_ram_options_t const key_table = {key_table_domains, key_table_domains_count, 0,
+                                             (usearch_cpu_class_t)cpu_class};
+    if (key_table_object && key_table_object != Py_None) load_arguments.ram = &key_table;
+    Py_BEGIN_ALLOW_THREADS;
+    usearch_dense_load_nvme(&load_arguments);
+    Py_END_ALLOW_THREADS;
+    result = index_adopt(type, handle, &outcome);
+
+release:
+    PyMem_Free(key_table_domains);
     usearch_py_paths_release(&paths);
     Py_XDECREF(decoded);
     return result;
@@ -3348,7 +3146,7 @@ static int metadata_parse(char const* verb, PyObject* const* args, Py_ssize_t po
     if (usearch_py_arguments_parse(verb, args, positional_args_count, args_names_tuple, 1, 1, arguments,
                                    usearch_py_table_size_(arguments)) != 0)
         return -1;
-    return executor_optional(executor_object, executor);
+    return usearch_py_optional_executor_from_object(executor_object, executor);
 }
 
 static char const doc_DenseIndex_metadata_read[] =                                             //
@@ -3441,6 +3239,7 @@ static PyMethodDef DenseIndex_methods[] = {
      doc_DenseIndex_load_vram_buffer},
     {"view_ram", (PyCFunction)DenseIndex_view_ram, METH_O | METH_CLASS, doc_DenseIndex_view_ram},
     {"view_nvme", (PyCFunction)DenseIndex_view_nvme, usearch_py_method_flags_k | METH_CLASS, doc_DenseIndex_view_nvme},
+    {"load_nvme", (PyCFunction)DenseIndex_load_nvme, usearch_py_method_flags_k | METH_CLASS, doc_DenseIndex_load_nvme},
     {"metadata_read", (PyCFunction)DenseIndex_metadata_read, usearch_py_method_flags_k | METH_STATIC,
      doc_DenseIndex_metadata_read},
     {"metadata_read_buffer", (PyCFunction)DenseIndex_metadata_read_buffer, usearch_py_method_flags_k | METH_STATIC,
@@ -3461,18 +3260,16 @@ static PyMethodDef DenseIndex_methods[] = {
     {"multiply", (PyCFunction)DenseIndex_multiply, usearch_py_method_flags_k, doc_DenseIndex_multiply},
     {"attend", (PyCFunction)DenseIndex_attend, usearch_py_method_flags_k, doc_DenseIndex_attend},
     {"maxsim", (PyCFunction)DenseIndex_maxsim, usearch_py_method_flags_k, doc_DenseIndex_maxsim},
-    {"absorb", (PyCFunction)DenseIndex_absorb, usearch_py_method_flags_k, doc_DenseIndex_absorb},
-    {"split", (PyCFunction)DenseIndex_split, usearch_py_method_flags_k, doc_DenseIndex_split},
+    {"reshard", (PyCFunction)DenseIndex_reshard, usearch_py_method_flags_k, doc_DenseIndex_reshard},
+    {"refine_plan_finish", (PyCFunction)DenseIndex_refine_plan_finish, METH_O, doc_DenseIndex_refine_plan_finish},
+    {"reshard_plan_finish", (PyCFunction)DenseIndex_reshard_plan_finish, METH_O, doc_DenseIndex_reshard_plan_finish},
     {"sample", (PyCFunction)DenseIndex_sample, usearch_py_method_flags_k, doc_DenseIndex_sample},
     {"save", (PyCFunction)DenseIndex_save, usearch_py_method_flags_k, doc_DenseIndex_save},
     {"save_buffer", (PyCFunction)DenseIndex_save_buffer, usearch_py_method_flags_k, doc_DenseIndex_save_buffer},
     {NULL, NULL, 0, NULL},
 };
 
-static char const doc_receiver_class_getitem[] =
-    "Names the index the receiver addresses, as `On[DenseIndex]` or `DeferredOn[DenseIndex]`.";
-
-PyMethodDef usearch_py_on_methods[] = {
+static PyMethodDef DenseIndex_on_methods[] = {
     {"cursor", (PyCFunction)DenseIndex_cursor, usearch_py_method_flags_k, doc_DenseIndex_cursor},
     {"search_stream", (PyCFunction)DenseIndex_search_stream, usearch_py_method_flags_k, doc_DenseIndex_search_stream},
     {"describe", (PyCFunction)DenseIndex_describe, METH_NOARGS, doc_DenseIndex_describe},
@@ -3487,16 +3284,16 @@ PyMethodDef usearch_py_on_methods[] = {
     {"multiply", (PyCFunction)DenseIndex_multiply, usearch_py_method_flags_k, doc_DenseIndex_multiply},
     {"attend", (PyCFunction)DenseIndex_attend, usearch_py_method_flags_k, doc_DenseIndex_attend},
     {"maxsim", (PyCFunction)DenseIndex_maxsim, usearch_py_method_flags_k, doc_DenseIndex_maxsim},
-    {"absorb", (PyCFunction)DenseIndex_absorb, usearch_py_method_flags_k, doc_DenseIndex_absorb},
-    {"split", (PyCFunction)DenseIndex_split, usearch_py_method_flags_k, doc_DenseIndex_split},
+    {"reshard", (PyCFunction)DenseIndex_reshard, usearch_py_method_flags_k, doc_DenseIndex_reshard},
+    {"refine_plan_finish", (PyCFunction)DenseIndex_refine_plan_finish, METH_O, doc_DenseIndex_refine_plan_finish},
+    {"reshard_plan_finish", (PyCFunction)DenseIndex_reshard_plan_finish, METH_O, doc_DenseIndex_reshard_plan_finish},
     {"sample", (PyCFunction)DenseIndex_sample, usearch_py_method_flags_k, doc_DenseIndex_sample},
     {"save", (PyCFunction)DenseIndex_save, usearch_py_method_flags_k, doc_DenseIndex_save},
     {"save_buffer", (PyCFunction)DenseIndex_save_buffer, usearch_py_method_flags_k, doc_DenseIndex_save_buffer},
-    {"__class_getitem__", Py_GenericAlias, METH_O | METH_CLASS, doc_receiver_class_getitem},
     {NULL, NULL, 0, NULL},
 };
 
-PyMethodDef usearch_py_deferred_on_methods[] = {
+static PyMethodDef DenseIndex_deferred_on_methods[] = {
     {"describe", (PyCFunction)DenseIndex_describe, METH_NOARGS, doc_DenseIndex_describe},
     {"reserve", (PyCFunction)DenseIndex_reserve, METH_O, doc_DenseIndex_reserve},
     {"clear", (PyCFunction)DenseIndex_clear, METH_NOARGS, doc_DenseIndex_clear},
@@ -3509,14 +3306,17 @@ PyMethodDef usearch_py_deferred_on_methods[] = {
     {"multiply", (PyCFunction)DenseIndex_multiply, usearch_py_method_flags_k, doc_DenseIndex_multiply},
     {"attend", (PyCFunction)DenseIndex_attend, usearch_py_method_flags_k, doc_DenseIndex_attend},
     {"maxsim", (PyCFunction)DenseIndex_maxsim, usearch_py_method_flags_k, doc_DenseIndex_maxsim},
-    {"absorb", (PyCFunction)DenseIndex_absorb, usearch_py_method_flags_k, doc_DenseIndex_absorb},
-    {"split", (PyCFunction)DenseIndex_split, usearch_py_method_flags_k, doc_DenseIndex_split},
+    {"reshard", (PyCFunction)DenseIndex_reshard, usearch_py_method_flags_k, doc_DenseIndex_reshard},
+    {"refine_plan_finish", (PyCFunction)DenseIndex_refine_plan_finish, METH_O, doc_DenseIndex_refine_plan_finish},
+    {"reshard_plan_finish", (PyCFunction)DenseIndex_reshard_plan_finish, METH_O, doc_DenseIndex_reshard_plan_finish},
     {"sample", (PyCFunction)DenseIndex_sample, usearch_py_method_flags_k, doc_DenseIndex_sample},
     {"save", (PyCFunction)DenseIndex_save, usearch_py_method_flags_k, doc_DenseIndex_save},
     {"save_buffer", (PyCFunction)DenseIndex_save_buffer, usearch_py_method_flags_k, doc_DenseIndex_save_buffer},
-    {"__class_getitem__", Py_GenericAlias, METH_O | METH_CLASS, doc_receiver_class_getitem},
     {NULL, NULL, 0, NULL},
 };
+
+usearch_py_receiver_verbs_t const usearch_py_dense_receiver_verbs = {&DenseIndexType, DenseIndex_on_methods,
+                                                                     DenseIndex_deferred_on_methods};
 
 static PyGetSetDef DenseIndex_getset[] = {
     {"capacity", (getter)DenseIndex_get_counter, NULL, doc_DenseIndex_capacity,

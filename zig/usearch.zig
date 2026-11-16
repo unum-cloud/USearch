@@ -33,7 +33,7 @@
 //! var arena = try usearch.Arena.init(executor);
 //! defer arena.deinit();
 //! const matches = try index.on(executor).search(try .of(f32, &slab, 256), 10, &arena, .{});
-//! const nearest = (try matches.query(0)).keys[0];
+//! const nearest = matches.query(0).keys[0];
 //! ```
 //!
 //! This root re-exports every public symbol from the modules that mirror the C headers - `types`
@@ -65,6 +65,8 @@ pub const Continuation = types.Continuation;
 pub const ProgressCallback = types.ProgressCallback;
 pub const Predicate = types.Predicate;
 pub const Mood = types.Mood;
+pub const Phase = types.Phase;
+pub const PhaseProgress = types.PhaseProgress;
 pub const ExecutorForRamConfig = types.ExecutorForRamConfig;
 pub const ExecutorOnPoolConfig = types.ExecutorOnPoolConfig;
 pub const ExecutorForVramConfig = types.ExecutorForVramConfig;
@@ -84,7 +86,10 @@ pub const DenseMetadata = dense.DenseMetadata;
 pub const DenseIndexDescription = dense.DenseIndexDescription;
 pub const DenseTraversalStats = dense.DenseTraversalStats;
 pub const DenseReachability = dense.DenseReachability;
+pub const DenseRefineVerdict = dense.DenseRefineVerdict;
 pub const DenseRefineReport = dense.DenseRefineReport;
+pub const DenseRefinePlan = dense.DenseRefinePlan;
+pub const DenseReshardPlan = dense.DenseReshardPlan;
 pub const DenseSoftmaxState = dense.DenseSoftmaxState;
 pub const DenseLoadRamConfig = dense.DenseLoadRamConfig;
 pub const DenseLoadVramConfig = dense.DenseLoadVramConfig;
@@ -96,8 +101,7 @@ pub const DenseMetadataReadBufferConfig = dense.DenseMetadataReadBufferConfig;
 pub const DenseInsertConfig = dense.DenseInsertConfig;
 pub const DenseRefineConfig = dense.DenseRefineConfig;
 pub const DenseSearchConfig = dense.DenseSearchConfig;
-pub const DenseAbsorbConfig = dense.DenseAbsorbConfig;
-pub const DenseSplitConfig = dense.DenseSplitConfig;
+pub const DenseReshardConfig = dense.DenseReshardConfig;
 pub const DenseSampleConfig = dense.DenseSampleConfig;
 pub const DenseMultiplyConfig = dense.DenseMultiplyConfig;
 pub const DenseAttendConfig = dense.DenseAttendConfig;
@@ -114,25 +118,6 @@ pub const DenseDraws = dense.DenseDraws;
 pub const Monolith = dense.Monolith;
 pub const DenseCursor = dense.DenseCursor;
 pub const DenseSearchStream = dense.DenseSearchStream;
-pub const DenseReserve = dense.DenseReserve;
-pub const DenseClear = dense.DenseClear;
-pub const DenseDescribe = dense.DenseDescribe;
-pub const DenseCount = dense.DenseCount;
-pub const DenseGet = dense.DenseGet;
-pub const DenseInsert = dense.DenseInsert;
-pub const DenseRefine = dense.DenseRefine;
-pub const DenseHealth = dense.DenseHealth;
-pub const DenseSearch = dense.DenseSearch;
-pub const DenseAbsorb = dense.DenseAbsorb;
-pub const DenseSplit = dense.DenseSplit;
-pub const DenseSample = dense.DenseSample;
-pub const DenseCursorNext = dense.DenseCursorNext;
-pub const DenseSearchStreamNext = dense.DenseSearchStreamNext;
-pub const DenseSave = dense.DenseSave;
-pub const DenseSaveBuffer = dense.DenseSaveBuffer;
-pub const DenseMultiply = dense.DenseMultiply;
-pub const DenseAttend = dense.DenseAttend;
-pub const DenseMaxsim = dense.DenseMaxsim;
 
 test { // pull each module's tests into `zig build test`
     _ = @import("usearch/types.zig");

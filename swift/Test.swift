@@ -107,9 +107,6 @@ private final class Reports: @unchecked Sendable {
     var completed = 0
 }
 
-/// What a caller's closure throws to stop a call.
-private struct Refusal: Swift.Error, Equatable {}
-
 @Suite("Keys")
 struct KeyTests {
 
@@ -190,6 +187,12 @@ struct VocabularyTests {
         #expect(Traversal.scan.description == "scan")
         #expect(Traversal(name: "walk") == .walk)
         #expect(Traversal(name: "sweep") == nil)
+        #expect(Phase.restitch.description == "restitch")
+        #expect(Phase(name: "gather") == .gather)
+        #expect(Phase(name: "sweep") == nil)
+        #expect(DenseRefineVerdict.stalled.description == "stalled")
+        #expect(DenseRefineVerdict(name: "converged") == .converged)
+        #expect(DenseRefineVerdict(name: "settled") == nil)
     }
 
     @Test func errorsRenderTheirStatusAndMessage() {
@@ -337,25 +340,6 @@ struct ResultTests {
         #expect(none.count == 1 && none[0].isEmpty)
     }
 
-    /// The arena's next call rewinds it, so a view an earlier call answered traps on its next read
-    /// rather than reading what the later call wrote there.
-    #if os(macOS) || os(Linux)
-        @Test func aLaterCallEndsTheEarlierViews() async {
-            let exit = await #expect(processExitsWith: .failure, observing: [\.standardErrorContent]) {
-                let index = try DenseIndex.initRam(DenseOptions(dimensions: 2))
-                try index.reserve(2)
-                let vectors = RowsView(try Tensor.fromArray([Float](arrayLiteral: 1, 2, 3, 4), rows: 2, columns: 2))
-                try index.insert(keys: [1, 2], vectors: vectors)
-                let arena = try Arena()
-                let first = try index.get(key: 1, as: Float.self, arena: arena)
-                _ = try index.get(key: 2, as: Float.self, arena: arena)
-                _ = first[0]
-            }
-            let reported = exit.map { String(decoding: $0.standardErrorContent, as: UTF8.self) } ?? ""
-            #expect(reported.contains("the arena was rewound since this view was written: uninitialized"))
-        }
-    #endif
-
     @Test func filteredSearchTrampoline() throws {
         let index = try triangle()
         let query = try rows([Float](arrayLiteral: 1, 0), columns: 2)
@@ -400,22 +384,6 @@ struct ResultTests {
         #expect(reports.completed == 2)
         let stopped = DenseSearchConfig(progress: { _, _ in .cancel })
         #expect(failureStatus(of: try index.search(queries, wanted: 1, arena: arena, config: stopped)) == .cancelled)
-    }
-
-    /// An error a predicate or handler throws never unwinds into C, and is what the call throws
-    /// once final, blocking or deferred.
-    @Test func closureErrorsArriveOnceFinal() throws {
-        let index = try triangle()
-        let query = try rows([Float](arrayLiteral: 1, 0), columns: 2)
-        let arena = try Arena()
-        let filtered = DenseSearchConfig(predicate: { _ in throw Refusal() })
-        let thrown = failure(of: try index.search(query, wanted: 3, arena: arena, config: filtered))
-        #expect(thrown?.cause as? Refusal == Refusal())
-
-        let reporting = DenseSearchConfig(progress: { _, _ in throw Refusal() })
-        let call = try index.deferred(try executor()).search(query, wanted: 3, arena: arena, config: reporting)
-        #expect(failure(of: try call.wait())?.cause as? Refusal == Refusal())
-        #expect(call.status == .cancelled)
     }
 }
 
@@ -549,6 +517,13 @@ struct LifetimeTests {
         defer { try? FileManager.default.removeItem(atPath: path) }
         try index.save(path: path)
 
+        // An NVMe view resolves keys only through the key table it was opened with.
+        let drives = try Executor.forNvme(threads: 1)
+        let keyed = try DenseIndex.viewNvme(path, config: DenseViewNvmeConfig(executor: drives, keyTableDomains: []))
+        #expect(try keyed.on(drives).count(key: 1) == 1)
+        let keyless = try DenseIndex.viewNvme(path, config: DenseViewNvmeConfig(executor: drives))
+        #expect(failureStatus(of: try keyless.on(drives).count(key: 1)) == .unsupported)
+
         // The engine declares views before it serves them, so only the refusal is checked there.
         guard let viewed = try? DenseIndex.viewRam(path) else {
             #expect(failureStatus(of: try DenseIndex.viewRam(path)) == .unsupported)
@@ -561,30 +536,27 @@ struct LifetimeTests {
         #expect(failureStatus(of: try viewed.insert(keys: [4], vectors: vector)) == .readOnly)
     }
 
-    /// An absorb consumes every donor it takes in, which then refuses every verb rather than reaching
-    /// a freed handle, and one stopped early hands the rest back.
-    @Test func absorbConsumesItsDonors() throws {
+    /// A reshard gathers its sources into one target, itself among them, leaving every other source
+    /// empty and live, and refuses a source named twice before moving anything.
+    @Test func reshardGathersItsSources() throws {
         let index = try triangle()
-        func donor(_ key: Key) throws -> DenseIndex {
-            let donor = try DenseIndex.initRam(DenseOptions(dimensions: 2, metric: .euclidean))
-            try donor.reserve(1)
-            try donor.insert(keys: [key], vectors: try rows([Float](arrayLiteral: 2, 2), columns: 2))
-            return donor
+        func shard(_ key: Key) throws -> DenseIndex {
+            let shard = try DenseIndex.initRam(DenseOptions(dimensions: 2, metric: .euclidean))
+            try shard.reserve(1)
+            try shard.insert(keys: [key], vectors: try rows([Float](arrayLiteral: 2, 2), columns: 2))
+            return shard
         }
-        let (first, second) = (try donor(4), try donor(5))
-        #expect(failureStatus(of: try index.absorb([first, first])) == .invalidArgument)
-        #expect(failureStatus(of: try index.absorb([index])) == .configMismatch)
+        let (first, second) = (try shard(4), try shard(5))
+        #expect(
+            failureStatus(of: try index.reshard(sources: [index, first, first], targets: [index])) == .invalidArgument
+        )
+        #expect(try index.describe().size == 3)
 
-        let stopped = DenseAbsorbConfig(progress: { _, _ in .cancel })
-        #expect(failureStatus(of: try index.absorb([first, second], config: stopped)) == .cancelled)
-        #expect(try index.count(key: 4) == 1)
-        #expect(failureStatus(of: try first.describe()) == .uninitialized)
-        #expect(try second.count(key: 5) == 1)
-
-        try index.absorb([second])
+        try index.reshard(sources: [index, first, second], targets: [index])
         #expect(try index.describe().size == 5)
-        #expect(failureStatus(of: try second.describe()) == .uninitialized)
-        #expect(failureStatus(of: try index.absorb([second])) == .uninitialized)
+        #expect(try index.count(key: 5) == 1)
+        #expect(try first.describe().size == 0)
+        #expect(try second.count(key: 5) == 0)
     }
 }
 
@@ -799,14 +771,6 @@ struct LinearAlgebraTests {
             }
         }
         #expect(failureStatus { _ = try attend(headCount: 2, values: values, resolvable: 3) } == .shapeMismatch)
-        // A lookup that throws leaves its key without a row, and the call throws what it threw.
-        let refusing = ValueLookup(values: try rows(values, columns: 2)) { _ in throw Refusal() }
-        let queryRows = try rows(queries, columns: 2)
-        let arena = try Arena(on: executor)
-        let refused = failure(
-            of: try index.on(executor).attend(queryRows, lookup: refusing, as: Float.self, arena: arena)
-        )
-        #expect(refused?.cause as? Refusal == Refusal())
         // Values of another kind than the index stores answer no row at all.
         #expect(failureStatus { _ = try attend(headCount: 1, values: floats) } == .shapeMismatch)
     }
@@ -824,17 +788,78 @@ struct LinearAlgebraTests {
         #expect(report.reachability == reachability)
     }
 
-    /// A split hands every entry to the receivers and leaves the source empty but live.
-    @Test func splitEmptiesTheSourceIntoItsReceivers() throws {
+    /// A plan keeps a stopped round live and the index closed to insertions, carries the phase each
+    /// call stopped in, and its finish lands the whole plan's report and frees it.
+    @Test func refinePlansResumeUntilFinished() throws {
         let index = try triangle()
-        let receivers = try (0 ..< 2).map { _ in
-            let receiver = try DenseIndex.initRam(DenseOptions(dimensions: 2, metric: .euclidean))
-            try receiver.reserve(3)
-            return receiver
+        let on = index.on(try executor())
+        let plan = DenseRefinePlan()
+        _ = try? on.refine(config: DenseRefineConfig(progress: { _, _ in .cancel }, plan: plan))
+        #expect(plan.phase.phase != .done)
+        let vector = try rows([Float](arrayLiteral: 2, 2), columns: 2)
+        #expect(failureStatus(of: try on.insert(keys: [4], vectors: vector)) == .contended)
+
+        try on.refine(config: DenseRefineConfig(plan: plan))
+        #expect(plan.phase.phase == .done)
+        #expect(try on.finish(plan).reachability.audited == 3)
+        #expect(failureStatus(of: try on.finish(plan)) == .invalidArgument)
+    }
+
+    /// A reshard plan moves every entry before its first barrier, so a stop leaves only the
+    /// closing rounds live; a deferred call continues them, and the finish lands the whole plan.
+    @Test func reshardPlansContinueUntilFinished() throws {
+        let index = try triangle()
+        let source = try DenseIndex.initRam(DenseOptions(dimensions: 2, metric: .euclidean))
+        try source.reserve(1)
+        try source.insert(keys: [4], vectors: try rows([Float](arrayLiteral: 2, 2), columns: 2))
+        let executor = try executor()
+        let plan = DenseReshardPlan()
+        let stopped = DenseReshardConfig(progress: { _, _ in .cancel }, plan: plan)
+        let status = failureStatus(
+            of: try index.on(executor).reshard(sources: [index, source], targets: [index], config: stopped)
+        )
+        #expect(status == nil || status == .cancelled)
+        #expect(try source.describe().size == 0)
+
+        let continued = DenseReshardConfig(plan: plan)
+        _ = try index.deferred(executor).reshard(sources: [], targets: [], config: continued).wait()
+        #expect(plan.phase.phase == .done)
+        #expect(try index.deferred(executor).finish(plan).wait().reachability.audited == 4)
+        #expect(failureStatus(of: try index.on(executor).finish(plan)) == .invalidArgument)
+    }
+
+    /// One source cut into several targets hands every entry over and leaves the source empty
+    /// but live.
+    @Test func reshardCutsTheSourceIntoItsTargets() throws {
+        let index = try triangle()
+        let targets = try (0 ..< 2).map { _ in
+            let target = try DenseIndex.initRam(DenseOptions(dimensions: 2, metric: .euclidean))
+            try target.reserve(3)
+            return target
         }
-        try index.on(try executor()).split(into: receivers, config: DenseSplitConfig(seed: 7))
+        try index.on(try executor()).reshard(sources: [index], targets: targets, config: DenseReshardConfig(seed: 7))
         #expect(try index.describe().size == 0)
-        #expect(try receivers.map { try $0.describe().size }.reduce(0, +) == 3)
+        #expect(try targets.map { try $0.describe().size }.reduce(0, +) == 3)
+    }
+
+    /// A recut in place keeps every entry; a lone monolith has no manifest a loaded handle
+    /// could replace.
+    @Test func reshardKeepsEveryEntryAndLoadNvmeWantsAManifest() throws {
+        let index = try triangle()
+        try index.on(try executor()).reshard(
+            sources: [index],
+            targets: [index],
+            config: DenseReshardConfig(memoryDomains: [], shardCapacity: 8)
+        )
+        #expect(try index.describe().size == 3)
+
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("usearch-swift-\(UUID().uuidString).safegraphs").path
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        try index.save(path: path)
+        let drives = try Executor.forNvme(threads: 1)
+        let loading = DenseViewNvmeConfig(executor: drives)
+        #expect(failureStatus(of: try DenseIndex.loadNvme(path, config: loading)) == .unsupported)
     }
 
     /// A sample draws held keys placed in three dimensions, refusing shown keys it cannot place.

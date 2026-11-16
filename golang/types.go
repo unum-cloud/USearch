@@ -13,7 +13,6 @@ import (
 	"runtime"
 	"runtime/cgo"
 	"strings"
-	"sync/atomic"
 	"unsafe"
 )
 
@@ -455,7 +454,6 @@ func (matrix RowsView) lower(call *call) C.usearch_rows_view_t {
 // scores positionally paired with them. A search writes distances, nearest first; a late
 // interaction writes summed similarities, largest first.
 type MatchesView struct {
-	exported
 	raw     C.usearch_matches_view_t
 	queries uint
 }
@@ -466,21 +464,15 @@ func (matches MatchesView) Queries() uint { return matches.queries }
 // Columns reports the matches the call made room for per query, at most its wanted - the "k" in "kANN".
 func (matches MatchesView) Columns() uint { return uint(matches.raw.columns) }
 
-// Query borrows one query's keys and scores from the arena, trimmed to the count that query reported,
-// and refused with StatusInvalidArgument when query is not below Queries.
-func (matches MatchesView) Query(query uint) ([]Key, []Distance, error) {
-	if err := matches.host(); err != nil {
-		return nil, nil, err
-	}
-	if query >= matches.queries {
-		return nil, nil, fail(StatusInvalidArgument, "the query is not below the call's count")
-	}
+// Query borrows one query's keys and scores from the arena, trimmed to the count that query
+// reported; query must be below Queries.
+func (matches MatchesView) Query(query uint) ([]Key, []Distance) {
 	columns := matches.Columns()
 	count := min(unsafe.Slice((*uint)(unsafe.Pointer(matches.raw.counts)), matches.queries)[query], columns)
 	from := query * columns
 	keys := unsafe.Slice((*Key)(unsafe.Pointer(matches.raw.keys)), matches.queries*columns)
 	scores := unsafe.Slice((*Distance)(unsafe.Pointer(matches.raw.scores)), matches.queries*columns)
-	return keys[from : from+count], scores[from : from+count], nil
+	return keys[from : from+count], scores[from : from+count]
 }
 
 // endregion: Matches
@@ -488,31 +480,20 @@ func (matches MatchesView) Query(query uint) ([]Key, []Distance, error) {
 // region: Callbacks
 
 // Predicate admits a candidate key into a filtered search, or passes over it. It runs on the
-// executor's threads together, so it must be safe for concurrent use, and a panic inside it
-// rejects the key and becomes the call's error.
+// executor's threads together, so it must be safe for concurrent use, and it must not panic.
 type Predicate func(key Key) bool
 
 // ProgressCallback is called with the units a long call finished so far and the units it
 // finishes unless stopped; false stops it wherever the verb can stop. It never runs on two
-// threads at once, and a panic inside it stops the call and becomes its error.
+// threads at once, and it must not panic.
 type ProgressCallback func(completed, total uint) bool
-
-// upcall is a Go value a C callback reaches, and the call its panics fail.
-type upcall struct {
-	call  *call
-	value any
-}
 
 //export usearchAdmits
 func usearchAdmits(keys *C.usearch_key_t, admissions *C.usearch_admission_t, count C.size_t, state unsafe.Pointer) {
-	upcall := (*cgo.Handle)(state).Value().(upcall)
+	predicate := (*cgo.Handle)(state).Value().(Predicate)
 	verdicts := unsafe.Slice(admissions, count)
-	for index := range verdicts {
-		verdicts[index] = C.usearch_reject_k
-	}
-	defer func() { upcall.call.latch(recover()) }() // a panic unwinding through C frames would skip their unlocks
-	predicate := upcall.value.(Predicate)
 	for index, key := range unsafe.Slice(keys, count) {
+		verdicts[index] = C.usearch_reject_k
 		if predicate(keyFromRaw(key)) {
 			verdicts[index] = C.usearch_admit_k
 		}
@@ -520,14 +501,11 @@ func usearchAdmits(keys *C.usearch_key_t, admissions *C.usearch_admission_t, cou
 }
 
 //export usearchContinues
-func usearchContinues(completed, total C.size_t, state unsafe.Pointer) (continuation C.usearch_continuation_t) {
-	upcall := (*cgo.Handle)(state).Value().(upcall)
-	continuation = C.usearch_cancel_k
-	defer func() { upcall.call.latch(recover()) }()
-	if upcall.value.(ProgressCallback)(uint(completed), uint(total)) {
-		continuation = C.usearch_continue_k
+func usearchContinues(completed, total C.size_t, state unsafe.Pointer) C.usearch_continuation_t {
+	if (*cgo.Handle)(state).Value().(ProgressCallback)(uint(completed), uint(total)) {
+		return C.usearch_continue_k
 	}
-	return continuation
+	return C.usearch_cancel_k
 }
 
 // predicate lends an optional predicate as the struct a filtering verb takes.
@@ -546,11 +524,11 @@ func (call *call) progress(progress ProgressCallback, steps uint) C.usearch_prog
 	return C.usearch_progress_t{callback: C.usearch_go_continues(), state: call.callback(progress), steps: C.size_t(steps)}
 }
 
-// callback lends a Go value to a C callback as an opaque handle rather than a Go pointer, since the
-// closure it names holds Go pointers the cgo rules forbid handing to C.
-func (call *call) callback(value any) unsafe.Pointer {
+// callback lends a handler to its C trampoline as an opaque handle rather than a Go pointer, since
+// the closure holds Go pointers the cgo rules forbid handing to C.
+func (call *call) callback(handler any) unsafe.Pointer {
 	handle := pin(call, new(cgo.Handle))
-	*handle = cgo.NewHandle(upcall{call: call, value: value})
+	*handle = cgo.NewHandle(handler)
 	call.handles = append(call.handles, *handle)
 	return unsafe.Pointer(handle)
 }
@@ -623,6 +601,73 @@ const (
 // String renders the mood as the library spells it.
 func (mood Mood) String() string {
 	return C.GoString(C.usearch_mood_name(C.usearch_mood_t(mood)))
+}
+
+// LoadPath is how a load from a path read the parts onto the devices.
+type LoadPath int32
+
+const (
+	// LoadPathNone means the index was never loaded from a path, or lives on RAM or NVMe.
+	LoadPathNone LoadPath = C.usearch_load_path_none_k
+	// LoadPathHostCopy means the parts passed through host memory, as some file took no cuFile
+	// registration.
+	LoadPathHostCopy LoadPath = C.usearch_load_path_host_copy_k
+	// LoadPathCuFile means every part went straight onto the device through cuFile.
+	LoadPathCuFile LoadPath = C.usearch_load_path_cufile_k
+)
+
+// String renders the load path as the library spells it.
+func (path LoadPath) String() string {
+	return C.GoString(C.usearch_load_path_name(C.usearch_load_path_t(path)))
+}
+
+// Phase is the kind of work a refine or reshard plan is doing, the same in every residency.
+type Phase int32
+
+const (
+	// PhaseNone means no plan, or one that has not started.
+	PhaseNone Phase = C.usearch_phase_none_k
+	// PhaseCopy is a reshard moving keys and values into a target, with the links it keeps.
+	PhaseCopy Phase = C.usearch_phase_copy_k
+	// PhaseBuild is a reshard on NVMe building blocks of a target's rows in RAM and writing
+	// their links.
+	PhaseBuild Phase = C.usearch_phase_build_k
+	// PhasePartition is a reshard cutting a source into one part per target.
+	PhasePartition Phase = C.usearch_phase_partition_k
+	// PhaseScatter is a reshard moving each part into its target.
+	PhaseScatter Phase = C.usearch_phase_scatter_k
+	// PhaseHealth is a round's health check, opening or closing it.
+	PhaseHealth Phase = C.usearch_phase_health_k
+	// PhaseHeal is a round linking each island with the root's component.
+	PhaseHeal Phase = C.usearch_phase_heal_k
+	// PhaseHubs is a round drawing the hubs its gather streams entries past.
+	PhaseHubs Phase = C.usearch_phase_hubs_k
+	// PhaseGather is a round gathering every entry into a neighborhood.
+	PhaseGather Phase = C.usearch_phase_gather_k
+	// PhaseRestitch is a round re-stitching each neighborhood.
+	PhaseRestitch Phase = C.usearch_phase_restitch_k
+	// PhaseWrite is a round on NVMe rewriting each tile of links from what its restitch changed.
+	PhaseWrite Phase = C.usearch_phase_write_k
+	// PhaseDone means the plan ended its round, and nothing more is pending.
+	PhaseDone Phase = C.usearch_phase_done_k
+)
+
+// String renders the phase as the library spells it.
+func (phase Phase) String() string {
+	return C.GoString(C.usearch_phase_name(C.usearch_phase_t(phase)))
+}
+
+// PhaseProgress is where a plan stands: its phase, that phase's position in the plan, and its own
+// count.
+type PhaseProgress struct {
+	// Phase is the kind of work in hand.
+	Phase Phase
+	// Ordinal is this phase's position among the ones the plan runs.
+	Ordinal uint
+	// Completed counts the units of this phase done, entries or islands.
+	Completed uint
+	// Total counts the units of this phase in all.
+	Total uint
 }
 
 // CPUClass is a CPU family USearch ships tuned variants for; a RAM or NVMe placement or executor
@@ -723,32 +768,28 @@ func (class GPUClass) String() string {
 // the ordered publication path. A pinned cpuClass narrows the workers' waiters and atomics to that
 // class's.
 func ExecutorForRam(memoryDomains []int32, cpuClass CPUClass, threads uint) (*Executor, error) {
-	lent := open[*Executor]()
-	executor := &Executor{}
+	lent := open[C.usearch_executor_t]()
 	C.usearch_executor_for_ram(&C.usearch_executor_for_ram_t{
-		executor: pin(&lent.call, &executor.handle),
+		executor: lent.result,
 		outcome:  lent.outcome,
 		ram:      lent.ram(memoryDomains, cpuClass),
 		threads:  C.size_t(threads),
 	})
-	lent.result = func() *Executor { return executor }
-	return block(lent)
+	return executorOf(block(lent))
 }
 
 // ExecutorOnPool creates a RAM executor over a borrowed ForkUnion fu_pool_t, so several
 // libraries in one process share one set of threads while each keeps its own scratch. The pool
 // must outlive the executor, and keeps its lender's mood.
 func ExecutorOnPool(memoryDomains []int32, cpuClass CPUClass, pool unsafe.Pointer) (*Executor, error) {
-	lent := open[*Executor]()
-	executor := &Executor{}
+	lent := open[C.usearch_executor_t]()
 	C.usearch_executor_on_pool(&C.usearch_executor_on_pool_t{
-		executor: pin(&lent.call, &executor.handle),
+		executor: lent.result,
 		outcome:  lent.outcome,
 		ram:      lent.ram(memoryDomains, cpuClass),
 		pool:     pool,
 	})
-	lent.result = func() *Executor { return executor }
-	return block(lent)
+	return executorOf(block(lent))
 }
 
 // ExecutorForNvme spawns host workers for NVMe-resident indexes, one submission ring apiece,
@@ -757,16 +798,14 @@ func ExecutorOnPool(memoryDomains []int32, cpuClass CPUClass, pool unsafe.Pointe
 //
 // Zero threads derives from those devices' queue capabilities.
 func ExecutorForNvme(paths []string, cpuClass CPUClass, threads uint) (*Executor, error) {
-	lent := open[*Executor]()
-	executor := &Executor{}
+	lent := open[C.usearch_executor_t]()
 	C.usearch_executor_for_nvme(&C.usearch_executor_for_nvme_t{
-		executor: pin(&lent.call, &executor.handle),
+		executor: lent.result,
 		outcome:  lent.outcome,
 		nvme:     lent.nvme(paths, cpuClass),
 		threads:  C.size_t(threads),
 	})
-	lent.result = func() *Executor { return executor }
-	return block(lent)
+	return executorOf(block(lent))
 }
 
 // ExecutorForVram opens one submission stream on every named device, or borrows the caller's,
@@ -783,17 +822,23 @@ func ExecutorForVram(
 	if len(streams) != 0 && len(streams) != len(devices) {
 		return nil, fail(StatusShapeMismatch, "pass no streams or one per device")
 	}
-	lent := open[*Executor]()
-	executor := &Executor{}
+	lent := open[C.usearch_executor_t]()
 	C.usearch_executor_for_vram(&C.usearch_executor_for_vram_t{
-		executor:      pin(&lent.call, &executor.handle),
+		executor:      lent.result,
 		outcome:       lent.outcome,
 		vram:          lent.vram(devices, gpuClass),
 		streams:       lend(&lent.call, streams),
 		scratch_limit: C.size_t(scratchLimit),
 	})
-	lent.result = func() *Executor { return executor }
-	return block(lent)
+	return executorOf(block(lent))
+}
+
+// executorOf wraps the handle an executor factory wrote.
+func executorOf(handle C.usearch_executor_t, err error) (*Executor, error) {
+	if err != nil {
+		return nil, err
+	}
+	return &Executor{handle: handle}, nil
 }
 
 // Drain waits until no call holds this executor, then adopts mood until the next call; it only
@@ -841,16 +886,14 @@ func (executor *Executor) lower() (C.usearch_executor_t, *Error) {
 // Arena is memory the library writes every output whose length scales with a call into - matches,
 // rows, products, monoliths, cursor and stream batches alike - reused so a steady loop allocates once.
 //
-// Every call given an arena rewinds and refills it, so the views of its previous call refuse access
-// from then on with StatusUninitialized, as they do once it is closed; to keep one call's views
-// past the next, give that call another arena. An arena serves one call at a time, and a second
-// overlapping it fails with StatusContended. Deferred verbs borrow it as blocking ones do, since
-// Close waits for every deferred call naming it. A slice an accessor already handed out is never
-// checked again, so drop it before the arena's next call.
+// Every call given an arena rewinds and refills it, so the views of its previous call and every
+// slice they handed out end there, as they do once it is closed; to keep one call's views past
+// the next, give that call another arena. An arena serves one call at a time, and a second
+// overlapping it fails with StatusContended. Deferred verbs borrow it as blocking ones do,
+// since Close waits for every deferred call naming it. Views over a GPU arena hold device
+// memory, which Describe reports and no Go code may read.
 type Arena struct {
 	handle C.usearch_arena_t
-	// generation counts the calls that rewound the arena, so a view knows when its memory moved on.
-	generation atomic.Uint64
 }
 
 // NewArena makes an empty arena where executor computes, host pages or the memory of its GPU,
@@ -863,21 +906,19 @@ func NewArena(executor *Executor) (*Arena, error) {
 	if refusal != nil {
 		return nil, refusal
 	}
-	arena := &Arena{}
-	lent := open[*Arena]()
-	C.usearch_arena_init(&C.usearch_arena_init_t{
-		arena:    pin(&lent.call, &arena.handle),
-		executor: handle,
-		outcome:  lent.outcome,
-	})
-	lent.result = func() *Arena { return arena }
-	return block(lent)
+	lent := open[C.usearch_arena_t]()
+	C.usearch_arena_init(&C.usearch_arena_init_t{arena: lent.result, executor: handle, outcome: lent.outcome})
+	arena, err := block(lent)
+	if err != nil {
+		return nil, err
+	}
+	return &Arena{handle: arena}, nil
 }
 
 // ArenaDescription is where an arena's outputs live, which decides whether Go code may read them.
 type ArenaDescription struct {
-	// Residency is ResidencyRam for host pages and ResidencyVram for one device's memory, which no
-	// Go code may read, so the accessors of its views refuse with StatusDevice.
+	// Residency is ResidencyRam for host pages and ResidencyVram for one device's memory, which no Go
+	// code may read.
 	Residency Residency
 	// Device is the ordinal of the GPU holding the outputs on ResidencyVram, and 0 for host pages.
 	Device uint
@@ -885,67 +926,33 @@ type ArenaDescription struct {
 
 // Describe reports where the arena's outputs live, as the executor that made it decided.
 func (arena *Arena) Describe() (ArenaDescription, error) {
-	handle, refusal := arena.lower()
-	if refusal != nil {
-		return ArenaDescription{}, refusal
-	}
 	lent := open[ArenaDescription]()
-	raw := pin(&lent.call, new(C.usearch_arena_description_t))
-	C.usearch_arena_describe(&C.usearch_arena_describe_t{arena: handle, outcome: lent.outcome, description: raw})
-	lent.result = func() ArenaDescription {
-		return ArenaDescription{Residency: Residency(raw.residency), Device: uint(raw.device)}
-	}
+	C.usearch_arena_describe(&C.usearch_arena_describe_t{
+		arena:       arena.lower(),
+		outcome:     lent.outcome,
+		description: (*C.usearch_arena_description_t)(unsafe.Pointer(lent.result)),
+	})
 	return block(lent)
 }
 
-// Close releases the memory, waiting for every deferred call naming the arena, and turns every view
-// over it away. It is idempotent, and a closed arena must not be used again.
+// Close releases the memory, waiting for every deferred call naming the arena, and ends every view
+// over it. It is idempotent, and a closed arena must not be used again.
 func (arena *Arena) Close() error {
 	if arena == nil || arena.handle == nil {
 		return nil
 	}
 	C.usearch_arena_free(arena.handle)
 	arena.handle = nil
-	arena.generation.Add(1)
 	return nil
 }
 
-// lower reports the handle a verb hands across, refusing a nil or closed arena before the call does.
-func (arena *Arena) lower() (C.usearch_arena_t, *Error) {
-	if arena == nil || arena.handle == nil {
-		return nil, fail(StatusInvalidArgument, "the arena is closed or was never made")
+// lower reports the handle a verb hands across, nil for a nil or closed arena, which the call
+// refuses.
+func (arena *Arena) lower() C.usearch_arena_t {
+	if arena == nil {
+		return nil
 	}
-	return arena.handle, nil
-}
-
-// exported is the arena a view lives in, and which of the arena's calls wrote it.
-type exported struct {
-	arena      *Arena
-	generation uint64
-}
-
-// rewound records that a call crossed with arena, retiring the views of its earlier calls, and
-// answers where this call's views live. A call refused as contended rewound nothing.
-func (call *call) rewound(arena *Arena) exported {
-	if call.status() == StatusContended {
-		return exported{}
-	}
-	return exported{arena: arena, generation: arena.generation.Add(1)}
-}
-
-// host refuses a view whose arena has been rewound or closed since, or holds device memory.
-func (view exported) host() error {
-	if view.arena == nil || view.arena.generation.Load() != view.generation {
-		return fail(StatusUninitialized, "the view's arena served another call or was closed since")
-	}
-	description, err := view.arena.Describe()
-	if err != nil {
-		return err
-	}
-	if description.Residency == ResidencyVram {
-		return fail(StatusDevice, "the view is device memory")
-	}
-	return nil
+	return arena.handle
 }
 
 // endregion: Arenas
@@ -965,22 +972,20 @@ type call struct {
 	handles []cgo.Handle
 	// refusal is a fault this binding caught before the call crossed.
 	refusal *Error
-	// panicked is the first panic one of its callbacks raised, recovered there and reported here.
-	panicked atomic.Pointer[error]
-	// discard frees what the call produced, once no result will hand it out.
-	discard func()
 }
 
-// lent is a call and the result it produces once it succeeded.
+// lent is a call and the slot its result lands in, which the library writes in place.
 type lent[Result any] struct {
 	call
-	result func() Result
+	result *Result
 }
 
-// open starts a call; a verb fills its argument structure, crosses, and names its result.
+// open starts a call; a verb fills its argument structure, pointing it at the result slot, and
+// crosses.
 func open[Result any]() *lent[Result] {
 	opened := new(lent[Result])
 	opened.outcome = pin(&opened.call, new(C.usearch_outcome_t))
+	opened.result = pin(&opened.call, new(Result))
 	return opened
 }
 
@@ -993,18 +998,6 @@ func (lent *lent[Result]) refuse(refusal *Error) *lent[Result] {
 // status reads the outcome word without waiting.
 func (call *call) status() Status {
 	return Status(C.usearch_outcome_status(call.outcome))
-}
-
-// latch keeps the first panic a callback raised, so the call reports it once final.
-func (call *call) latch(recovered any) {
-	if recovered == nil {
-		return
-	}
-	err, isError := recovered.(error)
-	if !isError {
-		err = fmt.Errorf("usearch: a callback panicked: %v", recovered)
-	}
-	call.panicked.CompareAndSwap(nil, &err)
 }
 
 // settle waits until the call is final, releases everything it lent, and reports its failure.
@@ -1020,39 +1013,23 @@ func (call *call) settle() error {
 	if call.refusal != nil {
 		return call.refusal
 	}
-	if panicked := call.panicked.Load(); panicked != nil {
-		return *panicked
-	}
 	return check(*call.outcome)
 }
 
-// drop frees what the call produced, for a result no one will read.
-func (call *call) drop() {
-	if call.discard != nil {
-		call.discard()
-		call.discard = nil
-	}
-}
-
-// block settles a call and hands back what it produced.
+// block settles a call and hands back its result.
 func block[Result any](lent *lent[Result]) (Result, error) {
-	var produced Result
 	if err := lent.settle(); err != nil {
-		lent.drop()
-		return produced, err
+		var empty Result
+		return empty, err
 	}
-	lent.discard = nil // the result owns what the call produced
-	if lent.result != nil {
-		produced = lent.result()
-	}
-	return produced, nil
+	return *lent.result, nil
 }
 
-// Deferred is a submitted call, which holds its outcome and inputs until it is final. Status
-// polls without blocking, Wait blocks until the call is final and hands back what it produced, and
-// Close waits the same way and frees what no one took. A Deferred dropped without
-// Wait or Close is released by the collector once the call is final, never blocking on it: until
-// then every later collection checks it again.
+// Deferred is a submitted call, which holds its outcome and inputs until it is final, owned by the
+// one goroutine that polls or waits on it. Status polls without blocking, Wait blocks until the
+// call is final and hands back its result, and Close waits the same way and drops it. A Deferred
+// dropped without Wait or Close is released by the collector once the call is final, never
+// blocking on it: until then every later collection checks it again.
 //
 // A failure the binding catches before the call crosses is reported here too, like any other.
 type Deferred[Result any] struct {
@@ -1067,15 +1044,14 @@ func submitted[Result any](lent *lent[Result]) *Deferred[Result] {
 	return deferred
 }
 
-// release frees a dropped call once it is final, and otherwise hands it to another dropped Deferred
-// for the next collection, since the collector's goroutine must not block.
+// release settles a dropped call once it is final, and otherwise hands it to another dropped
+// Deferred for the next collection, since the collector's goroutine must not block.
 func release[Result any](lent *lent[Result]) {
 	if lent.status() == StatusDeferred {
 		submitted(lent)
 		return
 	}
 	_ = lent.settle()
-	lent.drop()
 }
 
 // Status reports StatusDeferred until the call is final, then its final status, without blocking.
@@ -1086,20 +1062,18 @@ func (deferred *Deferred[Result]) Status() Status {
 	return deferred.lent.status()
 }
 
-// Wait blocks until the call is final, releases its pins, then hands back what it produced, as
-// many times as it is asked; one goroutine waits at a time.
+// Wait blocks until the call is final, releases its pins, then hands back its result, the same
+// every time it is asked.
 func (deferred *Deferred[Result]) Wait() (Result, error) {
 	deferred.cleanup.Stop()
 	return block(deferred.lent)
 }
 
-// Close blocks until the call is final, releases its pins, frees whatever it produced that Wait
-// has not handed out, and reports the call's failure. It is idempotent and safe after Wait.
+// Close blocks until the call is final, releases its pins, and reports the call's failure. It is
+// idempotent and safe after Wait.
 func (deferred *Deferred[Result]) Close() error {
 	deferred.cleanup.Stop()
-	err := deferred.lent.settle()
-	deferred.lent.drop()
-	return err
+	return deferred.lent.settle()
 }
 
 // endregion: Deferred Calls

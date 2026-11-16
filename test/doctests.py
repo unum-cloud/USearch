@@ -7,6 +7,10 @@ extension.
 
 Run:
     python -m pytest test/doctests.py -v
+
+File: test/doctests.py
+Author: Ash Vardanian
+Date: August 16, 2026
 """
 
 import doctest
@@ -28,6 +32,10 @@ _DOCUMENTED: list[str] = [
     "On",
     "DenseIndex",
     "DenseTraversalStats",
+    "DenseRefinePlan",
+    "SequenceIndex",
+    "ShapesIndex",
+    "GeospatialIndex",
     "version",
     "capabilities_compiled",
     "capabilities_available",

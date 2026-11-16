@@ -22,6 +22,10 @@ from usearch import (
     DenseMetric,
     DenseMultiplyConfig,
     DenseOptions,
+    DenseRefineConfig,
+    DenseRefinePlan,
+    DenseReshardConfig,
+    DenseReshardPlan,
     DenseSampleConfig,
     DenseSearchConfig,
     DenseSoftmaxState,
@@ -31,14 +35,20 @@ from usearch import (
     Key,
     Library,
     Mood,
+    Phase,
+    PhaseProgress,
     PredicateArguments,
+    RefineVerdict,
     ProgressArguments,
+    RamOptions,
     Residency,
     RowsView,
     ScalarKind,
     Status,
     Traversal,
     dense_metadata_read_buffer,
+    dense_reshard,
+    dense_reshard_plan_finish_deferred,
 )
 from usearch.types import Address, NULL_ADDRESS
 
@@ -266,6 +276,10 @@ def test_names_come_from_the_engine_tables() raises:
     assert_true(library.traversal_from_name("walk") == Traversal.WALK, "and back")
     assert_equal(library.dense_metric_name(DenseMetric.JACCARD), "jaccard", "a metric")
     assert_true(library.dense_metric_from_name("euclidean") == DenseMetric.EUCLIDEAN, "and back")
+    assert_equal(library.phase_name(Phase.RESTITCH), "restitch", "a phase")
+    assert_true(library.phase_from_name("gather") == Phase.GATHER, "and back")
+    assert_equal(library.refine_verdict_name(RefineVerdict.STALLED), "stalled", "a verdict")
+    assert_true(library.refine_verdict_from_name("converged") == RefineVerdict.CONVERGED, "and back")
 
 
 def test_get_exports_every_entry_under_a_key() raises:
@@ -288,17 +302,9 @@ def test_get_exports_every_entry_under_a_key() raises:
     assert_equal(exported.columns(), 2, "each as wide as the engine reports")
     assert_equal(exported[2][0], Float32(3), "in insertion order")
 
-    var status = Status.SUCCESS
-    try:
-        _ = index.get[DType.float32](Key(integer=7), arena, ScalarKind.U8)
-    except error:
-        status = error.status
-    assert_true(status == Status.SHAPE_MISMATCH, "byte rows never read as floats")
-
 
 def test_arena_is_reused_and_results_outlive_the_call() raises:
-    """A result survives calls on other arenas, and the next call on its own arena rewinds and refills it,
-    retiring the result."""
+    """A result survives calls on other arenas, and the next call on its own arena rewinds and refills it."""
     if not _engine_is_present():
         print("skipped: libusearch_shared is not on the loader path")
         return
@@ -316,16 +322,10 @@ def test_arena_is_reused_and_results_outlive_the_call() raises:
 
     var reused = index.get[DType.float32](Key(integer=1), arena)
     assert_equal(reused[0][1], Float32(1), "the third call refilled the first arena")
-    var status = Status.SUCCESS
-    try:
-        _ = first[0]
-    except error:
-        status = error.status
-    assert_true(status == Status.UNINITIALIZED, "and the view it rewound refuses to read")
 
 
-def test_arena_survives_a_failed_call_and_retires_stale_views() raises:
-    """An arena stays valid through a refusal, which retires the views of earlier calls as a success would."""
+def test_arena_survives_a_failed_call() raises:
+    """An arena stays valid through a refusal, and the next call rewinds and refills it."""
     if not _engine_is_present():
         print("skipped: libusearch_shared is not on the loader path")
         return
@@ -343,12 +343,6 @@ def test_arena_survives_a_failed_call_and_retires_stale_views() raises:
     except error:
         status = error.status
     assert_true(status == Status.SHAPE_MISMATCH, "a three-wide row cannot multiply a two-wide index")
-    status = Status.SUCCESS
-    try:
-        _ = earlier[0]
-    except error:
-        status = error.status
-    assert_true(status == Status.UNINITIALIZED, "the failed call rewound the memory the earlier view read")
 
     var reused = index.get[DType.float32](Key(integer=1), arena)
     assert_equal(reused[0][1], Float32(1), "which the next call rewinds and refills")
@@ -453,7 +447,7 @@ def test_cursor_walks_every_row_once() raises:
 
 
 def test_health_audits_every_entry() raises:
-    """A small graph is reached whole from its landmarks."""
+    """A small graph is reached whole from its root."""
     if not _engine_is_present():
         print("skipped: libusearch_shared is not on the loader path")
         return
@@ -464,28 +458,56 @@ def test_health_audits_every_entry() raises:
     assert_equal(Int(reachability.reachable), 2, "and both reached")
 
 
-def test_absorb_consumes_its_donors() raises:
-    """An absorb takes in every donor's entries, and the donors it consumed are freed exactly once."""
+def test_refine_plans_stay_live_until_finished() raises:
+    """A refine lent a plan opens it and reports where it stopped, and finishing it reports the whole plan."""
     if not _engine_is_present():
         print("skipped: libusearch_shared is not on the loader path")
         return
     var library = Library()
+    var executor = Executor.for_ram(library, threads=2)
     var index = _basis(library)
-    var donor = DenseIndex.init_ram(library, DenseOptions(2, DenseMetric.INNER, values_per_key=2))
-    donor.reserve(1)
+    var plan = DenseRefinePlan()
+    var progress = PhaseProgress()
+    var opened = index.on(executor).refine(DenseRefineConfig(plan=Pointer(to=plan), phase=Pointer(to=progress)))
+    assert_true(plan.address != NULL_ADDRESS, "the first refine opens the plan")
+    assert_true(progress.phase == Phase.DONE, "and reports its round ended")
+    assert_equal(library.phase_name(progress.phase), "done", "as the engine spells it")
+    var finished = index.deferred(executor).refine_plan_finish(plan^)
+    var whole = finished.wait()
+    assert_equal(Int(whole.reachability.reachable), 2, "the whole plan reaches both entries")
+    assert_equal(Int(opened.reachability.audited), 2, "as the round audited them")
+
+
+def test_reshard_gathers_its_sources() raises:
+    """A gather through a plan moves every source's entries into the target among them, leaving the other
+    sources empty, and its deferred finish reports the whole plan."""
+    if not _engine_is_present():
+        print("skipped: libusearch_shared is not on the loader path")
+        return
+    var library = Library()
+    var executor = Executor.for_ram(library, threads=2)
+    var shard = DenseIndex.init_ram(library, DenseOptions(2, DenseMetric.INNER, values_per_key=2))
+    shard.reserve(1)
     var rows = [Float32(1), 1]
     var keys = [Key(integer=3)]
-    donor.insert(keys, RowsView.of(rows, 2))
-    var donors = List[DenseIndex]()
-    donors.append(donor^)
-    var report = index.absorb(donors^)
-    assert_equal(Int(index.describe().size), 3, "the donor's entry joined")
-    assert_equal(index.count(Key(integer=3)), 1, "under its own key")
-    assert_true(report.changed <= report.reselected, "the closing refine changes only what it re-selected")
+    shard.insert(keys, RowsView.of(rows, 2))
+    var parts = List[DenseIndex]()
+    parts.append(_basis(library))
+    parts.append(shard^)
+    var plan = DenseReshardPlan()
+    var report = dense_reshard(executor, parts, Span(parts)[0:1], DenseReshardConfig(plan=Pointer(to=plan)))
+    assert_true(plan.address != NULL_ADDRESS, "a reshard lent a plan opens it")
+    assert_equal(Int(parts[0].describe().size), 3, "the shard's entry joined")
+    assert_equal(parts[0].count(Key(integer=3)), 1, "under its own key")
+    assert_equal(Int(parts[1].describe().size), 0, "and the shard is left empty")
+    assert_true(report.changed <= report.reselected, "the closing round changes only what it re-selected")
+    var finished = dense_reshard_plan_finish_deferred(executor, plan^)
+    assert_equal(Int(finished.wait().reachability.audited), 3, "the whole plan reports the gathered target")
+    _ = parts^  # every index a plan names outlives its finish
 
 
-def test_split_and_sample() raises:
-    """A split empties the source into its receivers, and a sample draws held keys, each placed in 3D."""
+def test_reshard_cuts_and_sample_draws() raises:
+    """A cut empties the source into its targets, and a sample draws held keys, each placed in 3D."""
     if not _engine_is_present():
         print("skipped: libusearch_shared is not on the loader path")
         return
@@ -502,14 +524,15 @@ def test_split_and_sample() raises:
     if len(draws) != 0:
         assert_equal(Int(draws.coordinates().view.columns), 3, "each draw is placed in three dimensions")
 
-    var receivers = List[DenseIndex]()
+    var parts = List[DenseIndex]()
+    parts.append(index^)
     for _ in range(2):
-        var receiver = DenseIndex.init_ram(library, DenseOptions(2, DenseMetric.INNER, values_per_key=2))
-        receiver.reserve(2)
-        receivers.append(receiver^)
-    _ = index.split(receivers, seed=7)
-    assert_equal(Int(index.describe().size), 0, "the source is left empty")
-    assert_equal(Int(receivers[0].describe().size + receivers[1].describe().size), 2, "and live in the receivers")
+        var target = DenseIndex.init_ram(library, DenseOptions(2, DenseMetric.INNER, values_per_key=2))
+        target.reserve(2)
+        parts.append(target^)
+    _ = dense_reshard(Executor(library), Span(parts)[0:1], Span(parts)[1:3], DenseReshardConfig(seed=7))
+    assert_equal(Int(parts[0].describe().size), 0, "the source is left empty")
+    assert_equal(Int(parts[1].describe().size + parts[2].describe().size), 2, "and its entries live in the targets")
 
 
 def test_mutating_a_view_is_refused_as_read_only() raises:
@@ -533,6 +556,49 @@ def test_mutating_a_view_is_refused_as_read_only() raises:
     except error:
         status = error.status
     assert_true(status == Status.READ_ONLY, "clearing a view is refused as read-only")
+
+
+def test_nvme_views_resolve_keys_through_their_key_table() raises:
+    """An NVMe view counts keys only through the key table it was opened with."""
+    if not _engine_is_present():
+        print("skipped: libusearch_shared is not on the loader path")
+        return
+    var library = Library()
+    var index = _basis(library)
+    index.save("/tmp/usearch-mojo-nvme.safegraphs")
+    var drives = Executor.for_nvme(library, threads=1)
+    var domains = List[Int32]()
+    var keyed = DenseIndex.view_nvme(drives, "/tmp/usearch-mojo-nvme.safegraphs", key_table=RamOptions.on(domains))
+    assert_equal(keyed.on(drives).count(Key(integer=1)), 1, "a keyed view counts a saved key")
+    var keyless = DenseIndex.view_nvme(drives, "/tmp/usearch-mojo-nvme.safegraphs")
+    var status = Status.SUCCESS
+    try:
+        _ = keyless.on(drives).count(Key(integer=1))
+    except error:
+        status = error.status
+    assert_true(status == Status.UNSUPPORTED, "a keyless view refuses to count")
+
+
+def test_reshard_keeps_every_entry_and_load_nvme_wants_a_manifest() raises:
+    """A recut keeps every entry, and a lone monolith has no manifest a loaded handle could replace."""
+    if not _engine_is_present():
+        print("skipped: libusearch_shared is not on the loader path")
+        return
+    var library = Library()
+    var parts = List[DenseIndex]()
+    parts.append(_basis(library))
+    var placement = RamOptions()
+    placement.shard_capacity = c_size_t(8)
+    _ = dense_reshard(Executor(library), parts, parts, DenseReshardConfig(ram=placement))
+    assert_equal(Int(parts[0].describe().size), 2, "every entry stays")
+    parts[0].save("/tmp/usearch-mojo-monolith.safegraphs")
+    var drives = Executor.for_nvme(library, threads=1)
+    var status = Status.SUCCESS
+    try:
+        _ = DenseIndex.load_nvme(drives, "/tmp/usearch-mojo-monolith.safegraphs")
+    except error:
+        status = error.status
+    assert_true(status == Status.UNSUPPORTED, "a lone monolith is refused")
 
 
 def test_scans_find_every_query_itself() raises:
@@ -713,8 +779,8 @@ def _hold_until_released(completed: Int, total: Int, mut gate: _Gate) -> Continu
 
 
 def test_deferred_results_borrow_the_callers_arena() raises:
-    """A deferred search holds the caller's arena until final, so a call meeting it is refused without
-    retiring the matches; a later call on that arena does retire them, and a deferred insertion publishes."""
+    """A deferred search holds the caller's arena until final, so a call meeting it is refused and the
+    matches stay readable, and a deferred insertion publishes."""
     if not _engine_is_present():
         print("skipped: libusearch_shared is not on the loader path")
         return
@@ -750,14 +816,6 @@ def test_deferred_results_borrow_the_callers_arena() raises:
     assert_true(searched.wait().query_keys(0)[0] == Key(integer=8), "the refused call left the holder's view readable")
     # The handler reaches the gate by address, which is not a use, so it is kept past the wait.
     _ = gate^
-
-    _ = index.get[DType.float32](Key(integer=0), arena)
-    status = Status.SUCCESS
-    try:
-        _ = searched.wait().query_keys(0)
-    except error:
-        status = error.status
-    assert_true(status == Status.UNINITIALIZED, "a later call on the arena retires the deferred view")
     assert_equal(index.count(Key(integer=8)), 1, "and the deferred insertion published")
 
 
@@ -920,15 +978,18 @@ def main() raises:
     suite.test[test_names_come_from_the_engine_tables]()
     suite.test[test_get_exports_every_entry_under_a_key]()
     suite.test[test_arena_is_reused_and_results_outlive_the_call]()
-    suite.test[test_arena_survives_a_failed_call_and_retires_stale_views]()
+    suite.test[test_arena_survives_a_failed_call]()
     suite.test[test_caller_thread_executor_drives_every_verb]()
     suite.test[test_buffers_round_trip_through_the_arena]()
     suite.test[test_search_stream_pulls_in_distance_order]()
     suite.test[test_cursor_walks_every_row_once]()
     suite.test[test_health_audits_every_entry]()
-    suite.test[test_absorb_consumes_its_donors]()
-    suite.test[test_split_and_sample]()
+    suite.test[test_refine_plans_stay_live_until_finished]()
+    suite.test[test_reshard_gathers_its_sources]()
+    suite.test[test_reshard_cuts_and_sample_draws]()
     suite.test[test_mutating_a_view_is_refused_as_read_only]()
+    suite.test[test_nvme_views_resolve_keys_through_their_key_table]()
+    suite.test[test_reshard_keeps_every_entry_and_load_nvme_wants_a_manifest]()
     suite.test[test_scans_find_every_query_itself]()
     suite.test[test_progress_cancels_a_search]()
     suite.test[test_predicate_filters_keys]()

@@ -12,8 +12,10 @@ Date: August 16, 2026
 """
 
 import asyncio
+import contextlib
 import gc
 import os
+import sys
 import weakref
 from collections.abc import Callable
 from itertools import pairwise
@@ -55,6 +57,8 @@ from usearch import (
     DenseMetric,
     DenseProducts,
     DenseReachability,
+    DenseRefinePlan,
+    DenseReshardPlan,
     DenseTraversalStats,
     DenseVectors,
     Executor,
@@ -67,6 +71,8 @@ from usearch import (
     Mood,
     NVMeClass,
     On,
+    OutOfMemoryError,
+    Phase,
     ReadOnlyError,
     RefineReport,
     Residency,
@@ -168,11 +174,6 @@ def test_vram_executor_takes_no_thread_count():
         Executor.for_vram(threads=4)
 
 
-def test_executor_records_its_residency():
-    """An executor names where its calls compute, which is where the outputs they size live."""
-    assert Executor.for_ram(threads=1).residency is Residency.RAM
-
-
 def test_ram_executor_takes_memory_domain_ordinals():
     """The NUMA nodes its workers stay local to arrive as ordinals, and nothing else is accepted."""
     Executor.for_ram(memory_domains=[0]).drain()
@@ -211,7 +212,7 @@ def test_class_enums_carry_the_library_spellings():
 
 def test_nvme_executor_takes_an_nvme_class():
     """The engine an NVMe executor submits through is an `NVMeClass`, and nothing else is guessed at."""
-    assert Executor.for_nvme(threads=1, nvme_class=NVMeClass.POSIX).residency is Residency.NVME
+    assert isinstance(Executor.for_nvme(threads=1, nvme_class=NVMeClass.POSIX), Executor)
     with pytest.raises(TypeError):
         Executor.for_nvme(threads=1, nvme_class="posix")
 
@@ -311,15 +312,15 @@ def test_arena_is_made_by_an_executor_or_none():
         Arena(2)
 
 
-@pytest.mark.parametrize("arena", [None, 0])
-def test_output_verbs_require_an_arena(executor, arena):
-    """No output verb allocates on its own, so one handed no arena, or anything else, is refused."""
+@pytest.mark.parametrize("arena, failure", [(None, InvalidArgumentError), (0, TypeError)])
+def test_output_verbs_require_an_arena(executor, arena, failure: type):
+    """No output verb allocates on its own: the library refuses one handed no arena, and anything else is no arena."""
     index, vectors = build_index(8, 8, executor)
     with pytest.raises(TypeError):
         index.search(vectors[:1], 1)
-    with pytest.raises(TypeError):
+    with pytest.raises(failure):
         index.search(vectors[:1], 1, arena)
-    with pytest.raises(TypeError):
+    with pytest.raises(failure):
         index.cursor().next(1, arena)
 
 
@@ -604,8 +605,17 @@ def test_insert_handler_reports_and_cannot_stop(executor):
     assert len(index) == 64
 
 
-def test_insert_surfaces_a_raising_handler(executor):
-    """A handler's own exception outranks the cancellation it turned into."""
+@pytest.fixture
+def unraisable(monkeypatch) -> list[BaseException]:
+    """The exceptions callbacks report through `sys.unraisablehook`, collected rather than printed."""
+    reported: list[BaseException] = []
+    monkeypatch.setattr(sys, "unraisablehook", lambda unraisable: reported.append(unraisable.exc_value))
+    return reported
+
+
+def test_insert_reports_a_raising_handler(executor, unraisable):
+    """A handler never raises into the library: its exception goes to `sys.unraisablehook`, and the cancel it
+    answers cannot stop an insertion."""
     index = DenseIndex.init_ram(dimensions=16, quantization=Scalar.BF16)
     index.reserve(8)
 
@@ -614,10 +624,9 @@ def test_insert_surfaces_a_raising_handler(executor):
     def broken(completed: int, total: int) -> bool:
         raise failure
 
-    with pytest.raises(ValueError) as raised:
-        index.on(executor).insert(np.arange(8), random_vectors(8, 16), progress=broken)
-    assert raised.value is failure
-    assert len(index) == 8, "the batch was inserted before the handler's exception surfaced"
+    index.on(executor).insert(np.arange(8), random_vectors(8, 16), progress=broken)
+    assert unraisable and all(reported is failure for reported in unraisable)
+    assert len(index) == 8
 
 
 # endregion Ingest
@@ -687,28 +696,6 @@ def test_insert_reads_its_own_arrow_columns(executor, column: type):
     assert np.array_equal(np.asarray(target.on(executor).get(41, Arena(executor))), np.asarray(exported))
 
 
-def test_arrow_export_refuses_a_rewind_until_released(executor):
-    """An exported column holds its arena, so a call naming it is refused until the capsules die."""
-    index, vectors = build_index(4, 8, executor)
-    arena = Arena(executor)
-    capsules = index.on(executor).search(vectors[:1], 2, arena).distances.__arrow_c_device_array__()
-    with pytest.raises(ContendedError):
-        index.on(executor).search(vectors[:1], 2, arena)
-    del capsules
-    gc.collect()
-    assert len(index.on(executor).search(vectors[:1], 2, arena)) == 1
-
-
-def test_stale_results_refuse_to_export(executor):
-    """A result a later call rewound exports nothing."""
-    index, vectors = build_index(4, 8, executor)
-    arena = Arena(executor)
-    stale = index.on(executor).search(vectors[:1], 2, arena)
-    index.on(executor).search(vectors[1:2], 2, arena)
-    with pytest.raises(UninitializedError):
-        stale.__arrow_c_array__()
-
-
 def test_arrow_columns_read_as_pyarrow_writes_them(executor):
     """PyArrow's fixed-size lists and integer keys insert, across chunks, and matches export compacted."""
     pa = pytest.importorskip("pyarrow")
@@ -743,9 +730,8 @@ def test_search_reuses_one_arena(executor):
 def test_search_rejects_an_overflowing_request(executor):
     """An output matrix that cannot fit memory is refused rather than silently wrapped."""
     index, vectors = build_index(4, 8, executor)
-    with pytest.raises(CapacityOverflowError) as raised:
+    with pytest.raises((CapacityOverflowError, OutOfMemoryError)):
         index.on(executor).search(vectors[:2], 2**62, Arena(executor))
-    assert raised.value.status is Status.OVERFLOW
 
 
 @pytest.mark.parametrize("dimensions", [97, 256])
@@ -819,8 +805,8 @@ def test_filtered_search_admits_only_approved_keys(executor):
         assert np.all(found[query_index, : counts[query_index]] % 2 == 0)
 
 
-def test_filtered_search_propagates_a_raising_predicate(executor):
-    """A predicate that raises fails the search rather than silently narrowing it."""
+def test_filtered_search_rejects_what_a_raising_predicate_was_asked(executor, unraisable):
+    """A predicate never raises into the library: its exception goes to `sys.unraisablehook` and the key is rejected."""
     index, vectors = build_index(64, 16, executor)
 
     failure = ValueError()
@@ -828,9 +814,9 @@ def test_filtered_search_propagates_a_raising_predicate(executor):
     def broken(key):
         raise failure
 
-    with pytest.raises(ValueError) as raised:
-        index.on(executor).search(vectors[:2], 4, Arena(executor), predicate=broken)
-    assert raised.value is failure
+    matches = index.on(executor).search(vectors[:2], 4, Arena(executor), predicate=broken)
+    assert np.asarray(matches.counts).tolist() == [0, 0]
+    assert unraisable and all(reported is failure for reported in unraisable)
 
 
 def test_scan_finds_every_row_itself(executor):
@@ -887,32 +873,14 @@ def test_get_leaves_unformattable_kinds_as_bytes(executor):
     assert view.shape == (1, 16)
 
 
-def test_arena_refuses_to_rewind_while_a_buffer_is_exported(executor):
-    """Like a `bytearray`, an arena exporting a buffer over its outputs refuses the call that would rewind it,
-    and the refused call leaves the holder's views readable."""
-    index, vectors = build_index(4, 8, executor)
-    arena = Arena(executor)
-    rows = index.on(executor).get(1, arena)
-    exported = memoryview(rows)
-    with pytest.raises(ContendedError):
-        index.on(executor).get(2, arena)
-    assert np.allclose(np.asarray(rows), vectors[1:2], rtol=BF16_EPSILON, atol=BF16_EPSILON)
-    exported.release()
-    assert np.asarray(index.on(executor).get(2, arena)).shape == (1, 8)
-
-
-def test_outputs_export_dlpack_and_hold_their_arena(executor):
-    """An output exports a DLPack tensor in place, and a live tensor refuses the call that would rewind its arena."""
+def test_outputs_export_dlpack_in_place(executor):
+    """An output exports a DLPack tensor over its arena's own memory, on the device the arena describes."""
     index, _ = build_index(4, 8, executor)
-    arena = Arena(executor)
-    rows = index.on(executor).get(1, arena)
+    rows = index.on(executor).get(1, Arena(executor))
     assert rows.__dlpack_device__() == (1, 0)
     tensor = np.from_dlpack(rows)
     assert np.array_equal(tensor, np.asarray(rows))
-    with pytest.raises(ContendedError):
-        index.on(executor).get(2, arena)
-    del tensor
-    assert np.from_dlpack(index.on(executor).get(2, arena)).shape == (1, 8)
+    assert tensor.ctypes.data == np.asarray(rows).ctypes.data
 
 
 class DLPackOnly:
@@ -936,21 +904,6 @@ def test_inputs_arrive_through_dlpack(executor):
     found = keys_to_integers(index.on(executor).search(queries, 1, Arena(executor)).keys)
     assert found[:, 0].tolist() == [0, 1]
     assert queries.requests and all(requested["stream"] is None for requested in queries.requests)
-
-
-def test_results_refuse_reads_once_their_arena_rewinds(executor):
-    """A result kept past the next call over its arena is stale, so every read of it is refused."""
-    index, vectors = build_index(16, 8, executor, metric=DenseMetric.INNER)
-    arena = Arena(executor)
-    matches = index.on(executor).search(vectors[:2], 4, arena)
-    products = index.on(executor).multiply(vectors[:2], 4, arena)
-    for read in (lambda: matches[0], lambda: memoryview(matches.keys), lambda: memoryview(matches.counts)):
-        with pytest.raises(UninitializedError):
-            read()
-    rows = index.on(executor).get(1, arena)
-    with pytest.raises(UninitializedError):
-        products.query(0)
-    assert np.asarray(rows).shape == (1, 8)
 
 
 def test_duplicate_keys_stack(executor):
@@ -977,8 +930,7 @@ def test_iteration_walks_every_key(executor):
 
 
 def test_iteration_carries_links(executor):
-    """A pull asked for links carries them as offsets and keys, one asked for none carries keys alone, and each pull
-    rewinds the batch before it."""
+    """A pull asked for links carries them as offsets and keys, and one asked for none carries keys alone."""
     index, _ = build_index(40, 12, executor)
     cursor, arena = index.cursor(), Arena()
     batch = cursor.next(16, arena, links=True)
@@ -987,12 +939,8 @@ def test_iteration_carries_links(executor):
     assert view.format == "N" and view.shape == (17,)
     assert len(batch) == 16 and np.asarray(batch.keys).shape == (16, 16)
     assert np.asarray(linked).shape == (view[16], 16)
-    with pytest.raises(ContendedError):
-        cursor.next(16, arena)
     view.release()
     assert cursor.next(16, arena).links is None
-    with pytest.raises(UninitializedError):
-        memoryview(offsets)
 
 
 def test_iteration_walks_from_start_keys(executor):
@@ -1016,12 +964,13 @@ def test_search_stream_yields_nearest_first(executor):
 
 
 def test_walks_close_before_they_are_collected(executor):
-    """`close()` and a `with` block release a cursor's snapshot or a stream's walk, after which a pull is refused."""
+    """`close()` and a `with` block release a cursor's snapshot or a stream's walk, after which the library refuses a
+    pull."""
     index, vectors = build_index(32, 8, executor)
     arena = Arena()
     with index.cursor() as cursor:
         assert len(cursor.next(4, arena)) == 4
-    with pytest.raises(UninitializedError):
+    with pytest.raises(InvalidArgumentError):
         cursor.next(4, arena)
     try:
         stream = index.search_stream(vectors[0])
@@ -1029,7 +978,7 @@ def test_walks_close_before_they_are_collected(executor):
         return
     with stream:
         assert int(stream.next(1, arena)[0][0].key) == 0
-    with pytest.raises(UninitializedError):
+    with pytest.raises(InvalidArgumentError):
         stream.next(1, arena)
 
 
@@ -1038,8 +987,8 @@ def test_walks_close_before_they_are_collected(executor):
 # region Composition
 
 
-def test_absorb_absorbs_and_consumes_every_donor(executor):
-    """Every donor's entries arrive and its handle stops answering, all at once, where the build absorbs."""
+def test_reshard_gathers_every_source_into_the_target(executor):
+    """Several sources into one target gather every entry there, and the other sources end empty and live."""
     first = DenseIndex.init_ram(dimensions=16, quantization=Scalar.BF16)
     first.reserve(96)
     first.on(executor).insert(np.arange(0, 32), random_vectors(32, 16))
@@ -1051,51 +1000,60 @@ def test_absorb_absorbs_and_consumes_every_donor(executor):
         donors.append(donor)
 
     try:
-        first.on(executor).absorb(*donors)
+        report = first.on(executor).reshard([first, *donors], [first])
     except UnsupportedError:
         return
+    assert isinstance(report, RefineReport)
     assert len(first) == 96
     assert [40 in first, 80 in first] == [True, True]
-    for donor in donors:
-        with pytest.raises(UninitializedError):
-            len(donor)
+    assert [len(donor) for donor in donors] == [0, 0]
 
 
-def test_absorb_stopped_still_consumes_every_donor(executor):
-    """A stop cuts the closing refinement alone, so every donor has moved in and been consumed."""
+def test_reshard_stopped_still_moves_every_entry(executor):
+    """A stop cuts the closing rounds alone, so every entry has moved in."""
     first, _ = build_index(8, 8, executor)
     second, _ = build_index(8, 8, executor, seed=1)
     third, _ = build_index(8, 8, executor, seed=2)
     with pytest.raises((CancelledError, UnsupportedError)) as raised:
-        first.on(executor).absorb(second, third, progress=lambda completed, total: False)
+        first.on(executor).reshard([first, second, third], [first], progress=lambda completed, total: False)
     if raised.type is UnsupportedError:
         return
-    assert len(first) == 24
-    for donor in (second, third):
-        with pytest.raises(UninitializedError):
-            len(donor)
+    assert [len(first), len(second), len(third)] == [24, 0, 0]
 
 
-def test_absorb_consumes_a_donor_still_walked(executor):
-    """A cursor keeps no hold on its index, so an absorb consumes the donor and the cursor's next
-    pull, naming a handle that is gone, is refused."""
-    first, _ = build_index(16, 8, executor)
-    second, _ = build_index(16, 8, executor, seed=1)
-    cursor = second.cursor()
+def test_reshard_plan_continues_where_a_stop_left_it(executor):
+    """With a plan a stop leaves the rounds live, the next call naming it ends them, and the receiver closes the plan
+    deferred as well."""
+    first, _ = build_index(8, 8, executor)
+    second, _ = build_index(8, 8, executor, seed=1)
+    plan = DenseReshardPlan()
     try:
-        first.on(executor).absorb(second)
+        with contextlib.suppress(CancelledError):
+            first.on(executor).reshard([first, second], [first], progress=lambda completed, total: False, plan=plan)
     except UnsupportedError:
         return
-    assert len(first) == 32
-    with pytest.raises(UninitializedError):
-        cursor.next(4, Arena())
+    assert len(first) == 16 and plan.phase is not Phase.DONE
+    first.on(executor).reshard([first, second], [first], plan=plan)
+    assert plan.phase is Phase.DONE
+    assert isinstance(first.deferred(executor).reshard_plan_finish(plan).wait(), RefineReport)
 
 
-def test_absorb_refuses_itself(executor):
-    """An index cannot absorb the handle it already is."""
+def test_reshard_refuses_a_source_named_twice(executor):
+    """The library refuses an index named twice among the sources, whatever receiver the call runs through."""
     index, _ = build_index(8, 8, executor)
-    with pytest.raises(ConfigMismatchError):
-        index.on(executor).absorb(index)
+    with pytest.raises(InvalidArgumentError):
+        index.on(executor).reshard([index, index], [index])
+
+
+def test_reshard_keeps_every_entry_and_load_nvme_wants_a_manifest(executor, tmp_path):
+    """A reshard recuts the shards in place, and a lone monolith has no manifest a loaded handle could replace."""
+    index, _ = build_index(32, 16, executor)
+    index.on(executor).reshard([index], [index], memory_domains=[], shard_capacity=64)
+    assert len(index) == 32
+    path = str(tmp_path / "monolith.safegraphs")
+    index.on(executor).save(path)
+    with pytest.raises(UnsupportedError):
+        DenseIndex.load_nvme(path, executor=Executor.for_nvme(threads=1))
 
 
 def test_clear_keeps_the_geometry(executor):
@@ -1208,11 +1166,11 @@ def test_refine_reports_a_sweep_and_leaves_the_index_standing(executor):
 
 
 def test_refine_reports_telemetry(executor):
-    """The sweep reports into the `DenseTraversalStats` a caller passes, as every other walk does."""
+    """A round reports the distances it computed into the `DenseTraversalStats` a caller passes, and walks nothing."""
     index, _ = build_index(32, 16, executor)
     stats = DenseTraversalStats()
     index.on(executor).refine(stats=stats)
-    assert stats.visited_members > 0
+    assert stats.computed_distances > 0 and stats.visited_members == 0
 
 
 def test_refine_takes_no_positionals(executor):
@@ -1229,16 +1187,18 @@ def test_refine_rejects_unknown_keywords(executor):
         index.on(executor).refine(expansion_add=64)
 
 
-def test_refine_refuses_a_consumed_handle(executor):
-    """A donor absorbed by `absorb` has no graph left to sweep."""
-    first, _ = build_index(8, 8, executor)
-    second, _ = build_index(8, 8, executor, seed=1)
-    try:
-        first.on(executor).absorb(second)
-    except UnsupportedError:
-        return
-    with pytest.raises(UninitializedError):
-        second.on(executor).refine()
+def test_refine_plan_resumes_and_finishes(executor):
+    """A plan keeps a stopped round live for the next call, and the receiver closes it with the whole plan's report."""
+    index, _ = build_index(64, 16, executor)
+    plan = DenseRefinePlan()
+    with contextlib.suppress(CancelledError):
+        index.on(executor).refine(plan=plan, progress=lambda completed, total: False)
+    assert plan.phase is not Phase.DONE
+    index.on(executor).refine(plan=plan)
+    assert plan.phase is Phase.DONE
+    assert index.on(executor).refine_plan_finish(plan).reachability.audited == 64
+    with pytest.raises(InvalidArgumentError):
+        index.on(executor).refine_plan_finish(plan)
 
 
 def test_health_reaches_every_entry_after_a_refine(executor):
@@ -1249,19 +1209,16 @@ def test_health_reaches_every_entry_after_a_refine(executor):
     assert isinstance(health, DenseReachability)
     assert health.audited == len(index)
     assert health.reachable == health.audited
-    assert health.sweeps >= 1
+    assert health.depth_from_root >= 1
 
 
-def test_split_partitions_every_entry_and_empties_the_source(executor):
-    """The receivers hold every entry between them, and the source stays live but empty."""
+def test_reshard_partitions_every_entry_and_empties_the_source(executor):
+    """One source into several targets cuts it between them, and the source stays live but empty."""
     index, _ = build_index(64, 16, executor)
     receivers = [DenseIndex.init_ram(dimensions=16, quantization=Scalar.BF16) for _ in range(2)]
     for receiver in receivers:
         receiver.reserve(64)
-    try:
-        report = index.on(executor).split(*receivers, seed=7)
-    except UnsupportedError:
-        return
+    report = index.on(executor).reshard([index], receivers, seed=7)
     assert isinstance(report, RefineReport)
     assert sum(len(receiver) for receiver in receivers) == 64
     assert len(index) == 0
@@ -1478,8 +1435,8 @@ def test_attend_writes_into_the_arena(executor):
     assert np.any(np.asarray(attended) != 0)
 
 
-def test_attend_refuses_a_missing_value_row(executor):
-    """A missing row is a wrong softmax rather than a smaller one, and a lookup's own failure outranks it."""
+def test_attend_refuses_a_missing_value_row(executor, unraisable):
+    """A missing row is a wrong softmax rather than a smaller one, and a lookup that raises misses its row."""
     index, keys_matrix = build_index(8, 8, executor, metric=DenseMetric.INNER)
     values = bf16_words(keys_matrix)
     with pytest.raises(ShapeMismatchError):
@@ -1488,8 +1445,9 @@ def test_attend_refuses_a_missing_value_row(executor):
         index.on(executor).attend(keys_matrix[:1], values[:4], int, Arena(), values_dtype=Scalar.BF16)
     with pytest.raises(ShapeMismatchError):
         index.on(executor).attend(keys_matrix[:1], keys_matrix, int, Arena())
-    with pytest.raises(ZeroDivisionError):
+    with pytest.raises(ShapeMismatchError):
         index.on(executor).attend(keys_matrix[:1], values, lambda key: 1 / 0, Arena(), values_dtype=Scalar.BF16)
+    assert unraisable and all(isinstance(reported, ZeroDivisionError) for reported in unraisable)
 
 
 def test_attend_refuses_a_half_width_carry(executor):

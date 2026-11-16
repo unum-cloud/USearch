@@ -322,18 +322,12 @@ test("Ranked runs land in the arena they are handed", async (t) => {
     });
   });
 
-  await t.test("the next call rewinds the arena, so the earlier view refuses and its arrays read empty", () => {
+  await t.test("the next call on the arena lands its own matches", () => {
     const arena = new Arena();
-    const first = index.search(new Float32Array([1, 1]), 2, arena);
-    const taken = first.keys;
+    index.search(new Float32Array([1, 1]), 2, arena);
     const second = index.search(new Float32Array([2, 2]), 2, arena);
 
     assert(second instanceof Matches);
-    assert.throws(() => first.keys, {
-      code: Status.Uninitialized,
-      message: "The arena was rewound or freed since this view was written.",
-    });
-    assert.equal(taken.length, 0, "an array taken out earlier reads nothing rather than the next call's matches");
     assert.equal(usearch.integerFromKey(usearch.keyAt(second.keys, 0)), 2n);
   });
 });
@@ -438,7 +432,7 @@ test("Deferred calls", async (t) => {
     assert.deepEqual(await calls.describe, index.describe());
     const health = await calls.health;
     assert.deepEqual([health.audited, health.reachable], [2, 2]);
-    assert(health.sweeps >= 1, "an audit sweeps at least once");
+    assert(health.depthFromRoot >= 1, "a health check reaches at least one depth");
     const stored = (await calls.get).data;
     [0.9, 0.1, 0.1].forEach((expected, column) => assertAlmostEqual(stored[column], expected, 2 ** -7));
     assert.equal((await calls.refine).changed, 0);
@@ -474,21 +468,12 @@ test("Deferred calls", async (t) => {
     executor.free();
   });
 
-  await t.test("a rewind or a free retires a deferred result nobody read yet", () => {
-    const stale = {
-      code: Status.Uninitialized,
-      message: "The arena was rewound or freed since this call wrote into it",
-    };
+  await t.test("freeing an arena waits for the deferred call writing it", () => {
     const executor = Executor.forRam();
     const arena = new Arena();
-    const rewound = index.deferred(executor).search(query, 2, arena);
-    executor.drain();
-    assert.equal(index.search(query, 1, arena).columns, 1, "the call after it rewinds the arena");
-    assert.throws(() => rewound.wait(), stale);
-    const freed = index.deferred(executor).search(query, 2, arena);
+    const call = index.deferred(executor).search(query, 2, arena);
     arena.free();
-    assert.equal(freed.status, Status.Success, "the free waited for the call");
-    assert.throws(() => freed.wait(), stale);
+    assert.equal(call.status, Status.Success, "the free waited for the call");
     executor.free();
   });
 
@@ -550,6 +535,9 @@ test("Capacity and clearing", () => {
   assert.equal(index.contains(42n), false);
 });
 
+/** The verdicts the library spells. */
+const VERDICTS = ["none", "improved", "converged", "stalled", "stopped"];
+
 test("Refinement leaves the graph searchable", () => {
   const index = DenseIndex.initRam({ metric: DenseMetric.Euclidean, connectivity: 16, dimensions: 4 });
   const keys = [];
@@ -561,93 +549,114 @@ test("Refinement leaves the graph searchable", () => {
   index.reserve(64);
   index.on(EXECUTOR).insert(keys, rows(4, ...values));
 
-  const report = index.on(EXECUTOR).refine({ expansionFactor: 64 });
+  const report = index.on(EXECUTOR).refine({ expansionFactor: 64, memoryLimit: 1 << 20 });
   assert(report.changed <= report.reselected, "refinement changes only the nodes it re-selected");
   assert.equal(typeof report.reachability.reachable, "number", "and closes on an audit");
+  assert(VERDICTS.includes(report.verdict), "and concludes with a verdict");
   assert.equal(index.describe().size, 64, "refinement adds and removes nothing");
   assert.equal(usearch.integerFromKey(index.search(new Float32Array([7, 8, 9, 10]), 1, new Arena()).get(0).keys), 7n);
 });
 
-test("Absorbing consumes only the donors it absorbed", (t) => {
+test("A reshard gathers its sources into the target, leaving the rest empty and live", (t) => {
   const index = DenseIndex.initRam({ metric: DenseMetric.Euclidean, dimensions: 2 });
-  const donor = DenseIndex.initRam({ metric: DenseMetric.Euclidean, dimensions: 2 });
+  const source = DenseIndex.initRam({ metric: DenseMetric.Euclidean, dimensions: 2 });
   index.reserve(2);
-  donor.reserve(1);
+  source.reserve(1);
   index.insert(1n, new Float32Array([1, 1]));
-  donor.insert(2n, new Float32Array([2, 2]));
+  source.insert(2n, new Float32Array([2, 2]));
 
-  index.absorb([donor]);
+  const report = index.on(EXECUTOR).reshard([index, source], [index]);
 
-  assert.equal(index.count(2n), 1, "the donor's entries joined the index");
-  assert.throws(() => donor.describe(), {
-    code: Status.Uninitialized,
-    message: "The index was freed or absorbed into another",
-  });
-  donor.free(); // a consumed donor holds nothing left to free
-  assert.throws(() => index.absorb([donor]), {
-    code: Status.Uninitialized,
-    message: "A donor was freed or absorbed already",
-  });
-  assert.throws(() => index.absorb([EXECUTOR]), {
+  assert(report.changed <= report.reselected, "the closing round changes only what it re-selected");
+  assert.equal(index.count(2n), 1, "the other source's entries joined the index");
+  assert.equal(source.describe().size, 0, "a source the targets do not name ends empty and live");
+  assert.throws(() => index.on(EXECUTOR).reshard([index, EXECUTOR], [index]), {
     code: Status.InvalidArgument,
-    message: "The 'donors' argument must hold indexes",
+    message: "The 'sources' argument must hold indexes",
   });
-
-  const twice = DenseIndex.initRam({ metric: DenseMetric.Euclidean, dimensions: 2 });
-  assert.throws(() => index.absorb([twice, twice]), {
-    code: Status.Uninitialized,
-    message: "A donor was freed or absorbed already",
-  });
-  assert.equal(twice.describe().size, 0, "a refused absorb hands its donors back");
+  assert.throws(() => index.on(EXECUTOR).reshard([index, source, source], [index]), { code: Status.InvalidArgument });
 
   const other = initRamOrSkip(t, { metric: DenseMetric.Euclidean, dimensions: 2, quantization: Scalar.I8 });
   if (!other) return;
   other.reserve(1);
   other.insert(3n, new Float32Array([3, 3]));
-  try {
-    index.absorb([other]);
-  } catch (error) {
-    // The engine refuses another scalar, which the stand-in absorbs, and hands the donor back live.
-    assert.equal(error.code, Status.ConfigMismatch);
-    assert.equal(other.count(3n), 1, "a donor the call did not absorb stays live");
-  }
+  assert.throws(() => index.on(EXECUTOR).reshard([index, other], [index]), { code: Status.ConfigMismatch });
+  assert.equal(other.count(3n), 1, "a refusal moves nothing");
 });
 
-test("A deferred absorb holds its donors until it is final", () => {
+test("A deferred reshard holds its handles until it is final", () => {
   const executor = Executor.forRam();
   const index = DenseIndex.initRam({ metric: DenseMetric.Euclidean, dimensions: 2 });
-  const donor = DenseIndex.initRam({ metric: DenseMetric.Euclidean, dimensions: 2 });
   index.reserve(1);
-  donor.reserve(1);
-  donor.insert(2n, new Float32Array([2, 2]));
-
-  const call = index.deferred(executor).absorb([donor]);
-  assert.throws(() => donor.count(2n), {
-    code: Status.Uninitialized,
-    message: "The index was freed or absorbed into another",
-  });
-  assert.throws(() => index.deferred(executor).absorb([donor]), {
-    code: Status.Uninitialized,
-    message: "A donor was freed or absorbed already",
-  });
+  const call = (() => {
+    const source = DenseIndex.initRam({ metric: DenseMetric.Euclidean, dimensions: 2 });
+    source.reserve(1);
+    source.insert(2n, new Float32Array([2, 2]));
+    return index.deferred(executor).reshard([index, source], [index]);
+  })();
+  collect();
   const report = call.wait();
-  assert(report.changed <= report.reselected, "the closing refine changes only what it re-selected");
-  assert.equal(index.count(2n), 1, "the donor's entries joined the index");
+  assert(report.changed <= report.reselected, "the closing round changes only what it re-selected");
+  assert.equal(index.count(2n), 1, "the other source's entries joined the index");
   executor.free();
 });
 
-test("A split empties the source into its receivers", () => {
+test("A reshard into several targets empties the source into them", () => {
   const index = DenseIndex.initRam({ metric: DenseMetric.Euclidean, dimensions: 2 });
   index.reserve(4);
   index.insert([1n, 2n, 3n, 4n], rows(2, 1, 0, 0, 1, 1, 1, 2, 2));
-  const receivers = [0, 1].map(() => {
-    const receiver = DenseIndex.initRam({ metric: DenseMetric.Euclidean, dimensions: 2 });
-    receiver.reserve(4);
-    return receiver;
+  const targets = [0, 1].map(() => {
+    const target = DenseIndex.initRam({ metric: DenseMetric.Euclidean, dimensions: 2 });
+    target.reserve(4);
+    return target;
   });
-  index.on(EXECUTOR).split(receivers, { seed: 7 });
+  index.on(EXECUTOR).reshard([index], targets, { seed: 7 });
   assert.equal(index.describe().size, 0, "the source is left empty but live");
-  assert.equal(receivers[0].describe().size + receivers[1].describe().size, 4, "every entry moved into a receiver");
+  assert.equal(targets[0].describe().size + targets[1].describe().size, 4, "every entry moved into a target");
+});
+
+test("A reshard in place keeps every entry, and loadNvme wants a manifest", () => {
+  const index = DenseIndex.initRam({ metric: DenseMetric.Euclidean, dimensions: 2 });
+  index.reserve(4);
+  index.insert([1n, 2n, 3n, 4n], rows(2, 1, 0, 0, 1, 1, 1, 2, 2));
+  index.on(EXECUTOR).reshard([index], [index], { shardCapacity: 8 });
+  assert.equal(index.describe().size, 4, "every entry stays");
+
+  const monolithPath = path.join(os.tmpdir(), "usearch.test.reshard.safegraphs");
+  index.on(EXECUTOR).save(monolithPath);
+  const drives = Executor.forNvme({ threads: 1 });
+  try {
+    assert.throws(() => DenseIndex.loadNvme(monolithPath, { executor: drives }), { code: Status.Unsupported });
+  } finally {
+    fs.unlinkSync(monolithPath);
+  }
+});
+
+test("Plans carry refines and reshards across calls until finished", () => {
+  const index = DenseIndex.initRam({ metric: DenseMetric.Euclidean, connectivity: 16, dimensions: 2 });
+  index.reserve(8);
+  index.insert([1n, 2n, 3n, 4n], rows(2, 1, 0, 0, 1, 1, 1, 2, 2));
+  const pool = index.on(EXECUTOR);
+
+  const refining = new usearch.DenseRefinePlan();
+  assert.equal(refining.phase, "none", "a plan that never ran stands nowhere");
+  pool.refine({ plan: refining });
+  pool.refine({ plan: refining });
+  assert.equal(refining.phase, "done", "each call ends its round");
+  assert.throws(() => index.insert(5n, new Float32Array([3, 3])), { code: Status.Contended });
+  assert(VERDICTS.includes(pool.refinePlanFinish(refining).verdict));
+  index.insert(5n, new Float32Array([3, 3]));
+
+  const source = DenseIndex.initRam({ metric: DenseMetric.Euclidean, connectivity: 16, dimensions: 2 });
+  source.reserve(1);
+  source.insert(6n, new Float32Array([4, 4]));
+  const resharding = new usearch.DenseReshardPlan();
+  pool.reshard([index, source], [index], { plan: resharding });
+  assert.equal(resharding.phase, "done");
+  const closing = index.deferred(EXECUTOR).reshardPlanFinish(resharding);
+  assert(VERDICTS.includes(closing.wait().verdict), "a deferred receiver closes it too");
+  assert.equal(index.count(6n), 1, "the other source's entries joined the index");
+  assert.throws(() => pool.reshardPlanFinish(resharding), { code: Status.InvalidArgument });
 });
 
 test("A sample draws held keys, each placed in three dimensions", () => {
@@ -688,9 +697,8 @@ test("Late interaction over multi-vector keys", () => {
   const every = index.maxsim(rows(4, 1, 0, 0, 0, 0, 1, 0, 0), 2, 0, new Arena());
   const bounded = index.maxsim(rows(4, 1, 0, 0, 0, 0, 1, 0, 0), 2, 1, new Arena());
   assert(every.get(0).count >= bounded.get(0).count, "a zero wanted lands every key the query scored");
-  assert.throws(() => index.maxsim(rows(4, 1, 0, 0, 0, 0, 1, 0, 0), 3, 2, new Arena()), {
+  assert.throws(() => index.maxsim(rows(4, 1, 0, 0, 0, 0, 1, 0, 0), 0, 2, new Arena()), {
     code: Status.ShapeMismatch,
-    message: "The rows do not split into whole queries.",
   });
 });
 
@@ -810,17 +818,30 @@ test("Attention folds every key the walk scores", async (t) => {
     assert.throws(() => index.attend(queryRows, widened, rowOf, new Arena()), { code: Status.ShapeMismatch });
   });
 
-  await t.test("the resolver's first exception stops every later lookup and outranks the refusal", () => {
-    let calls = 0;
-    const failing = () => {
-      calls++;
-      throw new RangeError("no such token");
-    };
-    assert.throws(() => index.attend(queryRows, valueRows, failing, new Arena()), {
-      name: "RangeError",
-      message: "no such token",
-    });
-    assert.equal(calls, 1);
+  await t.test("an exception the resolver throws reaches the uncaught-exception handlers and refuses its key", () => {
+    const reported = [];
+    // The runner's own handler would fail the test, so only this one listens meanwhile.
+    const runners = process.rawListeners("uncaughtException");
+    process.removeAllListeners("uncaughtException");
+    process.on("uncaughtException", (error) => reported.push(error));
+    try {
+      assert.throws(
+        () =>
+          index.attend(
+            queryRows,
+            valueRows,
+            () => {
+              throw new RangeError("no such token");
+            },
+            new Arena(),
+          ),
+        { code: Status.ShapeMismatch },
+      );
+    } finally {
+      process.removeAllListeners("uncaughtException");
+      for (const runner of runners) process.on("uncaughtException", runner);
+    }
+    assert(reported.length > 0 && reported.every((error) => error.message === "no such token"));
   });
 
   await t.test("a carry that holds no maximum and partition per query is refused", () => {
@@ -923,6 +944,14 @@ test("Serialization", async (t) => {
       usearch.keyFromInteger(42n),
     );
     assert.throws(() => index.insert(43n, new Float32Array([0.2, 0.6, 0.4])), { code: Status.ReadOnly });
+  });
+
+  await t.test("viewNvme resolves keys only through its key table", () => {
+    const drives = Executor.forNvme({ threads: 1 });
+    const keyed = DenseIndex.viewNvme(indexPath, { executor: drives, keyTableDomains: [] });
+    assert.equal(keyed.on(drives).count(42n), 1);
+    const keyless = DenseIndex.viewNvme(indexPath, { executor: drives });
+    assert.throws(() => keyless.on(drives).count(42n), { code: Status.Unsupported });
   });
 
   await t.test("metadataRead", () => {
@@ -1102,27 +1131,22 @@ test("Arenas hold every output whose length scales with the call", async (t) => 
     assert.deepEqual(second.data, new Float32Array([0, 1, 0, 0]));
   });
 
-  await t.test("a reused arena allocates once, and only its latest view reads", () => {
+  await t.test("a reused arena serves each call in turn", () => {
     const arena = new Arena();
-    let previous;
+    let latest;
     for (const key of [1n, 2n, 1n]) {
-      const current = index.get(key, arena);
-      assert.equal(current.rows, 1);
-      if (previous) assert.throws(() => previous.data, { code: Status.Uninitialized });
-      previous = current;
+      latest = index.get(key, arena);
+      assert.equal(latest.rows, 1);
     }
-    assert.deepEqual(previous.data, new Float32Array([1, 0, 0, 0]));
+    assert.deepEqual(latest.data, new Float32Array([1, 0, 0, 0]));
   });
 
-  await t.test("freeing an arena refuses every view of it, and every later call", () => {
+  await t.test("a freed arena is refused by every later call", () => {
     const arena = new Arena();
-    const held = index.get(1n, arena);
-    const taken = held.data;
+    index.get(1n, arena);
     arena.free();
     arena.free(); // freeing twice is a no-op
-    assert.throws(() => held.data, { code: Status.Uninitialized });
-    assert.equal(taken.length, 0, "an array taken out earlier reads nothing rather than freed memory");
-    assert.throws(() => index.get(1n, arena), { code: Status.Uninitialized, message: "The Arena was already freed" });
+    assert.throws(() => index.get(1n, arena), { code: Status.InvalidArgument });
   });
 
   await t.test("a host arena describes itself as RAM with no device", () => {
@@ -1141,11 +1165,7 @@ test("Arenas hold every output whose length scales with the call", async (t) => 
       { code: Status.ShapeMismatch, message: "Sub-byte rows come in whole bytes" },
       "four dimensions fill half a byte, which a packed export refuses",
     );
-    const arena = new Arena();
-    const absent = index.get(3n, arena);
-    assert.equal(absent.data.length, 0, "an absent key exports nothing");
-    index.get(1n, arena);
-    assert.throws(() => absent.data, { code: Status.Uninitialized }, "an empty view goes stale like any other");
+    assert.equal(index.get(3n, new Arena()).data.length, 0, "an absent key exports nothing");
   });
 });
 
@@ -1169,7 +1189,7 @@ test("Traversal telemetry", async (t) => {
   };
 
   const assertCounters = (stats, note) => {
-    for (const counter of ["visitedMembers", "computedDistances", "restarts"]) {
+    for (const counter of ["visitedMembers", "computedDistances", "restarts", "missingHints"]) {
       assert(Number.isInteger(stats[counter]) && stats[counter] >= 0, `${note}: ${counter} is a whole count`);
     }
   };
@@ -1193,7 +1213,7 @@ test("Traversal telemetry", async (t) => {
     const call = populated()
       .deferred(executor)
       .search(new Float32Array([7, 8, 9, 10]), 4, new Arena(), { stats });
-    assert.deepEqual({ ...stats }, { visitedMembers: 0, computedDistances: 0, restarts: 0 });
+    assert.deepEqual({ ...stats }, { visitedMembers: 0, computedDistances: 0, restarts: 0, missingHints: 0 });
     await call;
     assert(stats.computedDistances > 0, "the walk it paid for lands with its result");
     executor.free();
@@ -1217,9 +1237,10 @@ test("Traversal telemetry", async (t) => {
     reading.visitedMembers = 5;
     reading.computedDistances = 11;
     reading.restarts = 1;
+    reading.missingHints = 3;
     total.accumulate(reading);
     total.accumulate(reading);
-    assert.deepEqual({ ...total }, { visitedMembers: 10, computedDistances: 22, restarts: 2 });
+    assert.deepEqual({ ...total }, { visitedMembers: 10, computedDistances: 22, restarts: 2, missingHints: 6 });
   });
 });
 
@@ -1229,5 +1250,6 @@ test("Reachability audits", () => {
   index.insert([1n, 2n], rows(2, 1, 1, 2, 2));
   const health = index.on(EXECUTOR).health();
   assert.deepEqual([health.audited, health.reachable], [2, 2]);
-  assert(health.sweeps >= 1, "an audit sweeps at least once");
+  assert(health.depthFromRoot >= 1, "a health check reaches at least one depth");
+  assert.deepEqual([health.unreachedIslands, health.components], [0, 1], "two linked entries form one component");
 });

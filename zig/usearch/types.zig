@@ -35,6 +35,9 @@ extern fn usearch_traversal_name(traversal: Traversal) [*:0]const u8;
 extern fn usearch_traversal_from_name(name: BytesView, traversal: *Traversal) Status;
 extern fn usearch_mood_name(mood: Mood) [*:0]const u8;
 extern fn usearch_mood_from_name(name: BytesView, mood: *Mood) Status;
+extern fn usearch_phase_name(phase: Phase) [*:0]const u8;
+extern fn usearch_phase_from_name(name: BytesView, phase: *Phase) Status;
+extern fn usearch_load_path_name(load_path: usearch_load_path_t) [*:0]const u8;
 
 extern fn usearch_version_name() [*:0]const u8;
 extern fn usearch_cpu_class_name(cpu_class: usearch_cpu_class_t) [*:0]const u8;
@@ -46,6 +49,8 @@ const usearch_cpu_class_t = c_int;
 const usearch_gpu_class_t = c_int;
 /// Mirrors `usearch_nvme_class_t`, whose zero derives the devices' own class.
 const usearch_nvme_class_t = c_int;
+/// Mirrors `usearch_load_path_t`, whose zero names no load from a path.
+const usearch_load_path_t = c_int;
 extern fn usearch_capabilities_compiled() [*:0]const u8;
 extern fn usearch_capabilities_available() [*:0]const u8;
 
@@ -523,23 +528,18 @@ pub const QueryMatches = struct {
     scores: []const Distance,
 };
 
-/// The ranked matches a search or a stream pull wrote into an arena, one list per query, each holding up
-/// to the `wanted` the call asked for. Mirrors `usearch_matches_view_t`.
-///
-/// It reads the arena, so every read is refused once that arena serves another call or is freed.
+/// The ranked matches a search or a stream pull wrote into an arena, one list per query, each
+/// holding up to the `wanted` the call asked for, readable until the arena's next call.
+/// Mirrors `usearch_matches_view_t`.
 pub const Matches = struct {
-    stamp: Arena.Stamp,
-    view: usearch_matches_view_t,
+    view: usearch_matches_view_t = .{},
     /// Queries the call resolved.
     queries: usize,
 
-    /// The matches written for one query, refusing a `position` past `queries` with
-    /// `Error.InvalidArgument`, a stale view with `Error.Uninitialized`, and device memory with `Error.Device`.
-    pub fn query(self: Matches, position: usize) Error!QueryMatches {
-        try self.stamp.check();
-        if (position >= self.queries) return refuse(.invalid_argument);
+    /// The matches written for one query, `position` below `queries`.
+    pub fn query(self: Matches, position: usize) QueryMatches {
         const first = position * self.view.columns;
-        const written = self.view.counts.?[position];
+        const written = if (self.view.counts) |counts| counts[0..self.queries][position] else 0;
         return .{ .keys = outputSlice(Key, self.view.keys, first, written), .scores = outputSlice(Distance, self.view.scores, first, written) };
     }
 };
@@ -679,6 +679,8 @@ pub const abi = struct {
     pub const progress_t = usearch_progress_t;
     pub const cpu_class_name = usearch_cpu_class_name;
     pub const gpu_class_name = usearch_gpu_class_name;
+    pub const load_path_t = usearch_load_path_t;
+    pub const load_path_name = usearch_load_path_name;
 };
 
 /// How costly one predicate call is, which decides how many keys each call carries.
@@ -735,6 +737,61 @@ pub inline fn checkContext(comptime Context: type) void {
 pub inline fn contextPointer(comptime Context: type, context: Context) ?*anyopaque {
     return if (Context == void) null else @ptrCast(@constCast(context));
 }
+
+/// The kind of work a refine or reshard plan is doing. Mirrors `usearch_phase_t`.
+///
+/// Non-exhaustive, so a phase a newer engine reports arrives intact rather than coerced.
+pub const Phase = enum(c_int) {
+    /// No plan, or one that has not started.
+    none = 0,
+    /// A reshard moving keys and values into a target, with the links it keeps.
+    copy = 1,
+    /// A reshard on NVMe building blocks of a target's rows in RAM and writing their links.
+    build = 2,
+    /// A reshard cutting a source into one part per target.
+    partition = 3,
+    /// A reshard moving each part into its target.
+    scatter = 4,
+    /// A round's health check, opening or closing it.
+    health = 5,
+    /// A round linking each island with the root's component.
+    heal = 6,
+    /// A round drawing the hubs its gather streams entries past.
+    hubs = 7,
+    /// A round gathering every entry into a neighborhood.
+    gather = 8,
+    /// A round re-stitching each neighborhood.
+    restitch = 9,
+    /// A round on NVMe rewriting each tile of links from what its restitch changed.
+    write = 10,
+    /// The plan ended its round, and nothing more is pending.
+    done = 11,
+    _,
+
+    /// The canonical spelling, as `.restitch` spells "restitch". Calls `usearch_phase_name`.
+    pub fn name(self: Phase) [:0]const u8 {
+        return std.mem.span(usearch_phase_name(self));
+    }
+
+    /// Reads a spelling back, or null when no phase spells it. Calls `usearch_phase_from_name`.
+    pub fn fromName(text: []const u8) ?Phase {
+        var phase: Phase = undefined;
+        return if (usearch_phase_from_name(.of(text), &phase) == .success) phase else null;
+    }
+};
+
+/// Where a plan stands: its phase, that phase's position in the plan, and its own count.
+/// Mirrors `usearch_phase_progress_t`.
+pub const PhaseProgress = extern struct {
+    /// The kind of work in hand.
+    phase: Phase = .none,
+    /// This phase's position among the ones the plan runs.
+    ordinal: usize = 0,
+    /// Units of this phase done, entries or islands.
+    completed: usize = 0,
+    /// Units of this phase in all.
+    total: usize = 0,
+};
 
 /// Whether a call returns with its final status, or once submitted. Mirrors `usearch_completion_t`;
 /// a receiver's type picks it, so no verb takes it as an argument.
@@ -968,20 +1025,17 @@ pub const Executor = struct {
 /// products, monoliths and cursor batches - mirroring `usearch_arena_t`.
 ///
 /// Every verb writing such outputs borrows one as `*Arena`, blocking or deferred alike. Each call
-/// rewinds it, so the views of the previous call refuse every read afterwards, and refills it,
-/// growing only past its high-water mark, so a steady loop allocates once. An arena serves one call
-/// at a time: a second use while a call holds it fails with `Error.Contended` and leaves that call's
-/// views alone. A view finds its arena where the call left it, so an arena stays put, never copied,
-/// while views over it live.
+/// rewinds it, ending the previous call's views, and refills it, growing only past its high-water
+/// mark, so a steady loop allocates once. An arena serves one call at a time: a second use while a
+/// call holds it fails with `Error.Contended` and leaves that call's views alone.
 ///
-/// A GPU arena grows, fills and frees on the first stream of the executor that made it, so it
-/// serves only calls on that executor, any other or none answering `Error.Device`, and must be
-/// freed before that executor is.
+/// A GPU arena holds device memory, which `describe` reports and no host accessor may read. It
+/// grows, fills and frees on the first stream of the executor that made it, so it serves only calls
+/// on that executor, any other or none answering `Error.Device`, and must be freed before that
+/// executor is.
 pub const Arena = struct {
     /// The opaque `usearch_arena_t` the ABI hands back; null once freed.
     handle: ?*anyopaque,
-    /// Calls it has served, which every view compares against its own. Binding-only.
-    generation: usize = 0,
 
     /// Makes an arena where `executor` computes, decided once, or host pages for calls on the
     /// calling thread when null; host pages may outlive the executor, a GPU arena may not.
@@ -1000,12 +1054,11 @@ pub const Arena = struct {
         return arena;
     }
 
-    /// Frees every output in it, waiting for every deferred call naming it, and leaves every view
-    /// over it refusing reads. Calls `usearch_arena_free`.
+    /// Frees every output in it, waiting for every deferred call naming it.
+    /// Calls `usearch_arena_free`.
     pub fn deinit(self: *Arena) void {
         usearch_arena_free(self.handle);
         self.handle = null;
-        self.generation +%= 1;
     }
 
     /// Where its outputs live, as the executor that made it decided, refusing a freed arena with
@@ -1021,19 +1074,6 @@ pub const Arena = struct {
             .device = if (description.residency == .vram) @intCast(description.device) else null,
         };
     }
-
-    /// The arena and call a view was written by. Binding-only.
-    pub const Stamp = struct {
-        arena: *const Arena,
-        generation: usize,
-
-        /// Refuses a read once the arena served another call or was freed with `Error.Uninitialized`,
-        /// and a read of device memory with `Error.Device`.
-        pub fn check(self: Stamp) Error!void {
-            if (self.arena.generation != self.generation) return refuse(.uninitialized);
-            if ((try self.arena.describe()).residency == .vram) return refuse(.device);
-        }
-    };
 };
 
 /// Where an arena's outputs live. Mirrors `usearch_arena_description_t`.
@@ -1043,14 +1083,6 @@ pub const ArenaDescription = struct {
     /// The ordinal of the device holding a `.vram` arena; null for host pages.
     device: ?u32,
 };
-
-/// The stamp a call C has taken from `arena` carries, once a blocking call returns or a deferred one
-/// is submitted: every call but a contended one rewound the arena, killing the previous call's views.
-/// Binding-only.
-pub fn served(arena: *Arena, status: Status) Arena.Stamp {
-    if (status != .contended) arena.generation +%= 1;
-    return .{ .arena = arena, .generation = arena.generation };
-}
 
 /// The library's version, as a static null-terminated string. Calls `usearch_version_name`.
 pub fn version() [:0]const u8 {
@@ -1106,9 +1138,11 @@ test "every enumerator keeps the value the linked library spells it by" {
     try expectSpellings(Residency);
     try expectSpellings(Traversal);
     try expectSpellings(Mood);
+    try expectSpellings(Phase);
     try std.testing.expectEqualStrings("unrecognized", (@as(Status, @enumFromInt(9999))).name());
     try std.testing.expectEqual(@as(?Status, null), Status.fromName("pending"));
     try std.testing.expectEqual(@as(?Mood, null), Mood.fromName("chill"));
+    try std.testing.expectEqual(@as(?Phase, null), Phase.fromName("stage"));
     try std.testing.expectEqual(@as(?Residency, null), Residency.fromName("disk"));
     try std.testing.expectEqual(@as(?Traversal, null), Traversal.fromName("exact"));
     try std.testing.expectEqual(@as(?Scalar, null), Scalar.fromName("f128"));

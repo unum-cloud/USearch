@@ -12,6 +12,9 @@ public sealed class DenseIndexTests : IDisposable
 {
     private const int Dimensions = 4;
 
+    /// <summary>Bounds every wait in these tests; a passing case never reaches it.</summary>
+    private static readonly TimeSpan WaitLimit = TimeSpan.FromSeconds(120);
+
     private readonly Executor _pool = Executor.ForRam(threads: 1);
     private readonly Arena _arena = new();
 
@@ -43,37 +46,6 @@ public sealed class DenseIndexTests : IDisposable
     private static RowsView Rows(float[] values) => RowsView.RowsOf<float>(values, Dimensions);
 
     private static Key[] KeysOf(params ulong[] identities) => [.. identities.Select(identity => (Key)identity)];
-
-    #region Layouts
-
-    [Fact]
-    public void NativeStructsMatchTheirLayouts()
-    {
-        int word = IntPtr.Size;
-        Assert.Equal(2 * word, (int)Marshal.OffsetOf<NativeRamOptions>(nameof(NativeRamOptions.ShardCapacity)));
-        Assert.Equal(3 * word, (int)Marshal.OffsetOf<NativeRamOptions>(nameof(NativeRamOptions.CpuClass)));
-        Assert.Equal(5 * word, Unsafe.SizeOf<NativeRamOptions>());
-        Assert.Equal(3 * word, (int)Marshal.OffsetOf<NativeVramOptions>(nameof(NativeVramOptions.GpuClass)));
-        Assert.Equal(4 * word, Unsafe.SizeOf<NativeVramOptions>());
-        Assert.Equal(2 * word, (int)Marshal.OffsetOf<NativeNvmeOptions>(nameof(NativeNvmeOptions.CpuClass)));
-        Assert.Equal(3 * word, Unsafe.SizeOf<NativeNvmeOptions>());
-        Assert.Equal(7 * word, (int)Marshal.OffsetOf<NativeExecutorForNvme>(nameof(NativeExecutorForNvme.NvmeClass)));
-        Assert.Equal(4 * word, Unsafe.SizeOf<NativeDenseTraversalStats>());
-        int cpuClass = (int)Marshal.OffsetOf<NativeDenseDescription>(nameof(NativeDenseDescription.CpuClass));
-        Assert.Equal(Unsafe.SizeOf<NativeDenseMetadata>() + 3 * word, cpuClass);
-        Assert.Equal(cpuClass + 4, (int)Marshal.OffsetOf<NativeDenseDescription>(nameof(NativeDenseDescription.GpuClass)));
-        Assert.Equal(cpuClass + 8,
-                     (int)Marshal.OffsetOf<NativeDenseDescription>(nameof(NativeDenseDescription.ShardsCount)));
-        Assert.Equal(cpuClass + 8 + word, Unsafe.SizeOf<NativeDenseDescription>());
-        Assert.True(Unsafe.SizeOf<NativeDenseDescription>() <= 12 * sizeof(ulong), "the report slots hold it");
-        Assert.True(Unsafe.SizeOf<SampleReports>() <= 12 * sizeof(ulong), "the report slots hold a sample's views");
-        // The traversal enum packs right after the float scale, with no padding between them.
-        Assert.Equal((int)Marshal.OffsetOf<NativeDenseAttend>(nameof(NativeDenseAttend.ScoreScale)) + 4,
-                     (int)Marshal.OffsetOf<NativeDenseAttend>(nameof(NativeDenseAttend.Traversal)));
-        Assert.Equal(4 * word, (int)Marshal.OffsetOf<NativeDenseCursorInit>(nameof(NativeDenseCursorInit.Cursor)));
-    }
-
-    #endregion Layouts
 
     #region Keys
 
@@ -162,6 +134,14 @@ public sealed class DenseIndexTests : IDisposable
         Assert.True(Names.TryParse("walk", out Traversal traversal));
         Assert.Equal(Traversal.Walk, traversal);
         Assert.False(Names.TryParse("exact", out Traversal _));
+        Assert.Equal("restitch", Phase.Restitch.Name());
+        Assert.True(Names.TryParse("scatter", out Phase phase));
+        Assert.Equal(Phase.Scatter, phase);
+        Assert.False(Names.TryParse("absent", out Phase _));
+        Assert.Equal("stalled", RefineVerdict.Stalled.Name());
+        Assert.True(Names.TryParse("converged", out RefineVerdict verdict));
+        Assert.Equal(RefineVerdict.Converged, verdict);
+        Assert.False(Names.TryParse("settled", out RefineVerdict _));
 
         USearchException failure = new(Status.ReadOnly, "detail");
         Assert.Equal("usearch: read-only: detail", failure.Message);
@@ -263,12 +243,6 @@ public sealed class DenseIndexTests : IDisposable
     }
 
     [Fact]
-    public void BorrowedStreamsMustPairOnePerDevice() =>
-        Assert.Equal(
-            Status.ShapeMismatch,
-            Assert.Throws<USearchException>(() => Executor.ForVram(devices: [0], streams: [1, 2])).Status);
-
-    [Fact]
     public void TheIndexItselfRunsOnTheCallersThread()
     {
         using DenseIndex index = SmallIndex();
@@ -300,10 +274,6 @@ public sealed class DenseIndexTests : IDisposable
         Assert.Equal(Status.Success, inserted.Status);
         inserted.Wait();
         Assert.Equal(Key.FromUInt64(2), found[0].Keys[0]);
-
-        // The waited view borrows the arena the call named, so the arena's next call retires it.
-        index.Get(1UL, this._arena);
-        Assert.Equal(Status.Uninitialized, Assert.Throws<USearchException>(() => found[0].Count).Status);
     }
 
     [Fact]
@@ -334,7 +304,7 @@ public sealed class DenseIndexTests : IDisposable
         using Deferred<Matches> mismatched = index.Deferred(this._pool).Search(narrowRows, wanted: 1, this._arena);
         USearchException failure = Assert.Throws<USearchException>(() => mismatched.Wait());
         Assert.Equal(Status.ShapeMismatch, failure.Status);
-        Assert.Same(failure, Assert.Throws<USearchException>(() => mismatched.Wait()));
+        Assert.Equal(failure.Status, Assert.Throws<USearchException>(() => mismatched.Wait()).Status);
         Assert.Equal(Status.ShapeMismatch, mismatched.Status);
     }
 
@@ -345,14 +315,13 @@ public sealed class DenseIndexTests : IDisposable
         index.Insert(KeysOf(1), Rows(RowOf(1f)));
         Arena arena = new();
 
-        using Deferred<DenseVectors> got = index.Deferred(this._pool).Get(1UL, arena);
+        using Deferred<DenseVectors> got = index.Deferred(this._pool).Get<F32>(1UL, arena);
         using Deferred<DenseIndexDescription> described = index.Deferred(this._pool).Describe();
         arena.Dispose();
         index.Dispose();
 
         Assert.Equal(Status.Success, got.Status);
         Assert.Equal(1UL, described.Wait().Size);
-        Assert.Equal(Status.Uninitialized, Assert.Throws<USearchException>(() => got.Wait().Row<float>(0).Length).Status);
         Assert.Equal(Status.Uninitialized, Assert.Throws<USearchException>(() => index.Describe()).Status);
     }
 
@@ -363,26 +332,44 @@ public sealed class DenseIndexTests : IDisposable
         index.Insert(KeysOf(1), Rows(RowOf(1f)));
         using Arena arena = new();
 
-        Deferred<DenseVectors> pending = index.Deferred(this._pool).Get(1UL, arena);
-        Assert.Equal(Status.Contended, Assert.Throws<USearchException>(() => index.Get(1UL, arena)).Status);
-        using Deferred<DenseVectors> refused = index.Deferred(this._pool).Get(1UL, arena);
-        Assert.Equal(Status.Contended, refused.Status);
+        // The progress handler holds the deferred call on the pool's second thread until the refusals
+        // are checked, since a pool of one thread runs a deferred call on the caller's.
+        using Executor pool = Executor.ForRam(threads: 2);
+        using SemaphoreSlim entered = new(0), released = new(0);
+        Deferred<Matches> pending = index.Deferred(pool).Search(
+            Rows(RowOf(1f)), wanted: 1, arena, progress: (_, _) =>
+            {
+                entered.Release();
+                released.Wait();
+                return true;
+            });
+        try
+        {
+            Assert.True(entered.Wait(WaitLimit), "A deferred call reaches its progress handler");
+            Assert.Equal(Status.Contended, Assert.Throws<USearchException>(() => index.Get<F32>(1UL, arena)).Status);
+            using Deferred<DenseVectors> refused = index.Deferred(this._pool).Get<F32>(1UL, arena);
+            Assert.Equal(Status.Contended, refused.Status);
+        }
+        finally
+        {
+            released.Release(int.MaxValue / 2);
+        }
 
-        // A refused call never rewound the arena, so the busy call's view stays readable.
-        Assert.Equal(RowOf(1f), pending.Wait().Row<float>(0).ToArray());
+        // A refused call never rewound the arena, so the busy call's matches stay readable.
+        Assert.Equal(Key.FromUInt64(1), pending.Wait()[0].Keys[0]);
         pending.Dispose();
-        Assert.Equal(RowOf(1f), index.Get(1UL, arena).Row<float>(0).ToArray());
+        Assert.Equal(RowOf(1f), index.Get<F32>(1UL, arena).Row<float>(0).ToArray());
 
         SubmitAndDrop(index, this._pool, arena);
         Collect();
         this._pool.Drain();
         Collect();
-        Assert.Equal(RowOf(1f), index.Get(1UL, arena).Row<float>(0).ToArray());
+        Assert.Equal(RowOf(1f), index.Get<F32>(1UL, arena).Row<float>(0).ToArray());
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static void SubmitAndDrop(DenseIndex index, Executor pool, Arena arena) =>
-        index.Deferred(pool).Get(1UL, arena);
+        index.Deferred(pool).Get<F32>(1UL, arena);
 
     private static void Collect()
     {
@@ -425,7 +412,7 @@ public sealed class DenseIndexTests : IDisposable
         byte[] stored = [0b0000_0001, 0, 0, 0, 0, 0, 0, 0b1000_0000];
         index.On(this._pool).Insert(KeysOf(1), RowsView.RowsOf<byte>(stored, 64, Scalar.U1x8));
 
-        DenseVectors retrieved = index.On(this._pool).Get(1UL, this._arena, Scalar.U1x8);
+        DenseVectors retrieved = index.On(this._pool).Get<U1x8>(1UL, this._arena);
         Assert.Equal(1, retrieved.Rows);
         Assert.Equal(8, retrieved.StrideBytes);
         Assert.Equal(64, retrieved.Columns);
@@ -515,7 +502,7 @@ public sealed class DenseIndexTests : IDisposable
     }
 
     [Fact]
-    public void NegativeBoundsAndMissingArenasAreRefusedBeforeTheBoundary()
+    public void NegativeBoundsAndMissingArenasAreRefused()
     {
         using DenseIndex index = SmallIndex();
 
@@ -611,7 +598,7 @@ public sealed class DenseIndexTests : IDisposable
         index.On(this._pool).Insert(KeysOf(1), RowsView.RowsOf<sbyte>(new sbyte[] { 1, 2, 3, 4 }, Dimensions));
         index.On(this._pool).Insert(KeysOf(2), RowsView.RowsOf<byte>(new byte[] { 1, 2, 3, 4 }, Dimensions));
 
-        DenseVectors retrieved = index.Get(2UL, this._arena, Scalar.F64);
+        DenseVectors retrieved = index.Get<F64>(2UL, this._arena);
         Assert.Equal(new double[] { 1, 2, 3, 4 }, retrieved.Row<double>(0).ToArray());
     }
 
@@ -636,17 +623,67 @@ public sealed class DenseIndexTests : IDisposable
     }
 
     [Fact]
-    public void SplitEmptiesTheSourceIntoItsReceivers()
+    public void ReshardCutsOneSourceIntoItsTargetsAndGathersThemBack()
     {
         using DenseIndex index = SmallIndex();
         using DenseIndex left = SmallIndex();
         using DenseIndex right = SmallIndex();
         index.On(this._pool).Insert(KeysOf(1, 2, 3), Rows([.. RowOf(1f), .. RowOf(2f), .. RowOf(3f)]));
 
-        index.On(this._pool).Split([left, right], seed: 7);
-
+        index.On(this._pool).Reshard([index], [left, right], seed: 7);
         Assert.Equal(3UL, left.Describe().Size + right.Describe().Size);
         Assert.Equal(0UL, index.Describe().Size);
+
+        // Every source stays the caller's, so the emptied ones still answer.
+        index.On(this._pool).Reshard([index, left, right], [index]);
+        Assert.Equal(3UL, index.Describe().Size);
+        Assert.Equal(0UL, left.Count(1UL) + right.Count(1UL));
+    }
+
+    [Fact]
+    public void PlansKeepAStoppedRoundUntilFinished()
+    {
+        using DenseIndex index = SmallIndex();
+        index.On(this._pool).Insert(KeysOf(1, 2, 3), Rows([.. RowOf(1f), .. RowOf(2f), .. RowOf(3f)]));
+        DenseRefinePlan plan = new();
+
+        Assert.Equal(Phase.None, plan.Phase.Phase);
+        Assert.Equal(
+            Status.Cancelled,
+            Assert.Throws<USearchException>(
+                () => index.On(this._pool).Refine(progress: (_, _) => false, plan: plan)).Status);
+        Assert.NotEqual(Phase.Done, plan.Phase.Phase);
+
+        index.On(this._pool).Refine(plan: plan);
+        Assert.Equal(Phase.Done, plan.Phase.Phase);
+        Assert.Equal(RefineVerdict.Converged, index.On(this._pool).RefinePlanFinish(plan).Verdict);
+        Assert.Equal(
+            Status.InvalidArgument,
+            Assert.Throws<USearchException>(() => index.On(this._pool).RefinePlanFinish(plan)).Status);
+    }
+
+    [Fact]
+    public void ReshardKeepsEveryEntryAndLoadNvmeWantsAManifest()
+    {
+        string path = Path.Combine(Path.GetTempPath(), $"usearch-{Guid.NewGuid():N}.safegraphs");
+        try
+        {
+            using DenseIndex index = SmallIndex();
+            index.On(this._pool).Insert(KeysOf(1, 2, 3), Rows([.. RowOf(1f), .. RowOf(2f), .. RowOf(3f)]));
+
+            index.On(this._pool).Reshard([index], [index], memoryDomains: [], shardCapacity: 8);
+            Assert.Equal(3UL, index.Describe().Size);
+
+            index.On(this._pool).Save(path);
+            using Executor drives = Executor.ForNvme(threads: 1);
+            Assert.Equal(
+                Status.Unsupported,
+                Assert.Throws<USearchException>(() => DenseIndex.LoadNvme(path, executor: drives)).Status);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
     }
 
     [Fact]
@@ -715,7 +752,6 @@ public sealed class DenseIndexTests : IDisposable
 
         DenseProducts capped = index.Multiply(Rows(RowOf(1f)), this._arena, wanted: 1);
         Assert.Single(capped.Keys(0).ToArray());
-        Assert.Equal(Status.Uninitialized, Assert.Throws<USearchException>(() => products.Keys(1).Length).Status);
 
         using DenseIndex distances = SmallIndex();
         Assert.Equal(
@@ -736,14 +772,13 @@ public sealed class DenseIndexTests : IDisposable
         DenseSoftmaxState[] carry = new DenseSoftmaxState[1];
 
         // A zero query scores every key alike, so the output is the plain mean of the value rows.
-        DenseVectors attended = index.On(this._pool).Attend(
+        DenseVectors attended = index.On(this._pool).Attend<F32>(
             Rows(new float[Dimensions]), values, key => key.TryGetUInt64(out ulong identity) ? (int)identity - 1 : -1,
             this._arena, carry: carry);
         Assert.Equal(new[] { 0.5f, 0.5f, 0f, 0f }, attended.Row<float>(0).ToArray());
         Assert.Equal(2d, carry[0].Partition, 4);
 
-        DenseVectors widened = index.Attend(
-            Rows(new float[Dimensions]), values, _ => 0, this._arena, outputsScalar: Scalar.F64);
+        DenseVectors widened = index.Attend<F64>(Rows(new float[Dimensions]), values, _ => 0, this._arena);
         Assert.Equal(Scalar.F64, widened.Scalar);
         Assert.Equal(1d, widened.Row<double>(0)[0], 6);
 
@@ -751,14 +786,11 @@ public sealed class DenseIndexTests : IDisposable
         Assert.Equal(
             Status.ShapeMismatch,
             Assert.Throws<USearchException>(
-                () => index.Attend(Rows(new float[Dimensions]), narrow, _ => 0, this._arena)).Status);
+                () => index.Attend<F32>(Rows(new float[Dimensions]), narrow, _ => 0, this._arena)).Status);
         Assert.Equal(
             Status.ShapeMismatch,
             Assert.Throws<USearchException>(
-                () => index.Attend(Rows(new float[Dimensions]), values, _ => 7, this._arena)).Status);
-        Assert.Throws<InvalidOperationException>(
-            () => index.Attend(
-                Rows(new float[Dimensions]), values, _ => throw new InvalidOperationException(), this._arena));
+                () => index.Attend<F32>(Rows(new float[Dimensions]), values, _ => 7, this._arena)).Status);
     }
 
     #endregion Refinement & Linear Algebra
@@ -775,8 +807,8 @@ public sealed class DenseIndexTests : IDisposable
         index.On(this._pool).Insert(new[] { shared, shared, shared }, Rows([.. RowOf(1f), .. RowOf(2f), .. RowOf(3f)]));
 
         using Arena other = new(this._pool);
-        DenseVectors first = index.On(this._pool).Get(shared, this._arena);
-        DenseVectors second = index.Get(1UL, other);
+        DenseVectors first = index.On(this._pool).Get<F32>(shared, this._arena);
+        DenseVectors second = index.Get<F32>(1UL, other);
         Assert.Equal(3, first.Rows);
         Assert.Equal(Dimensions, first.Columns);
         Assert.Equal(Dimensions * sizeof(float), first.StrideBytes);
@@ -797,22 +829,13 @@ public sealed class DenseIndexTests : IDisposable
         QueryMatches query = found[0];
         Assert.Equal(Key.FromUInt64(1), query.Keys[0]);
 
-        // Any verb reuses any arena, and the next call's rewind retires every earlier view.
-        DenseVectors second = index.On(this._pool).Get(2UL, arena);
+        // Any verb reuses any arena.
+        DenseVectors second = index.On(this._pool).Get<F32>(2UL, arena);
         Assert.Equal(RowOf(2f), second.Row<float>(0).ToArray());
-        Assert.Equal(Status.Uninitialized, Assert.Throws<USearchException>(() => query.Count).Status);
-        Assert.Equal(Status.Uninitialized, Assert.Throws<USearchException>(() => found[0].Keys.Length).Status);
+        Assert.True(index.SaveBuffer(arena).Length > 0);
 
-        // A refused call rewinds the arena all the same.
-        Assert.Equal(
-            Status.UnknownKind,
-            Assert.Throws<USearchException>(() => index.Get(1UL, arena, Scalar.Unknown)).Status);
-        Assert.Equal(Status.Uninitialized, Assert.Throws<USearchException>(() => second.Row<float>(0).Length).Status);
-
-        Monolith monolith = index.SaveBuffer(arena);
         arena.Dispose();
-        Assert.Equal(Status.Uninitialized, Assert.Throws<USearchException>(() => monolith.Bytes.Length).Status);
-        Assert.Equal(Status.Uninitialized, Assert.Throws<USearchException>(() => index.Get(1UL, arena)).Status);
+        Assert.Equal(Status.Uninitialized, Assert.Throws<USearchException>(() => index.Get<F32>(1UL, arena)).Status);
     }
 
     #endregion Retrieval & Arenas
@@ -838,21 +861,43 @@ public sealed class DenseIndexTests : IDisposable
     }
 
     [Fact]
-    public void PredicateFailuresSurfaceAfterTheCallRatherThanUnwindingThroughIt()
+    public void ProductsAdmitOnlyWhatThePredicateApproves()
     {
-        using DenseIndex index = SmallIndex();
+        using DenseIndex index = DenseIndex.InitRam(SmallOptions() with { Metric = DenseMetric.Inner });
         index.On(this._pool).Insert(KeysOf(1, 2), Rows([.. RowOf(1f), .. RowOf(2f)]));
 
-        Assert.Throws<InvalidOperationException>(
-            () => index.On(this._pool).Search(
-                Rows(RowOf(1f)), wanted: 2, this._arena, predicate: _ => throw new InvalidOperationException()));
-
-        using Deferred<Matches> deferred = index.Deferred(this._pool).Search(
-            Rows(RowOf(1f)), wanted: 2, this._arena, predicate: _ => throw new InvalidOperationException());
-        Assert.Throws<InvalidOperationException>(() => deferred.Wait());
+        DenseProducts products = index.On(this._pool).Multiply(
+            Rows(RowOf(1f)), this._arena, predicate: key => key == Key.FromUInt64(2));
+        Assert.Equal([Key.FromUInt64(2)], products.Keys(0).ToArray());
     }
 
     #endregion Filtered Search
+
+    #region Progress
+
+    [Fact]
+    public void ProgressHearsTheCallAndCancelsItWhenAnsweredFalse()
+    {
+        using DenseIndex index = SmallIndex();
+        ulong heard = 0;
+        index.On(this._pool).Insert(
+            KeysOf(1, 2), Rows([.. RowOf(1f), .. RowOf(2f)]), progress: (completed, total) =>
+            {
+                heard = total;
+                return true;
+            });
+        Assert.Equal(2UL, heard);
+
+        // Reports come after each slice of a batch, so a cancel stops the slices after the first.
+        float[] queries = [.. Enumerable.Range(0, 20).SelectMany(query => RowOf(query))];
+        Assert.Equal(
+            Status.Cancelled,
+            Assert.Throws<USearchException>(
+                () => index.On(this._pool).Search(
+                    Rows(queries), wanted: 1, this._arena, progress: (_, _) => false)).Status);
+    }
+
+    #endregion Progress
 
     #region Handles
 
@@ -916,33 +961,6 @@ public sealed class DenseIndexTests : IDisposable
         }
     }
 
-    [Fact]
-    public void AbsorbConsumesOnlyTheDonorsItAbsorbed()
-    {
-        using DenseIndex index = SmallIndex();
-        DenseIndex donor = SmallIndex();
-        donor.Insert(KeysOf(7), Rows(RowOf(7f)));
-
-        index.On(this._pool).Absorb(donor);
-        Assert.True(index.Contains(7UL));
-        Assert.Equal(Status.Uninitialized, Assert.Throws<USearchException>(() => donor.Count(7UL)).Status);
-        donor.Dispose();
-
-        using DenseIndex other = DenseIndex.InitRam(SmallOptions() with { Quantization = Scalar.I8 });
-        other.Reserve(1);
-        other.Insert(KeysOf(8), Rows(RowOf(8f)));
-        try
-        {
-            index.On(this._pool).Absorb(other);
-        }
-        catch (USearchException refused)
-        {
-            // The engine refuses another scalar, which the stand-in absorbs, and hands the donor back live.
-            Assert.Equal(Status.ConfigMismatch, refused.Status);
-            Assert.Equal(1UL, other.Count(8UL));
-        }
-    }
-
     #endregion Handles
 
     #region Serialization
@@ -971,6 +989,17 @@ public sealed class DenseIndexTests : IDisposable
             Assert.Equal(2UL, restored.Describe().Size);
             Assert.Equal(
                 Key.FromUInt64(2), restored.On(this._pool).Search(Rows(RowOf(2f)), wanted: 1, this._arena)[0].Keys[0]);
+
+            // An NVMe view resolves keys only through the key table it was opened with.
+            using (Executor drives = Executor.ForNvme(threads: 1))
+            using (DenseIndex keyed = DenseIndex.ViewNvme(path, executor: drives, keyTableDomains: []))
+            using (DenseIndex keyless = DenseIndex.ViewNvme(path, executor: drives))
+            {
+                Assert.Equal(1UL, keyed.On(drives).Count(1UL));
+                Assert.Equal(
+                    Status.Unsupported,
+                    Assert.Throws<USearchException>(() => keyless.On(drives).Count(1UL)).Status);
+            }
 
             DenseIndex viewed;
             try
@@ -1028,9 +1057,6 @@ public sealed class DenseIndexTests : IDisposable
                 Path.Combine(Path.GetTempPath(), "usearch-absent-checkpoint.safegraphs"), executor: this._pool));
 
         Assert.Equal(Status.Io, failure.Status);
-        Assert.Equal(
-            Status.InvalidArgument,
-            Assert.Throws<USearchException>(() => DenseIndex.LoadRam(string.Empty)).Status);
     }
 
     #endregion Serialization

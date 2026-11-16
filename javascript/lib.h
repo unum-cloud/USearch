@@ -62,7 +62,7 @@ enum {
     usearch_js_key_bytes_k = 16,
 
     /** Heap blocks one call may own, freed together once it is final. */
-    usearch_js_owned_k = 2,
+    usearch_js_owned_k = 4,
 };
 
 /** Element count of a statically-sized table, which every naming table asks for. */
@@ -112,24 +112,12 @@ typedef struct usearch_js_arena_t {
 
     /** The strong reference keeping @c executor's wrapper alive alongside it. */
     napi_ref executor_reference;
-
-    /** The last call the library took naming it, compared and never read; @c NULL once freed. */
-    struct usearch_js_call_t const* holder;
-
-    /** Weak references to every @c ArrayBuffer viewing the memory since the last rewind. */
-    napi_ref* views;
-
-    /** References held in @c views. */
-    size_t views_count;
-
-    /** References @c views has room for. */
-    size_t views_capacity;
 } usearch_js_arena_t;
 
 /** An owned index handle, one per @c CompiledIndex instance. */
 typedef struct usearch_js_index_t {
 
-    /** The engine handle, freed by @c free or the collector, or consumed by an absorb. */
+    /** The engine handle, freed by @c free or the collector. */
     usearch_dense_index_t handle;
 } usearch_js_index_t;
 
@@ -160,10 +148,10 @@ typedef enum usearch_js_slot_t {
     /** The @c Arena its outputs land in. */
     usearch_js_slot_arena_k,
 
-    /** The rows it reads: vectors, queries, a left-hand matrix, a buffer, or donors. */
+    /** The rows it reads: vectors, queries, a left-hand matrix, or a reshard's sources. */
     usearch_js_slot_rows_k,
 
-    /** The identities it reads. */
+    /** The identities it reads, or a reshard's targets. */
     usearch_js_slot_keys_k,
 
     /** The @c DenseTraversalStats reading its telemetry lands in. */
@@ -172,15 +160,15 @@ typedef enum usearch_js_slot_t {
     /** The keys a sample looks around, beside the shown ones it reads through the keys slot. */
     usearch_js_slot_focus_k,
 
+    /** The plan a refine or a reshard continues, which the library writes in place. */
+    usearch_js_slot_plan_k,
+
     /** Slots in every call. */
     usearch_js_slots_k,
 } usearch_js_slot_t;
 
 /** Builds a verb's answer from a successful call's outputs; @c NULL with an exception pending. */
 typedef napi_value (*usearch_js_finish_t)(napi_env env, struct usearch_js_call_t* call, napi_value const* slots);
-
-/** Settles what a final call left behind whatever its status, like donors an absorb consumed. */
-typedef void (*usearch_js_conclude_t)(struct usearch_js_call_t* call);
 
 /**
  *  @brief One call submitted to the library: its outcome, how its answer is built, what it holds.
@@ -198,20 +186,14 @@ typedef struct usearch_js_call_t {
     /** Builds the answer of a call that succeeded; @c NULL once the answer was built. */
     usearch_js_finish_t finish;
 
-    /** The @b optional settlement every final call runs once, whatever its status. */
-    usearch_js_conclude_t conclude;
-
     /** Strong references to the slots a deferred call borrows; @c NULL for an empty slot. */
     napi_ref held[usearch_js_slots_k];
 
     /** Heap blocks the call reads or writes, freed once it is final. */
     void* owned[usearch_js_owned_k];
 
-    /** The arena the call lands its outputs in; @c NULL for none. */
-    usearch_js_arena_t* arena;
-
-    /** The first exception a callback threw, thrown instead of the refusal it caused. */
-    napi_ref failure;
+    /** Traversal telemetry, published into the stats slot once the call succeeded. */
+    usearch_traversal_stats_t stats;
 } usearch_js_call_t;
 
 #pragma endregion Vocabulary
@@ -253,6 +235,10 @@ char* usearch_js_string_from_value(napi_env env, napi_value value, char const* f
 /** Reads the C @c completion every verb takes beside its executor. */
 bool usearch_js_completion_from_value(napi_env env, napi_value value, usearch_completion_t* result);
 
+/** Points @p stats at @p call's telemetry when the caller passed a reading, nowhere otherwise. */
+bool usearch_js_stats_from_value(napi_env env, napi_value sink, usearch_js_call_t* call,
+                                 usearch_traversal_stats_t** stats);
+
 /** Reads a metric kind from its canonical spelling, through the C name tables. */
 bool usearch_js_metric_from_value(napi_env env, napi_value value, char const* field, usearch_dense_metric_t* result);
 
@@ -267,7 +253,7 @@ bool usearch_js_gpu_class_from_value(napi_env env, napi_value value, usearch_gpu
 /** Reads a traversal from its canonical spelling, through the C name tables; absent walks. */
 bool usearch_js_traversal_from_value(napi_env env, napi_value value, char const* field, usearch_traversal_t* result);
 
-/** Reads a scalar kind from the code @c usearch_js_scalars published for its canonical spelling. */
+/** Reads a scalar kind as the code @c usearch_js_scalars published for its canonical spelling. */
 bool usearch_js_scalar_from_value(napi_env env, napi_value value, char const* field, usearch_scalar_t* result);
 
 /** Maps every scalar kind's canonical spelling to its code once, through the C name tables. */
@@ -364,22 +350,16 @@ bool usearch_js_executor_from_value(napi_env env, napi_value value, usearch_exec
 /** Defines the @c Arena class; the module glue keeps the reference. */
 napi_value usearch_js_arena_define(napi_env env);
 
-/**
- *  @brief Unwraps the @c arena a verb's outputs land in for @p call.
- *
- *  A freed arena is refused with @c usearch_status_uninitialized_k; one a deferred call still
- *  writes is the library's to refuse with @c usearch_status_contended_k. The views of the previous
- *  call are detached once the library took this one, in @c usearch_js_call_answer.
- */
-bool usearch_js_arena_from_value(napi_env env, napi_value value, usearch_js_call_t* call, usearch_arena_t* handle);
+/** Unwraps the @c arena a verb's outputs land in; a freed one reads as @c NULL, for the library to
+ *  refuse. */
+bool usearch_js_arena_from_value(napi_env env, napi_value value, usearch_arena_t* handle);
 
 /**
  *  @brief Views @p bytes an arena holds as a @c TypedArray of @p type, without copying.
  *
- *  The backing @c ArrayBuffer references @p arena, so the memory outlives every view of it, and the
- *  arena remembers the buffer, empty ones included, so its next call or its @c free detaches the
- *  view rather than leaving it dangling. A VRAM arena holds device memory, which is never viewed as
- *  host memory, so its views read as @c null.
+ *  The backing @c ArrayBuffer references @p arena, so the collector keeps the memory for as long as
+ *  any view of it lives; the view ends at the arena's next call, and reads device memory as is for
+ *  a VRAM arena, which @c Arena.describe names.
  *
  *  @return The view, or @c NULL with an exception pending.
  */
@@ -417,12 +397,7 @@ usearch_js_call_t* usearch_js_call_open(napi_env env, usearch_completion_t compl
 bool usearch_js_call_hold(napi_env env, usearch_js_call_t* call, usearch_js_call_t const* local,
                           napi_value const* slots, napi_value* deferred);
 
-/**
- *  @brief Answers a submitted call: a blocking one's finished result, a deferred one's wrapper.
- *
- *  Unless the library refused it as contended, the call rewound its arena, so the views of the call
- *  before it are detached here and the arena remembers this one as its holder.
- */
+/** Answers a submitted call: a blocking one's finished result, a deferred one's wrapper. */
 napi_value usearch_js_call_answer(napi_env env, usearch_js_call_t* call, usearch_js_call_t const* local,
                                   napi_value const* slots, napi_value deferred);
 

@@ -83,7 +83,7 @@ export enum Mood {
 export enum Residency {
   /** Host memory traversed by CPU threads. */
   Ram = "ram",
-  /** Accelerator memory traversed by GPU streams, which no host view reads. */
+  /** Accelerator memory traversed by GPU streams, which a host must not read. */
   Vram = "vram",
   /** Persisted memory read through submission rings; its arenas are host pages. */
   Nvme = "nvme",
@@ -460,28 +460,27 @@ export interface ExecutorConstructor {
 /** The native executor class itself, so `instanceof Executor` holds for every one the factories spawn. */
 export const Executor = compiled.Executor as ExecutorConstructor;
 
-/**
- *  Memory the library writes every output whose length scales with a call into, reused across calls.
+/** Memory the library writes every output whose length scales with a call into, reused across
+ *  calls.
  *
  *  Every verb with such an output takes one and answers a view into it rather than a copy, so a
- *  steady loop allocates once. Each call rewinds the arena it is handed and detaches every buffer
- *  over the previous call's outputs: a view refuses its reads with {@link Status.Uninitialized} from
- *  then on, and every array already taken out of one reads empty rather than another call's memory.
- *  To keep one result past the next call, give that call another arena. A deferred call borrows it
- *  as a blocking one does: another call naming it before the first is final finishes
- *  {@link Status.Contended} and leaves the first call's outputs alone, and `free` waits for it. The
- *  collector frees the arena once nothing views it; `free` releases it now.
+ *  steady loop allocates once. Each call rewinds the arena it is handed, which ends every view of
+ *  the previous call's outputs: their arrays read whatever the arena holds from then on, and
+ *  nothing once it is freed. To keep one result past the next call, give that call another arena.
+ *  A deferred call borrows it as a blocking one does: another call naming it before the first is
+ *  final finishes {@link Status.Contended} and leaves the first call's outputs alone, and `free`
+ *  waits for it. The collector frees the arena once nothing views it; `free` releases it now, and
+ *  every later call naming it is refused with {@link Status.InvalidArgument}.
  *
  *  A `Vram` arena grows, fills and frees on its executor's first stream, so it serves only calls on
- *  that executor and keeps it alive until freed; host pages may outlive their executor.
- */
+ *  that executor and keeps it alive until freed; host pages may outlive their executor. */
 export interface Arena extends Disposable {
-  /** Where its outputs live, as the executor that made it decided; a `Vram` arena's views refuse
-   *  host reads with {@link Status.Device}. */
+  /** Where its outputs live, as the executor that made it decided; the views of a `Vram` arena hold
+   *  device memory, which only device code reads. */
   describe(): ArenaDescription;
 
-  /** Releases the memory now, once every deferred call writing it is final, detaching every view
-   *  into it; a second call does nothing. */
+  /** Releases the memory now, once every deferred call writing it is final; a second call does
+   *  nothing. */
   free(): void;
 }
 
@@ -503,23 +502,6 @@ export interface ArenaConstructor {
 /** The native arena class: `new Arena()` or `new Arena(executor)`. */
 export const Arena = compiled.Arena as unknown as ArenaConstructor;
 
-/**
- *  Outputs a call wrote into an arena, readable until the arena's next call rewinds it.
- *
- *  The rewind detaches the buffer under every array, so each accessor refuses once the arena moved
- *  on, with {@link Status.Uninitialized}, and refuses device memory with {@link Status.Device}, so a
- *  view never reads memory its call did not write.
- */
-export abstract class ArenaView {
-  /** Answers `view` while its buffer still holds this call's outputs in host memory, and refuses otherwise. */
-  protected live<View extends ArrayBufferView>(view: View | null): View {
-    if (view === null) throw fail(Status.Device, "The outputs are device memory, which no host view reads.");
-    if ((view.buffer as ArrayBuffer).detached)
-      throw fail(Status.Uninitialized, "The arena was rewound or freed since this view was written.");
-    return view;
-  }
-}
-
 /** The matches of one query, borrowed out of a run rather than copied.
  *
  *  Both arrays are subarrays of the run's own storage, so reading a query costs nothing. */
@@ -538,35 +520,26 @@ export class QueryMatches {
 }
 
 /** The ranked matches a search or a stream pull wrote into its arena: `queries` rows of `columns`
- *  cells, query `i` holding `counts[i]` matches. */
-export class Matches extends ArenaView {
+ *  cells, query `i` holding `counts[i]` matches, readable until the arena's next call. */
+export class Matches {
   /** Queries the call resolved. */
   readonly queries: number;
   /** Columns per query the call wrote, at most its `wanted` - the "k" in "kANN". */
   readonly columns: number;
-  readonly #outputs: CompiledMatches;
+  /** The `queries × columns` identity matrix, rows contiguous, sixteen bytes per key. */
+  readonly keys: Uint8Array;
+  /** The `queries × columns` distance matrix, rows contiguous. */
+  readonly scores: Float64Array;
+  /** Matches written per query, one count per query. */
+  readonly counts: BigUint64Array;
 
   /** Made by a ranked verb, never directly. */
   constructor(outputs: CompiledMatches, queries: number) {
-    super();
-    this.#outputs = outputs;
     this.queries = queries;
     this.columns = outputs.columns;
-  }
-
-  /** The `queries × columns` identity matrix, rows contiguous, sixteen bytes per key. */
-  get keys(): Uint8Array {
-    return this.live(this.#outputs.keys);
-  }
-
-  /** The `queries × columns` distance matrix, rows contiguous. */
-  get scores(): Float64Array {
-    return this.live(this.#outputs.scores);
-  }
-
-  /** Matches written per query, one count per query. */
-  get counts(): BigUint64Array {
-    return this.live(this.#outputs.counts);
+    this.keys = outputs.keys;
+    this.scores = outputs.scores;
+    this.counts = outputs.counts;
   }
 
   /**
@@ -591,18 +564,13 @@ export class Matches extends ArenaView {
  *
  *  The bytes are what a checkpoint holds, so a service that keeps its indexes in an object store
  *  never touches the filesystem; `loadRamBuffer` and `metadataReadBuffer` read them back. */
-export class Monolith extends ArenaView {
-  readonly #bytes: Uint8Array | null;
+export class Monolith {
+  /** The monolith, valid until the arena's next call. */
+  readonly bytes: Uint8Array;
 
   /** Made by `saveBuffer`, never directly. */
-  constructor(bytes: Uint8Array | null) {
-    super();
-    this.#bytes = bytes;
-  }
-
-  /** The monolith, valid until the arena's next call. */
-  get bytes(): Uint8Array {
-    return this.live(this.#bytes);
+  constructor(bytes: Uint8Array) {
+    this.bytes = bytes;
   }
 }
 
@@ -616,10 +584,9 @@ const unfinished = new FinalizationRegistry<CompiledDeferred>((call) => {
  *
  *  It keeps everything the library reads or writes alive until then - the outcome, the inputs,
  *  the outputs and every handle it names - so none of them is collected under the call, and it
- *  borrows its arena as a blocking call does. A result read after the arena was rewound or freed
- *  throws {@link Status.Uninitialized}. `status` polls without
- *  blocking, `wait` blocks and answers, and `await` runs that wait on the libuv pool; both answer
- *  the same cached result, or throw the same failure, however often they are asked.
+ *  borrows its arena as a blocking call does. `status` polls without blocking, `wait` blocks and
+ *  answers, and `await` runs that wait on the libuv pool; both answer the same cached result, or
+ *  throw the same failure, however often they are asked.
  *
  *  ```js
  *  const matches = await call; // or: call.wait()

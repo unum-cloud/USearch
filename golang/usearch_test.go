@@ -137,10 +137,7 @@ func ExampleDenseIndex() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	found, _, err := matches.Query(0) // valid until the next call given arena
-	if err != nil {
-		log.Fatal(err)
-	}
+	found, _ := matches.Query(0) // valid until the next call given arena
 	fmt.Println(found[0])
 	// Output: 00000000-0000-0000-0000-000000000002
 }
@@ -180,10 +177,7 @@ func ExampleDenseIndex_Deferred() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	found, _, err := matches.Query(0)
-	if err != nil {
-		log.Fatal(err)
-	}
+	found, _ := matches.Query(0)
 	fmt.Println(found[0])
 	// Output: 00000000-0000-0000-0000-000000000003
 }

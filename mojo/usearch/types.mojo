@@ -502,6 +502,20 @@ struct NVMeClass(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
 
 
 @fieldwise_init
+struct LoadPath(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
+    """How a load from a path read the parts onto the devices - `usearch_load_path_t`."""
+
+    var code: c_int
+    """The raw `usearch_load_path_t` value the ABI exchanges."""
+    comptime NONE = Self(0)
+    """Never loaded from a path, or an index on RAM or NVMe."""
+    comptime HOST_COPY = Self(1)
+    """Through host memory, since some part's file took no cuFile registration."""
+    comptime CUFILE = Self(2)
+    """Every part straight onto the device through cuFile."""
+
+
+@fieldwise_init
 struct Completion(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
     """Whether a verb returns with its final status or once submitted - `usearch_completion_t`.
 
@@ -832,44 +846,40 @@ struct RowsView[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
 
     @staticmethod
     def of[
-        dtype: DType, rows_origin: ImmOrigin, //
-    ](
-        rows: Span[Scalar[dtype], rows_origin],
-        columns: Int,
-        scalar: ScalarKind = ScalarKind.of[dtype](),
-    ) raises Error -> RowsView[rows_origin]:
+        dtype: DType, rows_origin: ImmOrigin, //, kind: ScalarKind = ScalarKind.of[dtype]()
+    ](rows: Span[Scalar[dtype], rows_origin], columns: Int) raises Error -> RowsView[rows_origin]:
         """Reads a flat run of scalars as contiguous rows of the given width. Binding-only.
 
-        The row count comes from the bytes the run spans divided by the bytes one row of
-        `scalar` occupies, so a kind that disagrees with `dtype` is refused here rather than
-        read past the end by the engine. A sub-byte kind counts logical dimensions, so eight
-        `U1X8` columns are one `UInt8`.
+        The row count comes from the bytes the run spans divided by the bytes one row of `kind`
+        occupies. A sub-byte kind counts logical dimensions, so eight `U1X8` columns are one `UInt8`.
 
         Parameters:
             dtype: The scalar type of the run, inferred from the argument.
             rows_origin: The run's origin, inferred with it.
+            kind: How the engine reads those scalars, which `dtype` must store whole; the kind
+                `dtype` stores by default.
 
         Args:
             rows: The scalars, laid out row after row with no padding between them.
             columns: Logical scalars per row, which must divide the run into whole rows.
-            scalar: How the engine should read those scalars; the kind `dtype` stores by default.
 
         Returns:
             A view of the whole run, strided at its natural row width.
 
         Raises:
-            `Error` when the run does not divide into whole rows of that width and kind.
+            `Error` when the run does not divide into whole rows of that width.
         """
-        var row_bytes = scalar.bytes_for_columns(columns)
+        comptime assert kind.stores[dtype](), "the element type must store the kind whole"
+        var row_bytes = kind.bytes_for_columns(columns)
         var spanned = len(rows) * size_of[Scalar[dtype]]()
-        if columns <= 0 or row_bytes == 0 or spanned % row_bytes != 0:
+        if columns <= 0 or spanned % row_bytes != 0:
             raise Error(Status.SHAPE_MISMATCH, "RowsView.of")
         return RowsView[rows_origin](
             rows.unsafe_ptr().unsafe_bitcast[NoneType](),
             c_size_t(spanned // row_bytes),
             c_size_t(columns),
             c_size_t(row_bytes),
-            scalar,
+            kind,
         )
 
     def arguments(self) -> RowsViewArguments:
@@ -945,10 +955,6 @@ struct Matches[origin: MutOrigin](Movable, Sized):
         origin: The arena the run lives in, which this result borrows.
     """
 
-    var arena: Pointer[Arena, Self.origin]
-    """The arena holding the run."""
-    var generation: Int
-    """The arena's call this run came from, so a read after a later call is refused."""
     var view: MatchesViewArguments
     """Where the engine wrote the keys, scores and counts, inside the arena."""
     var queries: Int
@@ -962,7 +968,7 @@ struct Matches[origin: MutOrigin](Movable, Sized):
         """
         return self.queries
 
-    def query_keys(ref self, query: Int) raises Error -> Span[Key, origin_of(self)]:
+    def query_keys(ref self, query: Int) -> Span[Key, origin_of(self)]:
         """One query's keys, nearest first, trimmed to the matches that query found.
 
         Args:
@@ -970,15 +976,11 @@ struct Matches[origin: MutOrigin](Movable, Sized):
 
         Returns:
             The keys, borrowed from the arena this result reads.
-
-        Raises:
-            `Error` with `UNINITIALIZED` once a later call rewound the arena, or `DEVICE` over VRAM.
         """
-        _readable(self.arena, self.generation, "Matches.query_keys")
         var start = self.view.keys + query * Int(self.view.columns) * size_of[Key]()
         return _in_arena[Key, origin_of(self)](start, self._found(query))
 
-    def query_distances(ref self, query: Int) raises Error -> Span[Distance, origin_of(self)]:
+    def query_distances(ref self, query: Int) -> Span[Distance, origin_of(self)]:
         """One query's scores, paired positionally with `query_keys`.
 
         Args:
@@ -986,11 +988,7 @@ struct Matches[origin: MutOrigin](Movable, Sized):
 
         Returns:
             The scores, borrowed from the arena this result reads.
-
-        Raises:
-            `Error` with `UNINITIALIZED` once a later call rewound the arena, or `DEVICE` over VRAM.
         """
-        _readable(self.arena, self.generation, "Matches.query_distances")
         var start = self.view.scores + query * Int(self.view.columns) * size_of[Distance]()
         return _in_arena[Distance, origin_of(self)](start, self._found(query))
 
@@ -1587,9 +1585,10 @@ struct Arena:
     Every verb takes it as its last required argument, deferred ones too, and the result borrows it
     in turn, so the arena outlives both; a failed call leaves it valid.
 
-    A result refuses every read with `UNINITIALIZED` once a later call rewinds its arena, and a
-    result over a VRAM arena refuses every host read with `DEVICE`. A VRAM arena serves only calls on
-    the executor that made it, and keeps that executor alive until it is freed.
+    A result reads the arena in place until its next call rewinds it, and `describe` says where that
+    memory lives, which a caller checks before reading a VRAM arena's results on the host. A VRAM
+    arena serves only calls on the executor that made it, and keeps that executor alive until it is
+    freed.
     """
 
     var _library: Library
@@ -1598,8 +1597,6 @@ struct Arena:
     """The `usearch_arena_t`, never null."""
     var _executor: Optional[ArcPointer[_ExecutorHandle]]
     """The VRAM executor that made it, held so the arena is freed first, on that executor's first stream."""
-    var _generation: Int
-    """Calls the engine took on it so far, which every result records to know when a later one rewound it."""
 
     def __init__(out self, library: Library) raises Error:
         """Host pages for calls on the calling thread. Calls `usearch_arena_init`.
@@ -1638,7 +1635,6 @@ struct Arena:
         self._library = executor.library
         self._address = created.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0]
         self._executor = None
-        self._generation = 0
         if self.describe().residency == Residency.VRAM:
             self._executor = Optional(executor._handle)
 
@@ -1657,7 +1653,7 @@ struct Arena:
         """Where its outputs live, as the executor that made it decided. Calls `usearch_arena_describe`.
 
         Returns:
-            `VRAM` and the device for device memory, which host reads refuse, and `RAM` otherwise.
+            `VRAM` and the device for device memory, which the host cannot read, and `RAM` otherwise.
 
         Raises:
             `Error` if the engine refuses the query.
@@ -1677,23 +1673,6 @@ struct Arena:
         return description.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0]
 
 
-def _served[origin: MutOrigin](arena: Pointer[Arena, origin], status: Status) -> Int:
-    """Retires every earlier result once the engine took a call naming the arena; a `CONTENDED` refusal
-    never touched it. Answers the generation the call's result is stamped with."""
-    var served = Pointer[Arena, MutAnyOrigin](unsafe_from_address=Int(arena))
-    if status != Status.CONTENDED:
-        served[]._generation += 1
-    return served[]._generation
-
-
-def _readable[origin: MutOrigin](arena: Pointer[Arena, origin], generation: Int, detail: StaticString) raises Error:
-    """Refuses a host read of a result over device memory, or over an arena a later call rewound."""
-    if arena[].describe().residency == Residency.VRAM:
-        raise Error(Status.DEVICE, detail)
-    if arena[]._generation != generation:
-        raise Error(Status.UNINITIALIZED, detail)
-
-
 def _in_arena[T: Copyable, origin: Origin](address: Address, length: Int) -> Span[T, origin]:
     """`length` values a call wrote into an arena; a failed or empty call left `address` null."""
     if length == 0:
@@ -1709,25 +1688,17 @@ struct Monolith[origin: MutOrigin](Movable):
         origin: The arena the bytes live in, which this result borrows.
     """
 
-    var arena: Pointer[Arena, Self.origin]
-    """The arena holding the bytes."""
-    var generation: Int
-    """The arena's call these bytes came from, so a read after a later call is refused."""
     var data: Address
     """The first byte, inside the arena."""
     var length: Int
     """Bytes the monolith spans."""
 
-    def bytes(ref self) raises Error -> Span[UInt8, origin_of(self)]:
+    def bytes(ref self) -> Span[UInt8, origin_of(self)]:
         """The monolith, borrowed from the arena this result reads.
 
         Returns:
             The bytes, valid until the arena's next call.
-
-        Raises:
-            `Error` with `UNINITIALIZED` once a later call rewound the arena, or `DEVICE` over VRAM.
         """
-        _readable(self.arena, self.generation, "Monolith.bytes")
         return _in_arena[UInt8, origin_of(self)](self.data, self.length)
 
 
@@ -1757,6 +1728,17 @@ struct CallSlots[Outputs: ImplicitlyCopyable & Defaultable & Deinitable](Implici
         self.outputs = Self.Outputs()
 
 
+@fieldwise_init
+struct CallHead(ImplicitlyCopyable):
+    """What every verb's arguments name beside its own inputs: the index, the executor, the outcome
+    and the completion. A verb naming no index reads only the last three."""
+
+    var index: Address
+    var executor: Address
+    var outcome: Pointer[Outcome, MutUntrackedOrigin]
+    var completion: Completion
+
+
 trait Call(Deinitable, Movable):
     """One verb crossing into the engine: what it lends until final, and how its outputs become a result.
 
@@ -1764,6 +1746,8 @@ trait Call(Deinitable, Movable):
     `index.deferred(executor)` wraps it in a `Deferred` - which is what keeps the verbs symmetric.
     """
 
+    comptime Arguments: ImplicitlyCopyable & Deinitable
+    """The argument structure the entry point reads, laid out as the ABI declares it."""
     comptime Outputs: ImplicitlyCopyable & Defaultable & Deinitable
     """The fixed-size outputs the engine writes through, such as a count or a view into the arena."""
     comptime Result: Movable & Deinitable
@@ -1771,32 +1755,38 @@ trait Call(Deinitable, Movable):
     comptime symbol: StaticString
     """The C entry point, carried into every error."""
 
-    def submit(
-        mut self,
-        library: Library,
-        index: Address,
-        executor: Address,
-        completion: Completion,
-        outcome: Pointer[Outcome, MutUntrackedOrigin],
-        outputs: Pointer[Self.Outputs, MutUntrackedOrigin],
-    ):
-        """Crosses into the engine, or writes the binding's own refusal into `outcome` without crossing."""
+    @staticmethod
+    def verb(library: Library) -> Verb[Self.Arguments]:
+        """The resolved entry point."""
         ...
 
-    def served(self, status: Status) -> Int:
-        """Stamps the call's arena once the engine took the call, and answers the stamp; the arena-free
-        calls keep none."""
-        return 0
+    def arguments(self, head: CallHead, outputs: Pointer[Self.Outputs, MutUntrackedOrigin]) -> Self.Arguments:
+        """The argument structure, its outputs pointing into `outputs`."""
+        ...
 
-    def conclude(deinit self, outputs: Self.Outputs, generation: Int) -> Self.Result:
-        """Adopts what the final call wrote - success or not - and builds the result around its arena,
-        stamped with the `generation` that `served` answered."""
+    def lengths_agree(self) -> Bool:
+        """Whether inputs the call reads under one count hold as many rows apiece; the binding refuses
+        the call as `SHAPE_MISMATCH` otherwise, as only it sees both lengths."""
+        return True
+
+    def conclude(deinit self, outputs: Self.Outputs) -> Self.Result:
+        """Adopts what the final call wrote, success or not, and builds the result around its arena."""
         ...
 
 
-def _refuse(outcome: Pointer[Outcome, MutUntrackedOrigin], status: Status):
-    """Finishes a call the binding refused before it crossed, so every receiver reports it alike."""
-    outcome[] = Outcome(c_int(status.code), None)
+def _cross[Arguments: ImplicitlyCopyable & Deinitable, //](arguments: Arguments, verb: Verb[Arguments]):
+    """Materializes one argument structure in a stack slot and hands its address to `verb`."""
+    var slot = stack_allocation[1, Arguments]()
+    slot[unsafe_offset=0] = arguments
+    verb(slot.unsafe_origin_cast[MutAnyOrigin]())
+
+
+def _submit[C: Call, //](library: Library, call: C, head: CallHead, outputs: Pointer[C.Outputs, MutUntrackedOrigin]):
+    """Crosses into the engine, or finishes a call whose lengths disagree without crossing."""
+    if not call.lengths_agree():
+        head.outcome[] = Outcome(c_int(Status.SHAPE_MISMATCH.code), None)
+        return
+    _cross(call.arguments(head, outputs), C.verb(library))
 
 
 def _block[C: Call](library: Library, var call: C, index: Address, executor: Address) raises Error -> C.Result:
@@ -1804,17 +1794,19 @@ def _block[C: Call](library: Library, var call: C, index: Address, executor: Add
     var slots = stack_allocation[1, CallSlots[C.Outputs]]()
     slots[unsafe_offset=0] = CallSlots[C.Outputs]()
     var mutable_slots = slots.unsafe_origin_cast[MutAnyOrigin]()
-    call.submit(
+    _submit(
         library,
-        index,
-        executor,
-        Completion.BLOCKING,
-        Pointer(to=mutable_slots[unsafe_offset=0].outcome).unsafe_origin_cast[MutUntrackedOrigin](),
+        call,
+        CallHead(
+            index,
+            executor,
+            Pointer(to=mutable_slots[unsafe_offset=0].outcome).unsafe_origin_cast[MutUntrackedOrigin](),
+            Completion.BLOCKING,
+        ),
         Pointer(to=mutable_slots[unsafe_offset=0].outputs).unsafe_origin_cast[MutUntrackedOrigin](),
     )
     var written = mutable_slots[unsafe_offset=0]
-    var generation = call.served(Status.of(written.outcome.status))
-    var result = call^.conclude(written.outputs, generation)
+    var result = call^.conclude(written.outputs)
     library._check(written.outcome, C.symbol)
     return result^
 
@@ -1847,8 +1839,6 @@ struct Deferred[C: Call, origin: ImmOrigin](Movable):
     """The result, once a wait found the call succeeded."""
     var failure: Optional[Error]
     """The failure, once a wait found the call failed."""
-    var generation: Int
-    """The stamp `served` answered at submission, so a result waited on late still reads as stale."""
 
     def __init__(out self, library: Library, var call: Self.C, index: Address, executor: Address):
         """Submits `call` deferred, on `executor`, against `index`.
@@ -1864,17 +1854,18 @@ struct Deferred[C: Call, origin: ImmOrigin](Movable):
         self.call = call^
         self.answer = None
         self.failure = None
-        self.generation = 0
         var slots = self._slots()
-        self.call.value().submit(
+        _submit(
             self.library,
-            index,
-            executor,
-            Completion.DEFERRED,
-            Pointer(to=slots[].outcome).unsafe_origin_cast[MutUntrackedOrigin](),
+            self.call.value(),
+            CallHead(
+                index,
+                executor,
+                Pointer(to=slots[].outcome).unsafe_origin_cast[MutUntrackedOrigin](),
+                Completion.DEFERRED,
+            ),
             Pointer(to=slots[].outputs).unsafe_origin_cast[MutUntrackedOrigin](),
         )
-        self.generation = self.call.value().served(self.status())
 
     def __deinit__(deinit self):
         """Waits until the call is final, then frees what it lent. Calls `usearch_outcome_wait`."""
@@ -1883,7 +1874,7 @@ struct Deferred[C: Call, origin: ImmOrigin](Movable):
                 unsafe_from_address=Int(Pointer(to=self.slots[]))
             )
             _ = self.library.symbols().outcome_wait(Pointer(to=slots[].outcome))
-            _ = self.call.take().conclude(slots[].outputs, self.generation)
+            _ = self.call.take().conclude(slots[].outputs)
         _ = self.library^
 
     def _slots(self) -> Pointer[CallSlots[Self.C.Outputs], MutAnyOrigin]:
@@ -1912,7 +1903,7 @@ struct Deferred[C: Call, origin: ImmOrigin](Movable):
             var slots = self._slots()
             _ = self.library.symbols().outcome_wait(Pointer(to=slots[].outcome))
             var written = slots[]
-            var result = self.call.take().conclude(written.outputs, self.generation)
+            var result = self.call.take().conclude(written.outputs)
             if written.outcome.status == c_int(0):
                 self.answer = result^
             else:

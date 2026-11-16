@@ -20,30 +20,30 @@
  *
  *  The type of the object a verb is called on chooses where its call runs and how it completes: an
  *  index runs it on the calling thread, an @c On blocks on its executor, and a @c DeferredOn
- *  submits it there and answers a @c Deferred. A verb fills one call structure, kept on the stack
+ *  submits it there and answers a @c Deferred. A verb fills one call record, kept on the stack
  *  while it blocks and inside its @c Deferred once submitted, so one body serves every receiver and
- *  nothing the library borrows ever moves. The binding starts no threads and keeps two counts: an
- *  arena's @c exports, since a buffer it exported cannot be revoked before C rewinds the memory
- *  under it, to which a call adds one until it is waited on or dropped, and an executor's GPU
- *  @c arenas, since each frees on the executor's stream, so a close leaves its handle to the last
- *  of them. Dropping a @c Deferred waits on its outcome, and every other wait belongs to the C
- *  library.
+ *  nothing the library borrows ever moves. Its result object is the output slot the library writes
+ *  into, so a deferred call answers it as a blocking one does. The binding starts no threads, takes
+ *  no locks and re-checks nothing the library refuses; it counts only the GPU arenas an executor
+ *  made, since each frees on the executor's stream, so a close leaves its handle to the last of
+ *  them. Callbacks never raise into the library: an exception escaping one goes to
+ *  @c sys.unraisablehook and the callback answers cancel or reject. Dropping a @c Deferred waits on
+ *  its outcome, and every other wait belongs to the C library.
  *
  *  @section python_buffers Buffer Protocol and NumPy Compatibility
  *
  *  Batch inputs arrive through PEP 3118 first and @c __array_interface__ second, so a PyTorch or
  *  TensorFlow tensor reaches the index without a NumPy round-trip and NumPy itself is never a
  *  build-time dependency. Every output whose length scales with the call lands in the @c Arena the
- *  caller passes and leaves as zero-copy results over it. An arena exporting a buffer refuses to
- *  rewind, as a @c bytearray refuses to resize, and a result whose arena a later call rewound
- *  raises @c UninitializedError when read.
+ *  caller passes and leaves as zero-copy results over it. A result views its arena until the next
+ *  call on that arena rewinds it, as a C view does, and @c Arena.describe says where it lives.
  *
  *  @section python_arrow Arrow PyCapsule Interface
  *
  *  Anything else exporting @c __arrow_c_array__ or @c __arrow_c_stream__ reads as a third source,
  *  so a PyArrow or Polars column reaches the index with neither library imported: one chunk stays
  *  in place, and several gather once, since one call is one batch. Results export the same
- *  protocol over their arena, an exported array counting among its exports until its release.
+ *  protocol over their arena, an exported array holding the arena until its release.
  *
  *  @section python_naming Naming
  *
@@ -67,6 +67,9 @@
 
 #include "usearch/arrow.h"
 #include "usearch/dense_index.h"
+#include "usearch/geospatial_index.h"
+#include "usearch/sequence_index.h"
+#include "usearch/shapes_index.h"
 #include "usearch/types.h"
 
 #ifdef __cplusplus
@@ -83,6 +86,21 @@ enum {
 
     /** The rank ceiling every batch verb accepts: a matrix, or a vector read as one row. */
     usearch_py_max_rank_k = 2,
+
+    /** Objects one call holds until it is final: callables, telemetry, plans, lists of indexes. */
+    usearch_py_holds_k = 5,
+
+    /** Buffers one call borrows until it is final. */
+    usearch_py_buffers_k = 3,
+
+    /** Runs of keys one call borrows until it is final. */
+    usearch_py_keys_k = 2,
+
+    /** Heap blocks one call lends until it is final: ordinals and arrays of handles. */
+    usearch_py_blocks_k = 4,
+
+    /** Words of the C arguments one call carries, room for the widest verb and its own outputs. */
+    usearch_py_arguments_words_k = 48,
 };
 
 /** @p value divided by @p divisor, rounded up - the packing arithmetic sub-byte kinds need. */
@@ -92,22 +110,6 @@ static inline size_t usearch_py_divide_round_up_(size_t value, size_t divisor) {
 
 /** Element count of a statically-sized table, which every naming table asks for. */
 #define usearch_py_table_size_(table) (sizeof(table) / sizeof((table)[0]))
-
-/**
- *  @brief Guards a mutable object's fields against a concurrent verb.
- *
- *  Free-threading, and the critical sections that fence it, arrived in 3.13; on 3.12 the
- *  interpreter lock already serializes what these protect, so they compile to the bare block.
- */
-#if PY_VERSION_HEX >= 0x030D0000
-#define usearch_py_critical_section_begin_(object) Py_BEGIN_CRITICAL_SECTION(object)
-#define usearch_py_critical_section_end_()         Py_END_CRITICAL_SECTION()
-#else
-#define usearch_py_critical_section_begin_(object) do {
-#define usearch_py_critical_section_end_() \
-    }                                      \
-    while (0)
-#endif
 
 /** One argument a verb takes and the slot its value lands in; a slot the caller skipped stays NULL. */
 typedef struct usearch_py_argument_t {
@@ -214,22 +216,35 @@ extern PyTypeObject DenseReachabilityType;
 extern PyTypeObject RefineReportType;
 extern PyTypeObject SampleType;
 extern PyTypeObject DenseTraversalStatsType;
+extern PyTypeObject DenseRefinePlanType;
+extern PyTypeObject DenseReshardPlanType;
 extern PyTypeObject DenseCursorType;
 extern PyTypeObject DenseBatchType;
 extern PyTypeObject DenseSearchStreamType;
 
 extern PyTypeObject SequenceIndexType;
+extern PyTypeObject SequenceMetadataType;
+extern PyTypeObject SequenceIndexDescriptionType;
+extern PyTypeObject SequenceRefinePlanType;
+extern PyTypeObject SequenceReshardPlanType;
 extern PyTypeObject ShapesIndexType;
+extern PyTypeObject ShapesMetadataType;
+extern PyTypeObject ShapesIndexDescriptionType;
+extern PyTypeObject ShapesRefinePlanType;
+extern PyTypeObject ShapesReshardPlanType;
 extern PyTypeObject GeospatialIndexType;
+extern PyTypeObject GeospatialMetadataType;
+extern PyTypeObject GeospatialIndexDescriptionType;
+extern PyTypeObject GeospatialRefinePlanType;
+extern PyTypeObject GeospatialReshardPlanType;
 
 /** The layouts of the struct sequences, which `lib.c` readies through their own initializer. */
 extern PyStructSequence_Desc usearch_py_match_desc;
 extern PyStructSequence_Desc usearch_py_arena_description_desc;
 extern PyStructSequence_Desc usearch_py_dense_metadata_desc;
-extern PyStructSequence_Desc usearch_py_dense_index_description_desc;
-extern PyStructSequence_Desc usearch_py_dense_reachability_desc;
-extern PyStructSequence_Desc usearch_py_refine_report_desc;
-extern PyStructSequence_Desc usearch_py_sample_desc;
+extern PyStructSequence_Desc usearch_py_sequence_metadata_desc;
+extern PyStructSequence_Desc usearch_py_shapes_metadata_desc;
+extern PyStructSequence_Desc usearch_py_geospatial_metadata_desc;
 
 /** The base of the one exception class per failing status, subclassing @c RuntimeError. */
 extern PyObject* ErrorType;
@@ -238,36 +253,22 @@ extern PyObject* ErrorType;
 typedef struct Executor {
     PyObject ob_base;
 
-    /** The library's executor, NULL once a `with` block closed it. */
-    usearch_executor_t handle;
+    /** The library's executor as verbs read it, NULL once closed. */
+    _Atomic(usearch_executor_t) handle;
 
-    /** Where the calls it runs compute, as its constructor named it. */
-    usearch_residency_t residency;
+    /** The library's executor, freed once nothing holds it. */
+    usearch_executor_t owned;
 
-    /** The GPU arenas it made that are still alive, each holding it, since they free on its first
-     *  stream. */
-    Py_ssize_t arenas;
-
-    /** The handle a close left to those arenas, freed with the last of them. */
-    usearch_executor_t retained;
+    /** One while it is open, plus one per GPU arena it made that is still alive, since each frees
+     *  on its first stream. */
+    atomic_size_t holds;
 } Executor;
 
-/**
- *  @brief The memory every output whose length scales with a call lands in, rewound by the next
- *      call handed it.
- *
- *  A call is refused while a buffer over the previous outputs is still exported, and every result
- *  over them refuses to be read once a later call rewound it.
- */
+/** The memory every output whose length scales with a call lands in, rewound by the next call
+ *  handed it. */
 typedef struct Arena {
     PyObject ob_base;
     usearch_arena_t handle;
-
-    /** Buffers exported over its outputs, plus one while a call holds it. */
-    Py_ssize_t exports;
-
-    /** Calls that claimed it so far, which a result compares against the one it was written by. */
-    size_t generation;
 
     /** The @c Executor a GPU arena serves alone, held until the arena is freed; NULL for host
      *  pages. */
@@ -292,6 +293,8 @@ typedef struct usearch_py_enum_t {
 
 extern usearch_py_enum_t usearch_py_status, usearch_py_mood, usearch_py_dense_metric, usearch_py_scalar,
     usearch_py_residency, usearch_py_traversal, usearch_py_cpu_class, usearch_py_gpu_class, usearch_py_nvme_class;
+extern usearch_py_enum_t usearch_py_sequence_metric, usearch_py_shapes_metric, usearch_py_geospatial_relation,
+    usearch_py_refine_verdict, usearch_py_phase;
 
 /**
  *  @brief Builds every mirrored enum's class from `enum.IntEnum` and adds it to @p module, one
@@ -329,12 +332,23 @@ typedef struct usearch_py_receiver_t {
     usearch_completion_t completion;
 } usearch_py_receiver_t;
 
-/** The verbs an @c On offers, each blocking on its executor. */
-extern PyMethodDef usearch_py_on_methods[];
+/** The verbs the receivers over one index type offer, which @c On and @c DeferredOn look up by the
+ *  type of the index they hold, so one receiver type serves every modality. */
+typedef struct usearch_py_receiver_verbs_t {
 
-/** The verbs a @c DeferredOn offers, each answering a @c Deferred; cursors and streams block on
- *  every pull, so they are absent. */
-extern PyMethodDef usearch_py_deferred_on_methods[];
+    /** The index type the receivers address. */
+    PyTypeObject* index;
+
+    /** The verbs an @c On offers, each blocking on its executor. */
+    PyMethodDef* on;
+
+    /** The verbs a @c DeferredOn offers, each answering a @c Deferred; cursors and streams block on
+     *  every pull, so they are absent. */
+    PyMethodDef* deferred_on;
+} usearch_py_receiver_verbs_t;
+
+extern usearch_py_receiver_verbs_t const usearch_py_dense_receiver_verbs, usearch_py_sequence_receiver_verbs,
+    usearch_py_shapes_receiver_verbs, usearch_py_geospatial_receiver_verbs;
 
 /**
  *  @brief Reads what @p self names: an index runs on the calling thread, an @c On or a @c DeferredOn on its executor.
@@ -346,112 +360,89 @@ int usearch_py_receiver_from_object(PyObject* self, usearch_py_receiver_t* recei
  *  NULL on failure. */
 PyObject* usearch_py_on_new(PyTypeObject* type, PyObject* index, PyObject* executor);
 
-/** What every call keeps until it is final, leading its verb's call structure: on the stack while it
- *  blocks, inside its @c Deferred once submitted. */
+/**
+ *  @brief Everything one call keeps until it is final: on the stack while it blocks, inside its
+ *      @c Deferred once submitted.
+ *
+ *  A verb fills the slots it needs and leaves the rest zeroed, so letting go of a call is the same
+ *  for every verb, and the C arguments ride at the end, where the library reads them.
+ */
 typedef struct usearch_py_call_t {
 
     /** The outcome the library finishes. */
     usearch_outcome_t outcome;
 
-    /** The first exception a callback raised, which outranks the outcome it turned into; NULL while none has. */
-    PyObject* raised;
+    /** Builds the answer from outputs a call keeps in its arguments; NULL answers @c result. */
+    PyObject* (*answer)(struct usearch_py_call_t* call);
 
-    /** The claimed @c Arena the call's outputs land in, or NULL for a verb with none. */
+    /** The @c Arena the outputs land in, held; NULL for a verb with none. */
     PyObject* arena;
+
+    /** The object the library writes the outputs into and the call answers; NULL answers None. */
+    PyObject* result;
+
+    /** Objects the library reads until the call is final, each held. */
+    PyObject* holds[usearch_py_holds_k];
+
+    /** Buffers the library reads until the call is final. */
+    usearch_py_buffer_backing_t buffers[usearch_py_buffers_k];
+
+    /** Keys the library reads until the call is final. */
+    usearch_py_keys_t keys[usearch_py_keys_k];
+
+    /** Paths the library reads until the call is final. */
+    usearch_py_paths_t paths;
+
+    /** Blocks the library reads until the call is final, freed with @c PyMem_Free. */
+    void* blocks[usearch_py_blocks_k];
+
+    /** The verb's C arguments, followed by any outputs @c answer converts. */
+    uint64_t arguments[usearch_py_arguments_words_k];
 } usearch_py_call_t;
 
-/** One Python callable a call re-enters from library threads, and the call its first failure lands in. */
-typedef struct usearch_py_callback_t {
-
-    /** The callable, held, or NULL when the caller passed none. */
-    PyObject* callable;
-
-    /** The call whose @c raised slot latches the first exception. */
-    usearch_py_call_t* call;
-} usearch_py_callback_t;
-
-/** How a verb runs a call it filled: the bytes of its call, how it reaches the library, answers and lets go. */
-typedef struct usearch_py_verb_t {
-
-    /** Bytes of the verb's call structure, which leads with a @c usearch_py_call_t. */
-    size_t call_bytes;
-
-    /** Hands the call to the library, with the thread state detached around it. */
-    void (*submit)(void* call);
-
-    /** Builds the answer of a call whose outcome succeeded, over the arena it claimed. */
-    PyObject* (*answer)(void* call);
-
-    /** Lets go of whatever the fill gathered and the answer did not take. */
-    void (*release)(void* call);
-
-    /** Visits the callables and reports the call holds beyond its header, for the collector; NULL
-     *  when none. */
-    int (*traverse)(void* call, visitproc visit, void* arg);
-} usearch_py_verb_t;
-
-/** A deferred call owning everything the library touches until it is final, the object being the allocation, so
- *  nothing it lends ever moves. */
+/** A call a @c DeferredOn submitted, the object its allocation, so nothing it lends ever moves. */
 typedef struct Deferred {
-
-    /** The object header, sized in bytes of the verb's call. */
-    PyVarObject ob_base;
-
-    /** How the call answers and lets go; NULL once it let go of its inputs. */
-    usearch_py_verb_t const* verb;
+    PyObject ob_base;
 
     /** The receiver the call was made through, held so its index and executor outlive the call. */
     PyObject* origin;
 
+    /** Nonzero once a thread took the call to answer it, and let go of its inputs. */
+    atomic_int answering;
+
     /** The answer, once the call finished without raising. */
-    PyObject* answer;
+    _Atomic(PyObject*) answer;
 
     /** The exception, once the call finished raising it. */
-    PyObject* raised;
+    _Atomic(PyObject*) raised;
 
-    /** The verb's call, led by a @c usearch_py_call_t, which the outcome lives in. */
-    uint64_t call[];
+    usearch_py_call_t call;
 } Deferred;
 
 /**
- *  @brief Opens the call of @p verb: the zeroed @p stack for a blocking receiver, or the storage of a new
+ *  @brief Opens a call: the zeroed @p stack for a blocking receiver, or the record of a new
  *      @c Deferred holding @p receiver for a deferred one.
  *  @return The call to fill, or NULL with an exception set.
  */
-void* usearch_py_call_open(usearch_py_receiver_t const* receiver, usearch_py_verb_t const* verb, void* stack);
+usearch_py_call_t* usearch_py_call_open(usearch_py_receiver_t const* receiver, usearch_py_call_t* stack);
 
-/** Runs a filled @p call: blocks and answers for a blocking receiver, or submits and answers its @c Deferred. */
-PyObject* usearch_py_call_run(usearch_py_receiver_t const* receiver, usearch_py_verb_t const* verb, void* call);
+/** Answers a submitted @p call: a blocking one's answer or exception, or its @c Deferred. */
+PyObject* usearch_py_call_finish(usearch_py_receiver_t const* receiver, usearch_py_call_t* call);
 
 /** Lets go of a call whose fill failed, keeping the exception set; always returns NULL. */
-PyObject* usearch_py_call_discard(usearch_py_receiver_t const* receiver, usearch_py_verb_t const* verb, void* call);
-
-/** Lets go of the arena claim and the latched exception every call header holds. */
-void usearch_py_call_release(void* call);
-
-/** The answer of a verb with nothing to report. */
-PyObject* usearch_py_call_answer_none(void* call);
+PyObject* usearch_py_call_discard(usearch_py_receiver_t const* receiver, usearch_py_call_t* call);
 
 /**
- *  @brief Reads an optional callable into @p callback, latching its failures into @p call.
+ *  @brief Reads an optional callable, holding it in @p callable and leaving NULL or None alone.
  *  @return 0 on success, -1 with a @c TypeError set when @p object is neither callable nor None.
  */
-int usearch_py_callback_from_object(PyObject* object, char const* field, usearch_py_call_t* call,
-                                    usearch_py_callback_t* callback);
+int usearch_py_callable_from_object(PyObject* object, char const* field, PyObject** callable);
 
-/** Moves the exception the calling thread holds into @p call unless an earlier one is there; the GIL is held. */
-void usearch_py_callback_latch(usearch_py_call_t* call);
+/** The progress to register for @p callable and @p steps, the callable its state; NULL for none. */
+usearch_progress_t usearch_py_progress_registered(PyObject* callable, size_t steps);
 
-/** Whether a callback of @p call already raised, so a later one returns at once. */
-int usearch_py_callback_raised(usearch_py_call_t* call);
-
-/** The progress to register for @p callback and @p steps; its trampoline is NULL when the caller
- *  passed no handler. */
-usearch_progress_t usearch_py_progress_registered(usearch_py_callback_t* callback, size_t steps);
-
-/** The predicate to register for @p callback; its trampoline is NULL when the caller passed no
- *  predicate. */
-usearch_predicate_t usearch_py_predicate_registered(usearch_py_callback_t* callback);
+/** The predicate to register for @p callable, the callable its state; no trampoline for NULL. */
+usearch_predicate_t usearch_py_predicate_registered(PyObject* callable);
 
 #pragma endregion Calls
 
@@ -614,32 +605,134 @@ void usearch_py_paths_release(usearch_py_paths_t* paths);
 /** Reads a non-negative count, leaving @p value alone when @p object is NULL; returns 0 or -1 with an exception set. */
 int usearch_py_size_from_object(PyObject* object, char const* field, size_t* value);
 
+/** Reads an optional seed, leaving @p seed alone when @p object is NULL; returns 0 or -1 with an
+ *  exception set. */
+int usearch_py_seed_from_object(PyObject* object, uint64_t* seed);
+
+/** Reads the class a placement pins, a member of @p classes, leaving zero for NULL or None; returns
+ *  0 or -1 with an exception set. */
+int usearch_py_class_from_object(PyObject* object, char const* field, usearch_py_enum_t const* classes, int* value);
+
+/** A new member of @p classes for @p value, or None for the zero value that means unknown. */
+PyObject* usearch_py_class_to_object(usearch_py_enum_t const* classes, int value);
+
+/** Reads the @c size_t at the byte offset @p closure inside @p self, as a report's getters do. */
+PyObject* usearch_py_size_getter(PyObject* self, void* closure);
+
+/** One reachability audit, the slot @c health writes it into. */
+typedef struct DenseReachability {
+    PyObject ob_base;
+    usearch_reachability_t reachability;
+} DenseReachability;
+
+/** Traversal telemetry a caller passes into a walking verb of any modality to have overwritten. */
+typedef struct DenseTraversalStats {
+    PyObject ob_base;
+    usearch_traversal_stats_t stats;
+} DenseTraversalStats;
+
+/** What one refine or reshard did to the graph, the slot the call writes it into. */
+typedef struct RefineReport {
+    PyObject ob_base;
+    usearch_refine_report_t report;
+} RefineReport;
+
+/** A new @c DenseReachability of @p reachability, or NULL with an exception set. */
+PyObject* usearch_py_reachability_to_object(usearch_reachability_t const* reachability);
+
+/** A new @c RefineReport of @p report, or NULL with an exception set. */
+PyObject* usearch_py_refine_report_to_object(usearch_refine_report_t const* report);
+
+/** Borrows a whole checkpoint blob, whatever its length; returns 0 or -1 with an exception set. */
+int usearch_py_checkpoint_from_object(PyObject* object, usearch_py_buffer_backing_t* backing);
+
 /**
  *  @brief The handle of the @c Executor @p object, refusing anything else and a closed one.
  *  @return 0 on success, -1 with an exception set otherwise.
  */
 int usearch_py_executor_from_object(PyObject* object, usearch_executor_t* executor);
 
-/**
- *  @brief Claims the @c Arena @p object for one call, rewinding it: every result over its previous
- *      outputs goes stale.
- *  @param[out] arena A new reference to the claimed @c Arena; hand it to @c usearch_py_arena_unclaim.
- *  @return 0 on success, -1 with an exception set when @p object is no @c Arena, serves a call, or
- *      still exports.
- */
-int usearch_py_arena_claim(PyObject* object, PyObject** arena);
+/** Reads an optional executor, NULL or @c None running on the calling thread; returns 0 or -1 with
+ *  an exception set. */
+int usearch_py_optional_executor_from_object(PyObject* object, usearch_executor_t* executor);
 
-/** Ends the claim @c usearch_py_arena_claim took, and drops its reference. */
-void usearch_py_arena_unclaim(PyObject* arena);
-
-/** Asks the library where the outputs of the @c Arena @p arena live; 0, or -1 with an exception
- *  set. */
+/** Asks the library where the outputs of the @c Arena @p arena live; 0, or -1 with an exception. */
 int usearch_py_arena_describe(PyObject* arena, usearch_arena_description_t* description);
 
+/** The handle of the @c Arena @p arena, or NULL for none, which the library refuses. */
+usearch_arena_t usearch_py_arena_handle(PyObject* arena);
+
+/** The handle of the @c Arena @p object, or NULL for None; 0, or -1 with a @c TypeError set. */
+int usearch_py_arena_from_object(PyObject* object, usearch_arena_t* handle);
+
+/** Holds the @c Arena @p object in @p call, or none for None; 0, or -1 with a @c TypeError set. */
+int usearch_py_call_hold_arena(usearch_py_call_t* call, PyObject* object);
+
 /**
- *  @brief A result of @p type - @c ArenaBufferType or a subtype - over the C-contiguous @p data the
- *      claiming call wrote inside @p arena, which it keeps alive and reads only until a later call
- *      rewinds it.
+ *  @brief Holds the @c Arena @p object in @p call, or none for None, and opens its result of
+ *      @p type over it, which leads with its arena as @c ArenaBuffer does.
+ *  @return The result the library writes into, or NULL with an exception set.
+ */
+void* usearch_py_call_arena(usearch_py_call_t* call, PyObject* object, PyTypeObject* type);
+
+/** Opens the result of @p type, a report the library writes into, as the answer of @p call; NULL
+ *  with an exception set. */
+void* usearch_py_call_result(usearch_py_call_t* call, PyTypeObject* type);
+
+/** One output a call left in an arena, exported zero-copy, and the base of every such result. */
+typedef struct ArenaBuffer {
+    PyObject ob_base;
+
+    /** The arena the output lives in, kept alive so the memory outlives every other name for it. */
+    PyObject* arena;
+
+    /** The rows a call writes into a @c DenseVectors, which carry its scalar and columns; zeroed
+     *  for every other output. */
+    usearch_rows_view_t rows;
+
+    /** The rows a call wrote into @c rows. */
+    size_t count;
+
+    void const* data;
+    char const* format;
+    Py_ssize_t item_bytes;
+    int rank;
+    Py_ssize_t shape[3];
+    Py_ssize_t strides[3];
+} ArenaBuffer;
+
+/** A ranked run a verb writes into an arena, the slot the library writes its view into. */
+typedef struct Matches {
+    PyObject ob_base;
+    PyObject* arena;
+    usearch_matches_view_t view;
+
+    /** Rows in each output, one per query. */
+    size_t queries;
+} Matches;
+
+/** The ragged pairs @c multiply or @c maxsim writes into an arena: its view and counts. */
+typedef struct DenseProducts {
+    PyObject ob_base;
+    PyObject* arena;
+    usearch_matches_tape_view_t view;
+
+    /** The left rows or queries, one fewer than the offsets. */
+    size_t queries;
+
+    /** Pairs written across them. */
+    size_t pairs;
+
+    /** Pairs scored before the bound cut any. */
+    size_t required;
+} DenseProducts;
+
+/** Answers the @c DenseVectors a call wrote its @c rows and @c count into, laid out for export. */
+PyObject* usearch_py_rows_answer(usearch_py_call_t* call);
+
+/**
+ *  @brief A result of @p type - @c ArenaBufferType or a subtype - over the C-contiguous @p data a
+ *      call wrote inside @p arena, which it keeps alive and views until a later call rewinds it.
  *
  *  Every output exports DLPack; host memory also exports the writable buffer protocol, and device
  *  memory @c __cuda_array_interface__.
@@ -650,8 +743,7 @@ PyObject* usearch_py_arena_buffer(PyTypeObject* type, PyObject* arena, void cons
                                   Py_ssize_t item_bytes, Py_ssize_t const* shape, int rank);
 
 /**
- *  @brief A @c DenseVectors over the @p count rows a call wrote packed into the claimed
- *      @c Arena @p arena.
+ *  @brief A @c DenseVectors over the @p count rows a call wrote packed into the @c Arena @p arena.
  *
  *  Kinds a @c memoryview cannot format - the sub-byte and mini-float ones - leave as a
  *  @b (count,row_bytes) run of @c 'B', since a cast to their format would report the wrong extent.
@@ -672,12 +764,10 @@ PyObject* usearch_py_products_new(PyObject* arena, usearch_matches_tape_view_t c
 extern char const doc_version[];
 extern char const doc_capabilities_compiled[];
 extern char const doc_capabilities_available[];
-extern char const doc_layouts[];
 
 PyObject* api_version(PyObject* self, PyObject* unused);
 PyObject* api_capabilities_compiled(PyObject* self, PyObject* unused);
 PyObject* api_capabilities_available(PyObject* self, PyObject* unused);
-PyObject* api_layouts(PyObject* self, PyObject* unused);
 
 #pragma endregion Shared Helpers
 

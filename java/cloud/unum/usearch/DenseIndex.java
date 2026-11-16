@@ -14,12 +14,14 @@ import java.lang.foreign.StructLayout;
 import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
 import java.util.function.Consumer;
+import java.util.function.Predicate;
 import java.util.function.ToLongFunction;
 
 import org.jspecify.annotations.Nullable;
 
-import cloud.unum.usearch.DenseVerbs.Request;
+import cloud.unum.usearch.DenseCalls.Request;
 import cloud.unum.usearch.Types.Arena;
 import cloud.unum.usearch.Types.CPUClass;
 import cloud.unum.usearch.Types.Call;
@@ -30,6 +32,8 @@ import cloud.unum.usearch.Types.Handle;
 import cloud.unum.usearch.Types.Key;
 import cloud.unum.usearch.Types.Matches;
 import cloud.unum.usearch.Types.Monolith;
+import cloud.unum.usearch.Types.PhaseProgress;
+import cloud.unum.usearch.Types.Progress;
 import cloud.unum.usearch.Types.RowsView;
 import cloud.unum.usearch.Types.Scalar;
 import cloud.unum.usearch.Types.Status;
@@ -57,10 +61,9 @@ import cloud.unum.usearch.Types.Verb;
  * <p>
  * The receiver chooses how a call runs, and the verb stays the same: the index runs every verb on
  * the caller's thread, the {@link On} that {@link #on} makes blocks on an executor, and the
- * {@link DeferredOn} that {@link #deferred} makes submits there and answers a {@link Deferred}. The
- * filtered search and the progress handlers of the C interface stay unbound: they run on engine
- * threads, where every candidate would pay an upcall and a throwing handler could not unwind. Filter
- * the results of {@link #search} instead, or narrow the index.
+ * {@link DeferredOn} that {@link #deferred} makes submits there and answers a {@link Deferred}.
+ * Predicates, progress handlers and value lookups run on the executor's threads and must not throw;
+ * an exception escaping one terminates the process.
  *
  * <p>
  * Every method here reports failure as an unchecked {@link USearchException} carrying the
@@ -80,7 +83,7 @@ import cloud.unum.usearch.Types.Verb;
  * }
  * }</pre>
  */
-public final class DenseIndex extends DenseVerbs implements AutoCloseable {
+public final class DenseIndex implements AutoCloseable {
 
     /**
      * A distance kind supported out of the box, with SIMD kernels dispatched by the machine's
@@ -173,34 +176,24 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
             return this;
         }
 
-        /**
-         * The width of the indexed vectors, which init freezes, refusing zero with CONFIG_MISMATCH.
-         *
-         * @throws USearchException INVALID_ARGUMENT on a negative width.
-         */
+        /** The width of the indexed vectors, which init freezes, refusing zero with CONFIG_MISMATCH. */
         public DenseOptions dimensions(long dimensions) {
-            this.dimensions = nonNegative(dimensions, "the dimensionality is negative");
+            this.dimensions = dimensions;
             return this;
         }
 
-        /**
-         * The connections-per-node bound of the graph; zero derives.
-         *
-         * @throws USearchException INVALID_ARGUMENT on a negative bound.
-         */
+        /** The connections-per-node bound of the graph; zero derives. */
         public DenseOptions connectivity(long connectivity) {
-            this.connectivity = nonNegative(connectivity, "the connectivity is negative");
+            this.connectivity = connectivity;
             return this;
         }
 
         /**
          * The upper bound on entries sharing one key; zero is unbounded. No checkpoint records it,
          * so every load takes it as an argument of its own.
-         *
-         * @throws USearchException INVALID_ARGUMENT on a negative bound.
          */
         public DenseOptions valuesPerKey(long valuesPerKey) {
-            this.valuesPerKey = nonNegative(valuesPerKey, "the entries per key is negative");
+            this.valuesPerKey = valuesPerKey;
             return this;
         }
 
@@ -251,13 +244,13 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     + ", valuesPerKey=" + valuesPerKey + ")";
         }
 
-        /** Fills the fields both init structures share. */
+        /** Fills the fields both init structures share, at the same offsets in each. */
         void fill(Call call) {
-            call.enumeration("metric", metric.code());
-            call.enumeration("quantization", quantization.code());
-            call.size("dimensions", dimensions);
-            call.size("connectivity", connectivity);
-            call.size("values_per_key", valuesPerKey);
+            call.enumeration(INIT_METRIC, metric.code());
+            call.enumeration(INIT_QUANTIZATION, quantization.code());
+            call.size(INIT_DIMENSIONS, dimensions);
+            call.size(INIT_CONNECTIVITY, connectivity);
+            call.size(INIT_VALUES_PER_KEY, valuesPerKey);
         }
     }
 
@@ -281,13 +274,13 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
      */
     public record DenseMetadata(long dimensions, DenseMetric metric, Scalar quantization, long connectivity) {
 
-        /** Lifts a {@code usearch_dense_metadata_t}. */
-        static DenseMetadata lift(MemorySegment metadata) {
+        /** Lifts the {@code usearch_dense_metadata_t} at {@code at} of {@code struct}. */
+        static DenseMetadata lift(MemorySegment struct, long at) {
             return new DenseMetadata(
-                    metadata.get(Library.SIZE, Library.offset(METADATA, "dimensions")),
-                    DenseMetric.of(metadata.get(Library.ENUM, Library.offset(METADATA, "metric"))),
-                    Scalar.of(metadata.get(Library.ENUM, Library.offset(METADATA, "quantization"))),
-                    metadata.get(Library.SIZE, Library.offset(METADATA, "connectivity")));
+                    (long) METADATA_DIMENSIONS.get(struct, at),
+                    DenseMetric.of((int) METADATA_METRIC.get(struct, at)),
+                    Scalar.of((int) METADATA_QUANTIZATION.get(struct, at)),
+                    (long) METADATA_CONNECTIVITY.get(struct, at));
         }
     }
 
@@ -319,16 +312,13 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
         /** Lifts a {@code usearch_dense_index_description_t}. */
         static DenseIndexDescription lift(MemorySegment description) {
             return new DenseIndexDescription(
-                    DenseMetadata.lift(
-                            description.asSlice(Library.offset(DESCRIPTION, "metadata"), METADATA.byteSize())),
-                    description.get(Library.SIZE, Library.offset(DESCRIPTION, "size")),
-                    description.get(Library.SIZE, Library.offset(DESCRIPTION, "capacity")),
-                    description.get(Library.SIZE, Library.offset(DESCRIPTION, "memory_usage")),
-                    Library.text(
-                            CPU_CLASS_NAME, description.get(Library.ENUM, Library.offset(DESCRIPTION, "cpu_class"))),
-                    Library.text(
-                            GPU_CLASS_NAME, description.get(Library.ENUM, Library.offset(DESCRIPTION, "gpu_class"))),
-                    description.get(Library.SIZE, Library.offset(DESCRIPTION, "shards_count")));
+                    DenseMetadata.lift(description, DESCRIPTION_METADATA),
+                    (long) DESCRIPTION_SIZE.get(description, 0L),
+                    (long) DESCRIPTION_CAPACITY.get(description, 0L),
+                    (long) DESCRIPTION_MEMORY_USAGE.get(description, 0L),
+                    Library.text(CPU_CLASS_NAME, (int) DESCRIPTION_CPU_CLASS.get(description, 0L)),
+                    Library.text(GPU_CLASS_NAME, (int) DESCRIPTION_GPU_CLASS.get(description, 0L)),
+                    (long) DESCRIPTION_SHARDS_COUNT.get(description, 0L));
         }
     }
 
@@ -342,22 +332,69 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
      *     this, never a later size.
      * @param reachable the entries a search reaches; the rest no search finds until a refinement
      *     re-links them.
-     * @param sweeps the levels the sweep took to converge.
-     * @param backSweeps the levels the sweep back toward the entry point took, where an audit
-     *     sweeps both ways.
+     * @param depthFromRoot the depths the walk from the root took to converge.
+     * @param depthToRoot the depths the walk back toward the root took, where a health check
+     *     walks both ways.
+     * @param unlinked the entries no reached entry links to.
+     * @param underlinked the entries linked to by fewer entries than they link to.
+     * @param beyondMostPopulatedDepth the entries deeper than the depth holding the most entries.
+     * @param unreachedIslands the islands no entry outside them links into.
+     * @param strandedIslands the islands with no link out.
+     * @param components the components when direction is ignored.
      */
-    public record DenseReachability(long audited, long reachable, long sweeps, long backSweeps) {
+    public record DenseReachability(
+            long audited,
+            long reachable,
+            long depthFromRoot,
+            long depthToRoot,
+            long unlinked,
+            long underlinked,
+            long beyondMostPopulatedDepth,
+            long unreachedIslands,
+            long strandedIslands,
+            long components) {
 
         /** Lifts a {@code usearch_reachability_t}. */
         static DenseReachability lift(MemorySegment reachability) {
-            long[] fields = reachability.toArray(ValueLayout.JAVA_LONG);
-            return new DenseReachability(fields[0], fields[1], fields[2], fields[3]);
+            return new DenseReachability(
+                    (long) REACHABILITY_AUDITED.get(reachability, 0L),
+                    (long) REACHABILITY_REACHABLE.get(reachability, 0L),
+                    (long) REACHABILITY_DEPTH_FROM_ROOT.get(reachability, 0L),
+                    (long) REACHABILITY_DEPTH_TO_ROOT.get(reachability, 0L),
+                    (long) REACHABILITY_UNLINKED.get(reachability, 0L),
+                    (long) REACHABILITY_UNDERLINKED.get(reachability, 0L),
+                    (long) REACHABILITY_BEYOND_MOST_POPULATED_DEPTH.get(reachability, 0L),
+                    (long) REACHABILITY_UNREACHED_ISLANDS.get(reachability, 0L),
+                    (long) REACHABILITY_STRANDED_ISLANDS.get(reachability, 0L),
+                    (long) REACHABILITY_COMPONENTS.get(reachability, 0L));
+        }
+    }
+
+    /** What a round concluded, so no caller picks a change rate. */
+    public enum RefineVerdict {
+
+        /** No round concluded: a report no round filled yet. */
+        NONE,
+        /** The round changed some entry's link set, so another round can help. */
+        IMPROVED,
+        /** The round changed no entry's link set. */
+        CONVERGED,
+        /** The round lowered nothing while something stands, as full entries leave no slot. */
+        STALLED,
+        /** The caller stopped the round; the phase names where. */
+        STOPPED;
+
+        /** Renders the verdict as the library spells it. Calls {@code usearch_refine_verdict_name}. */
+        @Override
+        public String toString() {
+            return Library.text(VERDICT_NAME, ordinal());
         }
     }
 
     /**
-     * What one refine-family call did to the graph: {@link DenseVerbs#refine(DenseRefineConfig)},
-     * {@link DenseVerbs#absorb} and {@link DenseVerbs#split(DenseSplitConfig, DenseIndex...)} land it.
+     * What one refining call did to the graph: {@link DenseIndex#refine(DenseRefineConfig)} and
+     * {@link DenseIndex#reshard} land it, so far while their plan stays live, and each plan's
+     * {@code finish} lands the whole plan's.
      *
      * <p>
      * Mirrors {@code usearch_refine_report_t}.
@@ -368,21 +405,42 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
      *     the graph has settled.
      * @param islandsFound the entries the first audit found not reached both ways.
      * @param islandsReconnected the links written between an island and an entry reached both ways.
-     * @param reachability the audit closing the heal, as a fresh {@link DenseVerbs#health()} right
+     * @param neighborhoods the neighborhoods the round re-stitched.
+     * @param widestNeighborhood the entries of the widest neighborhood.
+     * @param addedLinks the links the round added.
+     * @param droppedLinks the links the round dropped.
+     * @param verdict what the round concluded.
+     * @param opening the health check opening the round.
+     * @param reachability the health check closing the heal, as a fresh {@link DenseIndex#health()} right
      *     after would take it.
      */
     public record RefineReport(
-            long reselected, long changed, long islandsFound, long islandsReconnected, DenseReachability reachability) {
+            long reselected,
+            long changed,
+            long islandsFound,
+            long islandsReconnected,
+            long neighborhoods,
+            long widestNeighborhood,
+            long addedLinks,
+            long droppedLinks,
+            RefineVerdict verdict,
+            DenseReachability opening,
+            DenseReachability reachability) {
 
         /** Lifts a {@code usearch_refine_report_t}. */
         static RefineReport lift(MemorySegment report) {
-            long[] fields = report.toArray(ValueLayout.JAVA_LONG);
             return new RefineReport(
-                    fields[0],
-                    fields[1],
-                    fields[2],
-                    fields[3],
-                    new DenseReachability(fields[4], fields[5], fields[6], fields[7]));
+                    (long) REPORT_RESELECTED.get(report, 0L),
+                    (long) REPORT_CHANGED.get(report, 0L),
+                    (long) REPORT_ISLANDS_FOUND.get(report, 0L),
+                    (long) REPORT_ISLANDS_RECONNECTED.get(report, 0L),
+                    (long) REPORT_NEIGHBORHOODS.get(report, 0L),
+                    (long) REPORT_WIDEST_NEIGHBORHOOD.get(report, 0L),
+                    (long) REPORT_ADDED_LINKS.get(report, 0L),
+                    (long) REPORT_DROPPED_LINKS.get(report, 0L),
+                    RefineVerdict.values()[(int) REPORT_VERDICT.get(report, 0L)],
+                    DenseReachability.lift(report.asSlice(REPORT_OPENING, REACHABILITY.byteSize())),
+                    DenseReachability.lift(report.asSlice(REPORT_REACHABILITY, REACHABILITY.byteSize())));
         }
     }
 
@@ -455,9 +513,10 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
 
     /**
      * Resolves the keys a walk scores to their value rows, which the index does not store: each key
-     * names one row of {@code values}, as {@code row} answers it, and a row outside the matrix, a
-     * thrown exception, or a matrix of another scalar or width than the call states leaves the key
-     * without one, which refuses the call. The function runs on the executor's threads together.
+     * names one row of {@code values}, as {@code row} answers it, and a row outside the matrix or a
+     * matrix of another scalar or width than the call states leaves the key without one, which
+     * refuses the call. The function runs on the executor's threads together and must not throw; an
+     * exception escaping it terminates the process.
      *
      * <p>
      * The values are borrowed once, here, and so is the upcall every call hands across: a native slab
@@ -466,8 +525,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
      * <p>
      * Mirrors {@code usearch_value_lookup_t}, whose scalar and columns are checked against the matrix.
      * It is a host function, so it serves RAM handles alone: a VRAM walk resolves rows through a
-     * device function, which this binding does not build, so an attention into a VRAM arena refuses
-     * it with DEVICE.
+     * device function, which this binding does not build.
      */
     public static final class ValueLookup {
 
@@ -518,10 +576,9 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
             return row;
         }
 
-        /** Hands the upcall across under the call's outcome, which latches what the function raises, until final. */
+        /** Hands the upcall across, keeping it alive until the call is final. */
         void lend(Call call) {
-            call.pointer("value_lookup", upcall);
-            call.pointer("value_lookup_state", call.outcome);
+            call.pointer(ATTEND_VALUE_LOOKUP, upcall);
             call.lend(this);
         }
 
@@ -542,23 +599,20 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                 MemorySegment found = resolved.reinterpret(count * Library.POINTER.byteSize());
                 boolean fits = asked == scalar && width == columns;
                 for (long entry = 0; entry != count; ++entry) {
-                    MemorySegment located = MemorySegment.NULL;
-                    try {
-                        long position = fits ? row.applyAsLong(Key.read(named, entry * Key.BYTES)) : -1;
-                        if (position >= 0 && position < rows) {
-                            located = MemorySegment.ofAddress(base + position * strideBytes);
-                        }
-                    } catch (Throwable failure) {
-                        Call.latch(state, failure);
-                    }
-                    found.setAtIndex(Library.POINTER, entry, located);
+                    long position = fits ? row.applyAsLong(Key.read(named, entry * Key.BYTES)) : -1;
+                    found.setAtIndex(
+                            Library.POINTER,
+                            entry,
+                            position >= 0 && position < rows
+                                    ? MemorySegment.ofAddress(base + position * strideBytes)
+                                    : MemorySegment.NULL);
                 }
             }
         }
     }
 
     /**
-     * The knobs of an insertion; see {@link DenseVerbs#insert(Key[], RowsView, DenseInsertConfig)}.
+     * The knobs of an insertion; see {@link DenseIndex#insert(Key[], RowsView, DenseInsertConfig)}.
      * Mirrors {@code usearch_dense_insert_t}.
      */
     public static final class DenseInsertConfig {
@@ -566,18 +620,23 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
         long expansionFactor;
 
         @Nullable
+        Progress progress;
+
+        @Nullable
         DenseTraversalStats stats;
 
         /** Every knob derived. */
         public DenseInsertConfig() {}
 
-        /**
-         * The breadth of the candidates the build walk explores; zero derives.
-         *
-         * @throws USearchException INVALID_ARGUMENT on a negative breadth, which no candidates may have.
-         */
+        /** The breadth of the candidates the build walk explores; zero derives. */
         public DenseInsertConfig expansionFactor(long expansionFactor) {
-            this.expansionFactor = DenseVerbs.nonNegative(expansionFactor);
+            this.expansionFactor = expansionFactor;
+            return this;
+        }
+
+        /** Hears how far the insertion has advanced; an insertion cannot be cancelled, so its answer is ignored. */
+        public DenseInsertConfig progress(Progress progress) {
+            this.progress = progress;
             return this;
         }
 
@@ -589,26 +648,47 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
     }
 
     /**
-     * The knobs of a refinement; see {@link DenseVerbs#refine(DenseRefineConfig)}. Mirrors
-     * {@code usearch_dense_refine_t}.
+     * The knobs of a refinement and the plan it continues; see
+     * {@link DenseIndex#refine(DenseRefineConfig)}. Mirrors {@code usearch_dense_refine_t}.
      */
     public static final class DenseRefineConfig {
 
         long expansionFactor;
+        long memoryLimit;
+
+        @Nullable
+        DenseRefinePlan plan;
+
+        @Nullable
+        Progress progress;
 
         @Nullable
         DenseTraversalStats stats;
 
-        /** Every knob derived. */
+        /** Every knob derived, one round run to its end. */
         public DenseRefineConfig() {}
 
-        /**
-         * The breadth of the candidates the re-selection walk explores; zero derives.
-         *
-         * @throws USearchException INVALID_ARGUMENT on a negative breadth, which no candidates may have.
-         */
+        /** The breadth of the candidates any walk beside the rounds explores; zero derives. */
         public DenseRefineConfig expansionFactor(long expansionFactor) {
-            this.expansionFactor = DenseVerbs.nonNegative(expansionFactor);
+            this.expansionFactor = expansionFactor;
+            return this;
+        }
+
+        /** The bytes a loaded NVMe index holds for the one part it rewrites; zero derives, and less streams it. */
+        public DenseRefineConfig memoryLimit(long memoryLimit) {
+            this.memoryLimit = memoryLimit;
+            return this;
+        }
+
+        /** The plan the call opens or continues, so a cancel leaves its round resumable. */
+        public DenseRefineConfig plan(DenseRefinePlan plan) {
+            this.plan = plan;
+            return this;
+        }
+
+        /** Hears every barrier of every phase, and may cancel the round there. */
+        public DenseRefineConfig progress(Progress progress) {
+            this.progress = progress;
             return this;
         }
 
@@ -620,38 +700,89 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
     }
 
     /**
-     * The knobs of a split's closing refinements; see
-     * {@link DenseVerbs#split(DenseSplitConfig, DenseIndex...)}. Mirrors {@code usearch_dense_split_t}.
+     * The placement a reshard recuts toward, the plan it continues, and the knobs of its closing
+     * rounds, by default keeping every handle's own placement; see
+     * {@link DenseIndex#reshard(DenseIndex[], DenseIndex[], DenseReshardConfig)}. Mirrors
+     * {@code usearch_dense_reshard_t}.
      */
-    public static final class DenseSplitConfig {
+    public static final class DenseReshardConfig {
 
+        int @Nullable [] memoryDomains;
+        int @Nullable [] devices;
+        String @Nullable [] paths;
+        long shardCapacity;
         long expansionFactor;
+        long memoryLimit;
         long seed;
+
+        @Nullable
+        DenseReshardPlan plan;
+
+        @Nullable
+        Progress progress;
 
         @Nullable
         DenseTraversalStats stats;
 
-        /** Every knob derived, under seed zero. */
-        public DenseSplitConfig() {}
+        /** Every placement kept and every knob derived, under seed zero. */
+        public DenseReshardConfig() {}
 
-        /**
-         * The breadth of the candidates the closing walks explore; zero derives.
-         *
-         * @throws USearchException INVALID_ARGUMENT on a negative breadth, which no candidates may have.
-         */
-        public DenseSplitConfig expansionFactor(long expansionFactor) {
-            this.expansionFactor = DenseVerbs.nonNegative(expansionFactor);
+        /** NUMA node IDs of a RAM placement, one shard per node at least; an empty list derives them. */
+        public DenseReshardConfig memoryDomains(int[] memoryDomains) {
+            this.memoryDomains = memoryDomains;
             return this;
         }
 
-        /** Picks the part roots: equal seeds over an unchanged index split equally. */
-        public DenseSplitConfig seed(long seed) {
+        /** CUDA ordinals of a VRAM placement, one shard per device at least. */
+        public DenseReshardConfig devices(int[] devices) {
+            this.devices = devices;
+            return this;
+        }
+
+        /** Drives of an NVMe placement, one shard per drive at least. */
+        public DenseReshardConfig paths(String[] paths) {
+            this.paths = paths;
+            return this;
+        }
+
+        /** Entries per shard of the RAM or VRAM placement; zero keeps the handle's own bound. */
+        public DenseReshardConfig shardCapacity(long shardCapacity) {
+            this.shardCapacity = shardCapacity;
+            return this;
+        }
+
+        /** The breadth of the candidates any walk beside the closing rounds explores; zero derives. */
+        public DenseReshardConfig expansionFactor(long expansionFactor) {
+            this.expansionFactor = expansionFactor;
+            return this;
+        }
+
+        /** The bytes a loaded NVMe target holds for the one part it rewrites; zero derives, and less streams it. */
+        public DenseReshardConfig memoryLimit(long memoryLimit) {
+            this.memoryLimit = memoryLimit;
+            return this;
+        }
+
+        /** Picks the part roots of a source cut among several targets: equal seeds over an unchanged source cut equally. */
+        public DenseReshardConfig seed(long seed) {
             this.seed = seed;
             return this;
         }
 
+        /** The plan the call opens or continues, so a cancel leaves its closing rounds resumable. */
+        public DenseReshardConfig plan(DenseReshardPlan plan) {
+            this.plan = plan;
+            return this;
+        }
+
+        /** Hears every barrier of the closing rounds, and may cancel them there; a move is never cancelled. */
+        public DenseReshardConfig progress(Progress progress) {
+            this.progress = progress;
+            return this;
+        }
+
         /** Where the traversal telemetry lands, overwritten once the call succeeded. */
-        public DenseSplitConfig stats(DenseTraversalStats stats) {
+        public DenseReshardConfig stats(DenseTraversalStats stats) {
             this.stats = stats;
             return this;
         }
@@ -659,7 +790,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
 
     /**
      * The view a sample grows and how it draws, by default across the whole index with nothing
-     * shown yet; see {@link DenseVerbs#sample(long, Arena, DenseSampleConfig)}. Mirrors
+     * shown yet; see {@link DenseIndex#sample(long, Arena, DenseSampleConfig)}. Mirrors
      * {@code usearch_dense_sample_t}.
      */
     public static final class DenseSampleConfig {
@@ -669,6 +800,9 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
         Key[] focus = new Key[0];
         long seed;
         long expansionFactor;
+
+        @Nullable
+        Progress progress;
 
         @Nullable
         DenseTraversalStats stats;
@@ -700,13 +834,15 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
             return this;
         }
 
-        /**
-         * The breadth of the candidates the walks behind the draws explore; zero derives.
-         *
-         * @throws USearchException INVALID_ARGUMENT on a negative breadth, which no candidates may have.
-         */
+        /** The breadth of the candidates the walks behind the draws explore; zero derives. */
         public DenseSampleConfig expansionFactor(long expansionFactor) {
-            this.expansionFactor = DenseVerbs.nonNegative(expansionFactor);
+            this.expansionFactor = expansionFactor;
+            return this;
+        }
+
+        /** Hears how far the call has advanced, and may cancel it. */
+        public DenseSampleConfig progress(Progress progress) {
+            this.progress = progress;
             return this;
         }
 
@@ -719,7 +855,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
 
     /**
      * How many matches a search keeps and the knobs of its walk; see
-     * {@link DenseVerbs#search(RowsView, DenseSearchConfig, Arena)}. Mirrors {@code usearch_dense_search_t}.
+     * {@link DenseIndex#search(RowsView, DenseSearchConfig, Arena)}. Mirrors {@code usearch_dense_search_t}.
      */
     public static final class DenseSearchConfig {
 
@@ -728,24 +864,22 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
         Traversal traversal = Traversal.WALK;
 
         @Nullable
+        Predicate<Key> predicate;
+
+        @Nullable
+        Progress progress;
+
+        @Nullable
         DenseTraversalStats stats;
 
-        /**
-         * Up to {@code wanted} matches per query - the "k" in kANN.
-         *
-         * @throws USearchException INVALID_ARGUMENT on a negative count.
-         */
+        /** Up to {@code wanted} matches per query - the "k" in kANN. */
         public DenseSearchConfig(long wanted) {
-            this.wanted = nonNegative(wanted, "the wanted count is negative");
+            this.wanted = wanted;
         }
 
-        /**
-         * The breadth of the candidates the walk explores; zero derives.
-         *
-         * @throws USearchException INVALID_ARGUMENT on a negative breadth, which no candidates may have.
-         */
+        /** The breadth of the candidates the walk explores; zero derives. */
         public DenseSearchConfig expansionFactor(long expansionFactor) {
-            this.expansionFactor = DenseVerbs.nonNegative(expansionFactor);
+            this.expansionFactor = expansionFactor;
             return this;
         }
 
@@ -758,6 +892,21 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
             return this;
         }
 
+        /**
+         * Which candidate keys the walk may report, asked from the executor's threads together; it
+         * must not throw, as an exception escaping it terminates the process.
+         */
+        public DenseSearchConfig predicate(Predicate<Key> predicate) {
+            this.predicate = predicate;
+            return this;
+        }
+
+        /** Hears how far the call has advanced, and may cancel it. */
+        public DenseSearchConfig progress(Progress progress) {
+            this.progress = progress;
+            return this;
+        }
+
         /** Where the traversal telemetry lands, overwritten once the call succeeded. */
         public DenseSearchConfig stats(DenseTraversalStats stats) {
             this.stats = stats;
@@ -767,7 +916,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
 
     /**
      * How many documents a late-interaction search keeps and the knobs of its walk; see
-     * {@link DenseVerbs#maxsim(RowsView, long, DenseMaxsimConfig, Arena)}. Mirrors {@code usearch_dense_maxsim_t}.
+     * {@link DenseIndex#maxsim(RowsView, long, DenseMaxsimConfig, Arena)}. Mirrors {@code usearch_dense_maxsim_t}.
      */
     public static final class DenseMaxsimConfig {
 
@@ -775,25 +924,40 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
         long expansionFactor;
 
         @Nullable
+        Predicate<Key> predicate;
+
+        @Nullable
+        Progress progress;
+
+        @Nullable
         DenseTraversalStats stats;
 
         /**
          * Up to {@code wanted} documents per query - the "k" over keys, not rows; zero keeps every key
          * the query scored.
-         *
-         * @throws USearchException INVALID_ARGUMENT on a negative count.
          */
         public DenseMaxsimConfig(long wanted) {
-            this.wanted = nonNegative(wanted, "the wanted count is negative");
+            this.wanted = wanted;
+        }
+
+        /** The breadth of the candidates the walk explores; zero derives. */
+        public DenseMaxsimConfig expansionFactor(long expansionFactor) {
+            this.expansionFactor = expansionFactor;
+            return this;
         }
 
         /**
-         * The breadth of the candidates the walk explores; zero derives.
-         *
-         * @throws USearchException INVALID_ARGUMENT on a negative breadth, which no candidates may have.
+         * Which candidate keys the walk may report, asked from the executor's threads together; it
+         * must not throw, as an exception escaping it terminates the process.
          */
-        public DenseMaxsimConfig expansionFactor(long expansionFactor) {
-            this.expansionFactor = DenseVerbs.nonNegative(expansionFactor);
+        public DenseMaxsimConfig predicate(Predicate<Key> predicate) {
+            this.predicate = predicate;
+            return this;
+        }
+
+        /** Hears how far the call has advanced, and may cancel it. */
+        public DenseMaxsimConfig progress(Progress progress) {
+            this.progress = progress;
             return this;
         }
 
@@ -806,7 +970,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
 
     /**
      * How many pairs a sparse product keeps and the knobs of its walk; see
-     * {@link DenseVerbs#multiply(RowsView, DenseMultiplyConfig, Arena)}. Mirrors {@code usearch_dense_multiply_t}.
+     * {@link DenseIndex#multiply(RowsView, DenseMultiplyConfig, Arena)}. Mirrors {@code usearch_dense_multiply_t}.
      */
     public static final class DenseMultiplyConfig {
 
@@ -814,28 +978,41 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
         long expansionFactor;
 
         @Nullable
+        Predicate<Key> predicate;
+
+        @Nullable
+        Progress progress;
+
+        @Nullable
         DenseTraversalStats stats;
 
         /** Every pair kept, with every knob derived. */
         public DenseMultiplyConfig() {}
 
-        /**
-         * The bound on pairs kept per left row, the first ones its walk scored; zero keeps all.
-         *
-         * @throws USearchException INVALID_ARGUMENT on a negative count.
-         */
+        /** The bound on pairs kept per left row, the first ones its walk scored; zero keeps all. */
         public DenseMultiplyConfig wanted(long wanted) {
-            this.wanted = nonNegative(wanted, "the wanted count is negative");
+            this.wanted = wanted;
+            return this;
+        }
+
+        /** The breadth of the candidates, which widens the emitted pattern; zero derives. */
+        public DenseMultiplyConfig expansionFactor(long expansionFactor) {
+            this.expansionFactor = expansionFactor;
             return this;
         }
 
         /**
-         * The breadth of the candidates, which widens the emitted pattern; zero derives.
-         *
-         * @throws USearchException INVALID_ARGUMENT on a negative breadth, which no candidates may have.
+         * Which candidate keys the walk may report, asked from the executor's threads together; it
+         * must not throw, as an exception escaping it terminates the process.
          */
-        public DenseMultiplyConfig expansionFactor(long expansionFactor) {
-            this.expansionFactor = DenseVerbs.nonNegative(expansionFactor);
+        public DenseMultiplyConfig predicate(Predicate<Key> predicate) {
+            this.predicate = predicate;
+            return this;
+        }
+
+        /** Hears how far the call has advanced, and may cancel it. */
+        public DenseMultiplyConfig progress(Progress progress) {
+            this.progress = progress;
             return this;
         }
 
@@ -847,7 +1024,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
     }
 
     /**
-     * The knobs of an attention; see {@link DenseVerbs#attend(RowsView, ValueLookup, DenseAttendConfig, Arena)}.
+     * The knobs of an attention; see {@link DenseIndex#attend(RowsView, ValueLookup, DenseAttendConfig, Arena)}.
      * Mirrors {@code usearch_dense_attend_t}.
      */
     public static final class DenseAttendConfig {
@@ -859,6 +1036,12 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
         float scoreScale;
 
         @Nullable
+        Predicate<Key> predicate;
+
+        @Nullable
+        Progress progress;
+
+        @Nullable
         DenseTraversalStats stats;
 
         /** Every knob derived, the outputs in the queries' own scalar. */
@@ -868,11 +1051,9 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
          * The query heads sharing the index's key-value head, and with it one walk per token: row
          * {@code t * headCount + h} is head {@code h} of token {@code t}, so it must divide the rows;
          * zero means one.
-         *
-         * @throws USearchException INVALID_ARGUMENT on a negative count.
          */
         public DenseAttendConfig headCount(long headCount) {
-            this.headCount = nonNegative(headCount, "the head count is negative");
+            this.headCount = headCount;
             return this;
         }
 
@@ -888,19 +1069,30 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
             return this;
         }
 
-        /**
-         * The breadth of the candidates; zero derives. Wider candidates walk further, folding more of the tail.
-         *
-         * @throws USearchException INVALID_ARGUMENT on a negative breadth, which no candidates may have.
-         */
+        /** The breadth of the candidates; zero derives. Wider candidates walk further, folding more of the tail. */
         public DenseAttendConfig expansionFactor(long expansionFactor) {
-            this.expansionFactor = DenseVerbs.nonNegative(expansionFactor);
+            this.expansionFactor = expansionFactor;
             return this;
         }
 
         /** The logit scale, conventionally the inverse square root of the head dimensionality; zero derives it. */
         public DenseAttendConfig scoreScale(float scoreScale) {
             this.scoreScale = scoreScale;
+            return this;
+        }
+
+        /**
+         * Which candidate keys the walk may report, asked from the executor's threads together; it
+         * must not throw, as an exception escaping it terminates the process.
+         */
+        public DenseAttendConfig predicate(Predicate<Key> predicate) {
+            this.predicate = predicate;
+            return this;
+        }
+
+        /** Hears how far the call has advanced, and may cancel it. */
+        public DenseAttendConfig progress(Progress progress) {
+            this.progress = progress;
             return this;
         }
 
@@ -912,22 +1104,88 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
     }
 
     /**
-     * Rows a call wrote into its arena - the entries {@link DenseVerbs#get} found under a key, the
-     * outputs of {@link DenseVerbs#attend}, or the vectors of a {@link DenseBatch} - at the width, pitch
+     * A refinement in flight, which {@link DenseIndex#refine(DenseRefineConfig)} opens on its first
+     * call and continues on every later one, so a cancel keeps the round in hand resumable. The index
+     * admits no insertion and no save while it is open, and every call naming it names the index and
+     * executor it was opened with. {@link DenseIndex#refinePlanFinish} closes it on the receiver that
+     * opened it; a plan dropped open is never finished, and keeps the index closed to insertions.
+     */
+    public static final class DenseRefinePlan {
+
+        private final MemorySegment plan = java.lang.foreign.Arena.ofAuto().allocate(Library.POINTER);
+        private final MemorySegment phase = java.lang.foreign.Arena.ofAuto().allocate(Library.PHASE_PROGRESS);
+
+        /** A plan no call has opened yet. */
+        public DenseRefinePlan() {}
+
+        /** Where the last call naming the plan stopped. */
+        public PhaseProgress phase() {
+            return PhaseProgress.lift(phase);
+        }
+
+        void lend(Call call) {
+            call.pointer(REFINE_PLAN, plan);
+            call.pointer(REFINE_PHASE, phase);
+            call.lend(this);
+        }
+
+        /** The open plan a finish frees, leaving this one to open afresh on its next call. */
+        MemorySegment take() {
+            MemorySegment open = plan.get(Library.POINTER, 0);
+            plan.set(Library.POINTER, 0, MemorySegment.NULL);
+            return open;
+        }
+    }
+
+    /**
+     * A reshard in flight, which {@link DenseIndex#reshard(DenseIndex[], DenseIndex[], DenseReshardConfig)}
+     * opens on its first call and continues on every later one, moving what is still pending and
+     * resuming the closing rounds a cancel stopped. Every index it names admits no insertion and no
+     * save while it is open, and every call naming it names the executor it was opened with.
+     * {@link DenseIndex#reshardPlanFinish} closes it on a receiver of that executor; a plan dropped
+     * open is never finished, and keeps every index it names closed to insertions.
+     */
+    public static final class DenseReshardPlan {
+
+        private final MemorySegment plan = java.lang.foreign.Arena.ofAuto().allocate(Library.POINTER);
+        private final MemorySegment phase = java.lang.foreign.Arena.ofAuto().allocate(Library.PHASE_PROGRESS);
+
+        /** A plan no call has opened yet. */
+        public DenseReshardPlan() {}
+
+        /** Where the last call naming the plan stopped. */
+        public PhaseProgress phase() {
+            return PhaseProgress.lift(phase);
+        }
+
+        void lend(Call call) {
+            call.pointer(RESHARD_PLAN, plan);
+            call.pointer(RESHARD_PHASE, phase);
+            call.lend(this);
+        }
+
+        /** The open plan a finish frees, leaving this one to open afresh on its next call. */
+        MemorySegment take() {
+            MemorySegment open = plan.get(Library.POINTER, 0);
+            plan.set(Library.POINTER, 0, MemorySegment.NULL);
+            return open;
+        }
+    }
+
+    /**
+     * Rows a call wrote into its arena - the entries {@link DenseIndex#get} found under a key, the
+     * outputs of {@link DenseIndex#attend}, or the vectors of a {@link DenseBatch} - at the width, pitch
      * and scalar the library reported. Valid until the arena's next call or its close.
      */
     public static final class DenseVectors {
 
-        private final Arena arena;
         private final MemorySegment data;
         private final long rows;
         private final long columns;
         private final long strideBytes;
         private final Scalar scalar;
 
-        private DenseVectors(
-                Arena arena, MemorySegment data, long rows, long columns, long strideBytes, Scalar scalar) {
-            this.arena = arena;
+        private DenseVectors(MemorySegment data, long rows, long columns, long strideBytes, Scalar scalar) {
             this.data = data;
             this.rows = rows;
             this.columns = columns;
@@ -937,14 +1195,15 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
 
         /** Lifts the {@code usearch_rows_view_t} of {@code rows} rows a call wrote into its arena. */
         static DenseVectors lift(Call call, MemorySegment view, long rows) {
-            long stride = view.get(Library.SIZE, Library.offset(Library.ROWS_VIEW, "stride"));
+            long stride = (long) Library.ROWS_STRIDE.get(view, 0L);
             return new DenseVectors(
-                    call.arena(),
-                    call.reach(view.get(Library.POINTER, 0), Types.Extents.product(rows, stride, "the rows")),
+                    call.reach(
+                            (MemorySegment) Library.ROWS_DATA.get(view, 0L),
+                            Types.Extents.product(rows, stride, "the rows")),
                     rows,
-                    view.get(Library.SIZE, Library.offset(Library.ROWS_VIEW, "columns")),
+                    (long) Library.ROWS_COLUMNS.get(view, 0L),
                     stride,
-                    Scalar.of(view.get(Library.ENUM, Library.offset(Library.ROWS_VIEW, "scalar"))));
+                    Scalar.of((int) Library.ROWS_SCALAR.get(view, 0L)));
         }
 
         /** How many rows the call wrote; zero when a key holds none. */
@@ -967,25 +1226,19 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
             return scalar;
         }
 
-        /**
-         * The rows in place, in native byte order.
-         *
-         * @throws USearchException DEVICE when the arena holds device memory.
-         */
+        /** The rows in place, in native byte order. */
         public MemorySegment segment() {
-            arena.host();
             return data;
         }
     }
 
     /**
-     * The ragged sparse product {@link DenseVerbs#multiply} wrote into its arena: per left row, every
-     * pair its walk scored, in traversal order; or the keys {@link DenseVerbs#maxsim} kept per query,
+     * The ragged sparse product {@link DenseIndex#multiply} wrote into its arena: per left row, every
+     * pair its walk scored, in traversal order; or the keys {@link DenseIndex#maxsim} kept per query,
      * largest score first. Valid until the arena's next call or its close.
      */
     public static final class DenseProducts {
 
-        private final Arena arena;
         private final MemorySegment offsets;
         private final int queries;
         private final MemorySegment keys;
@@ -993,13 +1246,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
         private final long required;
 
         private DenseProducts(
-                Arena arena,
-                MemorySegment offsets,
-                int queries,
-                MemorySegment keys,
-                MemorySegment scores,
-                long required) {
-            this.arena = arena;
+                MemorySegment offsets, int queries, MemorySegment keys, MemorySegment scores, long required) {
             this.offsets = offsets;
             this.queries = queries;
             this.keys = keys;
@@ -1009,13 +1256,11 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
 
         /** Lifts the {@code usearch_matches_tape_view_t} a call over {@code queries} wrote into its arena. */
         static DenseProducts lift(Call call, MemorySegment view, int queries, long pairs, long required) {
-            StructLayout tape = Library.MATCHES_TAPE_VIEW;
             return new DenseProducts(
-                    call.arena(),
-                    call.reach(view.get(Library.POINTER, Library.offset(tape, "offsets")), (queries + 1L) * Long.BYTES),
+                    call.reach((MemorySegment) Library.TAPE_OFFSETS.get(view, 0L), (queries + 1L) * Long.BYTES),
                     queries,
-                    call.reach(view.get(Library.POINTER, Library.offset(tape, "keys")), pairs * Key.BYTES),
-                    call.reach(view.get(Library.POINTER, Library.offset(tape, "scores")), pairs * Double.BYTES),
+                    call.reach((MemorySegment) Library.TAPE_KEYS.get(view, 0L), pairs * Key.BYTES),
+                    call.reach((MemorySegment) Library.TAPE_SCORES.get(view, 0L), pairs * Double.BYTES),
                     required);
         }
 
@@ -1035,11 +1280,9 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
         /**
          * How many pairs one left row, or keys one query, holds.
          *
-         * @throws USearchException SHAPE_MISMATCH when the query is outside the batch, and DEVICE when
-         *     the arena holds device memory.
+         * @throws USearchException SHAPE_MISMATCH when the query is outside the batch.
          */
         public long count(int query) {
-            arena.host();
             if (query < 0 || query >= queries) {
                 throw new USearchException(Status.SHAPE_MISMATCH, "the query is outside the batch");
             }
@@ -1077,13 +1320,12 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
     }
 
     /**
-     * The draws of one {@link DenseVerbs#sample(long, Arena, DenseSampleConfig)}, written into its arena:
+     * The draws of one {@link DenseIndex#sample(long, Arena, DenseSampleConfig)}, written into its arena:
      * the keys drawn, which of its key's entries each is, the shown or earlier draw each hangs from,
      * and where each is placed. Valid until the arena's next call or its close.
      */
     public static final class Sample {
 
-        private final Arena arena;
         private final MemorySegment keys;
         private final MemorySegment entryOrdinals;
         private final Matches parents;
@@ -1091,13 +1333,11 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
         private final long written;
 
         private Sample(
-                Arena arena,
                 MemorySegment keys,
                 MemorySegment entryOrdinals,
                 Matches parents,
                 MemorySegment coordinates,
                 long written) {
-            this.arena = arena;
             this.keys = keys;
             this.entryOrdinals = entryOrdinals;
             this.parents = parents;
@@ -1114,14 +1354,15 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                 MemorySegment coordinates,
                 long written) {
             return new Sample(
-                    call.arena(),
-                    call.reach(keys.get(Library.POINTER, 0), Types.Extents.product(written, Key.BYTES, "the keys")),
+                    call.reach(
+                            (MemorySegment) Library.KEYS_DATA.get(keys, 0L),
+                            Types.Extents.product(written, Key.BYTES, "the keys")),
                     call.reach(
                             entryOrdinals.get(Library.POINTER, 0),
                             Types.Extents.product(written, Long.BYTES, "the entry ordinals")),
                     Matches.lift(call, parents, written),
                     call.reach(
-                            coordinates.get(Library.POINTER, 0),
+                            (MemorySegment) Library.ROWS_DATA.get(coordinates, 0L),
                             Types.Extents.product(written, 3 * Float.BYTES, "the coordinates")),
                     written);
         }
@@ -1134,15 +1375,14 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
         /**
          * The key of one draw.
          *
-         * @throws USearchException SHAPE_MISMATCH when the draw is past the sample, and DEVICE when the
-         *     arena holds device memory.
+         * @throws USearchException SHAPE_MISMATCH when the draw is past the sample.
          */
         public Key key(long draw) {
             return Key.read(keys, checked(draw) * Key.BYTES);
         }
 
         /**
-         * Which of its key's entries one draw is, in the order {@link DenseVerbs#get} writes them.
+         * Which of its key's entries one draw is, in the order {@link DenseIndex#get} writes them.
          *
          * @throws USearchException the statuses {@link #key(long)} names.
          */
@@ -1169,7 +1409,6 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
         }
 
         private long checked(long draw) {
-            arena.host();
             if (draw < 0 || draw >= written) {
                 throw new USearchException(Status.SHAPE_MISMATCH, "the sample holds " + written + " draws");
             }
@@ -1183,7 +1422,6 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
      */
     public static final class DenseBatch {
 
-        private final Arena arena;
         private final MemorySegment keys;
         private final long keysStride;
         private final long written;
@@ -1191,13 +1429,11 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
         private final MemorySegment linkKeys;
 
         private DenseBatch(
-                Arena arena,
                 MemorySegment keys,
                 long keysStride,
                 long written,
                 @Nullable MemorySegment linkOffsets,
                 MemorySegment linkKeys) {
-            this.arena = arena;
             this.keys = keys;
             this.keysStride = keysStride;
             this.written = written;
@@ -1213,11 +1449,9 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
         /**
          * The key of one entry, in scan order.
          *
-         * @throws USearchException SHAPE_MISMATCH when the entry is past the batch, and DEVICE when the
-         *     arena holds device memory.
+         * @throws USearchException SHAPE_MISMATCH when the entry is past the batch.
          */
         public Key key(long entry) {
-            arena.host();
             if (entry < 0 || entry >= written) {
                 throw new USearchException(Status.SHAPE_MISMATCH, "the batch holds " + written + " entries");
             }
@@ -1227,8 +1461,8 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
         /**
          * How many keys one entry links to.
          *
-         * @throws USearchException INVALID_ARGUMENT when the pull exported no links, SHAPE_MISMATCH when
-         *     the entry is past the batch, and DEVICE when the arena holds device memory.
+         * @throws USearchException INVALID_ARGUMENT when the pull exported no links, and SHAPE_MISMATCH
+         *     when the entry is past the batch.
          */
         public long linkCount(long entry) {
             MemorySegment offsets = linked(entry);
@@ -1251,7 +1485,6 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
         }
 
         private MemorySegment linked(long entry) {
-            arena.host();
             if (linkOffsets == null) {
                 throw new USearchException(Status.INVALID_ARGUMENT, "the pull exported no links");
             }
@@ -1283,8 +1516,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
          * Copies the keys of up to {@code wanted} next entries into {@code arena}. Calls
          * {@code usearch_dense_cursor_next}.
          *
-         * @throws USearchException INVALID_ARGUMENT on a negative count, and CONTENDED when the arena
-         *     serves another call.
+         * @throws USearchException CONTENDED when the arena serves another call.
          */
         public DenseBatch next(long wanted, Arena arena) {
             return pull(wanted, false, arena);
@@ -1294,39 +1526,38 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
          * Copies the keys of up to {@code wanted} next entries into {@code arena}, each with the keys it
          * links to. Calls {@code usearch_dense_cursor_next}.
          *
-         * @throws USearchException INVALID_ARGUMENT on a negative count, and CONTENDED when the arena
-         *     serves another call.
+         * @throws USearchException CONTENDED when the arena serves another call.
          */
         public DenseBatch nextLinks(long wanted, Arena arena) {
             return pull(wanted, true, arena);
         }
 
         private DenseBatch pull(long wanted, boolean linked, Arena arena) {
-            long bound = nonNegative(wanted, "the wanted count is negative");
             return Call.block(CURSOR_NEXT, index.handle, executor, call -> {
-                call.lease("cursor", handle);
-                MemorySegment keys = call.output("keys", Library.KEYS_VIEW);
-                MemorySegment tape = linked ? call.output("links", Library.KEYS_TAPE_VIEW) : MemorySegment.NULL;
-                MemorySegment written = call.output("written", Library.SIZE);
-                call.arena("arena", arena);
-                call.size("wanted", bound);
+                call.lease(CURSOR_NEXT_CURSOR, handle);
+                MemorySegment keys = call.output(CURSOR_NEXT_KEYS, Library.KEYS_VIEW);
+                MemorySegment tape =
+                        linked ? call.output(CURSOR_NEXT_LINKS, Library.KEYS_TAPE_VIEW) : MemorySegment.NULL;
+                MemorySegment written = call.output(CURSOR_NEXT_WRITTEN, Library.SIZE);
+                call.arena(CURSOR_NEXT_ARENA, arena);
+                call.size(CURSOR_NEXT_WANTED, wanted);
                 return () -> {
                     long count = written.get(Library.SIZE, 0);
-                    long stride = keys.get(Library.SIZE, Library.POINTER.byteSize());
+                    long stride = (long) Library.KEYS_STRIDE.get(keys, 0L);
                     MemorySegment offsets = null;
                     MemorySegment linkKeys = MemorySegment.NULL;
                     if (linked) {
                         offsets = call.reach(
-                                tape.get(Library.POINTER, Library.offset(Library.KEYS_TAPE_VIEW, "offsets")),
-                                (count + 1) * Long.BYTES);
+                                (MemorySegment) Library.KEYS_TAPE_OFFSETS.get(tape, 0L), (count + 1) * Long.BYTES);
                         long total = count == 0 ? 0 : offsets.getAtIndex(ValueLayout.JAVA_LONG, count);
                         linkKeys = call.reach(
-                                tape.get(Library.POINTER, Library.offset(Library.KEYS_TAPE_VIEW, "keys")),
+                                (MemorySegment) Library.KEYS_TAPE_KEYS.get(tape, 0L),
                                 Types.Extents.product(total, Key.BYTES, "the links"));
                     }
                     return new DenseBatch(
-                            call.arena(),
-                            call.reach(keys.get(Library.POINTER, 0), Types.Extents.product(count, stride, "the keys")),
+                            call.reach(
+                                    (MemorySegment) Library.KEYS_DATA.get(keys, 0L),
+                                    Types.Extents.product(count, stride, "the keys")),
                             stride,
                             count,
                             offsets,
@@ -1368,16 +1599,14 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
          * {@link Matches}; a row of none means the walk is drained. Calls
          * {@code usearch_dense_search_stream_next}.
          *
-         * @throws USearchException INVALID_ARGUMENT on a negative count, and CONTENDED when the arena
-         *     serves another call.
+         * @throws USearchException CONTENDED when the arena serves another call.
          */
         public Matches next(long wanted, Arena arena) {
-            long bound = nonNegative(wanted, "the wanted count is negative");
             return Call.block(SEARCH_STREAM_NEXT, index.handle, executor, call -> {
-                call.lease("stream", handle);
-                MemorySegment matches = call.output("matches", Library.MATCHES_VIEW);
-                call.arena("arena", arena);
-                call.size("wanted", bound);
+                call.lease(SEARCH_STREAM_NEXT_STREAM, handle);
+                MemorySegment matches = call.output(SEARCH_STREAM_NEXT_MATCHES, Library.MATCHES_VIEW);
+                call.arena(SEARCH_STREAM_NEXT_ARENA, arena);
+                call.size(SEARCH_STREAM_NEXT_WANTED, wanted);
                 return () -> Matches.lift(call, matches, 1);
             });
         }
@@ -1395,7 +1624,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
     }
 
     /** The receiver whose verbs block on an executor, contended while another call holds it. */
-    public static final class On extends DenseVerbs {
+    public static final class On {
 
         private final DenseIndex index;
         private final Executor executor;
@@ -1405,21 +1634,171 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
             this.executor = executor;
         }
 
-        @Override
-        DenseIndex index() {
-            return index;
+        private <Result> Result block(Request<Result> request) {
+            return Call.block(request.verb(), index.handle, executor, request.fill());
         }
 
-        @Override
-        Executor executor() {
-            return executor;
+        /** Runs {@link DenseIndex#reserve(long)} on this receiver's executor. */
+        public void reserve(long capacity) {
+            block(DenseCalls.reserving(capacity));
+        }
+
+        /** Runs {@link DenseIndex#clear()} on this receiver's executor. */
+        public void clear() {
+            block(DenseCalls.clearing());
+        }
+
+        /** Runs {@link DenseIndex#describe()} on this receiver's executor. */
+        public DenseIndexDescription describe() {
+            return block(DenseCalls.describing());
+        }
+
+        /** Runs {@link DenseIndex#count(Key)} on this receiver's executor. */
+        public long count(Key key) {
+            return block(DenseCalls.counting(key));
+        }
+
+        /** Runs {@link DenseIndex#contains(Key)} on this receiver's executor. */
+        public boolean contains(Key key) {
+            return count(key) != 0;
+        }
+
+        /** Runs {@link DenseIndex#get(Key, Scalar, Arena)} on this receiver's executor. */
+        public DenseVectors get(Key key, Scalar outputsScalar, Arena arena) {
+            return block(DenseCalls.getting(key, outputsScalar, arena));
+        }
+
+        /** Runs {@link DenseIndex#insert(Key[], RowsView)} on this receiver's executor. */
+        public void insert(Key[] keys, RowsView vectors) {
+            block(DenseCalls.inserting(keys, vectors, new DenseInsertConfig()));
+        }
+
+        /** Runs {@link DenseIndex#insert(Key[], RowsView, DenseInsertConfig)} on this receiver's executor. */
+        public void insert(Key[] keys, RowsView vectors, DenseInsertConfig config) {
+            block(DenseCalls.inserting(keys, vectors, config));
+        }
+
+        /** Runs {@link DenseIndex#refine()} on this receiver's executor. */
+        public RefineReport refine() {
+            return block(DenseCalls.refining(new DenseRefineConfig()));
+        }
+
+        /** Runs {@link DenseIndex#refine(DenseRefineConfig)} on this receiver's executor. */
+        public RefineReport refine(DenseRefineConfig config) {
+            return block(DenseCalls.refining(config));
+        }
+
+        /** Runs {@link DenseIndex#refinePlanFinish(DenseRefinePlan)} on this receiver's executor. */
+        public RefineReport refinePlanFinish(DenseRefinePlan plan) {
+            return block(DenseCalls.refinePlanFinishing(plan));
+        }
+
+        /** Runs {@link DenseIndex#health()} on this receiver's executor. */
+        public DenseReachability health() {
+            return block(DenseCalls.auditing());
+        }
+
+        /** Runs {@link DenseIndex#search(RowsView, long, Arena)} on this receiver's executor. */
+        public Matches search(RowsView queries, long wanted, Arena arena) {
+            return block(DenseCalls.searching(queries, new DenseSearchConfig(wanted), arena));
+        }
+
+        /** Runs {@link DenseIndex#search(RowsView, DenseSearchConfig, Arena)} on this receiver's executor. */
+        public Matches search(RowsView queries, DenseSearchConfig config, Arena arena) {
+            return block(DenseCalls.searching(queries, config, arena));
+        }
+
+        /** Runs {@link DenseIndex#maxsim(RowsView, long, long, Arena)} on this receiver's executor. */
+        public DenseProducts maxsim(RowsView queries, long rowsPerQuery, long wanted, Arena arena) {
+            return block(DenseCalls.scoring(queries, rowsPerQuery, new DenseMaxsimConfig(wanted), arena));
+        }
+
+        /** Runs {@link DenseIndex#maxsim(RowsView, long, DenseMaxsimConfig, Arena)} on this receiver's executor. */
+        public DenseProducts maxsim(RowsView queries, long rowsPerQuery, DenseMaxsimConfig config, Arena arena) {
+            return block(DenseCalls.scoring(queries, rowsPerQuery, config, arena));
+        }
+
+        /** Runs {@link DenseIndex#multiply(RowsView, Arena)} on this receiver's executor. */
+        public DenseProducts multiply(RowsView left, Arena arena) {
+            return block(DenseCalls.multiplying(left, new DenseMultiplyConfig(), arena));
+        }
+
+        /** Runs {@link DenseIndex#multiply(RowsView, DenseMultiplyConfig, Arena)} on this receiver's executor. */
+        public DenseProducts multiply(RowsView left, DenseMultiplyConfig config, Arena arena) {
+            return block(DenseCalls.multiplying(left, config, arena));
+        }
+
+        /** Runs {@link DenseIndex#attend(RowsView, ValueLookup, Arena)} on this receiver's executor. */
+        public DenseVectors attend(RowsView queries, ValueLookup valueLookup, Arena arena) {
+            return block(DenseCalls.attending(queries, valueLookup, new DenseAttendConfig(), arena));
+        }
+
+        /**
+         * Runs {@link DenseIndex#attend(RowsView, ValueLookup, DenseAttendConfig, Arena)}
+         * on this receiver's executor.
+         */
+        public DenseVectors attend(RowsView queries, ValueLookup valueLookup, DenseAttendConfig config, Arena arena) {
+            return block(DenseCalls.attending(queries, valueLookup, config, arena));
+        }
+
+        /**
+         * Runs {@link DenseIndex#reshard(DenseIndex[], DenseIndex[], DenseReshardConfig)}
+         * on this receiver's executor.
+         */
+        public RefineReport reshard(DenseIndex[] sources, DenseIndex[] targets, DenseReshardConfig config) {
+            return block(DenseCalls.resharding(sources, targets, config));
+        }
+
+        /** Runs {@link DenseIndex#reshardPlanFinish(DenseReshardPlan)} on this receiver's executor. */
+        public RefineReport reshardPlanFinish(DenseReshardPlan plan) {
+            return block(DenseCalls.reshardPlanFinishing(plan));
+        }
+
+        /** Runs {@link DenseIndex#sample(long, Arena, DenseSampleConfig)} on this receiver's executor. */
+        public Sample sample(long wanted, Arena arena, DenseSampleConfig config) {
+            return block(DenseCalls.sampling(wanted, arena, config));
+        }
+
+        /** Runs {@link DenseIndex#save(String)} on this receiver's executor. */
+        public void save(String path) {
+            block(DenseCalls.saving(path, null));
+        }
+
+        /** Runs {@link DenseIndex#save(String, Progress)} on this receiver's executor. */
+        public void save(String path, Progress progress) {
+            block(DenseCalls.saving(path, progress));
+        }
+
+        /** Runs {@link DenseIndex#saveBuffer(Arena)} on this receiver's executor. */
+        public Monolith saveBuffer(Arena arena) {
+            return block(DenseCalls.serializing(arena, null));
+        }
+
+        /** Runs {@link DenseIndex#saveBuffer(Arena, Progress)} on this receiver's executor. */
+        public Monolith saveBuffer(Arena arena, Progress progress) {
+            return block(DenseCalls.serializing(arena, progress));
+        }
+
+        /** Runs {@link DenseIndex#cursor(Key...)} on this receiver's executor. */
+        public DenseCursor cursor(Key... starts) {
+            return block(DenseCalls.cursorOpening(index, executor, starts));
+        }
+
+        /** Runs {@link DenseIndex#searchStream(RowsView)} on this receiver's executor. */
+        public DenseSearchStream searchStream(RowsView query) {
+            return searchStream(query, 0);
+        }
+
+        /** Runs {@link DenseIndex#searchStream(RowsView, long)} on this receiver's executor. */
+        public DenseSearchStream searchStream(RowsView query, long expansionFactor) {
+            return block(DenseCalls.searchStreamOpening(index, executor, query, expansionFactor));
         }
     }
 
     /**
      * The receiver whose verbs submit their calls to an executor, each answering a {@link Deferred}
      * that owns what the call reads until final, and whose join answers the view the blocking verb
-     * would, over the same borrowed arena. Its verbs are those of {@link DenseVerbs}, which each
+     * would, over the same borrowed arena. Its verbs are those of {@link DenseIndex}, which each
      * documents, less the scans that pull one batch at a time.
      */
     public static final class DeferredOn {
@@ -1436,155 +1815,158 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
             return Call.submit(request.verb(), index.handle, executor, request.fill());
         }
 
-        /** Submits {@link DenseVerbs#reserve}. Calls {@code usearch_dense_reserve}. */
+        /** Submits {@link DenseIndex#reserve}. Calls {@code usearch_dense_reserve}. */
         public Deferred<Void> reserve(long capacity) {
-            return submit(DenseVerbs.reserving(capacity));
+            return submit(DenseCalls.reserving(capacity));
         }
 
-        /** Submits {@link DenseVerbs#clear}. Calls {@code usearch_dense_clear}. */
+        /** Submits {@link DenseIndex#clear}. Calls {@code usearch_dense_clear}. */
         public Deferred<Void> clear() {
-            return submit(DenseVerbs.clearing());
+            return submit(DenseCalls.clearing());
         }
 
-        /** Submits {@link DenseVerbs#describe}. Calls {@code usearch_dense_describe}. */
+        /** Submits {@link DenseIndex#describe}. Calls {@code usearch_dense_describe}. */
         public Deferred<DenseIndexDescription> describe() {
-            return submit(DenseVerbs.describing());
+            return submit(DenseCalls.describing());
         }
 
-        /** Submits {@link DenseVerbs#count}. Calls {@code usearch_dense_count}. */
+        /** Submits {@link DenseIndex#count}. Calls {@code usearch_dense_count}. */
         public Deferred<Long> count(Key key) {
-            return submit(DenseVerbs.counting(key));
+            return submit(DenseCalls.counting(key));
         }
 
-        /** Submits {@link DenseVerbs#get}. Calls {@code usearch_dense_get}. */
+        /** Submits {@link DenseIndex#get}. Calls {@code usearch_dense_get}. */
         public Deferred<DenseVectors> get(Key key, Scalar outputsScalar, Arena arena) {
-            return submit(DenseVerbs.getting(key, outputsScalar, arena));
+            return submit(DenseCalls.getting(key, outputsScalar, arena));
         }
 
-        /** Submits {@link DenseVerbs#insert(Key[], RowsView)}. Calls {@code usearch_dense_insert}. */
+        /** Submits {@link DenseIndex#insert(Key[], RowsView)}. Calls {@code usearch_dense_insert}. */
         public Deferred<Void> insert(Key[] keys, RowsView vectors) {
-            return submit(DenseVerbs.inserting(keys, vectors, new DenseInsertConfig()));
+            return submit(DenseCalls.inserting(keys, vectors, new DenseInsertConfig()));
         }
 
-        /** Submits {@link DenseVerbs#insert(Key[], RowsView, DenseInsertConfig)}. Calls {@code usearch_dense_insert}. */
+        /** Submits {@link DenseIndex#insert(Key[], RowsView, DenseInsertConfig)}. Calls {@code usearch_dense_insert}. */
         public Deferred<Void> insert(Key[] keys, RowsView vectors, DenseInsertConfig config) {
-            return submit(DenseVerbs.inserting(keys, vectors, config));
+            return submit(DenseCalls.inserting(keys, vectors, config));
         }
 
-        /** Submits {@link DenseVerbs#refine()}. Calls {@code usearch_dense_refine}. */
+        /** Submits {@link DenseIndex#refine()}. Calls {@code usearch_dense_refine}. */
         public Deferred<RefineReport> refine() {
-            return submit(DenseVerbs.refining(new DenseRefineConfig()));
+            return submit(DenseCalls.refining(new DenseRefineConfig()));
         }
 
-        /** Submits {@link DenseVerbs#refine(DenseRefineConfig)}. Calls {@code usearch_dense_refine}. */
+        /** Submits {@link DenseIndex#refine(DenseRefineConfig)}. Calls {@code usearch_dense_refine}. */
         public Deferred<RefineReport> refine(DenseRefineConfig config) {
-            return submit(DenseVerbs.refining(config));
+            return submit(DenseCalls.refining(config));
         }
 
-        /** Submits {@link DenseVerbs#health}. Calls {@code usearch_dense_health}. */
+        /** Submits {@link DenseIndex#refinePlanFinish}. Calls {@code usearch_dense_refine_plan_finish}. */
+        public Deferred<RefineReport> refinePlanFinish(DenseRefinePlan plan) {
+            return submit(DenseCalls.refinePlanFinishing(plan));
+        }
+
+        /** Submits {@link DenseIndex#health}. Calls {@code usearch_dense_health}. */
         public Deferred<DenseReachability> health() {
-            return submit(DenseVerbs.auditing());
+            return submit(DenseCalls.auditing());
         }
 
-        /** Submits {@link DenseVerbs#search(RowsView, long, Arena)}. Calls {@code usearch_dense_search}. */
+        /** Submits {@link DenseIndex#search(RowsView, long, Arena)}. Calls {@code usearch_dense_search}. */
         public Deferred<Matches> search(RowsView queries, long wanted, Arena arena) {
-            return submit(DenseVerbs.searching(queries, new DenseSearchConfig(wanted), arena));
+            return submit(DenseCalls.searching(queries, new DenseSearchConfig(wanted), arena));
         }
 
         /**
-         * Submits {@link DenseVerbs#search(RowsView, DenseSearchConfig, Arena)}. Calls
+         * Submits {@link DenseIndex#search(RowsView, DenseSearchConfig, Arena)}. Calls
          * {@code usearch_dense_search}.
          */
         public Deferred<Matches> search(RowsView queries, DenseSearchConfig config, Arena arena) {
-            return submit(DenseVerbs.searching(queries, config, arena));
+            return submit(DenseCalls.searching(queries, config, arena));
         }
 
-        /** Submits {@link DenseVerbs#maxsim(RowsView, long, long, Arena)}. Calls {@code usearch_dense_maxsim}. */
+        /** Submits {@link DenseIndex#maxsim(RowsView, long, long, Arena)}. Calls {@code usearch_dense_maxsim}. */
         public Deferred<DenseProducts> maxsim(RowsView queries, long rowsPerQuery, long wanted, Arena arena) {
-            return submit(DenseVerbs.scoring(queries, rowsPerQuery, new DenseMaxsimConfig(wanted), arena));
+            return submit(DenseCalls.scoring(queries, rowsPerQuery, new DenseMaxsimConfig(wanted), arena));
         }
 
         /**
-         * Submits {@link DenseVerbs#maxsim(RowsView, long, DenseMaxsimConfig, Arena)}. Calls
+         * Submits {@link DenseIndex#maxsim(RowsView, long, DenseMaxsimConfig, Arena)}. Calls
          * {@code usearch_dense_maxsim}.
          */
         public Deferred<DenseProducts> maxsim(
                 RowsView queries, long rowsPerQuery, DenseMaxsimConfig config, Arena arena) {
-            return submit(DenseVerbs.scoring(queries, rowsPerQuery, config, arena));
+            return submit(DenseCalls.scoring(queries, rowsPerQuery, config, arena));
         }
 
-        /** Submits {@link DenseVerbs#multiply(RowsView, Arena)}. Calls {@code usearch_dense_multiply}. */
+        /** Submits {@link DenseIndex#multiply(RowsView, Arena)}. Calls {@code usearch_dense_multiply}. */
         public Deferred<DenseProducts> multiply(RowsView left, Arena arena) {
-            return submit(DenseVerbs.multiplying(left, new DenseMultiplyConfig(), arena));
+            return submit(DenseCalls.multiplying(left, new DenseMultiplyConfig(), arena));
         }
 
         /**
-         * Submits {@link DenseVerbs#multiply(RowsView, DenseMultiplyConfig, Arena)}. Calls
+         * Submits {@link DenseIndex#multiply(RowsView, DenseMultiplyConfig, Arena)}. Calls
          * {@code usearch_dense_multiply}.
          */
         public Deferred<DenseProducts> multiply(RowsView left, DenseMultiplyConfig config, Arena arena) {
-            return submit(DenseVerbs.multiplying(left, config, arena));
+            return submit(DenseCalls.multiplying(left, config, arena));
         }
 
-        /** Submits {@link DenseVerbs#attend(RowsView, ValueLookup, Arena)}. Calls {@code usearch_dense_attend}. */
+        /** Submits {@link DenseIndex#attend(RowsView, ValueLookup, Arena)}. Calls {@code usearch_dense_attend}. */
         public Deferred<DenseVectors> attend(RowsView queries, ValueLookup valueLookup, Arena arena) {
-            return submit(DenseVerbs.attending(queries, valueLookup, new DenseAttendConfig(), arena));
+            return submit(DenseCalls.attending(queries, valueLookup, new DenseAttendConfig(), arena));
         }
 
         /**
-         * Submits {@link DenseVerbs#attend(RowsView, ValueLookup, DenseAttendConfig, Arena)}. Calls
+         * Submits {@link DenseIndex#attend(RowsView, ValueLookup, DenseAttendConfig, Arena)}. Calls
          * {@code usearch_dense_attend}.
          */
         public Deferred<DenseVectors> attend(
                 RowsView queries, ValueLookup valueLookup, DenseAttendConfig config, Arena arena) {
-            return submit(DenseVerbs.attending(queries, valueLookup, config, arena));
-        }
-
-        /** Submits {@link DenseVerbs#absorb}, surrendering the donors at once. Calls {@code usearch_dense_absorb}. */
-        public Deferred<RefineReport> absorb(DenseIndex... donors) {
-            return submit(DenseVerbs.absorbing(donors));
+            return submit(DenseCalls.attending(queries, valueLookup, config, arena));
         }
 
         /**
-         * Submits {@link DenseVerbs#split(DenseSplitConfig, DenseIndex...)}. Calls
-         * {@code usearch_dense_split}.
+         * Submits {@link DenseIndex#reshard(DenseIndex[], DenseIndex[], DenseReshardConfig)}. Calls
+         * {@code usearch_dense_reshard}.
          */
-        public Deferred<RefineReport> split(DenseSplitConfig config, DenseIndex... receivers) {
-            return submit(DenseVerbs.splitting(config, receivers));
+        public Deferred<RefineReport> reshard(DenseIndex[] sources, DenseIndex[] targets, DenseReshardConfig config) {
+            return submit(DenseCalls.resharding(sources, targets, config));
         }
 
-        /** Submits {@link DenseVerbs#sample(long, Arena, DenseSampleConfig)}. Calls {@code usearch_dense_sample}. */
+        /** Submits {@link DenseIndex#reshardPlanFinish}. Calls {@code usearch_dense_reshard_plan_finish}. */
+        public Deferred<RefineReport> reshardPlanFinish(DenseReshardPlan plan) {
+            return submit(DenseCalls.reshardPlanFinishing(plan));
+        }
+
+        /** Submits {@link DenseIndex#sample(long, Arena, DenseSampleConfig)}. Calls {@code usearch_dense_sample}. */
         public Deferred<Sample> sample(long wanted, Arena arena, DenseSampleConfig config) {
-            return submit(DenseVerbs.sampling(wanted, arena, config));
+            return submit(DenseCalls.sampling(wanted, arena, config));
         }
 
-        /** Submits {@link DenseVerbs#save}. Calls {@code usearch_dense_save}. */
+        /** Submits {@link DenseIndex#save(String)}. Calls {@code usearch_dense_save}. */
         public Deferred<Void> save(String path) {
-            return submit(DenseVerbs.saving(path));
+            return submit(DenseCalls.saving(path, null));
         }
 
-        /** Submits {@link DenseVerbs#saveBuffer}. Calls {@code usearch_dense_save_buffer}. */
+        /** Submits {@link DenseIndex#save(String, Progress)}. Calls {@code usearch_dense_save}. */
+        public Deferred<Void> save(String path, Progress progress) {
+            return submit(DenseCalls.saving(path, progress));
+        }
+
+        /** Submits {@link DenseIndex#saveBuffer(Arena)}. Calls {@code usearch_dense_save_buffer}. */
         public Deferred<Monolith> saveBuffer(Arena arena) {
-            return submit(DenseVerbs.serializing(arena));
+            return submit(DenseCalls.serializing(arena, null));
+        }
+
+        /** Submits {@link DenseIndex#saveBuffer(Arena, Progress)}. Calls {@code usearch_dense_save_buffer}. */
+        public Deferred<Monolith> saveBuffer(Arena arena, Progress progress) {
+            return submit(DenseCalls.serializing(arena, progress));
         }
     }
 
-    /** Replaced once final by an absorb that surrendered this index as a donor and left it live. */
-    volatile Handle handle;
+    final Handle handle;
 
     private DenseIndex(MemorySegment created) {
         handle = new Handle(created, FREE);
-    }
-
-    @Override
-    DenseIndex index() {
-        return this;
-    }
-
-    @Override
-    @Nullable
-    Executor executor() {
-        return null;
     }
 
     /**
@@ -1600,6 +1982,431 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
         return new DeferredOn(this, executor);
     }
 
+    private <Result> Result block(Request<Result> request) {
+        return Call.block(request.verb(), handle, null, request.fill());
+    }
+
+    /**
+     * Claims capacity for a number of incoming vectors ahead of insertion, a hint, since insertions
+     * grow the index on demand. The capacity is the desired total, including the current size.
+     * Calls {@code usearch_dense_reserve}.
+     *
+     * @param capacity the desired total number of entries, including the current size.
+     * @throws USearchException OUT_OF_MEMORY when the capacity cannot be claimed, READ_ONLY on a
+     *     view, and OVERFLOW past the identity space's ceiling.
+     */
+    public void reserve(long capacity) {
+        block(DenseCalls.reserving(capacity));
+    }
+
+    /**
+     * Erases all entries, keeping the reserved capacity and the frozen geometry. No other call may
+     * overlap it. Calls {@code usearch_dense_clear}.
+     *
+     * @throws USearchException READ_ONLY on a view.
+     */
+    public void clear() {
+        block(DenseCalls.clearing());
+    }
+
+    /** Reports the frozen metadata and the current counters in one call. Calls {@code usearch_dense_describe}. */
+    public DenseIndexDescription describe() {
+        return block(DenseCalls.describing());
+    }
+
+    /**
+     * How many entries are stored under a key; zero means the index holds none. Calls {@code usearch_dense_count}.
+     *
+     * @param key the key to look up.
+     */
+    public long count(Key key) {
+        return block(DenseCalls.counting(key));
+    }
+
+    /**
+     * Whether the index holds at least one entry under a key. Binding-only sugar over {@link #count}.
+     *
+     * @param key the key to look up.
+     */
+    public boolean contains(Key key) {
+        return count(key) != 0;
+    }
+
+    /**
+     * Retrieves every vector stored under a key into {@code arena}, one row per entry sharing it, in
+     * insertion order, packed at the natural width of the kind asked for - one call, however many
+     * there turn out to be. Calls {@code usearch_dense_get}.
+     *
+     * @param key the key to look up.
+     * @param outputsScalar the scalar kind the rows are converted into.
+     * @param arena the arena the output lands in, borrowed until the call returns.
+     * @return the rows read in place, none when the key holds nothing.
+     * @throws USearchException UNKNOWN_KIND on a scalar the engine cannot convert into, and
+     *     CONTENDED when the arena serves another call.
+     */
+    public DenseVectors get(Key key, Scalar outputsScalar, Arena arena) {
+        return block(DenseCalls.getting(key, outputsScalar, arena));
+    }
+
+    /**
+     * Inserts a matrix of vectors under their keys, with every knob derived.
+     *
+     * @param keys one key per vector row.
+     * @param vectors the rows to insert, of any scalar kind the engine converts.
+     * @throws USearchException the statuses {@link #insert(Key[], RowsView, DenseInsertConfig)} names.
+     */
+    public void insert(Key[] keys, RowsView vectors) {
+        block(DenseCalls.inserting(keys, vectors, new DenseInsertConfig()));
+    }
+
+    /**
+     * Inserts a matrix of vectors under their keys - the native batch operation, where a single
+     * vector is a one-row matrix. Overlaps safely with concurrent searches on the same handle.
+     *
+     * <p>
+     * The input scalar type is independent of the stored quantization; the library converts on
+     * ingest. A batch is all-or-nothing: a returning call published every entry, a failing one
+     * published none. An accelerator fault severe enough to poison the device context is the sole
+     * exception, reporting DEVICE and latching the index unusable rather than partially applied.
+     * Calls {@code usearch_dense_insert}.
+     *
+     * @param keys one key per vector row.
+     * @param vectors the rows to insert, of any scalar kind the engine converts.
+     * @param config the insertion knobs.
+     * @throws USearchException SHAPE_MISMATCH when the key count and the row count disagree or the
+     *     rows are not as wide as the frozen geometry, UNKNOWN_KIND on a scalar the engine cannot convert, READ_ONLY on a view, and
+     *     OUT_OF_MEMORY when the batch cannot be accommodated.
+     */
+    public void insert(Key[] keys, RowsView vectors, DenseInsertConfig config) {
+        block(DenseCalls.inserting(keys, vectors, config));
+    }
+
+    /**
+     * Re-selects the neighbors of every stored entry, with every knob derived.
+     *
+     * @throws USearchException the statuses {@link #refine(DenseRefineConfig)} names.
+     */
+    public RefineReport refine() {
+        return block(DenseCalls.refining(new DenseRefineConfig()));
+    }
+
+    /**
+     * Re-selects the neighbors of every stored entry against the finished graph, improving neighbors
+     * chosen when the graph around them was still incomplete.
+     *
+     * <p>
+     * Searches may run throughout on a RAM handle, since re-selection publishes one node at a time
+     * and never removes one; insertions may not. Re-selecting a settled node changes nothing, so a
+     * caller loops until the report's {@code changed} falls below whatever rate it considers settled.
+     * Calls {@code usearch_dense_refine}.
+     *
+     * @param config the refinement knobs.
+     * @return the nodes re-selected and changed, the islands found and reconnected, and the audit
+     *     closing the heal; {@code changed} at zero means the graph has settled.
+     * @throws USearchException READ_ONLY on a view.
+     */
+    public RefineReport refine(DenseRefineConfig config) {
+        return block(DenseCalls.refining(config));
+    }
+
+    /**
+     * Closes the round a cancel left in hand, as a stop at its barrier would, and frees the plan
+     * whatever the call answers, reopening the index; the plan opens afresh on its next call. Calls
+     * {@code usearch_dense_refine_plan_finish}.
+     *
+     * @param plan the plan, opened on this index and executor.
+     * @return what the whole plan did to the graph.
+     * @throws USearchException INVALID_ARGUMENT on a plan no call opened, or one opened on another
+     *     index or executor.
+     */
+    public RefineReport refinePlanFinish(DenseRefinePlan plan) {
+        return block(DenseCalls.refinePlanFinishing(plan));
+    }
+
+    /**
+     * Audits how much of the graph a search reaches: forward reachability from as many landmarks as
+     * one search draws, swept level by level. Read-only, so concurrent insertions merely leave fresh
+     * entries unaudited. Calls {@code usearch_dense_health}.
+     */
+    public DenseReachability health() {
+        return block(DenseCalls.auditing());
+    }
+
+    /**
+     * Resolves a matrix of queries into up to {@code wanted} nearest matches apiece, with every other
+     * knob derived.
+     *
+     * @param queries the query rows, as wide as the frozen geometry.
+     * @param wanted the most matches kept per query.
+     * @param arena the arena the output lands in, borrowed until the call returns.
+     * @throws USearchException the statuses {@link #search(RowsView, DenseSearchConfig, Arena)} names.
+     */
+    public Matches search(RowsView queries, long wanted, Arena arena) {
+        return block(DenseCalls.searching(queries, new DenseSearchConfig(wanted), arena));
+    }
+
+    /**
+     * Resolves a matrix of queries into {@code arena} - the native batch operation, parallelized
+     * internally. Never writes to the graph, so any number of these may overlap with concurrent
+     * insertions. Calls {@code usearch_dense_search}.
+     *
+     * @param queries the query rows, as wide as the frozen geometry.
+     * @param config the wanted count and the other search knobs.
+     * @param arena the arena the output lands in, borrowed until the call returns.
+     * @throws USearchException SHAPE_MISMATCH when the rows are not as wide as the frozen geometry,
+     *     UNKNOWN_KIND on a scalar the engine cannot convert, and CONTENDED when the arena serves
+     *     another call.
+     */
+    public Matches search(RowsView queries, DenseSearchConfig config, Arena arena) {
+        return block(DenseCalls.searching(queries, config, arena));
+    }
+
+    /**
+     * Late-interaction scoring keeping up to {@code wanted} keys per query, zero keeping every key a
+     * query scored, with every other knob derived.
+     *
+     * @param queries the query rows, as wide as the frozen geometry.
+     * @param rowsPerQuery the token rows every query carries.
+     * @param wanted the most keys kept per query, zero keeping every key it scored.
+     * @param arena the arena the output lands in, borrowed until the call returns.
+     * @throws USearchException the statuses {@link #maxsim(RowsView, long, DenseMaxsimConfig, Arena)}
+     *     names.
+     */
+    public DenseProducts maxsim(RowsView queries, long rowsPerQuery, long wanted, Arena arena) {
+        return block(DenseCalls.scoring(queries, rowsPerQuery, new DenseMaxsimConfig(wanted), arena));
+    }
+
+    /**
+     * Late-interaction scoring of multi-row queries against multi-vector documents: every query
+     * row takes its best match within a key, and those maxima sum to that key's score. A document
+     * is one key holding its token rows, so the wanted count is the "k" over keys rather than over
+     * rows.
+     *
+     * <p>
+     * Every query carries the same number of rows, so a padded token batch applies as is, and the
+     * query count is the row count divided by that. Approximate in the same way a search is: a key
+     * can score below its exact value but never above it. Runs on the inner-product kinds alone.
+     * Each query's keys land in {@code arena} largest score first, as one ragged output like
+     * {@link #multiply}'s. Calls {@code usearch_dense_maxsim}.
+     *
+     * @param queries the query rows, as wide as the frozen geometry.
+     * @param rowsPerQuery the token rows every query carries.
+     * @param config the wanted count and the other scoring knobs.
+     * @param arena the arena the output lands in, borrowed until the call returns.
+     * @throws USearchException CONFIG_MISMATCH on a graph frozen under a distance kind,
+     *     SHAPE_MISMATCH when the token rows do not divide into whole queries or the rows are not as
+     *     wide as the frozen geometry, and CONTENDED when the arena serves another call.
+     */
+    public DenseProducts maxsim(RowsView queries, long rowsPerQuery, DenseMaxsimConfig config, Arena arena) {
+        return block(DenseCalls.scoring(queries, rowsPerQuery, config, arena));
+    }
+
+    /**
+     * Approximate sparse product keeping every pair, with every other knob derived.
+     *
+     * @param left the rows multiplied against the indexed vectors.
+     * @param arena the arena the output lands in, borrowed until the call returns.
+     * @throws USearchException the statuses {@link #multiply(RowsView, DenseMultiplyConfig, Arena)}
+     *     names.
+     */
+    public DenseProducts multiply(RowsView left, Arena arena) {
+        return block(DenseCalls.multiplying(left, new DenseMultiplyConfig(), arena));
+    }
+
+    /**
+     * Approximate sparse product of a matrix against the indexed vectors - the linear-algebra sibling
+     * of {@link #search}, reporting every pair the traversal scored rather than only the nearest.
+     * Pairs arrive in traversal order, and the pairs the walk never reaches are the low and negative
+     * products. Runs on the inner-product kinds alone.
+     *
+     * <p>
+     * Only the call knows how many pairs it scores, so the keys, the products and their offsets land
+     * in {@code arena} as one ragged output. Calls {@code usearch_dense_multiply}.
+     *
+     * @param left the rows multiplied against the indexed vectors.
+     * @param config the product knobs.
+     * @param arena the arena the output lands in, borrowed until the call returns.
+     * @throws USearchException CONFIG_MISMATCH on a graph frozen under a distance kind,
+     *     SHAPE_MISMATCH when the rows are not as wide as the frozen geometry, and CONTENDED when the
+     *     arena serves another call.
+     */
+    public DenseProducts multiply(RowsView left, DenseMultiplyConfig config, Arena arena) {
+        return block(DenseCalls.multiplying(left, config, arena));
+    }
+
+    /**
+     * Softmax attention with every knob derived.
+     *
+     * @param queries the query rows, as wide as the frozen geometry.
+     * @param valueLookup resolves every scored key to its value row.
+     * @param arena the arena the output lands in, borrowed until the call returns.
+     * @throws USearchException the statuses
+     *     {@link #attend(RowsView, ValueLookup, DenseAttendConfig, Arena)} names.
+     */
+    public DenseVectors attend(RowsView queries, ValueLookup valueLookup, Arena arena) {
+        return block(DenseCalls.attending(queries, valueLookup, new DenseAttendConfig(), arena));
+    }
+
+    /**
+     * Softmax attention of every query row over every indexed key its walk scores, folded as Flash
+     * Attention folds key tiles, with no top-k cut, writing one row per query into {@code arena}
+     * already divided by the partition. Runs on the inner-product kinds alone, since a softmax needs
+     * logits.
+     *
+     * <p>
+     * The index holds one layer's keys for one key-value head and no values, so the lookup resolves
+     * every scored key to its value row. Calls {@code usearch_dense_attend}.
+     *
+     * @param queries the query rows, as wide as the frozen geometry.
+     * @param valueLookup resolves every scored key to its value row.
+     * @param config the attention knobs.
+     * @param arena the arena the output lands in, borrowed until the call returns.
+     * @throws USearchException SHAPE_MISMATCH when a scored key resolves to no row or the head count
+     *     does not divide the rows, CONFIG_MISMATCH on a graph frozen under a distance kind, and
+     *     CONTENDED when the arena serves another call.
+     */
+    public DenseVectors attend(RowsView queries, ValueLookup valueLookup, DenseAttendConfig config, Arena arena) {
+        return block(DenseCalls.attending(queries, valueLookup, config, arena));
+    }
+
+    /**
+     * Moves the entries of {@code sources} into {@code targets} on this receiver's executor, keeping
+     * their links rather than re-inserting their vectors, then runs a round on every target that took
+     * entries. Several sources into one target among them gather into it; one source into several
+     * targets cuts it into one graph-local part per target; one index as its only source and target
+     * recuts its own shards toward the configured placement. Every index stays the caller's: a source
+     * the targets do not name ends empty and live. This receiver's own index takes part only where it
+     * is named. Calls {@code usearch_dense_reshard}.
+     *
+     * @param sources the indexes whose entries move, each named once.
+     * @param targets the indexes the entries move into, each a source itself or empty.
+     * @param config the placement, the plan, and the knobs of the closing rounds.
+     * @return what the closing rounds did to the graph.
+     * @throws USearchException READ_ONLY on an NVMe view, INVALID_ARGUMENT on no sources or targets or
+     *     an index named twice, CONFIG_MISMATCH on an index of another residency, scalar, metric or
+     *     geometry, or a target neither a source nor empty, and UNSUPPORTED on several sources into
+     *     several targets.
+     */
+    public RefineReport reshard(DenseIndex[] sources, DenseIndex[] targets, DenseReshardConfig config) {
+        return block(DenseCalls.resharding(sources, targets, config));
+    }
+
+    /**
+     * Closes the rounds a cancel stopped and frees the plan whatever the call answers, reopening
+     * every index it names; a plan whose entries have not all moved runs no round. Calls
+     * {@code usearch_dense_reshard_plan_finish}.
+     *
+     * @param plan the plan, opened with this receiver's executor.
+     * @return what the whole plan did to the graph.
+     * @throws USearchException INVALID_ARGUMENT on a plan no call opened, or one opened with another
+     *     executor.
+     */
+    public RefineReport reshardPlanFinish(DenseReshardPlan plan) {
+        return block(DenseCalls.reshardPlanFinishing(plan));
+    }
+
+    /**
+     * Draws keys around the focus, or across the whole index, each hanging from a shown or earlier
+     * draw and placed in three dimensions beside the shown ones - so a view grows one connected
+     * sample as it zooms. Writes up to {@code wanted} draws, and a larger count under the same seed
+     * draws a superset; only a RAM index samples yet. Calls {@code usearch_dense_sample}.
+     *
+     * @param wanted the most draws written.
+     * @param arena the arena the output lands in, borrowed until the call returns.
+     * @param config the focus, seed and other sampling knobs.
+     * @throws USearchException UNSUPPORTED on a GPU or NVMe handle, and CONTENDED when the arena
+     *     serves another call.
+     */
+    public Sample sample(long wanted, Arena arena, DenseSampleConfig config) {
+        return block(DenseCalls.sampling(wanted, arena, config));
+    }
+
+    /**
+     * Writes the index under a path, in the layout its extension picks - one {@code .safegraphs}
+     * monolith, or a {@code .safegraphs.json} manifest beside its shards. Demands a mutation-free
+     * window; concurrent readers keep searching throughout. Calls {@code usearch_dense_save}.
+     *
+     * @param path the destination; its extension picks the layout.
+     * @throws USearchException IO when the destination cannot be written - which leaves a file
+     *     without its header, for the caller to remove.
+     */
+    public void save(String path) {
+        block(DenseCalls.saving(path, null));
+    }
+
+    /**
+     * Writes the index under a path, as {@link #save(String)} does, reporting each shard written.
+     *
+     * @param path the destination; its extension picks the layout.
+     * @param progress hears each shard written, and may cancel the write.
+     * @throws USearchException the statuses {@link #save(String)} names, and CANCELLED once the
+     *     progress handler stopped it.
+     */
+    public void save(String path, Progress progress) {
+        block(DenseCalls.saving(path, progress));
+    }
+
+    /**
+     * Writes the index as one monolith - every shard, entries in placement order - the same bytes
+     * {@link #save} writes to a {@code .safegraphs} path, into {@code arena}. Calls
+     * {@code usearch_dense_save_buffer}.
+     *
+     * @param arena the arena the output lands in, borrowed until the call returns.
+     * @throws USearchException CONTENDED when the arena serves another call.
+     */
+    public Monolith saveBuffer(Arena arena) {
+        return block(DenseCalls.serializing(arena, null));
+    }
+
+    /**
+     * Writes the index as one monolith into {@code arena}, as {@link #saveBuffer(Arena)} does,
+     * reporting each shard written.
+     *
+     * @param arena the arena the output lands in, borrowed until the call returns.
+     * @param progress hears each shard written, and may cancel the write.
+     * @throws USearchException the statuses {@link #saveBuffer(Arena)} names, and CANCELLED once the
+     *     progress handler stopped it.
+     */
+    public Monolith saveBuffer(Arena arena, Progress progress) {
+        return block(DenseCalls.serializing(arena, progress));
+    }
+
+    /**
+     * Opens a walk over the current contents, pulled on this receiver's executor. Each shard's
+     * publication watermark is read as the walk enters it, so an entry once passed is never revisited.
+     * Without {@code starts} it yields every entry as stored; with them, the start keys' own entries
+     * first in order, then the entries those link to breadth-first, each once. Calls
+     * {@code usearch_dense_cursor_init}.
+     *
+     * @param starts the keys whose entries the walk starts from, or none to yield every entry.
+     */
+    public DenseCursor cursor(Key... starts) {
+        return block(DenseCalls.cursorOpening(this, null, starts));
+    }
+
+    /**
+     * Opens a resumable search for one query row, with the breadth of the candidates derived.
+     *
+     * @param query the query row; only the first row of the view is read.
+     * @throws USearchException the statuses {@link #searchStream(RowsView, long)} names.
+     */
+    public DenseSearchStream searchStream(RowsView query) {
+        return searchStream(query, 0);
+    }
+
+    /**
+     * Opens a resumable search for one query row, pulled on this receiver's executor: best-first
+     * traversal is naturally pausable, so callers that post-filter aggressively pull until satisfied
+     * instead of guessing the wanted count upfront. Calls {@code usearch_dense_search_stream_init}.
+     *
+     * @param query the query row; only the first row of the view is read.
+     * @param expansionFactor the breadth of the candidates, zero to derive it.
+     * @throws USearchException UNSUPPORTED where no residency implements the stream yet.
+     */
+    public DenseSearchStream searchStream(RowsView query, long expansionFactor) {
+        return block(DenseCalls.searchStreamOpening(this, null, query, expansionFactor));
+    }
+
     /**
      * Creates an empty, mutable index in host memory, one shard per NUMA node named. Calls
      * {@code usearch_dense_init_ram}.
@@ -1610,8 +2417,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
     public static DenseIndex initRam(DenseOptions options, int[] memoryDomains) {
         return create(INIT_RAM, null, call -> {
             options.fill(call);
-            call.ordinals("ram", memoryDomains);
-            call.pinned("ram", options.cpuClass);
+            call.ram(call.arguments, INIT_RAM_RAM, memoryDomains, options.cpuClass);
         });
     }
 
@@ -1626,8 +2432,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
     public static DenseIndex initVram(DenseOptions options, int[] devices) {
         return create(INIT_VRAM, null, call -> {
             options.fill(call);
-            call.ordinals("vram", devices);
-            call.pinned("vram", options.gpuClass);
+            call.vram(call.arguments, INIT_VRAM_VRAM, devices, options.gpuClass);
         });
     }
 
@@ -1635,10 +2440,11 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
      * Copies a checkpoint into a new index in host memory on the caller's thread, over every memory
      * domain, with no bound on entries per key.
      *
-     * @throws USearchException the statuses {@link #loadRam(String, Executor, int[], CPUClass, long)} names.
+     * @throws USearchException the statuses {@link #loadRam(String, Executor, int[], CPUClass, long, Progress)}
+     *     names.
      */
     public static DenseIndex loadRam(String path) {
-        return loadRam(path, null, new int[0], null, 0);
+        return loadRam(path, null, new int[0], null, 0, null);
     }
 
     /**
@@ -1651,6 +2457,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
      * @param cpuClass the class the index dispatches as, or {@code null} for the CPU's own.
      * @param valuesPerKey the upper bound on entries sharing one key, which no checkpoint records;
      *     zero is unbounded.
+     * @param progress hears each part read and may cancel the load, or {@code null} for none.
      * @throws USearchException MALFORMED on a checkpoint that ends early, and IO when the file cannot
      *     be read.
      */
@@ -1659,12 +2466,13 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
             @Nullable Executor executor,
             int[] memoryDomains,
             @Nullable CPUClass cpuClass,
-            long valuesPerKey) {
+            long valuesPerKey,
+            @Nullable Progress progress) {
         return create(LOAD_RAM, executor, call -> {
-            call.path("path", path);
-            call.ordinals("ram", memoryDomains);
-            call.pinned("ram", cpuClass);
-            call.size("values_per_key", nonNegative(valuesPerKey, "the entries per key is negative"));
+            call.path(LOAD_RAM_SOURCE, path);
+            call.ram(call.arguments, LOAD_RAM_RAM, memoryDomains, cpuClass);
+            call.size(LOAD_RAM_VALUES_PER_KEY, valuesPerKey);
+            call.progress(LOAD_RAM_PROGRESS, progress);
         });
     }
 
@@ -1672,30 +2480,37 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
      * Uploads a checkpoint into a new index in device memory on the default stream of one free
      * device, with no bound on entries per key.
      *
-     * @throws USearchException the statuses {@link #loadVram(String, Executor, int[], GPUClass, long)} names.
+     * @throws USearchException the statuses {@link #loadVram(String, Executor, int[], GPUClass, long, Progress)}
+     *     names.
      */
     public static DenseIndex loadVram(String path) {
-        return loadVram(path, null, new int[0], null, 0);
+        return loadVram(path, null, new int[0], null, 0, null);
     }
 
     /**
      * Copies a checkpoint into a new, mutable index in device memory, with the placement rules of
-     * {@link #loadRam(String, Executor, int[], CPUClass, long)}. Calls {@code usearch_dense_load_vram}.
+     * {@link #loadRam(String, Executor, int[], CPUClass, long, Progress)}. Calls {@code usearch_dense_load_vram}.
      *
      * @param executor the executor the upload runs on, or {@code null} for each device's default
      *     stream.
      * @param devices CUDA device ordinals to place the parts on; an empty list derives one free device.
      * @param gpuClass the class the index dispatches as, or {@code null} for the devices' own.
      * @param valuesPerKey the upper bound on entries sharing one key; zero is unbounded.
+     * @param progress hears each part uploaded and may cancel the load, or {@code null} for none.
      * @throws USearchException DEVICE when no device answers, and the statuses a RAM load names.
      */
     public static DenseIndex loadVram(
-            String path, @Nullable Executor executor, int[] devices, @Nullable GPUClass gpuClass, long valuesPerKey) {
+            String path,
+            @Nullable Executor executor,
+            int[] devices,
+            @Nullable GPUClass gpuClass,
+            long valuesPerKey,
+            @Nullable Progress progress) {
         return create(LOAD_VRAM, executor, call -> {
-            call.path("path", path);
-            call.ordinals("vram", devices);
-            call.pinned("vram", gpuClass);
-            call.size("values_per_key", nonNegative(valuesPerKey, "the entries per key is negative"));
+            call.path(LOAD_VRAM_SOURCE, path);
+            call.vram(call.arguments, LOAD_VRAM_VRAM, devices, gpuClass);
+            call.size(LOAD_VRAM_VALUES_PER_KEY, valuesPerKey);
+            call.progress(LOAD_VRAM_PROGRESS, progress);
         });
     }
 
@@ -1703,17 +2518,17 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
      * Copies a monolith from a buffer into a new index in host memory on the caller's thread, with
      * no bound on entries per key.
      *
-     * @throws USearchException the statuses {@link #loadRamBuffer(MemorySegment, Executor, int[], CPUClass, long)}
-     *     names.
+     * @throws USearchException the statuses
+     *     {@link #loadRamBuffer(MemorySegment, Executor, int[], CPUClass, long, Progress)} names.
      */
     public static DenseIndex loadRamBuffer(MemorySegment buffer) {
-        return loadRamBuffer(buffer, null, new int[0], null, 0);
+        return loadRamBuffer(buffer, null, new int[0], null, 0, null);
     }
 
     /**
      * Copies a monolith from a buffer into a new, mutable index in host memory, as
-     * {@link #loadRam(String, Executor, int[], CPUClass, long)} reads a path; the monolith lands whole on the
-     * first shard. A native buffer is read in place, a heap one is copied first. Calls
+     * {@link #loadRam(String, Executor, int[], CPUClass, long, Progress)} reads a path; the monolith lands
+     * whole on the first shard. A native buffer is read in place, a heap one is copied first. Calls
      * {@code usearch_dense_load_ram_buffer}.
      *
      * @throws USearchException MALFORMED on a monolith that ends early.
@@ -1723,12 +2538,13 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
             @Nullable Executor executor,
             int[] memoryDomains,
             @Nullable CPUClass cpuClass,
-            long valuesPerKey) {
+            long valuesPerKey,
+            @Nullable Progress progress) {
         return create(LOAD_RAM_BUFFER, executor, call -> {
-            call.bytes("buffer", buffer);
-            call.ordinals("ram", memoryDomains);
-            call.pinned("ram", cpuClass);
-            call.size("values_per_key", nonNegative(valuesPerKey, "the entries per key is negative"));
+            call.bytes(LOAD_RAM_SOURCE, buffer);
+            call.ram(call.arguments, LOAD_RAM_RAM, memoryDomains, cpuClass);
+            call.size(LOAD_RAM_VALUES_PER_KEY, valuesPerKey);
+            call.progress(LOAD_RAM_PROGRESS, progress);
         });
     }
 
@@ -1737,16 +2553,16 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
      * free device, with no bound on entries per key.
      *
      * @throws USearchException the statuses
-     *     {@link #loadVramBuffer(MemorySegment, Executor, int[], GPUClass, long)} names.
+     *     {@link #loadVramBuffer(MemorySegment, Executor, int[], GPUClass, long, Progress)} names.
      */
     public static DenseIndex loadVramBuffer(MemorySegment buffer) {
-        return loadVramBuffer(buffer, null, new int[0], null, 0);
+        return loadVramBuffer(buffer, null, new int[0], null, 0, null);
     }
 
     /**
      * Copies a monolith from a buffer into a new, mutable index in device memory, as
-     * {@link #loadRamBuffer(MemorySegment, Executor, int[], CPUClass, long)} does in host memory. Calls
-     * {@code usearch_dense_load_vram_buffer}.
+     * {@link #loadRamBuffer(MemorySegment, Executor, int[], CPUClass, long, Progress)} does in host memory.
+     * Calls {@code usearch_dense_load_vram_buffer}.
      *
      * @throws USearchException DEVICE when no device answers, and MALFORMED on a monolith that ends
      *     early.
@@ -1756,12 +2572,13 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
             @Nullable Executor executor,
             int[] devices,
             @Nullable GPUClass gpuClass,
-            long valuesPerKey) {
+            long valuesPerKey,
+            @Nullable Progress progress) {
         return create(LOAD_VRAM_BUFFER, executor, call -> {
-            call.bytes("buffer", buffer);
-            call.ordinals("vram", devices);
-            call.pinned("vram", gpuClass);
-            call.size("values_per_key", nonNegative(valuesPerKey, "the entries per key is negative"));
+            call.bytes(LOAD_VRAM_SOURCE, buffer);
+            call.vram(call.arguments, LOAD_VRAM_VRAM, devices, gpuClass);
+            call.size(LOAD_VRAM_VALUES_PER_KEY, valuesPerKey);
+            call.progress(LOAD_VRAM_PROGRESS, progress);
         });
     }
 
@@ -1774,17 +2591,17 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
      *     be mapped.
      */
     public static DenseIndex viewRam(String path) {
-        return create(VIEW_RAM, null, call -> call.path("path", path));
+        return create(VIEW_RAM, null, call -> call.path(VIEW_RAM_PATH, path));
     }
 
     /**
      * Serves a checkpoint in place from NVMe drives on the caller's thread, each part where its
      * manifest points.
      *
-     * @throws USearchException the statuses {@link #viewNvme(String, Executor, String[], CPUClass)} names.
+     * @throws USearchException the statuses {@link #viewNvme(String, Executor, String[], CPUClass, int[])} names.
      */
     public static DenseIndex viewNvme(String path) {
-        return viewNvme(path, null, new String[0], null);
+        return viewNvme(path, null, new String[0], null, null);
     }
 
     /**
@@ -1796,15 +2613,35 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
      * @param paths devices or directories to serve the parts from; an empty list serves each where
      *     its manifest points.
      * @param cpuClass the class the view dispatches as, or {@code null} for the CPU's own.
-     * @throws USearchException UNSUPPORTED while NVMe checkpoints carry no keys and no shard wrapper.
+     * @param keyTableDomains NUMA node IDs of a key table held in RAM, which counts, reads, samples,
+     *     MaxSim and hinted searches need; an empty list derives them, and {@code null} holds none.
+     * @throws USearchException IO when the checkpoint cannot be opened.
      */
     public static DenseIndex viewNvme(
-            String path, @Nullable Executor executor, String[] paths, @Nullable CPUClass cpuClass) {
-        return create(VIEW_NVME, executor, call -> {
-            call.path("path", path);
-            call.paths("nvme", paths);
-            call.pinned("nvme", cpuClass);
-        });
+            String path,
+            @Nullable Executor executor,
+            String[] paths,
+            @Nullable CPUClass cpuClass,
+            int @Nullable [] keyTableDomains) {
+        return create(VIEW_NVME, executor, call -> serving(call, path, paths, cpuClass, keyTableDomains));
+    }
+
+    /**
+     * Opens a checkpoint's manifest from NVMe drives as a writable index: it answers every read a view
+     * answers, and {@link DenseIndex#refine} rewrites its parts one at a time. Takes what
+     * {@link #viewNvme(String, Executor, String[], CPUClass, int[])} takes, with {@code paths} naming
+     * none. Calls {@code usearch_dense_load_nvme}.
+     *
+     * @throws USearchException UNSUPPORTED on a lone monolith, which has no manifest to replace, or on
+     *     paths naming any; CONTENDED when another writable handle holds the manifest.
+     */
+    public static DenseIndex loadNvme(
+            String path,
+            @Nullable Executor executor,
+            String[] paths,
+            @Nullable CPUClass cpuClass,
+            int @Nullable [] keyTableDomains) {
+        return create(LOAD_NVME, executor, call -> serving(call, path, paths, cpuClass, keyTableDomains));
     }
 
     /**
@@ -1824,7 +2661,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
      *     opened, and UNKNOWN_KIND when it names a metric this build cannot name.
      */
     public static DenseMetadata metadataRead(String path, @Nullable Executor executor) {
-        return metadata(METADATA_READ, executor, call -> call.path("path", path));
+        return metadata(METADATA_READ, executor, call -> call.path(READ_SOURCE, path));
     }
 
     /**
@@ -1844,7 +2681,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
      *     metric this build cannot name.
      */
     public static DenseMetadata metadataReadBuffer(MemorySegment buffer, @Nullable Executor executor) {
-        return metadata(METADATA_READ_BUFFER, executor, call -> call.bytes("buffer", buffer));
+        return metadata(METADATA_READ_BUFFER, executor, call -> call.bytes(READ_SOURCE, buffer));
     }
 
     /**
@@ -1868,38 +2705,30 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
     /** Runs one lifecycle verb and adopts the handle it created. */
     private static DenseIndex create(Verb verb, @Nullable Executor executor, Consumer<Call> fill) {
         return Call.block(verb, null, executor, call -> {
-            MemorySegment created = call.output("index", Library.POINTER);
+            MemorySegment created = call.output(java.util.Objects.requireNonNull(verb.index()), Library.POINTER);
             fill.accept(call);
             return () -> new DenseIndex(created.get(Library.POINTER, 0));
         });
     }
 
+    /** Fills a view or a load of an NVMe checkpoint, with a key table in RAM unless its domains are {@code null}. */
+    private static void serving(
+            Call call, String path, String[] paths, @Nullable CPUClass cpuClass, int @Nullable [] keyTableDomains) {
+        call.path(SERVE_NVME_PATH, path);
+        call.nvme(call.arguments, SERVE_NVME_NVME, paths, cpuClass);
+        if (keyTableDomains != null) {
+            call.ram(call.output(SERVE_NVME_RAM, Library.RAM_OPTIONS), 0, keyTableDomains, cpuClass);
+        }
+    }
+
     private static DenseMetadata metadata(Verb verb, @Nullable Executor executor, Consumer<Call> fill) {
         return Call.block(verb, null, executor, call -> {
             fill.accept(call);
-            MemorySegment metadata = call.output("metadata", METADATA);
-            return () -> DenseMetadata.lift(metadata);
+            MemorySegment metadata = call.output(READ_METADATA, METADATA);
+            return () -> DenseMetadata.lift(metadata, 0);
         });
     }
 
-    static long nonNegative(long value, String message) {
-        if (value < 0) {
-            throw new USearchException(Status.INVALID_ARGUMENT, message);
-        }
-        return value;
-    }
-
-    private static final MemoryLayout PREDICATE = MemoryLayout.structLayout(
-                    Library.POINTER.withName("callback"),
-                    Library.POINTER.withName("state"),
-                    Library.ENUM.withName("cost"),
-                    Library.padding())
-            .withName("predicate");
-    private static final MemoryLayout PROGRESS = MemoryLayout.structLayout(
-                    Library.POINTER.withName("callback"),
-                    Library.POINTER.withName("state"),
-                    Library.SIZE.withName("steps"))
-            .withName("progress");
     private static final MemoryLayout REFINE_OPTIONS = MemoryLayout.structLayout(
                     Library.SIZE.withName("expansion_factor"), Library.SIZE.withName("memory_limit"))
             .withName("refine");
@@ -1911,6 +2740,11 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
             Library.ENUM.withName("quantization"),
             Library.SIZE.withName("dimensions"),
             Library.SIZE.withName("connectivity"));
+
+    private static final VarHandle METADATA_METRIC = Library.field(METADATA, "metric");
+    private static final VarHandle METADATA_QUANTIZATION = Library.field(METADATA, "quantization");
+    private static final VarHandle METADATA_DIMENSIONS = Library.field(METADATA, "dimensions");
+    private static final VarHandle METADATA_CONNECTIVITY = Library.field(METADATA, "connectivity");
 
     /** {@code usearch_dense_index_description_t}. */
     static final StructLayout DESCRIPTION = MemoryLayout.structLayout(
@@ -1924,25 +2758,71 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
             Library.ENUM.withName("load_path"),
             Library.padding());
 
-    /** Spells a {@code usearch_cpu_class_t} and a {@code usearch_gpu_class_t}. */
+    private static final long DESCRIPTION_METADATA = Library.offset(DESCRIPTION, "metadata");
+    private static final VarHandle DESCRIPTION_SIZE = Library.field(DESCRIPTION, "size");
+    private static final VarHandle DESCRIPTION_CAPACITY = Library.field(DESCRIPTION, "capacity");
+    private static final VarHandle DESCRIPTION_MEMORY_USAGE = Library.field(DESCRIPTION, "memory_usage");
+    private static final VarHandle DESCRIPTION_CPU_CLASS = Library.field(DESCRIPTION, "cpu_class");
+    private static final VarHandle DESCRIPTION_GPU_CLASS = Library.field(DESCRIPTION, "gpu_class");
+    private static final VarHandle DESCRIPTION_SHARDS_COUNT = Library.field(DESCRIPTION, "shards_count");
+
+    /** Spells a {@code usearch_cpu_class_t}, a {@code usearch_gpu_class_t} and a {@code usearch_refine_verdict_t}. */
     private static final MethodHandle CPU_CLASS_NAME = Library.namer("usearch_cpu_class_name");
 
     private static final MethodHandle GPU_CLASS_NAME = Library.namer("usearch_gpu_class_name");
+    private static final MethodHandle VERDICT_NAME = Library.namer("usearch_refine_verdict_name");
 
     /** {@code usearch_reachability_t}. */
     static final StructLayout REACHABILITY = MemoryLayout.structLayout(
             Library.SIZE.withName("audited"),
             Library.SIZE.withName("reachable"),
-            Library.SIZE.withName("sweeps"),
-            Library.SIZE.withName("back_sweeps"));
+            Library.SIZE.withName("depth_from_root"),
+            Library.SIZE.withName("depth_to_root"),
+            Library.SIZE.withName("unlinked"),
+            Library.SIZE.withName("underlinked"),
+            Library.SIZE.withName("beyond_most_populated_depth"),
+            Library.SIZE.withName("unreached_islands"),
+            Library.SIZE.withName("stranded_islands"),
+            Library.SIZE.withName("components"));
 
     /** {@code usearch_refine_report_t}. */
-    static final StructLayout REFINE_REPORT = MemoryLayout.structLayout(
+    static final StructLayout REPORT = MemoryLayout.structLayout(
             Library.SIZE.withName("reselected"),
             Library.SIZE.withName("changed"),
             Library.SIZE.withName("islands_found"),
             Library.SIZE.withName("islands_reconnected"),
+            Library.SIZE.withName("neighborhoods"),
+            Library.SIZE.withName("widest_neighborhood"),
+            Library.SIZE.withName("added_links"),
+            Library.SIZE.withName("dropped_links"),
+            Library.ENUM.withName("verdict"),
+            Library.padding(),
+            REACHABILITY.withName("opening"),
             REACHABILITY.withName("reachability"));
+
+    private static final VarHandle REACHABILITY_AUDITED = Library.field(REACHABILITY, "audited");
+    private static final VarHandle REACHABILITY_REACHABLE = Library.field(REACHABILITY, "reachable");
+    private static final VarHandle REACHABILITY_DEPTH_FROM_ROOT = Library.field(REACHABILITY, "depth_from_root");
+    private static final VarHandle REACHABILITY_DEPTH_TO_ROOT = Library.field(REACHABILITY, "depth_to_root");
+    private static final VarHandle REACHABILITY_UNLINKED = Library.field(REACHABILITY, "unlinked");
+    private static final VarHandle REACHABILITY_UNDERLINKED = Library.field(REACHABILITY, "underlinked");
+    private static final VarHandle REACHABILITY_BEYOND_MOST_POPULATED_DEPTH =
+            Library.field(REACHABILITY, "beyond_most_populated_depth");
+    private static final VarHandle REACHABILITY_UNREACHED_ISLANDS = Library.field(REACHABILITY, "unreached_islands");
+    private static final VarHandle REACHABILITY_STRANDED_ISLANDS = Library.field(REACHABILITY, "stranded_islands");
+    private static final VarHandle REACHABILITY_COMPONENTS = Library.field(REACHABILITY, "components");
+
+    private static final VarHandle REPORT_RESELECTED = Library.field(REPORT, "reselected");
+    private static final VarHandle REPORT_CHANGED = Library.field(REPORT, "changed");
+    private static final VarHandle REPORT_ISLANDS_FOUND = Library.field(REPORT, "islands_found");
+    private static final VarHandle REPORT_ISLANDS_RECONNECTED = Library.field(REPORT, "islands_reconnected");
+    private static final VarHandle REPORT_NEIGHBORHOODS = Library.field(REPORT, "neighborhoods");
+    private static final VarHandle REPORT_WIDEST_NEIGHBORHOOD = Library.field(REPORT, "widest_neighborhood");
+    private static final VarHandle REPORT_ADDED_LINKS = Library.field(REPORT, "added_links");
+    private static final VarHandle REPORT_DROPPED_LINKS = Library.field(REPORT, "dropped_links");
+    private static final VarHandle REPORT_VERDICT = Library.field(REPORT, "verdict");
+    private static final long REPORT_OPENING = Library.offset(REPORT, "opening");
+    private static final long REPORT_REACHABILITY = Library.offset(REPORT, "reachability");
 
     /** {@code usearch_dense_softmax_state_t}. */
     static final StructLayout SOFTMAX_STATE = MemoryLayout.structLayout(
@@ -1961,44 +2841,46 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                 Library.placement(placement));
     }
 
-    /** {@code usearch_dense_load_*_t}, reading {@code source} into the placement named {@code placement}. */
-    private static StructLayout loading(String source, String placement) {
-        return Library.opening(
-                Library.padding(),
-                Library.BYTES_VIEW.withName(source),
-                Library.placement(placement),
-                Library.SIZE.withName("values_per_key"),
-                PROGRESS);
-    }
-
-    /** {@code usearch_dense_load_ram_*_t}, reading {@code source}, which also names the connectivity to widen to. */
-    private static StructLayout loadingRam(String source) {
-        return Library.opening(
-                Library.padding(),
-                Library.BYTES_VIEW.withName(source),
-                Library.placement("ram"),
-                Library.SIZE.withName("connectivity"),
-                Library.SIZE.withName("values_per_key"),
-                PROGRESS);
-    }
-
-    /** {@code usearch_dense_metadata_read_t} or its buffer twin, reading {@code source}. */
-    private static StructLayout reading(String source) {
-        return MemoryLayout.structLayout(
-                Library.POINTER.withName("executor"),
-                Library.POINTER.withName("outcome"),
-                Library.ENUM.withName("completion"),
-                Library.padding(),
-                Library.BYTES_VIEW.withName(source),
-                Library.POINTER.withName("metadata"));
-    }
-
     static final Verb INIT_RAM = new Verb("usearch_dense_init_ram", initializing("ram"));
     static final Verb INIT_VRAM = new Verb("usearch_dense_init_vram", initializing("vram"));
-    static final Verb LOAD_RAM = new Verb("usearch_dense_load_ram", loadingRam("path"));
-    static final Verb LOAD_VRAM = new Verb("usearch_dense_load_vram", loading("path", "vram"));
-    static final Verb LOAD_RAM_BUFFER = new Verb("usearch_dense_load_ram_buffer", loadingRam("buffer"));
-    static final Verb LOAD_VRAM_BUFFER = new Verb("usearch_dense_load_vram_buffer", loading("buffer", "vram"));
+    static final VarHandle INIT_METRIC = INIT_RAM.field("metric");
+    static final VarHandle INIT_QUANTIZATION = INIT_RAM.field("quantization");
+    static final VarHandle INIT_DIMENSIONS = INIT_RAM.field("dimensions");
+    static final VarHandle INIT_CONNECTIVITY = INIT_RAM.field("connectivity");
+    static final VarHandle INIT_VALUES_PER_KEY = INIT_RAM.field("values_per_key");
+    static final long INIT_RAM_RAM = INIT_RAM.at("ram");
+    static final long INIT_VRAM_VRAM = INIT_VRAM.at("vram");
+
+    /** {@code usearch_dense_load_ram_t} and its buffer twin, reading {@code source}. */
+    private static final StructLayout LOADING_RAM = Library.opening(
+            Library.padding(),
+            Library.BYTES_VIEW.withName("source"),
+            Library.placement("ram"),
+            Library.SIZE.withName("connectivity"),
+            Library.SIZE.withName("values_per_key"),
+            Library.PROGRESS);
+
+    static final Verb LOAD_RAM = new Verb("usearch_dense_load_ram", LOADING_RAM);
+    static final Verb LOAD_RAM_BUFFER = new Verb("usearch_dense_load_ram_buffer", LOADING_RAM);
+    static final long LOAD_RAM_SOURCE = LOAD_RAM.at("source");
+    static final long LOAD_RAM_RAM = LOAD_RAM.at("ram");
+    static final VarHandle LOAD_RAM_VALUES_PER_KEY = LOAD_RAM.field("values_per_key");
+    static final long LOAD_RAM_PROGRESS = LOAD_RAM.at("progress");
+
+    /** {@code usearch_dense_load_vram_t} and its buffer twin, reading {@code source}. */
+    private static final StructLayout LOADING_VRAM = Library.opening(
+            Library.padding(),
+            Library.BYTES_VIEW.withName("source"),
+            Library.placement("vram"),
+            Library.SIZE.withName("values_per_key"),
+            Library.PROGRESS);
+
+    static final Verb LOAD_VRAM = new Verb("usearch_dense_load_vram", LOADING_VRAM);
+    static final Verb LOAD_VRAM_BUFFER = new Verb("usearch_dense_load_vram_buffer", LOADING_VRAM);
+    static final long LOAD_VRAM_SOURCE = LOAD_VRAM.at("source");
+    static final long LOAD_VRAM_VRAM = LOAD_VRAM.at("vram");
+    static final VarHandle LOAD_VRAM_VALUES_PER_KEY = LOAD_VRAM.field("values_per_key");
+    static final long LOAD_VRAM_PROGRESS = LOAD_VRAM.at("progress");
 
     static final Verb VIEW_RAM = new Verb(
             "usearch_dense_view_ram",
@@ -2007,21 +2889,32 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     Library.POINTER.withName("outcome"),
                     Library.BYTES_VIEW.withName("path")));
 
-    static final Verb VIEW_NVME = new Verb(
-            "usearch_dense_view_nvme",
-            Library.opening(
-                    Library.padding(),
-                    Library.BYTES_VIEW.withName("path"),
-                    Library.placement("nvme"),
-                    Library.POINTER.withName("ram")));
+    static final long VIEW_RAM_PATH = VIEW_RAM.at("path");
+
+    /** {@code usearch_dense_view_nvme_t} and {@code usearch_dense_load_nvme_t}. */
+    private static final StructLayout SERVING_NVME = Library.opening(
+            Library.padding(),
+            Library.BYTES_VIEW.withName("path"),
+            Library.placement("nvme"),
+            Library.POINTER.withName("ram"));
+
+    static final Verb VIEW_NVME = new Verb("usearch_dense_view_nvme", SERVING_NVME);
+    static final Verb LOAD_NVME = new Verb("usearch_dense_load_nvme", SERVING_NVME);
+    static final long SERVE_NVME_PATH = VIEW_NVME.at("path");
+    static final long SERVE_NVME_NVME = VIEW_NVME.at("nvme");
+    static final VarHandle SERVE_NVME_RAM = VIEW_NVME.field("ram");
 
     static final Verb RESERVE =
             new Verb("usearch_dense_reserve", Library.opening(Library.padding(), Library.SIZE.withName("capacity")));
+
+    static final VarHandle RESERVE_CAPACITY = RESERVE.field("capacity");
 
     static final Verb CLEAR = new Verb("usearch_dense_clear", Library.opening(Library.padding()));
 
     static final Verb DESCRIBE = new Verb(
             "usearch_dense_describe", Library.opening(Library.padding(), Library.POINTER.withName("description")));
+
+    static final VarHandle DESCRIBE_DESCRIPTION = DESCRIBE.field("description");
 
     static final Verb INSERT = new Verb(
             "usearch_dense_insert",
@@ -2031,15 +2924,46 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     Library.KEYS_VIEW.withName("keys"),
                     Library.ROWS_VIEW.withName("vectors"),
                     Library.SIZE.withName("expansion_factor"),
-                    PROGRESS,
+                    Library.PROGRESS,
                     STATS));
+
+    static final VarHandle INSERT_COUNT = INSERT.field("count");
+    static final long INSERT_KEYS = INSERT.at("keys");
+    static final long INSERT_VECTORS = INSERT.at("vectors");
+    static final VarHandle INSERT_EXPANSION_FACTOR = INSERT.field("expansion_factor");
+    static final long INSERT_PROGRESS = INSERT.at("progress");
+    static final VarHandle INSERT_STATS = INSERT.field("stats");
 
     static final Verb REFINE = new Verb(
             "usearch_dense_refine",
-            Library.opening(Library.padding(), Library.POINTER.withName("report"), REFINE_OPTIONS, PROGRESS, STATS));
+            Library.opening(
+                    Library.padding(),
+                    Library.POINTER.withName("report"),
+                    REFINE_OPTIONS,
+                    Library.PROGRESS,
+                    STATS,
+                    Library.POINTER.withName("plan"),
+                    Library.POINTER.withName("phase")));
+
+    static final VarHandle REFINE_REPORT = REFINE.field("report");
+    static final VarHandle REFINE_EXPANSION_FACTOR = REFINE.field("refine", "expansion_factor");
+    static final VarHandle REFINE_MEMORY_LIMIT = REFINE.field("refine", "memory_limit");
+    static final long REFINE_PROGRESS = REFINE.at("progress");
+    static final VarHandle REFINE_STATS = REFINE.field("stats");
+    static final VarHandle REFINE_PLAN = REFINE.field("plan");
+    static final VarHandle REFINE_PHASE = REFINE.field("phase");
+
+    static final Verb REFINE_PLAN_FINISH = new Verb(
+            "usearch_dense_refine_plan_finish",
+            Library.opening(Library.padding(), Library.POINTER.withName("plan"), Library.POINTER.withName("report")));
+
+    static final VarHandle REFINE_PLAN_FINISH_PLAN = REFINE_PLAN_FINISH.field("plan");
+    static final VarHandle REFINE_PLAN_FINISH_REPORT = REFINE_PLAN_FINISH.field("report");
 
     static final Verb HEALTH = new Verb(
             "usearch_dense_health", Library.opening(Library.padding(), Library.POINTER.withName("reachability")));
+
+    static final VarHandle HEALTH_REACHABILITY = HEALTH.field("reachability");
 
     static final Verb SEARCH = new Verb(
             "usearch_dense_search",
@@ -2053,15 +2977,29 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     Library.SIZE.withName("expansion_factor"),
                     Library.ENUM.withName("traversal"),
                     Library.padding(),
-                    PREDICATE,
+                    Library.PREDICATE,
                     Library.POINTER.withName("hints"),
-                    PROGRESS,
+                    Library.PROGRESS,
                     STATS));
+
+    static final VarHandle SEARCH_COUNT = SEARCH.field("count");
+    static final long SEARCH_QUERIES = SEARCH.at("queries");
+    static final VarHandle SEARCH_MATCHES = SEARCH.field("matches");
+    static final VarHandle SEARCH_ARENA = SEARCH.field("arena");
+    static final VarHandle SEARCH_WANTED = SEARCH.field("wanted");
+    static final VarHandle SEARCH_EXPANSION_FACTOR = SEARCH.field("expansion_factor");
+    static final VarHandle SEARCH_TRAVERSAL = SEARCH.field("traversal");
+    static final long SEARCH_PREDICATE = SEARCH.at("predicate");
+    static final long SEARCH_PROGRESS = SEARCH.at("progress");
+    static final VarHandle SEARCH_STATS = SEARCH.field("stats");
 
     // The key follows the completion unpadded, since sixteen bytes align to one.
     static final Verb COUNT = new Verb(
             "usearch_dense_count",
             Library.opening(Library.KEY.withName("key"), Library.padding(), Library.POINTER.withName("entries")));
+
+    static final long COUNT_KEY = COUNT.at("key");
+    static final VarHandle COUNT_ENTRIES = COUNT.field("entries");
 
     static final Verb GET = new Verb(
             "usearch_dense_get",
@@ -2074,28 +3012,62 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     Library.ENUM.withName("outputs_scalar"),
                     Library.padding()));
 
-    static final Verb ABSORB = new Verb(
-            "usearch_dense_absorb",
-            Library.opening(
-                    Library.padding(),
-                    Library.SIZE.withName("count"),
-                    Library.POINTER.withName("donors"),
-                    Library.POINTER.withName("report"),
-                    REFINE_OPTIONS,
-                    PROGRESS,
-                    STATS));
+    static final long GET_KEY = GET.at("key");
+    static final VarHandle GET_VECTORS = GET.field("vectors");
+    static final VarHandle GET_WRITTEN = GET.field("written");
+    static final VarHandle GET_ARENA = GET.field("arena");
+    static final VarHandle GET_OUTPUTS_SCALAR = GET.field("outputs_scalar");
 
-    static final Verb SPLIT = new Verb(
-            "usearch_dense_split",
-            Library.opening(
+    static final Verb RESHARD = new Verb(
+            "usearch_dense_reshard",
+            MemoryLayout.structLayout(
+                    Library.SIZE.withName("sources_count"),
+                    Library.POINTER.withName("sources"),
+                    Library.SIZE.withName("targets_count"),
+                    Library.POINTER.withName("targets"),
+                    Library.POINTER.withName("executor"),
+                    Library.POINTER.withName("outcome"),
+                    Library.ENUM.withName("completion"),
                     Library.padding(),
-                    Library.SIZE.withName("count"),
-                    Library.POINTER.withName("receivers"),
+                    Library.POINTER.withName("ram"),
+                    Library.POINTER.withName("vram"),
+                    Library.POINTER.withName("nvme"),
                     Library.POINTER.withName("report"),
                     REFINE_OPTIONS,
                     ValueLayout.JAVA_LONG.withName("seed"),
-                    PROGRESS,
-                    STATS));
+                    Library.PROGRESS,
+                    STATS,
+                    Library.POINTER.withName("plan"),
+                    Library.POINTER.withName("phase")));
+
+    static final VarHandle RESHARD_SOURCES_COUNT = RESHARD.field("sources_count");
+    static final VarHandle RESHARD_SOURCES = RESHARD.field("sources");
+    static final VarHandle RESHARD_TARGETS_COUNT = RESHARD.field("targets_count");
+    static final VarHandle RESHARD_TARGETS = RESHARD.field("targets");
+    static final VarHandle RESHARD_RAM = RESHARD.field("ram");
+    static final VarHandle RESHARD_VRAM = RESHARD.field("vram");
+    static final VarHandle RESHARD_NVME = RESHARD.field("nvme");
+    static final VarHandle RESHARD_REPORT = RESHARD.field("report");
+    static final VarHandle RESHARD_EXPANSION_FACTOR = RESHARD.field("refine", "expansion_factor");
+    static final VarHandle RESHARD_MEMORY_LIMIT = RESHARD.field("refine", "memory_limit");
+    static final VarHandle RESHARD_SEED = RESHARD.field("seed");
+    static final long RESHARD_PROGRESS = RESHARD.at("progress");
+    static final VarHandle RESHARD_STATS = RESHARD.field("stats");
+    static final VarHandle RESHARD_PLAN = RESHARD.field("plan");
+    static final VarHandle RESHARD_PHASE = RESHARD.field("phase");
+
+    static final Verb RESHARD_PLAN_FINISH = new Verb(
+            "usearch_dense_reshard_plan_finish",
+            MemoryLayout.structLayout(
+                    Library.POINTER.withName("executor"),
+                    Library.POINTER.withName("outcome"),
+                    Library.ENUM.withName("completion"),
+                    Library.padding(),
+                    Library.POINTER.withName("plan"),
+                    Library.POINTER.withName("report")));
+
+    static final VarHandle RESHARD_PLAN_FINISH_PLAN = RESHARD_PLAN_FINISH.field("plan");
+    static final VarHandle RESHARD_PLAN_FINISH_REPORT = RESHARD_PLAN_FINISH.field("report");
 
     static final Verb SAMPLE = new Verb(
             "usearch_dense_sample",
@@ -2115,8 +3087,25 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     Library.SIZE.withName("wanted"),
                     ValueLayout.JAVA_LONG.withName("seed"),
                     Library.SIZE.withName("expansion_factor"),
-                    PROGRESS,
+                    Library.PROGRESS,
                     STATS));
+
+    static final VarHandle SAMPLE_SHOWN_COUNT = SAMPLE.field("shown_count");
+    static final long SAMPLE_SHOWN = SAMPLE.at("shown");
+    static final long SAMPLE_SHOWN_COORDINATES = SAMPLE.at("shown_coordinates");
+    static final VarHandle SAMPLE_FOCUS_COUNT = SAMPLE.field("focus_count");
+    static final long SAMPLE_FOCUS = SAMPLE.at("focus");
+    static final VarHandle SAMPLE_KEYS = SAMPLE.field("keys");
+    static final VarHandle SAMPLE_ENTRY_ORDINALS = SAMPLE.field("entry_ordinals");
+    static final VarHandle SAMPLE_PARENTS = SAMPLE.field("parents");
+    static final VarHandle SAMPLE_COORDINATES = SAMPLE.field("coordinates");
+    static final VarHandle SAMPLE_WRITTEN = SAMPLE.field("written");
+    static final VarHandle SAMPLE_ARENA = SAMPLE.field("arena");
+    static final VarHandle SAMPLE_WANTED = SAMPLE.field("wanted");
+    static final VarHandle SAMPLE_SEED = SAMPLE.field("seed");
+    static final VarHandle SAMPLE_EXPANSION_FACTOR = SAMPLE.field("expansion_factor");
+    static final long SAMPLE_PROGRESS = SAMPLE.at("progress");
+    static final VarHandle SAMPLE_STATS = SAMPLE.field("stats");
 
     static final Verb CURSOR_INIT = new Verb(
             "usearch_dense_cursor_init",
@@ -2126,6 +3115,10 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     Library.SIZE.withName("starts_count"),
                     Library.POINTER.withName("starts"),
                     Library.POINTER.withName("cursor")));
+
+    static final VarHandle CURSOR_INIT_STARTS_COUNT = CURSOR_INIT.field("starts_count");
+    static final VarHandle CURSOR_INIT_STARTS = CURSOR_INIT.field("starts");
+    static final VarHandle CURSOR_INIT_CURSOR = CURSOR_INIT.field("cursor");
 
     static final Verb CURSOR_NEXT = new Verb(
             "usearch_dense_cursor_next",
@@ -2138,6 +3131,13 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     Library.POINTER.withName("arena"),
                     Library.SIZE.withName("wanted")));
 
+    private static final VarHandle CURSOR_NEXT_CURSOR = CURSOR_NEXT.field("cursor");
+    private static final VarHandle CURSOR_NEXT_KEYS = CURSOR_NEXT.field("keys");
+    private static final VarHandle CURSOR_NEXT_LINKS = CURSOR_NEXT.field("links");
+    private static final VarHandle CURSOR_NEXT_WRITTEN = CURSOR_NEXT.field("written");
+    private static final VarHandle CURSOR_NEXT_ARENA = CURSOR_NEXT.field("arena");
+    private static final VarHandle CURSOR_NEXT_WANTED = CURSOR_NEXT.field("wanted");
+
     static final Verb SEARCH_STREAM_INIT = new Verb(
             "usearch_dense_search_stream_init",
             MemoryLayout.structLayout(
@@ -2146,6 +3146,10 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     Library.POINTER.withName("outcome"),
                     Library.ROWS_VIEW.withName("query"),
                     Library.SIZE.withName("expansion_factor")));
+
+    static final VarHandle SEARCH_STREAM_INIT_STREAM = SEARCH_STREAM_INIT.field("stream");
+    static final long SEARCH_STREAM_INIT_QUERY = SEARCH_STREAM_INIT.at("query");
+    static final VarHandle SEARCH_STREAM_INIT_EXPANSION_FACTOR = SEARCH_STREAM_INIT.field("expansion_factor");
 
     static final Verb SEARCH_STREAM_NEXT = new Verb(
             "usearch_dense_search_stream_next",
@@ -2156,8 +3160,17 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     Library.POINTER.withName("arena"),
                     Library.SIZE.withName("wanted")));
 
+    private static final VarHandle SEARCH_STREAM_NEXT_STREAM = SEARCH_STREAM_NEXT.field("stream");
+    private static final VarHandle SEARCH_STREAM_NEXT_MATCHES = SEARCH_STREAM_NEXT.field("matches");
+    private static final VarHandle SEARCH_STREAM_NEXT_ARENA = SEARCH_STREAM_NEXT.field("arena");
+    private static final VarHandle SEARCH_STREAM_NEXT_WANTED = SEARCH_STREAM_NEXT.field("wanted");
+
     static final Verb SAVE = new Verb(
-            "usearch_dense_save", Library.opening(Library.padding(), Library.BYTES_VIEW.withName("path"), PROGRESS));
+            "usearch_dense_save",
+            Library.opening(Library.padding(), Library.BYTES_VIEW.withName("path"), Library.PROGRESS));
+
+    static final long SAVE_PATH = SAVE.at("path");
+    static final long SAVE_PROGRESS = SAVE.at("progress");
 
     static final Verb SAVE_BUFFER = new Verb(
             "usearch_dense_save_buffer",
@@ -2165,11 +3178,25 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     Library.padding(),
                     Library.POINTER.withName("monolith"),
                     Library.POINTER.withName("arena"),
-                    PROGRESS));
+                    Library.PROGRESS));
 
-    static final Verb METADATA_READ = new Verb("usearch_dense_metadata_read", reading("path"));
+    static final VarHandle SAVE_BUFFER_MONOLITH = SAVE_BUFFER.field("monolith");
+    static final VarHandle SAVE_BUFFER_ARENA = SAVE_BUFFER.field("arena");
+    static final long SAVE_BUFFER_PROGRESS = SAVE_BUFFER.at("progress");
 
-    static final Verb METADATA_READ_BUFFER = new Verb("usearch_dense_metadata_read_buffer", reading("buffer"));
+    /** {@code usearch_dense_metadata_read_t} and its buffer twin, reading {@code source}. */
+    private static final StructLayout READING = MemoryLayout.structLayout(
+            Library.POINTER.withName("executor"),
+            Library.POINTER.withName("outcome"),
+            Library.ENUM.withName("completion"),
+            Library.padding(),
+            Library.BYTES_VIEW.withName("source"),
+            Library.POINTER.withName("metadata"));
+
+    static final Verb METADATA_READ = new Verb("usearch_dense_metadata_read", READING);
+    static final Verb METADATA_READ_BUFFER = new Verb("usearch_dense_metadata_read_buffer", READING);
+    private static final long READ_SOURCE = METADATA_READ.at("source");
+    private static final VarHandle READ_METADATA = METADATA_READ.field("metadata");
 
     static final Verb MULTIPLY = new Verb(
             "usearch_dense_multiply",
@@ -2185,9 +3212,21 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     Library.SIZE.withName("expansion_factor"),
                     Library.ENUM.withName("traversal"),
                     Library.padding(),
-                    PREDICATE,
-                    PROGRESS,
+                    Library.PREDICATE,
+                    Library.PROGRESS,
                     STATS));
+
+    static final VarHandle MULTIPLY_COUNT = MULTIPLY.field("count");
+    static final long MULTIPLY_LEFT = MULTIPLY.at("left");
+    static final VarHandle MULTIPLY_PRODUCTS = MULTIPLY.field("products");
+    static final VarHandle MULTIPLY_WRITTEN = MULTIPLY.field("written");
+    static final VarHandle MULTIPLY_REQUIRED = MULTIPLY.field("required");
+    static final VarHandle MULTIPLY_ARENA = MULTIPLY.field("arena");
+    static final VarHandle MULTIPLY_WANTED = MULTIPLY.field("wanted");
+    static final VarHandle MULTIPLY_EXPANSION_FACTOR = MULTIPLY.field("expansion_factor");
+    static final long MULTIPLY_PREDICATE = MULTIPLY.at("predicate");
+    static final long MULTIPLY_PROGRESS = MULTIPLY.at("progress");
+    static final VarHandle MULTIPLY_STATS = MULTIPLY.field("stats");
 
     static final Verb ATTEND = new Verb(
             "usearch_dense_attend",
@@ -2206,9 +3245,23 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     Library.SIZE.withName("expansion_factor"),
                     ValueLayout.JAVA_FLOAT.withName("score_scale"),
                     Library.ENUM.withName("traversal"),
-                    PREDICATE,
-                    PROGRESS,
+                    Library.PREDICATE,
+                    Library.PROGRESS,
                     STATS));
+
+    static final VarHandle ATTEND_COUNT = ATTEND.field("count");
+    static final long ATTEND_QUERIES = ATTEND.at("queries");
+    static final VarHandle ATTEND_HEAD_COUNT = ATTEND.field("head_count");
+    static final VarHandle ATTEND_VALUE_LOOKUP = ATTEND.field("value_lookup");
+    static final VarHandle ATTEND_CARRY = ATTEND.field("carry");
+    static final VarHandle ATTEND_OUTPUTS = ATTEND.field("outputs");
+    static final VarHandle ATTEND_ARENA = ATTEND.field("arena");
+    static final VarHandle ATTEND_OUTPUTS_SCALAR = ATTEND.field("outputs_scalar");
+    static final VarHandle ATTEND_EXPANSION_FACTOR = ATTEND.field("expansion_factor");
+    static final VarHandle ATTEND_SCORE_SCALE = ATTEND.field("score_scale");
+    static final long ATTEND_PREDICATE = ATTEND.at("predicate");
+    static final long ATTEND_PROGRESS = ATTEND.at("progress");
+    static final VarHandle ATTEND_STATS = ATTEND.field("stats");
 
     static final Verb MAXSIM = new Verb(
             "usearch_dense_maxsim",
@@ -2226,10 +3279,23 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     Library.SIZE.withName("expansion_factor"),
                     Library.ENUM.withName("traversal"),
                     Library.padding(),
-                    PREDICATE,
+                    Library.PREDICATE,
                     Library.POINTER.withName("hints"),
-                    PROGRESS,
+                    Library.PROGRESS,
                     STATS));
+
+    static final VarHandle MAXSIM_COUNT = MAXSIM.field("count");
+    static final long MAXSIM_QUERIES = MAXSIM.at("queries");
+    static final VarHandle MAXSIM_ROWS_PER_QUERY = MAXSIM.field("rows_per_query");
+    static final VarHandle MAXSIM_MATCHES = MAXSIM.field("matches");
+    static final VarHandle MAXSIM_WRITTEN = MAXSIM.field("written");
+    static final VarHandle MAXSIM_REQUIRED = MAXSIM.field("required");
+    static final VarHandle MAXSIM_ARENA = MAXSIM.field("arena");
+    static final VarHandle MAXSIM_WANTED = MAXSIM.field("wanted");
+    static final VarHandle MAXSIM_EXPANSION_FACTOR = MAXSIM.field("expansion_factor");
+    static final long MAXSIM_PREDICATE = MAXSIM.at("predicate");
+    static final long MAXSIM_PROGRESS = MAXSIM.at("progress");
+    static final VarHandle MAXSIM_STATS = MAXSIM.field("stats");
 
     /** {@code usearch_value_lookup_t}. */
     private static final FunctionDescriptor LOOKUP = FunctionDescriptor.ofVoid(

@@ -42,25 +42,40 @@ static struct {
 
     {"DenseIndex", &DenseIndexType, NULL},
     {"DenseMetadata", &DenseMetadataType, &usearch_py_dense_metadata_desc},
-    {"DenseIndexDescription", &DenseIndexDescriptionType, &usearch_py_dense_index_description_desc},
-    {"DenseReachability", &DenseReachabilityType, &usearch_py_dense_reachability_desc},
-    {"RefineReport", &RefineReportType, &usearch_py_refine_report_desc},
-    {"Sample", &SampleType, &usearch_py_sample_desc},
+    {"DenseIndexDescription", &DenseIndexDescriptionType, NULL},
+    {"DenseReachability", &DenseReachabilityType, NULL},
+    {"RefineReport", &RefineReportType, NULL},
+    {"Sample", &SampleType, NULL},
     {"DenseTraversalStats", &DenseTraversalStatsType, NULL},
+    {"DenseRefinePlan", &DenseRefinePlanType, NULL},
+    {"DenseReshardPlan", &DenseReshardPlanType, NULL},
     {"DenseCursor", &DenseCursorType, NULL},
     {"DenseBatch", &DenseBatchType, NULL},
     {"DenseSearchStream", &DenseSearchStreamType, NULL},
 
     {"SequenceIndex", &SequenceIndexType, NULL},
+    {"SequenceMetadata", &SequenceMetadataType, &usearch_py_sequence_metadata_desc},
+    {"SequenceIndexDescription", &SequenceIndexDescriptionType, NULL},
+    {"SequenceRefinePlan", &SequenceRefinePlanType, NULL},
+    {"SequenceReshardPlan", &SequenceReshardPlanType, NULL},
+
     {"ShapesIndex", &ShapesIndexType, NULL},
+    {"ShapesMetadata", &ShapesMetadataType, &usearch_py_shapes_metadata_desc},
+    {"ShapesIndexDescription", &ShapesIndexDescriptionType, NULL},
+    {"ShapesRefinePlan", &ShapesRefinePlanType, NULL},
+    {"ShapesReshardPlan", &ShapesReshardPlanType, NULL},
+
     {"GeospatialIndex", &GeospatialIndexType, NULL},
+    {"GeospatialMetadata", &GeospatialMetadataType, &usearch_py_geospatial_metadata_desc},
+    {"GeospatialIndexDescription", &GeospatialIndexDescriptionType, NULL},
+    {"GeospatialRefinePlan", &GeospatialRefinePlanType, NULL},
+    {"GeospatialReshardPlan", &GeospatialReshardPlanType, NULL},
 };
 
 static PyMethodDef module_methods[] = {
     {"version", (PyCFunction)api_version, METH_NOARGS, doc_version},                                              //
     {"capabilities_compiled", (PyCFunction)api_capabilities_compiled, METH_NOARGS, doc_capabilities_compiled},    //
     {"capabilities_available", (PyCFunction)api_capabilities_available, METH_NOARGS, doc_capabilities_available}, //
-    {"layouts", (PyCFunction)api_layouts, METH_NOARGS, doc_layouts},                                              //
     {NULL, NULL, 0, NULL},
 };
 

@@ -9,7 +9,7 @@
  *  @c CompiledDeferred a deferred call answers.
  */
 #include <stdio.h>  // `snprintf`
-#include <stdlib.h> // `malloc`, `calloc`, `realloc`, `free`
+#include <stdlib.h> // `malloc`, `calloc`, `free`
 #include <string.h> // `memset`, `strcmp`, `strlen`
 
 #include "lib.h"
@@ -118,14 +118,13 @@ bool usearch_js_metric_from_value(napi_env env, napi_value value, char const* fi
     int metric = usearch_dense_metric_unknown_k;
     if (!usearch_js_name_from_value(env, value, field, usearch_js_metric_parse, usearch_js_metric_spell, &metric))
         return false;
-    if (metric == usearch_dense_metric_unknown_k) return usearch_js_throw_field(env, field, "must name a metric");
     *result = (usearch_dense_metric_t)metric;
     return true;
 }
 
 bool usearch_js_scalar_from_value(napi_env env, napi_value value, char const* field, usearch_scalar_t* result) {
     uint32_t code = 0;
-    if (napi_get_value_uint32(env, value, &code) != napi_ok || !usearch_js_row_bytes((usearch_scalar_t)code, 1))
+    if (napi_get_value_uint32(env, value, &code) != napi_ok)
         return usearch_js_throw_field(env, field, "must name a scalar kind");
     *result = (usearch_scalar_t)code;
     return true;
@@ -269,6 +268,30 @@ bool usearch_js_completion_from_value(napi_env env, napi_value value, usearch_co
     if (completion != usearch_completion_blocking_k && completion != usearch_completion_deferred_k)
         return usearch_js_throw_field(env, "completion", "must be blocking or deferred");
     *result = (usearch_completion_t)completion;
+    return true;
+}
+
+bool usearch_js_stats_from_value(napi_env env, napi_value sink, usearch_js_call_t* call,
+                                 usearch_traversal_stats_t** stats) {
+    napi_valuetype kind = napi_undefined;
+    *stats = NULL;
+    if (usearch_js_value_absent(env, sink)) return true;
+    if (napi_typeof(env, sink, &kind) != napi_ok || kind != napi_object)
+        return usearch_js_throw_field(env, "stats", "must be a DenseTraversalStats");
+    *stats = &call->stats;
+    return true;
+}
+
+/** Overwrites the reading @p sink with the counters one call reported; an absent one takes none. */
+static bool usearch_js_stats_report(napi_env env, napi_value sink, usearch_traversal_stats_t const* stats) {
+    if (usearch_js_value_absent(env, sink)) return true;
+    if (napi_set_named_property(env, sink, "visitedMembers", usearch_js_number(env, stats->visited_members)) !=
+            napi_ok ||
+        napi_set_named_property(env, sink, "computedDistances", usearch_js_number(env, stats->computed_distances)) !=
+            napi_ok ||
+        napi_set_named_property(env, sink, "restarts", usearch_js_number(env, stats->restarts)) != napi_ok ||
+        napi_set_named_property(env, sink, "missingHints", usearch_js_number(env, stats->missing_hints)) != napi_ok)
+        return usearch_js_throw(env, usearch_status_internal_k, "Could not publish the telemetry");
     return true;
 }
 
@@ -847,18 +870,6 @@ napi_value usearch_js_executor_define(napi_env env) {
 
 #pragma region Arena
 
-/** Forgets every view handed out so far, detaching the ones still alive when @p detach asks. */
-static void usearch_js_arena_forget(napi_env env, usearch_js_arena_t* arena,
-                                    napi_status (*detach)(napi_env, napi_value)) {
-    for (size_t view_index = 0; view_index != arena->views_count; ++view_index) {
-        napi_value buffer = NULL;
-        if (detach && napi_get_reference_value(env, arena->views[view_index], &buffer) == napi_ok && buffer)
-            detach(env, buffer);
-        napi_delete_reference(env, arena->views[view_index]);
-    }
-    arena->views_count = 0;
-}
-
 /** Lets go of the executor a GPU arena held, once the arena's memory is freed. */
 static void usearch_js_arena_unbind(napi_env env, usearch_js_arena_t* arena) {
     if (!arena->executor) return;
@@ -871,8 +882,6 @@ static void usearch_js_arena_finalize(napi_env env, void* data, void* hint) {
     usearch_js_arena_t* const arena = (usearch_js_arena_t*)data;
     (void)hint;
     if (!arena) return;
-    usearch_js_arena_forget(env, arena, NULL);
-    free(arena->views);
     usearch_arena_free(arena->handle);
     usearch_js_arena_unbind(env, arena);
     free(arena);
@@ -957,28 +966,23 @@ static napi_value usearch_js_arena_describe(napi_env env, napi_callback_info inf
     return object;
 }
 
-/** @c free() - releases the memory now, once every deferred call writing it is final, detaching
- *  every view still held into it; a second call is a no-op. */
+/** @c free() - releases the memory now, once every deferred call writing it is final; a second call
+ *  is a no-op. */
 static napi_value usearch_js_arena_release(napi_env env, napi_callback_info info) {
     usearch_js_arena_t* const arena = (usearch_js_arena_t*)usearch_js_self(env, info, NULL, NULL, NULL);
     if (!arena) return NULL;
-    if (!arena->handle) return usearch_js_undefined(env);
-    usearch_js_arena_forget(env, arena, napi_detach_arraybuffer);
     usearch_arena_free(arena->handle);
     usearch_js_arena_unbind(env, arena);
     arena->handle = NULL;
-    arena->holder = NULL;
     return usearch_js_undefined(env);
 }
 
-bool usearch_js_arena_from_value(napi_env env, napi_value value, usearch_js_call_t* call, usearch_arena_t* handle) {
+bool usearch_js_arena_from_value(napi_env env, napi_value value, usearch_arena_t* handle) {
     usearch_js_addon_t* const addon = usearch_js_addon(env);
-    if (!addon) return false;
-    usearch_js_arena_t* const arena = (usearch_js_arena_t*)usearch_js_unwrap_instance(env, value, addon->arena_class,
-                                                                                      "arena", "must be an Arena");
+    usearch_js_arena_t const* const arena = addon ? (usearch_js_arena_t const*)usearch_js_unwrap_instance(
+                                                        env, value, addon->arena_class, "arena", "must be an Arena")
+                                                  : NULL;
     if (!arena) return false;
-    if (!arena->handle) return usearch_js_throw(env, usearch_status_uninitialized_k, "The Arena was already freed");
-    call->arena = arena;
     *handle = arena->handle;
     return true;
 }
@@ -995,46 +999,19 @@ static napi_status usearch_js_typedarray(napi_env env, napi_typedarray_type type
     return created;
 }
 
-napi_value usearch_js_arena_view(napi_env env, napi_value arena_value, napi_typedarray_type type, void* data,
-                                 size_t bytes, size_t elements) {
+napi_value usearch_js_arena_view(napi_env env, napi_value arena, napi_typedarray_type type, void* data, size_t bytes,
+                                 size_t elements) {
     napi_value buffer = NULL, array = NULL;
-    usearch_js_arena_t* arena = NULL;
-    if (napi_unwrap(env, arena_value, (void**)&arena) != napi_ok || !arena) {
-        usearch_js_throw(env, usearch_status_internal_k, "The Arena is not attached");
-        return NULL;
-    }
-    usearch_outcome_t outcome = {usearch_status_success_k, NULL};
-    usearch_arena_description_t description = {usearch_residency_ram_k, 0};
-    usearch_arena_describe_t describe = {.arena = arena->handle, .outcome = &outcome, .description = &description};
-    usearch_arena_describe(&describe);
-    if (!usearch_js_succeeded(env, &outcome)) return NULL;
-    if (description.residency == usearch_residency_vram_k) {
-        napi_get_null(env, &array);
-        return array;
-    }
-    if (arena->views_count == arena->views_capacity) {
-        size_t const capacity = arena->views_capacity ? arena->views_capacity * 2 : 4;
-        napi_ref* const views = (napi_ref*)realloc(arena->views, capacity * sizeof(napi_ref));
-        if (!views) {
-            usearch_js_throw(env, usearch_status_out_of_memory_k, "Could not track the arena view");
-            return NULL;
-        }
-        arena->views = views;
-        arena->views_capacity = capacity;
-    }
     // The non-enumerable `arena` property is what keeps the memory alive while any view of it is.
-    napi_property_descriptor const owner = {"arena", NULL, NULL, NULL, NULL, arena_value, napi_default, NULL};
-    // An empty result owns a buffer of its own, tracked alike, so it goes stale with the rest.
+    napi_property_descriptor const owner = {"arena", NULL, NULL, NULL, NULL, arena, napi_default, NULL};
     bool const empty = !data || !bytes;
     napi_status const created = empty ? napi_create_arraybuffer(env, 0, NULL, &buffer)
                                       : napi_create_external_arraybuffer(env, data, bytes, NULL, NULL, &buffer);
     if (created != napi_ok || napi_define_properties(env, buffer, 1, &owner) != napi_ok ||
-        usearch_js_typedarray(env, type, empty ? 0 : elements, buffer, &array) != napi_ok ||
-        napi_create_reference(env, buffer, 0, &arena->views[arena->views_count]) != napi_ok) {
+        usearch_js_typedarray(env, type, empty ? 0 : elements, buffer, &array) != napi_ok) {
         usearch_js_throw(env, usearch_status_internal_k, "Could not view the arena");
         return NULL;
     }
-    ++arena->views_count;
     return array;
 }
 
@@ -1059,10 +1036,6 @@ napi_value usearch_js_arena_define(napi_env env) {
 
 /** Drops what a final call holds and owns, keeping its outcome readable; safe to repeat. */
 static void usearch_js_call_release(napi_env env, usearch_js_call_t* call) {
-    if (call->conclude) call->conclude(call);
-    call->conclude = NULL;
-    if (call->failure) napi_delete_reference(env, call->failure);
-    call->failure = NULL;
     for (size_t slot = 0; slot != usearch_js_slots_k; ++slot) {
         if (call->held[slot]) napi_delete_reference(env, call->held[slot]);
         call->held[slot] = NULL;
@@ -1169,19 +1142,11 @@ static napi_value usearch_js_deferred_settled(napi_env env, napi_callback_info i
     return promise;
 }
 
-/** Builds a final call's answer, or throws its callback's exception, failure or stale arena. */
+/** Builds a final call's answer after publishing its telemetry, or throws its failure. */
 static napi_value usearch_js_call_finish(napi_env env, usearch_js_call_t* call, napi_value const* slots) {
-    napi_value failure = NULL;
-    if (call->failure && napi_get_reference_value(env, call->failure, &failure) == napi_ok) {
-        napi_throw(env, failure);
+    if (!usearch_js_succeeded(env, &call->outcome) ||
+        !usearch_js_stats_report(env, slots[usearch_js_slot_stats_k], &call->stats))
         return NULL;
-    }
-    if (!usearch_js_succeeded(env, &call->outcome)) return NULL;
-    if (call->arena && call->arena->holder != call) {
-        usearch_js_throw(env, usearch_status_uninitialized_k,
-                         "The arena was rewound or freed since this call wrote into it");
-        return NULL;
-    }
     return call->finish(env, call, slots);
 }
 
@@ -1252,12 +1217,6 @@ bool usearch_js_call_hold(napi_env env, usearch_js_call_t* call, usearch_js_call
 
 napi_value usearch_js_call_answer(napi_env env, usearch_js_call_t* call, usearch_js_call_t const* local,
                                   napi_value const* slots, napi_value deferred) {
-    // A contended call never rewound the arena, so the holder's views stay readable.
-    usearch_js_arena_t* const arena = call->arena;
-    if (arena && usearch_outcome_status(&call->outcome) != usearch_status_contended_k) {
-        usearch_js_arena_forget(env, arena, napi_detach_arraybuffer);
-        arena->holder = call;
-    }
     if (call != local) return deferred;
     napi_value const result = usearch_js_call_finish(env, call, slots);
     usearch_js_call_release(env, call);

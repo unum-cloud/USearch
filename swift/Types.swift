@@ -13,7 +13,6 @@
 
 import Dispatch
 import NumKong
-import Synchronization
 
 import USearchC
 
@@ -86,15 +85,12 @@ public struct USearchError: Swift.Error, CustomStringConvertible, Equatable, Sen
     public let status: Status
     /// The library's static detail, or this binding's own when it rejected the call.
     public let message: String
-    /// What a caller's closure threw to stop the call, and nil for every other failure.
-    public let cause: (any Swift.Error)?
 
     public var description: String { "usearch: \(status): \(message)" }
 
     init(status: Status, message: String) {
         self.status = status
         self.message = message
-        cause = nil
     }
 
     /// Lifts a final outcome. Messages are static library storage and need no deallocation, so the
@@ -102,23 +98,6 @@ public struct USearchError: Swift.Error, CustomStringConvertible, Equatable, Sen
     init(_ outcome: usearch_outcome_t) {
         status = Status(raw: outcome.status)
         message = outcome.message.map { String(cString: $0) } ?? ""
-        cause = nil
-    }
-
-    /// Carries what a caller's closure threw: a `USearchError` as it was, any other as `cancelled`.
-    init(thrown: any Swift.Error) {
-        if let thrown = thrown as? USearchError {
-            self = thrown
-            return
-        }
-        status = .cancelled
-        message = String(describing: thrown)
-        cause = thrown
-    }
-
-    /// Equal in status and message, which is as far as an arbitrary cause compares.
-    public static func == (left: USearchError, right: USearchError) -> Bool {
-        left.status == right.status && left.message == right.message
     }
 }
 
@@ -447,12 +426,13 @@ public struct Match: Equatable, Sendable {
     public let distance: Distance
 }
 
-/// The ranked matches a search or a stream pull wrote into an arena, one list per query, read in place.
+/// The ranked matches a search or a stream pull wrote into an arena, one list per query, read
+/// in place until the arena's next call.
 public struct Matches: RandomAccessCollection {
-    /// The arena the matches live in, and which call wrote them.
-    let write: ArenaWrite
+    /// The arena the matches live in, held so they outlive no release of it.
+    let arena: Arena
     /// The packed matches the call wrote.
-    let view: usearch_matches_view_t
+    var view = usearch_matches_view_t()
     /// One past the last query the call resolved.
     public let endIndex: Int
 
@@ -464,10 +444,10 @@ public struct Matches: RandomAccessCollection {
 
     /// One query's matches, as many as the call wrote.
     public subscript(query: Int) -> QueryMatches {
-        write.check(query, below: endIndex)
+        boundsCheck(query, below: endIndex)
         let start = query * view.columns
         return QueryMatches(
-            write: write,
+            arena: arena,
             keys: view.keys,
             scores: view.scores,
             cells: start ..< start + view.counts[query]
@@ -477,8 +457,8 @@ public struct Matches: RandomAccessCollection {
 
 /// One query's matches, or one left row's pairs, read in place from the arena they live in.
 public struct QueryMatches: RandomAccessCollection {
-    /// The arena the matches live in, and which call wrote them.
-    let write: ArenaWrite
+    /// The arena the matches live in, held so they outlive no release of it.
+    let arena: Arena
     /// The keys of every query of the call.
     let keys: UnsafePointer<usearch_key_t>?
     /// The scores of every query of the call, positionally paired with `keys`.
@@ -494,7 +474,7 @@ public struct QueryMatches: RandomAccessCollection {
 
     /// The match at a position, key and score read from their paired arrays.
     public subscript(position: Int) -> Match {
-        write.check(position, below: cells.count)
+        boundsCheck(position, below: cells.count)
         let cell = cells.lowerBound + position
         return Match(key: Key(raw: keys![cell]), distance: scores![cell])
     }
@@ -514,35 +494,78 @@ public enum Continuation: Sendable {
 /// the verb consumes - and the caller's chance to stop it.
 ///
 /// Never invoked concurrently, however many threads perform the work, so the handler needs no
-/// synchronization of its own; an error it throws never unwinds into the engine, but stops the call
-/// as `.cancel` would and is thrown once the call is final. It runs on whichever thread advanced the
-/// work, hence `@Sendable`.
-public typealias Progress = @Sendable (_ completed: Int, _ total: Int) throws -> Continuation
+/// synchronization of its own. It runs on whichever thread advanced the work, hence `@Sendable`.
+public typealias Progress = @Sendable (_ completed: Int, _ total: Int) -> Continuation
 
-/// A progress handler and the call state its first thrown error goes to, placed in that state,
-/// since a Swift closure has no stable representation the engine can call.
-private final class ProgressState {
-    let progress: Progress
-    /// The call state that keeps this one, so it outlives every call of the trampoline.
-    unowned let callState: CallState
+/// A handler placed where its trampoline reads it, since a Swift closure has no stable
+/// representation the engine can call.
+final class Handler<Body> {
+    let body: Body
 
-    init(progress: @escaping Progress, callState: CallState) {
-        self.progress = progress
-        self.callState = callState
-    }
+    init(_ body: Body) { self.body = body }
 }
 
 /// The trampoline every reporting verb hands the engine.
 private let progressTrampoline: usearch_progress_callback_t = { completed, total, state in
-    guard let state else { return usearch_cancel_k }
-    let progress = Unmanaged<ProgressState>.fromOpaque(state).takeUnretainedValue()
-    do {
-        return try progress.progress(completed, total) == .cancel ? usearch_cancel_k : usearch_continue_k
+    let progress = Unmanaged<Handler<Progress>>.fromOpaque(state!).takeUnretainedValue()
+    return progress.body(completed, total) == .cancel ? usearch_cancel_k : usearch_continue_k
+}
+
+/// The kind of work a refine or reshard plan is doing, the same in every residency.
+public struct Phase: Hashable, Sendable, CustomStringConvertible {
+    /// The engine's own value.
+    let raw: usearch_phase_t
+
+    /// No plan, or one that has not started.
+    public static let none = Phase(raw: usearch_phase_none_k)
+    /// A reshard moving keys and values into a target, with the links it keeps.
+    public static let copy = Phase(raw: usearch_phase_copy_k)
+    /// A reshard on NVMe building blocks of a target's rows in RAM and writing their links.
+    public static let build = Phase(raw: usearch_phase_build_k)
+    /// A reshard cutting a source into one part per target.
+    public static let partition = Phase(raw: usearch_phase_partition_k)
+    /// A reshard moving each part into its target.
+    public static let scatter = Phase(raw: usearch_phase_scatter_k)
+    /// A round's health check, opening or closing it.
+    public static let health = Phase(raw: usearch_phase_health_k)
+    /// A round linking each island with the root's component.
+    public static let heal = Phase(raw: usearch_phase_heal_k)
+    /// A round drawing the hubs its gather streams entries past.
+    public static let hubs = Phase(raw: usearch_phase_hubs_k)
+    /// A round gathering every entry into a neighborhood.
+    public static let gather = Phase(raw: usearch_phase_gather_k)
+    /// A round re-stitching each neighborhood.
+    public static let restitch = Phase(raw: usearch_phase_restitch_k)
+    /// A round on NVMe rewriting each tile of links from what its restitch changed.
+    public static let write = Phase(raw: usearch_phase_write_k)
+    /// The plan ended its round, and nothing more is pending.
+    public static let done = Phase(raw: usearch_phase_done_k)
+
+    /// The phase rendered as the library spells it.
+    public var description: String { String(cString: usearch_phase_name(raw)) }
+
+    /// Reads a spelling back, and nil for one no phase carries.
+    public init?(name: String) {
+        guard let raw = parsed(name, usearch_phase_from_name, usearch_phase_none_k) else { return nil }
+        self.raw = raw
     }
-    catch {
-        progress.callState.latch(error)
-        return usearch_cancel_k
-    }
+
+    init(raw: usearch_phase_t) { self.raw = raw }
+}
+
+/// Where a plan stands: its phase, that phase's position in the plan, and its own count.
+public struct PhaseProgress: Sendable {
+    /// The library's own record.
+    var raw = usearch_phase_progress_t()
+
+    /// The kind of work in hand.
+    public var phase: Phase { Phase(raw: raw.phase) }
+    /// This phase's position among the ones the plan runs.
+    public var ordinal: Int { raw.ordinal }
+    /// The units of this phase done, entries or islands.
+    public var completed: Int { raw.completed }
+    /// The units of this phase in all.
+    public var total: Int { raw.total }
 }
 
 // MARK: - Call State
@@ -550,7 +573,7 @@ private let progressTrampoline: usearch_progress_callback_t = { completed, total
 /// Everything one call points the library at, held where it cannot move until the call is final.
 ///
 /// Submission copies the argument structure, so only its pointees live here: the outcome, the slots
-/// the call writes, the closures it calls back, and for a deferred call the copies of what it
+/// the call writes, the handlers it calls back, and for a deferred call the copies of what it
 /// borrows and the objects whose memory it reads. A blocking call releases it on return, and a
 /// deferred one is kept by its `Deferred` until final.
 final class CallState {
@@ -558,17 +581,10 @@ final class CallState {
     let completion: usearch_completion_t
     /// The outcome the call stores its final status in.
     let outcome = UnsafeMutablePointer<usearch_outcome_t>.allocate(capacity: 1)
-    /// The first error a lent closure threw, from whichever thread threw it.
-    private let thrown = Mutex<(any Swift.Error)?>(nil)
-    /// The trivial values the call reads or writes through, freed with the call state.
-    private var slots: [UnsafeMutableRawPointer] = []
-    /// The callback states the call reads, and the objects whose memory a deferred call reads.
+    /// The values the call reads or writes through, released with the call state.
+    private var slots: [any Allocation] = []
+    /// The handlers the call reads, and the objects whose memory a deferred call reads.
     private var anchors: [AnyObject] = []
-    /// What the call hands back once final, like the donors an absorb did not consume, taken by the
-    /// first wait to settle, since several threads may wait at once.
-    private let finals = Mutex<[@Sendable () -> Void]>([])
-    /// The arena lent to the call, until `rewind` learns whether the call took it.
-    private var lentArena: ArenaWrite?
 
     init(_ completion: usearch_completion_t = usearch_completion_blocking_k) {
         self.completion = completion
@@ -577,38 +593,26 @@ final class CallState {
 
     /// Runs only once the call is final: it returned blocking, its `Deferred` waited, or it never crossed.
     deinit {
-        settle()
-        for slot in slots { slot.deallocate() }
+        for slot in slots { slot.release() }
         outcome.deallocate()
     }
 
     /// Whether the call returns once submitted, so its result is read on a later wait.
     var isDeferred: Bool { completion == usearch_completion_deferred_k }
 
-    /// Allocates `count` trivial values, initialized to `initial`, which the call reads or writes
-    /// through.
+    /// Allocates `count` values, initialized to `initial`, which the call reads or writes through.
     func slots<Value>(_ initial: Value, count: Int = 1) -> UnsafeMutablePointer<Value> {
         let values = UnsafeMutablePointer<Value>.allocate(capacity: count)
         values.initialize(repeating: initial, count: count)
-        slots.append(UnsafeMutableRawPointer(values))
+        slots.append(Values(start: values, count: count))
         return values
     }
 
-    /// Keeps a callback's state alive until the call is final, answering the pointer its trampoline
-    /// reads it through.
-    func place(_ state: AnyObject) -> UnsafeMutableRawPointer {
-        anchors.append(state)
-        return Unmanaged.passUnretained(state).toOpaque()
-    }
-
-    /// Keeps `error` unless another thread's got there first, so the first failure wins.
-    func latch(_ error: any Swift.Error) {
-        thrown.withLock { if $0 == nil { $0 = error } }
-    }
-
-    /// The error a lent closure threw, read once the call is final.
-    var failure: USearchError? {
-        thrown.withLock { $0 }.map { USearchError(thrown: $0) }
+    /// Keeps a handler alive until the call is final, answering the pointer its trampoline reads it
+    /// through.
+    func place(_ handler: AnyObject) -> UnsafeMutableRawPointer {
+        anchors.append(handler)
+        return Unmanaged.passUnretained(handler).toOpaque()
     }
 
     /// Keeps an object alive until a deferred call is final; a blocking call's caller already does.
@@ -622,14 +626,20 @@ final class CallState {
         _ values: [Element],
         _ body: (UnsafePointer<Element>?) throws(USearchError) -> Value
     ) throws(USearchError) -> Value {
-        guard isDeferred, let first = values.first else {
+        guard isDeferred, !values.isEmpty else {
             return try values.withUnsafeBufferPointer { (values) throws(USearchError) -> Value in
                 try body(values.baseAddress)
             }
         }
+        return try body(copied(values))
+    }
+
+    /// Copies trivial `values` into slots the call state owns until final; empty answers nil.
+    func copied<Element>(_ values: [Element]) -> UnsafeMutablePointer<Element>? {
+        guard let first = values.first else { return nil }
         let copy = slots(first, count: values.count)
         _ = UnsafeMutableBufferPointer(start: copy, count: values.count).update(fromContentsOf: values)
-        return try body(copy)
+        return copy
     }
 
     /// Lends the UTF-8 bytes of a path, never terminated, by contract.
@@ -647,74 +657,53 @@ final class CallState {
     /// the trampoline can never be paired with the wrong state; nil lends a null callback.
     func lend(_ progress: Progress?, steps: Int) -> usearch_progress_t {
         guard let progress else { return usearch_progress_t(callback: nil, state: nil, steps: steps) }
-        let state = place(ProgressState(progress: progress, callState: self))
-        return usearch_progress_t(callback: progressTrampoline, state: state, steps: steps)
+        return usearch_progress_t(callback: progressTrampoline, state: place(Handler(progress)), steps: steps)
     }
 
-    /// Lends `arena` to the call, answering the stamp its views carry once `rewind` advances the
-    /// arena to it.
-    func lend(_ arena: Arena) -> ArenaWrite {
-        let write = ArenaWrite(arena: arena, generation: arena.generation &+ 1)
-        lentArena = write
-        return write
+    /// Waits until the call is final, then throws its failure.
+    func wait() throws(USearchError) {
+        guard usearch_outcome_wait(outcome) == usearch_status_success_k else { throw USearchError(outcome.pointee) }
     }
 
-    /// Advances the lent arena once the library took the call, after a blocking one returns or right
-    /// after a deferred one is submitted, so the views earlier calls wrote there stop reading. Failed
-    /// calls advance it too, and only a `contended` one, which never touched the arena, does not.
-    func rewind() {
-        guard let write = lentArena else { return }
-        lentArena = nil
-        if usearch_outcome_status(outcome) != usearch_status_contended_k { write.arena.generation &+= 1 }
-    }
-
-    /// Hands back what the call may leave behind once it is final: now for a blocking call, which is
-    /// final on return, or on every wait of a deferred one, so each must hand back at most once.
-    func onFinal(_ body: @escaping () -> Void) {
-        guard isDeferred else { return body() }
-        // What the closure captures belongs to the call until final, so the first settler may run it.
-        nonisolated(unsafe) let body = body
-        finals.withLock { $0.append { body() } }
-    }
-
-    private func settle() {
-        var actions: [@Sendable () -> Void] = []
-        finals.withLock { swap(&$0, &actions) }
-        for action in actions { action() }
-    }
-
-    /// Waits until the call is final, hands back what it left, then answers its result or throws its
-    /// failure, a closure's before the library's.
-    func read<Value>(_ result: () throws(USearchError) -> Value) throws(USearchError) -> Value {
-        let status = usearch_outcome_wait(outcome)
-        rewind()
-        settle()
-        if let failure { throw failure }
-        guard status == usearch_status_success_k else { throw USearchError(outcome.pointee) }
-        return try result()
+    /// The submission of a verb whose result the library wrote into `result`.
+    func submitted<Value>(_ result: UnsafeMutablePointer<Value>) throws(USearchError) -> Submission<Value> {
+        guard isDeferred else {
+            try wait()
+            return .final(result.pointee)
+        }
+        return .pending(self, result)
     }
 
     /// The submission of a verb with nothing to read but its status.
-    func submitted() throws(USearchError) -> Submission<Void> {
-        try isDeferred ? .pending(self) {} : .final(read {})
-    }
+    func submitted() throws(USearchError) -> Submission<Void> { try submitted(slots(())) }
 }
 
-/// A call the library accepted, and how to read what it produced.
-///
-/// A verb reads a blocking call's result at once, through a reader it borrows, and keeps the reader
-/// only for a deferred one - so only a deferred call pays for the closure.
+/// A run of values a call state allocated, released with it.
+private protocol Allocation {
+    func release()
+}
+
+private struct Values<Value>: Allocation {
+    let start: UnsafeMutablePointer<Value>
+    let count: Int
+
+    func release() { start.deinitialize(count: count).deallocate() }
+}
+
+/// A call the library accepted, and the slot its result lands in.
 enum Submission<Value> {
     /// A blocking call's result, read once the call returned final.
     case final(Value)
-    /// A deferred call's state, and how to read its result once final.
-    case pending(CallState, () throws(USearchError) -> Value)
+    /// A deferred call's state, and the slot its result lands in once final.
+    case pending(CallState, UnsafeMutablePointer<Value>)
 
     /// Blocks until the call is final, then answers its result or throws its failure.
     func wait() throws(USearchError) -> Value {
         switch self {
         case .final(let value): return value
-        case .pending(let callState, let result): return try callState.read(result)
+        case .pending(let callState, let result):
+            try callState.wait()
+            return result.pointee
         }
     }
 }
@@ -727,21 +716,24 @@ func created<Handle>(_ slot: UnsafeMutablePointer<Handle?>) throws(USearchError)
     return handle
 }
 
+/// Traps on a position past `count`, as a collection does.
+func boundsCheck(_ position: Int, below count: Int) {
+    precondition(position >= 0 && position < count, "the position is out of bounds")
+}
+
 // MARK: - Deferred Calls
 
-/// A call submitted to an executor, which finishes there while the caller does other work.
+/// A call submitted to an executor, which finishes there while its one owner polls, waits, or does
+/// other work.
 ///
 /// It owns the call's outcome and outputs, and keeps alive every object whose memory the call reads,
 /// until the call is final. The handles it names, the arena among them, it borrows as a blocking
 /// call does. Releasing an unfinished one waits for it first.
 public final class Deferred<Value> {
-    /// The call state and the result reader.
+    /// The call state and the result slot.
     private let submission: Submission<Value>
 
-    init(_ submission: Submission<Value>) {
-        self.submission = submission
-        if case .pending(let callState, _) = submission { callState.rewind() }
-    }
+    init(_ submission: Submission<Value>) { self.submission = submission }
 
     deinit {
         if case .pending(let callState, _) = submission { _ = usearch_outcome_wait(callState.outcome) }
@@ -751,9 +743,7 @@ public final class Deferred<Value> {
     /// Binding-only: reads the status word `wait` would, with its acquire ordering.
     public var status: Status {
         guard case .pending(let callState, _) = submission else { return .success }
-        let raw = usearch_outcome_status(callState.outcome)
-        guard raw != usearch_status_deferred_k else { return .deferred }
-        return callState.failure?.status ?? Status(raw: raw)
+        return Status(raw: usearch_outcome_status(callState.outcome))
     }
 
     /// Blocks until the call is final, then answers its result or throws its failure, the same
@@ -1008,7 +998,8 @@ public final class Executor: @unchecked Sendable {
             )
             usearch_executor_for_ram(&arguments)
         }
-        return try callState.read { () throws(USearchError) in Executor(raw: try created(executor)) }
+        try callState.wait()
+        return Executor(raw: try created(executor))
     }
 
     /// Creates a RAM executor over a borrowed ForkUnion `fu_pool_t`, so several libraries in one
@@ -1036,7 +1027,8 @@ public final class Executor: @unchecked Sendable {
             )
             usearch_executor_on_pool(&arguments)
         }
-        return try callState.read { () throws(USearchError) in Executor(raw: try created(executor)) }
+        try callState.wait()
+        return Executor(raw: try created(executor))
     }
 
     /// Creates an executor of host threads for NVMe-resident indexes, one submission ring apiece,
@@ -1060,7 +1052,8 @@ public final class Executor: @unchecked Sendable {
             )
             usearch_executor_for_nvme(&arguments)
         }
-        return try callState.read { () throws(USearchError) in Executor(raw: try created(executor)) }
+        try callState.wait()
+        return Executor(raw: try created(executor))
     }
 
     /// Opens one submission stream on every named device, all of them driven by the one host thread
@@ -1098,7 +1091,8 @@ public final class Executor: @unchecked Sendable {
                 usearch_executor_for_vram(&arguments)
             }
         }
-        return try callState.read { () throws(USearchError) in Executor(raw: try created(executor)) }
+        try callState.wait()
+        return Executor(raw: try created(executor))
     }
 
     deinit { usearch_executor_free(raw) }
@@ -1109,7 +1103,7 @@ public final class Executor: @unchecked Sendable {
         let callState = CallState()
         var arguments = usearch_executor_drain_t(executor: raw, outcome: callState.outcome, mood: mood.raw)
         usearch_executor_drain(&arguments)
-        try callState.read {}
+        try callState.wait()
     }
 }
 
@@ -1145,19 +1139,18 @@ func withPaths<Value>(
 /// products, monoliths, cursor and stream batches - reused across calls so a steady loop allocates
 /// once.
 ///
-/// Every such verb requires one and answers a view reading it in place. Each call given the arena
-/// rewinds it, so the views an earlier call answered stop reading: any read of them traps, as an
-/// out-of-bounds index does. To keep a result past the next call, give that call another arena.
-/// Every call borrows the arena, deferred ones included, and one naming it while another call
-/// writes it is refused with `contended`. An arena serves one call at a time and is not `Sendable`.
-/// One in GPU memory serves only calls on the executor that made it, and keeps that executor alive.
+/// Every such verb requires one and answers a view reading it in place. Each call given the
+/// arena rewinds it, so the views an earlier call answered end there, and reading one after
+/// reads what the next call wrote. To keep a result past the next call, give that call another
+/// arena. Every call borrows the arena, deferred ones included, and one naming it while another
+/// call writes it is refused with `contended`. An arena serves one call at a time and is not
+/// `Sendable`. One in GPU memory, as `describe` reports, serves only calls on the executor that
+/// made it, keeps that executor alive, and answers views no host read may reach.
 public final class Arena {
     /// The native handle, released by `deinit`.
     let raw: usearch_arena_t
     /// The VRAM executor that made it, held so the arena is freed first, on that executor's first stream.
     private var executor: Executor?
-    /// Advanced by every call given the arena, so a view remembers which call wrote it.
-    var generation: UInt64 = 0
 
     /// Makes an arena where `executor` computes, host pages or its GPU's memory, decided once; nil
     /// makes host pages for calls on the calling thread.
@@ -1166,7 +1159,8 @@ public final class Arena {
         let arena = callState.slots(usearch_arena_t?.none)
         var arguments = usearch_arena_init_t(arena: arena, executor: executor?.raw, outcome: callState.outcome)
         usearch_arena_init(&arguments)
-        raw = try callState.read { () throws(USearchError) in try created(arena) }
+        try callState.wait()
+        raw = try created(arena)
         if try describe().residency == .vram { self.executor = executor }
     }
 
@@ -1179,7 +1173,8 @@ public final class Arena {
         let description = callState.slots(usearch_arena_description_t())
         var arguments = usearch_arena_describe_t(arena: raw, outcome: callState.outcome, description: description)
         usearch_arena_describe(&arguments)
-        return try callState.read { ArenaDescription(description.pointee) }
+        try callState.wait()
+        return ArenaDescription(description.pointee)
     }
 }
 
@@ -1193,24 +1188,6 @@ public struct ArenaDescription: Sendable {
     init(_ raw: usearch_arena_description_t) {
         residency = Residency(raw: raw.residency)
         device = residency == .vram ? Int32(raw.device) : nil
-    }
-}
-
-/// The arena a view reads, and which of the calls given it wrote the view.
-struct ArenaWrite {
-    let arena: Arena
-    let generation: UInt64
-
-    /// Refuses a read the arena no longer backs, or one reaching device memory.
-    func check() {
-        precondition(arena.generation == generation, "the arena was rewound since this view was written: uninitialized")
-        precondition(try! arena.describe().residency != .vram, "the view is device memory, which no host read reaches")
-    }
-
-    /// Refuses as `check()` does, then a `position` past `count`, as a collection does.
-    func check(_ position: Int, below count: Int) {
-        check()
-        precondition(position >= 0 && position < count, "the position is out of bounds")
     }
 }
 

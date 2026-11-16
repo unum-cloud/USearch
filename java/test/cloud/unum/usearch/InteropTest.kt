@@ -66,15 +66,15 @@ class InteropTest {
                 index.reserve(2)
                 index.insert(arrayOf(Key.of(1), Key.of(2)), RowsView.of(floatArrayOf(1f, 0f, 0f, 1f), 2))
                 val query = RowsView.of(floatArrayOf(1f, 0f), 2)
-                Arena(pool).use { arena ->
-                    val call: Deferred<Matches> = index.deferred(pool).search(query, 1, arena)
-                    // Whether a call meets the held arena depends on timing here; the C suite checks contention.
-                    val held = call.use { it.join() }
-                    assertEquals(Key.of(1), held.key(0, 0))
-                    // The next call rewinds the arena, so the joined view refuses to read.
-                    assertEquals(Key.of(1), index.search(query, 1, arena).key(0, 0))
-                    assertFailsWith<IllegalStateException> { held.key(0, 0) }
-                }
+                val held =
+                    Arena(pool).use { arena ->
+                        val call: Deferred<Matches> = index.deferred(pool).search(query, 1, arena)
+                        val joined = call.use { it.join() }
+                        assertEquals(Key.of(1), joined.key(0, 0))
+                        joined
+                    }
+                // Closing the arena voids every view over it.
+                assertFailsWith<IllegalStateException> { held.key(0, 0) }
             }
         }
     }

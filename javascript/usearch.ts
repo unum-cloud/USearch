@@ -10,7 +10,6 @@
  */
 export {
   Arena,
-  ArenaView,
   Deferred,
   Executor,
   Matches,
@@ -54,10 +53,11 @@ export {
   DenseIndexOn,
   DenseMetric,
   DenseProducts,
+  DenseRefinePlan,
+  DenseReshardPlan,
   DenseSearchStream,
   DenseTraversalStats,
   DenseVectors,
-  DenseVerbs,
 } from "./dense_index";
 export type {
   DenseAttendConfig,
@@ -75,21 +75,22 @@ export type {
   DenseMetadataReadConfig,
   DenseMultiplyConfig,
   DenseOptions,
+  DensePhaseProgress,
   DenseReachability,
   DenseRefineConfig,
   DenseRefineReport,
+  DenseReshardConfig,
   DenseSampleConfig,
   DenseSearchConfig,
   DenseSearchStreamInitConfig,
-  DenseSplitConfig,
   DenseViewNvmeConfig,
+  RefineVerdict,
   ValueRowOf,
 } from "./dense_index";
 
 import { compiled } from "./library";
 import {
   Arena,
-  ArenaView,
   Deferred,
   Executor,
   Matches,
@@ -118,10 +119,11 @@ import {
   DenseIndexOn,
   DenseMetric,
   DenseProducts,
+  DenseRefinePlan,
+  DenseReshardPlan,
   DenseSearchStream,
   DenseTraversalStats,
   DenseVectors,
-  DenseVerbs,
 } from "./dense_index";
 
 /** The library's version, as the release tooling stamped it. */
@@ -141,7 +143,6 @@ export function capabilitiesAvailable(): string {
 
 const usearch = {
   Arena,
-  ArenaView,
   Deferred,
   DenseCursor,
   DenseCursorBatch,
@@ -152,10 +153,11 @@ const usearch = {
   DenseIndexOn,
   DenseMetric,
   DenseProducts,
+  DenseRefinePlan,
+  DenseReshardPlan,
   DenseSearchStream,
   DenseTraversalStats,
   DenseVectors,
-  DenseVerbs,
   Executor,
   Matches,
   QueryMatches,

@@ -37,8 +37,8 @@ Every output whose length scales with the call lands in an `Arena` the verb take
 required argument, and is read in place. `Arena(library)` holds host pages for calls on the calling
 thread, and `Arena(executor)` places its memory where that executor computes. Every receiver takes
 it the same way, deferred ones too, and the result borrows it in turn; each call rewinds and refills
-it, so a steady loop allocates once. A result refuses every read once a later call rewound its
-arena, and a VRAM arena refuses host reads.
+it, so a steady loop allocates once. A result reads its arena in place until the arena's next call,
+and `Arena.describe` says whether that memory is a device's, which the host cannot read.
 
 Every fallible entry point raises `Error` and nothing else, because Mojo allows one error type per
 function, so a second would force every caller raising `Error` to catch and convert. A function raises if and only if it can fail, so a
@@ -74,6 +74,7 @@ from .types import (
     Executor,
     GPUClass,
     Key,
+    LoadPath,
     Matches,
     Monolith,
     Mood,
@@ -110,7 +111,10 @@ from .dense import (
     DenseProducts,
     DenseReachability,
     DenseRefineConfig,
+    DenseRefinePlan,
     DenseRefineReport,
+    DenseReshardConfig,
+    DenseReshardPlan,
     DenseSampleConfig,
     DenseSearchConfig,
     DenseSearchStream,
@@ -119,7 +123,14 @@ from .dense import (
     DenseTraversalStats,
     DenseVectors,
     DenseVerbs,
+    Phase,
+    PhaseProgress,
+    RefineVerdict,
     ValueLookup,
     dense_metadata_read,
     dense_metadata_read_buffer,
+    dense_reshard,
+    dense_reshard_deferred,
+    dense_reshard_plan_finish,
+    dense_reshard_plan_finish_deferred,
 )

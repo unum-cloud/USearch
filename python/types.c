@@ -54,7 +54,7 @@ static struct {
     {usearch_status_overflow_k, "usearch.CapacityOverflowError", &PyExc_OverflowError,
      "A hard design ceiling was reached; a smaller request cannot help."},
     {usearch_status_uninitialized_k, "usearch.UninitializedError", NULL,
-     "The handle is not ready for the verb - absorbed as a donor, or closed."},
+     "The verb needs a prior successful reservation that never happened."},
     {usearch_status_config_mismatch_k, "usearch.ConfigMismatchError", &PyExc_ValueError,
      "The request contradicts an already-frozen configuration."},
     {usearch_status_contended_k, "usearch.ContendedError", NULL,
@@ -174,6 +174,22 @@ static char const* spell_traversal(int value) { return usearch_traversal_name((u
 static char const* spell_cpu_class(int value) { return usearch_cpu_class_name((usearch_cpu_class_t)value); }
 static char const* spell_gpu_class(int value) { return usearch_gpu_class_name((usearch_gpu_class_t)value); }
 static char const* spell_nvme_class(int value) { return usearch_nvme_class_name((usearch_nvme_class_t)value); }
+static char const* spell_sequence_metric(int value) {
+    return usearch_sequence_metric_name((usearch_sequence_metric_t)value);
+}
+static char const* spell_shapes_metric(int value) { return usearch_shapes_metric_name((usearch_shapes_metric_t)value); }
+
+/** The C surface spells no relation, so the members carry the names the header documents. */
+static char const* spell_geospatial_relation(int value) {
+    static char const* const names[] = {"unknown", "near", "visible", "sees", "seen"};
+    return value >= 0 && (size_t)value < usearch_py_table_size_(names) ? names[value] : "unknown";
+}
+
+static char const* spell_refine_verdict(int value) {
+    return usearch_refine_verdict_name((usearch_refine_verdict_t)value);
+}
+
+static char const* spell_phase(int value) { return usearch_phase_name((usearch_phase_t)value); }
 
 usearch_py_enum_t usearch_py_status = {"Status", usearch_status_success_k, usearch_status_invalid_argument_k,
                                        spell_status, NULL};
@@ -192,6 +208,17 @@ usearch_py_enum_t usearch_py_gpu_class = {"GPUClass", usearch_gpu_class_nvidia_a
                                           NULL};
 usearch_py_enum_t usearch_py_nvme_class = {"NVMeClass", usearch_nvme_class_posix_k, usearch_nvme_class_windows_ioring_k,
                                            spell_nvme_class, NULL};
+usearch_py_enum_t usearch_py_sequence_metric = {"SequenceMetric", usearch_sequence_metric_levenshtein_bytes_k,
+                                                usearch_sequence_metric_overlap_k, spell_sequence_metric, NULL};
+usearch_py_enum_t usearch_py_shapes_metric = {"ShapesMetric", usearch_shapes_metric_chamfer_k,
+                                              usearch_shapes_metric_wasserstein_procrustes_k, spell_shapes_metric,
+                                              NULL};
+usearch_py_enum_t usearch_py_geospatial_relation = {"GeospatialRelation", usearch_geospatial_relation_near_k,
+                                                    usearch_geospatial_relation_seen_k, spell_geospatial_relation,
+                                                    NULL};
+usearch_py_enum_t usearch_py_refine_verdict = {"RefineVerdict", usearch_refine_none_k, usearch_refine_stopped_k,
+                                               spell_refine_verdict, NULL};
+usearch_py_enum_t usearch_py_phase = {"Phase", usearch_phase_none_k, usearch_phase_done_k, spell_phase, NULL};
 
 /** The C spelling of @p value, or NULL when C names no member by it. */
 static char const* enum_spelling(usearch_py_enum_t const* mirrored, long value) {
@@ -228,9 +255,12 @@ static int enum_register(PyObject* module, PyObject* int_enum, PyObject* keyword
 }
 
 int usearch_py_register_enums(PyObject* module) {
-    usearch_py_enum_t* const mirrored[] = {&usearch_py_status,    &usearch_py_mood,      &usearch_py_dense_metric,
-                                           &usearch_py_scalar,    &usearch_py_residency, &usearch_py_traversal,
-                                           &usearch_py_cpu_class, &usearch_py_gpu_class, &usearch_py_nvme_class};
+    usearch_py_enum_t* const mirrored[] = {
+        &usearch_py_status,          &usearch_py_mood,          &usearch_py_dense_metric,
+        &usearch_py_scalar,          &usearch_py_residency,     &usearch_py_traversal,
+        &usearch_py_cpu_class,       &usearch_py_gpu_class,     &usearch_py_nvme_class,
+        &usearch_py_sequence_metric, &usearch_py_shapes_metric, &usearch_py_geospatial_relation,
+        &usearch_py_refine_verdict,  &usearch_py_phase};
     PyObject* const enum_module = PyImport_ImportModule("enum");
     PyObject* const int_enum = enum_module ? PyObject_GetAttrString(enum_module, "IntEnum") : NULL;
     PyObject* keywords = int_enum ? PyDict_New() : NULL;
@@ -1029,19 +1059,12 @@ int usearch_py_matrix_from_object(PyObject* object, usearch_scalar_t scalar_hint
     usearch_scalar_t kind = scalar_hint;
     if (kind == usearch_scalar_unknown_k && buffer->format)
         kind = usearch_py_scalar_from_spelling(buffer->format, (Py_ssize_t)strlen(buffer->format));
+    // Items naming no kind cross as one value each, for the library to refuse as an unknown kind.
     scalar_naming_t const* const naming = scalar_naming(kind);
-    if (!naming) {
-        PyObject* const format = PyUnicode_FromString(buffer->format ? buffer->format : "?");
-        usearch_py_buffer_release(backing);
-        if (!format) return -1;
-        usearch_py_raise(usearch_status_unknown_kind_k, "the buffer's %R items name no scalar kind; pass `dtype=`",
-                         format);
-        Py_DECREF(format);
-        return -1;
-    }
+    size_t const values_packed = naming ? naming->values_packed : 1;
     // A named kind reinterprets the bytes, so it must be exactly as wide as the items the buffer
     // holds; anything else would read a float32 row as twice as many halves.
-    if (scalar_hint != usearch_scalar_unknown_k && buffer->itemsize != (Py_ssize_t)naming->unit_bytes) {
+    if (naming && scalar_hint != usearch_scalar_unknown_k && buffer->itemsize != (Py_ssize_t)naming->unit_bytes) {
         Py_ssize_t const itemsize = buffer->itemsize;
         usearch_py_buffer_release(backing);
         return usearch_py_raise(usearch_status_unknown_kind_k,
@@ -1064,12 +1087,12 @@ int usearch_py_matrix_from_object(PyObject* object, usearch_scalar_t scalar_hint
     view->scalar = kind;
     if (buffer->ndim == 1) {
         view->rows = 1;
-        view->columns = (size_t)buffer->shape[0] * naming->values_packed;
+        view->columns = (size_t)buffer->shape[0] * values_packed;
         view->stride = (size_t)buffer->len;
     }
     else {
         view->rows = (size_t)buffer->shape[0];
-        view->columns = (size_t)buffer->shape[1] * naming->values_packed;
+        view->columns = (size_t)buffer->shape[1] * values_packed;
         Py_ssize_t const stride_bytes = buffer->strides ? buffer->strides[0] : buffer->shape[1] * buffer->itemsize;
         if (stride_bytes < 0) {
             usearch_py_buffer_release(backing);
@@ -1571,6 +1594,125 @@ PyObject* usearch_py_struct_sequence_steal(PyTypeObject* type, PyObject** fields
     return result;
 }
 
+PyObject* usearch_py_size_getter(PyObject* self, void* closure) {
+    return PyLong_FromSize_t(*(size_t const*)((char const*)self + (size_t)closure));
+}
+
+static char const doc_DenseReachability[] = //
+    "DenseReachability\n"                   //
+    "\n"                                    //
+    "One reachability audit, as `health` takes it and a `RefineReport` carries it twice.";
+
+static PyGetSetDef DenseReachability_getset[] = {
+    {"audited", usearch_py_size_getter, NULL, "Entries published when the audit started, the population it judged.",
+     (void*)offsetof(DenseReachability, reachability.audited)},
+    {"reachable", usearch_py_size_getter, NULL, "Of those, the entries a search reaches from the root.",
+     (void*)offsetof(DenseReachability, reachability.reachable)},
+    {"depth_from_root", usearch_py_size_getter, NULL, "Depths the sweep from the root took.",
+     (void*)offsetof(DenseReachability, reachability.depth_from_root)},
+    {"depth_to_root", usearch_py_size_getter, NULL, "Depths the sweep toward the root took.",
+     (void*)offsetof(DenseReachability, reachability.depth_to_root)},
+    {"unlinked", usearch_py_size_getter, NULL, "Entries no reached entry links to.",
+     (void*)offsetof(DenseReachability, reachability.unlinked)},
+    {"underlinked", usearch_py_size_getter, NULL, "Entries linked to by fewer entries than they link to.",
+     (void*)offsetof(DenseReachability, reachability.underlinked)},
+    {"beyond_most_populated_depth", usearch_py_size_getter, NULL,
+     "Entries deeper than the depth holding the most entries.",
+     (void*)offsetof(DenseReachability, reachability.beyond_most_populated_depth)},
+    {"unreached_islands", usearch_py_size_getter, NULL, "Islands no entry outside them links into.",
+     (void*)offsetof(DenseReachability, reachability.unreached_islands)},
+    {"stranded_islands", usearch_py_size_getter, NULL, "Islands that link to no entry outside them.",
+     (void*)offsetof(DenseReachability, reachability.stranded_islands)},
+    {"components", usearch_py_size_getter, NULL, "Components when direction is ignored.",
+     (void*)offsetof(DenseReachability, reachability.components)},
+    {NULL, NULL, NULL, NULL, NULL},
+};
+
+static PyObject* DenseReachability_repr(DenseReachability* self) {
+    return PyUnicode_FromFormat("DenseReachability(audited=%zu, reachable=%zu)", self->reachability.audited,
+                                self->reachability.reachable);
+}
+
+PyTypeObject DenseReachabilityType = {
+    PyVarObject_HEAD_INIT(NULL, 0) //
+        .tp_name = "usearch.DenseReachability",
+    .tp_doc = doc_DenseReachability,
+    .tp_basicsize = sizeof(DenseReachability),
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_repr = (reprfunc)DenseReachability_repr,
+    .tp_getset = DenseReachability_getset,
+};
+
+PyObject* usearch_py_reachability_to_object(usearch_reachability_t const* reachability) {
+    DenseReachability* const object = (DenseReachability*)DenseReachabilityType.tp_alloc(&DenseReachabilityType, 0);
+    if (object) object->reachability = *reachability;
+    return (PyObject*)object;
+}
+
+static char const doc_RefineReport[] = //
+    "RefineReport\n"                   //
+    "\n"                               //
+    "What one `refine` or `reshard` did to the graph, or what a plan did once finished.";
+
+static PyObject* RefineReport_get_verdict(RefineReport* self, void* closure) {
+    return usearch_py_enum_to_object(&usearch_py_refine_verdict, (int)self->report.verdict);
+}
+
+static PyObject* RefineReport_get_opening(RefineReport* self, void* closure) {
+    return usearch_py_reachability_to_object(&self->report.opening);
+}
+
+static PyObject* RefineReport_get_reachability(RefineReport* self, void* closure) {
+    return usearch_py_reachability_to_object(&self->report.reachability);
+}
+
+static PyGetSetDef RefineReport_getset[] = {
+    {"reselected", usearch_py_size_getter, NULL, "Entries the restitch selected neighbors for.",
+     (void*)offsetof(RefineReport, report.reselected)},
+    {"changed", usearch_py_size_getter, NULL, "Of those, the entries whose neighbor set changed.",
+     (void*)offsetof(RefineReport, report.changed)},
+    {"islands_found", usearch_py_size_getter, NULL, "Entries the first audit found not reached both ways.",
+     (void*)offsetof(RefineReport, report.islands_found)},
+    {"islands_reconnected", usearch_py_size_getter, NULL,
+     "Links written between an island and an entry reached both ways.",
+     (void*)offsetof(RefineReport, report.islands_reconnected)},
+    {"neighborhoods", usearch_py_size_getter, NULL, "Neighborhoods the round re-stitched.",
+     (void*)offsetof(RefineReport, report.neighborhoods)},
+    {"widest_neighborhood", usearch_py_size_getter, NULL, "Entries of the widest neighborhood.",
+     (void*)offsetof(RefineReport, report.widest_neighborhood)},
+    {"added_links", usearch_py_size_getter, NULL, "Links the round added.",
+     (void*)offsetof(RefineReport, report.added_links)},
+    {"dropped_links", usearch_py_size_getter, NULL, "Links the round dropped.",
+     (void*)offsetof(RefineReport, report.dropped_links)},
+    {"verdict", (getter)RefineReport_get_verdict, NULL, "What the round concluded, as a `RefineVerdict`.", NULL},
+    {"opening", (getter)RefineReport_get_opening, NULL, "The `DenseReachability` audit opening the round.", NULL},
+    {"reachability", (getter)RefineReport_get_reachability, NULL,
+     "The `DenseReachability` audit closing the heal, as `health` would take it right after.", NULL},
+    {NULL, NULL, NULL, NULL, NULL},
+};
+
+static PyObject* RefineReport_repr(RefineReport* self) {
+    return PyUnicode_FromFormat("RefineReport(verdict=%s, reselected=%zu, changed=%zu)",
+                                usearch_refine_verdict_name(self->report.verdict), self->report.reselected,
+                                self->report.changed);
+}
+
+PyTypeObject RefineReportType = {
+    PyVarObject_HEAD_INIT(NULL, 0) //
+        .tp_name = "usearch.RefineReport",
+    .tp_doc = doc_RefineReport,
+    .tp_basicsize = sizeof(RefineReport),
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_repr = (reprfunc)RefineReport_repr,
+    .tp_getset = RefineReport_getset,
+};
+
+PyObject* usearch_py_refine_report_to_object(usearch_refine_report_t const* report) {
+    RefineReport* const object = (RefineReport*)RefineReportType.tp_alloc(&RefineReportType, 0);
+    if (object) object->report = *report;
+    return (PyObject*)object;
+}
+
 #pragma endregion Matches
 
 #pragma region Arguments
@@ -1717,168 +1859,170 @@ int usearch_py_size_from_object(PyObject* object, char const* field, size_t* val
     return 0;
 }
 
+int usearch_py_seed_from_object(PyObject* object, uint64_t* seed) {
+    if (!object) return 0;
+    unsigned long long const value = PyLong_AsUnsignedLongLong(object);
+    if (value == (unsigned long long)-1 && PyErr_Occurred()) return -1;
+    *seed = (uint64_t)value;
+    return 0;
+}
+
+int usearch_py_class_from_object(PyObject* object, char const* field, usearch_py_enum_t const* classes, int* value) {
+    *value = 0;
+    if (!object || object == Py_None) return 0;
+    return usearch_py_enum_from_object(object, field, classes, value);
+}
+
+PyObject* usearch_py_class_to_object(usearch_py_enum_t const* classes, int value) {
+    return value ? usearch_py_enum_to_object(classes, value) : Py_NewRef(Py_None);
+}
+
+int usearch_py_checkpoint_from_object(PyObject* object, usearch_py_buffer_backing_t* backing) {
+    memset(backing, 0, sizeof(*backing));
+    if (PyObject_GetBuffer(object, &backing->buffer, PyBUF_C_CONTIGUOUS) != 0)
+        return usearch_py_raise_from_cause(PyExc_ValueError, "the checkpoint buffer must be contiguous");
+    return 0;
+}
+
 #pragma endregion Arguments
 
 #pragma region Calls
 
-/** The @c Deferred whose trailing storage holds @p call. */
-static Deferred* deferred_of(void* call) { return (Deferred*)(void*)((char*)call - offsetof(Deferred, call)); }
+/** The @c Deferred whose record is @p call. */
+static Deferred* deferred_of(usearch_py_call_t* call) {
+    return (Deferred*)(void*)((char*)call - offsetof(Deferred, call));
+}
 
-void* usearch_py_call_open(usearch_py_receiver_t const* receiver, usearch_py_verb_t const* verb, void* stack) {
-    void* call = stack;
+usearch_py_call_t* usearch_py_call_open(usearch_py_receiver_t const* receiver, usearch_py_call_t* stack) {
+    usearch_py_call_t* call = stack;
     if (receiver->completion == usearch_completion_deferred_k) {
-        Deferred* const deferred = PyObject_GC_NewVar(Deferred, &DeferredType, (Py_ssize_t)verb->call_bytes);
+        Deferred* const deferred = PyObject_GC_New(Deferred, &DeferredType);
         if (!deferred) return NULL;
-        deferred->verb = verb;
         deferred->origin = Py_NewRef(receiver->origin);
-        deferred->answer = NULL;
-        deferred->raised = NULL;
-        call = deferred->call;
-        memset(call, 0, verb->call_bytes);
-        PyObject_GC_Track(deferred);
-        return call;
+        atomic_init(&deferred->answering, 0);
+        atomic_init(&deferred->answer, NULL);
+        atomic_init(&deferred->raised, NULL);
+        call = &deferred->call;
     }
-    memset(call, 0, verb->call_bytes);
+    memset(call, 0, sizeof(*call));
     return call;
 }
 
-/** Answers a final @p call: a callback's first exception, else the outcome's failure, else the verb's answer. */
-static PyObject* call_answer(usearch_py_verb_t const* verb, void* call) {
-    usearch_py_call_t* const header = (usearch_py_call_t*)call;
-    if (header->raised) {
-        PyErr_SetRaisedException(header->raised);
-        header->raised = NULL;
-        return NULL;
-    }
-    return usearch_py_raise_on_outcome(&header->outcome) == 0 ? verb->answer(call) : NULL;
+/** Answers a final @p call: its failure, what its outputs convert into, or its result or None. */
+static PyObject* call_answer(usearch_py_call_t* call) {
+    if (usearch_py_raise_on_outcome(&call->outcome) != 0) return NULL;
+    if (call->answer) return call->answer(call);
+    return Py_NewRef(call->result ? call->result : Py_None);
 }
 
-/** Lets go of what @p call gathered, keeping whatever exception is set. */
-static void call_release(usearch_py_verb_t const* verb, void* call) {
+/** Lets go of everything @p call holds and lends, keeping whatever exception is set. */
+static void call_release(usearch_py_call_t* call) {
     PyObject* const raised = PyErr_GetRaisedException();
-    verb->release(call);
+    Py_CLEAR(call->arena);
+    Py_CLEAR(call->result);
+    for (size_t slot = 0; slot != usearch_py_holds_k; ++slot) Py_CLEAR(call->holds[slot]);
+    for (size_t slot = 0; slot != usearch_py_buffers_k; ++slot) usearch_py_buffer_release(&call->buffers[slot]);
+    for (size_t slot = 0; slot != usearch_py_keys_k; ++slot) usearch_py_keys_release(&call->keys[slot]);
+    usearch_py_paths_release(&call->paths);
+    for (size_t slot = 0; slot != usearch_py_blocks_k; ++slot) {
+        PyMem_Free(call->blocks[slot]);
+        call->blocks[slot] = NULL;
+    }
     PyErr_SetRaisedException(raised);
 }
 
-PyObject* usearch_py_call_run(usearch_py_receiver_t const* receiver, usearch_py_verb_t const* verb, void* call) {
-    Py_BEGIN_ALLOW_THREADS;
-    verb->submit(call);
-    Py_END_ALLOW_THREADS;
-    if (receiver->completion == usearch_completion_deferred_k) return (PyObject*)deferred_of(call);
-    PyObject* const answer = call_answer(verb, call);
-    call_release(verb, call);
+PyObject* usearch_py_call_finish(usearch_py_receiver_t const* receiver, usearch_py_call_t* call) {
+    if (receiver->completion == usearch_completion_deferred_k) {
+        Deferred* const deferred = deferred_of(call);
+        PyObject_GC_Track(deferred);
+        return (PyObject*)deferred;
+    }
+    PyObject* const answer = call_answer(call);
+    call_release(call);
     return answer;
 }
 
-PyObject* usearch_py_call_discard(usearch_py_receiver_t const* receiver, usearch_py_verb_t const* verb, void* call) {
-    call_release(verb, call);
+PyObject* usearch_py_call_discard(usearch_py_receiver_t const* receiver, usearch_py_call_t* call) {
+    call_release(call);
     if (receiver->completion == usearch_completion_blocking_k) return NULL;
     Deferred* const deferred = deferred_of(call);
-    deferred->verb = NULL;
+    atomic_store(&deferred->answering, 1);
     PyObject* const raised = PyErr_GetRaisedException();
     Py_DECREF(deferred);
     PyErr_SetRaisedException(raised);
     return NULL;
 }
 
-void usearch_py_call_release(void* call) {
-    usearch_py_call_t* const header = (usearch_py_call_t*)call;
-    Py_CLEAR(header->raised);
-    if (header->arena) usearch_py_arena_unclaim(header->arena);
-    header->arena = NULL;
+void* usearch_py_call_result(usearch_py_call_t* call, PyTypeObject* type) {
+    call->result = type->tp_alloc(type, 0);
+    return call->result;
 }
 
-PyObject* usearch_py_call_answer_none(void* call) { Py_RETURN_NONE; }
-
-int usearch_py_callback_from_object(PyObject* object, char const* field, usearch_py_call_t* call,
-                                    usearch_py_callback_t* callback) {
-    callback->call = call;
-    callback->callable = NULL;
+int usearch_py_callable_from_object(PyObject* object, char const* field, PyObject** callable) {
     if (!object || object == Py_None) return 0;
     if (!PyCallable_Check(object)) {
         PyErr_Format(PyExc_TypeError, "the '%s' handler must be callable, got %S", field, Py_TYPE(object));
         return -1;
     }
-    callback->callable = Py_NewRef(object);
+    *callable = Py_NewRef(object);
     return 0;
-}
-
-void usearch_py_callback_latch(usearch_py_call_t* call) {
-    PyObject* const raised = PyErr_GetRaisedException();
-    PyObject* expected = NULL;
-    // Predicates run concurrently on the library's threads, and without the interpreter lock two
-    // of them may fail at once; only the first exception is kept, and the store is the fence.
-    if (raised && !atomic_compare_exchange_strong((_Atomic(PyObject*)*)&call->raised, &expected, raised))
-        Py_DECREF(raised);
-}
-
-int usearch_py_callback_raised(usearch_py_call_t* call) {
-    return atomic_load_explicit((_Atomic(PyObject*)*)&call->raised, memory_order_acquire) != NULL;
 }
 
 /**
  *  @brief Re-enters Python for one progress report, from whichever library thread advances.
  *
  *  Reports are serialized, but nothing guarantees they land on the calling thread, so the GIL is
- *  taken here rather than assumed. A handler answering @c None carries on, and one that raises
- *  also stops the walk, so the call unwinds at the next boundary instead of running on.
+ *  taken here rather than assumed. A handler answering None carries on and a falsy one cancels;
+ *  one that raises reports through the unraisable hook and cancels.
  */
 static usearch_continuation_t progress_trampoline(size_t completed, size_t total, void* state) {
-    usearch_py_callback_t const* const callback = (usearch_py_callback_t const*)state;
-    if (usearch_py_callback_raised(callback->call)) return usearch_cancel_k;
+    PyObject* const callable = (PyObject*)state;
     PyGILState_STATE const gil_state = PyGILState_Ensure();
-    usearch_continuation_t continuation = usearch_cancel_k;
     PyObject* const completed_object = PyLong_FromSize_t(completed);
     PyObject* const total_object = completed_object ? PyLong_FromSize_t(total) : NULL;
     PyObject* const arguments[2] = {completed_object, total_object};
-    PyObject* const verdict = total_object ? PyObject_Vectorcall(callback->callable, arguments, 2, NULL) : NULL;
-    if (verdict) {
-        int const truth = verdict == Py_None ? 1 : PyObject_IsTrue(verdict);
-        continuation = truth > 0 ? usearch_continue_k : usearch_cancel_k;
-        Py_DECREF(verdict);
-    }
+    PyObject* const verdict = total_object ? PyObject_Vectorcall(callable, arguments, 2, NULL) : NULL;
+    int const truth = !verdict ? -1 : verdict == Py_None ? 1 : PyObject_IsTrue(verdict);
+    Py_XDECREF(verdict);
     Py_XDECREF(total_object);
     Py_XDECREF(completed_object);
-    if (PyErr_Occurred()) usearch_py_callback_latch(callback->call);
+    if (truth < 0) PyErr_WriteUnraisable(callable);
     PyGILState_Release(gil_state);
-    return continuation;
+    return truth > 0 ? usearch_continue_k : usearch_cancel_k;
 }
 
-usearch_progress_t usearch_py_progress_registered(usearch_py_callback_t* callback, size_t steps) {
-    return (usearch_progress_t) {.callback = callback->callable ? progress_trampoline : NULL,
-                                 .state = callback,
-                                 .steps = steps};
+usearch_progress_t usearch_py_progress_registered(PyObject* callable, size_t steps) {
+    return (usearch_progress_t) {.callback = callable ? progress_trampoline : NULL, .state = callable, .steps = steps};
 }
 
 /**
  *  @brief Re-enters Python for one batch of admission decisions, from whichever library thread
  *      traverses, taking the GIL once per batch.
  *
- *  A worker's thread state dies with the callback and the caller's would surface the exception
- *  at an unrelated return, so a raising predicate latches its failure into the call for the answer
- *  to raise, and every later decision rejects without re-entering Python.
+ *  A predicate that raises reports through the unraisable hook, and its key and the rest of the
+ *  batch are rejected.
  */
 static void predicate_trampoline(usearch_key_t const* keys, usearch_admission_t* admissions, size_t count,
                                  void* state) {
-    usearch_py_callback_t const* const callback = (usearch_py_callback_t const*)state;
-    for (size_t index = 0; index != count; ++index) admissions[index] = usearch_reject_k;
-    if (usearch_py_callback_raised(callback->call)) return;
+    PyObject* const callable = (PyObject*)state;
     PyGILState_STATE const gil_state = PyGILState_Ensure();
-    for (size_t index = 0; index != count && !PyErr_Occurred(); ++index) {
+    size_t index = 0;
+    for (; index != count; ++index) {
         PyObject* const key_object = usearch_py_key_to_object(keys[index]);
-        PyObject* const verdict = key_object ? PyObject_CallOneArg(callback->callable, key_object) : NULL;
+        PyObject* const verdict = key_object ? PyObject_CallOneArg(callable, key_object) : NULL;
         Py_XDECREF(key_object);
-        if (verdict) {
-            admissions[index] = PyObject_IsTrue(verdict) > 0 ? usearch_admit_k : usearch_reject_k;
-            Py_DECREF(verdict);
-        }
+        int const truth = verdict ? PyObject_IsTrue(verdict) : -1;
+        Py_XDECREF(verdict);
+        if (truth < 0) break;
+        admissions[index] = truth ? usearch_admit_k : usearch_reject_k;
     }
-    if (PyErr_Occurred()) usearch_py_callback_latch(callback->call);
+    if (index != count) PyErr_WriteUnraisable(callable);
+    for (; index != count; ++index) admissions[index] = usearch_reject_k;
     PyGILState_Release(gil_state);
 }
 
-usearch_predicate_t usearch_py_predicate_registered(usearch_py_callback_t* callback) {
-    return (usearch_predicate_t) {.callback = callback->callable ? predicate_trampoline : NULL, .state = callback};
+usearch_predicate_t usearch_py_predicate_registered(PyObject* callable) {
+    return (usearch_predicate_t) {.callback = callable ? predicate_trampoline : NULL, .state = callable};
 }
 
 #pragma endregion Calls
@@ -1959,6 +2103,36 @@ static PyObject* On_repr(On* self) {
                                 self->executor);
 }
 
+/** Every index type a receiver may hold, beside the verbs its receivers offer. */
+static usearch_py_receiver_verbs_t const* const receiver_verbs[] = {
+    &usearch_py_dense_receiver_verbs,
+    &usearch_py_sequence_receiver_verbs,
+    &usearch_py_shapes_receiver_verbs,
+    &usearch_py_geospatial_receiver_verbs,
+};
+
+/** Binds the verb @p name of the index the receiver holds, as its type's table names it; anything
+ *  else resolves as on any object. */
+static PyObject* On_getattro(PyObject* self, PyObject* name) {
+    PyTypeObject* const index_type = Py_TYPE(((On*)self)->index);
+    int const deferred = Py_IS_TYPE(self, &DeferredOnType);
+    for (size_t row = 0; row != usearch_py_table_size_(receiver_verbs); ++row) {
+        if (receiver_verbs[row]->index != index_type) continue;
+        for (PyMethodDef* verb = deferred ? receiver_verbs[row]->deferred_on : receiver_verbs[row]->on; verb->ml_name;
+             ++verb)
+            if (PyUnicode_CompareWithASCIIString(name, verb->ml_name) == 0) return PyCFunction_New(verb, self);
+    }
+    return PyObject_GenericGetAttr(self, name);
+}
+
+static char const doc_receiver_class_getitem[] =
+    "Names the index the receiver addresses, as `On[DenseIndex]` or `DeferredOn[ShapesIndex]`.";
+
+static PyMethodDef On_methods[] = {
+    {"__class_getitem__", Py_GenericAlias, METH_O | METH_CLASS, doc_receiver_class_getitem},
+    {NULL, NULL, 0, NULL},
+};
+
 PyTypeObject OnType = {
     PyVarObject_HEAD_INIT(NULL, 0) //
         .tp_name = "usearch.On",
@@ -1968,7 +2142,8 @@ PyTypeObject OnType = {
     .tp_new = On_tp_new,
     .tp_dealloc = (destructor)On_dealloc,
     .tp_repr = (reprfunc)On_repr,
-    .tp_methods = usearch_py_on_methods,
+    .tp_getattro = On_getattro,
+    .tp_methods = On_methods,
 };
 
 PyTypeObject DeferredOnType = {
@@ -1980,7 +2155,8 @@ PyTypeObject DeferredOnType = {
     .tp_new = On_tp_new,
     .tp_dealloc = (destructor)On_dealloc,
     .tp_repr = (reprfunc)On_repr,
-    .tp_methods = usearch_py_deferred_on_methods,
+    .tp_getattro = On_getattro,
+    .tp_methods = On_methods,
 };
 
 static char const doc_Deferred[] =                                                             //
@@ -1991,8 +2167,8 @@ static char const doc_Deferred[] =                                              
     "`await` suspends the coroutine until the call is final, and `wait()` blocks the thread\n" //
     "instead. Either answers what the blocking verb would have answered, or raises what it\n"  //
     "would have raised, as many times as it is asked; `status` polls without waiting. It\n"    //
-    "holds the call and the buffers it reads until the call is final, so dropping it\n"        //
-    "waits, and borrows its arena as the blocking verb would.\n"                               //
+    "holds the call and the buffers it reads until the call is final, so dropping it waits,\n" //
+    "and lends its arena as the blocking verb would.\n"                                        //
     "\n"                                                                                       //
     "Example:\n"                                                                               //
     "  >>> import asyncio\n"                                                                   //
@@ -2007,65 +2183,40 @@ static char const doc_Deferred[] =                                              
     "  >>> len(index)\n"                                                                       //
     "  1";
 
-/** The outcome of the call @p deferred holds. */
-static usearch_outcome_t* deferred_outcome(Deferred* deferred) {
-    return &((usearch_py_call_t*)(void*)deferred->call)->outcome;
-}
-
 /** The status of the call @p deferred holds, as the library finishes it elsewhere. */
-static usearch_status_t deferred_status(Deferred* deferred) {
-    return usearch_outcome_status(deferred_outcome(deferred));
-}
+static usearch_status_t deferred_status(Deferred* deferred) { return usearch_outcome_status(&deferred->call.outcome); }
 
 /** Blocks with the thread state detached until the call @p deferred holds is final. */
 static void deferred_block(Deferred* deferred) {
     if (deferred_status(deferred) != usearch_status_deferred_k) return;
-    usearch_outcome_t* const outcome = deferred_outcome(deferred);
     Py_BEGIN_ALLOW_THREADS;
-    usearch_outcome_wait(outcome);
+    usearch_outcome_wait(&deferred->call.outcome);
     Py_END_ALLOW_THREADS;
 }
 
 /**
- *  @brief Finishes a final @p self exactly once: the thread taking its verb answers, publishes,
- *      then lets go of its inputs.
+ *  @brief Answers what a final @p self finished with.
  *
- *  Answering may run Python, which lets another thread in even under the GIL, so the verb is taken
- *  before answering and the answer published after it, never one check spanning both.
+ *  The one thread taking the call answers it, lets go of its inputs and publishes; a thread asking
+ *  while that one still answers is refused as contended rather than made to wait.
  */
-static void deferred_finish(Deferred* self) {
-    usearch_py_verb_t const* finishing = NULL;
-    usearch_py_critical_section_begin_((PyObject*)self);
-    finishing = self->verb;
-    self->verb = NULL;
-    usearch_py_critical_section_end_();
-    if (!finishing) return;
-    PyObject* const answer = call_answer(finishing, self->call);
-    PyObject* const raised = answer ? NULL : PyErr_GetRaisedException();
-    usearch_py_critical_section_begin_((PyObject*)self);
-    self->answer = answer;
-    self->raised = raised;
-    usearch_py_critical_section_end_();
-    call_release(finishing, self->call);
-}
-
-/** Answers what a final @p self finished with, finishing it first when nobody has. */
 static PyObject* deferred_answer(Deferred* self) {
-    deferred_finish(self);
-    for (;;) {
-        PyObject* answer = NULL;
-        int published = 0;
-        usearch_py_critical_section_begin_((PyObject*)self);
-        published = self->answer || self->raised;
-        if (self->raised) PyErr_SetRaisedException(Py_NewRef(self->raised));
-        else if (self->answer) answer = Py_NewRef(self->answer);
-        usearch_py_critical_section_end_();
-        if (published) return answer;
-        // Another thread took the verb and is still answering, so this one yields until it
-        // publishes.
-        Py_BEGIN_ALLOW_THREADS;
-        Py_END_ALLOW_THREADS;
+    if (!atomic_exchange(&self->answering, 1)) {
+        PyObject* const answer = call_answer(&self->call);
+        PyObject* const raised = answer ? NULL : PyErr_GetRaisedException();
+        call_release(&self->call);
+        if (answer) atomic_store_explicit(&self->answer, answer, memory_order_release);
+        else atomic_store_explicit(&self->raised, raised, memory_order_release);
     }
+    PyObject* const raised = atomic_load_explicit(&self->raised, memory_order_acquire);
+    if (raised) {
+        PyErr_SetRaisedException(Py_NewRef(raised));
+        return NULL;
+    }
+    PyObject* const answer = atomic_load_explicit(&self->answer, memory_order_acquire);
+    if (answer) return Py_NewRef(answer);
+    usearch_py_raise(usearch_status_contended_k, "another thread is answering this call");
+    return NULL;
 }
 
 static char const doc_Deferred_status[] =                                                        //
@@ -2073,10 +2224,7 @@ static char const doc_Deferred_status[] =                                       
     "`Status.SUCCESS`. Calls `usearch_outcome_status`.";
 
 static PyObject* Deferred_get_status(Deferred* self, void* closure) {
-    usearch_status_t const status = deferred_status(self);
-    // A poller that saw the call final never needs to wait, so the inputs are let go of here too.
-    if (status != usearch_status_deferred_k) deferred_finish(self);
-    return usearch_py_enum_to_object(&usearch_py_status, (int)status);
+    return usearch_py_enum_to_object(&usearch_py_status, (int)deferred_status(self));
 }
 
 static char const doc_Deferred_wait[] =                                                      //
@@ -2088,7 +2236,7 @@ static char const doc_Deferred_wait[] =                                         
     "\n"                                                                                     //
     "Raises:\n"                                                                              //
     "  Error: What the blocking verb would have raised, `ContendedError` included when\n"    //
-    "    another call held the executor.";
+    "    another call held the executor or another thread is answering this one.";
 
 static PyObject* Deferred_wait(Deferred* self, PyObject* unused) {
     deferred_block(self);
@@ -2112,12 +2260,12 @@ static PyObject* Deferred_await(PyObject* self) {
 static void Deferred_dealloc(Deferred* self) {
     PyObject_GC_UnTrack(self);
     // The library writes into the call this object holds, and reads the inputs it borrows, until the call is final.
-    if (self->verb) {
+    if (!atomic_load(&self->answering)) {
         deferred_block(self);
-        call_release(self->verb, self->call);
+        call_release(&self->call);
     }
-    Py_XDECREF(self->answer);
-    Py_XDECREF(self->raised);
+    Py_XDECREF(atomic_load(&self->answer));
+    Py_XDECREF(atomic_load(&self->raised));
     Py_XDECREF(self->origin);
     Py_TYPE(self)->tp_free((PyObject*)self);
 }
@@ -2126,25 +2274,25 @@ static void Deferred_dealloc(Deferred* self) {
  *  through them waits for a later collection rather than being cleared while the library still
  *  reads them. */
 static int Deferred_traverse(Deferred* self, visitproc visit, void* arg) {
+    PyObject* const answer = atomic_load_explicit(&self->answer, memory_order_relaxed);
+    PyObject* const raised = atomic_load_explicit(&self->raised, memory_order_relaxed);
     Py_VISIT(self->origin);
-    Py_VISIT(self->answer);
-    Py_VISIT(self->raised);
-    if (!self->verb || deferred_status(self) == usearch_status_deferred_k) return 0;
-    usearch_py_call_t const* const header = (usearch_py_call_t const*)(void const*)self->call;
-    Py_VISIT(header->raised);
-    Py_VISIT(header->arena);
-    return self->verb->traverse ? self->verb->traverse(self->call, visit, arg) : 0;
+    Py_VISIT(answer);
+    Py_VISIT(raised);
+    if (atomic_load(&self->answering) || deferred_status(self) == usearch_status_deferred_k) return 0;
+    Py_VISIT(self->call.arena);
+    Py_VISIT(self->call.result);
+    for (size_t slot = 0; slot != usearch_py_holds_k; ++slot) Py_VISIT(self->call.holds[slot]);
+    return 0;
 }
 
 /** Breaks a garbage cycle through a final @p self; an unfinished one is left whole, as its
  *  traversal hid the cycle. */
 static int Deferred_clear(Deferred* self) {
     if (deferred_status(self) == usearch_status_deferred_k) return 0;
-    usearch_py_verb_t const* const releasing = self->verb;
-    self->verb = NULL;
-    if (releasing) call_release(releasing, self->call);
-    Py_CLEAR(self->answer);
-    Py_CLEAR(self->raised);
+    if (!atomic_exchange(&self->answering, 1)) call_release(&self->call);
+    Py_XDECREF(atomic_exchange(&self->answer, NULL));
+    Py_XDECREF(atomic_exchange(&self->raised, NULL));
     Py_CLEAR(self->origin);
     return 0;
 }
@@ -2171,7 +2319,6 @@ PyTypeObject DeferredType = {
         .tp_name = "usearch.Deferred",
     .tp_doc = doc_Deferred,
     .tp_basicsize = sizeof(Deferred),
-    .tp_itemsize = 1,
     .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
     .tp_new = NULL, // Answered by the verbs of a deferred receiver, never constructed by name.
     .tp_dealloc = (destructor)Deferred_dealloc,
@@ -2218,14 +2365,15 @@ static char const doc_Executor[] =                                              
  *  @brief Wraps a fresh handle, or frees it when the wrapper cannot be allocated.
  *  @return A new reference, or NULL with an exception set.
  */
-static PyObject* executor_adopt(PyTypeObject* type, usearch_executor_t handle, usearch_residency_t residency) {
+static PyObject* executor_adopt(PyTypeObject* type, usearch_executor_t handle) {
     Executor* const executor = (Executor*)type->tp_alloc(type, 0);
     if (!executor) {
         usearch_executor_free(handle);
         return NULL;
     }
-    executor->handle = handle;
-    executor->residency = residency;
+    atomic_init(&executor->handle, handle);
+    executor->owned = handle;
+    atomic_init(&executor->holds, 1);
     return (PyObject*)executor;
 }
 
@@ -2235,48 +2383,17 @@ static PyObject* Executor_tp_new(PyTypeObject* type, PyObject* args, PyObject* k
     return NULL;
 }
 
-/** Frees @p handle, waiting in C for the call holding it; NULL is safe. */
-static void executor_free(usearch_executor_t handle) {
-    if (!handle) return;
+/** Drops one hold on @p executor, the last freeing its handle once the call holding it ends. */
+static void executor_release(Executor* executor) {
+    if (atomic_fetch_sub(&executor->holds, 1) != 1) return;
     Py_BEGIN_ALLOW_THREADS;
-    usearch_executor_free(handle);
+    usearch_executor_free(executor->owned);
     Py_END_ALLOW_THREADS;
 }
 
-/** Closes @p executor once, fenced against a concurrent close; while a GPU arena it made is alive,
- *  the handle is left for the last of them to free. */
+/** Closes @p executor once, so verbs refuse it and its handle goes with its last hold. */
 static void executor_close(Executor* executor) {
-    usearch_executor_t handle = NULL;
-    usearch_py_critical_section_begin_((PyObject*)executor);
-    handle = executor->handle;
-    executor->handle = NULL;
-    if (handle && executor->arenas) {
-        executor->retained = handle;
-        handle = NULL;
-    }
-    usearch_py_critical_section_end_();
-    executor_free(handle);
-}
-
-/** Takes a GPU arena's hold on @p executor, whose handle must outlive the arena. */
-static PyObject* executor_hold(PyObject* executor) {
-    usearch_py_critical_section_begin_(executor);
-    ++((Executor*)executor)->arenas;
-    usearch_py_critical_section_end_();
-    return Py_NewRef(executor);
-}
-
-/** Drops a GPU arena's hold on @p executor, freeing the handle a close left to the last of them. */
-static void executor_release(PyObject* executor) {
-    usearch_executor_t retained = NULL;
-    usearch_py_critical_section_begin_(executor);
-    if (!--((Executor*)executor)->arenas) {
-        retained = ((Executor*)executor)->retained;
-        ((Executor*)executor)->retained = NULL;
-    }
-    usearch_py_critical_section_end_();
-    executor_free(retained);
-    Py_DECREF(executor);
+    if (atomic_exchange(&executor->handle, NULL)) executor_release(executor);
 }
 
 static void Executor_dealloc(Executor* executor) {
@@ -2296,12 +2413,15 @@ int usearch_py_executor_from_object(PyObject* object, usearch_executor_t* execut
         PyErr_Format(PyExc_TypeError, "expected an Executor, got %S", Py_TYPE(object));
         return -1;
     }
-    usearch_py_critical_section_begin_(object);
-    *executor = ((Executor*)object)->handle;
-    usearch_py_critical_section_end_();
+    *executor = atomic_load(&((Executor*)object)->handle);
     // Without this, a closed executor would quietly run the call on the calling thread.
     if (!*executor) return usearch_py_raise(usearch_status_uninitialized_k, "the executor was closed");
     return 0;
+}
+
+int usearch_py_optional_executor_from_object(PyObject* object, usearch_executor_t* executor) {
+    *executor = NULL;
+    return !object || object == Py_None ? 0 : usearch_py_executor_from_object(object, executor);
 }
 
 static char const doc_Executor_for_ram[] =                                                     //
@@ -2355,7 +2475,7 @@ static PyObject* Executor_for_ram(PyTypeObject* type, PyObject* const* args, Py_
     PyMem_Free(memory_domains);
 
     if (usearch_py_raise_on_outcome(&outcome) != 0) return NULL;
-    return executor_adopt(type, handle, usearch_residency_ram_k);
+    return executor_adopt(type, handle);
 }
 
 static char const doc_Executor_on_pool[] =                                                     //
@@ -2417,7 +2537,7 @@ static PyObject* Executor_on_pool(PyTypeObject* type, PyObject* const* args, Py_
     PyMem_Free(memory_domains);
 
     if (usearch_py_raise_on_outcome(&outcome) != 0) return NULL;
-    return executor_adopt(type, handle, usearch_residency_ram_k);
+    return executor_adopt(type, handle);
 }
 
 static char const doc_Executor_for_vram[] =                                              //
@@ -2467,7 +2587,7 @@ static PyObject* Executor_for_vram(PyTypeObject* type, PyObject* const* args, Py
     PyMem_Free(devices);
 
     if (usearch_py_raise_on_outcome(&outcome) != 0) return NULL;
-    return executor_adopt(type, handle, usearch_residency_vram_k);
+    return executor_adopt(type, handle);
 }
 
 static char const doc_Executor_for_nvme[] =                                                 //
@@ -2525,7 +2645,7 @@ static PyObject* Executor_for_nvme(PyTypeObject* type, PyObject* const* args, Py
     usearch_py_paths_release(&paths);
 
     if (usearch_py_raise_on_outcome(&outcome) != 0) return NULL;
-    return executor_adopt(type, handle, usearch_residency_nvme_k);
+    return executor_adopt(type, handle);
 }
 
 static char const doc_Executor_drain[] =                                                   //
@@ -2565,12 +2685,8 @@ static PyObject* Executor_drain(Executor* executor, PyObject* const* args, Py_ss
     Py_RETURN_NONE;
 }
 
-static PyObject* Executor_get_residency(Executor* executor, void* closure) {
-    return usearch_py_enum_to_object(&usearch_py_residency, executor->residency);
-}
-
 static PyObject* Executor_repr(Executor* executor) {
-    return PyUnicode_FromFormat("usearch.Executor(at=%p)", (void*)executor->handle);
+    return PyUnicode_FromFormat("usearch.Executor(at=%p)", (void*)atomic_load(&executor->handle));
 }
 
 static PyMethodDef Executor_methods[] = {
@@ -2584,11 +2700,6 @@ static PyMethodDef Executor_methods[] = {
     {NULL, NULL, 0, NULL},
 };
 
-static PyGetSetDef Executor_getset[] = {
-    {"residency", (getter)Executor_get_residency, NULL, "The `Residency` its calls compute in. Python-only.", NULL},
-    {NULL, NULL, NULL, NULL, NULL},
-};
-
 PyTypeObject ExecutorType = {
     PyVarObject_HEAD_INIT(NULL, 0) //
         .tp_name = "usearch.Executor",
@@ -2598,7 +2709,6 @@ PyTypeObject ExecutorType = {
     .tp_new = Executor_tp_new,
     .tp_dealloc = (destructor)Executor_dealloc,
     .tp_methods = Executor_methods,
-    .tp_getset = Executor_getset,
     .tp_repr = (reprfunc)Executor_repr,
 };
 
@@ -2606,40 +2716,47 @@ PyTypeObject ExecutorType = {
 
 #pragma region Arenas
 
-static char const doc_Arena[] =                                                                //
-    "Arena(executor=None, /)\n"                                                                //
-    "\n"                                                                                       //
-    "The memory every output whose length scales with a call lands in - matches, rows,\n"      //
-    "products, monoliths - which every such verb requires and each call rewinds, so a\n"       //
-    "steady loop allocates once.\n"                                                            //
-    "\n"                                                                                       //
-    "The executor makes it where its calls compute, host pages or the memory of its GPU,\n"    //
-    "and none makes host pages for calls on the calling thread; a call of another residency\n" //
-    "raises `DeviceError`. Results are zero-copy views over it. Like a `bytearray`, it\n"      //
-    "refuses to rewind with `ContendedError` while a buffer over its outputs is exported,\n"   //
-    "and a result read after a later call rewound it raises `UninitializedError`. A\n"         //
-    "deferred call holds it as a blocking one does, until it is waited on or dropped.\n"       //
-    "Results over device memory export `__cuda_array_interface__`, and host reads of them\n"   //
-    "raise `DeviceError`. A GPU arena serves only calls on the executor that made it, any\n"   //
-    "other or none raising `DeviceError`, and holds that executor until it is freed, so an\n"  //
-    "executor closed first keeps its streams until then.\n"                                    //
-    "Calls `usearch_arena_init`.\n"                                                            //
-    "\n"                                                                                       //
-    "Args:\n"                                                                                  //
-    "  executor (Executor, optional): The executor whose calls it serves; None serves the\n"   //
-    "    calling thread.\n"                                                                    //
-    "\n"                                                                                       //
-    "Example:\n"                                                                               //
-    "  >>> from array import array\n"                                                          //
-    "  >>> index = usearch.DenseIndex.init_ram(dimensions=2)\n"                                //
-    "  >>> index.reserve(2)\n"                                                                 //
-    "  >>> index.insert([1], array('d', [0.1, 0.2]))\n"                                        //
-    "  >>> index.insert([2], array('d', [0.3, 0.4]))\n"                                        //
-    "  >>> arena = usearch.Arena()\n"                                                          //
-    "  >>> first = memoryview(index.get(1, arena))\n"                                          //
-    "  >>> first.release()\n"                                                                  //
-    "  >>> memoryview(index.get(2, arena)).shape\n"                                            //
+static char const doc_Arena[] =                                                                 //
+    "Arena(executor=None, /)\n"                                                                 //
+    "\n"                                                                                        //
+    "The memory every output whose length scales with a call lands in - matches, rows,\n"       //
+    "products, monoliths - which every such verb requires and each call rewinds, so a\n"        //
+    "steady loop allocates once.\n"                                                             //
+    "\n"                                                                                        //
+    "The executor makes it where its calls compute, host pages or the memory of its GPU, and\n" //
+    "none makes host pages for calls on the calling thread; a call of another residency\n"      //
+    "raises `DeviceError`. Results are zero-copy views over it, read until the next call\n"     //
+    "handed it rewinds it, so a result to keep past that call is copied first. A call naming\n" //
+    "it while another still writes it raises `ContendedError`. `describe` says where results\n" //
+    "live: those over device memory export `__cuda_array_interface__` and are not read\n"       //
+    "through host buffers. A GPU arena serves only calls on the executor that made it, any\n"   //
+    "other or none raising `DeviceError`, and holds that executor until it is freed, so an\n"   //
+    "executor closed first keeps its streams until then.\n"                                     //
+    "Calls `usearch_arena_init`.\n"                                                             //
+    "\n"                                                                                        //
+    "Args:\n"                                                                                   //
+    "  executor (Executor, optional): The executor whose calls it serves; None serves the\n"    //
+    "    calling thread.\n"                                                                     //
+    "\n"                                                                                        //
+    "Example:\n"                                                                                //
+    "  >>> from array import array\n"                                                           //
+    "  >>> index = usearch.DenseIndex.init_ram(dimensions=2)\n"                                 //
+    "  >>> index.reserve(2)\n"                                                                  //
+    "  >>> index.insert([1], array('d', [0.1, 0.2]))\n"                                         //
+    "  >>> index.insert([2], array('d', [0.3, 0.4]))\n"                                         //
+    "  >>> arena = usearch.Arena()\n"                                                           //
+    "  >>> first = bytes(index.get(1, arena))\n"                                                //
+    "  >>> memoryview(index.get(2, arena)).shape\n"                                             //
     "  (1, 2)";
+
+int usearch_py_arena_describe(PyObject* arena, usearch_arena_description_t* description) {
+    usearch_outcome_t outcome = {0};
+    usearch_arena_describe_t arguments = {.arena = ((Arena*)arena)->handle,
+                                          .outcome = &outcome,
+                                          .description = description};
+    usearch_arena_describe(&arguments);
+    return usearch_py_raise_on_outcome(&outcome);
+}
 
 static PyObject* Arena_tp_new(PyTypeObject* type, PyObject* args, PyObject* keywords) {
     Py_ssize_t const positional_args_count = PyTuple_GET_SIZE(args);
@@ -2668,7 +2785,10 @@ static PyObject* Arena_tp_new(PyTypeObject* type, PyObject* args, PyObject* keyw
         return NULL;
     }
     // A GPU arena grows, fills and frees on its executor's first stream, so it holds the executor.
-    if (placed.residency == usearch_residency_vram_k) arena->executor = executor_hold(executor_object);
+    if (placed.residency == usearch_residency_vram_k) {
+        atomic_fetch_add(&((Executor*)executor_object)->holds, 1);
+        arena->executor = Py_NewRef(executor_object);
+    }
     return (PyObject*)arena;
 }
 
@@ -2676,17 +2796,9 @@ static void Arena_dealloc(Arena* self) {
     Py_BEGIN_ALLOW_THREADS;
     usearch_arena_free(self->handle);
     Py_END_ALLOW_THREADS;
-    if (self->executor) executor_release(self->executor);
+    if (self->executor) executor_release((Executor*)self->executor);
+    Py_XDECREF(self->executor);
     Py_TYPE(self)->tp_free((PyObject*)self);
-}
-
-int usearch_py_arena_describe(PyObject* arena, usearch_arena_description_t* description) {
-    usearch_outcome_t outcome = {0};
-    usearch_arena_describe_t arguments = {.arena = ((Arena*)arena)->handle,
-                                          .outcome = &outcome,
-                                          .description = description};
-    usearch_arena_describe(&arguments);
-    return usearch_py_raise_on_outcome(&outcome);
 }
 
 static char const doc_ArenaDescription[] =                                         //
@@ -2744,63 +2856,37 @@ PyTypeObject ArenaType = {
     .tp_methods = Arena_methods,
 };
 
-int usearch_py_arena_claim(PyObject* object, PyObject** arena) {
+usearch_arena_t usearch_py_arena_handle(PyObject* arena) { return arena ? ((Arena*)arena)->handle : NULL; }
+
+int usearch_py_arena_from_object(PyObject* object, usearch_arena_t* handle) {
+    *handle = NULL;
+    if (object == Py_None) return 0;
     if (!PyObject_TypeCheck(object, &ArenaType)) {
         PyErr_Format(PyExc_TypeError, "the 'arena' argument must be an Arena, got %S", Py_TYPE(object));
         return -1;
     }
-    Arena* const claimed = (Arena*)object;
-    Py_ssize_t held = 0;
-    usearch_py_critical_section_begin_(object);
-    held = claimed->exports;
-    if (!held) {
-        claimed->exports = 1;
-        ++claimed->generation;
-    }
-    usearch_py_critical_section_end_();
-    if (held)
-        return usearch_py_raise(usearch_status_contended_k,
-                                "the arena serves a call or exports a buffer over its outputs; release it first");
-    *arena = Py_NewRef(object);
+    *handle = ((Arena*)object)->handle;
     return 0;
 }
 
-void usearch_py_arena_unclaim(PyObject* arena) {
-    usearch_py_critical_section_begin_(arena);
-    --((Arena*)arena)->exports;
-    usearch_py_critical_section_end_();
-    Py_DECREF(arena);
+int usearch_py_call_hold_arena(usearch_py_call_t* call, PyObject* object) {
+    usearch_arena_t handle = NULL;
+    if (usearch_py_arena_from_object(object, &handle) != 0) return -1;
+    if (handle) call->arena = Py_NewRef(object);
+    return 0;
+}
+
+void* usearch_py_call_arena(usearch_py_call_t* call, PyObject* object, PyTypeObject* type) {
+    if (usearch_py_call_hold_arena(call, object) != 0) return NULL;
+    // Every result over an arena leads with the arena, as an `ArenaBuffer` does.
+    ArenaBuffer* const result = (ArenaBuffer*)usearch_py_call_result(call, type);
+    if (result) result->arena = Py_XNewRef(call->arena);
+    return result;
 }
 
 /** The rank of a ranked run's keys, queries by columns by sixteen bytes, and so of every output in
  *  an arena. */
 enum { arena_buffer_max_rank_k = 3 };
-
-/** One output a call left in an arena, exported zero-copy, and the base of every result that is one. */
-typedef struct ArenaBuffer {
-    PyObject ob_base;
-
-    /** The arena the output lives in, kept alive so the memory outlives every other name for it. */
-    PyObject* arena;
-
-    /** The arena's generation when the call wrote the output; any later one means a call rewound
-     *  it. */
-    size_t generation;
-
-    void const* data;
-    char const* format;
-    Py_ssize_t item_bytes;
-    int rank;
-    Py_ssize_t shape[arena_buffer_max_rank_k];
-    Py_ssize_t strides[arena_buffer_max_rank_k];
-
-    /** What the rows of a @c DenseVectors hold, which its format alone cannot tell of packed kinds;
-     *  unknown for every other output. */
-    usearch_scalar_t scalar;
-
-    /** Logical scalars per row of a @c DenseVectors. */
-    size_t columns;
-} ArenaBuffer;
 
 /** Whether @p buffer lives in device memory, which the host may not dereference; -1 with an
  *  exception set when the library cannot say. */
@@ -2810,50 +2896,7 @@ static int arena_buffer_on_device(ArenaBuffer const* buffer) {
     return description.residency == usearch_residency_vram_k;
 }
 
-/** Raises @c UninitializedError unless the call that wrote @p buffer is still the last to claim
- *  its arena; returns 0 or -1. */
-static int arena_buffer_fresh(ArenaBuffer const* buffer, size_t generation) {
-    if (generation == buffer->generation) return 0;
-    return usearch_py_raise(usearch_status_uninitialized_k, "a later call rewound the arena this output lived in");
-}
-
-/** Holds the arena of @p buffer against a rewind as one more export, wherever its memory lives;
- *  0, or -1 with an @c UninitializedError when a later call rewound it. */
-static int arena_buffer_hold(ArenaBuffer const* buffer) {
-    Arena* const arena = (Arena*)buffer->arena;
-    size_t generation = 0;
-    usearch_py_critical_section_begin_((PyObject*)arena);
-    generation = arena->generation;
-    if (generation == buffer->generation) ++arena->exports;
-    usearch_py_critical_section_end_();
-    return arena_buffer_fresh(buffer, generation);
-}
-
-/**
- *  @brief Holds the arena of @p buffer against a rewind while its host memory is read, as one more
- *      export.
- *  @return 0 on success, -1 with a @c DeviceError set when the output is on a device, or an
- *      @c UninitializedError when a later call rewound it.
- */
-static int arena_buffer_pin(ArenaBuffer const* buffer) {
-    int const on_device = arena_buffer_on_device(buffer);
-    if (on_device < 0) return -1;
-    if (on_device)
-        return usearch_py_raise(usearch_status_device_k,
-                                "the output lives in device memory; read `__cuda_array_interface__`");
-    return arena_buffer_hold(buffer);
-}
-
-/** Ends the hold @c arena_buffer_pin took. */
-static void arena_buffer_unpin(ArenaBuffer const* buffer) {
-    usearch_py_critical_section_begin_(buffer->arena);
-    --((Arena*)buffer->arena)->exports;
-    usearch_py_critical_section_end_();
-}
-
 static int ArenaBuffer_getbuffer(ArenaBuffer* self, Py_buffer* view, int flags) {
-    view->obj = NULL;
-    if (arena_buffer_pin(self) != 0) return -1;
     Py_ssize_t bytes = self->item_bytes;
     for (int axis = 0; axis != self->rank; ++axis) bytes *= self->shape[axis];
     view->obj = Py_NewRef((PyObject*)self);
@@ -2870,8 +2913,6 @@ static int ArenaBuffer_getbuffer(ArenaBuffer* self, Py_buffer* view, int flags) 
     view->internal = NULL;
     return 0;
 }
-
-static void ArenaBuffer_releasebuffer(ArenaBuffer* self, Py_buffer* view) { arena_buffer_unpin(self); }
 
 /** A tuple of the first @p rank of @p extents; a new reference, or NULL. */
 static PyObject* extents_to_tuple(Py_ssize_t const* extents, int rank) {
@@ -2894,11 +2935,6 @@ static PyObject* ArenaBuffer_get_cuda_array_interface(ArenaBuffer* self, void* c
         PyErr_SetString(PyExc_AttributeError, "the output lives in host memory; read it through the buffer protocol");
         return NULL;
     }
-    size_t generation = 0;
-    usearch_py_critical_section_begin_(self->arena);
-    generation = ((Arena*)self->arena)->generation;
-    usearch_py_critical_section_end_();
-    if (arena_buffer_fresh(self, generation) != 0) return NULL;
     char const kind = *self->format == 'b' ? 'i' : strchr("efd", *self->format) ? 'f' : 'u';
     char const typestr[3] = {self->item_bytes == 1 ? '|' : '<', kind, (char)('0' + self->item_bytes)};
     PyObject* const address = PyLong_FromVoidPtr((void*)self->data);
@@ -2952,7 +2988,7 @@ static int arena_buffer_dlpack_device(ArenaBuffer const* buffer, DLDevice* devic
 /** The DLPack type of the items in @p buffer : the stored scalar for rows DLPack spells, else the
  *  buffer format's. */
 static DLDataType arena_buffer_dlpack_type(ArenaBuffer const* buffer) {
-    switch (buffer->scalar) {
+    switch (buffer->rows.scalar) {
     case usearch_scalar_bf16_k: return (DLDataType) {kDLBfloat, 16, 1};
     case usearch_scalar_e4m3_k: return (DLDataType) {kDLFloat8_e4m3fn, 8, 1};
     case usearch_scalar_e5m2_k: return (DLDataType) {kDLFloat8_e5m2, 8, 1};
@@ -2971,7 +3007,7 @@ static DLDataType arena_buffer_dlpack_type(ArenaBuffer const* buffer) {
 }
 
 /** What a DLPack capsule over an @c ArenaBuffer owns: the tensor, its extents, and the buffer,
- *  whose arena stays held against a rewind until the consumer deletes the tensor. */
+ *  whose arena stays alive until the consumer deletes the tensor. */
 typedef struct arena_buffer_dlpack_t {
     union {
         DLManagedTensor legacy;
@@ -2985,7 +3021,6 @@ typedef struct arena_buffer_dlpack_t {
 static void arena_buffer_dlpack_release(arena_buffer_dlpack_t* export) {
     // Consumers such as PyTorch delete tensors from threads that do not hold the interpreter.
     PyGILState_STATE const interpreter = PyGILState_Ensure();
-    arena_buffer_unpin(export->owner);
     Py_DECREF(export->owner);
     PyMem_Free(export);
     PyGILState_Release(interpreter);
@@ -3016,7 +3051,7 @@ static char const doc_ArenaBuffer_dlpack[] =                                    
     "__dlpack__(self, /, *, stream=None, max_version=None, dl_device=None, copy=None)\n"        //
     "\n"                                                                                        //
     "Exports the output as a DLPack tensor in place, on the host or the arena's device, and\n"  //
-    "holds the arena against a rewind until the consumer deletes it. Python-only.\n"            //
+    "holds the arena until the consumer deletes it. Python-only.\n"                             //
     "\n"                                                                                        //
     "Args:\n"                                                                                   //
     "  stream (int, optional): Ignored, as the call that wrote the output has finished.\n"      //
@@ -3057,7 +3092,6 @@ static PyObject* ArenaBuffer_dlpack(ArenaBuffer* self, PyObject* const* args, Py
 
     arena_buffer_dlpack_t* const export = PyMem_Calloc(1, sizeof(arena_buffer_dlpack_t));
     if (!export) return PyErr_NoMemory();
-    if (arena_buffer_hold(self) != 0) return PyMem_Free(export), NULL;
     export->owner = (ArenaBuffer*)Py_NewRef((PyObject*)self);
     for (int axis = 0; axis != self->rank; ++axis) {
         export->shape[axis] = self->shape[axis];
@@ -3073,10 +3107,10 @@ static PyObject* ArenaBuffer_dlpack(ArenaBuffer* self, PyObject* const* args, Py
         .strides = export->strides,
     };
     // Rows DLPack spells by their stored scalar travel at their logical width, not as bytes.
-    if (self->scalar == usearch_scalar_bf16_k || self->scalar == usearch_scalar_e4m3_k ||
-        self->scalar == usearch_scalar_e5m2_k) {
-        Py_ssize_t const unit_bytes = (Py_ssize_t)usearch_py_scalar_row_bytes(self->scalar, 1);
-        export->shape[self->rank - 1] = (int64_t)self->columns;
+    if (self->rows.scalar == usearch_scalar_bf16_k || self->rows.scalar == usearch_scalar_e4m3_k ||
+        self->rows.scalar == usearch_scalar_e5m2_k) {
+        Py_ssize_t const unit_bytes = (Py_ssize_t)usearch_py_scalar_row_bytes(self->rows.scalar, 1);
+        export->shape[self->rank - 1] = (int64_t)self->rows.columns;
         export->strides[0] = self->strides[0] / unit_bytes;
     }
     if (versioned) {
@@ -3108,7 +3142,7 @@ static PyMethodDef ArenaBuffer_methods[] = {
 };
 
 static void ArenaBuffer_dealloc(ArenaBuffer* self) {
-    Py_DECREF(self->arena);
+    Py_XDECREF(self->arena);
     Py_TYPE(self)->tp_free((PyObject*)self);
 }
 
@@ -3116,10 +3150,7 @@ static Py_ssize_t ArenaBuffer_length(ArenaBuffer* self) { return self->shape[0];
 
 static PySequenceMethods ArenaBuffer_as_sequence = {.sq_length = (lenfunc)ArenaBuffer_length};
 
-static PyBufferProcs ArenaBuffer_as_buffer = {
-    .bf_getbuffer = (getbufferproc)ArenaBuffer_getbuffer,
-    .bf_releasebuffer = (releasebufferproc)ArenaBuffer_releasebuffer,
-};
+static PyBufferProcs ArenaBuffer_as_buffer = {.bf_getbuffer = (getbufferproc)ArenaBuffer_getbuffer};
 
 static PyGetSetDef ArenaBuffer_getset[] = {
     {"__cuda_array_interface__", (getter)ArenaBuffer_get_cuda_array_interface, NULL,
@@ -3201,128 +3232,95 @@ PyTypeObject MonolithType = {
     .tp_base = &ArenaBufferType,
 };
 
-PyObject* usearch_py_arena_buffer(PyTypeObject* type, PyObject* arena, void const* data, char const* format,
-                                  Py_ssize_t item_bytes, Py_ssize_t const* shape, int rank) {
+/** Lays @p data out as a C-contiguous run of @p rank extents in @p shape for every protocol. */
+static void arena_buffer_lay(ArenaBuffer* buffer, void const* data, Py_ssize_t const* shape, int rank) {
     // A call with nothing to report leaves its output null, which no exporter may hand out.
     static char const empty_output = 0;
-    ArenaBuffer* const exporter = PyObject_New(ArenaBuffer, type);
-    if (!exporter) return NULL;
-    exporter->arena = Py_NewRef(arena);
-    // Built while the writing call still holds the arena, so its generation is that call's.
-    exporter->generation = ((Arena*)arena)->generation;
-    exporter->data = data ? data : &empty_output;
-    exporter->format = format;
-    exporter->item_bytes = item_bytes;
-    exporter->rank = rank;
-    exporter->scalar = usearch_scalar_unknown_k;
-    exporter->columns = 0;
-    Py_ssize_t stride = item_bytes;
+    buffer->data = data ? data : &empty_output;
+    buffer->rank = rank;
+    Py_ssize_t stride = buffer->item_bytes;
     for (int axis = rank - 1; axis >= 0; --axis) {
-        exporter->shape[axis] = shape[axis];
-        exporter->strides[axis] = stride;
+        buffer->shape[axis] = shape[axis];
+        buffer->strides[axis] = stride;
         stride *= shape[axis];
     }
+}
+
+PyObject* usearch_py_arena_buffer(PyTypeObject* type, PyObject* arena, void const* data, char const* format,
+                                  Py_ssize_t item_bytes, Py_ssize_t const* shape, int rank) {
+    ArenaBuffer* const exporter = (ArenaBuffer*)type->tp_alloc(type, 0);
+    if (!exporter) return NULL;
+    exporter->arena = Py_NewRef(arena);
+    exporter->format = format;
+    exporter->item_bytes = item_bytes;
+    arena_buffer_lay(exporter, data, shape, rank);
     return (PyObject*)exporter;
+}
+
+/** Lays the @c count packed rows @p buffer holds out for export, in their format or as bytes. */
+static void arena_buffer_lay_rows(ArenaBuffer* buffer) {
+    usearch_rows_view_t const* const rows = &buffer->rows;
+    char const* const format = usearch_py_scalar_buffer_format(rows->scalar);
+    size_t const row_bytes = usearch_py_scalar_row_bytes(rows->scalar, rows->columns);
+    Py_ssize_t const shape[2] = {(Py_ssize_t)buffer->count, format ? (Py_ssize_t)rows->columns : (Py_ssize_t)row_bytes};
+    buffer->format = format ? format : "B";
+    buffer->item_bytes = format ? (Py_ssize_t)usearch_py_scalar_row_bytes(rows->scalar, 1) : 1;
+    arena_buffer_lay(buffer, rows->data, shape, 2);
 }
 
 PyObject* usearch_py_rows_new(PyObject* arena, usearch_rows_view_t const* rows, size_t count) {
-    char const* const format = usearch_py_scalar_buffer_format(rows->scalar);
-    size_t const row_bytes = usearch_py_scalar_row_bytes(rows->scalar, rows->columns);
-    Py_ssize_t const shape[2] = {(Py_ssize_t)count, format ? (Py_ssize_t)rows->columns : (Py_ssize_t)row_bytes};
-    Py_ssize_t const item_bytes = format ? (Py_ssize_t)usearch_py_scalar_row_bytes(rows->scalar, 1) : 1;
-    ArenaBuffer* const exporter = (ArenaBuffer*)usearch_py_arena_buffer(&DenseVectorsType, arena, rows->data,
-                                                                        format ? format : "B", item_bytes, shape, 2);
-    if (exporter) exporter->scalar = rows->scalar, exporter->columns = rows->columns;
+    ArenaBuffer* const exporter = (ArenaBuffer*)DenseVectorsType.tp_alloc(&DenseVectorsType, 0);
+    if (!exporter) return NULL;
+    exporter->arena = Py_NewRef(arena);
+    exporter->rows = *rows;
+    exporter->count = count;
+    arena_buffer_lay_rows(exporter);
     return (PyObject*)exporter;
 }
 
-/** Rows @p begin up to @p end of @p whole, a new @c ArenaBuffer over the same output; NULL with an
- *  exception set. */
-static PyObject* arena_buffer_slice(ArenaBuffer const* whole, size_t begin, size_t end) {
-    Py_ssize_t shape[arena_buffer_max_rank_k];
-    memcpy(shape, whole->shape, sizeof(shape));
-    shape[0] = (Py_ssize_t)(end - begin);
-    ArenaBuffer* const slice = (ArenaBuffer*)usearch_py_arena_buffer(
-        &ArenaBufferType, whole->arena, (char const*)whole->data + begin * whole->strides[0], whole->format,
-        whole->item_bytes, shape, whole->rank);
-    if (slice) slice->generation = whole->generation;
-    return (PyObject*)slice;
+PyObject* usearch_py_rows_answer(usearch_py_call_t* call) {
+    arena_buffer_lay_rows((ArenaBuffer*)call->result);
+    return Py_NewRef(call->result);
 }
 
-/** A ranked run a verb wrote into an arena: three outputs of one row per query. */
-typedef struct Matches {
-    PyObject ob_base;
-
-    /** The (queries, columns, 16) @c ArenaBuffer of identities. */
-    PyObject* keys;
-
-    /** The (queries, columns) @c ArenaBuffer of float64 distances, positionally paired with
-     *  @c keys. */
-    PyObject* distances;
-
-    /** The (queries,) @c ArenaBuffer of match counts, one per query. */
-    PyObject* counts;
-
-    /** Rows in each output - one per query. */
-    size_t queries;
-
-    /** Columns in the key and distance outputs, at most the call's "k" in "kANN". */
-    size_t columns;
-} Matches;
-
-static char const doc_Matches[] =                                                               //
-    "Matches\n"                                                                                 //
-    "\n"                                                                                        //
-    "A ranked run `search` wrote into an `Arena`, viewing it until it rewinds.\n"               //
-    "\n"                                                                                        //
-    "Reads through to three outputs, so `np.asarray` costs nothing and NumPy is never\n"        //
-    "required; a buffer exported over them holds the arena against the next call. No NumPy\n"   //
-    "dtype expresses a 128-bit integer, so keys arrive as big-endian sixteen-byte rows. Each\n" //
-    "count bounds its own row, and the cells past it hold nothing a call wrote.\n"              //
-    "\n"                                                                                        //
-    "Exports Arrow through the PyCapsule protocol as a LargeList of Struct<key, distance>,\n"   //
-    "compacted into a copy that holds no arena; `distances` exports in place.\n"                //
-    "\n"                                                                                        //
-    "Attributes:\n"                                                                             //
-    "  keys (buffer): (queries, columns, 16) identities, most significant byte first.\n"        //
-    "  distances (DenseVectors): (queries, columns) distances, columns at most wanted.\n"       //
-    "  counts (buffer): (queries,) match counts, each bounding its own row.\n"                  //
-    "\n"                                                                                        //
-    "Example:\n"                                                                                //
-    "  >>> from array import array\n"                                                           //
-    "  >>> index = usearch.DenseIndex.init_ram(dimensions=2)\n"                                 //
-    "  >>> index.reserve(1)\n"                                                                  //
-    "  >>> index.insert([5], array('d', [0.1, 0.2]))\n"                                         //
-    "  >>> matches = index.search(array('d', [0.1, 0.2]), 3, usearch.Arena())\n"                //
-    "  >>> len(matches), int(matches[0][0].key)\n"                                              //
+static char const doc_Matches[] =                                                              //
+    "Matches\n"                                                                                //
+    "\n"                                                                                       //
+    "A ranked run `search` wrote into an `Arena`, viewing it until it rewinds.\n"              //
+    "\n"                                                                                       //
+    "Reads through to three outputs, so `np.asarray` costs nothing and NumPy is never\n"       //
+    "required. No NumPy dtype expresses a 128-bit integer, so keys arrive as big-endian\n"     //
+    "sixteen-byte rows. Each count bounds its own row, and the cells past it hold nothing a\n" //
+    "call wrote.\n"                                                                            //
+    "\n"                                                                                       //
+    "Exports Arrow through the PyCapsule protocol as a LargeList of Struct<key, distance>,\n"  //
+    "compacted into a copy that holds no arena; `distances` exports in place.\n"               //
+    "\n"                                                                                       //
+    "Attributes:\n"                                                                            //
+    "  keys (buffer): Identities, `(queries, columns, 16)`, most significant byte first.\n"    //
+    "  distances (DenseVectors): Distances, `(queries, columns)`, columns at most wanted.\n"   //
+    "  counts (buffer): Match counts, `(queries,)`, each bounding its own row.\n"              //
+    "\n"                                                                                       //
+    "Example:\n"                                                                               //
+    "  >>> from array import array\n"                                                          //
+    "  >>> index = usearch.DenseIndex.init_ram(dimensions=2)\n"                                //
+    "  >>> index.reserve(1)\n"                                                                 //
+    "  >>> index.insert([5], array('d', [0.1, 0.2]))\n"                                        //
+    "  >>> matches = index.search(array('d', [0.1, 0.2]), 3, usearch.Arena())\n"               //
+    "  >>> len(matches), int(matches[0][0].key)\n"                                             //
     "  (1, 5)";
 
 PyObject* usearch_py_matches_new(PyObject* arena, usearch_matches_view_t const* view, size_t queries) {
-    Py_ssize_t const keys_shape[3] = {(Py_ssize_t)queries, (Py_ssize_t)view->columns,
-                                      (Py_ssize_t)sizeof(usearch_key_t)};
-    Py_ssize_t const counts_shape[1] = {(Py_ssize_t)queries};
-    Matches* matches = PyObject_New(Matches, &MatchesType);
+    Matches* const matches = (Matches*)MatchesType.tp_alloc(&MatchesType, 0);
     if (!matches) return NULL;
+    matches->arena = Py_NewRef(arena);
+    matches->view = *view;
     matches->queries = queries;
-    matches->columns = view->columns;
-    matches->distances = matches->counts = NULL;
-    matches->keys = usearch_py_arena_buffer(&ArenaBufferType, arena, view->keys, "B", 1, keys_shape, 3);
-    usearch_rows_view_t const distances = {.data = view->scores,
-                                           .stride = view->columns * sizeof(usearch_distance_t),
-                                           .columns = view->columns,
-                                           .scalar = usearch_scalar_f64_k};
-    if (matches->keys) matches->distances = usearch_py_rows_new(arena, &distances, queries);
-    if (matches->distances)
-        matches->counts = usearch_py_arena_buffer(&ArenaBufferType, arena, view->counts, "N", sizeof(size_t),
-                                                  counts_shape, 1);
-    if (!matches->counts) Py_CLEAR(matches);
     return (PyObject*)matches;
 }
 
 static void Matches_dealloc(Matches* self) {
-    Py_XDECREF(self->counts);
-    Py_XDECREF(self->distances);
-    Py_XDECREF(self->keys);
+    Py_XDECREF(self->arena);
     Py_TYPE(self)->tp_free((PyObject*)self);
 }
 
@@ -3334,38 +3332,50 @@ static PyObject* Matches_item(Matches* self, Py_ssize_t query_index) {
         PyErr_SetString(PyExc_IndexError, "query index out of range");
         return NULL;
     }
-    ArenaBuffer const* const keys_buffer = (ArenaBuffer const*)self->keys;
-    if (arena_buffer_pin(keys_buffer) != 0) return NULL;
-    size_t const* const counts = (size_t const*)((ArenaBuffer const*)self->counts)->data;
-    usearch_key_t const* const keys = (usearch_key_t const*)keys_buffer->data;
-    usearch_distance_t const* const distances = (usearch_distance_t const*)((ArenaBuffer const*)self->distances)->data;
-
+    usearch_matches_view_t const* const view = &self->view;
     // A count is the engine's word, and the sibling `multiply` verb documents counts that
     // exceed the column width outright - so it bounds a read here rather than defining one.
-    size_t const found = counts[query_index] < self->columns ? counts[query_index] : self->columns;
-    size_t const offset = (size_t)query_index * self->columns;
+    size_t const found = view->counts[query_index] < view->columns ? view->counts[query_index] : view->columns;
+    size_t const offset = (size_t)query_index * view->columns;
     PyObject* matches = PyTuple_New((Py_ssize_t)found);
     for (size_t match_index = 0; matches && match_index != found; ++match_index) {
-        PyObject* const match = usearch_py_match_to_object(keys[offset + match_index], distances[offset + match_index]);
+        PyObject* const match = usearch_py_match_to_object(view->keys[offset + match_index],
+                                                           view->scores[offset + match_index]);
         if (!match) Py_CLEAR(matches);
         else PyTuple_SET_ITEM(matches, (Py_ssize_t)match_index, match);
     }
-    arena_buffer_unpin(keys_buffer);
     return matches;
 }
 
 static PyObject* Matches_repr(Matches* self) {
-    return PyUnicode_FromFormat("Matches(queries=%zu, columns=%zu)", self->queries, self->columns);
+    return PyUnicode_FromFormat("Matches(queries=%zu, columns=%zu)", self->queries, self->view.columns);
 }
 
-static PyMemberDef Matches_members[] = {
-    {"keys", Py_T_OBJECT_EX, offsetof(Matches, keys), Py_READONLY,
-     "(queries, columns, 16) identities, most significant byte first."},
-    {"distances", Py_T_OBJECT_EX, offsetof(Matches, distances), Py_READONLY,
-     "(queries, columns) distances, in the index's own metric."},
-    {"counts", Py_T_OBJECT_EX, offsetof(Matches, counts), Py_READONLY,
-     "(queries,) match counts, each bounding its own row."},
-    {NULL, 0, 0, 0, NULL},
+static PyObject* Matches_get_keys(Matches* self, void* closure) {
+    Py_ssize_t const shape[3] = {(Py_ssize_t)self->queries, (Py_ssize_t)self->view.columns,
+                                 (Py_ssize_t)sizeof(usearch_key_t)};
+    return usearch_py_arena_buffer(&ArenaBufferType, self->arena, self->view.keys, "B", 1, shape, 3);
+}
+
+static PyObject* Matches_get_distances(Matches* self, void* closure) {
+    usearch_rows_view_t const distances = {.data = self->view.scores,
+                                           .stride = self->view.columns * sizeof(usearch_distance_t),
+                                           .columns = self->view.columns,
+                                           .scalar = usearch_scalar_f64_k};
+    return usearch_py_rows_new(self->arena, &distances, self->queries);
+}
+
+static PyObject* Matches_get_counts(Matches* self, void* closure) {
+    Py_ssize_t const shape[1] = {(Py_ssize_t)self->queries};
+    return usearch_py_arena_buffer(&ArenaBufferType, self->arena, self->view.counts, "N", sizeof(size_t), shape, 1);
+}
+
+static PyGetSetDef Matches_getset[] = {
+    {"keys", (getter)Matches_get_keys, NULL, "(queries, columns, 16) identities, most significant byte first.", NULL},
+    {"distances", (getter)Matches_get_distances, NULL, "(queries, columns) distances, in the index's own metric.",
+     NULL},
+    {"counts", (getter)Matches_get_counts, NULL, "(queries,) match counts, each bounding its own row.", NULL},
+    {NULL, NULL, NULL, NULL, NULL},
 };
 
 static PySequenceMethods Matches_as_sequence = {
@@ -3384,28 +3394,8 @@ PyTypeObject MatchesType = {
     .tp_repr = (reprfunc)Matches_repr,
     .tp_as_sequence = &Matches_as_sequence,
     .tp_methods = ArenaOutput_methods,
-    .tp_members = Matches_members,
+    .tp_getset = Matches_getset,
 };
-
-/** The ragged pairs `multiply` wrote into an arena: Apache Arrow offsets around keys and scores. */
-typedef struct DenseProducts {
-    PyObject ob_base;
-
-    /** The (queries + 1,) @c ArenaBuffer of Apache Arrow offsets. */
-    PyObject* offsets;
-
-    /** The (pairs, 16) @c ArenaBuffer naming each pair's indexed entry. */
-    PyObject* keys;
-
-    /** The (pairs,) @c ArenaBuffer of float64 products, positionally paired with @c keys. */
-    PyObject* scores;
-
-    /** The pairs scored before the bound cut any, an @c int. */
-    PyObject* required;
-
-    /** The left rows or queries, one fewer than the offsets. */
-    size_t queries;
-} DenseProducts;
 
 static char const doc_DenseProducts[] =                                                           //
     "DenseProducts\n"                                                                             //
@@ -3424,33 +3414,42 @@ static char const doc_DenseProducts[] =                                         
 
 PyObject* usearch_py_products_new(PyObject* arena, usearch_matches_tape_view_t const* view, size_t queries,
                                   size_t pairs, size_t required) {
-    Py_ssize_t const offsets_shape[1] = {(Py_ssize_t)queries + 1};
-    Py_ssize_t const keys_shape[2] = {(Py_ssize_t)pairs, (Py_ssize_t)sizeof(usearch_key_t)};
-    DenseProducts* products = PyObject_New(DenseProducts, &DenseProductsType);
+    DenseProducts* const products = (DenseProducts*)DenseProductsType.tp_alloc(&DenseProductsType, 0);
     if (!products) return NULL;
+    products->arena = Py_NewRef(arena);
+    products->view = *view;
     products->queries = queries;
-    products->keys = products->scores = products->required = NULL;
-    products->offsets = usearch_py_arena_buffer(&ArenaBufferType, arena, view->offsets, "N", sizeof(size_t),
-                                                offsets_shape, 1);
-    if (products->offsets)
-        products->keys = usearch_py_arena_buffer(&ArenaBufferType, arena, view->keys, "B", 1, keys_shape, 2);
-    if (products->keys)
-        products->scores = usearch_py_arena_buffer(&ArenaBufferType, arena, view->scores, "d",
-                                                   sizeof(usearch_distance_t), keys_shape, 1);
-    if (products->scores) products->required = PyLong_FromSize_t(required);
-    if (!products->required) Py_CLEAR(products);
+    products->pairs = pairs;
+    products->required = required;
     return (PyObject*)products;
 }
 
 static void DenseProducts_dealloc(DenseProducts* self) {
-    Py_XDECREF(self->required);
-    Py_XDECREF(self->scores);
-    Py_XDECREF(self->keys);
-    Py_XDECREF(self->offsets);
+    Py_XDECREF(self->arena);
     Py_TYPE(self)->tp_free((PyObject*)self);
 }
 
 static Py_ssize_t DenseProducts_length(DenseProducts* self) { return (Py_ssize_t)self->queries; }
+
+static PyObject* DenseProducts_get_offsets(DenseProducts* self, void* closure) {
+    Py_ssize_t const shape[1] = {(Py_ssize_t)self->queries + 1};
+    return usearch_py_arena_buffer(&ArenaBufferType, self->arena, self->view.offsets, "N", sizeof(size_t), shape, 1);
+}
+
+static PyObject* DenseProducts_get_keys(DenseProducts* self, void* closure) {
+    Py_ssize_t const shape[2] = {(Py_ssize_t)self->pairs, (Py_ssize_t)sizeof(usearch_key_t)};
+    return usearch_py_arena_buffer(&ArenaBufferType, self->arena, self->view.keys, "B", 1, shape, 2);
+}
+
+static PyObject* DenseProducts_get_scores(DenseProducts* self, void* closure) {
+    Py_ssize_t const shape[1] = {(Py_ssize_t)self->pairs};
+    return usearch_py_arena_buffer(&ArenaBufferType, self->arena, self->view.scores, "d", sizeof(usearch_distance_t),
+                                   shape, 1);
+}
+
+static PyObject* DenseProducts_get_required(DenseProducts* self, void* closure) {
+    return PyLong_FromSize_t(self->required);
+}
 
 static PyObject* DenseProducts_query(DenseProducts* self, PyObject* query_object) {
     Py_ssize_t const query = PyNumber_AsSsize_t(query_object, PyExc_IndexError);
@@ -3459,13 +3458,14 @@ static PyObject* DenseProducts_query(DenseProducts* self, PyObject* query_object
         PyErr_SetString(PyExc_IndexError, "query index out of range");
         return NULL;
     }
-    ArenaBuffer const* const offsets_buffer = (ArenaBuffer const*)self->offsets;
-    if (arena_buffer_pin(offsets_buffer) != 0) return NULL;
-    size_t const* const offsets = (size_t const*)offsets_buffer->data;
-    size_t const begin = offsets[query], end = offsets[query + 1];
-    arena_buffer_unpin(offsets_buffer);
-    PyObject* const keys = arena_buffer_slice((ArenaBuffer*)self->keys, begin, end);
-    PyObject* const scores = keys ? arena_buffer_slice((ArenaBuffer*)self->scores, begin, end) : NULL;
+    size_t const begin = self->view.offsets[query], end = self->view.offsets[query + 1];
+    Py_ssize_t const keys_shape[2] = {(Py_ssize_t)(end - begin), (Py_ssize_t)sizeof(usearch_key_t)};
+    Py_ssize_t const scores_shape[1] = {(Py_ssize_t)(end - begin)};
+    PyObject* const keys = usearch_py_arena_buffer(&ArenaBufferType, self->arena, self->view.keys + begin, "B", 1,
+                                                   keys_shape, 2);
+    PyObject* const scores = keys ? usearch_py_arena_buffer(&ArenaBufferType, self->arena, self->view.scores + begin,
+                                                            "d", sizeof(usearch_distance_t), scores_shape, 1)
+                                  : NULL;
     PyObject* const pair = scores ? PyTuple_Pack(2, keys, scores) : NULL;
     Py_XDECREF(scores);
     Py_XDECREF(keys);
@@ -3473,7 +3473,7 @@ static PyObject* DenseProducts_query(DenseProducts* self, PyObject* query_object
 }
 
 static PyObject* DenseProducts_repr(DenseProducts* self) {
-    return PyUnicode_FromFormat("DenseProducts(queries=%zu, required=%S)", self->queries, self->required);
+    return PyUnicode_FromFormat("DenseProducts(queries=%zu, required=%zu)", self->queries, self->required);
 }
 
 static PyMethodDef DenseProducts_methods[] = {
@@ -3488,14 +3488,12 @@ static PyMethodDef DenseProducts_methods[] = {
     {NULL, NULL, 0, NULL},
 };
 
-static PyMemberDef DenseProducts_members[] = {
-    {"offsets", Py_T_OBJECT_EX, offsetof(DenseProducts, offsets), Py_READONLY, "(queries + 1,) Apache Arrow offsets."},
-    {"keys", Py_T_OBJECT_EX, offsetof(DenseProducts, keys), Py_READONLY,
-     "(pairs, 16) identities of the indexed entries."},
-    {"scores", Py_T_OBJECT_EX, offsetof(DenseProducts, scores), Py_READONLY, "(pairs,) float64 products."},
-    {"required", Py_T_OBJECT_EX, offsetof(DenseProducts, required), Py_READONLY,
-     "Pairs scored before the bound cut any."},
-    {NULL, 0, 0, 0, NULL},
+static PyGetSetDef DenseProducts_getset[] = {
+    {"offsets", (getter)DenseProducts_get_offsets, NULL, "(queries + 1,) Apache Arrow offsets.", NULL},
+    {"keys", (getter)DenseProducts_get_keys, NULL, "(pairs, 16) identities of the indexed entries.", NULL},
+    {"scores", (getter)DenseProducts_get_scores, NULL, "(pairs,) float64 products.", NULL},
+    {"required", (getter)DenseProducts_get_required, NULL, "Pairs scored before the bound cut any.", NULL},
+    {NULL, NULL, NULL, NULL, NULL},
 };
 
 static PySequenceMethods DenseProducts_as_sequence = {.sq_length = (lenfunc)DenseProducts_length};
@@ -3511,13 +3509,13 @@ PyTypeObject DenseProductsType = {
     .tp_repr = (reprfunc)DenseProducts_repr,
     .tp_as_sequence = &DenseProducts_as_sequence,
     .tp_methods = DenseProducts_methods,
-    .tp_members = DenseProducts_members,
+    .tp_getset = DenseProducts_getset,
 };
 
 #pragma region Arrow Outputs
 
 /** What a capsule's export holds beside the library's own pin: the release it stands in for, and
- *  the @c Arena, so its executor outlives the array and a rewind refuses meanwhile. */
+ *  the @c Arena, so its memory and executor outlive the array. */
 typedef struct arrow_hold_t {
     void (*release)(struct ArrowArray*);
     void* private_data;
@@ -3531,15 +3529,9 @@ static void arrow_hold_release(struct ArrowArray* array) {
     array->release = hold->release;
     array->release(array);
     PyGILState_STATE const interpreter = PyGILState_Ensure();
-    usearch_py_arena_unclaim(hold->arena);
+    Py_DECREF(hold->arena);
     PyGILState_Release(interpreter);
     PyMem_RawFree(hold);
-}
-
-/** The output whose arena and generation stand for all of @p self. */
-static ArenaBuffer const* arena_output_anchor(PyObject* self) {
-    if (PyObject_TypeCheck(self, &DenseProductsType)) return (ArenaBuffer const*)((DenseProducts*)self)->offsets;
-    return (ArenaBuffer const*)self;
 }
 
 /** Exports @p self through the library's converter of its type. */
@@ -3547,41 +3539,33 @@ static usearch_status_t arena_output_to_arrow(PyObject* self, usearch_arena_t ar
                                               struct ArrowDeviceArray* array) {
     if (PyObject_TypeCheck(self, &DenseProductsType)) {
         DenseProducts const* const products = (DenseProducts const*)self;
-        usearch_matches_tape_view_t const tape = {.keys = ((ArenaBuffer const*)products->keys)->data,
-                                                  .scores = ((ArenaBuffer const*)products->scores)->data,
-                                                  .offsets = ((ArenaBuffer const*)products->offsets)->data};
-        return usearch_matches_tape_view_to_arrow(tape, products->queries, arena, schema, array);
+        return usearch_matches_tape_view_to_arrow(products->view, products->queries, arena, schema, array);
     }
     ArenaBuffer const* const buffer = (ArenaBuffer const*)self;
     usearch_rows_view_t const rows = {.data = buffer->data,
                                       .stride = (size_t)buffer->strides[0],
-                                      .columns = buffer->columns,
-                                      .scalar = buffer->scalar};
+                                      .columns = buffer->rows.columns,
+                                      .scalar = buffer->rows.scalar};
     return usearch_rows_view_to_arrow(rows, (size_t)buffer->shape[0], arena, schema, array);
 }
 
-/** Exports @p self into @p schema and @p array in place, holding its arena until @p array's
- *  release; 0, or -1 with an exception set. */
+/** Exports @p self into @p schema and @p array in place, holding its arena, which leads every
+ *  result as it leads an @c ArenaBuffer, until @p array's release; 0, or -1 with an exception. */
 static int arena_output_export(PyObject* self, struct ArrowSchema* schema, struct ArrowDeviceArray* array) {
-    ArenaBuffer const* const anchor = arena_output_anchor(self);
+    PyObject* const arena = ((ArenaBuffer const*)self)->arena;
     arrow_hold_t* const hold = (arrow_hold_t*)PyMem_RawMalloc(sizeof(arrow_hold_t));
     if (!hold) {
         PyErr_NoMemory();
         return -1;
     }
-    if (arena_buffer_hold(anchor) != 0) {
-        PyMem_RawFree(hold);
-        return -1;
-    }
-    usearch_status_t const status = arena_output_to_arrow(self, ((Arena*)anchor->arena)->handle, schema, array);
+    usearch_status_t const status = arena_output_to_arrow(self, usearch_py_arena_handle(arena), schema, array);
     if (status != usearch_status_success_k) {
-        arena_buffer_unpin(anchor);
         PyMem_RawFree(hold);
         return usearch_py_raise(status, "exporting the output as Arrow failed");
     }
     hold->release = array->array.release;
     hold->private_data = array->array.private_data;
-    hold->arena = Py_NewRef(anchor->arena);
+    hold->arena = Py_NewRef(arena);
     array->array.release = arrow_hold_release;
     array->array.private_data = hold;
     return 0;
@@ -3638,11 +3622,10 @@ static struct ArrowArray arrow_compacted_node(arrow_compacted_t* block, int64_t 
  *  The child schema moves out of an export of no rows, so its tags stay the library's.
  */
 static int matches_compact_export(Matches* self, struct ArrowSchema* schema, struct ArrowDeviceArray* array) {
-    ArenaBuffer const* const anchor = (ArenaBuffer const*)self->keys;
     usearch_matches_tape_view_t const nothing = {0};
     struct ArrowSchema view_schema;
     struct ArrowDeviceArray view_array;
-    usearch_status_t const status = usearch_matches_tape_view_to_arrow(nothing, 0, ((Arena*)anchor->arena)->handle,
+    usearch_status_t const status = usearch_matches_tape_view_to_arrow(nothing, 0, usearch_py_arena_handle(self->arena),
                                                                        &view_schema, &view_array);
     if (status != usearch_status_success_k) return usearch_py_raise(status, "exporting the matches failed");
     view_array.array.release(&view_array.array);
@@ -3663,21 +3646,14 @@ static int matches_compact_export(Matches* self, struct ArrowSchema* schema, str
                                      .release = arrow_compacted_schema_release,
                                      .private_data = root};
 
-    if (arena_buffer_pin(anchor) != 0) {
-        arrow_compacted_schema_release(&(struct ArrowSchema) {.private_data = root});
-        return -1;
-    }
-    size_t const* const counts = (size_t const*)((ArenaBuffer const*)self->counts)->data;
-    usearch_key_t const* const keys = (usearch_key_t const*)anchor->data;
-    usearch_distance_t const* const distances = (usearch_distance_t const*)((ArenaBuffer const*)self->distances)->data;
+    size_t const* const counts = self->view.counts;
+    size_t const columns = self->view.columns;
     size_t total = 0;
-    for (size_t query = 0; query != self->queries; ++query)
-        total += counts[query] < self->columns ? counts[query] : self->columns;
+    for (size_t query = 0; query != self->queries; ++query) total += counts[query] < columns ? counts[query] : columns;
     size_t const offsets_bytes = (self->queries + 1) * sizeof(int64_t);
     size_t const bytes = sizeof(arrow_compacted_t) + offsets_bytes + total * (sizeof(usearch_key_t) + sizeof(double));
     arrow_compacted_t* const block = (arrow_compacted_t*)PyMem_RawMalloc(bytes);
     if (!block) {
-        arena_buffer_unpin(anchor);
         arrow_compacted_schema_release(&(struct ArrowSchema) {.private_data = root});
         PyErr_NoMemory();
         return -1;
@@ -3688,16 +3664,15 @@ static int matches_compact_export(Matches* self, struct ArrowSchema* schema, str
     size_t written = 0;
     offsets[0] = 0;
     for (size_t query = 0; query != self->queries; ++query) {
-        size_t const found = counts[query] < self->columns ? counts[query] : self->columns;
-        size_t const first = query * self->columns;
+        size_t const found = counts[query] < columns ? counts[query] : columns;
+        size_t const first = query * columns;
         if (found) {
-            memcpy(key_bytes + written * sizeof(usearch_key_t), keys + first, found * sizeof(usearch_key_t));
-            memcpy(distance_bytes + written * sizeof(double), distances + first, found * sizeof(double));
+            memcpy(key_bytes + written * sizeof(usearch_key_t), self->view.keys + first, found * sizeof(usearch_key_t));
+            memcpy(distance_bytes + written * sizeof(double), self->view.scores + first, found * sizeof(double));
         }
         written += found;
         offsets[query + 1] = (int64_t)written;
     }
-    arena_buffer_unpin(anchor);
 
     atomic_init(&block->live, 4);
     block->buffers[0][0] = block->buffers[1][0] = block->buffers[2][0] = block->buffers[3][0] = NULL;
@@ -3872,7 +3847,7 @@ static int arrow_stream_get_next(struct ArrowArrayStream* stream, struct ArrowAr
 }
 
 static char const* arrow_stream_get_last_error(struct ArrowArrayStream* stream) {
-    return "a later call rewound the arena, or the output lives in device memory";
+    return "the output lives in device memory";
 }
 
 static void arrow_stream_release(struct ArrowArrayStream* stream) {
@@ -3957,93 +3932,6 @@ PyObject* api_capabilities_compiled(PyObject* self, PyObject* unused) {
 
 PyObject* api_capabilities_available(PyObject* self, PyObject* unused) {
     return PyUnicode_FromString(usearch_capabilities_available());
-}
-
-char const doc_layouts[] =                                                                      //
-    "layouts() -> dict[str, tuple[int, dict[str, int]]]\n"                                      //
-    "\n"                                                                                        //
-    "The size and field offsets of every argument struct the other bindings lay out by hand,\n" //
-    "as this build's compiler laid them out, keyed by the struct's name.";
-
-/** One field of a probed struct: its name and its byte offset. */
-typedef struct layout_field_t {
-    char const* name;
-    size_t offset;
-} layout_field_t;
-
-/** Adds `name: (size, {field: offset})` to @p layouts; returns 0, or -1 with an exception set. */
-static int layout_add(PyObject* layouts, char const* name, size_t size, layout_field_t const* fields, size_t count) {
-    PyObject* offsets = PyDict_New();
-    for (size_t field = 0; offsets && field != count; ++field)
-        if (usearch_py_dict_steal_item(offsets, fields[field].name, PyLong_FromSize_t(fields[field].offset)) != 0)
-            Py_CLEAR(offsets);
-    PyObject* const size_object = offsets ? PyLong_FromSize_t(size) : NULL;
-    PyObject* const layout = size_object ? PyTuple_New(2) : NULL;
-    if (!layout) {
-        Py_XDECREF(size_object);
-        Py_XDECREF(offsets);
-        return usearch_py_dict_steal_item(layouts, name, NULL);
-    }
-    PyTuple_SET_ITEM(layout, 0, size_object);
-    PyTuple_SET_ITEM(layout, 1, offsets);
-    return usearch_py_dict_steal_item(layouts, name, layout);
-}
-
-PyObject* api_layouts(PyObject* self, PyObject* unused) {
-    layout_field_t const ram[] = {
-        {"memory_domains", offsetof(usearch_ram_options_t, memory_domains)},
-        {"memory_domains_count", offsetof(usearch_ram_options_t, memory_domains_count)},
-        {"shard_capacity", offsetof(usearch_ram_options_t, shard_capacity)},
-        {"cpu_class", offsetof(usearch_ram_options_t, cpu_class)},
-        {"memory_limit", offsetof(usearch_ram_options_t, memory_limit)},
-    };
-    layout_field_t const vram[] = {
-        {"devices", offsetof(usearch_vram_options_t, devices)},
-        {"devices_count", offsetof(usearch_vram_options_t, devices_count)},
-        {"shard_capacity", offsetof(usearch_vram_options_t, shard_capacity)},
-        {"gpu_class", offsetof(usearch_vram_options_t, gpu_class)},
-    };
-    layout_field_t const nvme[] = {
-        {"paths", offsetof(usearch_nvme_options_t, paths)},
-        {"paths_count", offsetof(usearch_nvme_options_t, paths_count)},
-        {"cpu_class", offsetof(usearch_nvme_options_t, cpu_class)},
-    };
-    layout_field_t const executor_for_nvme[] = {
-        {"nvme", offsetof(usearch_executor_for_nvme_t, nvme)},
-        {"threads", offsetof(usearch_executor_for_nvme_t, threads)},
-        {"nvme_class", offsetof(usearch_executor_for_nvme_t, nvme_class)},
-    };
-    layout_field_t const stats[] = {
-        {"visited_members", offsetof(usearch_traversal_stats_t, visited_members)},
-        {"computed_distances", offsetof(usearch_traversal_stats_t, computed_distances)},
-        {"restarts", offsetof(usearch_traversal_stats_t, restarts)},
-        {"missing_hints", offsetof(usearch_traversal_stats_t, missing_hints)},
-    };
-    layout_field_t const description[] = {
-        {"metadata", offsetof(usearch_dense_index_description_t, metadata)},
-        {"size", offsetof(usearch_dense_index_description_t, size)},
-        {"capacity", offsetof(usearch_dense_index_description_t, capacity)},
-        {"memory_usage", offsetof(usearch_dense_index_description_t, memory_usage)},
-        {"cpu_class", offsetof(usearch_dense_index_description_t, cpu_class)},
-        {"gpu_class", offsetof(usearch_dense_index_description_t, gpu_class)},
-        {"shards_count", offsetof(usearch_dense_index_description_t, shards_count)},
-        {"load_path", offsetof(usearch_dense_index_description_t, load_path)},
-    };
-    PyObject* layouts = PyDict_New();
-    if (layouts && (layout_add(layouts, "usearch_ram_options_t", sizeof(usearch_ram_options_t), ram,
-                               usearch_py_table_size_(ram)) != 0 ||
-                    layout_add(layouts, "usearch_vram_options_t", sizeof(usearch_vram_options_t), vram,
-                               usearch_py_table_size_(vram)) != 0 ||
-                    layout_add(layouts, "usearch_nvme_options_t", sizeof(usearch_nvme_options_t), nvme,
-                               usearch_py_table_size_(nvme)) != 0 ||
-                    layout_add(layouts, "usearch_executor_for_nvme_t", sizeof(usearch_executor_for_nvme_t),
-                               executor_for_nvme, usearch_py_table_size_(executor_for_nvme)) != 0 ||
-                    layout_add(layouts, "usearch_traversal_stats_t", sizeof(usearch_traversal_stats_t), stats,
-                               usearch_py_table_size_(stats)) != 0 ||
-                    layout_add(layouts, "usearch_dense_index_description_t", sizeof(usearch_dense_index_description_t),
-                               description, usearch_py_table_size_(description)) != 0))
-        Py_CLEAR(layouts);
-    return layouts;
 }
 
 #pragma endregion Paths and Library Probes

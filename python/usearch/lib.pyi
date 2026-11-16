@@ -14,7 +14,7 @@ import uuid
 from collections.abc import Buffer, Callable, Generator, Sequence
 from enum import IntEnum
 from types import GenericAlias, TracebackType
-from typing import Any, Final, NoReturn, Protocol, Self, final, type_check_only
+from typing import Any, Final, NoReturn, Protocol, Self, final, overload, type_check_only
 
 from _typeshed import structseq
 
@@ -35,6 +35,8 @@ __all__: list[str] = [
     "DenseMetric",
     "DenseProducts",
     "DenseReachability",
+    "DenseRefinePlan",
+    "DenseReshardPlan",
     "DenseSearchStream",
     "DenseTraversalStats",
     "DenseVectors",
@@ -42,6 +44,10 @@ __all__: list[str] = [
     "Error",
     "Executor",
     "GPUClass",
+    "GeospatialIndex",
+    "GeospatialIndexDescription",
+    "GeospatialMetadata",
+    "GeospatialRelation",
     "InputOutputError",
     "InternalError",
     "InvalidArgumentError",
@@ -54,12 +60,22 @@ __all__: list[str] = [
     "NVMeClass",
     "On",
     "OutOfMemoryError",
+    "Phase",
     "ReadOnlyError",
     "RefineReport",
+    "RefineVerdict",
     "Residency",
     "Sample",
     "Scalar",
+    "SequenceIndex",
+    "SequenceIndexDescription",
+    "SequenceMetadata",
+    "SequenceMetric",
     "ShapeMismatchError",
+    "ShapesIndex",
+    "ShapesIndexDescription",
+    "ShapesMetadata",
+    "ShapesMetric",
     "Status",
     "Traversal",
     "UninitializedError",
@@ -68,7 +84,6 @@ __all__: list[str] = [
     "UnsupportedLayoutError",
     "capabilities_available",
     "capabilities_compiled",
-    "layouts",
     "version",
 ]
 
@@ -86,10 +101,6 @@ def capabilities_compiled() -> str:
 
 def capabilities_available() -> str:
     """The kernel families this machine can run."""
-    ...
-
-def layouts() -> dict[str, tuple[int, dict[str, int]]]:
-    """The size and field offsets of every argument struct the other bindings lay out by hand."""
     ...
 
 # endregion: Library Probes
@@ -234,6 +245,48 @@ class Traversal(IntEnum):
     SCAN = 2
     """Scores every entry published when the scan starts; exact, the ground truth a walk approximates."""
 
+class RefineVerdict(IntEnum):
+    """What a refine round concluded, so no caller picks a change rate."""
+
+    NONE = 0
+    """No round concluded: a report no round filled yet."""
+    IMPROVED = 1
+    """The round changed some entry's link set, so another round can help."""
+    CONVERGED = 2
+    """The round changed no entry's link set."""
+    STALLED = 3
+    """The round lowered nothing while something stands, as full entries leave no slot."""
+    STOPPED = 4
+    """The caller stopped the round; the phase names where."""
+
+class Phase(IntEnum):
+    """The kind of work a plan is doing, one value shared by refine and reshard in every residency."""
+
+    NONE = 0
+    """No plan, or one that has not started."""
+    COPY = 1
+    """A reshard moving keys and values into a target, with the links it keeps."""
+    BUILD = 2
+    """A reshard on NVMe building blocks of a target's rows in RAM and writing their links."""
+    PARTITION = 3
+    """A reshard cutting a source into one part per target."""
+    SCATTER = 4
+    """A reshard moving each part into its target."""
+    HEALTH = 5
+    """A round's health check, opening or closing it."""
+    HEAL = 6
+    """A round linking each island with the root's component."""
+    HUBS = 7
+    """A round drawing the hubs its gather streams entries past."""
+    GATHER = 8
+    """A round gathering every entry into a neighborhood."""
+    RESTITCH = 9
+    """A round re-stitching each neighborhood."""
+    WRITE = 10
+    """A round on NVMe rewriting each tile of links from what its restitch changed."""
+    DONE = 11
+    """The plan ended its round, and nothing more is pending."""
+
 class CPUClass(IntEnum):
     """The CPU families dispatch picks from; a placement may pin one."""
 
@@ -356,7 +409,7 @@ class CapacityOverflowError(Error, OverflowError):
     """A hard design ceiling was reached; a smaller request cannot help."""
 
 class UninitializedError(Error):
-    """The handle is not ready for the verb - absorbed as a donor, or closed."""
+    """The verb needs a prior successful reservation that never happened."""
 
 class ConfigMismatchError(Error, ValueError):
     """The request contradicts an already-frozen configuration."""
@@ -443,11 +496,6 @@ class Executor:
         """Waits until no call holds the executor, then sets what idle workers do."""
         ...
 
-    @property
-    def residency(self) -> Residency:
-        """The `Residency` its calls compute in. Python-only."""
-        ...
-
     def __enter__(self) -> Self: ...
     def __exit__(
         self, kind: type[BaseException] | None, value: BaseException | None, traceback: TracebackType | None, /
@@ -491,7 +539,7 @@ class _ArenaBuffer:
     """One output a call left in an `Arena`, readable until a later call rewinds it."""
 
     def __buffer__(self, flags: int, /) -> memoryview:
-        """Host memory only; device memory raises `DeviceError`, a rewound arena `UninitializedError`. Python-only."""
+        """Host memory only, which `Arena.describe` tells apart from device memory. Python-only."""
         ...
 
     def __len__(self) -> int:
@@ -641,6 +689,7 @@ class On[IndexT]:
         """Names the index the receiver addresses, as `On[DenseIndex]`."""
         ...
 
+    @overload
     def describe(self: On[DenseIndex]) -> DenseIndexDescription:
         """The frozen metadata and the current counters, read in one call. Each counter is read
         once, so under concurrent insertions they may come from slightly different moments.
@@ -651,6 +700,13 @@ class On[IndexT]:
         """
         ...
 
+    @overload
+    def describe(self: On[SequenceIndex]) -> SequenceIndexDescription: ...
+    @overload
+    def describe(self: On[ShapesIndex]) -> ShapesIndexDescription: ...
+    @overload
+    def describe(self: On[GeospatialIndex]) -> GeospatialIndexDescription: ...
+    @overload
     def reserve(self: On[DenseIndex], capacity: int, /) -> None:
         """Grows the index to host at least `capacity` entries, a hint,
         since insertions grow the index on demand.
@@ -660,11 +716,24 @@ class On[IndexT]:
         """
         ...
 
+    @overload
+    def reserve(self: On[SequenceIndex], capacity: int, /, *, payload_bytes: int = 0) -> None: ...
+    @overload
+    def reserve(self: On[ShapesIndex], capacity: int, /, *, points: int = 0) -> None: ...
+    @overload
+    def reserve(self: On[GeospatialIndex], capacity: int, /) -> None: ...
+    @overload
     def clear(self: On[DenseIndex]) -> None:
-        """Drops every entry, keeping the capacity and the frozen geometry.
-        """
+        """Drops every entry, keeping the capacity and the frozen geometry."""
         ...
 
+    @overload
+    def clear(self: On[SequenceIndex]) -> None: ...
+    @overload
+    def clear(self: On[ShapesIndex]) -> None: ...
+    @overload
+    def clear(self: On[GeospatialIndex]) -> None: ...
+    @overload
     def insert(
         self: On[DenseIndex],
         keys: Sequence[_KeyLike] | _Tensor,
@@ -690,7 +759,7 @@ class On[IndexT]:
             must be as wide as the buffer's items.
           progress (callable, optional): Called with (completed, total) entries. It reports and
             cannot stop the batch, every entry being claimed before the first report; what it
-            raises surfaces once the batch has finished. Reports are serialized.
+            raises goes to `sys.unraisablehook`. Reports are serialized.
           progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
           stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
 
@@ -704,13 +773,53 @@ class On[IndexT]:
         """
         ...
 
-    def refine(
-        self: On[DenseIndex],
+    @overload
+    def insert(
+        self: On[SequenceIndex],
+        keys: Sequence[_KeyLike] | _Tensor,
+        sequences: _Sequences,
+        /,
         *,
         expansion_factor: int = 0,
         progress: _Progress | None = None,
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
+    ) -> None: ...
+    @overload
+    def insert(
+        self: On[ShapesIndex],
+        keys: Sequence[_KeyLike] | _Tensor,
+        shapes: _Shapes,
+        /,
+        *,
+        expansion_factor: int = 0,
+        dtype: Scalar | None = None,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        stats: DenseTraversalStats | None = None,
+    ) -> None: ...
+    @overload
+    def insert(
+        self: On[GeospatialIndex],
+        keys: Sequence[_KeyLike] | _Tensor,
+        observations: _Tensor,
+        /,
+        *,
+        expansion_factor: int = 0,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        stats: DenseTraversalStats | None = None,
+    ) -> None: ...
+    @overload
+    def refine(
+        self: On[DenseIndex],
+        *,
+        expansion_factor: int = 0,
+        memory_limit: int = 0,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        stats: DenseTraversalStats | None = None,
+        plan: DenseRefinePlan | None = None,
     ) -> RefineReport:
         """Re-selects the neighbors of every stored entry against the finished graph, improving
         edges that were chosen when the graph around them was still incomplete.
@@ -719,33 +828,74 @@ class On[IndexT]:
         reaches a better graph, in less total time, than one expensive insertion pass - so a
         wide `expansion_factor` belongs here rather than in `insert`. Searches may run
         throughout on a RAM handle but not on a VRAM one, and a caller loops until the
-        report's `changed` falls below whatever change rate they consider settled.
+        report's `verdict` is no longer `RefineVerdict.IMPROVED`.
 
         Stopping is safe: re-selecting edges claims no identity, so a stopped sweep still
         re-links its islands, leaves the graph correct and merely less improved, and raises
-        `CancelledError`. A handler is therefore how a sweep is put under a time budget.
+        `CancelledError`. A handler is therefore how a sweep is put under a time budget. With
+        a `plan`, a stop leaves it live and the next call naming it continues the round;
+        `refine_plan_finish(plan)` closes it.
 
         Args:
           expansion_factor (int, optional): Breadth of the candidates; 0 derives it.
-          progress (callable, optional): Called with (completed, total) nodes; returning
-            False ends the sweep, None carries on.
+          memory_limit (int, optional): Bytes a loaded NVMe handle holds for the part it
+            rewrites; 0 derives what rounds that part in RAM.
+          progress (callable, optional): Called with (completed, total) units of each phase;
+            returning False stops the round, None carries on.
           progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
           stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
+          plan (DenseRefinePlan, optional): The round to open or continue; None runs one round
+            to its end.
 
         Returns:
           RefineReport: Entries re-selected and changed, the islands found and reconnected,
-            and the audit closing the heal; `changed` at zero means the graph has settled.
+            the neighborhoods, links added and dropped, the `RefineVerdict`, and the health
+            checks opening the round and closing the heal.
 
         Example:
           >>> from array import array
           >>> index = usearch.DenseIndex.init_ram(dimensions=4)
           >>> index.reserve(1)
           >>> index.insert([1], array('d', [0.1, 0.2, 0.3, 0.4]))
-          >>> index.refine().changed
-          0
+          >>> index.refine().verdict
+          <RefineVerdict.CONVERGED: 2>
         """
         ...
 
+    @overload
+    def refine(
+        self: On[SequenceIndex],
+        *,
+        expansion_factor: int = 0,
+        memory_limit: int = 0,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        stats: DenseTraversalStats | None = None,
+        plan: SequenceRefinePlan | None = None,
+    ) -> RefineReport: ...
+    @overload
+    def refine(
+        self: On[ShapesIndex],
+        *,
+        expansion_factor: int = 0,
+        memory_limit: int = 0,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        stats: DenseTraversalStats | None = None,
+        plan: ShapesRefinePlan | None = None,
+    ) -> RefineReport: ...
+    @overload
+    def refine(
+        self: On[GeospatialIndex],
+        *,
+        expansion_factor: int = 0,
+        memory_limit: int = 0,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        stats: DenseTraversalStats | None = None,
+        plan: GeospatialRefinePlan | None = None,
+    ) -> RefineReport: ...
+    @overload
     def health(self: On[DenseIndex]) -> DenseReachability:
         """Audits how much of the graph a search can reach, sweeping forward reachability from as
         many landmarks as one search draws. Read-only.
@@ -761,6 +911,13 @@ class On[IndexT]:
         """
         ...
 
+    @overload
+    def health(self: On[SequenceIndex]) -> DenseReachability: ...
+    @overload
+    def health(self: On[ShapesIndex]) -> DenseReachability: ...
+    @overload
+    def health(self: On[GeospatialIndex]) -> DenseReachability: ...
+    @overload
     def search(
         self: On[DenseIndex],
         queries: _Tensor,
@@ -811,6 +968,56 @@ class On[IndexT]:
         """
         ...
 
+    @overload
+    def search(
+        self: On[SequenceIndex],
+        queries: _Sequences,
+        wanted: int,
+        arena: Arena,
+        /,
+        *,
+        expansion_factor: int = 0,
+        traversal: Traversal = ...,
+        predicate: Callable[[Key], bool] | None = None,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        stats: DenseTraversalStats | None = None,
+    ) -> Matches: ...
+    @overload
+    def search(
+        self: On[ShapesIndex],
+        queries: _Shapes,
+        wanted: int,
+        arena: Arena,
+        /,
+        *,
+        expansion_factor: int = 0,
+        traversal: Traversal = ...,
+        dtype: Scalar | None = None,
+        predicate: Callable[[Key], bool] | None = None,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        stats: DenseTraversalStats | None = None,
+    ) -> Matches: ...
+    @overload
+    def search(
+        self: On[GeospatialIndex],
+        queries: _Tensor,
+        wanted: int,
+        arena: Arena,
+        /,
+        *,
+        relation: GeospatialRelation = ...,
+        metres: float = 0.0,
+        seconds: float = 0.0,
+        expansion_factor: int = 0,
+        traversal: Traversal = ...,
+        predicate: Callable[[Key], bool] | None = None,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        stats: DenseTraversalStats | None = None,
+    ) -> Matches: ...
+    @overload
     def count(self: On[DenseIndex], key: _KeyLike, /) -> int:
         """How many entries share `key`; zero means the index holds none.
 
@@ -829,6 +1036,13 @@ class On[IndexT]:
         """
         ...
 
+    @overload
+    def count(self: On[SequenceIndex], key: _KeyLike, /) -> int: ...
+    @overload
+    def count(self: On[ShapesIndex], key: _KeyLike, /) -> int: ...
+    @overload
+    def count(self: On[GeospatialIndex], key: _KeyLike, /) -> int: ...
+    @overload
     def get(self: On[DenseIndex], key: _KeyLike, arena: Arena, /, *, outputs_dtype: Scalar = ...) -> DenseVectors:
         """Every vector stored under `key`, in insertion order, and none when the key is absent.
 
@@ -845,6 +1059,14 @@ class On[IndexT]:
         """
         ...
 
+    @overload
+    def get(self: On[SequenceIndex], key: _KeyLike, arena: Arena, /) -> tuple[_ArenaBuffer, _ArenaBuffer]: ...
+    @overload
+    def get(
+        self: On[ShapesIndex], key: _KeyLike, arena: Arena, /, *, outputs_dtype: Scalar = ...
+    ) -> tuple[_ArenaBuffer, _ArenaBuffer]: ...
+    @overload
+    def get(self: On[GeospatialIndex], key: _KeyLike, arena: Arena, /) -> _ArenaBuffer: ...
     def multiply(
         self: On[DenseIndex],
         rows: _Tensor,
@@ -1000,59 +1222,144 @@ class On[IndexT]:
         """
         ...
 
-    def absorb(
-        self: On[DenseIndex], *donors: DenseIndex, progress: _Progress | None = None, progress_steps: int = 0
-    ) -> RefineReport:
-        """Absorbs every donor into this index, one after another, keeping their graphs rather
-        than re-inserting their vectors, and linking each in by walks across the appended
-        part. Each donor handle is consumed and every verb on it afterwards raises. Readers
-        of a RAM index may keep searching throughout, while a VRAM one admits no overlapping
-        search.
-
-        Cancellation stops the closing refinement alone: every donor is still consumed, the
-        islands still re-linked, and the call raises `CancelledError`. A donor whose absorption
-        fails, and every later one, stays a live handle its caller still owns, though the
-        entries of the one it struck may already have moved into this index.
-
-        Args:
-          donors (DenseIndex): The indexes to absorb.
-          progress (callable, optional): Called with (completed, total) nodes the closing
-            refinement re-selected; returning False stops it, None carries on.
-          progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
-
-        Returns:
-          RefineReport: What the closing refinement did to the graph.
-        """
-        ...
-
-    def split(
+    @overload
+    def reshard(
         self: On[DenseIndex],
-        *receivers: DenseIndex,
+        sources: Sequence[DenseIndex],
+        targets: Sequence[DenseIndex],
+        /,
+        *,
+        memory_domains: Sequence[int] | None = None,
+        devices: Sequence[int] | None = None,
+        paths: Sequence[_PathLike] | None = None,
+        shard_capacity: int = 0,
         expansion_factor: int = 0,
+        memory_limit: int = 0,
         seed: int = 0,
         progress: _Progress | None = None,
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
+        plan: DenseReshardPlan | None = None,
     ) -> RefineReport:
-        """Splits this index into the empty receivers, the inverse of `absorb`: the entries are
-        partitioned along the graph, each part lands in one receiver with its edges kept, and
-        a closing refinement re-links every receiver. This index is left empty and live.
-        Receivers match its residency, scalar, metric, geometry and shard count.
+        """Moves the entries of `sources` into `targets`, keeping their links rather than
+        re-inserting their vectors, then runs a round on every target that took entries. Several
+        sources into one target, itself among them, gather into it; one source into several
+        targets cuts it into one graph-local part per target; one index as its only source and
+        target recuts its own shards in place under the placement's `shard_capacity`. Every
+        index stays the caller's, and a source the targets do not name ends empty and live. The
+        receiver names where the call runs, and need not be among them.
+
+        The handler stops the closing rounds alone, never a move: a stop raises `CancelledError`
+        with every entry moved, or, with a `plan`, leaves it live for the next call naming it to
+        continue, until `reshard_plan_finish(plan)` closes it.
+
+        A live plan holds no index, so each index it names must outlive its finish.
 
         Args:
-          receivers (DenseIndex): At least two empty indexes, one per part.
-          expansion_factor (int, optional): Breadth of the closing walks; 0 derives it.
-          seed (int, optional): Picks the part roots; equal seeds split equally.
-          progress (callable, optional): Called with (completed, total) nodes the closing
-            refinements re-selected; returning False stops them, None carries on.
+          sources (Sequence[DenseIndex]): The indexes whose entries move, each named once.
+          targets (Sequence[DenseIndex]): The indexes they move into, each a source or empty.
+          memory_domains (Sequence[int], optional): NUMA node IDs of a RAM placement recut in
+            place; None keeps the placement.
+          devices (Sequence[int], optional): Device ordinals of a VRAM placement; None keeps it.
+          paths (Sequence[str | bytes | PathLike], optional): Drives of an NVMe placement;
+            None keeps it.
+          shard_capacity (int, optional): Entries per shard of the RAM or VRAM placement; 0
+            keeps the handle's own bound.
+          expansion_factor (int, optional): Breadth of any walk beside the rounds; 0 derives it.
+          memory_limit (int, optional): Bytes a loaded NVMe handle holds for the part it
+            rewrites; 0 derives what rounds that part in RAM.
+          seed (int, optional): Picks the part roots of a cut; equal seeds cut equally.
+          progress (callable, optional): Called with (completed, total) units of each phase of
+            the closing rounds; returning False stops them, None carries on.
           progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
           stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
+          plan (DenseReshardPlan, optional): The reshard to open or continue; None runs it to
+            its end.
 
         Returns:
-          RefineReport: What the closing refinements did, across the receivers.
+          RefineReport: What the closing rounds did to the graph, across the targets.
         """
         ...
 
+    @overload
+    def reshard(
+        self: On[SequenceIndex],
+        sources: Sequence[SequenceIndex],
+        targets: Sequence[SequenceIndex],
+        /,
+        *,
+        expansion_factor: int = 0,
+        memory_limit: int = 0,
+        seed: int = 0,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        stats: DenseTraversalStats | None = None,
+        plan: SequenceReshardPlan | None = None,
+    ) -> RefineReport: ...
+    @overload
+    def reshard(
+        self: On[ShapesIndex],
+        sources: Sequence[ShapesIndex],
+        targets: Sequence[ShapesIndex],
+        /,
+        *,
+        expansion_factor: int = 0,
+        memory_limit: int = 0,
+        seed: int = 0,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        stats: DenseTraversalStats | None = None,
+        plan: ShapesReshardPlan | None = None,
+    ) -> RefineReport: ...
+    @overload
+    def reshard(
+        self: On[GeospatialIndex],
+        sources: Sequence[GeospatialIndex],
+        targets: Sequence[GeospatialIndex],
+        /,
+        *,
+        expansion_factor: int = 0,
+        memory_limit: int = 0,
+        seed: int = 0,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        stats: DenseTraversalStats | None = None,
+        plan: GeospatialReshardPlan | None = None,
+    ) -> RefineReport: ...
+    @overload
+    def refine_plan_finish(self: On[DenseIndex], plan: DenseRefinePlan, /) -> RefineReport:
+        """Closes a refine plan on this index and the receiver's executor, the ones it was opened
+        with, and frees it whatever the call answers; a round a stop left open closes as a stop at
+        that barrier would.
+
+        Returns:
+          RefineReport: What the whole plan did to the graph.
+        """
+        ...
+
+    @overload
+    def refine_plan_finish(self: On[SequenceIndex], plan: SequenceRefinePlan, /) -> RefineReport: ...
+    @overload
+    def refine_plan_finish(self: On[ShapesIndex], plan: ShapesRefinePlan, /) -> RefineReport: ...
+    @overload
+    def refine_plan_finish(self: On[GeospatialIndex], plan: GeospatialRefinePlan, /) -> RefineReport: ...
+    @overload
+    def reshard_plan_finish(self: On[DenseIndex], plan: DenseReshardPlan, /) -> RefineReport:
+        """Closes a reshard plan on the receiver's executor, the one it was opened with, and frees
+        it whatever the call answers, reopening every index it names; a plan whose entries have
+        not all moved runs no round and reports zeros.
+
+        Returns:
+          RefineReport: What the whole plan did to the graph.
+        """
+        ...
+
+    @overload
+    def reshard_plan_finish(self: On[SequenceIndex], plan: SequenceReshardPlan, /) -> RefineReport: ...
+    @overload
+    def reshard_plan_finish(self: On[ShapesIndex], plan: ShapesReshardPlan, /) -> RefineReport: ...
+    @overload
+    def reshard_plan_finish(self: On[GeospatialIndex], plan: GeospatialReshardPlan, /) -> RefineReport: ...
     def sample(
         self: On[DenseIndex],
         wanted: int,
@@ -1093,6 +1400,7 @@ class On[IndexT]:
         """
         ...
 
+    @overload
     def save(
         self: On[DenseIndex], path: _PathLike, /, *, progress: _Progress | None = None, progress_steps: int = 0
     ) -> None:
@@ -1109,6 +1417,19 @@ class On[IndexT]:
         """
         ...
 
+    @overload
+    def save(
+        self: On[SequenceIndex], path: _PathLike, /, *, progress: _Progress | None = None, progress_steps: int = 0
+    ) -> None: ...
+    @overload
+    def save(
+        self: On[ShapesIndex], path: _PathLike, /, *, progress: _Progress | None = None, progress_steps: int = 0
+    ) -> None: ...
+    @overload
+    def save(
+        self: On[GeospatialIndex], path: _PathLike, /, *, progress: _Progress | None = None, progress_steps: int = 0
+    ) -> None: ...
+    @overload
     def save_buffer(
         self: On[DenseIndex], arena: Arena, /, *, progress: _Progress | None = None, progress_steps: int = 0
     ) -> Monolith:
@@ -1133,6 +1454,18 @@ class On[IndexT]:
         """
         ...
 
+    @overload
+    def save_buffer(
+        self: On[SequenceIndex], arena: Arena, /, *, progress: _Progress | None = None, progress_steps: int = 0
+    ) -> Monolith: ...
+    @overload
+    def save_buffer(
+        self: On[ShapesIndex], arena: Arena, /, *, progress: _Progress | None = None, progress_steps: int = 0
+    ) -> Monolith: ...
+    @overload
+    def save_buffer(
+        self: On[GeospatialIndex], arena: Arena, /, *, progress: _Progress | None = None, progress_steps: int = 0
+    ) -> Monolith: ...
     def cursor(self: On[DenseIndex], starts: Sequence[_KeyLike] | _Tensor | None = None) -> DenseCursor:
         """Opens a walk over the stored entries that `DenseCursor.next` pulls in batches, from the
         `starts` keys in their order when given, or across every entry as stored otherwise.
@@ -1165,6 +1498,21 @@ class On[IndexT]:
         ...
 
     def __repr__(self) -> str: ...
+    def within(
+        self: On[GeospatialIndex],
+        queries: _Tensor,
+        arena: Arena,
+        /,
+        *,
+        metres: float = 0.0,
+        relation: GeospatialRelation = ...,
+        seconds: float = 0.0,
+        traversal: Traversal = ...,
+        predicate: Callable[[Key], bool] | None = None,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        stats: DenseTraversalStats | None = None,
+    ) -> DenseProducts: ...
 
 @final
 class DeferredOn[IndexT]:
@@ -1175,6 +1523,7 @@ class DeferredOn[IndexT]:
         """Names the index the receiver addresses, as `DeferredOn[DenseIndex]`."""
         ...
 
+    @overload
     def describe(self: DeferredOn[DenseIndex]) -> Deferred[DenseIndexDescription]:
         """The frozen metadata and the current counters, read in one call. Each counter is read
         once, so under concurrent insertions they may come from slightly different moments.
@@ -1185,6 +1534,13 @@ class DeferredOn[IndexT]:
         """
         ...
 
+    @overload
+    def describe(self: DeferredOn[SequenceIndex]) -> Deferred[SequenceIndexDescription]: ...
+    @overload
+    def describe(self: DeferredOn[ShapesIndex]) -> Deferred[ShapesIndexDescription]: ...
+    @overload
+    def describe(self: DeferredOn[GeospatialIndex]) -> Deferred[GeospatialIndexDescription]: ...
+    @overload
     def reserve(self: DeferredOn[DenseIndex], capacity: int, /) -> Deferred[None]:
         """Grows the index to host at least `capacity` entries, a hint,
         since insertions grow the index on demand.
@@ -1194,11 +1550,24 @@ class DeferredOn[IndexT]:
         """
         ...
 
+    @overload
+    def reserve(self: DeferredOn[SequenceIndex], capacity: int, /, *, payload_bytes: int = 0) -> Deferred[None]: ...
+    @overload
+    def reserve(self: DeferredOn[ShapesIndex], capacity: int, /, *, points: int = 0) -> Deferred[None]: ...
+    @overload
+    def reserve(self: DeferredOn[GeospatialIndex], capacity: int, /) -> Deferred[None]: ...
+    @overload
     def clear(self: DeferredOn[DenseIndex]) -> Deferred[None]:
-        """Drops every entry, keeping the capacity and the frozen geometry.
-        """
+        """Drops every entry, keeping the capacity and the frozen geometry."""
         ...
 
+    @overload
+    def clear(self: DeferredOn[SequenceIndex]) -> Deferred[None]: ...
+    @overload
+    def clear(self: DeferredOn[ShapesIndex]) -> Deferred[None]: ...
+    @overload
+    def clear(self: DeferredOn[GeospatialIndex]) -> Deferred[None]: ...
+    @overload
     def insert(
         self: DeferredOn[DenseIndex],
         keys: Sequence[_KeyLike] | _Tensor,
@@ -1224,7 +1593,7 @@ class DeferredOn[IndexT]:
             must be as wide as the buffer's items.
           progress (callable, optional): Called with (completed, total) entries. It reports and
             cannot stop the batch, every entry being claimed before the first report; what it
-            raises surfaces once the batch has finished. Reports are serialized.
+            raises goes to `sys.unraisablehook`. Reports are serialized.
           progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
           stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
 
@@ -1238,13 +1607,53 @@ class DeferredOn[IndexT]:
         """
         ...
 
-    def refine(
-        self: DeferredOn[DenseIndex],
+    @overload
+    def insert(
+        self: DeferredOn[SequenceIndex],
+        keys: Sequence[_KeyLike] | _Tensor,
+        sequences: _Sequences,
+        /,
         *,
         expansion_factor: int = 0,
         progress: _Progress | None = None,
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
+    ) -> Deferred[None]: ...
+    @overload
+    def insert(
+        self: DeferredOn[ShapesIndex],
+        keys: Sequence[_KeyLike] | _Tensor,
+        shapes: _Shapes,
+        /,
+        *,
+        expansion_factor: int = 0,
+        dtype: Scalar | None = None,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        stats: DenseTraversalStats | None = None,
+    ) -> Deferred[None]: ...
+    @overload
+    def insert(
+        self: DeferredOn[GeospatialIndex],
+        keys: Sequence[_KeyLike] | _Tensor,
+        observations: _Tensor,
+        /,
+        *,
+        expansion_factor: int = 0,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        stats: DenseTraversalStats | None = None,
+    ) -> Deferred[None]: ...
+    @overload
+    def refine(
+        self: DeferredOn[DenseIndex],
+        *,
+        expansion_factor: int = 0,
+        memory_limit: int = 0,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        stats: DenseTraversalStats | None = None,
+        plan: DenseRefinePlan | None = None,
     ) -> Deferred[RefineReport]:
         """Re-selects the neighbors of every stored entry against the finished graph, improving
         edges that were chosen when the graph around them was still incomplete.
@@ -1253,33 +1662,74 @@ class DeferredOn[IndexT]:
         reaches a better graph, in less total time, than one expensive insertion pass - so a
         wide `expansion_factor` belongs here rather than in `insert`. Searches may run
         throughout on a RAM handle but not on a VRAM one, and a caller loops until the
-        report's `changed` falls below whatever change rate they consider settled.
+        report's `verdict` is no longer `RefineVerdict.IMPROVED`.
 
         Stopping is safe: re-selecting edges claims no identity, so a stopped sweep still
         re-links its islands, leaves the graph correct and merely less improved, and raises
-        `CancelledError`. A handler is therefore how a sweep is put under a time budget.
+        `CancelledError`. A handler is therefore how a sweep is put under a time budget. With
+        a `plan`, a stop leaves it live and the next call naming it continues the round;
+        `refine_plan_finish(plan)` closes it.
 
         Args:
           expansion_factor (int, optional): Breadth of the candidates; 0 derives it.
-          progress (callable, optional): Called with (completed, total) nodes; returning
-            False ends the sweep, None carries on.
+          memory_limit (int, optional): Bytes a loaded NVMe handle holds for the part it
+            rewrites; 0 derives what rounds that part in RAM.
+          progress (callable, optional): Called with (completed, total) units of each phase;
+            returning False stops the round, None carries on.
           progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
           stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
+          plan (DenseRefinePlan, optional): The round to open or continue; None runs one round
+            to its end.
 
         Returns:
           RefineReport: Entries re-selected and changed, the islands found and reconnected,
-            and the audit closing the heal; `changed` at zero means the graph has settled.
+            the neighborhoods, links added and dropped, the `RefineVerdict`, and the health
+            checks opening the round and closing the heal.
 
         Example:
           >>> from array import array
           >>> index = usearch.DenseIndex.init_ram(dimensions=4)
           >>> index.reserve(1)
           >>> index.insert([1], array('d', [0.1, 0.2, 0.3, 0.4]))
-          >>> index.refine().changed
-          0
+          >>> index.refine().verdict
+          <RefineVerdict.CONVERGED: 2>
         """
         ...
 
+    @overload
+    def refine(
+        self: DeferredOn[SequenceIndex],
+        *,
+        expansion_factor: int = 0,
+        memory_limit: int = 0,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        stats: DenseTraversalStats | None = None,
+        plan: SequenceRefinePlan | None = None,
+    ) -> Deferred[RefineReport]: ...
+    @overload
+    def refine(
+        self: DeferredOn[ShapesIndex],
+        *,
+        expansion_factor: int = 0,
+        memory_limit: int = 0,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        stats: DenseTraversalStats | None = None,
+        plan: ShapesRefinePlan | None = None,
+    ) -> Deferred[RefineReport]: ...
+    @overload
+    def refine(
+        self: DeferredOn[GeospatialIndex],
+        *,
+        expansion_factor: int = 0,
+        memory_limit: int = 0,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        stats: DenseTraversalStats | None = None,
+        plan: GeospatialRefinePlan | None = None,
+    ) -> Deferred[RefineReport]: ...
+    @overload
     def health(self: DeferredOn[DenseIndex]) -> Deferred[DenseReachability]:
         """Audits how much of the graph a search can reach, sweeping forward reachability from as
         many landmarks as one search draws. Read-only.
@@ -1295,6 +1745,13 @@ class DeferredOn[IndexT]:
         """
         ...
 
+    @overload
+    def health(self: DeferredOn[SequenceIndex]) -> Deferred[DenseReachability]: ...
+    @overload
+    def health(self: DeferredOn[ShapesIndex]) -> Deferred[DenseReachability]: ...
+    @overload
+    def health(self: DeferredOn[GeospatialIndex]) -> Deferred[DenseReachability]: ...
+    @overload
     def search(
         self: DeferredOn[DenseIndex],
         queries: _Tensor,
@@ -1345,6 +1802,56 @@ class DeferredOn[IndexT]:
         """
         ...
 
+    @overload
+    def search(
+        self: DeferredOn[SequenceIndex],
+        queries: _Sequences,
+        wanted: int,
+        arena: Arena,
+        /,
+        *,
+        expansion_factor: int = 0,
+        traversal: Traversal = ...,
+        predicate: Callable[[Key], bool] | None = None,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        stats: DenseTraversalStats | None = None,
+    ) -> Deferred[Matches]: ...
+    @overload
+    def search(
+        self: DeferredOn[ShapesIndex],
+        queries: _Shapes,
+        wanted: int,
+        arena: Arena,
+        /,
+        *,
+        expansion_factor: int = 0,
+        traversal: Traversal = ...,
+        dtype: Scalar | None = None,
+        predicate: Callable[[Key], bool] | None = None,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        stats: DenseTraversalStats | None = None,
+    ) -> Deferred[Matches]: ...
+    @overload
+    def search(
+        self: DeferredOn[GeospatialIndex],
+        queries: _Tensor,
+        wanted: int,
+        arena: Arena,
+        /,
+        *,
+        relation: GeospatialRelation = ...,
+        metres: float = 0.0,
+        seconds: float = 0.0,
+        expansion_factor: int = 0,
+        traversal: Traversal = ...,
+        predicate: Callable[[Key], bool] | None = None,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        stats: DenseTraversalStats | None = None,
+    ) -> Deferred[Matches]: ...
+    @overload
     def count(self: DeferredOn[DenseIndex], key: _KeyLike, /) -> Deferred[int]:
         """How many entries share `key`; zero means the index holds none.
 
@@ -1363,6 +1870,13 @@ class DeferredOn[IndexT]:
         """
         ...
 
+    @overload
+    def count(self: DeferredOn[SequenceIndex], key: _KeyLike, /) -> Deferred[int]: ...
+    @overload
+    def count(self: DeferredOn[ShapesIndex], key: _KeyLike, /) -> Deferred[int]: ...
+    @overload
+    def count(self: DeferredOn[GeospatialIndex], key: _KeyLike, /) -> Deferred[int]: ...
+    @overload
     def get(
         self: DeferredOn[DenseIndex], key: _KeyLike, arena: Arena, /, *, outputs_dtype: Scalar = ...
     ) -> Deferred[DenseVectors]:
@@ -1381,6 +1895,16 @@ class DeferredOn[IndexT]:
         """
         ...
 
+    @overload
+    def get(
+        self: DeferredOn[SequenceIndex], key: _KeyLike, arena: Arena, /
+    ) -> Deferred[tuple[_ArenaBuffer, _ArenaBuffer]]: ...
+    @overload
+    def get(
+        self: DeferredOn[ShapesIndex], key: _KeyLike, arena: Arena, /, *, outputs_dtype: Scalar = ...
+    ) -> Deferred[tuple[_ArenaBuffer, _ArenaBuffer]]: ...
+    @overload
+    def get(self: DeferredOn[GeospatialIndex], key: _KeyLike, arena: Arena, /) -> Deferred[_ArenaBuffer]: ...
     def multiply(
         self: DeferredOn[DenseIndex],
         rows: _Tensor,
@@ -1536,59 +2060,150 @@ class DeferredOn[IndexT]:
         """
         ...
 
-    def absorb(
-        self: DeferredOn[DenseIndex], *donors: DenseIndex, progress: _Progress | None = None, progress_steps: int = 0
-    ) -> Deferred[RefineReport]:
-        """Absorbs every donor into this index, one after another, keeping their graphs rather
-        than re-inserting their vectors, and linking each in by walks across the appended
-        part. Each donor handle is consumed and every verb on it afterwards raises. Readers
-        of a RAM index may keep searching throughout, while a VRAM one admits no overlapping
-        search.
-
-        Cancellation stops the closing refinement alone: every donor is still consumed, the
-        islands still re-linked, and the call raises `CancelledError`. A donor whose absorption
-        fails, and every later one, stays a live handle its caller still owns, though the
-        entries of the one it struck may already have moved into this index.
-
-        Args:
-          donors (DenseIndex): The indexes to absorb.
-          progress (callable, optional): Called with (completed, total) nodes the closing
-            refinement re-selected; returning False stops it, None carries on.
-          progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
-
-        Returns:
-          RefineReport: What the closing refinement did to the graph.
-        """
-        ...
-
-    def split(
+    @overload
+    def reshard(
         self: DeferredOn[DenseIndex],
-        *receivers: DenseIndex,
+        sources: Sequence[DenseIndex],
+        targets: Sequence[DenseIndex],
+        /,
+        *,
+        memory_domains: Sequence[int] | None = None,
+        devices: Sequence[int] | None = None,
+        paths: Sequence[_PathLike] | None = None,
+        shard_capacity: int = 0,
         expansion_factor: int = 0,
+        memory_limit: int = 0,
         seed: int = 0,
         progress: _Progress | None = None,
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
+        plan: DenseReshardPlan | None = None,
     ) -> Deferred[RefineReport]:
-        """Splits this index into the empty receivers, the inverse of `absorb`: the entries are
-        partitioned along the graph, each part lands in one receiver with its edges kept, and
-        a closing refinement re-links every receiver. This index is left empty and live.
-        Receivers match its residency, scalar, metric, geometry and shard count.
+        """Moves the entries of `sources` into `targets`, keeping their links rather than
+        re-inserting their vectors, then runs a round on every target that took entries. Several
+        sources into one target, itself among them, gather into it; one source into several
+        targets cuts it into one graph-local part per target; one index as its only source and
+        target recuts its own shards in place under the placement's `shard_capacity`. Every
+        index stays the caller's, and a source the targets do not name ends empty and live. The
+        receiver names where the call runs, and need not be among them.
+
+        The handler stops the closing rounds alone, never a move: a stop raises `CancelledError`
+        with every entry moved, or, with a `plan`, leaves it live for the next call naming it to
+        continue, until `reshard_plan_finish(plan)` closes it.
+
+        A live plan holds no index, so each index it names must outlive its finish.
 
         Args:
-          receivers (DenseIndex): At least two empty indexes, one per part.
-          expansion_factor (int, optional): Breadth of the closing walks; 0 derives it.
-          seed (int, optional): Picks the part roots; equal seeds split equally.
-          progress (callable, optional): Called with (completed, total) nodes the closing
-            refinements re-selected; returning False stops them, None carries on.
+          sources (Sequence[DenseIndex]): The indexes whose entries move, each named once.
+          targets (Sequence[DenseIndex]): The indexes they move into, each a source or empty.
+          memory_domains (Sequence[int], optional): NUMA node IDs of a RAM placement recut in
+            place; None keeps the placement.
+          devices (Sequence[int], optional): Device ordinals of a VRAM placement; None keeps it.
+          paths (Sequence[str | bytes | PathLike], optional): Drives of an NVMe placement;
+            None keeps it.
+          shard_capacity (int, optional): Entries per shard of the RAM or VRAM placement; 0
+            keeps the handle's own bound.
+          expansion_factor (int, optional): Breadth of any walk beside the rounds; 0 derives it.
+          memory_limit (int, optional): Bytes a loaded NVMe handle holds for the part it
+            rewrites; 0 derives what rounds that part in RAM.
+          seed (int, optional): Picks the part roots of a cut; equal seeds cut equally.
+          progress (callable, optional): Called with (completed, total) units of each phase of
+            the closing rounds; returning False stops them, None carries on.
           progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
           stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
+          plan (DenseReshardPlan, optional): The reshard to open or continue; None runs it to
+            its end.
 
         Returns:
-          RefineReport: What the closing refinements did, across the receivers.
+          RefineReport: What the closing rounds did to the graph, across the targets.
         """
         ...
 
+    @overload
+    def reshard(
+        self: DeferredOn[SequenceIndex],
+        sources: Sequence[SequenceIndex],
+        targets: Sequence[SequenceIndex],
+        /,
+        *,
+        expansion_factor: int = 0,
+        memory_limit: int = 0,
+        seed: int = 0,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        stats: DenseTraversalStats | None = None,
+        plan: SequenceReshardPlan | None = None,
+    ) -> Deferred[RefineReport]: ...
+    @overload
+    def reshard(
+        self: DeferredOn[ShapesIndex],
+        sources: Sequence[ShapesIndex],
+        targets: Sequence[ShapesIndex],
+        /,
+        *,
+        expansion_factor: int = 0,
+        memory_limit: int = 0,
+        seed: int = 0,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        stats: DenseTraversalStats | None = None,
+        plan: ShapesReshardPlan | None = None,
+    ) -> Deferred[RefineReport]: ...
+    @overload
+    def reshard(
+        self: DeferredOn[GeospatialIndex],
+        sources: Sequence[GeospatialIndex],
+        targets: Sequence[GeospatialIndex],
+        /,
+        *,
+        expansion_factor: int = 0,
+        memory_limit: int = 0,
+        seed: int = 0,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        stats: DenseTraversalStats | None = None,
+        plan: GeospatialReshardPlan | None = None,
+    ) -> Deferred[RefineReport]: ...
+    @overload
+    def refine_plan_finish(self: DeferredOn[DenseIndex], plan: DenseRefinePlan, /) -> Deferred[RefineReport]:
+        """Closes a refine plan on this index and the receiver's executor, the ones it was opened
+        with, and frees it whatever the call answers; a round a stop left open closes as a stop at
+        that barrier would.
+
+        Returns:
+          RefineReport: What the whole plan did to the graph.
+        """
+        ...
+
+    @overload
+    def refine_plan_finish(self: DeferredOn[SequenceIndex], plan: SequenceRefinePlan, /) -> Deferred[RefineReport]: ...
+    @overload
+    def refine_plan_finish(self: DeferredOn[ShapesIndex], plan: ShapesRefinePlan, /) -> Deferred[RefineReport]: ...
+    @overload
+    def refine_plan_finish(
+        self: DeferredOn[GeospatialIndex], plan: GeospatialRefinePlan, /
+    ) -> Deferred[RefineReport]: ...
+    @overload
+    def reshard_plan_finish(self: DeferredOn[DenseIndex], plan: DenseReshardPlan, /) -> Deferred[RefineReport]:
+        """Closes a reshard plan on the receiver's executor, the one it was opened with, and frees
+        it whatever the call answers, reopening every index it names; a plan whose entries have
+        not all moved runs no round and reports zeros.
+
+        Returns:
+          RefineReport: What the whole plan did to the graph.
+        """
+        ...
+
+    @overload
+    def reshard_plan_finish(
+        self: DeferredOn[SequenceIndex], plan: SequenceReshardPlan, /
+    ) -> Deferred[RefineReport]: ...
+    @overload
+    def reshard_plan_finish(self: DeferredOn[ShapesIndex], plan: ShapesReshardPlan, /) -> Deferred[RefineReport]: ...
+    @overload
+    def reshard_plan_finish(
+        self: DeferredOn[GeospatialIndex], plan: GeospatialReshardPlan, /
+    ) -> Deferred[RefineReport]: ...
     def sample(
         self: DeferredOn[DenseIndex],
         wanted: int,
@@ -1629,6 +2244,7 @@ class DeferredOn[IndexT]:
         """
         ...
 
+    @overload
     def save(
         self: DeferredOn[DenseIndex], path: _PathLike, /, *, progress: _Progress | None = None, progress_steps: int = 0
     ) -> Deferred[None]:
@@ -1645,6 +2261,29 @@ class DeferredOn[IndexT]:
         """
         ...
 
+    @overload
+    def save(
+        self: DeferredOn[SequenceIndex],
+        path: _PathLike,
+        /,
+        *,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+    ) -> Deferred[None]: ...
+    @overload
+    def save(
+        self: DeferredOn[ShapesIndex], path: _PathLike, /, *, progress: _Progress | None = None, progress_steps: int = 0
+    ) -> Deferred[None]: ...
+    @overload
+    def save(
+        self: DeferredOn[GeospatialIndex],
+        path: _PathLike,
+        /,
+        *,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+    ) -> Deferred[None]: ...
+    @overload
     def save_buffer(
         self: DeferredOn[DenseIndex], arena: Arena, /, *, progress: _Progress | None = None, progress_steps: int = 0
     ) -> Deferred[Monolith]:
@@ -1669,7 +2308,39 @@ class DeferredOn[IndexT]:
         """
         ...
 
+    @overload
+    def save_buffer(
+        self: DeferredOn[SequenceIndex], arena: Arena, /, *, progress: _Progress | None = None, progress_steps: int = 0
+    ) -> Deferred[Monolith]: ...
+    @overload
+    def save_buffer(
+        self: DeferredOn[ShapesIndex], arena: Arena, /, *, progress: _Progress | None = None, progress_steps: int = 0
+    ) -> Deferred[Monolith]: ...
+    @overload
+    def save_buffer(
+        self: DeferredOn[GeospatialIndex],
+        arena: Arena,
+        /,
+        *,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+    ) -> Deferred[Monolith]: ...
     def __repr__(self) -> str: ...
+    def within(
+        self: DeferredOn[GeospatialIndex],
+        queries: _Tensor,
+        arena: Arena,
+        /,
+        *,
+        metres: float = 0.0,
+        relation: GeospatialRelation = ...,
+        seconds: float = 0.0,
+        traversal: Traversal = ...,
+        predicate: Callable[[Key], bool] | None = None,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        stats: DenseTraversalStats | None = None,
+    ) -> Deferred[DenseProducts]: ...
 
 # endregion: Shared Vocabulary
 
@@ -1716,19 +2387,8 @@ class DenseMetadata(structseq[Any], tuple[int, DenseMetric, Scalar, int]):
         ...
 
 @final
-class DenseIndexDescription(structseq[Any], tuple[DenseMetadata, int, int, int, CPUClass | None, GPUClass | None, int, str]):
+class DenseIndexDescription:
     """A live index's frozen metadata and current counters."""
-
-    __match_args__: Final = (
-        "metadata",
-        "size",
-        "capacity",
-        "memory_usage",
-        "cpu_class",
-        "gpu_class",
-        "shards_count",
-        "load_path",
-    )
 
     @property
     def metadata(self) -> DenseMetadata:
@@ -1771,10 +2431,8 @@ class DenseIndexDescription(structseq[Any], tuple[DenseMetadata, int, int, int, 
         ...
 
 @final
-class DenseReachability(structseq[Any], tuple[int, int, int, int]):
+class DenseReachability:
     """One reachability audit."""
-
-    __match_args__: Final = ("audited", "reachable", "sweeps", "back_sweeps")
 
     @property
     def audited(self) -> int:
@@ -1783,24 +2441,52 @@ class DenseReachability(structseq[Any], tuple[int, int, int, int]):
 
     @property
     def reachable(self) -> int:
-        """Of those, the entries a search reaches; the rest wait for a `refine` to re-link them."""
+        """Of those, the entries a search reaches from the root."""
         ...
 
     @property
-    def sweeps(self) -> int:
-        """Levels the sweep took to converge."""
+    def depth_from_root(self) -> int:
+        """Depths the sweep from the root took."""
         ...
 
     @property
-    def back_sweeps(self) -> int:
-        """Levels the sweep back toward the entry point took, where an audit sweeps both ways."""
+    def depth_to_root(self) -> int:
+        """Depths the sweep toward the root took."""
+        ...
+
+    @property
+    def unlinked(self) -> int:
+        """Entries no reached entry links to."""
+        ...
+
+    @property
+    def underlinked(self) -> int:
+        """Entries linked to by fewer entries than they link to."""
+        ...
+
+    @property
+    def beyond_most_populated_depth(self) -> int:
+        """Entries deeper than the depth holding the most entries."""
+        ...
+
+    @property
+    def unreached_islands(self) -> int:
+        """Islands no entry outside them links into."""
+        ...
+
+    @property
+    def stranded_islands(self) -> int:
+        """Islands that link to no entry outside them."""
+        ...
+
+    @property
+    def components(self) -> int:
+        """Components when direction is ignored."""
         ...
 
 @final
-class RefineReport(structseq[Any], tuple[int, int, int, int, DenseReachability]):
-    """What one refine-family call did to the graph."""
-
-    __match_args__: Final = ("reselected", "changed", "islands_found", "islands_reconnected", "reachability")
+class RefineReport:
+    """What one `refine` or `reshard` did to the graph, or what a plan did once finished."""
 
     @property
     def reselected(self) -> int:
@@ -1809,7 +2495,7 @@ class RefineReport(structseq[Any], tuple[int, int, int, int, DenseReachability])
 
     @property
     def changed(self) -> int:
-        """Of those, the entries whose neighbor set gained a member it lacked; zero means settled."""
+        """Of those, the entries whose neighbor set changed, any link added or dropped."""
         ...
 
     @property
@@ -1823,15 +2509,43 @@ class RefineReport(structseq[Any], tuple[int, int, int, int, DenseReachability])
         ...
 
     @property
+    def neighborhoods(self) -> int:
+        """Neighborhoods the round re-stitched."""
+        ...
+
+    @property
+    def widest_neighborhood(self) -> int:
+        """Entries of the widest neighborhood."""
+        ...
+
+    @property
+    def added_links(self) -> int:
+        """Links the round added."""
+        ...
+
+    @property
+    def dropped_links(self) -> int:
+        """Links the round dropped."""
+        ...
+
+    @property
+    def verdict(self) -> RefineVerdict:
+        """What the round concluded."""
+        ...
+
+    @property
+    def opening(self) -> DenseReachability:
+        """The health check opening the round."""
+        ...
+
+    @property
     def reachability(self) -> DenseReachability:
-        """The audit closing the heal, as `health` would take it right after."""
+        """The health check closing the heal, as `health` would take it right after."""
         ...
 
 @final
-class Sample(structseq[Any], tuple[_ArenaBuffer, _ArenaBuffer, Matches, _ArenaBuffer]):
+class Sample:
     """The draws one `sample` call wrote into an `Arena`, viewing it until it rewinds."""
-
-    __match_args__: Final = ("keys", "entry_ordinals", "parents", "coordinates")
 
     @property
     def keys(self) -> _ArenaBuffer:
@@ -1873,11 +2587,50 @@ class DenseTraversalStats:
         """Times the walk fell back to a fresh entry point."""
         ...
 
+    @property
+    def missing_hints(self) -> int:
+        """Hint keys no shard held an entry under."""
+        ...
+
     def __iadd__(self, other: DenseTraversalStats, /) -> Self:
         """Python-only."""
         ...
 
     def __repr__(self) -> str: ...
+
+# The base of both plan types, which the module does not export by name.
+@type_check_only
+class _Plan:
+    """A long call in flight, which every call naming it continues until a receiver's finish verb closes it."""
+
+    def __init__(self) -> None: ...
+    @property
+    def phase(self) -> Phase:
+        """Where the last call naming the plan stopped, `Phase.DONE` once it ended."""
+        ...
+
+    @property
+    def ordinal(self) -> int:
+        """That phase's position among the ones the plan runs."""
+        ...
+
+    @property
+    def completed(self) -> int:
+        """Units of that phase done, entries or islands."""
+        ...
+
+    @property
+    def total(self) -> int:
+        """Units of that phase in all."""
+        ...
+
+@final
+class DenseRefinePlan(_Plan):
+    """A refine in flight: the round in hand, and the root every round's health checks share."""
+
+@final
+class DenseReshardPlan(_Plan):
+    """A reshard in flight: its own sources and targets, the entries still to move, then the rounds."""
 
 @final
 class DenseBatch:
@@ -2045,8 +2798,23 @@ class DenseIndex:
         paths: Sequence[_PathLike] | None = None,
         executor: Executor | None = None,
         cpu_class: CPUClass | None = None,
+        key_table_domains: Sequence[int] | None = None,
     ) -> DenseIndex:
         """Serves a checkpoint in place from NVMe drives, read-only."""
+        ...
+
+    @classmethod
+    def load_nvme(
+        cls,
+        path: _PathLike,
+        /,
+        *,
+        paths: Sequence[_PathLike] | None = None,
+        executor: Executor | None = None,
+        cpu_class: CPUClass | None = None,
+        key_table_domains: Sequence[int] | None = None,
+    ) -> DenseIndex:
+        """Opens a checkpoint's manifest from NVMe drives, writable by `refine` alone."""
         ...
 
     @staticmethod
@@ -2072,9 +2840,7 @@ class DenseIndex:
         ...
 
     def reserve(self, capacity: int, /) -> None:
-        """Grows the index to host at least `capacity` entries, a hint, since insertions grow it on demand.
-
-        """
+        """Grows the index to host at least `capacity` entries, a hint, since insertions grow it on demand."""
         ...
 
     def clear(self) -> None:
@@ -2100,9 +2866,11 @@ class DenseIndex:
         self,
         *,
         expansion_factor: int = 0,
+        memory_limit: int = 0,
         progress: _Progress | None = None,
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
+        plan: DenseRefinePlan | None = None,
     ) -> RefineReport:
         """Re-selects every entry's neighbors, reporting what changed."""
         ...
@@ -2194,20 +2962,36 @@ class DenseIndex:
         """Late interaction over multi-row queries."""
         ...
 
-    def absorb(self, *donors: DenseIndex, progress: _Progress | None = None, progress_steps: int = 0) -> RefineReport:
-        """Absorbs and consumes every donor, one after another."""
-        ...
-
-    def split(
+    def reshard(
         self,
-        *receivers: DenseIndex,
+        sources: Sequence[DenseIndex],
+        targets: Sequence[DenseIndex],
+        /,
+        *,
+        memory_domains: Sequence[int] | None = None,
+        devices: Sequence[int] | None = None,
+        paths: Sequence[_PathLike] | None = None,
+        shard_capacity: int = 0,
         expansion_factor: int = 0,
+        memory_limit: int = 0,
         seed: int = 0,
         progress: _Progress | None = None,
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
+        plan: DenseReshardPlan | None = None,
     ) -> RefineReport:
-        """Splits the entries into the empty receivers, leaving this index empty."""
+        """Moves the entries of `sources` into `targets` with their links, then runs a round on each target.
+
+        A live plan holds no index, so each index it names must outlive its finish.
+        """
+        ...
+
+    def refine_plan_finish(self, plan: DenseRefinePlan, /) -> RefineReport:
+        """Closes a refine plan on this index and frees it, reporting what the whole plan did."""
+        ...
+
+    def reshard_plan_finish(self, plan: DenseReshardPlan, /) -> RefineReport:
+        """Closes a reshard plan and frees it, reporting what the whole plan did."""
         ...
 
     def sample(
@@ -2295,22 +3079,971 @@ class DenseIndex:
 
 # region: Other Modalities
 
+type _Sequences = Sequence[str | Buffer] | str | Buffer
+type _Shapes = Sequence[_Tensor] | _Tensor
+
+class SequenceMetric(IntEnum):
+    """How a sequence index scores two sequences."""
+
+    LEVENSHTEIN = 1
+    """Single-byte insertions, deletions and substitutions, every edit costing one."""
+    LEVENSHTEIN_UTF8 = 2
+    """The same edits over decoded UTF-8 code points."""
+    NEEDLEMAN_WUNSCH = 3
+    """Global alignment under a substitution matrix and a flat gap cost."""
+    OVERLAP = 4
+    """The share of the larger window set the other side misses, over fixed window widths."""
+
+@final
+class SequenceMetadata(structseq[Any], tuple[SequenceMetric, int]):
+    """The metric and geometry a checkpoint froze."""
+
+    __match_args__: Final = ("metric", "connectivity")
+
+    @property
+    def metric(self) -> SequenceMetric:
+        """The `SequenceMetric` the checkpoint scores with."""
+        ...
+
+    @property
+    def connectivity(self) -> int:
+        """Connections per node the graph was built with."""
+        ...
+
+@final
+class SequenceIndexDescription:
+    """A live sequence index's frozen metadata and current counters."""
+
+    @property
+    def metadata(self) -> SequenceMetadata: ...
+    @property
+    def size(self) -> int: ...
+    @property
+    def capacity(self) -> int: ...
+    @property
+    def memory_usage(self) -> int: ...
+    @property
+    def cpu_class(self) -> CPUClass | None: ...
+    @property
+    def gpu_class(self) -> GPUClass | None: ...
+    @property
+    def shards_count(self) -> int: ...
+    @property
+    def load_path(self) -> str: ...
+
+@final
+class SequenceRefinePlan(_Plan):
+    """A refine in flight: the round in hand, and the root every round's health checks share."""
+
+@final
+class SequenceReshardPlan(_Plan):
+    """A reshard in flight: its own sources and targets, the entries still to move, then the rounds."""
+
 @final
 class SequenceIndex:
-    """Similarity search over variable-length sequences."""
+    """Similarity search over variable-length sequences; its verbs run on the calling thread."""
 
-    def __init__(self) -> NoReturn: ...
+    def __new__(cls, *args: object, **keywords: object) -> NoReturn: ...
+    @classmethod
+    def init_ram(
+        cls,
+        metric: SequenceMetric = ...,
+        *,
+        substitution_matrix: Buffer | None = None,
+        gap: int | None = None,
+        window_widths: Sequence[int] | None = None,
+        connectivity: int = 0,
+        values_per_key: int = 0,
+        memory_domains: Sequence[int] | None = None,
+        cpu_class: CPUClass | None = None,
+    ) -> SequenceIndex:
+        """Starts an empty, mutable graph in host memory."""
+        ...
+
+    @classmethod
+    def init_vram(
+        cls,
+        metric: SequenceMetric = ...,
+        *,
+        substitution_matrix: Buffer | None = None,
+        gap: int | None = None,
+        window_widths: Sequence[int] | None = None,
+        connectivity: int = 0,
+        values_per_key: int = 0,
+        devices: Sequence[int] | None = None,
+        gpu_class: GPUClass | None = None,
+    ) -> SequenceIndex:
+        """Starts an empty, mutable graph on GPU devices."""
+        ...
+
+    @classmethod
+    def load_ram(
+        cls,
+        path: _PathLike,
+        /,
+        *,
+        memory_domains: Sequence[int] | None = None,
+        executor: Executor | None = None,
+        values_per_key: int = 0,
+        substitution_matrix: Buffer | None = None,
+        gap: int | None = None,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        cpu_class: CPUClass | None = None,
+    ) -> SequenceIndex:
+        """Copies a checkpoint into a new, mutable index in host memory."""
+        ...
+
+    @classmethod
+    def load_ram_buffer(
+        cls,
+        buffer: Buffer,
+        /,
+        *,
+        memory_domains: Sequence[int] | None = None,
+        executor: Executor | None = None,
+        values_per_key: int = 0,
+        substitution_matrix: Buffer | None = None,
+        gap: int | None = None,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        cpu_class: CPUClass | None = None,
+    ) -> SequenceIndex:
+        """Copies a checkpoint out of a buffer into host memory."""
+        ...
+
+    @classmethod
+    def load_vram(
+        cls,
+        path: _PathLike,
+        /,
+        *,
+        devices: Sequence[int] | None = None,
+        executor: Executor | None = None,
+        values_per_key: int = 0,
+        substitution_matrix: Buffer | None = None,
+        gap: int | None = None,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        gpu_class: GPUClass | None = None,
+    ) -> SequenceIndex:
+        """Copies a checkpoint into a new, mutable index on GPU devices."""
+        ...
+
+    @classmethod
+    def load_vram_buffer(
+        cls,
+        buffer: Buffer,
+        /,
+        *,
+        devices: Sequence[int] | None = None,
+        executor: Executor | None = None,
+        values_per_key: int = 0,
+        substitution_matrix: Buffer | None = None,
+        gap: int | None = None,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        gpu_class: GPUClass | None = None,
+    ) -> SequenceIndex:
+        """Copies a checkpoint out of a host buffer onto GPU devices."""
+        ...
+
+    @classmethod
+    def view_ram(
+        cls,
+        path: _PathLike,
+        /,
+        *,
+        substitution_matrix: Buffer | None = None,
+        gap: int | None = None,
+        cpu_class: CPUClass | None = None,
+    ) -> SequenceIndex:
+        """Serves a checkpoint in place through a memory mapping, read-only."""
+        ...
+
+    @classmethod
+    def view_nvme(
+        cls,
+        path: _PathLike,
+        /,
+        *,
+        paths: Sequence[_PathLike] | None = None,
+        executor: Executor | None = None,
+        substitution_matrix: Buffer | None = None,
+        gap: int | None = None,
+        cpu_class: CPUClass | None = None,
+    ) -> SequenceIndex:
+        """Serves a checkpoint in place from NVMe drives, read-only."""
+        ...
+
+    @staticmethod
+    def metadata_read(path: _PathLike, /, *, executor: Executor | None = None) -> SequenceMetadata:
+        """Reads the metric and connectivity a checkpoint froze."""
+        ...
+
+    @staticmethod
+    def metadata_read_buffer(buffer: Buffer, /, *, executor: Executor | None = None) -> SequenceMetadata:
+        """Reads a serialized checkpoint's metric and connectivity."""
+        ...
+
+    def on(self, executor: Executor, /) -> On[SequenceIndex]:
+        """A receiver whose verbs block on `executor`."""
+        ...
+
+    def deferred(self, executor: Executor, /) -> DeferredOn[SequenceIndex]:
+        """A receiver whose verbs submit to `executor` and answer a `Deferred`."""
+        ...
+
+    def describe(self) -> SequenceIndexDescription:
+        """The frozen metadata and the current counters, read in one call."""
+        ...
+
+    def reserve(self, capacity: int, /, *, payload_bytes: int = 0) -> None:
+        """Grows the index to host at least `capacity` entries."""
+        ...
+
+    def clear(self) -> None:
+        """Drops every entry, keeping the capacity and the frozen metric."""
+        ...
+
+    def insert(
+        self,
+        keys: Sequence[_KeyLike] | _Tensor,
+        sequences: _Sequences,
+        /,
+        *,
+        expansion_factor: int = 0,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        stats: DenseTraversalStats | None = None,
+    ) -> None:
+        """Inserts a batch of sequences under their keys, all or nothing."""
+        ...
+
+    def refine(
+        self,
+        *,
+        expansion_factor: int = 0,
+        memory_limit: int = 0,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        stats: DenseTraversalStats | None = None,
+        plan: SequenceRefinePlan | None = None,
+    ) -> RefineReport:
+        """Re-selects every entry's neighbors, reporting what changed; a `plan` keeps a stopped round live."""
+        ...
+
+    def health(self) -> DenseReachability:
+        """Audits how much of the graph a search reaches."""
+        ...
+
+    def search(
+        self,
+        queries: _Sequences,
+        wanted: int,
+        arena: Arena,
+        /,
+        *,
+        expansion_factor: int = 0,
+        traversal: Traversal = ...,
+        predicate: Callable[[Key], bool] | None = None,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        stats: DenseTraversalStats | None = None,
+    ) -> Matches:
+        """Finds the `wanted` nearest entries for every query sequence."""
+        ...
+
+    def count(self, key: _KeyLike, /) -> int:
+        """How many entries share `key`."""
+        ...
+
+    def get(self, key: _KeyLike, arena: Arena, /) -> tuple[_ArenaBuffer, _ArenaBuffer]:
+        """The (offsets, bytes) tape of every sequence stored under `key`."""
+        ...
+
+    def reshard(
+        self,
+        sources: Sequence[SequenceIndex],
+        targets: Sequence[SequenceIndex],
+        /,
+        *,
+        expansion_factor: int = 0,
+        memory_limit: int = 0,
+        seed: int = 0,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        stats: DenseTraversalStats | None = None,
+        plan: SequenceReshardPlan | None = None,
+    ) -> RefineReport:
+        """Moves the entries of `sources` into `targets`, then runs a round on every target that took entries.
+
+        A live plan holds no index, so each index it names must outlive its finish.
+        """
+        ...
+
+    def refine_plan_finish(self, plan: SequenceRefinePlan, /) -> RefineReport:
+        """Closes a refine plan on this index and the executor it was opened with."""
+        ...
+
+    def reshard_plan_finish(self, plan: SequenceReshardPlan, /) -> RefineReport:
+        """Closes a reshard plan on the executor it was opened with, reopening every index it names."""
+        ...
+
+    def save(self, path: _PathLike, /, *, progress: _Progress | None = None, progress_steps: int = 0) -> None:
+        """Writes a checkpoint in the layout the extension picks."""
+        ...
+
+    def save_buffer(self, arena: Arena, /, *, progress: _Progress | None = None, progress_steps: int = 0) -> Monolith:
+        """Serializes the index into an arena."""
+        ...
+
+    @property
+    def capacity(self) -> int: ...
+    @property
+    def connectivity(self) -> int: ...
+    @property
+    def memory_usage(self) -> int: ...
+    @property
+    def cpu_class(self) -> CPUClass | None: ...
+    @property
+    def gpu_class(self) -> GPUClass | None: ...
+    @property
+    def shards_count(self) -> int: ...
+    def __len__(self) -> int: ...
+    def __contains__(self, key: _KeyLike, /) -> bool: ...
+
+class ShapesMetric(IntEnum):
+    """How a shapes index scores two point clouds."""
+
+    CHAMFER = 1
+    """Mean distance to each point's nearest partner, both directions, halved."""
+    HAUSDORFF = 2
+    """The worst of all nearest-partner distances, both directions."""
+    GROMOV_WASSERSTEIN = 3
+    """Transport over each side's internal geometry, the best ranker and the costliest."""
+    WASSERSTEIN_PROCRUSTES = 4
+    """Residual after the best rigid motion and the best matching."""
+
+@final
+class ShapesMetadata(structseq[Any], tuple[ShapesMetric, Scalar, int, int]):
+    """The metric and geometry a checkpoint froze."""
+
+    __match_args__: Final = ("metric", "quantization", "points", "connectivity")
+
+    @property
+    def metric(self) -> ShapesMetric: ...
+    @property
+    def quantization(self) -> Scalar: ...
+    @property
+    def points(self) -> int: ...
+    @property
+    def connectivity(self) -> int: ...
+
+@final
+class ShapesIndexDescription:
+    """A live shapes index's frozen metadata and current counters."""
+
+    @property
+    def metadata(self) -> ShapesMetadata: ...
+    @property
+    def size(self) -> int: ...
+    @property
+    def capacity(self) -> int: ...
+    @property
+    def total_points(self) -> int: ...
+    @property
+    def memory_usage(self) -> int: ...
+    @property
+    def cpu_class(self) -> CPUClass | None: ...
+    @property
+    def gpu_class(self) -> GPUClass | None: ...
+    @property
+    def shards_count(self) -> int: ...
+    @property
+    def load_path(self) -> str: ...
+
+@final
+class ShapesRefinePlan(_Plan):
+    """A refine in flight: the round in hand, and the root every round's health checks share."""
+
+@final
+class ShapesReshardPlan(_Plan):
+    """A reshard in flight: its own sources and targets, the entries still to move, then the rounds."""
 
 @final
 class ShapesIndex:
-    """Similarity search over 3D point clouds."""
+    """Similarity search over 3D point clouds of any size; its verbs run on the calling thread."""
 
-    def __init__(self) -> NoReturn: ...
+    def __new__(cls, *args: object, **keywords: object) -> NoReturn: ...
+    @classmethod
+    def init_ram(
+        cls,
+        metric: ShapesMetric = ...,
+        quantization: Scalar = ...,
+        *,
+        points: int = 0,
+        connectivity: int = 0,
+        values_per_key: int = 0,
+        memory_domains: Sequence[int] | None = None,
+        cpu_class: CPUClass | None = None,
+    ) -> ShapesIndex:
+        """Starts an empty, mutable graph in host memory."""
+        ...
+
+    @classmethod
+    def init_vram(
+        cls,
+        metric: ShapesMetric = ...,
+        quantization: Scalar = ...,
+        *,
+        points: int = 0,
+        connectivity: int = 0,
+        values_per_key: int = 0,
+        devices: Sequence[int] | None = None,
+        gpu_class: GPUClass | None = None,
+    ) -> ShapesIndex:
+        """Starts an empty, mutable graph on GPU devices."""
+        ...
+
+    @classmethod
+    def load_ram(
+        cls,
+        path: _PathLike,
+        /,
+        *,
+        memory_domains: Sequence[int] | None = None,
+        executor: Executor | None = None,
+        values_per_key: int = 0,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        cpu_class: CPUClass | None = None,
+    ) -> ShapesIndex:
+        """Copies a checkpoint into a new, mutable index in host memory."""
+        ...
+
+    @classmethod
+    def load_ram_buffer(
+        cls,
+        buffer: Buffer,
+        /,
+        *,
+        memory_domains: Sequence[int] | None = None,
+        executor: Executor | None = None,
+        values_per_key: int = 0,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        cpu_class: CPUClass | None = None,
+    ) -> ShapesIndex:
+        """Copies a checkpoint out of a buffer into host memory."""
+        ...
+
+    @classmethod
+    def load_vram(
+        cls,
+        path: _PathLike,
+        /,
+        *,
+        devices: Sequence[int] | None = None,
+        executor: Executor | None = None,
+        values_per_key: int = 0,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        gpu_class: GPUClass | None = None,
+    ) -> ShapesIndex:
+        """Copies a checkpoint into a new, mutable index on GPU devices."""
+        ...
+
+    @classmethod
+    def load_vram_buffer(
+        cls,
+        buffer: Buffer,
+        /,
+        *,
+        devices: Sequence[int] | None = None,
+        executor: Executor | None = None,
+        values_per_key: int = 0,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        gpu_class: GPUClass | None = None,
+    ) -> ShapesIndex:
+        """Copies a checkpoint out of a host buffer onto GPU devices."""
+        ...
+
+    @classmethod
+    def view_ram(cls, path: _PathLike, /, *, cpu_class: CPUClass | None = None) -> ShapesIndex:
+        """Serves a checkpoint in place through a memory mapping, read-only."""
+        ...
+
+    @classmethod
+    def view_nvme(
+        cls,
+        path: _PathLike,
+        /,
+        *,
+        paths: Sequence[_PathLike] | None = None,
+        executor: Executor | None = None,
+        cpu_class: CPUClass | None = None,
+    ) -> ShapesIndex:
+        """Serves a checkpoint in place from NVMe drives, read-only."""
+        ...
+
+    @staticmethod
+    def metadata_read(path: _PathLike, /, *, executor: Executor | None = None) -> ShapesMetadata:
+        """Reads the metric and geometry a checkpoint froze."""
+        ...
+
+    @staticmethod
+    def metadata_read_buffer(buffer: Buffer, /, *, executor: Executor | None = None) -> ShapesMetadata:
+        """Reads a serialized checkpoint's metric and geometry."""
+        ...
+
+    def on(self, executor: Executor, /) -> On[ShapesIndex]:
+        """A receiver whose verbs block on `executor`."""
+        ...
+
+    def deferred(self, executor: Executor, /) -> DeferredOn[ShapesIndex]:
+        """A receiver whose verbs submit to `executor` and answer a `Deferred`."""
+        ...
+
+    def describe(self) -> ShapesIndexDescription:
+        """The frozen metadata and the current counters, read in one call."""
+        ...
+
+    def reserve(self, capacity: int, /, *, points: int = 0) -> None:
+        """Grows the index to host at least `capacity` entries."""
+        ...
+
+    def clear(self) -> None:
+        """Drops every entry, keeping the capacity and the frozen geometry."""
+        ...
+
+    def insert(
+        self,
+        keys: Sequence[_KeyLike] | _Tensor,
+        shapes: _Shapes,
+        /,
+        *,
+        expansion_factor: int = 0,
+        dtype: Scalar | None = None,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        stats: DenseTraversalStats | None = None,
+    ) -> None:
+        """Inserts a batch of (points, 3) shapes under their keys, all or nothing."""
+        ...
+
+    def refine(
+        self,
+        *,
+        expansion_factor: int = 0,
+        memory_limit: int = 0,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        stats: DenseTraversalStats | None = None,
+        plan: ShapesRefinePlan | None = None,
+    ) -> RefineReport:
+        """Re-selects every entry's neighbors, reporting what changed; a `plan` keeps a stopped round live."""
+        ...
+
+    def health(self) -> DenseReachability:
+        """Audits how much of the graph a search reaches."""
+        ...
+
+    def search(
+        self,
+        queries: _Shapes,
+        wanted: int,
+        arena: Arena,
+        /,
+        *,
+        expansion_factor: int = 0,
+        traversal: Traversal = ...,
+        dtype: Scalar | None = None,
+        predicate: Callable[[Key], bool] | None = None,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        stats: DenseTraversalStats | None = None,
+    ) -> Matches:
+        """Finds the `wanted` nearest entries for every query shape."""
+        ...
+
+    def count(self, key: _KeyLike, /) -> int:
+        """How many entries share `key`."""
+        ...
+
+    def get(self, key: _KeyLike, arena: Arena, /, *, outputs_dtype: Scalar = ...) -> tuple[_ArenaBuffer, _ArenaBuffer]:
+        """The (offsets, points) tape of every shape stored under `key`."""
+        ...
+
+    def reshard(
+        self,
+        sources: Sequence[ShapesIndex],
+        targets: Sequence[ShapesIndex],
+        /,
+        *,
+        expansion_factor: int = 0,
+        memory_limit: int = 0,
+        seed: int = 0,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        stats: DenseTraversalStats | None = None,
+        plan: ShapesReshardPlan | None = None,
+    ) -> RefineReport:
+        """Moves the entries of `sources` into `targets`, then runs a round on every target that took entries.
+
+        A live plan holds no index, so each index it names must outlive its finish.
+        """
+        ...
+
+    def refine_plan_finish(self, plan: ShapesRefinePlan, /) -> RefineReport:
+        """Closes a refine plan on this index and the executor it was opened with."""
+        ...
+
+    def reshard_plan_finish(self, plan: ShapesReshardPlan, /) -> RefineReport:
+        """Closes a reshard plan on the executor it was opened with, reopening every index it names."""
+        ...
+
+    def save(self, path: _PathLike, /, *, progress: _Progress | None = None, progress_steps: int = 0) -> None:
+        """Writes a checkpoint in the layout the extension picks."""
+        ...
+
+    def save_buffer(self, arena: Arena, /, *, progress: _Progress | None = None, progress_steps: int = 0) -> Monolith:
+        """Serializes the index into an arena."""
+        ...
+
+    @property
+    def capacity(self) -> int: ...
+    @property
+    def connectivity(self) -> int: ...
+    @property
+    def memory_usage(self) -> int: ...
+    @property
+    def cpu_class(self) -> CPUClass | None: ...
+    @property
+    def gpu_class(self) -> GPUClass | None: ...
+    @property
+    def shards_count(self) -> int: ...
+    def __len__(self) -> int: ...
+    def __contains__(self, key: _KeyLike, /) -> bool: ...
+
+class GeospatialRelation(IntEnum):
+    """Which entries count as matches of a geospatial query."""
+
+    NEAR = 1
+    """Within the radius, widened by three standard deviations of both positions combined."""
+    VISIBLE = 2
+    """Near, with a clear line of sight over the handle's terrain."""
+    SEES = 3
+    """Near, and the entry's view cone holds the query."""
+    SEEN = 4
+    """Near, and the query's view cone holds the entry."""
+
+@final
+class GeospatialMetadata(structseq[Any], tuple[int]):
+    """The geometry a checkpoint froze."""
+
+    __match_args__: Final = ("connectivity",)
+
+    @property
+    def connectivity(self) -> int: ...
+
+@final
+class GeospatialIndexDescription:
+    """A live geospatial index's frozen metadata and current counters."""
+
+    @property
+    def metadata(self) -> GeospatialMetadata: ...
+    @property
+    def size(self) -> int: ...
+    @property
+    def capacity(self) -> int: ...
+    @property
+    def memory_usage(self) -> int: ...
+    @property
+    def cpu_class(self) -> CPUClass | None: ...
+    @property
+    def gpu_class(self) -> GPUClass | None: ...
+    @property
+    def shards_count(self) -> int: ...
+    @property
+    def load_path(self) -> str: ...
+
+@final
+class GeospatialRefinePlan(_Plan):
+    """A refine in flight: the round in hand, and the root every round's health checks share."""
+
+@final
+class GeospatialReshardPlan(_Plan):
+    """A reshard in flight: its own sources and targets, the entries still to move, then the rounds."""
 
 @final
 class GeospatialIndex:
-    """Similarity search over space and time."""
+    """Similarity search over observations in space and time; its verbs run on the calling thread."""
 
-    def __init__(self) -> NoReturn: ...
+    def __new__(cls, *args: object, **keywords: object) -> NoReturn: ...
+    @classmethod
+    def init_ram(
+        cls,
+        *,
+        connectivity: int = 0,
+        values_per_key: int = 0,
+        memory_domains: Sequence[int] | None = None,
+        cpu_class: CPUClass | None = None,
+    ) -> GeospatialIndex:
+        """Starts an empty, mutable graph in host memory."""
+        ...
+
+    @classmethod
+    def init_vram(
+        cls,
+        *,
+        connectivity: int = 0,
+        values_per_key: int = 0,
+        devices: Sequence[int] | None = None,
+        gpu_class: GPUClass | None = None,
+    ) -> GeospatialIndex:
+        """Starts an empty, mutable graph on GPU devices."""
+        ...
+
+    @classmethod
+    def load_ram(
+        cls,
+        path: _PathLike,
+        /,
+        *,
+        memory_domains: Sequence[int] | None = None,
+        executor: Executor | None = None,
+        values_per_key: int = 0,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        cpu_class: CPUClass | None = None,
+    ) -> GeospatialIndex:
+        """Copies a checkpoint into a new, mutable index in host memory."""
+        ...
+
+    @classmethod
+    def load_ram_buffer(
+        cls,
+        buffer: Buffer,
+        /,
+        *,
+        memory_domains: Sequence[int] | None = None,
+        executor: Executor | None = None,
+        values_per_key: int = 0,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        cpu_class: CPUClass | None = None,
+    ) -> GeospatialIndex:
+        """Copies a checkpoint out of a buffer into host memory."""
+        ...
+
+    @classmethod
+    def load_vram(
+        cls,
+        path: _PathLike,
+        /,
+        *,
+        devices: Sequence[int] | None = None,
+        executor: Executor | None = None,
+        values_per_key: int = 0,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        gpu_class: GPUClass | None = None,
+    ) -> GeospatialIndex:
+        """Copies a checkpoint into a new, mutable index on GPU devices."""
+        ...
+
+    @classmethod
+    def load_vram_buffer(
+        cls,
+        buffer: Buffer,
+        /,
+        *,
+        devices: Sequence[int] | None = None,
+        executor: Executor | None = None,
+        values_per_key: int = 0,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        gpu_class: GPUClass | None = None,
+    ) -> GeospatialIndex:
+        """Copies a checkpoint out of a host buffer onto GPU devices."""
+        ...
+
+    @classmethod
+    def view_ram(cls, path: _PathLike, /, *, cpu_class: CPUClass | None = None) -> GeospatialIndex:
+        """Serves a checkpoint in place through a memory mapping, read-only."""
+        ...
+
+    @classmethod
+    def view_nvme(
+        cls,
+        path: _PathLike,
+        /,
+        *,
+        paths: Sequence[_PathLike] | None = None,
+        executor: Executor | None = None,
+        cpu_class: CPUClass | None = None,
+    ) -> GeospatialIndex:
+        """Serves a checkpoint in place from NVMe drives, read-only."""
+        ...
+
+    @staticmethod
+    def metadata_read(path: _PathLike, /, *, executor: Executor | None = None) -> GeospatialMetadata:
+        """Reads the geometry a checkpoint froze."""
+        ...
+
+    @staticmethod
+    def metadata_read_buffer(buffer: Buffer, /, *, executor: Executor | None = None) -> GeospatialMetadata:
+        """Reads a serialized checkpoint's geometry."""
+        ...
+
+    def on(self, executor: Executor, /) -> On[GeospatialIndex]:
+        """A receiver whose verbs block on `executor`."""
+        ...
+
+    def deferred(self, executor: Executor, /) -> DeferredOn[GeospatialIndex]:
+        """A receiver whose verbs submit to `executor` and answer a `Deferred`."""
+        ...
+
+    def describe(self) -> GeospatialIndexDescription:
+        """The frozen metadata and the current counters, read in one call."""
+        ...
+
+    def reserve(self, capacity: int, /) -> None:
+        """Grows the index to host at least `capacity` observations."""
+        ...
+
+    def clear(self) -> None:
+        """Drops every entry, keeping the capacity and the frozen geometry."""
+        ...
+
+    def insert(
+        self,
+        keys: Sequence[_KeyLike] | _Tensor,
+        observations: _Tensor,
+        /,
+        *,
+        expansion_factor: int = 0,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        stats: DenseTraversalStats | None = None,
+    ) -> None:
+        """Inserts an (N, 11) float64 batch of observations under their keys, all or nothing."""
+        ...
+
+    def refine(
+        self,
+        *,
+        expansion_factor: int = 0,
+        memory_limit: int = 0,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        stats: DenseTraversalStats | None = None,
+        plan: GeospatialRefinePlan | None = None,
+    ) -> RefineReport:
+        """Re-selects every entry's neighbors, reporting what changed; a `plan` keeps a stopped round live."""
+        ...
+
+    def health(self) -> DenseReachability:
+        """Audits how much of the graph a search reaches."""
+        ...
+
+    def search(
+        self,
+        queries: _Tensor,
+        wanted: int,
+        arena: Arena,
+        /,
+        *,
+        relation: GeospatialRelation = ...,
+        metres: float = 0.0,
+        seconds: float = 0.0,
+        expansion_factor: int = 0,
+        traversal: Traversal = ...,
+        predicate: Callable[[Key], bool] | None = None,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        stats: DenseTraversalStats | None = None,
+    ) -> Matches:
+        """Finds the nearest entries the relation admits for every query observation."""
+        ...
+
+    def within(
+        self,
+        queries: _Tensor,
+        arena: Arena,
+        /,
+        *,
+        metres: float = 0.0,
+        relation: GeospatialRelation = ...,
+        seconds: float = 0.0,
+        traversal: Traversal = ...,
+        predicate: Callable[[Key], bool] | None = None,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        stats: DenseTraversalStats | None = None,
+    ) -> DenseProducts:
+        """Every entry within `metres` of each query that the relation admits."""
+        ...
+
+    def count(self, key: _KeyLike, /) -> int:
+        """How many observations share `key`."""
+        ...
+
+    def get(self, key: _KeyLike, arena: Arena, /) -> _ArenaBuffer:
+        """The (count, 11) float64 observations stored under `key`."""
+        ...
+
+    def reshard(
+        self,
+        sources: Sequence[GeospatialIndex],
+        targets: Sequence[GeospatialIndex],
+        /,
+        *,
+        expansion_factor: int = 0,
+        memory_limit: int = 0,
+        seed: int = 0,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        stats: DenseTraversalStats | None = None,
+        plan: GeospatialReshardPlan | None = None,
+    ) -> RefineReport:
+        """Moves the entries of `sources` into `targets`, then runs a round on every target that took entries.
+
+        A live plan holds no index, so each index it names must outlive its finish.
+        """
+        ...
+
+    def refine_plan_finish(self, plan: GeospatialRefinePlan, /) -> RefineReport:
+        """Closes a refine plan on this index and the executor it was opened with."""
+        ...
+
+    def reshard_plan_finish(self, plan: GeospatialReshardPlan, /) -> RefineReport:
+        """Closes a reshard plan on the executor it was opened with, reopening every index it names."""
+        ...
+
+    def save(self, path: _PathLike, /, *, progress: _Progress | None = None, progress_steps: int = 0) -> None:
+        """Writes a checkpoint in the layout the extension picks."""
+        ...
+
+    def save_buffer(self, arena: Arena, /, *, progress: _Progress | None = None, progress_steps: int = 0) -> Monolith:
+        """Serializes the index into an arena."""
+        ...
+
+    @property
+    def capacity(self) -> int: ...
+    @property
+    def connectivity(self) -> int: ...
+    @property
+    def memory_usage(self) -> int: ...
+    @property
+    def cpu_class(self) -> CPUClass | None: ...
+    @property
+    def gpu_class(self) -> GPUClass | None: ...
+    @property
+    def shards_count(self) -> int: ...
+    def __len__(self) -> int: ...
+    def __contains__(self, key: _KeyLike, /) -> bool: ...
 
 # endregion: Other Modalities

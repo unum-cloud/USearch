@@ -21,14 +21,13 @@ import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
+import java.lang.invoke.VarHandle;
 import java.nio.file.FileSystemNotFoundException;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.ProviderNotFoundException;
 import java.nio.file.StandardCopyOption;
-import java.util.HashMap;
-import java.util.Map;
 
 /**
  * Loads the engine's shared object once per class loader, and links the C interface through it.
@@ -185,6 +184,25 @@ final class Library {
                     SIZE.withName("missing_hints"))
             .withName("usearch_traversal_stats_t");
 
+    /** @c usearch_predicate_t, the handler a walk asks which candidate keys it may report. */
+    static final StructLayout PREDICATE = MemoryLayout.structLayout(
+                    POINTER.withName("callback"), POINTER.withName("state"), ENUM.withName("cost"), padding())
+            .withName("predicate");
+
+    /** @c usearch_progress_t, the handler a long call reports its advance to. */
+    static final StructLayout PROGRESS = MemoryLayout.structLayout(
+                    POINTER.withName("callback"), POINTER.withName("state"), SIZE.withName("steps"))
+            .withName("progress");
+
+    /** @c usearch_phase_progress_t, where a plan stands. */
+    static final StructLayout PHASE_PROGRESS = MemoryLayout.structLayout(
+                    ENUM.withName("phase"),
+                    padding(),
+                    SIZE.withName("ordinal"),
+                    SIZE.withName("completed"),
+                    SIZE.withName("total"))
+            .withName("usearch_phase_progress_t");
+
     /**
      * The fields that open every verb on a handle - the handle, the executor, the outcome, the
      * completion - then @p rest.
@@ -200,34 +218,60 @@ final class Library {
     }
 
     /** The offset of one possibly nested field, named by the path of member names leading to it. */
-    static long offset(StructLayout layout, String... path) {
+    static long offset(MemoryLayout layout, String... path) {
+        return layout.byteOffset(elements(path));
+    }
+
+    /**
+     * The handle of one possibly nested field, named by the path of member names leading to it, whose
+     * coordinates are a segment and the offset of the structure inside it.
+     */
+    static VarHandle field(MemoryLayout layout, String... path) {
+        return layout.varHandle(elements(path));
+    }
+
+    private static MemoryLayout.PathElement[] elements(String... path) {
         MemoryLayout.PathElement[] elements = new MemoryLayout.PathElement[path.length];
         for (int depth = 0; depth != path.length; ++depth) {
             elements[depth] = MemoryLayout.PathElement.groupElement(path[depth]);
         }
-        return layout.byteOffset(elements);
+        return elements;
     }
 
-    /** The offset of every named field, nested ones under their dotted path, which a verb resolves once. */
-    static Map<String, Long> offsets(StructLayout layout) {
-        Map<String, Long> offsets = new HashMap<>();
-        gather(layout, "", 0, offsets);
-        return Map.copyOf(offsets);
-    }
-
-    private static void gather(StructLayout layout, String prefix, long base, Map<String, Long> offsets) {
-        long offset = base;
-        for (MemoryLayout member : layout.memberLayouts()) {
-            if (member.name().isPresent()) {
-                String path = prefix + member.name().get();
-                offsets.put(path, offset);
-                if (member instanceof StructLayout nested) {
-                    gather(nested, path + ".", offset, offsets);
-                }
-            }
-            offset += member.byteSize();
-        }
-    }
+    static final VarHandle BYTES_DATA = field(BYTES_VIEW, "data");
+    static final VarHandle BYTES_LENGTH = field(BYTES_VIEW, "length");
+    static final VarHandle KEYS_DATA = field(KEYS_VIEW, "data");
+    static final VarHandle KEYS_STRIDE = field(KEYS_VIEW, "stride");
+    static final VarHandle ROWS_DATA = field(ROWS_VIEW, "data");
+    static final VarHandle ROWS_STRIDE = field(ROWS_VIEW, "stride");
+    static final VarHandle ROWS_COLUMNS = field(ROWS_VIEW, "columns");
+    static final VarHandle ROWS_SCALAR = field(ROWS_VIEW, "scalar");
+    static final VarHandle MATCHES_KEYS = field(MATCHES_VIEW, "keys");
+    static final VarHandle MATCHES_SCORES = field(MATCHES_VIEW, "scores");
+    static final VarHandle MATCHES_COUNTS = field(MATCHES_VIEW, "counts");
+    static final VarHandle MATCHES_COLUMNS = field(MATCHES_VIEW, "columns");
+    static final VarHandle TAPE_KEYS = field(MATCHES_TAPE_VIEW, "keys");
+    static final VarHandle TAPE_SCORES = field(MATCHES_TAPE_VIEW, "scores");
+    static final VarHandle TAPE_OFFSETS = field(MATCHES_TAPE_VIEW, "offsets");
+    static final VarHandle KEYS_TAPE_KEYS = field(KEYS_TAPE_VIEW, "keys");
+    static final VarHandle KEYS_TAPE_OFFSETS = field(KEYS_TAPE_VIEW, "offsets");
+    static final VarHandle RAM_DATA = field(RAM_OPTIONS, "data");
+    static final VarHandle RAM_COUNT = field(RAM_OPTIONS, "count");
+    static final VarHandle RAM_SHARD_CAPACITY = field(RAM_OPTIONS, "shard_capacity");
+    static final VarHandle RAM_CPU_CLASS = field(RAM_OPTIONS, "cpu_class");
+    static final VarHandle VRAM_DATA = field(VRAM_OPTIONS, "data");
+    static final VarHandle VRAM_COUNT = field(VRAM_OPTIONS, "count");
+    static final VarHandle VRAM_SHARD_CAPACITY = field(VRAM_OPTIONS, "shard_capacity");
+    static final VarHandle VRAM_GPU_CLASS = field(VRAM_OPTIONS, "gpu_class");
+    static final VarHandle NVME_PATHS = field(NVME_OPTIONS, "data");
+    static final VarHandle NVME_COUNT = field(NVME_OPTIONS, "count");
+    static final VarHandle NVME_CPU_CLASS = field(NVME_OPTIONS, "cpu_class");
+    static final VarHandle PREDICATE_CALLBACK = field(PREDICATE, "callback");
+    static final VarHandle PROGRESS_CALLBACK = field(PROGRESS, "callback");
+    static final VarHandle PHASE_PHASE = field(PHASE_PROGRESS, "phase");
+    static final VarHandle PHASE_ORDINAL = field(PHASE_PROGRESS, "ordinal");
+    static final VarHandle PHASE_COMPLETED = field(PHASE_PROGRESS, "completed");
+    static final VarHandle PHASE_TOTAL = field(PHASE_PROGRESS, "total");
 
     /** A verb taking one argument structure, which is every verb but the name lookups and frees. */
     static MethodHandle verb(String name) {
@@ -280,15 +324,16 @@ final class Library {
      * @throws Types.USearchException when the verb reported a failure.
      */
     static void check(MemorySegment outcome) {
-        int status = outcome.get(ENUM, OUTCOME_STATUS);
+        int status = (int) OUTCOME_STATUS.get(outcome, 0L);
         if (status == 0) {
             return;
         }
-        throw new Types.USearchException(Types.Status.of(status), string(outcome.get(POINTER, OUTCOME_MESSAGE)));
+        throw new Types.USearchException(
+                Types.Status.of(status), string((MemorySegment) OUTCOME_MESSAGE.get(outcome, 0L)));
     }
 
-    private static final long OUTCOME_STATUS = offset(OUTCOME, "status");
-    private static final long OUTCOME_MESSAGE = offset(OUTCOME, "message");
+    private static final VarHandle OUTCOME_STATUS = field(OUTCOME, "status");
+    private static final VarHandle OUTCOME_MESSAGE = field(OUTCOME, "message");
 
     /**
      * Carries a downcall's failure out unchanged when it is already one of ours, and wraps anything

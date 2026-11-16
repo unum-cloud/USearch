@@ -30,15 +30,17 @@ DenseLoadVram::usage = "DenseLoadVram[path] copies a checkpoint, a manifest or a
 DenseLoadRamBuffer::usage = "DenseLoadRamBuffer[monolith] copies a checkpoint held in a ByteArray or a byte NumericArray into a new, mutable index in host memory, taking the options of DenseLoadRam."
 DenseLoadVramBuffer::usage = "DenseLoadVramBuffer[monolith] copies a checkpoint held in a ByteArray or a byte NumericArray into a new, mutable index in device memory, taking the options of DenseLoadVram."
 DenseViewRam::usage = "DenseViewRam[path] serves a checkpoint in place through a memory mapping, as a read-only index."
-DenseViewNvme::usage = "DenseViewNvme[path] serves a checkpoint in place from NVMe drives as a read-only index, which every later call reads through its executor. \"Executor\" runs the call, None meaning the calling thread, and \"Paths\" lists the devices or directories to serve shards from, {} leaving every shard where its manifest points."
+DenseViewNvme::usage = "DenseViewNvme[path] serves a checkpoint in place from NVMe drives as a read-only index, which every later call reads through its executor. \"Executor\" runs the call, None meaning the calling thread, \"Paths\" lists the devices or directories to serve shards from, {} leaving every shard where its manifest points; and \"KeyTableDomains\" lists the NUMA nodes of a key table held in RAM, which DenseCount, DenseGet, DenseSample, DenseMaxsim and hinted searches read, {} deriving them and None holding none."
+DenseLoadNvme::usage = "DenseLoadNvme[path] opens a checkpoint's manifest from NVMe drives as a writable index: it answers every read a view answers, and DenseRefine and DenseReshard rewrite its parts one at a time. It takes the options of DenseViewNvme, with \"Paths\" naming none, and a lone monolith fails as \"unsupported\"."
 DenseMetadataRead::usage = "DenseMetadataRead[path] reads a checkpoint's geometry and metric without loading it. \"Executor\" runs the call, None meaning the calling thread."
 DenseMetadataReadBuffer::usage = "DenseMetadataReadBuffer[monolith] reads the geometry and metric of a checkpoint held in a ByteArray or a byte NumericArray, taking the option of DenseMetadataRead."
 
 DenseReserve::usage = "DenseReserve[receiver, capacity] grows the index ahead of incoming vectors to capacity entries in total, the current ones included."
 DenseClear::usage = "DenseClear[receiver] erases every entry, keeping the reserved capacity and the frozen geometry."
 DenseInsert::usage = "DenseInsert[receiver, keys, vectors] adds vectors, one row per key, under keys, each an integer below 2^128. \"ExpansionFactor\" sets the breadth of the candidates the walk explores, 0 deriving it."
-DenseRefine::usage = "DenseRefine[receiver] re-selects the neighbors of every stored entry against the finished graph, improving those chosen while the graph around them was incomplete. \"ExpansionFactor\" sets the breadth of the candidates the walk explores, 0 deriving it."
-DenseHealth::usage = "DenseHealth[receiver] audits how much of the graph a search can reach, leaving the index unchanged."
+DenseRefine::usage = "DenseRefine[receiver] runs one round over the whole graph: it heals every island a search cannot reach, gathers every entry into a neighborhood of near entries and re-stitches each one. \"ExpansionFactor\" sets the breadth of any walk beside the round, 0 deriving it, and \"MemoryLimit\" the bytes a loaded NVMe index holds for the one part it rewrites, 0 deriving it and less streaming the part from the drives. It answers the \"Reselected\", \"Changed\", \"IslandsFound\", \"IslandsReconnected\", \"Neighborhoods\", \"WidestNeighborhood\", \"AddedLinks\" and \"DroppedLinks\" counts, the \"Verdict\" of \"none\", \"improved\", \"converged\", \"stalled\" or \"stopped\", and the \"Opening\" and \"Reachability\" audits, each as DenseHealth answers it."
+DenseReshard::usage = "DenseReshard[sources, targets] moves the entries of the sources into the targets, keeping their links, then runs a round on every target that took entries and answers its report as DenseRefine does. Several sources into one target among them gather into it, one source into several empty targets cuts it into one graph-local part apiece, and one index as its only source and target recuts its own shards; a source the targets do not name ends empty and live. \"Executor\" runs the call, None meaning the calling thread; \"MemoryDomains\", \"Devices\" and \"Paths\" name a RAM, VRAM or NVMe placement for a recut, None keeping the index's own; \"ShardCapacity\" bounds the entries per RAM or VRAM shard, 0 keeping the index's bound; \"ExpansionFactor\" sets the breadth of any walk beside the rounds, 0 deriving it; \"Seed\" picks the part roots of a cut; and \"MemoryLimit\" bounds a loaded NVMe target as in DenseRefine."
+DenseHealth::usage = "DenseHealth[receiver] audits how much of the graph a search can reach, leaving the index unchanged: the \"Audited\" entries, the \"Reachable\" ones, the \"DepthFromRoot\" and \"DepthToRoot\" of its two sweeps, the \"Unlinked\", \"Underlinked\" and \"BeyondMostPopulatedDepth\" entries, the \"UnreachedIslands\" and \"StrandedIslands\", and the undirected \"Components\"."
 DenseSearch::usage = "DenseSearch[receiver, queries, wanted, arena] finds up to wanted nearest entries for each query row, answering their \"Keys\" and \"Scores\" per query. \"ExpansionFactor\" sets the breadth of the candidates the walk explores, 0 deriving it, and \"Traversal\" is \"walk\", the default, or \"scan\", an exact pass over every entry."
 DenseMaxsim::usage = "DenseMaxsim[receiver, queries, rowsPerQuery, wanted, arena] scores queries of rowsPerQuery rows against multi-row entries: every query row takes its best match within a key, and those maxima sum to the key's score, keeping up to wanted keys per query. \"ExpansionFactor\" sets the breadth of the candidates the walk explores, 0 deriving it."
 DenseCount::usage = "DenseCount[receiver, key] counts the entries stored under key."
@@ -84,13 +86,16 @@ denseLoadRamBuffer =
 denseLoadVramBuffer =
     verb["DenseLoadVramBuffer", {Integer, Integer, LibraryDataType[NumericArray], "DataStore", Integer}];
 denseViewRam = verb["DenseViewRam", {Integer, "UTF8String"}];
-denseViewNvme = verb["DenseViewNvme", {Integer, Integer, "UTF8String", "DataStore"}];
+denseViewNvme = verb["DenseViewNvme", {Integer, Integer, "UTF8String", "DataStore", "Boolean", "DataStore"}];
+denseLoadNvme = verb["DenseLoadNvme", {Integer, Integer, "UTF8String", "DataStore", "Boolean", "DataStore"}];
 denseMetadataRead = verb["DenseMetadataRead", {Integer, "UTF8String"}];
 denseMetadataReadBuffer = verb["DenseMetadataReadBuffer", {Integer, LibraryDataType[NumericArray]}];
 denseReserve = receiving["DenseReserve", {Integer}];
 denseClear = receiving["DenseClear", {}];
 denseInsert = receivingRows["DenseInsert", {{LibraryDataType[NumericArray], "Constant"}}, {Integer}];
-denseRefine = receiving["DenseRefine", {Integer}];
+denseRefine = receiving["DenseRefine", {Integer, Integer}];
+denseReshard = verb["DenseReshard", {Integer, "DataStore", "DataStore", "Boolean", "DataStore", "Boolean", "DataStore",
+    "Boolean", "DataStore", Integer, Integer, Integer, Integer}];
 denseHealth = receiving["DenseHealth", {}];
 denseSearch = receivingRows["DenseSearch", {}, {Integer, Integer, Integer, "UTF8String"}];
 denseMaxsim = receivingRows["DenseMaxsim", {}, {Integer, Integer, Integer, Integer}];
@@ -120,8 +125,9 @@ rows[vectors_List] := Developer`ToPackedArray[N[vectors]]
 monolith[bytes_ByteArray] := NumericArray[Normal[bytes], "UnsignedInteger8"]
 monolith[bytes_NumericArray] := bytes
 
-(* Outputs arrive under their C names; found matches split by each query's count, and a lone output stands alone. *)
-answer[result_Developer`DataStore] := answer[Association @@ result]
+(* Outputs arrive under their C names, a nested audit as its own store; found matches split by each query's count,
+   and a lone output stands alone. *)
+answer[result_Developer`DataStore] := answer[Replace[result, fields_Developer`DataStore :> Association @@ fields, {0, 2}]]
 answer[LibraryFunctionError["LIBRARY_MEMORY_ERROR", _]] :=
     Failure["out-of-memory", <|"MessageTemplate" -> "the kernel could not allocate the answer"|>]
 answer[<|"Status" -> status_String, "Message" -> message_String|>] := Failure[status, <|"MessageTemplate" -> message|>]
@@ -135,9 +141,10 @@ answer[fields_Association] := Module[{result = fields},
 answer[_] := Failure["invalid-argument", <|"MessageTemplate" -> "the arguments do not match the verb's types"|>]
 
 (* The kernel frees a managed expression once nothing references it, so a call holds every handle it names
-   until it returns, and only then do they cross as IDs. *)
+   until it returns, and only then do they cross as IDs, a list of indexes as a store of them. *)
 call[function_, arguments_List] := Module[{held = arguments},
-    answer[function @@ Replace[held, {(DenseIndex | Executor | Arena)[id_Integer] :> id, None -> 0}, {1}]]]
+    answer[function @@ Replace[held, {(DenseIndex | Executor | Arena)[id_Integer] :> id, None -> 0,
+        indexes : {__DenseIndex} :> store[First /@ indexes]}, {1}]]]
 
 (* A constructor fills a fresh managed expression, which a failure leaves for the kernel to release. *)
 construct[head_Symbol, function_, arguments_List] :=
@@ -193,9 +200,14 @@ DenseLoadVramBuffer[bytes : (_ByteArray | _NumericArray), OptionsPattern[]] :=
     construct[DenseIndex, denseLoadVramBuffer, {OptionValue["Executor"], monolith[bytes],
         store[OptionValue["Devices"]], OptionValue["ValuesPerKey"]}]
 DenseViewRam[path_String] := construct[DenseIndex, denseViewRam, {path}]
-Options[DenseViewNvme] = {"Executor" -> None, "Paths" -> {}};
+Options[DenseViewNvme] = {"Executor" -> None, "Paths" -> {}, "KeyTableDomains" -> None};
 DenseViewNvme[path_String, OptionsPattern[]] := construct[DenseIndex, denseViewNvme,
-    {OptionValue["Executor"], path, store[OptionValue["Paths"]]}]
+    {OptionValue["Executor"], path, store[OptionValue["Paths"]], ListQ[OptionValue["KeyTableDomains"]],
+        store[Replace[OptionValue["KeyTableDomains"], None -> {}]]}]
+Options[DenseLoadNvme] = Options[DenseViewNvme];
+DenseLoadNvme[path_String, OptionsPattern[]] := construct[DenseIndex, denseLoadNvme,
+    {OptionValue["Executor"], path, store[OptionValue["Paths"]], ListQ[OptionValue["KeyTableDomains"]],
+        store[Replace[OptionValue["KeyTableDomains"], None -> {}]]}]
 Options[DenseMetadataRead] = {"Executor" -> None};
 DenseMetadataRead[path_String, OptionsPattern[]] := call[denseMetadataRead, {OptionValue["Executor"], path}]
 Options[DenseMetadataReadBuffer] = {"Executor" -> None};
@@ -209,8 +221,18 @@ Options[DenseInsert] = {"ExpansionFactor" -> 0};
 DenseInsert[receiver_, {}, {}, OptionsPattern[]] := Null
 DenseInsert[receiver_, keys : {__?keyQ}, vectors : (_List | _NumericArray), OptionsPattern[]] :=
     submitRows[receiver, denseInsert, {keyBytes[keys]}, vectors, {OptionValue["ExpansionFactor"]}]
-Options[DenseRefine] = {"ExpansionFactor" -> 0};
-DenseRefine[receiver_, OptionsPattern[]] := submit[receiver, denseRefine, {OptionValue["ExpansionFactor"]}]
+Options[DenseRefine] = {"ExpansionFactor" -> 0, "MemoryLimit" -> 0};
+DenseRefine[receiver_, OptionsPattern[]] :=
+    submit[receiver, denseRefine, {OptionValue["ExpansionFactor"], OptionValue["MemoryLimit"]}]
+Options[DenseReshard] = {"Executor" -> None, "MemoryDomains" -> None, "Devices" -> None, "Paths" -> None,
+    "ShardCapacity" -> 0, "ExpansionFactor" -> 0, "Seed" -> 0, "MemoryLimit" -> 0};
+(* An empty list crosses as an empty store, so the C library answers it as it answers any malformed list. *)
+DenseReshard[sources : {___DenseIndex}, targets : {___DenseIndex}, OptionsPattern[]] := call[denseReshard, {
+    OptionValue["Executor"], Replace[sources, {} -> store[{}]], Replace[targets, {} -> store[{}]],
+    ListQ[OptionValue["MemoryDomains"]], store[Replace[OptionValue["MemoryDomains"], None -> {}]],
+    ListQ[OptionValue["Devices"]], store[Replace[OptionValue["Devices"], None -> {}]],
+    ListQ[OptionValue["Paths"]], store[Replace[OptionValue["Paths"], None -> {}]],
+    OptionValue["ShardCapacity"], OptionValue["ExpansionFactor"], OptionValue["Seed"], OptionValue["MemoryLimit"]}]
 DenseHealth[receiver_] := submit[receiver, denseHealth, {}]
 Options[DenseSearch] = {"ExpansionFactor" -> 0, "Traversal" -> "walk"};
 (* No tensor holds zero rows, so a call with no queries answers here, as C would, with nothing found. *)

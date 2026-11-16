@@ -45,29 +45,50 @@ export interface CompiledStats {
   visitedMembers: number;
   computedDistances: number;
   restarts: number;
+  missingHints: number;
 }
 
 /** One reachability audit. */
 export interface CompiledReachability {
   audited: number;
   reachable: number;
-  sweeps: number;
-  backSweeps: number;
+  depthFromRoot: number;
+  depthToRoot: number;
+  unlinked: number;
+  underlinked: number;
+  beyondMostPopulatedDepth: number;
+  unreachedIslands: number;
+  strandedIslands: number;
+  components: number;
 }
 
-/** What a refine, absorb or split did to the graph. */
+/** What a refine or a reshard did to the graph. */
 export interface CompiledRefineReport {
   reselected: number;
   changed: number;
   islandsFound: number;
   islandsReconnected: number;
+  neighborhoods: number;
+  widestNeighborhood: number;
+  addedLinks: number;
+  droppedLinks: number;
+  verdict: string;
+  opening: CompiledReachability;
   reachability: CompiledReachability;
+}
+
+/** Where a plan's last call stopped, the phase by its canonical name. */
+export interface CompiledPhaseProgress {
+  phase: string;
+  ordinal: number;
+  completed: number;
+  total: number;
 }
 
 /** The draws a sample wrote, viewed inside its arena. */
 export interface CompiledDraws {
-  keys: Uint8Array | null;
-  entryOrdinals: BigUint64Array | null;
+  keys: Uint8Array;
+  entryOrdinals: BigUint64Array;
   parents: CompiledMatches;
   coordinates: CompiledVectors;
   draws: number;
@@ -90,19 +111,20 @@ export interface CompiledDescription {
   cpuClass: string;
   gpuClass: string;
   shardsCount: number;
+  loadPath: string;
 }
 
-/** A ranked run viewed inside its arena; every view is `null` over device memory. */
+/** A ranked run viewed inside its arena. */
 export interface CompiledMatches {
-  keys: Uint8Array | null;
-  scores: Float64Array | null;
-  counts: BigUint64Array | null;
+  keys: Uint8Array;
+  scores: Float64Array;
+  counts: BigUint64Array;
   columns: number;
 }
 
 /** Rows a call wrote inside its arena. */
 export interface CompiledVectors {
-  data: ArrayBufferView | null;
+  data: ArrayBufferView;
   rows: number;
   columns: number;
   stride: number;
@@ -110,21 +132,21 @@ export interface CompiledVectors {
 
 /** The pairs a sparse product scored, viewed inside its arena. */
 export interface CompiledProducts {
-  offsets: BigUint64Array | null;
-  keys: Uint8Array | null;
-  scores: Float64Array | null;
+  offsets: BigUint64Array;
+  keys: Uint8Array;
+  scores: Float64Array;
   required: number;
 }
 
 /** The keys each entry of a cursor pull links to, viewed inside its arena as a ragged run. */
 export interface CompiledLinks {
-  offsets: BigUint64Array | null;
-  keys: Uint8Array | null;
+  offsets: BigUint64Array;
+  keys: Uint8Array;
 }
 
 /** One cursor pull viewed inside its arena, the links present when they were asked for. */
 export interface CompiledBatch {
-  keys: Uint8Array | null;
+  keys: Uint8Array;
   entries: number;
   links?: CompiledLinks;
 }
@@ -162,8 +184,15 @@ export interface CompiledIndex {
     ]
   ): undefined | CompiledDeferred;
   refine(
-    ...arguments_: [...On, expansion: number | undefined, stats: CompiledStats | undefined]
+    ...arguments_: [
+      ...On,
+      expansion: number | undefined,
+      memoryLimit: number | undefined,
+      stats: CompiledStats | undefined,
+      plan: ArrayBuffer | undefined,
+    ]
   ): CompiledRefineReport | CompiledDeferred;
+  refinePlanFinish(...arguments_: [...On, plan: ArrayBuffer]): CompiledRefineReport | CompiledDeferred;
   search(
     ...arguments_: [
       ...On,
@@ -199,10 +228,6 @@ export interface CompiledIndex {
       stats: CompiledStats | undefined,
     ]
   ): CompiledProducts | CompiledDeferred;
-  absorb(...arguments_: [...On, donors: CompiledIndex[]]): CompiledRefineReport | CompiledDeferred;
-  split(
-    ...arguments_: [...On, receivers: CompiledIndex[], seed: number | bigint | undefined, expansion: number | undefined]
-  ): CompiledRefineReport | CompiledDeferred;
   sample(
     ...arguments_: [
       ...On,
@@ -216,7 +241,7 @@ export interface CompiledIndex {
     ]
   ): CompiledDraws | CompiledDeferred;
   save(...arguments_: [...On, path: string]): undefined | CompiledDeferred;
-  saveBuffer(...arguments_: [...On, arena: CompiledArena]): Uint8Array | null | CompiledDeferred;
+  saveBuffer(...arguments_: [...On, arena: CompiledArena]): Uint8Array | CompiledDeferred;
   attend(
     ...arguments_: [
       ...queries: CompiledRows,
@@ -291,9 +316,36 @@ export interface CompiledIndexConstructor {
     executor: CompiledExecutor | undefined,
     paths: string[] | undefined,
     cpuClass: string | undefined,
+    keyTableDomains: number[] | undefined,
+  ): CompiledIndex;
+  loadNvme(
+    path: string,
+    executor: CompiledExecutor | undefined,
+    paths: string[] | undefined,
+    cpuClass: string | undefined,
+    keyTableDomains: number[] | undefined,
   ): CompiledIndex;
   metadataRead(path: string, executor: CompiledExecutor | undefined): CompiledMetadata;
   metadataReadBuffer(buffer: ArrayBufferView, executor: CompiledExecutor | undefined): CompiledMetadata;
+  reshard(
+    ...arguments_: [
+      ...On,
+      sources: CompiledIndex[],
+      targets: CompiledIndex[],
+      memoryDomains: number[] | undefined,
+      devices: number[] | undefined,
+      paths: string[] | undefined,
+      shardCapacity: number | undefined,
+      seed: number | bigint | undefined,
+      expansion: number | undefined,
+      memoryLimit: number | undefined,
+      stats: CompiledStats | undefined,
+      plan: ArrayBuffer | undefined,
+    ]
+  ): CompiledRefineReport | CompiledDeferred;
+  reshardPlanFinish(...arguments_: [...On, plan: ArrayBuffer]): CompiledRefineReport | CompiledDeferred;
+  plan(): ArrayBuffer;
+  planProgress(plan: ArrayBuffer): CompiledPhaseProgress;
 }
 
 /** Everything the native addon publishes. */

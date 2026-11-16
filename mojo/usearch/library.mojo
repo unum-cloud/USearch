@@ -19,7 +19,6 @@ from std.memory import ArcPointer, stack_allocation
 from std.sys.info import CompilationTarget
 
 from usearch.dense import (
-    DenseAbsorb,
     DenseAttend,
     DenseClear,
     DenseCount,
@@ -32,6 +31,7 @@ from usearch.dense import (
     DenseInitVram,
     DenseInsert,
     DenseLoadRam,
+    DenseLoadNvme,
     DenseLoadRamBuffer,
     DenseLoadVram,
     DenseLoadVramBuffer,
@@ -41,16 +41,20 @@ from usearch.dense import (
     DenseMetric,
     DenseMultiply,
     DenseRefine,
+    DenseRefinePlanFinish,
     DenseReserve,
+    DenseReshard,
+    DenseReshardPlanFinish,
     DenseSample,
     DenseSave,
     DenseSaveBuffer,
     DenseSearch,
     DenseSearchStreamInit,
     DenseSearchStreamNext,
-    DenseSplit,
     DenseViewNvme,
     DenseViewRam,
+    Phase,
+    RefineVerdict,
 )
 from usearch.types import (
     ArenaDescribe,
@@ -157,6 +161,14 @@ struct Symbols:
     """`usearch_mood_name`."""
     var mood_from_name: FromNameStatus
     """`usearch_mood_from_name`."""
+    var phase_name: NameOf
+    """`usearch_phase_name`."""
+    var phase_from_name: FromNameStatus
+    """`usearch_phase_from_name`."""
+    var refine_verdict_name: NameOf
+    """`usearch_refine_verdict_name`."""
+    var refine_verdict_from_name: FromNameStatus
+    """`usearch_refine_verdict_from_name`."""
     var cpu_class_name: NameOf
     """`usearch_cpu_class_name`."""
     var gpu_class_name: NameOf
@@ -201,6 +213,8 @@ struct Symbols:
     """`usearch_dense_view_ram`."""
     var dense_view_nvme: DenseViewNvme
     """`usearch_dense_view_nvme`."""
+    var dense_load_nvme: DenseLoadNvme
+    """`usearch_dense_load_nvme`."""
     var dense_free: Release
     """`usearch_dense_free`."""
 
@@ -214,12 +228,14 @@ struct Symbols:
     """`usearch_dense_insert`."""
     var dense_refine: DenseRefine
     """`usearch_dense_refine`."""
+    var dense_refine_plan_finish: DenseRefinePlanFinish
+    """`usearch_dense_refine_plan_finish`."""
     var dense_health: DenseHealth
     """`usearch_dense_health`."""
-    var dense_absorb: DenseAbsorb
-    """`usearch_dense_absorb`."""
-    var dense_split: DenseSplit
-    """`usearch_dense_split`."""
+    var dense_reshard: DenseReshard
+    """`usearch_dense_reshard`."""
+    var dense_reshard_plan_finish: DenseReshardPlanFinish
+    """`usearch_dense_reshard_plan_finish`."""
     var dense_sample: DenseSample
     """`usearch_dense_sample`."""
     var dense_search: DenseSearch
@@ -283,6 +299,10 @@ struct Symbols:
         self.traversal_from_name = _resolve[FromNameStatus](handle, "usearch_traversal_from_name")
         self.mood_name = _resolve[NameOf](handle, "usearch_mood_name")
         self.mood_from_name = _resolve[FromNameStatus](handle, "usearch_mood_from_name")
+        self.phase_name = _resolve[NameOf](handle, "usearch_phase_name")
+        self.phase_from_name = _resolve[FromNameStatus](handle, "usearch_phase_from_name")
+        self.refine_verdict_name = _resolve[NameOf](handle, "usearch_refine_verdict_name")
+        self.refine_verdict_from_name = _resolve[FromNameStatus](handle, "usearch_refine_verdict_from_name")
         self.cpu_class_name = _resolve[NameOf](handle, "usearch_cpu_class_name")
         self.gpu_class_name = _resolve[NameOf](handle, "usearch_gpu_class_name")
         self.dense_metric_name = _resolve[NameOf](handle, "usearch_dense_metric_name")
@@ -306,6 +326,7 @@ struct Symbols:
         self.dense_load_vram_buffer = _resolve[DenseLoadVramBuffer](handle, "usearch_dense_load_vram_buffer")
         self.dense_view_ram = _resolve[DenseViewRam](handle, "usearch_dense_view_ram")
         self.dense_view_nvme = _resolve[DenseViewNvme](handle, "usearch_dense_view_nvme")
+        self.dense_load_nvme = _resolve[DenseLoadNvme](handle, "usearch_dense_load_nvme")
         self.dense_free = _resolve[Release](handle, "usearch_dense_free")
 
         self.dense_reserve = _resolve[DenseReserve](handle, "usearch_dense_reserve")
@@ -313,9 +334,10 @@ struct Symbols:
         self.dense_describe = _resolve[DenseDescribe](handle, "usearch_dense_describe")
         self.dense_insert = _resolve[DenseInsert](handle, "usearch_dense_insert")
         self.dense_refine = _resolve[DenseRefine](handle, "usearch_dense_refine")
+        self.dense_refine_plan_finish = _resolve[DenseRefinePlanFinish](handle, "usearch_dense_refine_plan_finish")
         self.dense_health = _resolve[DenseHealth](handle, "usearch_dense_health")
-        self.dense_absorb = _resolve[DenseAbsorb](handle, "usearch_dense_absorb")
-        self.dense_split = _resolve[DenseSplit](handle, "usearch_dense_split")
+        self.dense_reshard = _resolve[DenseReshard](handle, "usearch_dense_reshard")
+        self.dense_reshard_plan_finish = _resolve[DenseReshardPlanFinish](handle, "usearch_dense_reshard_plan_finish")
         self.dense_sample = _resolve[DenseSample](handle, "usearch_dense_sample")
         self.dense_search = _resolve[DenseSearch](handle, "usearch_dense_search")
         self.dense_count = _resolve[DenseCount](handle, "usearch_dense_count")
@@ -466,6 +488,26 @@ struct Library(ImplicitlyCopyable):
     def mood_from_name(self, name: StringSlice) raises Error -> Mood:
         """Reads a spelling back, raising `INVALID_ARGUMENT` for one it refuses. Calls `usearch_mood_from_name`."""
         return Mood(self._read_named(self.symbols().mood_from_name, name, "usearch_mood_from_name"))
+
+    def phase_name(self, phase: Phase) -> String:
+        """The engine's spelling of a plan's phase, as `RESTITCH` spells "restitch". Calls `usearch_phase_name`."""
+        return text_at(self.symbols().phase_name(phase.code))
+
+    def phase_from_name(self, name: StringSlice) raises Error -> Phase:
+        """Reads a spelling back, raising `INVALID_ARGUMENT` for one it refuses. Calls `usearch_phase_from_name`."""
+        return Phase(self._read_named(self.symbols().phase_from_name, name, "usearch_phase_from_name"))
+
+    def refine_verdict_name(self, verdict: RefineVerdict) -> String:
+        """The engine's spelling of a refine verdict, as `STALLED` spells "stalled". Calls
+        `usearch_refine_verdict_name`."""
+        return text_at(self.symbols().refine_verdict_name(verdict.code))
+
+    def refine_verdict_from_name(self, name: StringSlice) raises Error -> RefineVerdict:
+        """Reads a spelling back, raising `INVALID_ARGUMENT` for one it refuses. Calls
+        `usearch_refine_verdict_from_name`."""
+        return RefineVerdict(
+            self._read_named(self.symbols().refine_verdict_from_name, name, "usearch_refine_verdict_from_name")
+        )
 
     def _read_named(self, parse: FromNameStatus, name: StringSlice, symbol: StaticString) raises Error -> c_int:
         """The enumerator a status-answering reader writes for `name`, or `INVALID_ARGUMENT` when it refuses."""

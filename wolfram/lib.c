@@ -47,9 +47,10 @@
  *  that encoding of a number below @c 2^64, so it parks in the low eight bytes with the rest
  *  zeroed, exactly as the ABI describes.
  */
-#include <stdint.h> // `int32_t`, `intptr_t`, `uint8_t`
 #include <stdlib.h> // `malloc`, `realloc`, `free`
 #include <string.h> // `memcpy`, `memset`, `strlen`, `strcmp`
+
+#include <stdint.h> // `int32_t`, `intptr_t`, `uint8_t`
 
 #include <WolframIOLibraryFunctions.h>
 #include <WolframLibrary.h>
@@ -267,16 +268,16 @@ static usearch_status_t rows_from_array(WolframLibraryData library_data, MNumeri
     return usearch_status_success_k;
 }
 
-/** Reads a metric and a quantization by their canonical names. */
-static int geometry_from_arguments(WolframLibraryData library_data, MArgument const* arguments,
-                                   usearch_dense_metric_t* metric, usearch_scalar_t* quantization) {
+/** Reads a metric and a quantization by their canonical names; an unknown name reads as an unknown
+ *  kind. */
+static void geometry_from_arguments(WolframLibraryData library_data, MArgument const* arguments,
+                                    usearch_dense_metric_t* metric, usearch_scalar_t* quantization) {
     char* metric_text = MArgument_getUTF8String(arguments[0]);
     char* quantization_text = MArgument_getUTF8String(arguments[1]);
     *metric = usearch_dense_metric_from_name(bytes_from_text(metric_text));
     *quantization = usearch_scalar_from_name(bytes_from_text(quantization_text));
     library_data->UTF8String_disown(metric_text);
     library_data->UTF8String_disown(quantization_text);
-    return *metric != usearch_dense_metric_unknown_k && *quantization != usearch_scalar_unknown_k;
 }
 
 #pragma endregion Vocabulary
@@ -300,21 +301,6 @@ static char empty_slot_marker;
 static void* const empty_slot = &empty_slot_marker;
 
 static handles_t indexes, executors, arenas;
-
-typedef struct index_t {
-    usearch_dense_index_t handle;
-    usearch_residency_t residency;
-} index_t;
-
-/** What an @c Executor slot holds. */
-typedef struct executor_t {
-    usearch_executor_t handle;
-} executor_t;
-
-/** What an @c Arena slot holds. */
-typedef struct arena_t {
-    usearch_arena_t handle;
-} arena_t;
 
 /**
  *  @brief Gives a fresh expression its slot, holding @p content; an ID left without one names
@@ -372,9 +358,13 @@ static void handles_free(handles_t* handles) {
 
 /** The executor an ID names, or @c NULL for zero, a released ID, or one whose constructor never
  *  succeeded. */
-static usearch_executor_t executor_find(mint id) {
-    executor_t const* const executor = (executor_t const*)handles_find(&executors, id);
-    return executor ? executor->handle : NULL;
+static usearch_executor_t executor_find(mint id) { return (usearch_executor_t)handles_find(&executors, id); }
+
+/** Resolves the optional executor a call fans out over; zero is the kernel's thread. */
+static int executor_from_argument(MArgument argument, usearch_executor_t* executor) {
+    mint const executor_id = MArgument_getInteger(argument);
+    *executor = executor_find(executor_id);
+    return !executor_id || *executor;
 }
 
 #pragma endregion Managed Expressions
@@ -391,7 +381,6 @@ struct call_t {
 
     /** The index the verb addresses. */
     usearch_dense_index_t index;
-    usearch_residency_t residency;
     usearch_dense_softmax_state_t* carry;
 
     /** The executor the verb fans out over; @c NULL runs it on the kernel's thread. */
@@ -478,17 +467,17 @@ static usearch_status_t call_key(WolframLibraryData library_data, call_t* call, 
 }
 
 /** The arena an ID names for the call, refusing a released one and one holding memory the kernel
- *  cannot read. */
+ *  cannot copy out of. */
 static usearch_arena_t call_arena(call_t* call, mint id) {
-    arena_t const* const arena = (arena_t const*)handles_find(&arenas, id);
+    usearch_arena_t const arena = (usearch_arena_t)handles_find(&arenas, id);
     if (!arena) return call_refuse(call, usearch_status_uninitialized_k, "the Arena was released"), NULL;
     usearch_arena_description_t description = {usearch_residency_ram_k, 0};
     usearch_arena_describe(
-        &(usearch_arena_describe_t) {.arena = arena->handle, .outcome = &call->outcome, .description = &description});
+        &(usearch_arena_describe_t) {.arena = arena, .outcome = &call->outcome, .description = &description});
     if (call->outcome.status != usearch_status_success_k) return NULL;
     if (description.residency == usearch_residency_vram_k)
         return call_refuse(call, usearch_status_device_k, "the Arena holds VRAM, which the kernel cannot read"), NULL;
-    return arena->handle;
+    return arena;
 }
 
 /** Reads the matches a call keeps per query, refusing a negative number rather than wrapping it. */
@@ -505,9 +494,8 @@ static usearch_status_t call_traversal(WolframLibraryData library_data, call_t* 
     char* traversal_text = MArgument_getUTF8String(argument);
     usearch_status_t const parsed = usearch_traversal_from_name(bytes_from_text(traversal_text), traversal);
     library_data->UTF8String_disown(traversal_text);
-    if (parsed != usearch_status_success_k)
-        return call_refuse(call, usearch_status_unknown_kind_k, "the traversal is neither walk nor scan");
-    return usearch_status_success_k;
+    return parsed == usearch_status_success_k ? parsed
+                                              : call_refuse(call, parsed, "the traversal is neither walk nor scan");
 }
 
 /**
@@ -517,9 +505,7 @@ static usearch_status_t call_traversal(WolframLibraryData library_data, call_t* 
  */
 static usearch_status_t call_open(MArgument const* arguments, call_t* call) {
     memset(call, 0, sizeof(call_t));
-    index_t const* const index = (index_t const*)handles_find(&indexes, MArgument_getInteger(arguments[0]));
-    call->index = index ? index->handle : NULL;
-    call->residency = index ? index->residency : usearch_residency_ram_k;
+    call->index = (usearch_dense_index_t)handles_find(&indexes, MArgument_getInteger(arguments[0]));
     mint const executor_id = MArgument_getInteger(arguments[1]);
     call->executor = executor_find(executor_id);
     if (!call->index)
@@ -553,36 +539,19 @@ static int call_answer(WolframLibraryData library_data, call_t* call, MArgument 
 /** Frees a released index. */
 static void manage_index(WolframLibraryData library_data, mbool mode, mint id) {
     if (!mode) handles_admit(&indexes, id, empty_slot);
-    else {
-        index_t* const index = (index_t*)handles_release(&indexes, id);
-        if (!index) return;
-        usearch_dense_free(index->handle);
-        free(index);
-    }
+    else usearch_dense_free((usearch_dense_index_t)handles_release(&indexes, id));
 }
 
 /** Frees a released executor. */
 static void manage_executor(WolframLibraryData library_data, mbool mode, mint id) {
-    if (!mode) {
-        handles_admit(&executors, id, empty_slot);
-        return;
-    }
-    executor_t* const executor = (executor_t*)handles_release(&executors, id);
-    if (!executor) return;
-    usearch_executor_free(executor->handle);
-    free(executor);
+    if (!mode) handles_admit(&executors, id, empty_slot);
+    else usearch_executor_free((usearch_executor_t)handles_release(&executors, id));
 }
 
 /** Frees a released arena and every output in it. */
 static void manage_arena(WolframLibraryData library_data, mbool mode, mint id) {
-    if (!mode) {
-        handles_admit(&arenas, id, empty_slot);
-        return;
-    }
-    arena_t* const arena = (arena_t*)handles_release(&arenas, id);
-    if (!arena) return;
-    usearch_arena_free(arena->handle);
-    free(arena);
+    if (!mode) handles_admit(&arenas, id, empty_slot);
+    else usearch_arena_free((usearch_arena_t)handles_release(&arenas, id));
 }
 
 EXTERN_C DLLEXPORT mint WolframLibrary_getVersion(void) { return WolframLibraryVersion; }
@@ -636,17 +605,8 @@ EXTERN_C DLLEXPORT int CapabilitiesAvailable(WolframLibraryData library_data, mi
 /** Fills a fresh executor's slot with the handle, or reports why no executor was made. */
 static int executor_adopt(WolframLibraryData library_data, void** slot, usearch_executor_t handle,
                           usearch_outcome_t const* outcome, MArgument result) {
-    executor_t* const executor = outcome->status == usearch_status_success_k ? (executor_t*)malloc(sizeof(executor_t))
-                                                                             : NULL;
-    if (!executor) {
-        usearch_executor_free(handle);
-        if (outcome->status == usearch_status_success_k)
-            return answer_failure(library_data, usearch_status_out_of_memory_k, "the Executor could not be kept",
-                                  result);
-        return answer_outcome(library_data, outcome, result);
-    }
-    executor->handle = handle;
-    *slot = executor;
+    if (outcome->status == usearch_status_success_k) *slot = handle;
+    else usearch_executor_free(handle);
     return answer_outcome(library_data, outcome, result);
 }
 
@@ -782,8 +742,7 @@ EXTERN_C DLLEXPORT int ExecutorDrain(WolframLibraryData library_data, mint argum
     usearch_status_t const parsed = usearch_mood_from_name(bytes_from_text(mood_text), &mood);
     library_data->UTF8String_disown(mood_text);
     if (parsed != usearch_status_success_k)
-        return answer_failure(library_data, usearch_status_invalid_argument_k,
-                              "the mood is neither parked nor spinning", result);
+        return answer_failure(library_data, parsed, "the mood is neither parked nor spinning", result);
 
     usearch_outcome_t outcome = {usearch_status_success_k, NULL};
     usearch_executor_drain(&(usearch_executor_drain_t) {.executor = executor, .outcome = &outcome, .mood = mood});
@@ -796,22 +755,14 @@ EXTERN_C DLLEXPORT int ArenaInit(WolframLibraryData library_data, mint arguments
                                  MArgument result) {
     void** const slot = handles_fresh(&arenas, MArgument_getInteger(arguments[0]));
     if (!slot) return answer_failure(library_data, usearch_status_invalid_argument_k, "the Arena is not fresh", result);
-    mint const executor_id = MArgument_getInteger(arguments[1]);
-    executor_t const* const executor = (executor_t const*)handles_find(&executors, executor_id);
-    if (executor_id && !executor)
+    usearch_executor_t executor;
+    if (!executor_from_argument(arguments[1], &executor))
         return answer_failure(library_data, usearch_status_uninitialized_k, "the Executor was released", result);
-    arena_t* const arena = (arena_t*)malloc(sizeof(arena_t));
-    if (!arena)
-        return answer_failure(library_data, usearch_status_out_of_memory_k, "the Arena could not be kept", result);
-    arena->handle = NULL;
     usearch_outcome_t outcome = {usearch_status_success_k, NULL};
-    usearch_arena_init(&(usearch_arena_init_t) {
-        .arena = &arena->handle,
-        .executor = executor ? executor->handle : NULL,
-        .outcome = &outcome,
-    });
+    usearch_arena_t arena = NULL;
+    usearch_arena_init(&(usearch_arena_init_t) {.arena = &arena, .executor = executor, .outcome = &outcome});
     if (outcome.status == usearch_status_success_k) *slot = arena;
-    else usearch_arena_free(arena->handle), free(arena);
+    else usearch_arena_free(arena);
     return answer_outcome(library_data, &outcome, result);
 }
 
@@ -819,12 +770,12 @@ EXTERN_C DLLEXPORT int ArenaInit(WolframLibraryData library_data, mint arguments
  *  for host pages. */
 EXTERN_C DLLEXPORT int ArenaDescribe(WolframLibraryData library_data, mint arguments_count, MArgument* arguments,
                                      MArgument result) {
-    arena_t const* const arena = (arena_t const*)handles_find(&arenas, MArgument_getInteger(arguments[0]));
+    usearch_arena_t const arena = (usearch_arena_t)handles_find(&arenas, MArgument_getInteger(arguments[0]));
     if (!arena) return answer_failure(library_data, usearch_status_uninitialized_k, "the Arena was released", result);
     usearch_outcome_t outcome = {usearch_status_success_k, NULL};
     usearch_arena_description_t description = {usearch_residency_ram_k, 0};
     usearch_arena_describe(
-        &(usearch_arena_describe_t) {.arena = arena->handle, .outcome = &outcome, .description = &description});
+        &(usearch_arena_describe_t) {.arena = arena, .outcome = &outcome, .description = &description});
     if (outcome.status != usearch_status_success_k) return answer_outcome(library_data, &outcome, result);
     int const answered = answer_nothing(library_data, result);
     if (answered != LIBRARY_NO_ERROR) return answered;
@@ -841,26 +792,13 @@ EXTERN_C DLLEXPORT int ArenaDescribe(WolframLibraryData library_data, mint argum
 
 /** Fills a fresh index's slot, or reports why no index was made. */
 static int index_adopt(WolframLibraryData library_data, void** slot, usearch_dense_index_t handle,
-                       usearch_residency_t residency, usearch_outcome_t const* outcome, MArgument result) {
+                       usearch_outcome_t const* outcome, MArgument result) {
     if (outcome->status != usearch_status_success_k) {
         usearch_dense_free(handle);
         return answer_outcome(library_data, outcome, result);
     }
-    index_t* const index = (index_t*)malloc(sizeof(index_t));
-    if (!index) {
-        usearch_dense_free(handle);
-        return answer_failure(library_data, usearch_status_out_of_memory_k, "the DenseIndex could not be kept", result);
-    }
-    *index = (index_t) {handle, residency};
-    *slot = index;
+    *slot = handle;
     return answer_nothing(library_data, result);
-}
-
-/** Resolves the optional executor a constructor fans out over; zero is the kernel's thread. */
-static int executor_from_argument(MArgument argument, usearch_executor_t* executor) {
-    mint const executor_id = MArgument_getInteger(argument);
-    *executor = executor_find(executor_id);
-    return !executor_id || *executor;
 }
 
 /**
@@ -877,9 +815,7 @@ EXTERN_C DLLEXPORT int DenseInitRam(WolframLibraryData library_data, mint argume
         return answer_failure(library_data, usearch_status_invalid_argument_k, "the DenseIndex is not fresh", result);
     usearch_dense_metric_t metric;
     usearch_scalar_t quantization;
-    if (!geometry_from_arguments(library_data, arguments + 1, &metric, &quantization))
-        return answer_failure(library_data, usearch_status_unknown_kind_k,
-                              "the metric or quantization is not a known name", result);
+    geometry_from_arguments(library_data, arguments + 1, &metric, &quantization);
     int32_t* domains = NULL;
     size_t domains_count = 0;
     usearch_status_t const read = ordinals_from_store(library_data, arguments[6], &domains, &domains_count);
@@ -899,7 +835,7 @@ EXTERN_C DLLEXPORT int DenseInitRam(WolframLibraryData library_data, mint argume
         .ram = {domains_count ? domains : NULL, domains_count},
     });
     free(domains);
-    return index_adopt(library_data, slot, index, usearch_residency_ram_k, &outcome, result);
+    return index_adopt(library_data, slot, index, &outcome, result);
 }
 
 /** Calls @c usearch_dense_init_vram: @c index → @c metric → @c quantization → @c dimensions
@@ -911,9 +847,7 @@ EXTERN_C DLLEXPORT int DenseInitVram(WolframLibraryData library_data, mint argum
         return answer_failure(library_data, usearch_status_invalid_argument_k, "the DenseIndex is not fresh", result);
     usearch_dense_metric_t metric;
     usearch_scalar_t quantization;
-    if (!geometry_from_arguments(library_data, arguments + 1, &metric, &quantization))
-        return answer_failure(library_data, usearch_status_unknown_kind_k,
-                              "the metric or quantization is not a known name", result);
+    geometry_from_arguments(library_data, arguments + 1, &metric, &quantization);
     int32_t* devices = NULL;
     size_t devices_count = 0;
     usearch_status_t const read = ordinals_from_store(library_data, arguments[6], &devices, &devices_count);
@@ -933,7 +867,7 @@ EXTERN_C DLLEXPORT int DenseInitVram(WolframLibraryData library_data, mint argum
         .vram = {devices_count ? devices : NULL, devices_count},
     });
     free(devices);
-    return index_adopt(library_data, slot, index, usearch_residency_vram_k, &outcome, result);
+    return index_adopt(library_data, slot, index, &outcome, result);
 }
 
 /**
@@ -970,7 +904,7 @@ EXTERN_C DLLEXPORT int DenseLoadRam(WolframLibraryData library_data, mint argume
     });
     library_data->UTF8String_disown(path_text);
     free(domains);
-    return index_adopt(library_data, slot, index, usearch_residency_ram_k, &outcome, result);
+    return index_adopt(library_data, slot, index, &outcome, result);
 }
 
 /** Calls @c usearch_dense_load_vram: @c index → @c executor → @c path → @c devices →
@@ -1002,7 +936,7 @@ EXTERN_C DLLEXPORT int DenseLoadVram(WolframLibraryData library_data, mint argum
     });
     library_data->UTF8String_disown(path_text);
     free(devices);
-    return index_adopt(library_data, slot, index, usearch_residency_vram_k, &outcome, result);
+    return index_adopt(library_data, slot, index, &outcome, result);
 }
 
 /** Calls @c usearch_dense_load_ram_buffer: @c index → @c executor → @c monolith →
@@ -1036,7 +970,7 @@ EXTERN_C DLLEXPORT int DenseLoadRamBuffer(WolframLibraryData library_data, mint 
         .values_per_key = (size_t)MArgument_getInteger(arguments[4]),
     });
     free(domains);
-    return index_adopt(library_data, slot, index, usearch_residency_ram_k, &outcome, result);
+    return index_adopt(library_data, slot, index, &outcome, result);
 }
 
 /** Calls @c usearch_dense_load_vram_buffer: @c index → @c executor → @c monolith → @c devices
@@ -1070,7 +1004,7 @@ EXTERN_C DLLEXPORT int DenseLoadVramBuffer(WolframLibraryData library_data, mint
         .values_per_key = (size_t)MArgument_getInteger(arguments[4]),
     });
     free(devices);
-    return index_adopt(library_data, slot, index, usearch_residency_vram_k, &outcome, result);
+    return index_adopt(library_data, slot, index, &outcome, result);
 }
 
 /** Calls @c usearch_dense_view_ram: @c index → @c path, served in place and read-only. */
@@ -1085,11 +1019,11 @@ EXTERN_C DLLEXPORT int DenseViewRam(WolframLibraryData library_data, mint argume
     usearch_dense_view_ram(
         &(usearch_dense_view_ram_t) {.index = &index, .outcome = &outcome, .path = bytes_from_text(path_text)});
     library_data->UTF8String_disown(path_text);
-    return index_adopt(library_data, slot, index, usearch_residency_ram_k, &outcome, result);
+    return index_adopt(library_data, slot, index, &outcome, result);
 }
 
-/** Calls @c usearch_dense_view_nvme: @c index → @c executor → @c path → @c paths, served
- *  read-only. */
+/** Calls @c usearch_dense_view_nvme: @c index → @c executor → @c path → @c paths → whether a key
+ *  table is held → its memory domains, served read-only. */
 EXTERN_C DLLEXPORT int DenseViewNvme(WolframLibraryData library_data, mint arguments_count, MArgument* arguments,
                                      MArgument result) {
     void** const slot = handles_fresh(&indexes, MArgument_getInteger(arguments[0]));
@@ -1103,20 +1037,71 @@ EXTERN_C DLLEXPORT int DenseViewNvme(WolframLibraryData library_data, mint argum
     usearch_status_t const read = paths_from_store(library_data, arguments[3], &paths, &paths_count);
     if (read != usearch_status_success_k)
         return answer_failure(library_data, read, "paths are a list of strings", result);
+    int32_t* domains = NULL;
+    size_t domains_count = 0;
+    usearch_status_t const domains_read = ordinals_from_store(library_data, arguments[5], &domains, &domains_count);
+    if (domains_read != usearch_status_success_k) {
+        free(paths);
+        return answer_failure(library_data, domains_read, "key table domains are a list of integers", result);
+    }
 
     char* path_text = MArgument_getUTF8String(arguments[2]);
     usearch_outcome_t outcome = {usearch_status_success_k, NULL};
     usearch_dense_index_t index = NULL;
+    usearch_ram_options_t const key_table = {domains_count ? domains : NULL, domains_count};
     usearch_dense_view_nvme(&(usearch_dense_view_nvme_t) {
         .index = &index,
         .executor = executor,
         .outcome = &outcome,
         .path = bytes_from_text(path_text),
         .nvme = {paths_count ? paths : NULL, paths_count},
+        .ram = MArgument_getBoolean(arguments[4]) ? &key_table : NULL,
     });
     library_data->UTF8String_disown(path_text);
+    free(domains);
     free(paths);
-    return index_adopt(library_data, slot, index, usearch_residency_nvme_k, &outcome, result);
+    return index_adopt(library_data, slot, index, &outcome, result);
+}
+
+/** Calls @c usearch_dense_load_nvme: @c index → @c executor → @c path → @c paths → whether a key
+ *  table is held → its memory domains, a manifest opened writable. */
+EXTERN_C DLLEXPORT int DenseLoadNvme(WolframLibraryData library_data, mint arguments_count, MArgument* arguments,
+                                     MArgument result) {
+    void** const slot = handles_fresh(&indexes, MArgument_getInteger(arguments[0]));
+    if (!slot)
+        return answer_failure(library_data, usearch_status_invalid_argument_k, "the DenseIndex is not fresh", result);
+    usearch_executor_t executor;
+    if (!executor_from_argument(arguments[1], &executor))
+        return answer_failure(library_data, usearch_status_uninitialized_k, "the Executor was released", result);
+    usearch_bytes_view_t* paths = NULL;
+    size_t paths_count = 0;
+    usearch_status_t const read = paths_from_store(library_data, arguments[3], &paths, &paths_count);
+    if (read != usearch_status_success_k)
+        return answer_failure(library_data, read, "paths are a list of strings", result);
+    int32_t* domains = NULL;
+    size_t domains_count = 0;
+    usearch_status_t const domains_read = ordinals_from_store(library_data, arguments[5], &domains, &domains_count);
+    if (domains_read != usearch_status_success_k) {
+        free(paths);
+        return answer_failure(library_data, domains_read, "key table domains are a list of integers", result);
+    }
+
+    char* path_text = MArgument_getUTF8String(arguments[2]);
+    usearch_outcome_t outcome = {usearch_status_success_k, NULL};
+    usearch_dense_index_t index = NULL;
+    usearch_ram_options_t const key_table = {domains_count ? domains : NULL, domains_count};
+    usearch_dense_load_nvme(&(usearch_dense_load_nvme_t) {
+        .index = &index,
+        .executor = executor,
+        .outcome = &outcome,
+        .path = bytes_from_text(path_text),
+        .nvme = {paths_count ? paths : NULL, paths_count},
+        .ram = MArgument_getBoolean(arguments[4]) ? &key_table : NULL,
+    });
+    library_data->UTF8String_disown(path_text);
+    free(domains);
+    free(paths);
+    return index_adopt(library_data, slot, index, &outcome, result);
 }
 
 /** Calls @c usearch_dense_metadata_read: @c executor → @c path → the checkpoint's frozen
@@ -1254,18 +1239,52 @@ static int answer_count(WolframLibraryData library_data, call_t* call, DataStore
     return LIBRARY_NO_ERROR;
 }
 
-/** Lands the nodes a refinement changed. */
-static int answer_refine(WolframLibraryData library_data, call_t* call, DataStore store) {
-    store_size(library_data, store, "Changed", call->report.changed);
+/** Adds every field of one reachability audit, each under its own name. */
+static void store_reachability(WolframLibraryData library_data, DataStore store,
+                               usearch_reachability_t const* reachability) {
+    store_size(library_data, store, "Audited", reachability->audited);
+    store_size(library_data, store, "Reachable", reachability->reachable);
+    store_size(library_data, store, "DepthFromRoot", reachability->depth_from_root);
+    store_size(library_data, store, "DepthToRoot", reachability->depth_to_root);
+    store_size(library_data, store, "Unlinked", reachability->unlinked);
+    store_size(library_data, store, "Underlinked", reachability->underlinked);
+    store_size(library_data, store, "BeyondMostPopulatedDepth", reachability->beyond_most_populated_depth);
+    store_size(library_data, store, "UnreachedIslands", reachability->unreached_islands);
+    store_size(library_data, store, "StrandedIslands", reachability->stranded_islands);
+    store_size(library_data, store, "Components", reachability->components);
+}
+
+/** Adds one reachability audit under @p name, as a nested store. */
+static int store_audit(WolframLibraryData library_data, DataStore store, char const* name,
+                       usearch_reachability_t const* reachability) {
+    WolframIOLibrary_Functions const io = library_data->ioLibraryFunctions;
+    DataStore const audit = io->createDataStore();
+    if (!audit) return LIBRARY_MEMORY_ERROR;
+    store_reachability(library_data, audit, reachability);
+    io->DataStore_addNamedDataStore(store, (char*)name, audit);
     return LIBRARY_NO_ERROR;
+}
+
+/** Lands what a refinement did, its two audits nested under @c Opening and @c Reachability. */
+static int answer_refine(WolframLibraryData library_data, call_t* call, DataStore store) {
+    usearch_refine_report_t const* const report = &call->report;
+    store_size(library_data, store, "Reselected", report->reselected);
+    store_size(library_data, store, "Changed", report->changed);
+    store_size(library_data, store, "IslandsFound", report->islands_found);
+    store_size(library_data, store, "IslandsReconnected", report->islands_reconnected);
+    store_size(library_data, store, "Neighborhoods", report->neighborhoods);
+    store_size(library_data, store, "WidestNeighborhood", report->widest_neighborhood);
+    store_size(library_data, store, "AddedLinks", report->added_links);
+    store_size(library_data, store, "DroppedLinks", report->dropped_links);
+    store_text(library_data, store, "Verdict", usearch_refine_verdict_name(report->verdict));
+    int const opened = store_audit(library_data, store, "Opening", &report->opening);
+    return opened != LIBRARY_NO_ERROR ? opened
+                                      : store_audit(library_data, store, "Reachability", &report->reachability);
 }
 
 /** Lands a reachability audit. */
 static int answer_health(WolframLibraryData library_data, call_t* call, DataStore store) {
-    store_size(library_data, store, "Audited", call->reachability.audited);
-    store_size(library_data, store, "Reachable", call->reachability.reachable);
-    store_size(library_data, store, "Sweeps", call->reachability.sweeps);
-    store_size(library_data, store, "BackSweeps", call->reachability.back_sweeps);
+    store_reachability(library_data, store, &call->reachability);
     return LIBRARY_NO_ERROR;
 }
 
@@ -1278,6 +1297,7 @@ static int answer_describe(WolframLibraryData library_data, call_t* call, DataSt
     store_text(library_data, store, "CPUClass", usearch_cpu_class_name(call->description.cpu_class));
     store_text(library_data, store, "GPUClass", usearch_gpu_class_name(call->description.gpu_class));
     store_size(library_data, store, "ShardsCount", call->description.shards_count);
+    store_text(library_data, store, "LoadPath", usearch_load_path_name(call->description.load_path));
     return LIBRARY_NO_ERROR;
 }
 
@@ -1349,7 +1369,7 @@ EXTERN_C DLLEXPORT int DenseInsert(WolframLibraryData library_data, mint argumen
     return call_answer(library_data, &call, result);
 }
 
-/** Calls @c usearch_dense_refine: @c expansionFactor → the nodes whose neighbors changed. */
+/** Calls @c usearch_dense_refine: @c expansionFactor → @c memoryLimit → the refinement's report. */
 EXTERN_C DLLEXPORT int DenseRefine(WolframLibraryData library_data, mint arguments_count, MArgument* arguments,
                                    MArgument result) {
     call_t call;
@@ -1360,14 +1380,98 @@ EXTERN_C DLLEXPORT int DenseRefine(WolframLibraryData library_data, mint argumen
             .executor = call.executor,
             .outcome = &call.outcome,
             .report = &call.report,
-            .refine = {.expansion_factor = (size_t)MArgument_getInteger(arguments[receiver_arguments])},
+            .refine = {.expansion_factor = (size_t)MArgument_getInteger(arguments[receiver_arguments]),
+                       .memory_limit = (size_t)MArgument_getInteger(arguments[receiver_arguments + 1])},
         });
     }
     return call_answer(library_data, &call, result);
 }
 
+/**
+ *  @brief Reads a @c DataStore of @c DenseIndex IDs as the handles they name into a fresh array,
+ *      which the caller frees.
+ *  @return @c usearch_status_uninitialized_k for an entry naming no live index.
+ */
+static usearch_status_t indexes_from_store(WolframLibraryData library_data, MArgument argument,
+                                           usearch_dense_index_t** handles, size_t* count) {
+    DataStore const store = MArgument_getDataStore(argument);
+    WolframIOLibrary_Functions const io = library_data->ioLibraryFunctions;
+    *count = (size_t)io->DataStore_getLength(store);
+    *handles = (usearch_dense_index_t*)malloc(sizeof(usearch_dense_index_t) * (*count ? *count : 1));
+    if (!*handles) return usearch_status_out_of_memory_k;
+    size_t position = 0;
+    for (DataStoreNode node = io->DataStore_getFirstNode(store); node; node = io->DataStoreNode_getNextNode(node)) {
+        MArgument cell;
+        usearch_dense_index_t const handle =
+            io->DataStoreNode_getDataType(node) == MType_Integer && io->DataStoreNode_getData(node, &cell) == 0
+                ? (usearch_dense_index_t)handles_find(&indexes, MArgument_getInteger(cell))
+                : NULL;
+        if (!handle) {
+            free(*handles);
+            *handles = NULL;
+            return usearch_status_uninitialized_k;
+        }
+        (*handles)[position++] = handle;
+    }
+    return usearch_status_success_k;
+}
+
+/** Calls @c usearch_dense_reshard: @c executor → @c sources → @c targets → whether a RAM placement
+ *  is named → its memory domains → whether a VRAM one is → its devices → whether an NVMe one is →
+ *  its paths → @c shardCapacity → @c expansionFactor → @c seed → @c memoryLimit → the report of
+ *  the closing rounds. */
+EXTERN_C DLLEXPORT int DenseReshard(WolframLibraryData library_data, mint arguments_count, MArgument* arguments,
+                                    MArgument result) {
+    call_t call;
+    memset(&call, 0, sizeof(call_t));
+    if (!executor_from_argument(arguments[0], &call.executor))
+        return answer_failure(library_data, usearch_status_uninitialized_k, "the Executor was released", result);
+    usearch_dense_index_t *sources = NULL, *targets = NULL;
+    int32_t *domains = NULL, *devices = NULL;
+    usearch_bytes_view_t* paths = NULL;
+    size_t sources_count = 0, targets_count = 0, domains_count = 0, devices_count = 0, paths_count = 0;
+    usearch_status_t read = indexes_from_store(library_data, arguments[1], &sources, &sources_count);
+    if (read == usearch_status_success_k)
+        read = indexes_from_store(library_data, arguments[2], &targets, &targets_count);
+    if (read == usearch_status_success_k)
+        read = ordinals_from_store(library_data, arguments[4], &domains, &domains_count);
+    if (read == usearch_status_success_k)
+        read = ordinals_from_store(library_data, arguments[6], &devices, &devices_count);
+    if (read == usearch_status_success_k) read = paths_from_store(library_data, arguments[8], &paths, &paths_count);
+    if (read != usearch_status_success_k)
+        call_refuse(&call, read, "sources and targets name live indexes, and placements list integers or strings");
+    else {
+        size_t const shard_capacity = (size_t)MArgument_getInteger(arguments[9]);
+        usearch_ram_options_t const ram = {domains_count ? domains : NULL, domains_count, shard_capacity};
+        usearch_vram_options_t const vram = {devices_count ? devices : NULL, devices_count, shard_capacity};
+        usearch_nvme_options_t const nvme = {paths_count ? paths : NULL, paths_count};
+        call.answer = answer_refine;
+        usearch_dense_reshard(&(usearch_dense_reshard_t) {
+            .sources_count = sources_count,
+            .sources = sources,
+            .targets_count = targets_count,
+            .targets = targets,
+            .executor = call.executor,
+            .outcome = &call.outcome,
+            .ram = MArgument_getBoolean(arguments[3]) ? &ram : NULL,
+            .vram = MArgument_getBoolean(arguments[5]) ? &vram : NULL,
+            .nvme = MArgument_getBoolean(arguments[7]) ? &nvme : NULL,
+            .report = &call.report,
+            .refine = {.expansion_factor = (size_t)MArgument_getInteger(arguments[10]),
+                       .memory_limit = (size_t)MArgument_getInteger(arguments[12])},
+            .seed = (uint64_t)MArgument_getInteger(arguments[11]),
+        });
+    }
+    free(paths);
+    free(devices);
+    free(domains);
+    free(targets);
+    free(sources);
+    return call_answer(library_data, &call, result);
+}
+
 /** Calls @c usearch_dense_health: the population audited, the entries a search reaches, and the
- *  sweeps. */
+ *  depths. */
 EXTERN_C DLLEXPORT int DenseHealth(WolframLibraryData library_data, mint arguments_count, MArgument* arguments,
                                    MArgument result) {
     call_t call;
@@ -1658,9 +1762,8 @@ EXTERN_C DLLEXPORT int DenseValues(WolframLibraryData library_data, mint argumen
                                                         .outcome = &call.outcome,
                                                         .description = &call.description});
     if (call.outcome.status != usearch_status_success_k) return call_answer(library_data, &call, result);
-    if (!count || count != keys_count || values.columns != call.description.metadata.dimensions)
-        return answer_failure(library_data, usearch_status_shape_mismatch_k, "values need one full-width row per key",
-                              result);
+    if (!count || count != keys_count)
+        return answer_failure(library_data, usearch_status_shape_mismatch_k, "values need one row per key", result);
     nk_dtype_t const dtype = value_dtype(call.description.metadata.quantization);
     size_t const row_bytes = (values.columns * nk_dtype_bits(dtype) + 7) / 8;
     if (!row_bytes || count > SIZE_MAX / sizeof(value_row_t) || count > (size_t)PTRDIFF_MAX / row_bytes)
@@ -1718,12 +1821,16 @@ EXTERN_C DLLEXPORT int DenseValues(WolframLibraryData library_data, mint argumen
 typedef struct value_lookup_t {
     usearch_key_t const* keys;
     uint8_t const* values;
-    size_t count, stride;
+    size_t count, stride, columns;
+    usearch_scalar_t scalar;
 } value_lookup_t;
 
+/** Finds each key's value row; rows of another kind or width than the call states resolve to none,
+ *  which refuses the call. */
 static void value_lookup(void* state, usearch_key_t const* keys, size_t count, usearch_scalar_t scalar, size_t columns,
                          void const** rows) {
     value_lookup_t const* const lookup = (value_lookup_t const*)state;
+    int const shaped = scalar == lookup->scalar && columns == lookup->columns;
     for (size_t row = 0; row != count; ++row) {
         size_t first = 0, last = lookup->count;
         while (first != last) {
@@ -1731,7 +1838,7 @@ static void value_lookup(void* state, usearch_key_t const* keys, size_t count, u
             if (memcmp(&lookup->keys[middle], &keys[row], sizeof(usearch_key_t)) < 0) first = middle + 1;
             else last = middle;
         }
-        rows[row] = first != lookup->count && !memcmp(&lookup->keys[first], &keys[row], sizeof(usearch_key_t))
+        rows[row] = shaped && first != lookup->count && !memcmp(&lookup->keys[first], &keys[row], sizeof(usearch_key_t))
                         ? lookup->values + first * lookup->stride
                         : NULL;
     }
@@ -1752,7 +1859,7 @@ static int answer_attend(WolframLibraryData library_data, call_t* call, DataStor
     return LIBRARY_NO_ERROR;
 }
 
-/** Calls the folded attention verb with an immutable, host-readable value cache. */
+/** Calls @c usearch_dense_attend on a RAM index, reading value rows from a @c DenseValues cache. */
 EXTERN_C DLLEXPORT int DenseAttend(WolframLibraryData library_data, mint arguments_count, MArgument* arguments,
                                    MArgument result) {
     call_t call;
@@ -1769,28 +1876,20 @@ EXTERN_C DLLEXPORT int DenseAttend(WolframLibraryData library_data, mint argumen
             usearch_status_success_k ||
         !(arena = call_arena(&call, MArgument_getInteger(arguments[8]))))
         return call_answer(library_data, &call, result);
-    if (call.residency == usearch_residency_vram_k)
-        return answer_failure(library_data, usearch_status_device_k,
-                              "Wolfram value rows require a host attention lookup", result);
     char* scalar_name = MArgument_getUTF8String(arguments[6]);
-    usearch_scalar_t const scalar = usearch_scalar_from_name(bytes_from_text(scalar_name));
+    lookup.scalar = usearch_scalar_from_name(bytes_from_text(scalar_name));
     library_data->UTF8String_disown(scalar_name);
-    usearch_dense_describe(&(usearch_dense_describe_t) {.index = call.index,
-                                                        .executor = call.executor,
-                                                        .outcome = &call.outcome,
-                                                        .description = &call.description});
-    if (call.outcome.status != usearch_status_success_k) return call_answer(library_data, &call, result);
+    lookup.columns = (size_t)MArgument_getInteger(arguments[7]);
+    lookup.stride = (lookup.columns * nk_dtype_bits(value_dtype(lookup.scalar)) + 7) / 8;
     WolframNumericArrayLibrary_Functions const arrays = library_data->numericarrayLibraryFunctions;
     MNumericArray const values = MArgument_getMNumericArray(arguments[5]);
     mint const* const shape = arrays->MNumericArray_getDimensions(values);
-    lookup.stride = (queries.columns * nk_dtype_bits(value_dtype(scalar)) + 7) / 8;
-    if (scalar != call.description.metadata.quantization ||
-        MArgument_getInteger(arguments[7]) != (mint)queries.columns ||
-        arrays->MNumericArray_getType(values) != MNumericArray_Type_UBit8 ||
+    // The value rows are this side's own, so only this side can see them disagree with their keys.
+    if (arrays->MNumericArray_getType(values) != MNumericArray_Type_UBit8 ||
         arrays->MNumericArray_getRank(values) != 2 || (size_t)shape[0] != lookup.count ||
         (size_t)shape[1] != lookup.stride)
         return answer_failure(library_data, usearch_status_shape_mismatch_k,
-                              "value cache must match the index's quantization and query width", result);
+                              "value rows must hold one row per key, as wide as their dimensions", result);
     lookup.values = (uint8_t const*)arrays->MNumericArray_getData(values);
     if (call.count > SIZE_MAX / sizeof(usearch_dense_softmax_state_t)) return LIBRARY_MEMORY_ERROR;
     call.carry = (usearch_dense_softmax_state_t*)calloc(call.count, sizeof(usearch_dense_softmax_state_t));

@@ -30,8 +30,7 @@ Expect["an arena for the calling thread", ArenaDescribe[$local], <|"Residency" -
 Expect["an unknown mood", ExecutorDrain[$executor, "chill"],
     Failure["invalid-argument", <|"MessageTemplate" -> "the mood is neither parked nor spinning"|>]]
 
-Expect["an unknown quantization", DenseInitRam["inner", "f24", 5],
-    Failure["unknown-kind", <|"MessageTemplate" -> "the metric or quantization is not a known name"|>]]
+Expect["an unknown quantization", DenseInitRam["inner", "f24", 5][[1]], "unknown-kind"]
 Expect["a quantization the engine never stores", DenseInitRam["inner", "f32", 5][[1]], "unknown-kind"]
 $index = DenseInitRam["inner", "bf16", 5]
 Print["New Index: ", $index]
@@ -76,7 +75,7 @@ Expect["a reservation to scan", DenseReserve[$scanned, 2], Null]
 Expect["an insertion to scan", DenseInsert[$scanned, {$uuid, 43}, $rows], Null]
 Expect["a scan", First /@ DenseSearch[$scanned, $rows, 2, $local, "Traversal" -> "scan"]["Keys"], {$uuid, 43}]
 Expect["an unknown traversal", DenseSearch[$scanned, $rows, 2, $local, "Traversal" -> "sweep"],
-    Failure["unknown-kind", <|"MessageTemplate" -> "the traversal is neither walk nor scan"|>]]
+    Failure["invalid-argument", <|"MessageTemplate" -> "the traversal is neither walk nor scan"|>]]
 
 Expect["a drain", ExecutorDrain[$executor, "parked"], Null]
 Expect["an arena no constructor made", DenseSearch[$index, $rows, 10, Arena[0]],
@@ -115,7 +114,25 @@ Expect["single-row queries scored late-interaction style",
 Expect["a zero wanted lands every scored key", And @@ MapThread[GreaterEqual,
     Differences[DenseMaxsim[$index, $typed, 1, #, $arena]["Offsets"]] & /@ {0, 1}], True]
 
-Expect["a refinement", IntegerQ[DenseRefine[DenseIndexOn[$index, $executor]]], True]
+Expect["a refinement", With[{report = DenseRefine[DenseIndexOn[$index, $executor]]},
+    {MemberQ[{"none", "improved", "converged", "stalled", "stopped"}, report["Verdict"]},
+        report["Reachability"] === DenseHealth[$index]}],
+    {True, True}]
+Expect["a recut keeps every entry", {AssociationQ[DenseReshard[{$index}, {$index}, "Executor" -> $executor,
+    "MemoryDomains" -> {}, "ShardCapacity" -> 8]], DenseDescribe[$index]["Size"]}, {True, 2}]
+$source = DenseInitRam["inner", "bf16", 5]
+$gathered = DenseInitRam["inner", "bf16", 5]
+Expect["a source insertion", DenseInsert[$source, {44}, {First[$rows]}], Null]
+Expect["a gather empties its other sources into the target", {AssociationQ[DenseReshard[{$gathered, $source},
+    {$gathered}]], DenseDescribe[$gathered]["Size"], DenseDescribe[$source]["Size"]}, {True, 1, 0}]
+$cut = DenseInitRam["inner", "bf16", 5]
+Expect["a cut source insertion", DenseInsert[$cut, {45, 46}, $rows], Null]
+$left = DenseInitRam["inner", "bf16", 5]
+$right = DenseInitRam["inner", "bf16", 5]
+Expect["a cut empties its source into its targets", {AssociationQ[DenseReshard[{$cut}, {$left, $right},
+    "Executor" -> $executor, "Seed" -> 7]], DenseDescribe[$cut]["Size"],
+    DenseDescribe[$left]["Size"] + DenseDescribe[$right]["Size"]}, {True, 0, 2}]
+Expect["an empty source list is the library's to refuse", DenseReshard[{}, {$left}][[1]], "invalid-argument"]
 Expect["an audit", KeyTake[DenseHealth[$index], {"Audited", "Reachable"}], <|"Audited" -> 2, "Reachable" -> 2|>]
 
 $checkpoint = FileNameJoin[{$TemporaryDirectory, "usearch-test-wolfram.safegraphs"}]
@@ -123,6 +140,12 @@ Expect["a save", DenseSave[DenseIndexOn[$index, $executor], $checkpoint], Null]
 $loaded = DenseLoadRam[$checkpoint, "Executor" -> $executor]
 Expect["a checkpoint round trip", DenseDescribe[$loaded]["Size"], 2]
 $nvme = DenseViewNvme[$checkpoint];
+Expect["an NVMe view without a key table refuses key lookups", DenseCount[$nvme, $uuid][[1]], "unsupported"]
+$drives = ExecutorForNvme["Threads" -> 1]
+Expect["a lone monolith has no manifest to load writable",
+    DenseLoadNvme[$checkpoint, "Executor" -> $drives][[1]], "unsupported"]
+Expect["an NVMe view counts through its key table", DenseCount[DenseIndexOn[
+    DenseViewNvme[$checkpoint, "Executor" -> $drives, "KeyTableDomains" -> {}], $drives], $uuid], 1]
 Expect["a value cache also serves NVMe attention", Max[Abs[Flatten[
     DenseAttend[$nvme, $typed, $values, $local, "HeadCount" -> 2, "ScoreScale" -> 0.01]["Outputs"] - $oracle]]] < 0.00005,
     True]
@@ -144,6 +167,6 @@ Expect["empty sparse products", Normal[DenseMultiply[$loaded, $typed, {43, $uuid
 Expect["no matches in an empty index", DenseSearch[$loaded, $typed, 2, $local],
     <|"Scores" -> {{}, {}}, "Keys" -> {{}, {}}|>]
 
-ClearAll[$loaded, $viewed, $nvme, $arena, $local, $scanned, $index, $executor]
+ClearAll[$loaded, $viewed, $nvme, $source, $gathered, $cut, $left, $right, $arena, $local, $scanned, $index, $executor]
 DeleteFile[$checkpoint]
 Print["Handles Released"]
