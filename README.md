@@ -12,7 +12,7 @@ across RAM, VRAM &amp; NVMe
 &nbsp;&nbsp;&nbsp;
 <a href="https://twitter.com/unum_cloud"><img height="25" src="https://github.com/unum-cloud/.github/raw/main/assets/twitter.svg" alt="Twitter"></a>
 &nbsp;&nbsp;&nbsp;
-<a href="https://unum.cloud/post"><img height="25" src="https://github.com/unum-cloud/.github/raw/main/assets/blog.svg" alt="Blog"></a>
+<a href="https://www.unum.cloud/blog"><img height="25" src="https://github.com/unum-cloud/.github/raw/main/assets/blog.svg" alt="Blog"></a>
 &nbsp;&nbsp;&nbsp;
 <a href="https://github.com/unum-cloud/USearch"><img height="25" src="https://github.com/unum-cloud/.github/raw/main/assets/github.svg" alt="GitHub"></a>
 </p>
@@ -90,34 +90,40 @@ The [benchmark tables](https://github.com/unum-cloud/USearch/blob/main/bench/REA
 
 ## Quickstart
 
-Every binding is a thin layer over the same C ABI, so this matrix follows the C symbols each one calls.
-The C++ core also exposes lower-level kits & custom folds.
+```sh
+pip install usearch
+```
 
-| Operation                         |  C  | Python | Rust | JS  | Go  | Swift | Java | C#  | Zig | Mojo | Wolfram |
-| :-------------------------------- | :-: | :----: | :--: | :-: | :-: | :---: | :--: | :-: | :-: | :--: | :-----: |
-| Dense Init, Load, Insert & Search |  ✓  |   ✓    |  ✓   |  ✓  |  ✓  |   ✓   |  ✓   |  ✓  |  ✓  |  ✓   |    ✓    |
-| Save, Metadata & Describe         |  ✓  |   ✓    |  ✓   |  ✓  |  ✓  |   ✓   |  ✓   |  ✓  |  ✓  |  ✓   |    ✓    |
-| Refine & Health                   |  ✓  |   ✓    |  ✓   |  ✓  |  ✓  |   ✓   |  ✓   |  ✓  |  ✓  |  ✓   |    ✓    |
-| Resumable Operation Plans         |  ✓  |   ✓    |  ✓   |  ✓  |  ✓  |   ✓   |  ✓   |  ✓  |  ✓  |  ✓   |    -    |
-| Count & Get by Key                |  ✓  |   ✓    |  ✓   |  ✓  |  ✓  |   ✓   |  ✓   |  ✓  |  ✓  |  ✓   |    ✓    |
-| Exact Scans                       |  ✓  |   ✓    |  ✓   |  ✓  |  ✓  |   ✓   |  ✓   |  ✓  |  ✓  |  ✓   |    ✓    |
-| VRAM & NVMe Residencies           |  ✓  |   ✓    |  ✓   |  ✓  |  ✓  |   ✓   |  ✓   |  ✓  |  ✓  |  ✓   |    ✓    |
-| Multiply & MaxSim                 |  ✓  |   ✓    |  ✓   |  ✓  |  ✓  |   ✓   |  ✓   |  ✓  |  ✓  |  ✓   |    ✓    |
-| Folded Flash Attention            |  ✓  |   ✓    |  ✓   |  ✓  |  ✓  |   ✓   |  ✓   |  ✓  |  ✓  |  ✓   |    ✓    |
-| Batched Iteration with Cursors    |  ✓  |   ✓    |  ✓   |  ✓  |  ✓  |   ✓   |  ✓   |  ✓  |  ✓  |  ✓   |    -    |
-| Filtered Search with Predicates   |  ✓  |   ✓    |  ✓   |  -  |  ✓  |   ✓   |  -   |  ✓  |  ✓  |  ✓   |    -    |
-| Deferred Calls                    |  ✓  |   ✓    |  ✓   |  ✓  |  ✓  |   ✓   |  ✓   |  ✓  |  ✓  |  ✓   |    -    |
-| Merge & Streams ¹                 |  ✓  |   ✓    |  ✓   |  ✓  |  ✓  |   ✓   |  ✓   |  ✓  |  ✓  |  ✓   |    -    |
-| Sequence, Shapes & Geospatial ²   |  ✓  |   -    |  -   |  -  |  -  |   -   |  -   |  -  |  -  |  -   |    -    |
+Index ten thousand vectors, then search the first hundred of them on an executor, with the results landing in an arena:
 
-✓ indicates a binding surface; engine availability still depends on residency, as detailed in the [C guide](https://github.com/unum-cloud/USearch/blob/main/c/README.md).
-¹ Absorption runs in the C engine; streams expose the declared API, but their C engine verbs currently report unsupported.
-² The experimental sequence, shape & geospatial C calls run the engines, on RAM & NVIDIA GPUs.
-Kotlin & Scala consume the Java surface directly & match its column.
+```python
+import numpy as np
+import usearch
+from usearch import DenseIndex, DenseMetric, Scalar
+
+index = DenseIndex.init_ram(
+    dimensions=256,  # Scalars per vector
+    metric=DenseMetric.ANGULAR,  # INNER, ANGULAR, EUCLIDEAN, HAMMING or JACCARD
+    quantization=Scalar.BF16,  # The stored scalar type: BF16...E2M3, I8, U8, U1X8
+    connectivity=16,  # Connections per node; 0 derives it from the geometry
+)
+
+vectors = np.random.rand(10_000, 256).astype(np.float32)
+index.reserve(len(vectors))  # Optional capacity hint; inserts grow on demand
+index.insert(np.arange(len(vectors)), vectors)  # On the calling thread
+
+pool = usearch.Executor.for_ram()  # The workers a receiver names
+arena = usearch.Arena(pool)  # The memory results land in, made where the pool computes
+matches = index.on(pool).search(vectors[:100], 10, arena)  # Blocking, on the pool
+assert len(index) == 10_000
+assert np.asarray(matches.distances).shape == (100, 10)
+key, distance = matches[0][0]
+assert distance < 0.001
+```
 
 Most calls name an Index, an Executor for scheduling, & an Arena for outputs whose size grows with the input.
 Typed buffers cross the ABI directly; arenas own the returned buffers & can be reused once their results are consumed.
-The language guides above cover installation & complete examples.
+Every binding's guide opens with its own Quickstart: [C](https://github.com/unum-cloud/USearch/blob/main/c/README.md#quickstart), [C++](https://github.com/unum-cloud/USearch/blob/main/cpp/README.md#quickstart), [Python](https://github.com/unum-cloud/USearch/blob/main/python/README.md#quickstart), [Rust](https://github.com/unum-cloud/USearch/blob/main/rust/README.md#quickstart), [JavaScript](https://github.com/unum-cloud/USearch/blob/main/javascript/README.md#quickstart), [Go](https://github.com/unum-cloud/USearch/blob/main/golang/README.md#quickstart), [Swift](https://github.com/unum-cloud/USearch/blob/main/swift/README.md#quickstart), [Java](https://github.com/unum-cloud/USearch/blob/main/java/README.md#quickstart), [C#](https://github.com/unum-cloud/USearch/blob/main/csharp/README.md#quickstart), [Zig](https://github.com/unum-cloud/USearch/blob/main/zig/README.md#quickstart), [Mojo](https://github.com/unum-cloud/USearch/blob/main/mojo/README.md#quickstart) & [Wolfram](https://github.com/unum-cloud/USearch/blob/main/wolfram/README.md#quickstart).
 See [contributing](https://github.com/unum-cloud/USearch/blob/main/CONTRIBUTING.md) for building from source, & [benchmarks](https://github.com/unum-cloud/USearch/blob/main/bench/README.md) for measuring it.
 
 ## Architecture
@@ -314,12 +320,11 @@ USearch is used in databases, frameworks & applications:
 - [x] Pathway: [Rust](https://github.com/pathwaycom/pathway).
 - [x] Vald: [GoLang](https://github.com/vdaas/vald).
 - [x] MatrixOne: [GoLang](https://github.com/matrixorigin/matrixone).
-- [x] GreptimeDB: [Rust](https://github.com/GreptimeTeam/greptimedb/blob/main/src/index/src/vector.rs).
 - [x] KurrentDB: [C#](https://github.com/kurrent-io/KurrentDB/blob/master/src/KurrentDB.Kontext/Indexing/USearch/USearchVectorStore.cs), [credits](https://github.com/kurrent-io/KurrentDB/blob/master/NOTICE.md).
 - [x] Chroma: [Rust](https://github.com/chroma-core/chroma/blob/main/rust/index/src/usearch.rs), behind their RaBitQ-quantized SPANN index.
 - [x] Arm MCP: [Python](https://github.com/arm/mcp/blob/main/arm_kb_search/loaders.py).
 - [x] GPT4All: [C++](https://github.com/nomic-ai/gpt4all/blob/main/gpt4all-chat/src/database.cpp).
-- [x] Ente: [Rust](https://github.com/ente-io/ente/blob/main/rust/crates/photos/src/ml/vector_db.rs), [post](https://ente.com/blog/vector-db/).
+- [x] Ente: [Rust](https://github.com/ente/ente/blob/main/rust/crates/ml/src/vector_db.rs), [post](https://ente.com/blog/vector-db/).
 - [x] Tracy profiler: [C++](https://github.com/wolfpld/tracy/blob/master/profiler/src/profiler/TracyLlmEmbeddings.cpp), behind the embeddings index of its LLM assistant.
 - [x] Copilot for Xcode by Intitni: [Swift](https://github.com/intitni/CopilotForXcode/blob/main/Tool/Sources/USearchIndex/UsearchIndex.swift).
 - [x] LLM for Unity: [C#](https://github.com/undreamai/LLMUnity/tree/main/Runtime/RAG/usearch), [docs](https://undream.ai/LLMUnity/).
@@ -349,14 +354,87 @@ USearch compiles in one of two shapes, picked by `USEARCH_MULTIVERSIONED`.
 A monoversioned build compiles the single `monoversioned` CPU class in place of the ladder of named ones.
 It needs no monoversioned GPU class, as a preset's one GPU architecture already matches a named class, and CMake builds only the class units carrying code for it.
 
+## Compatibility
+
+Every modality is served in every residency, with the exceptions the notes under the table name.
+
+| Modality        | RAM |    NVMe     | NVIDIA VRAM | AMD VRAM | Apple VRAM |
+| :-------------- | :-: | :---------: | :---------: | :------: | :--------: |
+| Dense Vectors   | ✅  |     ✅      |     ✅      |    ✅    |     ✅     |
+| Sequences       | ✅  | read-only ¹ |     ✅      |    ✅    |     ✅     |
+| Shapes          | ✅  | read-only ¹ |     ✅      |    ✅    | f16 only ² |
+| Geospatial Sets | ✅  | read-only ¹ |     ✅      |    ✅    |    · ²     |
+
+¹ Sequence, shape & geospatial checkpoints open on NVMe as read-only views, while a dense one loaded there writes new parts as it refines & reshards.
+
+² Apple GPUs refuse geospatial sets & `f32` shapes with `usearch_status_unsupported_k`, as no Metal kernel meets their `f64` & `f32` numerics contract.
+
+Every GPU refuses filtered search, since a host predicate cannot narrow a device walk, & scores shapes with Chamfer & Hausdorff alone; Apple GPUs refuse attention too.
+
+The [C guide](https://github.com/unum-cloud/USearch/blob/main/c/README.md#residency) lists the verbs each residency serves.
+
+| Modality        | C & C++ | Python | Rust | JavaScript | Go  | Swift | Java | C#  | Zig | Mojo | Wolfram |
+| :-------------- | :-----: | :----: | :--: | :--------: | :-: | :---: | :--: | :-: | :-: | :--: | :-----: |
+| Dense Vectors   |   ✅    |   ✅   |  ✅  |     ✅     | ✅  |  ✅   |  ✅  | ✅  | ✅  |  ✅  |   ✅    |
+| Sequences       |   ✅    |   ✅   |  ✅  |     ✅     | ✅  |  ✅   |  ✅  | ✅  | ✅  |  ✅  |   ✅    |
+| Shapes          |   ✅    |   ✅   |  ✅  |     ✅     | ✅  |  ✅   |  ✅  | ✅  | ✅  |  ✅  |   ✅    |
+| Geospatial Sets |   ✅    |   ✅   |  ✅  |     ✅     | ✅  |  ✅   |  ✅  | ✅  | ✅  |  ✅  |   ✅    |
+
+Every binding is a thin layer over the same C ABI, so each exposes every modality the C headers declare, & the engine decides what a residency serves.
+The C & C++ column covers the C ABI & the C++ wrapper over it in `cpp/`, while Kotlin & Scala consume the Java surface directly & match its column.
+The C++ core also exposes lower-level kits & custom folds, & each binding's guide lists what it does not expose.
+
+## Repository Layout
+
+```bash
+usearch/
+├── include/usearch/  the header-only C++ 20 engine, one folder per layer & modality
+│   ├── utilities/    devices, shards, walks, buffers, sorts & the SafeGraphs format
+│   ├── basic/        the reference graph index the other three modalities instantiate
+│   ├── dense/        dense vectors in RAM, on NVMe & on NVIDIA, AMD & Apple GPUs
+│   ├── sequence/     edit distances & alignments over byte strings
+│   ├── shapes/       distances between 3D point clouds
+│   └── geospatial/   relations between observations on the Earth
+├── c/                the C ABI in usearch/*.h, shared by every binding, & its test
+├── cpp/              the C++ wrappers of the C ABI in usearch/*.hpp
+├── src/              the instantiations, dispatch & per-class units behind the C ABI
+├── src_stub/         a brute-force stand-in answering the same verbs
+├── tools/            the `usearch` & `usearch-mpi` command-line tools
+├── bench/            benchmarks of search, algebra & NVMe reads
+├── test/             the C++ suites & the Python suites
+├── verification/     Promela & GenMC models of the concurrent protocols
+├── docs/             the SafeGraphs format & the Doxygen configuration
+├── explorer/         a browser map of an index's neighborhoods
+├── python/           the CPython extension
+├── rust/             the crate, over `extern "C"` declarations
+├── javascript/       the Node-API addon
+├── golang/           the Go package, through cgo
+├── swift/            the Swift package, through a Clang module map
+├── java/             the Java, Kotlin & Scala SDK, through the FFM API
+├── csharp/           the .NET package, through `[LibraryImport]` stubs
+├── zig/              the Zig SDK, over `extern fn` declarations
+├── mojo/             the Mojo package, opening the shared library at runtime
+├── wolfram/          the Wolfram Language package, through LibraryLink
+├── numkong/          the dense kernels & tensors, as a git submodule
+├── stringzilla/      the sequence kernels, as a git submodule
+├── forkunion/        the thread pools & memory topology, as a git submodule
+└── smashtable/       the row directories of NVMe indexes, as a git submodule
+```
+
+Each binding folder holds its package, its suite & its guide, all over the C ABI in `c/usearch/`.
+Conventions, hooks & the commit format are described in [`CONTRIBUTING.md`](https://github.com/unum-cloud/USearch/blob/main/CONTRIBUTING.md).
+
 ## Citation
+
+If USearch helps your work, please cite it:
 
 ```bibtex
 @software{Vardanian_USearch,
-doi = {10.5281/zenodo.7949415},
-author = {Vardanian, Ash},
-title = {{USearch: One Proximity Graph for Search, Sparse Products and Attention, across RAM, VRAM and NVMe}},
-url = {https://github.com/unum-cloud/USearch},
+  author = {Vardanian, Ash},
+  title = {{USearch: One Proximity Graph for Search, Sparse Products \& Attention across RAM, VRAM \& NVMe}},
+  doi = {10.5281/zenodo.7949415},
+  url = {https://github.com/unum-cloud/USearch},
+  license = {Apache-2.0}
 }
 ```
 

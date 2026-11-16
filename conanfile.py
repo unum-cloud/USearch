@@ -19,20 +19,24 @@ required_conan_version = ">=2.0"
 class USearchConan(ConanFile):
     name = "usearch"
     license = "Apache-2.0"
-    description = "One Proximity Graph for Search, Sparse Products & Attention, across RAM, VRAM & NVMe"
+    description = "One Proximity Graph for Search, Sparse Products & Attention across RAM, VRAM & NVMe"
     homepage = "https://www.unum.cloud/docs/usearch"
     url = "https://github.com/unum-cloud/USearch"
     topics = (
         "vector-search",
-        "vector-database",
         "similarity-search",
-        "nearest-neighbors",
+        "nearest-neighbor-search",
         "embeddings",
-        "semantic-search",
-        "retrieval",
-        "clustering",
-        "simd",
+        "sequence-search",
+        "edit-distance",
+        "shape-search",
+        "point-clouds",
+        "geospatial-search",
+        "proximity-graph",
+        "sparse-matrix-multiplication",
+        "attention",
         "gpu",
+        "nvme",
     )
 
     # Compiled rather than header-only: the C interface links an instantiation grid that a consumer

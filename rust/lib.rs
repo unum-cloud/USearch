@@ -1,4 +1,4 @@
-//! USearch - One Proximity Graph for Search, Sparse Products & Attention, across RAM, VRAM & NVMe.
+//! USearch - One Proximity Graph for Search, Sparse Products & Attention across RAM, VRAM & NVMe.
 //!
 //! The crate links the precompiled engine, so building it compiles no index.
 //!

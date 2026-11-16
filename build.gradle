@@ -8,6 +8,7 @@ plugins {
 }
 
 group = "cloud.unum"
+description = "One Proximity Graph for Search, Sparse Products & Attention across RAM, VRAM & NVMe"
 version = file("VERSION").text.trim()
 
 java {
@@ -273,7 +274,8 @@ task fatJar(type: Jar) {
 
     manifest {
         attributes 'Implementation-Title': 'USearch',
-                   'Implementation-Version': version
+                   'Implementation-Version': version,
+                   'Implementation-URL': 'https://www.unum.cloud/docs/usearch/java'
     }
 
     // Log what we're packaging for transparency

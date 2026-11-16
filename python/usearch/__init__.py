@@ -1,4 +1,4 @@
-"""One Proximity Graph for Search, Sparse Products & Attention, across RAM, VRAM & NVMe.
+"""One Proximity Graph for Search, Sparse Products & Attention across RAM, VRAM & NVMe.
 
 File: python/usearch/__init__.py
 Author: Ash Vardanian

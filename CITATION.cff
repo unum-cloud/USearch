@@ -1,5 +1,5 @@
 cff-version: 1.2.0
-title: "USearch: One Proximity Graph for Search, Sparse Products and Attention, across RAM, VRAM and NVMe"
+title: "USearch: One Proximity Graph for Search, Sparse Products & Attention across RAM, VRAM & NVMe"
 message: "If you use this software, please cite it as below."
 type: software
 license: Apache-2.0
@@ -9,17 +9,24 @@ doi: 10.5281/zenodo.7949415
 abstract: >-
   USearch is an open-source proximity-graph index for nearest-neighbor search over dense vectors,
   sequences, shapes and geospatial sets. The same graph serves as a sparse operand, folding sparse
-  matrix products, late-interaction MaxSim scoring and softmax attention into its traversal, and one
-  checkpoint opens in host memory, GPU memory or on NVMe drives without being rewritten. Its core
-  is a header-only C++ 20 library with no external dependencies, and ClickHouse, DuckDB, ScyllaDB
-  and YugabyteDB embed it for vector search.
+  matrix products, late-interaction MaxSim scoring and softmax attention into its traversal, and
+  one checkpoint opens in RAM, on NVMe drives, or in the VRAM of NVIDIA, AMD and Apple GPUs without
+  being rewritten. Its core is a header-only C++ 20 library with no external dependencies, and
+  ClickHouse, DuckDB, ScyllaDB and YugabyteDB embed it for vector search.
 keywords:
   - nearest-neighbor search
   - vector search
   - similarity search
+  - sequence search
+  - edit distance
+  - shape search
+  - point clouds
+  - geospatial search
   - proximity graph
   - sparse matrix multiplication
   - attention
+  - ram
+  - vram
   - nvme
   - gpu
 

@@ -2,7 +2,7 @@
  *  @file javascript/usearch.ts
  *  @author Ash Vardanian
  *  @date March 30, 2024
- *  @brief One Proximity Graph for Search, Sparse Products & Attention, across RAM, VRAM & NVMe,
+ *  @brief One Proximity Graph for Search, Sparse Products & Attention across RAM, VRAM & NVMe,
  *      for Node.
  *
  *  The package entry point: one module per modality underneath, re-exported here so a caller

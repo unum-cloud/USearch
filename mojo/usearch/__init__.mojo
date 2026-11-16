@@ -1,4 +1,4 @@
-"""One Proximity Graph for Search, Sparse Products & Attention, across RAM, VRAM & NVMe, bound over its C ABI.
+"""One Proximity Graph for Search, Sparse Products & Attention across RAM, VRAM & NVMe, bound over its C ABI.
 
 USearch indexes dense embeddings in a navigable graph and answers approximate nearest-neighbor
 queries over it, with SIMD kernels dispatched to the machine it runs on. This package binds the

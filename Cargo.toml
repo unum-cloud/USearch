@@ -1,9 +1,7 @@
 [package]
 authors = ["Ash Vardanian <info@unum.cloud>"]
-description = "One Proximity Graph for Search, Sparse Products & Attention, across RAM, VRAM & NVMe"
-keywords = ["vector-search", "vector-database", "similarity-search", "embeddings", "nearest-neighbor"]
-documentation = "https://www.unum.cloud/docs/usearch/rust"
-homepage = "https://www.unum.cloud/docs/usearch"
+description = "One Proximity Graph for Search, Sparse Products & Attention across RAM, VRAM & NVMe"
+keywords = ["vector-search", "sequence-search", "shape-search", "geospatial-search", "nearest-neighbor"]
 edition = "2024"
 rust-version = "1.100"
 include = [
@@ -20,7 +18,9 @@ license = "Apache-2.0"
 name = "usearch"
 links = "usearch"
 publish = true
+homepage = "https://www.unum.cloud/docs/usearch"
 repository = "https://github.com/unum-cloud/USearch"
+documentation = "https://www.unum.cloud/docs/usearch/rust"
 version = "3.0.0-rc.1"
 
 [lib]

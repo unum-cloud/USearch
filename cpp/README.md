@@ -67,7 +67,7 @@ auto [reachability, status, message] = audit.wait();     // what the blocking ca
 Both receivers are one class template over the completion, so each verb has one body that fills the C struct and lands its result in the call's output slot.
 A `deferred` owns its outcome and output slot and never moves, since the library writes into it; the arena, handles, inputs and handlers it was handed stay borrowed until it is final.
 Its one owner polls `status` or blocks in `wait`, and destruction waits the same way, so a scope ending is a join.
-The full rules live in the [C README](../c/README.md#completion--deferred-calls).
+The full rules live in the [C README](../c/README.md#receivers--deferred-calls).
 
 ## Executors
 

@@ -8,7 +8,7 @@ project(
     usearch
     VERSION ${CMAKE_MATCH_1}
     LANGUAGES C CXX
-    DESCRIPTION "One Proximity Graph for Search, Sparse Products & Attention, across RAM, VRAM & NVMe"
+    DESCRIPTION "One Proximity Graph for Search, Sparse Products & Attention across RAM, VRAM & NVMe"
     HOMEPAGE_URL "https://www.unum.cloud/docs/usearch"
 )
 

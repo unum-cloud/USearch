@@ -11,7 +11,7 @@ requires = ["scikit-build-core>=0.11"]
 
 [project]
 name = "usearch"
-description = "One Proximity Graph for Search, Sparse Products & Attention, across RAM, VRAM & NVMe"
+description = "One Proximity Graph for Search, Sparse Products & Attention across RAM, VRAM & NVMe"
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
@@ -20,15 +20,19 @@ dynamic = ["version"]
 authors = [{ name = "Ash Vardanian", email = "info@unum.cloud" }]
 keywords = [
   "vector-search",
-  "vector-database",
   "similarity-search",
-  "nearest-neighbors",
+  "nearest-neighbor-search",
   "embeddings",
-  "semantic-search",
-  "retrieval",
-  "clustering",
-  "simd",
+  "sequence-search",
+  "edit-distance",
+  "shape-search",
+  "point-clouds",
+  "geospatial-search",
+  "proximity-graph",
+  "sparse-matrix-multiplication",
+  "attention",
   "gpu",
+  "nvme",
 ]
 classifiers = [
   "Development Status :: 5 - Production/Stable",
@@ -67,6 +71,7 @@ eval = ["numpy", "tqdm"]
 Homepage = "https://www.unum.cloud/docs/usearch"
 Documentation = "https://www.unum.cloud/docs/usearch/python"
 Repository = "https://github.com/unum-cloud/USearch"
+Issues = "https://github.com/unum-cloud/USearch/issues"
 
 # One CMake tree serves the compiler flags, the instantiation grid and the release artifacts, so the
 # SDK has one native build rather than a second one described in a `setup.py`.

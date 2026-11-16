@@ -9,11 +9,11 @@
  */
 #include "lib.h"
 
-static char const doc_module[] =                                                              //
-    "One Proximity Graph for Search, Sparse Products & Attention, across RAM, VRAM & NVMe.\n" //
-    "\n"                                                                                      //
-    "One index type per modality, each sitting directly on the stable C ABI. Every verb\n"    //
-    "is a batch over buffer-protocol inputs, so a memory-mapped dataset reaches the index\n"  //
+static char const doc_module[] =                                                             //
+    "One Proximity Graph for Search, Sparse Products & Attention across RAM, VRAM & NVMe.\n" //
+    "\n"                                                                                     //
+    "One index type per modality, each sitting directly on the stable C ABI. Every verb\n"   //
+    "is a batch over buffer-protocol inputs, so a memory-mapped dataset reaches the index\n" //
     "with no reshape and no copy, and NumPy is never required.";
 
 /** One type the module readies, the name it exports it under, and the layout of a struct sequence. */

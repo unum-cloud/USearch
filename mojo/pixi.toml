@@ -3,7 +3,7 @@
 
 [package]
 authors = ["Ash Vardanian <info@unum.cloud>"]
-description = "One Proximity Graph for Search, Sparse Products & Attention, across RAM, VRAM & NVMe"
+description = "One Proximity Graph for Search, Sparse Products & Attention across RAM, VRAM & NVMe"
 documentation = "https://www.unum.cloud/docs/usearch/mojo"
 homepage = "https://www.unum.cloud/docs/usearch"
 license = "Apache-2.0"

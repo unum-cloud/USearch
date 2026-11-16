@@ -5,9 +5,9 @@
 
     <Authors>Ash Vardanian</Authors>
     <Company>Unum</Company>
-    <Description>One Proximity Graph for Search, Sparse Products &amp; Attention, across RAM, VRAM &amp; NVMe</Description>
+    <Description>One Proximity Graph for Search, Sparse Products &amp; Attention across RAM, VRAM &amp; NVMe</Description>
     <!-- Search keywords, semicolon-separated: each is matched on its own, so a phrase would never hit. -->
-    <PackageTags>vector-search;similarity-search;nearest-neighbors;hnsw;embeddings;clustering;simd;gpu</PackageTags>
+    <PackageTags>vector-search;similarity-search;nearest-neighbor-search;embeddings;sequence-search;edit-distance;shape-search;point-clouds;geospatial-search;proximity-graph;sparse-matrix-multiplication;attention;gpu;nvme</PackageTags>
     <PackageId>Cloud.Unum.USearch</PackageId>
 
     <PackageLicenseFile>LICENSE</PackageLicenseFile>

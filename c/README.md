@@ -2,7 +2,7 @@
 
 This is the C 99 interface every other binding wraps: the headers in `c/usearch/`, compiled into `libusearch_shared` and `libusearch_static`.
 Building the library takes CMake 3.28 and a C++20 compiler, while calling it takes any C99 compiler.
-It exposes all four modalities, each served by the engine in RAM, on NVMe and on NVIDIA GPUs; `-D USEARCH_BUILD_STUB=1` adds a brute-force stand-in under the same names.
+It exposes all four modalities, each served by the engine in RAM, on NVMe and on NVIDIA, AMD and Apple GPUs, short of geospatial sets and `f32` shapes on Apple; `-D USEARCH_BUILD_STUB=1` adds a brute-force stand-in under the same names.
 
 ## Installation
 
@@ -95,7 +95,7 @@ cleanup:
 
 Every call here blocks, so its outcome is final by the time it returns.
 
-## Completion & Deferred Calls
+## Receivers & Deferred Calls
 
 Every call reports through its `outcome` and names its `completion` in the same struct, so no verb has a second, asynchronous twin.
 `usearch_completion_blocking_k`, the default, returns with the final status stored and every output readable.
@@ -747,7 +747,7 @@ usearch_dense_health(&(usearch_dense_health_t) {
 
 ## Sequence Indexes
 
-A sequence index searches byte strings, UTF-8 text, DNA, RNA and proteins under edit distances and alignments, in RAM only.
+A sequence index searches byte strings, UTF-8 text, DNA, RNA and proteins under edit distances and alignments, in RAM, on NVMe or on GPUs.
 Variable-length entries travel as Apache Arrow tapes, `usearch_tape_view_t`: the elements end to end, and `count + 1` offsets around them, 32-bit or 64-bit as its `layout` says, so sequences are bytes with byte offsets:
 
 ```c
@@ -786,7 +786,7 @@ The kinds are Levenshtein over bytes or UTF-8 code points, Needleman-Wunsch with
 Needleman-Wunsch takes `usearch_sequence_weights_t`, a 256×256 substitution matrix with a gap cost, and the overlap kind takes `window_widths` in bytes, each refused by every other kind with `usearch_status_config_mismatch_k`.
 The verbs mirror the dense ones: `init_ram`, `init_vram`, `load_ram`, `load_vram`, `view_ram`, `reserve`, `clear`, `insert`, `refine`, `search` with a predicate, `get` writing tapes into an arena, `cursor_next` writing keys and their links, `reshard`, `save`, `metadata_read`, the `_buffer` forms of `load_ram`, `save` and `metadata_read`, and `describe`, while `count` also reports a key's total and largest byte lengths.
 A key already holding `values_per_key` entries rejects the whole insertion with `usearch_status_overflow_k`.
-The engine serves every kind, and answers `view_ram` with `usearch_status_unsupported_k`; `refine` and `reshard` serve RAM indexes, while `sample`, `health` and cursors with `starts` and `links` serve RAM indexes and NVMe views.
+The engine serves every kind in RAM, on NVMe and on NVIDIA, AMD and Apple GPUs, and answers `view_ram` with `usearch_status_unsupported_k`; `refine` and `reshard` serve every mutable index, while `sample`, `health` and cursors with `starts` and `links` serve RAM indexes and NVMe views.
 The stand-in serves every kind by textbook dynamic programming, quadratic and unbanded, and reports alignment similarities negated.
 
 ## Shape Indexes
@@ -820,12 +820,12 @@ Gromov-Wasserstein compares each side's internal distances.
 All four are invariant to rotation, reflection, translation and point order.
 A non-zero `points` freezes the count, rejecting insertions of any other with `usearch_status_shape_mismatch_k`.
 The verbs are the sequence ones, where `get` converts to an `outputs_scalar` and returns each shape in its inserted pose, and `count` reports a key's total and largest point counts.
-The engine serves all four kinds in RAM and on NVMe over `f16` or `f32` points, refusing other quantizations and `view_ram` with `usearch_status_unsupported_k`, and Chamfer and Hausdorff on NVIDIA GPUs; `sample`, `health` and cursors with `starts` and `links` serve RAM indexes and NVMe views.
+The engine serves all four kinds in RAM and on NVMe over `f16` or `f32` points, refusing other quantizations and `view_ram` with `usearch_status_unsupported_k`, and Chamfer and Hausdorff on NVIDIA, AMD and Apple GPUs, where Apple stores `f16` points alone; `sample`, `health` and cursors with `starts` and `links` serve RAM indexes and NVMe views.
 The stand-in scores Chamfer and Hausdorff in the frame the points arrive in, refuses the two transport kinds with `usearch_status_unknown_kind_k`, refuses quantizations other than `f16` and `f32` with `usearch_status_unsupported_k`, and refuses every VRAM verb with `usearch_status_device_k`.
 
 ## Geospatial Indexes
 
-A geospatial index searches observations on and above the Earth, like photos, video frames, drone footage and sensor fixes, in RAM, on NVMe or on NVIDIA GPUs.
+A geospatial index searches observations on and above the Earth, like photos, video frames, drone footage and sensor fixes, in RAM, on NVMe or on NVIDIA and AMD GPUs.
 Each entry is one `usearch_geospatial_observation_t` of eleven doubles in natural units: latitude and longitude in WGS-84 degrees, altitude in metres above the ellipsoid, the horizontal accuracy, the heading, pitch, heading accuracy and field of view of the device's view cone, how far it saw, and the first and last Unix second it covers.
 A device that recorded nothing for a field leaves it NaN, never zero, and each NaN only widens the tests that read it: an unknown accuracy counts as exact, an unknown view as looking everywhere, an unknown time as always.
 A key may hold several observations, up to the `values_per_key` its creation froze, like a camera's frames or a vehicle's fixes:
@@ -874,7 +874,7 @@ Every score is the chord between the two positions in metres, altitude included,
 The tolerance's `seconds` widen the query's interval on both ends, and a query without a time matches entries of any time.
 The terrain is a north-up grid of heights above the ellipsoid, borrowed in place or filled on demand by a callback; a checkpoint never carries it, so every load and view names it again, and a GPU index takes borrowed heights alone.
 The remaining verbs are the shapes ones, where `get` returns observations within the stored rounding, centimetres and milliseconds among them, `count` reports a key's entries, and `sample` places its draws at their Earth-fixed positions.
-The engine serves every relation in RAM, on NVMe and on NVIDIA GPUs, answering `view_ram` with `usearch_status_unsupported_k`; `sample`, `health` and cursors with `starts` and `links` serve RAM indexes and NVMe views.
+The engine serves every relation in RAM, on NVMe and on NVIDIA and AMD GPUs, answering `view_ram` and Apple GPUs with `usearch_status_unsupported_k`; `sample`, `health` and cursors with `starts` and `links` serve RAM indexes and NVMe views.
 The stand-in scans every entry exactly, keeps the doubles inserted, refuses every terrain and so `visible_k`, and refuses every VRAM verb with `usearch_status_device_k`.
 
 ## What This Binding Does Not Expose
