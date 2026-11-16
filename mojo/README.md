@@ -100,8 +100,8 @@ Every output whose length only the call knows, such as matches, rows, products, 
 Each call rewinds its arena, so the previous call's views die and a steady loop allocates once.
 To keep a result past the next call, or to read one while making the next, pass that call another arena.
 An arena serves one call at a time, so each deferred call needs its own.
-A view's origin keeps its arena alive, and reading a stale one raises `Status.UNINITIALIZED`.
-An arena from a VRAM executor holds device memory, which host accessors refuse with `Status.DEVICE`, and serves only that executor's calls, keeping the executor alive until the arena goes.
+A view's origin keeps its arena alive, and the view reads it in place until the arena's next call.
+An arena from a VRAM executor holds device memory, which `arena.describe()` reports and the host cannot read, and serves only that executor's calls, keeping the executor alive until the arena goes.
 
 ```mojo
 var arena = Arena(executor)  # Arena(library) makes host pages for the calling thread
@@ -170,11 +170,12 @@ var domains = [Int32(0), Int32(1)]
 var in_ram = DenseIndex.init_ram(library, options, RamOptions.on(domains))  # one graph per socket
 var devices = [Int32(0), Int32(1), Int32(2), Int32(3)]
 var in_vram = DenseIndex.init_vram(library, options, VramOptions.on(devices))  # sharded, never replicated
-var on_nvme = DenseIndex.view_nvme(Executor.for_nvme(library), "index.safegraphs")
+var on_nvme = DenseIndex.view_nvme(Executor.for_nvme(library), "index.safegraphs", key_table=RamOptions.on(domains))
 ```
 
-An NVMe index is only ever viewed: external-memory graphs are never modified in place.
-Until NVMe checkpoints carry keys, `view_nvme` answers `Status.UNSUPPORTED`.
+An NVMe view serves a checkpoint in place, and external-memory graphs are never modified in place.
+`key_table` holds a key table in RAM beside the view; without one, `count`, `get`, `sample`, MaxSim and hinted searches answer `Status.UNSUPPORTED`.
+`load_nvme` takes the same arguments and opens a manifest writable, so `refine` rewrites its parts one at a time, while a lone monolith answers `Status.UNSUPPORTED`.
 
 ## Serialization
 
@@ -217,7 +218,7 @@ Sub-byte kinds count logical dimensions rather than bytes and name their kind ex
 
 ```mojo
 var packed = List[UInt8](unsafe_uninit_length=rows * 16)  # filled before the call
-var bits = RowsView.of(packed, 128, ScalarKind.U1X8)
+var bits = RowsView.of[kind=ScalarKind.U1X8](packed, 128)
 ```
 
 A dataset whose rows are padded to a wider pitch builds the view field by field, with its own `stride` in bytes.
@@ -274,7 +275,10 @@ Mojo handlers work on linux-64 in Mojo 1.2; AArch64 and macOS are confirmed by C
 
 ```mojo
 var stored = index.get[DType.float32](Key(integer=42), arena)  # empty when the key is absent
+var signs = index.get[DType.uint8, ScalarKind.U1X8](Key(integer=42), arena)  # packed bits, as bytes
 ```
+
+`DType` names no e4m3, e5m2, u1x8 or i4, so the scalar kind beside the element type names those, read as the bytes the element type holds.
 
 A cursor walks the contents, writing each batch in the arena; `next_keys` walks the key column alone, and `next_links` lands the keys each entry links to beside it, while the vectors come from `get`.
 Without start keys it yields every entry as stored; `cursor(starts)` yields the starts' own entries first, then the entries those link to breadth-first, each once.
@@ -304,26 +308,41 @@ Both borrow the index and the executor, so neither can be released while a curso
 
 ### Refinement
 
-`refine` re-runs the neighbor selection over entries already in the graph, returning a `DenseRefineReport`: the entries re-selected and changed, the islands found and reconnected, and the closing audit.
-A batch built at a low expansion factor reaches the quality of a slower build afterwards, and `changed` reaching zero is what settled looks like:
+`refine` re-runs the neighbor selection over entries already in the graph, returning a `DenseRefineReport`: the entries re-selected and changed, the islands found and reconnected, the neighborhoods re-stitched with the links added and dropped, the `verdict`, and the health checks opening the round and closing the heal.
+A batch built at a low expansion factor reaches the quality of a slower build afterwards, and a `verdict` other than `RefineVerdict.IMPROVED` is what settled looks like:
 
 ```mojo
-while index.on(executor).refine(DenseRefineConfig(expansion_factor=128)).changed != 0:
+while index.on(executor).refine().verdict == RefineVerdict.IMPROVED:
     pass
 ```
 
-### Absorbing & Splitting
-
-Bigger indexes come from absorbing, never mutating: `absorb` takes its donors by value, appends each one's entries with its graph, then refines across the appended part, and the engine frees each donor it absorbs.
-`split` is the inverse: it hands graph-local parts of the index to empty receivers of the same configuration, one part each, keeping their edges and leaving the index empty but live.
-Both report the closing refines as `refine` does.
+A `DenseRefinePlan` lent through the config makes the rounds resumable: the first refine opens it, a cancel from the progress handler leaves it live, the next refine continues where it stopped, and `refine_plan_finish` closes it and reports the whole plan.
+A `PhaseProgress` slot receives where each call stopped, its `Phase` spelled by `library.phase_name`.
 
 ```mojo
-var donors = List[DenseIndex]()
-donors.append(shard^)
-_ = index.on(executor).absorb(donors^)
-_ = index.on(executor).split(receivers, seed=42)
+var plan = DenseRefinePlan()
+var progress = PhaseProgress()
+_ = index.on(executor).refine(DenseRefineConfig(plan=Pointer(to=plan), phase=Pointer(to=progress)))
+var whole = index.on(executor).refine_plan_finish(plan^)
 ```
+
+### Resharding
+
+`dense_reshard` moves the entries of its sources into its targets, keeping their links rather than re-inserting their vectors, then runs a round on every target that took entries and reports it as `refine` does.
+Several sources into one target among them gather into it, one source into several empty targets cuts it into one graph-local part apiece, and one index as its only source and target recuts its own shards; a source the targets do not name ends empty and live.
+Both lists are spans of one list of indexes, so an index can be a source and a target at once:
+
+```mojo
+var parts = List[DenseIndex]()
+parts.append(index^)
+parts.append(shard^)
+_ = dense_reshard(executor, parts, Span(parts)[0:1])  # gathers the shard into the index, leaving it empty
+var placement = RamOptions()
+placement.shard_capacity = c_size_t(10_000_000)
+_ = dense_reshard(executor, Span(parts)[0:1], Span(parts)[0:1], DenseReshardConfig(ram=placement))
+```
+
+`dense_reshard_deferred` submits the same call and answers a `Deferred`, and a `DenseReshardPlan` resumes it as a refine plan does, closed by `dense_reshard_plan_finish` or `dense_reshard_plan_finish_deferred`.
 
 ### Sampling
 
@@ -398,11 +417,11 @@ print(reachability.reachable, "of", reachability.audited, "entries reachable")
 print(library.version_name(), library.capabilities_available())
 ```
 
-`health` audits how much of the graph a search reaches from its landmarks; entries it misses stay unfound until a `refine` re-links them.
+`health` measures how much of the graph a search reaches from the root; entries it misses stay unfound until a `refine` re-links them.
 
 ## What This Binding Does Not Expose
 
-- __Progress on loads, saves, absorbs and splits.__
+- __Progress on loads and saves.__
   Their entry points take no config, so those calls run without a handler.
 - __Deferred cursors and streams.__
   `DenseIndexDeferredOn` offers neither, since their pulls block.

@@ -20,7 +20,7 @@ class USearchConan(ConanFile):
     name = "usearch"
     license = "Apache-2.0"
     description = "One Proximity Graph for Search, Sparse Products & Attention, across RAM, VRAM & NVMe"
-    homepage = "https://github.com/unum-cloud/USearch"
+    homepage = "https://www.unum.cloud/docs/usearch"
     url = "https://github.com/unum-cloud/USearch"
     topics = (
         "vector-search",

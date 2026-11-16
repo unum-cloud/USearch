@@ -134,6 +134,7 @@ So a caller that reads success may resubmit on the same executor or free a handl
 
 A call submitted while another holds the executor finishes at once with `usearch_status_contended_k`, and nothing queues, so submitting never allocates.
 Every `*_free` waits until each executor call naming its handle has ended, so a handle may be dropped at any moment, though never from a callback of a call naming it.
+The handles a reshard's lists name are the exception: each must outlive the call and, with a plan, the plan's finish.
 Waits, drains and frees only wait: none of them runs another thread's call.
 
 ## Inclusive and Exclusive Executors
@@ -247,7 +248,7 @@ We aim for no `NULL` that switches behaviour, no bitmask that mixes unrelated op
 An index lives in RAM, VRAM or on NVMe, and every lifecycle verb names its action and its residency instead of taking a tag a residency might not support:
 
 - `init` starts empty and mutable: `usearch_dense_init_ram`, `usearch_dense_init_vram`.
-- `load` copies a checkpoint in: `usearch_dense_load_ram`, `usearch_dense_load_vram`, and their `_buffer` forms.
+- `load` copies a checkpoint in: `usearch_dense_load_ram`, `usearch_dense_load_vram`, and their `_buffer` forms; `usearch_dense_load_nvme` opens a manifest in place as a writable handle.
 - `view` serves one in place, read-only: `usearch_dense_view_ram`, `usearch_dense_view_nvme`.
 
 The options name where an index lives, never who walks it.
@@ -263,11 +264,14 @@ Callers lend memory, never a way to allocate it: no allocator callback crosses t
 Every dense verb is exported for every residency, and the engine answers what a residency lacks with `usearch_status_unsupported_k`:
 
 - RAM answers every verb but `usearch_dense_view_ram` and `usearch_dense_search_stream_init`, and exact scans serve `multiply` and `attend` too.
-- VRAM answers insertion, refinement, absorbing, counting, `get`, search, `multiply`, `maxsim`, attention and the serialization family, `save_buffer` included, while cursors answer `usearch_status_unsupported_k`, as [GPUs](#gpus) explains.
+- VRAM answers insertion, refinement, resharding, counting, `get`, search, `multiply`, `maxsim`, attention and the serialization family, `save_buffer` included, while cursors answer `usearch_status_unsupported_k`, as [GPUs](#gpus) explains.
   NVIDIA devices answer exact scans, while AMD and Apple ones refuse them with `usearch_status_unsupported_k`.
   Apple's Metal answers attention `usearch_status_unsupported_k` too, since its kernels cannot call the caller's value lookup.
   A sequence, shape or geospatial VRAM index answers `save_buffer` with `usearch_status_unsupported_k` for now, and those modalities load from memory into RAM alone, through `load_ram_buffer`.
-- NVMe answers every read verb as RAM does, `sample` and `health` included, refuses every mutating one with `usearch_status_read_only_k`, and refuses `save` and `save_buffer`, since a view already is its checkpoint.
+- NVMe answers every read verb as RAM does, `sample` and `health` included.
+  A view refuses every mutating verb with `usearch_status_read_only_k`, and refuses `save` and `save_buffer`, since it already is its checkpoint.
+  A handle `usearch_dense_load_nvme` opened answers `refine` and `reshard`, each writing new parts beside the old ones: the manifest is replaced durably to name them, and searches read the old parts until then.
+  It answers every other mutating verb, `save` included, with `usearch_status_unsupported_k`, and holds an advisory lock on the manifest until it is freed.
 
 ### GPUs
 
@@ -526,45 +530,108 @@ Cursors and streams keep no hold on the index either: every pull passes the inde
 
 ### Refinement
 
-`usearch_dense_refine` re-selects the neighbors of every stored entry against the finished graph, improving those chosen while the graph around them was incomplete.
-A cheap insertion pass followed by one refinement reaches a better graph in less total time than one expensive pass, so a wide `expansion_factor` belongs here rather than in `usearch_dense_insert`.
-Re-selection is idempotent and claims no identity, so a cancelled pass leaves the graph correct and merely less improved, still re-links any entry no search would reach, and answers `usearch_status_cancelled_k`.
-The index keeps nothing of a stopped pass, so a caller looping until the graph settles calls again:
+`usearch_dense_refine` makes every stored entry findable: each call runs one round of phases, a `"health"` check without a distance, a `"heal"` of the islands it names, a `"hubs"` draw, a `"gather"` that streams every stored entry past the hubs into the neighborhood of its nearest one, and a `"restitch"` of each neighborhood in one core's cache, then a closing health check.
+A round never shrinks what a search reaches, sizes everything from the graph and the cache of the cores it runs on, and closes with a verdict: improved while it changed some entry's links, converged once it changes none, stalled when full entries leave no slot to lower anything that stands, and stopped when the caller stopped it, while a report no round filled reads none.
+Every residency runs the same round: RAM on the executor's cores, NVIDIA, AMD and Apple GPUs on their devices, and a loaded NVMe index one part at a time, in RAM when the part fits `refine.memory_limit` and streamed from the drives when it does not.
+A cheap insertion pass followed by rounds reaches a better graph in less total time than one expensive pass, so `expansion_factor` stays narrow in `usearch_dense_insert`, and no option tunes a round.
+Re-stitching is idempotent and claims no identity, so a cancelled round leaves the graph correct and merely less improved, never with fewer entries reached, and answers `usearch_status_cancelled_k`.
+A caller repeats rounds until one answers other than improved, and never picks a change rate:
 
 ```c
-size_t changed = 0;
+usearch_refine_report_t report = {0};
 do {
     usearch_dense_refine(&(usearch_dense_refine_t) {.index = index,
                                                     .executor = executor,
                                                     .outcome = &outcome,
-                                                    .changed = &changed,
-                                                    .expansion_factor = 256});
-} while (outcome.status == usearch_status_success_k && changed > 100);
+                                                    .report = &report});
+} while (outcome.status == usearch_status_success_k && report.verdict == usearch_refine_improved_k);
 ```
 
 Searches may run throughout on a RAM handle, while a VRAM handle rewrites neighbors in place and admits no overlapping search.
 Insertions never overlap a refinement: one running refuses it with `usearch_status_contended_k`, one arriving meanwhile is refused the same way and lands nothing, and so on VRAM is a save, which holds the handle the same way for its own duration.
 Nothing waits, so a service schedules refinements between its insertion bursts and retries a refused call.
 
-A refinement that must continue where a cancel stopped is a handle the caller holds instead.
-`usearch_dense_refinement_init` opens it, optionally absorbing donors first, and the index refuses insertions and saves until it is finished.
-Each `usearch_dense_refinement_next` continues it on the executor it was opened with, holding that executor only for the call, and answers `usearch_status_cancelled_k` while more is left.
-It reports the running totals, the nodes re-selected so far, those whose neighbors changed, and the telemetry, so a caller stops calling once the changed share stops paying for another call.
-`usearch_dense_refinement_finish` re-links what a stopped pass leaves, reports, reopens the index and frees the handle.
+Without a plan the index keeps nothing of a stopped round.
+Each long verb has a plan type of its own, `usearch_dense_refine_plan_t` here and `usearch_dense_reshard_plan_t` for [resharding](#resharding), and takes it with an optional `phase` output: a `NULL` `plan` runs to the end, a `NULL` pointee opens a plan that a cancel leaves live, and a live plan continues where the cancel came, or starts the next round from the same root once the last one ended.
+`phase` is a `usearch_phase_progress_t`: the `usearch_phase_t` the call stopped in, or `usearch_phase_done_k` once its round ended, with that phase's ordinal and the units it completed of its total.
+`usearch_phase_name` spells a phase as the list above does, and `usearch_phase_from_name` reads the spelling back.
+`usearch_dense_refine_plan_finish` closes the round in hand, reports it and frees the plan, whatever it answers.
+The index refuses insertions and saves while a plan lives, on every residency, and each call and the finish name the index and executor the plan was opened with, both of which must outlive the finish.
+A `plan` without an executor, a live plan given another index or executor, and a finish of a `NULL` plan answer `usearch_status_invalid_argument_k`.
+Here a handler stops each call at a deadline, and the loop resumes the round until one answers other than improved:
 
-### Absorbing & Splitting
+```c
+usearch_dense_refine_plan_t plan = NULL;
+usearch_phase_progress_t phase = {0};
+usearch_refine_report_t report = {0};
+do {
+    usearch_dense_refine(&(usearch_dense_refine_t) {.index = index,
+                                                    .executor = executor,
+                                                    .outcome = &outcome,
+                                                    .report = &report,
+                                                    .progress = {stop_at_deadline, &deadline},
+                                                    .plan = &plan,
+                                                    .phase = &phase});
+    if (outcome.status == usearch_status_cancelled_k)
+        printf("Stopped in %s at %zu of %zu\n", usearch_phase_name(phase.phase), phase.completed, phase.total);
+} while (outcome.status == usearch_status_cancelled_k ||
+         (outcome.status == usearch_status_success_k && report.verdict == usearch_refine_improved_k));
+usearch_dense_refine_plan_finish(&(usearch_dense_refine_plan_finish_t) {.index = index,
+                                                                        .executor = executor,
+                                                                        .outcome = &outcome,
+                                                                        .plan = plan,
+                                                                        .report = &report});
+```
 
-`usearch_dense_absorb` moves an array of donor handles into one index, one donor after another, keeping their graphs rather than re-inserting their vectors.
-Donors are consumed and nulled as they go, so the array itself says which handles the caller still owns and must free, and a cancel stops only the closing refinement, answering `usearch_status_cancelled_k`.
-Each donor's shards append to the index's as appended parts with their edges rebased, then a refinement of every shard that took one walks each of its nodes across into the other part from landmarks drawn there and re-selects it, so a group costs one such refinement per donor, and its heal re-selects from the landmarks every node no earlier one links to.
-A donor must share the index's residency, scalar, class, metric and geometry, else the call answers `usearch_status_config_mismatch_k`, and an NVMe view answers `usearch_status_read_only_k`.
-An insertion running on the index or on the next donor refuses the call with `usearch_status_contended_k`, leaving that donor and the rest live, and an insertion into the index arriving meanwhile is refused the same way, while nothing may search a donor or start an insertion into it.
-A VRAM-built donor joins a RAM index through a save and a load.
+Sequences, shapes and geospatial indexes resume the same way through `usearch_<modality>_refine_plan_t` and `usearch_<modality>_reshard_plan_t`, each closed by its own `_plan_finish`.
+There is no verb that describes a plan, and `usearch_dense_insert` takes none, since its plan cannot be abandoned once rows are placed.
 
-`usearch_dense_split` is the inverse, emptying one index into `count` receivers, empty handles of its residency, scalar, class, metric, geometry and shard count.
-It grows one graph-local part per receiver from roots drawn from `seed`, breadth-first over the links and capped at an equal share, lands part `p` of shard `s` in shard `s` of receiver `p` with edges rebased and edges across parts dropped, and refines the nodes that lost an edge.
-`usearch_dense_refinement_init` takes `receivers` in place of `donors` for the resumable form, never both, refusing the pair with `usearch_status_invalid_argument_k`.
-RAM and NVIDIA and AMD VRAM indexes split, Apple and NVMe ones answer `usearch_status_unsupported_k` and `usearch_status_read_only_k`, and the stand-in partitions by brute force.
+### Resharding
+
+`usearch_dense_reshard` moves the entries of `sources` into `targets`, keeping their links rather than re-inserting their vectors, then runs a round on every target that took entries.
+The two lists cover every layout change:
+
+- Gathering names several sources and one target, itself a source or empty.
+  Each other source lands all-or-nothing, its shards appending to the target's with their edges rebased, so at most one source's entries are ever held twice.
+- Cutting names one source and several empty targets, one graph-local part each.
+  The part roots are drawn from `seed`, each part grows breadth-first over the links capped at an equal share, and part `p` of shard `s` lands in shard `s` of target `p`, its edges into other parts dropped.
+- Recutting names one handle as its only source and target.
+  On RAM its shards pack largest first, each into the first shard with room under `ram->shard_capacity`, so many small shard generations pack into as few shards as fit, and the shard a bin keeps stays resident with its IDs.
+
+No walk links a moved entry in: each target's round heals what arrived as an island into the root's component without a distance and re-stitches the neighborhoods it shares with the entries already there, so any number of sources costs one round per target.
+Every handle is checked and held before the first entry moves, so a refusal moves nothing, and every handle stays the caller's: a source the targets do not name ends empty and live, for `usearch_dense_free` to free.
+
+```c
+usearch_dense_index_t const parts[3] = {index, built_on_socket_1, built_on_socket_2};
+usearch_dense_reshard(&(usearch_dense_reshard_t) {.sources_count = 3,
+                                                  .sources = parts,
+                                                  .targets_count = 1,
+                                                  .targets = &index,
+                                                  .executor = executor,
+                                                  .outcome = &outcome});
+// The two other parts are empty now, and still the caller's to free.
+```
+
+Readers of a RAM target keep searching throughout, while a VRAM target rewrites its neighbors in place and admits no overlapping search, as refinement does.
+An insertion into any handle named is refused with `usearch_status_contended_k` while the call or its plan holds it.
+A loaded NVMe index writes new parts beside its manifests: a gather writes the target's parts and the sources' into new ones, a cut divides every part by ID into one contiguous range per target, and a recut repacks the parts into as few as address their entries.
+Each part that took entries runs one streamed round, and only then is every manifest replaced, so a failure or a cancel before it leaves every handle serving its own.
+The stand-in partitions by brute force.
+
+The handler reports and cancels the closing rounds alone, never a move, and a cancel answers `usearch_status_cancelled_k` with every entry moved.
+With a `usearch_dense_reshard_plan_t` in `plan`, a cancel leaves the plan live, the next call moves what is still pending and continues the rounds, `phase` names where each call stopped, and `usearch_dense_reshard_plan_finish` closes it.
+The plan owns its lists and placement, so a live one never reads the call's, and its finish names only the executor it was opened with.
+Every handle the lists name must outlive the call and, with a plan, the plan's finish.
+
+A reshard refuses before anything moves, in every family:
+
+- `usearch_status_invalid_argument_k`: no sources or no targets, a `NULL` list or slot, a handle named twice within one list, a `plan` without an executor, a live plan opened with another executor, or a finish of a `NULL` plan.
+- `usearch_status_read_only_k`: an NVMe view.
+- `usearch_status_config_mismatch_k`: a handle unlike the first source in residency, scalar, class, metric or geometry, a target that is neither a source nor empty, a source cut into targets that include it, or a placement of another residency than the handles'.
+- `usearch_status_unsupported_k`: several sources into several targets; named memory domains, devices or paths, which would place shards anew; on RAM a shard past `ram->shard_capacity`, which would have to be cut first; on VRAM any `vram->shard_capacity`, which its moves cannot honour.
+- `usearch_status_contended_k`: an insertion in flight on a handle named, or on VRAM a save of one.
+
+Sequences, shapes and geospatial indexes reshard through `usearch_<modality>_reshard` with the same lists and refusals, but without placements: a handle of one shard has nothing to recut, so one handle as its only source and target answers `usearch_status_unsupported_k`.
 
 ### Sparse Multiplication
 
@@ -662,7 +729,7 @@ printf("%zu of %zu entries, %zu bytes, %zu dimensions, class: %s\n", description
 ```
 
 `usearch_dense_count` reports how many entries a key holds, as when a long document is split into chunks.
-`usearch_dense_health` audits how much of the graph a search reaches, sweeping forward from as many landmarks as one search draws:
+`usearch_dense_health` checks how much of the graph a search reaches, sweeping forward from as many landmarks as one search draws:
 
 ```c
 usearch_reachability_t reachability = {0};
@@ -713,9 +780,9 @@ usearch_sequence_search(&(usearch_sequence_search_t) {.index = sequences,
 
 The kinds are Levenshtein over bytes or UTF-8 code points, Needleman-Wunsch with a linear gap, and overlap, the share of fixed-width windows one side misses of the other.
 Needleman-Wunsch takes `usearch_sequence_weights_t`, a 256×256 substitution matrix with a gap cost, and the overlap kind takes `window_widths` in bytes, each refused by every other kind with `usearch_status_config_mismatch_k`.
-The verbs mirror the dense ones: `init_ram`, `init_vram`, `load_ram`, `load_vram`, `view_ram`, `reserve`, `clear`, `insert`, `refine`, `search` with a predicate, `get` writing tapes into an arena, `cursor_next` writing keys and their links, `absorb`, `split`, `save`, `metadata_read`, the `_buffer` forms of `load_ram`, `save` and `metadata_read`, and `describe`, while `count` also reports a key's total and largest byte lengths.
+The verbs mirror the dense ones: `init_ram`, `init_vram`, `load_ram`, `load_vram`, `view_ram`, `reserve`, `clear`, `insert`, `refine`, `search` with a predicate, `get` writing tapes into an arena, `cursor_next` writing keys and their links, `reshard`, `save`, `metadata_read`, the `_buffer` forms of `load_ram`, `save` and `metadata_read`, and `describe`, while `count` also reports a key's total and largest byte lengths.
 A key already holding `values_per_key` entries rejects the whole insertion with `usearch_status_overflow_k`.
-The engine serves every kind, and answers `view_ram` with `usearch_status_unsupported_k`; `refine`, `absorb` and `split` serve RAM indexes, while `sample`, `health` and cursors with `starts` and `links` serve RAM indexes and NVMe views.
+The engine serves every kind, and answers `view_ram` with `usearch_status_unsupported_k`; `refine` and `reshard` serve RAM indexes, while `sample`, `health` and cursors with `starts` and `links` serve RAM indexes and NVMe views.
 The stand-in serves every kind by textbook dynamic programming, quadratic and unbanded, and reports alignment similarities negated.
 
 ## Shape Indexes

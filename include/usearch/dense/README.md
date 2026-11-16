@@ -26,22 +26,22 @@ A `*_index` is a mono-index and a `*_indexes` the sharded index over shards of i
 - `vram_nvidia_indexes.hpp` and `vram_amd_indexes.hpp` - the sharded indexes over NVIDIA and AMD shards with round-robin ingestion and merged cross-shard search, any number of shards per device.
 - `vram_apple_indexes.hpp` - the Apple twin over its one device, so one shard.
 - `nvme_indexes.hpp` - read-only views of the parts a RAM or VRAM sharded index saved, every query's walks over all parts on one executor thread, and key lookups as bulk scans of the key columns.
-- `ram_compaction.hpp`, `vram_nvidia_compaction.hpp` and `vram_amd_compaction.hpp` - the freestanding compactions of a sharded index's sources into a RAM target under a shard capacity, in place when the RAM target is one of its sources.
-- `nvme_compaction.hpp` - the freestanding `compact`, `refine` and `build` that write new parts from old ones in phases of steps, within a workspace the caller lends, each target part holding at most a shard capacity of entries.
+- `ram_reshard.hpp`, `vram_nvidia_reshard.hpp` and `vram_amd_reshard.hpp` - the freestanding reshard plans moving a sharded index's sources into its targets, several sources gathered into one target, one source cut into several, or one index recut in place under a shard capacity.
+- `nvme_reshard.hpp` - the freestanding reshard, refine and build plans that write new parts from old ones in phases of tasks, within a workspace the caller lends, each target part holding at most a shard capacity of entries, and that round each part in RAM when it fits the workspace and streamed from the drives when it does not.
 
 ## Construction
 
 Every residency builds through the same two verbs, in this order:
 
 - `insert` wires each node against the graph as it stood, so a narrow `expansion_factor` ingests cheaply and leaves a graph whose picks a wider walk could improve on.
-- `refine` re-selects a node range's neighbors against the finished graph, back-linking as an insertion does, then heals whatever no search can reach: the audit's islands re-select from scratch, and whatever the diversity judgment still drops is reconnected into a reached pick, round after round while the island population shrinks.
-  It claims no identity and moves no watermark, so a stopped pass merely leaves the graph less improved.
-  Call it until a pass re-wires nothing; the first two passes carry most of the gain.
-  A `refine` over no nodes is the heal alone.
+- `refine` runs rounds over the finished graph: a health check from a root, a heal linking each island it names into the root's component without a distance, a draw of hubs, a gather streaming every entry past them into the neighborhood of its nearest one, and a restitch of each neighborhood in one core's cache, closed by a second health check that decides the verdict.
+  It claims no identity and moves no watermark, so a stopped round merely leaves the graph less improved.
+  Call it until a round answers other than improved.
+  `reshard` moves entries with their links from its sources into its targets, then runs the same rounds, so no verb walks to find what an entry links to.
 
-`health` is the read-only audit the heal starts from - the same landmark sweep, reporting the reachable population and the levels it took, with no edit.
+`health` is the read-only check the heal starts from - the same sweep from the root, reporting the reachable population, its depths, islands and components, with no edit.
 Use it to judge a graph without changing it.
 
-Every sharded index and residency reports one `utilities::refine_report_t`, whose counts mean the same everywhere.
-The sharded index fans the passes over one executor.
-The RAM mono-index hands out plans instead - `plan_refine` and `plan_health` cut each phase into disjoint ID ranges any number of threads may run, with `advance` the one barrier between phases - since one index knows nothing about pools.
+Every sharded index and residency runs the same round and reports one `utilities::refine_report_t`, whose counts and verdicts mean the same everywhere.
+The sharded index fans the rounds over one executor, each shard's on its own device in VRAM.
+The RAM mono-index hands out plans instead - `plan_refine` and `plan_health` cut each phase into tasks any number of threads may run, with `advance` the one barrier between phases - since one index knows nothing about pools.

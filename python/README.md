@@ -3,12 +3,15 @@
 The bindings are pure CPython, with no PyBind11, no NanoBind, and no SWIG.
 They need CPython 3.12 or newer on Linux, macOS or Windows, and the extension itself never requires NumPy.
 Every verb is a batch, and one vector is a one-row matrix, so a memory-mapped dataset reaches the index with no reshape and no copy.
-They expose dense indexes; the other modalities are declared and raise `NotImplementedError` until the library ships their engines.
+Every modality forwards to the C library, and a residency or verb a build cannot serve raises the status the library answers.
 
-- `usearch.DenseIndex` searches equidimensional dense embeddings, and is the one instantiated today.
-- `usearch.SequenceIndex` searches variable-length sequences.
-- `usearch.ShapesIndex` searches 3D point clouds of any size.
-- `usearch.GeospatialIndex` searches space and time.
+- `usearch.DenseIndex` searches equidimensional dense embeddings.
+- `usearch.SequenceIndex` searches variable-length sequences, a batch being a list of `str` or bytes-like objects.
+- `usearch.ShapesIndex` searches 3D point clouds of any size, a batch being a list of `(points, 3)` matrices.
+- `usearch.GeospatialIndex` searches observations in space and time, a batch being an `(N, 11)` float64 matrix.
+
+Every modality takes the same receivers, `refine` and `reshard`, each with its own pair of plan types, such as `usearch.ShapesRefinePlan` and `usearch.ShapesReshardPlan`.
+Their `reshard` gathers and cuts, and refuses to recut one index in place with `UnsupportedError`.
 
 ## Installation
 
@@ -112,7 +115,8 @@ Calling `usearch.Executor()` raises a `TypeError` naming the factories, since wh
 The index and every receiver derived from it never change after they are made, so threads share them freely.
 Searches never write to the graph, so any number may overlap with insertions, and saving needs a mutation-free window.
 The extension declares `Py_MOD_GIL_NOT_USED`, so free-threaded builds run without the interpreter lock.
-Critical sections or atomics fence the few fields the binding mutates: an arena's exports and generation, the handle a cursor or stream lends its running pull, a closed executor's handle, a latched callback exception, a `DenseTraversalStats` total and an absorbed donor's handle.
+The binding takes no locks and re-checks nothing the library refuses: an overlapping cursor pull or a second call on a held arena finishes `Status.CONTENDED` in the library itself.
+Callbacks never raise into the library, so an exception escaping a `progress`, `predicate` or `row_of` callback goes to `sys.unraisablehook`, and the callback answers cancel, or rejects its key.
 
 ## Arenas
 
@@ -121,9 +125,8 @@ Every output whose length only the call knows, such as matches, rows, products, 
 Each call rewinds its arena, so the previous call's views die and a steady loop allocates once.
 To keep a result past the next call, or to read one while making the next, pass that call another arena.
 An arena serves one call at a time, so each deferred call needs its own.
-A NumPy array or `memoryview` over an output pins its arena as a `memoryview` pins a `bytearray`, so the next call naming that arena raises `ContendedError` until the export is released.
-A stale output raises `UninitializedError` from `memoryview`, from indexing a `Matches` and from `DenseProducts.query`, but `np.asarray` swallows that error into a 0-d object array, so read through those or copy with `np.array(...)` while the output is fresh.
-An arena from a VRAM executor holds device memory, which host accessors refuse with `DeviceError`.
+A view reads its arena as a C view does, so one kept past the next call naming that arena reads whatever that call wrote; copy it with `np.array(...)` first.
+An arena from a VRAM executor holds device memory, which host accessors must not read.
 It serves only calls on that executor, any other or none raising `DeviceError`, and holds the executor until it is freed, so an executor closed first keeps its streams until then.
 Its views export `__cuda_array_interface__` instead, for CuPy, PyTorch or Numba, and `arena.describe()` tells the two apart.
 Every view also exports `__dlpack__` wherever it lives, so `torch.from_dlpack(vectors)` takes it in place.
@@ -216,7 +219,9 @@ Handing a constructor another residency's arm, such as `devices` to `init_ram`, 
 
 Shards are never replicated, so eight devices host eight slices of one graph rather than eight copies, and an index outgrowing them fails rather than paging to the host, so the answer is to name more devices.
 An NVMe path is whatever identifies a device to an engine that can reach it: a filesystem path names a kernel device, a transport identifier selects a userspace engine, and a FUSE mount is how object storage stages in without an HTTP stack.
-External-memory graphs are never modified in place, so an NVMe handle is a view and every mutating verb fails on it; bigger ones come from [absorbing](#absorbing--splitting).
+External-memory graphs are never modified in place, so an NVMe handle is a view and every mutating verb fails on it; bigger ones come from [resharding](#resharding).
+`key_table_domains` holds a key table in RAM beside the view; without one, `count`, `get`, `sample`, `maxsim` and hinted searches raise `UnsupportedError`.
+`load_nvme` takes the same arguments and opens a manifest writable, so `refine` rewrites its parts one at a time, while a lone monolith raises `UnsupportedError`.
 
 ## Serialization
 
@@ -317,7 +322,7 @@ with index.on(pool).search_stream(query) as stream:  # resumable best-first stre
 `get` for an absent key answers an empty, falsy `DenseVectors`.
 Every pull names its arena and rewinds it like any other call, so one arena serves a scan and any other verb in turn.
 A drained cursor answers an empty, falsy `DenseBatch`, and a drained stream a query with no matches.
-A cursor or a stream releases its walk on `close()` or at the end of a `with` block, so an `absorb` waiting on it need not wait for the collector, and a later pull raises `UninitializedError`.
+A cursor or a stream releases its walk on `close()` or at the end of a `with` block, so nothing waiting on it needs the collector, and the library refuses a later pull with `InvalidArgumentError`.
 
 ### Refinement
 
@@ -325,24 +330,27 @@ A cursor or a stream releases its walk on `close()` or at the end of a `with` bl
 It is a build step rather than a repair: a cheap insertion pass followed by one refinement reaches a better graph, in less total time, than a single expensive insertion pass, so a wide `expansion_factor` belongs here rather than in `insert`.
 
 ```python
-while index.on(pool).refine(expansion_factor=128).changed > len(index) // 100:
-    pass  # Loop until fewer than one node in a hundred still moves an edge
+while index.on(pool).refine(expansion_factor=128).verdict == usearch.RefineVerdict.IMPROVED:
+    pass  # Loop until a round changes no entry's links, stalls or is stopped
 ```
 
-The return is a `RefineReport`: the nodes re-selected and, of those, `changed`; the islands found and reconnected; and the `reachability` audit closing the heal.
-A caller loops until `changed` falls below whatever change rate they consider settled.
+The return is a `RefineReport`: the nodes re-selected and, of those, `changed`; the islands found and reconnected; the `neighborhoods` re-stitched, the `widest_neighborhood`, and the links added and dropped; the `verdict`, a `RefineVerdict`; and the `opening` and `reachability` audits around the round.
+A caller loops until the `verdict` is no longer `IMPROVED`: `CONVERGED` means no entry's links changed, `STALLED` that full entries left no slot to lower anything, and `STOPPED` that the caller ended the round.
 Searches may run throughout on a RAM handle but not on a VRAM one, and a stopped sweep still re-links its islands before raising `CancelledError`, leaving the graph correct for the next call to sweep again, which is what makes a whole-graph pass affordable under a time budget.
+A `usearch.DenseRefinePlan` passed as `plan=` keeps a stopped round live: the next call naming it continues where it stopped, `plan.phase` names the `Phase` the last call reached, and `index.on(pool).refine_plan_finish(plan)` closes it with a report of the whole plan.
 
-### Absorbing & Splitting
+### Resharding
 
 ```python
-first.on(pool).absorb(second, third)  # both donors are consumed and must not be used afterwards
-first.on(pool).split(left, right, seed=7)  # two empty receivers take a part each, `first` is left empty
+first.on(pool).reshard([first, second, third], [first])  # gathers every entry into `first`
+first.on(pool).reshard([first], [left, right], seed=7)  # cuts `first` between two empty targets
+first.on(pool).reshard([first], [first], memory_domains=[], shard_capacity=10_000_000)  # recuts in place
 ```
 
-Donors are absorbed one after another, each keeping its graph and linked in by walks across the appended part.
-A later verb on a consumed donor raises `UninitializedError`, and a stopped `absorb` cuts only its closing refinement, every donor already consumed.
-Both answer a `RefineReport` of their closing refinements.
+Entries move with their links rather than being re-inserted, then every target that took entries runs one round, as `refine` does.
+Every index stays the caller's, and a source the targets do not name ends empty and live.
+A stop cuts only the closing rounds, every entry already moved, and a `usearch.DenseReshardPlan` keeps them live for the next call until `reshard_plan_finish` closes it, as a refine plan does.
+Each call answers a `RefineReport` of its closing rounds.
 
 ### Sampling
 
@@ -412,7 +420,7 @@ index.count(42)  # entries sharing this key
 42 in index  # the same question, as a membership test
 len(index)  # stored entries
 index.describe()  # a DenseIndexDescription: .metadata, .size, .capacity, .memory_usage, .cpu_class, .gpu_class, .shards_count
-index.health()  # a DenseReachability: .audited, .reachable, .sweeps
+index.health()  # a DenseReachability: .audited, .reachable, .depth_from_root
 index.cpu_class  # the CPU class dispatch picked on this machine
 usearch.capabilities_compiled()  # the kernel families this build carries
 usearch.capabilities_available()  # the ones this machine can run
@@ -449,7 +457,7 @@ print(stats.mean_recall, stats.mean_efficiency)
 - __No life of its own.__
   The binding starts no threads and keeps no queues; releasing a `Deferred` rides reference counting, which waits for the call first.
 - __Arenas are lent and reused, never shared.__
-  Every output whose length scales with the call lands in an arena the caller passes; an exported buffer pins its arena until released, and a view over a rewound one raises `UninitializedError`.
+  Every output whose length scales with the call lands in an arena the caller passes, and a view over it lasts until the next call rewinds it.
 - __Nothing costs anything until it is used.__
   Submitting a call allocates nothing, and an arena allocates only when a call writes into it.
 - __Blocking calls stay as simple as the language allows.__

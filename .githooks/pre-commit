@@ -8,9 +8,10 @@
 # the bottom diffs every staged file once and routes it by extension. `.githooks/selftest` holds one
 # fixture per rule.
 #
-# Every region between Project Settings and USearch Rules is shared with the sibling hooks, and
-# `check_shared_regions_match` pins the sums of the four that stay word for word identical. Configuring
-# the CMake build arms these hooks; see the `core.hooksPath` block in CMakeLists.txt.
+# Every region between Project Settings and USearch Rules is shared with the sibling hooks, Shared
+# Bindings with the UStore, UCall and UForm hooks alone, and `check_shared_regions_match` pins the sums
+# of those that stay word for word identical. Configuring the CMake build arms these hooks; see the
+# `core.hooksPath` block in CMakeLists.txt.
 #
 # Bypass knowingly, which you almost never should, with: git commit --no-verify
 
@@ -2171,21 +2172,23 @@ check_filesystem_in_harnesses_only() {
         "$staged_path uses std::filesystem in library code - it is allowed only in test/, bench/ and tools/ harnesses:"
 }
 
-# Rejects the standard containers, `std::pair` and `std::tuple` in the library and its bindings, because the
-# containers allocate through the global heap behind the caller's back and throw when it runs out, and a pair
-# or a tuple hides what each member means behind `first` and `get<1>`; only the harnesses may use them.
-check_std_collections_in_harnesses_only() {
+# Rejects the standard containers, owning strings, `std::pair` and `std::tuple` in the library, its bindings
+# and the tools, because the containers and strings allocate through the global heap behind the caller's back
+# and throw when it runs out, and a pair or a tuple hides what each member means behind `first` and `get<1>`;
+# views like `std::string_view` and `std::span` stay, and only the test and benchmark harnesses may use the rest.
+check_std_collections_absent() {
     local reached baseline_path
     for baseline_path in $std_collections_baseline_paths; do
         [ "$staged_path" != "$baseline_path" ] || return 0
     done
     reached=$(printf '%s\n' "$staged_added_text" |
         grep -vE "$added_comment_line_pattern" |
-        grep -E '\bstd::(vector|pair|tuple|deque|list|forward_list|map|multimap|set|multiset|unordered_map|unordered_multimap|unordered_set|unordered_multiset|queue|priority_queue|stack|valarray)\b|#[[:space:]]*include[[:space:]]*<(vector|deque|list|forward_list|map|set|unordered_map|unordered_set|queue|stack|valarray)>' ||
+        grep -E '\bstd::(vector|pair|tuple|deque|list|forward_list|map|multimap|set|multiset|unordered_map|unordered_multimap|unordered_set|unordered_multiset|queue|priority_queue|stack|valarray)\b|\bstd::(basic_|w|u8|u16|u32)?string\b|#[[:space:]]*include[[:space:]]*<(vector|deque|list|forward_list|map|set|unordered_map|unordered_set|queue|stack|valarray)>' ||
         true)
     [ -z "$reached" ] || reject_with_reason "$reached" \
-        "$staged_path uses a standard container, std::pair or std::tuple in library code - name a struct, take" \
-        "            the caller's buffer or allocator, or move the code to a test/, bench/ or tools/ harness:"
+        "$staged_path uses a standard container, an owning std::string, std::pair or std::tuple - name a struct," \
+        "            view the caller's bytes, take st::vector or sz::string_t with their status verbs, or move" \
+        "            the code to a test/ or bench/ harness:"
 }
 
 # `_t` marks a materialized type and `_k` a materialized constant. A concept names a requirement
@@ -2984,6 +2987,133 @@ check_single_space_between_sentences() {
 
 # endregion All Files
 
+# region Shared Bindings
+
+# The runtime guards a binding cannot avoid, removed before the lock check reads a line: CPython's
+# free-threaded guard around a borrowed sequence's items, and the thread pin cgo calls need.
+binding_locks_inherent='Py_(BEGIN|END)_CRITICAL_SECTION_SEQUENCE_FAST|runtime\.(Lock|Unlock)OSThread\('
+
+# Rejects a lock in a binding source, because one owner per deferred call polls its atomic outcome and
+# the C library decides what any other caller gets, so a binding has nothing to guard.
+check_binding_locks_absent() {
+    local locks
+    locks=$(printf '%s\n' "$binding_added_code" | sed -E "s/$binding_locks_inherent//g" |
+        grep -E '\b(RW|Py)?Mutex\b|\b(RwLock|Condvar|NSLock|NSRecursiveLock|NSCondition|OSAllocatedUnfairLock|ReentrantLock|ReentrantReadWriteLock|StampedLock|SpinLock)\b|\bsynchronized\b|\block[[:space:]]*\(|\.(R|Try)?Lock[A-Za-z]*\(|\bsync\.Cond\b|\bthreading\.(R?Lock|Condition)\b|\bstd::(recursive_|shared_|timed_)*mutex\b|\bstd::(lock_guard|unique_lock|scoped_lock|shared_lock|condition_variable)|\bpthread_(mutex|rwlock|spin|cond)_|\buv_(mutex|rwlock|cond)_|\bos_unfair_lock|\bPy_(BEGIN|END)_CRITICAL_SECTION' ||
+        true)
+    [ -z "$locks" ] || reject_with_reason "$locks" \
+        "$staged_path locks in a binding; let the call's one owner poll its atomic outcome, and forward" \
+        "            whatever the C library answers any other caller:"
+}
+
+# Rejects a binding callback that may raise and a binding that keeps an exception to raise later, because
+# callbacks never raise: typed bindings declare them non-throwing, and dynamic ones report through the
+# runtime's unraisable hook and cancel. A Swift callback type says `throws`, a Zig one returns an error
+# union, a Mojo one `raises`, and a C++ one named as a callback lacks `noexcept`; Rust catches an
+# unwind, Go recovers, CPython re-raises an exception a struct held, N-API clears one it never reports
+# as uncaught, Java, Kotlin or C# catches one without rethrowing it, and Wolfram calls back into the
+# kernel, which may abort.
+check_binding_callbacks_never_raise() {
+    local raising=""
+    case "$staged_path" in
+    *.swift)
+        raising=$(printf '%s\n' "$binding_added_code" |
+            grep -E '(typealias[[:space:]].*=|@Sendable|@escaping)[[:space:]]*(@[A-Za-z]+[[:space:]]+)*\([^()]*\)[[:space:]]*(async[[:space:]]+)?throws\b' ||
+                true)
+        ;;
+    *.zig)
+        raising=$(printf '%s\n' "$binding_added_code" |
+            grep -E '\bfn[[:space:]]*\(([^()]|\([^()]*\))*\)[[:space:]]*(callconv\([^()]*\)[[:space:]]*)?([A-Za-z_][A-Za-z0-9_.]*)?!' ||
+                true)
+        ;;
+    *.mojo)
+        raising=$(printf '%s\n' "$binding_added_code" |
+            grep -E '\bdef\(([^()]|\([^()]*\))*\)[[:space:]]*(thin[[:space:]]+)?(abi\("C"\)[[:space:]]+)?raises\b|\babi\("C"\)[[:space:]]+raises\b' ||
+                true)
+        ;;
+    cpp/*.hpp | cpp/*.cpp)
+        raising=$(printf '%s\n' "$binding_added_code" |
+            grep -E '\bstd::(move_only_|copyable_)?function[[:space:]]*<|\busing[[:space:]]+[A-Za-z0-9_]*(callback|handler|predicate|progress|lookup)[A-Za-z0-9_]*[[:space:]]*=[^;]*\)[[:space:]]*;|\btypedef[^;]*\([[:space:]]*\*[[:space:]]*[A-Za-z0-9_]*(callback|handler|predicate|progress|lookup)[A-Za-z0-9_]*[[:space:]]*\)[[:space:]]*\([^;]*\)[[:space:]]*;' |
+            grep -vE '\bnoexcept\b|\bdecltype\b' || true)
+        ;;
+    wolfram/*.c | wolfram/*.h)
+        raising=$(printf '%s\n' "$binding_added_code" |
+            grep -E '(->|\.)[[:space:]]*(callLibraryCallbackFunction|evaluateExpression|Message)[[:space:]]*\(' || true)
+        ;;
+    *.rs) raising=$(printf '%s\n' "$binding_added_code" | grep -E '\b(catch|resume)_unwind\b' || true) ;;
+    *.go) raising=$(printf '%s\n' "$binding_added_code" | grep -E '\brecover\(\)' || true) ;;
+    python/*.c | python/*.h | python/*.cpp | python/*.hpp)
+        raising=$(printf '%s\n' "$binding_added_code" | grep -E '\bPyErr_(SetRaisedException|Restore)[[:space:]]*\((Py_NewRef\()?[A-Za-z_][A-Za-z0-9_]*(->|\.)' || true)
+        ;;
+    javascript/*.c | javascript/*.h | javascript/*.cpp | javascript/*.hpp)
+        raising=$(scan_staged_file_marking_added_lines '
+            { code[FNR] = $0 }
+            END {
+                for (line = 1; line <= FNR; ++line)
+                    if ((line in added) && code[line] ~ /napi_get_and_clear_last_exception/ &&
+                        (code[line] code[line + 1] code[line + 2]) !~ /napi_fatal_exception/) printf "line %d: %s\n", line, code[line]
+            }' "$binding_code_path")
+        ;;
+    *.java | *.kt | *.cs)
+        raising=$(scan_staged_file_marking_added_lines '
+            function feed(text,    opens, closes) {
+                kept = kept "\n" text; opens = gsub(/\{/, "{", text); closes = gsub(/\}/, "}", text)
+                braced = braced || opens; depth += opens - closes
+                if (braced && depth <= 0) {
+                    if (kept !~ /(^|[^A-Za-z0-9_])throw[[:space:];(]/ && (caught in added)) printf "line %d: %s\n", caught, caught_text
+                    caught = 0
+                }
+            }
+            caught { feed($0); next }
+            /catch[[:space:]]*\((final[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*[[:space:]]*:[[:space:]]*)?(Throwable|(Runtime)?Exception|Error)[[:space:]|)]/ {
+                caught = FNR; caught_text = $0; kept = ""; depth = 0; braced = 0
+                rest = $0; sub(/.*catch[[:space:]]*\([^)]*\)/, "", rest); feed(rest)
+            }' "$binding_code_path")
+        ;;
+    esac
+    [ -z "$raising" ] || reject_with_reason "$raising" \
+        "$staged_path lets a binding callback raise or keeps an exception to raise later; declare callbacks" \
+        "            non-throwing in a typed binding, or report through the unraisable hook and cancel in a dynamic one:"
+}
+
+# Rejects a span of pointers to const in the headers, because a batch of queries arrives as one flat
+# transparent view over a static extent, which the metric reads without chasing a pointer per query; a
+# span of C strings names things rather than queries, so it stays.
+check_query_pointer_spans_absent() {
+    local spans
+    spans=$(sed -E 's/span<[[:space:]]*(const[[:space:]]+)?char[[:space:]]+(const[[:space:]]*)?\*[[:space:]]*const[[:space:]]*>//g' \
+        "$staged_added_code_path" | grep -E '\bspan<[^;<>]*(<[^;<>]*>[^;<>]*)?const[[:space:]]*\*[[:space:]]*const[[:space:]]*(,[^;<>]*)?>' || true)
+    [ -z "$spans" ] || reject_with_reason "$spans" \
+        "$staged_path takes a span of pointers to const; pass the batch as a flat transparent query view over" \
+        "            a static extent:"
+}
+
+# Routes one staged file through the binding checks, reading the code of a binding source with its
+# comments and literal contents blanked; tests drive a binding as users do, so they are exempt. Each
+# project's own rules region calls it, as no shared dispatch does.
+run_binding_checks() {
+    case "$staged_path" in
+    include/*.h | include/*.hpp | include/*.cuh | include/*.hip) check_query_pointer_spans_absent ;;
+    esac
+    case "$staged_path" in
+    *[Tt]est*) return 0 ;;
+    python/* | javascript/* | rust/* | golang/* | csharp/* | java/* | swift/* | zig/* | mojo/* | wolfram/* | cpp/*) ;;
+    *) return 0 ;;
+    esac
+    binding_code_path=$results_directory/$ordinal.binding-code
+    case "$staged_path" in
+    *.c | *.h | *.cpp | *.hpp | *.cc | *.rs | *.go | *.swift | *.zig | *.ts | *.mts | *.js | *.mjs | *.cjs | *.java | *.kt | *.cs)
+        blank_c_comments_preserving_columns literals < "$staged_text_path" | blank_c_comments_preserving_columns > "$binding_code_path"
+        ;;
+    *.py | *.pyi | *.mojo) sed -E 's/#.*$//' "$staged_text_path" > "$binding_code_path" ;;
+    *) return 0 ;;
+    esac
+    binding_added_code=$(scan_staged_file_marking_added_lines 'FNR in added { print "+" $0 }' "$binding_code_path")
+    check_binding_locks_absent
+    check_binding_callbacks_never_raise
+}
+
+# endregion Shared Bindings
+
 # region Shared Dispatch
 
 # Routes one staged file through every shared check its extension calls for, reading the `staged_*` globals.
@@ -3097,7 +3227,7 @@ run_shared_checks() {
         case "$staged_path" in
         *.c | *.h | *.cpp | *.hpp | *.cu | *.cuh | *.hip | *.cc | *.cxx | *.mm)
             check_filesystem_in_harnesses_only
-            check_std_collections_in_harnesses_only
+            check_std_collections_absent
             ;;
         esac
         ;;
@@ -3950,6 +4080,18 @@ check_deleted_verbs() {
         "$staged_path deletes a verb; a face keeps every verb, answering unsupported_k or device_k where it serves none:"
 }
 
+# Rejects an absorb, split or compact verb, plan type or CLI verb in the C surface, the stub or the
+# tools, because refine and reshard are the only long operations, and a reshard with several sources
+# or several targets covers what those verbs did.
+check_absorb_split_exports_absent() {
+    local exported
+    exported=$(printf '%s\n' "$staged_added_text" |
+        grep -E '\busearch_[a-z]+_(absorb|split|compact)(_[a-z0-9]+)*\b|_(absorb|split|compact)(_plan)?_t\b|"(absorb|split|compact)"' ||
+        true)
+    [ -z "$exported" ] || reject_with_reason "$exported" \
+        "$staged_path exports an absorb, split or compact verb; a reshard with several sources or targets serves it:"
+}
+
 check_tower_isolation() {
     local vendor crossing
     # The device listing alone gathers every vendor's devices, so it alone includes every tower.
@@ -4456,16 +4598,15 @@ check_utilities_vocabulary() {
         "            nodes, offsets and queries, and the dense words live in dense/:"
 }
 
-# The md5 of the lines between each shared region's `# region` and `# endregion` in NumKong's hook,
-# which every sibling hook carries word for word.
+# The md5 of the lines between each pinned region's `# region` and `# endregion`, which every sibling
+# hook carrying that region holds word for word.
 shared_region_sums='Shared Helpers	0f47a409a3595919bb8c842cb2947d38
 All Files	53c26430146a2f3695eb5998e4b1dc4c
-Shared Dispatch	763b62fb29c14c5871e5e6d7612b1881
+Shared Dispatch	f8fc4e7bf5abf7361e4e17d17d720af4
 Parallel Judging	738b237daa7b91d37b6a535e0f073b9a'
 
-# Rejects a pinned region of this hook whose text drifted from NumKong's copy, because Shared Helpers,
-# All Files, Shared Dispatch and Parallel Judging are edited in every sibling hook together, and the
-# sums above are what pins them.
+# Rejects a pinned region of this hook whose text drifted from the sibling hooks' copy, because a pinned
+# region is edited in every sibling hook carrying it together, and the sums above are what pins them.
 check_shared_regions_match() {
     local name expected actual drifted=""
     while IFS=$'\t' read -r name expected; do
@@ -4474,7 +4615,7 @@ check_shared_regions_match() {
         [ "$actual" = "$expected" ] || drifted="$drifted$name: $actual, pinned $expected"$'\n'
     done <<< "$shared_region_sums"
     [ -z "$drifted" ] || reject_with_reason "${drifted%$'\n'}" \
-        "$staged_path drifts from NumKong's shared regions; edit a shared region in every sibling" \
+        "$staged_path drifts from the sibling hooks' shared regions; edit a shared region in every sibling" \
         "            hook together, and record the new sums in shared_region_sums:"
 }
 
@@ -4659,11 +4800,15 @@ run_project_checks() {
     case "$staged_path" in
     .githooks/pre-commit) check_shared_regions_match ;;
     esac
+    run_binding_checks
     case " $core_files " in
     *" $staged_path "*) check_dependency_free_core ;;
     esac
     case "$staged_path" in
     include/usearch/* | tools/*) check_layer_includes ;;
+    esac
+    case "$staged_path" in
+    tools/*.hpp | tools/*.cpp) check_std_collections_absent ;;
     esac
     case "$staged_path" in
     *.c | *.h | *.hpp | *.cpp | *.cc | *.cu | *.cuh | *.hip | *.metal)
@@ -4734,6 +4879,9 @@ run_project_checks() {
     esac
     case "$staged_path" in
     c/usearch/*.h) check_verb_field_order ;;
+    esac
+    case "$staged_path" in
+    c/usearch/*.h | src_stub/* | tools/*) check_absorb_split_exports_absent ;;
     esac
     case "$staged_path" in
     c/usearch/*.h | cpp/usearch/*.hpp | include/*.hpp | include/*.cuh | include/*.hip | src/*.cpp | src/*.cuh | src/*.hip)

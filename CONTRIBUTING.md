@@ -285,21 +285,51 @@ A cheap one is asked as candidates arrive, a full quad or a round's shorter tail
 An expensive one gathers each thread's candidates beside the engine's payloads and answers them in one call per traversal round or scan run.
 Those per-thread buffers are the only buffers a predicate ever holds, and an engine opens a per-thread family and reserves its buffers in the executor's arenas right after the call's rewind.
 
+### Query Views
+
+A metric takes a batch of queries as one flat transparent view over a static extent, like a `std::array` of views sized by the batch's extent, never as a span of pointers it chases one query at a time.
+A query type that owns packed storage exposes a view of it, and the metric reads that view.
+`.githooks/pre-commit` refuses a `std::span` of pointers to const under `include/`, except a span of C strings, which names things rather than batching queries.
+
 ### Planned Operations
 
-A long or multi-phase operation starts as a plan, like `plan_refine` or `plan_insert`, and its blocking verb is only a loop driving that plan.
-`steps()` lists the current phase's steps, `run(step, context)` runs any of them on the calling thread, `advance()` is the barrier answering whether another phase follows, and `finish()` publishes and releases.
-Planning claims and reserves everything a step writes, so a step never fails for lack of memory and a plan stopped between steps leaves the index correct.
+A long or multi-phase operation starts as a plan, like `plan_refine` or `plan_insert`, and its blocking verb is only a loop over a one-shot plan, on every residency.
+Each operation has one plan type and one finish, like `usearch_dense_refine_plan_t` and `usearch_dense_refine_plan_finish`, in every family that offers the operation, and no verb describes a plan.
+The plan is a lazy handle field on its verb: `NULL` runs the operation once, a `NULL` pointee opens a plan, and a live plan continues.
+Cursors are not plans, and keep their `init`, `next` and `free` verbs.
+An engine plan owns its input and output lists, and the glue opens each operation through its own plan-open table entry, with no `std::variant` and no opener callable.
+Every handle a call or a live plan names must outlive the call and the plan's finish; the headers say so, and nothing counts handles in flight.
+Its parts are named by kind, and the kinds never mix.
+A phase is a different kind of work, ended by an `advance()` barrier, like a refine round's health, heal, hubs, gather and restitch.
+Phases are one enum shared by every plan and mirrored by one C enum with a name function, like `phase_t`, `usearch_phase_t` and `usearch_phase_name`, the way a verdict is named.
+A repetition is the same work again, named for what repeats and counted, like a refine round, a health check's depth or a gather's nesting.
+A task is an independent unit of one phase that any thread runs in any order, ForkUnion's word; "step" names only sequential work, like `walk_step_t`.
+`tasks()` lists the current phase's tasks, `run(task, context)` runs any of them on the calling thread, `advance()` is the barrier answering whether another phase follows, and `finish()` publishes and releases.
+Planning claims and reserves everything a task writes, so a task never fails for lack of memory and a plan stopped between tasks leaves the index correct.
 Per-thread state lives in the traversal context `run` is handed, in buffers it already holds where they fit, as attention keeps its softmax states past the queries in `staged_queries`.
 An operation is a plan only when its work crosses a barrier between phases, runs long enough to stop and resume, or writes the index; a pass whose threads each finish their own share, like `search`, `multiply`, `attend` or MaxSim, is a direct verb over the caller's contexts.
 A plan owns only what crosses its barriers: scratch belongs to the context, results land in the caller's outputs, named at planning, and whatever follows from other members is computed rather than stored.
 `run`, `advance` and `finish` never allocate.
+
+USearch has two long operations, refine and reshard, each with its plan in dense and in every modality.
+A reshard names its sources and its targets: several sources into one target is a gather, one source into several targets is a cut, and one handle as its own only source and target is recut in place.
+"Gather" names both the reshard of several sources into one target and the round's phase, which gathers entries into the neighborhoods under its hubs; both collect many into few, so they share the word.
+It moves entries first, in phases of its own that rewrite links only within the parts it moves, then runs rounds, and no phase walks to find what an entry links to.
+The phases are the values of `phase_t` in `utilities/types.hpp`, in order: copy, build, partition, scatter, health, heal, hubs, gather, restitch, write and done.
 
 A member of a plan, cursor or walk names what it holds and when it holds it, like `picked_this_round_` or `visited_`.
 A pair that trades places shares one stem and differs in one word, like `picked_this_round_` and `picked_next_round_`, and the verb moving between them is named for the barrier it runs at, like `advance_round_`.
 No member is `bits`, `current`, `state`, `data`, `flags`, `tmp` or `scratch` alone, and none is named by its type.
 Sizes come from the owner, never from a helper on the state.
 Two bit runs are two `growing_bitset_t` members, never one buffer with an index.
+
+### Refusals
+
+A call the library cannot run answers one status, picked by what is wrong, in this order.
+A malformed list, one that is empty, `NULL` or names a handle twice, answers `invalid_argument`.
+Handles of another kind, or of a geometry the call cannot join, answer `config_mismatch`.
+A well-formed case no tower implements yet, like a USearch reshard of several sources into several targets, answers `unsupported`.
+An option a tower cannot honour is refused with `unsupported`, never ignored.
 
 ### Components
 
@@ -341,35 +371,45 @@ Templates carry no `_t` or `_k` suffix, whether class, alias or variable templat
 
 ### Vocabulary
 
-| Concept                                                                                    | Word                                                                                               | Refused                                                         |
-| :----------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------- | :-------------------------------------------------------------- |
-| `*_index` in prose                                                                         | mono-index                                                                                         | singular, mono, standalone, single                              |
-| `*_indexes` in prose                                                                       | sharded index                                                                                      | plural, group, collection, multi                                |
-| a mono-index inside a sharded index                                                        | shard                                                                                              | …                                                               |
-| one shard's graph in one file; several                                                     | monolith; parts under a manifest                                                                   | …                                                               |
-| RAM, VRAM or NVMe                                                                          | residency                                                                                          | home, memory side                                               |
-| which device or NUMA domain a shard sits on                                                | placement                                                                                          | …                                                               |
-| a residency split by the vendor its VRAM needs, one compiled variant each                  | vendored residency                                                                                 | home, tower                                                     |
-| a stored item; its ID inside a shard; its ordinal in a batch                               | entry; node; offset                                                                                | row, value, member, item                                        |
-| a horizontal slice of a physical matrix                                                    | row                                                                                                | …                                                               |
-| one query and its results                                                                  | query                                                                                              | row                                                             |
-| a dedicated per-residency or per-vendor implementation; its C-facing side                  | tower; face                                                                                        | backend, engine class                                           |
-| a compiled alternative per class, dtype or residency                                       | variant                                                                                            | arm, cell                                                       |
-| a per-capability kernel bundle                                                             | kit                                                                                                | trait                                                           |
-| an exported operation and its table entry                                                  | verb; trampoline                                                                                   | …                                                               |
-| a fixed-shape collection a verb fills                                                      | outputs                                                                                            | landing, lander                                                 |
-| a callback consuming intermediate results                                                  | sink                                                                                               | landing                                                         |
-| the device fan-out's wait                                                                  | await                                                                                              | join                                                            |
-| the nodes a refinement round re-selects                                                    | picked                                                                                             | dirty, seam, marked                                             |
-| the nodes a walk has met and the ones it still has to expand                               | visited, frontier                                                                                  | met, seen, queue                                                |
-| the reachability sweep: its verb and plan; what it returns; the step inside a refine       | health; reachability; audit                                                                        | check, scan, sweep                                              |
-| one step of a plan                                                                         | the same word in every plan: partition, picking, scatter, copy, reselect, merge, audit, heal, done | sweeping, copying, reconnect, land                              |
-| what a sample returns; the points it starts from; the ones it keeps near; a region's start | draws; shown; focus; root                                                                          | pick, anchor, landmark, context, seed                           |
-| device row storage                                                                         | flat matrix, flat column                                                                           | plane                                                           |
-| node ID width under `utilities/` and `basic/`                                              | `node_id_type_`                                                                                    | `node_id_t`, `u32_t node`                                       |
-| the candidates a walk keeps                                                                | candidates                                                                                         | pool                                                            |
-| how a batch's entries are shared among shards                                              | split_batch_into_shards, offsets                                                                   | seat, deal, landed                                              |
-| a member of a plan, cursor or walk                                                         | what it holds and when it holds it                                                                 | bits, current, state, data, flags, tmp, scratch, bitset, buffer |
+| Concept                                                                                             | Word                                                                                                            | Refused                                                               |
+| :-------------------------------------------------------------------------------------------------- | :-------------------------------------------------------------------------------------------------------------- | :-------------------------------------------------------------------- |
+| `*_index` in prose                                                                                  | mono-index                                                                                                      | singular, mono, standalone, single                                    |
+| `*_indexes` in prose                                                                                | sharded index                                                                                                   | plural, group, collection, multi                                      |
+| a mono-index inside a sharded index                                                                 | shard                                                                                                           | …                                                                     |
+| one shard's graph in one file; several                                                              | monolith; parts under a manifest                                                                                | …                                                                     |
+| RAM, VRAM or NVMe                                                                                   | residency                                                                                                       | home, memory side                                                     |
+| which device or NUMA domain a shard sits on                                                         | placement                                                                                                       | …                                                                     |
+| a residency split by the vendor its VRAM needs, one compiled variant each                           | vendored residency                                                                                              | home, tower                                                           |
+| a stored item; its ID inside a shard; its ordinal in a batch                                        | entry; node; offset                                                                                             | row, value, member, item                                              |
+| a horizontal slice of a physical matrix                                                             | row                                                                                                             | …                                                                     |
+| one query and its results                                                                           | query                                                                                                           | row                                                                   |
+| a dedicated per-residency or per-vendor implementation; its C-facing side                           | tower; face                                                                                                     | backend, engine class                                                 |
+| a compiled alternative per class, dtype or residency                                                | variant                                                                                                         | arm, cell                                                             |
+| a per-capability kernel bundle                                                                      | kit                                                                                                             | trait                                                                 |
+| an exported operation and its table entry                                                           | verb; trampoline                                                                                                | …                                                                     |
+| the two long operations; the handles a reshard reads from and moves into                            | refine, reshard; sources, targets                                                                               | absorb, split, compact, compaction, merge, donor, receiver, recipient |
+| a reshard of several sources into one target; of one source into several; of one handle into itself | gather; cut; recut                                                                                              | pack, absorb, merge, split, compact                                   |
+| a fixed-shape collection a verb fills                                                               | outputs                                                                                                         | landing, lander                                                       |
+| a callback consuming intermediate results                                                           | sink                                                                                                            | landing                                                               |
+| the device fan-out's wait                                                                           | await                                                                                                           | join                                                                  |
+| the nodes a refinement round re-selects                                                             | picked                                                                                                          | dirty, seam, marked                                                   |
+| the nodes a walk has met and the ones it still has to expand                                        | visited, frontier                                                                                               | met, seen, queue                                                      |
+| the reachability check: its verb, its plan and its phase inside a refine; what it returns           | health; reachability                                                                                            | check, scan, sweep, audit                                             |
+| a kind of work in a plan, ended by a barrier                                                        | the same word in every plan: copy, build, partition, scatter, health, heal, hubs, gather, restitch, write, done | stage, audit, step, picking, sweeping, copying, reconnect, land       |
+| the same work again, counted                                                                        | round, depth, nesting                                                                                           | phase, pass                                                           |
+| an independent unit of one phase, run by any thread in any order                                    | task                                                                                                            | step, chunk                                                           |
+| what a sample returns; the points it starts from; the ones it keeps near                            | draws; shown; focus                                                                                             | pick, anchor, landmark, context, seed, pivot                          |
+| a strong component outside the root's; one nothing links into; one with no link out                 | island; unreached island; stranded island                                                                       | orphan, remainder                                                     |
+| an entry none of whose links is nearer to a target than itself                                      | dead end                                                                                                        | trap, local minimum, stall                                            |
+| the entries a round draws to gather around; the one entry the health check starts from              | hubs; root                                                                                                      | centre, pivot, landmark, seed, region root, audit root                |
+| the entries nearest one hub; the most one may hold, a core's cache                                  | neighborhood; neighborhood capacity                                                                             | region, bucket, cluster, cell, slice                                  |
+| what a matrix engine multiplies at once                                                             | kit tile                                                                                                        | tile alone                                                            |
+| what one round concludes                                                                            | improved, converged, stalled, stopped                                                                           | settled, done                                                         |
+| device row storage                                                                                  | flat matrix, flat column                                                                                        | plane                                                                 |
+| node ID width under `utilities/` and `basic/`                                                       | `node_id_type_`                                                                                                 | `node_id_t`, `u32_t node`                                             |
+| the candidates a walk keeps                                                                         | candidates                                                                                                      | pool                                                                  |
+| how a batch's entries are shared among shards                                                       | split_batch_into_shards, offsets                                                                                | seat, deal, landed                                                    |
+| a member of a plan, cursor or walk                                                                  | what it holds and when it holds it                                                                              | bits, current, state, data, flags, tmp, scratch, bitset, buffer       |
 
 ### Macro Naming
 
@@ -456,6 +496,40 @@ file build_artifacts/libusearch_shared.so # Verify the output
 ```
 
 The resulting `libusearch_shared.so` can be used in Android projects by placing it in `src/main/jniLibs/armeabi-v7a/` for 32-bit ARM or `arm64-v8a/` for 64-bit ARM.
+
+## Bindings
+
+Every binding is a thin layer over the C interface, and these rules hold in each of them.
+Typed bindings are those whose compiler checks callback signatures, and dynamic bindings are the rest; in USearch the typed ones are Rust, Swift, Go, Java, C#, Zig, Mojo and C++, and the dynamic ones are Python, JavaScript and Wolfram.
+
+The C library decides what is valid.
+A binding forwards its status, turns each status into its language's error in one place, re-checks nothing the library refuses, and keeps no copy of state the library already holds.
+
+Nothing in a binding takes a lock or sends a notification.
+The object that submitted a deferred call is the only one that polls its atomic outcome, so no other thread ever waits on it, and whatever a second caller asks, the library answers.
+
+A callback never raises into the library.
+Its fault never unwinds through C frames and never waits in a latch for the call to end: typed bindings give their callback types no way to throw, like a `noexcept` C++ callback type, while dynamic bindings report the fault through their language's unraisable path, like Python's `sys.unraisablehook` and JavaScript's uncaught-exception handler, and the callback answers cancel.
+A binding that hands the library no callback of its own, like Wolfram, whose value lookup is C, has nothing to report.
+
+A view the library hands back lives until the next call on its arena.
+The library describes where the memory sits, and the caller checks it; the binding neither copies the view to be safe nor checks its residency on the caller's behalf.
+
+Every array a verb reads shares the call's one count, so mismatched shapes cannot be expressed.
+Where a binding's own types carry two lengths, like a slice of keys beside a matrix of values, it checks once that they agree before the call crosses into the library, and nowhere else.
+
+Each verb has one body, which fills the C struct and calls the library with no layers in between.
+What it returns is read from the struct's output slot, a trampoline receives the handler itself as its state with no hub around it, and whether a call blocks or defers follows from the type of the receiver it is called on, never from a flag.
+Verbs are never shared through a base class; a trait whose default methods hold the one body per verb is fine, like Rust's and Mojo's, since each receiver supplies only its handle.
+
+A typed binding takes the scalar as a type parameter of each call, like `search::<f32>`, rather than letting the index type fix one.
+A deferred Rust call owns what it lends the library until the call is final, since the borrow checker cannot see the library holding it.
+A C++ wrapper over the C interface is a full typed binding: it has a deferred receiver, `noexcept` callback types and per-call scalar templates.
+
+A dynamic binding publishes every field of every report the library fills.
+Tests never restate a struct's layout that the compiler already pins, while tests of how keys print and parse, and of an engine run again through the binding, stay.
+
+`.githooks/pre-commit` refuses locks in binding sources, throwing callback types, caught unwinds and kept exceptions.
 
 ## Python 3
 

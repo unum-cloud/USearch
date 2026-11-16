@@ -38,17 +38,7 @@ Linux • macOS • Windows • FreeBSD • iOS • Android • WASI
 x86 • Arm • RISC-V • WebAssembly • CUDA • ROCm • Metal
 </p>
 
-<div align="center">
-<a href="https://pepy.tech/project/usearch"> <img alt="PyPI" src="https://static.pepy.tech/personalized-badge/usearch?period=total&units=abbreviation&left_color=black&right_color=blue&left_text=Python%20PyPI%20installs"> </a>
-<a href="https://www.npmjs.com/package/usearch"> <img alt="NPM" src="https://img.shields.io/npm/dy/usearch?label=JavaScript%20NPM%20installs"> </a>
-<a href="https://crates.io/crates/usearch"> <img alt="Crate" src="https://img.shields.io/crates/d/usearch?label=Rust%20Crate%20installs"> </a>
-<a href="https://www.nuget.org/packages/Cloud.Unum.USearch"> <img alt="NuGet" src="https://img.shields.io/nuget/dt/Cloud.Unum.USearch?label=CSharp%20NuGet%20installs"> </a>
-<img alt="GitHub code size in bytes" src="https://img.shields.io/github/languages/code-size/unum-cloud/USearch?label=Repo%20size">
-</div>
-
 ---
-
-![USearch banner](https://github.com/ashvardanian/ashvardanian/blob/master/repositories/USearch-v3.png?raw=true)
 
 USearch is an open-source proximity-graph index for nearest-neighbor search over dense vectors, sequences, shapes & geospatial sets.
 The same graph serves as a sparse operand, folding sparse matrix products, MaxSim scoring & softmax attention into its traversal, and one checkpoint opens in RAM, VRAM or on NVMe without being rewritten.
@@ -108,6 +98,7 @@ The C++ core also exposes lower-level kits & custom folds.
 | Dense Init, Load, Insert & Search |  ✓  |   ✓    |  ✓   |  ✓  |  ✓  |   ✓   |  ✓   |  ✓  |  ✓  |  ✓   |    ✓    |
 | Save, Metadata & Describe         |  ✓  |   ✓    |  ✓   |  ✓  |  ✓  |   ✓   |  ✓   |  ✓  |  ✓  |  ✓   |    ✓    |
 | Refine & Health                   |  ✓  |   ✓    |  ✓   |  ✓  |  ✓  |   ✓   |  ✓   |  ✓  |  ✓  |  ✓   |    ✓    |
+| Resumable Operation Plans         |  ✓  |   ✓    |  ✓   |  ✓  |  ✓  |   ✓   |  ✓   |  ✓  |  ✓  |  ✓   |    -    |
 | Count & Get by Key                |  ✓  |   ✓    |  ✓   |  ✓  |  ✓  |   ✓   |  ✓   |  ✓  |  ✓  |  ✓   |    ✓    |
 | Exact Scans                       |  ✓  |   ✓    |  ✓   |  ✓  |  ✓  |   ✓   |  ✓   |  ✓  |  ✓  |  ✓   |    ✓    |
 | VRAM & NVMe Residencies           |  ✓  |   ✓    |  ✓   |  ✓  |  ✓  |   ✓   |  ✓   |  ✓  |  ✓  |  ✓   |    ✓    |
@@ -179,18 +170,52 @@ An index grows as it inserts; `reserve` is only a hint of the capacity to come.
 
 #### Macro-Level Refinements
 
-`refine` re-selects neighbors for entries already in the graph, against the finished graph.
+`refine` makes every entry findable.
 It solves a different problem from insertion: building an approximate nearest-neighbor graph over every entry at once, plus the global properties no single walk can see.
-Its audit sweeps the graph from landmarks, finds islands no search reaches, & heals them.
+
+- __Navigability is the goal.__
+  A reachable entry is not enough: a greedy search, starting where searches start, must arrive at it.
+- __Fewer islands.__
+  Every strong component outside the root's is an island, and re-stitching islands into the root's component is the core of a round, so the island count is what it drives down.
+- __Diagnose all, re-stitch all.__
+  One sweep that computes no distance measures every entry; one streamed pass then gathers every entry into a neighborhood of near entries.
+- __Scan, never guess.__
+  Neighborhoods come from streaming the stored entries past a pack of drawn hubs, many at once.
+  A sequential scan costs far less than the random reads a walk makes, so no walk decides what an entry may link to.
+- __Mend the neighborhood.__
+  A neighborhood is re-stitched as a unit, every entry against every other, in one core's cache.
+  A tiled many-to-many kernel computes far more distances per byte it loads than one query against many, so the round spends that compute.
+- __Keep the diverse, leave the rest free.__
+  An entry keeps the links that lead somewhere new; a slot no such link claims stays empty.
+- __Reach never shrinks.__
+  A link is dropped only while an entry of smaller depth still links to its target.
+- __Chance, not position.__
+  Hubs are seeded draws, new each round, so no entry's fate rests on where it is stored.
+- __Nothing to tune.__
+  Every size comes from the graph or the device: its connectivity, the cache a core has.
+- __Says when it is done.__
+  Each round reports what it found and changed, and whether another can help.
+- __Watchable, stoppable, resumable.__
+  Every phase reports its progress; a stop keeps the work done and leaves a graph that saves; a plan resumes where it stopped.
+- __One writer, readers never wait.__
+  On NVMe a plan rewrites a private copy of a part and publishes it whole.
+- __Move, then rounds.__
+  Resharding moves entries with their links and rewrites links only within the parts it moves, then runs rounds; none walks.
+
+A round opens with a health check from a root, measuring every entry's component, in-links & depth without a distance, & a heal links each island it names to the root's component, again without a distance.
+The round then draws one pack of hubs & streams every stored entry past them once, so each entry joins the neighborhood of its nearest hub; a neighborhood over its capacity, what one core's cache holds, draws hubs among its own entries & gathers again, & one whose entries all tie, as duplicates do, is cut into pieces by ID.
+Each neighborhood is then re-stitched in one core's cache: every entry is scored against every other, & each keeps the diverse links among its own & its nearest neighborhood-mates, leaving the other slots empty.
+A closing health check from the same root decides the verdict: converged once a round changes no entry's links, improved while it changes some, stalled when full entries leave no slot to lower anything that stands, & stopped when the caller stopped it.
+Every residency runs the same round with the same phases, report & verdicts: RAM on the executor's cores, NVIDIA, AMD & Apple GPUs on their devices, & NVMe one part at a time, in RAM when the part fits or streamed from the drives when it does not.
 Like compaction in a database, refinement is optional & never changes what the index contains, only how well it is connected, & it must never lower recall.
-Because nothing waits on its answers, refinement can use bandwidth-oriented kernels a search cannot afford: on GPUs, a two-hop pass will score an entry's neighbors-of-neighbors as one Gram matrix on Tensor Cores, trading per-entry latency for many more distances per byte loaded.
 
-#### Absorption & Compaction
+#### Resharding
 
-`absorb` moves every entry of one or more donor indexes into a recipient, keeps their links, & re-selects only the entries across the new seams; the donors end empty.
-Shards hold at most about 4 billion entries, so a collection past that size grows by adding shards, & `compact` absorbs small shards into larger ones while each stays under the bound.
-Absorption also crosses residencies: GPU shards link to each other on their devices, then land in RAM as one graph.
-NVMe parts are immutable, so their compaction writes new parts from old ones & leaves the sources untouched.
+`reshard` moves the entries of its sources into its targets, keeps their links, & runs one round on every target that took entries, which heals what arrived into the target's graph without a distance & re-stitches the neighborhoods they share.
+Several sources into one target is a gather: the other sources end empty & stay the caller's to free.
+One source into several targets is a cut into graph-local parts, each grown from a seeded root over the links.
+One index as its own only source & target is a recut in place: shards hold at most about 4 billion entries, so a collection past that size grows by adding shards, & a recut packs small shards into larger ones while each stays under the bound.
+NVMe parts are immutable, so a reshard writes new parts beside the manifests & leaves every index serving its own until the manifests are replaced.
 
 ## Dense Modality
 
@@ -206,7 +231,7 @@ Bit sets suit fingerprints; byte integers suit quantized embeddings; `e4m3` & `b
 Most dense measures reuse a dot-product & precomputed norms.
 Squared Euclidean distance is $\lVert a\rVert^2 + \lVert b\rVert^2 - 2\langle a,b\rangle$; Angular distance derives from the normalized product; packed-bit intersections yield Hamming & Jaccard distances.
 Geometry freezes when the index opens, while the graph's population grows.
-`refine` improves its links & `health` audits reachability, making disconnected regions visible in the same reports that measure recall & throughput.
+`refine` improves its links & `health` checks reachability, making islands visible in the same reports that measure recall & throughput.
 
 ### Search & MaxSim
 

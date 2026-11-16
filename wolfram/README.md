@@ -158,12 +158,13 @@ DenseInitVram["inner", "bf16", 768, "Devices"->{0, 1, 2, 3}]
 DenseLoadRam["index.safegraphs", "Executor"->executor, "MemoryDomains"->{}, "ValuesPerKey"->0]
 DenseLoadVram["index.safegraphs", "Executor"->gpu, "Devices"->{0}]
 DenseViewRam["index.safegraphs"]                                   (* read-only, served from the mapping *)
-DenseViewNvme["index.safegraphs", "Executor"->drives, "Paths"->{"/dev/nvme0n1"}]
+DenseViewNvme["index.safegraphs", "Executor"->drives, "Paths"->{"/dev/nvme0n1"}, "KeyTableDomains"->{0}]
 ```
 
 `DenseInitRam[dimensions]` makes an `angular` `bf16` index.
 A viewed index is read-only, and every mutating verb on it fails as `read-only`.
-Until NVMe checkpoints carry keys, `DenseViewNvme` fails as `unsupported`.
+`"KeyTableDomains"` holds a key table in RAM beside an NVMe view; without one, `DenseCount`, `DenseGet`, `DenseSample`, `DenseMaxsim` and hinted searches fail as `unsupported`.
+`DenseLoadNvme[path]` takes the options of `DenseViewNvme` and opens a manifest writable, so `DenseRefine` and `DenseReshard` rewrite its parts one at a time, while a lone monolith fails as `unsupported`.
 
 ## Serialization
 
@@ -222,8 +223,18 @@ DenseSearch[index, queries, 10, arena, "Traversal"->"scan"]
 
 ### Refinement
 
-`DenseRefine[receiver]` re-links the graph and answers how many nodes had their neighbors changed, taking `"ExpansionFactor"` like the other walks.
+`DenseRefine[receiver]` re-links the graph, taking `"ExpansionFactor"` like the other walks and `"MemoryLimit"` for the bytes a loaded NVMe index holds per part it rewrites, a smaller one streaming that part from the drives, and answers the `"Reselected"`, `"Changed"`, `"IslandsFound"`, `"IslandsReconnected"`, `"Neighborhoods"`, `"WidestNeighborhood"`, `"AddedLinks"` and `"DroppedLinks"` counts, the `"Verdict"`, and the `"Opening"` and `"Reachability"` audits shaped as `DenseHealth` answers.
+A caller loops until the `"Verdict"` is no longer `"improved"`; the others are `"converged"`, `"stalled"` and `"stopped"`, and `"none"` marks a report no round filled.
 It is what makes the entries `DenseHealth` finds unreachable searchable again.
+`DenseReshard[sources, targets]` moves the entries of the sources into the targets with their links, then runs a round on every target that took entries, and answers like `DenseRefine`:
+
+```wolfram
+DenseReshard[{index, shard}, {index}, "Executor"->executor]   (* gathers the shard in, leaving it empty *)
+DenseReshard[{index}, {left, right}, "Seed"->7]               (* cuts the index into two empty indexes *)
+DenseReshard[{index}, {index}, "MemoryDomains"->{}, "ShardCapacity"->n]
+```
+
+The last one recuts a RAM index's own shards into as few as fit `n` entries apiece, keeping every entry.
 
 ### Sparse Multiplication
 
@@ -281,8 +292,8 @@ Outputs & carry are copied before the Arena is reused.
 
 ### Introspection
 
-- `DenseDescribe[receiver]` answers the metric, quantization, dimensions, connectivity, size, capacity, memory usage and dispatched capabilities.
-- `DenseHealth[receiver]` answers `<|"Audited"->…, "Reachable"->…, "Sweeps"->…|>`: the entries published when the audit started, how many of them a search reaches, and the levels the sweep took to converge.
+- `DenseDescribe[receiver]` answers the metric, quantization, dimensions, connectivity, size, capacity, memory usage, dispatched capabilities, shard count and the `"LoadPath"` its last load read through.
+- `DenseHealth[receiver]` answers `<|"Audited"->…, "Reachable"->…, "DepthFromRoot"->…, …|>`: the entries published when the health check started, how many of them a search reaches, the depths of its two sweeps, the unlinked, underlinked and deepest entries, the unreached and stranded islands, and the undirected components.
 - `DenseCount[receiver, key]` counts the entries under one key.
 - `VersionName[]`, `CapabilitiesCompiled[]` and `CapabilitiesAvailable[]` describe the library itself.
 
@@ -290,7 +301,7 @@ Outputs & carry are copied before the Arena is reused.
 
 - Deferred calls, since every call blocks.
 - Search predicates and progress callbacks, since the kernel evaluates on one thread and the executor's workers would have nowhere to call back into.
-- Traversal telemetry, cursors, search streams & `absorb`, which the C interface has and this package does not bind yet.
+- Traversal telemetry, cursors, search streams and refine and reshard plans, which the C interface has and this package does not bind yet.
 
 ## Design
 

@@ -2,7 +2,8 @@
 authors = ["Ash Vardanian <info@unum.cloud>"]
 description = "One Proximity Graph for Search, Sparse Products & Attention, across RAM, VRAM & NVMe"
 keywords = ["vector-search", "vector-database", "similarity-search", "embeddings", "nearest-neighbor"]
-documentation = "https://docs.rs/usearch"
+documentation = "https://www.unum.cloud/docs/usearch/rust"
+homepage = "https://www.unum.cloud/docs/usearch"
 edition = "2021"
 rust-version = "1.100"
 include = [

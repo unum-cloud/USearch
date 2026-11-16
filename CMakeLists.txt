@@ -4,7 +4,7 @@ project(
     VERSION 3.0.0
     LANGUAGES C CXX
     DESCRIPTION "One Proximity Graph for Search, Sparse Products & Attention, across RAM, VRAM & NVMe"
-    HOMEPAGE_URL "https://github.com/unum-cloud/USearch"
+    HOMEPAGE_URL "https://www.unum.cloud/docs/usearch"
 )
 
 # No target uses C++20 modules, and a Clang installed without `clang-scan-deps` would fail every C++ unit.

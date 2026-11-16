@@ -67,8 +67,8 @@ usearch_shapes_search(&(usearch_shapes_search_t) {.index = index,
 
 Insert cheaply and spend the wide `expansion_factor` on `usearch_shapes_refine`, which pays most here, where one comparison scores a whole shape against another.
 A cancelled `usearch_shapes_refine` leaves the graph correct and the next call starts over.
-To run under a time budget and continue where a cancel stopped, open a refinement with `usearch_shapes_refinement_init`, advance it with `usearch_shapes_refinement_next` and release it with `usearch_shapes_refinement_finish`.
-Searches continue throughout, while insertions and saves wait until the refinement finishes.
+To run under a time budget and continue where a cancel stopped, pass `usearch_shapes_refine` a `usearch_shapes_refine_plan_t` in `plan`, read where it stopped from `phase`, and close it with `usearch_shapes_refine_plan_finish`.
+Searches continue throughout, while insertions and saves wait until the plan finishes.
 
 ## Moving From Other Tools
 

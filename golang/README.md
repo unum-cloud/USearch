@@ -91,10 +91,7 @@ defer arena.Close()
 	if err != nil {
 		log.Fatal(err)
 }
-	found, distances, err := matches.Query(0)
-	if err != nil {
-		log.Fatal(err)
-}
+	found, distances := matches.Query(0)
 	for rank := range found {
 		fmt.Println(found[rank], distances[rank])
 }
@@ -135,7 +132,7 @@ matches, err := call.Wait() // a view borrowing arena, as a blocking call's does
 
 Go needs nothing more: a goroutine that wants to overlap the wait simply calls `Wait` there, and a `select` waits on a channel that goroutine closes.
 `Status` reads the outcome without blocking, and `Wait` blocks until the call is final and hands back what it produced, as many times as it is asked.
-`Close` waits the same way and frees whatever `Wait` has not handed out, so a call no one reads is closed rather than waited on; it is idempotent and safe after `Wait`.
+`Close` waits the same way and drops the result, so a call no one reads is closed rather than waited on; it is idempotent and safe after `Wait`.
 A failure this binding catches before the call crosses arrives through the same `Status` and `Wait`, as the engine's own refusals do.
 A `Deferred` dropped without `Wait` or `Close` is released by the collector once its call is final, which checks it again at every later collection rather than blocking on it.
 
@@ -192,8 +189,8 @@ Every output whose length only the call knows, such as matches, rows, products, 
 Each call rewinds its arena, so the previous call's views die and a steady loop allocates once.
 To keep a result past the next call, or to read one while making the next, pass that call another arena.
 An arena serves one call at a time, so each deferred call needs its own.
-A stale view answers `StatusUninitialized`; slices an accessor already returned are not checked again.
-An arena from a VRAM executor holds device memory, which host accessors refuse with `StatusDevice`.
+A view and every slice its accessors returned end at the arena's next call, or its `Close`, and nothing checks them after that.
+An arena from a VRAM executor holds device memory, which `Describe` reports and no Go code may read.
 It grows and frees on that executor's stream, so it serves only calls on that executor, any other finishing `StatusDevice`, and is closed before it; host pages may outlive theirs.
 
 ```go
@@ -207,7 +204,7 @@ for _, batch := range batches {
 	if err != nil {
 		log.Fatal(err)
 }
-	keys, _, _ := matches.Query(0)
+	keys, _ := matches.Query(0)
 	kept = append(kept, keys...) // a slice into the arena goes stale unchecked, so copy what outlives the loop
 }
 
@@ -216,7 +213,7 @@ defer found.Close()
 fetched, _ := usearch.NewArena(nil)
 defer fetched.Close()
 matches, _ := index.Search(query, 10, found, nil)
-neighbors, _, _ := matches.Query(0)
+neighbors, _ := matches.Query(0)
 for _, key := range neighbors {
 	vectors, _ := index.Get(key, usearch.ScalarF32, fetched) // rewinds fetched, never found
 	rerank(key, vectors)
@@ -234,7 +231,7 @@ for position, call := range calls {
 ```
 
 A call that finds its arena serving another call finishes with `StatusContended` and rewinds nothing, so the holder's views stay readable.
-`Close` waits for every deferred call naming the arena and retires its views as a rewind does, so a dropped `Deferred` never leaves it unsafe.
+`Close` waits for every deferred call naming the arena and ends its views as a rewind does, so a dropped `Deferred` never leaves it unsafe.
 
 ## Keys
 
@@ -303,8 +300,7 @@ restored, err := usearch.DenseLoadRam("index.safegraphs", &usearch.DenseLoadRamC
 defer restored.Close()
 
 monolith, err := index.SaveBuffer(arena, nil) // sized by the call itself, see Arenas
-serialized, err := monolith.Bytes()
-copied, err := usearch.DenseLoadRamBuffer(serialized, nil)
+copied, err := usearch.DenseLoadRamBuffer(monolith.Bytes(), nil)
 ```
 
 Loading creates the index, freezing its geometry from the checkpoint's own headers.
@@ -321,10 +317,14 @@ Serving a checkpoint in place, rather than copying it, yields a read-only handle
 ```go
 mapped, err := usearch.DenseViewRam("index.safegraphs")
 served, err := usearch.DenseViewNvme("index.safegraphs", &usearch.DenseViewNvmeConfig{
-	Executor: drives,
-	Paths:    []string{"/dev/nvme0n1"},
+	Executor:        drives,
+	Paths:           []string{"/dev/nvme0n1"},
+	KeyTableDomains: []int32{0}, // a key table on NUMA node 0, for Count, Get and Sample
 })
 ```
+
+Without `KeyTableDomains`, an NVMe view holds nothing per entry, so `Count`, `Get`, `Sample`, MaxSim and hinted searches report `StatusUnsupported`.
+`DenseLoadNvme` takes the same config and opens a manifest writable, so `Refine` rewrites its parts one at a time, while a lone monolith reports `StatusUnsupported`.
 
 ## Dense Indexes
 
@@ -368,10 +368,7 @@ A search returns a `MatchesView` over its arena, holding up to `wanted` keys per
 
 ```go
 for query := range matches.Queries() {
-	found, distances, err := matches.Query(query)
-	if err != nil {
-		log.Fatal(err)
-}
+	found, distances := matches.Query(query)
 	for rank := range found {
 		fmt.Println(query, found[rank], distances[rank])
 }
@@ -421,8 +418,7 @@ report, err := index.On(executor).Refine(&usearch.DenseRefineConfig{
 ```
 
 A handler never runs on two threads at once, so it may carry a counter or a deadline without a lock.
-A panic inside a predicate, a handler or a value lookup is recovered where it is raised and read as a rejection, a stop or a missing row, since unwinding it through the library's frames would skip their unlocks.
-The first such panic becomes the call's error once the call is final, the panic itself when it is an `error`.
+A predicate, a handler or a value lookup must not panic: a panic unwinding through the library's frames is a bug, and nothing here recovers it.
 
 ### Retrieval and Streaming
 
@@ -447,9 +443,7 @@ for {
 	if err != nil || batch.Written() == 0 {
 		break
 	}
-	keys, _ := batch.Keys()
-	first, _ := batch.Links(0)
-	consume(keys, first)
+	consume(batch.Keys(), batch.Links(0))
 }
 ```
 
@@ -469,7 +463,7 @@ for accepted := 0; accepted < 10; {
 	if err != nil {
 		log.Fatal(err)
 }
-	found, _, _ := matches.Query(0)
+	found, _ := matches.Query(0)
 	if len(found) == 0 {
 		break // the walk is drained
 }
@@ -483,35 +477,57 @@ for accepted := 0; accepted < 10; {
 
 ### Refinement
 
-`Refine` re-runs the neighbor selection over entries already in the graph, returning a `DenseRefineReport`: the entries re-selected and changed, the islands found and reconnected, and the closing audit.
-A batch built at a low expansion factor can be brought up to the quality of a slower build afterwards, and `Changed` reaching zero is what settled looks like:
+`Refine` re-runs the neighbor selection over entries already in the graph, returning a `DenseRefineReport`: the entries re-selected and changed, the islands found and reconnected, the neighborhoods re-stitched with the links added and dropped, the `Verdict`, and the health checks opening the round and closing the heal.
+A batch built at a low expansion factor can be brought up to the quality of a slower build afterwards, and a `Verdict` other than `DenseRefineImproved` is what settled looks like:
 
 ```go
 for {
 	report, err := index.On(executor).Refine(&usearch.DenseRefineConfig{ExpansionFactor: 128})
 	if err != nil {
 		log.Fatal(err)
-}
-	if report.Changed == 0 {
+	}
+	if report.Verdict != usearch.DenseRefineImproved {
 		break
-}
+	}
 }
 ```
 
-### Absorbing
+On a loaded NVMe handle `MemoryLimit` bounds the bytes a round holds for the one part it rewrites: zero rounds the part in RAM, and a smaller budget streams its rounds from the drives.
 
-`Absorb` moves donor indexes into one, one after another, keeping their graphs rather than re-inserting their vectors, then refines every shard that took one across the appended part.
-A donor must share the index's residency, scalar, metric and geometry, or the call answers `StatusConfigMismatch`.
-Each absorbed donor is consumed, and every later verb on it reports `StatusUninitialized`; a stop between donors, or a failure, leaves the rest live, still yours to close.
+### Resharding
+
+`Reshard` moves the entries of its sources into its targets, keeping their links rather than re-inserting their vectors, then runs a round on every target that took entries; the receiver lends only its executor, so every handle is named.
+Several sources gather into one target, itself among them, and each other source ends empty and live, still yours to close.
+Every handle must share the first source's residency, scalar, class, metric and geometry, or the call answers `StatusConfigMismatch`, and a refusal moves nothing.
 
 ```go
-report, err := index.On(executor).Absorb([]*usearch.DenseIndex{first, second}, nil)
+report, err := index.On(executor).Reshard([]*usearch.DenseIndex{index, first, second}, []*usearch.DenseIndex{index}, nil)
 ```
 
-`Split` is the inverse: it hands graph-local parts of the index to empty receivers of the same configuration, one part each, keeping their edges and leaving the index empty but live.
+One source cut into several empty targets hands each a graph-local part, keeping their edges and leaving the source empty but live.
 
 ```go
-report, err := index.On(executor).Split([]*usearch.DenseIndex{left, right}, &usearch.DenseSplitConfig{Seed: 42})
+report, err := index.On(executor).Reshard([]*usearch.DenseIndex{index}, []*usearch.DenseIndex{left, right}, &usearch.DenseReshardConfig{Seed: 42})
+```
+
+The index as its only source and target recuts its own shards in place into as few as fit `ShardCapacity`, keeping every entry.
+
+```go
+self := []*usearch.DenseIndex{index}
+report, err := index.On(executor).Reshard(self, self, &usearch.DenseReshardConfig{MemoryDomains: []int32{}, ShardCapacity: 10_000_000})
+```
+
+A `Plan` in a `DenseRefineConfig` or `DenseReshardConfig` keeps a stopped call live: the next call naming it continues where the stop came, its `Phase` says where each call stopped, and `RefinePlanFinish` or `ReshardPlanFinish` closes it and lands what the whole plan did.
+
+```go
+var plan usearch.DenseRefinePlan
+for plan.Phase.Phase != usearch.PhaseDone {
+	_, err := index.On(executor).Refine(&usearch.DenseRefineConfig{Plan: &plan, Progress: withinBudget})
+	if err != nil && !errors.Is(err, usearch.StatusCancelled) {
+		log.Fatal(err)
+	}
+}
+report, err := index.On(executor).RefinePlanFinish(&plan)
 ```
 
 ### Sampling
@@ -523,9 +539,9 @@ Equal seeds, shown keys and focus draw equally, and a larger `wanted` draws a su
 draws, err := index.On(executor).Sample(256, arena, &usearch.DenseSampleConfig{
 	Shown: shown, ShownCoordinates: places, Focus: near, Seed: 42,
 })
-keys, _ := draws.Keys()
-entryOrdinals, _ := draws.EntryOrdinals()
-parent, distance, _ := draws.Parents().Query(0) // empty for a root
+keys := draws.Keys()
+entryOrdinals := draws.EntryOrdinals()
+parent, distance := draws.Parents().Query(0) // empty for a root
 points, _ := usearch.DenseValues[float32](draws.Coordinates())
 ```
 
@@ -537,7 +553,7 @@ It runs on an inner-product index alone, and its keys, products and row offsets 
 ```go
 products, err := index.On(executor).Multiply(usearch.RowsOf(left, dimensions), arena, &usearch.DenseMultiplyConfig{Wanted: 64})
 for row := range products.Queries() {
-	columns, scores, _ := products.Query(row)
+	columns, scores := products.Query(row)
 	accumulate(row, columns, scores)
 }
 ```
@@ -555,7 +571,7 @@ options.ValuesPerKey = 512
 
 documents, err := index.On(executor).Maxsim(usearch.RowsOf(tokens, dimensions), tokensPerQuery, 10, arena, nil)
 for query := range documents.Queries() {
-	keys, scores, _ := documents.Query(query)
+	keys, scores := documents.Query(query)
 	rerank(query, keys, scores)
 }
 ```
@@ -565,7 +581,7 @@ for query := range documents.Queries() {
 `Attend` is Flash Attention folded into the walk: every key it scores folds into each head's running maximum, partition and weighted value sum, with no top-k cut, and the outputs land in an arena already divided by the partition.
 The index stores no values, so a `ValueLookup` names, for every scored key, its row of a `Values` matrix as wide as the keys and stored in the index's own quantization.
 A key without a row, or values of another width or scalar type, refuses the call with `StatusShapeMismatch`, since a missing row is a wrong softmax rather than a smaller one.
-A VRAM walk resolves its rows through a device function, which no Go function can be, so `Attend` refuses a VRAM index with `StatusDevice`.
+A VRAM walk resolves its rows through a device function, which no Go function can be, so `Attend` serves RAM and NVMe indexes alone.
 With `HeadCount: 8`, row `t * 8 + h` of the queries is head `h` of token `t`, and the heads of one token share its walk.
 
 ```go
@@ -587,7 +603,7 @@ A `Carry` of one `DenseSoftmaxState` per query row, lent rather than written int
 ```go
 description, _ := index.Describe()
 fmt.Println(description.Metadata.Dimensions, description.Size, description.Capacity,
-	description.MemoryUsage, description.Capabilities) // the codename dispatch picked on this machine
+	description.MemoryUsage, description.CPUClass) // the class dispatch picked on this machine
 
 found, _ := index.Contains(usearch.KeyFromUint64(42))
 count, _ := index.Count(usearch.KeyFromUint64(42)) // entries sharing one key
@@ -598,7 +614,7 @@ fmt.Println(reachability.Reachable, "of", reachability.Audited, "entries reachab
 fmt.Println(usearch.Version(), usearch.CapabilitiesCompiled(), usearch.CapabilitiesAvailable())
 ```
 
-`Health` audits how much of the graph a search reaches from its landmarks; entries it misses stay unfound until a `Refine` re-links them.
+`Health` measures how much of the graph a search reaches from the root; entries it misses stay unfound until a `Refine` re-links them.
 
 ## What This Binding Does Not Expose
 
@@ -612,6 +628,6 @@ fmt.Println(usearch.Version(), usearch.CapabilitiesCompiled(), usearch.Capabilit
 - __The receiver chooses, the verb stays.__ The index runs a verb on the calling goroutine, `On(executor)` blocks on an executor, and `Deferred(executor)` submits it, all with the same arguments.
 - __Deferred calls use the language's own idioms.__ `Status` polls through `usearch_outcome_status` and `Wait` blocks through `usearch_outcome_wait`; a goroutine calling `Wait` overlaps the wait, and a `select` reaches it through a channel that goroutine closes.
 - __No life of its own.__ The binding starts no goroutines and keeps no queues; releasing a `Deferred` rides `Close`, which waits for the call first, or the collector's cleanup, which frees it only once final.
-- __Arenas are lent and reused, never shared.__ Every output whose length scales with the call lands in an arena the caller passes; each rewind bumps the arena's generation, so a stale view answers `StatusUninitialized`.
+- __Arenas are lent and reused, never shared.__ Every output whose length scales with the call lands in an arena the caller passes, and its views end at the arena's next call.
 - __Nothing costs anything until it is used.__ Submitting a call allocates nothing, and an arena allocates only when a call writes into it.
 - __Types and configs are the header's.__ Every type is its C name without `usearch_` and `_t`, a verb's argument structure becomes its `Dense*Config`, and every wrapper's documentation names the C symbol it calls or says it is binding-only.

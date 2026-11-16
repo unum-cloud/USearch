@@ -50,11 +50,11 @@ The variants are aliases over those templates, keyed by the storage dtype and th
 
 A variant's executor type is its residency, so `vendored_residency_of`, `is_ram_index`, `is_nvme_index` and `is_vram_index` read it rather than a second tag that could disagree.
 Every residency fills every entry: an NVMe view answers `read_only_k` for each mutation, and a device variant `unsupported_k` for what only a host walk takes.
-`insert` is one plan with a step per slice that publishes every entry at once, and refinements and cursors live behind a `void*` their own entries open, step and free.
+`insert` is one plan with a task per slice that publishes every entry at once, and the plans of refine and reshard, like cursors, live behind a `void*` their own entries run and free, each operation opened through its own entry and driven by `drive_plan`, a call naming no plan through a one-shot one.
 Rows reach every variant in the caller's scalar as a `dense::rows_view_t`, and each variant imports them into its stored scalar per thread, in scratch its executor already owns, so the C layer never stages a row.
 Scores reach the arena as the ABI's `double` straight from the engines, and row outputs export into the scalar the caller asks for.
 A `usearch_progress_t` with a handler slices a batch into its `steps`, ten unless the caller asks otherwise, each handed to the engine whole and reported once; without a handler the call is one slice, and a GPU engine windows a large one through its own staging.
-`progress_ticks_t` keeps that rule in one place, also thinning the ticks of verbs that count their own units, a checkpoint's shards or a refinement's nodes.
+`progress_ticks_t` keeps that rule in one place, and forwards every barrier of a verb that counts its own units, a checkpoint's shards or each phase of a round, so a long phase stays watchable.
 
 ## Dispatch over Capability Kits
 
@@ -126,7 +126,7 @@ A null executor builds one for that call alone: the calling thread on RAM, one t
 Every call naming an executor enters through `submitted<verb>`, and one call holds an executor at a time:
 
 - It takes `holding_call.claim` by exchange; a call finding it held finishes `usearch_status_contended_k`, and nothing queues.
-- It raises `named_calls` on every index, cursor, refinement and arena it names, which every free and every consumed donor waits to fall to zero.
+- It raises `named_calls` on every index, cursor, plan and arena it names, which every free and every reshard naming the handle waits to fall to zero.
 - A blocking call, or a deferred one on a pool that needs its caller, runs the verb's body on the calling thread.
 - A deferred call on a caller-exclusive pool copies its arguments into `holding_call.delegated_arguments` and dispatches them with `fu_pool_unsafe_for_threads`, whose slice on thread 0 runs the body and `end_call` while the others return at once; the body's fan-outs fork the other threads as a caller's would.
 - The next call, a drain and a free first await any dispatch in flight, which waits at most for the tail of thread 0's slice.
@@ -154,4 +154,4 @@ Sequence, shapes and geospatial compile the same classes, each into a RAM and an
 - Overlap distances are reported as the share of missed windows, from zero to one, rather than the kernels' fixed point.
 - Checkpoints are one SafeGraphs monolith for a lone live shard, or one part per live shard beside a `.json` manifest, whose metric token is `levenshtein`, `levenshtein-utf8`, `needleman_wunsch`, `overlap`, `chamfer`, `hausdorff`, `gromov_wasserstein` or `wasserstein_procrustes`, with `connectivity`, `window_widths` and `points` in the provenance.
 
-`refine`, `absorb`, `split` and `sample` serve RAM indexes, and a cursor opens at start keys and reports links there, while `view_ram` answers `usearch_status_unsupported_k`, as does every refinement on an NVIDIA index.
+`refine` and `reshard` run rounds on RAM and NVIDIA indexes, `sample` serves RAM ones, and a cursor opens at start keys and reports links there, while `view_ram` answers `usearch_status_unsupported_k`.

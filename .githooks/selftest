@@ -2557,17 +2557,26 @@ assert_accepts "filesystem include in a test harness" test/probe.cpp <<'FIXTURE'
 #include <filesystem>
 FIXTURE
 
-assert_rejects "vector in the library" "uses a standard container, std::pair or std::tuple" include/$project_directory/probe.hpp <<'FIXTURE'
+assert_rejects "vector in the library" "uses a standard container, an owning std::string, std::pair or std::tuple" include/$project_directory/probe.hpp <<'FIXTURE'
 #include <vector>
 FIXTURE
 
-assert_rejects "pair in a binding" "uses a standard container, std::pair or std::tuple" python/probe.cpp <<'FIXTURE'
+assert_rejects "pair in a binding" "uses a standard container, an owning std::string, std::pair or std::tuple" python/probe.cpp <<'FIXTURE'
 std::pair<int, int> probe_bounds(void);
 FIXTURE
 
 assert_accepts "containers in a test harness" test/probe.cpp <<'FIXTURE'
 #include <vector>
 std::vector<std::pair<int, int>> probe_pairs;
+FIXTURE
+
+assert_rejects "owning string in a tool" "an owning std::string" tools/probe.hpp <<'FIXTURE'
+std::string probe_name;
+FIXTURE
+
+assert_accepts "views and sibling containers in a tool" tools/probe.cpp <<'FIXTURE'
+std::string_view probe_name;
+st::vector<int> probe_items;
 FIXTURE
 
 assert_accepts "move and tuple traits in the library" include/$project_directory/probe.hpp <<'FIXTURE'
@@ -2946,6 +2955,264 @@ func Probe() {}
 FIXTURE
 
 # endregion Binding Doc Fixtures
+
+# region Shared Binding Fixtures
+
+assert_rejects "Rust mutex in a binding" "locks in a binding" rust/probe.rs <<'FIXTURE'
+pub struct Callbacks {
+    panic: Mutex<Option<u32>>,
+}
+FIXTURE
+
+assert_rejects "Swift lock in a binding" "locks in a binding" swift/Probe.swift <<'FIXTURE'
+let guard = NSLock()
+FIXTURE
+
+assert_rejects "Go mutex in a binding" "locks in a binding" golang/probe.go <<'FIXTURE'
+package probe
+
+var guard sync.RWMutex
+FIXTURE
+
+assert_rejects "Java synchronized method in a binding" "locks in a binding" java/Probe.java <<'FIXTURE'
+public synchronized void close() {}
+FIXTURE
+
+assert_rejects "C# lock statement in a binding" "locks in a binding" csharp/Probe.cs <<'FIXTURE'
+lock (this.outputs)
+{
+    this.settled = true;
+}
+FIXTURE
+
+assert_rejects "Python lock in a binding" "locks in a binding" python/probe.py <<'FIXTURE'
+import threading
+
+guard = threading.Lock()
+FIXTURE
+
+assert_rejects "CPython critical section in a binding" "locks in a binding" python/probe.c <<'FIXTURE'
+#define probe_guard_begin_(object) Py_BEGIN_CRITICAL_SECTION(object)
+FIXTURE
+
+assert_rejects "standard mutex in the C++ binding" "locks in a binding" cpp/probe.hpp <<'FIXTURE'
+inline std::mutex probe_guard;
+FIXTURE
+
+assert_accepts "atomics in a binding, and a lock named in a comment" rust/probe.rs <<'FIXTURE'
+/// The call's outcome, polled by its one owner; nothing here takes a Mutex.
+pub struct Outcome {
+    status: AtomicU32,
+}
+FIXTURE
+
+assert_accepts "CPython thread state and sequence guards in a binding" python/probe.c <<'FIXTURE'
+static void probe_wait(PyObject* sequence) {
+    Py_BEGIN_CRITICAL_SECTION_SEQUENCE_FAST(sequence);
+    Py_END_CRITICAL_SECTION_SEQUENCE_FAST();
+    Py_BEGIN_ALLOW_THREADS;
+    Py_END_ALLOW_THREADS;
+}
+FIXTURE
+
+assert_accepts "cgo pins in a binding" golang/probe.go <<'FIXTURE'
+package probe
+
+func call() {
+	var pinner runtime.Pinner
+	defer pinner.Unpin()
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+}
+FIXTURE
+
+assert_accepts "locks in a binding test" golang/probe_test.go <<'FIXTURE'
+package probe
+
+var guard sync.Mutex
+FIXTURE
+
+assert_rejects "throwing Swift callback type" "lets a binding callback raise or keeps an exception" swift/Probe.swift <<'FIXTURE'
+public typealias Progress = @Sendable (_ completed: Int, _ total: Int) throws -> Bool
+FIXTURE
+
+assert_accepts "non-throwing Swift callback beside a throwing verb and a scoped body" swift/Probe.swift <<'FIXTURE'
+public typealias Progress = @Sendable (_ completed: Int, _ total: Int) -> Bool
+
+public func open(path: String, progress: Progress) throws -> Index { try Index(path: path) }
+
+func withBytes<Result>(_ body: (UnsafeRawBufferPointer) throws -> Result) rethrows -> Result { try body(bytes) }
+FIXTURE
+
+assert_rejects "Rust trampoline catching an unwind" "lets a binding callback raise or keeps an exception" rust/probe.rs <<'FIXTURE'
+fn admit(handler: &dyn Fn(u64) -> bool, key: u64) -> bool {
+    std::panic::catch_unwind(|| handler(key)).unwrap_or(false)
+}
+FIXTURE
+
+assert_rejects "Go trampoline recovering a panic" "lets a binding callback raise or keeps an exception" golang/probe.go <<'FIXTURE'
+package probe
+
+func admit(handler func(uint64) bool, key uint64) bool {
+	defer func() { latch(recover()) }()
+	return handler(key)
+}
+FIXTURE
+
+assert_rejects "CPython call re-raising an exception it kept" "lets a binding callback raise or keeps an exception" python/probe.c <<'FIXTURE'
+static void probe_answer(probe_call_t* call) { PyErr_SetRaisedException(call->raised); }
+FIXTURE
+
+assert_accepts "CPython cleanup keeping the pending exception" python/probe.c <<'FIXTURE'
+static void probe_release(probe_call_t* call) {
+    PyObject* const raised = PyErr_GetRaisedException();
+    probe_free(call);
+    PyErr_SetRaisedException(raised);
+}
+FIXTURE
+
+assert_rejects "N-API trampoline keeping an exception" "lets a binding callback raise or keeps an exception" javascript/probe.c <<'FIXTURE'
+static void probe_keep(napi_env env, napi_value* raised) { napi_get_and_clear_last_exception(env, raised); }
+FIXTURE
+
+assert_accepts "N-API trampoline reporting an exception as uncaught" javascript/probe.c <<'FIXTURE'
+static void probe_report(napi_env env) {
+    napi_value raised;
+    if (napi_get_and_clear_last_exception(env, &raised) == napi_ok) napi_fatal_exception(env, raised);
+}
+FIXTURE
+
+assert_rejects "Java upcall keeping an exception" "lets a binding callback raise or keeps an exception" java/Probe.java <<'FIXTURE'
+void admit() {
+    try {
+        handler.run();
+    } catch (Throwable failure) {
+        latch(failure);
+    }
+}
+FIXTURE
+
+assert_accepts "Java downcall rethrowing what a method handle throws" java/Probe.java <<'FIXTURE'
+void invoke() {
+    try {
+        handle.invokeExact();
+    } catch (Throwable failure) {
+        release();
+        throw rethrow(failure);
+    }
+}
+FIXTURE
+
+assert_rejects "span of pointers to const queries" "takes a span of pointers to const" include/$project_directory/probe.hpp <<'FIXTURE'
+void probe_reset(std::span<probe_query_t const* const> queries) noexcept;
+FIXTURE
+
+assert_accepts "flat query view and a span of index pointers" include/$project_directory/probe.hpp <<'FIXTURE'
+void probe_reset(std::span<probe_query_t const> queries, std::span<probe_index_t* const> sources) noexcept;
+FIXTURE
+
+assert_accepts "span of C strings naming devices" include/$project_directory/probe.hpp <<'FIXTURE'
+void probe_name(std::span<char const* const> names) noexcept;
+FIXTURE
+
+assert_rejects "N-API mutex in a binding" "locks in a binding" javascript/probe.c <<'FIXTURE'
+static uv_mutex_t probe_guard;
+FIXTURE
+
+assert_rejects "C# upcall keeping an exception" "lets a binding callback raise or keeps an exception" csharp/Probe.cs <<'FIXTURE'
+void Admit()
+{
+    try
+    {
+        handler();
+    }
+    catch (Exception failure)
+    {
+        Latch(failure);
+    }
+}
+FIXTURE
+
+assert_accepts "C# downcall rethrowing what it caught" csharp/Probe.cs <<'FIXTURE'
+void Invoke()
+{
+    try
+    {
+        handle();
+    }
+    catch (Exception)
+    {
+        Release();
+        throw;
+    }
+}
+FIXTURE
+
+assert_rejects "Kotlin upcall keeping an exception" "lets a binding callback raise or keeps an exception" java/Probe.kt <<'FIXTURE'
+fun admit() {
+    try {
+        handler.run()
+    } catch (failure: Throwable) {
+        latch(failure)
+    }
+}
+FIXTURE
+
+assert_accepts "Kotlin downcall rethrowing what it caught" java/Probe.kt <<'FIXTURE'
+fun invoke() {
+    try {
+        handle.invokeExact()
+    } catch (failure: Throwable) {
+        release()
+        throw failure
+    }
+}
+FIXTURE
+
+assert_rejects "Zig callback type returning an error union" "lets a binding callback raise or keeps an exception" zig/probe.zig <<'FIXTURE'
+const Progress = *const fn (usize, usize, ?*anyopaque) callconv(.c) anyerror!bool;
+FIXTURE
+
+assert_accepts "Zig callback type answering a value beside a fallible verb" zig/probe.zig <<'FIXTURE'
+const Progress = *const fn (usize, usize, ?*anyopaque) callconv(.c) bool;
+
+fn open(path: []const u8) !Progress {
+    return if (path.len == 0) error.Empty else undefined;
+}
+FIXTURE
+
+assert_rejects "Mojo callback type that raises" "lets a binding callback raise or keeps an exception" mojo/probe.mojo <<'FIXTURE'
+comptime Progress = def(Int, Int, Int) thin raises -> Int
+FIXTURE
+
+assert_accepts "Mojo callback type beside a raising verb" mojo/probe.mojo <<'FIXTURE'
+comptime Progress = def(Int, Int, Int) thin abi("C") -> Int
+
+
+def run[handler: def(Int) thin -> Int](count: Int) raises -> Int:
+    return handler(count)
+FIXTURE
+
+assert_rejects "Wolfram callback calling back into the kernel" "lets a binding callback raise or keeps an exception" wolfram/probe.c <<'FIXTURE'
+static void probe_admit(WolframLibraryData library_data) { library_data->Message("admit"); }
+FIXTURE
+
+assert_accepts "Wolfram callback answering through its slots" wolfram/probe.c <<'FIXTURE'
+static void probe_admit(void* state, int* admissions, size_t count) {
+    for (size_t index = 0; index != count; ++index) admissions[index] = state != NULL;
+}
+FIXTURE
+
+assert_rejects "C++ callback type that may throw" "lets a binding callback raise or keeps an exception" cpp/probe.hpp <<'FIXTURE'
+using progress_callback_t = bool (*)(std::size_t completed, std::size_t total);
+FIXTURE
+
+assert_accepts "C++ noexcept callback type beside a C verb pointer" cpp/probe.hpp <<'FIXTURE'
+using progress_callback_t = bool (*)(std::size_t completed, std::size_t total) noexcept;
+using probe_verb_t = void (*)(int*);
+FIXTURE
+
+# endregion Shared Binding Fixtures
 
 # region USearch Fixtures
 
@@ -3730,7 +3997,7 @@ expect_acceptance "the hook's shared regions at their pinned sums"
 
 stage_fixture_verbatim .githooks/pre-commit < <(sed 's/^# Prints the reason and the first offending lines\./# Prints the reason and the offending lines./' "$hooks_directory/pre-commit")
 run_precommit
-expect_rejection "a shared region edited away from its pinned sum" "drifts from NumKong's shared regions"
+expect_rejection "a shared region edited away from its pinned sum" "drifts from the sibling hooks' shared regions"
 
 stage_fixture_verbatim CONTRIBUTING.md <<'FIXTURE'
 ### Vocabulary
@@ -3904,6 +4171,27 @@ use std::fmt;
 use usearch::index;
 
 use numkong::dot;
+FIXTURE
+
+assert_rejects "absorb verb exported from the C surface" "exports an absorb, split or compact verb" c/usearch/probe.h <<'FIXTURE'
+void usearch_probe_absorb(usearch_probe_absorb_t* arguments);
+FIXTURE
+
+assert_rejects "split plan type in the stub" "exports an absorb, split or compact verb" src_stub/probe.cpp <<'FIXTURE'
+struct usearch_probe_split_plan_t {};
+FIXTURE
+
+assert_rejects "compact verb in the CLI table" "exports an absorb, split or compact verb" tools/probe.cpp <<'FIXTURE'
+int probe(std::string_view verb) noexcept { return verb == "compact"; }
+FIXTURE
+
+assert_accepts "reshard verb, batch splitting and a splitmix seed" src_stub/probe.cpp <<'FIXTURE'
+void usearch_probe_reshard(usearch_probe_reshard_t* arguments);
+void split_batch_into_shards(std::uint64_t splitmix64_state);
+FIXTURE
+
+assert_accepts "walk fold absorbing a candidate in the engine" include/usearch/probe.hpp <<'FIXTURE'
+inline void probe(probe_fold_t& fold, probe_candidate_t candidate) noexcept { fold.absorb(candidate); }
 FIXTURE
 
 # endregion USearch Fixtures

@@ -64,7 +64,9 @@ dependencies = []
 eval = ["numpy", "tqdm"]
 
 [project.urls]
-Homepage = "https://github.com/unum-cloud/USearch"
+Homepage = "https://www.unum.cloud/docs/usearch"
+Documentation = "https://www.unum.cloud/docs/usearch/python"
+Repository = "https://github.com/unum-cloud/USearch"
 
 # One CMake tree serves the compiler flags, the instantiation grid and the release artifacts, so the
 # SDK has one native build rather than a second one described in a `setup.py`.

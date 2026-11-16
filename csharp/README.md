@@ -76,6 +76,7 @@ Matches matches = await call;                                       // Or: call.
 ```
 
 Waiting again answers the same result or raises the same failure.
+A deferred call has one owner at a time, which polls, waits and disposes it; the binding takes no lock around it.
 Disposing a call nobody waited for waits for it, discards what it produced, and lets its arena serve the next call.
 One left unfinished and unreachable keeps its outputs and pins alive until a collection finds it final, rather than freeing memory the library still writes.
 Disposing an index or an arena that a deferred call names waits for that call first.
@@ -115,9 +116,9 @@ Every output whose length only the call knows, such as matches, rows, products, 
 `new Arena(executor)` places it where that executor computes, decided once, and `new Arena()` makes host pages for the calling thread.
 Each call rewinds its arena, so the previous call's views die and a steady loop allocates once.
 To keep a result past the next call, or to read one while making the next, pass that call another arena.
-An arena serves one call at a time, so each deferred call needs its own, and a call naming an arena that serves another call finishes with `Status.Contended` and rewinds nothing, so the holder's views stay readable.
-A stale view throws `USearchException` with `Status.Uninitialized`; a `ReadOnlySpan` an accessor already returned cannot outlive its stack frame, so read it before the next call.
-An arena's `Describe()` says where it lives, and one from a VRAM executor holds device memory, which host accessors refuse with `Status.Device`.
+An arena serves one call at a time, so each deferred call needs its own, and a call naming an arena that serves another call finishes with `Status.Contended`.
+A view ends at its arena's next call or disposal, so read it before then.
+An arena's `Describe()` says where it lives, and one from a VRAM executor holds device memory, whose views are for device code alone.
 It grows, fills and frees on that executor's first stream, so it serves only calls on that executor and holds it open until disposed; a host arena may outlive its executor.
 
 ```csharp
@@ -131,7 +132,7 @@ foreach (RowsView batch in batches)
 using Arena found = new(), fetched = new();                        // Two live results, two arenas
 foreach (Key key in index.Search(query, 10, found)[0].Keys)
 {
-    Rerank(key, index.Get(key, fetched));
+    Rerank(key, index.Get<F32>(key, fetched));
 }
 
 Executor[] pools = [.. shards.Select(_ => Executor.ForRam(threads: 8))];  // One executor and one arena per submitted call
@@ -172,7 +173,8 @@ using DenseIndex onDisk = DenseIndex.ViewNvme("index.safegraphs.json", paths: ["
 ```
 
 An NVMe handle serves a checkpoint in place, and every mutating verb fails on it with `Status.ReadOnly`, as on a `DenseIndex.ViewRam`.
-Until NVMe checkpoints carry keys, `ViewNvme` answers `Status.Unsupported`.
+`ViewNvme` holds a key table in RAM on the NUMA nodes `keyTableDomains` names; without one, counts, reads, samples, MaxSim and hinted searches answer `Status.Unsupported`.
+`LoadNvme` takes the same arguments and opens a manifest writable, so `Refine` rewrites its parts one at a time, while a lone monolith answers `Status.Unsupported`.
 
 ## Serialization
 
@@ -259,13 +261,14 @@ Matches admitted = index.On(pool).Search(
 
 Rejected entries still route the traversal, so recall does not collapse at low selectivity.
 The predicate runs on the executor's worker threads, so it must be safe for concurrent use, and it is called once per scored candidate rather than once per reported match.
-An exception it throws is captured, every later candidate is rejected, and the exception is rethrown with its own type once the call is final, never unwound through the native frames.
-A host predicate cannot narrow a device walk, so a VRAM handle refuses one with `Status.Device`.
+It must not throw: an exception escaping it terminates the process.
+`Maxsim`, `Multiply` and `Attend` take the same `predicate` argument.
+A host predicate cannot narrow a device walk, so a VRAM handle refuses one with `Status.Unsupported`.
 
 ### Retrieval and Streaming
 
 ```csharp
-DenseVectors vectors = index.On(pool).Get(key, arena, Scalar.F32);  // Every entry under the key, zero-copy
+DenseVectors vectors = index.On(pool).Get<F32>(key, arena);         // Every entry under the key, zero-copy
 ReadOnlySpan<float> first = vectors.Row<float>(0);                  // As wide as vectors.Columns
 
 using DenseCursor cursor = index.On(pool).Cursor();    // Each entry once, in storage order; `Cursor([key])` walks out from a key
@@ -289,19 +292,33 @@ RefineReport report = index.On(pool).Refine(expansionFactor: 256);
 
 Refinement re-selects the neighbors of every stored entry against the finished graph, improving edges that were chosen when the graph around them was still incomplete.
 It is a build step rather than a repair: a cheap insertion pass followed by one refinement reaches a better graph, in less total time, than a single expensive insertion pass, so a wide expansion factor belongs here rather than in `Insert`.
-The return is a `RefineReport` of the nodes re-selected and `Changed`, the islands found and reconnected, and the `Reachability` audit closing the heal; `Changed` at zero means the graph has settled, so a caller under a time budget loops until it falls below whatever rate it considers settled.
+The return is a `RefineReport` of the nodes re-selected and `Changed`, the islands found and reconnected, the neighborhoods re-stitched with the links added and dropped, the `Verdict`, and the `Opening` and `Reachability` health checks around the round; a caller loops until the `Verdict` is no longer `RefineVerdict.Improved`.
 Searches may run throughout.
-
-### Absorbing & Splitting
+On a loaded NVMe handle `memoryLimit` bounds the bytes a round holds for the one part it rewrites: zero rounds the part in RAM, and a smaller budget streams its rounds from the drives.
 
 ```csharp
-index.On(pool).Absorb(donor);
-index.On(pool).Split([left, right], seed: 7); // two empty receivers take a part each
+DenseRefinePlan plan = new();
+index.On(pool).Refine(progress: (completed, total) => !userStopped, plan: plan);  // A stop keeps the round
+PhaseProgress stopped = plan.Phase;                                                 // Phase.Gather, 3 of 5, say
+index.On(pool).Refine(plan: plan);                                                  // Continues where it stopped
+RefineReport whole = index.On(pool).RefinePlanFinish(plan);                         // Closes and frees the plan
 ```
 
-Bigger indexes come from absorbing, never mutating: `Absorb` appends each donor in turn, keeping its graph and linking it in across the appended part.
-Every donor it absorbs is consumed and then refuses every verb with `Status.Uninitialized`, while one it did not absorb, like a donor of another scalar refused with `Status.ConfigMismatch`, stays a live index you still own, though its entries may already have moved.
-`Split` is its inverse, partitioning the entries along the graph into empty receivers and leaving the source empty and live; both answer a `RefineReport` of their closing refinements.
+A `progress` delegate hears every phase's units and may stop the round at that barrier by answering false, which raises `Status.Cancelled`.
+Without a plan a stop closes the round; with one, the plan stays live, its `Phase` says where the round stopped, and the next call naming it continues.
+While a plan lives the index admits no insertion and no save.
+
+### Resharding
+
+```csharp
+index.On(pool).Reshard([index, shard1, shard2], [index]);                         // Gathers both shards into the index
+index.On(pool).Reshard([index], [left, right], seed: 7);                          // Cuts the index into two empty targets
+index.On(pool).Reshard([index], [index], memoryDomains: [], shardCapacity: 10_000_000); // Recuts its own shards in place
+```
+
+`Reshard` moves the entries of its sources into its targets, keeping their links rather than re-inserting their vectors, then runs a round on every target that took entries.
+Every handle is checked before the first entry moves, so a refusal moves nothing, and every handle stays yours: a source the targets do not name ends empty and live.
+Its `progress` delegate stops only the closing rounds, never a move, and a `DenseReshardPlan` keeps a stopped reshard for the next call as a refine plan does, closed by `ReshardPlanFinish`.
 
 ### Sampling
 
@@ -351,29 +368,29 @@ The index stores no values, so every scored key resolves to a row of a values `R
 
 ```csharp
 DenseSoftmaxState[] carry = new DenseSoftmaxState[queryRows];
-DenseVectors attended = index.On(pool).Attend(
+DenseVectors attended = index.On(pool).Attend<F32>(
     RowsView.RowsOf<float>(queryHeads, 128), RowsView.RowsOf<ushort>(valueCache, 128, Scalar.BF16),
     rowOf: key => positionOf[key],                       // Runs on the executor's threads together
-    arena, headCount: 8, carry: carry);                  // One row per query row, as the queries' kind
+    arena, headCount: 8, carry: carry);                  // One row per query row, as F32
 ReadOnlySpan<float> first = attended.Row<float>(0);
 ```
 
 With `headCount: 8`, row `t * 8 + h` of the queries is head `h` of token `t`, and the heads of one token share its walk.
 A key resolving outside the values, or values of another kind or width than the library reads, refuses the call with `Status.ShapeMismatch`, since a missing row is a wrong softmax rather than a smaller one.
 The `carry` holds one `DenseSoftmaxState` per query row, which folds this branch into another over the same queries, such as a recent window kept out of the index; it is state the caller carries between calls, so it stays lent rather than written into the arena.
-An `outputsScalar` argument lands the attended rows as another kind than the queries' own.
-`rowOf` is a host function, so it serves RAM handles alone: a VRAM walk resolves rows through a device function, which this binding does not build, and an `Attend` into a VRAM arena refuses with `Status.Device`.
+The type argument names the kind the attended rows land as, `F32` here, as it names the kind `Get` exports.
+`rowOf` is a host function that must not throw, so it serves RAM handles alone: a VRAM walk resolves rows through a device function, which this binding does not build.
 
 ### Introspection
 
 ```csharp
 DenseIndexDescription description = index.Describe();    // Metadata, size, capacity, memory, capabilities
-DenseReachability reachability = index.On(pool).Health();   // Audited, Reachable, Sweeps
+DenseReachability reachability = index.On(pool).Health();   // Audited, Reachable, DepthFromRoot
 ulong stored = index.On(pool).Count(key);                 // Entries under the key; Contains(key) tests for any
 string kernels = USearchCapabilities.CapabilitiesAvailable();
 ```
 
-`Health` audits how much of the graph a search reaches from its landmarks; entries it misses stay unfound until a refinement re-links them.
+`Health` measures how much of the graph a search reaches from the root; entries it misses stay unfound until a refinement re-links them.
 `USearchCapabilities` also reports the linked library's `Version()` and the `CapabilitiesCompiled()` into it, tied to no index.
 
 ## Interop
@@ -383,8 +400,8 @@ Every verb takes one argument struct, as the C interface does, and holds a refer
 
 ## What This Binding Does Not Expose
 
-- __Progress handlers.__
-  Every verb passes the C `progress` callback as null, so a long `Insert`, `Refine`, `Absorb`, `Split`, `Sample` or `Save` runs to its end, and `Status.Cancelled` never arises.
+- __Progress steps.__
+  A `progress` delegate hears a batch verb after each of the ten slices the C interface derives, since the binding leaves `steps` at zero.
 - __Deferred cursors and streams.__
   `Cursor` and `SearchStream` pull blocking, so a `DenseIndexDeferredOn` lacks them.
 - __Constructors on receivers.__
@@ -403,10 +420,12 @@ Every verb takes one argument struct, as the C interface does, and holds a refer
 - __No life of its own.__
   The binding starts no threads and keeps no queues; releasing a `Deferred` rides `Dispose` and `using`, which waits for the call first.
 - __Arenas are lent and reused, never shared.__
-  Every output whose length scales with the call lands in an arena the caller passes; a view the arena's next call outdated throws rather than reading rewound memory.
+  Every output whose length scales with the call lands in an arena the caller passes, and a view ends at the arena's next call.
+- __C decides.__
+  The binding forwards every status the library answers and checks only what the library cannot see, like a key run as long as the rows it accompanies.
 - __Nothing costs anything until it is used.__
   Submitting a call allocates nothing, and an arena allocates only when a call writes into it.
 - __Blocking calls stay on the stack.__
-  A blocking call keeps its outputs on the stack, fixes its buffers in place without a pinning handle, and answers a view by value; a deferred one allocates its handle and one pinned outputs struct.
-- __Exceptions never cross the native boundary.__
-  A predicate or `rowOf` delegate that throws is captured on the worker thread and rethrown with its own type once the call is final.
+  A blocking call keeps its outputs on the stack and answers a view by value; a deferred one allocates its handle and one pinned outputs struct.
+- __Callbacks never raise.__
+  A `predicate`, `progress` or `rowOf` delegate runs on the engine's threads and must not throw; an exception escaping one terminates the process.

@@ -11,7 +11,7 @@
     <PackageId>Cloud.Unum.USearch</PackageId>
 
     <PackageLicenseFile>LICENSE</PackageLicenseFile>
-    <PackageProjectUrl>https://github.com/unum-cloud/USearch</PackageProjectUrl>
+    <PackageProjectUrl>https://www.unum.cloud/docs/usearch</PackageProjectUrl>
     <PackageLicenseExpression Condition="'$(PackageLicenseFile)' == ''">Apache-2.0</PackageLicenseExpression>
     <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
     <Copyright>Copyright (c) Unum Cloud</Copyright>

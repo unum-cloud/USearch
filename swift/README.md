@@ -57,7 +57,7 @@ let call = try index.deferred(executor).search(queries, wanted: 10, arena: arena
 let matches = try await call.value  // or: try call.wait()
 ```
 
-A `Deferred` owns its outcome and its outputs, and keeps alive every object whose memory the call reads, until the call is final.
+A `Deferred` owns its outcome and its outputs, and keeps alive every object whose memory the call reads, until the call is final; one owner polls or waits on it, and nothing locks.
 It borrows the index, the executor and the arena as a blocking call does, since releasing any of them waits for the calls naming it, and its waited result is the same view a blocking call answers.
 A blocking call lends its inputs in place and frees its outcome, slots and callbacks on return; a deferred one copies only the keys and paths it borrows.
 `status` reads `deferred` until then, through the outcome word with acquire ordering, and `wait()` blocks and answers the result or throws the failure, the same every time it is asked.
@@ -107,9 +107,9 @@ There is one verb per operation: no allocating twin, no caller buffers, and no d
 Each call rewinds its arena, so the previous call's views die and a steady loop allocates once it reaches its high-water mark.
 To keep a result past the next call, or to read one while making the next, pass that call another arena.
 An arena serves one call at a time, so each deferred call needs its own.
-Views stay on the arena's thread, which the compiler checks, and reading a stale one traps as an out-of-bounds index does.
-A view cannot be `~Escapable` while its lifetime annotation is still behind an experimental feature flag as of Swift 6.4, so it checks its arena at runtime instead.
-An arena from a VRAM executor holds device memory, which host accessors refuse with a trap, and serves only that executor's calls, keeping the executor alive until the arena goes.
+Views stay on the arena's thread, which the compiler checks, and hold the arena alive, but end at its next call: a stale one reads what that call wrote.
+A view cannot be `~Escapable` while its lifetime annotation is still behind an experimental feature flag as of Swift 6.4, so nothing checks which call wrote it.
+An arena from a VRAM executor holds device memory, which `describe()` reports and no host read may reach, and serves only that executor's calls, keeping the executor alive until the arena goes.
 
 ```swift
 let arena = try Arena(on: executor)                                              // Arena() is host pages for the calling thread
@@ -172,7 +172,8 @@ let inVram = try DenseIndex.initVram(options, devices: [0, 1])              // s
 let onNvme = try DenseIndex.viewNvme("index.safegraphs.json", config: DenseViewNvmeConfig(paths: ["/mnt/nvme0"]))
 ```
 
-An NVMe index serves a checkpoint in place, so it is only ever viewed, and until NVMe checkpoints carry keys, `viewNvme` reports `unsupported`.
+An NVMe view serves a checkpoint in place, and `keyTableDomains` holds a key table in RAM beside it; without one, `count`, `get`, `sample`, MaxSim and hinted searches report `unsupported`.
+`loadNvme` takes the same config and opens a manifest writable, so `refine` rewrites its parts one at a time, while a lone monolith reports `unsupported`.
 Placement never comes back out of a checkpoint, which records where it was written, never where a reader must keep it, so `metadataRead` answers a `DenseMetadata` naming dimensions, metric, quantization and connectivity alone.
 `valuesPerKey` is absent from it too, bounding a live handle's mutable state rather than the serialized form.
 
@@ -253,7 +254,7 @@ Insertions and searches overlap freely on one handle: searches read only entries
 
 ### Filtered Search
 
-The predicate runs on the executor's threads, so it must be `@Sendable` and safe for concurrent use; an error it throws rejects that key.
+The predicate runs on the executor's threads, so it must be `@Sendable` and safe for concurrent use.
 Non-matching entries still route the traversal, so recall does not collapse at low selectivity.
 `DenseSearchConfig(traversal: .scan)` skips the walk and scores every entry exactly, on RAM and NVMe handles, the fallback for a filter too selective for a walk to cross.
 
@@ -264,7 +265,7 @@ let even = try index.on(executor).search(queries, wanted: 10, arena: arena, conf
 
 Every long verb's config, and every lifecycle config that reports, takes a `progress` handler, called with the units finished so far and the units the call finishes if it runs to the end; returning `.cancel` stops it with `cancelled` wherever the verb can stop, which an `insert` cannot.
 A handler never runs on two threads at once, so it may carry a counter or a deadline without a lock, but it may run on whichever thread advanced the work, hence `@Sendable`.
-A predicate, handler or value lookup that throws never unwinds into C; the first error stops the call where it can and is thrown once the call is final, a `USearchError` as it was and any other as the `cause` of a `cancelled` one.
+A predicate, handler or value lookup never throws, as its type says, so nothing unwinds into C; a handler stops a call by returning `.cancel`.
 
 ```swift
 let deadline = ContinuousClock.now + .seconds(30)
@@ -315,28 +316,52 @@ Cursors and streams keep their index alive until they go.
 
 ### Refinement
 
-`refine` re-selects the neighbors of every stored entry against the finished graph and returns a `DenseRefineReport`: the entries re-selected and changed, the islands found and reconnected, and the closing audit.
+`refine` re-selects the neighbors of every stored entry against the finished graph and returns a `DenseRefineReport`: the entries re-selected and changed, the islands found and reconnected, the neighborhoods re-stitched with the links added and dropped, the `verdict`, and the health checks opening the round and closing the heal.
 A cheap insertion pass followed by one refinement reaches a better graph in less total time than one expensive insertion pass.
-Zero `changed` means the graph has settled, and searches may run throughout.
+A caller loops until the `verdict` is no longer `.improved`, and searches may run throughout.
 
 ```swift
-while try index.on(executor).refine(config: DenseRefineConfig(expansionFactor: 128)).changed != 0 {}
+while try index.on(executor).refine(config: DenseRefineConfig(expansionFactor: 128)).verdict == .improved {}
 ```
 
-### Absorbing & Splitting
+On a loaded NVMe handle `memoryLimit` bounds the bytes a round holds for the one part it rewrites: zero rounds the part in RAM, and a smaller budget streams its rounds from the drives.
 
-Bigger indexes come from absorbing, never mutating: `absorb` appends every donor's entries with its graph, then refines across the appended part.
-It consumes every donor it absorbs, so every later verb on one reports `uninitialized`, and an absorb stopped early hands the rest back to their indexes.
+### Resharding
+
+`reshard` moves the entries of its `sources` into its `targets`, keeping their links rather than re-inserting their vectors, then runs a round on every target that took entries; every handle is named, the index itself included.
+Several sources gather into one target, itself among them, and each other source ends empty and live.
 
 ```swift
-try index.on(executor).absorb([shard])
+try index.on(executor).reshard(sources: [index, shard], targets: [index])
 ```
 
-`split` is the inverse: it hands graph-local parts of the index to empty receivers of the same configuration, one part each, keeping their edges and leaving the index empty but live.
-Both report the closing refines as `refine` does.
+One source cut into several empty targets hands each a graph-local part, keeping their edges and leaving the source empty but live.
+Every reshard reports its closing rounds as `refine` does.
 
 ```swift
-let report = try index.on(executor).split(into: [left, right], config: DenseSplitConfig(seed: 42))
+let report = try index.on(executor).reshard(sources: [index], targets: [left, right], config: DenseReshardConfig(seed: 42))
+```
+
+The index as its only source and target recuts its own shards in place into as few as fit `shardCapacity`, keeping every entry.
+
+```swift
+try index.on(executor).reshard(
+    sources: [index],
+    targets: [index],
+    config: DenseReshardConfig(memoryDomains: [], shardCapacity: 10_000_000)
+)
+```
+
+A `DenseRefinePlan` or `DenseReshardPlan` in the config keeps a stopped call live: the next call naming it continues where the stop came, its `phase` says where each call stopped, and `finish(_:)` closes it and reports what the whole plan did.
+
+```swift
+let plan = DenseRefinePlan()
+while plan.phase.phase != .done {
+    do {
+        _ = try index.on(executor).refine(config: DenseRefineConfig(progress: withinBudget, plan: plan))
+    } catch where error.status == .cancelled {}
+}
+let report = try index.on(executor).finish(plan)
 ```
 
 ### Sampling
@@ -382,7 +407,7 @@ for document in documents[0] { print(document.key, document.distance) }
 Row `t · headCount + h` of the queries, outputs and carry is head `h` of token `t`, so the query heads of grouped-query attention share the index's one key-value head and one walk per token.
 The index stores no values: a `ValueLookup` names, for every scored key, its row of a values `RowsView` as wide as the keys and stored in the index's own quantization.
 A key without a row, or values of another width or scalar kind than the library reads, refuses the call with `shapeMismatch`, since a missing row is a wrong softmax rather than a smaller one.
-A VRAM index walks on the device and resolves values through a device function, which a Swift closure cannot be, so `attend` refuses it with `device`.
+A VRAM index walks on the device and resolves values through a device function, which a Swift closure cannot be, so `attend` on it reports `unsupported`.
 The lookup runs on the executor's threads together, so it must be `@Sendable` and safe for concurrent use.
 The outputs land in the arena as rows of the scalar kind `as:` names, and a `carry` of one `DenseSoftmaxState` per query row folds this branch into another over the same queries.
 
@@ -404,12 +429,12 @@ print(description.size, description.capacity, description.memoryUsage, descripti
 print(try index.count(key: 42), try index.contains(key: 42))
 
 let reachability = try index.on(executor).health()
-print(reachability.reachable, "of", reachability.audited, "entries reachable after", reachability.sweeps, "sweeps")
+print(reachability.reachable, "of", reachability.audited, "entries reachable at depth", reachability.depthFromRoot)
 
 print(version(), capabilitiesCompiled(), capabilitiesAvailable())
 ```
 
-`health` audits how much of the graph a search reaches from its landmarks; entries it misses stay unfound until a `refine` re-links them.
+`health` measures how much of the graph a search reaches from the root; entries it misses stay unfound until a `refine` re-links them.
 
 ## What This Binding Does Not Expose
 
@@ -427,7 +452,7 @@ print(version(), capabilitiesCompiled(), capabilitiesAvailable())
 - __No life of its own.__
   The binding starts no threads and keeps no queues; releasing a `Deferred` rides its `deinit`, which waits for the call first.
 - __Arenas are lent and reused, never shared.__
-  Every output whose length scales with the call lands in an arena the caller passes; a view remembers which call wrote it and traps once a later one did.
+  Every output whose length scales with the call lands in an arena the caller passes, and its views end at the arena's next call.
 - __Nothing costs anything until it is used.__
   Submitting a call allocates nothing, and an arena allocates only when a call writes into it.
 - __Every wrapper names its C symbol.__

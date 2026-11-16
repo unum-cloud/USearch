@@ -19,8 +19,9 @@ One binary serves every residency, CPU class and GPU class the library compiled,
 - `usearch_bench_dense_ram_index_search` instantiates one `dense::ram_index` itself, at `f32` or `bf16` storage and at the serial class or the newest one its host compiled, for what only a benchmark looks inside: plan stepping, saturated walks and islands, per-query latency percentiles, immutable mode, indexer heads and managed memory.
 
 A bad value prints one line, like `--top-k="0" does not parse, expected a positive count` or `RETRIEVAL_TOP_K="0" does not parse, expected a positive count`, and exits with status 1.
-Every run reports the build, the index's entries, bytes, shards and classes from `describe`, and per breadth the recall at one and at `--top-k`, the nDCG, the throughput, and the distances, visited members and restarts per query from the traversal stats.
-A hit counts when its distance is within the exact k-th, so ties the oracle broke arbitrarily are not undercounted; against `--query-neighbors` a hit counts by key.
+Every run reports the build, the index's entries, bytes, shards and classes from `describe`, and per breadth the 1-recall and the k-recall at `--top-k`, the nDCG, the throughput, and the distances, visited members and restarts per query from the traversal stats.
+A query's 1-recall@k counts when any of its first k matches lies within the true nearest distance, and its k-recall@k is the share of its first k within the true k-th distance, so ties the oracle broke arbitrarily are never undercounted.
+Against `--query-neighbors` both sides are rescored exactly over the base rows, in the file's own scalar, whatever scalar the index stores; `within` allows a relative 10⁻⁶ for the rounding two kits differ by.
 A ground truth is computed for the whole file, so `--first-vector` or `--max-base-vectors` reshapes the graph it describes and the harness drops it, printing a notice; `--self-search` judges connectivity instead and needs no ground truth at all.
 
 ### Building
@@ -76,8 +77,8 @@ The dense binaries add their dataset and graph flags.
 - `--metric` defaults to `angular`: `inner`, `angular`, `euclidean`, `hamming` or `jaccard`; the last two for `u1`.
 - `--connectivity` and `--expansion-add` default to the library's derivations: the graph degree and the candidates kept while inserting.
 - `--expansion-search` defaults to `96`: the search breadths, like `32,64,128`, each judged over the one graph the run builds.
-- `--max-refines` defaults to `0`: refinement passes after ingestion, stopping once one changes nothing.
-- `--compact-capacity` defaults to none: entries per shard after compacting the built index in place, reported with the distances it computed.
+- `--max-refines` defaults to `0`: refinement rounds after ingestion, stopping once one changes no entry's links.
+- `--reshard-capacity` defaults to none: entries per shard after resharding the built index in place, reported with the distances it computed.
 - `--top-k` defaults to `10`: matches judged per query.
 - `--first-vector` defaults to `0`: first dataset row viewed, keyed by its global row, to slice one file across runs.
   Over a glob the viewed rows must lie inside one part, so `--first-vector 4608000000 --max-base-vectors 512000000` builds the tenth 512M-row part keyed by its global rows.
@@ -143,8 +144,9 @@ systemd-run --user --scope -p MemoryMax=8G -p MemorySwapMax=0 -- \
 
 ### Refinement
 
-`--max-refines` inserts a refinement phase between ingestion and search: each pass re-selects every node's neighbors against the finished graph, and the phase stops early once a pass re-wires nothing.
-This is what a cheap ingestion pays for - a narrow `--expansion-add` topped with one or two wide passes, rather than one expensive build.
+`--max-refines` inserts a refinement phase between ingestion and search: each round heals what no search reaches, gathers every entry into the neighborhood of its nearest drawn hub, and re-stitches each neighborhood in one core's cache, without ever shrinking what a search reaches.
+The library closes every round with a verdict, improved, converged, stalled or stopped, and the phase stops early once a round changes no entry.
+This is what a cheap ingestion pays for - a narrow `--expansion-add` topped with one or two rounds, rather than one expensive build.
 Judge the two builds at matched distance computations rather than matched knobs; the report prints the count for every phase.
 
 ### Algebra
@@ -196,8 +198,8 @@ Datasets and ground truth stay in this layout, while every index the benchmarks 
 | :-------------------------- | -----------: | ---------: | :-------- | :------------ | :--------------------- |
 | `wiki-1m`, UForm Wiki       |        `f32` |        256 | dot       | 1M            | 100K queries           |
 | `sift-*`, Meta BigANN       |         `u8` |        128 | euclidean | 10M, 100M, 1B | 10K queries            |
-| `spacev-*`, Microsoft       |         `i8` |        100 | euclidean | 100M, 1B      | 30K queries            |
-| `deep-*`, Yandex Deep       |        `f32` |         96 | euclidean | 10M, 100M, 1B | 10K queries, 1B only   |
+| `spacev-*`, Microsoft       |         `i8` |        100 | euclidean | 10M, 100M, 1B | 30K queries            |
+| `deep-*`, Yandex Deep       |        `f32` |         96 | euclidean | 10M, 100M, 1B | 10K queries            |
 | `turing-*`, Microsoft       |        `f32` |        100 | euclidean | 100M, 1B      | 100K queries           |
 | `t2i-1b`, Yandex T2I        |        `f32` |        200 | angular   | 1B            | 100K queries, 1B only  |
 | `pubchem-maccs-*`, PubChem  |         `u1` |        166 | hamming   | 10M, 100M     | 10K queries            |
@@ -246,9 +248,12 @@ Panoramax publishes every picture's metadata across its federated instances as o
 ## Results
 
 Every table below holds one row per machine and core class, so a new machine is a new row and nothing else moves.
-Every row is connectivity 32 and top-10 over the whole file ingested in one run.
-Expansion lists the insertion and search expansions: the smallest pair reaching 99% recall@10 or more, or the defaults of 256 and 96 on rows measured before that rule.
-A row never inserts faster than it searches: when insertions outpace queries, the insertion expansion rises and the search expansion falls until the row searches at least as fast at 99% recall@10.
+Every row keeps 64 links per vector and top-10 over the whole file ingested in one run.
+Expansion lists the insertion and search expansions, starting from 128 and 64.
+The search expansion grows until 1-recall@10 reaches 99%; the insertion expansion grows only when 99% is out of reach or the row inserts faster than it searches.
+A dataset that misses 99% gets a wider insertion expansion or a refine pass, never a lower target.
+CPU rows name the threads used, and run with the 1 GiB pool reserved.
+A row never inserts faster than it searches: when insertions outpace queries, the insertion expansion rises and the search expansion falls until the row searches at least as fast at 99% 1-recall@10.
 
 ### 10M
 
@@ -272,7 +277,7 @@ PubChem MACCS and ECFP4 from USearchMolecules, `u1`, Hamming, the first 10,000,0
 
 ### 100M
 
-SIFT, `u8`, euclidean, 100,000,000 rows of 128 dimensions, and SpaceV, `i8`, euclidean, 100,000,000 rows of 100 dimensions.
+SIFT, `u8`, euclidean, 100,000,000 rows of 128 dimensions, SpaceV, `i8`, euclidean, 100,000,000 rows of 100 dimensions, and Deep, `f32` stored as `bf16`, euclidean, 100,000,000 rows of 96 dimensions.
 
 | Machine                                           | Class       | Dataset | Expansion |   Insertions |      Queries | Recall@10 | Date       |
 | :------------------------------------------------ | :---------- | :------ | --------: | -----------: | -----------: | --------: | :--------- |
@@ -282,6 +287,9 @@ SIFT, `u8`, euclidean, 100,000,000 rows of 128 dimensions, and SpaceV, `i8`, euc
 | NVIDIA B200, 148 SMs, 178.35 GB                   | `blackwell` | SIFT    |  256 / 96 | 342.23 k IPS | 483.06 k QPS |   95.160% | 2026-10-15 |
 | NVIDIA B300 SXM6, 148 SMs, 267.68 GB              | `blackwell` | SIFT    | 256 / 256 | 431.52 k IPS | 604.49 k QPS |   99.130% | 2026-10-21 |
 | AWS Graviton5, 192 cores, 2 domains, 4K pages     | `apple-m2`  | SIFT    | 512 / 160 | 161.95 k IPS | 173.82 k QPS |   99.250% | 2026-11-09 |
+| AWS Graviton4, 96 cores, 84 threads, 1 domain     | `apple-m2`  | SIFT    | 128 / 128 | 185.05 k IPS | 208.84 k QPS |   99.210% | 2026-11-13 |
+| AWS Graviton4, 96 cores, 84 threads, 1 domain     | `apple-m2`  | SpaceV  | 512 / 384 |  38.71 k IPS |  57.97 k QPS |   99.340% | 2026-11-13 |
+| AWS Graviton4, 96 cores, 84 threads, 1 domain     | `apple-m2`  | Deep    | 256 / 192 |  87.96 k IPS | 118.98 k QPS |   99.340% | 2026-11-13 |
 
 PubChem MACCS and ECFP4 from USearchMolecules, `u1`, Hamming, all 115,627,267 molecules, of 166 and 2048 bits.
 
@@ -290,6 +298,7 @@ PubChem MACCS and ECFP4 from USearchMolecules, `u1`, Hamming, all 115,627,267 mo
 | NVIDIA B300 SXM6, 148 SMs, 267.68 GB          | `blackwell` | MACCS   |  256 / 64 | 559.14 k IPS |   1.46 M QPS |   99.070% | 2026-10-21 |
 | NVIDIA B300 SXM6, 148 SMs, 267.68 GB          | `blackwell` | ECFP4   | 512 / 512 | 146.81 k IPS | 285.23 k QPS |   99.060% | 2026-10-21 |
 | AWS Graviton5, 192 cores, 2 domains, 4K pages | `apple-m2`  | ECFP4   | 512 / 512 | 104.41 k IPS |  57.81 k QPS |   98.210% | 2026-11-09 |
+| AWS Graviton4, 96 cores, 84 threads, 1 domain | `apple-m2`  | ECFP4   | 512 / 512 |  41.01 k IPS |  49.05 k QPS |   99.310% | 2026-11-13 |
 
 ### 1B
 

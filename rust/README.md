@@ -71,7 +71,7 @@ An `On` borrows the index and the executor, so neither it nor a `Deferred` it su
 use numkong::Matrix;
 
 let queries = Matrix::<f32>::from_slice(&slab, &[2, 4]).expect("8 values fill 2 × 4");
-let call = index.deferred(&executor).search(queries, 10, &mut arena)?;   // Deferred<'_, DenseSearch<..>>
+let call = index.deferred(&executor).search(queries, 10, &mut arena)?;   // Deferred<'_, (Matrix<f32>, ..), Matches>
 if call.status() == Err(Status::Deferred) {
     // other work
 }
@@ -83,11 +83,11 @@ The waited result is the `Matches` a blocking search answers, borrowing the same
 `status` answers `Ok(())` once the call succeeded, `Err(Status::Deferred)` while it is not final, and its failure otherwise.
 Inside an `async` block, `.await` polls the call's status until it is final, so other tasks run meanwhile, while `wait` blocks the thread without spinning.
 The crate starts no thread, so waiting off-thread goes through a scoped thread, as `std::thread::scope(|scope| scope.spawn(move || call.wait()).join())` does.
-Dropping an unfinished `Deferred` waits for the call, and a panic a handler raised resurfaces from `wait`, `.await`, or a drop outside unwinding.
+Dropping an unfinished `Deferred` waits for the call.
 
 The library reads a deferred call's inputs after the verb returns, so a deferred receiver takes owned inputs: keys in a `Vec` or an array, rows in a NumKong `Matrix` or a `'static` `MatrixView`, a `PathBuf`, `String` or `'static` path, and `'static` configs, handlers and value lookups.
 Lending `&[Key]` or `&MatrixView` fails to compile with "a deferred receiver needs owned inputs", and a config or view borrowing a local fails as "does not live long enough".
-A deferred call allocates one box holding its outcome, argument struct and inputs until it is final.
+A deferred call allocates one box holding its outcome, inputs and output until it is final.
 The box is the crate's rather than yours, since a `Deferred` leaked without a wait would leave the library writing into storage you had reused.
 
 One call holds an executor at a time, so a second call finding it held finishes at once with `Status::Contended`, and nothing queues.
@@ -105,7 +105,7 @@ let threads = Executor::for_ram(&[], None, 8)?;                        // eight 
 let domains = Executor::for_ram(&[0, 1], None, 0)?;                    // threads interleaved across two NUMA nodes
 let pinned = Executor::for_ram(&[], Some(CPUClass::IntelHaswell), 0)?; // waiters and atomics of one class
 let rings = Executor::for_nvme(&["/mnt/nvme0"], None, 4)?;             // one submission ring apiece
-let streams = unsafe { Executor::for_vram(&[0, 1], None, &[], 0)? };   // one stream per device, scratch grown as asked
+let streams = Executor::for_vram(&[0, 1], None, 0)?;                   // one stream per device, scratch grown as asked
 let shared = unsafe { Executor::on_pool(&[], None, pool)? };           // shares the threads another library spawned
 let local = Executor::default();                                       // owns nothing, runs on the calling thread
 
@@ -113,8 +113,8 @@ threads.drain(Mood::Spinning)?;                                        // waits 
 ```
 
 `for_ram` and `for_nvme` take a thread count, where zero derives one.
-`for_vram` takes none, since one host thread drives one stream per device, and may borrow your CUDA streams, one per device.
-`for_vram` and `on_pool` are `unsafe`, since the streams or the pool they borrow must outlive the executor; the engine wires neither borrowing yet and answers `Status::Unsupported`.
+`for_vram` takes none, since one host thread drives one stream per device, and `for_vram_on_streams` borrows your CUDA streams instead, one per device.
+`for_vram_on_streams` and `on_pool` are `unsafe`, since the streams or the pool they borrow must outlive the executor; the engine wires neither borrowing yet and answers `Status::Unsupported`.
 `Executor::default()` owns nothing and runs every call handed to it on the calling thread.
 One call holds an executor at a time, so two threads that genuinely overlap take one apiece; an executor is `Send` but not `Sync`, while index handles stay freely shared.
 `drain` waits until no call holds the executor and sets the `Mood` idle workers adopt, and dropping an executor drains it, unless a GPU arena it made still holds it, which then does so on its own drop.
@@ -127,8 +127,9 @@ Each call rewinds its arena, so the previous call's views die and a steady loop 
 To keep a result past the next call, or to read one while making the next, pass that call another arena.
 An arena serves one call at a time, so each deferred call needs its own.
 Every call, blocking or deferred, borrows the arena as `&mut Arena` and its result borrows it in turn, so the borrow checker refuses a stale view at compile time and keeps a call's inputs out of the arena it rewinds.
-An arena from a VRAM executor holds device memory, which host accessors refuse with `Status::Device`.
-It grows, fills and frees on that executor's first stream, so it serves only calls on that executor, any other refused with `Status::Device`, and holds the executor until it drops.
+An arena from a VRAM executor holds device memory, which host accessors must not read; `Arena::describe` says where an arena's outputs live.
+It grows, fills and frees on that executor's first stream, so it serves only calls on that executor, any other refused with `Status::Device`.
+Every arena holds the executor that made it until it drops.
 
 ```rust
 let mut arena = Arena::new_in(&executor)?;                           // Arena::new() is host pages for the calling thread
@@ -192,8 +193,8 @@ match index.on(&executor).search(&rows(&query, 4)?, 10, &mut arena) {
 ```
 
 `Status` carries the C enumerators' values and leaves success to `Result`, so an `Error` never carries `Status::Deferred`, which only `Deferred::status` reports.
-`Status`, `Mood`, `Residency`, `Traversal`, `DenseMetric` and `Scalar` print through `Display` and parse through `FromStr` the names the C tables own, such as `"out-of-memory"` or `"angular"`, so nothing is compared as a string.
-A panic inside a predicate, progress handler or value lookup is caught at the C frame, since unwinding out of one is an abort, and resurfaces once the call is final.
+`Status`, `Mood`, `Residency`, `Traversal`, `Phase`, `RefineVerdict`, `DenseMetric` and `Scalar` print through `Display` and parse through `FromStr` the names the C tables own, such as `"out-of-memory"` or `"angular"`, so nothing is compared as a string.
+A panic inside a predicate, progress handler or value lookup aborts the process, since it cannot unwind through the library, so handlers report through what they capture.
 
 ## Residency
 
@@ -207,11 +208,14 @@ let in_ram = DenseIndex::init_ram(&options, &[0, 1])?;               // one grap
 let in_vram = DenseIndex::init_vram(&options, &[0, 1, 2, 3])?;       // sharded, never replicated
 let on_nvme = DenseIndex::view_nvme(DenseViewNvmeConfig {
     paths: &[Path::new("/mnt/nvme0")],                               // striped across the drives named
+    key_table_domains: Some(&[0]),                                   // keys resolved through RAM on node 0
     ..DenseViewNvmeConfig::from("index.safegraphs")
 })?;
 ```
 
 An NVMe handle serves a checkpoint in place and is read-only, so every mutating verb fails on it with `Status::ReadOnly`.
+Without `key_table_domains`, it holds nothing per entry, so `count`, `get`, `sample`, MaxSim and hinted searches fail with `Status::Unsupported`.
+`load_nvme` takes the same config and opens a manifest writable, so `refine` rewrites its parts one at a time, while a lone monolith fails with `Status::Unsupported`.
 Bigger indexes come from merging, never mutating: shards build in RAM, serialize, and join a manifest.
 
 ## Serialization
@@ -221,7 +225,7 @@ The path extension picks the layout: a `.safegraphs` path is one monolith, and a
 ```rust
 index.on(&executor).save("index.safegraphs")?;
 let loaded = DenseIndex::load_ram("index.safegraphs")?;
-let gpu = unsafe { Executor::for_vram(&[0], None, &[], 0)? };
+let gpu = Executor::for_vram(&[0], None, 0)?;
 let placed = DenseIndex::load_vram(DenseLoadVramConfig {
     executor: Some(&gpu),
     devices: &[0],
@@ -241,7 +245,7 @@ In-memory buffers hold single monoliths only, through `save_buffer`, `load_ram_b
 ```rust
 let mut arena = Arena::new_in(&executor)?;
 let monolith = index.on(&executor).save_buffer(&mut arena)?;
-let restored = DenseIndex::load_ram_buffer(monolith.view()?)?;
+let restored = DenseIndex::load_ram_buffer(monolith.view())?;
 ```
 
 ## Dense Indexes
@@ -306,7 +310,7 @@ println!("{} distances computed", stats.computed_distances);
 `query` pairs one query's keys with its distances, nearest first and trimmed to the cells the call wrote, and `iter` walks every query in order.
 
 ```rust
-for query in matches.iter()? {
+for query in matches.iter() {
     for (key, distance) in query.keys.iter().zip(query.distances) {
         println!("{key} at {distance}");
 }
@@ -331,7 +335,7 @@ let matches = index.on(&executor).search(&rows(&query, 768)?, DenseSearchConfig 
 }, &mut arena)?;
 ```
 
-A predicate is `Fn` and `Sync`, since the executor's threads call it together, and a panic inside it rejects the key.
+A predicate is `Fn` and `Sync`, since the executor's threads call it together.
 A VRAM handle refuses a host predicate with `Status::Device`.
 
 Every long verb's config takes a `progress` handler, called with the units finished so far and the units the call finishes if it runs to the end.
@@ -357,14 +361,13 @@ if let Err(failure) = refined {
 ```
 
 The handler is `FnMut` and `Send` where a predicate is `Fn` and `Sync`: it arrives on whichever thread advanced the work and never on two at once, which is what lets it carry a counter or a deadline without a lock of its own.
-A panic inside it is read as a stop.
-Reports are denominated in whatever the verb consumes: entries for an insertion, queries for a search, re-selected nodes for a refine, an absorb or a split, draws for a sample, shards for a checkpoint, and bytes for a buffer.
+Reports are denominated in whatever the verb consumes: entries for an insertion, queries for a search, a phase's entries or islands for a refine or a reshard, draws for a sample, shards for a checkpoint, and bytes for a buffer.
 How often they arrive is the increment's size rather than a guarantee, so read the counts and never the number of calls.
 
 What a stop leaves behind is each verb's own contract.
 An `insert` cannot be stopped: it claims every entry before its first report, ignores a `Break`, and publishes the whole batch at once.
 A stopped search reports `Status::Cancelled` and leaves no matches.
-A stopped `refine` is the time budget a whole-graph sweep is meant to run under: re-selection claims no identity, and the call still re-links its islands, so the graph stays correct and merely less improved, and it reports `Status::Cancelled`.
+A stopped `refine` or `reshard` reports `Status::Cancelled` and leaves a graph that saves; without a plan it closes the round where it stopped, and with one it leaves the plan live for the next call.
 A stopped load creates no index, and a stopped `save_buffer` leaves no monolith.
 
 ### Retrieval and Streaming
@@ -388,7 +391,7 @@ let mut cursor = index.on(&executor).cursor(&[])?;
 loop {
     let batch = cursor.next_links(1024, &mut arena)?;
     if batch.written() == 0 { break; }
-    println!("{} keys, the first linking to {:?}", batch.keys()?.len(), batch.links(0)?);
+    println!("{} keys, the first linking to {:?}", batch.keys().len(), batch.links(0)?);
 }
 ```
 
@@ -412,27 +415,53 @@ let mut stream = index.on(&executor).search_stream(rows(&query, 768)?)?;
 
 ### Refinement
 
-`refine` re-runs the neighbor selection over entries already in the graph and returns a `RefineReport` of the nodes re-selected, those whose neighbors `changed`, the islands found and reconnected, and the `reachability` audit closing the heal, so a batch built at a low expansion factor reaches the quality of a slower build afterwards.
-`changed` reaching zero is what settled looks like.
+`refine` re-runs the neighbor selection over entries already in the graph and returns a `RefineReport` of the nodes re-selected, those whose neighbors `changed`, the islands found and reconnected, the neighborhoods re-stitched with the links added and dropped, the `verdict`, and the `opening` and `reachability` health checks around the round, so a batch built at a low expansion factor reaches the quality of a slower build afterwards.
+A `verdict` other than `RefineVerdict::Improved` is what settled looks like.
 On a RAM handle searches may run throughout, on a VRAM one they may not, and insertions never may.
 
 ```rust
 let receiver = index.on(&executor);
-while receiver.refine(DenseRefineConfig { expansion_factor: 128, ..DenseRefineConfig::default() })?.changed != 0 {}
+while receiver.refine(DenseRefineConfig { expansion_factor: 128, ..DenseRefineConfig::default() })?.verdict == RefineVerdict::Improved {}
 ```
 
-### Absorbing & Splitting
+On a loaded NVMe handle `memory_limit` bounds the bytes a round holds for the one part it rewrites: zero rounds the part in RAM, and a smaller budget streams its rounds from the drives.
 
-`absorb` takes donor indexes, handed over by value, one after another, keeping their graphs rather than re-inserting their entries and linking each in by walks across the appended part.
-Readers of a RAM index may keep searching throughout, while a VRAM one admits no overlapping search.
+A `DenseRefinePlan` carries a round across calls: a stop leaves it live, the next call holding it continues where it stopped, `phase` reports the `Phase` the call stopped in, and `refine_plan_finish` closes it.
 
 ```rust
-index.on(&executor).absorb([first_shard, second_shard])?;
-index.on(&executor).split(&[&left, &right][..])?; // two empty receivers take a part each
+let (mut plan, mut phase) = (DenseRefinePlan::default(), PhaseProgress::default());
+while let Err(failure) = receiver.refine(DenseRefineConfig {
+    progress: Some(&mut before_the_deadline),
+    plan: Some(&mut plan),
+    phase: Some(&mut phase),
+    ..DenseRefineConfig::default()
+}) {
+    assert_eq!(failure.status, Status::Cancelled);
+    println!("stopped in {} at {} of {}", phase.phase, phase.completed, phase.total);
+}
+let report = receiver.refine_plan_finish(plan)?;
 ```
 
-A stopped `absorb` cuts only its closing refinement, every donor already moved, and reports `Status::Cancelled`.
-`split` is its inverse, leaving the source empty and live; both answer a `RefineReport`.
+A deferred call owns the plan it carries rather than borrowing it, and `wait_with_inputs` hands the plan back beside the answer.
+
+```rust
+let (answer, config) = index.deferred(&executor).refine(DenseRefineConfig::from(plan))?.wait_with_inputs();
+let plan = config.plan.expect("the call hands its plan back");
+```
+
+### Resharding
+
+`reshard` moves the entries of its `sources` into its `targets`, keeping their links rather than re-inserting their entries, then runs a round on every target that took entries; the receiver supplies the executor.
+Several sources gather into the one target among them, one source cuts into several empty targets, and one handle alone recuts its own shards in place under `shard_capacity`.
+Every handle stays yours: a source the targets do not name ends empty and live.
+Readers of a RAM target may keep searching throughout, while a VRAM one admits no overlapping search.
+
+```rust
+index.on(&executor).reshard(DenseReshardConfig { sources: &[&index, &first_shard, &second_shard], targets: &[&index], ..Default::default() })?;
+index.on(&executor).reshard(DenseReshardConfig { sources: &[&index], targets: &[&left, &right], ..Default::default() })?; // two empty targets take a part each
+```
+
+A stopped `reshard` cuts only its closing rounds, every entry already moved, and reports `Status::Cancelled`; a `DenseReshardPlan` continues it as a refine plan does, and `reshard_plan_finish` closes it.
 
 ### Sampling
 
@@ -444,7 +473,7 @@ let drawn = index.on(&executor).sample(
     &mut arena,
     DenseSampleConfig { shown: &shown, shown_coordinates: &xyz, focus: &near, seed: 42, ..Default::default() },
 )?;
-let (keys, places) = (drawn.keys()?, drawn.coordinates()?);
+let (keys, places) = (drawn.keys(), drawn.coordinates());
 ```
 
 ### Sparse Multiplication
@@ -459,7 +488,7 @@ The run's Apache Arrow offsets land in the arena beside the keys and products.
 ```rust
 let mut arena = Arena::new_in(&executor)?;
 let products = index.on(&executor).multiply(&rows(&left, 768)?, 32, &mut arena)?;
-for row in products.iter()? {
+for row in products.iter() {
     println!("{} pairs", row.keys.len());
 }
 ```
@@ -472,7 +501,7 @@ Each query lands its best documents, largest score first, in the same ragged `De
 
 ```rust
 let documents = index.on(&executor).maxsim(&rows(&tokens, 768)?, tokens_per_query, 10, &mut arena)?;
-for query in documents.iter()? {
+for query in documents.iter() {
     println!("best {:?} of {} documents", query.keys.first(), query.keys.len());
 }
 ```
@@ -482,7 +511,7 @@ for query in documents.iter()? {
 `attend` is Flash Attention folded into the walk: every key it scores folds into each head's running maximum, partition and weighted value sum, with no top-k cut, and the outputs land in an arena already divided by the partition, as rows of the queries' own scalar type.
 The index stores no values, so a `ValueLookup` closure resolves every scored key to its value row, as wide as the keys, stored in the index's own quantization, and borrowed from storage outliving the call.
 A `None` row, or rows of another scalar type or width than the library reads, refuses the call with `Status::ShapeMismatch`.
-It runs on the executor's threads together, hence `Sync`, and a panic inside it refuses the call.
+It runs on the executor's threads together, hence `Sync`.
 A VRAM walk resolves values on the device, where no Rust closure runs, so an arena from a VRAM executor is refused with `Status::Device`.
 With a `head_count` of 8, row `t * 8 + h` of the queries is head `h` of token `t`, and the heads of one token share its walk.
 A `carry` of one `DenseSoftmaxState` per query row, lent by you, folds this branch into another over the same queries, such as a recent window kept out of the index.
@@ -503,7 +532,7 @@ println!("{:?}", context.view()?.shape());
 ```rust
 let description = index.describe()?;
 println!("{} entries in {} bytes", description.size, description.memory_usage);
-println!("dispatched to {} and {}", description.cpu_class, description.gpu_class);
+println!("dispatched to {} and {}", description.cpu_class(), description.gpu_class());
 println!("compiled for {}", usearch::capabilities_compiled());
 println!("available here {}", usearch::capabilities_available());
 
@@ -514,7 +543,7 @@ println!("{} entries under {key}, contained: {}", index.count(key)?, index.conta
 ```
 
 `describe` reads the frozen metadata and the counters once each, so under concurrent insertions they may come from slightly different moments, and `memory_usage` excludes the executor's scratch.
-`health` audits how much of the graph a search reaches from its landmarks; entries it misses stay unfound until a `refine` re-links them.
+`health` measures how much of the graph a search reaches from the root; entries it misses stay unfound until a `refine` re-links them.
 `contains` is the blocking shorthand for a nonzero `count`.
 
 ## What This Binding Does Not Expose

@@ -110,8 +110,8 @@ Each call rewinds its arena, so the previous call's views die and a steady loop 
 To keep a result past the next call, or to read one while making the next, pass that call another arena.
 An arena serves one call at a time, so each deferred call needs its own.
 A deferred call borrows its arena as a blocking one does: another call naming it before the first is final finishes with `Status.Contended`, and `free()` waits for it.
-A rewind or a `free()` detaches every buffer over the previous outputs, so a stale view throws `Status.Uninitialized` and typed arrays taken from it read as empty.
-An arena from a VRAM executor holds device memory, which host accessors refuse with `Status.Device`.
+A view ends at the next call on its arena, as a pointer into it would: its typed arrays read whatever the arena holds from then on, and a call naming a freed arena is refused with `Status.InvalidArgument`.
+An arena from a VRAM executor holds device memory, which `arena.describe()` names and only device code reads.
 It grows, fills and frees on that executor's first stream, so it serves only calls on that executor and keeps it alive until freed, and the executor's `free()` refuses with `Status.Contended` while such an arena lives; a host arena may outlive its executor.
 
 ```js
@@ -191,7 +191,8 @@ const diskIndex = usearch.DenseIndex.viewNvme('index.safegraphs.json', { executo
 ```
 
 `initRam` shards over the named NUMA nodes, absent spreading the shards over every node, and `initVram` over the named CUDA ordinals, absent taking one free device.
-An NVMe index is never initialized, only served in place from a checkpoint, read-only.
+An NVMe index is never initialized, only served in place from a checkpoint, read-only, and `keyTableDomains` holds a key table in RAM beside it; without one, `count`, `get`, `sample`, `maxsim` and hinted searches refuse with `Status.Unsupported`.
+`loadNvme` takes the same arguments and opens a manifest writable, so `refine` rewrites its parts one at a time, while a lone monolith refuses with `Status.Unsupported`.
 An index's `free()` waits for every deferred call naming it, and a freed index refuses every later call.
 
 ## Serialization
@@ -367,30 +368,39 @@ A cheap insertion pass followed by one refinement reaches a better graph, in les
 ```js
 const pool = index.on(executor);
 pool.insert(keys, vectors, { expansionFactor: 32 });
-while (pool.refine({ expansionFactor: 128 }).changed > vectors.rows / 100) {}
+while (pool.refine({ expansionFactor: 128 }).verdict === "improved") {}
 ```
 
-Each call answers a `DenseRefineReport`: the entries re-selected and changed, the islands found and reconnected, and the closing `reachability` audit.
+Each call answers a `DenseRefineReport`: the entries re-selected and changed, the islands found and reconnected, the neighborhoods re-stitched with the links added and dropped, the `verdict` as the library spells it, and the `opening` and closing `reachability` audits.
+A caller loops until the `verdict` is no longer "improved".
+
+A `DenseRefinePlan` keeps one root across rounds: each `refine` naming it runs the next round, its `phase` names where the last call stopped, and a receiver's `refinePlanFinish(plan)` closes it with the whole plan's report, as `reshardPlanFinish(plan)` closes a `DenseReshardPlan`.
+The index admits no insertion and no save while a plan lives, and nothing finishes a plan for you: one dropped unfinished leaks and keeps its indexes closed.
+
+```js
+const plan = new usearch.DenseRefinePlan();
+while (pool.refine({ plan }).verdict === "improved") {}
+const total = pool.refinePlanFinish(plan);
+```
 
 Refinement is a build step rather than a repair.
 It adds and removes nothing, and searches may run throughout.
 
-### Absorbing & Splitting
+### Resharding
 
-Bigger indexes come from absorbing, never mutating: `absorb` appends every donor in turn, keeping its graph and linking it in across the appended part, and a donor the library consumed refuses every later verb with `Status.Uninitialized`.
-A donor it did not absorb, like one of another scalar refused with `Status.ConfigMismatch`, stays a live index you still own, though its entries may already have moved.
-A deferred absorb holds its donors until it is final, so meanwhile they refuse every verb and no other absorb can name them.
-
-```js
-index.on(executor).absorb([shard]);
-```
-
-`split` is the inverse: it hands graph-local parts of the index to empty receivers of the same configuration, one part each, keeping their edges and leaving the index empty but live.
-Both answer the closing refines' report, as `refine` does.
+`reshard(sources, targets)` moves the entries of every source into the targets on the receiver's executor, keeping their links rather than re-inserting their vectors, then runs a round on every target that took entries, and answers that round's report, as `refine` does.
+Several sources into one target, itself among them, gather into it; one source into several empty targets of the same configuration cuts it into graph-local parts, one per target; one index as its only source and target recuts its own shards into as few as fit `shardCapacity`.
+Every index stays yours: a source the targets do not name ends empty and live.
+Every handle is checked before the first entry moves, so a refusal, like a source of another scalar refused with `Status.ConfigMismatch`, moves nothing.
 
 ```js
-index.on(executor).split([left, right], { seed: 42 });
+index.on(executor).reshard([index, shard], [index]);
+index.on(executor).reshard([index], [left, right], { seed: 42 });
+index.on(executor).reshard([index], [index], { memoryDomains: [], shardCapacity: 10_000_000 });
 ```
+
+A `DenseReshardPlan` continues one reshard across calls as a `DenseRefinePlan` continues a refine.
+On a loaded NVMe index, `memoryLimit` beside `expansionFactor` bounds the bytes each rewritten part holds in RAM, for `refine` and `reshard` alike; a smaller one streams that part's rounds from the drives.
 
 ### Sampling
 
@@ -459,7 +469,7 @@ outputs.data;
 ```
 
 One index holds one layer's one key-value head, so the `headCount` query heads of grouped-query attention share its keys and one walk per token.
-The first exception `rowOf` throws stops every later lookup and surfaces as itself.
+An exception `rowOf` throws never unwinds through the library: it reaches the process's `uncaughtException` handlers, and its key resolves to no row, which refuses the call with `Status.ShapeMismatch`.
 `rowOf` runs on the host, so `attend` serves RAM handles alone: a VRAM walk resolves rows through a device function, which this binding does not build, and a VRAM arena refuses with `Status.Device`.
 The carry is what folds one branch into another over the same queries, by the usual partial-softmax rescaling: attention sinks, a dense recent window, or a second index of one context.
 Its two floats travel in one row because a maximum without its partition is a number nothing can rescale, and omitting it altogether starts the softmax fresh.
@@ -479,7 +489,7 @@ usearch.capabilitiesCompiled();
 usearch.capabilitiesAvailable();
 ```
 
-`health` audits from the search landmarks, and entries it misses stay unfound until a `refine` re-links them; its `sweeps` counts the levels the audit took to converge.
+`health` audits from the search landmarks, and entries it misses stay unfound until a `refine` re-links them; its `depthFromRoot` counts the depths the check took to converge.
 
 ## What This Binding Does Not Expose
 
@@ -496,12 +506,13 @@ The same reasoning excludes the progress handlers every long verb takes.
   Enums mirror C enums through the C name tables, so a misspelling is refused rather than read as a default.
 - __The receiver chooses, the verb stays.__
   The index runs a verb on the calling thread, `on(executor)` blocks on an executor, and `deferred(executor)` submits it, all with the same arguments.
+  Each verb has one body that fills the C structure, and every receiver calls it with its own completion, so no receiver derives from another.
 - __Deferred calls use the language's own idioms.__
   `status` polls through `usearch_outcome_status`, `wait()` blocks through `usearch_outcome_wait`, and `await` hands that same wait to the libuv pool through `napi_async_work`, since the library has no wake-up to register.
 - __No life of its own.__
   The binding starts no threads and keeps no queues; releasing a `Deferred` rides `using` and `Symbol.dispose`, which waits for the call first.
 - __Arenas are lent and reused, never shared.__
-  Every output whose length scales with the call lands in an arena the caller passes; a rewind detaches the buffers under the previous call's views, so a stale one throws rather than reading another call's memory.
+  Every output whose length scales with the call lands in an arena the caller passes, and its views end at the arena's next call, as in C.
 - __Nothing costs anything until it is used.__
   Submitting a call allocates nothing, and an arena allocates only when a call writes into it.
 - __Every wrapper names its C symbol.__

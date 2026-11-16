@@ -5,6 +5,8 @@
 authors = ["Ash Vardanian <info@unum.cloud>"]
 channels = ["conda-forge", "https://conda.modular.com/max"]
 description = "One Proximity Graph for Search, Sparse Products & Attention, across RAM, VRAM & NVMe"
+documentation = "https://www.unum.cloud/docs/usearch"
+homepage = "https://www.unum.cloud/docs/usearch"
 license = "Apache-2.0"
 license-file = "LICENSE"
 name = "usearch"
@@ -15,6 +17,7 @@ platforms = [
 ]
 preview = ["pixi-build"]
 readme = "README.md"
+repository = "https://github.com/unum-cloud/USearch"
 version = "3.0.0-rc.1"
 
 [workspace.target.linux-64.build-variants]
@@ -25,7 +28,7 @@ c_stdlib_version = ["2.39"]
 
 # A dependency of the environment too, so `pixi run` puts the library in the prefix `mojo build` bakes as runpath.
 [dependencies]
-mojo = ">=1.2.0,<1.3" # ? Mojo minors still change the language, as 1.1 and 1.2 did, so each is adopted by hand
+mojo = ">=1.2.0,<1.3"    # ? Mojo minors still change the language, as 1.1 and 1.2 did, so each is adopted by hand
 usearch = { path = "." }
 
 # `mojo build` links against a MAX runtime that needs a newer glibc than conda-forge's default

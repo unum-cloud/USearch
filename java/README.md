@@ -48,7 +48,7 @@ The SDK looks for the shared object on the system library path first, which a lo
 One source file mirrors one header.
 `Types.java` carries the shared vocabulary: `Key`, `Status`, `Scalar`, `Residency`, `Traversal`, `Executor`, `Arena`, `Mood`, `Deferred`, `USearchException`, `RowsView`, and the arena-backed `Matches` and `Monolith`.
 `DenseIndex.java` carries the dense modality: the index itself, its `On` and `DeferredOn` receivers, `DenseOptions`, `DenseMetric`, `DenseMetadata`, `DenseIndexDescription`, `DenseReachability`, `DenseTraversalStats`, the `Dense*Config` knobs, `ValueLookup`, the arena-backed `DenseVectors`, `DenseProducts` and `DenseBatch`, and the `DenseCursor` and `DenseSearchStream` scans.
-`DenseVerbs.java` writes the blocking verbs once for the index and its `On` receiver.
+`DenseCalls.java` writes each verb's body once, and the index, `On` and `DeferredOn` each run it blocking or deferred.
 `Library.java` loads the shared object and links every verb against it.
 Both vocabularies are nested types, and a nested type imports directly, so every call site below spells the bare name:
 
@@ -112,6 +112,7 @@ try (Arena arena = new Arena(pool);
 The first `join` frees the outcome and keeps what it answered or raised, so a later `status` or `join` repeats it; only a closed `Deferred` raises `IllegalStateException`.
 Closing an unfinished `Deferred` waits for the call before freeing what it lent, so a native slab lent to one must stay open until then.
 Dropping one never blocks the collector: what it lent stays reachable until the call is final, and only then is it freed.
+One thread owns a `Deferred` at a time: it takes no lock, so polling, joining and closing one from two threads at once is a race, and handing it over through a queue or a future is safe.
 One call holds an executor at a time, so a second call finding it held finishes with `Status.CONTENDED`, and nothing queues.
 A deferred call on a caller-exclusive pool runs on the pool's thread 0, so polling `status` alone finishes it, and its progress handler and predicate run on the pool's threads; a single thread or a VRAM executor runs it at submission.
 Calls depending on each other are ordered by joining the first before submitting the second, since no call carries an ordering field.
@@ -164,11 +165,11 @@ An index, executor, arena or deferred call the program drops without closing is 
 
 Every output whose length only the call knows, such as matches, rows, products, monoliths and cursor or stream batches, lands in an `Arena` you pass, and the verb answers a view over it without copying.
 `new Arena(executor)` places it where that executor computes, decided once, and `new Arena()` makes host pages for the calling thread.
-Each call rewinds its arena, so the previous call's views die and a steady loop allocates once.
+Each call rewinds its arena, so a view ends at the arena's next call and a steady loop allocates once.
 To keep a result past the next call, or to read one while making the next, pass that call another arena.
 An arena serves one call at a time, so each deferred call needs its own.
-A stale view's segments are closed, so reading one throws `IllegalStateException`.
-An arena from a VRAM executor holds device memory, which host accessors refuse with `Status.DEVICE`.
+Reading a view after the arena's next call reads whatever that call left; closing the arena closes every view's segments, so reading one then throws `IllegalStateException`.
+`arena.describe()` reports where the outputs live, and an arena from a VRAM executor holds device memory, which is the caller's to hand to device code rather than read from the host.
 It grows, fills and frees on that executor's first stream, so it serves only calls on that executor, keeps it reachable, and must be closed before it; a host arena may outlive its executor.
 
 ```java
@@ -198,7 +199,7 @@ for (Deferred<Matches> call : calls) {
 A blocking call holds its arena until it returns, and a deferred one until it is joined, closed or collected.
 A call that finds its arena serving another call finishes with `Status.CONTENDED` and rewinds nothing, so the holder's views stay readable.
 Closing an arena waits for the deferred calls naming it, and joining one of them afterwards throws `IllegalStateException`.
-A null arena is refused with `Status.INVALID_ARGUMENT`, and fixed-size reports, like `DenseTraversalStats` and `describe`, stay the caller's own objects.
+Fixed-size reports, like `DenseTraversalStats` and `describe`, stay the caller's own objects.
 Every output verb takes an arena, so there is one verb per operation with no allocating twin, and no index holds an arena of its own.
 
 ## Keys
@@ -221,7 +222,7 @@ long identity = key.toLong();
 ## Errors
 
 Every failure is an unchecked `USearchException`, since nearly every verb can report one, and its `status()` is a `Status` mirroring the C interface's `usearch_status_*_k`.
-Checks the SDK runs before a call crosses report the status the engine would have reported for the same fault, and a code this build cannot name reads as `Status.INVALID_ARGUMENT`, as in C.
+The SDK checks only what the engine cannot see, such as a key count against a row count, since the C call carries one count; everything else is the engine's status, forwarded, and a code this build cannot name reads as `Status.INVALID_ARGUMENT`, as in C.
 `Status.DEFERRED` is the one non-final status, which only a `Deferred` reports before its call is final.
 Any verb on a closed handle raises `IllegalStateException` instead.
 
@@ -245,16 +246,17 @@ Each takes only the placement its own hardware has, one shard per memory domain,
 ```java
 DenseIndex inRam = DenseIndex.initRam(options, new int[] {0, 1});             // one graph per socket
 DenseIndex inVram = DenseIndex.initVram(options, new int[] {0, 1, 2, 3});     // sharded, never replicated
-DenseIndex copied = DenseIndex.loadRam("index.safegraphs", pool, new int[0], null, 0);
-DenseIndex uploaded = DenseIndex.loadVram("index.safegraphs", gpu, new int[] {0}, 0);
+DenseIndex copied = DenseIndex.loadRam("index.safegraphs", pool, new int[0], null, 0, null);
+DenseIndex uploaded = DenseIndex.loadVram("index.safegraphs", gpu, new int[] {0}, null, 0, null);
 DenseIndex mapped = DenseIndex.viewRam("index.safegraphs");
-DenseIndex served = DenseIndex.viewNvme("index.safegraphs.json", disks, new String[] {"/mnt/nvme0"}, null);
+DenseIndex served = DenseIndex.viewNvme("index.safegraphs.json", disks, new String[] {"/mnt/nvme0"}, null, new int[] {0});
 ```
 
 `initRam` and `initVram` create an empty, mutable index, and the `load` family copies a checkpoint in, each taking the executor its read fans out over, or `null` for the calling thread.
 `viewRam` serves a checkpoint in place through a memory mapping, and `viewNvme` from NVMe drives.
 A served handle is read-only, so every mutating verb on it fails with `Status.READ_ONLY`.
-Until NVMe checkpoints carry keys, `viewNvme` answers `Status.UNSUPPORTED`.
+`viewNvme` holds a key table in RAM on the NUMA nodes its last argument names; without one, `null`, counts, reads, samples, MaxSim and hinted searches answer `Status.UNSUPPORTED`.
+`loadNvme` takes the same arguments and opens a manifest writable, so `refine` rewrites its parts one at a time, while a lone monolith answers `Status.UNSUPPORTED`.
 
 ## Serialization
 
@@ -354,24 +356,42 @@ try (DenseSearchStream stream = index.on(pool).searchStream(query)) {
 
 Refinement re-selects the neighbors of every stored entry against the finished graph, improving edges that were chosen when the graph around them was still incomplete.
 It is a build step rather than a repair: a cheap insertion pass followed by one refinement reaches a better graph, in less total time, than a single expensive insertion pass, so a wide expansion factor belongs here rather than in `insert`.
-It answers a `RefineReport` of the nodes re-selected and changed, the islands found and reconnected, and the `reachability` audit closing the heal.
-Re-selecting a settled node changes nothing, so a caller loops until `changed` falls below whatever rate it considers settled.
+It answers a `RefineReport` of the nodes re-selected and changed, the islands found and reconnected, the neighborhoods re-stitched with the links added and dropped, the `verdict`, and the `opening` and `reachability` audits around the round.
+A caller loops until the `verdict` is no longer `RefineVerdict.IMPROVED`.
 
 ```java
 DenseRefineConfig wide = new DenseRefineConfig().expansionFactor(256);
-while (index.on(pool).refine(wide).changed() > index.describe().size() / 100) {}
+while (index.on(pool).refine(wide).verdict() == DenseIndex.RefineVerdict.IMPROVED) {}
 ```
 
-### Absorbing & Splitting
-
-`absorb` appends donor indexes one after another, keeping their graphs and linking each in across the appended part, rather than re-inserting their vectors.
-Every donor refuses every verb until the call is final; each one absorbed then stays closed, while one it did not absorb, like a donor of another scalar, is a live index again that you still own, though its entries may already have moved.
-`split` is its inverse: the entries are partitioned along the graph into empty receivers, leaving the source empty and live.
-Both answer a `RefineReport` of their closing refinements.
+A `DenseRefinePlan` passed in the config makes a round resumable: a cancel from the progress handler answers `Status.CANCELLED` and leaves the plan open, the next `refine` naming it continues where the cancel came, and `plan.phase()` reports where the last call stopped.
+`refinePlanFinish` on the receiver ends it with the whole plan's report, blocking or deferred; a plan dropped open is never finished and keeps the index closed to insertions.
+On a loaded NVMe index, `memoryLimit` caps the bytes held for the one part a round rewrites, and a smaller one streams that part's rounds from the drives.
 
 ```java
-index.on(pool).absorb(shard0, shard1);  // both donors are closed from here on
-index.on(pool).split(new DenseSplitConfig().seed(7), left, right);  // two empty receivers take a part each
+DenseRefinePlan plan = new DenseRefinePlan();
+DenseRefineConfig resumable = new DenseRefineConfig().plan(plan).progress((completed, total) -> !paused());
+try {
+    index.on(pool).refine(resumable);
+} catch (USearchException stopped) {
+    if (stopped.status() != Status.CANCELLED) throw stopped;
+}
+RefineReport report = index.on(pool).refinePlanFinish(plan);
+```
+
+### Resharding
+
+`reshard` moves the entries of its sources into its targets, keeping their links rather than re-inserting their vectors, then runs a round on every target that took entries.
+Several sources into one target among them gather into it, one source into several empty targets cuts it into graph-local parts, and one index as its own only source and target recuts its shards toward the configured placement.
+Every index stays yours: a source the targets do not name ends empty and live.
+It runs on the receiver's executor, answers a `RefineReport` of its closing rounds, and takes a `DenseReshardPlan` as `refine` takes its plan, which `reshardPlanFinish` ends.
+
+```java
+index.on(pool).reshard(new DenseIndex[] {index, shard0, shard1}, new DenseIndex[] {index}, new DenseReshardConfig());
+index.on(pool).reshard(new DenseIndex[] {index}, new DenseIndex[] {left, right}, new DenseReshardConfig().seed(7));
+index.on(pool).reshard(
+        new DenseIndex[] {index}, new DenseIndex[] {index},
+        new DenseReshardConfig().memoryDomains(new int[0]).shardCapacity(10_000_000));
 ```
 
 ### Sampling
@@ -423,9 +443,9 @@ It runs on the inner-product kinds alone, since a maximum over logits is what la
 `attend` is Flash Attention folded into the walk: every key it scores folds into each head's running maximum, partition and weighted value sum, with no top-k cut, and the outputs land in the arena already divided by the partition.
 The index stores no values, so a `ValueLookup` names the row of a values matrix each scored key resolves to.
 It borrows that matrix and builds its upcall once, so every call reuses both: a native matrix is read in place, a heap one is copied at construction.
-The library states the scalar and width it reads each row as, and a values matrix of another kind, a row outside it, or a lookup that throws leaves the key without a row, which refuses the call with `Status.SHAPE_MISMATCH`; the first exception the lookup raised outranks that status, and is raised once the call is final.
-The lookup runs on the executor's threads together, so it must tolerate concurrent calls.
-It is a host function, so it serves RAM handles alone: a VRAM walk resolves rows through a device function, which this binding does not build, and an `attend` into a VRAM arena refuses with `Status.DEVICE`.
+The library states the scalar and width it reads each row as, and a values matrix of another kind or a row outside it leaves the key without a row, which refuses the call with `Status.SHAPE_MISMATCH`.
+The lookup runs on the executor's threads together, so it must tolerate concurrent calls, and it must not throw: an exception escaping it terminates the process.
+It is a host function, so it serves RAM handles alone: a VRAM walk resolves rows through a device function, which this binding does not build.
 
 ```java
 ValueLookup cache = new ValueLookup(RowsView.of(valueRows, 128, Scalar.BF16), rowOf::get);
@@ -478,13 +498,20 @@ val keys: Array[Key] = Array(Key.of(1), Key.of(2))
 index.on(pool).insert(keys, RowsView.of(Array(1.0f, 0.0f, 0.0f, 1.0f), 2))
 ```
 
-## What This Binding Does Not Expose
+## Callbacks
 
-The filtered search of the C interface stays unbound.
-Its predicate runs on the engine's own worker threads, which are not attached to the JVM, so every batch of candidates would pay an attach, an upcall, and an exception check.
-A predicate that threw would also unwind through native frames that cannot handle it.
-Filter the results of `search` instead, or narrow the index.
-Progress handlers stay unbound for the same reason, which is what makes an insertion batch all-or-nothing here.
+A `java.util.function.Predicate<Key>` on the search, multiply, attention and MaxSim configs decides which candidate keys a walk may report, and a `Progress` on every long verb hears its advance and cancels it by answering false, which the call reports as `Status.CANCELLED`.
+An insertion is all-or-nothing, so its progress handler cannot cancel it.
+Each runs as an upcall straight into your object, the predicate on the executor's threads together and the progress handler never concurrently.
+Neither may throw: an exception escaping a callback terminates the process.
+
+```java
+DenseSearchConfig filtered = new DenseSearchConfig(10).predicate(key -> allowed.contains(key));
+DenseSearchConfig watched = new DenseSearchConfig(10).progress((completed, total) -> !cancelRequested());
+index.save("index.safegraphs", (completed, total) -> { bar.set(completed, total); return true; });
+```
+
+## What This Binding Does Not Expose
 
 `cursor` and `searchStream` pull one batch at a time, blocking, so a `DeferredOn` lacks them, and constructors address no index yet, so no receiver offers them.
 
@@ -500,7 +527,7 @@ Progress handlers stay unbound for the same reason, which is what makes an inser
 - __No life of its own.__
   The binding starts no threads and keeps no queues; releasing a `Deferred` rides try-with-resources, whose `close` waits for the call first, and the collector frees a dropped one only once it is final.
 - __Arenas are lent and reused, never shared.__
-  Every output whose length scales with the call lands in an arena the caller passes; each call closes the FFM scope the previous call's views read through, so a stale view throws instead of reading reused memory.
+  Every output whose length scales with the call lands in an arena the caller passes, and its views end at the arena's next call; closing the arena closes their FFM scope, so a view of a freed arena throws instead of reading freed memory.
 - __Nothing costs anything until it is used.__
   Submitting a call allocates nothing, and an arena allocates only when a call writes into it.
 - __Blocking calls stay as simple as the language allows.__
