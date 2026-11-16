@@ -4637,8 +4637,6 @@ void test_library_probes(void) {
     expect_eq(outcome.status, usearch_status_success_k, "Listing the GPUs must succeed");
     for (size_t position = 0; position != devices_count && position != 8; ++position) {
         expect(devices[position].vendor != usearch_gpu_vendor_unknown_k, "A listed GPU names its vendor");
-        expect(strcmp(usearch_gpu_class_name(devices[position].gpu_class), "unknown") != 0,
-               "A listed GPU names its class");
         printf("- GPU %zu: %s, %s, %u compute units, %llu MiB\n", position, devices[position].name,
                usearch_gpu_class_name(devices[position].gpu_class), devices[position].compute_units,
                (unsigned long long)(devices[position].memory_bytes >> 20));
@@ -4747,9 +4745,15 @@ static int phase_from_name(usearch_bytes_view_t name) {
     return usearch_phase_from_name(name, &phase) == usearch_status_success_k ? (int)phase : -1;
 }
 static char const* cpu_class_name_of(int value) { return usearch_cpu_class_name((usearch_cpu_class_t)value); }
-static int cpu_class_from_name(usearch_bytes_view_t name) { return (int)usearch_cpu_class_from_name(name); }
+static int cpu_class_from_name(usearch_bytes_view_t name) {
+    usearch_cpu_class_t cpu_class = usearch_cpu_class_unknown_k;
+    return usearch_cpu_class_from_name(name, &cpu_class) == usearch_status_success_k ? (int)cpu_class : -1;
+}
 static char const* gpu_class_name_of(int value) { return usearch_gpu_class_name((usearch_gpu_class_t)value); }
-static int gpu_class_from_name(usearch_bytes_view_t name) { return (int)usearch_gpu_class_from_name(name); }
+static int gpu_class_from_name(usearch_bytes_view_t name) {
+    usearch_gpu_class_t gpu_class = usearch_gpu_class_unknown_k;
+    return usearch_gpu_class_from_name(name, &gpu_class) == usearch_status_success_k ? (int)gpu_class : -1;
+}
 static char const* nvme_class_name_of(int value) { return usearch_nvme_class_name((usearch_nvme_class_t)value); }
 static int nvme_class_from_name(usearch_bytes_view_t name) { return (int)usearch_nvme_class_from_name(name); }
 static char const* dense_metric_name_of(int value) { return usearch_dense_metric_name((usearch_dense_metric_t)value); }
@@ -4881,10 +4885,10 @@ void test_names(void) {
     expect(status == usearch_status_success_k && residency == usearch_residency_ram_k &&
                traversal == usearch_traversal_walk_k && mood == usearch_mood_parked_k,
            "A refused spelling leaves its output alone");
-    expect_names("CPU class", cpu_classes, sizeof(cpu_classes) / row_bytes, usearch_cpu_class_unknown_k, "unknown",
-                 cpu_class_name_of, cpu_class_from_name);
-    expect_names("GPU class", gpu_classes, sizeof(gpu_classes) / row_bytes, usearch_gpu_class_unknown_k, "unknown",
-                 gpu_class_name_of, gpu_class_from_name);
+    expect_names("CPU class", cpu_classes, sizeof(cpu_classes) / row_bytes, -1, "unknown", cpu_class_name_of,
+                 cpu_class_from_name);
+    expect_names("GPU class", gpu_classes, sizeof(gpu_classes) / row_bytes, -1, "unknown", gpu_class_name_of,
+                 gpu_class_from_name);
     expect_names("NVMe class", nvme_classes, sizeof(nvme_classes) / row_bytes, usearch_nvme_class_unknown_k, "unknown",
                  nvme_class_name_of, nvme_class_from_name);
     expect_names("dense metric", dense_metrics, sizeof(dense_metrics) / row_bytes, usearch_dense_metric_unknown_k,

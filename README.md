@@ -331,6 +331,24 @@ Lending an application's own ForkUnion pool through `usearch_executor_on_pool` i
 
 Related applications include [SwiftSemanticSearch](https://github.com/ashvardanian/SwiftSemanticSearch) for multimodal retrieval & [USearch Molecules](https://github.com/unum-science/USearchMolecules), indexing 7 billion molecules through 28 billion fingerprints.
 
+## Multiversioned and Monoversioned Builds
+
+USearch compiles in one of two shapes, picked by `USEARCH_MULTIVERSIONED`.
+
+- __Multiversioned builds are for distribution.__
+  One binary runs well across diverse machines, because each CPU and each GPU picks its own class at runtime.
+  This is the default, and the shape of the Python wheels, the Rust crate and the JavaScript, Swift, Go, Java and C# packages.
+- __Monoversioned builds are for throughput.__
+  For common hardware and data-center deployments, the binary carries only the best code for one machine.
+  These are the leanest binaries: they start fast and take little memory and disk.
+  Outside that machine they refuse cleanly with `usearch_status_unsupported_k`, never crashing and never falling back to slower code in silence.
+- __The switches.__
+  `USEARCH_MULTIVERSIONED=OFF` picks the second shape and `USEARCH_MARCH` names its CPU floor.
+  The `xeon4_hopper`, `xeon6_blackwell`, `grace_hopper`, `vera_rubin` and `venice_mi450` presets spell whole machines.
+
+A monoversioned build compiles the single `monoversioned` CPU class in place of the ladder of named ones.
+It needs no monoversioned GPU class, as a preset's one GPU architecture already matches a named class, and CMake builds only the class units carrying code for it.
+
 ## Citation
 
 ```bibtex

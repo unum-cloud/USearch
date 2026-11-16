@@ -2006,7 +2006,7 @@ internal static unsafe partial class NativeMethods
 
     [LibraryImport(LibraryName)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
-    internal static partial int usearch_cpu_class_from_name(NativeBytesView name);
+    internal static partial Status usearch_cpu_class_from_name(NativeBytesView name, out int cpuClass);
 
     [LibraryImport(LibraryName)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
@@ -2014,7 +2014,7 @@ internal static unsafe partial class NativeMethods
 
     [LibraryImport(LibraryName)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
-    internal static partial int usearch_gpu_class_from_name(NativeBytesView name);
+    internal static partial Status usearch_gpu_class_from_name(NativeBytesView name, out int gpuClass);
 
     [LibraryImport(LibraryName)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]

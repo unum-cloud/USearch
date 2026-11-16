@@ -411,8 +411,8 @@ expected<sample_result_t> shapes_nvme_variant<scalar_type_, cpu_class_>::sample(
 #if USEARCH_ARCH_CUDA_
 
 /** One class's shapes kits over one dtype as a fatbin, defined in its class unit,
- *  @c src/shapes/vram_variants_nvidia.cpp for the vendor-wide Ampere floor, beside the bytes it
- *  embeds. */
+ *  @c src/shapes/vram_variants_nvidia.cpp for the floor or a monoversioned build's one class,
+ *  beside the bytes it embeds. */
 template <gpu_class_t gpu_class_, nk_dtype_t dtype_>
 struct shapes_nvidia_fatbin {
     static bytes_view_t bytes() noexcept;
@@ -447,8 +447,8 @@ struct shapes_vram_nvidia_build {
 
 /** The shapes alternative on NVIDIA GPUs of @p gpu_class_ or newer: the basic VRAM shards over
  *  packs of @p scalar_type_, scoring Chamfer or Hausdorff as the geometry names, with 32-bit node
- *  IDs. A batch packs its clouds on the host end to end through the serial kit, as the RAM variants
- *  pack them. */
+ *  IDs. A batch packs its clouds on the host end to end through the CPU floor's kit, as the RAM
+ *  variants pack them. */
 template <nk::shapes_dtype scalar_type_, gpu_class_t gpu_class_>
 struct shapes_vram_nvidia_variant {
     using executor_t = cuda_executor_t;
@@ -457,7 +457,8 @@ struct shapes_vram_nvidia_variant {
     using index_t = basic::vram_nvidia_indexes<face_t, us::utilities::uuid128_t, build_t>;
     using refine_plan_t = typename index_t::refine_plan_t;
     using scalar_t = scalar_type_;
-    using pack_kit_t = typename us::shapes::shapes_ladder<scalar_type_, nk_cap_serial_k>::kit_t;
+    using pack_kit_t =
+        typename us::shapes::shapes_ladder<scalar_type_, numkong_capabilities_of(cpu_ladder_floor_k)>::kit_t;
     static constexpr nk_dtype_t dtype_k = scalar_type_::dtype();
     static constexpr gpu_class_t gpu_class_k = gpu_class_;
 
@@ -645,7 +646,13 @@ template <auto class_>
 struct shapes_variants_of<vendored_residency_t::nvme_k, class_> {
     using type = type_list<shapes_nvme_variant<nk::f32_t, class_>, shapes_nvme_variant<nk::f16_t, class_>>;
 };
-#if USEARCH_ARCH_CUDA_
+#if USEARCH_ARCH_CUDA_ && USEARCH_TARGET_MONOVERSIONED
+template <auto class_>
+struct shapes_variants_of<vendored_residency_t::vram_nvidia_k, class_> {
+    using type =
+        type_list<shapes_vram_nvidia_variant<nk::f32_t, class_>, shapes_vram_nvidia_variant<nk::f16_t, class_>>;
+};
+#elif USEARCH_ARCH_CUDA_
 template <>
 struct shapes_variants_of<vendored_residency_t::vram_nvidia_k, gpu_class_t::nvidia_blackwell_k> {
     using type = type_list<shapes_vram_nvidia_variant<nk::f16_t, gpu_class_t::nvidia_blackwell_k>>;

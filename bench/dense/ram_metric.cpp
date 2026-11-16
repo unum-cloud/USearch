@@ -567,9 +567,8 @@ static void bench_kernel(environment_t const& env, std::string_view kernel_name,
         for (std::size_t const dim : dimensions_to_bench)
             run_benchmark(env, fmt::format("{}/{}/numkong/1to1/{}d", kernel_name, scalar_name, dim),
                           measure_baseline<kernel_, scalar_>, dim);
-    // Newest silicon first, split by the architecture-family macros like the test's tier
-    // sweep - the concept gates silently absorb any tier without a kit.
-#if NUMKONG_ARCH_X8664_
+    // Newest silicon first, every architecture's tiers in one list - the concept gates silently
+    // absorb any tier without a kit, which is every tier of another architecture.
     bench_quads<kernel_, scalar_, nk_cap_diamond_k>(env, kernel_name, scalar_name, "diamond");
     bench_tiles<kernel_, scalar_, nk_cap_graniteamx_k>(env, kernel_name, scalar_name, "graniteamx");
     bench_quads<kernel_, scalar_, nk_cap_sierra_k>(env, kernel_name, scalar_name, "sierra");
@@ -579,7 +578,6 @@ static void bench_kernel(environment_t const& env, std::string_view kernel_name,
     bench_quads<kernel_, scalar_, nk_cap_icelake_k>(env, kernel_name, scalar_name, "icelake");
     bench_quads<kernel_, scalar_, nk_cap_skylake_k>(env, kernel_name, scalar_name, "skylake");
     bench_quads<kernel_, scalar_, nk_cap_haswell_k>(env, kernel_name, scalar_name, "haswell");
-#elif NUMKONG_ARCH_ARM64_
     bench_quads<kernel_, scalar_, nk_cap_neonfp8_k>(env, kernel_name, scalar_name, "neonfp8");
     bench_tiles<kernel_, scalar_, nk_cap_smebi32_k>(env, kernel_name, scalar_name, "smebi32");
     bench_tiles<kernel_, scalar_, nk_cap_sme_k>(env, kernel_name, scalar_name, "sme");
@@ -587,12 +585,9 @@ static void bench_kernel(environment_t const& env, std::string_view kernel_name,
     bench_quads<kernel_, scalar_, nk_cap_neonfhm_k>(env, kernel_name, scalar_name, "neonfhm");
     bench_quads<kernel_, scalar_, nk_cap_neonsdot_k>(env, kernel_name, scalar_name, "neonsdot");
     bench_quads<kernel_, scalar_, nk_cap_neon_k>(env, kernel_name, scalar_name, "neon");
-#elif NUMKONG_ARCH_WASM_
     bench_quads<kernel_, scalar_, nk_cap_v128relaxed_k>(env, kernel_name, scalar_name, "v128relaxed");
     bench_quads<kernel_, scalar_, nk_cap_v128_k>(env, kernel_name, scalar_name, "v128");
-#elif NUMKONG_ARCH_PPC64_
     bench_quads<kernel_, scalar_, nk_cap_powervsx_k>(env, kernel_name, scalar_name, "powervsx");
-#endif
     bench_quads<kernel_, scalar_, nk_cap_serial_k>(env, kernel_name, scalar_name, "serial");
 }
 

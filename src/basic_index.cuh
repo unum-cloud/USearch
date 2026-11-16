@@ -151,15 +151,16 @@ basic_verbs<traits_type_, residency_> const* pick_basic_cpu_variant(cpu_ladder<c
     return picked;
 }
 
-/** The NVIDIA variant of @p traits_type_ serving @p geometry on the newest rung of @p ladder the
- *  build compiled and the devices' @p available capabilities admit. */
+/** The NVIDIA variant of @p traits_type_ serving @p geometry on the newest rung of @p ladder at or
+ *  under the class of @p placement whose unit every placed device loads. */
 template <typename traits_type_, gpu_class_t... classes_>
 basic_verbs<traits_type_, vendored_residency_t::vram_nvidia_k> const* pick_basic_gpu_variant(
-    gpu_ladder<classes_...>, typename traits_type_::geometry_t const& geometry, nk_capability_t available) noexcept {
+    gpu_ladder<classes_...>, typename traits_type_::geometry_t const& geometry,
+    gpu_placement_t const& placement) noexcept {
     basic_verbs<traits_type_, vendored_residency_t::vram_nvidia_k> const* picked = nullptr;
     auto rung = [&]<gpu_class_t class_>() noexcept {
-        if constexpr (basic_gpu_class_compiled(class_))
-            if (!picked && numkong_admits(available, class_))
+        if constexpr (gpu_class_compiled(class_))
+            if (!picked && class_ <= placement.gpu_class && (placement.loaded & gpu_class_bit(class_)))
                 picked = basic_class_tables<traits_type_, vendored_residency_t::vram_nvidia_k, class_>::find(geometry);
     };
     (rung.template operator()<classes_>(), ...);
@@ -182,8 +183,7 @@ handle_type_* make_basic_cpu_handle(typename handle_type_::traits_t::geometry_t&
     if (!traits_t::admits(geometry, arguments, outcome)) return nullptr;
     auto const [ceiling, pick_status] = pick_cpu_ceiling(ram.cpu_class);
     if (failed(pick_status))
-        return propagate_error(usearch_status_unsupported_k, outcome, "The CPU does not admit the pinned class"),
-               nullptr;
+        return propagate_error(pick_status, outcome, "The CPU does not admit the pinned class"), nullptr;
     basic_verbs<traits_t, residency_> const* const verbs = pick_basic_cpu_variant<traits_t, residency_>(
         cpu_ladder_t {}, geometry, ceiling);
     if (!verbs)
@@ -268,9 +268,9 @@ status_t place_shards(punned_basic_index<traits_type_, residency_> const& punned
  *      records why not, as for a geometry no device kit serves.
  *
  *  It calls <tt>fill(punned_basic_index) → bool</tt>. The variant is the first on the modality's GPU
- *  ladder whose class the first device's capabilities admit, narrowed to the pinned class, and
- *  which serves the geometry; every named device shares that class. The shards are placed once the
- *  variant holds its geometry, since each one is built as the geometry names.
+ *  ladder at or under the best class every named device loads under the pin, whose unit they all
+ *  load and which serves the geometry. The shards are placed once the variant holds its geometry,
+ *  since each one is built as the geometry names.
  */
 template <typename handle_type_, typename arguments_type_, typename fill_type_>
 handle_type_* make_basic_vram_handle(typename handle_type_::traits_t::geometry_t& geometry,
@@ -281,26 +281,23 @@ handle_type_* make_basic_vram_handle(typename handle_type_::traits_t::geometry_t
     if (arguments.values_per_key)
         return propagate_error(usearch_status_unsupported_k, outcome, "A GPU index bounds no key's entries"), nullptr;
     usearch_vram_options_t const& vram = arguments.vram;
-    gpu_device_t const* const device = basic_device_at(named_ordinal(vram, 0), outcome);
-    if (!device) return nullptr;
-    for (std::size_t shard = 1; shard < named_count(vram); ++shard) {
-        gpu_device_t const* const other = basic_device_at(named_ordinal(vram, shard), outcome);
-        if (!other) return nullptr;
-        if (gpu_class_of(*other) != gpu_class_of(*device))
-            return propagate_error(usearch_status_config_mismatch_k, outcome, "The devices must share one class"),
-                   nullptr;
-    }
-    nk_capability_t const available = gpu_pin_capabilities(gpu_class_of(*device), vram.gpu_class);
-    if (!available)
-        return propagate_error(usearch_status_unsupported_k, outcome, "The devices do not run the pinned class"),
+    auto const [placement, placed_status] = resolve_placement(vram);
+    if (placed_status == status_t::invalid_argument_k)
+        return propagate_error(placed_status, outcome, "No GPU class has that value"), nullptr;
+    if (placed_status == status_t::device_error_k)
+        return propagate_error(placed_status, outcome, "A device ordinal is past the listing"), nullptr;
+    if (placed_status == status_t::config_mismatch_k)
+        return propagate_error(placed_status, outcome, "The devices must share one vendor"), nullptr;
+    if (failed(placed_status))
+        return propagate_error(placed_status, outcome, "The devices share no class this build carries under the pin"),
                nullptr;
     basic_verbs<traits_t, vendored_residency_t::vram_nvidia_k> const* const verbs = pick_basic_gpu_variant<traits_t>(
-        typename traits_t::gpu_ladder_t {}, geometry, available);
+        typename traits_t::gpu_ladder_t {}, geometry, placement);
     if (!verbs)
         return propagate_error(usearch_status_device_k, outcome, "This build carries no kernels for the device"),
                nullptr;
     auto const [created, create_status] = verbs->create(std::move(geometry), traits_t::geometry_extras_of(arguments),
-                                                        vram_residency(device->vendor_ordinal),
+                                                        vram_residency(placement.first().vendor_ordinal),
                                                         host_allocator_of(vram));
     if (failed(create_status)) return propagate_error(create_status, outcome), nullptr;
     handle_type_* const index = new (std::nothrow) handle_type_ {{verbs, created}};

@@ -943,6 +943,8 @@ template <vendored_residency_t residency_, auto class_>
 dense_verbs<residency_> const* dense_class_tables<residency_, class_>::find(nk_dtype_t dtype) noexcept {
     static constexpr std::array<dense_verbs<residency_>, tables_count<residency_, class_>(dense_dtypes_t {})> tables_k =
         tables_for<residency_, class_>(dense_dtypes_t {});
+    static_assert(tables_count<residency_, class_>(dense_ladder_dtypes_t {}) != 0,
+                  "A compiled class advances past its parent for no dtype");
     for (dense_verbs<residency_> const& table : tables_k)
         if (table.dtype == dtype) return &table;
     return nullptr;

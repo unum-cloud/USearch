@@ -6,7 +6,8 @@
  *
  *  The rebase of moved nodes, the reachability audit with its reconnection, a sweep's count and
  *  scatter, and a split's partition and scatter read the neighbors matrix alone and move values as
- *  opaque bytes, so one unit serves every modality on every NVIDIA class.
+ *  opaque bytes, so one unit serves every modality on every NVIDIA class, compiled as the Ampere
+ *  floor or as a monoversioned build's one class.
  *
  *  Compiled twice: by NVCC device-only into the unit's fatbin, and by Clang host-only, where it
  *  names that fatbin, linked in beside it, to the faces, which load it at their first @c reserve.
@@ -15,17 +16,33 @@
 #include <utility>  // `std::index_sequence` - every shared kernel
 
 #include "usearch/utilities/types.hpp"
-#include "usearch/utilities/vram_nvidia_device.cuh" // `cuda_warp_t`
+#include "usearch/utilities/vram_nvidia_device.cuh" // `cuda_warp_t`, `ampere_scan_t`
 #include "usearch/dense/vram_index.cuh"             // `vram_rebase_links`, the health passes' & splits' bodies
 #include "usearch/basic/vram_nvidia_index.hpp"
 
+#include "lib.hpp" // `gpu_class_t`, `cuda_class_k` - the class this unit compiles as
+
+/** The bounds of the fatbin every basic face loads, linked in as raw bytes, from the table CMake
+ *  writes for the class this unit compiles as; the other classes' tables stay unreferenced. */
+extern "C" byte_t const* const basic_nvidia_ampere_bundles[];
+extern "C" byte_t const* const basic_nvidia_ada_bundles[];
+extern "C" byte_t const* const basic_nvidia_hopper_bundles[];
+extern "C" byte_t const* const basic_nvidia_blackwell_bundles[];
+extern "C" byte_t const* const basic_nvidia_blackwellrtx_bundles[];
+template <gpu_class_t gpu_class_>
+byte_t const* const* basic_bundles() noexcept {
+    if constexpr (gpu_class_ == gpu_class_t::nvidia_ada_k) return basic_nvidia_ada_bundles;
+    else if constexpr (gpu_class_ == gpu_class_t::nvidia_hopper_k) return basic_nvidia_hopper_bundles;
+    else if constexpr (gpu_class_ == gpu_class_t::nvidia_blackwell_k) return basic_nvidia_blackwell_bundles;
+    else if constexpr (gpu_class_ == gpu_class_t::nvidia_blackwellrtx_k) return basic_nvidia_blackwellrtx_bundles;
+    else return basic_nvidia_ampere_bundles;
+}
+
 namespace unum::usearch::basic {
 
-/** The unit's fatbin, linked in as raw bytes, which every basic face loads. */
-extern "C" byte_t const basic_nvidia_bundle_start[], basic_nvidia_bundle_end[];
-
 bytes_view_t cuda_graph_fatbin_t::bytes() noexcept {
-    return {basic_nvidia_bundle_start, static_cast<std::size_t>(basic_nvidia_bundle_end - basic_nvidia_bundle_start)};
+    byte_t const* const* const bounds = basic_bundles<cuda_class_k>();
+    return {bounds[0], bounds[1]};
 }
 
 /** Every shared NVIDIA basic kernel: @p kernel_ picks the pass, and @p node_id_type_ the IDs of the
@@ -40,7 +57,8 @@ __global__ void __launch_bounds__(vram_warps_per_block_k * 32, cuda_resident_blo
         dense::vram_widen_links<cuda_warp_t>(graph.neighbors, graph.first_id, graph.nodes_count, graph.connectivity,
                                              graph.saved_neighbors, graph.saved_offsets, graph.degree,
                                              graph.source_bound, graph.shift, graph.malformed);
-    else if constexpr (dense::vram_health_kernel(kernel_)) dense::vram_health_pass<kernel_, cuda_warp_t>(graph.health);
+    else if constexpr (dense::vram_health_kernel(kernel_))
+        dense::vram_health_pass<kernel_, cuda_warp_t, ampere_scan_t>(graph.health);
     else if constexpr (kernel_ == vram_kernel_t::partition_roots_k)
         dense::vram_partition_roots<cuda_warp_t>(graph.roots, graph.seed_count, graph.node_parts, graph.frontier,
                                                  graph.part_sizes);
@@ -69,8 +87,9 @@ __global__ void __launch_bounds__(vram_warps_per_block_k * 32, cuda_resident_blo
         dense::vram_split_tape<cuda_warp_t>(graph.values, graph.value_offsets, graph.nodes_count, graph.node_parts,
                                             graph.part_capacity, graph.part_values, graph.part_offsets);
     else if constexpr (kernel_ == vram_kernel_t::gather_tape_k)
-        dense::vram_gather_tape<cuda_warp_t>(graph.values, graph.value_offsets, graph.listed, graph.listed_count,
-                                             graph.gathered_values, graph.gathered_offsets);
+        dense::vram_gather_tape<cuda_warp_t, ampere_scan_t>(graph.values, graph.value_offsets, graph.listed,
+                                                            graph.listed_count, graph.gathered_values,
+                                                            graph.gathered_offsets);
 }
 
 template <typename node_id_type_, std::size_t... kernels_>

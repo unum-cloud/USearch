@@ -38,8 +38,7 @@ std::size_t check_vram_nvidia(settings_t const& settings, gpu_device_t const& de
     auto [executor, spawn_status] = cuda_executor_t::spawn(api, std::span<int const> {&ordinal, 1});
     if (failed(spawn_status)) return fmt::println("- CUDA: device #{} opens no stream", ordinal), 1;
     std::size_t failures_count = 0;
-    if (dense_nvidia_runs(device.architecture_major, device.architecture_minor))
-        failures_count += check_vram_indexes(settings, executor);
+    if (dense_nvidia_runs(device)) failures_count += check_vram_indexes(settings, executor);
     else
         fmt::println("- CUDA: dense rung cells skipped, the build names {} for them",
                      usearch_gpu_class_name(static_cast<usearch_gpu_class_t>(dense_nvidia_class_k)));

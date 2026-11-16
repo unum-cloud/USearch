@@ -70,14 +70,31 @@ struct capability_choice {
  *  NumKong's microarchitecture vocabulary; the floor the table never lists is the serial
  *  kernels. */
 inline constexpr capability_choice<nk_capability_t> compute_choices_k[] = {
-#if NUMKONG_ARCH_X8664_
-    {"haswell", nk_cap_haswell_k}, {"skylake", nk_cap_skylake_k},         {"icelake", nk_cap_icelake_k},
-    {"genoa", nk_cap_genoa_k},     {"sapphireamx", nk_cap_sapphireamx_k},
-#elif NUMKONG_ARCH_ARM64_
+#if NUMKONG_TARGET_HASWELL
+    {"haswell", nk_cap_haswell_k},
+#endif
+#if NUMKONG_TARGET_SKYLAKE
+    {"skylake", nk_cap_skylake_k},
+#endif
+#if NUMKONG_TARGET_ICELAKE
+    {"icelake", nk_cap_icelake_k},
+#endif
+#if NUMKONG_TARGET_GENOA
+    {"genoa", nk_cap_genoa_k},
+#endif
+#if NUMKONG_TARGET_SAPPHIREAMX
+    {"sapphireamx", nk_cap_sapphireamx_k},
+#endif
+#if NUMKONG_TARGET_NEON
     {"neon", nk_cap_neon_k},
+#endif
+#if NUMKONG_TARGET_NEONSDOT
     {"neonsdot", nk_cap_neonsdot_k},
+#endif
+#if NUMKONG_TARGET_NEONBFDOT
     {"neonbfdot", nk_cap_neonbfdot_k},
-#else
+#endif
+#if !NUMKONG_TARGET_HASWELL && !NUMKONG_TARGET_NEON
     {"serial", nk_cap_serial_k},
 #endif
 };

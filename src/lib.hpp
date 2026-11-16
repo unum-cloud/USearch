@@ -591,13 +591,20 @@ struct first_dtypes_of<count_, dtype_list<taken_...>, next_, rest_...> {
     using type = typename first_dtypes_of<count_ - 1, dtype_list<taken_..., next_>, rest_...>::type;
 };
 
-/** The leading @p count_ dtypes of the pack, as a @c dtype_list. */
+/** The leading @p count_ dtypes of @p list_type_, as a @c dtype_list. */
+template <std::size_t count_, typename list_type_>
+struct first_dtypes;
 template <std::size_t count_, nk_dtype_t... dtypes_>
-using first_dtypes = typename first_dtypes_of<count_, dtype_list<>, dtypes_...>::type;
+struct first_dtypes<count_, dtype_list<dtypes_...>> {
+    using type = typename first_dtypes_of<count_, dtype_list<>, dtypes_...>::type;
+};
+
+/** Every dense storage dtype, in the order the variants cover them from the front. */
+using dense_ladder_dtypes_t = dtype_list<nk_bf16_k, nk_u1_k, nk_i8_k, nk_e4m3_k, nk_f16_k, nk_u8_k, nk_e5m2_k, nk_i4_k,
+                                         nk_u4_k, nk_e3m2_k, nk_e2m3_k>;
 
 /** The dense storage dtypes this build compiles variants for. */
-using dense_dtypes_t = first_dtypes<USEARCH_DENSE_DTYPES, nk_bf16_k, nk_u1_k, nk_i8_k, nk_e4m3_k, nk_f16_k, nk_u8_k,
-                                    nk_e5m2_k, nk_i4_k, nk_u4_k, nk_e3m2_k, nk_e2m3_k>;
+using dense_dtypes_t = typename first_dtypes<USEARCH_DENSE_DTYPES, dense_ladder_dtypes_t>::type;
 
 #pragma endregion Type Lists
 
@@ -857,6 +864,7 @@ constexpr sz_capability_t stringzilla_capabilities_of(cpu_class_t cpu_class) noe
         return stringzilla_capabilities_of(cpu_class_t::intel_haswell_k) | sz_cap_goldmont_k;
     case cpu_class_t::aws_g2_k:
     case cpu_class_t::apple_m2_k: return sz_cap_serial_k | sz_cap_neon_k | sz_cap_neonaes_k | sz_cap_neonsha_k;
+    case cpu_class_t::alibaba_c930_k: return sz_cap_serial_k | sz_cap_rvv_k;
     case cpu_class_t::ibm_power10_k: return sz_cap_serial_k | sz_cap_powervsx_k;
     case cpu_class_t::monoversioned_k: return sz_capabilities_compiled_cpu_mask();
     default: return stringzilla_capabilities_of(parent_class_of(cpu_class));
@@ -1280,52 +1288,56 @@ struct cpu_ladder {};
 template <gpu_class_t... classes_>
 struct gpu_ladder {};
 
-/** This architecture's ladder, the serial floor last, or the one class of a monoversioned build; a
- *  rung the build left out is skipped by the walk, never by the list. */
+/** Rungs of a ladder this build compiled; a monoversioned build compiles at most one. */
+template <cpu_class_t... classes_>
+consteval std::size_t compiled_rungs(cpu_ladder<classes_...>) noexcept {
+    return (std::size_t {cpu_class_compiled(classes_)} + ... + 0);
+}
+
+/** Every class carrying variants, each lineage newest first and the serial floor last, or the one
+ *  class of a monoversioned build; the walk, never the list, skips a rung the build left out. */
 #if USEARCH_TARGET_MONOVERSIONED
 using cpu_ladder_t = cpu_ladder<cpu_class_t::monoversioned_k>;
-#elif NUMKONG_ARCH_X8664_
+inline constexpr cpu_class_t cpu_ladder_floor_k = cpu_class_t::monoversioned_k;
+static_assert(compiled_rungs(cpu_ladder_t {}) <= 1);
+#else
 using cpu_ladder_t =
     cpu_ladder<cpu_class_t::intel_diamond_k, cpu_class_t::intel_granite_k, cpu_class_t::intel_sapphire_k,
                cpu_class_t::amd_genoa_k, cpu_class_t::intel_icelake_k, cpu_class_t::intel_skylake_k,
-               cpu_class_t::intel_sierra_k, cpu_class_t::intel_haswell_k, cpu_class_t::serial_k>;
-#elif NUMKONG_ARCH_ARM64_
-using cpu_ladder_t = cpu_ladder<cpu_class_t::nvidia_vera_k, cpu_class_t::apple_m4_k, cpu_class_t::aws_g5_k,
-                                cpu_class_t::apple_m2_k, cpu_class_t::aws_g2_k, cpu_class_t::serial_k>;
-#elif NUMKONG_ARCH_RISCV64_
-using cpu_ladder_t = cpu_ladder<cpu_class_t::alibaba_c930_k, cpu_class_t::serial_k>;
-#elif NUMKONG_ARCH_PPC64_
-using cpu_ladder_t = cpu_ladder<cpu_class_t::ibm_power10_k, cpu_class_t::serial_k>;
-#elif NUMKONG_ARCH_WASM_
-using cpu_ladder_t = cpu_ladder<cpu_class_t::wasm64_extended_k, cpu_class_t::wasm32_v128_k, cpu_class_t::serial_k>;
-#else
-using cpu_ladder_t = cpu_ladder<cpu_class_t::serial_k>;
+               cpu_class_t::intel_sierra_k, cpu_class_t::intel_haswell_k, cpu_class_t::nvidia_vera_k,
+               cpu_class_t::apple_m4_k, cpu_class_t::aws_g5_k, cpu_class_t::apple_m2_k, cpu_class_t::aws_g2_k,
+               cpu_class_t::alibaba_c930_k, cpu_class_t::ibm_power10_k, cpu_class_t::wasm64_extended_k,
+               cpu_class_t::wasm32_v128_k, cpu_class_t::serial_k>;
+inline constexpr cpu_class_t cpu_ladder_floor_k = cpu_class_t::serial_k;
 #endif
 
 /** The ceiling of a handle pinned to @p pinned, the one caller of NumKong's, StringZilla's and
- *  ForkUnion's detection; @c unsupported_k when this machine lacks the pinned class's masks, or
- *  when the build compiled no class under the ceiling, as a monoversioned build on an older CPU or
- *  under a pin below its one class. */
+ *  ForkUnion's detection and of the AMX grant, whose refusal clears the AMX bits. Answers
+ *  @c invalid_argument_k for a value no class takes, and @c unsupported_k when this machine lacks
+ *  the pinned class's masks or the build compiled no class under the ceiling, as a monoversioned
+ *  build on an older CPU or under a pin below its one class. */
 inline expected<cpu_ceiling_t> pick_cpu_ceiling(usearch_cpu_class_t pinned) noexcept {
-    cpu_ceiling_t ceiling;
-    if (nk_capabilities_enabled_cpu(&ceiling.compute) != nk_success_k) ceiling.compute = nk_cap_serial_k;
-    if (sz_capabilities_enabled_cpu(&ceiling.strings) != sz_success_k) ceiling.strings = sz_cap_serial_k;
-    ceiling.sync = fu::cpu_capabilities();
     if (pinned != usearch_cpu_class_unknown_k && !listed(cpu_classes_k, pinned))
-        return {ceiling, status_t::unsupported_k};
-    bool runs = true;
+        return {{}, status_t::invalid_argument_k};
+    cpu_ceiling_t ceiling;
+    if (nk_capabilities_detected_cpu(&ceiling.compute) != nk_success_k) ceiling.compute = nk_cap_serial_k;
+    if (sz_capabilities_detected_cpu(&ceiling.strings) != sz_success_k) ceiling.strings = sz_cap_serial_k;
+    ceiling.sync = fu::cpu_capabilities();
+    nk_capability_t const tiles = ceiling.compute & (nk_cap_sapphireamx_k | nk_cap_graniteamx_k | nk_cap_diamondamx_k);
+    if (tiles && nk_configure_thread_cpu(tiles) != nk_success_k) ceiling.compute &= ~tiles;
     if (pinned != usearch_cpu_class_unknown_k) {
         cpu_class_t const pinned_class = cpu_class_of(pinned);
         cpu_ceiling_t const wanted {numkong_capabilities_of(pinned_class), stringzilla_capabilities_of(pinned_class),
                                     forkunion_capabilities_of(pinned_class)};
-        runs = (ceiling.compute & wanted.compute) == wanted.compute &&
-               (ceiling.strings & wanted.strings) == wanted.strings && (ceiling.sync & wanted.sync) == wanted.sync;
+        if ((ceiling.compute & wanted.compute) != wanted.compute ||
+            (ceiling.strings & wanted.strings) != wanted.strings || (ceiling.sync & wanted.sync) != wanted.sync)
+            return {ceiling, status_t::unsupported_k};
         ceiling = wanted;
     }
     bool const compiled = []<cpu_class_t... classes_>(cpu_ladder<classes_...>, cpu_ceiling_t under) noexcept {
         return ((cpu_class_compiled(classes_) && cpu_rung_fits(classes_, under)) || ...);
     }(cpu_ladder_t {}, ceiling);
-    return {ceiling, runs && compiled ? status_t::success_k : status_t::unsupported_k};
+    return {ceiling, compiled ? status_t::success_k : status_t::unsupported_k};
 }
 
 /** One class's outcome row: its reference over the status, the claim and the named-call counts,
@@ -1377,11 +1389,11 @@ outcome_verbs_t outcome_verbs_of() noexcept {
 inline outcome_verbs_t const& host_outcome_verbs() noexcept {
     static outcome_verbs_t const picked = []<cpu_class_t... classes_>(cpu_ladder<classes_...>) noexcept {
         cpu_ceiling_t const ceiling = pick_cpu_ceiling(usearch_cpu_class_unknown_k).value;
-        outcome_verbs_t row = outcome_verbs_of<cpu_class_t::serial_k>();
+        outcome_verbs_t row = outcome_verbs_of<cpu_ladder_floor_k>();
         bool found = false;
         auto rung = [&]<cpu_class_t class_>() noexcept {
-            if (!found && cpu_class_compiled(class_) && cpu_rung_fits(class_, ceiling))
-                row = outcome_verbs_of<class_>(), found = true;
+            if constexpr (cpu_class_compiled(class_))
+                if (!found && cpu_rung_fits(class_, ceiling)) row = outcome_verbs_of<class_>(), found = true;
         };
         (rung.template operator()<classes_>(), ...);
         return row;
@@ -1554,77 +1566,24 @@ inline constexpr vendored_residency_t vendored_residency_of =
     : std::is_same_v<executor_type_, hip_executor_t>     ? vendored_residency_t::vram_amd_k
                                                          : vendored_residency_t::vram_apple_k;
 
-/** The first compute capability one class's cubins run on; the class covers the rest of that major
- *  version up to the next row, the family its @c f or @c a target covers. */
-struct nvidia_class_span_t {
-    gpu_class_t gpu_class;
-    cuda_arch_t first;
-};
+/** A set of GPU classes, one bit per C enum value. */
+using gpu_class_mask_t = u32_t;
 
-/** Every NVIDIA class and the GPUs its unit runs natively; a new family is a new row. */
-inline constexpr nvidia_class_span_t nvidia_class_spans_k[] = {
-    {gpu_class_t::nvidia_ampere_k, cuda_arch_ampere_k},
-    {gpu_class_t::nvidia_ada_k, cuda_arch_ada_k},
-    {gpu_class_t::nvidia_hopper_k, cuda_arch_hopper_k},
-    {gpu_class_t::nvidia_blackwell_k, cuda_arch_blackwell_k},
-    {gpu_class_t::nvidia_blackwellrtx_k, cuda_arch_blackwellrtx_k},
-};
-
-/** The class whose unit carries cubins for compute capability @p arch: the last row of its major
- *  version at or below it, else the Ampere unit, whose PTX JIT-compiles for any newer GPU, and none
- *  older than Ampere. */
-constexpr gpu_class_t nvidia_class_of(cuda_arch_t arch) noexcept {
-    if (arch < cuda_arch_ampere_k) return gpu_class_t::unknown_k;
-    gpu_class_t picked = gpu_class_t::nvidia_ampere_k;
-    for (nvidia_class_span_t const& span : nvidia_class_spans_k)
-        if (span.first <= arch && span.first / 100 == arch / 100) picked = span.gpu_class;
-    return picked;
+constexpr gpu_class_mask_t gpu_class_bit(gpu_class_t gpu_class) noexcept {
+    return gpu_class_mask_t {1} << static_cast<u32_t>(gpu_class);
 }
 
-/** The class whose kernels run on an AMD GPU of @c gfx version @p major. @p minor: 9.4 is MI300's
- *  @c gfx942, 9.5 is MI350's @c gfx950, and 12.5 is MI400's @c gfx1250 and @c gfx1251; any other
- *  has no code object to load. */
-constexpr gpu_class_t amd_class_of(u32_t major, u32_t minor) noexcept {
-    if (major == 9 && minor == 4) return gpu_class_t::amd_cdna3_k;
-    if (major == 9 && minor == 5) return gpu_class_t::amd_cdna4_k;
-    if (major == 12 && minor == 5) return gpu_class_t::amd_cdna5_k;
-    return gpu_class_t::unknown_k;
-}
-
-/** The class whose unit runs on an Apple GPU of the newest family @p family: Apple7 and Apple8
- *  share the floor, and a GPU older than Apple7 runs none. */
-constexpr gpu_class_t apple_class_of(u32_t family) noexcept {
-    if (family >= 10) return gpu_class_t::apple_metal10_k;
-    if (family == 9) return gpu_class_t::apple_metal9_k;
-    if (family >= 7) return gpu_class_t::apple_metal7_k;
-    return gpu_class_t::unknown_k;
-}
-
-/** The class whose unit runs on @p device, read off the architecture its driver reported; unknown
- *  where no unit does. */
-constexpr gpu_class_t gpu_class_of(gpu_device_t const& device) noexcept {
-    switch (device.vendor) {
-    case gpu_vendor_t::nvidia_k:
-        return nvidia_class_of(cuda_arch_of(device.architecture_major, device.architecture_minor));
-    case gpu_vendor_t::amd_k: return amd_class_of(device.architecture_major, device.architecture_minor);
-    case gpu_vendor_t::apple_k: return apple_class_of(device.architecture_major);
-    default: return gpu_class_t::unknown_k;
-    }
-}
-
-/** The GPU side of the process, built at its first VRAM call: every vendor's driver, and the
- *  devices some class runs on, NVIDIA first, then AMD, then Apple, a device's position here being
- *  its USearch ordinal. */
+/** The GPU side of the process, built at its first VRAM call: every vendor's driver, and every
+ *  device they report, NVIDIA first, then AMD, then Apple, a device's position here being its
+ *  USearch ordinal, beside the classes whose units its loader took; a device no class runs on is
+ *  listed too, and refuses work. */
 struct gpu_runtime_t {
     gpu_drivers_t drivers;
     gpu_device_t devices[3 * gpu_devices_capacity_k];
+    gpu_class_mask_t loaded[3 * gpu_devices_capacity_k] = {};
     std::size_t devices_count = 0;
 
-    gpu_runtime_t() noexcept {
-        std::size_t const reported = list_gpu_devices(drivers, devices);
-        for (std::size_t position = 0; position != reported; ++position)
-            if (gpu_class_of(devices[position]) != gpu_class_t::unknown_k) devices[devices_count++] = devices[position];
-    }
+    gpu_runtime_t() noexcept;
 };
 
 /** The one runtime every VRAM call passes its drivers down from. */
@@ -1636,99 +1595,16 @@ inline gpu_runtime_t& gpu_runtime() noexcept {
 /** Every vendor's driver, loaded at the first VRAM call. */
 inline gpu_drivers_t& gpu_drivers() noexcept { return gpu_runtime().drivers; }
 
-/** Every GPU some class runs on, as the ABI numbers them. */
+/** Every GPU the drivers report, as the ABI numbers them. */
 inline std::span<gpu_device_t const> gpu_devices() noexcept {
     gpu_runtime_t const& runtime = gpu_runtime();
     return {runtime.devices, runtime.devices_count};
 }
 
-/** The checkpoint in @p bytes and where it sits: on the NVIDIA or AMD device whose memory holds it,
- *  which no host read reaches, or on the host, as host pages and Apple's unified memory are. */
-inline checkpoint_source_t checkpoint_source_of(bytes_view_t bytes) noexcept {
-    gpu_drivers_t const& drivers = gpu_drivers();
-    int const nvidia = cuda_device_of(drivers.cuda, bytes.data());
-    return {bytes, nvidia >= 0 ? nvidia : hip_device_of(drivers.hip, bytes.data())};
-}
-
-/** Copies the NVIDIA or AMD device bytes @p source into the host's @p destination through the
- *  driver whose device holds them, returning once they arrived, as a checkpoint's headers cross. */
-inline status_t copy_off_device(bytes_span_t destination, bytes_view_t source) noexcept {
-    if (destination.size() != source.size()) return status_t::config_mismatch_k;
-    gpu_drivers_t const& drivers = gpu_drivers();
-    if (int const nvidia = cuda_device_of(drivers.cuda, source.data()); nvidia >= 0)
-        return cuda_set_device(drivers.cuda, nvidia) == cuda_success_k &&
-                       cuda_copy(drivers.cuda, destination.data(), source.data(), source.size()) == cuda_success_k
-                   ? status_t::success_k
-                   : status_t::device_error_k;
-    if (int const amd = hip_device_of(drivers.hip, source.data()); amd >= 0)
-        return hip_set_device(drivers.hip, amd) == hip_success_k &&
-                       drivers.hip.copy(destination.data(), source.data(), source.size(), hip_copy_device_to_host_k) ==
-                           hip_success_k
-                   ? status_t::success_k
-                   : status_t::device_error_k;
-    return status_t::device_error_k;
-}
-
-/** Lowers one GPU class onto NumKong's GPU capabilities. On NVIDIA, the Ampere & Ada bits
- *  accumulate, while Hopper, Blackwell & RTX Blackwell each run only their own kits, and Rubin
- *  rides the Blackwell kits until its own land. AMD and Apple generations accumulate over their
- *  vendor's floor. */
-constexpr nk_capability_t numkong_capabilities_of(gpu_class_t gpu_class) noexcept {
-    nk_capability_t const ampere = nk_cap_cuda_k | nk_cap_ampere_k, ada = ampere | nk_cap_ada_k;
-    nk_capability_t const cdna3 = nk_cap_rocm_k | nk_cap_cdna3_k, cdna4 = cdna3 | nk_cap_cdna4_k;
-    nk_capability_t const metal9 = nk_cap_metal_k | nk_cap_apple9_k;
-    switch (gpu_class) {
-    case gpu_class_t::nvidia_ada_k: return ada;
-    case gpu_class_t::nvidia_hopper_k: return ada | nk_cap_hopper_k;
-    case gpu_class_t::nvidia_blackwell_k:
-    case gpu_class_t::nvidia_rubin_k: return ada | nk_cap_blackwell_k;
-    case gpu_class_t::nvidia_blackwellrtx_k: return ada | nk_cap_blackwellrtx_k;
-    case gpu_class_t::amd_cdna3_k: return cdna3;
-    case gpu_class_t::amd_cdna4_k: return cdna4;
-    case gpu_class_t::amd_cdna5_k: return cdna4 | nk_cap_cdna5_k;
-    case gpu_class_t::apple_metal7_k: return nk_cap_metal_k;
-    case gpu_class_t::apple_metal9_k: return metal9;
-    case gpu_class_t::apple_metal10_k: return metal9 | nk_cap_apple10_k;
-    case gpu_class_t::nvidia_ampere_k: return ampere;
-    case gpu_class_t::unknown_k: return nk_cap_serial_k;
-    }
-    return nk_cap_serial_k;
-}
-
-/** The ceiling an NVIDIA device pass instantiates: its class's, read off the one NumKong target the
- *  class compiles under. */
-inline constexpr nk_capability_t cuda_class_capabilities_k = numkong_capabilities_of(
-    NUMKONG_TARGET_BLACKWELLRTX ? gpu_class_t::nvidia_blackwellrtx_k
-    : NUMKONG_TARGET_BLACKWELL  ? gpu_class_t::nvidia_blackwell_k
-    : NUMKONG_TARGET_HOPPER     ? gpu_class_t::nvidia_hopper_k
-    : NUMKONG_TARGET_ADA        ? gpu_class_t::nvidia_ada_k
-                                : gpu_class_t::nvidia_ampere_k);
-
-/** Devices @p vram names, one when it names none. */
-inline std::size_t named_count(usearch_vram_options_t const& vram) noexcept {
-    return vram.devices && vram.devices_count ? vram.devices_count : 1;
-}
-
-/** The USearch device ordinal shard @p shard of @p vram sits on: the named devices taken
- *  round-robin, device zero when it names none. */
-inline std::size_t named_ordinal(usearch_vram_options_t const& vram, std::size_t shard) noexcept {
-    return vram.devices && vram.devices_count ? static_cast<std::size_t>(vram.devices[shard % vram.devices_count]) : 0;
-}
-
-/** Whether a device of @p available capabilities runs every kit one GPU class lowers onto. */
-constexpr bool numkong_admits(nk_capability_t available, gpu_class_t gpu_class) noexcept {
-    nk_capability_t const wanted = numkong_capabilities_of(gpu_class);
-    return (available & wanted) == wanted;
-}
-
-/** The capabilities a GPU ladder walks under: the devices' class @p device_class, narrowed to
- *  @p pinned when a caller names one; zero when the devices do not run the pinned class. */
-constexpr nk_capability_t gpu_pin_capabilities(gpu_class_t device_class, usearch_gpu_class_t pinned) noexcept {
-    nk_capability_t const device = numkong_capabilities_of(device_class);
-    if (pinned == usearch_gpu_class_unknown_k) return device;
-    if (!listed(gpu_classes_k, pinned)) return 0;
-    gpu_class_t const pinned_class = static_cast<gpu_class_t>(pinned);
-    return numkong_admits(device, pinned_class) ? numkong_capabilities_of(pinned_class) : 0;
+/** The classes whose units load on each device @ref gpu_devices lists, asked once at listing. */
+inline std::span<gpu_class_mask_t const> gpu_classes_loaded() noexcept {
+    gpu_runtime_t const& runtime = gpu_runtime();
+    return {runtime.loaded, runtime.devices_count};
 }
 
 /** Whether the build compiled device code for @p gpu_class, as CMake decided and told the dispatch
@@ -1772,16 +1648,337 @@ constexpr bool gpu_class_compiled(gpu_class_t gpu_class) noexcept {
     }
 }
 
-/** Whether the basic modalities compiled device code for @p gpu_class: their Ampere rung is the
- *  vendor-wide @c nvidia unit, which CMake gates as @c USEARCH_TARGET_NVIDIA. */
-constexpr bool basic_gpu_class_compiled(gpu_class_t gpu_class) noexcept {
-    if (gpu_class != gpu_class_t::nvidia_ampere_k) return gpu_class_compiled(gpu_class);
-#if USEARCH_TARGET_NVIDIA
-    return true;
-#else
-    return false;
+/** The bundle tables of the GPU class units, two addresses per dtype, which CMake writes beside
+ *  each class's dense unit. */
+extern "C" byte_t const* const dense_nvidia_ampere_bundles[];
+extern "C" byte_t const* const dense_nvidia_ada_bundles[];
+extern "C" byte_t const* const dense_nvidia_hopper_bundles[];
+extern "C" byte_t const* const dense_nvidia_blackwell_bundles[];
+extern "C" byte_t const* const dense_nvidia_blackwellrtx_bundles[];
+extern "C" byte_t const* const dense_amd_cdna3_bundles[];
+extern "C" byte_t const* const dense_amd_cdna4_bundles[];
+extern "C" byte_t const* const dense_amd_cdna5_bundles[];
+
+/** The device code the loader is asked about for @p gpu_class: its dense unit's first bundle, empty
+ *  where the build has none. */
+inline bytes_view_t gpu_class_probe_of(gpu_class_t gpu_class) noexcept {
+    byte_t const* const* bounds = nullptr;
+    switch (gpu_class) {
+#if USEARCH_TARGET_NVIDIA_AMPERE
+    case gpu_class_t::nvidia_ampere_k: bounds = dense_nvidia_ampere_bundles; break;
 #endif
+#if USEARCH_TARGET_NVIDIA_ADA
+    case gpu_class_t::nvidia_ada_k: bounds = dense_nvidia_ada_bundles; break;
+#endif
+#if USEARCH_TARGET_NVIDIA_HOPPER
+    case gpu_class_t::nvidia_hopper_k: bounds = dense_nvidia_hopper_bundles; break;
+#endif
+#if USEARCH_TARGET_NVIDIA_BLACKWELL
+    case gpu_class_t::nvidia_blackwell_k: bounds = dense_nvidia_blackwell_bundles; break;
+#endif
+#if USEARCH_TARGET_NVIDIA_BLACKWELLRTX
+    case gpu_class_t::nvidia_blackwellrtx_k: bounds = dense_nvidia_blackwellrtx_bundles; break;
+#endif
+#if USEARCH_TARGET_AMD_CDNA3
+    case gpu_class_t::amd_cdna3_k: bounds = dense_amd_cdna3_bundles; break;
+#endif
+#if USEARCH_TARGET_AMD_CDNA4
+    case gpu_class_t::amd_cdna4_k: bounds = dense_amd_cdna4_bundles; break;
+#endif
+#if USEARCH_TARGET_AMD_CDNA5
+    case gpu_class_t::amd_cdna5_k: bounds = dense_amd_cdna5_bundles; break;
+#endif
+    default: return {};
+    }
+    return {bounds[0], bounds[1]};
 }
+
+/** The vendor whose devices @p gpu_class serves, read off the C enum's per-vendor value ranges. */
+constexpr gpu_vendor_t gpu_vendor_of(gpu_class_t gpu_class) noexcept {
+    u32_t const value = static_cast<u32_t>(gpu_class);
+    return value == usearch_gpu_class_unknown_k         ? gpu_vendor_t::unknown_k
+           : value <= usearch_gpu_class_nvidia_rubin_k  ? gpu_vendor_t::nvidia_k
+           : value <= usearch_gpu_class_amd_cdna5_k     ? gpu_vendor_t::amd_k
+           : value <= usearch_gpu_class_apple_metal10_k ? gpu_vendor_t::apple_k
+                                                        : gpu_vendor_t::unknown_k;
+}
+
+/** The newest Apple GPU family an Apple class needs, Apple7 and Apple8 sharing the floor. */
+constexpr u32_t apple_family_of(gpu_class_t gpu_class) noexcept {
+    return gpu_class == gpu_class_t::apple_metal10_k ? 10 : gpu_class == gpu_class_t::apple_metal9_k ? 9 : 7;
+}
+
+/** Whether @p device runs @p gpu_class, as the loader of @p drivers answers: the driver loads a
+ *  class's device code only where some code it holds runs there, and an Apple class runs from the
+ *  Apple family it needs on. */
+inline bool gpu_class_serves(gpu_class_t gpu_class, gpu_device_t const& device, gpu_drivers_t const& drivers) noexcept {
+    if (gpu_vendor_of(gpu_class) != device.vendor || !gpu_class_compiled(gpu_class)) return false;
+    int const ordinal = static_cast<int>(device.vendor_ordinal);
+    switch (device.vendor) {
+    case gpu_vendor_t::nvidia_k:
+        return succeeded(cuda_module_t::load(drivers.cuda, ordinal, gpu_class_probe_of(gpu_class)).status);
+    case gpu_vendor_t::amd_k:
+        return succeeded(hip_module_t::load(drivers.hip, ordinal, gpu_class_probe_of(gpu_class)).status);
+    case gpu_vendor_t::apple_k: return device.architecture_major >= apple_family_of(gpu_class);
+    default: return false;
+    }
+}
+
+inline gpu_runtime_t::gpu_runtime_t() noexcept {
+    devices_count = list_gpu_devices(drivers, devices);
+    for (std::size_t position = 0; position != devices_count; ++position)
+        for (usearch_gpu_class_t const gpu_class : gpu_classes_k)
+            if (gpu_class_serves(static_cast<gpu_class_t>(gpu_class), devices[position], drivers))
+                loaded[position] |= gpu_class_bit(static_cast<gpu_class_t>(gpu_class));
+}
+
+/** The class a GPU class extends, the next one down its own lineage, or @c unknown_k past the
+ *  lineage's root: the oldest class of each vendor, and CDNA5, which roots its own lineage on the
+ *  ROCm floor, since it drops instructions CDNA3 and CDNA4 keep. */
+constexpr gpu_class_t parent_class_of(gpu_class_t gpu_class) noexcept {
+    switch (gpu_class) {
+    case gpu_class_t::nvidia_rubin_k: return gpu_class_t::nvidia_blackwell_k;
+    case gpu_class_t::nvidia_blackwell_k:
+    case gpu_class_t::nvidia_blackwellrtx_k:
+    case gpu_class_t::nvidia_hopper_k: return gpu_class_t::nvidia_ada_k;
+    case gpu_class_t::nvidia_ada_k: return gpu_class_t::nvidia_ampere_k;
+    case gpu_class_t::amd_cdna4_k: return gpu_class_t::amd_cdna3_k;
+    case gpu_class_t::apple_metal10_k: return gpu_class_t::apple_metal9_k;
+    case gpu_class_t::apple_metal9_k: return gpu_class_t::apple_metal7_k;
+    default: return gpu_class_t::unknown_k;
+    }
+}
+
+/** Whether @p gpu_class sits on the lineage of @p pinned, the pin or one of its ancestors, every
+ *  class when nothing is pinned. */
+constexpr bool gpu_class_under_pin(gpu_class_t gpu_class, usearch_gpu_class_t pinned) noexcept {
+    if (pinned == usearch_gpu_class_unknown_k) return true;
+    for (gpu_class_t rung = static_cast<gpu_class_t>(pinned); rung != gpu_class_t::unknown_k;
+         rung = parent_class_of(rung))
+        if (rung == gpu_class) return true;
+    return false;
+}
+
+/** NVIDIA classes newest first, Rubin's unit to come. */
+using nvidia_ladder_t =
+    gpu_ladder<gpu_class_t::nvidia_rubin_k, gpu_class_t::nvidia_blackwellrtx_k, gpu_class_t::nvidia_blackwell_k,
+               gpu_class_t::nvidia_hopper_k, gpu_class_t::nvidia_ada_k, gpu_class_t::nvidia_ampere_k>;
+
+/** AMD classes newest first. */
+using amd_ladder_t = gpu_ladder<gpu_class_t::amd_cdna5_k, gpu_class_t::amd_cdna4_k, gpu_class_t::amd_cdna3_k>;
+
+/** Apple classes newest first. */
+using apple_ladder_t =
+    gpu_ladder<gpu_class_t::apple_metal10_k, gpu_class_t::apple_metal9_k, gpu_class_t::apple_metal7_k>;
+
+/** A basic modality's multiversioned ladder, or the vendor ladder in a monoversioned build, whose
+ *  one kept class carries every modality. */
+#if USEARCH_TARGET_MONOVERSIONED
+template <typename multiversioned_ladder_type_>
+using basic_gpu_ladder = nvidia_ladder_t;
+#else
+template <typename multiversioned_ladder_type_>
+using basic_gpu_ladder = multiversioned_ladder_type_;
+#endif
+
+/** The newest class of @p ladder at or under @p pinned among @p loaded, or @c unknown_k. */
+template <gpu_class_t... classes_>
+gpu_class_t pick_gpu_class(gpu_ladder<classes_...>, gpu_class_mask_t loaded, usearch_gpu_class_t pinned) noexcept {
+    gpu_class_t picked = gpu_class_t::unknown_k;
+    auto rung = [&]<gpu_class_t class_>() noexcept {
+        if (picked == gpu_class_t::unknown_k && gpu_class_under_pin(class_, pinned) && (loaded & gpu_class_bit(class_)))
+            picked = class_;
+    };
+    (rung.template operator()<classes_>(), ...);
+    return picked;
+}
+
+/** The class a device of @p vendor whose loader took @p loaded takes under @p pinned, walking
+ *  its own vendor's ladder; @c unknown_k when no unit this build carries runs on it, or none at
+ *  or under the pin does. */
+inline gpu_class_t pick_gpu_class(gpu_vendor_t vendor, gpu_class_mask_t loaded, usearch_gpu_class_t pinned) noexcept {
+    switch (vendor) {
+    case gpu_vendor_t::nvidia_k: return pick_gpu_class(nvidia_ladder_t {}, loaded, pinned);
+    case gpu_vendor_t::amd_k: return pick_gpu_class(amd_ladder_t {}, loaded, pinned);
+    case gpu_vendor_t::apple_k: return pick_gpu_class(apple_ladder_t {}, loaded, pinned);
+    default: return gpu_class_t::unknown_k;
+    }
+}
+
+/** The class @p device takes under @p pinned, from what the listing entry of its vendor and
+ *  ordinal loaded. */
+inline gpu_class_t pick_gpu_class(gpu_device_t const& device, usearch_gpu_class_t pinned) noexcept {
+    std::span<gpu_device_t const> const devices = gpu_devices();
+    std::span<gpu_class_mask_t const> const loaded = gpu_classes_loaded();
+    for (std::size_t position = 0; position != devices.size(); ++position)
+        if (devices[position].vendor == device.vendor && devices[position].vendor_ordinal == device.vendor_ordinal)
+            return pick_gpu_class(device.vendor, loaded[position], pinned);
+    return gpu_class_t::unknown_k;
+}
+
+/** The devices one index places its shards on: their one vendor, the best class all of them load
+ *  under the pin, every class they all load, and their positions in the listing @c table. */
+struct gpu_placement_t {
+    gpu_vendor_t vendor = gpu_vendor_t::unknown_k;
+    gpu_class_t gpu_class = gpu_class_t::unknown_k;
+    gpu_class_mask_t loaded = 0;
+    std::span<gpu_device_t const> table;
+    std::span<std::int32_t const> positions;
+
+    gpu_device_t const& first() const noexcept { return table[static_cast<std::size_t>(positions[0])]; }
+};
+
+/**
+ *  @brief Resolves the devices @p vram names, device zero when it names none, against the listing
+ *      @p table, whose classes @p loaded holds as the loader answered at listing.
+ *
+ *  An index spans one vendor, since its shards merge through peer copies, and runs the best class
+ *  all its devices load, never above the pin, as a CPU executor runs what all its cores share.
+ *
+ *  @par Statuses:
+ *  - @c invalid_argument_k The pin is a value no class takes.
+ *  - @c device_error_k An ordinal is past the listing.
+ *  - @c config_mismatch_k The devices span vendors.
+ *  - @c unsupported_k The devices share no class this build carries at or under the pin.
+ */
+inline expected<gpu_placement_t> resolve_placement(std::span<gpu_device_t const> table,
+                                                   std::span<gpu_class_mask_t const> loaded,
+                                                   usearch_vram_options_t const& vram) noexcept {
+    static constexpr std::int32_t device_zero_k[] {0};
+    if (vram.gpu_class != usearch_gpu_class_unknown_k && !listed(gpu_classes_k, vram.gpu_class))
+        return {{}, status_t::invalid_argument_k};
+    gpu_placement_t placement;
+    placement.table = table, placement.loaded = ~gpu_class_mask_t {0};
+    placement.positions = vram.devices && vram.devices_count
+                              ? std::span<std::int32_t const> {vram.devices, vram.devices_count}
+                              : std::span<std::int32_t const> {device_zero_k};
+    for (std::int32_t const ordinal : placement.positions) {
+        std::size_t const position = static_cast<std::size_t>(ordinal);
+        if (ordinal < 0 || position >= table.size()) return {{}, status_t::device_error_k};
+        gpu_vendor_t const vendor = table[position].vendor;
+        if (placement.vendor != gpu_vendor_t::unknown_k && vendor != placement.vendor)
+            return {{}, status_t::config_mismatch_k};
+        placement.vendor = vendor, placement.loaded &= loaded[position];
+    }
+    placement.gpu_class = pick_gpu_class(placement.vendor, placement.loaded, vram.gpu_class);
+    if (placement.gpu_class == gpu_class_t::unknown_k) return {{}, status_t::unsupported_k};
+    return {placement, status_t::success_k};
+}
+
+/** Resolves the devices @p vram names against this process's listing. */
+inline expected<gpu_placement_t> resolve_placement(usearch_vram_options_t const& vram) noexcept {
+    return resolve_placement(gpu_devices(), gpu_classes_loaded(), vram);
+}
+
+/** The checkpoint in @p bytes and where it sits: on the NVIDIA or AMD device whose memory holds it,
+ *  which no host read reaches, or on the host, as host pages and Apple's unified memory are. */
+inline checkpoint_source_t checkpoint_source_of(bytes_view_t bytes) noexcept {
+    gpu_drivers_t const& drivers = gpu_drivers();
+    int const nvidia = cuda_device_of(drivers.cuda, bytes.data());
+    return {bytes, nvidia >= 0 ? nvidia : hip_device_of(drivers.hip, bytes.data())};
+}
+
+/** Copies the NVIDIA or AMD device bytes @p source into the host's @p destination through the
+ *  driver whose device holds them, returning once they arrived, as a checkpoint's headers cross. */
+inline status_t copy_off_device(bytes_span_t destination, bytes_view_t source) noexcept {
+    if (destination.size() != source.size()) return status_t::config_mismatch_k;
+    gpu_drivers_t const& drivers = gpu_drivers();
+    if (int const nvidia = cuda_device_of(drivers.cuda, source.data()); nvidia >= 0)
+        return cuda_set_device(drivers.cuda, nvidia) == cuda_success_k &&
+                       cuda_copy(drivers.cuda, destination.data(), source.data(), source.size()) == cuda_success_k
+                   ? status_t::success_k
+                   : status_t::device_error_k;
+    if (int const amd = hip_device_of(drivers.hip, source.data()); amd >= 0)
+        return hip_set_device(drivers.hip, amd) == hip_success_k &&
+                       drivers.hip.copy(destination.data(), source.data(), source.size(), hip_copy_device_to_host_k) ==
+                           hip_success_k
+                   ? status_t::success_k
+                   : status_t::device_error_k;
+    return status_t::device_error_k;
+}
+
+/** Lowers one GPU class onto NumKong's GPU capabilities. On NVIDIA, the Ampere & Ada bits
+ *  accumulate, while Hopper, Blackwell & RTX Blackwell each run only their own kits, and Rubin
+ *  rides the Blackwell kits until its own land. On AMD, CDNA4 accumulates over CDNA3, while CDNA5
+ *  drops the half and byte dots and roots its own lineage on the ROCm floor, so each kit lists the
+ *  classes it runs on. Apple generations accumulate over their vendor's floor. */
+constexpr nk_capability_t numkong_capabilities_of(gpu_class_t gpu_class) noexcept {
+    nk_capability_t const ampere = nk_cap_cuda_k | nk_cap_ampere_k, ada = ampere | nk_cap_ada_k;
+    nk_capability_t const cdna3 = nk_cap_rocm_k | nk_cap_cdna3_k, cdna4 = cdna3 | nk_cap_cdna4_k;
+    nk_capability_t const cdna5 = nk_cap_rocm_k | nk_cap_cdna5_k;
+    nk_capability_t const metal9 = nk_cap_metal_k | nk_cap_apple9_k;
+    switch (gpu_class) {
+    case gpu_class_t::nvidia_ada_k: return ada;
+    case gpu_class_t::nvidia_hopper_k: return ada | nk_cap_hopper_k;
+    case gpu_class_t::nvidia_blackwell_k:
+    case gpu_class_t::nvidia_rubin_k: return ada | nk_cap_blackwell_k;
+    case gpu_class_t::nvidia_blackwellrtx_k: return ada | nk_cap_blackwellrtx_k;
+    case gpu_class_t::amd_cdna3_k: return cdna3;
+    case gpu_class_t::amd_cdna4_k: return cdna4;
+    case gpu_class_t::amd_cdna5_k: return cdna5;
+    case gpu_class_t::apple_metal7_k: return nk_cap_metal_k;
+    case gpu_class_t::apple_metal9_k: return metal9;
+    case gpu_class_t::apple_metal10_k: return metal9 | nk_cap_apple10_k;
+    case gpu_class_t::nvidia_ampere_k: return ampere;
+    case gpu_class_t::unknown_k: return nk_cap_serial_k;
+    }
+    return nk_cap_serial_k;
+}
+
+/** Lowers one NVIDIA class onto StringZilla's GPU capabilities: every class reaches @c ampere , and
+ *  the tiers past it start at compute capability 9.0 for @c hopper and 10.0 for @c blackwell ,
+ *  consumer Blackwell and Rubin included. */
+constexpr sz_capability_t stringzilla_capabilities_of(gpu_class_t gpu_class) noexcept {
+    sz_capability_t const ampere = sz_cap_cuda_k | sz_cap_ampere_k, hopper = ampere | sz_cap_hopper_k;
+    switch (gpu_class) {
+    case gpu_class_t::nvidia_ampere_k:
+    case gpu_class_t::nvidia_ada_k: return ampere;
+    case gpu_class_t::nvidia_hopper_k: return hopper;
+    case gpu_class_t::nvidia_blackwell_k:
+    case gpu_class_t::nvidia_blackwellrtx_k:
+    case gpu_class_t::nvidia_rubin_k: return hopper | sz_cap_blackwell_k;
+    default: return sz_cap_serial_k;
+    }
+}
+
+/** The NVIDIA class a class unit and its device passes compile as, the one its CMake row sets
+ *  @c USEARCH_TARGET_NVIDIA_<CLASS> for; where gates name several, the newest. */
+inline constexpr gpu_class_t cuda_class_k =
+#if USEARCH_TARGET_NVIDIA_BLACKWELLRTX
+    gpu_class_t::nvidia_blackwellrtx_k;
+#elif USEARCH_TARGET_NVIDIA_BLACKWELL
+    gpu_class_t::nvidia_blackwell_k;
+#elif USEARCH_TARGET_NVIDIA_HOPPER
+    gpu_class_t::nvidia_hopper_k;
+#elif USEARCH_TARGET_NVIDIA_ADA
+    gpu_class_t::nvidia_ada_k;
+#else
+    gpu_class_t::nvidia_ampere_k;
+#endif
+
+/** The ceiling an NVIDIA device pass instantiates: its class's. */
+inline constexpr nk_capability_t cuda_class_capabilities_k = numkong_capabilities_of(cuda_class_k);
+
+/** Devices @p vram names, one when it names none. */
+inline std::size_t named_count(usearch_vram_options_t const& vram) noexcept {
+    return vram.devices && vram.devices_count ? vram.devices_count : 1;
+}
+
+/** The USearch device ordinal shard @p shard of @p vram sits on: the named devices taken
+ *  round-robin, device zero when it names none. */
+inline std::size_t named_ordinal(usearch_vram_options_t const& vram, std::size_t shard) noexcept {
+    return vram.devices && vram.devices_count ? static_cast<std::size_t>(vram.devices[shard % vram.devices_count]) : 0;
+}
+
+template <gpu_class_t... classes_>
+consteval std::size_t compiled_rungs(gpu_ladder<classes_...>) noexcept {
+    return (std::size_t {gpu_class_compiled(classes_)} + ... + 0);
+}
+
+#if USEARCH_TARGET_MONOVERSIONED
+static_assert(compiled_rungs(nvidia_ladder_t {}) <= 1 && compiled_rungs(amd_ladder_t {}) <= 1 &&
+              compiled_rungs(apple_ladder_t {}) <= 1);
+#endif
 
 // The device listing crosses the ABI by casts, so the C vendors and classes mirror the engine's.
 static_assert(static_cast<u32_t>(gpu_vendor_t::apple_k) == usearch_gpu_vendor_apple_k);
@@ -1920,13 +2117,6 @@ struct usearch_executor_handle_t {
     std::variant<forkunion_executor_t, nvme_executor_t, gpu_executor_t> executor;
 };
 
-/** Requests AMX tile state alone when @p ceiling holds it, granted process-wide on Linux; more bits
- *  would rewrite FPCR. */
-inline void request_tile_state(cpu_ceiling_t ceiling) noexcept {
-    if (!(ceiling.compute & nk_cap_sapphireamx_k)) return;
-    [[maybe_unused]] nk_status_t const requested = nk_configure_thread_cpu(nk_cap_sapphireamx_k);
-}
-
 /** Discovers the topology and spawns @p threads over it into @p handle under @p ceiling, near the
  *  one memory domain @p ram names on a machine of several, answering @p handle, or null once the
  *  outcome records why not; one thread is the caller. */
@@ -1946,7 +2136,6 @@ inline usearch_executor_t spawn_ram_executor(usearch_executor_handle_t& handle, 
                                             threads, forkunion_allowed_of(ceiling))
                                       : forkunion_executor_t::spawn(topology, threads, forkunion_allowed_of(ceiling));
     if (failed(status)) return propagate_error(status, outcome), nullptr;
-    request_tile_state(ceiling);
     handle.executor.emplace<forkunion_executor_t>(std::move(spawned));
     return &handle;
 }
@@ -2022,7 +2211,6 @@ inline usearch_executor_t spawn_nvme_executor(usearch_executor_handle_t& handle,
                                                     near_domain);
     if (failed(status))
         return propagate_error(status, outcome, "No I/O engine opened on the executor's threads"), nullptr;
-    request_tile_state(ceiling);
     handle.executor.emplace<nvme_executor_t>(std::move(spawned));
     return &handle;
 }

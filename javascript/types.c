@@ -32,7 +32,7 @@ static bool usearch_js_name_from_value(napi_env env, napi_value value, char cons
         napi_get_value_string_utf8(env, value, name, sizeof(name), &length) != napi_ok)
         return usearch_js_throw_field(env, field, "must be a string");
     *result = parse(name);
-    if (strcmp(spell(*result), name) == 0) return true;
+    if (*result >= 0 && strcmp(spell(*result), name) == 0) return true;
     char message[usearch_js_message_capacity_k];
     snprintf(message, sizeof(message), "The '%s' argument names nothing: '%s'", field, name);
     return usearch_js_throw(env, usearch_status_invalid_argument_k, message);
@@ -69,7 +69,10 @@ static char const* usearch_js_traversal_spell(int traversal) {
 }
 
 static int usearch_js_cpu_class_parse(char const* name) {
-    return (int)usearch_cpu_class_from_name(usearch_js_name_view(name));
+    usearch_cpu_class_t cpu_class = usearch_cpu_class_unknown_k;
+    return usearch_cpu_class_from_name(usearch_js_name_view(name), &cpu_class) == usearch_status_success_k
+               ? (int)cpu_class
+               : -1;
 }
 
 static char const* usearch_js_cpu_class_spell(int cpu_class) {
@@ -77,7 +80,10 @@ static char const* usearch_js_cpu_class_spell(int cpu_class) {
 }
 
 static int usearch_js_gpu_class_parse(char const* name) {
-    return (int)usearch_gpu_class_from_name(usearch_js_name_view(name));
+    usearch_gpu_class_t gpu_class = usearch_gpu_class_unknown_k;
+    return usearch_gpu_class_from_name(usearch_js_name_view(name), &gpu_class) == usearch_status_success_k
+               ? (int)gpu_class
+               : -1;
 }
 
 static char const* usearch_js_gpu_class_spell(int gpu_class) {

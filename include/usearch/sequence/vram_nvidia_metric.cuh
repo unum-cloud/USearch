@@ -32,14 +32,14 @@
 #include <utility>     // `std::make_integer_sequence` - the word counts, every rung's kernels
 #include <variant>     // `std::monostate` - the Levenshtein kits' parameters
 
-#include <numkong/types.h>                  // `NUMKONG_ARCH_CUDA_AMPERE_` - the kits this unit carries
 #include <stringzilla/cuda.cuh>             // `sz_group_shuffle_up_cuda_` & kin - the lane steps
 #include <stringzilla/levenshtein/simt.cuh> // `sz_levenshtein_group_score_simt_` & the query preparation
 #include <stringzilla/overlap/simt.cuh>     // `sz_overlap_query_prepare_simt_` & the candidate matches
+#include <stringzilla/strings/ampere.cuh>   // `sz_u32_lanes_sum_ampere_`
 
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/vram_device.hpp"        // `vram_kernel_symbol` - a kernel's symbol
-#include "usearch/utilities/vram_nvidia_device.cuh" // `cuda_warp_t` - the NVIDIA warp policy
+#include "usearch/utilities/vram_nvidia_device.cuh" // `cuda_warp_t`, `ampere_scan_t` - the NVIDIA warp and scans
 #include "usearch/basic/vram_index.cuh"
 #include "usearch/basic/vram_nvidia_index.cuh" // `basic::cuda_kernel_body`
 #include "usearch/sequence/ram_metric.hpp"     // `levenshtein_ladder`, `overlap_ladder`
@@ -181,12 +181,6 @@ __device__ __forceinline__ distance_t cuda_levenshtein_bound_ampere(sz_levenshte
                                                          : 0);
 }
 
-/** The sum of @p value over the warp, in every lane, which StringZilla's group scorers count
- *  through: one @c redux.sync on the Ampere floor every sequence kit compiles for. */
-__device__ __forceinline__ sz_u32_t cuda_u32_lanes_sum_ampere(sz_u32_t value) noexcept {
-    return __reduce_add_sync(0xFFFFFFFFu, value);
-}
-
 /** The distance over @p symbol_ from @p query to @p sequence, scored by a group of @p lanes_ lanes
  *  owning @p lane_words_ Myers words apiece, exact within @p limit and the running score past it.
  *  Out of line, so each body compiles once per unit, whatever number of walks call it. */
@@ -198,11 +192,11 @@ __device__ __noinline__ sz_ssize_t cuda_levenshtein_group_ampere(sz_levenshtein_
     if constexpr (symbol_ == sz_levenshtein_runes_k)
         return sz_levenshtein_group_score_utf8_simt_(&query, text, sequence.bytes, lane_words_, lanes_, limit,
                                                      lane % lanes_, sz_group_shuffle_up_cuda_,
-                                                     sz_group_shuffle_index_cuda_, cuda_u32_lanes_sum_ampere);
+                                                     sz_group_shuffle_index_cuda_, sz_u32_lanes_sum_ampere_);
     else
         return sz_levenshtein_group_score_simt_(&query, text, sequence.bytes, lane_words_, lanes_, limit, lane % lanes_,
                                                 sz_group_shuffle_up_cuda_, sz_group_shuffle_index_cuda_,
-                                                cuda_u32_lanes_sum_ampere);
+                                                sz_u32_lanes_sum_ampere_);
 }
 
 /** Scores a lone lane's candidate at the query's exact word count, through the scorer of that count
@@ -258,13 +252,13 @@ __device__ __forceinline__ distance_t cuda_levenshtein_score_ampere(sz_levenshte
  *  query's classes and masks in the span its walk prepares. Serves queries of up to 64 symbols a
  *  word. */
 struct u8_ampere_levenshtein_kit_t {
-    inline static constexpr sz_capability_t capability_k = sz_cap_cuda_k;
-    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_AMPERE_;
+    inline static constexpr sz_capability_t capability_k = sz_cap_ampere_k;
 
     /** The kit's identity in kernel symbols. */
     inline static constexpr char name_k[] = "u8_ampere_levenshtein_kit_t";
 
     using warp_t = cuda_warp_t;
+    using scan_t = ampere_scan_t;
     using query_t = sz_levenshtein_query_t;
     using selector_t = basic::vram_keep_diverse_t;
 
@@ -322,13 +316,13 @@ struct u8_ampere_levenshtein_kit_t {
  *  query's span holds. A sequence of @c b bytes holds at most @c b runes, so the byte kit's
  *  sequences bound its rungs too. */
 struct utf8_ampere_levenshtein_kit_t {
-    inline static constexpr sz_capability_t capability_k = sz_cap_cuda_k;
-    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_AMPERE_;
+    inline static constexpr sz_capability_t capability_k = sz_cap_ampere_k;
 
     /** The kit's identity in kernel symbols. */
     inline static constexpr char name_k[] = "utf8_ampere_levenshtein_kit_t";
 
     using warp_t = cuda_warp_t;
+    using scan_t = ampere_scan_t;
     using query_t = sz_levenshtein_query_t;
     using selector_t = basic::vram_keep_diverse_t;
 
@@ -426,12 +420,12 @@ __device__ __noinline__ inline u64_t cuda_overlap_score_ampere(sz_overlap_query_
  *  the parameters the face uploads, their count first. */
 struct u8_ampere_overlap_kit_t {
     inline static constexpr sz_capability_t capability_k = sz_cap_cuda_k;
-    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_AMPERE_;
 
     /** The kit's identity in kernel symbols. */
     inline static constexpr char name_k[] = "u8_ampere_overlap_kit_t";
 
     using warp_t = cuda_warp_t;
+    using scan_t = ampere_scan_t;
     using query_t = sz_overlap_query_t;
     using selector_t = basic::vram_keep_diverse_t;
 
@@ -675,12 +669,12 @@ __device__ __noinline__ distance_t cuda_needleman_wunsch_score_ampere(cuda_needl
  *  folded table the face uploads as the parameters. */
 struct packed_ampere_needleman_wunsch_kit_t {
     inline static constexpr sz_capability_t capability_k = sz_cap_cuda_k;
-    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_AMPERE_;
 
     /** The kit's identity in kernel symbols. */
     inline static constexpr char name_k[] = "packed_ampere_needleman_wunsch_kit_t";
 
     using warp_t = cuda_warp_t;
+    using scan_t = ampere_scan_t;
     using query_t = cuda_needleman_wunsch_query_t;
     using selector_t = basic::vram_keep_diverse_t;
 

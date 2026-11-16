@@ -3,13 +3,17 @@
  *  @author Ash Vardanian
  *  @date October 16, 2026
  *  @brief Device-side vocabulary every AMD index's kernels share, the twin of
- *      @c vram_nvidia_device.cuh: the warp policy the walks are written against.
+ *      @c vram_nvidia_device.cuh: the warp policy the walks are written against and the scan kit
+ *      of each generation.
  */
 #pragma once
 
 #include <cstddef> // `std::size_t`
 
 #include <hip/hip_runtime.h> // `__shfl`, `__ballot`, `__lane_id` & the agent-scope atomics
+
+#include <stringzilla/strings/cdna3.cuh> // `sz_u32_wavefront_prefix_sum_cdna3_`, `sz_u64_wavefront_prefix_sum_cdna3_`
+#include <stringzilla/strings/cdna5.cuh> // `sz_u32_lanes_prefix_sum_cdna5_`, `sz_u64_lanes_prefix_sum_cdna5_`
 
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/vram_amd_device.hpp"
@@ -23,16 +27,15 @@ static_assert(sizeof(hip_allocation_properties_t) == 32 && sizeof(hip_access_des
 
 /**
  *  @brief The AMD warp policy the shared walk code is written against, the twin of
- *      @c cuda_warp_t: wavefronts of @p width_ lanes and agent-scope atomics.
+ *      @c cuda_warp_t: wavefronts of @c width_k lanes and agent-scope atomics.
  *
  *  A wavefront moves in lockstep, so the votes and shuffles take no participation mask, and
  *  @ref sync is a wave-scoped fence pair around the scheduling barrier. Masks are as wide as the
- *  wavefront, @c u64_t for the 64 lanes of CDNA3 and CDNA4. The width is the class's, which a
- *  schedule takes from its ceiling, so one code object may carry kernels of either width.
+ *  wavefront, @c u64_t for the 64 lanes of CDNA3 and CDNA4. The schedule names the width, and
+ *  scans live in its generation's scan kit beside it.
  */
 template <u32_t width_>
 struct hip_warp {
-    static_assert(width_ == 32 || width_ == 64);
     inline static constexpr u32_t width_k = width_;
     using mask_t = std::conditional_t<width_k == 64, u64_t, u32_t>;
     inline static constexpr mask_t all_k = ~mask_t(0);
@@ -54,6 +57,7 @@ struct hip_warp {
                                                                u32_t width = width_k) noexcept {
         return __shfl_down(value, delta, width);
     }
+
     // The predicates are `int`, as the vote intrinsics take them, so any nonzero lane votes.
     static __device__ __forceinline__ mask_t ballot(int predicate) noexcept { return __ballot(predicate); }
     static __device__ __forceinline__ bool any(int predicate) noexcept { return __any(predicate) != 0; }
@@ -136,6 +140,46 @@ struct hip_warp {
     static __device__ __forceinline__ void copy_bytes(void* target, void const* source, std::size_t bytes) noexcept {
         for (std::size_t offset = 0; offset != bytes; ++offset)
             static_cast<byte_t*>(target)[offset] = static_cast<byte_t const*>(source)[offset];
+    }
+};
+
+/** The scans every ROCm device runs: a shuffle per doubling of the distance across the
+ *  wavefront. */
+struct rocm_scan_t {
+
+    /** The sum of @p value over @p lane and every lane below it. */
+    template <typename value_type_>
+    static __device__ __forceinline__ value_type_ warp_inclusive_sum(value_type_ value, u32_t lane) noexcept {
+        u32_t const width = warpSize;
+        for (u32_t delta = 1; delta != width; delta <<= 1) {
+            value_type_ const below = __shfl_up(value, delta);
+            if (lane >= delta) value += below;
+        }
+        return value;
+    }
+};
+
+/** The CDNA3 and CDNA4 scans: StringZilla's DPP moves across a 64-lane wavefront. */
+struct cdna3_scan_t {
+
+    /** The sum of @p value over its lane and every lane below it. */
+    template <typename value_type_>
+    static __device__ __forceinline__ value_type_ warp_inclusive_sum(value_type_ value, u32_t) noexcept {
+        static_assert(std::is_unsigned_v<value_type_> && (sizeof(value_type_) == 4 || sizeof(value_type_) == 8));
+        if constexpr (sizeof(value_type_) == 4) return sz_u32_wavefront_prefix_sum_cdna3_(value);
+        else return sz_u64_wavefront_prefix_sum_cdna3_(value);
+    }
+};
+
+/** The CDNA5 scans: StringZilla's DPP rows joined by lane permutes across a 32-lane wavefront. */
+struct cdna5_scan_t {
+
+    /** The sum of @p value over its lane and every lane below it. */
+    template <typename value_type_>
+    static __device__ __forceinline__ value_type_ warp_inclusive_sum(value_type_ value, u32_t) noexcept {
+        static_assert(std::is_unsigned_v<value_type_> && (sizeof(value_type_) == 4 || sizeof(value_type_) == 8));
+        if constexpr (sizeof(value_type_) == 4) return sz_u32_lanes_prefix_sum_cdna5_(value);
+        else return sz_u64_lanes_prefix_sum_cdna5_(value);
     }
 };
 

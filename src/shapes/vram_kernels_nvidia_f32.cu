@@ -2,7 +2,7 @@
  *  @file src/shapes/vram_kernels_nvidia_f32.cu
  *  @author Ash Vardanian
  *  @date October 15, 2026
- *  @brief The f32 shapes kernels at the Ampere floor, for every NVIDIA class.
+ *  @brief The f32 shapes kernels at the Ampere floor, or a monoversioned build's one class.
  *
  *  NVCC compiles it device-only into the f32 fatbin, which @c vram_variants_nvidia.cpp finds linked
  *  in beside its variants.

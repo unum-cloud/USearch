@@ -30,12 +30,11 @@
 #include <numkong/shapes.h>        // `nk_shapes_pack_f16_serial` & kin, which `shapes/serial.h` expects declared ahead
 #include <numkong/shapes/cuda.cuh> // `nk_chamfer_warp_packed_f16_cuda_` & kin
 #include <numkong/shapes/blackwell.cuh> // `nk_chamfer_warp_packed_f16_blackwell_` & kin
-#include <numkong/types.h>              // `NUMKONG_ARCH_CUDA_AMPERE_` - the kits this unit carries
 #include <numkong/types.hpp>            // `nk::type_for` - a kernel's scalar
 
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/vram_device.hpp"        // `vram_kernel_symbol` - a kernel's symbol
-#include "usearch/utilities/vram_nvidia_device.cuh" // `cuda_warp_t` - the NVIDIA warp policy
+#include "usearch/utilities/vram_nvidia_device.cuh" // `cuda_warp_t`, `ampere_scan_t` - the NVIDIA warp and scans
 #include "usearch/basic/vram_index.cuh"
 #include "usearch/basic/vram_nvidia_index.cuh" // `basic::cuda_kernel_body`
 #include "usearch/shapes/ram_metric.hpp"       // `shapes_ladder`
@@ -84,10 +83,10 @@ __device__ __forceinline__ void cuda_shapes_load_values(basic::vram_load<node_id
 /** Chamfer and Hausdorff between f16 packs in f32 math, a warp to a shape. */
 struct f16_ampere_shapes_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
-    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_AMPERE_;
     inline static constexpr u32_t lanes_per_entry_k = 32;
 
     using warp_t = cuda_warp_t;
+    using scan_t = ampere_scan_t;
     using query_t = vram_pack_query_t;
     using selector_t = basic::vram_keep_diverse_t;
 
@@ -125,17 +124,15 @@ struct f16_ampere_shapes_kit_t {
     }
 };
 
-#if NUMKONG_TARGET_BLACKWELL
-
 /** Chamfer and Hausdorff between f16 packs in f32 math, a warp to a shape, each lane scanning two
  *  inner points per step through packed f32x2 and the f16 widening folded into every difference;
  *  the Ampere kit's distances bit for bit. */
 struct f16_blackwell_shapes_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_blackwell_k;
-    inline static constexpr bool compiled_k = true;
     inline static constexpr u32_t lanes_per_entry_k = 32;
 
     using warp_t = cuda_warp_t;
+    using scan_t = ampere_scan_t;
     using query_t = vram_pack_query_t;
     using selector_t = basic::vram_keep_diverse_t;
 
@@ -167,23 +164,14 @@ struct f16_blackwell_shapes_kit_t {
                    : nk_chamfer_warp_packed_f16_blackwell_(query.pack, shape.data, radius, lane);
     }
 };
-#else
-
-/** The kit this build cannot carry, kept so @c shapes_ladder stays one list rather than a run of
- *  preprocessor branches. */
-struct f16_blackwell_shapes_kit_t {
-    inline static constexpr nk_capability_t capability_k = nk_cap_blackwell_k;
-    inline static constexpr bool compiled_k = false;
-};
-#endif // NUMKONG_TARGET_BLACKWELL
 
 /** Chamfer and Hausdorff between f32 packs in f64 math, a warp to a shape. */
 struct f32_ampere_shapes_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
-    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_AMPERE_;
     inline static constexpr u32_t lanes_per_entry_k = 32;
 
     using warp_t = cuda_warp_t;
+    using scan_t = ampere_scan_t;
     using query_t = vram_pack_query_t;
     using selector_t = basic::vram_keep_diverse_t;
 

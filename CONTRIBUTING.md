@@ -136,9 +136,10 @@ The CMakeLists.txt file has a number of options you can pass:
     `-D USEARCH_MARCH=native -D USEARCH_MULTIVERSIONED=OFF` is the native build, and the siblings take the same build kind.
 - Which GPUs to target:
   - `USEARCH_CUDA_ARCH` - the NVIDIA code the library, tests and benchmarks compile for: `all` for the release set, `native` for each GPU `nvidia-smi` lists, mapped to its family code like `100f` on a B200 or B300, or one code like `90a`.
-    A GPU class exists only when a code names it, `100`, `100a`, `100f`, `103a` or `103f` for datacenter Blackwell, so `100f` compiles the Blackwell kernels and the vendor-wide `nvidia` unit alone.
-    The release set compiles each class at the lowest code its kernels need, as PTX alone where a plain code suffices, so every later GPU runs it, and never below CUDA 13's Turing floor: `compute_80` for the vendor-wide unit, whose sequence, shapes, geospatial and basic kernels carry NumKong's Ampere `bf16x2` casts, and for Ampere's `mma.sync`, `compute_89` for Ada's FP8, `compute_90` for Hopper, which issues no `wgmma`, and `compute_120` for the RTX line.
-    Datacenter Blackwell's `tcgen05` needs a family code, so its class carries the `100f` cubin instead.
+    A GPU class exists only when a code names it, `100`, `100a`, `100f`, `103a` or `103f` for datacenter Blackwell, so a monoversioned `100f` build compiles the Blackwell class alone, carrying every modality, and refuses a code no class runs.
+    A multiversioned build also always compiles the Ampere class, the floor, at `compute_80` PTX, which every GPU newer than any class runs, and which alone carries the sequence, shapes, geospatial and basic kernels, datacenter Blackwell adding its packed f16 shapes.
+    The release set compiles each class at the lowest code its kernels need, as PTX alone where a plain code suffices, so every later GPU runs it, and never below CUDA 13's Turing floor: `compute_80` for the Ampere floor, whose kernels carry NumKong's Ampere `bf16x2` casts and `mma.sync`, `compute_89` for Ada's FP8, and `compute_120` for the RTX line.
+    Hopper's `wgmma` and datacenter Blackwell's `tcgen05` need family codes, so their classes carry the `90a` and `100f` cubins instead.
     A native or named code compiles as SASS alone, with no PTX.
     NVCC compiles only device code, into fatbins the binaries embed; nothing links `libcuda` or the CUDA runtime, as the library opens the driver at first use.
     A NumKong GPU tier turns on in the CUDA tests only when every code runs it, so the release set exercises the Ampere one; iterate on one GPU with its family code, like `100f`, to test that generation's kits.
@@ -362,6 +363,70 @@ Each template in `include/` takes its kits, cache hints, waiter and atomic refer
 An engine that needs richer behavior, like prefetching whole objects, wraps the primitive it was handed.
 No template names a CPU class, an ISA instruction or a topology query, and capability masks stay in `src/`, where rungs are chosen.
 
+### Dispatch Classes
+
+The C enums give every class a fixed value, shared with UStore, UCall and UForm, so a pinned value means the same hardware in all four.
+CPU class 0 is `unknown`, which pins nothing so dispatch derives the CPU's own class, and GPU class 0 is `unknown`, which a device no class runs on reports.
+
+| Value | CPU class         | Adds over its parent                                                   |
+| ----: | ----------------- | ---------------------------------------------------------------------- |
+|     0 | `unknown`         | nothing: dispatch derives the CPU's own class                          |
+|     1 | `serial`          | the portable floor                                                     |
+|     2 | `monoversioned`   | everything the libraries compiled, in a monoversioned build alone      |
+|     3 | `intel-haswell`   | AVX2 and FMA kits                                                      |
+|     4 | `intel-sierra`    | AVX-VNNI and its successors over Haswell, TPAUSE waits, CMPCCXADD adds |
+|     5 | `intel-skylake`   | AVX-512 kits over Haswell                                              |
+|     6 | `intel-icelake`   | AVX-512 VNNI and VPOPCNT kits                                          |
+|     7 | `amd-genoa`       | AVX-512 BF16 kits                                                      |
+|     8 | `intel-sapphire`  | AVX-512 FP16 kits and AMX-BF16 and AMX-INT8 tiles                      |
+|     9 | `intel-granite`   | AMX FP16 tiles                                                         |
+|    10 | `intel-diamond`   | AVX10.2 FP8, the Sierra bundle, TPAUSE waits, CMPCCXADD adds           |
+|    12 | `aws-g2`          | NEON kits                                                              |
+|    13 | `apple-m2`        | dot-product, BF16 and FHM kits, LSE and RCpc atomics                   |
+|    14 | `apple-m4`        | SME tiles                                                              |
+|    15 | `aws-g5`          | WFE waits over Apple M2                                                |
+|    16 | `nvidia-vera`     | FP8 dot products over Apple M2                                         |
+|    17 | `alibaba-c930`    | RVV and Zvbb kits, RVV StringZilla kits, WRS waits, Zacas atomics      |
+|    18 | `ibm-power10`     | VSX and MMA kits, `pause_short` waits                                  |
+|    19 | `wasm32-v128`     | `simd128` kits                                                         |
+|    20 | `wasm64-extended` | relaxed SIMD, shared memory and 64-bit addressing                      |
+
+| Value | GPU class             | Unit codes in the release set                   |
+| ----: | --------------------- | ----------------------------------------------- |
+|     1 | `nvidia-ampere`       | `80-virtual`                                    |
+|     2 | `nvidia-ada`          | `89-virtual`                                    |
+|     3 | `nvidia-hopper`       | `90a-real`                                      |
+|     4 | `nvidia-blackwell`    | `100f-real`                                     |
+|     5 | `nvidia-blackwellrtx` | `120-virtual`                                   |
+|     6 | `nvidia-rubin`        | none yet                                        |
+|     7 | `amd-cdna3`           | `gfx942 gfx950`                                 |
+|     8 | `amd-cdna4`           | `gfx950`                                        |
+|     9 | `amd-cdna5`           | `gfx1250 gfx1251`                               |
+|    10 | `apple-metal7`        | the Apple7 family, compiled on the device       |
+|    11 | `apple-metal9`        | the Apple9 family, compiled on the device       |
+|    12 | `apple-metal10`       | the Apple10 family, compiled on the device      |
+
+Every compiled CPU class must advance past its parent for at least one dtype, and `dense_class_tables` asserts it at compile time.
+
+### Pick Rules
+
+`pick_cpu_ceiling` picks the CPU class once per handle and executor:
+
+1. A value no class takes is refused with `invalid_argument`.
+2. The machine's masks are the libraries' detected ones: NumKong's, StringZilla's and `fu::cpu_capabilities()`.
+3. AMX is granted inside the pick, and a refused grant clears the AMX bits.
+4. A pinned class whose masks the machine lacks is refused with `unsupported`, and otherwise its masks become the ceiling.
+5. The ladder walk takes the newest compiled class whose masks fit the ceiling, and a ceiling no compiled class fits is refused with `unsupported`.
+
+`pick_gpu_class` picks a GPU class per device, walking its vendor's ladder newest first:
+
+1. The class must be built, as its gate `USEARCH_TARGET_<VENDOR>_<CLASS>` tells the dispatch units.
+2. It must sit at or under the pinned class.
+3. The driver must load the class's device code on the device, as `cuModuleLoadData` and `hipModuleLoadData` answer for its first dense bundle, or the device's Apple family must reach the class's.
+
+Every device is listed, and one no class serves reports `unknown` and refuses work with `unsupported`.
+An index whose devices pick different classes is refused with `config_mismatch`.
+
 ### Spelling Types
 
 New code never names or sizes a type through `decltype`, `decltype(auto)` included.
@@ -419,7 +484,7 @@ A name without it is a public contract, either a switch you may set or a value y
 
 | Family                     | Form                             | Example                    |
 | :------------------------- | :------------------------------- | :------------------------- |
-| CPU or GPU class           | `USEARCH_TARGET_<CLASS>`         | `USEARCH_TARGET_NVIDIA`    |
+| CPU or GPU class           | `USEARCH_TARGET_<CLASS>`         | `USEARCH_TARGET_SERIAL`    |
 | Optional facility          | `USEARCH_WITH_[<OS>_]<FACILITY>` | `USEARCH_WITH_LINUX_URING` |
 | Architecture or GPU vendor | `USEARCH_ARCH_<ARCH>_`           | `USEARCH_ARCH_CUDA_`       |
 | Operating-system identity  | `USEARCH_OS_<OS>_`               | `USEARCH_OS_LINUX_`        |

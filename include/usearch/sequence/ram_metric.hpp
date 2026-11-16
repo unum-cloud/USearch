@@ -109,7 +109,6 @@ sz_strings_view_t as_strings_view(std::span<query_type_ const> queries) noexcept
 /** Scalar Myers: eight candidates per sweep, each one's recurrence a chain of its own. */
 struct u8_serial_levenshtein_kit_t {
     static constexpr sz_capability_t capability_k = sz_cap_serial_k;
-    static constexpr bool compiled_k = true;
     static constexpr sz_levenshtein_symbol_t symbol_k = sz_levenshtein_bytes_k;
     static constexpr auto init = sz_levenshtein_engine_init_serial;
     static constexpr auto distances = sz_levenshtein_distances_serial;
@@ -118,7 +117,6 @@ struct u8_serial_levenshtein_kit_t {
 /** Scalar Myers over UTF-8 runes, each rune's class from the query's page table. */
 struct utf8_serial_levenshtein_kit_t {
     static constexpr sz_capability_t capability_k = sz_cap_serial_k;
-    static constexpr bool compiled_k = true;
     static constexpr sz_levenshtein_symbol_t symbol_k = sz_levenshtein_runes_k;
     static constexpr auto init = sz_levenshtein_engine_init_serial;
     static constexpr auto distances = sz_levenshtein_distances_serial;
@@ -129,7 +127,6 @@ struct utf8_serial_levenshtein_kit_t {
 /** Intel Haswell AVX2: four candidates per YMM, a SIMD byte transpose. */
 struct u8_haswell_levenshtein_kit_t {
     static constexpr sz_capability_t capability_k = sz_cap_haswell_k;
-    static constexpr bool compiled_k = true;
     static constexpr sz_levenshtein_symbol_t symbol_k = sz_levenshtein_bytes_k;
     static constexpr auto init = sz_levenshtein_engine_init_haswell;
     static constexpr auto distances = sz_levenshtein_distances_haswell;
@@ -138,7 +135,6 @@ struct u8_haswell_levenshtein_kit_t {
 /** Intel Haswell AVX2 over UTF-8 runes: four candidates per YMM, fed 32-bit rune classes. */
 struct utf8_haswell_levenshtein_kit_t {
     static constexpr sz_capability_t capability_k = sz_cap_haswell_k;
-    static constexpr bool compiled_k = true;
     static constexpr sz_levenshtein_symbol_t symbol_k = sz_levenshtein_runes_k;
     static constexpr auto init = sz_levenshtein_engine_init_haswell;
     static constexpr auto distances = sz_levenshtein_distances_haswell;
@@ -162,7 +158,6 @@ struct utf8_haswell_levenshtein_kit_t {
 /** Intel Skylake-X AVX-512: eight candidates per ZMM, a SIMD byte transpose. */
 struct u8_skylake_levenshtein_kit_t {
     static constexpr sz_capability_t capability_k = sz_cap_skylake_k;
-    static constexpr bool compiled_k = true;
     static constexpr sz_levenshtein_symbol_t symbol_k = sz_levenshtein_bytes_k;
     static constexpr auto init = sz_levenshtein_engine_init_skylake;
     static constexpr auto distances = sz_levenshtein_distances_skylake;
@@ -171,7 +166,6 @@ struct u8_skylake_levenshtein_kit_t {
 /** Intel Skylake-X AVX-512 over UTF-8 runes: eight candidates per ZMM, fed 32-bit rune classes. */
 struct utf8_skylake_levenshtein_kit_t {
     static constexpr sz_capability_t capability_k = sz_cap_skylake_k;
-    static constexpr bool compiled_k = true;
     static constexpr sz_levenshtein_symbol_t symbol_k = sz_levenshtein_runes_k;
     static constexpr auto init = sz_levenshtein_engine_init_skylake;
     static constexpr auto distances = sz_levenshtein_distances_skylake;
@@ -196,7 +190,6 @@ struct utf8_skylake_levenshtein_kit_t {
  *  eight bytes, thirty-two up to sixteen, the Skylake sweep above. */
 struct u8_icelake_levenshtein_kit_t {
     static constexpr sz_capability_t capability_k = sz_cap_icelake_k;
-    static constexpr bool compiled_k = true;
     static constexpr sz_levenshtein_symbol_t symbol_k = sz_levenshtein_bytes_k;
     static constexpr auto init = sz_levenshtein_engine_init_icelake;
     static constexpr auto distances = sz_levenshtein_distances_icelake;
@@ -206,7 +199,6 @@ struct u8_icelake_levenshtein_kit_t {
  *  as Skylake does. */
 struct utf8_icelake_levenshtein_kit_t {
     static constexpr sz_capability_t capability_k = sz_cap_icelake_k;
-    static constexpr bool compiled_k = true;
     static constexpr sz_levenshtein_symbol_t symbol_k = sz_levenshtein_runes_k;
     static constexpr auto init = sz_levenshtein_engine_init_icelake;
     static constexpr auto distances = sz_levenshtein_distances_icelake;
@@ -230,7 +222,6 @@ struct utf8_icelake_levenshtein_kit_t {
 /** Arm NEON: two candidates per register, four registers per position, a SIMD byte transpose. */
 struct u8_neon_levenshtein_kit_t {
     static constexpr sz_capability_t capability_k = sz_cap_neon_k;
-    static constexpr bool compiled_k = true;
     static constexpr sz_levenshtein_symbol_t symbol_k = sz_levenshtein_bytes_k;
     static constexpr auto init = sz_levenshtein_engine_init_neon;
     static constexpr auto distances = sz_levenshtein_distances_neon;
@@ -239,7 +230,6 @@ struct u8_neon_levenshtein_kit_t {
 /** Arm NEON over UTF-8 runes: two candidates per register, four registers per position. */
 struct utf8_neon_levenshtein_kit_t {
     static constexpr sz_capability_t capability_k = sz_cap_neon_k;
-    static constexpr bool compiled_k = true;
     static constexpr sz_levenshtein_symbol_t symbol_k = sz_levenshtein_runes_k;
     static constexpr auto init = sz_levenshtein_engine_init_neon;
     static constexpr auto distances = sz_levenshtein_distances_neon;
@@ -263,7 +253,6 @@ struct utf8_neon_levenshtein_kit_t {
 /** IBM Power VSX: two candidates per register, four registers per position, a byte transpose. */
 struct u8_powervsx_levenshtein_kit_t {
     static constexpr sz_capability_t capability_k = sz_cap_powervsx_k;
-    static constexpr bool compiled_k = true;
     static constexpr sz_levenshtein_symbol_t symbol_k = sz_levenshtein_bytes_k;
     static constexpr auto init = sz_levenshtein_engine_init_powervsx;
     static constexpr auto distances = sz_levenshtein_distances_powervsx;
@@ -272,7 +261,6 @@ struct u8_powervsx_levenshtein_kit_t {
 /** IBM Power VSX over UTF-8 runes: two candidates per register, four registers per position. */
 struct utf8_powervsx_levenshtein_kit_t {
     static constexpr sz_capability_t capability_k = sz_cap_powervsx_k;
-    static constexpr bool compiled_k = true;
     static constexpr sz_levenshtein_symbol_t symbol_k = sz_levenshtein_runes_k;
     static constexpr auto init = sz_levenshtein_engine_init_powervsx;
     static constexpr auto distances = sz_levenshtein_distances_powervsx;
@@ -292,8 +280,8 @@ struct utf8_powervsx_levenshtein_kit_t {
 #endif // STRINGZILLA_TARGET_POWERVSX
 
 /** The widest Levenshtein kit over the symbols @p symbol_ names this build compiled in among the
- *  backends @p caps_ admits, newest first; each kit states its @c capability_k and its
- *  @c compiled_k, so an unselected kit's body never has to exist. */
+ *  backends @p caps_ admits, newest first; each kit states its @c capability_k, and a stub its
+ *  @c compiled_k as false, so an unselected kit's body never has to exist. */
 template <sz_levenshtein_symbol_t symbol_, sz_capability_t caps_>
 struct levenshtein_ladder;
 
@@ -334,7 +322,6 @@ struct levenshtein_ladder<sz_levenshtein_runes_k, caps_> {
 /** Scalar: one position per hashing step, one key per sort and probe step. */
 struct u8_serial_overlap_kit_t {
     static constexpr sz_capability_t capability_k = sz_cap_serial_k;
-    static constexpr bool compiled_k = true;
     static constexpr auto init = sz_overlap_engine_init_serial;
     static constexpr auto scores = sz_overlap_scores_serial;
 };
@@ -344,7 +331,6 @@ struct u8_serial_overlap_kit_t {
 /** Intel Haswell AVX2: four positions per hashing step, eight keys per sort and probe step. */
 struct u8_haswell_overlap_kit_t {
     static constexpr sz_capability_t capability_k = sz_cap_haswell_k;
-    static constexpr bool compiled_k = true;
     static constexpr auto init = sz_overlap_engine_init_haswell;
     static constexpr auto scores = sz_overlap_scores_haswell;
 };
@@ -364,7 +350,6 @@ struct u8_haswell_overlap_kit_t {
  *  step. */
 struct u8_skylake_overlap_kit_t {
     static constexpr sz_capability_t capability_k = sz_cap_skylake_k;
-    static constexpr bool compiled_k = true;
     static constexpr auto init = sz_overlap_engine_init_skylake;
     static constexpr auto scores = sz_overlap_scores_skylake;
 };
@@ -383,7 +368,6 @@ struct u8_skylake_overlap_kit_t {
 /** Arm NEON: two positions per hashing step, four keys per sort and probe step. */
 struct u8_neon_overlap_kit_t {
     static constexpr sz_capability_t capability_k = sz_cap_neon_k;
-    static constexpr bool compiled_k = true;
     static constexpr auto init = sz_overlap_engine_init_neon;
     static constexpr auto scores = sz_overlap_scores_neon;
 };
@@ -402,7 +386,6 @@ struct u8_neon_overlap_kit_t {
 /** IBM Power VSX: two positions per hashing step, four keys per sort and probe step. */
 struct u8_powervsx_overlap_kit_t {
     static constexpr sz_capability_t capability_k = sz_cap_powervsx_k;
-    static constexpr bool compiled_k = true;
     static constexpr auto init = sz_overlap_engine_init_powervsx;
     static constexpr auto scores = sz_overlap_scores_powervsx;
 };
@@ -417,8 +400,8 @@ struct u8_powervsx_overlap_kit_t {
 #endif // STRINGZILLA_TARGET_POWERVSX
 
 /** The widest overlap kit this build compiled in among the backends @p caps_ admits, newest first;
- *  each kit states its @c capability_k and its @c compiled_k, so an unselected kit's body never
- *  has to exist. */
+ *  each kit states its @c capability_k, and a stub its @c compiled_k as false, so an unselected
+ *  kit's body never has to exist. */
 template <sz_capability_t caps_>
 struct overlap_ladder;
 
@@ -994,7 +977,6 @@ inline sz_size_t needleman_wunsch_serial(needleman_wunsch_costs_t const& costs, 
 /** Scalar: one candidate at a time, a column of @c u32 cells per query code. */
 struct packed_serial_needleman_wunsch_kit_t {
     static constexpr sz_capability_t capability_k = sz_cap_serial_k;
-    static constexpr bool compiled_k = true;
 
     /** Scratch bytes a round of a @p query_codes long query and candidates of up to
      *  @p longest_codes takes. */
@@ -1031,7 +1013,6 @@ struct packed_serial_needleman_wunsch_kit_t {
  */
 struct packed_skylake_needleman_wunsch_kit_t {
     static constexpr sz_capability_t capability_k = sz_cap_skylake_k;
-    static constexpr bool compiled_k = true;
 
     /** Candidates one group sweeps, the @c u16 lanes of a ZMM. */
     static constexpr std::size_t lanes_k = sizeof(__m512i) / sizeof(u16_t);
@@ -1169,7 +1150,6 @@ struct packed_skylake_needleman_wunsch_kit_t {
  */
 struct packed_haswell_needleman_wunsch_kit_t {
     static constexpr sz_capability_t capability_k = sz_cap_haswell_k;
-    static constexpr bool compiled_k = true;
 
     /** Candidates one group sweeps, the @c u16 lanes of a YMM. */
     static constexpr std::size_t lanes_k = sizeof(__m256i) / sizeof(u16_t);
@@ -1321,7 +1301,6 @@ struct packed_haswell_needleman_wunsch_kit_t {
  */
 struct packed_neon_needleman_wunsch_kit_t {
     static constexpr sz_capability_t capability_k = sz_cap_neon_k;
-    static constexpr bool compiled_k = true;
 
     /** Candidates one group sweeps, the @c u16 lanes of a Q register. */
     static constexpr std::size_t lanes_k = sizeof(uint16x8_t) / sizeof(u16_t);
@@ -1458,7 +1437,6 @@ struct packed_neon_needleman_wunsch_kit_t {
  */
 struct packed_powervsx_needleman_wunsch_kit_t {
     static constexpr sz_capability_t capability_k = sz_cap_powervsx_k;
-    static constexpr bool compiled_k = true;
 
     /** Candidates one group sweeps, the @c u16 lanes of a VSX register. */
     static constexpr std::size_t lanes_k = sizeof(__vector unsigned short) / sizeof(u16_t);

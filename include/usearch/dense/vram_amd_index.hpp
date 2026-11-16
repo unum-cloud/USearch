@@ -291,7 +291,7 @@ struct vram_amd_kernels {
     }
 
     /** Lanes of this class's wavefronts: 32 on CDNA5, 64 before it. */
-    static constexpr u32_t wave_lanes() noexcept { return hip_wave_lanes(capability_k); }
+    static constexpr u32_t wave_lanes() noexcept { return capability_k & nk_cap_cdna5_k ? 32u : 64u; }
 
     /** Threads per block, four wavefronts. */
     u32_t block_threads() const noexcept { return vram_warps_per_block_k * wave_lanes(); }

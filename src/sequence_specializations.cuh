@@ -346,11 +346,11 @@ struct sequence_nvidia_fatbin {
     static bytes_view_t bytes() noexcept;
 };
 
-/** The capabilities the sequence kits compile under on NVIDIA: StringZilla's CUDA floor, which one
- *  cubin per class carries. */
-inline constexpr sz_capability_t sequence_nvidia_capabilities_k = sz_cap_cuda_k;
+/** The capabilities the sequence kits compile under on NVIDIA: StringZilla's tiers of the class
+ *  this unit compiles as. */
+inline constexpr sz_capability_t sequence_nvidia_capabilities_k = stringzilla_capabilities_of(cuda_class_k);
 
-/** The kit each sequence kind scores with on NVIDIA, its ladder's pick at the CUDA floor. */
+/** The kit each sequence kind scores with on NVIDIA, its ladder's pick at the class's tiers. */
 template <usearch_sequence_metric_t metric_>
 using sequence_nvidia_kit = std::conditional_t<
     metric_ == usearch_sequence_metric_overlap_k,
@@ -430,10 +430,10 @@ struct sequence_vram_nvidia_build {
     }
 };
 
-/** The sequence alternative on NVIDIA GPUs: the basic VRAM shards under the sequence kind
- *  @p metric_ - Levenshtein over bytes or UTF-8 runes, overlap, or Needleman-Wunsch - with 32-bit
- *  node IDs. */
-template <usearch_sequence_metric_t metric_>
+/** The sequence alternative on NVIDIA GPUs of @p gpu_class_ : the basic VRAM shards under the
+ *  sequence kind @p metric_ - Levenshtein over bytes or UTF-8 runes, overlap, or Needleman-Wunsch -
+ *  with 32-bit node IDs. */
+template <usearch_sequence_metric_t metric_, gpu_class_t gpu_class_>
 struct sequence_vram_nvidia_variant {
     using executor_t = cuda_executor_t;
     using build_t = sequence_vram_nvidia_build<metric_>;
@@ -441,7 +441,7 @@ struct sequence_vram_nvidia_variant {
     using index_t = basic::vram_nvidia_indexes<face_t, us::utilities::uuid128_t, build_t>;
     using refine_plan_t = typename index_t::refine_plan_t;
     static constexpr usearch_sequence_metric_t metric_k = metric_;
-    static constexpr gpu_class_t gpu_class_k = gpu_class_t::nvidia_ampere_k;
+    static constexpr gpu_class_t gpu_class_k = gpu_class_;
 
     sequence_geometry_t geometry;
     us::sequence::needleman_wunsch_costs_t costs {};
@@ -517,13 +517,22 @@ template <auto class_>
 struct sequence_variants_of<vendored_residency_t::nvme_k, class_> {
     using type = type_list<sequence_nvme_variant<class_>>;
 };
-#if USEARCH_ARCH_CUDA_
+#if USEARCH_ARCH_CUDA_ && USEARCH_TARGET_MONOVERSIONED
+template <auto class_>
+struct sequence_variants_of<vendored_residency_t::vram_nvidia_k, class_> {
+    using type = type_list<sequence_vram_nvidia_variant<usearch_sequence_metric_levenshtein_bytes_k, class_>,
+                           sequence_vram_nvidia_variant<usearch_sequence_metric_levenshtein_utf8_k, class_>,
+                           sequence_vram_nvidia_variant<usearch_sequence_metric_overlap_k, class_>,
+                           sequence_vram_nvidia_variant<usearch_sequence_metric_needleman_wunsch_k, class_>>;
+};
+#elif USEARCH_ARCH_CUDA_
 template <>
 struct sequence_variants_of<vendored_residency_t::vram_nvidia_k, gpu_class_t::nvidia_ampere_k> {
-    using type = type_list<sequence_vram_nvidia_variant<usearch_sequence_metric_levenshtein_bytes_k>,
-                           sequence_vram_nvidia_variant<usearch_sequence_metric_levenshtein_utf8_k>,
-                           sequence_vram_nvidia_variant<usearch_sequence_metric_overlap_k>,
-                           sequence_vram_nvidia_variant<usearch_sequence_metric_needleman_wunsch_k>>;
+    using type = type_list<
+        sequence_vram_nvidia_variant<usearch_sequence_metric_levenshtein_bytes_k, gpu_class_t::nvidia_ampere_k>,
+        sequence_vram_nvidia_variant<usearch_sequence_metric_levenshtein_utf8_k, gpu_class_t::nvidia_ampere_k>,
+        sequence_vram_nvidia_variant<usearch_sequence_metric_overlap_k, gpu_class_t::nvidia_ampere_k>,
+        sequence_vram_nvidia_variant<usearch_sequence_metric_needleman_wunsch_k, gpu_class_t::nvidia_ampere_k>>;
 };
 #endif
 

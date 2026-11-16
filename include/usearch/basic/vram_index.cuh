@@ -48,20 +48,21 @@ struct vram_entry_t {
 };
 
 /** What a basic VRAM kit binds: one modality's distance on one GPU generation, with the warp policy
- *  its walks shuffle through and the selector its nodes keep neighbors by. @c prepare lays an entry
- *  out as a query in a span, every lane of the warp taking part, from the entry alone or, for a kit
- *  with runtime parameters, from the storage's @c parameters too, which
- *  @ref unum::usearch::basic::vram_prepare tells apart; @c lower_bound answers a lower bound from
- *  the two entries' headers alone. Its @c score runs on its lanes per entry, every one of them
- *  returning the distance, exact within the radius and above it past: @c lanes_per_entry_k of them
- *  and a plain @c score, or, for a kit whose split follows a rung, @c lanes_per_row of the rung and
- *  a @c score templated on it, which @ref unum::usearch::basic::vram_lanes_per_entry and
- *  @ref unum::usearch::basic::vram_score tell apart. A round's entries carry no order: results go
- *  by slot, and ties break by node ID. */
+ *  its walks shuffle through, the scan kit its prefix sums run on, and the selector its nodes keep
+ *  neighbors by. @c prepare lays an entry out as a query in a span, every lane of the warp taking
+ *  part, from the entry alone or, for a kit with runtime parameters, from the storage's
+ *  @c parameters too, which @ref unum::usearch::basic::vram_prepare tells apart; @c lower_bound
+ *  answers a lower bound from the two entries' headers alone. Its @c score runs on its lanes per
+ *  entry, every one of them returning the distance, exact within the radius and above it past:
+ *  @c lanes_per_entry_k of them and a plain @c score, or, for a kit whose split follows a rung,
+ *  @c lanes_per_row of the rung and a @c score templated on it, which
+ *  @ref unum::usearch::basic::vram_lanes_per_entry and @ref unum::usearch::basic::vram_score tell
+ *  apart. A round's entries carry no order: results go by slot, and ties break by node ID. */
 template <typename kit_>
 concept vram_basic_kit = requires(typename kit_::query_t const& query, vram_entry_t entry, byte_t* span,
                                   byte_t const* parameters, nk_kernel_kind_t kernel, u32_t lane) {
     typename kit_::warp_t;
+    typename kit_::scan_t;
     typename kit_::query_t;
     typename kit_::selector_t;
     requires requires {

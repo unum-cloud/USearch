@@ -17,7 +17,7 @@
 #include <cstddef> // `std::size_t`
 #include <utility> // `std::index_sequence` - every rung of one dtype
 
-#include <numkong/types.h>       // `NUMKONG_ARCH_ROCM_`, which the two below test before including it
+#include <numkong/types.h>       // the vendor detection the two below test before including it
 #include <numkong/cast/simt.cuh> // `nk_cast_unit_simt_` - the import casts' device body
 #include <numkong/each/rocm.cuh> // `nk_each_rmscast_e4m3_rocm_vectors_` & kin - the unit-RMS import's device bodies
 
@@ -38,7 +38,7 @@ bool vram_amd_kernels<vector_dtype_, kernels_type_, wait_type_, cache_hints_type
     using warp_t = typename schedule_ladder<capability_k>::schedule_t::warp_t;
     static_assert(std::is_same_v<typename kit_t::norms_t, norms_t> &&
                   sizeof(typename kit_t::fragment_t) == core_t::fragment_bytes_k);
-    static_assert(warp_t::width_k == hip_wave_lanes(capability_k));
+    static_assert(warp_t::width_k == wave_lanes());
     return std::size_t {vram_warps_per_block_k} *
                (core.row_bytes() + fold_bytes + sizeof(vram_gathered<kit_t, warp_t>)) <=
            core.device_.shared_memory_per_block_bytes;
@@ -90,12 +90,13 @@ bool vram_amd_kernels<vector_dtype_, kernels_type_, wait_type_, cache_hints_type
  *  @ref hip_resident_blocks keeps per compute unit bound its registers and reach the body, which
  *  sizes its load window by them. */
 template <vram_kernel_t kernel_, nk_capability_t capability_, nk_dtype_t dtype_, u32_t slots_, typename lookup_type_>
-__global__ void __launch_bounds__(vram_warps_per_block_k* hip_wave_lanes(capability_),
+__global__ void __launch_bounds__(vram_warps_per_block_k* schedule_ladder<capability_>::schedule_t::warp_t::width_k,
                                   hip_waves_per_simd(hip_resident_blocks<capability_, dtype_>(kernel_, slots_)))
     amd_kernel(vram_arguments_t arguments) {
     using kit_t = typename quads_ladder<typename nk::type_for<dtype_>::type, capability_>::kit_t;
     using schedule_t = typename schedule_ladder<capability_>::schedule_t;
     using warp_t = typename schedule_t::warp_t;
+    using scan_t = typename schedule_t::scan_t;
     constexpr u32_t resident_blocks = hip_resident_blocks<capability_, dtype_>(kernel_, slots_);
     vram_graph_t const& graph = arguments.graph;
     if constexpr (kernel_ == vram_kernel_t::insert_k)
@@ -112,7 +113,7 @@ __global__ void __launch_bounds__(vram_warps_per_block_k* hip_wave_lanes(capabil
         vram_gather_neighborhoods<kit_t, warp_t>(vram_view<kit_t>(arguments.gather_neighborhoods));
     else if constexpr (kernel_ == vram_kernel_t::restitch_k)
         vram_restitch<kit_t, schedule_t, resident_blocks, vram_simt_mates>(vram_view<kit_t>(arguments.restitch));
-    else if constexpr (vram_health_kernel(kernel_)) vram_health_pass<kernel_, warp_t>(arguments.health);
+    else if constexpr (vram_health_kernel(kernel_)) vram_health_pass<kernel_, warp_t, scan_t>(arguments.health);
     else if constexpr (vram_split_kernel(kernel_)) vram_split_pass<kernel_, warp_t>(graph);
     else if constexpr (kernel_ == vram_kernel_t::gather_vectors_k) vram_gather_vectors<warp_t>(arguments.gather);
     else if constexpr (kernel_ == vram_kernel_t::sum_counts_k)
@@ -125,8 +126,8 @@ __global__ void __launch_bounds__(vram_warps_per_block_k* hip_wave_lanes(capabil
     }
     else if constexpr (kernel_ == vram_kernel_t::compact_products_k) {
         vram_multiply_t const& products = arguments.products;
-        vram_compact_products<warp_t>(vram_view(products.ranking), products.block_bytes, products.shards_count,
-                                      products.queries_count, products.tape, products.totals);
+        vram_compact_products<warp_t, scan_t>(vram_view(products.ranking), products.block_bytes, products.shards_count,
+                                              products.queries_count, products.tape, products.totals);
     }
     else if constexpr (kernel_ == vram_kernel_t::nominate_keys_k) {
         vram_maxsim_t const& maxsim = arguments.maxsim;
@@ -158,12 +159,13 @@ __global__ void __launch_bounds__(vram_warps_per_block_k* hip_wave_lanes(capabil
  *  @p lookup_type_ an attend's value lookup record and @c void for every other kernel. */
 template <vram_dense_kernel_t kernel_, nk_capability_t capability_, nk_dtype_t dtype_, u32_t slots_,
           typename lookup_type_>
-__global__ void __launch_bounds__(vram_warps_per_block_k* hip_wave_lanes(capability_),
+__global__ void __launch_bounds__(vram_warps_per_block_k* schedule_ladder<capability_>::schedule_t::warp_t::width_k,
                                   hip_waves_per_simd(hip_resident_blocks<capability_, dtype_>(kernel_, slots_)))
     amd_dense_kernel(vram_arguments_t arguments) {
     using kit_t = typename quads_ladder<typename nk::type_for<dtype_>::type, capability_>::kit_t;
     using schedule_t = typename schedule_ladder<capability_>::schedule_t;
     using warp_t = typename schedule_t::warp_t;
+    using scan_t = typename schedule_t::scan_t;
     constexpr u32_t resident_blocks = hip_resident_blocks<capability_, dtype_>(kernel_, slots_);
     vram_graph_t const& graph = arguments.graph;
     if constexpr (kernel_ == vram_dense_kernel_t::search_indexer_k) {
@@ -195,7 +197,7 @@ __global__ void __launch_bounds__(vram_warps_per_block_k* hip_wave_lanes(capabil
     else if constexpr (kernel_ == vram_dense_kernel_t::fold_k)
         vram_fold<kit_t, schedule_t, resident_blocks>(vram_view<kit_t>(arguments.fold));
     else if constexpr (kernel_ == vram_dense_kernel_t::derive_norms_k)
-        vram_derive_norms<kit_t, warp_t>(vram_view<kit_t>(graph.storage), graph.first_id, graph.rows_count);
+        vram_derive_norms<kit_t, warp_t, scan_t>(vram_view<kit_t>(graph.storage), graph.first_id, graph.rows_count);
     else if constexpr (kernel_ == vram_dense_kernel_t::cast_k) {
         nk_size_t const threads = static_cast<nk_size_t>(gridDim.x) * blockDim.x;
         for (nk_size_t unit = static_cast<nk_size_t>(blockIdx.x) * blockDim.x + threadIdx.x;

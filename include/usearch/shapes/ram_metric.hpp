@@ -94,7 +94,6 @@ inline status_t status_of(nk::status_t status) noexcept { return status_of(stati
 /** The f32 shape kernels for any CPU. */
 struct f32_serial_shapes_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::f32_t;
     using distance_t = nk_f64_t;
     static constexpr auto cast = nk_cast_serial;
@@ -116,7 +115,6 @@ struct f32_serial_shapes_kit_t {
 /** The f32 shape kernels for Arm NEON. */
 struct f32_neon_shapes_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neon_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::f32_t;
     using distance_t = nk_f64_t;
     static constexpr auto cast = nk_cast_neon;
@@ -147,7 +145,6 @@ struct f32_neon_shapes_kit_t {
 /** The f32 shape kernels for Intel Haswell AVX2. */
 struct f32_haswell_shapes_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::f32_t;
     using distance_t = nk_f64_t;
     static constexpr auto cast = nk_cast_haswell;
@@ -178,7 +175,6 @@ struct f32_haswell_shapes_kit_t {
 /** The f32 shape kernels for Intel Skylake-X AVX-512. */
 struct f32_skylake_shapes_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::f32_t;
     using distance_t = nk_f64_t;
     static constexpr auto cast = nk_cast_skylake;
@@ -209,7 +205,6 @@ struct f32_skylake_shapes_kit_t {
 /** The f32 shape kernels for the RISC-V Vector extension. */
 struct f32_rvv_shapes_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_rvv_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::f32_t;
     using distance_t = nk_f64_t;
     static constexpr auto cast = nk_cast_rvv;
@@ -240,7 +235,6 @@ struct f32_rvv_shapes_kit_t {
 /** The f32 shape kernels for IBM Power VSX. */
 struct f32_powervsx_shapes_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_powervsx_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::f32_t;
     using distance_t = nk_f64_t;
     static constexpr auto cast = nk_cast_powervsx;
@@ -271,7 +265,6 @@ struct f32_powervsx_shapes_kit_t {
 /** The f32 shape kernels for WebAssembly Relaxed SIMD. */
 struct f32_v128relaxed_shapes_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::f32_t;
     using distance_t = nk_f64_t;
     static constexpr auto cast = nk_cast_v128relaxed;
@@ -300,7 +293,6 @@ struct f32_v128relaxed_shapes_kit_t {
 /** The f16 shape kernels for any CPU. */
 struct f16_serial_shapes_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::f16_t;
     using distance_t = nk_f32_t;
     static constexpr auto cast = nk_cast_serial;
@@ -322,7 +314,6 @@ struct f16_serial_shapes_kit_t {
 /** The f16 shape kernels for Arm NEON. */
 struct f16_neon_shapes_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neon_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::f16_t;
     using distance_t = nk_f32_t;
     static constexpr auto cast = nk_cast_neon;
@@ -354,7 +345,6 @@ struct f16_neon_shapes_kit_t {
  *  beside NEON's transport kinds. */
 struct f16_neonfhm_shapes_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonfhm_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::f16_t;
     using distance_t = nk_f32_t;
     static constexpr auto cast = nk_cast_neon;
@@ -385,7 +375,6 @@ struct f16_neonfhm_shapes_kit_t {
 /** The f16 shape kernels for Intel Haswell AVX2. */
 struct f16_haswell_shapes_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::f16_t;
     using distance_t = nk_f32_t;
     static constexpr auto cast = nk_cast_haswell;
@@ -416,7 +405,6 @@ struct f16_haswell_shapes_kit_t {
 /** The f16 shape kernels for Intel Skylake-X AVX-512. */
 struct f16_skylake_shapes_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::f16_t;
     using distance_t = nk_f32_t;
     static constexpr auto cast = nk_cast_skylake;
@@ -447,7 +435,6 @@ struct f16_skylake_shapes_kit_t {
 /** The f16 shape kernels for the RISC-V Vector extension. */
 struct f16_rvv_shapes_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_rvv_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::f16_t;
     using distance_t = nk_f32_t;
     static constexpr auto cast = nk_cast_rvv;
@@ -478,7 +465,6 @@ struct f16_rvv_shapes_kit_t {
 /** The f16 shape kernels for IBM Power VSX. */
 struct f16_powervsx_shapes_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_powervsx_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::f16_t;
     using distance_t = nk_f32_t;
     static constexpr auto cast = nk_cast_powervsx;
@@ -509,7 +495,6 @@ struct f16_powervsx_shapes_kit_t {
 /** The f16 shape kernels for WebAssembly Relaxed SIMD. */
 struct f16_v128relaxed_shapes_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::f16_t;
     using distance_t = nk_f32_t;
     static constexpr auto cast = nk_cast_v128relaxed;
@@ -536,8 +521,8 @@ struct f16_v128relaxed_shapes_kit_t {
 #endif // NUMKONG_TARGET_V128RELAXED
 
 /** The widest shapes kit of @p scalar_ this build compiled in among the backends @p caps_ admits,
- *  newest first; each kit states its @c capability_k and its @c compiled_k, so an unselected kit's
- *  body never has to exist. Only the scalars some kit stores specialize it. */
+ *  newest first; each kit states its @c capability_k, and a stub its @c compiled_k as false, so an
+ *  unselected kit's body never has to exist. Only the scalars some kit stores specialize it. */
 template <nk::shapes_dtype scalar_, nk_capability_t caps_>
 struct shapes_ladder;
 
