@@ -17,6 +17,8 @@
  *  a plan with every key in one, and a cleared index holds nothing and ends any cursor it opened
  *  before the clear.
  */
+#undef NDEBUG // ! A test's oracle must stay live in every build
+
 #include <algorithm> // `std::find`, `std::nth_element` - the contained keys, the radius
 #include <limits>    // `std::numeric_limits` - unrecorded fields
 #include <string>    // `std::string` - the cells' names
@@ -38,7 +40,7 @@ static constexpr std::size_t geospatial_expansion_k = 64;
 /** @p count points over a city's square kilometre, every other field unrecorded. */
 static std::vector<usearch_geospatial_observation_t> generate_points(std::size_t count, u64_t seed) {
     constexpr f64_t nan_k = std::numeric_limits<f64_t>::quiet_NaN();
-    splitmix64_t random_generator {seed};
+    split_mix_generator_t random_generator {seed};
     uniform_between<f64_t> const across {-1, 1};
     std::vector<usearch_geospatial_observation_t> points(count);
     for (usearch_geospatial_observation_t& point : points)
@@ -57,8 +59,8 @@ static std::vector<usearch_geospatial_observation_t> generate_points(std::size_t
 }
 
 /** Every key of the first @p count entries reads one observation back, on host residencies. */
-static std::size_t expect_gets(handle<geospatial_verbs_t>& index, std::size_t count) {
-    if (index.residency == usearch_residency_vram_k) return 0;
+static void expect_gets(handle<geospatial_verbs_t>& index, std::size_t count) {
+    if (index.residency == usearch_residency_vram_k) return;
     std::size_t misread = 0;
     for (std::size_t offset = 0; offset != count; ++offset) {
         usearch_outcome_t outcome {};
@@ -71,23 +73,22 @@ static std::size_t expect_gets(handle<geospatial_verbs_t>& index, std::size_t co
         usearch_geospatial_get(&get);
         misread += outcome.status != usearch_status_success_k || written != 1;
     }
-    return check(misread == 0);
+    expect_true(misread == 0);
 }
 
 /** A containment walk on the refined graph, at the median tenth-nearest distance, reports every
  *  entry of the exact scan's top ten inside that radius, where the residency serves a scan. */
-static std::size_t expect_within(handle<geospatial_verbs_t>& index, geospatial_queries_t queries) {
+static void expect_within(handle<geospatial_verbs_t>& index, geospatial_queries_t queries) {
     copied_matches_t oracle;
     usearch_outcome_t const scanned = scan_oracle(index, queries, geospatial_queries_k, cell_wanted_k, cell_batch_k,
                                                   oracle);
-    if (scanned.status == usearch_status_unsupported_k) return 0;
-    std::size_t failures = check(scanned);
-    if (failures) return failures;
+    if (scanned.status == usearch_status_unsupported_k) return;
+    if (!expect_success(scanned)) return;
     st::vector<std::size_t> const offsets = match_offsets(oracle);
     std::vector<f64_t> tenth;
     for (std::size_t query = 0; query != geospatial_queries_k; ++query)
         if (oracle.counts[query]) tenth.push_back(oracle.scores[offsets[query + 1] - 1]);
-    if (tenth.empty()) return check(false);
+    if (tenth.empty()) return void(expect_true(false));
     std::nth_element(tenth.begin(), tenth.begin() + tenth.size() / 2, tenth.end());
     f64_t const radius_metres = tenth[tenth.size() / 2];
 
@@ -98,13 +99,11 @@ static std::size_t expect_within(handle<geospatial_verbs_t>& index, geospatial_q
     within.count = geospatial_queries_k, within.queries = queries.observations, within.relation = queries.relation;
     within.tolerance = {radius_metres, 0}, within.matches = &matches, within.arena = index.arena();
     usearch_geospatial_within(&within);
-    failures += check(outcome);
-    if (failures) return failures;
+    if (!expect_success(outcome)) return;
     std::vector<std::size_t> contained_offsets(geospatial_queries_k + 1);
-    failures += check(
-        download(contained_offsets.data(), matches.offsets, contained_offsets.size() * sizeof(std::size_t)));
+    expect_true(download(contained_offsets.data(), matches.offsets, contained_offsets.size() * sizeof(std::size_t)));
     std::vector<usearch_key_t> contained(contained_offsets.back());
-    failures += check(download(contained.data(), matches.keys, contained.size() * sizeof(usearch_key_t)));
+    expect_true(download(contained.data(), matches.keys, contained.size() * sizeof(usearch_key_t)));
     std::size_t unminted = 0;
     std::vector<u64_t> contained_entries(contained.size());
     for (std::size_t match = 0; match != contained.size(); ++match) {
@@ -125,53 +124,52 @@ static std::size_t expect_within(handle<geospatial_verbs_t>& index, geospatial_q
                       contained_entries.begin() + contained_offsets[query + 1];
         }
     if (missed) fmt::println(stderr, "  {} entries inside {:.1f} m left out", missed, radius_metres);
-    return failures + check(unminted == 0) + check(missed == 0);
+    expect_true(unminted == 0);
+    expect_true(missed == 0);
 }
 
-/** One cell, named @p name, as the file's docblock describes. */
-static std::size_t check_geospatial_behaviors(sweep_cell_t const& cell, session_t& session, std::string const& name,
-                                              u64_t seed) {
+/** One cell, as the file's docblock describes. */
+static void test_geospatial_behaviors(sweep_cell_t const& cell, u64_t seed) {
+    session_t session = open_session(settings_of(session_settings(), cell), cell.cpu_class);
+    if (!expect_true(bool(session))) return;
     handle<geospatial_verbs_t> index = open_index<geospatial_verbs_t>(session, geospatial_geometry_t {}, cell.shards);
-    if (!index) return 1;
+    if (!expect_true(bool(index))) return;
     std::vector<usearch_geospatial_observation_t> const points = generate_points(
         geospatial_entries_k + geospatial_queries_k, seed);
     std::vector<usearch_geospatial_observation_t> const second_source = generate_points(geospatial_packed_entries_k,
                                                                                         ~seed);
     geospatial_queries_t const queries {points.data() + geospatial_entries_k, usearch_geospatial_relation_near_k, {}};
 
-    std::size_t failures = expect_built(cell, index, points.data(), geospatial_entries_k);
-    if (failures) return failures;
-    failures += expect_gets(index, geospatial_entries_k);
-    failures += expect_walk_recall(index, queries, geospatial_queries_k, geospatial_expansion_k, 0.8);
-    failures += expect_refined(index, queries, geospatial_queries_k, geospatial_expansion_k, usearch_status_success_k);
-    failures += expect_within(index, queries);
-    failures += expect_health(index, geospatial_entries_k);
-    failures += expect_cursor(index, geospatial_entries_k);
-    failures += expect_sample(index, geospatial_entries_k);
-    failures += expect_buffer_round_trip(index, queries, geospatial_queries_k, geospatial_expansion_k, 0.8,
-                                         usearch_status_unsupported_k);
-    std::string const stem = fmt::format("/tmp/usearch-abi-geospatial-{:016x}", stream_key(seed, name));
-    failures += expect_persistence(cell, index, points.data(), queries, geospatial_queries_k, geospatial_expansion_k,
-                                   0.8, stem, saved_bytes_t::identical_k, 0.0);
-    if (cell.residency == usearch_residency_nvme_k) return failures;
-    failures += expect_refine_plan(index, points.data(), geospatial_entries_k, usearch_status_success_k);
-    failures += expect_reshard_gather(index, second_source.data(), geospatial_packed_entries_k, geospatial_entries_k,
-                                      usearch_status_success_k);
-    failures += expect_reshard_cut(index, usearch_status_success_k);
-    return failures + expect_cleared(index, points.data());
+    if (!check_built(cell, index, points.data(), geospatial_entries_k)) return;
+    expect_gets(index, geospatial_entries_k);
+    expect_walk_recall(index, queries, geospatial_queries_k, geospatial_expansion_k, 0.8);
+    expect_refined(index, queries, geospatial_queries_k, geospatial_expansion_k, usearch_status_success_k);
+    expect_within(index, queries);
+    expect_health(index, geospatial_entries_k);
+    expect_cursor(index, geospatial_entries_k);
+    expect_sample(index, geospatial_entries_k);
+    expect_buffer_round_trip(index, queries, geospatial_queries_k, geospatial_expansion_k, 0.8,
+                             usearch_status_unsupported_k);
+    scratch_directory_t const scratch;
+    std::string const stem = scratch.path("checkpoint");
+    expect_persistence(cell, index, points.data(), queries, geospatial_queries_k, geospatial_expansion_k, 0.8, stem,
+                       saved_bytes_t::identical_k, 0.0);
+    if (cell.residency == usearch_residency_nvme_k) return;
+    expect_refine_plan(index, points.data(), geospatial_entries_k, usearch_status_success_k);
+    expect_reshard_gather(index, second_source.data(), geospatial_packed_entries_k, geospatial_entries_k,
+                          usearch_status_success_k);
+    expect_reshard_cut(index, usearch_status_success_k);
+    expect_cleared(index, points.data());
 }
 
-std::size_t check_geospatial_abi(settings_t const& settings) {
-    std::size_t failures = 0;
+void run_geospatial_abi_cases() {
+    // Each stream keeps the name its cell had before the label spelled the constants.
     for (sweep_cell_t const& cell : diagonal_sweep(usearch_scalar_unknown_k)) {
         std::string const name = fmt::format("geospatial {} near", name_of(cell));
-        if (!settings.filter.selects(name)) continue;
-        session_t session = open_session(settings_of(settings, cell), cell.cpu_class);
-        failures += report(
-            name.c_str(),
-            session ? check_geospatial_behaviors(cell, session, name, stream_key(settings.seed, name)) : 1);
+        std::string const label = fmt::format("test_geospatial_behaviors({}, {}, {})", constant_of(cell.residency),
+                                              constant_of(cell.cpu_class), cell.shards);
+        run_test_case(label.c_str(), test_geospatial_behaviors, cell, stream_key(test_run.settings.seed, name));
     }
-    return failures;
 }
 
 } // namespace unum::usearch::test::abi

@@ -14,6 +14,8 @@
  *  deliberately minimal - instantiate, insert, search, round-trip - existence is the
  *  assertion; behavioral depth lives in the fmt-linked suite.
  */
+#undef NDEBUG // ! A test's oracle must stay live in every build
+
 #include <array>       // `std::array` - stored tags & batch overloads
 #include <bit>         // `std::bit_cast` - uuid keys from words
 #include <memory>      // `std::allocator` - every container names its allocator, `std::unique_ptr` - the indexes

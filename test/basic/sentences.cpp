@@ -10,6 +10,8 @@
  *  edits each, so edit distances bimodalize - within a template only the edits differ,
  *  across templates most characters do - giving the graph structure to navigate.
  */
+#undef NDEBUG // ! A test's oracle must stay live in every build
+
 #include <array>       // `std::array` - the vocabulary & handmade triple
 #include <span>        // `std::span` - the metric's drain surface
 #include <string>      // `std::string` - the stored payload
@@ -120,7 +122,7 @@ struct sentences_fixture {
                                                                  "cache", "tensor", "payload", "cluster"};
         constexpr std::size_t templates_k = 8;
         constexpr std::size_t words_per_sentence_k = 6;
-        splitmix64_t random_generator {seed};
+        split_mix_generator_t random_generator {seed};
         uniform_below<u32_t> word_distribution {static_cast<u32_t>(vocabulary_k.size())};
         uniform_below<u32_t> template_distribution {templates_k};
         uniform_below<u32_t> letter_distribution {26};
@@ -163,8 +165,7 @@ static_assert(value_codec<sentence_codec_t, std::string>);
 
 /** The transparency case: a @c string_view query - never a stored value - opens the
  *  metric's rounds, and its self-match still ranks at distance zero. */
-static std::size_t check_sentences_transparent_search(u64_t seed) {
-    std::size_t failures = 0;
+static void test_sentences_transparent_search(u64_t seed) {
     allocation_ledger_t ledger;
     {
         auto const index_ptr = sentences_fixture_t::make_index(ledger);
@@ -175,24 +176,22 @@ static std::size_t check_sentences_transparent_search(u64_t seed) {
         auto values = sentences_fixture_t::make_values(16, stream_key(seed, "transparent_search", 1),
                                                        counting_allocator_t {ledger});
         std::string const copied_value = values[0];
-        failures += expect(bool(index.reserve(values.size())));
+        expect_true(bool(index.reserve(values.size())));
         std::vector<u32_t> assigned_ids;
-        failures += basic_build<sentences_fixture_t>(index, metric, values, assigned_ids, context, keep_diverse_t {4});
+        basic_build<sentences_fixture_t>(index, metric, values, assigned_ids, context, keep_diverse_t {4});
 
         auto const [result, status] = index.search(std::string_view {copied_value}, {}, metric, context);
-        failures += expect_eq(status, status_t::success_k);
-        failures += expect(result.count > 0);
-        failures += expect_eq(context.results[0].distance, u64_t {0});
+        expect_equal(status, status_t::success_k);
+        expect_true(result.count > 0);
+        expect_equal(context.results[0].distance, u64_t {0});
     }
-    failures += expect_eq(ledger.live_bytes, 0);
-    return failures;
+    expect_equal(ledger.live_bytes, 0);
 }
 
 /** The codec-rejection case of the hostile battery: a poison byte in the values section must
  *  surface the codec's own refusal through @c load, and an insert into the failed index meets
  *  neither the dead attempt's keys nor its values. */
-static std::size_t check_sentences_codec_poison(u64_t seed) {
-    std::size_t failures = 0;
+static void test_sentences_codec_poison(u64_t seed) {
     allocation_ledger_t ledger;
     {
         auto const index_ptr = sentences_fixture_t::make_index(ledger);
@@ -203,18 +202,18 @@ static std::size_t check_sentences_codec_poison(u64_t seed) {
                                                                    counting_allocator_t {ledger}};
         auto values = sentences_fixture_t::make_values(8, stream_key(seed, "codec_poison", 1),
                                                        counting_allocator_t {ledger});
-        failures += expect(bool(index.reserve(values.size())));
+        expect_true(bool(index.reserve(values.size())));
         std::vector<u32_t> assigned_ids;
-        failures += basic_build<sentences_fixture_t>(index, metric, values, assigned_ids, context, keep_diverse_t {4});
+        basic_build<sentences_fixture_t>(index, metric, values, assigned_ids, context, keep_diverse_t {4});
 
         auto [columns, status] = basic_saved_columns(index, codec);
-        failures += expect(succeeded(status));
+        expect_true(succeeded(status));
         columns.values.back() = std::byte {0xFF}; // Poisons the last value's final byte.
 
         auto const poisoned_ptr = sentences_fixture_t::make_index(ledger);
         auto& poisoned = *poisoned_ptr;
-        failures += expect(bool(poisoned.reserve(values.size())));
-        failures += expect_eq(poisoned.load(columns.view(), codec), status_t::malformed_k);
+        expect_true(bool(poisoned.reserve(values.size())));
+        expect_equal(poisoned.load(columns.view(), codec), status_t::malformed_k);
 
         // The dead plan decoded every entry but the last, so the IDs an insert now dispenses held
         // its keys and values.
@@ -224,22 +223,20 @@ static std::size_t check_sentences_codec_poison(u64_t seed) {
                                                sentences_fixture_t::make_key(values.size() + 1)};
         auto const [inserted, insert_status] = poisoned.insert(std::span(fresh_values), std::span(fresh_keys), metric,
                                                                {}, context, keep_diverse_t {4});
-        failures += expect_eq(insert_status, status_t::success_k);
-        failures += expect(!poisoned.contains(sentences_fixture_t::make_key(0)));
-        failures += expect_eq(poisoned.degree_of(0).value, 1u);
-        failures += expect_eq(poisoned.health(context).status, status_t::success_k);
+        expect_equal(insert_status, status_t::success_k);
+        expect_true(!poisoned.contains(sentences_fixture_t::make_key(0)));
+        expect_equal(poisoned.degree_of(0).value, 1u);
+        expect_equal(poisoned.health(context).status, status_t::success_k);
     }
-    failures += expect_eq(ledger.live_bytes, 0);
-    return failures;
+    expect_equal(ledger.live_bytes, 0);
 }
 
 /** A batch publishes whole: a two-value batch on an empty index parks in its second entry's walk,
  *  which already admitted the first entry through its @c wired_k bit, and no reader sees either
  *  entry until the batch's turn. */
-static std::size_t check_sentences_whole_batch(u64_t seed) {
+static void test_sentences_whole_batch(u64_t seed) {
     using index_t = sentences_fixture_t::index_t;
     using context_t = index_t::traversal_context_t;
-    std::size_t failures = 0;
     allocation_ledger_t ledger;
     {
         std::unique_ptr<index_t> const index_ptr = sentences_fixture_t::make_index(ledger);
@@ -247,13 +244,13 @@ static std::size_t check_sentences_whole_batch(u64_t seed) {
         auto values = sentences_fixture_t::make_values(2, stream_key(seed, "whole_batch"),
                                                        counting_allocator_t {ledger});
         std::array<u64_t, 2> const keys {sentences_fixture_t::make_key(0), sentences_fixture_t::make_key(1)};
-        failures += expect(bool(index.reserve(values.size())));
+        expect_true(bool(index.reserve(values.size())));
         bool entered_word = false, released_word = false;
         fu::standard_atomic_ref<bool> const entered {entered_word}, released {released_word};
         std::size_t thread_failures_count = 0;
         fu::standard_atomic_ref<std::size_t> const thread_failures {thread_failures_count};
         fu::flat_pool_t pool;
-        if (fu::failed(pool.spawn(2))) return failures + expect(false);
+        if (fu::failed(pool.spawn(2))) return void(expect_true(false));
         pool.for_threads([&](std::size_t thread) noexcept {
             if (thread == 0) {
                 basic_gated_metric<levenshtein_metric_t, u64_t> gated {sentences_fixture_t::make_metric(),
@@ -273,13 +270,12 @@ static std::size_t check_sentences_whole_batch(u64_t seed) {
                 thread_failures.store_add(1);
             released.store(true, std::memory_order_release);
         });
-        failures += expect_eq(thread_failures_count, 0u);
-        failures += expect_eq(index.size(), 2u);
-        failures += expect(index.contains(keys[1]));
-        failures += expect_eq(index.degree_of(1).value, 1u); // Linked to the first entry before either published.
+        expect_equal(thread_failures_count, 0u);
+        expect_equal(index.size(), 2u);
+        expect_true(index.contains(keys[1]));
+        expect_equal(index.degree_of(1).value, 1u); // Linked to the first entry before either published.
     }
-    failures += expect_eq(ledger.live_bytes, 0);
-    return failures;
+    expect_equal(ledger.live_bytes, 0);
 }
 
 /** Myers' bit-parallel Levenshtein - a genuinely different algorithm from the
@@ -313,8 +309,7 @@ static u64_t myers_levenshtein_distance(std::string_view first, std::string_view
 
 /** The independent-oracle audit over sampled pairs, truncated to the bit-parallel
  *  form's 64-character bound. */
-static std::size_t check_sentences_independent_oracle(u64_t seed) {
-    std::size_t failures = 0;
+static void test_sentences_independent_oracle(u64_t seed) {
     std::vector<u64_t> previous_row, current_row;
     allocation_ledger_t ledger;
     auto values = sentences_fixture_t::make_values(24, stream_key(seed, "independent_oracle"),
@@ -322,24 +317,26 @@ static std::size_t check_sentences_independent_oracle(u64_t seed) {
     for (std::size_t pair = 0; pair + 1 < values.size(); pair += 2) {
         std::string_view const first = std::string_view {values[pair]}.substr(0, 64);
         std::string_view const second = std::string_view {values[pair + 1]}.substr(0, 64);
-        failures += expect_eq(levenshtein_distance(first, second, previous_row, current_row),
-                              myers_levenshtein_distance(first, second));
+        expect_equal(levenshtein_distance(first, second, previous_row, current_row),
+                     myers_levenshtein_distance(first, second));
     }
-    failures += expect_eq(levenshtein_distance("kitten", "sitting", previous_row, current_row),
-                          myers_levenshtein_distance("kitten", "sitting"));
-    return failures;
+    expect_equal(levenshtein_distance("kitten", "sitting", previous_row, current_row),
+                 myers_levenshtein_distance("kitten", "sitting"));
 }
 
-std::size_t test::basic::check_sentences(settings_t const& settings) {
-    std::size_t failures = 0;
-    failures += test_basic_scenarios<sentences_fixture_t>(settings.seed);
-    failures += test_basic_scenarios<sentences_fixture<fu::standard_yield_t>>(settings.seed);
-    failures += check_sentences_transparent_search(settings.seed);
-    failures += check_sentences_codec_poison(settings.seed);
-    failures += check_sentences_whole_batch(settings.seed);
-    failures += check_sentences_independent_oracle(settings.seed);
-    failures += test_basic_safegraphs_roundtrip<sentences_fixture_t>(settings.seed, "u64", "levenshtein");
-    failures += test_basic_safegraphs_hostile<sentences_fixture_t>(settings.seed, "levenshtein");
-    failures += test_basic_safegraphs_distributed<sentences_fixture_t>(settings.seed, "levenshtein");
-    return report("sentences", failures);
+void test::basic::run_sentences_cases() {
+    u64_t const seed = test_run.settings.seed;
+    run_test_case("test_basic_scenarios<sentences_fixture_t>", test_basic_scenarios<sentences_fixture_t>, seed);
+    run_test_case("test_basic_scenarios<sentences_fixture<fu::standard_yield_t>>",
+                  test_basic_scenarios<sentences_fixture<fu::standard_yield_t>>, seed);
+    run_test_case("test_sentences_transparent_search", test_sentences_transparent_search, seed);
+    run_test_case("test_sentences_codec_poison", test_sentences_codec_poison, seed);
+    run_test_case("test_sentences_whole_batch", test_sentences_whole_batch, seed);
+    run_test_case("test_sentences_independent_oracle", test_sentences_independent_oracle, seed);
+    run_test_case("test_basic_safegraphs_round_trip<sentences_fixture_t>",
+                  test_basic_safegraphs_round_trip<sentences_fixture_t>, seed, "u64", "levenshtein");
+    run_test_case("test_basic_safegraphs_hostile<sentences_fixture_t>",
+                  test_basic_safegraphs_hostile<sentences_fixture_t>, seed, "levenshtein");
+    run_test_case("test_basic_safegraphs_distributed<sentences_fixture_t>",
+                  test_basic_safegraphs_distributed<sentences_fixture_t>, seed, "levenshtein");
 }

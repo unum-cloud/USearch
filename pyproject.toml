@@ -196,6 +196,7 @@ select = [
   "SIM", # flake8-simplify (needless complexity)
   "TID", # flake8-tidy-imports (relative imports)
   "D",   # pydocstyle (docstrings)
+  "PT",  # flake8-pytest-style (pytest idioms)
 ]
 ignore = [
   "E501",  # line too long (handled by formatter)
@@ -209,7 +210,9 @@ ignore = [
   "E402",
 ] # re-exports and conditional imports
 ".cmake-format.py" = ["F821"] # cmake-format defines `section` when it runs the profile
-"!python/**" = ["D"]
+"!{python,test}/**" = ["D"]
+# Tests owe a docstring on every module-level function (D103) and nothing else from pydocstyle.
+"test/**" = ["D100", "D101", "D102", "D104", "D105", "D106", "D107", "D2", "D3", "D4"]
 "*.pyi" = ["D"]
 
 [tool.ruff.lint.pydocstyle]

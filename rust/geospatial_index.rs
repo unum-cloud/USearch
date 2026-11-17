@@ -2032,23 +2032,14 @@ impl Drop for GeospatialCursor<'_> {
 #[cfg(test)]
 mod tests {
     use core::ops::ControlFlow;
-    use std::path::PathBuf;
 
     use rand::{RngExt, SeedableRng};
 
     use super::*;
-    use crate::types::{Error, Phase};
+    use crate::testing::{ScratchDirectory, assert_close, case_stream_key, executor, keys, refused};
+    use crate::types::Phase;
 
     // region: Helpers
-
-    /// One executor per test, since an executor runs one call at a time.
-    fn executor() -> Executor {
-        Executor::for_ram(&[], None, 0).expect("the executor must spawn")
-    }
-
-    fn keys(first: u64, count: usize) -> Vec<Key> {
-        (first..first + count as u64).map(Key::from).collect()
-    }
 
     /// Random positions between the 60th parallels, every other field unrecorded, the same for the
     /// same seed.
@@ -2084,29 +2075,15 @@ mod tests {
         Ok(index.describe()?.size)
     }
 
-    fn refused(answer: Result<impl Sized>, status: Status) -> bool {
-        matches!(answer, Err(Error { status: answered, .. }) if answered == status)
-    }
-
-    /// A checkpoint path scoped by test name and process, never the working directory.
-    fn scratch_path(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("usearch-rust-geospatial-{name}-{}.safegraphs", std::process::id()))
-    }
-
-    fn remove_quietly(path: &Path) {
-        let _ = std::fs::remove_file(path);
-    }
-
     // endregion: Helpers
 
     // region: Construction
 
     #[test]
-    fn init_ram_starts_empty() -> Result<()> {
-        let described = GeospatialIndex::init_ram(&GeospatialOptions::default(), &[])?.describe()?;
+    fn init_ram_starts_empty() {
+        let described = GeospatialIndex::init_ram(&GeospatialOptions::default(), &[]).unwrap().describe().unwrap();
         assert_eq!(described.size, 0);
         assert_eq!(described.gpu_class(), "unknown", "a host index names no GPU class");
-        Ok(())
     }
 
     /// A VRAM index either opens on a GPU or answers the library's own refusal.
@@ -2125,7 +2102,7 @@ mod tests {
     /// Mirrors the Geospatial Indexes snippet of rust/README.md line by line; only the function
     /// around it and its closing `Ok(())` differ.
     #[test]
-    fn readme_geospatial_indexes() -> Result<()> {
+    fn readme_quickstart() -> Result<()> {
         let index = GeospatialIndex::init_ram(&GeospatialOptions::default(), &[])?;
         let stops = [
             GeospatialObservation::at(51.5308, -0.1238), // every other field unrecorded, NaN
@@ -2142,66 +2119,63 @@ mod tests {
 
     /// An observation searched for comes back first, at zero chord metres.
     #[test]
-    fn finds_the_inserted_entry() -> Result<()> {
-        let index = GeospatialIndex::init_ram(&GeospatialOptions::default(), &[])?;
+    fn finds_the_inserted_entry() {
+        let index = GeospatialIndex::init_ram(&GeospatialOptions::default(), &[]).unwrap();
         let places = capitals();
-        index.insert(keys(1, 3), &places)?;
-        assert_eq!(size(&index)?, 3);
+        index.insert(keys(1, 3), &places).unwrap();
+        assert_eq!(size(&index).unwrap(), 3);
 
-        let mut arena = Arena::new()?;
-        let matches = index.search(&places[1..2], 1, &mut arena)?;
-        let best = matches.query(0)?;
+        let mut arena = Arena::new().unwrap();
+        let matches = index.search(&places[1..2], 1, &mut arena).unwrap();
+        let best = matches.query(0).unwrap();
         assert_eq!((best.keys, best.distances[0]), (&[Key::from(2u64)][..], 0.0));
-        Ok(())
     }
 
     /// Two observations a kilometre apart fall inside a two-kilometre radius, and a far one does
     /// not.
     #[test]
-    fn within_reports_only_the_entries_inside_the_radius() -> Result<()> {
+    fn within_reports_only_the_entries_inside_the_radius() {
         let places = [
             GeospatialObservation::at(48.8566, 2.3522),
             GeospatialObservation::at(48.8656, 2.3522),
             GeospatialObservation::at(52.52, 13.405),
         ];
-        let index = GeospatialIndex::init_ram(&GeospatialOptions::default(), &[])?;
-        index.insert(keys(1, 3), &places)?;
+        let index = GeospatialIndex::init_ram(&GeospatialOptions::default(), &[]).unwrap();
+        index.insert(keys(1, 3), &places).unwrap();
 
-        let mut arena = Arena::new()?;
-        let report = index.within(&places[..1], 2000.0, &mut arena)?;
-        let mut found: Vec<u64> = report.query(0)?.keys.iter().map(|&key| u64::try_from(key).unwrap()).collect();
+        let mut arena = Arena::new().unwrap();
+        let report = index.within(&places[..1], 2000.0, &mut arena).unwrap();
+        let mut found: Vec<u64> =
+            report.query(0).unwrap().keys.iter().map(|&key| u64::try_from(key).unwrap()).collect();
         found.sort_unstable();
         assert_eq!(found, [1, 2]);
-        Ok(())
     }
 
     #[test]
-    fn gets_and_counts_every_entry_under_a_key() -> Result<()> {
-        let index = GeospatialIndex::init_ram(&GeospatialOptions::default(), &[])?;
+    fn gets_and_counts_every_entry_under_a_key() {
+        let index = GeospatialIndex::init_ram(&GeospatialOptions::default(), &[]).unwrap();
         let shared = Key::from(7u64);
         let places = capitals();
-        index.insert([shared, shared], &places[..2])?;
+        index.insert([shared, shared], &places[..2]).unwrap();
 
-        assert_eq!(index.count(shared)?.entries, 2);
-        assert!(index.contains(shared)? && !index.contains(Key::from(8u64))?);
+        assert_eq!(index.count(shared).unwrap().entries, 2);
+        assert!(index.contains(shared).unwrap() && !index.contains(Key::from(8u64)).unwrap());
 
-        let mut arena = Arena::new()?;
-        let stored = index.get(shared, &mut arena)?;
+        let mut arena = Arena::new().unwrap();
+        let stored = index.get(shared, &mut arena).unwrap();
         assert_eq!(stored.view().len(), 2);
         for (restored, inserted) in stored.view().iter().zip(&places) {
-            assert!((restored.latitude_degrees - inserted.latitude_degrees).abs() < 1e-6);
-            assert!((restored.longitude_degrees - inserted.longitude_degrees).abs() < 1e-6);
+            assert_close(restored.latitude_degrees, inserted.latitude_degrees, 1e-6);
+            assert_close(restored.longitude_degrees, inserted.longitude_degrees, 1e-6);
         }
-        assert!(index.get(Key::from(8u64), &mut arena)?.view().is_empty(), "an absent key yields none");
-        Ok(())
+        assert!(index.get(Key::from(8u64), &mut arena).unwrap().view().is_empty(), "an absent key yields none");
     }
 
     #[test]
-    fn rejects_mismatched_key_and_entry_counts() -> Result<()> {
-        let index = GeospatialIndex::init_ram(&GeospatialOptions::default(), &[])?;
+    fn rejects_mismatched_key_and_entry_counts() {
+        let index = GeospatialIndex::init_ram(&GeospatialOptions::default(), &[]).unwrap();
         assert!(refused(index.insert(keys(0, 3), &capitals()[..1]), Status::ShapeMismatch));
-        assert_eq!(size(&index)?, 0);
-        Ok(())
+        assert_eq!(size(&index).unwrap(), 0);
     }
 
     // endregion: Ingest and Retrieval
@@ -2209,44 +2183,42 @@ mod tests {
     // region: Serialization
 
     #[test]
-    fn saves_and_loads_a_file() -> Result<()> {
-        let path = scratch_path("saves_and_loads_a_file");
-        let index = populated_index(32, 0, 0)?;
-        index.on(&executor()).save(&path)?;
+    fn saves_and_loads_a_file() {
+        let scratch = ScratchDirectory::new("usearch-geospatial-saves_and_loads_a_file");
+        let path = scratch.path().join("index.safegraphs");
+        let index = populated_index(32, 0, case_stream_key(0)).unwrap();
+        index.on(&executor()).save(&path).unwrap();
 
-        assert!(GeospatialIndex::metadata(&path)?.connectivity > 0);
-        let restored = GeospatialIndex::load_ram(&path)?;
-        assert_eq!(size(&restored)?, 32);
-        assert!(restored.contains(Key::from(17u64))?);
+        assert!(GeospatialIndex::metadata(&path).unwrap().connectivity > 0);
+        let restored = GeospatialIndex::load_ram(&path).unwrap();
+        assert_eq!(size(&restored).unwrap(), 32);
+        assert!(restored.contains(Key::from(17u64)).unwrap());
 
         // A view serves the checkpoint in place and refuses changes, where RAM serves views at all.
         match GeospatialIndex::view_ram(&path, None) {
             Ok(viewed) => {
-                assert_eq!(size(&viewed)?, 32);
+                assert_eq!(size(&viewed).unwrap(), 32);
                 assert!(refused(viewed.reserve(64), Status::ReadOnly));
             }
             Err(error) => assert_eq!(error.status, Status::Unsupported),
         }
-        remove_quietly(&path);
-        Ok(())
     }
 
     #[test]
-    fn saves_and_loads_a_buffer() -> Result<()> {
-        let index = populated_index(32, 0, 0)?;
-        let mut arena = Arena::new()?;
-        let saved = index.save_buffer(&mut arena)?;
+    fn saves_and_loads_a_buffer() {
+        let index = populated_index(32, 0, case_stream_key(0)).unwrap();
+        let mut arena = Arena::new().unwrap();
+        let saved = index.save_buffer(&mut arena).unwrap();
         let monolith = saved.view();
         assert!(!monolith.is_empty());
 
-        let connectivity = index.describe()?.metadata.connectivity;
-        assert_eq!(GeospatialIndex::metadata_buffer(monolith)?.connectivity, connectivity);
-        assert_eq!(size(&GeospatialIndex::load_ram_buffer(monolith)?)?, 32);
+        let connectivity = index.describe().unwrap().metadata.connectivity;
+        assert_eq!(GeospatialIndex::metadata_buffer(monolith).unwrap().connectivity, connectivity);
+        assert_eq!(size(&GeospatialIndex::load_ram_buffer(monolith).unwrap()).unwrap(), 32);
         assert!(
             GeospatialIndex::load_ram_buffer(&monolith[..monolith.len() - 1]).is_err(),
             "a short buffer must not be read"
         );
-        Ok(())
     }
 
     // endregion: Serialization
@@ -2256,19 +2228,18 @@ mod tests {
     /// A round reports what it did, its closing audit judging every entry, and leaves each entry
     /// findable.
     #[test]
-    fn refine_reports_a_round_over_every_entry() -> Result<()> {
-        let index = populated_index(64, 0, 0)?;
-        let report = index.on(&executor()).refine(GeospatialRefineConfig::default())?;
+    fn refine_reports_a_round_over_every_entry() {
+        let index = populated_index(64, 0, case_stream_key(0)).unwrap();
+        let report = index.on(&executor()).refine(GeospatialRefineConfig::default()).unwrap();
         assert!(report.changed <= report.reselected);
         assert_eq!(report.reachability.audited, 64);
-        assert!(index.contains(Key::from(17u64))?);
-        Ok(())
+        assert!(index.contains(Key::from(17u64)).unwrap());
     }
 
     /// A plan keeps a stopped round live for the next call, and its finish reports the whole plan.
     #[test]
-    fn a_refine_plan_resumes_and_finishes() -> Result<()> {
-        let index = populated_index(64, 0, 0)?;
+    fn a_refine_plan_resumes_and_finishes() {
+        let index = populated_index(64, 0, case_stream_key(0)).unwrap();
         let executor = executor();
         let (mut plan, mut phase) = (GeospatialRefinePlan::default(), PhaseProgress::default());
         let stopped = index.on(&executor).refine(GeospatialRefineConfig {
@@ -2280,26 +2251,27 @@ mod tests {
         if let Err(failure) = stopped {
             assert_eq!(failure.status, Status::Cancelled);
             assert!(phase.phase != Phase::Done && phase.completed <= phase.total);
-            index.on(&executor).refine(GeospatialRefineConfig {
-                plan: Some(&mut plan),
-                phase: Some(&mut phase),
-                ..GeospatialRefineConfig::default()
-            })?;
+            index
+                .on(&executor)
+                .refine(GeospatialRefineConfig {
+                    plan: Some(&mut plan),
+                    phase: Some(&mut phase),
+                    ..GeospatialRefineConfig::default()
+                })
+                .unwrap();
         }
         assert_eq!(phase.phase, Phase::Done);
-        assert_eq!(index.on(&executor).refine_plan_finish(plan)?.reachability.audited, 64);
-        Ok(())
+        assert_eq!(index.on(&executor).refine_plan_finish(plan).unwrap().reachability.audited, 64);
     }
 
     /// A plan lives across calls on one executor, so a call on the calling thread cannot open one.
     #[test]
-    fn a_refine_plan_needs_an_executor() -> Result<()> {
-        let index = populated_index(0, 0, 0)?;
+    fn a_refine_plan_needs_an_executor() {
+        let index = populated_index(0, 0, case_stream_key(0)).unwrap();
         let mut plan = GeospatialRefinePlan::default();
         let refined =
             index.refine(GeospatialRefineConfig { plan: Some(&mut plan), ..GeospatialRefineConfig::default() });
         assert!(refused(refined, Status::InvalidArgument));
-        Ok(())
     }
 
     // endregion: Refinement
@@ -2309,26 +2281,31 @@ mod tests {
     /// Several sources into one target gather every entry there, and the other sources end empty
     /// and live.
     #[test]
-    fn gathers_several_sources_into_one_target() -> Result<()> {
-        let first = populated_index(32, 0, 0)?;
-        let (second, third) = (populated_index(32, 32, 1)?, populated_index(32, 64, 2)?);
-        first.on(&executor()).reshard(GeospatialReshardConfig {
-            sources: &[&first, &second, &third],
-            targets: &[&first],
-            ..GeospatialReshardConfig::default()
-        })?;
-        assert_eq!(size(&first)?, 96);
-        assert!(first.contains(Key::from(40u64))? && first.contains(Key::from(80u64))?);
-        assert_eq!((size(&second)?, size(&third)?), (0, 0));
-        Ok(())
+    fn gathers_several_sources_into_one_target() {
+        let first = populated_index(32, 0, case_stream_key(0)).unwrap();
+        let (second, third) = (
+            populated_index(32, 32, case_stream_key(1)).unwrap(),
+            populated_index(32, 64, case_stream_key(2)).unwrap(),
+        );
+        first
+            .on(&executor())
+            .reshard(GeospatialReshardConfig {
+                sources: &[&first, &second, &third],
+                targets: &[&first],
+                ..GeospatialReshardConfig::default()
+            })
+            .unwrap();
+        assert_eq!(size(&first).unwrap(), 96);
+        assert!(first.contains(Key::from(40u64)).unwrap() && first.contains(Key::from(80u64)).unwrap());
+        assert_eq!((size(&second).unwrap(), size(&third).unwrap()), (0, 0));
     }
 
     /// A stop cuts only the closing rounds, so every entry has moved; the plan it leaves live
     /// continues where it stopped, and a deferred receiver closes it.
     #[test]
-    fn a_stopped_gather_continues_through_its_plan() -> Result<()> {
-        let first = populated_index(16, 0, 0)?;
-        let second = populated_index(16, 16, 1)?;
+    fn a_stopped_gather_continues_through_its_plan() {
+        let first = populated_index(16, 0, case_stream_key(0)).unwrap();
+        let second = populated_index(16, 16, case_stream_key(1)).unwrap();
         let executor = executor();
         let (mut plan, mut phase) = (GeospatialReshardPlan::default(), PhaseProgress::default());
         let stopped = first.on(&executor).reshard(GeospatialReshardConfig {
@@ -2343,42 +2320,45 @@ mod tests {
             assert_eq!(failure.status, Status::Cancelled);
             assert_ne!(phase.phase, Phase::Done, "a stop names the phase it stopped in");
         }
-        assert_eq!(size(&first)?, 32);
+        assert_eq!(size(&first).unwrap(), 32);
 
         // A deferred call owns the plan it continues and hands it back once final.
-        let continued = first.deferred(&executor).reshard(GeospatialReshardConfig::from(plan))?;
+        let continued = first.deferred(&executor).reshard(GeospatialReshardConfig::from(plan)).unwrap();
         let (finished, (config, _)) = continued.wait_with_inputs();
-        finished?;
+        finished.unwrap();
         let plan = config.plan.expect("the call hands its plan back");
-        let report = first.deferred(&executor).reshard_plan_finish(plan)?.wait()?;
+        let report = first.deferred(&executor).reshard_plan_finish(plan).unwrap().wait().unwrap();
         assert!(report.changed <= report.reselected);
-        Ok(())
     }
 
     /// One source into several targets cuts it between them, and the source stays live but empty.
     #[test]
-    fn reshards_one_source_into_several_targets() -> Result<()> {
-        let source = populated_index(64, 0, 0)?;
-        let targets = [populated_index(0, 0, 0)?, populated_index(0, 0, 0)?];
-        let report = source.on(&executor()).reshard(GeospatialReshardConfig {
-            sources: &[&source],
-            targets: &[&targets[0], &targets[1]],
-            seed: 7,
-            ..GeospatialReshardConfig::default()
-        })?;
+    fn reshards_one_source_into_several_targets() {
+        let source = populated_index(64, 0, case_stream_key(0)).unwrap();
+        let targets =
+            [populated_index(0, 0, case_stream_key(0)).unwrap(), populated_index(0, 0, case_stream_key(0)).unwrap()];
+        let report = source
+            .on(&executor())
+            .reshard(GeospatialReshardConfig {
+                sources: &[&source],
+                targets: &[&targets[0], &targets[1]],
+                seed: case_stream_key(1),
+                ..GeospatialReshardConfig::default()
+            })
+            .unwrap();
         assert!(report.changed <= report.reselected);
-        let (left, right) = (size(&targets[0])?, size(&targets[1])?);
+        let (left, right) = (size(&targets[0]).unwrap(), size(&targets[1]).unwrap());
         assert!(left != 0 && right != 0 && left + right == 64);
-        assert_eq!(size(&source)?, 0);
-        Ok(())
+        assert_eq!(size(&source).unwrap(), 0);
     }
 
     /// A cut a stop interrupts keeps every entry moved, the next call naming the plan ends its
     /// rounds, and a deferred receiver closes it.
     #[test]
-    fn reshards_one_source_into_several_targets_through_a_plan() -> Result<()> {
-        let source = populated_index(64, 0, 0)?;
-        let targets = [populated_index(0, 0, 0)?, populated_index(0, 0, 0)?];
+    fn reshards_one_source_into_several_targets_through_a_plan() {
+        let source = populated_index(64, 0, case_stream_key(0)).unwrap();
+        let targets =
+            [populated_index(0, 0, case_stream_key(0)).unwrap(), populated_index(0, 0, case_stream_key(0)).unwrap()];
         let executor = executor();
         let (mut plan, mut phase) = (GeospatialReshardPlan::default(), PhaseProgress::default());
         let stopped = source.on(&executor).reshard(GeospatialReshardConfig {
@@ -2389,39 +2369,41 @@ mod tests {
             phase: Some(&mut phase),
             ..GeospatialReshardConfig::default()
         });
-        assert_eq!(size(&targets[0])? + size(&targets[1])?, 64);
+        assert_eq!(size(&targets[0]).unwrap() + size(&targets[1]).unwrap(), 64);
         if stopped.is_err() {
-            source.on(&executor).reshard(GeospatialReshardConfig {
-                plan: Some(&mut plan),
-                phase: Some(&mut phase),
-                ..GeospatialReshardConfig::default()
-            })?;
+            source
+                .on(&executor)
+                .reshard(GeospatialReshardConfig {
+                    plan: Some(&mut plan),
+                    phase: Some(&mut phase),
+                    ..GeospatialReshardConfig::default()
+                })
+                .unwrap();
         }
         assert_eq!(phase.phase, Phase::Done);
-        source.deferred(&executor).reshard_plan_finish(plan)?.wait()?;
-        Ok(())
+        source.deferred(&executor).reshard_plan_finish(plan).unwrap().wait().unwrap();
     }
 
     /// One index as its only source and target has a single shard to recut, which the library
     /// refuses.
     #[test]
-    fn a_recut_of_one_handle_is_unsupported() -> Result<()> {
-        let index = populated_index(16, 0, 0)?;
+    fn a_recut_of_one_handle_is_unsupported() {
+        let index = populated_index(16, 0, case_stream_key(0)).unwrap();
         let recut = index.on(&executor()).reshard(GeospatialReshardConfig {
             sources: &[&index],
             targets: &[&index],
             ..GeospatialReshardConfig::default()
         });
         assert!(refused(recut, Status::Unsupported));
-        assert_eq!(size(&index)?, 16);
-        Ok(())
+        assert_eq!(size(&index).unwrap(), 16);
     }
 
     /// Empty or repeated lists are malformed and a target holding foreign entries mismatches;
     /// every refusal leaves the entries where they were.
     #[test]
-    fn refuses_malformed_lists_and_moves_nothing() -> Result<()> {
-        let (first, second) = (populated_index(8, 0, 0)?, populated_index(8, 8, 1)?);
+    fn refuses_malformed_lists_and_moves_nothing() {
+        let (first, second) =
+            (populated_index(8, 0, case_stream_key(0)).unwrap(), populated_index(8, 8, case_stream_key(1)).unwrap());
         let executor = executor();
         let reshard = |sources: &[&GeospatialIndex], targets: &[&GeospatialIndex]| {
             first.on(&executor).reshard(GeospatialReshardConfig {
@@ -2433,8 +2415,7 @@ mod tests {
         assert!(refused(reshard(&[], &[&first]), Status::InvalidArgument));
         assert!(refused(reshard(&[&first, &first], &[&first]), Status::InvalidArgument));
         assert!(refused(reshard(&[&first], &[&second]), Status::ConfigMismatch));
-        assert_eq!((size(&first)?, size(&second)?), (8, 8));
-        Ok(())
+        assert_eq!((size(&first).unwrap(), size(&second).unwrap()), (8, 8));
     }
 
     // endregion: Resharding

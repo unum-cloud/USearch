@@ -26,7 +26,7 @@ struct counting_metal_allocator_t {
         if (ledger_ && buffer) {
             fu::standard_atomic_ref<std::ptrdiff_t>(ledger_->live_bytes)
                 .store_add(static_cast<std::ptrdiff_t>(buffer.bytes));
-            fu::standard_atomic_ref<std::size_t>(ledger_->total_allocations).store_add(1);
+            fu::standard_atomic_ref<std::size_t>(ledger_->allocations).store_add(1);
         }
         return buffer;
     }

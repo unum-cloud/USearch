@@ -316,7 +316,8 @@ bool run_refinement(streamed_dataset_type_& streamed, fu_pool_t pool) {
 
     std::vector<std::size_t> changed_per_pass;
     changed_per_pass.reserve(max_refines);
-    progress_bar_t progress {"refining", max_refines, bench.settings.terminal};
+    progress_bar_t progress {"refining", max_refines,
+                             bench.settings.terminal ? progress_style_t::bar_k : progress_style_t::deciles_k};
     for (std::size_t pass = 0; pass != max_refines; ++pass) {
         auto [plan, plan_status] = bench.index->plan_refine(config);
         if (failed(plan_status)) {

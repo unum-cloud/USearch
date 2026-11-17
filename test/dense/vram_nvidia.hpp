@@ -30,6 +30,9 @@ namespace unum::usearch::test::dense {
  *  device the library picks that class for. */
 inline constexpr gpu_class_t dense_nvidia_class_k = cuda_class_k;
 
+/** Why the rung cells skip on a device the library would pick another class's unit for. */
+inline constexpr char needs_dense_nvidia_class_k[] = "needs dense_nvidia_class_k";
+
 /** Whether @p device runs the cells of @ref dense_nvidia_class_k, as the library would pick its
  *  unit. */
 inline bool dense_nvidia_runs(gpu_device_t const& device) noexcept {

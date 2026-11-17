@@ -2442,6 +2442,7 @@ impl<Inputs, Output> Future for Wait<'_, Inputs, Output> {
 mod tests {
     use super::*;
     use crate::DenseVerbs;
+    use crate::testing::skipped;
 
     #[test]
     fn keys_round_trip_through_their_rendering() {
@@ -2601,23 +2602,25 @@ mod tests {
 
     /// An arena lives where the executor that made it computes, and keeps that executor alive.
     #[test]
-    fn arenas_live_where_their_executor_computes() -> Result<()> {
+    fn arenas_live_where_their_executor_computes() {
         let host = ArenaDescription { residency: Residency::Ram, device: None };
-        assert_eq!(Arena::new()?.describe()?, host);
+        assert_eq!(Arena::new().unwrap().describe().unwrap(), host);
 
-        let executor = Executor::for_ram(&[], None, 1)?;
-        let placed = Arena::new_in(&executor)?;
+        let executor = Executor::for_ram(&[], None, 1).unwrap();
+        let placed = Arena::new_in(&executor).unwrap();
         let share = Arc::downgrade(&executor.share);
         drop(executor);
-        assert_eq!(placed.describe()?, host, "an arena outlives its executor's handle");
+        assert_eq!(placed.describe().unwrap(), host, "an arena outlives its executor's handle");
         drop(placed);
         assert!(share.upgrade().is_none(), "the last arena frees its executor");
 
         let Ok(gpu) = Executor::for_vram(&[0], None, 0) else {
-            return Ok(());
+            return skipped("no GPU device");
         };
-        assert_eq!(Arena::new_in(&gpu)?.describe()?, ArenaDescription { residency: Residency::Vram, device: Some(0) });
-        Ok(())
+        assert_eq!(
+            Arena::new_in(&gpu).unwrap().describe().unwrap(),
+            ArenaDescription { residency: Residency::Vram, device: Some(0) }
+        );
     }
 
     #[test]
@@ -2765,39 +2768,37 @@ mod tests {
 
     /// A foreign producer's column inserts in place and answers at its own keys, past its offset.
     #[test]
-    fn arrow_columns_insert_in_place() -> Result<()> {
+    fn arrow_columns_insert_in_place() {
         let options = crate::DenseOptions { dimensions: 4, ..crate::DenseOptions::default() };
-        let index = crate::DenseIndex::init_ram(&options, &[])?;
+        let index = crate::DenseIndex::init_ram(&options, &[]).unwrap();
         let slab = [0.0f32, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0];
         let keys = [Key::from(7u64), Key::from(9u64)];
         let vectors = hand_made_rows(&slab, 1);
         let identities = hand_made_keys(&keys);
-        assert_eq!(keys_from_arrow(&identities)?, &keys);
-        index.insert(keys_from_arrow(&identities)?, ArrowRows::<f32>::new(&vectors)?)?;
+        assert_eq!(keys_from_arrow(&identities).unwrap(), &keys);
+        index.insert(keys_from_arrow(&identities).unwrap(), ArrowRows::<f32>::new(&vectors).unwrap()).unwrap();
 
-        let mut arena = Arena::new()?;
-        let matches = index.search(&rows(&slab[8..], 4)?, 1, &mut arena)?;
-        assert_eq!(matches.query(0)?.keys, &[Key::from(9u64)]);
+        let mut arena = Arena::new().unwrap();
+        let matches = index.search(&rows(&slab[8..], 4).unwrap(), 1, &mut arena).unwrap();
+        assert_eq!(matches.query(0).unwrap().keys, &[Key::from(9u64)]);
         assert_eq!(ArrowRows::<f64>::new(&vectors).err().map(|error| error.status), Some(Status::UnknownKind));
-        Ok(())
     }
 
     /// Padded matches export their keys and distances as two columns, one row per query.
     #[test]
-    fn matches_export_keys_and_distances_apart() -> Result<()> {
+    fn matches_export_keys_and_distances_apart() {
         let options = crate::DenseOptions { dimensions: 4, ..crate::DenseOptions::default() };
-        let index = crate::DenseIndex::init_ram(&options, &[])?;
+        let index = crate::DenseIndex::init_ram(&options, &[]).unwrap();
         let slab = [1.0f32, 0.0, 0.0, 0.0];
-        index.insert([Key::from(3u64)], &rows(&slab, 4)?)?;
+        index.insert([Key::from(3u64)], &rows(&slab, 4).unwrap()).unwrap();
 
-        let mut arena = Arena::new()?;
-        let matches = index.search(&rows(&slab, 4)?, 1, &mut arena)?;
-        let keys = matches.keys_to_arrow()?;
+        let mut arena = Arena::new().unwrap();
+        let matches = index.search(&rows(&slab, 4).unwrap(), 1, &mut arena).unwrap();
+        let keys = matches.keys_to_arrow().unwrap();
         assert_eq!(keys.schema().format(), Some(c"w:16"));
-        let distances = matches.distances_to_arrow()?;
+        let distances = matches.distances_to_arrow().unwrap();
         assert_eq!(distances.schema().format(), Some(c"+w:1"));
         assert_eq!(distances.array().array.length(), 1);
-        Ok(())
     }
 }
 

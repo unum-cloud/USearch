@@ -2869,16 +2869,16 @@ impl Drop for DenseSearchStream<'_> {
 mod tests {
     use core::ops::ControlFlow;
     use std::collections::HashSet;
-    use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use numkong::{Matrix, MatrixView, bf16, u1x8};
     use rand::{RngExt, SeedableRng};
 
     use super::*;
+    use crate::testing::{
+        ScratchDirectory, assert_close, assert_close_rows, block_on, case_stream_key, executor, skipped,
+    };
     use crate::types::{Deferred, Mood, Phase, rows};
-
-    const SEED: u64 = 42;
 
     // region: Helpers
 
@@ -2907,11 +2907,6 @@ mod tests {
         (0..count as u64).map(Key::from).collect()
     }
 
-    /// One executor per test, since an executor runs one call at a time.
-    fn executor() -> Executor {
-        Executor::for_ram(&[], None, 0).expect("the executor must spawn")
-    }
-
     fn empty_index(dimensions: usize, metric: DenseMetric, quantization: Scalar) -> Result<DenseIndex> {
         let options = DenseOptions { dimensions, metric, quantization, ..DenseOptions::default() };
         let index = DenseIndex::init_ram(&options, &[])?;
@@ -2923,7 +2918,7 @@ mod tests {
     fn empty_index_or_skip(dimensions: usize, metric: DenseMetric, quantization: Scalar) -> Result<Option<DenseIndex>> {
         match empty_index(dimensions, metric, quantization) {
             Err(error) if error.status == Status::Unsupported => {
-                eprintln!("skipped: this build leaves {quantization:?} out");
+                skipped(&format!("built without {quantization}"));
                 Ok(None)
             }
             built => built.map(Some),
@@ -2939,7 +2934,7 @@ mod tests {
         let index = empty_index(dimensions, metric, quantization)?;
         index.reserve(count)?;
         let keys = sequential_keys(count);
-        let slab = seeded_rows(count, dimensions, SEED);
+        let slab = seeded_rows(count, dimensions, case_stream_key(0));
         index.on(&executor()).insert(&keys, &rows(&slab, dimensions)?)?;
         assert_eq!(index.describe()?.size, count);
         Ok((index, keys, slab))
@@ -2959,27 +2954,8 @@ mod tests {
             .collect()
     }
 
-    /// A checkpoint path scoped by test name and process, never the working directory.
-    fn scratch_path(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("usearch-rust-{name}-{}.safegraphs", std::process::id()))
-    }
-
-    fn remove_quietly(path: &std::path::Path) {
-        let _ = std::fs::remove_file(path);
-    }
-
     /// The spacing of bf16 values at one, the suites' stored kind.
     const BF16_EPSILON: f64 = 1.0 / 128.0;
-
-    fn close(left: f64, right: f64, epsilon: f64) -> bool {
-        (left - right).abs() <= epsilon * left.abs().max(right.abs()).max(1.0)
-    }
-
-    /// Whether rows read back from bf16 storage match the rows written.
-    fn close_rows(read: &[f32], written: &[f32]) -> bool {
-        read.len() == written.len()
-            && read.iter().zip(written).all(|(left, right)| close(f64::from(*left), f64::from(*right), BF16_EPSILON))
-    }
 
     fn requires_send_sync<Subject: Send + Sync>() {}
 
@@ -3035,7 +3011,7 @@ mod tests {
     /// constant reaches the library as a different kind, and is caught here and nowhere else.
     /// A storage kind the build's `USEARCH_DENSE_DTYPES` left out is refused as unsupported.
     #[test]
-    fn constructs_every_metric_and_quantization() -> Result<()> {
+    fn constructs_every_metric_and_quantization() {
         for quantization in [
             Scalar::BF16,
             Scalar::F16,
@@ -3049,10 +3025,10 @@ mod tests {
             Scalar::U4x2,
             Scalar::U1x8,
         ] {
-            let Some(index) = empty_index_or_skip(64, DenseMetric::Inner, quantization)? else {
+            let Some(index) = empty_index_or_skip(64, DenseMetric::Inner, quantization).unwrap() else {
                 continue;
             };
-            let described = index.describe()?;
+            let described = index.describe().unwrap();
             assert_eq!(described.metadata.dimensions, 64, "{quantization:?}");
             assert_eq!(described.metadata.quantization, quantization);
             assert_eq!(described.size, 0, "{quantization:?}");
@@ -3067,29 +3043,27 @@ mod tests {
             (DenseMetric::Hamming, Scalar::U1x8),
             (DenseMetric::Jaccard, Scalar::U1x8),
         ] {
-            let Some(index) = empty_index_or_skip(64, metric, quantization)? else {
+            let Some(index) = empty_index_or_skip(64, metric, quantization).unwrap() else {
                 continue;
             };
-            let described = index.describe()?;
+            let described = index.describe().unwrap();
             assert_eq!(described.metadata.metric, metric);
             assert_eq!(metric.to_string().parse(), Ok(metric), "the library spells it back");
         }
         assert!("cosine".parse::<DenseMetric>().is_err());
-        Ok(())
     }
 
     #[test]
-    fn does_not_preallocate_members() -> Result<()> {
+    fn does_not_preallocate_members() {
         let options = DenseOptions { dimensions: 16, ..DenseOptions::default() };
-        let index = DenseIndex::init_ram(&options, &[])?;
-        let described = index.describe()?;
+        let index = DenseIndex::init_ram(&options, &[]).unwrap();
+        let described = index.describe().unwrap();
         assert_eq!((described.size, described.capacity), (0, 0));
 
-        index.reserve(1024)?;
-        let described = index.describe()?;
+        index.reserve(1024).unwrap();
+        let described = index.describe().unwrap();
         assert!(described.capacity >= 1024);
         assert_eq!(described.size, 0);
-        Ok(())
     }
 
     /// Init freezes the geometry, so a zeroed width is refused there rather than at the first batch.
@@ -3101,32 +3075,30 @@ mod tests {
 
     /// The handle is one pointer, so a move must not disturb it and two threads may share it.
     #[test]
-    fn survives_box_and_arc_moves() -> Result<()> {
+    fn survives_box_and_arc_moves() {
         requires_send_sync::<DenseIndex>();
-        let (index, _, _) = populated_index(4, 8, DenseMetric::Angular, Scalar::BF16)?;
+        let (index, _, _) = populated_index(4, 8, DenseMetric::Angular, Scalar::BF16).unwrap();
 
         let boxed = Box::new(index);
-        assert_eq!(boxed.describe()?.size, 4);
+        assert_eq!(boxed.describe().unwrap().size, 4);
         let shared = std::sync::Arc::new(*boxed);
-        assert_eq!(shared.describe()?.size, 4);
-        Ok(())
+        assert_eq!(shared.describe().unwrap().size, 4);
     }
 
     #[test]
-    fn clears_and_reuses() -> Result<()> {
+    fn clears_and_reuses() {
         const DIMENSIONS: usize = 8;
-        let (mut index, keys, slab) = populated_index(16, DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
-        let reserved = index.describe()?.capacity;
+        let (mut index, keys, slab) = populated_index(16, DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
+        let reserved = index.describe().unwrap().capacity;
 
-        index.clear()?;
-        let cleared = index.describe()?;
+        index.clear().unwrap();
+        let cleared = index.describe().unwrap();
         assert_eq!(cleared.size, 0);
         assert_eq!(cleared.capacity, reserved, "clearing keeps the arena");
         assert_eq!(cleared.metadata.dimensions, DIMENSIONS, "and keeps the frozen geometry");
 
-        index.insert(&keys, &rows(&slab, DIMENSIONS)?)?;
-        assert_eq!(index.describe()?.size, 16);
-        Ok(())
+        index.insert(&keys, &rows(&slab, DIMENSIONS).unwrap()).unwrap();
+        assert_eq!(index.describe().unwrap().size, 16);
     }
 
     // endregion: Construction and Geometry
@@ -3134,82 +3106,77 @@ mod tests {
     // region: Ingest and Retrieval
 
     #[test]
-    fn adds_and_gets_vectors() -> Result<()> {
+    fn adds_and_gets_vectors() {
         const DIMENSIONS: usize = 4;
-        let index = empty_index(DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
+        let index = empty_index(DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
         let keys = sequential_keys(2);
         let slab: [f32; 8] = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0];
-        index.insert(&keys, &rows(&slab, DIMENSIONS)?)?;
-        assert_eq!(index.describe()?.size, 2);
+        index.insert(&keys, &rows(&slab, DIMENSIONS).unwrap()).unwrap();
+        assert_eq!(index.describe().unwrap().size, 2);
 
-        let mut arena = Arena::new()?;
-        let found = index.get::<f32>(keys[1], &mut arena)?;
-        assert_eq!(found.view()?.shape(), &[1, DIMENSIONS]);
-        assert_eq!(flattened(found.view()?), [0.0, 1.0, 0.0, 0.0]);
+        let mut arena = Arena::new().unwrap();
+        let found = index.get::<f32>(keys[1], &mut arena).unwrap();
+        assert_eq!(found.view().unwrap().shape(), &[1, DIMENSIONS]);
+        assert_eq!(flattened(found.view().unwrap()), [0.0, 1.0, 0.0, 0.0]);
         assert_eq!(
-            index.get::<f32>(Key::from(7u64), &mut arena)?.view()?.shape()[0],
+            index.get::<f32>(Key::from(7u64), &mut arena).unwrap().view().unwrap().shape()[0],
             0,
             "an absent key yields no rows"
         );
-        Ok(())
     }
 
     /// An empty batch is a shape rather than a mistake, so it publishes nothing and reports no
     /// failure - what a caller filtering its own input relies on.
     #[test]
-    fn accepts_an_empty_batch() -> Result<()> {
+    fn accepts_an_empty_batch() {
         const DIMENSIONS: usize = 4;
-        let index = empty_index(DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
+        let index = empty_index(DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
         let empty: [f32; 0] = [];
-        index.insert([], &rows(&empty, DIMENSIONS)?)?;
-        assert_eq!(index.describe()?.size, 0);
-        Ok(())
+        index.insert([], &rows(&empty, DIMENSIONS).unwrap()).unwrap();
+        assert_eq!(index.describe().unwrap().size, 0);
     }
 
     #[test]
-    fn rejects_mismatched_key_and_row_counts() -> Result<()> {
+    fn rejects_mismatched_key_and_row_counts() {
         const DIMENSIONS: usize = 4;
-        let index = empty_index(DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
-        let slab = seeded_rows(2, DIMENSIONS, SEED);
+        let index = empty_index(DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
+        let slab = seeded_rows(2, DIMENSIONS, case_stream_key(0));
         assert!(matches!(
-            index.insert(sequential_keys(3), &rows(&slab, DIMENSIONS)?),
+            index.insert(sequential_keys(3), &rows(&slab, DIMENSIONS).unwrap()),
             Err(Error { status: Status::ShapeMismatch, .. })
         ));
-        Ok(())
     }
 
     /// Every view carries the width the caller laid out, so the call refuses a narrow row before
     /// reading past it.
     #[test]
-    fn rejects_wrong_dimension_matrices() -> Result<()> {
+    fn rejects_wrong_dimension_matrices() {
         const DIMENSIONS: usize = 8;
-        let (index, _, _) = populated_index(4, DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
-        let narrow = seeded_rows(1, DIMENSIONS - 1, SEED);
+        let (index, _, _) = populated_index(4, DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
+        let narrow = seeded_rows(1, DIMENSIONS - 1, case_stream_key(0));
 
         assert!(matches!(
-            index.insert(sequential_keys(1), &rows(&narrow, DIMENSIONS - 1)?),
+            index.insert(sequential_keys(1), &rows(&narrow, DIMENSIONS - 1).unwrap()),
             Err(Error { status: Status::ShapeMismatch, .. })
         ));
         assert!(matches!(
-            index.search(&rows(&narrow, DIMENSIONS - 1)?, 1, &mut Arena::new()?),
+            index.search(&rows(&narrow, DIMENSIONS - 1).unwrap(), 1, &mut Arena::new().unwrap()),
             Err(Error { status: Status::ShapeMismatch, .. })
         ));
         assert!(
             matches!(
-                index.search_stream(rows(&narrow, DIMENSIONS - 1)?),
+                index.search_stream(rows(&narrow, DIMENSIONS - 1).unwrap()),
                 Err(Error { status: Status::ShapeMismatch | Status::Unsupported, .. })
             ),
             "the query width is checked too, where a residency streams at all"
         );
-
-        Ok(())
     }
 
     #[test]
-    fn rejects_non_contiguous_rows() -> Result<()> {
+    fn rejects_non_contiguous_rows() {
         const DIMENSIONS: usize = 4;
-        let index = empty_index(DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
-        let slab = seeded_rows(2, DIMENSIONS * 2, SEED);
+        let index = empty_index(DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
+        let slab = seeded_rows(2, DIMENSIONS * 2, case_stream_key(0));
         let element = core::mem::size_of::<f32>() as isize;
         // A column stride of two elements interleaves the rows, which the boundary forbids:
         // the ABI carries one row stride and no column stride.
@@ -3220,14 +3187,13 @@ mod tests {
             index.insert(sequential_keys(2), interleaved),
             Err(Error { status: Status::UnsupportedLayout, .. })
         ));
-        Ok(())
     }
 
     #[test]
-    fn rejects_descending_row_pitch() -> Result<()> {
+    fn rejects_descending_row_pitch() {
         const DIMENSIONS: usize = 4;
-        let index = empty_index(DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
-        let slab = seeded_rows(2, DIMENSIONS, SEED);
+        let index = empty_index(DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
+        let slab = seeded_rows(2, DIMENSIONS, case_stream_key(0));
         let element = core::mem::size_of::<f32>() as isize;
         let descending: MatrixView<'_, f32> = unsafe {
             MatrixView::from_raw_parts(
@@ -3241,18 +3207,17 @@ mod tests {
             index.insert(sequential_keys(2), descending),
             Err(Error { status: Status::UnsupportedLayout, .. })
         ));
-        Ok(())
     }
 
     /// A pitch wider than the row is the layout a mapped dataset arrives in, and its rows must
     /// read back packed from the arena, padding left behind.
     #[test]
-    fn accepts_strided_row_pitch() -> Result<()> {
+    fn accepts_strided_row_pitch() {
         const DIMENSIONS: usize = 4;
         const PITCH: usize = 8;
-        let index = empty_index(DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
+        let index = empty_index(DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
         let mut padded = [0.0f32; 2 * PITCH];
-        let rows_source = seeded_rows(2, DIMENSIONS, SEED);
+        let rows_source = seeded_rows(2, DIMENSIONS, case_stream_key(0));
         padded[..DIMENSIONS].copy_from_slice(&rows_source[..DIMENSIONS]);
         padded[PITCH..PITCH + DIMENSIONS].copy_from_slice(&rows_source[DIMENSIONS..]);
 
@@ -3261,128 +3226,121 @@ mod tests {
             MatrixView::from_raw_parts(padded.as_ptr(), &[2, DIMENSIONS], &[element * PITCH as isize, element])
         }
         .unwrap();
-        index.insert(sequential_keys(2), strided)?;
+        index.insert(sequential_keys(2), strided).unwrap();
 
-        let mut arena = Arena::new()?;
-        let walked_keys = index.cursor(&[])?.next_keys(2, &mut arena)?.keys().to_vec();
+        let mut arena = Arena::new().unwrap();
+        let walked_keys = index.cursor(&[]).unwrap().next_keys(2, &mut arena).unwrap().keys().to_vec();
         assert_eq!(walked_keys.len(), 2);
         for key in walked_keys {
             let source = u64::try_from(key).unwrap() as usize;
-            let restored = flattened(index.get::<f32>(key, &mut arena)?.view()?);
-            assert!(close_rows(&restored, &rows_source[source * DIMENSIONS..][..DIMENSIONS]));
+            let restored = flattened(index.get::<f32>(key, &mut arena).unwrap().view().unwrap());
+            assert_close_rows(&restored, &rows_source[source * DIMENSIONS..][..DIMENSIONS], BF16_EPSILON);
         }
-        Ok(())
     }
 
     #[test]
-    fn converts_scalar_kinds_on_ingest() -> Result<()> {
+    fn converts_scalar_kinds_on_ingest() {
         const DIMENSIONS: usize = 16;
-        let index = empty_index(DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
+        let index = empty_index(DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
         let keys = sequential_keys(1);
-        let slab = seeded_rows(1, DIMENSIONS, SEED);
-        index.insert(&keys, &rows(&slab, DIMENSIONS)?)?;
+        let slab = seeded_rows(1, DIMENSIONS, case_stream_key(0));
+        index.insert(&keys, &rows(&slab, DIMENSIONS).unwrap()).unwrap();
 
-        let wide = flattened(index.get::<f64>(keys[0], &mut Arena::new()?)?.view()?);
+        let wide = flattened(index.get::<f64>(keys[0], &mut Arena::new().unwrap()).unwrap().view().unwrap());
         assert_eq!(wide.len(), DIMENSIONS);
         for (left, right) in wide.iter().zip(&slab) {
-            assert!(close(*left, *right as f64, BF16_EPSILON), "bf16 keeps eight mantissa bits");
+            assert_close(*left, f64::from(*right), BF16_EPSILON);
         }
-        Ok(())
     }
 
     /// One call returns every entry under a key, however many there turn out to be.
     #[test]
-    fn gets_every_entry_sharing_a_key() -> Result<()> {
+    fn gets_every_entry_sharing_a_key() {
         const DIMENSIONS: usize = 4;
-        let index = empty_index(DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
+        let index = empty_index(DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
         let shared = Key::from(3u64);
-        let slab = seeded_rows(3, DIMENSIONS, SEED);
-        index.insert([shared; 3], &rows(&slab, DIMENSIONS)?)?;
+        let slab = seeded_rows(3, DIMENSIONS, case_stream_key(0));
+        index.insert([shared; 3], &rows(&slab, DIMENSIONS).unwrap()).unwrap();
 
-        assert_eq!(index.count(shared)?, 3);
-        assert!(index.contains(shared)?);
-        assert!(!index.contains(Key::from(8u64))?);
+        assert_eq!(index.count(shared).unwrap(), 3);
+        assert!(index.contains(shared).unwrap());
+        assert!(!index.contains(Key::from(8u64)).unwrap());
 
-        let mut arena = Arena::new()?;
-        let restored = index.get::<f32>(shared, &mut arena)?;
-        assert_eq!(restored.view()?.shape(), &[3, DIMENSIONS], "one row per entry");
-        assert!(close_rows(&flattened(restored.view()?), &slab));
-        Ok(())
+        let mut arena = Arena::new().unwrap();
+        let restored = index.get::<f32>(shared, &mut arena).unwrap();
+        assert_eq!(restored.view().unwrap().shape(), &[3, DIMENSIONS], "one row per entry");
+        assert_close_rows(&flattened(restored.view().unwrap()), &slab, BF16_EPSILON);
     }
 
     /// An arena is reused once its outputs are no longer read, and keeping one call's outputs past
     /// the next takes a second one.
     #[test]
-    fn a_second_arena_keeps_the_first_output_alive() -> Result<()> {
+    fn a_second_arena_keeps_the_first_output_alive() {
         const DIMENSIONS: usize = 4;
-        let (index, keys, slab) = populated_index(4, DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
+        let (index, keys, slab) = populated_index(4, DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
         let executor = executor();
         let receiver = index.on(&executor);
-        let (mut first, mut second) = (Arena::new_in(&executor)?, Arena::new_in(&executor)?);
-        let held = receiver.get::<f32>(keys[0], &mut first)?;
-        let next = receiver.get::<f32>(keys[1], &mut second)?;
-        assert!(close_rows(&flattened(held.view()?), &slab[..DIMENSIONS]));
-        assert!(close_rows(&flattened(next.view()?), &slab[DIMENSIONS..DIMENSIONS * 2]));
+        let (mut first, mut second) = (Arena::new_in(&executor).unwrap(), Arena::new_in(&executor).unwrap());
+        let held = receiver.get::<f32>(keys[0], &mut first).unwrap();
+        let next = receiver.get::<f32>(keys[1], &mut second).unwrap();
+        assert_close_rows(&flattened(held.view().unwrap()), &slab[..DIMENSIONS], BF16_EPSILON);
+        assert_close_rows(&flattened(next.view().unwrap()), &slab[DIMENSIONS..DIMENSIONS * 2], BF16_EPSILON);
 
-        let reused = receiver.get::<f32>(keys[3], &mut first)?;
-        assert!(close_rows(&flattened(reused.view()?), &slab[DIMENSIONS * 3..]));
-        Ok(())
+        let reused = receiver.get::<f32>(keys[3], &mut first).unwrap();
+        assert_close_rows(&flattened(reused.view().unwrap()), &slab[DIMENSIONS * 3..], BF16_EPSILON);
     }
 
     #[test]
-    fn uses_128_bit_keys() -> Result<()> {
+    fn uses_128_bit_keys() {
         const DIMENSIONS: usize = 4;
-        let index = empty_index(DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
+        let index = empty_index(DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
         let wide = Key::from(u128::MAX);
         let narrow = Key::from(9u64);
-        let slab = seeded_rows(2, DIMENSIONS, SEED);
-        index.insert([wide, narrow], &rows(&slab, DIMENSIONS)?)?;
+        let slab = seeded_rows(2, DIMENSIONS, case_stream_key(0));
+        index.insert([wide, narrow], &rows(&slab, DIMENSIONS).unwrap()).unwrap();
 
-        assert_eq!(index.count(wide)?, 1);
-        assert_eq!(index.count(narrow)?, 1);
+        assert_eq!(index.count(wide).unwrap(), 1);
+        assert_eq!(index.count(narrow).unwrap(), 1);
         assert!(u64::try_from(wide).is_err(), "a non-zero high half has no integer identity");
         assert_eq!(u64::try_from(narrow), Ok(9));
-        Ok(())
     }
 
     /// A sub-byte kind counts logical dimensions, so eight of them are one stored byte - the
     /// one place where the row width and the row extent part ways.
     #[test]
-    fn packed_bit_rows_cross_as_one_byte_per_eight_dimensions() -> Result<()> {
+    fn packed_bit_rows_cross_as_one_byte_per_eight_dimensions() {
         const DIMENSIONS: usize = 8;
-        let Some(index) = empty_index_or_skip(DIMENSIONS, DenseMetric::Hamming, Scalar::U1x8)? else {
-            return Ok(());
+        let Some(index) = empty_index_or_skip(DIMENSIONS, DenseMetric::Hamming, Scalar::U1x8).unwrap() else {
+            return skipped("built without u1x8");
         };
         let stored = bit_rows(&[0b0000_1111, 0b1111_0000]);
         let keys = [Key::from(42u64), Key::from(43u64)];
-        index.insert(keys, &rows(&stored, DIMENSIONS)?)?;
-        assert_eq!(index.describe()?.size, 2, "two bytes are two rows, not sixteen");
+        index.insert(keys, &rows(&stored, DIMENSIONS).unwrap()).unwrap();
+        assert_eq!(index.describe().unwrap().size, 2, "two bytes are two rows, not sixteen");
 
         let query = bit_rows(&[0b0111_1000]);
-        let mut arena = Arena::new()?;
-        let matches = index.search(&rows(&query, DIMENSIONS)?, 2, &mut arena)?;
-        let found = matches.query(0)?;
+        let mut arena = Arena::new().unwrap();
+        let matches = index.search(&rows(&query, DIMENSIONS).unwrap(), 2, &mut arena).unwrap();
+        let found = matches.query(0).unwrap();
         assert_eq!(
             found.keys.iter().copied().collect::<HashSet<Key>>(),
             keys.iter().copied().collect::<HashSet<Key>>()
         );
-        Ok(())
     }
 
     /// A sub-byte row comes back counted in dimensions, never in the bytes that hold them.
     #[test]
-    fn gets_sub_byte_rows_at_their_logical_width() -> Result<()> {
+    fn gets_sub_byte_rows_at_their_logical_width() {
         const DIMENSIONS: usize = 16;
-        let Some(index) = empty_index_or_skip(DIMENSIONS, DenseMetric::Hamming, Scalar::U1x8)? else {
-            return Ok(());
+        let Some(index) = empty_index_or_skip(DIMENSIONS, DenseMetric::Hamming, Scalar::U1x8).unwrap() else {
+            return skipped("built without u1x8");
         };
         let key = Key::from(5u64);
-        index.insert([key], &rows(&bit_rows(&[0b1010_1010, 0b0000_0101]), DIMENSIONS)?)?;
+        index.insert([key], &rows(&bit_rows(&[0b1010_1010, 0b0000_0101]), DIMENSIONS).unwrap()).unwrap();
 
-        let mut arena = Arena::new()?;
-        let found = index.get::<u1x8>(key, &mut arena)?;
-        assert_eq!(found.view()?.shape(), &[1, DIMENSIONS]);
-        Ok(())
+        let mut arena = Arena::new().unwrap();
+        let found = index.get::<u1x8>(key, &mut arena).unwrap();
+        assert_eq!(found.view().unwrap().shape(), &[1, DIMENSIONS]);
     }
 
     // endregion: Ingest and Retrieval
@@ -3390,166 +3348,175 @@ mod tests {
     // region: Search
 
     #[test]
-    fn searches_an_empty_index() -> Result<()> {
+    fn searches_an_empty_index() {
         const DIMENSIONS: usize = 8;
-        let index = empty_index(DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
-        let query = seeded_rows(1, DIMENSIONS, SEED);
-        assert_eq!(matches_of(&index, &query, DIMENSIONS)?, 0);
-        Ok(())
+        let index = empty_index(DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
+        let query = seeded_rows(1, DIMENSIONS, case_stream_key(0));
+        assert_eq!(matches_of(&index, &query, DIMENSIONS).unwrap(), 0);
     }
 
     /// A zero `wanted` walks nothing and lands only zeroed counts, with no keys to read.
     #[test]
-    fn a_zero_wanted_lands_only_counts() -> Result<()> {
+    fn a_zero_wanted_lands_only_counts() {
         const DIMENSIONS: usize = 8;
-        let (index, _, slab) = populated_index(16, DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
-        let mut arena = Arena::new()?;
-        let matches = index.search(&rows(&slab[..4 * DIMENSIONS], DIMENSIONS)?, 0, &mut arena)?;
+        let (index, _, slab) = populated_index(16, DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
+        let mut arena = Arena::new().unwrap();
+        let matches = index.search(&rows(&slab[..4 * DIMENSIONS], DIMENSIONS).unwrap(), 0, &mut arena).unwrap();
         assert_eq!(matches.queries(), 4);
         assert!(matches.iter().all(|query| query.keys.is_empty()), "no query holds a match");
-        Ok(())
     }
 
     /// Every query's matches land packed in the arena, and its count in its own slot; a query past
     /// the call's count is refused rather than read.
     #[test]
-    fn fills_every_query_of_a_batch() -> Result<()> {
+    fn fills_every_query_of_a_batch() {
         const DIMENSIONS: usize = 64;
         const QUERIES: usize = 8;
         const WANTED: usize = 5;
-        let (index, keys, slab) = populated_index(256, DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
+        let (index, keys, slab) = populated_index(256, DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
 
         let executor = executor();
-        let mut arena = Arena::new_in(&executor)?;
-        let matches = index.on(&executor).search(
-            &rows(&slab[..QUERIES * DIMENSIONS], DIMENSIONS)?,
-            DenseSearchConfig { expansion_factor: 64, ..DenseSearchConfig::from(WANTED) },
-            &mut arena,
-        )?;
+        let mut arena = Arena::new_in(&executor).unwrap();
+        let matches = index
+            .on(&executor)
+            .search(
+                &rows(&slab[..QUERIES * DIMENSIONS], DIMENSIONS).unwrap(),
+                DenseSearchConfig { expansion_factor: 64, ..DenseSearchConfig::from(WANTED) },
+                &mut arena,
+            )
+            .unwrap();
         assert_eq!(matches.queries(), QUERIES);
         assert!(matches.iter().all(|found| found.keys.len() == WANTED));
         for (query, found) in matches.iter().enumerate() {
             assert_eq!(found.keys[0], keys[query], "each query finds itself first");
         }
         assert_eq!(matches.query(QUERIES).unwrap_err().status, Status::InvalidArgument);
-        Ok(())
     }
 
     #[test]
-    fn reports_traversal_stats() -> Result<()> {
+    fn reports_traversal_stats() {
         const DIMENSIONS: usize = 32;
-        let index = empty_index(DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
+        let index = empty_index(DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
         let keys = sequential_keys(64);
-        let slab = seeded_rows(64, DIMENSIONS, SEED);
+        let slab = seeded_rows(64, DIMENSIONS, case_stream_key(0));
 
         let mut inserting = DenseTraversalStats::default();
-        index.insert(
-            &keys,
-            DenseInsertConfig { stats: Some(&mut inserting), ..DenseInsertConfig::from(&rows(&slab, DIMENSIONS)?) },
-        )?;
+        index
+            .insert(
+                &keys,
+                DenseInsertConfig {
+                    stats: Some(&mut inserting),
+                    ..DenseInsertConfig::from(&rows(&slab, DIMENSIONS).unwrap())
+                },
+            )
+            .unwrap();
         assert!(inserting.computed_distances > 0);
 
-        let query = rows(&slab[..DIMENSIONS], DIMENSIONS)?;
-        let mut arena = Arena::new()?;
+        let query = rows(&slab[..DIMENSIONS], DIMENSIONS).unwrap();
+        let mut arena = Arena::new().unwrap();
         let mut searching = DenseTraversalStats::default();
-        index.search(
-            &query,
-            DenseSearchConfig { stats: Some(&mut searching), ..DenseSearchConfig::from(4) },
-            &mut arena,
-        )?;
+        index
+            .search(&query, DenseSearchConfig { stats: Some(&mut searching), ..DenseSearchConfig::from(4) }, &mut arena)
+            .unwrap();
         let first = searching;
         assert!(first.computed_distances > 0);
 
-        index.search(
-            &query,
-            DenseSearchConfig { stats: Some(&mut searching), ..DenseSearchConfig::from(4) },
-            &mut arena,
-        )?;
+        index
+            .search(&query, DenseSearchConfig { stats: Some(&mut searching), ..DenseSearchConfig::from(4) }, &mut arena)
+            .unwrap();
         assert_eq!(searching, first, "stats are overwritten by their call, never accumulated");
-        Ok(())
     }
 
     #[test]
-    fn filters_with_a_stateless_predicate() -> Result<()> {
+    fn filters_with_a_stateless_predicate() {
         const DIMENSIONS: usize = 16;
         const WANTED: usize = 8;
-        let (index, _, slab) = populated_index(64, DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
+        let (index, _, slab) = populated_index(64, DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
 
         let is_even = |key: Key| u64::try_from(key).is_ok_and(|value| value % 2 == 0);
-        let mut arena = Arena::new()?;
-        let matches = index.search(
-            &rows(&slab[..DIMENSIONS], DIMENSIONS)?,
-            DenseSearchConfig { expansion_factor: 64, predicate: Some(&is_even), ..DenseSearchConfig::from(WANTED) },
-            &mut arena,
-        )?;
+        let mut arena = Arena::new().unwrap();
+        let matches = index
+            .search(
+                &rows(&slab[..DIMENSIONS], DIMENSIONS).unwrap(),
+                DenseSearchConfig {
+                    expansion_factor: 64,
+                    predicate: Some(&is_even),
+                    ..DenseSearchConfig::from(WANTED)
+                },
+                &mut arena,
+            )
+            .unwrap();
 
-        let admitted = matches.query(0)?;
+        let admitted = matches.query(0).unwrap();
         assert!(!admitted.keys.is_empty());
         for key in admitted.keys {
             assert!(is_even(*key), "{key} was not admitted by the predicate");
         }
-        Ok(())
     }
 
     /// The captured set crosses as the trampoline's context pointer, which is what separates
     /// this from the stateless case above.
     #[test]
-    fn filters_with_a_stateful_predicate() -> Result<()> {
+    fn filters_with_a_stateful_predicate() {
         const DIMENSIONS: usize = 16;
         const WANTED: usize = 8;
-        let (index, keys, slab) = populated_index(64, DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
+        let (index, keys, slab) = populated_index(64, DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
 
         let allowed: HashSet<Key> = keys.iter().copied().take(5).collect();
         let executor = executor();
-        let mut arena = Arena::new_in(&executor)?;
-        let matches = index.on(&executor).search(
-            &rows(&slab[..DIMENSIONS], DIMENSIONS)?,
-            DenseSearchConfig {
-                expansion_factor: 64,
-                predicate: Some(&|key: Key| allowed.contains(&key)),
-                ..DenseSearchConfig::from(WANTED)
-            },
-            &mut arena,
-        )?;
+        let mut arena = Arena::new_in(&executor).unwrap();
+        let matches = index
+            .on(&executor)
+            .search(
+                &rows(&slab[..DIMENSIONS], DIMENSIONS).unwrap(),
+                DenseSearchConfig {
+                    expansion_factor: 64,
+                    predicate: Some(&|key: Key| allowed.contains(&key)),
+                    ..DenseSearchConfig::from(WANTED)
+                },
+                &mut arena,
+            )
+            .unwrap();
 
-        for key in matches.query(0)?.keys {
+        for key in matches.query(0).unwrap().keys {
             assert!(allowed.contains(key), "{key} is outside the captured set");
         }
-        Ok(())
     }
 
     #[test]
-    fn filters_everything_out() -> Result<()> {
+    fn filters_everything_out() {
         const DIMENSIONS: usize = 16;
-        let (index, _, slab) = populated_index(64, DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
-        let mut arena = Arena::new()?;
-        let matches = index.search(
-            &rows(&slab[..DIMENSIONS], DIMENSIONS)?,
-            DenseSearchConfig { expansion_factor: 64, predicate: Some(&|_| false), ..DenseSearchConfig::from(4) },
-            &mut arena,
-        )?;
-        assert!(matches.query(0)?.keys.is_empty(), "a fully-rejecting predicate is not an error");
-        Ok(())
+        let (index, _, slab) = populated_index(64, DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
+        let mut arena = Arena::new().unwrap();
+        let matches = index
+            .search(
+                &rows(&slab[..DIMENSIONS], DIMENSIONS).unwrap(),
+                DenseSearchConfig { expansion_factor: 64, predicate: Some(&|_| false), ..DenseSearchConfig::from(4) },
+                &mut arena,
+            )
+            .unwrap();
+        assert!(matches.query(0).unwrap().keys.is_empty(), "a fully-rejecting predicate is not an error");
     }
 
     /// A scan scores every entry rather than the ones a walk reaches, so every query finds itself first.
     #[test]
-    fn scans_find_every_query_itself() -> Result<()> {
+    fn scans_find_every_query_itself() {
         const DIMENSIONS: usize = 16;
         const COUNT: usize = 64;
-        let (index, keys, slab) = populated_index(COUNT, DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
+        let (index, keys, slab) = populated_index(COUNT, DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
 
-        let mut arena = Arena::new()?;
-        let matches = index.search(
-            &rows(&slab, DIMENSIONS)?,
-            DenseSearchConfig { traversal: Traversal::Scan, ..DenseSearchConfig::from(1) },
-            &mut arena,
-        )?;
+        let mut arena = Arena::new().unwrap();
+        let matches = index
+            .search(
+                &rows(&slab, DIMENSIONS).unwrap(),
+                DenseSearchConfig { traversal: Traversal::Scan, ..DenseSearchConfig::from(1) },
+                &mut arena,
+            )
+            .unwrap();
         assert_eq!(matches.queries(), COUNT);
         for (query, found) in matches.iter().enumerate() {
             assert_eq!(found.keys[0], keys[query]);
         }
-        Ok(())
     }
 
     // endregion: Search
@@ -3558,107 +3525,105 @@ mod tests {
 
     /// The return is a report rather than a status, so a caller loops until the graph settles.
     #[test]
-    fn refine_reports_its_round() -> Result<()> {
+    fn refine_reports_its_round() {
         const COUNT: usize = 64;
-        let (index, _, _) = populated_index(COUNT, 8, DenseMetric::Angular, Scalar::BF16)?;
+        let (index, _, _) = populated_index(COUNT, 8, DenseMetric::Angular, Scalar::BF16).unwrap();
         let mut stats = DenseTraversalStats::default();
-        let report = index.on(&executor()).refine(DenseRefineConfig {
-            expansion_factor: 64,
-            stats: Some(&mut stats),
-            ..DenseRefineConfig::default()
-        })?;
+        let report = index
+            .on(&executor())
+            .refine(DenseRefineConfig { expansion_factor: 64, stats: Some(&mut stats), ..DenseRefineConfig::default() })
+            .unwrap();
         assert!(report.changed <= report.reselected, "a sweep changes only the nodes it re-selected");
         assert_eq!(report.reachability.audited, COUNT, "the closing health check judges every entry");
         assert!(stats.computed_distances > 0, "the round reports its distances");
-        Ok(())
     }
 
     /// One source cut among empty targets leaves every entry in them, the source live and empty.
     #[test]
-    fn reshards_one_source_into_several_targets() -> Result<()> {
+    fn reshards_one_source_into_several_targets() {
         const DIMENSIONS: usize = 8;
         const COUNT: usize = 64;
-        let (index, _, _) = populated_index(COUNT, DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
+        let (index, _, _) = populated_index(COUNT, DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
         let targets = [
-            empty_index(DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?,
-            empty_index(DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?,
+            empty_index(DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap(),
+            empty_index(DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap(),
         ];
-        let report = index.on(&executor()).reshard(DenseReshardConfig {
-            sources: &[&index],
-            targets: &[&targets[0], &targets[1]],
-            seed: 7,
-            ..DenseReshardConfig::default()
-        })?;
+        let report = index
+            .on(&executor())
+            .reshard(DenseReshardConfig {
+                sources: &[&index],
+                targets: &[&targets[0], &targets[1]],
+                seed: case_stream_key(1),
+                ..DenseReshardConfig::default()
+            })
+            .unwrap();
         assert!(report.changed <= report.reselected);
-        assert_eq!(targets[0].describe()?.size + targets[1].describe()?.size, COUNT);
-        assert_eq!(index.describe()?.size, 0);
-        Ok(())
+        assert_eq!(targets[0].describe().unwrap().size + targets[1].describe().unwrap().size, COUNT);
+        assert_eq!(index.describe().unwrap().size, 0);
     }
 
     /// Equal seeds over an unchanged index draw equally, so a larger draw extends a smaller one.
     #[test]
-    fn a_larger_sample_draws_a_superset() -> Result<()> {
+    fn a_larger_sample_draws_a_superset() {
         const COUNT: usize = 64;
-        let (index, _, _) = populated_index(COUNT, 8, DenseMetric::Angular, Scalar::BF16)?;
-        let (mut smaller_arena, mut larger_arena) = (Arena::new()?, Arena::new()?);
-        let seeded = || DenseSampleConfig { seed: 42, ..Default::default() };
-        let smaller = index.on(&executor()).sample(8, &mut smaller_arena, seeded())?;
-        let larger = index.on(&executor()).sample(16, &mut larger_arena, seeded())?;
+        let (index, _, _) = populated_index(COUNT, 8, DenseMetric::Angular, Scalar::BF16).unwrap();
+        let (mut smaller_arena, mut larger_arena) = (Arena::new().unwrap(), Arena::new().unwrap());
+        let seed = case_stream_key(1);
+        let seeded = || DenseSampleConfig { seed, ..Default::default() };
+        let smaller = index.on(&executor()).sample(8, &mut smaller_arena, seeded()).unwrap();
+        let larger = index.on(&executor()).sample(16, &mut larger_arena, seeded()).unwrap();
         assert_eq!((smaller.written(), larger.written()), (8, 16));
         assert_eq!(larger.coordinates().len(), 16);
         assert_eq!(larger.parents().queries(), 16);
         let drawn = larger.keys();
         assert!(smaller.keys().iter().all(|key| drawn.contains(key)));
-        Ok(())
     }
 
     /// The audit judges every entry published when it started, and no search reaches more.
     #[test]
-    fn audits_how_much_of_the_graph_a_search_reaches() -> Result<()> {
+    fn audits_how_much_of_the_graph_a_search_reaches() {
         const COUNT: usize = 64;
-        let (index, _, _) = populated_index(COUNT, 8, DenseMetric::Angular, Scalar::BF16)?;
-        let reachability = index.on(&executor()).health()?;
+        let (index, _, _) = populated_index(COUNT, 8, DenseMetric::Angular, Scalar::BF16).unwrap();
+        let reachability = index.on(&executor()).health().unwrap();
         assert_eq!(reachability.audited, COUNT);
         assert!(reachability.reachable != 0 && reachability.reachable <= COUNT);
         assert!(reachability.depth_from_root != 0, "a populated graph takes at least one depth");
-        Ok(())
     }
 
     /// Every row's pairs land in one ragged run, and `wanted` cuts each row while `required`
     /// still counts what the walks scored; the offsets land in the arena beside the run.
     #[test]
-    fn multiplication_reports_every_scored_pair() -> Result<()> {
+    fn multiplication_reports_every_scored_pair() {
         const DIMENSIONS: usize = 4;
         const ROWS: usize = 3;
         const WANTED: usize = 2;
         // A product is a logit, so the linear-algebra verbs take the inner kind alone.
-        let index = empty_index(DIMENSIONS, DenseMetric::Inner, Scalar::BF16)?;
-        let slab = seeded_rows(ROWS, DIMENSIONS, SEED);
-        index.insert(sequential_keys(ROWS), &rows(&slab, DIMENSIONS)?)?;
+        let index = empty_index(DIMENSIONS, DenseMetric::Inner, Scalar::BF16).unwrap();
+        let slab = seeded_rows(ROWS, DIMENSIONS, case_stream_key(0));
+        index.insert(sequential_keys(ROWS), &rows(&slab, DIMENSIONS).unwrap()).unwrap();
 
-        let left = rows(&slab, DIMENSIONS)?;
-        let mut arena = Arena::new()?;
-        let every = index.multiply(&left, 0, &mut arena)?;
+        let left = rows(&slab, DIMENSIONS).unwrap();
+        let mut arena = Arena::new().unwrap();
+        let every = index.multiply(&left, 0, &mut arena).unwrap();
         assert!(every.iter().all(|row| row.keys.len() == ROWS), "every row scores every column");
 
         let executor = executor();
         let config = DenseMultiplyConfig { expansion_factor: 2 * ROWS, ..DenseMultiplyConfig::from(WANTED) };
-        let cut = index.multiply(&left, config, &mut arena)?;
+        let cut = index.multiply(&left, config, &mut arena).unwrap();
         assert_eq!(cut.queries(), ROWS);
         assert!(cut.iter().all(|row| row.keys.len() == WANTED));
         assert_eq!(cut.required(), ROWS * ROWS, "the count outruns the pairs kept");
         assert_eq!(cut.query(ROWS).unwrap_err().status, Status::InvalidArgument);
 
-        let mut placed = Arena::new_in(&executor)?;
-        let same = index.on(&executor).multiply(&left, WANTED, &mut placed)?;
+        let mut placed = Arena::new_in(&executor).unwrap();
+        let same = index.on(&executor).multiply(&left, WANTED, &mut placed).unwrap();
         assert!(same.iter().all(|row| row.keys.len() == WANTED));
-        Ok(())
     }
 
     /// The outputs are sized over documents rather than rows, which is the one piece of
     /// arithmetic this door does that the batch search does not.
     #[test]
-    fn late_interaction_scores_over_documents() -> Result<()> {
+    fn late_interaction_scores_over_documents() {
         const DIMENSIONS: usize = 4;
         const TOKENS: usize = 2;
         const DOCUMENTS: usize = 3;
@@ -3670,24 +3635,24 @@ mod tests {
             values_per_key: TOKENS,
             ..DenseOptions::default()
         };
-        let index = DenseIndex::init_ram(&options, &[])?;
-        index.reserve(DOCUMENTS * TOKENS)?;
+        let index = DenseIndex::init_ram(&options, &[]).unwrap();
+        index.reserve(DOCUMENTS * TOKENS).unwrap();
 
-        let slab = seeded_rows(DOCUMENTS * TOKENS, DIMENSIONS, SEED);
+        let slab = seeded_rows(DOCUMENTS * TOKENS, DIMENSIONS, case_stream_key(0));
         let mut keys = Vec::with_capacity(DOCUMENTS * TOKENS);
         for document in 0..DOCUMENTS {
             keys.extend(core::iter::repeat_n(Key::from(document as u64), TOKENS));
         }
-        index.insert(&keys, &rows(&slab, DIMENSIONS)?)?;
+        index.insert(&keys, &rows(&slab, DIMENSIONS).unwrap()).unwrap();
 
-        let tokens = rows(&slab[..QUERIES * TOKENS * DIMENSIONS], DIMENSIONS)?;
+        let tokens = rows(&slab[..QUERIES * TOKENS * DIMENSIONS], DIMENSIONS).unwrap();
         let executor = executor();
-        let mut arena = Arena::new_in(&executor)?;
-        let matches = index.on(&executor).maxsim(&tokens, TOKENS, DOCUMENTS, &mut arena)?;
+        let mut arena = Arena::new_in(&executor).unwrap();
+        let matches = index.on(&executor).maxsim(&tokens, TOKENS, DOCUMENTS, &mut arena).unwrap();
         assert_eq!(matches.queries(), QUERIES);
         assert!(matches.iter().all(|query| query.keys.len() == DOCUMENTS), "every document is scored, once per query");
         let bounded: Vec<usize> = matches.iter().map(|query| query.keys.len()).collect();
-        let every = index.maxsim(&tokens, TOKENS, 0, &mut arena)?;
+        let every = index.maxsim(&tokens, TOKENS, 0, &mut arena).unwrap();
         assert!(
             every.iter().zip(bounded).all(|(query, kept)| query.keys.len() >= kept),
             "no bound lands every key a query scored"
@@ -3697,24 +3662,23 @@ mod tests {
             index.maxsim(&tokens, TOKENS + 1, DOCUMENTS, &mut arena),
             Err(Error { status: Status::ShapeMismatch, .. })
         ));
-        Ok(())
     }
 
     /// A graph this small walks every key, so each head's output and carry are exact attention's,
     /// with one head per walk and with two sharing it; a key left without a row, or rows of another
     /// scalar type than the index stores, refuse.
     #[test]
-    fn attention_is_exact_over_every_key() -> Result<()> {
+    fn attention_is_exact_over_every_key() {
         const DIMENSIONS: usize = 4;
         const ENTRIES: usize = 16;
         const TOKENS: usize = 2;
-        let index = empty_index(DIMENSIONS, DenseMetric::Inner, Scalar::BF16)?;
+        let index = empty_index(DIMENSIONS, DenseMetric::Inner, Scalar::BF16).unwrap();
         // Rounding every row through bf16 first lets the oracle score exactly what the index stores.
         let in_bf16 =
             |slab: Vec<f32>| -> Vec<f32> { slab.into_iter().map(|value| bf16::from_f32(value).to_f32()).collect() };
-        let slab = in_bf16(seeded_rows(ENTRIES, DIMENSIONS, SEED));
-        index.insert(sequential_keys(ENTRIES), &rows(&slab, DIMENSIONS)?)?;
-        let values = in_bf16(seeded_rows(ENTRIES, DIMENSIONS, SEED + 1));
+        let slab = in_bf16(seeded_rows(ENTRIES, DIMENSIONS, case_stream_key(0)));
+        index.insert(sequential_keys(ENTRIES), &rows(&slab, DIMENSIONS).unwrap()).unwrap();
+        let values = in_bf16(seeded_rows(ENTRIES, DIMENSIONS, case_stream_key(1)));
         let stored_values: Vec<bf16> = values.iter().map(|value| bf16::from_f32(*value)).collect();
         fn row_of<Value>(table: &[Value], entry: usize) -> &[Value] {
             &table[entry * DIMENSIONS..][..DIMENSIONS]
@@ -3723,22 +3687,25 @@ mod tests {
             &|key| u64::try_from(key).ok().map(|entry| row_of(&stored_values, entry as usize));
 
         let executor = executor();
-        let mut arena = Arena::new_in(&executor)?;
+        let mut arena = Arena::new_in(&executor).unwrap();
         for head_count in [1, 2] {
-            let queries = in_bf16(seeded_rows(TOKENS * head_count, DIMENSIONS, SEED + 2));
+            let queries = in_bf16(seeded_rows(TOKENS * head_count, DIMENSIONS, case_stream_key(2)));
             let mut carry = vec![DenseSoftmaxState::default(); TOKENS * head_count];
-            let outputs = index.on(&executor).attend(
-                &rows(&queries, DIMENSIONS)?,
-                value_lookup,
-                DenseAttendConfig {
-                    expansion_factor: 2 * ENTRIES,
-                    carry: Some(&mut carry),
-                    ..DenseAttendConfig::from(head_count)
-                },
-                &mut arena,
-            )?;
-            assert_eq!(outputs.view()?.shape(), &[TOKENS * head_count, DIMENSIONS]);
-            let attended = flattened(outputs.view()?);
+            let outputs = index
+                .on(&executor)
+                .attend(
+                    &rows(&queries, DIMENSIONS).unwrap(),
+                    value_lookup,
+                    DenseAttendConfig {
+                        expansion_factor: 2 * ENTRIES,
+                        carry: Some(&mut carry),
+                        ..DenseAttendConfig::from(head_count)
+                    },
+                    &mut arena,
+                )
+                .unwrap();
+            assert_eq!(outputs.view().unwrap().shape(), &[TOKENS * head_count, DIMENSIONS]);
+            let attended = flattened(outputs.view().unwrap());
             for query in 0..TOKENS * head_count {
                 let logits: Vec<f64> = (0..ENTRIES)
                     .map(|entry| {
@@ -3755,37 +3722,37 @@ mod tests {
                         .enumerate()
                         .map(|(entry, weight)| weight * f64::from(row_of(&values, entry)[column]));
                     let expected = mixed.sum::<f64>() / partition;
-                    assert!(close(f64::from(attended[query * DIMENSIONS + column]), expected, 1e-3));
+                    assert_close(f64::from(attended[query * DIMENSIONS + column]), expected, 1e-3);
                 }
-                assert!(close(f64::from(carry[query].maximum_score), maximum, 1e-3));
-                assert!(close(f64::from(carry[query].partition), partition, 1e-3));
+                assert_close(f64::from(carry[query].maximum_score), maximum, 1e-3);
+                assert_close(f64::from(carry[query].partition), partition, 1e-3);
             }
         }
 
-        let refused = index.attend(&rows(&slab[..DIMENSIONS], DIMENSIONS)?, &|_| None::<&[bf16]>, 1, &mut arena);
+        let refused =
+            index.attend(&rows(&slab[..DIMENSIONS], DIMENSIONS).unwrap(), &|_| None::<&[bf16]>, 1, &mut arena);
         assert!(matches!(refused, Err(Error { status: Status::ShapeMismatch, .. })));
 
         let wide = vec![0.0f64; DIMENSIONS];
-        let mistyped = index.attend(&rows(&slab[..DIMENSIONS], DIMENSIONS)?, &|_| Some(wide.as_slice()), 1, &mut arena);
+        let mistyped =
+            index.attend(&rows(&slab[..DIMENSIONS], DIMENSIONS).unwrap(), &|_| Some(wide.as_slice()), 1, &mut arena);
         assert!(
             matches!(mistyped, Err(Error { status: Status::ShapeMismatch, .. })),
             "value rows are read in the index's own quantization"
         );
-        Ok(())
     }
 
     /// A product and a softmax both need logits, so a graph frozen under a distance refuses.
     #[test]
-    fn linear_algebra_refuses_a_distance_kind() -> Result<()> {
+    fn linear_algebra_refuses_a_distance_kind() {
         const DIMENSIONS: usize = 4;
-        let (index, _, slab) = populated_index(4, DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
+        let (index, _, slab) = populated_index(4, DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
         assert!(matches!(
             index
-                .multiply(&rows(&slab[..DIMENSIONS], DIMENSIONS)?, 0, &mut Arena::new()?)
+                .multiply(&rows(&slab[..DIMENSIONS], DIMENSIONS).unwrap(), 0, &mut Arena::new().unwrap())
                 .map(|products| products.queries()),
             Err(Error { status: Status::ConfigMismatch, .. })
         ));
-        Ok(())
     }
 
     // endregion: Refinement and Linear Algebra
@@ -3794,53 +3761,52 @@ mod tests {
 
     /// The loaded index adopts its geometry from the checkpoint's own headers.
     #[test]
-    fn saves_and_loads_a_file() -> Result<()> {
+    fn saves_and_loads_a_file() {
         const DIMENSIONS: usize = 16;
-        let path = scratch_path("saves_and_loads_a_file");
-        let (index, keys, _) = populated_index(32, DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
-        index.on(&executor()).save(&path)?;
+        let scratch = ScratchDirectory::new("usearch-dense-saves_and_loads_a_file");
+        let path = scratch.path().join("index.safegraphs");
+        let (index, keys, _) = populated_index(32, DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
+        index.on(&executor()).save(&path).unwrap();
 
-        let restored = DenseIndex::load_ram(&path)?.describe()?;
+        let restored = DenseIndex::load_ram(&path).unwrap().describe().unwrap();
         assert_eq!(restored.metadata.dimensions, DIMENSIONS);
         assert_eq!(restored.size, 32);
 
         // An NVMe view resolves keys only through the key table it was opened with.
-        let storage = Executor::for_nvme(&[] as &[&Path], None, 1)?;
+        let storage = Executor::for_nvme(&[] as &[&Path], None, 1).unwrap();
         let keyed = DenseIndex::view_nvme(DenseViewNvmeConfig {
             executor: Some(&storage),
             key_table_domains: Some(&[]),
             ..DenseViewNvmeConfig::from(&path)
-        })?;
-        assert_eq!(keyed.on(&storage).count(keys[5])?, 1);
-        let keyless = DenseIndex::view_nvme(DenseViewNvmeConfig {
-            executor: Some(&storage),
-            ..DenseViewNvmeConfig::from(&path)
-        })?;
+        })
+        .unwrap();
+        assert_eq!(keyed.on(&storage).count(keys[5]).unwrap(), 1);
+        let keyless =
+            DenseIndex::view_nvme(DenseViewNvmeConfig { executor: Some(&storage), ..DenseViewNvmeConfig::from(&path) })
+                .unwrap();
         assert!(matches!(keyless.on(&storage).count(keys[5]), Err(Error { status: Status::Unsupported, .. })));
 
         // A view serves the same checkpoint in place and refuses to change it, where RAM serves views at all.
         match DenseIndex::view_ram(&path) {
             Ok(viewed) => {
-                assert_eq!(viewed.describe()?.size, 32);
+                assert_eq!(viewed.describe().unwrap().size, 32);
                 assert!(matches!(viewed.reserve(64), Err(Error { status: Status::ReadOnly, .. })));
             }
             Err(error) => assert_eq!(error.status, Status::Unsupported),
         }
-        remove_quietly(&path);
-        Ok(())
     }
 
     #[test]
-    fn saves_and_loads_a_buffer() -> Result<()> {
+    fn saves_and_loads_a_buffer() {
         const DIMENSIONS: usize = 16;
-        let (index, _, _) = populated_index(32, DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
-        let mut arena = Arena::new()?;
-        let saved = index.save_buffer(&mut arena)?;
+        let (index, _, _) = populated_index(32, DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
+        let mut arena = Arena::new().unwrap();
+        let saved = index.save_buffer(&mut arena).unwrap();
         let monolith = saved.view();
         assert!(!monolith.is_empty());
 
-        let restored = DenseIndex::load_ram_buffer(monolith)?;
-        assert_eq!(restored.describe()?.size, 32);
+        let restored = DenseIndex::load_ram_buffer(monolith).unwrap();
+        assert_eq!(restored.describe().unwrap().size, 32);
 
         let executor = executor();
         let truncated = DenseLoadRamBufferConfig {
@@ -3848,47 +3814,46 @@ mod tests {
             ..DenseLoadRamBufferConfig::from(&monolith[..monolith.len() - 1])
         };
         assert!(DenseIndex::load_ram_buffer(truncated).is_err(), "a short buffer must not be read");
-        Ok(())
     }
 
     #[test]
-    fn reads_metadata_without_loading() -> Result<()> {
+    fn reads_metadata_without_loading() {
         const DIMENSIONS: usize = 16;
-        let path = scratch_path("reads_metadata_without_loading");
-        if empty_index_or_skip(DIMENSIONS, DenseMetric::Euclidean, Scalar::I8)?.is_none() {
-            return Ok(());
+        let scratch = ScratchDirectory::new("usearch-dense-reads_metadata_without_loading");
+        let path = scratch.path().join("index.safegraphs");
+        if empty_index_or_skip(DIMENSIONS, DenseMetric::Euclidean, Scalar::I8).unwrap().is_none() {
+            return;
         }
-        let (index, _, _) = populated_index(8, DIMENSIONS, DenseMetric::Euclidean, Scalar::I8)?;
-        index.save(&path)?;
+        let (index, _, _) = populated_index(8, DIMENSIONS, DenseMetric::Euclidean, Scalar::I8).unwrap();
+        index.save(&path).unwrap();
 
-        let described = DenseIndex::metadata(&path)?;
+        let described = DenseIndex::metadata(&path).unwrap();
         assert_eq!(described.dimensions, DIMENSIONS);
         assert_eq!(described.metric, DenseMetric::Euclidean);
         assert_eq!(described.quantization, Scalar::I8);
 
-        let mut arena = Arena::new()?;
-        let buffer = index.save_buffer(DenseSaveBufferConfig {
-            progress: Some(&mut |_, _| ControlFlow::Continue(())),
-            ..DenseSaveBufferConfig::from(&mut arena)
-        })?;
-        assert_eq!(DenseIndex::metadata_buffer(buffer.view())?.dimensions, DIMENSIONS);
-        remove_quietly(&path);
-        Ok(())
+        let mut arena = Arena::new().unwrap();
+        let buffer = index
+            .save_buffer(DenseSaveBufferConfig {
+                progress: Some(&mut |_, _| ControlFlow::Continue(())),
+                ..DenseSaveBufferConfig::from(&mut arena)
+            })
+            .unwrap();
+        assert_eq!(DenseIndex::metadata_buffer(buffer.view()).unwrap().dimensions, DIMENSIONS);
     }
 
     #[test]
     #[cfg(unix)]
-    fn rejects_a_non_utf8_path() -> Result<()> {
+    fn rejects_a_non_utf8_path() {
         use std::ffi::OsStr;
         use std::os::unix::ffi::OsStrExt;
 
-        let index = empty_index(8, DenseMetric::Angular, Scalar::BF16)?;
+        let index = empty_index(8, DenseMetric::Angular, Scalar::BF16).unwrap();
         let path = std::path::Path::new(OsStr::from_bytes(&[0xff, 0xfe]));
         assert!(
             matches!(index.save(path), Err(Error { status: Status::Io, .. })),
             "the C interface exchanges UTF-8 bytes"
         );
-        Ok(())
     }
 
     // endregion: Serialization
@@ -3897,66 +3862,70 @@ mod tests {
 
     /// Several sources gather into the one target among them, the others staying the caller's.
     #[test]
-    fn gathers_several_sources_into_one_target() -> Result<()> {
+    fn gathers_several_sources_into_one_target() {
         const DIMENSIONS: usize = 16;
-        let (index, keys, _) = populated_index(32, DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
+        let (index, keys, _) = populated_index(32, DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
 
-        let shard = empty_index(DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
+        let shard = empty_index(DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
         let shard_keys: Vec<Key> = (100..132u64).map(Key::from).collect();
-        let shard_slab = seeded_rows(32, DIMENSIONS, SEED + 1);
-        shard.insert(&shard_keys, &rows(&shard_slab, DIMENSIONS)?)?;
+        let shard_slab = seeded_rows(32, DIMENSIONS, case_stream_key(1));
+        shard.insert(&shard_keys, &rows(&shard_slab, DIMENSIONS).unwrap()).unwrap();
 
-        index.on(&executor()).reshard(DenseReshardConfig {
-            sources: &[&index, &shard],
-            targets: &[&index],
-            ..DenseReshardConfig::default()
-        })?;
-        assert_eq!(index.describe()?.size, 64);
-        assert_eq!(shard.describe()?.size, 0);
-        assert!(index.contains(keys[0])? && index.contains(shard_keys[0])?);
-        Ok(())
+        index
+            .on(&executor())
+            .reshard(DenseReshardConfig {
+                sources: &[&index, &shard],
+                targets: &[&index],
+                ..DenseReshardConfig::default()
+            })
+            .unwrap();
+        assert_eq!(index.describe().unwrap().size, 64);
+        assert_eq!(shard.describe().unwrap().size, 0);
+        assert!(index.contains(keys[0]).unwrap() && index.contains(shard_keys[0]).unwrap());
     }
 
     /// A reshard keeps every entry; a lone monolith has no manifest a loaded handle could replace.
     #[test]
-    fn reshards_in_place_and_loads_only_manifests() -> Result<()> {
+    fn reshards_in_place_and_loads_only_manifests() {
         const DIMENSIONS: usize = 16;
-        let path = scratch_path("reshards_in_place_and_loads_only_manifests");
-        let (index, _, _) = populated_index(32, DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
+        let scratch = ScratchDirectory::new("usearch-dense-reshards_in_place_and_loads_only_manifests");
+        let path = scratch.path().join("index.safegraphs");
+        let (index, _, _) = populated_index(32, DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
         let executor = executor();
-        index.on(&executor).reshard(DenseReshardConfig {
-            sources: &[&index],
-            targets: &[&index],
-            memory_domains: Some(&[]),
-            shard_capacity: 64,
-            ..DenseReshardConfig::default()
-        })?;
-        assert_eq!(index.describe()?.size, 32);
+        index
+            .on(&executor)
+            .reshard(DenseReshardConfig {
+                sources: &[&index],
+                targets: &[&index],
+                memory_domains: Some(&[]),
+                shard_capacity: 64,
+                ..DenseReshardConfig::default()
+            })
+            .unwrap();
+        assert_eq!(index.describe().unwrap().size, 32);
 
-        index.on(&executor).save(&path)?;
-        let storage = Executor::for_nvme(&[] as &[&Path], None, 1)?;
+        index.on(&executor).save(&path).unwrap();
+        let storage = Executor::for_nvme(&[] as &[&Path], None, 1).unwrap();
         let loaded =
             DenseIndex::load_nvme(DenseViewNvmeConfig { executor: Some(&storage), ..DenseViewNvmeConfig::from(&path) });
-        remove_quietly(&path);
         assert!(matches!(loaded, Err(Error { status: Status::Unsupported, .. })));
-        Ok(())
     }
 
     #[test]
-    fn walks_entries_in_batches() -> Result<()> {
+    fn walks_entries_in_batches() {
         const DIMENSIONS: usize = 8;
         const COUNT: usize = 20;
         const BUFFERED: usize = 8;
-        let (index, keys, _) = populated_index(COUNT, DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
+        let (index, keys, _) = populated_index(COUNT, DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
 
         let executor = executor();
         let receiver = index.on(&executor);
-        let mut cursor = receiver.cursor(&[])?;
-        let mut arena = Arena::new_in(&executor)?;
+        let mut cursor = receiver.cursor(&[]).unwrap();
+        let mut arena = Arena::new_in(&executor).unwrap();
         let mut seen = HashSet::new();
         let mut batches = Vec::new();
         loop {
-            let batch = cursor.next_keys(BUFFERED, &mut arena)?;
+            let batch = cursor.next_keys(BUFFERED, &mut arena).unwrap();
             if batch.written() == 0 {
                 break;
             }
@@ -3966,68 +3935,70 @@ mod tests {
 
         assert_eq!(batches, vec![8, 8, 4], "the batch boundary is crossed twice");
         assert_eq!(seen, keys.iter().copied().collect::<HashSet<Key>>());
-        Ok(())
     }
 
     #[test]
-    fn walks_entries_by_keys() -> Result<()> {
+    fn walks_entries_by_keys() {
         const DIMENSIONS: usize = 8;
-        let (index, keys, _) = populated_index(4, DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
+        let (index, keys, _) = populated_index(4, DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
 
-        let mut cursor = index.cursor(&[])?;
-        let mut arena = Arena::new()?;
-        let batch = cursor.next_keys(8, &mut arena)?;
+        let mut cursor = index.cursor(&[]).unwrap();
+        let mut arena = Arena::new().unwrap();
+        let batch = cursor.next_keys(8, &mut arena).unwrap();
         assert_eq!(batch.written(), 4);
         assert_eq!(
             batch.keys().iter().copied().collect::<HashSet<Key>>(),
             keys.iter().copied().collect::<HashSet<Key>>()
         );
-        assert_eq!(cursor.next_keys(8, &mut arena)?.written(), 0, "the walk is exhausted");
-        Ok(())
+        assert_eq!(cursor.next_keys(8, &mut arena).unwrap().written(), 0, "the walk is exhausted");
     }
 
     #[test]
-    fn streams_matches_in_pulls() -> Result<()> {
+    fn streams_matches_in_pulls() {
         const DIMENSIONS: usize = 16;
         const COUNT: usize = 200;
         const PULL: usize = 64;
-        let (index, _, slab) = populated_index(COUNT, DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
+        let (index, _, slab) = populated_index(COUNT, DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
 
-        let query = rows(&slab[..DIMENSIONS], DIMENSIONS)?;
-        let mut arena = Arena::new()?;
+        let query = rows(&slab[..DIMENSIONS], DIMENSIONS).unwrap();
+        let mut arena = Arena::new().unwrap();
         let mut stream = match index.search_stream(query) {
-            Err(error) if error.status == Status::Unsupported => return Ok(()),
-            opened => opened?,
+            Err(error) if error.status == Status::Unsupported => return skipped("needs search streams"),
+            opened => opened.unwrap(),
         };
-        let first = stream.next(5, &mut arena)?;
+        let first = stream.next(5, &mut arena).unwrap();
         assert_eq!(first.queries(), 1, "a pull is one query of a search");
-        assert_eq!(first.query(0)?.keys.len(), 5, "a pull hands the caller as many as it asked for");
+        assert_eq!(first.query(0).unwrap().keys.len(), 5, "a pull hands the caller as many as it asked for");
 
         let mut drained = 0;
         loop {
-            let pulled = stream.next(PULL, &mut arena)?.query(0)?.keys.len();
+            let pulled = stream.next(PULL, &mut arena).unwrap().query(0).unwrap().keys.len();
             if pulled == 0 {
                 break;
             }
             drained += pulled;
         }
         assert!(drained > PULL, "the walk spans several pulls");
-        assert!(stream.next(PULL, &mut arena)?.query(0)?.keys.is_empty(), "a drained stream stays drained");
+        assert!(
+            stream.next(PULL, &mut arena).unwrap().query(0).unwrap().keys.is_empty(),
+            "a drained stream stays drained"
+        );
 
-        let mut widened = index.search_stream(DenseSearchStreamInitConfig {
-            expansion_factor: 64,
-            ..DenseSearchStreamInitConfig::from(query)
-        })?;
-        assert!(!widened.next(PULL, &mut arena)?.query(0)?.keys.is_empty());
+        let mut widened = index
+            .search_stream(DenseSearchStreamInitConfig {
+                expansion_factor: 64,
+                ..DenseSearchStreamInitConfig::from(query)
+            })
+            .unwrap();
+        assert!(!widened.next(PULL, &mut arena).unwrap().query(0).unwrap().keys.is_empty());
 
         assert!(
             matches!(
-                index.search_stream(rows(&slab[..2 * DIMENSIONS], DIMENSIONS)?),
+                index.search_stream(rows(&slab[..2 * DIMENSIONS], DIMENSIONS).unwrap()),
                 Err(Error { status: Status::ShapeMismatch, .. })
             ),
             "a stream walks one row, never the first of many"
         );
-        Ok(())
     }
 
     // endregion: Resharding and Iteration
@@ -4035,81 +4006,86 @@ mod tests {
     // region: Progress and Cancellation
 
     #[test]
-    fn a_reported_batch_counts_up_to_the_rows_it_was_given() -> Result<()> {
+    fn a_reported_batch_counts_up_to_the_rows_it_was_given() {
         const DIMENSIONS: usize = 8;
         const COUNT: usize = 64;
-        let index = empty_index(DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
-        index.reserve(COUNT)?;
+        let index = empty_index(DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
+        index.reserve(COUNT).unwrap();
         let keys = sequential_keys(COUNT);
-        let slab = seeded_rows(COUNT, DIMENSIONS, SEED);
+        let slab = seeded_rows(COUNT, DIMENSIONS, case_stream_key(0));
 
         let mut watch = Watch::new(Patience::Complete);
-        index.on(&executor()).insert(
-            &keys,
-            DenseInsertConfig {
-                progress: Some(&mut |finished, total| watch.saw(finished, total)),
-                ..DenseInsertConfig::from(&rows(&slab, DIMENSIONS)?)
-            },
-        )?;
+        index
+            .on(&executor())
+            .insert(
+                &keys,
+                DenseInsertConfig {
+                    progress: Some(&mut |finished, total| watch.saw(finished, total)),
+                    ..DenseInsertConfig::from(&rows(&slab, DIMENSIONS).unwrap())
+                },
+            )
+            .unwrap();
 
-        assert_eq!(index.describe()?.size, COUNT);
+        assert_eq!(index.describe().unwrap().size, COUNT);
         assert!(watch.ordered, "a report never counts down");
         assert_eq!(watch.last, (COUNT, COUNT), "the last report names the whole batch");
-        Ok(())
     }
 
     /// Every entry is claimed before the first report, so a stop is ignored and the batch publishes
     /// whole.
     #[test]
-    fn a_stopped_batch_publishes_everything() -> Result<()> {
+    fn a_stopped_batch_publishes_everything() {
         const DIMENSIONS: usize = 8;
         const COUNT: usize = 64;
-        let index = empty_index(DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
-        index.reserve(COUNT)?;
+        let index = empty_index(DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
+        index.reserve(COUNT).unwrap();
         let keys = sequential_keys(COUNT);
-        let slab = seeded_rows(COUNT, DIMENSIONS, SEED);
+        let slab = seeded_rows(COUNT, DIMENSIONS, case_stream_key(0));
 
         let mut watch = Watch::new(Patience::StopAtFirstReport);
-        index.insert(
-            &keys,
-            DenseInsertConfig {
-                progress: Some(&mut |finished, total| watch.saw(finished, total)),
-                ..DenseInsertConfig::from(&rows(&slab, DIMENSIONS)?)
-            },
-        )?;
-        assert_eq!(index.describe()?.size, COUNT);
-        Ok(())
+        index
+            .insert(
+                &keys,
+                DenseInsertConfig {
+                    progress: Some(&mut |finished, total| watch.saw(finished, total)),
+                    ..DenseInsertConfig::from(&rows(&slab, DIMENSIONS).unwrap())
+                },
+            )
+            .unwrap();
+        assert_eq!(index.describe().unwrap().size, COUNT);
     }
 
     #[test]
-    fn a_reported_search_counts_up_to_the_queries_it_was_given() -> Result<()> {
+    fn a_reported_search_counts_up_to_the_queries_it_was_given() {
         const DIMENSIONS: usize = 8;
         const QUERIES: usize = 4;
         const WANTED: usize = 3;
-        let (index, _, slab) = populated_index(32, DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
+        let (index, _, slab) = populated_index(32, DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
 
         let mut watch = Watch::new(Patience::Complete);
-        index.on(&executor()).search(
-            &rows(&slab[..QUERIES * DIMENSIONS], DIMENSIONS)?,
-            DenseSearchConfig {
-                progress: Some(&mut |finished, total| watch.saw(finished, total)),
-                ..DenseSearchConfig::from(WANTED)
-            },
-            &mut Arena::new()?,
-        )?;
+        index
+            .on(&executor())
+            .search(
+                &rows(&slab[..QUERIES * DIMENSIONS], DIMENSIONS).unwrap(),
+                DenseSearchConfig {
+                    progress: Some(&mut |finished, total| watch.saw(finished, total)),
+                    ..DenseSearchConfig::from(WANTED)
+                },
+                &mut Arena::new().unwrap(),
+            )
+            .unwrap();
 
         assert!(watch.ordered, "a report never counts down");
         assert_eq!(watch.last, (QUERIES, QUERIES));
-        Ok(())
     }
 
     /// Stopping a sweep is its time budget: the call still re-links its islands, so the graph it
     /// leaves stays whole, and answers `Cancelled`.
     #[test]
-    fn a_stopped_refine_still_heals() -> Result<()> {
+    fn a_stopped_refine_still_heals() {
         const DIMENSIONS: usize = 8;
         const COUNT: usize = 32;
-        let (index, _, _) = populated_index(COUNT, DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
+        let (index, _, _) = populated_index(COUNT, DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
 
         let mut watch = Watch::new(Patience::StopAtFirstReport);
         let refined = index.on(&executor()).refine(DenseRefineConfig {
@@ -4123,22 +4099,25 @@ mod tests {
         }
         assert!(watch.ordered, "a report never counts down");
         assert!(watch.last.1 != 0, "the handler saw the sweep start");
-        assert_eq!(index.on(&executor()).health()?.audited, COUNT);
-        Ok(())
+        assert_eq!(index.on(&executor()).health().unwrap().audited, COUNT);
     }
 
     #[test]
-    fn a_reported_checkpoint_counts_what_it_wrote_and_placed() -> Result<()> {
+    fn a_reported_checkpoint_counts_what_it_wrote_and_placed() {
         const DIMENSIONS: usize = 16;
         const COUNT: usize = 32;
-        let path = scratch_path("a_reported_checkpoint");
-        let (index, _, _) = populated_index(COUNT, DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
+        let scratch = ScratchDirectory::new("usearch-dense-a_reported_checkpoint");
+        let path = scratch.path().join("index.safegraphs");
+        let (index, _, _) = populated_index(COUNT, DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
 
         let mut writing = Watch::new(Patience::Complete);
-        index.on(&executor()).save(DenseSaveConfig {
-            progress: Some(&mut |finished, total| writing.saw(finished, total)),
-            ..DenseSaveConfig::from(&path)
-        })?;
+        index
+            .on(&executor())
+            .save(DenseSaveConfig {
+                progress: Some(&mut |finished, total| writing.saw(finished, total)),
+                ..DenseSaveConfig::from(&path)
+            })
+            .unwrap();
         assert!(writing.ordered, "a report never counts down");
         assert_eq!(writing.last.0, writing.last.1, "the last report names a finished write");
         assert!(writing.last.1 != 0);
@@ -4148,46 +4127,46 @@ mod tests {
             executor: Some(&executor()),
             progress: Some(&mut |finished, total| placing.saw(finished, total)),
             ..DenseLoadRamConfig::from(&path)
-        })?;
+        })
+        .unwrap();
         assert!(placing.ordered, "a report never counts down");
         assert_eq!(placing.last.0, placing.last.1, "the last report names a finished read");
-        assert_eq!(restored.describe()?.size, COUNT);
-
-        remove_quietly(&path);
-        Ok(())
+        assert_eq!(restored.describe().unwrap().size, COUNT);
     }
 
     /// The handler reports the closing rounds, never the entries moved.
     #[test]
-    fn a_reported_reshard_counts_its_closing_rounds() -> Result<()> {
+    fn a_reported_reshard_counts_its_closing_rounds() {
         const DIMENSIONS: usize = 16;
         const COUNT: usize = 16;
-        let (index, _, _) = populated_index(COUNT, DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
-        let first = populated_index(COUNT, DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?.0;
-        let second = populated_index(COUNT, DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?.0;
+        let (index, _, _) = populated_index(COUNT, DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
+        let first = populated_index(COUNT, DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap().0;
+        let second = populated_index(COUNT, DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap().0;
 
         let mut watch = Watch::new(Patience::Complete);
-        let report = index.on(&executor()).reshard(DenseReshardConfig {
-            sources: &[&index, &first, &second],
-            targets: &[&index],
-            progress: Some(&mut |finished, total| watch.saw(finished, total)),
-            ..DenseReshardConfig::default()
-        })?;
+        let report = index
+            .on(&executor())
+            .reshard(DenseReshardConfig {
+                sources: &[&index, &first, &second],
+                targets: &[&index],
+                progress: Some(&mut |finished, total| watch.saw(finished, total)),
+                ..DenseReshardConfig::default()
+            })
+            .unwrap();
         assert_eq!(watch.last.0, watch.last.1, "the last report names a finished phase");
         assert!(report.changed <= report.reselected);
-        assert_eq!(index.describe()?.size, COUNT * 3);
-        Ok(())
+        assert_eq!(index.describe().unwrap().size, COUNT * 3);
     }
 
     /// A stop cuts only the closing rounds, so every entry has moved; the plan it leaves live
     /// continues where it stopped, and its finish closes it.
     #[test]
-    fn a_stopped_reshard_continues_through_its_plan() -> Result<()> {
+    fn a_stopped_reshard_continues_through_its_plan() {
         const DIMENSIONS: usize = 16;
         const COUNT: usize = 16;
-        let (index, _, _) = populated_index(COUNT, DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
-        let first = populated_index(COUNT, DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?.0;
-        let second = populated_index(COUNT, DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?.0;
+        let (index, _, _) = populated_index(COUNT, DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
+        let first = populated_index(COUNT, DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap().0;
+        let second = populated_index(COUNT, DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap().0;
 
         let executor = executor();
         let (mut plan, mut phase) = (DenseReshardPlan::default(), PhaseProgress::default());
@@ -4204,24 +4183,23 @@ mod tests {
             assert_eq!(failure.status, Status::Cancelled);
             assert_ne!(phase.phase, Phase::Done, "a stop names the phase it stopped in");
         }
-        assert_eq!(index.describe()?.size, COUNT * 3);
+        assert_eq!(index.describe().unwrap().size, COUNT * 3);
 
         // A deferred call owns the plan it continues and hands it back once final.
-        let continued = index.deferred(&executor).reshard(DenseReshardConfig::from(plan))?;
+        let continued = index.deferred(&executor).reshard(DenseReshardConfig::from(plan)).unwrap();
         let (finished, (config, _)) = continued.wait_with_inputs();
-        finished?;
+        finished.unwrap();
         let plan = config.plan.expect("the call hands its plan back");
-        let report = index.deferred(&executor).reshard_plan_finish(plan)?.wait()?;
+        let report = index.deferred(&executor).reshard_plan_finish(plan).unwrap().wait().unwrap();
         assert!(report.changed <= report.reselected);
-        Ok(())
     }
 
     /// A plan carries a refine across calls: a stop leaves it live, the next call ends the round,
     /// and the finish reports the whole plan.
     #[test]
-    fn a_refine_plan_resumes_and_finishes() -> Result<()> {
+    fn a_refine_plan_resumes_and_finishes() {
         const COUNT: usize = 32;
-        let (index, _, _) = populated_index(COUNT, 8, DenseMetric::Angular, Scalar::BF16)?;
+        let (index, _, _) = populated_index(COUNT, 8, DenseMetric::Angular, Scalar::BF16).unwrap();
         let executor = executor();
         let (mut plan, mut phase) = (DenseRefinePlan::default(), PhaseProgress::default());
         let mut watch = Watch::new(Patience::StopAtFirstReport);
@@ -4234,16 +4212,18 @@ mod tests {
         if let Err(failure) = stopped {
             assert_eq!(failure.status, Status::Cancelled);
             assert_ne!(phase.phase, Phase::Done);
-            index.on(&executor).refine(DenseRefineConfig {
-                plan: Some(&mut plan),
-                phase: Some(&mut phase),
-                ..DenseRefineConfig::default()
-            })?;
+            index
+                .on(&executor)
+                .refine(DenseRefineConfig {
+                    plan: Some(&mut plan),
+                    phase: Some(&mut phase),
+                    ..DenseRefineConfig::default()
+                })
+                .unwrap();
         }
         assert_eq!(phase.phase, Phase::Done);
-        let report = index.on(&executor).refine_plan_finish(plan)?;
+        let report = index.on(&executor).refine_plan_finish(plan).unwrap();
         assert_eq!(report.reachability.audited, COUNT);
-        Ok(())
     }
 
     // endregion: Progress and Cancellation
@@ -4255,61 +4235,59 @@ mod tests {
     /// The batch is the unit of parallelism: the executor fans one call out over its threads,
     /// so the caller never spawns any of its own.
     #[test]
-    fn builds_and_searches_on_a_shared_executor() -> Result<()> {
+    fn builds_and_searches_on_a_shared_executor() {
         const DIMENSIONS: usize = 128;
         const COUNT: usize = 1000;
         const WANTED: usize = 10;
 
-        let index = empty_index(DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
-        index.reserve(COUNT)?;
+        let index = empty_index(DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
+        index.reserve(COUNT).unwrap();
         let keys = sequential_keys(COUNT);
-        let slab = seeded_rows(COUNT, DIMENSIONS, SEED);
+        let slab = seeded_rows(COUNT, DIMENSIONS, case_stream_key(0));
 
-        let executor = Executor::for_ram(&[], None, THREADS)?;
+        let executor = Executor::for_ram(&[], None, THREADS).unwrap();
         let receiver = index.on(&executor);
-        let vectors = rows(&slab, DIMENSIONS)?;
-        receiver.insert(&keys, &vectors)?;
-        assert_eq!(receiver.describe()?.size, COUNT);
+        let vectors = rows(&slab, DIMENSIONS).unwrap();
+        receiver.insert(&keys, &vectors).unwrap();
+        assert_eq!(receiver.describe().unwrap().size, COUNT);
 
         let config = DenseSearchConfig { expansion_factor: 64, ..DenseSearchConfig::from(WANTED) };
-        let mut arena = Arena::new_in(&executor)?;
-        let matches = receiver.search(&vectors, config, &mut arena)?;
+        let mut arena = Arena::new_in(&executor).unwrap();
+        let matches = receiver.search(&vectors, config, &mut arena).unwrap();
         assert!(matches.iter().all(|query| query.keys.len() == WANTED), "every query fills its own output");
-        Ok(())
     }
 
     /// The index itself is the blocking receiver on the calling thread, with the same results.
     #[test]
-    fn runs_on_the_calling_thread() -> Result<()> {
+    fn runs_on_the_calling_thread() {
         const DIMENSIONS: usize = 8;
-        let (index, _, slab) = populated_index(16, DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
-        let query = rows(&slab[..DIMENSIONS], DIMENSIONS)?;
-        let (mut first, mut second) = (Arena::new()?, Arena::new()?);
-        let on_this_thread = index.search(&query, 4, &mut first)?;
-        let on_the_null_executor = index.on(&Executor::default()).search(&query, 4, &mut second)?;
-        assert_eq!(on_this_thread.query(0)?.keys.len(), 4);
+        let (index, _, slab) = populated_index(16, DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
+        let query = rows(&slab[..DIMENSIONS], DIMENSIONS).unwrap();
+        let (mut first, mut second) = (Arena::new().unwrap(), Arena::new().unwrap());
+        let on_this_thread = index.search(&query, 4, &mut first).unwrap();
+        let on_the_null_executor = index.on(&Executor::default()).search(&query, 4, &mut second).unwrap();
+        assert_eq!(on_this_thread.query(0).unwrap().keys.len(), 4);
         assert_eq!(on_this_thread.query(0), on_the_null_executor.query(0));
-        Ok(())
     }
 
     #[test]
-    fn searches_while_inserting() -> Result<()> {
+    fn searches_while_inserting() {
         const DIMENSIONS: usize = 64;
         const HALF: usize = 500;
         const WANTED: usize = 4;
 
-        let index = empty_index(DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
-        index.reserve(2 * HALF)?;
+        let index = empty_index(DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
+        index.reserve(2 * HALF).unwrap();
         let keys = sequential_keys(2 * HALF);
-        let slab = seeded_rows(2 * HALF, DIMENSIONS, SEED);
+        let slab = seeded_rows(2 * HALF, DIMENSIONS, case_stream_key(0));
 
         // The first half lands serially, so the reader below traverses a populated graph.
-        index.insert(&keys[..HALF], &rows(&slab[..HALF * DIMENSIONS], DIMENSIONS)?)?;
+        index.insert(&keys[..HALF], &rows(&slab[..HALF * DIMENSIONS], DIMENSIONS).unwrap()).unwrap();
 
         // One call holds an executor at a time, so genuinely overlapping calls need one apiece -
         // the writer's and the reader's, on two threads sharing the handle.
-        let writer = Executor::for_ram(&[], None, THREADS)?;
-        let reader = Executor::for_ram(&[], None, THREADS)?;
+        let writer = Executor::for_ram(&[], None, THREADS).unwrap();
+        let reader = Executor::for_ram(&[], None, THREADS).unwrap();
         let known: HashSet<Key> = keys.iter().copied().collect();
         let strangers = AtomicUsize::new(0);
 
@@ -4337,8 +4315,7 @@ mod tests {
         });
 
         assert_eq!(strangers.load(Ordering::Relaxed), 0, "searches never see unpublished entries");
-        assert_eq!(index.describe()?.size, 2 * HALF);
-        Ok(())
+        assert_eq!(index.describe().unwrap().size, 2 * HALF);
     }
 
     // endregion: Concurrency
@@ -4348,44 +4325,45 @@ mod tests {
     /// A deferred search owns its queries, borrows its arena as the blocking one does, and answers
     /// what the blocking one does once waited on.
     #[test]
-    fn a_deferred_search_matches_the_blocking_one() -> Result<()> {
+    fn a_deferred_search_matches_the_blocking_one() {
         const DIMENSIONS: usize = 16;
         const QUERIES: usize = 4;
         const WANTED: usize = 5;
-        let (index, _, slab) = populated_index(64, DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
+        let (index, _, slab) = populated_index(64, DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
         let queries = Matrix::<f32>::from_slice(&slab[..QUERIES * DIMENSIONS], &[QUERIES, DIMENSIONS]).unwrap();
 
         let executor = executor();
-        let mut arena = Arena::new_in(&executor)?;
-        let call = index.deferred(&executor).search(queries, WANTED, &mut arena)?;
+        let mut arena = Arena::new_in(&executor).unwrap();
+        let call = index.deferred(&executor).search(queries, WANTED, &mut arena).unwrap();
         requires_send::<Deferred<'static, (Matrix<f32>, DenseSearchConfig<'static>), Matches<'static>>>();
         requires_send::<Matches<'static>>();
         assert!(matches!(call.status(), Err(Status::Deferred) | Ok(())));
-        let deferred = call.wait()?;
+        let deferred = call.wait().unwrap();
 
-        let mut blocking_arena = Arena::new()?;
-        let blocking = index.search(&rows(&slab[..QUERIES * DIMENSIONS], DIMENSIONS)?, WANTED, &mut blocking_arena)?;
+        let mut blocking_arena = Arena::new().unwrap();
+        let blocking = index
+            .search(&rows(&slab[..QUERIES * DIMENSIONS], DIMENSIONS).unwrap(), WANTED, &mut blocking_arena)
+            .unwrap();
         assert_eq!(deferred.queries(), QUERIES);
         for query in 0..QUERIES {
             assert_eq!(deferred.query(query), blocking.query(query));
         }
 
         let queries = Matrix::<f32>::from_slice(&slab[..DIMENSIONS], &[1, DIMENSIONS]).unwrap();
-        let again = index.deferred(&executor).search(queries, WANTED, &mut arena)?;
-        assert_eq!(again.wait()?.query(0), blocking.query(0));
-        Ok(())
+        let again = index.deferred(&executor).search(queries, WANTED, &mut arena).unwrap();
+        assert_eq!(again.wait().unwrap().query(0), blocking.query(0));
     }
 
     /// A leaked deferred call leaves its arena busy rather than unsafe: a call naming it finishes
     /// contended, and dropping it waits for the leaked call.
     #[test]
-    fn a_leaked_deferred_call_keeps_its_arena_busy() -> Result<()> {
+    fn a_leaked_deferred_call_keeps_its_arena_busy() {
         use std::sync::atomic::AtomicBool;
 
         static ENTERED: AtomicBool = AtomicBool::new(false);
         static RELEASED: AtomicBool = AtomicBool::new(false);
         const DIMENSIONS: usize = 8;
-        let (index, keys, slab) = populated_index(16, DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
+        let (index, keys, slab) = populated_index(16, DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
         let queries = Matrix::<f32>::from_slice(&slab[..DIMENSIONS], &[1, DIMENSIONS]).unwrap();
         // The handler holds the call until released, so it is still running when the arena is named again.
         let gate: &'static mut ProgressCallback<'static> = Box::leak(Box::new(|_, _| {
@@ -4397,28 +4375,27 @@ mod tests {
         }));
 
         let executor = executor();
-        let mut arena = Arena::new_in(&executor)?;
+        let mut arena = Arena::new_in(&executor).unwrap();
         let config = DenseSearchConfig { progress: Some(gate), ..DenseSearchConfig::from(3) };
-        core::mem::forget(index.deferred(&executor).search(queries, config, &mut arena)?);
+        core::mem::forget(index.deferred(&executor).search(queries, config, &mut arena).unwrap());
         while !ENTERED.load(Ordering::Acquire) {
             std::thread::yield_now();
         }
         assert!(matches!(index.get::<f32>(keys[0], &mut arena), Err(Error { status: Status::Contended, .. })));
         RELEASED.store(true, Ordering::Release);
         drop(arena);
-        Ok(())
     }
 
     /// A call meeting a running one on its executor finishes contended without running, and the
     /// executor serves the next call once the first is final.
     #[test]
-    fn a_running_call_holds_its_executor() -> Result<()> {
+    fn a_running_call_holds_its_executor() {
         use std::sync::atomic::AtomicBool;
 
         static ENTERED: AtomicBool = AtomicBool::new(false);
         static RELEASED: AtomicBool = AtomicBool::new(false);
         const DIMENSIONS: usize = 8;
-        let (index, keys, slab) = populated_index(16, DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
+        let (index, keys, slab) = populated_index(16, DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
         let queries = Matrix::<f32>::from_slice(&slab[..DIMENSIONS], &[1, DIMENSIONS]).unwrap();
         // A deferred call borrows its handler for as long as it may run, so the gate is leaked.
         let gate: &'static mut ProgressCallback<'static> = Box::leak(Box::new(|_, _| {
@@ -4430,91 +4407,89 @@ mod tests {
         }));
 
         let executor = executor();
-        let mut arena = Arena::new_in(&executor)?;
+        let mut arena = Arena::new_in(&executor).unwrap();
         let config = DenseSearchConfig { progress: Some(gate), ..DenseSearchConfig::from(3) };
-        let held = index.deferred(&executor).search(queries, config, &mut arena)?;
+        let held = index.deferred(&executor).search(queries, config, &mut arena).unwrap();
         while !ENTERED.load(Ordering::Acquire) {
             std::thread::yield_now();
         }
         assert!(matches!(index.on(&executor).count(keys[0]), Err(Error { status: Status::Contended, .. })));
         RELEASED.store(true, Ordering::Release);
-        assert_eq!(held.wait()?.query(0)?.keys.len(), 3);
-        assert_eq!(index.on(&executor).count(keys[0])?, 1);
-        Ok(())
+        assert_eq!(held.wait().unwrap().query(0).unwrap().keys.len(), 3);
+        assert_eq!(index.on(&executor).count(keys[0]).unwrap(), 1);
     }
 
     /// A drain leaves idle threads in the mood it names, and the next call runs in either.
     #[test]
-    fn a_drain_sets_the_mood() -> Result<()> {
-        let (index, keys, _) = populated_index(4, 4, DenseMetric::Angular, Scalar::BF16)?;
+    fn a_drain_sets_the_mood() {
+        let (index, keys, _) = populated_index(4, 4, DenseMetric::Angular, Scalar::BF16).unwrap();
         let executor = executor();
         for mood in [Mood::Spinning, Mood::Parked] {
-            executor.drain(mood)?;
-            assert_eq!(index.on(&executor).count(keys[0])?, 1);
+            executor.drain(mood).unwrap();
+            assert_eq!(index.on(&executor).count(keys[0]).unwrap(), 1);
         }
-        Ok(())
     }
 
     /// Polling an awaited deferred call alone finishes it, since pool thread 0 runs it in the
     /// caller's place, and the answer is what `wait` would give.
     #[test]
-    fn an_awaited_call_finishes_by_polling() -> Result<()> {
+    fn an_awaited_call_finishes_by_polling() {
         use core::future::{Future, IntoFuture};
         use core::pin::pin;
         use core::task::{Context, Poll, Waker};
 
         const DIMENSIONS: usize = 16;
-        let (index, _, slab) = populated_index(64, DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
+        let (index, _, slab) = populated_index(64, DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
         let queries = Matrix::<f32>::from_slice(&slab[..DIMENSIONS], &[1, DIMENSIONS]).unwrap();
         let executor = executor();
-        let mut arena = Arena::new_in(&executor)?;
-        let mut awaited = pin!(index.deferred(&executor).search(queries, 3, &mut arena)?.into_future());
-        let mut context = Context::from_waker(Waker::noop());
-        let matches = loop {
-            if let Poll::Ready(matches) = awaited.as_mut().poll(&mut context) {
-                break matches;
-            }
-        };
+        let mut arena = Arena::new_in(&executor).unwrap();
+        let mut awaited = pin!(index.deferred(&executor).search(queries, 3, &mut arena).unwrap().into_future());
+        let matches = block_on(awaited.as_mut());
         assert_eq!(
-            matches?.query(0),
-            index.search(&rows(&slab[..DIMENSIONS], DIMENSIONS)?, 3, &mut Arena::new()?)?.query(0)
+            matches.unwrap().query(0),
+            index
+                .search(&rows(&slab[..DIMENSIONS], DIMENSIONS).unwrap(), 3, &mut Arena::new().unwrap())
+                .unwrap()
+                .query(0)
         );
+        let mut context = Context::from_waker(Waker::noop());
         assert!(matches!(awaited.as_mut().poll(&mut context), Poll::Ready(Err(_))));
-        Ok(())
     }
 
     /// Deferred calls running together each borrow an arena, which their results borrow in turn.
     #[test]
-    fn deferred_calls_borrow_their_arenas() -> Result<()> {
+    fn deferred_calls_borrow_their_arenas() {
         const DIMENSIONS: usize = 4;
-        let (index, keys, slab) = populated_index(4, DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
+        let (index, keys, slab) = populated_index(4, DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
         // One call holds an executor at a time, so calls running together take one apiece.
         let (finder, saver, counter) = (executor(), executor(), executor());
 
-        let (mut first, mut second) = (Arena::new_in(&finder)?, Arena::new_in(&saver)?);
-        let found = index.deferred(&finder).get::<f32>(keys[2], &mut first)?;
-        let buffer = index.deferred(&saver).save_buffer(&mut second)?;
-        let counted = index.deferred(&counter).count(keys[3])?;
-        assert!(close_rows(&flattened(found.wait()?.view()?), &slab[DIMENSIONS * 2..DIMENSIONS * 3]));
-        assert_eq!(DenseIndex::metadata_buffer(buffer.wait()?.view())?.dimensions, DIMENSIONS);
-        assert_eq!(counted.wait()?, 1);
-        Ok(())
+        let (mut first, mut second) = (Arena::new_in(&finder).unwrap(), Arena::new_in(&saver).unwrap());
+        let found = index.deferred(&finder).get::<f32>(keys[2], &mut first).unwrap();
+        let buffer = index.deferred(&saver).save_buffer(&mut second).unwrap();
+        let counted = index.deferred(&counter).count(keys[3]).unwrap();
+        assert_close_rows(
+            &flattened(found.wait().unwrap().view().unwrap()),
+            &slab[DIMENSIONS * 2..DIMENSIONS * 3],
+            BF16_EPSILON,
+        );
+        assert_eq!(DenseIndex::metadata_buffer(buffer.wait().unwrap().view()).unwrap().dimensions, DIMENSIONS);
+        assert_eq!(counted.wait().unwrap(), 1);
     }
 
     /// Dropping a call that is not yet final waits for it, then frees what it owned.
     #[test]
-    fn an_unfinished_deferred_call_drops_by_waiting() -> Result<()> {
+    fn an_unfinished_deferred_call_drops_by_waiting() {
         const DIMENSIONS: usize = 8;
         const COUNT: usize = 64;
-        let index = empty_index(DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
-        let slab = seeded_rows(COUNT, DIMENSIONS, SEED);
+        let index = empty_index(DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
+        let slab = seeded_rows(COUNT, DIMENSIONS, case_stream_key(0));
         let vectors = Matrix::<f32>::from_slice(&slab, &[COUNT, DIMENSIONS]).unwrap();
 
         let executor = executor();
-        let call = index.deferred(&executor).insert(sequential_keys(COUNT), vectors)?;
+        let call = index.deferred(&executor).insert(sequential_keys(COUNT), vectors).unwrap();
         drop(call);
-        assert_eq!(index.describe()?.size, COUNT);
-        Ok(())
+        assert_eq!(index.describe().unwrap().size, COUNT);
     }
 
     // endregion: Deferred Calls

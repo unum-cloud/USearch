@@ -5,6 +5,8 @@
  *  @brief The Linux kernel ABI mirrors of @c nvme_device.hpp, checked against the kernel's own
  *      spelling where the build's headers have it.
  */
+#undef NDEBUG // ! A test's oracle must stay live in every build
+
 #include <cstddef> // `offsetof`
 
 #include <linux/io_uring.h>

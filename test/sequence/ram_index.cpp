@@ -14,6 +14,8 @@
  *  the two-row Wagner-Fischer recurrence over bytes or runes, and a brute-force count of the
  *  windows two strings share.
  */
+#undef NDEBUG // ! A test's oracle must stay live in every build
+
 #include <cstring> // `std::memcmp` - the folded nucleotide costs
 
 #include <algorithm>   // `std::find` - a found key among the batch's
@@ -89,7 +91,7 @@ static std::vector<sequence_value_t> generate_values(std::size_t count, u64_t se
                                                      std::size_t symbols_count, counting_allocator_t const& allocator) {
     constexpr std::size_t templates_k = 8;
     std::vector<std::string_view> const alphabet = split_symbols(alphabet_text, sz_levenshtein_runes_k);
-    splitmix64_t random_generator {seed};
+    split_mix_generator_t random_generator {seed};
     uniform_below<u32_t> const symbol_distribution {static_cast<u32_t>(alphabet.size())};
     uniform_below<u32_t> const template_distribution {templates_k};
     uniform_below<u32_t> const edit_kind_distribution {3};
@@ -345,11 +347,10 @@ static_assert(value_codec<codec_t, sequence_value_t>);
  *  otherwise, at an unbounded radius and at a tight one that cuts by length and freezes flights.
  *  The joined strings pass two query words, so the scratch verticals score beside the resident. */
 template <sz_capability_t capability_, sz_levenshtein_symbol_t symbol_>
-std::size_t check_levenshtein_kit(u64_t seed) {
+void test_levenshtein_kit(u64_t seed) {
     constexpr std::size_t generated_k = 36, parts_per_join_k = 6, joined_k = generated_k / parts_per_join_k;
     constexpr std::size_t candidates_k = generated_k + joined_k;
     constexpr sz_size_t tight_radius_k = 3;
-    std::size_t failures = 0;
     allocation_ledger_t ledger;
     {
         counting_allocator_t const allocator {ledger};
@@ -364,25 +365,24 @@ std::size_t check_levenshtein_kit(u64_t seed) {
         }
 
         levenshtein_metric<typename levenshtein_ladder<symbol_, capability_>::kit_t> metric;
-        failures += expect_eq(metric.init(candidates_k), status_t::success_k);
+        expect_equal(metric.init(candidates_k), status_t::success_k);
         for (sz_size_t const radius : {unbounded_radius<sz_size_t>(), tight_radius_k}) {
             for (std::size_t const query : {std::size_t {0}, generated_k}) {
                 metric.reset(candidates[query]);
                 for (sequence_value_t const& candidate : candidates)
-                    failures += expect(metric.push(candidate) == metric_staging_t::staged_k);
+                    expect_true(metric.push(candidate) == metric_staging_t::staged_k);
                 std::array<sz_size_t, candidates_k> distances;
                 metric.drain(distances, radius);
-                failures += expect_eq(metric.status(), status_t::success_k);
+                expect_equal(metric.status(), status_t::success_k);
                 for (std::size_t candidate = 0; candidate != candidates_k; ++candidate) {
                     sz_size_t const truth = levenshtein_oracle(candidates[query], candidates[candidate], symbol_);
-                    failures += truth <= radius ? expect_eq(distances[candidate], truth)
-                                                : expect(distances[candidate] > radius);
+                    truth <= radius ? expect_equal(distances[candidate], truth)
+                                    : expect_true(distances[candidate] > radius);
                 }
             }
         }
     }
-    failures += expect_eq(ledger.live_bytes, 0);
-    return failures;
+    expect_equal(ledger.live_bytes, 0);
 }
 
 /** One overlap kit against the brute-force window count: exact within the radius and above it
@@ -390,9 +390,8 @@ std::size_t check_levenshtein_kit(u64_t seed) {
  *  own budget. Generated strings, a string shorter than every width, and the empty one, opening a
  *  round that shares no window. */
 template <sz_capability_t capability_>
-std::size_t check_overlap_kit(u64_t seed) {
+void test_overlap_kit(u64_t seed) {
     constexpr std::size_t generated_k = 24, candidates_k = generated_k + 2;
-    std::size_t failures = 0;
     allocation_ledger_t ledger;
     {
         counting_allocator_t const allocator {ledger};
@@ -402,38 +401,37 @@ std::size_t check_overlap_kit(u64_t seed) {
         candidates.push_back(make_value("", allocator));
 
         overlap_metric<typename overlap_ladder<capability_>::kit_t> metric;
-        failures += expect_eq(metric.init(candidates_k, sequence_window_widths_k), status_t::success_k);
+        expect_equal(metric.init(candidates_k, sequence_window_widths_k), status_t::success_k);
         for (sz_size_t const radius : {unbounded_radius<sz_size_t>(), overlap_resolution_k / 2}) {
             // A batch scores every query as that query alone would, and the empty query
             // reopened right after it is prepared anew rather than taken for the batch.
             std::array<std::string_view, 2> const batch {candidates[0], candidates[candidates_k - 1]};
             metric.reset(std::span<std::string_view const>(batch));
             for (sequence_value_t const& candidate : candidates)
-                failures += expect(metric.push(candidate) == metric_staging_t::staged_k);
+                expect_true(metric.push(candidate) == metric_staging_t::staged_k);
             std::array<sz_size_t, candidates_k * 2> batched;
             metric.drain(batched, radius);
-            failures += expect_eq(metric.status(), status_t::success_k);
+            expect_equal(metric.status(), status_t::success_k);
             for (std::size_t slot = 0; slot != batched.size(); ++slot) {
                 sz_size_t const truth = overlap_oracle(batch[slot / candidates_k], candidates[slot % candidates_k]);
-                failures += truth <= radius ? expect_eq(batched[slot], truth) : expect(batched[slot] > radius);
+                truth <= radius ? expect_equal(batched[slot], truth) : expect_true(batched[slot] > radius);
             }
             for (std::size_t const query : {candidates_k - 1, std::size_t {0}}) {
                 metric.reset(candidates[query]);
                 for (sequence_value_t const& candidate : candidates)
-                    failures += expect(metric.push(candidate) == metric_staging_t::staged_k);
+                    expect_true(metric.push(candidate) == metric_staging_t::staged_k);
                 std::array<sz_size_t, candidates_k> distances;
                 metric.drain(distances, radius);
-                failures += expect_eq(metric.status(), status_t::success_k);
+                expect_equal(metric.status(), status_t::success_k);
                 for (std::size_t candidate = 0; candidate != candidates_k; ++candidate) {
                     sz_size_t const truth = overlap_oracle(candidates[query], candidates[candidate]);
-                    failures += truth <= radius ? expect_eq(distances[candidate], truth)
-                                                : expect(distances[candidate] > radius);
+                    truth <= radius ? expect_equal(distances[candidate], truth)
+                                    : expect_true(distances[candidate] > radius);
                 }
             }
         }
     }
-    failures += expect_eq(ledger.live_bytes, 0);
-    return failures;
+    expect_equal(ledger.live_bytes, 0);
 }
 
 /** One Needleman-Wunsch kit against the two-row oracle over five-bit codes. The fold first: the
@@ -442,19 +440,18 @@ std::size_t check_overlap_kit(u64_t seed) {
  *  from a short query passes a 16-bit cell, exact within the radius and above it otherwise, at an
  *  unbounded radius and at a tight one that stops columns early. */
 template <sz_capability_t capability_>
-std::size_t check_needleman_wunsch_kit(u64_t seed) {
+void test_needleman_wunsch_kit(u64_t seed) {
     constexpr std::size_t side_k = needleman_wunsch_byte_alphabet_k, classes_k = 24, generated_k = 40;
     constexpr std::size_t longest_k = 4500;
     constexpr sz_size_t tight_radius_k = 40;
-    std::size_t failures = 0;
 
     std::vector<i8_t> nucleotides(side_k * side_k);
     for (std::size_t first = 0; first != 4; ++first)
         for (std::size_t second = 0; second != 4; ++second)
             nucleotides[first * side_k + second] = first == second ? 2 : (first & 1) == (second & 1) ? 1 : 0;
     auto const [nucleotide_folded, nucleotide_status] = needleman_wunsch_costs_t::fold(nucleotides, 2);
-    failures += expect_eq(nucleotide_status, status_t::success_k);
-    failures += expect(std::memcmp(&nucleotide_folded, &nucleotide_costs_k, sizeof(nucleotide_costs_k)) == 0);
+    expect_equal(nucleotide_status, status_t::success_k);
+    expect_true(std::memcmp(&nucleotide_folded, &nucleotide_costs_k, sizeof(nucleotide_costs_k)) == 0);
 
     // Self-scores of 8 to 11 and cross-scores of -3 to 3 keep every cost at 14 or below, so the gap
     // of 20 alone scales the table by 3/4.
@@ -464,17 +461,17 @@ std::size_t check_needleman_wunsch_kit(u64_t seed) {
             similarities[first * side_k + second] = static_cast<i8_t>(
                 first == second ? 8 + first % 4 : static_cast<int>(first * second % 7) - 3);
     auto const [costs, fold_status] = needleman_wunsch_costs_t::fold(similarities, 20);
-    failures += expect_eq(fold_status, status_t::success_k);
-    failures += expect_eq(costs.code_bits, 5u);
-    failures += expect_eq(costs.classes, classes_k);
-    failures += expect_eq(costs.gap, 15u);
+    expect_equal(fold_status, status_t::success_k);
+    expect_equal(costs.code_bits, 5u);
+    expect_equal(costs.classes, classes_k);
+    expect_equal(costs.gap, 15u);
     // Codes 0 and 1 cost (8 + 9) / 2 + 3 = 11.5, scaled to 8.625 and rounded to 9.
-    failures += expect_eq(costs.substitutions[0][1], 9u);
-    failures += expect_eq(costs.substitutions[5][5], 0u);
+    expect_equal(costs.substitutions[0][1], 9u);
+    expect_equal(costs.substitutions[5][5], 0u);
     similarities[1] = 100;
-    failures += expect_eq(needleman_wunsch_costs_t::fold(similarities, 20).status, status_t::config_mismatch_k);
+    expect_equal(needleman_wunsch_costs_t::fold(similarities, 20).status, status_t::config_mismatch_k);
 
-    splitmix64_t random_generator {stream_key(seed, "needleman_wunsch")};
+    split_mix_generator_t random_generator {stream_key(seed, "needleman_wunsch")};
     uniform_below<u32_t> const code_distribution {classes_k}, length_distribution {60};
     std::vector<std::string> candidates;
     for (std::size_t candidate = 0; candidate != generated_k; ++candidate) {
@@ -488,23 +485,22 @@ std::size_t check_needleman_wunsch_kit(u64_t seed) {
     }
 
     needleman_wunsch_metric<typename needleman_wunsch_ladder<capability_>::kit_t> metric;
-    failures += expect_eq(metric.init(generated_k, costs), status_t::success_k);
+    expect_equal(metric.init(generated_k, costs), status_t::success_k);
     for (sz_size_t const radius : {unbounded_radius<sz_size_t>(), tight_radius_k}) {
         for (std::size_t const query : {std::size_t {2}, std::size_t {0}, generated_k - 1}) {
             metric.reset(std::string_view {candidates[query]});
             for (std::string const& candidate : candidates)
-                failures += expect(metric.push(std::string_view {candidate}) == metric_staging_t::staged_k);
+                expect_true(metric.push(std::string_view {candidate}) == metric_staging_t::staged_k);
             std::array<sz_size_t, generated_k> distances;
             metric.drain(distances, radius);
-            failures += expect_eq(metric.status(), status_t::success_k);
+            expect_equal(metric.status(), status_t::success_k);
             for (std::size_t candidate = 0; candidate != generated_k; ++candidate) {
                 sz_size_t const truth = needleman_wunsch_oracle(candidates[query], candidates[candidate], costs);
-                failures += truth <= radius ? expect_eq(distances[candidate], truth)
-                                            : expect(distances[candidate] > radius);
+                truth <= radius ? expect_equal(distances[candidate], truth)
+                                : expect_true(distances[candidate] > radius);
             }
         }
     }
-    return failures;
 }
 
 /** The byte Levenshtein fixture over 64-bit node IDs, which a saved neighbors column records. */
@@ -568,7 +564,7 @@ struct levenshtein_nvme_fixture_t {
 
 /** 5000 strings over sharded indexes, as @c test_basic_sharded checks, against the Wagner-Fischer
  *  oracle over every string. */
-std::size_t check_sequence_sharded(u64_t seed) {
+void test_sequence_sharded(u64_t seed) {
     using index_t = sequence::ram_index<us::utilities::uuid128_t, u32_t, flaky_waiter_t, fu::standard_atomic_ref,
                                         forkunion_allocator_t>;
     using value_t = index_t::value_t;
@@ -605,7 +601,7 @@ std::size_t check_sequence_sharded(u64_t seed) {
 }
 
 /** Generated strings sampled from two shards, as @c test_basic_sharded_sample checks. */
-std::size_t check_sequence_sample(u64_t seed) {
+void test_sequence_sample(u64_t seed) {
     using index_t = sequence::ram_index<us::utilities::uuid128_t, u32_t, flaky_waiter_t, fu::standard_atomic_ref,
                                         forkunion_allocator_t>;
     using value_t = index_t::value_t;
@@ -634,7 +630,7 @@ std::size_t check_sequence_sample(u64_t seed) {
 
 /** 600 strings in a sharded index of two shards cut into two sharded indexes of two, as
  *  @c test_basic_sharded_cut checks. */
-std::size_t check_sequence_sharded_cut(u64_t seed) {
+void test_sequence_sharded_cut(u64_t seed) {
     using index_t = sequence::ram_index<us::utilities::uuid128_t, u32_t, flaky_waiter_t, fu::standard_atomic_ref,
                                         forkunion_allocator_t>;
     using value_t = index_t::value_t;
@@ -668,7 +664,7 @@ std::size_t check_sequence_sharded_cut(u64_t seed) {
  *  and a fresh one takes the next batch, which the only shard then names. A cursor opened before a
  *  clear answers @c contended_k after it. Under a sanitizer, a value freed under a search would
  *  trap. */
-std::size_t check_sequence_sharded_clear_race(u64_t seed) {
+void test_sequence_sharded_clear_race(u64_t seed) {
     using index_t = sequence::ram_index<us::utilities::uuid128_t, u32_t, flaky_waiter_t, fu::standard_atomic_ref,
                                         forkunion_allocator_t>;
     using indexes_t = us::basic::ram_indexes<index_t>;
@@ -676,7 +672,6 @@ std::size_t check_sequence_sharded_clear_race(u64_t seed) {
     using distance_t = index_t::distance_t;
     using metric_t = levenshtein_bytes_fixture_t::metric_t;
     constexpr std::size_t entries_k = 400, searchers_k = 4, rounds_k = 4, wanted_k = 8;
-    std::size_t failures = 0;
     std::vector<std::string> texts;
     {
         allocation_ledger_t ledger;
@@ -695,35 +690,34 @@ std::size_t check_sequence_sharded_clear_race(u64_t seed) {
     metrics.reserve(searchers_k + 1);
     for (std::size_t thread = 0; thread != searchers_k + 1; ++thread) {
         contexts.emplace_back(stream_key(seed, "plural_clear_race") + thread, allocator);
-        failures += expect_eq(index_t::reserve_traversal(contexts.back(), basic_connectivity_k, {}),
-                              status_t::success_k);
+        expect_equal(index_t::reserve_traversal(contexts.back(), basic_connectivity_k, {}), status_t::success_k);
         metrics.push_back(levenshtein_bytes_fixture_t::make_metric());
     }
 
     indexes_t indexes {allocator};
-    failures += expect_eq(indexes.emplace(no_memory_domain_k), status_t::success_k);
+    expect_equal(indexes.emplace(no_memory_domain_k), status_t::success_k);
     auto insert_batch = [&] {
         std::vector<value_t> values;
         values.reserve(entries_k);
         for (std::size_t entry = 0; entry != entries_k; ++entry) [[maybe_unused]]
             sz::status_t const assigned = values.emplace_back(allocator).assign(texts[entry]);
         auto [plan, plan_status] = indexes.plan_insert(entries_k);
-        failures += expect_eq(plan_status, status_t::success_k);
+        expect_equal(plan_status, status_t::success_k);
         if (failed(plan_status)) return;
         plan.insert(0, std::span<value_t>(values), std::span<us::utilities::uuid128_t const>(keys), metrics[0],
                     contexts[0], selector);
-        failures += expect_eq(plan.finish(), status_t::success_k);
+        expect_equal(plan.finish(), status_t::success_k);
     };
 
     fu::flat_pool_t pool;
-    if (fu::failed(pool.spawn(searchers_k + 1))) return failures + expect(false);
+    if (fu::failed(pool.spawn(searchers_k + 1))) return void(expect_true(false));
     std::size_t foreign_count = 0;
     fu::standard_atomic_ref<std::size_t> const foreign {foreign_count};
     for (std::size_t round = 0; round != rounds_k; ++round) {
         insert_batch();
-        failures += expect_eq(indexes.size(), entries_k);
+        expect_equal(indexes.size(), entries_k);
         indexes_t::cursor_t cursor {forkunion_allocator_t {no_memory_domain_k}};
-        failures += expect(succeeded(cursor.open(indexes, {})));
+        expect_true(succeeded(cursor.open(indexes, {})));
         bool cleared = false;
         std::size_t searched = 0;
         pool.for_threads([&](std::size_t thread) noexcept {
@@ -755,56 +749,66 @@ std::size_t check_sequence_sharded_clear_race(u64_t seed) {
                         foreign.store_add(std::find(keys.begin(), keys.end(), found_keys[match]) == keys.end());
             }
         });
-        failures += expect_eq(indexes.size(), std::size_t {0});
-        failures += expect_eq(indexes.count(keys[0]), std::size_t {0});
-        failures += expect_eq(indexes.shards_count(), round + 2);
+        expect_equal(indexes.size(), std::size_t {0});
+        expect_equal(indexes.count(keys[0]), std::size_t {0});
+        expect_equal(indexes.shards_count(), round + 2);
         auto const live = indexes.live_shards();
-        failures += expect_eq(live.bound - live.first, std::size_t {1});
+        expect_equal(live.bound - live.first, std::size_t {1});
         std::array<us::utilities::uuid128_t, 4> read_keys;
-        failures += expect_eq(
-            cursor.pull(indexes, std::span<us::utilities::uuid128_t> {read_keys}, nullptr, nullptr).status,
-            status_t::contended_k);
+        expect_equal(cursor.pull(indexes, std::span<us::utilities::uuid128_t> {read_keys}, nullptr, nullptr).status,
+                     status_t::contended_k);
     }
-    failures += expect_eq(foreign_count, std::size_t {0});
+    expect_equal(foreign_count, std::size_t {0});
 
     // The fresh shard takes a batch whole, and a clear of an empty index retires nothing.
     insert_batch();
-    failures += expect_eq(indexes.size(), entries_k);
-    failures += expect_eq(indexes.count(keys[entries_k - 1]), std::size_t {1});
-    failures += expect_eq(indexes.clear(), status_t::success_k);
-    failures += expect_eq(indexes.clear(), status_t::success_k);
-    failures += expect_eq(indexes.shards_count(), rounds_k + 2);
-    return failures;
+    expect_equal(indexes.size(), entries_k);
+    expect_equal(indexes.count(keys[entries_k - 1]), std::size_t {1});
+    expect_equal(indexes.clear(), status_t::success_k);
+    expect_equal(indexes.clear(), status_t::success_k);
+    expect_equal(indexes.shards_count(), rounds_k + 2);
 }
 
-std::size_t check_sequence(settings_t const& settings) {
-    std::size_t failures = 0;
-    failures += test_basic_scenarios<levenshtein_bytes_fixture_t>(settings.seed);
-    failures += test_basic_scenarios<levenshtein_runes_fixture_t>(settings.seed);
-    failures += test_basic_scenarios<overlap_fixture_t>(settings.seed);
-    failures += test_basic_scenarios<needleman_wunsch_fixture_t>(settings.seed);
-    failures += test_basic_safegraphs_roundtrip<levenshtein_bytes_fixture_t>(settings.seed, "uuid", "levenshtein");
-    failures += test_basic_safegraphs_roundtrip<levenshtein_runes_fixture_t>(settings.seed, "uuid", "levenshtein-utf8");
-    failures += test_basic_safegraphs_roundtrip<overlap_fixture_t>(settings.seed, "uuid", "overlap");
-    failures += test_basic_safegraphs_hostile<levenshtein_bytes_fixture_t>(settings.seed, "levenshtein");
-    failures += test_basic_safegraphs_hostile<levenshtein_runes_fixture_t>(settings.seed, "levenshtein-utf8");
-    failures += test_basic_safegraphs_hostile<overlap_fixture_t>(settings.seed, "overlap");
-    failures += check_levenshtein_kit<sz_cap_serial_k, sz_levenshtein_bytes_k>(settings.seed);
-    failures += check_levenshtein_kit<sz_cap_any_k, sz_levenshtein_bytes_k>(settings.seed);
-    failures += check_levenshtein_kit<sz_cap_serial_k, sz_levenshtein_runes_k>(settings.seed);
-    failures += check_levenshtein_kit<sz_cap_any_k, sz_levenshtein_runes_k>(settings.seed);
-    failures += check_overlap_kit<sz_cap_serial_k>(settings.seed);
-    failures += check_overlap_kit<sz_cap_any_k>(settings.seed);
-    failures += check_needleman_wunsch_kit<sz_cap_serial_k>(settings.seed);
-    failures += check_needleman_wunsch_kit<sz_cap_haswell_k>(settings.seed);
-    failures += check_needleman_wunsch_kit<sz_cap_neon_k>(settings.seed);
-    failures += check_needleman_wunsch_kit<sz_cap_any_k>(settings.seed);
-    failures += test_basic_nvme_engines(levenshtein_nvme_fixture_t {settings.seed}, "sequence", settings.seed);
-    failures += check_sequence_sharded(settings.seed);
-    failures += check_sequence_sample(settings.seed);
-    failures += check_sequence_sharded_cut(settings.seed);
-    failures += check_sequence_sharded_clear_race(settings.seed);
-    return report("sequence", failures);
+void run_sequence_cases() {
+    u64_t const seed = test_run.settings.seed;
+    run_test_case("test_basic_scenarios<levenshtein_bytes_fixture_t>",
+                  test_basic_scenarios<levenshtein_bytes_fixture_t>, seed);
+    run_test_case("test_basic_scenarios<levenshtein_runes_fixture_t>",
+                  test_basic_scenarios<levenshtein_runes_fixture_t>, seed);
+    run_test_case("test_basic_scenarios<overlap_fixture_t>", test_basic_scenarios<overlap_fixture_t>, seed);
+    run_test_case("test_basic_scenarios<needleman_wunsch_fixture_t>", test_basic_scenarios<needleman_wunsch_fixture_t>,
+                  seed);
+    run_test_case("test_basic_safegraphs_round_trip<levenshtein_bytes_fixture_t>",
+                  test_basic_safegraphs_round_trip<levenshtein_bytes_fixture_t>, seed, "uuid", "levenshtein");
+    run_test_case("test_basic_safegraphs_round_trip<levenshtein_runes_fixture_t>",
+                  test_basic_safegraphs_round_trip<levenshtein_runes_fixture_t>, seed, "uuid", "levenshtein-utf8");
+    run_test_case("test_basic_safegraphs_round_trip<overlap_fixture_t>",
+                  test_basic_safegraphs_round_trip<overlap_fixture_t>, seed, "uuid", "overlap");
+    run_test_case("test_basic_safegraphs_hostile<levenshtein_bytes_fixture_t>",
+                  test_basic_safegraphs_hostile<levenshtein_bytes_fixture_t>, seed, "levenshtein");
+    run_test_case("test_basic_safegraphs_hostile<levenshtein_runes_fixture_t>",
+                  test_basic_safegraphs_hostile<levenshtein_runes_fixture_t>, seed, "levenshtein-utf8");
+    run_test_case("test_basic_safegraphs_hostile<overlap_fixture_t>", test_basic_safegraphs_hostile<overlap_fixture_t>,
+                  seed, "overlap");
+    run_test_case("test_levenshtein_kit<sz_cap_serial_k, sz_levenshtein_bytes_k>",
+                  test_levenshtein_kit<sz_cap_serial_k, sz_levenshtein_bytes_k>, seed);
+    run_test_case("test_levenshtein_kit<sz_cap_any_k, sz_levenshtein_bytes_k>",
+                  test_levenshtein_kit<sz_cap_any_k, sz_levenshtein_bytes_k>, seed);
+    run_test_case("test_levenshtein_kit<sz_cap_serial_k, sz_levenshtein_runes_k>",
+                  test_levenshtein_kit<sz_cap_serial_k, sz_levenshtein_runes_k>, seed);
+    run_test_case("test_levenshtein_kit<sz_cap_any_k, sz_levenshtein_runes_k>",
+                  test_levenshtein_kit<sz_cap_any_k, sz_levenshtein_runes_k>, seed);
+    run_test_case("test_overlap_kit<sz_cap_serial_k>", test_overlap_kit<sz_cap_serial_k>, seed);
+    run_test_case("test_overlap_kit<sz_cap_any_k>", test_overlap_kit<sz_cap_any_k>, seed);
+    run_test_case("test_needleman_wunsch_kit<sz_cap_serial_k>", test_needleman_wunsch_kit<sz_cap_serial_k>, seed);
+    run_test_case("test_needleman_wunsch_kit<sz_cap_haswell_k>", test_needleman_wunsch_kit<sz_cap_haswell_k>, seed);
+    run_test_case("test_needleman_wunsch_kit<sz_cap_neon_k>", test_needleman_wunsch_kit<sz_cap_neon_k>, seed);
+    run_test_case("test_needleman_wunsch_kit<sz_cap_any_k>", test_needleman_wunsch_kit<sz_cap_any_k>, seed);
+    run_basic_nvme_cases("levenshtein_nvme_fixture_t", levenshtein_nvme_fixture_t {seed}, seed);
+    run_test_case("test_sequence_sharded", test_sequence_sharded, seed);
+    run_test_case("test_sequence_sample", test_sequence_sample, seed);
+    run_test_case("test_sequence_sharded_cut", test_sequence_sharded_cut, seed);
+    run_test_case("test_sequence_sharded_clear_race", test_sequence_sharded_clear_race, seed);
 }
 
 } // namespace unum::usearch::test::sequence

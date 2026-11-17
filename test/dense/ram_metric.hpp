@@ -11,19 +11,16 @@
  *  metric a runtime argument of its epilogue. The test:
  *
  *  1. Walks every stored scalar in shrinking dynamic range and every @c (kernel,scalar,capability)
- *     tuple inside @c check_scalar. The @c dense::quads_supported concept gates each call so
- *     combinations not yet adapted are no-ops at compile time without breaking the build - new kits
- *     and ladders light up the matching cells automatically.
+ *     tuple inside @c test_ram_metric. The @c dense::quads_supported concept gates each call, so
+ *     combinations not yet adapted compile to no-ops and new kits light up their cells.
  *  2. For each supported tuple and three dimensions, computes a baseline distance with NumKong's
- *     monolithic API - @c nk::dot returns the raw inner product, wrapped to `1 - dot` for the dot
+ *     monolithic API - @c nk::dot returns the raw inner product, wrapped to <tt>1 - dot</tt> for the dot
  *     kernel; @c nk::sqeuclidean is compared to USearch's squared euclidean), then calls
  *     @c distance (1-to-1) and @c distances (1-to-4) and compares with a relative tolerance.
  *  3. For tuples with a matrix engine, @c check_tiles packs one tile of queries plus a ragged tail,
  *     streams stored rows against the pack, finalizes the raw dots through the quads kit, and
- *     compares every cell against the @c distance oracle, skipping silently when the machine lacks
- *     the engine at runtime.
- *  4. Each check returns its own failure count, rolling up to the suite's @c main without any
- *     global mutable state.
+ *     compares every cell against @c distance, skipping where the machine lacks the engine.
+ *  4. Each check counts into the run, so a dtype unit's case reports every tuple that strayed.
  *
  *  The input vectors are populated with cyclic values from {0..7} - representable exactly in every
  *  stored scalar (BF16..E2M1, i8/u8, i4/u4) - at four different cyclic rotations so the four
@@ -116,15 +113,13 @@ static f32_t reference_distance(nk::vector_view<scalar_> first_vector,
 /** No-op overload picked when the (kernel, scalar, caps) tuple isn't wired up - lets the caller
  *  enumerate the full capability list without if-constexpr gates inline. */
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
-static int check_quads(std::size_t /*dim*/) noexcept {
-    return 0;
-}
+static void check_quads(std::size_t /*dim*/) noexcept {}
 
 /** Runs one (kernel, scalar, caps, dim) check - returns the number of mismatches across both the
  *  1-to-1 and 1-to-4 paths. Body instantiates only for adapted tuples. */
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
     requires quads_supported<kernel_, scalar_, caps_>
-static int check_quads(std::size_t dim) noexcept {
+static void check_quads(std::size_t dim) noexcept {
     // With a single capability bit requested, exactly one cascade row can match, so the
     // winner is either that tier or the serial fallback. Anything else means a row names
     // a kit from another backend - numerically indistinguishable, hence the static check.
@@ -188,17 +183,15 @@ static int check_quads(std::size_t dim) noexcept {
     quad_errors.add(distances_array[1], second_reference);
     quad_errors.add(distances_array[2], third_reference);
     quad_errors.add(distances_array[3], fourth_reference);
-    std::size_t const failures = expect_errors("one-to-one distances", dense_comparison_family<kernel_>(),
-                                               comparison_verdict_t::assert_k, single_errors, 0);
-    return failures + expect_errors("one-to-four distances", dense_comparison_family<kernel_>(),
-                                    comparison_verdict_t::assert_k, quad_errors, 0);
+    expect_errors("one-to-one distances", dense_comparison_family<kernel_>(), comparison_verdict_t::assert_k,
+                  single_errors, 0);
+    expect_errors("one-to-four distances", dense_comparison_family<kernel_>(), comparison_verdict_t::assert_k,
+                  quad_errors, 0);
 }
 
 /** No-op sibling picked when no tile engine exists for the tuple. */
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
-static int check_tiles() noexcept {
-    return 0;
-}
+static void check_tiles() noexcept {}
 
 /** A tiles kit against the 4-way path as the oracle: one tile of queries plus a ragged tail packs
  *  once, stored rows stream against the pack where they lie, and every raw dot, finalized by the
@@ -206,10 +199,10 @@ static int check_tiles() noexcept {
  *  machine lacks the engine at runtime. */
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
     requires tiles_supported<kernel_, scalar_, caps_>
-static int check_tiles() noexcept {
+static void check_tiles() noexcept {
     nk_capability_t available = 0;
-    if (nk_capabilities_enabled_cpu(&available) != nk_success_k || (available & caps_) != caps_) return 0;
-    if (nk_configure_thread_cpu(available) != nk_success_k) return 0;
+    if (nk_capabilities_enabled_cpu(&available) != nk_success_k || (available & caps_) != caps_) return;
+    if (nk_configure_thread_cpu(available) != nk_success_k) return;
 
     using tiles_kit_t = typename tiles_ladder<scalar_, caps_>::kit_t;
     using quads_kit_t = typename quads_ladder<scalar_, caps_>::kit_t;
@@ -226,14 +219,14 @@ static int check_tiles() noexcept {
         query_sumsqs[query] = norms<quads_kit_t>(queries.row(query).as_vector()).sumsq;
 
     nk_size_t packed_bytes = 0;
-    int failures = expect(tiles_kit_t::pack_size(queries_k, dimensions_k, &packed_bytes) == nk_success_k);
+    expect_true(tiles_kit_t::pack_size(queries_k, dimensions_k, &packed_bytes) == nk_success_k);
     auto packed = nk::vector<nk::u8_t>::zeros(packed_bytes).value;
-    failures += expect(tiles_kit_t::pack(queries.raw_values_data(), queries_k, dimensions_k, stride, packed.data(), 0,
-                                         queries_k, nullptr) == nk_success_k);
+    expect_true(tiles_kit_t::pack(queries.raw_values_data(), queries_k, dimensions_k, stride, packed.data(), 0,
+                                  queries_k, nullptr) == nk_success_k);
     auto dots = nk::matrix<raw_dot_t>::zeros({rows_k, queries_k}).value;
-    failures += expect(tiles_kit_t::dots_packed(rows.raw_values_data(), packed.data(), dots.data(), rows_k, queries_k,
-                                                dimensions_k, stride, queries_k * sizeof(raw_dot_t), nullptr, 0,
-                                                nullptr) == nk_success_k);
+    expect_true(tiles_kit_t::dots_packed(rows.raw_values_data(), packed.data(), dots.data(), rows_k, queries_k,
+                                         dimensions_k, stride, queries_k * sizeof(raw_dot_t), nullptr, 0,
+                                         nullptr) == nk_success_k);
 
     error_stats_t tile_errors;
     for (std::size_t row = 0; row != rows_k; ++row) {
@@ -254,60 +247,52 @@ static int check_tiles() noexcept {
             }
         }
     }
-    return failures + expect_errors("tiled distances", dense_comparison_family<kernel_>(),
-                                    comparison_verdict_t::assert_k, tile_errors, 0);
+    expect_errors("tiled distances", dense_comparison_family<kernel_>(), comparison_verdict_t::assert_k, tile_errors,
+                  0);
 }
 
 template <nk_kernel_kind_t kernel_, typename scalar_>
-static int check_kernel() noexcept {
-    int failures = 0;
+static void check_kernel() noexcept {
     for (std::size_t const requested : dimensions_to_test) {
         // Packed scalars hold whole bytes of dimensions, so a ragged request rounds up a byte.
         std::size_t const dim = round_up_to_multiple<std::size_t>(requested, nk::dimensions_per_value<scalar_>());
         // Every rung a CPU class ships, newest silicon first: x86, then Arm, each by generation,
         // then WebAssembly, then the serial floor.
-        failures += check_quads<kernel_, scalar_, nk_cap_diamond_k>(dim);
-        failures += check_quads<kernel_, scalar_, nk_cap_sierra_k>(dim);
-        failures += check_quads<kernel_, scalar_, nk_cap_genoa_k>(dim);
-        failures += check_quads<kernel_, scalar_, nk_cap_alder_k>(dim);
-        failures += check_quads<kernel_, scalar_, nk_cap_icelake_k>(dim);
-        failures += check_quads<kernel_, scalar_, nk_cap_skylake_k>(dim);
-        failures += check_quads<kernel_, scalar_, nk_cap_haswell_k>(dim);
-        failures += check_quads<kernel_, scalar_, nk_cap_neonfp8_k>(dim);
-        failures += check_quads<kernel_, scalar_, nk_cap_neonbfdot_k>(dim);
-        failures += check_quads<kernel_, scalar_, nk_cap_neonfhm_k>(dim);
-        failures += check_quads<kernel_, scalar_, nk_cap_neonsdot_k>(dim);
-        failures += check_quads<kernel_, scalar_, nk_cap_neon_k>(dim);
-        failures += check_quads<kernel_, scalar_, nk_cap_v128relaxed_k>(dim);
-        failures += check_quads<kernel_, scalar_, nk_cap_serial_k>(dim);
+        check_quads<kernel_, scalar_, nk_cap_diamond_k>(dim);
+        check_quads<kernel_, scalar_, nk_cap_sierra_k>(dim);
+        check_quads<kernel_, scalar_, nk_cap_genoa_k>(dim);
+        check_quads<kernel_, scalar_, nk_cap_alder_k>(dim);
+        check_quads<kernel_, scalar_, nk_cap_icelake_k>(dim);
+        check_quads<kernel_, scalar_, nk_cap_skylake_k>(dim);
+        check_quads<kernel_, scalar_, nk_cap_haswell_k>(dim);
+        check_quads<kernel_, scalar_, nk_cap_neonfp8_k>(dim);
+        check_quads<kernel_, scalar_, nk_cap_neonbfdot_k>(dim);
+        check_quads<kernel_, scalar_, nk_cap_neonfhm_k>(dim);
+        check_quads<kernel_, scalar_, nk_cap_neonsdot_k>(dim);
+        check_quads<kernel_, scalar_, nk_cap_neon_k>(dim);
+        check_quads<kernel_, scalar_, nk_cap_v128relaxed_k>(dim);
+        check_quads<kernel_, scalar_, nk_cap_serial_k>(dim);
     }
-    failures += check_tiles<kernel_, scalar_, nk_cap_graniteamx_k>();
-    failures += check_tiles<kernel_, scalar_, nk_cap_sapphireamx_k>();
-    failures += check_tiles<kernel_, scalar_, nk_cap_smebi32_k>();
-    failures += check_tiles<kernel_, scalar_, nk_cap_sme_k>();
-    return failures;
+    check_tiles<kernel_, scalar_, nk_cap_graniteamx_k>();
+    check_tiles<kernel_, scalar_, nk_cap_sapphireamx_k>();
+    check_tiles<kernel_, scalar_, nk_cap_smebi32_k>();
+    check_tiles<kernel_, scalar_, nk_cap_sme_k>();
 }
 
+/** Every kernel of the stored @p scalar_ at every rung, against NumKong's reference. */
 template <typename scalar_>
-static int check_scalar() noexcept {
-    return check_kernel<nk_kernel_dot_k, scalar_>() +     //
-           check_kernel<nk_kernel_angular_k, scalar_>() + //
-           check_kernel<nk_kernel_euclidean_k, scalar_>();
+static void test_ram_metric() noexcept {
+    check_kernel<nk_kernel_dot_k, scalar_>();
+    check_kernel<nk_kernel_angular_k, scalar_>();
+    check_kernel<nk_kernel_euclidean_k, scalar_>();
 }
 
 /** Binary inputs run dot/hamming/jaccard instead of dot/angular/euclidean. */
 template <>
-[[maybe_unused]] int check_scalar<nk::u1x8_t>() noexcept {
-    return check_kernel<nk_kernel_dot_k, nk::u1x8_t>() +     //
-           check_kernel<nk_kernel_hamming_k, nk::u1x8_t>() + //
-           check_kernel<nk_kernel_jaccard_k, nk::u1x8_t>();
-}
-
-/** One stored scalar the suite walks, and the name a filter selects it by. */
-template <typename scalar_>
-static std::size_t check_named_scalar(settings_t const& settings, char const* name) {
-    if (!settings.filter.selects(name)) return 0;
-    return report(name, static_cast<std::size_t>(check_scalar<scalar_>()));
+[[maybe_unused]] void test_ram_metric<nk::u1x8_t>() noexcept {
+    check_kernel<nk_kernel_dot_k, nk::u1x8_t>();
+    check_kernel<nk_kernel_hamming_k, nk::u1x8_t>();
+    check_kernel<nk_kernel_jaccard_k, nk::u1x8_t>();
 }
 
 } // namespace unum::usearch::test::dense

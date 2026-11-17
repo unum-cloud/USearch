@@ -13,6 +13,8 @@
  *  coordinates fails the recall bar loudly. The spectrum is derived state: cached per
  *  value, never serialized, and recomputed by the codec on load.
  */
+#undef NDEBUG // ! A test's oracle must stay live in every build
+
 #include <cmath> // `std::sqrt`
 
 #include <array>  // `std::array` - the handmade tetrahedra
@@ -173,7 +175,8 @@ struct meshes_fixture {
     static spectra_metric_t make_metric() { return {}; }
     static mesh_codec_t make_codec() { return {}; }
     static us::utilities::uuid128_t make_key(std::size_t ordinal) {
-        return std::bit_cast<us::utilities::uuid128_t>(std::array<u64_t, 2> {mix_bits(ordinal ^ 0x3D3D3Dull), ordinal});
+        return std::bit_cast<us::utilities::uuid128_t>(
+            std::array<u64_t, 2> {split_mix_bits(ordinal ^ 0x3D3D3Dull), ordinal});
     }
     static f64_t oracle(mesh_t const& query, mesh_t const& stored) noexcept {
         return scalar_spectra_distance(query.spectrum, stored.spectrum);
@@ -195,7 +198,7 @@ struct meshes_fixture {
         constexpr std::size_t prototypes_k = 8;
         constexpr std::size_t points_per_mesh_k = 24;
         constexpr std::size_t jittered_points_k = 4;
-        splitmix64_t random_generator {seed};
+        split_mix_generator_t random_generator {seed};
         uniform_below<u32_t> coordinate_distribution {2001};
         uniform_below<u32_t> prototype_distribution {prototypes_k};
         uniform_below<u32_t> point_distribution {points_per_mesh_k};
@@ -245,7 +248,7 @@ static_assert(value_codec<mesh_codec_t, mesh_t>);
 
 /** The invariance case: a rigidly moved cloud must sit at spectra distance zero
  *  from its original - the property that makes the metric a GW lower bound. */
-static std::size_t check_meshes_rigid_invariance() {
+static void test_meshes_rigid_invariance() {
     mesh_t const original = make_tetrahedron(2);
     mesh_t moved = original;
     constexpr f32_t half_k = 0.5f;
@@ -258,14 +261,14 @@ static std::size_t check_meshes_rigid_invariance() {
     error_stats_t oracle_errors;
     oracle_errors.add(meshes_fixture_t::oracle(original, moved), 0.0);
     oracle_errors.add(meshes_fixture_t::oracle(original, make_tetrahedron(3)), 1.0);
-    return expect_errors("rigid invariance", comparison_family_t::approximate_k, comparison_verdict_t::assert_k,
-                         oracle_errors, 0);
+    expect_errors("rigid invariance", comparison_family_t::approximate_k, comparison_verdict_t::assert_k, oracle_errors,
+                  0);
 }
 
 /** Kernel-vs-scalar parity: the NumKong-built metric distance and the scalar
  *  oracle must agree over sampled cloud pairs - each also runs implicitly through
  *  every scenario's per-result audit. */
-static std::size_t check_meshes_kernel_parity(u64_t seed) {
+static void test_meshes_kernel_parity(u64_t seed) {
     allocation_ledger_t ledger;
     auto values = meshes_fixture_t::make_values(8, stream_key(seed, "kernel_parity"), counting_allocator_t {ledger});
     error_stats_t kernel_errors;
@@ -274,19 +277,22 @@ static std::size_t check_meshes_kernel_parity(u64_t seed) {
         auto const& second = values[pair + 1].spectrum;
         kernel_errors.add(spectra_distance(first, second), scalar_spectra_distance(first, second));
     }
-    return expect_errors("spectra kernel parity", comparison_family_t::approximate_k, comparison_verdict_t::assert_k,
-                         kernel_errors, 0);
+    expect_errors("spectra kernel parity", comparison_family_t::approximate_k, comparison_verdict_t::assert_k,
+                  kernel_errors, 0);
 }
 
-std::size_t test::basic::check_meshes(settings_t const& settings) {
-    std::size_t failures = 0;
-    failures += test_basic_scenarios<meshes_fixture_t>(settings.seed);
-    failures += test_basic_scenarios<meshes_fixture<flaky_waiter_t>>(settings.seed);
-    failures += check_meshes_rigid_invariance();
-    failures += check_meshes_kernel_parity(settings.seed);
+void test::basic::run_meshes_cases() {
+    u64_t const seed = test_run.settings.seed;
+    run_test_case("test_basic_scenarios<meshes_fixture_t>", test_basic_scenarios<meshes_fixture_t>, seed);
+    run_test_case("test_basic_scenarios<meshes_fixture<flaky_waiter_t>>",
+                  test_basic_scenarios<meshes_fixture<flaky_waiter_t>>, seed);
+    run_test_case("test_meshes_rigid_invariance", test_meshes_rigid_invariance);
+    run_test_case("test_meshes_kernel_parity", test_meshes_kernel_parity, seed);
     // The uuid key column.
-    failures += test_basic_safegraphs_roundtrip<meshes_fixture_t>(settings.seed, "uuid", "rmsd");
-    failures += test_basic_safegraphs_hostile<meshes_fixture_t>(settings.seed, "rmsd");
-    failures += test_basic_safegraphs_distributed<meshes_fixture_t>(settings.seed, "rmsd");
-    return report("meshes", failures);
+    run_test_case("test_basic_safegraphs_round_trip<meshes_fixture_t>",
+                  test_basic_safegraphs_round_trip<meshes_fixture_t>, seed, "uuid", "rmsd");
+    run_test_case("test_basic_safegraphs_hostile<meshes_fixture_t>", test_basic_safegraphs_hostile<meshes_fixture_t>,
+                  seed, "rmsd");
+    run_test_case("test_basic_safegraphs_distributed<meshes_fixture_t>",
+                  test_basic_safegraphs_distributed<meshes_fixture_t>, seed, "rmsd");
 }

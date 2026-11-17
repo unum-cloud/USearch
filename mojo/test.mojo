@@ -1,7 +1,7 @@
 """The Mojo binding's tests, in the shape `c/test.c` already uses.
 
-Mojo 1.1 has no `mojo test` subcommand and no test discovery, so every check below is registered in
-`main` and one that is not silently never runs. The pure-logic group needs no engine loaded; the
+Mojo has no `mojo test` subcommand and no test discovery, so every check below is registered in
+`main` and one that is not silently never runs. The pure-logic group needs no library loaded; the
 rest exercise the C ABI directly and are skipped when nothing is on the loader path.
 """
 
@@ -9,6 +9,8 @@ from std.atomic import Atomic
 from std.ffi import c_size_t
 from std.math import exp, sqrt
 from std.memory import stack_allocation
+from std.os import getenv, remove, rmdir
+from std.tempfile import mkdtemp
 from std.testing import TestSuite, assert_almost_equal, assert_equal, assert_false, assert_true
 from std.time import perf_counter_ns
 
@@ -82,6 +84,38 @@ from usearch import (
     shapes_reshard,
 )
 from usearch.types import Address, NULL_ADDRESS
+
+
+# region Shared Testing
+def _skipped(reason: String):
+    """Announces a skipped test, so a run shows what it left out rather than passing in silence."""
+    print("skipped:", reason)
+
+
+def _split_mix_bits(value: UInt64) -> UInt64:
+    """SplitMix64's finalizer, a bijection that spreads every input bit over all 64 output bits."""
+    var mixed = (value ^ (value >> 30)) * 0xBF58476D1CE4E5B9
+    mixed = (mixed ^ (mixed >> 27)) * 0x94D049BB133111EB
+    return mixed ^ (mixed >> 31)
+
+
+def _stream_key(seed: UInt64, name: String, index: UInt64 = 0) -> UInt64:
+    """The `index`-th stream of the family `name` under `seed`, identical in C, C++, Rust and Python."""
+    var hashed: UInt64 = 0xCBF29CE484222325
+    for byte in name.as_bytes():
+        hashed = (hashed ^ UInt64(byte)) * 0x100000001B3
+    return _split_mix_bits(_split_mix_bits(seed ^ hashed) + index)
+# endregion Shared Testing
+
+
+comptime library_missing_k = "the shared library is not on the loader path"
+
+
+def _run_seed() raises -> UInt64:
+    """`USEARCH_SEED`, 42 when unset or empty, so a draw reproduces under the seed every suite reports."""
+    var text = getenv("USEARCH_SEED")
+    return 42 if text == "" else UInt64(atol(text))
+
 
 # region Pure Logic
 
@@ -191,8 +225,8 @@ def test_telemetry_starts_at_an_untaken_walk() raises:
 # region Engine
 
 
-def _engine_is_present() raises -> Bool:
-    """Whether anything answers on the loader path; a library missing a symbol fails rather than skips."""
+def _library_is_present() raises -> Bool:
+    """Whether the shared library is on the loader path; any other failure to load it raises rather than skips."""
     try:
         _ = Library()
         return True
@@ -221,8 +255,8 @@ def _basis(library: Library) raises -> DenseIndex:
 
 def test_engine_round_trips_when_present() raises:
     """Builds a three-vector index, searches it, and reads one row back out."""
-    if not _engine_is_present():
-        print("skipped: libusearch_shared is not on the loader path")
+    if not _library_is_present():
+        _skipped(library_missing_k)
         return
     var library = Library()
     var executor = Executor.for_ram(library, threads=2)
@@ -264,8 +298,8 @@ def test_engine_round_trips_when_present() raises:
 
 def test_width_mismatch_is_refused_by_the_engine() raises:
     """The binding passes the caller's width through, and the engine refuses one that disagrees."""
-    if not _engine_is_present():
-        print("skipped: libusearch_shared is not on the loader path")
+    if not _library_is_present():
+        _skipped(library_missing_k)
         return
     var library = Library()
     var index = _basis(library)
@@ -286,10 +320,10 @@ def test_width_mismatch_is_refused_by_the_engine() raises:
     )
 
 
-def test_names_come_from_the_engine_tables() raises:
+def test_names_round_trip_through_the_library_and_refuse_strangers() raises:
     """Every enum spells and parses through the C name tables, which own the vocabulary."""
-    if not _engine_is_present():
-        print("skipped: libusearch_shared is not on the loader path")
+    if not _library_is_present():
+        _skipped(library_missing_k)
         return
     var library = Library()
     assert_equal(library.status_name(Status.READ_ONLY), "read-only", "a status")
@@ -315,8 +349,8 @@ def test_names_come_from_the_engine_tables() raises:
 
 def test_get_exports_every_entry_under_a_key() raises:
     """Get sizes its own output, so every entry sharing a key comes back in one call."""
-    if not _engine_is_present():
-        print("skipped: libusearch_shared is not on the loader path")
+    if not _library_is_present():
+        _skipped(library_missing_k)
         return
     var library = Library()
     var index = DenseIndex.init_ram(library, DenseOptions(2, values_per_key=3))
@@ -336,8 +370,8 @@ def test_get_exports_every_entry_under_a_key() raises:
 
 def test_arena_is_reused_and_results_outlive_the_call() raises:
     """A result survives calls on other arenas, and the next call on its own arena rewinds and refills it."""
-    if not _engine_is_present():
-        print("skipped: libusearch_shared is not on the loader path")
+    if not _library_is_present():
+        _skipped(library_missing_k)
         return
     var library = Library()
     var index = _basis(library)
@@ -357,8 +391,8 @@ def test_arena_is_reused_and_results_outlive_the_call() raises:
 
 def test_arena_survives_a_failed_call() raises:
     """An arena stays valid through a refusal, and the next call rewinds and refills it."""
-    if not _engine_is_present():
-        print("skipped: libusearch_shared is not on the loader path")
+    if not _library_is_present():
+        _skipped(library_missing_k)
         return
     var library = Library()
     var index = _basis(library)
@@ -381,8 +415,8 @@ def test_arena_survives_a_failed_call() raises:
 
 def test_caller_thread_executor_drives_every_verb() raises:
     """The executor that owns nothing runs a verb inline instead of being refused."""
-    if not _engine_is_present():
-        print("skipped: libusearch_shared is not on the loader path")
+    if not _library_is_present():
+        _skipped(library_missing_k)
         return
     var library = Library()
     var inline = Executor(library)
@@ -403,8 +437,8 @@ def test_caller_thread_executor_drives_every_verb() raises:
 
 def test_buffers_round_trip_through_the_arena() raises:
     """A monolith read in place from the arena loads back with the geometry and entries it froze."""
-    if not _engine_is_present():
-        print("skipped: libusearch_shared is not on the loader path")
+    if not _library_is_present():
+        _skipped(library_missing_k)
         return
     var library = Library()
     var executor = Executor.for_ram(library, threads=2)
@@ -428,8 +462,8 @@ def test_buffers_round_trip_through_the_arena() raises:
 
 def test_search_stream_pulls_in_distance_order() raises:
     """Each pull resumes the walk where the last one stopped, until the stream drains."""
-    if not _engine_is_present():
-        print("skipped: libusearch_shared is not on the loader path")
+    if not _library_is_present():
+        _skipped(library_missing_k)
         return
     var library = Library()
     var executor = Executor.for_ram(library, threads=2)
@@ -444,6 +478,7 @@ def test_search_stream_pulls_in_distance_order() raises:
         _ = index.on(executor).search_stream(RowsView.of(query, 2))
     except error:
         assert_true(error.status == Status.UNSUPPORTED, "a residency that streams no matches yet refuses the stream")
+        _skipped("search streaming is refused on this machine")
         return
     var stream = index.on(executor).search_stream(RowsView.of(query, 2))
     var arena = Arena(executor)
@@ -454,8 +489,8 @@ def test_search_stream_pulls_in_distance_order() raises:
 
 def test_cursor_walks_every_row_once() raises:
     """A cursor pulls keys and their links in batches the caller sizes, until the walk is exhausted."""
-    if not _engine_is_present():
-        print("skipped: libusearch_shared is not on the loader path")
+    if not _library_is_present():
+        _skipped(library_missing_k)
         return
     var library = Library()
     var executor = Executor.for_ram(library, threads=2)
@@ -479,8 +514,8 @@ def test_cursor_walks_every_row_once() raises:
 
 def test_health_audits_every_entry() raises:
     """A small graph is reached whole from its root."""
-    if not _engine_is_present():
-        print("skipped: libusearch_shared is not on the loader path")
+    if not _library_is_present():
+        _skipped(library_missing_k)
         return
     var library = Library()
     var index = _basis(library)
@@ -491,8 +526,8 @@ def test_health_audits_every_entry() raises:
 
 def test_refine_plans_stay_live_until_finished() raises:
     """A refine lent a plan opens it and reports where it stopped, and finishing it reports the whole plan."""
-    if not _engine_is_present():
-        print("skipped: libusearch_shared is not on the loader path")
+    if not _library_is_present():
+        _skipped(library_missing_k)
         return
     var library = Library()
     var executor = Executor.for_ram(library, threads=2)
@@ -510,10 +545,9 @@ def test_refine_plans_stay_live_until_finished() raises:
 
 
 def test_reshard_gathers_its_sources() raises:
-    """A gather through a plan moves every source's entries into the target among them, leaving the other
-    sources empty, and its deferred finish reports the whole plan."""
-    if not _engine_is_present():
-        print("skipped: libusearch_shared is not on the loader path")
+    """A planned gather empties every other source into the target, and its deferred finish reports the whole plan."""
+    if not _library_is_present():
+        _skipped(library_missing_k)
         return
     var library = Library()
     var executor = Executor.for_ram(library, threads=2)
@@ -539,8 +573,8 @@ def test_reshard_gathers_its_sources() raises:
 
 def test_reshard_cuts_and_sample_draws() raises:
     """A cut empties the source into its targets, and a sample draws held keys, each placed in 3D."""
-    if not _engine_is_present():
-        print("skipped: libusearch_shared is not on the loader path")
+    if not _library_is_present():
+        _skipped(library_missing_k)
         return
     var library = Library()
     var index = _basis(library)
@@ -548,7 +582,11 @@ def test_reshard_cuts_and_sample_draws() raises:
     var shown = List[Key]()
     var places = List[Float32]()
     var focus = List[Key]()
-    var draws = index.sample(2, arena, DenseSampleConfig(shown=shown, shown_coordinates=places, focus=focus, seed=42))
+    var draws = index.sample(
+        2,
+        arena,
+        DenseSampleConfig(shown=shown, shown_coordinates=places, focus=focus, seed=_stream_key(_run_seed(), "sample")),
+    )
     assert_true(len(draws) <= 2, "no more draws than wanted")
     for key in draws.keys():
         assert_true(key == Key(integer=0) or key == Key(integer=1), "every draw is a held key")
@@ -561,25 +599,35 @@ def test_reshard_cuts_and_sample_draws() raises:
         var target = DenseIndex.init_ram(library, DenseOptions(2, DenseMetric.INNER, values_per_key=2))
         target.reserve(2)
         parts.append(target^)
-    _ = dense_reshard(Executor(library), Span(parts)[0:1], Span(parts)[1:3], DenseReshardConfig(seed=7))
+    _ = dense_reshard(
+        Executor(library),
+        Span(parts)[0:1],
+        Span(parts)[1:3],
+        DenseReshardConfig(seed=_stream_key(_run_seed(), "reshard")),
+    )
     assert_equal(Int(parts[0].describe().size), 0, "the source is left empty")
     assert_equal(Int(parts[1].describe().size + parts[2].describe().size), 2, "and its entries live in the targets")
 
 
 def test_mutating_a_view_is_refused_as_read_only() raises:
     """A viewed checkpoint refuses every mutating verb under its own status."""
-    if not _engine_is_present():
-        print("skipped: libusearch_shared is not on the loader path")
+    if not _library_is_present():
+        _skipped(library_missing_k)
         return
     var library = Library()
     var index = _basis(library)
-    index.save("/tmp/usearch-mojo-view.safegraphs")
+    var directory = mkdtemp(prefix="usearch-mojo-")
+    var path = directory + "/view.safegraphs"
+    index.save(path)
     try:
-        _ = DenseIndex.view_ram(library, "/tmp/usearch-mojo-view.safegraphs")
+        _ = DenseIndex.view_ram(library, path)
     except error:
         assert_true(error.status == Status.UNSUPPORTED, "RAM serves no mapping in place yet")
+        remove(path)
+        rmdir(directory)
+        _skipped("mapping a checkpoint in place is refused on this machine")
         return
-    var view = DenseIndex.view_ram(library, "/tmp/usearch-mojo-view.safegraphs")
+    var view = DenseIndex.view_ram(library, path)
     assert_equal(Int(view.describe().size), 2, "the view serves what was saved")
     var status = Status.SUCCESS
     try:
@@ -587,33 +635,39 @@ def test_mutating_a_view_is_refused_as_read_only() raises:
     except error:
         status = error.status
     assert_true(status == Status.READ_ONLY, "clearing a view is refused as read-only")
+    remove(path)
+    rmdir(directory)
 
 
 def test_nvme_views_resolve_keys_through_their_key_table() raises:
     """An NVMe view counts keys only through the key table it was opened with."""
-    if not _engine_is_present():
-        print("skipped: libusearch_shared is not on the loader path")
+    if not _library_is_present():
+        _skipped(library_missing_k)
         return
     var library = Library()
     var index = _basis(library)
-    index.save("/tmp/usearch-mojo-nvme.safegraphs")
+    var directory = mkdtemp(prefix="usearch-mojo-")
+    var path = directory + "/nvme.safegraphs"
+    index.save(path)
     var drives = Executor.for_nvme(library, threads=1)
     var domains = List[Int32]()
-    var keyed = DenseIndex.view_nvme(drives, "/tmp/usearch-mojo-nvme.safegraphs", key_table=RamOptions.on(domains))
+    var keyed = DenseIndex.view_nvme(drives, path, key_table=RamOptions.on(domains))
     assert_equal(keyed.on(drives).count(Key(integer=1)), 1, "a keyed view counts a saved key")
-    var keyless = DenseIndex.view_nvme(drives, "/tmp/usearch-mojo-nvme.safegraphs")
+    var keyless = DenseIndex.view_nvme(drives, path)
     var status = Status.SUCCESS
     try:
         _ = keyless.on(drives).count(Key(integer=1))
     except error:
         status = error.status
     assert_true(status == Status.UNSUPPORTED, "a keyless view refuses to count")
+    remove(path)
+    rmdir(directory)
 
 
-def test_reshard_keeps_every_entry_and_load_nvme_wants_a_manifest() raises:
+def test_reshards_in_place_and_loads_only_manifests() raises:
     """A recut keeps every entry, and a lone monolith has no manifest a loaded handle could replace."""
-    if not _engine_is_present():
-        print("skipped: libusearch_shared is not on the loader path")
+    if not _library_is_present():
+        _skipped(library_missing_k)
         return
     var library = Library()
     var parts = List[DenseIndex]()
@@ -622,20 +676,24 @@ def test_reshard_keeps_every_entry_and_load_nvme_wants_a_manifest() raises:
     placement.shard_capacity = c_size_t(8)
     _ = dense_reshard(Executor(library), parts, parts, DenseReshardConfig(ram=placement))
     assert_equal(Int(parts[0].describe().size), 2, "every entry stays")
-    parts[0].save("/tmp/usearch-mojo-monolith.safegraphs")
+    var directory = mkdtemp(prefix="usearch-mojo-")
+    var path = directory + "/monolith.safegraphs"
+    parts[0].save(path)
     var drives = Executor.for_nvme(library, threads=1)
     var status = Status.SUCCESS
     try:
-        _ = DenseIndex.load_nvme(drives, "/tmp/usearch-mojo-monolith.safegraphs")
+        _ = DenseIndex.load_nvme(drives, path)
     except error:
         status = error.status
     assert_true(status == Status.UNSUPPORTED, "a lone monolith is refused")
+    remove(path)
+    rmdir(directory)
 
 
 def test_scans_find_every_query_itself() raises:
     """A scan scores every entry rather than the ones a walk reaches, so every query finds itself first."""
-    if not _engine_is_present():
-        print("skipped: libusearch_shared is not on the loader path")
+    if not _library_is_present():
+        _skipped(library_missing_k)
         return
     var library = Library()
     var index = DenseIndex.init_ram(library, DenseOptions(2))
@@ -650,7 +708,7 @@ def test_scans_find_every_query_itself() raises:
         assert_true(matches.query_keys(query)[0] == keys[query], "each query finds itself first")
 
 
-def _cancel_at_once(completed: Int, total: Int, mut reports: Int) -> Continuation:
+def _stop_at_first_report(completed: Int, total: Int, mut reports: Int) -> Continuation:
     """Counts its reports and stops the call at the first one."""
     reports += 1
     return Continuation.CANCEL
@@ -658,8 +716,8 @@ def _cancel_at_once(completed: Int, total: Int, mut reports: Int) -> Continuatio
 
 def test_progress_cancels_a_search() raises:
     """A handler answering `CANCEL` at its first report stops the search, which raises `CANCELLED`."""
-    if not _engine_is_present():
-        print("skipped: libusearch_shared is not on the loader path")
+    if not _library_is_present():
+        _skipped(library_missing_k)
         return
     var library = Library()
     var index = _basis(library)
@@ -676,7 +734,7 @@ def test_progress_cancels_a_search() raises:
             RowsView.of(queries, 2),
             1,
             arena,
-            DenseSearchConfig(progress=ProgressArguments.of[_cancel_at_once](reports)),
+            DenseSearchConfig(progress=ProgressArguments.of[_stop_at_first_report](reports)),
         )
     except error:
         status = error.status
@@ -693,8 +751,8 @@ def _admit_parity(keys: Span[Key, ImmUntrackedOrigin], admissions: Span[Admissio
 
 def test_predicate_filters_keys() raises:
     """A Mojo predicate admitting odd keys leaves only those among every query's matches."""
-    if not _engine_is_present():
-        print("skipped: libusearch_shared is not on the loader path")
+    if not _library_is_present():
+        _skipped(library_missing_k)
         return
     var library = Library()
     var index = DenseIndex.init_ram(library, DenseOptions(2))
@@ -725,8 +783,8 @@ def test_predicate_filters_keys() raises:
 
 def test_deferred_calls_wait_until_final() raises:
     """A deferred call reads `DEFERRED` until final, and its wait answers repeatedly."""
-    if not _engine_is_present():
-        print("skipped: libusearch_shared is not on the loader path")
+    if not _library_is_present():
+        _skipped(library_missing_k)
         return
     var library = Library()
     var executor = Executor.for_ram(library, threads=2)
@@ -745,8 +803,8 @@ def test_deferred_calls_wait_until_final() raises:
 
 def test_deferred_failures_repeat() raises:
     """A deferred call the engine refuses raises the same failure on every wait."""
-    if not _engine_is_present():
-        print("skipped: libusearch_shared is not on the loader path")
+    if not _library_is_present():
+        _skipped(library_missing_k)
         return
     var library = Library()
     var executor = Executor.for_ram(library, threads=2)
@@ -766,8 +824,8 @@ def test_deferred_failures_repeat() raises:
 
 def test_deferred_refusals_finish_at_submission() raises:
     """A failure the binding catches before crossing is final at once, with no drain."""
-    if not _engine_is_present():
-        print("skipped: libusearch_shared is not on the loader path")
+    if not _library_is_present():
+        _skipped(library_missing_k)
         return
     var library = Library()
     var executor = Executor.for_ram(library, threads=2)
@@ -810,10 +868,9 @@ def _hold_until_released(completed: Int, total: Int, mut gate: _Gate) -> Continu
 
 
 def test_deferred_results_borrow_the_callers_arena() raises:
-    """A deferred search holds the caller's arena until final, so a call meeting it is refused and the
-    matches stay readable, and a deferred insertion publishes."""
-    if not _engine_is_present():
-        print("skipped: libusearch_shared is not on the loader path")
+    """A deferred search holds the caller's arena until final, so another call on it is refused meanwhile."""
+    if not _library_is_present():
+        _skipped(library_missing_k)
         return
     var library = Library()
     var executor = Executor.for_ram(library, threads=2)
@@ -855,10 +912,10 @@ def test_deferred_results_borrow_the_callers_arena() raises:
 # region Linear Algebra
 
 
-def test_multiply_reports_every_scored_pair() raises:
+def test_multiplication_reports_every_scored_pair() raises:
     """The sparse product keeps the pairs `wanted` allows, and still counts every pair it scored."""
-    if not _engine_is_present():
-        print("skipped: libusearch_shared is not on the loader path")
+    if not _library_is_present():
+        _skipped(library_missing_k)
         return
     var library = Library()
     var executor = Executor.for_ram(library, threads=2)
@@ -876,10 +933,10 @@ def test_multiply_reports_every_scored_pair() raises:
     assert_equal(cut.required, 2, "though both were counted")
 
 
-def test_maxsim_scores_over_documents_rather_than_rows() raises:
+def test_late_interaction_scores_over_documents() raises:
     """Two tokens of one query score against the indexed documents, not against each other."""
-    if not _engine_is_present():
-        print("skipped: libusearch_shared is not on the loader path")
+    if not _library_is_present():
+        _skipped(library_missing_k)
         return
     var library = Library()
     var index = _basis(library)
@@ -920,12 +977,10 @@ def _value_rows(
         rows[unsafe_offset=lane] = table.data + row * table.row_bytes if shaped and row < table.rows else NULL_ADDRESS
 
 
-def test_attend_is_exact_attention_over_every_key() raises:
-    """A graph this small scores every key, so attention is the exact softmax over all of them, with
-    one head per walk and with two sharing it; a key without a value row refuses the call, and so
-    does a carry shorter than the rows."""
-    if not _engine_is_present():
-        print("skipped: libusearch_shared is not on the loader path")
+def test_attention_is_exact_over_every_key() raises:
+    """Over a graph this small, attention is the exact softmax over every key, and malformed inputs are refused."""
+    if not _library_is_present():
+        _skipped(library_missing_k)
         return
     var library = Library()
     var executor = Executor.for_ram(library, threads=2)
@@ -998,20 +1053,17 @@ def test_attend_is_exact_attention_over_every_key() raises:
 # region Sequences
 
 
-def _words(count: Int, seed: Int) -> Tape[DType.uint8]:
-    """`count` lowercase words of 8 to 16 letters, drawn from a fixed linear congruential stream."""
+def _words(count: Int, stream: Int) raises -> Tape[DType.uint8]:
+    """`count` lowercase words of 8 to 16 letters, from the linear congruential stream `stream` keys."""
     var tape = Tape[DType.uint8]()
-    var state = UInt64(seed * 2654435761 + 1)
+    var state = _stream_key(_run_seed(), "words", UInt64(stream))
     for _ in range(count):
         state = state * 6364136223846793005 + 1442695040888963407
         var letters = List[UInt8]()
         for _ in range(8 + Int((state >> 33) % 9)):
             state = state * 6364136223846793005 + 1442695040888963407
             letters.append(UInt8(97 + Int((state >> 33) % 26)))
-        try:
-            tape.append(Span(letters))
-        except:
-            pass
+        tape.append(Span(letters))
     return tape^
 
 
@@ -1023,25 +1075,21 @@ def _keys(first: Int, count: Int) -> List[Key]:
     return keys^
 
 
-def _sequences(library: Library, executor: Executor, count: Int, first: Int = 0, seed: Int = 0) raises -> SequenceIndex:
+def _sequences(
+    library: Library, executor: Executor, count: Int, first: Int = 0, stream: Int = 0
+) raises -> SequenceIndex:
     """A host sequence index holding `count` random words under consecutive keys from `first`."""
     var index = SequenceIndex.init_ram(library)
     if count != 0:
-        var tape = _words(count, seed)
+        var tape = _words(count, stream)
         index.on(executor).insert(_keys(first, count), tape.view())
     return index^
 
 
-def _stop_at_once(completed: Int, total: Int, mut reports: Int) -> Continuation:
-    """Stops the call at its first report."""
-    reports += 1
-    return Continuation.CANCEL
-
-
 def test_sequence_index_starts_empty_and_keeps_its_metric() raises:
     """A fresh host index is empty, on a CPU class, and reads back the kind it froze, spelled by the engine."""
-    if not _engine_is_present():
-        print("skipped: libusearch_shared is not on the loader path")
+    if not _library_is_present():
+        _skipped(library_missing_k)
         return
     var library = Library()
     var index = SequenceIndex.init_ram(library, SequenceOptions(SequenceMetric.LEVENSHTEIN_UTF8))
@@ -1061,8 +1109,8 @@ def test_sequence_index_starts_empty_and_keeps_its_metric() raises:
 
 def test_sequence_search_get_and_count() raises:
     """Every word searched for comes back first under its own key at distance zero, and reads back whole."""
-    if not _engine_is_present():
-        print("skipped: libusearch_shared is not on the loader path")
+    if not _library_is_present():
+        _skipped(library_missing_k)
         return
     var library = Library()
     var index = SequenceIndex.init_ram(library)
@@ -1089,10 +1137,10 @@ def test_sequence_search_get_and_count() raises:
     assert_equal(len(index.get(Key(integer=9), arena)), 0, "an absent key exports nothing")
 
 
-def test_sequence_checkpoints_round_trip() raises:
+def test_sequence_saves_and_loads_a_buffer() raises:
     """A monolith saved into an arena loads back with every entry, and its header reads without loading."""
-    if not _engine_is_present():
-        print("skipped: libusearch_shared is not on the loader path")
+    if not _library_is_present():
+        _skipped(library_missing_k)
         return
     var library = Library()
     var executor = Executor.for_ram(library, threads=2)
@@ -1107,8 +1155,8 @@ def test_sequence_checkpoints_round_trip() raises:
 
 def test_sequence_refine_plan_resumes_and_finishes() raises:
     """A stopped round stays live in its plan, the next call ends it, and the plan finishes exactly once."""
-    if not _engine_is_present():
-        print("skipped: libusearch_shared is not on the loader path")
+    if not _library_is_present():
+        _skipped(library_missing_k)
         return
     var library = Library()
     var executor = Executor.for_ram(library, threads=2)
@@ -1125,7 +1173,7 @@ def test_sequence_refine_plan_resumes_and_finishes() raises:
     try:
         _ = index.on(executor).refine(
             SequenceRefineConfig(
-                progress=ProgressArguments.of[_stop_at_once](reports),
+                progress=ProgressArguments.of[_stop_at_first_report](reports),
                 plan=Pointer(to=plan),
                 phase=Pointer(to=progress),
             )
@@ -1155,16 +1203,15 @@ def test_sequence_refine_plan_resumes_and_finishes() raises:
 
 
 def test_sequence_reshard_gathers_cuts_and_refuses() raises:
-    """Sources gather into a target, a source cuts into targets through a plan, and malformed lists move
-    nothing."""
-    if not _engine_is_present():
-        print("skipped: libusearch_shared is not on the loader path")
+    """Sources gather into a target, a source cuts into targets through a plan, and malformed lists move nothing."""
+    if not _library_is_present():
+        _skipped(library_missing_k)
         return
     var library = Library()
     var executor = Executor.for_ram(library, threads=2)
     var parts = List[SequenceIndex]()
-    for seed in range(3):
-        parts.append(_sequences(library, executor, 16, 16 * seed, seed))
+    for stream in range(3):
+        parts.append(_sequences(library, executor, 16, 16 * stream, stream))
     var report = sequence_reshard(executor, parts, Span(parts)[0:1])
     assert_true(report.changed <= report.reselected, "the closing round changes only what it re-selected")
     assert_equal(Int(parts[0].describe().size), 48, "every entry gathers into the target")
@@ -1179,14 +1226,15 @@ def test_sequence_reshard_gathers_cuts_and_refuses() raises:
     var progress = PhaseProgress()
     var reports = stack_allocation[1, Int]().unsafe_origin_cast[MutAnyOrigin]()
     reports[unsafe_offset=0] = 0
+    var seed = _stream_key(_run_seed(), "reshard")
     try:
         _ = sequence_reshard(
             executor,
             Span(cut)[0:1],
             Span(cut)[1:3],
             SequenceReshardConfig(
-                seed=7,
-                progress=ProgressArguments.of[_stop_at_once](reports),
+                seed=seed,
+                progress=ProgressArguments.of[_stop_at_first_report](reports),
                 plan=Pointer(to=plan),
                 phase=Pointer(to=progress),
             ),
@@ -1237,36 +1285,33 @@ def test_sequence_reshard_gathers_cuts_and_refuses() raises:
 # region Shapes
 
 
-def _clouds(count: Int, seed: Int) -> Tape[DType.float32, 3]:
-    """`count` point clouds of 4 to 12 points in the unit cube, drawn from a fixed linear congruential stream."""
+def _clouds(count: Int, stream: Int) raises -> Tape[DType.float32, 3]:
+    """`count` point clouds of 4 to 12 points in the unit cube, from the linear congruential stream `stream` keys."""
     var tape = Tape[DType.float32, 3]()
-    var state = UInt64(seed * 2654435761 + 1)
+    var state = _stream_key(_run_seed(), "clouds", UInt64(stream))
     for _ in range(count):
         state = state * 6364136223846793005 + 1442695040888963407
         var scalars = List[Float32]()
         for _ in range(3 * (4 + Int((state >> 33) % 9))):
             state = state * 6364136223846793005 + 1442695040888963407
             scalars.append(Float32(Int((state >> 33) % 1000)) / 1000)
-        try:
-            tape.append(Span(scalars))
-        except:
-            pass
+        tape.append(Span(scalars))
     return tape^
 
 
-def _shapes(library: Library, executor: Executor, count: Int, first: Int = 0, seed: Int = 0) raises -> ShapesIndex:
+def _shapes(library: Library, executor: Executor, count: Int, first: Int = 0, stream: Int = 0) raises -> ShapesIndex:
     """A host shape index holding `count` random clouds under consecutive keys from `first`."""
     var index = ShapesIndex.init_ram(library)
     if count != 0:
-        var tape = _clouds(count, seed)
+        var tape = _clouds(count, stream)
         index.on(executor).insert(_keys(first, count), tape.view())
     return index^
 
 
 def test_shapes_index_starts_empty_and_keeps_its_metric() raises:
     """A fresh host index is empty, on a CPU class, and reads back the kind it froze, spelled by the engine."""
-    if not _engine_is_present():
-        print("skipped: libusearch_shared is not on the loader path")
+    if not _library_is_present():
+        _skipped(library_missing_k)
         return
     var library = Library()
     var index = ShapesIndex.init_ram(library, ShapesOptions(ShapesMetric.HAUSDORFF))
@@ -1287,8 +1332,8 @@ def test_shapes_index_starts_empty_and_keeps_its_metric() raises:
 
 def test_shapes_search_get_and_count() raises:
     """Clouds of different point counts share one tape, each finds itself first, and reads back in its pose."""
-    if not _engine_is_present():
-        print("skipped: libusearch_shared is not on the loader path")
+    if not _library_is_present():
+        _skipped(library_missing_k)
         return
     var library = Library()
     var executor = Executor.for_ram(library, threads=2)
@@ -1326,10 +1371,9 @@ def test_shapes_search_get_and_count() raises:
 
 
 def test_shapes_checkpoints_refine_and_reshard() raises:
-    """A monolith round-trips, a stopped round resumes in its plan, sources gather, and malformed lists move
-    nothing."""
-    if not _engine_is_present():
-        print("skipped: libusearch_shared is not on the loader path")
+    """A monolith round-trips, a stopped round resumes, sources gather, and malformed lists move nothing."""
+    if not _library_is_present():
+        _skipped(library_missing_k)
         return
     var library = Library()
     var executor = Executor.for_ram(library, threads=2)
@@ -1348,7 +1392,9 @@ def test_shapes_checkpoints_refine_and_reshard() raises:
     try:
         _ = index.on(executor).refine(
             ShapesRefineConfig(
-                progress=ProgressArguments.of[_stop_at_once](reports), plan=Pointer(to=plan), phase=Pointer(to=progress)
+                progress=ProgressArguments.of[_stop_at_first_report](reports),
+                plan=Pointer(to=plan),
+                phase=Pointer(to=progress),
             )
         )
     except error:
@@ -1358,8 +1404,8 @@ def test_shapes_checkpoints_refine_and_reshard() raises:
     assert_equal(Int(index.on(executor).refine_plan_finish(plan^).reachability.audited), 16, "the plan saw all")
 
     var parts = List[ShapesIndex]()
-    for seed in range(2):
-        parts.append(_shapes(library, executor, 8, 8 * seed, seed))
+    for stream in range(2):
+        parts.append(_shapes(library, executor, 8, 8 * stream, stream))
     _ = shapes_reshard(executor, parts, Span(parts)[0:1])
     assert_equal(Int(parts[0].describe().size), 16, "every entry gathers into the target")
     assert_equal(Int(parts[1].describe().size), 0, "the other source ends empty")
@@ -1390,10 +1436,10 @@ def test_shapes_checkpoints_refine_and_reshard() raises:
 # region Geospatial
 
 
-def _stops(count: Int, seed: Int) -> List[GeospatialObservation]:
-    """`count` positions spread over the inhabited latitudes, drawn from a fixed linear congruential stream."""
+def _stops(count: Int, stream: Int) raises -> List[GeospatialObservation]:
+    """`count` positions spread over the inhabited latitudes, from the linear congruential stream `stream` keys."""
     var stops = List[GeospatialObservation]()
-    var state = UInt64(seed * 2654435761 + 1)
+    var state = _stream_key(_run_seed(), "stops", UInt64(stream))
     for _ in range(count):
         state = state * 6364136223846793005 + 1442695040888963407
         var latitude = Float64(Int((state >> 33) % 120000)) / 1000 - 60
@@ -1402,18 +1448,20 @@ def _stops(count: Int, seed: Int) -> List[GeospatialObservation]:
     return stops^
 
 
-def _places(library: Library, executor: Executor, count: Int, first: Int = 0, seed: Int = 0) raises -> GeospatialIndex:
+def _places(
+    library: Library, executor: Executor, count: Int, first: Int = 0, stream: Int = 0
+) raises -> GeospatialIndex:
     """A host geospatial index holding `count` random positions under consecutive keys from `first`."""
     var index = GeospatialIndex.init_ram(library)
     if count != 0:
-        index.on(executor).insert(_keys(first, count), _stops(count, seed))
+        index.on(executor).insert(_keys(first, count), _stops(count, stream))
     return index^
 
 
 def test_geospatial_index_starts_empty_and_refuses_what_it_lacks() raises:
     """A fresh host index is empty on a CPU class; sight lines need a terrain, and a terrain needs its steps."""
-    if not _engine_is_present():
-        print("skipped: libusearch_shared is not on the loader path")
+    if not _library_is_present():
+        _skipped(library_missing_k)
         return
     var library = Library()
     var index = GeospatialIndex.init_ram(library)
@@ -1447,10 +1495,9 @@ def test_geospatial_index_starts_empty_and_refuses_what_it_lacks() raises:
 
 
 def test_geospatial_search_within_get_and_count() raises:
-    """An observation finds itself at zero chord metres, a radius reports only its neighbors, and it reads
-    back within the stored rounding."""
-    if not _engine_is_present():
-        print("skipped: libusearch_shared is not on the loader path")
+    """An observation finds itself at zero metres, a radius reports only its neighbors, and it reads back rounded."""
+    if not _library_is_present():
+        _skipped(library_missing_k)
         return
     var library = Library()
     var executor = Executor.for_ram(library, threads=2)
@@ -1483,10 +1530,9 @@ def test_geospatial_search_within_get_and_count() raises:
 
 
 def test_geospatial_checkpoints_refine_and_reshard() raises:
-    """A monolith round-trips, a stopped round resumes in its plan, sources gather, and malformed lists move
-    nothing."""
-    if not _engine_is_present():
-        print("skipped: libusearch_shared is not on the loader path")
+    """A monolith round-trips, a stopped round resumes, sources gather, and malformed lists move nothing."""
+    if not _library_is_present():
+        _skipped(library_missing_k)
         return
     var library = Library()
     var executor = Executor.for_ram(library, threads=2)
@@ -1504,7 +1550,9 @@ def test_geospatial_checkpoints_refine_and_reshard() raises:
     try:
         _ = index.on(executor).refine(
             GeospatialRefineConfig(
-                progress=ProgressArguments.of[_stop_at_once](reports), plan=Pointer(to=plan), phase=Pointer(to=progress)
+                progress=ProgressArguments.of[_stop_at_first_report](reports),
+                plan=Pointer(to=plan),
+                phase=Pointer(to=progress),
             )
         )
     except error:
@@ -1514,8 +1562,8 @@ def test_geospatial_checkpoints_refine_and_reshard() raises:
     assert_equal(Int(index.on(executor).refine_plan_finish(plan^).reachability.audited), 16, "the plan saw all")
 
     var parts = List[GeospatialIndex]()
-    for seed in range(2):
-        parts.append(_places(library, executor, 8, 8 * seed, seed))
+    for stream in range(2):
+        parts.append(_places(library, executor, 8, 8 * stream, stream))
     _ = geospatial_reshard(executor, parts, Span(parts)[0:1])
     assert_equal(Int(parts[0].describe().size), 16, "every entry gathers into the target")
     assert_equal(Int(parts[1].describe().size), 0, "the other source ends empty")
@@ -1541,11 +1589,10 @@ def test_geospatial_checkpoints_refine_and_reshard() raises:
     assert_equal(Int(parts[0].describe().size + parts[1].describe().size), 17, "every refusal moves nothing")
 
 
-def test_basic_readme_examples_hold() raises:
-    """The sequence, shape and geospatial examples of `mojo/README.md`, line for line, with the library and
-    arena they assume made first."""
-    if not _engine_is_present():
-        print("skipped: libusearch_shared is not on the loader path")
+def test_readme_quickstart() raises:
+    """The sequence, shape and geospatial examples of `mojo/README.md` run line for line."""
+    if not _library_is_present():
+        _skipped(library_missing_k)
         return
     var library = Library()
     var arena = Arena(library)
@@ -1595,7 +1642,7 @@ def main() raises:
     suite.test[test_telemetry_starts_at_an_untaken_walk]()
     suite.test[test_engine_round_trips_when_present]()
     suite.test[test_width_mismatch_is_refused_by_the_engine]()
-    suite.test[test_names_come_from_the_engine_tables]()
+    suite.test[test_names_round_trip_through_the_library_and_refuse_strangers]()
     suite.test[test_get_exports_every_entry_under_a_key]()
     suite.test[test_arena_is_reused_and_results_outlive_the_call]()
     suite.test[test_arena_survives_a_failed_call]()
@@ -1609,7 +1656,7 @@ def main() raises:
     suite.test[test_reshard_cuts_and_sample_draws]()
     suite.test[test_mutating_a_view_is_refused_as_read_only]()
     suite.test[test_nvme_views_resolve_keys_through_their_key_table]()
-    suite.test[test_reshard_keeps_every_entry_and_load_nvme_wants_a_manifest]()
+    suite.test[test_reshards_in_place_and_loads_only_manifests]()
     suite.test[test_scans_find_every_query_itself]()
     suite.test[test_progress_cancels_a_search]()
     suite.test[test_predicate_filters_keys]()
@@ -1617,12 +1664,12 @@ def main() raises:
     suite.test[test_deferred_failures_repeat]()
     suite.test[test_deferred_refusals_finish_at_submission]()
     suite.test[test_deferred_results_borrow_the_callers_arena]()
-    suite.test[test_multiply_reports_every_scored_pair]()
-    suite.test[test_maxsim_scores_over_documents_rather_than_rows]()
-    suite.test[test_attend_is_exact_attention_over_every_key]()
+    suite.test[test_multiplication_reports_every_scored_pair]()
+    suite.test[test_late_interaction_scores_over_documents]()
+    suite.test[test_attention_is_exact_over_every_key]()
     suite.test[test_sequence_index_starts_empty_and_keeps_its_metric]()
     suite.test[test_sequence_search_get_and_count]()
-    suite.test[test_sequence_checkpoints_round_trip]()
+    suite.test[test_sequence_saves_and_loads_a_buffer]()
     suite.test[test_sequence_refine_plan_resumes_and_finishes]()
     suite.test[test_sequence_reshard_gathers_cuts_and_refuses]()
     suite.test[test_shapes_index_starts_empty_and_keeps_its_metric]()
@@ -1631,5 +1678,5 @@ def main() raises:
     suite.test[test_geospatial_index_starts_empty_and_refuses_what_it_lacks]()
     suite.test[test_geospatial_search_within_get_and_count]()
     suite.test[test_geospatial_checkpoints_refine_and_reshard]()
-    suite.test[test_basic_readme_examples_hold]()
+    suite.test[test_readme_quickstart]()
     suite^.run()

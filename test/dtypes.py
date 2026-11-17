@@ -52,7 +52,8 @@ def test_modes_are_int_enums_of_the_package(name: str):
     """Statuses and modes mirror the C enumerators value for value, so nothing compares as a string."""
     enum = getattr(usearch, name)
     assert issubclass(enum, IntEnum)
-    assert enum.__module__ == "usearch" and enum.__name__ == name
+    assert enum.__module__ == "usearch"
+    assert enum.__name__ == name
     assert pickle.loads(pickle.dumps(next(iter(enum)))) is next(iter(enum))
 
 
@@ -68,7 +69,7 @@ def test_status_values_follow_the_header():
 
 
 @pytest.mark.parametrize("value", [0, 1, 42, 255, 256, 2**63, 2**127 - 1])
-def test_key_integer_roundtrip(value: int):
+def test_key_integer_round_trip(value: int):
     """An integer identity survives every rendering the type offers."""
     key = Key(value)
     assert int(key) == value
@@ -100,7 +101,8 @@ def test_key_hashes_as_the_integer_it_equals(value: int):
     assert hash(Key(value)) == hash(value)
     assert {value: "stored"}[Key(value)] == "stored"
     assert len({Key(value), value}) == 1
-    assert Key(value) == uuid.UUID(int=value) and hash(Key(value)) == hash(uuid.UUID(int=value))
+    assert Key(value) == uuid.UUID(int=value)
+    assert hash(Key(value)) == hash(uuid.UUID(int=value))
 
 
 def test_key_never_equals_what_merely_parses_into_it():
@@ -142,7 +144,7 @@ def test_key_malformed_text_carries_a_status():
 
 
 @pytest.mark.parametrize("count", BATCH_SIZES)
-def test_identity_packing_roundtrip(count: int):
+def test_identity_packing_round_trip(count: int):
     """Integer identities survive the trip through the sixteen-byte wire rows."""
     original = np.arange(count, dtype=np.uint64)
     packed = integers_to_keys(original)
@@ -179,7 +181,8 @@ def test_stats_add_into_a_total():
     total, reading = DenseTraversalStats(), DenseTraversalStats()
     alias = total
     total += reading
-    assert total is alias and total.visited_members == 0
+    assert total is alias
+    assert total.visited_members == 0
     with pytest.raises(TypeError):
         total += 1
 

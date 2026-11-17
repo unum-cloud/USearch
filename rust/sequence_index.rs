@@ -1772,23 +1772,14 @@ impl Drop for SequenceCursor<'_> {
 #[cfg(test)]
 mod tests {
     use core::ops::ControlFlow;
-    use std::path::PathBuf;
 
     use rand::{RngExt, SeedableRng};
 
     use super::*;
+    use crate::testing::{ScratchDirectory, case_stream_key, executor, keys, refused};
     use crate::types::Phase;
 
     // region: Helpers
-
-    /// One executor per test, since an executor runs one call at a time.
-    fn executor() -> Executor {
-        Executor::for_ram(&[], None, 0).expect("the executor must spawn")
-    }
-
-    fn keys(first: u64, count: usize) -> Vec<Key> {
-        (first..first + count as u64).map(Key::from).collect()
-    }
 
     /// Random lowercase words of 8 to 16 letters, the same for the same seed.
     fn words(count: usize, seed: u64) -> Vec<Vec<u8>> {
@@ -1814,31 +1805,17 @@ mod tests {
         Ok(index.describe()?.size)
     }
 
-    fn refused(answer: Result<impl Sized>, status: Status) -> bool {
-        matches!(answer, Err(Error { status: answered, .. }) if answered == status)
-    }
-
-    /// A checkpoint path scoped by test name and process, never the working directory.
-    fn scratch_path(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("usearch-rust-sequence-{name}-{}.safegraphs", std::process::id()))
-    }
-
-    fn remove_quietly(path: &Path) {
-        let _ = std::fs::remove_file(path);
-    }
-
     // endregion: Helpers
 
     // region: Construction
 
     #[test]
-    fn init_ram_starts_empty_and_keeps_the_metric() -> Result<()> {
+    fn init_ram_starts_empty_and_keeps_the_metric() {
         let options = SequenceOptions { metric: SequenceMetric::LevenshteinUtf8, ..SequenceOptions::default() };
-        let described = SequenceIndex::init_ram(&options, &[])?.describe()?;
+        let described = SequenceIndex::init_ram(&options, &[]).unwrap().describe().unwrap();
         assert_eq!(described.size, 0);
         assert_eq!(described.metadata.metric, SequenceMetric::LevenshteinUtf8);
         assert_eq!(described.gpu_class(), "unknown", "a host index names no GPU class");
-        Ok(())
     }
 
     #[test]
@@ -1870,7 +1847,7 @@ mod tests {
     /// Mirrors the Sequence Indexes snippet of rust/README.md line by line; only the function
     /// around it and its closing `Ok(())` differ.
     #[test]
-    fn readme_sequence_indexes() -> Result<()> {
+    fn readme_quickstart() -> Result<()> {
         let options = SequenceOptions { metric: SequenceMetric::LevenshteinUtf8, ..SequenceOptions::default() };
         let index = SequenceIndex::init_ram(&options, &[])?;
         let words = Tape::of(["kitten", "sitting", "mitten"]);
@@ -1885,41 +1862,38 @@ mod tests {
 
     /// Every sequence searched for comes back first under its own key, at distance zero.
     #[test]
-    fn finds_the_inserted_entry() -> Result<()> {
-        let index = SequenceIndex::init_ram(&SequenceOptions::default(), &[])?;
-        index.insert(keys(1, 3), Tape::of(["kitten", "sitting", "mitten"]))?;
-        assert_eq!(size(&index)?, 3);
+    fn finds_the_inserted_entry() {
+        let index = SequenceIndex::init_ram(&SequenceOptions::default(), &[]).unwrap();
+        index.insert(keys(1, 3), Tape::of(["kitten", "sitting", "mitten"])).unwrap();
+        assert_eq!(size(&index).unwrap(), 3);
 
-        let mut arena = Arena::new()?;
-        let matches = index.search(Tape::of(["sitting"]), 1, &mut arena)?;
-        let best = matches.query(0)?;
+        let mut arena = Arena::new().unwrap();
+        let matches = index.search(Tape::of(["sitting"]), 1, &mut arena).unwrap();
+        let best = matches.query(0).unwrap();
         assert_eq!((best.keys, best.distances[0]), (&[Key::from(2u64)][..], 0.0));
-        Ok(())
     }
 
     #[test]
-    fn gets_and_counts_every_entry_under_a_key() -> Result<()> {
-        let index = SequenceIndex::init_ram(&SequenceOptions::default(), &[])?;
+    fn gets_and_counts_every_entry_under_a_key() {
+        let index = SequenceIndex::init_ram(&SequenceOptions::default(), &[]).unwrap();
         let shared = Key::from(7u64);
-        index.insert([shared, shared], Tape::of(["kitten", "sitting"]))?;
+        index.insert([shared, shared], Tape::of(["kitten", "sitting"])).unwrap();
 
-        let stats = index.count(shared)?;
+        let stats = index.count(shared).unwrap();
         assert_eq!((stats.entries, stats.total_bytes, stats.largest_bytes), (2, 13, 7));
-        assert!(index.contains(shared)? && !index.contains(Key::from(8u64))?);
+        assert!(index.contains(shared).unwrap() && !index.contains(Key::from(8u64)).unwrap());
 
-        let mut arena = Arena::new()?;
-        let stored = index.get(shared, &mut arena)?;
+        let mut arena = Arena::new().unwrap();
+        let stored = index.get(shared, &mut arena).unwrap();
         assert_eq!(stored.iter().collect::<Vec<_>>(), [&b"kitten"[..], &b"sitting"[..]]);
-        assert_eq!(index.get(Key::from(8u64), &mut arena)?.written(), 0, "an absent key yields none");
-        Ok(())
+        assert_eq!(index.get(Key::from(8u64), &mut arena).unwrap().written(), 0, "an absent key yields none");
     }
 
     #[test]
-    fn rejects_mismatched_key_and_entry_counts() -> Result<()> {
-        let index = SequenceIndex::init_ram(&SequenceOptions::default(), &[])?;
+    fn rejects_mismatched_key_and_entry_counts() {
+        let index = SequenceIndex::init_ram(&SequenceOptions::default(), &[]).unwrap();
         assert!(refused(index.insert(keys(0, 3), Tape::of(["kitten"])), Status::ShapeMismatch));
-        assert_eq!(size(&index)?, 0);
-        Ok(())
+        assert_eq!(size(&index).unwrap(), 0);
     }
 
     // endregion: Ingest and Retrieval
@@ -1927,43 +1901,41 @@ mod tests {
     // region: Serialization
 
     #[test]
-    fn saves_and_loads_a_file() -> Result<()> {
-        let path = scratch_path("saves_and_loads_a_file");
-        let index = populated_index(32, 0, 0)?;
-        index.on(&executor()).save(&path)?;
+    fn saves_and_loads_a_file() {
+        let scratch = ScratchDirectory::new("usearch-sequence-saves_and_loads_a_file");
+        let path = scratch.path().join("index.safegraphs");
+        let index = populated_index(32, 0, case_stream_key(0)).unwrap();
+        index.on(&executor()).save(&path).unwrap();
 
-        assert_eq!(SequenceIndex::metadata(&path)?.metric, SequenceMetric::LevenshteinBytes);
-        let restored = SequenceIndex::load_ram(&path)?;
-        assert_eq!(size(&restored)?, 32);
-        assert!(restored.contains(Key::from(17u64))?);
+        assert_eq!(SequenceIndex::metadata(&path).unwrap().metric, SequenceMetric::LevenshteinBytes);
+        let restored = SequenceIndex::load_ram(&path).unwrap();
+        assert_eq!(size(&restored).unwrap(), 32);
+        assert!(restored.contains(Key::from(17u64)).unwrap());
 
         // A view serves the checkpoint in place and refuses changes, where RAM serves views at all.
         match SequenceIndex::view_ram(&path, None) {
             Ok(viewed) => {
-                assert_eq!(size(&viewed)?, 32);
+                assert_eq!(size(&viewed).unwrap(), 32);
                 assert!(refused(viewed.reserve(64, 0), Status::ReadOnly));
             }
             Err(error) => assert_eq!(error.status, Status::Unsupported),
         }
-        remove_quietly(&path);
-        Ok(())
     }
 
     #[test]
-    fn saves_and_loads_a_buffer() -> Result<()> {
-        let index = populated_index(32, 0, 0)?;
-        let mut arena = Arena::new()?;
-        let saved = index.save_buffer(&mut arena)?;
+    fn saves_and_loads_a_buffer() {
+        let index = populated_index(32, 0, case_stream_key(0)).unwrap();
+        let mut arena = Arena::new().unwrap();
+        let saved = index.save_buffer(&mut arena).unwrap();
         let monolith = saved.view();
         assert!(!monolith.is_empty());
 
-        assert_eq!(SequenceIndex::metadata_buffer(monolith)?.metric, SequenceMetric::LevenshteinBytes);
-        assert_eq!(size(&SequenceIndex::load_ram_buffer(monolith)?)?, 32);
+        assert_eq!(SequenceIndex::metadata_buffer(monolith).unwrap().metric, SequenceMetric::LevenshteinBytes);
+        assert_eq!(size(&SequenceIndex::load_ram_buffer(monolith).unwrap()).unwrap(), 32);
         assert!(
             SequenceIndex::load_ram_buffer(&monolith[..monolith.len() - 1]).is_err(),
             "a short buffer must not be read"
         );
-        Ok(())
     }
 
     // endregion: Serialization
@@ -1973,19 +1945,18 @@ mod tests {
     /// A round reports what it did, its closing audit judging every entry, and leaves each entry
     /// findable.
     #[test]
-    fn refine_reports_a_round_over_every_entry() -> Result<()> {
-        let index = populated_index(64, 0, 0)?;
-        let report = index.on(&executor()).refine(SequenceRefineConfig::default())?;
+    fn refine_reports_a_round_over_every_entry() {
+        let index = populated_index(64, 0, case_stream_key(0)).unwrap();
+        let report = index.on(&executor()).refine(SequenceRefineConfig::default()).unwrap();
         assert!(report.changed <= report.reselected);
         assert_eq!(report.reachability.audited, 64);
-        assert!(index.contains(Key::from(17u64))?);
-        Ok(())
+        assert!(index.contains(Key::from(17u64)).unwrap());
     }
 
     /// A plan keeps a stopped round live for the next call, and its finish reports the whole plan.
     #[test]
-    fn a_refine_plan_resumes_and_finishes() -> Result<()> {
-        let index = populated_index(64, 0, 0)?;
+    fn a_refine_plan_resumes_and_finishes() {
+        let index = populated_index(64, 0, case_stream_key(0)).unwrap();
         let executor = executor();
         let (mut plan, mut phase) = (SequenceRefinePlan::default(), PhaseProgress::default());
         let stopped = index.on(&executor).refine(SequenceRefineConfig {
@@ -1997,25 +1968,26 @@ mod tests {
         if let Err(failure) = stopped {
             assert_eq!(failure.status, Status::Cancelled);
             assert!(phase.phase != Phase::Done && phase.completed <= phase.total);
-            index.on(&executor).refine(SequenceRefineConfig {
-                plan: Some(&mut plan),
-                phase: Some(&mut phase),
-                ..SequenceRefineConfig::default()
-            })?;
+            index
+                .on(&executor)
+                .refine(SequenceRefineConfig {
+                    plan: Some(&mut plan),
+                    phase: Some(&mut phase),
+                    ..SequenceRefineConfig::default()
+                })
+                .unwrap();
         }
         assert_eq!(phase.phase, Phase::Done);
-        assert_eq!(index.on(&executor).refine_plan_finish(plan)?.reachability.audited, 64);
-        Ok(())
+        assert_eq!(index.on(&executor).refine_plan_finish(plan).unwrap().reachability.audited, 64);
     }
 
     /// A plan lives across calls on one executor, so a call on the calling thread cannot open one.
     #[test]
-    fn a_refine_plan_needs_an_executor() -> Result<()> {
-        let index = populated_index(0, 0, 0)?;
+    fn a_refine_plan_needs_an_executor() {
+        let index = populated_index(0, 0, case_stream_key(0)).unwrap();
         let mut plan = SequenceRefinePlan::default();
         let refined = index.refine(SequenceRefineConfig { plan: Some(&mut plan), ..SequenceRefineConfig::default() });
         assert!(refused(refined, Status::InvalidArgument));
-        Ok(())
     }
 
     // endregion: Refinement
@@ -2025,26 +1997,31 @@ mod tests {
     /// Several sources into one target gather every entry there, and the other sources end empty
     /// and live.
     #[test]
-    fn gathers_several_sources_into_one_target() -> Result<()> {
-        let first = populated_index(32, 0, 0)?;
-        let (second, third) = (populated_index(32, 32, 1)?, populated_index(32, 64, 2)?);
-        first.on(&executor()).reshard(SequenceReshardConfig {
-            sources: &[&first, &second, &third],
-            targets: &[&first],
-            ..SequenceReshardConfig::default()
-        })?;
-        assert_eq!(size(&first)?, 96);
-        assert!(first.contains(Key::from(40u64))? && first.contains(Key::from(80u64))?);
-        assert_eq!((size(&second)?, size(&third)?), (0, 0));
-        Ok(())
+    fn gathers_several_sources_into_one_target() {
+        let first = populated_index(32, 0, case_stream_key(0)).unwrap();
+        let (second, third) = (
+            populated_index(32, 32, case_stream_key(1)).unwrap(),
+            populated_index(32, 64, case_stream_key(2)).unwrap(),
+        );
+        first
+            .on(&executor())
+            .reshard(SequenceReshardConfig {
+                sources: &[&first, &second, &third],
+                targets: &[&first],
+                ..SequenceReshardConfig::default()
+            })
+            .unwrap();
+        assert_eq!(size(&first).unwrap(), 96);
+        assert!(first.contains(Key::from(40u64)).unwrap() && first.contains(Key::from(80u64)).unwrap());
+        assert_eq!((size(&second).unwrap(), size(&third).unwrap()), (0, 0));
     }
 
     /// A stop cuts only the closing rounds, so every entry has moved; the plan it leaves live
     /// continues where it stopped, and a deferred receiver closes it.
     #[test]
-    fn a_stopped_gather_continues_through_its_plan() -> Result<()> {
-        let first = populated_index(16, 0, 0)?;
-        let second = populated_index(16, 16, 1)?;
+    fn a_stopped_gather_continues_through_its_plan() {
+        let first = populated_index(16, 0, case_stream_key(0)).unwrap();
+        let second = populated_index(16, 16, case_stream_key(1)).unwrap();
         let executor = executor();
         let (mut plan, mut phase) = (SequenceReshardPlan::default(), PhaseProgress::default());
         let stopped = first.on(&executor).reshard(SequenceReshardConfig {
@@ -2059,42 +2036,45 @@ mod tests {
             assert_eq!(failure.status, Status::Cancelled);
             assert_ne!(phase.phase, Phase::Done, "a stop names the phase it stopped in");
         }
-        assert_eq!(size(&first)?, 32);
+        assert_eq!(size(&first).unwrap(), 32);
 
         // A deferred call owns the plan it continues and hands it back once final.
-        let continued = first.deferred(&executor).reshard(SequenceReshardConfig::from(plan))?;
+        let continued = first.deferred(&executor).reshard(SequenceReshardConfig::from(plan)).unwrap();
         let (finished, (config, _)) = continued.wait_with_inputs();
-        finished?;
+        finished.unwrap();
         let plan = config.plan.expect("the call hands its plan back");
-        let report = first.deferred(&executor).reshard_plan_finish(plan)?.wait()?;
+        let report = first.deferred(&executor).reshard_plan_finish(plan).unwrap().wait().unwrap();
         assert!(report.changed <= report.reselected);
-        Ok(())
     }
 
     /// One source into several targets cuts it between them, and the source stays live but empty.
     #[test]
-    fn reshards_one_source_into_several_targets() -> Result<()> {
-        let source = populated_index(64, 0, 0)?;
-        let targets = [populated_index(0, 0, 0)?, populated_index(0, 0, 0)?];
-        let report = source.on(&executor()).reshard(SequenceReshardConfig {
-            sources: &[&source],
-            targets: &[&targets[0], &targets[1]],
-            seed: 7,
-            ..SequenceReshardConfig::default()
-        })?;
+    fn reshards_one_source_into_several_targets() {
+        let source = populated_index(64, 0, case_stream_key(0)).unwrap();
+        let targets =
+            [populated_index(0, 0, case_stream_key(0)).unwrap(), populated_index(0, 0, case_stream_key(0)).unwrap()];
+        let report = source
+            .on(&executor())
+            .reshard(SequenceReshardConfig {
+                sources: &[&source],
+                targets: &[&targets[0], &targets[1]],
+                seed: case_stream_key(1),
+                ..SequenceReshardConfig::default()
+            })
+            .unwrap();
         assert!(report.changed <= report.reselected);
-        let (left, right) = (size(&targets[0])?, size(&targets[1])?);
+        let (left, right) = (size(&targets[0]).unwrap(), size(&targets[1]).unwrap());
         assert!(left != 0 && right != 0 && left + right == 64);
-        assert_eq!(size(&source)?, 0);
-        Ok(())
+        assert_eq!(size(&source).unwrap(), 0);
     }
 
     /// A cut a stop interrupts keeps every entry moved, the next call naming the plan ends its
     /// rounds, and a deferred receiver closes it.
     #[test]
-    fn reshards_one_source_into_several_targets_through_a_plan() -> Result<()> {
-        let source = populated_index(64, 0, 0)?;
-        let targets = [populated_index(0, 0, 0)?, populated_index(0, 0, 0)?];
+    fn reshards_one_source_into_several_targets_through_a_plan() {
+        let source = populated_index(64, 0, case_stream_key(0)).unwrap();
+        let targets =
+            [populated_index(0, 0, case_stream_key(0)).unwrap(), populated_index(0, 0, case_stream_key(0)).unwrap()];
         let executor = executor();
         let (mut plan, mut phase) = (SequenceReshardPlan::default(), PhaseProgress::default());
         let stopped = source.on(&executor).reshard(SequenceReshardConfig {
@@ -2105,39 +2085,41 @@ mod tests {
             phase: Some(&mut phase),
             ..SequenceReshardConfig::default()
         });
-        assert_eq!(size(&targets[0])? + size(&targets[1])?, 64);
+        assert_eq!(size(&targets[0]).unwrap() + size(&targets[1]).unwrap(), 64);
         if stopped.is_err() {
-            source.on(&executor).reshard(SequenceReshardConfig {
-                plan: Some(&mut plan),
-                phase: Some(&mut phase),
-                ..SequenceReshardConfig::default()
-            })?;
+            source
+                .on(&executor)
+                .reshard(SequenceReshardConfig {
+                    plan: Some(&mut plan),
+                    phase: Some(&mut phase),
+                    ..SequenceReshardConfig::default()
+                })
+                .unwrap();
         }
         assert_eq!(phase.phase, Phase::Done);
-        source.deferred(&executor).reshard_plan_finish(plan)?.wait()?;
-        Ok(())
+        source.deferred(&executor).reshard_plan_finish(plan).unwrap().wait().unwrap();
     }
 
     /// One index as its only source and target has a single shard to recut, which the library
     /// refuses.
     #[test]
-    fn a_recut_of_one_handle_is_unsupported() -> Result<()> {
-        let index = populated_index(16, 0, 0)?;
+    fn a_recut_of_one_handle_is_unsupported() {
+        let index = populated_index(16, 0, case_stream_key(0)).unwrap();
         let recut = index.on(&executor()).reshard(SequenceReshardConfig {
             sources: &[&index],
             targets: &[&index],
             ..SequenceReshardConfig::default()
         });
         assert!(refused(recut, Status::Unsupported));
-        assert_eq!(size(&index)?, 16);
-        Ok(())
+        assert_eq!(size(&index).unwrap(), 16);
     }
 
     /// Empty or repeated lists are malformed and a target holding foreign entries mismatches;
     /// every refusal leaves the entries where they were.
     #[test]
-    fn refuses_malformed_lists_and_moves_nothing() -> Result<()> {
-        let (first, second) = (populated_index(8, 0, 0)?, populated_index(8, 8, 1)?);
+    fn refuses_malformed_lists_and_moves_nothing() {
+        let (first, second) =
+            (populated_index(8, 0, case_stream_key(0)).unwrap(), populated_index(8, 8, case_stream_key(1)).unwrap());
         let executor = executor();
         let reshard = |sources: &[&SequenceIndex], targets: &[&SequenceIndex]| {
             first.on(&executor).reshard(SequenceReshardConfig { sources, targets, ..SequenceReshardConfig::default() })
@@ -2145,8 +2127,7 @@ mod tests {
         assert!(refused(reshard(&[], &[&first]), Status::InvalidArgument));
         assert!(refused(reshard(&[&first, &first], &[&first]), Status::InvalidArgument));
         assert!(refused(reshard(&[&first], &[&second]), Status::ConfigMismatch));
-        assert_eq!((size(&first)?, size(&second)?), (8, 8));
-        Ok(())
+        assert_eq!((size(&first).unwrap(), size(&second).unwrap()), (8, 8));
     }
 
     // endregion: Resharding

@@ -19,6 +19,8 @@
  *  with every key in one, each through a plan its cancelled calls carry to the end; a cleared index
  *  holds nothing and ends a cursor opened before it; every metric's name reads back.
  */
+#undef NDEBUG // ! A test's oracle must stay live in every build
+
 #include <cstring> // `std::memcmp` - the keys' order
 
 #include <algorithm> // `std::binary_search`, `std::sort` - the admitted keys
@@ -51,12 +53,12 @@ static nk::matrix<nk::f32_t> dense_rows(usearch_scalar_t scalar, std::size_t cou
 
 /** Every row searches for itself: nine in ten must land first, every written key was minted, and
  *  every query's matches ascend. */
-static std::size_t expect_self_recall(handle<dense_verbs_t>& index, usearch_rows_view_t rows, std::size_t count) {
+static void expect_self_recall(handle<dense_verbs_t>& index, usearch_rows_view_t rows, std::size_t count) {
     copied_matches_t found;
     usearch_traversal_stats_t stats {};
-    std::size_t failures = check(search_queries(index, rows, count, cell_batch_k, cell_wanted_k, dense_expansion_k,
-                                                usearch_traversal_walk_k, stats, found));
-    if (failures) return failures;
+    if (!expect_success(search_queries(index, rows, count, cell_batch_k, cell_wanted_k, dense_expansion_k,
+                                       usearch_traversal_walk_k, stats, found)))
+        return;
     st::vector<std::size_t> const offsets = match_offsets(found);
     std::size_t found_first = 0, unminted = 0, descending = 0;
     for (std::size_t query = 0; query != count; ++query) {
@@ -69,11 +71,13 @@ static std::size_t expect_self_recall(handle<dense_verbs_t>& index, usearch_rows
             if (match != first) descending += found.scores[match] < found.scores[match - 1];
         }
     }
-    return check(found_first * 10 >= count * 9) + check(unminted == 0) + check(descending == 0);
+    expect_true(found_first * 10 >= count * 9);
+    expect_true(unminted == 0);
+    expect_true(descending == 0);
 }
 
 /** Every key of the first @p count entries reads one vector back. */
-static std::size_t expect_gets(handle<dense_verbs_t>& index, std::size_t count) {
+static void expect_gets(handle<dense_verbs_t>& index, std::size_t count) {
     std::size_t misread = 0;
     for (std::size_t offset = 0; offset != count; ++offset) {
         usearch_outcome_t outcome {};
@@ -87,7 +91,7 @@ static std::size_t expect_gets(handle<dense_verbs_t>& index, std::size_t count) 
         usearch_dense_get(&get);
         misread += outcome.status != usearch_status_success_k || written != 1;
     }
-    return check(misread == 0);
+    expect_true(misread == 0);
 }
 
 /** Whether @p first sorts before @p second, byte by byte. */
@@ -107,7 +111,7 @@ static void admit_listed(usearch_key_t const* keys, usearch_admission_t* admissi
 
 /** A host walk writes only the keys of the even entries among the first @p count , chosen up front
  *  for the predicate to look up; a device walk refuses a host predicate as unsupported. */
-static std::size_t expect_predicate(handle<dense_verbs_t>& index, usearch_rows_view_t rows, std::size_t count) {
+static void expect_predicate(handle<dense_verbs_t>& index, usearch_rows_view_t rows, std::size_t count) {
     std::vector<usearch_key_t> admitted;
     for (std::size_t offset = 0; offset < count; offset += 2)
         admitted.push_back(key_of_offset(index.session->seed, offset));
@@ -120,121 +124,112 @@ static std::size_t expect_predicate(handle<dense_verbs_t>& index, usearch_rows_v
     search.arena = index.arena(), search.wanted = cell_wanted_k, search.expansion_factor = dense_expansion_k;
     search.predicate = {admit_listed, &admitted, usearch_predicate_cost_cheap_k};
     usearch_dense_search(&search);
-    if (index.residency == usearch_residency_vram_k) return check(outcome.status == usearch_status_unsupported_k);
-    std::size_t failures = check(outcome);
-    if (failures) return failures;
+    if (index.residency == usearch_residency_vram_k) return void(expect_status(outcome, usearch_status_unsupported_k));
+    if (!expect_success(outcome)) return;
     copied_matches_t const found = copy_matches(matches, dense_queries_k);
     std::size_t outside = 0;
     for (uuid128_t const& key : found.keys)
         outside += !std::binary_search(admitted.begin(), admitted.end(), std::bit_cast<usearch_key_t>(key),
                                        key_precedes);
-    return check(outside == 0 && !found.keys.empty());
+    expect_true(outside == 0 && !found.keys.empty());
 }
 
 /** A RAM index reshards in place, as its own only source and target, under a capacity of every
  *  entry through a plan every call of which is cancelled, and keeps every entry, which the plan's
  *  finish audits; the description then counts each shard it emptied among the live ones, as an
  *  idle slot of its own. */
-static std::size_t expect_reshard_in_place(handle<dense_verbs_t>& index, std::size_t count) {
+static void expect_reshard_in_place(handle<dense_verbs_t>& index, std::size_t count) {
     usearch_outcome_t outcome {};
     usearch_ram_options_t ram {};
     ram.shard_capacity = count;
     usearch_refine_report_t report {};
     usearch_dense_reshard_plan_t plan = nullptr;
     usearch_dense_index_t const self = index.get();
-    std::size_t failures = drive_cancelled_plan(
-        plan, outcome, count, [&](usearch_progress_t progress, usearch_phase_progress_t* phase) {
-            usearch_dense_reshard_t reshard {};
-            reshard.sources_count = 1, reshard.sources = &self, reshard.targets_count = 1, reshard.targets = &self;
-            reshard.executor = index.executor(), reshard.outcome = &outcome;
-            reshard.ram = &ram, reshard.report = &report, reshard.progress = progress;
-            reshard.plan = &plan, reshard.phase = phase;
-            usearch_dense_reshard(&reshard);
-        });
-    failures += check(outcome) + check(plan != nullptr);
+    drive_cancelled_plan(plan, outcome, count, [&](usearch_progress_t progress, usearch_phase_progress_t* phase) {
+        usearch_dense_reshard_t reshard {};
+        reshard.sources_count = 1, reshard.sources = &self, reshard.targets_count = 1, reshard.targets = &self;
+        reshard.executor = index.executor(), reshard.outcome = &outcome;
+        reshard.ram = &ram, reshard.report = &report, reshard.progress = progress;
+        reshard.plan = &plan, reshard.phase = phase;
+        usearch_dense_reshard(&reshard);
+    });
+    expect_success(outcome);
+    expect_true(plan != nullptr);
     usearch_dense_reshard_plan_finish_t finish {};
     finish.executor = index.executor(), finish.outcome = &outcome;
     finish.plan = plan, finish.report = &report;
     usearch_dense_reshard_plan_finish(&finish);
-    failures += check(outcome) + check(report.reachability.audited == count);
-    return failures + check(describe(index).size == count);
+    expect_success(outcome);
+    expect_true(report.reachability.audited == count);
+    expect_true(describe(index).size == count);
 }
 
 /** Walks as narrow as their rankings answer the first @p count queries alike on the session's
  *  executor and on the calling thread alone, since a walk's landmarks follow its row. */
-static std::size_t expect_repeatable_walks(handle<dense_verbs_t>& index, usearch_rows_view_t rows, std::size_t count) {
+static void expect_repeatable_walks(handle<dense_verbs_t>& index, usearch_rows_view_t rows, std::size_t count) {
     copied_matches_t pooled, alone;
     usearch_traversal_stats_t stats {};
-    std::size_t failures = check(search_queries(index, rows, count, count, cell_wanted_k, cell_wanted_k,
-                                                usearch_traversal_walk_k, stats, pooled));
+    expect_success(search_queries(index, rows, count, count, cell_wanted_k, cell_wanted_k, usearch_traversal_walk_k,
+                                  stats, pooled));
     usearch_outcome_t outcome {};
     usearch_matches_view_t matches {};
     dense_verbs_t::search(index.get(), nullptr, index.arena(), count, rows, cell_wanted_k, cell_wanted_k,
                           usearch_traversal_walk_k, &matches, &stats, &outcome);
-    failures += check(outcome);
-    if (failures) return failures;
-    failures += check(append_matches(matches, count, alone));
-    return failures ? failures : check(std::ranges::equal(pooled.keys, alone.keys));
+    if (!expect_success(outcome) || !expect_true(append_matches(matches, count, alone))) return;
+    expect_true(std::ranges::equal(pooled.keys, alone.keys));
 }
 
-/** One cell of the dense diagonal, named @p name, as the file's docblock describes. */
-static std::size_t check_dense_behaviors(sweep_cell_t const& cell, settings_t const& settings,
-                                         std::string const& name) {
+/** One cell of the dense diagonal, as the file's docblock describes. */
+static void test_dense_behaviors(sweep_cell_t const& cell, u64_t seed) {
     // A view holds a key table, so its key verbs and hints probe it rather than scan.
-    settings_t cell_settings = settings_of(settings, cell);
+    settings_t cell_settings = settings_of(session_settings(), cell);
     if (cell.residency == usearch_residency_nvme_k)
         cell_settings.nvme_ram.value = (std::numeric_limits<std::size_t>::max)();
     session_t session = open_session(cell_settings, cell.cpu_class);
-    if (!session) return 1;
-    u64_t const seed = stream_key(settings.seed, name);
+    if (!expect_true(bool(session))) return;
     bool const binary = cell.scalar == usearch_scalar_u1x8_k;
     usearch_dense_metadata_t const geometry {binary ? usearch_dense_metric_hamming_k : usearch_dense_metric_angular_k,
                                              cell.scalar, dense_dimensions_k, 0};
     handle<dense_verbs_t> index = open_index<dense_verbs_t>(session, geometry, cell.shards);
-    if (!index) return 1;
+    if (!expect_true(bool(index))) return;
     nk::matrix<nk::f32_t> const vectors = dense_rows(cell.scalar, dense_rows_k, seed);
     usearch_rows_view_t const rows = rows_of(vectors);
 
-    std::size_t failures = expect_built(cell, index, rows, dense_rows_k);
-    if (failures) return failures;
-    failures += expect_gets(index, dense_rows_k);
-    failures += expect_self_recall(index, rows, dense_rows_k);
-    failures += expect_walk_recall(index, rows, dense_queries_k, dense_expansion_k, 0.9);
-    if (cell.residency == usearch_residency_ram_k) failures += expect_repeatable_walks(index, rows, dense_queries_k);
-    failures += expect_predicate(index, rows, dense_rows_k);
-    failures += expect_hints(
-        index, rows, dense_queries_k, dense_expansion_k,
-        cell.residency == usearch_residency_vram_k ? usearch_status_unsupported_k : usearch_status_success_k);
-    failures += expect_refined(index, rows, dense_queries_k, dense_expansion_k, usearch_status_success_k);
-    failures += expect_health(index, dense_rows_k);
-    failures += expect_cursor(index, dense_rows_k);
-    failures += expect_sample(index, dense_rows_k);
-    failures += expect_buffer_round_trip(index, rows, dense_queries_k, dense_expansion_k, 0.9,
-                                         usearch_status_success_k);
-    std::string const stem = fmt::format("/tmp/usearch-abi-dense-{:016x}", seed);
-    failures += expect_persistence(cell, index, rows, rows, dense_queries_k, dense_expansion_k, 0.9, stem,
-                                   saved_bytes_t::identical_k, 0.0);
-    if (cell.residency == usearch_residency_nvme_k) return failures;
-    failures += expect_refine_plan(index, rows, dense_rows_k, usearch_status_success_k);
+    if (!check_built(cell, index, rows, dense_rows_k)) return;
+    expect_gets(index, dense_rows_k);
+    expect_self_recall(index, rows, dense_rows_k);
+    expect_walk_recall(index, rows, dense_queries_k, dense_expansion_k, 0.9);
+    if (cell.residency == usearch_residency_ram_k) expect_repeatable_walks(index, rows, dense_queries_k);
+    expect_predicate(index, rows, dense_rows_k);
+    expect_hints(index, rows, dense_queries_k, dense_expansion_k,
+                 cell.residency == usearch_residency_vram_k ? usearch_status_unsupported_k : usearch_status_success_k);
+    expect_refined(index, rows, dense_queries_k, dense_expansion_k, usearch_status_success_k);
+    expect_health(index, dense_rows_k);
+    expect_cursor(index, dense_rows_k);
+    expect_sample(index, dense_rows_k);
+    expect_buffer_round_trip(index, rows, dense_queries_k, dense_expansion_k, 0.9, usearch_status_success_k);
+    scratch_directory_t const scratch;
+    std::string const stem = scratch.path("checkpoint");
+    expect_persistence(cell, index, rows, rows, dense_queries_k, dense_expansion_k, 0.9, stem,
+                       saved_bytes_t::identical_k, 0.0);
+    if (cell.residency == usearch_residency_nvme_k) return;
+    expect_refine_plan(index, rows, dense_rows_k, usearch_status_success_k);
     nk::matrix<nk::f32_t> const second_source = dense_rows(cell.scalar, dense_packed_rows_k, ~seed);
-    failures += expect_reshard_gather(index, rows_of(second_source), dense_packed_rows_k, dense_rows_k,
-                                      usearch_status_success_k);
-    if (cell.residency == usearch_residency_ram_k)
-        failures += expect_reshard_in_place(index, dense_rows_k + dense_packed_rows_k);
-    failures += expect_reshard_cut(index, usearch_status_success_k);
-    return failures + expect_cleared(index, rows);
+    expect_reshard_gather(index, rows_of(second_source), dense_packed_rows_k, dense_rows_k, usearch_status_success_k);
+    if (cell.residency == usearch_residency_ram_k) expect_reshard_in_place(index, dense_rows_k + dense_packed_rows_k);
+    expect_reshard_cut(index, usearch_status_success_k);
+    expect_cleared(index, rows);
 }
 
-std::size_t check_dense_abi(settings_t const& settings) {
-    std::size_t failures = 0;
-    if (settings.filter.selects("dense metric names"))
-        failures += report("dense metric names", expect_metric_names<dense_verbs_t>());
+void run_dense_abi_cases() {
+    run_test_case("test_metric_names<dense_verbs_t>", test_metric_names<dense_verbs_t>);
     for (sweep_cell_t const& cell : diagonal_sweep(usearch_scalar_bf16_k)) {
         std::string const name = fmt::format("dense {}", name_of(cell));
-        if (settings.filter.selects(name))
-            failures += report(name.c_str(), check_dense_behaviors(cell, settings, name));
+        // The stream keeps the name the cell had before its label spelled the constants.
+        std::string const label = fmt::format("test_dense_behaviors({}, {}, {}, {})", constant_of(cell.residency),
+                                              constant_of(cell.scalar), constant_of(cell.cpu_class), cell.shards);
+        run_test_case(label.c_str(), test_dense_behaviors, cell, stream_key(test_run.settings.seed, name));
     }
-    return failures;
 }
 
 } // namespace unum::usearch::test::abi

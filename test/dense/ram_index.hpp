@@ -41,11 +41,10 @@ static bool ram_index_row_matches(index_type_ const& index, node_id_t node, vect
  *  key beside its row, and a save and load round trip keeps every key, into a wider index too,
  *  whose rows one refine grows past the saved width while every node stays reachable. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
-static std::size_t test_ram_index_keys(make_index_type_ const& make_index, u64_t seed) {
+static void test_ram_index_keys(make_index_type_ const& make_index, u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
     using key_t = typename index_type_::key_t;
     using keys_view_t = typename index_type_::keys_view_t;
-    std::size_t failures = 0;
     std::size_t const rows = dense_thread_nodes_k, dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
     auto vectors = make_vectors<scalar_t>(rows, dimensions, stream_key(seed, "index_keys"));
     // Rows 2k and 2k + 1 share key k + 1, so every lookup must find a pair.
@@ -58,10 +57,10 @@ static std::size_t test_ram_index_keys(make_index_type_ const& make_index, u64_t
         index_type_& index = *index_ptr;
         typename index_type_::traversal_context_t context = dense_make_context<index_type_>(make_index);
         auto assigned = nk::vector<node_id_t>::zeros(rows).value;
-        failures += expect_eq(index.capacity(), 0u);
-        failures += expect(
+        expect_equal(index.capacity(), 0u);
+        expect_true(
             succeeded(index.insert(keys_view_t {keys.data(), rows}, vectors.view(), assigned.span(), context).status));
-        failures += expect_eq(index.size(), rows);
+        expect_equal(index.size(), rows);
 
         std::size_t wrong = 0;
         for (std::size_t row = 0; row != rows; ++row) {
@@ -70,15 +69,15 @@ static std::size_t test_ram_index_keys(make_index_type_ const& make_index, u64_t
             index.find_each(keys[row], [&](node_id_t node) noexcept { own += node == assigned[row]; });
             wrong += own != 1 || index.count(keys[row]) != 2 || !index.contains(keys[row]);
         }
-        failures += expect_eq(wrong, 0u);
-        failures += expect_eq(index.key_of(static_cast<node_id_t>(rows)).status, status_t::config_mismatch_k);
-        failures += expect(!index.contains(dense_key<key_t>(rows)));
+        expect_equal(wrong, 0u);
+        expect_equal(index.key_of(static_cast<node_id_t>(rows)).status, status_t::config_mismatch_k);
+        expect_true(!index.contains(dense_key<key_t>(rows)));
 
         // A pair exports whole, and a narrower export still reports the true total.
         auto exported = nk::matrix<scalar_t>::zeros({2, dimensions}).value;
-        failures += expect_eq(index.get(keys[0], rows_span_t {exported.span()}, 2), 2u);
-        failures += expect_eq(index.get(keys[0], rows_span_t {exported.span()}, 1), 2u);
-        failures += expect_eq(index.get(dense_key<key_t>(rows), rows_span_t {exported.span()}, 2), 0u);
+        expect_equal(index.get(keys[0], rows_span_t {exported.span()}, 2), 2u);
+        expect_equal(index.get(keys[0], rows_span_t {exported.span()}, 1), 2u);
+        expect_equal(index.get(dense_key<key_t>(rows), rows_span_t {exported.span()}, 2), 0u);
 
         // A reshard into two targets carries every key beside its row into one of the parts, and
         // the source forgets it.
@@ -88,19 +87,19 @@ static std::size_t test_ram_index_keys(make_index_type_ const& make_index, u64_t
             index_type_* const source = &index;
             auto [cutting, cut_status] = index.plan_reshard(std::span<index_type_* const> {&source, 1},
                                                             std::span<index_type_* const> {targets});
-            failures += expect(succeeded(cut_status) && succeeded(cutting.reserve(context)));
+            expect_true(succeeded(cut_status) && succeeded(cutting.reserve(context)));
             if (succeeded(cut_status)) {
                 do
-                    for (auto const task : cutting.tasks()) failures += expect(succeeded(cutting.run(task, context)));
+                    for (auto const task : cutting.tasks()) expect_true(succeeded(cutting.run(task, context)));
                 while (cutting.advance());
-                failures += expect(succeeded(cutting.finish().status));
+                expect_true(succeeded(cutting.finish().status));
                 // A finished plan advances no further, and finishing it again answers the same.
-                failures += expect(!cutting.advance() && succeeded(cutting.finish().status));
+                expect_true(!cutting.advance() && succeeded(cutting.finish().status));
             }
         }
-        failures += expect_eq(index.size(), 0u);
-        failures += expect_eq(index.count(keys[0]), 0u);
-        failures += expect_eq(targets[0]->size() + targets[1]->size(), rows);
+        expect_equal(index.size(), 0u);
+        expect_equal(index.count(keys[0]), 0u);
+        expect_equal(targets[0]->size() + targets[1]->size(), rows);
         wrong = 0;
         for (index_type_ const* part : targets)
             for (node_id_t node = 0; node != part->size(); ++node) {
@@ -111,25 +110,25 @@ static std::size_t test_ram_index_keys(make_index_type_ const& make_index, u64_t
             }
         for (std::size_t row = 0; row != rows; row += 2)
             wrong += targets[0]->count(keys[row]) + targets[1]->count(keys[row]) != 2;
-        failures += expect_eq(wrong, 0u);
+        expect_equal(wrong, 0u);
 
         // A save and a load through the plans keep every key beside its row.
         index_type_& saved = *targets[0];
         auto const shape = saved.saved_shape();
         auto saved_vectors = nk::matrix<scalar_t>::zeros({shape.nodes, shape.dimensions}).value;
         auto saved_neighbors = nk::matrix<node_id_t>::zeros({shape.nodes, shape.connectivity}).value;
-        failures += expect_eq(saved.save({dense_matrix_bytes(saved_vectors), dense_matrix_bytes(saved_neighbors)},
-                                         synchronization_t::exclusive_k),
-                              status_t::success_k);
+        expect_equal(saved.save({dense_matrix_bytes(saved_vectors), dense_matrix_bytes(saved_neighbors)},
+                                synchronization_t::exclusive_k),
+                     status_t::success_k);
         std::vector<key_t> saved_keys(shape.nodes);
         for (node_id_t node = 0; node != shape.nodes; ++node) saved_keys[node] = saved.key_of(node).value;
         std::unique_ptr<index_type_> const restored_ptr = make_index(ledger);
         index_type_& restored = *restored_ptr;
-        failures += expect_eq(
+        expect_equal(
             restored.load({dense_matrix_bytes(saved_vectors.view()), dense_matrix_bytes(saved_neighbors.view())},
                           to_span(saved_keys), shape.nodes, {0, static_cast<node_id_t>(shape.nodes)}),
             status_t::success_k);
-        failures += expect_eq(restored.size(), shape.nodes);
+        expect_equal(restored.size(), shape.nodes);
         wrong = 0;
         for (node_id_t node = 0; node != shape.nodes; ++node) {
             wrong += restored.key_of(node).value != saved_keys[node];
@@ -137,7 +136,7 @@ static std::size_t test_ram_index_keys(make_index_type_ const& make_index, u64_t
             wrong += !ram_index_row_matches(restored, node, vectors, rows_of_key(saved_keys[node])) &&
                      !ram_index_row_matches(restored, node, vectors, rows_of_key(saved_keys[node]) + 1);
         }
-        failures += expect_eq(wrong, 0u);
+        expect_equal(wrong, 0u);
 
         // A wider index takes the saved rows with empty tails, and a round over them reaches all.
         iota_view<node_id_t> const saved_nodes {0, static_cast<node_id_t>(shape.nodes)};
@@ -149,19 +148,18 @@ static std::size_t test_ram_index_keys(make_index_type_ const& make_index, u64_t
             .neighbors = dense_matrix_bytes(saved_neighbors.view()),
             .connectivity = shape.connectivity,
         };
-        failures += expect_eq(widened.load(narrow_columns, to_span(saved_keys), shape.nodes, saved_nodes),
-                              status_t::success_k);
-        failures += expect(succeeded(widened.refine({}, context).status));
+        expect_equal(widened.load(narrow_columns, to_span(saved_keys), shape.nodes, saved_nodes), status_t::success_k);
+        expect_true(succeeded(widened.refine({}, context).status));
         auto const wide_shape = widened.saved_shape();
-        failures += expect_eq(wide_shape.connectivity, 2 * shape.connectivity);
+        expect_equal(wide_shape.connectivity, 2 * shape.connectivity);
         auto wide_vectors = nk::matrix<scalar_t>::zeros({wide_shape.nodes, wide_shape.dimensions}).value;
         auto wide_neighbors = nk::matrix<node_id_t>::zeros({wide_shape.nodes, wide_shape.connectivity}).value;
-        failures += expect_eq(widened.save({dense_matrix_bytes(wide_vectors), dense_matrix_bytes(wide_neighbors)},
-                                           synchronization_t::exclusive_k),
-                              status_t::success_k);
+        expect_equal(widened.save({dense_matrix_bytes(wide_vectors), dense_matrix_bytes(wide_neighbors)},
+                                  synchronization_t::exclusive_k),
+                     status_t::success_k);
         auto const [reachability, health_status] = dense_audit_health(widened, context);
-        failures += expect(succeeded(health_status));
-        failures += expect_eq(reachability.reachable_nodes, reachability.audited_nodes);
+        expect_true(succeeded(health_status));
+        expect_equal(reachability.reachable_nodes, reachability.audited_nodes);
         // The wider rows never fit back into the narrower index.
         std::unique_ptr<index_type_> const narrowed_ptr = make_index(ledger);
         typename index_type_::columns_view_t const wide_columns {
@@ -169,10 +167,10 @@ static std::size_t test_ram_index_keys(make_index_type_ const& make_index, u64_t
             .neighbors = dense_matrix_bytes(wide_neighbors.view()),
             .connectivity = wide_shape.connectivity,
         };
-        failures += expect_eq(narrowed_ptr->load(wide_columns, to_span(saved_keys), shape.nodes, saved_nodes),
-                              status_t::config_mismatch_k);
+        expect_equal(narrowed_ptr->load(wide_columns, to_span(saved_keys), shape.nodes, saved_nodes),
+                     status_t::config_mismatch_k);
     }
-    return failures + expect_eq(ledger.live_bytes, 0);
+    expect_equal(ledger.live_bytes, 0);
 }
 
 /** A RAM index whose rows hold @p links, one list of targets per entry, its vectors drawn from
@@ -220,7 +218,7 @@ static typename index_type_::health_plan_t ram_index_audit(index_type_& index, r
  *  linking only to each other is a stranded one, depths are breadth-first whatever order the
  *  tasks run in, and a root drawn inside a small component gives way to the largest. */
 template <typename index_type_, typename make_index_type_>
-static std::size_t test_ram_index_audit_components(make_index_type_ const& make_index, u64_t seed) {
+static void test_ram_index_audit_components(make_index_type_ const& make_index, u64_t seed) {
     using links_t = std::vector<std::vector<node_id_t>>;
     constexpr std::size_t entries = 200;
     node_id_t const root = static_cast<node_id_t>(seeded_bijection(0, entries, 0));
@@ -232,16 +230,15 @@ static std::size_t test_ram_index_audit_components(make_index_type_ const& make_
         for (std::size_t entry = first; entry != bound; ++entry)
             links[at(entry)].push_back(at(entry + 1 == bound ? first : entry + 1));
     };
-    std::size_t failures = 0;
     allocation_ledger_t ledger;
     auto audit = [&](links_t const& links, auto&& check) {
         std::unique_ptr<index_type_> const index = ram_index_of_links<index_type_>(make_index, ledger, links, seed);
-        failures += expect(index != nullptr);
+        expect_true(index != nullptr);
         if (!index) return;
         auto plan = ram_index_audit(*index, ram_tasks_order_t::first_to_last_k);
         auto const [health, status] = plan.finish();
-        failures += expect(succeeded(status));
-        failures += expect_eq(health.audited_nodes, entries);
+        expect_true(succeeded(status));
+        expect_equal(health.audited_nodes, entries);
         check(plan, health);
     };
 
@@ -251,11 +248,11 @@ static std::size_t test_ram_index_audit_components(make_index_type_ const& make_
     cycle(joined, 150, entries);
     joined[at(10)].push_back(at(160));
     audit(joined, [&](auto const& plan, reachability_t const& health) {
-        failures += expect_eq(health.reachable_nodes, 150u);
-        failures += expect_eq(health.unreached_islands, 0u);
-        failures += expect_eq(health.stranded_islands, 1u);
-        failures += expect_eq(health.components, 1u);
-        failures += expect(plan.reached(at(170)) && !plan.reaches_root(at(170)));
+        expect_equal(health.reachable_nodes, 150u);
+        expect_equal(health.unreached_islands, 0u);
+        expect_equal(health.stranded_islands, 1u);
+        expect_equal(health.components, 1u);
+        expect_true(plan.reached(at(170)) && !plan.reaches_root(at(170)));
     });
 
     // An entry linking into the cycle, which nothing links to.
@@ -263,13 +260,13 @@ static std::size_t test_ram_index_audit_components(make_index_type_ const& make_
     cycle(unlinked, 0, entries - 1);
     unlinked[at(entries - 1)].push_back(at(5));
     audit(unlinked, [&](auto const& plan, reachability_t const& health) {
-        failures += expect_eq(health.reachable_nodes, entries - 1);
-        failures += expect_eq(health.unreached_islands, 1u);
-        failures += expect_eq(health.stranded_islands, 0u);
-        failures += expect_eq(health.unlinked, 1u);
-        failures += expect_eq(health.underlinked, 1u);
-        failures += expect_eq(plan.in_links(at(entries - 1)), 0u);
-        failures += expect(!plan.reached(at(entries - 1)) && plan.reaches_root(at(entries - 1)));
+        expect_equal(health.reachable_nodes, entries - 1);
+        expect_equal(health.unreached_islands, 1u);
+        expect_equal(health.stranded_islands, 0u);
+        expect_equal(health.unlinked, 1u);
+        expect_equal(health.underlinked, 1u);
+        expect_equal(plan.in_links(at(entries - 1)), 0u);
+        expect_true(!plan.reached(at(entries - 1)) && plan.reaches_root(at(entries - 1)));
     });
 
     // A pair the cycle links into, linking only to each other.
@@ -278,10 +275,10 @@ static std::size_t test_ram_index_audit_components(make_index_type_ const& make_
     cycle(stranded, entries - 2, entries);
     stranded[at(20)].push_back(at(entries - 2));
     audit(stranded, [&](auto const& plan, reachability_t const& health) {
-        failures += expect_eq(health.reachable_nodes, entries - 2);
-        failures += expect_eq(health.unreached_islands, 0u);
-        failures += expect_eq(health.stranded_islands, 1u);
-        failures += expect(plan.reached(at(entries - 1)) && !plan.reaches_root(at(entries - 1)));
+        expect_equal(health.reachable_nodes, entries - 2);
+        expect_equal(health.unreached_islands, 0u);
+        expect_equal(health.stranded_islands, 1u);
+        expect_true(plan.reached(at(entries - 1)) && !plan.reaches_root(at(entries - 1)));
     });
 
     // A root drawn inside a three-entry cycle linking into the rest gives way to the rest.
@@ -290,11 +287,11 @@ static std::size_t test_ram_index_audit_components(make_index_type_ const& make_
     cycle(nested, 3, entries);
     nested[at(1)].push_back(at(50));
     audit(nested, [&](auto const& plan, reachability_t const& health) {
-        failures += expect_eq(health.reachable_nodes, entries - 3);
-        failures += expect(!plan.in_component(root) && plan.in_component(at(100)));
-        failures += expect_eq(health.unreached_islands, 1u);
-        failures += expect_eq(health.stranded_islands, 0u);
-        failures += expect_eq(health.components, 1u);
+        expect_equal(health.reachable_nodes, entries - 3);
+        expect_true(!plan.in_component(root) && plan.in_component(at(100)));
+        expect_equal(health.unreached_islands, 1u);
+        expect_equal(health.stranded_islands, 0u);
+        expect_equal(health.components, 1u);
     });
 
     // Chains run upward through every word, so a sweep expanding what it reached itself would
@@ -320,18 +317,18 @@ static std::size_t test_ram_index_audit_components(make_index_type_ const& make_
         for (node_id_t const target : row) ++in_links[target];
     {
         std::unique_ptr<index_type_> const index = ram_index_of_links<index_type_>(make_index, ledger, chained, seed);
-        failures += expect(index != nullptr);
+        expect_true(index != nullptr);
         for (ram_tasks_order_t const order : {ram_tasks_order_t::first_to_last_k, ram_tasks_order_t::last_to_first_k}) {
             if (!index) break;
             auto plan = ram_index_audit(*index, order);
             std::size_t wrong = 0;
             for (node_id_t entry = 0; entry != entries; ++entry)
                 wrong += plan.depth_from_root(entry) != depths[entry] || plan.in_links(entry) != in_links[entry];
-            failures += expect_eq(wrong, 0u);
-            failures += expect_eq(plan.finish().value.depth_from_root, deepest);
+            expect_equal(wrong, 0u);
+            expect_equal(plan.finish().value.depth_from_root, deepest);
         }
     }
-    return failures + expect_eq(ledger.live_bytes, 0);
+    expect_equal(ledger.live_bytes, 0);
 }
 
 /** One round over @p index under @p config on the calling thread, @p at_barrier hearing the plan
@@ -373,12 +370,11 @@ static nk::matrix<node_id_t> ram_index_rows(index_type_& index, make_index_type_
  *  capacity are cut by ID, renumbering the entries changes recall within noise only, and a graph
  *  refined until converged changes no link set on the next round. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
-static std::size_t test_ram_index_rounds(make_index_type_ const& make_index, u64_t seed) {
+static void test_ram_index_rounds(make_index_type_ const& make_index, u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
     using key_t = typename index_type_::key_t;
     using refine_config_t = typename index_type_::refine_config_t;
     using links_t = std::vector<std::vector<node_id_t>>;
-    std::size_t failures = 0;
     allocation_ledger_t ledger;
     typename index_type_::traversal_context_t context = dense_make_context<index_type_>(make_index);
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
@@ -404,7 +400,7 @@ static std::size_t test_ram_index_rounds(make_index_type_ const& make_index, u64
         links[cycled + 2] = {cycled + 1};
         links[20].push_back(cycled + 1);
         std::unique_ptr<index_type_> const index = ram_index_of_links<index_type_>(make_index, ledger, links, seed);
-        failures += expect(index != nullptr);
+        expect_true(index != nullptr);
         if (index) {
             std::size_t healed_from = 0, healing = 0;
             bool in_heal = false;
@@ -413,13 +409,13 @@ static std::size_t test_ram_index_rounds(make_index_type_ const& make_index, u64
                 in_heal = plan.phase() == phase_t::heal_k;
                 healed_from = context.computed_distances;
             });
-            failures += expect(succeeded(status));
-            failures += expect_eq(report.opening.unreached_islands, 1u);
-            failures += expect_eq(report.opening.stranded_islands, 1u);
-            failures += expect_eq(report.reachability.unreached_islands, 0u);
-            failures += expect_eq(report.reachability.stranded_islands, 0u);
-            failures += expect_eq(report.reachability.reachable_nodes, entries);
-            failures += expect_eq(healing, 0u);
+            expect_true(succeeded(status));
+            expect_equal(report.opening.unreached_islands, 1u);
+            expect_equal(report.opening.stranded_islands, 1u);
+            expect_equal(report.reachability.unreached_islands, 0u);
+            expect_equal(report.reachability.stranded_islands, 0u);
+            expect_equal(report.reachability.reachable_nodes, entries);
+            expect_equal(healing, 0u);
         }
     }
 
@@ -430,21 +426,21 @@ static std::size_t test_ram_index_rounds(make_index_type_ const& make_index, u64
     auto saved_neighbors = nk::matrix<node_id_t>::zeros({built, static_cast<std::size_t>(connectivity_16_k)}).value;
     {
         std::unique_ptr<index_type_> const index = make_index(ledger);
-        failures += expect(succeeded(index->reserve({built}).status));
+        expect_true(succeeded(index->reserve({built}).status));
         typename index_type_::insert_config_t cheap;
         cheap.expansion_factor = 4;
-        failures += expect(succeeded(index->insert(to_span(keys), vectors.view(), {}, context, cheap).status));
-        failures += expect_eq(
+        expect_true(succeeded(index->insert(to_span(keys), vectors.view(), {}, context, cheap).status));
+        expect_equal(
             dense_save(*index, make_index, {dense_matrix_bytes(saved_vectors), dense_matrix_bytes(saved_neighbors)},
                        synchronization_t::exclusive_k),
             status_t::success_k);
     }
     auto load = [&](nk::matrix_view<scalar_t> rows, nk::matrix_view<node_id_t> links, std::span<key_t const> named) {
         std::unique_ptr<index_type_> index = make_index(ledger);
-        failures += expect(succeeded(index->reserve({built}).status));
-        failures += expect_eq(dense_load(*index, make_index, {dense_matrix_bytes(rows), dense_matrix_bytes(links)},
-                                         named, built, {0, static_cast<node_id_t>(built)}),
-                              status_t::success_k);
+        expect_true(succeeded(index->reserve({built}).status));
+        expect_equal(dense_load(*index, make_index, {dense_matrix_bytes(rows), dense_matrix_bytes(links)}, named, built,
+                                {0, static_cast<node_id_t>(built)}),
+                     status_t::success_k);
         return index;
     };
     nk::matrix_view<scalar_t> const rows = vectors.view();
@@ -463,10 +459,10 @@ static std::size_t test_ram_index_rounds(make_index_type_ const& make_index, u64
                 plan.stop();
                 stopped = true;
             });
-            failures += expect(stopped);
-            failures += expect_eq(status, status_t::cancelled_k);
-            failures += expect(report.verdict == refine_verdict_t::stopped_k);
-            failures += expect(dense_recall_at_ten(*index, make_index, queries) >= before);
+            expect_true(stopped);
+            expect_equal(status, status_t::cancelled_k);
+            expect_true(report.verdict == refine_verdict_t::stopped_k);
+            expect_true(dense_recall_at_ten(*index, make_index, queries) >= before);
         }
 
     // A cache of a few rows puts the first neighborhoods over capacity, which gather again
@@ -476,12 +472,12 @@ static std::size_t test_ram_index_rounds(make_index_type_ const& make_index, u64
         std::size_t gathers = 0;
         auto const [report, status] = ram_index_round(
             *index, narrow, context, [&](auto const& plan) noexcept { gathers += plan.phase() == phase_t::gather_k; });
-        failures += expect(succeeded(status));
-        failures += expect(gathers >= 2);
-        failures += expect_eq(report.reselected_nodes, built);
-        failures += expect(report.neighborhoods > 1 && report.widest_neighborhood != 0);
-        if constexpr (!index_type_::has_tiles_k) failures += expect(report.widest_neighborhood <= narrow_capacity);
-        failures += expect(report.reachability.reachable_nodes >= report.opening.reachable_nodes);
+        expect_true(succeeded(status));
+        expect_true(gathers >= 2);
+        expect_equal(report.reselected_nodes, built);
+        expect_true(report.neighborhoods > 1 && report.widest_neighborhood != 0);
+        if constexpr (!index_type_::has_tiles_k) expect_true(report.widest_neighborhood <= narrow_capacity);
+        expect_true(report.reachability.reachable_nodes >= report.opening.reachable_nodes);
     }
 
     // Identical entries all lie nearest to one hub, so no gather splits them; they are cut into
@@ -495,13 +491,13 @@ static std::size_t test_ram_index_rounds(make_index_type_ const& make_index, u64
             for (std::size_t dimension = 0; dimension != dimensions; ++dimension) target[dimension] = source[dimension];
         }
         std::unique_ptr<index_type_> const index = make_index(ledger);
-        failures += expect(succeeded(index->reserve({entries}).status));
-        failures += expect(succeeded(index->insert(std::span(keys).first(entries), copies.view(), {}, context).status));
+        expect_true(succeeded(index->reserve({entries}).status));
+        expect_true(succeeded(index->insert(std::span(keys).first(entries), copies.view(), {}, context).status));
         auto const [report, status] = ram_index_round(*index, narrow, context, ignore_barriers);
-        failures += expect(succeeded(status));
-        failures += expect_eq(report.reselected_nodes, entries);
-        if constexpr (!index_type_::has_tiles_k) failures += expect(report.widest_neighborhood <= narrow_capacity);
-        failures += expect(report.reachability.reachable_nodes >= report.opening.reachable_nodes);
+        expect_true(succeeded(status));
+        expect_equal(report.reselected_nodes, entries);
+        if constexpr (!index_type_::has_tiles_k) expect_true(report.widest_neighborhood <= narrow_capacity);
+        expect_true(report.reachability.reachable_nodes >= report.opening.reachable_nodes);
     }
 
     // The same graph under shuffled IDs draws other entries but reaches recall within noise.
@@ -529,12 +525,12 @@ static std::size_t test_ram_index_rounds(make_index_type_ const& make_index, u64
         std::unique_ptr<index_type_> const plain = load(saved_vectors.view(), saved_neighbors.view(), to_span(keys));
         std::unique_ptr<index_type_> const shuffled = load(shuffled_vectors.view(), shuffled_neighbors.view(),
                                                            to_span(shuffled_keys));
-        failures += expect(succeeded(ram_index_round(*plain, narrow, context, ignore_barriers).status));
-        failures += expect(succeeded(ram_index_round(*shuffled, narrow, context, ignore_barriers).status));
+        expect_true(succeeded(ram_index_round(*plain, narrow, context, ignore_barriers).status));
+        expect_true(succeeded(ram_index_round(*shuffled, narrow, context, ignore_barriers).status));
         std::size_t const plain_found = dense_recall_at_ten(*plain, make_index, queries);
         std::size_t const shuffled_found = dense_recall_at_ten(*shuffled, make_index, queries);
         std::size_t const noise = queries.extent(0) * 10 / 20;
-        failures += expect(plain_found + noise >= shuffled_found && shuffled_found + noise >= plain_found);
+        expect_true(plain_found + noise >= shuffled_found && shuffled_found + noise >= plain_found);
     }
 
     // Seventeen entries in one neighborhood: rounds run until one changes no link set, and the next
@@ -542,22 +538,22 @@ static std::size_t test_ram_index_rounds(make_index_type_ const& make_index, u64
     {
         constexpr std::size_t entries = connectivity_16_k + 1, rounds = 8;
         std::unique_ptr<index_type_> const index = make_index(ledger);
-        failures += expect(succeeded(index->reserve({entries}).status));
-        failures += expect(succeeded(
+        expect_true(succeeded(index->reserve({entries}).status));
+        expect_true(succeeded(
             index->insert(std::span(keys).first(entries), rows(nk::range(0, entries), nk::slice), {}, context).status));
         bool converged = false;
         for (std::size_t round = 0; round != rounds && !converged; ++round)
             converged = ram_index_round(*index, {}, context, ignore_barriers).value.verdict ==
                         refine_verdict_t::converged_k;
-        failures += expect(converged);
+        expect_true(converged);
         nk::matrix<node_id_t> const before = ram_index_rows(*index, make_index);
         auto const [report, status] = ram_index_round(*index, {}, context, ignore_barriers);
         nk::matrix<node_id_t> const after = ram_index_rows(*index, make_index);
         nk::matrix_view<node_id_t> const links_before = before.view(), links_after = after.view();
-        failures += expect(succeeded(status));
-        failures += expect(report.verdict == refine_verdict_t::converged_k);
-        failures += expect_eq(report.changed_nodes, 0u);
-        failures += expect_eq(report.added_links + report.dropped_links, 0u);
+        expect_true(succeeded(status));
+        expect_true(report.verdict == refine_verdict_t::converged_k);
+        expect_equal(report.changed_nodes, 0u);
+        expect_equal(report.added_links + report.dropped_links, 0u);
         std::size_t differing = 0;
         for (std::size_t entry = 0; entry != entries; ++entry)
             for (std::size_t slot = 0; slot != connectivity_16_k; ++slot) {
@@ -566,9 +562,9 @@ static std::size_t test_ram_index_rounds(make_index_type_ const& make_index, u64
                     found |= links_before(entry, slot) == links_after(entry, other);
                 differing += !found;
             }
-        failures += expect_eq(differing, 0u);
+        expect_equal(differing, 0u);
     }
-    return failures + expect_eq(ledger.live_bytes, 0);
+    expect_equal(ledger.live_bytes, 0);
 }
 
 /** No-op sibling picked when the cell cannot be compiled on this target: its serial
@@ -578,10 +574,10 @@ template <                                        //
     typename waiter_type_ = fu::standard_yield_t, //
     nk_capability_t caps_ = nk_cap_serial_k,      //
     template <typename> class atomic_ref_ = fu::standard_atomic_ref>
-static std::size_t test_ram_index_configuration(char const* name, u64_t) {
+static case_result_t test_ram_index_configuration(u64_t) {
     if constexpr (!quads_supported<kernel_, typename nk::type_for<dtype_>::type, nk_cap_serial_k>)
-        return report(name, "serial kernels not adapted yet");
-    else return report(name, "kit not compiled for this target");
+        return case_result_t::skipped(needs_serial_kernels_k);
+    else return case_result_t::skipped(needs_kit_target_k);
 }
 
 template <                                        //
@@ -590,7 +586,7 @@ template <                                        //
     nk_capability_t caps_ = nk_cap_serial_k,      //
     template <typename> class atomic_ref_ = fu::standard_atomic_ref>
     requires dense_cell_testable<dtype_, kernel_, caps_>
-static std::size_t test_ram_index_configuration(char const* name, u64_t seed) {
+static case_result_t test_ram_index_configuration(u64_t seed) {
 
     using index_t = ram_index<typename quads_ladder<typename nk::type_for<dtype_>::type, caps_>::kit_t,
                               typename tiles_ladder<typename nk::type_for<dtype_>::type, caps_>::kit_t,
@@ -599,7 +595,7 @@ static std::size_t test_ram_index_configuration(char const* name, u64_t seed) {
                               typename visits_hash_set_ladder<caps_>::kit_t, waiter_type_, atomic_ref_,
                               dummy_cache_hints_t, counting_allocator_t, counting_allocator_t, std::allocator<byte_t>>;
 
-    if (!dense_cell_admitted<caps_, atomic_ref_>()) return report(name, "capabilities missing at runtime");
+    if (!dense_cell_admitted<caps_, atomic_ref_>()) return case_result_t::skipped(needs_capabilities_k);
 
     using geometry_t = typename index_t::geometry_t;
     using scalar_t = typename index_t::scalar_t;
@@ -609,47 +605,46 @@ static std::size_t test_ram_index_configuration(char const* name, u64_t seed) {
             new (std::nothrow) index_t(kernel_, geometry, counting_allocator_t(ledger), counting_allocator_t(ledger)));
     };
 
-    std::size_t failures_count = 0;
-    failures_count += test_ram_index_keys<index_t, kernel_>(make_index, seed);
-    failures_count += test_dense_guards<index_t>(make_index, seed);
-    failures_count += test_dense_three_vectors<index_t, kernel_>(make_index, seed);
-    failures_count += test_dense_growth_and_recall<index_t, kernel_>(make_index, seed);
-    failures_count += test_dense_refine_settles<index_t, kernel_>(make_index, seed);
-    failures_count += test_dense_duplicate_basin<index_t, kernel_>(make_index, seed);
-    failures_count += test_dense_health_audits<index_t, kernel_>(make_index, seed);
-    failures_count += test_ram_index_audit_components<index_t>(make_index, seed);
-    failures_count += test_ram_index_rounds<index_t, kernel_>(make_index, seed);
-    failures_count += test_dense_heal_islands<index_t>(make_index, seed);
-    failures_count += test_dense_round_in_place<index_t, kernel_>(make_index, seed);
-    failures_count += test_dense_cut<index_t, kernel_>(make_index, seed);
-    failures_count += test_dense_predicated_search<index_t, kernel_>(make_index, seed);
-    failures_count += test_dense_scan<index_t, kernel_>(make_index, seed);
-    failures_count += test_dense_multiply<index_t, kernel_>(make_index, seed);
-    failures_count += test_dense_attend<index_t, kernel_>(make_index, seed);
-    failures_count += test_dense_indexer_search<index_t, kernel_>(make_index, seed);
-    failures_count += test_dense_save_load_roundtrip<index_t, kernel_>(make_index, seed);
-    failures_count += test_dense_load_hostile<index_t, kernel_>(make_index, seed);
-    failures_count += test_dense_load_append<index_t, kernel_>(make_index, seed);
-    failures_count += test_dense_concurrent_build<index_t, kernel_>(make_index, seed);
-    failures_count += test_dense_concurrent_search<index_t, kernel_>(make_index, seed);
-    failures_count += test_dense_save_race<index_t, kernel_>(make_index, seed);
-    failures_count += test_dense_immutable_parity<index_t, kernel_>(make_index, seed);
+    test_ram_index_keys<index_t, kernel_>(make_index, seed);
+    test_dense_guards<index_t>(make_index, seed);
+    test_dense_three_vectors<index_t, kernel_>(make_index, seed);
+    test_dense_growth_and_recall<index_t, kernel_>(make_index, seed);
+    test_dense_refine_settles<index_t, kernel_>(make_index, seed);
+    test_dense_duplicate_basin<index_t, kernel_>(make_index, seed);
+    test_dense_health_audits<index_t, kernel_>(make_index, seed);
+    test_ram_index_audit_components<index_t>(make_index, seed);
+    test_ram_index_rounds<index_t, kernel_>(make_index, seed);
+    test_dense_heal_islands<index_t>(make_index, seed);
+    test_dense_round_in_place<index_t, kernel_>(make_index, seed);
+    test_dense_cut<index_t, kernel_>(make_index, seed);
+    test_dense_predicated_search<index_t, kernel_>(make_index, seed);
+    test_dense_scan<index_t, kernel_>(make_index, seed);
+    test_dense_multiply<index_t, kernel_>(make_index, seed);
+    test_dense_attend<index_t, kernel_>(make_index, seed);
+    test_dense_indexer_search<index_t, kernel_>(make_index, seed);
+    test_dense_save_load_round_trip<index_t, kernel_>(make_index, seed);
+    test_dense_load_hostile<index_t, kernel_>(make_index, seed);
+    test_dense_load_append<index_t, kernel_>(make_index, seed);
+    test_dense_concurrent_build<index_t, kernel_>(make_index, seed);
+    test_dense_concurrent_search<index_t, kernel_>(make_index, seed);
+    test_dense_save_race<index_t, kernel_>(make_index, seed);
+    test_dense_immutable_parity<index_t, kernel_>(make_index, seed);
     using concurrent_cursor_t = ram_cursor<index_t, synchronization_t::concurrent_k, //
                                            counting_allocator_t>;
     using immutable_cursor_t = ram_cursor<index_t, synchronization_t::immutable_k, //
                                           counting_allocator_t>;
-    failures_count += test_dense_cursor<index_t, concurrent_cursor_t, immutable_cursor_t>(make_index, seed);
-    failures_count += test_dense_allocation_budget<index_t, kernel_>(make_index, seed);
-    failures_count += test_dense_frontier_shedding<index_t>(make_index, seed);
-    failures_count += test_dense_overflow_race<index_t>(make_index, seed);
-    return report(name, failures_count);
+    test_dense_cursor<index_t, concurrent_cursor_t, immutable_cursor_t>(make_index, seed);
+    test_dense_allocation_budget<index_t, kernel_>(make_index, seed);
+    test_dense_frontier_shedding<index_t>(make_index, seed);
+    test_dense_overflow_race<index_t>(make_index, seed);
+    return {};
 }
 
 /** The starved cell: the same index over ledgered traversal scratch, so a refused re-table
  *  has somewhere to come from, walked by the saturation scenario alone. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
     requires quads_supported<kernel_, typename nk::type_for<dtype_>::type, nk_cap_serial_k>
-static std::size_t test_starved_configuration(char const* name, u64_t seed) {
+static void test_starved_configuration(u64_t seed) {
     using index_t = ram_index<typename quads_ladder<typename nk::type_for<dtype_>::type, nk_cap_serial_k>::kit_t,
                               typename tiles_ladder<typename nk::type_for<dtype_>::type, nk_cap_serial_k>::kit_t,
                               typename elementwise_ladder<nk_cap_serial_k>::kit_t,
@@ -664,8 +659,8 @@ static std::size_t test_starved_configuration(char const* name, u64_t seed) {
         return std::unique_ptr<index_t>(
             new (std::nothrow) index_t(kernel_, geometry, counting_allocator_t(ledger), counting_allocator_t(ledger)));
     };
-    return report(
-        name, test_dense_saturated<index_t>(make_index, seed) + test_dense_refine_atomic<index_t>(make_index, seed));
+    test_dense_saturated<index_t>(make_index, seed);
+    test_dense_refine_atomic<index_t>(make_index, seed);
 }
 
 } // namespace unum::usearch::test::dense

@@ -49,7 +49,7 @@
 #include <numkong/numkong.h> // `nk_cast_serial` - the value table, the widened rows
 
 #include "abi.hpp"
-#include "bench.hpp" // `humanized`
+#include "harness.hpp" // `humanized`
 
 namespace unum::usearch::bench {
 using namespace unum::usearch::tools;

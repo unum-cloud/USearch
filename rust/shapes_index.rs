@@ -1729,23 +1729,14 @@ impl Drop for ShapesCursor<'_> {
 #[cfg(test)]
 mod tests {
     use core::ops::ControlFlow;
-    use std::path::PathBuf;
 
     use rand::{RngExt, SeedableRng};
 
     use super::*;
+    use crate::testing::{ScratchDirectory, assert_close_rows, case_stream_key, executor, keys, refused};
     use crate::types::Phase;
 
     // region: Helpers
-
-    /// One executor per test, since an executor runs one call at a time.
-    fn executor() -> Executor {
-        Executor::for_ram(&[], None, 0).expect("the executor must spawn")
-    }
-
-    fn keys(first: u64, count: usize) -> Vec<Key> {
-        (first..first + count as u64).map(Key::from).collect()
-    }
 
     /// Random clouds of the given point counts inside the unit cube, the same for the same seed.
     fn clouds(points: impl IntoIterator<Item = usize>, seed: u64) -> Vec<Vec<[f32; 3]>> {
@@ -1759,9 +1750,9 @@ mod tests {
 
     /// Random clouds of 4 to 12 points, the same for the same seed.
     fn random_clouds(count: usize, seed: u64) -> Vec<Vec<[f32; 3]>> {
-        let mut generator = rand_chacha::ChaCha8Rng::seed_from_u64(seed ^ 0x5eed);
+        let mut generator = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
         let points: Vec<usize> = (0..count).map(|_| generator.random_range(4..13)).collect();
-        clouds(points, seed)
+        clouds(points, generator.random())
     }
 
     /// A host index holding `count` random clouds under consecutive keys from `first`.
@@ -1777,32 +1768,18 @@ mod tests {
         Ok(index.describe()?.size)
     }
 
-    fn refused(answer: Result<impl Sized>, status: Status) -> bool {
-        matches!(answer, Err(Error { status: answered, .. }) if answered == status)
-    }
-
-    /// A checkpoint path scoped by test name and process, never the working directory.
-    fn scratch_path(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("usearch-rust-shapes-{name}-{}.safegraphs", std::process::id()))
-    }
-
-    fn remove_quietly(path: &Path) {
-        let _ = std::fs::remove_file(path);
-    }
-
     // endregion: Helpers
 
     // region: Construction
 
     #[test]
-    fn init_ram_starts_empty_and_keeps_the_metric() -> Result<()> {
+    fn init_ram_starts_empty_and_keeps_the_metric() {
         let options = ShapesOptions { metric: ShapesMetric::Hausdorff, ..ShapesOptions::default() };
-        let described = ShapesIndex::init_ram(&options, &[])?.describe()?;
+        let described = ShapesIndex::init_ram(&options, &[]).unwrap().describe().unwrap();
         assert_eq!((described.size, described.total_points), (0, 0));
         assert_eq!(described.metadata.metric, ShapesMetric::Hausdorff);
         assert_eq!(described.metadata.quantization, Scalar::F32);
         assert_eq!(described.gpu_class(), "unknown", "a host index names no GPU class");
-        Ok(())
     }
 
     #[test]
@@ -1836,7 +1813,7 @@ mod tests {
     /// Mirrors the Shape Indexes snippet of rust/README.md line by line; only the function
     /// around it and its closing `Ok(())` differ.
     #[test]
-    fn readme_shape_indexes() -> Result<()> {
+    fn readme_quickstart() -> Result<()> {
         let index = ShapesIndex::init_ram(&ShapesOptions::default(), &[])?; // Chamfer over f32 points
         let pair: [[f32; 3]; 2] = [[0.0, 0.0, 0.0], [1.1, 0.0, 0.0]];
         let triple: [[f32; 3]; 3] = [[0.0, 0.0, 0.0], [1.5, 0.0, 0.0], [0.0, 1.5, 0.0]];
@@ -1851,50 +1828,45 @@ mod tests {
 
     /// Shapes of different point counts share one batch, and each finds itself first.
     #[test]
-    fn finds_the_inserted_entry() -> Result<()> {
-        let shapes = clouds([5, 9, 13], 42);
-        let index = ShapesIndex::init_ram(&ShapesOptions::default(), &[])?;
-        index.insert(keys(1, 3), Tape::of(&shapes))?;
-        let described = index.describe()?;
+    fn finds_the_inserted_entry() {
+        let shapes = clouds([5, 9, 13], case_stream_key(0));
+        let index = ShapesIndex::init_ram(&ShapesOptions::default(), &[]).unwrap();
+        index.insert(keys(1, 3), Tape::of(&shapes)).unwrap();
+        let described = index.describe().unwrap();
         assert_eq!((described.size, described.total_points), (3, 27));
 
-        let mut arena = Arena::new()?;
-        let matches = index.search(Tape::of([&shapes[2]]), 1, &mut arena)?;
-        assert_eq!(matches.query(0)?.keys, [Key::from(3u64)]);
-        Ok(())
+        let mut arena = Arena::new().unwrap();
+        let matches = index.search(Tape::of([&shapes[2]]), 1, &mut arena).unwrap();
+        assert_eq!(matches.query(0).unwrap().keys, [Key::from(3u64)]);
     }
 
     #[test]
-    fn gets_and_counts_every_entry_under_a_key() -> Result<()> {
-        let shapes = clouds([5, 9], 42);
-        let index = ShapesIndex::init_ram(&ShapesOptions::default(), &[])?;
+    fn gets_and_counts_every_entry_under_a_key() {
+        let shapes = clouds([5, 9], case_stream_key(0));
+        let index = ShapesIndex::init_ram(&ShapesOptions::default(), &[]).unwrap();
         let shared = Key::from(7u64);
-        index.insert([shared, shared], Tape::of(&shapes))?;
+        index.insert([shared, shared], Tape::of(&shapes)).unwrap();
 
-        let stats = index.count(shared)?;
+        let stats = index.count(shared).unwrap();
         assert_eq!((stats.entries, stats.total_points, stats.largest_points), (2, 14, 9));
-        assert!(index.contains(shared)? && !index.contains(Key::from(8u64))?);
+        assert!(index.contains(shared).unwrap() && !index.contains(Key::from(8u64)).unwrap());
 
-        let mut arena = Arena::new()?;
-        let stored = index.get::<f32>(shared, &mut arena)?;
+        let mut arena = Arena::new().unwrap();
+        let stored = index.get::<f32>(shared, &mut arena).unwrap();
         assert_eq!(stored.written(), 2);
         for (restored, inserted) in stored.iter().zip(&shapes) {
             assert_eq!(restored.len(), inserted.len());
             let flat = |cloud: &[[f32; 3]]| cloud.iter().flatten().copied().collect::<Vec<f32>>();
-            let (restored, inserted) = (flat(restored), flat(inserted));
-            let close = restored.iter().zip(&inserted).all(|(left, right)| (left - right).abs() <= 1e-4);
-            assert!(close, "each shape reads back in its inserted pose");
+            assert_close_rows(&flat(restored), &flat(inserted), 1e-4);
         }
-        assert_eq!(index.get::<f32>(Key::from(8u64), &mut arena)?.written(), 0, "an absent key yields none");
-        Ok(())
+        assert_eq!(index.get::<f32>(Key::from(8u64), &mut arena).unwrap().written(), 0, "an absent key yields none");
     }
 
     #[test]
-    fn rejects_mismatched_key_and_entry_counts() -> Result<()> {
-        let index = ShapesIndex::init_ram(&ShapesOptions::default(), &[])?;
-        assert!(refused(index.insert(keys(0, 3), Tape::of(clouds([5], 42))), Status::ShapeMismatch));
-        assert_eq!(size(&index)?, 0);
-        Ok(())
+    fn rejects_mismatched_key_and_entry_counts() {
+        let index = ShapesIndex::init_ram(&ShapesOptions::default(), &[]).unwrap();
+        assert!(refused(index.insert(keys(0, 3), Tape::of(clouds([5], case_stream_key(0)))), Status::ShapeMismatch));
+        assert_eq!(size(&index).unwrap(), 0);
     }
 
     // endregion: Ingest and Retrieval
@@ -1902,43 +1874,41 @@ mod tests {
     // region: Serialization
 
     #[test]
-    fn saves_and_loads_a_file() -> Result<()> {
-        let path = scratch_path("saves_and_loads_a_file");
-        let index = populated_index(32, 0, 0)?;
-        index.on(&executor()).save(&path)?;
+    fn saves_and_loads_a_file() {
+        let scratch = ScratchDirectory::new("usearch-shapes-saves_and_loads_a_file");
+        let path = scratch.path().join("index.safegraphs");
+        let index = populated_index(32, 0, case_stream_key(0)).unwrap();
+        index.on(&executor()).save(&path).unwrap();
 
-        assert_eq!(ShapesIndex::metadata(&path)?.metric, ShapesMetric::Chamfer);
-        let restored = ShapesIndex::load_ram(&path)?;
-        assert_eq!(size(&restored)?, 32);
-        assert!(restored.contains(Key::from(17u64))?);
+        assert_eq!(ShapesIndex::metadata(&path).unwrap().metric, ShapesMetric::Chamfer);
+        let restored = ShapesIndex::load_ram(&path).unwrap();
+        assert_eq!(size(&restored).unwrap(), 32);
+        assert!(restored.contains(Key::from(17u64)).unwrap());
 
         // A view serves the checkpoint in place and refuses changes, where RAM serves views at all.
         match ShapesIndex::view_ram(&path) {
             Ok(viewed) => {
-                assert_eq!(size(&viewed)?, 32);
+                assert_eq!(size(&viewed).unwrap(), 32);
                 assert!(refused(viewed.reserve(64, 0), Status::ReadOnly));
             }
             Err(error) => assert_eq!(error.status, Status::Unsupported),
         }
-        remove_quietly(&path);
-        Ok(())
     }
 
     #[test]
-    fn saves_and_loads_a_buffer() -> Result<()> {
-        let index = populated_index(32, 0, 0)?;
-        let mut arena = Arena::new()?;
-        let saved = index.save_buffer(&mut arena)?;
+    fn saves_and_loads_a_buffer() {
+        let index = populated_index(32, 0, case_stream_key(0)).unwrap();
+        let mut arena = Arena::new().unwrap();
+        let saved = index.save_buffer(&mut arena).unwrap();
         let monolith = saved.view();
         assert!(!monolith.is_empty());
 
-        assert_eq!(ShapesIndex::metadata_buffer(monolith)?.metric, ShapesMetric::Chamfer);
-        assert_eq!(size(&ShapesIndex::load_ram_buffer(monolith)?)?, 32);
+        assert_eq!(ShapesIndex::metadata_buffer(monolith).unwrap().metric, ShapesMetric::Chamfer);
+        assert_eq!(size(&ShapesIndex::load_ram_buffer(monolith).unwrap()).unwrap(), 32);
         assert!(
             ShapesIndex::load_ram_buffer(&monolith[..monolith.len() - 1]).is_err(),
             "a short buffer must not be read"
         );
-        Ok(())
     }
 
     // endregion: Serialization
@@ -1948,19 +1918,18 @@ mod tests {
     /// A round reports what it did, its closing audit judging every entry, and leaves each entry
     /// findable.
     #[test]
-    fn refine_reports_a_round_over_every_entry() -> Result<()> {
-        let index = populated_index(64, 0, 0)?;
-        let report = index.on(&executor()).refine(ShapesRefineConfig::default())?;
+    fn refine_reports_a_round_over_every_entry() {
+        let index = populated_index(64, 0, case_stream_key(0)).unwrap();
+        let report = index.on(&executor()).refine(ShapesRefineConfig::default()).unwrap();
         assert!(report.changed <= report.reselected);
         assert_eq!(report.reachability.audited, 64);
-        assert!(index.contains(Key::from(17u64))?);
-        Ok(())
+        assert!(index.contains(Key::from(17u64)).unwrap());
     }
 
     /// A plan keeps a stopped round live for the next call, and its finish reports the whole plan.
     #[test]
-    fn a_refine_plan_resumes_and_finishes() -> Result<()> {
-        let index = populated_index(64, 0, 0)?;
+    fn a_refine_plan_resumes_and_finishes() {
+        let index = populated_index(64, 0, case_stream_key(0)).unwrap();
         let executor = executor();
         let (mut plan, mut phase) = (ShapesRefinePlan::default(), PhaseProgress::default());
         let stopped = index.on(&executor).refine(ShapesRefineConfig {
@@ -1972,25 +1941,26 @@ mod tests {
         if let Err(failure) = stopped {
             assert_eq!(failure.status, Status::Cancelled);
             assert!(phase.phase != Phase::Done && phase.completed <= phase.total);
-            index.on(&executor).refine(ShapesRefineConfig {
-                plan: Some(&mut plan),
-                phase: Some(&mut phase),
-                ..ShapesRefineConfig::default()
-            })?;
+            index
+                .on(&executor)
+                .refine(ShapesRefineConfig {
+                    plan: Some(&mut plan),
+                    phase: Some(&mut phase),
+                    ..ShapesRefineConfig::default()
+                })
+                .unwrap();
         }
         assert_eq!(phase.phase, Phase::Done);
-        assert_eq!(index.on(&executor).refine_plan_finish(plan)?.reachability.audited, 64);
-        Ok(())
+        assert_eq!(index.on(&executor).refine_plan_finish(plan).unwrap().reachability.audited, 64);
     }
 
     /// A plan lives across calls on one executor, so a call on the calling thread cannot open one.
     #[test]
-    fn a_refine_plan_needs_an_executor() -> Result<()> {
-        let index = populated_index(0, 0, 0)?;
+    fn a_refine_plan_needs_an_executor() {
+        let index = populated_index(0, 0, case_stream_key(0)).unwrap();
         let mut plan = ShapesRefinePlan::default();
         let refined = index.refine(ShapesRefineConfig { plan: Some(&mut plan), ..ShapesRefineConfig::default() });
         assert!(refused(refined, Status::InvalidArgument));
-        Ok(())
     }
 
     // endregion: Refinement
@@ -2000,26 +1970,31 @@ mod tests {
     /// Several sources into one target gather every entry there, and the other sources end empty
     /// and live.
     #[test]
-    fn gathers_several_sources_into_one_target() -> Result<()> {
-        let first = populated_index(32, 0, 0)?;
-        let (second, third) = (populated_index(32, 32, 1)?, populated_index(32, 64, 2)?);
-        first.on(&executor()).reshard(ShapesReshardConfig {
-            sources: &[&first, &second, &third],
-            targets: &[&first],
-            ..ShapesReshardConfig::default()
-        })?;
-        assert_eq!(size(&first)?, 96);
-        assert!(first.contains(Key::from(40u64))? && first.contains(Key::from(80u64))?);
-        assert_eq!((size(&second)?, size(&third)?), (0, 0));
-        Ok(())
+    fn gathers_several_sources_into_one_target() {
+        let first = populated_index(32, 0, case_stream_key(0)).unwrap();
+        let (second, third) = (
+            populated_index(32, 32, case_stream_key(1)).unwrap(),
+            populated_index(32, 64, case_stream_key(2)).unwrap(),
+        );
+        first
+            .on(&executor())
+            .reshard(ShapesReshardConfig {
+                sources: &[&first, &second, &third],
+                targets: &[&first],
+                ..ShapesReshardConfig::default()
+            })
+            .unwrap();
+        assert_eq!(size(&first).unwrap(), 96);
+        assert!(first.contains(Key::from(40u64)).unwrap() && first.contains(Key::from(80u64)).unwrap());
+        assert_eq!((size(&second).unwrap(), size(&third).unwrap()), (0, 0));
     }
 
     /// A stop cuts only the closing rounds, so every entry has moved; the plan it leaves live
     /// continues where it stopped, and a deferred receiver closes it.
     #[test]
-    fn a_stopped_gather_continues_through_its_plan() -> Result<()> {
-        let first = populated_index(16, 0, 0)?;
-        let second = populated_index(16, 16, 1)?;
+    fn a_stopped_gather_continues_through_its_plan() {
+        let first = populated_index(16, 0, case_stream_key(0)).unwrap();
+        let second = populated_index(16, 16, case_stream_key(1)).unwrap();
         let executor = executor();
         let (mut plan, mut phase) = (ShapesReshardPlan::default(), PhaseProgress::default());
         let stopped = first.on(&executor).reshard(ShapesReshardConfig {
@@ -2034,42 +2009,45 @@ mod tests {
             assert_eq!(failure.status, Status::Cancelled);
             assert_ne!(phase.phase, Phase::Done, "a stop names the phase it stopped in");
         }
-        assert_eq!(size(&first)?, 32);
+        assert_eq!(size(&first).unwrap(), 32);
 
         // A deferred call owns the plan it continues and hands it back once final.
-        let continued = first.deferred(&executor).reshard(ShapesReshardConfig::from(plan))?;
+        let continued = first.deferred(&executor).reshard(ShapesReshardConfig::from(plan)).unwrap();
         let (finished, (config, _)) = continued.wait_with_inputs();
-        finished?;
+        finished.unwrap();
         let plan = config.plan.expect("the call hands its plan back");
-        let report = first.deferred(&executor).reshard_plan_finish(plan)?.wait()?;
+        let report = first.deferred(&executor).reshard_plan_finish(plan).unwrap().wait().unwrap();
         assert!(report.changed <= report.reselected);
-        Ok(())
     }
 
     /// One source into several targets cuts it between them, and the source stays live but empty.
     #[test]
-    fn reshards_one_source_into_several_targets() -> Result<()> {
-        let source = populated_index(64, 0, 0)?;
-        let targets = [populated_index(0, 0, 0)?, populated_index(0, 0, 0)?];
-        let report = source.on(&executor()).reshard(ShapesReshardConfig {
-            sources: &[&source],
-            targets: &[&targets[0], &targets[1]],
-            seed: 7,
-            ..ShapesReshardConfig::default()
-        })?;
+    fn reshards_one_source_into_several_targets() {
+        let source = populated_index(64, 0, case_stream_key(0)).unwrap();
+        let targets =
+            [populated_index(0, 0, case_stream_key(0)).unwrap(), populated_index(0, 0, case_stream_key(0)).unwrap()];
+        let report = source
+            .on(&executor())
+            .reshard(ShapesReshardConfig {
+                sources: &[&source],
+                targets: &[&targets[0], &targets[1]],
+                seed: case_stream_key(1),
+                ..ShapesReshardConfig::default()
+            })
+            .unwrap();
         assert!(report.changed <= report.reselected);
-        let (left, right) = (size(&targets[0])?, size(&targets[1])?);
+        let (left, right) = (size(&targets[0]).unwrap(), size(&targets[1]).unwrap());
         assert!(left != 0 && right != 0 && left + right == 64);
-        assert_eq!(size(&source)?, 0);
-        Ok(())
+        assert_eq!(size(&source).unwrap(), 0);
     }
 
     /// A cut a stop interrupts keeps every entry moved, the next call naming the plan ends its
     /// rounds, and a deferred receiver closes it.
     #[test]
-    fn reshards_one_source_into_several_targets_through_a_plan() -> Result<()> {
-        let source = populated_index(64, 0, 0)?;
-        let targets = [populated_index(0, 0, 0)?, populated_index(0, 0, 0)?];
+    fn reshards_one_source_into_several_targets_through_a_plan() {
+        let source = populated_index(64, 0, case_stream_key(0)).unwrap();
+        let targets =
+            [populated_index(0, 0, case_stream_key(0)).unwrap(), populated_index(0, 0, case_stream_key(0)).unwrap()];
         let executor = executor();
         let (mut plan, mut phase) = (ShapesReshardPlan::default(), PhaseProgress::default());
         let stopped = source.on(&executor).reshard(ShapesReshardConfig {
@@ -2080,39 +2058,41 @@ mod tests {
             phase: Some(&mut phase),
             ..ShapesReshardConfig::default()
         });
-        assert_eq!(size(&targets[0])? + size(&targets[1])?, 64);
+        assert_eq!(size(&targets[0]).unwrap() + size(&targets[1]).unwrap(), 64);
         if stopped.is_err() {
-            source.on(&executor).reshard(ShapesReshardConfig {
-                plan: Some(&mut plan),
-                phase: Some(&mut phase),
-                ..ShapesReshardConfig::default()
-            })?;
+            source
+                .on(&executor)
+                .reshard(ShapesReshardConfig {
+                    plan: Some(&mut plan),
+                    phase: Some(&mut phase),
+                    ..ShapesReshardConfig::default()
+                })
+                .unwrap();
         }
         assert_eq!(phase.phase, Phase::Done);
-        source.deferred(&executor).reshard_plan_finish(plan)?.wait()?;
-        Ok(())
+        source.deferred(&executor).reshard_plan_finish(plan).unwrap().wait().unwrap();
     }
 
     /// One index as its only source and target has a single shard to recut, which the library
     /// refuses.
     #[test]
-    fn a_recut_of_one_handle_is_unsupported() -> Result<()> {
-        let index = populated_index(16, 0, 0)?;
+    fn a_recut_of_one_handle_is_unsupported() {
+        let index = populated_index(16, 0, case_stream_key(0)).unwrap();
         let recut = index.on(&executor()).reshard(ShapesReshardConfig {
             sources: &[&index],
             targets: &[&index],
             ..ShapesReshardConfig::default()
         });
         assert!(refused(recut, Status::Unsupported));
-        assert_eq!(size(&index)?, 16);
-        Ok(())
+        assert_eq!(size(&index).unwrap(), 16);
     }
 
     /// Empty or repeated lists are malformed and a target holding foreign entries mismatches;
     /// every refusal leaves the entries where they were.
     #[test]
-    fn refuses_malformed_lists_and_moves_nothing() -> Result<()> {
-        let (first, second) = (populated_index(8, 0, 0)?, populated_index(8, 8, 1)?);
+    fn refuses_malformed_lists_and_moves_nothing() {
+        let (first, second) =
+            (populated_index(8, 0, case_stream_key(0)).unwrap(), populated_index(8, 8, case_stream_key(1)).unwrap());
         let executor = executor();
         let reshard = |sources: &[&ShapesIndex], targets: &[&ShapesIndex]| {
             first.on(&executor).reshard(ShapesReshardConfig { sources, targets, ..ShapesReshardConfig::default() })
@@ -2120,8 +2100,7 @@ mod tests {
         assert!(refused(reshard(&[], &[&first]), Status::InvalidArgument));
         assert!(refused(reshard(&[&first, &first], &[&first]), Status::InvalidArgument));
         assert!(refused(reshard(&[&first], &[&second]), Status::ConfigMismatch));
-        assert_eq!((size(&first)?, size(&second)?), (8, 8));
-        Ok(())
+        assert_eq!((size(&first).unwrap(), size(&second).unwrap()), (8, 8));
     }
 
     // endregion: Resharding

@@ -9,6 +9,7 @@
  *  function, which only this device-only pass compiles; @c vram_amd.hip, compiled host-only, never
  *  names them.
  */
+#undef NDEBUG // ! A test's oracle must stay live in every build
 #include "vram_amd.hip"
 
 namespace unum::usearch::dense {

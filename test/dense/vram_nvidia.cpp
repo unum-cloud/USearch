@@ -3,11 +3,12 @@
  *  @author Ash Vardanian
  *  @date July 22, 2026
  *  @brief The NVIDIA suite's entry for the one VRAM runner: selects the device, then runs the dense
- *      rung cells and every modality's VRAM cells the settings select.
+ *      rung cases and every modality's VRAM cases.
  *
  *  Clang compiles it host-only into the cells' index types, whose kernels the library's class
  *  fatbins carry.
  */
+#undef NDEBUG // ! A test's oracle must stay live in every build
 #include <fmt/format.h>
 
 #include "usearch/dense/vram_nvidia_index.cuh"
@@ -28,26 +29,24 @@ template struct vram_nvidia_indexes<uuid128_t, nk_bf16_k, dense_nvidia_fatbin<nk
 
 namespace unum::usearch::test::dense {
 
-std::size_t check_vram_nvidia(settings_t const& settings, gpu_device_t const& device) {
+void run_vram_nvidia_cases(gpu_device_t const& device) {
     int const ordinal = static_cast<int>(device.vendor_ordinal);
     cuda_api_t const& api = test::gpu_drivers().cuda;
-    if (cuda_set_device(api, ordinal) != cuda_success_k)
-        return fmt::println("- CUDA: device #{} does not answer", ordinal), 1;
+    if (!expect_true(cuda_set_device(api, ordinal) == cuda_success_k, "CUDA device #{} does not answer", ordinal))
+        return;
     fmt::println("- CUDA: {} sm_{}{} #{}, {} SMs, {} MiB", device.name, device.architecture_major,
                  device.architecture_minor, ordinal, device.compute_units, device.memory_bytes >> 20);
     auto [executor, spawn_status] = cuda_executor_t::spawn(api, std::span<int const> {&ordinal, 1});
-    if (failed(spawn_status)) return fmt::println("- CUDA: device #{} opens no stream", ordinal), 1;
-    std::size_t failures_count = 0;
-    if (dense_nvidia_runs(device)) failures_count += check_vram_indexes(settings, executor);
+    if (!expect_true(succeeded(spawn_status), "CUDA device #{} opens no stream", ordinal)) return;
+    if (dense_nvidia_runs(device)) run_vram_indexes_cases(executor);
     else
-        fmt::println("- CUDA: dense rung cells skipped, the build names {} for them",
-                     usearch_gpu_class_name(static_cast<usearch_gpu_class_t>(dense_nvidia_class_k)));
-    failures_count += test::sequence::check_sequence_vram<cuda_executor_t>(settings, device);
-    failures_count += test::shapes::check_shapes_vram<cuda_executor_t>(settings, device);
-    failures_count += test::geospatial::check_geospatial_vram<cuda_executor_t>(settings, device);
-    return failures_count;
+        run_test_case("run_vram_indexes_cases(gpu_vendor_t::nvidia_k)",
+                      [] { return case_result_t::skipped(needs_dense_nvidia_class_k); });
+    test::sequence::run_sequence_vram_cases<cuda_executor_t>(device);
+    test::shapes::run_shapes_vram_cases<cuda_executor_t>(device);
+    test::geospatial::run_geospatial_vram_cases<cuda_executor_t>(device);
 }
 
-static bool const vram_nvidia_registered = (registered_suites({gpu_vendor_t::nvidia_k, &check_vram_nvidia}), true);
+static bool const vram_nvidia_registered = (registered_suites({gpu_vendor_t::nvidia_k, &run_vram_nvidia_cases}), true);
 
 } // namespace unum::usearch::test::dense

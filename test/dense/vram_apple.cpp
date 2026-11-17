@@ -3,9 +3,9 @@
  *  @author Ash Vardanian
  *  @date October 11, 2026
  *  @brief The Apple suite's entry for the one VRAM runner: selects the device, then runs the dense
- *      rung cells the settings select over the Apple index and the basic modalities' cells.
+ *      rung cases over the Apple index and the basic modalities' cases.
  */
-
+#undef NDEBUG // ! A test's oracle must stay live in every build
 #include <fmt/format.h>
 
 #include "vram_index.cuh"
@@ -13,20 +13,19 @@
 
 namespace unum::usearch::test::dense {
 
-std::size_t check_vram_apple(settings_t const& settings, gpu_device_t const& device) {
+void run_vram_apple_cases(gpu_device_t const& device) {
     int const ordinal = static_cast<int>(device.vendor_ordinal);
     fmt::println("- Metal: device #{} {}, Apple{} family, {} compute units, {} MiB", ordinal, device.name,
                  device.architecture_major, device.compute_units, device.memory_bytes >> 20);
     auto [executor, spawn_status] = metal_executor_t::spawn(gpu_drivers().metal_contexts,
                                                             std::span<int const> {&ordinal, 1});
-    if (failed(spawn_status)) return fmt::println("- Metal: device #{} opens no queue", ordinal), 1;
-    std::size_t failures_count = check_vram_indexes(settings, executor);
-    failures_count += test::sequence::check_sequence_vram<metal_executor_t>(settings, device);
-    failures_count += test::shapes::check_shapes_vram<metal_executor_t>(settings, device);
-    failures_count += test::geospatial::check_geospatial_vram<metal_executor_t>(settings, device);
-    return failures_count;
+    if (!expect_true(succeeded(spawn_status), "Metal device #{} opens no queue", ordinal)) return;
+    run_vram_indexes_cases(executor);
+    test::sequence::run_sequence_vram_cases<metal_executor_t>(device);
+    test::shapes::run_shapes_vram_cases<metal_executor_t>(device);
+    test::geospatial::run_geospatial_vram_cases<metal_executor_t>(device);
 }
 
-static bool const vram_apple_registered = (registered_suites({gpu_vendor_t::apple_k, &check_vram_apple}), true);
+static bool const vram_apple_registered = (registered_suites({gpu_vendor_t::apple_k, &run_vram_apple_cases}), true);
 
 } // namespace unum::usearch::test::dense

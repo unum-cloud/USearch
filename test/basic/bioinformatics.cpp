@@ -13,6 +13,8 @@
  *  codec packs nucleotides two bits each, four per byte, proving @c load decodes rather
  *  than copies.
  */
+#undef NDEBUG // ! A test's oracle must stay live in every build
+
 #include <array>       // `std::array` - the handmade triple
 #include <span>        // `std::span` - the metric's drain surface
 #include <string>      // `std::string` - the read payload, one `ACGT` letter per base
@@ -139,7 +141,7 @@ struct bioinformatics_fixture {
     static packed_dna_codec_t make_codec() { return {}; }
     static us::utilities::uuid128_t make_key(std::size_t ordinal) {
         return std::bit_cast<us::utilities::uuid128_t>(
-            std::array<u64_t, 2> {mix_bits(ordinal), 0xB10B10B1ull ^ ordinal});
+            std::array<u64_t, 2> {split_mix_bits(ordinal), 0xB10B10B1ull ^ ordinal});
     }
     static u64_t oracle(dna_t const& query, dna_t const& stored) noexcept {
         std::vector<u64_t> previous_row, current_row;
@@ -154,7 +156,7 @@ struct bioinformatics_fixture {
     static std::vector<dna_t> make_values(std::size_t count, u64_t seed, typename index_t::allocator_t const&) {
         constexpr std::size_t references_k = 6;
         constexpr std::size_t reference_bases_k = 48;
-        splitmix64_t random_generator {seed};
+        split_mix_generator_t random_generator {seed};
         uniform_below<u32_t> nucleotide_distribution {4};
         uniform_below<u32_t> reference_distribution {references_k};
         uniform_below<u32_t> mutation_kind_distribution {10};
@@ -193,23 +195,21 @@ static_assert(value_codec<packed_dna_codec_t, dna_t>);
 
 /** The codec on its own: a bit-exact pack/unpack roundtrip at every length modulo
  *  four, and a length prefix disagreeing with its slice refused as malformed. */
-static std::size_t check_bioinformatics_codec() {
-    std::size_t failures = 0;
+static void test_bioinformatics_codec() {
     packed_dna_codec_t const codec;
     for (std::size_t bases = 0; bases != 9; ++bases) {
         dna_t original;
         for (std::size_t base = 0; base != bases; ++base) original += "ACGT"[(base * 7 + bases) % 4];
         std::vector<std::byte> encoded(codec.storage_requirements(original));
-        failures += expect_eq(codec.save(original, {encoded}), status_t::success_k);
+        expect_equal(codec.save(original, {encoded}), status_t::success_k);
         dna_t decoded;
-        failures += expect_eq(codec.load({encoded}, decoded), status_t::success_k);
-        failures += expect(decoded == original);
+        expect_equal(codec.load({encoded}, decoded), status_t::success_k);
+        expect_true(decoded == original);
         if (encoded.size() > sizeof(u32_t)) {
             dna_t rejected;
-            failures += expect_eq(codec.load({encoded.data(), encoded.size() - 1}, rejected), status_t::malformed_k);
+            expect_equal(codec.load({encoded.data(), encoded.size() - 1}, rejected), status_t::malformed_k);
         }
     }
-    return failures;
 }
 
 /** Exhaustive alignment-tree search - enumerates every gap/substitution alignment
@@ -228,8 +228,7 @@ static u64_t exhaustive_alignment_distance(std::string_view first, std::string_v
 
 /** The independent-oracle audit: sampled read prefixes short enough for the
  *  exhaustive search, plus the handmade triple at full length. */
-static std::size_t check_bioinformatics_independent_oracle(u64_t seed) {
-    std::size_t failures = 0;
+static void test_bioinformatics_independent_oracle(u64_t seed) {
     std::vector<u64_t> previous_row, current_row;
     allocation_ledger_t ledger;
     auto values = bioinformatics_fixture_t::make_values(16, stream_key(seed, "independent_oracle"),
@@ -237,26 +236,29 @@ static std::size_t check_bioinformatics_independent_oracle(u64_t seed) {
     for (std::size_t pair = 0; pair + 1 < values.size(); pair += 2) {
         std::string_view const first = std::string_view {values[pair]}.substr(0, 6);
         std::string_view const second = std::string_view {values[pair + 1]}.substr(0, 6);
-        failures += expect_eq(alignment_distance(first, second, previous_row, current_row),
-                              exhaustive_alignment_distance(first, second));
+        expect_equal(alignment_distance(first, second, previous_row, current_row),
+                     exhaustive_alignment_distance(first, second));
     }
     auto const handmade = bioinformatics_fixture_t::make_handmade(counting_allocator_t {ledger});
     for (std::size_t row = 0; row != 3; ++row)
         for (std::size_t column = 0; column != 3; ++column)
-            failures += expect_eq(exhaustive_alignment_distance(handmade.values[row], handmade.values[column]),
-                                  handmade.distances[row][column]);
-    return failures;
+            expect_equal(exhaustive_alignment_distance(handmade.values[row], handmade.values[column]),
+                         handmade.distances[row][column]);
 }
 
-std::size_t test::basic::check_bioinformatics(settings_t const& settings) {
-    std::size_t failures = 0;
-    failures += test_basic_scenarios<bioinformatics_fixture_t>(settings.seed);
-    failures += test_basic_scenarios<bioinformatics_fixture<flaky_waiter_t>>(settings.seed);
-    failures += check_bioinformatics_codec();
-    failures += check_bioinformatics_independent_oracle(settings.seed);
+void test::basic::run_bioinformatics_cases() {
+    u64_t const seed = test_run.settings.seed;
+    run_test_case("test_basic_scenarios<bioinformatics_fixture_t>", test_basic_scenarios<bioinformatics_fixture_t>,
+                  seed);
+    run_test_case("test_basic_scenarios<bioinformatics_fixture<flaky_waiter_t>>",
+                  test_basic_scenarios<bioinformatics_fixture<flaky_waiter_t>>, seed);
+    run_test_case("test_bioinformatics_codec", test_bioinformatics_codec);
+    run_test_case("test_bioinformatics_independent_oracle", test_bioinformatics_independent_oracle, seed);
     // The uuid key column.
-    failures += test_basic_safegraphs_roundtrip<bioinformatics_fixture_t>(settings.seed, "uuid", "needleman-wunsch");
-    failures += test_basic_safegraphs_hostile<bioinformatics_fixture_t>(settings.seed, "needleman-wunsch");
-    failures += test_basic_safegraphs_distributed<bioinformatics_fixture_t>(settings.seed, "needleman-wunsch");
-    return report("bioinformatics", failures);
+    run_test_case("test_basic_safegraphs_round_trip<bioinformatics_fixture_t>",
+                  test_basic_safegraphs_round_trip<bioinformatics_fixture_t>, seed, "uuid", "needleman-wunsch");
+    run_test_case("test_basic_safegraphs_hostile<bioinformatics_fixture_t>",
+                  test_basic_safegraphs_hostile<bioinformatics_fixture_t>, seed, "needleman-wunsch");
+    run_test_case("test_basic_safegraphs_distributed<bioinformatics_fixture_t>",
+                  test_basic_safegraphs_distributed<bioinformatics_fixture_t>, seed, "needleman-wunsch");
 }

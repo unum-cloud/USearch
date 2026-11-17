@@ -9,8 +9,8 @@
 # fixture per rule.
 #
 # Every region between Project Settings and USearch Rules is shared with the sibling hooks, Shared
-# Bindings with the UStore, UCall and UForm hooks alone, and `check_shared_regions_match` pins the sums
-# of those that stay word for word identical. Configuring the CMake build arms these hooks; see the
+# Bindings with the UStore, UCall and UForm hooks alone; edit a shared region in every sibling hook
+# together. Configuring the CMake build arms these hooks; see the
 # `core.hooksPath` block in CMakeLists.txt.
 #
 # Bypass knowingly, which you almost never should, with: git commit --no-verify
@@ -78,22 +78,16 @@ project_namespace_alias="us"
 stdout_harness_paths="test/harness.hpp test/main.cpp test/dense_vram.cpp test/dense/vram_nvidia.cpp test/dense/vram_amd.hip test/dense/vram_apple.cpp"
 # The directories whose C and C++ sources the three gates and the nesting limit judge.
 gated_source_directories="include src src_stub"
-# The md5 of the lines between each pinned region's `# region` and `# endregion`, which every sibling hook
-# carrying that region holds word for word.
-shared_region_sums='Shared Helpers	0f47a409a3595919bb8c842cb2947d38
-Doxygen Blocks	3c4ea22c2b76e1efb437372fe0c03534
-Binding Docs	04e4b1b314779668c35d7aaf36b0258a
-Comments and Prose	3743ade0b3af9638562754bd144c6bc6
-C and C++ Idioms	111aa66ebe0c1bb35970f35874b958c8
-Formatters	ed9dd7f3c1c587e4db673f14e96782ab
-All Files	360816f6488a26caf0ef051b37f11a1e
-Shared Bindings	e27e86e6cbb77f1e378329f6c15e2872
-Shared Builds	9702e89c575420fe081a3d2c5a6800c5
-Shared Harnesses	b6e3dd5e32eddc53ac50ca87fd8c64c9
-Shared Gates	2b4869c38a66d2963ce0ba7df15c8f7a
-Shared Dispatch	db91e9b9670cfe52ddd3cb5702c100b4
-Parallel Judging	738b237daa7b91d37b6a535e0f073b9a
-Dispatch	6160e20a10117221086869a5ecdcd2c4'
+# Test and bench units waived to include a private header or source, each explained under CONTRIBUTING's
+# "Private Surface Waivers"; adding one is a decision for review, so it lands with the include it waives.
+private_surface_tests="bench/dense/ram_metric.cpp test/dense/ram_indexes.hpp test/dense/vram_nvidia.hpp test/placement.cpp \
+    test/sequence/vram_index.cpp test/shapes/vram_index.cpp"
+# The test units whose `#undef NDEBUG` opening another owner adds on its own schedule.
+ndebug_exempt_tests=""
+# The Python test files that are scaffolding, the only ones that may skip from inside a function.
+python_test_scaffolding_paths="test/conftest.py test/base.py"
+# The GPU vendors whose `<PREFIX>_ARCH_<VENDOR>_` switches one unit may carry together, empty without GPU code.
+gpu_vendor_switches='CUDA|ROCM|METAL'
 
 # endregion Project Settings
 
@@ -1746,12 +1740,14 @@ check_go_file_header() {
         "$staged_path opens without its file header, the // File:, // Author: and // Date: fields:"
 }
 
-# Rejects a Rust file whose leading `//!` module doc does not end with `File: <path>`, `Author:` and `Date:` lines.
+# Rejects a Rust file whose leading `//!` module doc does not end with `File: <path>`, `Author:` and `Date:` lines;
+# inner attributes, as in `#![allow(dead_code, reason = "…")]`, may open the file above it.
 check_rust_module_fields() {
     local fields
     fields=$("$fastest_awk" -v path="$staged_path" '
-        NR == 1 && !/^\/\/!/ { print "line 1: no //! module doc"; exit }
-        /^\/\/!/ { third_last = before_last; before_last = last; last = $0; next }
+        !documented && /^#!\[/ { next }
+        !documented && !/^\/\/!/ { printf "line %d: no //! module doc\n", NR; exit }
+        /^\/\/!/ { documented = 1; third_last = before_last; before_last = last; last = $0; next }
         {
             if (third_last != "//! File: " path) print "module doc must end with //! File: " path
             else if (before_last !~ /^\/\/! Author: [A-Z]/) print "module doc must follow //! File: with //! Author: <author>"
@@ -2673,6 +2669,70 @@ check_iterator_debug_level() {
         "$staged_path defines _ITERATOR_DEBUG_LEVEL, which must match across every object; leave it to /MD or /MDd:"
 }
 
+# Rejects a function-like ALL_CAPS macro, because preprocessor codegen hides the very lines a reader greps for.
+# Every ALL_CAPS macro is object-like; one that must take arguments is a file-local snake_case_ generator.
+check_function_like_macros() {
+    local generators
+    generators=$(grep -E '^\+[[:space:]]*#[[:space:]]*define[[:space:]]+[A-Z][A-Z0-9_]*\(' "$staged_added_code_path" || true)
+    [ -z "$generators" ] || reject_with_reason "$generators" \
+        "$staged_path defines a function-like ALL_CAPS macro; write a helper function or the expansion out," \
+        "            or name a file-local generator snake_case_ and #undef it after use:"
+}
+
+# Rejects a parent-directory hop in an include or a Rust path, because the target's include directories or
+# Cargo already name the folder, so a hop only hides where the file lives.
+check_path_hops() {
+    local hops
+    hops=$(printf '%s\n' "$staged_added_text" |
+        grep -E '^\+[[:space:]]*#[[:space:]]*include[[:space:]]*"([^"]*/)?\.\./|#\[path[[:space:]]*=[[:space:]]*"([^"]*/)?\.\.|include_(str|bytes)!\("\.\.' ||
+        true)
+    [ -z "$hops" ] || reject_with_reason "$hops" \
+        "$staged_path reaches a file through a parent-directory hop; add its folder to the target's include" \
+        "            directories, or read the value through Cargo, as env!(\"CARGO_PKG_VERSION\") does:"
+}
+
+# Rejects a C-family chain whose `#elif` names another GPU vendor than its `#if`, or a vendor's switch negated beside
+# another's, because a unit carrying both vendors would silently keep one; a unit that assumes a single vendor says
+# so with `#if A + B > 1` and `#error`. Compiler predefines such as `__CUDA_ARCH__` are per compilation and exempt,
+# and an empty `gpu_vendor_switches` turns the rule off where a project has no GPU code.
+check_vendor_switches_independent() {
+    [ -n "$gpu_vendor_switches" ] || return 0
+    local exclusive
+    exclusive=$(switches="$gpu_vendor_switches" scan_staged_file_marking_added_lines '
+        BEGIN { switch_pattern = "!?[[:space:]]*[A-Z][A-Z0-9]*_ARCH_(" ENVIRON["switches"] ")_" }
+        function read_vendors(text,    spelled, vendor) {
+            first_vendor = ""; asserted = ""; negated = ""
+            while (match(text, switch_pattern)) {
+                spelled = substr(text, RSTART, RLENGTH); text = substr(text, RSTART + RLENGTH)
+                vendor = spelled; sub(/_$/, "", vendor); sub(/^.*_ARCH_/, "", vendor)
+                if (first_vendor == "") first_vendor = vendor
+                if (spelled ~ /^!/) negated = negated " " vendor; else asserted = asserted " " vendor
+            }
+        }
+        function negates_beside_another(    asserted_count, negated_count, asserted_names, negated_names, kept, dropped) {
+            asserted_count = split(asserted, asserted_names, " "); negated_count = split(negated, negated_names, " ")
+            for (kept = 1; kept <= asserted_count; ++kept)
+                for (dropped = 1; dropped <= negated_count; ++dropped)
+                    if (asserted_names[kept] != negated_names[dropped]) return 1
+            return 0
+        }
+        /^[[:space:]]*#[[:space:]]*if/ {
+            read_vendors($0); opened[++depth] = first_vendor
+            if ((FNR in added) && negates_beside_another()) printf "line %d: %s\n", FNR, $0
+            next
+        }
+        /^[[:space:]]*#[[:space:]]*elif/ {
+            read_vendors($0)
+            if ((FNR in added) && (negates_beside_another() || (first_vendor != "" && opened[depth] != "" && first_vendor != opened[depth])))
+                printf "line %d: %s\n", FNR, $0
+            next
+        }
+        /^[[:space:]]*#[[:space:]]*endif/ { --depth }' "$staged_code_path")
+    [ -z "$exclusive" ] || reject_with_reason "$exclusive" \
+        "$staged_path makes GPU vendors exclude each other; write one #if per vendor, and an #error where the" \
+        "            unit assumes a single vendor:"
+}
+
 # endregion C and C++ Idioms
 
 # region Formatters
@@ -3017,22 +3077,6 @@ check_single_space_between_sentences() {
         "$staged_path double-spaces between sentences;" "            use a single space after . ! or ?:"
 }
 
-# Rejects a pinned region of this hook whose text drifted from the sibling hooks' copy, because every sibling
-# hook carrying a pinned region edits it together; `shared_region_sums` in Project Settings holds the md5 of
-# the lines between each pinned region's opening and closing comment.
-check_shared_regions_match() {
-    local name expected actual drifted=""
-    while IFS=$'\t' read -r name expected; do
-        [ -n "$name" ] || continue
-        actual=$("$fastest_awk" -v name="$name" '$0 == "# endregion " name { inside = 0 } inside { print } $0 == "# region " name { inside = 1 }' \
-            "$staged_text_path" | { command -v md5sum > /dev/null 2>&1 && md5sum || md5; } | cut -d' ' -f1)
-        [ "$actual" = "$expected" ] || drifted="$drifted$name: $actual, pinned $expected"$'\n'
-    done <<< "$shared_region_sums"
-    [ -z "$drifted" ] || reject_with_reason "${drifted%$'\n'}" \
-        "$staged_path drifts from the sibling hooks' shared regions; edit a shared region in every sibling" \
-        "            hook together, and record the new sums in shared_region_sums:"
-}
-
 # endregion All Files
 
 # region Shared Bindings
@@ -3298,6 +3342,348 @@ check_test_bodies_quiet() {
     [ -z "$prints" ] || reject_with_reason "$prints" \
         "$staged_path prints to stdout from a test body; report failures to stderr and leave progress" \
         "            to the harness:"
+}
+
+# Rejects a hand-summed tally in a test or bench, `failures += …`, `tally += …` or `return failures;`, because the
+# run counts every failed check in `test_run`, and `run_test_case` diffs that count around each case.
+check_no_test_tallies() {
+    local tallies
+    tallies=$(grep -E '(^|[^A-Za-z0-9_.>])(failures|failures_count|tally)[[:space:]]*\+=|(^|[^A-Za-z0-9_])return[[:space:]]+(failures|failures_count)[[:space:]]*;' \
+        "$staged_added_code_path" || true)
+    [ -z "$tallies" ] || reject_with_reason "$tallies" \
+        "$staged_path sums a tally by hand; call the checks and let run_test_case count what failed:"
+}
+
+# Rejects a mutable `inline` or `static` variable at namespace scope in a C++ test, because state shared between
+# cases couples them, so a filtered or reordered run stops reproducing; `test_run` is the one sanctioned global. A
+# heuristic over one declaration per line: a `const` or `constexpr` on it, or a `(` before its `=`, `{` or `;`,
+# reads as a constant or a function and passes, and the braces of a namespace or `extern` block keep its scope.
+check_harness_globals_sanctioned() {
+    local globals
+    globals=$(scan_staged_file_marking_added_lines '
+        {
+            text = $0
+            gsub(/"(\\.|[^"\\])*"/, "\"\"", text); gsub(/\047(\\.|[^\047\\])\047/, "\047\047", text)
+            if ((FNR in added) && depth == namespaces && text ~ /^[[:space:]]*(static|inline)[[:space:]]/ &&
+                text !~ /(^|[^A-Za-z0-9_])(const|constexpr|namespace|using|struct|class|union|enum)([^A-Za-z0-9_]|$)/) {
+                head = text; sub(/[=;{].*$/, "", head)
+                while (gsub(/<[^<>]*>/, "", head)) {}
+                if (head !~ /\(/ && match(head, /[A-Za-z_][A-Za-z0-9_]*[[:space:]]*(\[[^]]*\][[:space:]]*)*$/)) {
+                    name = substr(head, RSTART, RLENGTH); sub(/[^A-Za-z0-9_].*$/, "", name)
+                    if (name != "test_run") printf "line %d: %s\n", FNR, $0
+                }
+            }
+            for (position = 1; position <= length(text); ++position) {
+                character = substr(text, position, 1)
+                if (character == "{") {
+                    scoping[++depth] = (header ~ /(^|[^A-Za-z0-9_])(namespace|extern)([^A-Za-z0-9_]|$)/ && header !~ /\(/)
+                    namespaces += scoping[depth]; header = ""
+                } else if (character == "}") {
+                    if (depth > 0) namespaces -= scoping[depth--]
+                    header = ""
+                } else if (character == ";") header = ""
+                else header = header character
+            }
+            header = header " "
+        }' "$staged_code_path")
+    [ -z "$globals" ] || reject_with_reason "$globals" \
+        "$staged_path keeps mutable state at namespace scope; pass it to the case as an argument, or make it" \
+        "            constexpr, as test_run alone is shared:"
+}
+
+# Rejects a check spelled as a macro in a C++ test, as `#define expect_near(…)` or `#define verify(…)`, because a
+# check is a function taking the caller's `std::source_location`, so it type-checks its arguments and a debugger
+# steps into it; an ALL_CAPS one is `check_function_like_macros`'s.
+check_harness_checks_are_functions() {
+    local macros
+    macros=$(grep -E '^\+[[:space:]]*#[[:space:]]*define[[:space:]]+([a-z0-9]+_)*(expect|verify|check|require|assert)[a-z0-9_]*\(' \
+        "$staged_added_code_path" || true)
+    [ -z "$macros" ] || reject_with_reason "$macros" \
+        "$staged_path spells a check as a macro; write a function taking" \
+        "            std::source_location where = std::source_location::current():"
+}
+
+# Rejects a message folded into a check's condition, as in `expect_true(found && "the key")`, because the literal
+# is always true, so the message never prints; it goes last, as in `expect_true(found, "the key")`. The call may
+# wrap over several lines.
+check_check_messages_are_arguments() {
+    local folded
+    folded=$(scan_staged_file_marking_added_lines '
+        {
+            rest = $0
+            gsub(/"(\\.|[^"\\])*"/, "\"\"", rest); gsub(/\047(\\.|[^\047\\])\047/, "\047\047", rest)
+            if (depth > 0 && (FNR in added)) touched = 1
+            while (rest != "") {
+                if (depth == 0) {
+                    if (!match(rest, /(^|[^A-Za-z0-9_])expect_[A-Za-z0-9_]*[[:space:]]*\(/)) break
+                    rest = substr(rest, RSTART); call = ""; start = FNR; touched = (FNR in added)
+                    rest = substr(rest, index(rest, "("))
+                }
+                for (position = 1; position <= length(rest); ++position) {
+                    character = substr(rest, position, 1)
+                    if (character == "(") ++depth
+                    else if (character == ")" && --depth == 0) break
+                }
+                call = call substr(rest, 1, position) " "
+                rest = substr(rest, position + 1)
+                if (depth == 0 && touched && call ~ /&&[[:space:]]*""/) printf "line %d: %s\n", start, $0
+            }
+        }' "$staged_code_path")
+    [ -z "$folded" ] || reject_with_reason "$folded" \
+        "$staged_path folds a message into a check's condition, where it never prints; pass it as the" \
+        "            trailing argument:"
+}
+
+# Rejects a case label that does not spell code: a symbol, a qualified name, or a call with its exact arguments,
+# as `nk_dots_packed_f64_haswell`, `fu::flat_pool::for_n` or `test_kit(row_kit_t::haswell_k)`, because a label
+# that greps to the code under test needs no glossary. The label is the first string literal after the open
+# parenthesis, which the formatter may move to the next line.
+check_test_case_labels() {
+    local labels
+    labels=$(scan_staged_file_marking_added_lines '
+        function judge(text, line,    label) {
+            if (!match(text, /^[[:space:]]*"[^"]*"/)) return
+            label = substr(text, RSTART, RLENGTH); sub(/^[^"]*"/, "", label); sub(/"$/, "", label)
+            if (label !~ /^[A-Za-z_][A-Za-z0-9_]*(::~?[A-Za-z_][A-Za-z0-9_]*)*([<(].*)?$/)
+                printf "line %d: \"%s\"\n", line, label
+        }
+        awaiting { if (awaiting_added || (FNR in added)) judge($0, FNR); awaiting = 0 }
+        {
+            rest = $0
+            while (match(rest, /(run_test|start_test|run_kernel)_case[[:space:]]*\(/)) {
+                rest = substr(rest, RSTART + RLENGTH)
+                if (rest ~ /^[[:space:]]*$/) { awaiting = 1; awaiting_added = (FNR in added) }
+                else if (FNR in added) judge(rest, FNR)
+            }
+        }' "$staged_code_path")
+    [ -z "$labels" ] || reject_with_reason "$labels" \
+        "$staged_path labels a case with prose; spell the code under test, as in test_kit(row_kit_t::haswell_k):"
+}
+
+# Rejects the names the run singleton retired from tests and benches, because each concept keeps one name in every
+# sibling: the tallies, suites and contexts, the generators and the environment readers, a `settings_t const&` that
+# hands a case what `test_run` holds, and in tests the `report(` and `require(` runners.
+check_retired_test_vocabulary() {
+    local pattern retired
+    pattern='(^|[^A-Za-z0-9_])(test_tally_t|suite_totals_t|test_suite_t|suite_exit_code|report_test_failures|failed_checks_t|test_context_t|error_stats_section_t|random_t|random_generator_t|mix_seed|env_text|env_parsed|env_seed)([^A-Za-z0-9_]|$)'
+    pattern="$pattern"'|(^|[^A-Za-z0-9_])(settings_t[[:space:]]+const|const[[:space:]]+settings_t)[[:space:]]*&'
+    case "$staged_path" in
+    bench/*) ;;
+    *) pattern="$pattern"'|(^|[^A-Za-z0-9_.>:])(report|require)[[:space:]]*\(' ;;
+    esac
+    retired=$(grep -E "$pattern" "$staged_added_code_path" || true)
+    [ -z "$retired" ] || reject_with_reason "$retired" \
+        "$staged_path spells a retired test name; use test_run, run_test_case, expect_*, case_stream_key and" \
+        "            the read_*_setting readers:"
+}
+
+# Rejects `assert`, or a library's own `<prefix>_assert_`, in a test, because Release builds compile both out and,
+# where they stay, they abort the whole run instead of counting one failed check.
+check_test_oracle_never_compiled_out() {
+    local asserts
+    asserts=$(sed -E 's/(^|[^A-Za-z0-9_])static_assert[[:space:]]*\(/\1(/g' "$staged_added_code_path" |
+        grep -E '(^|[^A-Za-z0-9_])([a-z0-9]+_)*assert_?[[:space:]]*\(' || true)
+    [ -z "$asserts" ] || reject_with_reason "$asserts" \
+        "$staged_path asserts in a test, which Release builds compile out; call expect_true or expect_equal," \
+        "            which count the failure and never compile out:"
+}
+
+# Rejects a C or C++ test unit that does not open with `#undef NDEBUG // ! A test's oracle must stay live in every
+# build` below its file docblock, so the asserts inside the code under test stay live in Release builds too. Order
+# is context, so this reads the whole staged file; one opening with `#pragma once` is included, not compiled alone,
+# and `ndebug_exempt_tests` names the units another owner migrates.
+check_test_undefines_ndebug() {
+    local exempt opening
+    for exempt in $ndebug_exempt_tests; do
+        [ "$staged_path" != "$exempt" ] || return 0
+    done
+    opening=$(< "$staged_text_path" "$fastest_awk" -v wanted="#undef NDEBUG // ! A test's oracle must stay live in every build" '
+        in_comment { if ($0 ~ /\*\//) in_comment = 0; next }
+        /^[[:space:]]*\/\*/ { if ($0 !~ /\*\//) in_comment = 1; next }
+        /^[[:space:]]*(\/\/|$)/ { next }
+        /^#pragma once$/ { exit }
+        { if ($0 != wanted) printf "line %d: %s\n", NR, $0; exit }')
+    [ -z "$opening" ] || reject_with_reason "$opening" \
+        "$staged_path does not open with \`#undef NDEBUG // ! A test's oracle must stay live in every build\`;" \
+        "            put it on the line below the file docblock, before the first #include:"
+}
+
+# Rejects a test or bench include past the public surface, a `.c` or `.cpp` source, or a header that resolves into
+# `src/`, beside the including file or through `src/` on the include path, because a test that reaches internals
+# stops proving what a user can do. `private_surface_tests` names the waived units, each explained under
+# CONTRIBUTING's "Private Surface Waivers".
+check_test_includes_public() {
+    local waived private
+    for waived in $private_surface_tests; do
+        [ "$staged_path" != "$waived" ] || return 0
+    done
+    private=$(grep -E '^\+[[:space:]]*#[[:space:]]*include[[:space:]]*"' "$staged_added_code_path" |
+        "$fastest_awk" -v file="$staged_path" '
+            {
+                header = $0; sub(/^[^"]*"/, "", header); sub(/".*$/, "", header)
+                beside = file; sub(/[^\/]*$/, "", beside); beside = beside header
+                while (sub(/[^\/.][^\/]*\/\.\.\//, "", beside)) {}
+                if (header ~ /\.(c|cc|cpp|cxx)$/) print $0
+                else if (!system("git cat-file -e \":" beside "\" 2> /dev/null")) { if (beside ~ /^src\//) print $0 }
+                else if (!system("git cat-file -e \":src/" header "\" 2> /dev/null")) print $0
+            }' || true)
+    [ -z "$private" ] || reject_with_reason "$private" \
+        "$staged_path includes past the public surface; include the public header, or waive the unit in" \
+        "            private_surface_tests with its reason under CONTRIBUTING's \"Private Surface Waivers\":"
+}
+
+# Rejects `pytest.skip(` in a test module, because a skip decided inside a test hides what it waits on; a `skipif`
+# mark, or a fixture in `python_test_scaffolding_paths`, decides it once for every test that needs it.
+check_pytest_skip_in_scaffolding() {
+    local scaffolding skips
+    for scaffolding in $python_test_scaffolding_paths; do
+        [ "$staged_path" != "$scaffolding" ] || return 0
+    done
+    skips=$(printf '%s\n' "$staged_added_text" | grep -vE '^\+[[:space:]]*#' |
+        grep -E '(^|[^A-Za-z0-9_.])pytest\.skip[[:space:]]*\(' || true)
+    [ -z "$skips" ] || reject_with_reason "$skips" \
+        "$staged_path skips from inside a test; mark it with skipif, or decide the skip in a fixture in" \
+        "            ${python_test_scaffolding_paths// /, }:"
+}
+
+# Rejects a parametrize axis spelled with a refused synonym, because one axis keeps one name in every suite: `ndim`
+# for a vector's length, `count` for the rows in a batch and `dtype` for the input scalar type. The argument names
+# may sit on the line below the call.
+check_parametrize_axis_names() {
+    local synonyms
+    synonyms=$(scan_staged_file_marking_added_lines '
+        BEGIN {
+            count = split("dims dimensions ndims dim n size num_vectors batch_size list_length input_dtype numpy_dtype dtype_str", names, " ")
+            for (position = 1; position <= count; ++position) refused[names[position]]
+        }
+        function names_end(text) {
+            sub(/^[[:space:]]*/, "", text)
+            if (text ~ /^"/) return text ~ /^"[^"]*"/
+            if (text ~ /^\047/) return text ~ /^\047[^\047]*\047/
+            if (text ~ /^[([]/) return text ~ /^[([][^])]*[])]/
+            return text != ""
+        }
+        function judge(text,    listed, position) {
+            sub(/^[[:space:]]*/, "", text)
+            if (!match(text, /^("[^"]*"|\047[^\047]*\047|[([][^])]*[])])/)) return
+            count = split(substr(text, 1, RLENGTH), listed, /[^A-Za-z0-9_]+/)
+            for (position = 1; position <= count; ++position)
+                if (listed[position] in refused) printf "line %d: parametrizes %s\n", start, listed[position]
+        }
+        pending_lines > 0 { pending = pending " " $0; touched = touched || (FNR in added); ++pending_lines }
+        pending_lines == 0 && match($0, /parametrize[[:space:]]*\(/) {
+            pending = substr($0, RSTART + RLENGTH); start = FNR; touched = (FNR in added); pending_lines = 1
+        }
+        pending_lines > 0 && (names_end(pending) || pending_lines > 3) { if (touched) judge(pending); pending_lines = 0 }')
+    [ -z "$synonyms" ] || reject_with_reason "$synonyms" \
+        "$staged_path names a parametrize axis with a refused synonym; write ndim, count or dtype:"
+}
+
+# Rejects a literal seed in a Python test, as in `default_rng(42)`, `random.Random(7)` or `np.random.seed(…)`,
+# because a test draws from the `seed` or `rng` fixture, keyed by `<PREFIX>SEED` and the test's own name, so the
+# run's seed reproduces it and a neighbour's draws cannot shift it.
+check_python_seeds_from_fixture() {
+    local seeds
+    seeds=$(printf '%s\n' "$staged_added_text" | grep -vE '^\+[[:space:]]*#' |
+        grep -E '(default_rng|random\.Random)[[:space:]]*\([[:space:]]*[0-9]|(^|[^A-Za-z0-9_])(np|numpy)\.random\.seed[[:space:]]*\(' || true)
+    [ -z "$seeds" ] || reject_with_reason "$seeds" \
+        "$staged_path seeds a generator with a literal; draw from the seed or rng fixture in conftest.py:"
+}
+
+# Marks, as `tests`, each Rust line inside a module gated by `#[cfg(test)]`, for the rules that judge test code
+# alone; `code` is the line without its comment and string contents, so format strings never count as braces.
+rust_test_module_awk='
+    {
+        code = $0; sub(/\/\/.*$/, "", code); gsub(/"(\\.|[^"\\])*"/, "\"\"", code)
+        tests = (module_depth > 0)
+        if (code ~ /#\[cfg\((all\()?test[,)]/) gated = 1
+        if (gated && code ~ /(^|[^A-Za-z0-9_])mod[[:space:]]+[A-Za-z0-9_]+[[:space:]]*\{/) { gated = 0; module_depth = depth + 1 }
+        else if (gated && code !~ /^[[:space:]]*(#\[.*)?$/) gated = 0
+        depth += gsub(/\{/, "{", code) - gsub(/\}/, "}", code)
+        if (module_depth > depth) module_depth = 0
+    }
+'
+
+# Rejects a silent early return in a Rust test module, as in `let … else { return; };`, because a test that skips
+# says so with `return skipped("…")` from testing.rs, so a run shows what it left out rather than passing in silence.
+check_rust_skips_announced() {
+    local silent
+    silent=$(scan_staged_file_marking_added_lines "$rust_test_module_awk"'
+        tests && (FNR in added) && (code ~ /else[[:space:]]*\{[[:space:]]*return[[:space:]]*(;|\}|Ok\(\(\)\))/ ||
+            (else_opened && code ~ /^[[:space:]]*return[[:space:]]*(Ok\(\(\)\))?[[:space:]]*;?[[:space:]]*$/)) { printf "line %d: %s\n", FNR, $0 }
+        { else_opened = tests && code ~ /else[[:space:]]*\{[[:space:]]*$/ }')
+    [ -z "$silent" ] || reject_with_reason "$silent" \
+        "$staged_path returns early from a Rust test in silence; announce the skip with" \
+        "            return skipped(\"<reason>\") from testing.rs:"
+}
+
+# Rejects a literal seed in a Rust test module, as in `seed_from_u64(42)`, because a test seeds from
+# `case_stream_key(index)`, so `<PREFIX>SEED` reproduces it and each test draws a stream of its own.
+check_rust_seeds_from_streams() {
+    local seeds
+    seeds=$(scan_staged_file_marking_added_lines "$rust_test_module_awk"'
+        tests && (FNR in added) && code ~ /seed_from_u64[[:space:]]*\([[:space:]]*[0-9]/ { printf "line %d: %s\n", FNR, $0 }')
+    [ -z "$seeds" ] || reject_with_reason "$seeds" \
+        "$staged_path seeds a Rust test with a literal; seed from case_stream_key(index) in testing.rs:"
+}
+
+# Rejects a skip printed by hand in Mojo, `print("skipped: …")` outside the `_skipped` helper, because the one
+# helper in the Shared Testing region words every skip the same in every suite.
+check_mojo_skips_through_helper() {
+    local printed
+    printed=$(scan_staged_file_marking_added_lines '
+        /^(def|fn)[[:space:]]+_skipped[[:space:]]*\(/ { helper = 1; next }
+        helper && /^[^[:space:]]/ { helper = 0 }
+        !helper && (FNR in added) && /print[[:space:]]*\([[:space:]]*"skipped/ { printf "line %d: %s\n", FNR, $0 }')
+    [ -z "$printed" ] || reject_with_reason "$printed" \
+        "$staged_path prints a skip by hand; call _skipped(reason) from the Shared Testing region:"
+}
+
+# Routes one staged file through the rules of this region its path calls for.
+run_harness_checks() {
+    case "$staged_path" in
+    test/*.cpp | test/*.hpp | test/*.cu | test/*.cuh | test/*.hip)
+        check_test_bodies_quiet
+        check_harness_library_qualified
+        check_harness_globals_sanctioned
+        check_harness_checks_are_functions
+        ;;
+    bench/*.cpp | bench/*.hpp | bench/*.cu | bench/*.cuh | bench/*.hip) check_harness_library_qualified ;;
+    esac
+    case "$staged_path" in
+    test/*.c | test/*.h | test/*.cpp | test/*.hpp | test/*.cu | test/*.cuh | test/*.hip | c/test.c | src_stub/test.c | cpp/test.cpp)
+        check_test_oracle_never_compiled_out
+        check_check_messages_are_arguments
+        check_test_case_labels
+        check_no_test_tallies
+        check_retired_test_vocabulary
+        ;;
+    bench/*.c | bench/*.h | bench/*.cpp | bench/*.hpp | bench/*.cu | bench/*.cuh | bench/*.hip)
+        check_no_test_tallies
+        check_retired_test_vocabulary
+        ;;
+    esac
+    case "$staged_path" in
+    test/*.c | test/*.cpp | test/*.cu | test/*.hip | c/test.c | src_stub/test.c | cpp/test.cpp) check_test_undefines_ndebug ;;
+    esac
+    case "$staged_path" in
+    test/*.c | test/*.h | test/*.cpp | test/*.hpp | test/*.cu | test/*.cuh | test/*.hip | bench/*.c | bench/*.h | bench/*.cpp | \
+        bench/*.hpp | bench/*.cu | bench/*.cuh | bench/*.hip)
+        check_test_includes_public
+        ;;
+    esac
+    case "$staged_path" in
+    test/*.py | */test_*.py)
+        check_pytest_skip_in_scaffolding
+        check_parametrize_axis_names
+        check_python_seeds_from_fixture
+        ;;
+    *.rs)
+        check_rust_skips_announced
+        check_rust_seeds_from_streams
+        ;;
+    *.mojo) check_mojo_skips_through_helper ;;
+    esac
 }
 
 # endregion Shared Harnesses
@@ -3648,6 +4034,9 @@ run_shared_checks() {
         check_platform_identity_once
         check_switches_tested_by_value
         check_macro_families
+        check_function_like_macros
+        check_path_hops
+        check_vendor_switches_independent
         ;;
     esac
     case "$staged_path" in
@@ -3680,20 +4069,13 @@ run_shared_checks() {
         ;;
     esac
     case "$staged_path" in
-    .githooks/pre-commit) check_shared_regions_match ;;
     *.c | *.h | *.hpp | *.cpp | *.cc | *.cu | *.cuh | *.hip | *.metal) check_library_arch_flags_unnamed ;;
     CMakeLists.txt | */CMakeLists.txt | *.cmake)
         check_cmake_string_surgery
         check_library_gpu_targets_unset
         ;;
     esac
-    case "$staged_path" in
-    test/*.cpp | test/*.hpp | test/*.cu | test/*.cuh | test/*.hip)
-        check_test_bodies_quiet
-        check_harness_library_qualified
-        ;;
-    bench/*.cpp | bench/*.hpp | bench/*.cu | bench/*.cuh | bench/*.hip) check_harness_library_qualified ;;
-    esac
+    run_harness_checks
     run_gate_checks
     case "$staged_path" in
     *.md) check_markdown_tex_not_in_code_spans ;;
@@ -3735,6 +4117,7 @@ run_shared_checks() {
         ;;
     *.rs)
         check_rust_macros_absent
+        check_path_hops
         check_deprecations
         check_rust_module_fields
         check_rust_use_groups "$project_include_prefix" "$staged_path" < "$staged_text_path" ||
@@ -4241,17 +4624,6 @@ check_layer_includes() {
         grep -vE "\"usearch/${allowed}" || true)
     [ -z "$reaching" ] || reject_with_reason "$reaching" \
         "$staged_path reaches past its layer; see Layers in CONTRIBUTING.md:"
-}
-
-# Function-like ALL_CAPS macros: every macro here is object-like, include guards, config flags and
-# platform shims. Preprocessor codegen hides the very lines a reader greps for, so write the
-# expansion out; a truly unavoidable file-local generator is snake_case_ plus #undef.
-check_function_like_macros() {
-    local generators
-    generators=$(printf '%s\n' "$staged_added_text" | grep -E '^\+[[:space:]]*#[[:space:]]*define[[:space:]]+[A-Z][A-Z0-9_]*\(' || true)
-    [ -z "$generators" ] || reject_with_reason "$generators" \
-        "$staged_path defines a function-like ALL_CAPS macro; write the expansion out, or name a" \
-        "            file-local generator snake_case_ and #undef it after use:"
 }
 
 # Spelled-out byte spans in C++ sources: `types.hpp` names them once, `bytes_span_t` for mutable
@@ -5189,7 +5561,6 @@ run_project_checks() {
         check_c_limit_macros
         check_bare_libc_math
         check_requires_clauses
-        check_function_like_macros
         check_spelled_byte_spans
         check_redundant_nodiscard
         check_printf

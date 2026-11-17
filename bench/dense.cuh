@@ -48,7 +48,7 @@
 #endif
 
 #include "abi.hpp" // `flag_t`, `count_t`, `counts_t`, `switch_t`, `parse_or_exit`, `mapped_rows_t`
-#include "bench.hpp"
+#include "harness.hpp"
 
 namespace unum::usearch::bench {
 using tools::count_t;

@@ -12,6 +12,8 @@
  *  exactly, a reload packs the same bytes, and the scenarios' checks of identical answers after a
  *  reload hold in @c f16 as well as @c f32. The oracle is the serial kit's 1×1 call.
  */
+#undef NDEBUG // ! A test's oracle must stay live in every build
+
 #include <cmath>   // `std::sqrt`, `std::fabs`, `std::fmax`
 #include <cstring> // `std::memcmp` - unpacked poses and packs compared as bytes
 
@@ -87,7 +89,7 @@ template <typename scalar_type_>
 std::vector<std::vector<scalar_type_>> make_clouds(std::size_t count, u64_t seed) {
     constexpr std::size_t prototypes_k = 8;
     constexpr std::size_t jittered_points_k = 4;
-    splitmix64_t random_generator {seed};
+    split_mix_generator_t random_generator {seed};
     uniform_between<f64_t> const centered {-1, 1};
     uniform_below<u32_t> const prototype_distribution {prototypes_k};
     uniform_below<u32_t> const extra_points_distribution {shapes_max_points_k - shapes_min_points_k + 1};
@@ -196,7 +198,8 @@ struct shapes_fixture {
     }
     static codec<kit_t> make_codec() noexcept { return {}; }
     static us::utilities::uuid128_t make_key(std::size_t ordinal) {
-        return std::bit_cast<us::utilities::uuid128_t>(std::array<u64_t, 2> {mix_bits(ordinal ^ 0x5A5A5Aull), ordinal});
+        return std::bit_cast<us::utilities::uuid128_t>(
+            std::array<u64_t, 2> {split_mix_bits(ordinal ^ 0x5A5A5Aull), ordinal});
     }
     static distance_t oracle(value_t const& query, value_t const& stored) noexcept {
         return serial_distance<scalar_t>(kernel_, query[0], stored[0]);
@@ -251,35 +254,30 @@ static_assert(value_codec<codec<procrustes_fixture_t::kit_t>, procrustes_fixture
 /** Rounds of @p metric: the first pack as the query, the rest staged as they fit, drained within
  *  @p radius into @p distances. */
 template <typename fixture_type_>
-std::size_t score_round(typename fixture_type_::metric_t& metric,
-                        std::vector<typename fixture_type_::value_t> const& packs,
-                        std::span<typename fixture_type_::distance_t> distances,
-                        typename fixture_type_::distance_t radius) {
-    std::size_t failures = 0;
+void score_round(typename fixture_type_::metric_t& metric, std::vector<typename fixture_type_::value_t> const& packs,
+                 std::span<typename fixture_type_::distance_t> distances, typename fixture_type_::distance_t radius) {
     for (std::size_t first = 0; first != distances.size();) {
         metric.reset(packs[0]);
         std::size_t staged = 0;
         while (first + staged != distances.size() &&
                metric.push(packs[1 + first + staged]) == metric_staging_t::staged_k)
             ++staged;
-        failures += expect(staged != 0);
+        expect_true(staged != 0);
         metric.drain(distances.subspan(first, staged), radius);
-        failures += expect_eq(metric.status(), status_t::success_k);
+        expect_equal(metric.status(), status_t::success_k);
         first += staged;
     }
-    return failures;
 }
 
 /** Every kind through the fixture's kit against the serial oracle: exact at an unbounded radius,
  *  past a zero one where the truth is, and near zero for the query's mirror image. */
 template <typename fixture_type_>
-std::size_t check_shapes_kernels(u64_t seed) {
+void test_shapes_kernels(u64_t seed) {
     using scalar_t = typename fixture_type_::scalar_t;
     using value_t = typename fixture_type_::value_t;
     using distance_t = typename fixture_type_::distance_t;
     using metric_t = typename fixture_type_::metric_t;
     constexpr std::size_t candidates_k = 8;
-    std::size_t failures = 0;
     allocation_ledger_t ledger;
     {
         counting_allocator_t const allocator {ledger};
@@ -298,32 +296,30 @@ std::size_t check_shapes_kernels(u64_t seed) {
         for (nk_kernel_kind_t const kernel : shapes_kernels_k) {
             metric_t metric(kernel, forkunion_allocator_t {});
             std::array<distance_t, candidates_k> exact, zero_radius;
-            failures += score_round<fixture_type_>(metric, packs, exact, unbounded_radius<distance_t>());
-            failures += score_round<fixture_type_>(metric, packs, zero_radius, distance_t {});
-            failures += expect(exact[0] <= mirror_tolerance);
+            score_round<fixture_type_>(metric, packs, exact, unbounded_radius<distance_t>());
+            score_round<fixture_type_>(metric, packs, zero_radius, distance_t {});
+            expect_true(exact[0] <= mirror_tolerance);
             for (std::size_t candidate = 0; candidate != candidates_k; ++candidate) {
                 distance_t const truth = serial_distance<scalar_t>(kernel, packs[0][0], packs[1 + candidate][0]);
                 kernel_errors.add(exact[candidate], truth);
-                failures += expect(exact[candidate] > 0 ? zero_radius[candidate] > 0
-                                                        : zero_radius[candidate] == exact[candidate]);
+                expect_true(exact[candidate] > 0 ? zero_radius[candidate] > 0
+                                                 : zero_radius[candidate] == exact[candidate]);
             }
         }
-        failures += expect_errors("shapes kernels", comparison_family_t::approximate_k, comparison_verdict_t::assert_k,
-                                  kernel_errors, 0);
+        expect_errors("shapes kernels", comparison_family_t::approximate_k, comparison_verdict_t::assert_k,
+                      kernel_errors, 0);
     }
-    failures += expect_eq(ledger.live_bytes, 0);
-    return failures;
+    expect_equal(ledger.live_bytes, 0);
 }
 
 /** A save returns each cloud's inserted pose within one storage rounding, and a reload, which packs
  *  the saved pose again, scores against the query as before to the storage precision. */
 template <typename fixture_type_>
-std::size_t check_shapes_codec(u64_t seed) {
+void test_shapes_codec(u64_t seed) {
     using scalar_t = typename fixture_type_::scalar_t;
     using value_t = typename fixture_type_::value_t;
     using distance_t = typename fixture_type_::distance_t;
     constexpr std::size_t clouds_k = 8;
-    std::size_t failures = 0;
     allocation_ledger_t ledger;
     {
         counting_allocator_t const allocator {ledger};
@@ -333,18 +329,17 @@ std::size_t check_shapes_codec(u64_t seed) {
         f64_t extent = 0;
         for (std::vector<scalar_t> const& cloud : clouds) {
             packs.push_back(fixture_type_::pack(cloud, allocator));
-            failures += expect_eq(shapes_codec.storage_requirements(packs.back()), cloud.size() * sizeof(scalar_t));
+            expect_equal(shapes_codec.storage_requirements(packs.back()), cloud.size() * sizeof(scalar_t));
             std::vector<scalar_t> saved(cloud.size());
-            failures += expect_eq(shapes_codec.save(packs.back(), std::as_writable_bytes(std::span {saved})),
-                                  status_t::success_k);
+            expect_equal(shapes_codec.save(packs.back(), std::as_writable_bytes(std::span {saved})),
+                         status_t::success_k);
             f64_t const tolerance = storage_precision<scalar_t>(cloud_extent(cloud));
             std::size_t drifted = 0;
             for (std::size_t coordinate = 0; coordinate != cloud.size(); ++coordinate)
                 drifted += std::fabs(f64_t(float(saved[coordinate])) - f64_t(float(cloud[coordinate]))) > tolerance;
-            failures += expect_eq(drifted, 0u);
+            expect_equal(drifted, 0u);
             reloaded.emplace_back(allocator);
-            failures += expect_eq(shapes_codec.load(std::as_bytes(std::span {saved}), reloaded.back()),
-                                  status_t::success_k);
+            expect_equal(shapes_codec.load(std::as_bytes(std::span {saved}), reloaded.back()), status_t::success_k);
             extent = std::fmax(extent, cloud_extent(cloud));
         }
         for (std::size_t candidate = 1; candidate != clouds_k; ++candidate) {
@@ -352,11 +347,10 @@ std::size_t check_shapes_codec(u64_t seed) {
                                                                 packs[candidate][0]);
             distance_t const after = serial_distance<scalar_t>(fixture_type_::kernel_k, reloaded[0][0],
                                                                reloaded[candidate][0]);
-            failures += expect(std::fabs(f64_t(after) - f64_t(before)) <= storage_precision<scalar_t>(extent));
+            expect_true(std::fabs(f64_t(after) - f64_t(before)) <= storage_precision<scalar_t>(extent));
         }
     }
-    failures += expect_eq(ledger.live_bytes, 0);
-    return failures;
+    expect_equal(ledger.live_bytes, 0);
 }
 
 /** What the index relies on, as inserts, queries and loads all pack through the kit's own
@@ -364,13 +358,12 @@ std::size_t check_shapes_codec(u64_t seed) {
  *  against a query packed from the same coordinates, exactly under every kind but
  *  Gromov-Wasserstein, whose loss reaches zero only to the fast-math tolerance. */
 template <typename fixture_type_>
-std::size_t check_shapes_packing(u64_t seed) {
+void test_shapes_packing(u64_t seed) {
     using scalar_t = typename fixture_type_::scalar_t;
     using value_t = typename fixture_type_::value_t;
     using distance_t = typename fixture_type_::distance_t;
     using metric_t = typename fixture_type_::metric_t;
     using query_t = shapes::value<scalar_t>;
-    std::size_t failures = 0;
     allocation_ledger_t ledger;
     {
         counting_allocator_t const allocator {ledger};
@@ -378,10 +371,10 @@ std::size_t check_shapes_packing(u64_t seed) {
         error_stats_t transport_errors;
         for (std::vector<scalar_t> const& cloud : make_clouds<scalar_t>(4, stream_key(seed, "packing"))) {
             value_t first(allocator), second(allocator);
-            failures += expect_eq(shapes_codec.load(std::as_bytes(std::span {cloud}), first), status_t::success_k);
-            failures += expect_eq(shapes_codec.load(std::as_bytes(std::span {cloud}), second), status_t::success_k);
+            expect_equal(shapes_codec.load(std::as_bytes(std::span {cloud}), first), status_t::success_k);
+            expect_equal(shapes_codec.load(std::as_bytes(std::span {cloud}), second), status_t::success_k);
             std::size_t const bytes = nk::shapes_pack_size<scalar_t>(cloud.size() / 3, 0).value;
-            failures += expect(std::memcmp(first[0], second[0], bytes) == 0);
+            expect_true(std::memcmp(first[0], second[0], bytes) == 0);
 
             // The query comes from another allocator, as a call builds one in its arena.
             std::array<std::span<scalar_t const>, 1> const clouds {cloud};
@@ -390,19 +383,18 @@ std::size_t check_shapes_packing(u64_t seed) {
             for (nk_kernel_kind_t const kernel : shapes_kernels_k) {
                 metric_t metric(kernel, forkunion_allocator_t {});
                 metric.reset(query);
-                failures += expect(metric.push(second) == metric_staging_t::staged_k);
+                expect_true(metric.push(second) == metric_staging_t::staged_k);
                 std::array<distance_t, 1> distances {1};
                 metric.drain(distances, unbounded_radius<distance_t>());
-                failures += expect_eq(metric.status(), status_t::success_k);
+                expect_equal(metric.status(), status_t::success_k);
                 if (kernel == nk_kernel_gromovwassersteins_packed_k) transport_errors.add(distances[0], 0.0);
-                else failures += expect_eq(distances[0], distance_t {});
+                else expect_equal(distances[0], distance_t {});
             }
         }
-        failures += expect_errors("transport self distances", comparison_family_t::approximate_k,
-                                  comparison_verdict_t::assert_k, transport_errors, 0);
+        expect_errors("transport self distances", comparison_family_t::approximate_k, comparison_verdict_t::assert_k,
+                      transport_errors, 0);
     }
-    failures += expect_eq(ledger.live_bytes, 0);
-    return failures;
+    expect_equal(ledger.live_bytes, 0);
 }
 
 /** The sharded index of Chamfer shards over the heap, and the clouds its cells hold. */
@@ -435,7 +427,7 @@ struct chamfer_entries_t {
 
 /** Clouds over sharded indexes, as @c test_basic_sharded checks, held to the best a full round of
  *  the same metric over every cloud scores. */
-std::size_t check_shapes_sharded(u64_t seed) {
+void test_shapes_sharded(u64_t seed) {
     using distance_t = chamfer_fixture_t::distance_t;
     constexpr std::size_t entries_k = basic_recall_samples_k * basic_connectivity_k * basic_connectivity_k;
     chamfer_entries_t const entries {entries_k + basic_recall_samples_k, stream_key(seed, "plural")};
@@ -464,7 +456,7 @@ std::size_t check_shapes_sharded(u64_t seed) {
 
 /** 600 clouds in a sharded index of two shards cut into two sharded indexes of two, as
  *  @c test_basic_sharded_cut checks. */
-std::size_t check_shapes_sharded_cut(u64_t seed) {
+void test_shapes_sharded_cut(u64_t seed) {
     constexpr std::size_t entries_k = 600;
     chamfer_entries_t const entries {entries_k, stream_key(seed, "plural_cut")};
     chamfer_fixture_t::metric_t metric = chamfer_fixture_t::make_metric();
@@ -474,7 +466,7 @@ std::size_t check_shapes_sharded_cut(u64_t seed) {
 }
 
 /** Clouds sampled from two shards, as @c test_basic_sharded_sample checks. */
-std::size_t check_shapes_sample(u64_t seed) {
+void test_shapes_sample(u64_t seed) {
     constexpr std::size_t entries_k = basic_recall_samples_k * basic_connectivity_k;
     chamfer_entries_t const entries {entries_k, stream_key(seed, "plural_sample")};
     chamfer_fixture_t::metric_t metric = chamfer_fixture_t::make_metric();
@@ -484,7 +476,7 @@ std::size_t check_shapes_sample(u64_t seed) {
 }
 
 /** Clouds walked by a cursor over two shards, as @c test_basic_sharded_cursor checks. */
-std::size_t check_shapes_cursor(u64_t seed) {
+void test_shapes_cursor(u64_t seed) {
     constexpr std::size_t entries_k = basic_recall_samples_k * basic_connectivity_k;
     chamfer_entries_t const entries {entries_k, stream_key(seed, "plural_cursor")};
     chamfer_fixture_t::metric_t metric = chamfer_fixture_t::make_metric();
@@ -541,26 +533,29 @@ struct chamfer_nvme_fixture_t {
     }
 };
 
-std::size_t check_shapes(settings_t const& settings) {
-    std::size_t failures = 0;
-    failures += test_basic_scenarios<chamfer_fixture_t>(settings.seed);
-    failures += test_basic_scenarios<procrustes_fixture_t>(settings.seed);
-    failures += test_basic_safegraphs_roundtrip<chamfer_fixture_t>(settings.seed, "uuid", "chamfer");
-    failures += test_basic_safegraphs_roundtrip<procrustes_fixture_t>(settings.seed, "uuid", "wasserstein-procrustes");
-    failures += test_basic_safegraphs_hostile<chamfer_fixture_t>(settings.seed, "chamfer");
-    failures += test_basic_safegraphs_hostile<procrustes_fixture_t>(settings.seed, "wasserstein-procrustes");
-    failures += check_shapes_kernels<chamfer_fixture_t>(settings.seed);
-    failures += check_shapes_kernels<procrustes_fixture_t>(settings.seed);
-    failures += check_shapes_codec<chamfer_fixture_t>(settings.seed);
-    failures += check_shapes_codec<procrustes_fixture_t>(settings.seed);
-    failures += check_shapes_packing<chamfer_fixture_t>(settings.seed);
-    failures += check_shapes_packing<procrustes_fixture_t>(settings.seed);
-    failures += check_shapes_sharded(settings.seed);
-    failures += check_shapes_sharded_cut(settings.seed);
-    failures += check_shapes_sample(settings.seed);
-    failures += check_shapes_cursor(settings.seed);
-    failures += test_basic_nvme_engines(chamfer_nvme_fixture_t {settings.seed}, "shapes", settings.seed);
-    return report("shapes", failures);
+void run_shapes_cases() {
+    u64_t const seed = test_run.settings.seed;
+    run_test_case("test_basic_scenarios<chamfer_fixture_t>", test_basic_scenarios<chamfer_fixture_t>, seed);
+    run_test_case("test_basic_scenarios<procrustes_fixture_t>", test_basic_scenarios<procrustes_fixture_t>, seed);
+    run_test_case("test_basic_safegraphs_round_trip<chamfer_fixture_t>",
+                  test_basic_safegraphs_round_trip<chamfer_fixture_t>, seed, "uuid", "chamfer");
+    run_test_case("test_basic_safegraphs_round_trip<procrustes_fixture_t>",
+                  test_basic_safegraphs_round_trip<procrustes_fixture_t>, seed, "uuid", "wasserstein-procrustes");
+    run_test_case("test_basic_safegraphs_hostile<chamfer_fixture_t>", test_basic_safegraphs_hostile<chamfer_fixture_t>,
+                  seed, "chamfer");
+    run_test_case("test_basic_safegraphs_hostile<procrustes_fixture_t>",
+                  test_basic_safegraphs_hostile<procrustes_fixture_t>, seed, "wasserstein-procrustes");
+    run_test_case("test_shapes_kernels<chamfer_fixture_t>", test_shapes_kernels<chamfer_fixture_t>, seed);
+    run_test_case("test_shapes_kernels<procrustes_fixture_t>", test_shapes_kernels<procrustes_fixture_t>, seed);
+    run_test_case("test_shapes_codec<chamfer_fixture_t>", test_shapes_codec<chamfer_fixture_t>, seed);
+    run_test_case("test_shapes_codec<procrustes_fixture_t>", test_shapes_codec<procrustes_fixture_t>, seed);
+    run_test_case("test_shapes_packing<chamfer_fixture_t>", test_shapes_packing<chamfer_fixture_t>, seed);
+    run_test_case("test_shapes_packing<procrustes_fixture_t>", test_shapes_packing<procrustes_fixture_t>, seed);
+    run_test_case("test_shapes_sharded", test_shapes_sharded, seed);
+    run_test_case("test_shapes_sharded_cut", test_shapes_sharded_cut, seed);
+    run_test_case("test_shapes_sample", test_shapes_sample, seed);
+    run_test_case("test_shapes_cursor", test_shapes_cursor, seed);
+    run_basic_nvme_cases("chamfer_nvme_fixture_t", chamfer_nvme_fixture_t {seed}, seed);
 }
 
 } // namespace unum::usearch::test::shapes

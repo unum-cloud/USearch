@@ -1,8 +1,8 @@
 """Shared harness for the Python side of the USearch test suite.
 
-Holds the matrices every module parametrizes over, the oracle it checks against, the recall
-floors it asserts, and the gate that skips a kernel family this machine cannot reach. Imported by
-name from each test module; only what pytest loads for itself lives in `conftest`.
+Holds the settings every module reads, the matrices it parametrizes over, the oracle it checks against, the
+recall floors it asserts, and the gates that skip what this machine or build cannot reach. Imported by name from
+each test module; only what pytest loads for itself lives in `conftest`.
 
 File: test/base.py
 Author: Ash Vardanian
@@ -10,10 +10,10 @@ Date: August 16, 2026
 """
 
 import os
+import random
 import re
-import secrets
-from collections.abc import Callable
 from dataclasses import dataclass
+from typing import NoReturn
 
 import numpy as np
 import numpy.typing as npt
@@ -24,51 +24,122 @@ from usearch import Arena, DenseIndex, DenseMetric, Executor, Scalar, Unsupporte
 from usearch.eval import exact_matches, random_vectors
 from usearch.keys import integers_to_keys, keys_to_integers
 
-# region Settings
+# region Shared Settings
+_UINT64_MASK = 2**64 - 1
 
 
-def env_text(name: str) -> str | None:
-    """Reads `name`, or `None` when it is unset or empty."""
-    return os.environ.get(name) or None
+def env_text(variable: str) -> str | None:
+    """The stripped text of the environment `variable`, or None when unset or blank."""
+    text = os.environ.get(variable, "").strip()
+    return text or None
 
 
-def env_parsed[T](name: str, fallback: T, parse: Callable[[str], T | None], expected: str) -> T:
-    """Reads `name` through `parse`, or `fallback` when unset or empty; exits with status 1 if it does not parse."""
-    text = env_text(name)
+def exit_unparsed(variable: str, text: str, expected: str) -> NoReturn:
+    """Stops the session on a setting that does not parse, naming it as the C and C++ suites do."""
+    raise SystemExit(f'{variable}="{text}" does not parse, expected {expected}')
+
+
+def env_seed(variable: str) -> int:
+    """An unsigned 64-bit seed: 42 when unset, drawn afresh for `random`."""
+    text = env_text(variable)
+    if text is None:
+        return 42
+    if text == "random":
+        return random.SystemRandom().getrandbits(64)
+    if not text.isdigit() or int(text) > _UINT64_MASK:
+        exit_unparsed(variable, text, "an unsigned integer or random")
+    return int(text)
+
+
+def env_real(variable: str, fallback: float) -> float:
+    """A positive real, `fallback` when unset."""
+    text = env_text(variable)
     if text is None:
         return fallback
     try:
-        parsed = parse(text)
-    except (ValueError, TypeError):
-        parsed = None
-    if parsed is None:
-        raise SystemExit(f'{name}="{text}" does not parse, expected {expected}')
-    return parsed
+        value = float(text)
+    except ValueError:
+        value = 0.0
+    if not value > 0 or value == float("inf"):
+        exit_unparsed(variable, text, "a positive number like 0.1 or 10")
+    return value
 
 
-def parse_count(text: str) -> int | None:
-    """Parses a positive whole number in ASCII digits, like `128`; zero is `None`."""
-    digits = re.fullmatch(r"[0-9]+", text) is not None
-    return (int(text) or None) if digits else None
+def env_count(variable: str, fallback: int) -> int:
+    """A whole number, `fallback` when unset."""
+    text = env_text(variable)
+    if text is None:
+        return fallback
+    if not text.isdigit():
+        exit_unparsed(variable, text, "a whole number")
+    return int(text)
 
 
-def parse_dims(text: str) -> list[int] | None:
-    """Parses one count like `128` or a comma list like `64,128,256,512`."""
-    counts = [parse_count(piece) for piece in text.split(",")]
-    return None if None in counts else counts
+def env_flag(variable: str, fallback: bool = False) -> bool:
+    """A switch, `fallback` when unset: 0, false, off and no turn it off."""
+    text = env_text(variable)
+    if text is None:
+        return fallback
+    return text not in {"0", "false", "off", "no"}
 
 
-_REQUESTED_SEED: str = os.environ.get("USEARCH_SEED") or "42"
-"""The `USEARCH_SEED` text, an unsigned integer or `random`."""
+@dataclass(frozen=True)
+class Filter:
+    """Which node ids a run selects: a regex search when the pattern compiles, else a substring, all when empty."""
 
-_RUN_SEED: int
-"""The seed every test derives its own from, drawn once when `USEARCH_SEED` is `random`."""
-if _REQUESTED_SEED == "random":
-    _RUN_SEED = secrets.randbits(32)
-elif _REQUESTED_SEED.isascii() and _REQUESTED_SEED.isdigit() and int(_REQUESTED_SEED) < 2**32:
-    _RUN_SEED = int(_REQUESTED_SEED)
-else:
-    raise SystemExit(f'USEARCH_SEED="{_REQUESTED_SEED}" does not parse, expected an unsigned integer or random')
+    pattern: str
+    regex: re.Pattern[str] | None
+
+    def selects(self, nodeid: str) -> bool:
+        """Whether `nodeid` passes the filter."""
+        if not self.pattern:
+            return True
+        if self.regex is not None:
+            return self.regex.search(nodeid) is not None
+        return self.pattern in nodeid
+
+
+def env_filter(variable: str) -> Filter:
+    """The filter the environment `variable` spells, compiled once."""
+    pattern = env_text(variable) or ""
+    try:
+        regex = re.compile(pattern) if pattern else None
+    except re.error:
+        regex = None
+    return Filter(pattern, regex)
+
+
+def mix(value: int) -> int:
+    """SplitMix64's finalizer, a bijection that spreads every input bit over all 64 output bits."""
+    value = ((value ^ (value >> 30)) * 0xBF58476D1CE4E5B9) & _UINT64_MASK
+    value = ((value ^ (value >> 27)) * 0x94D049BB133111EB) & _UINT64_MASK
+    return value ^ (value >> 31)
+
+
+def stream_key(seed: int, name: str, index: int = 0) -> int:
+    """The `index`-th stream of the family `name` under `seed`, identical in C, C++, Rust and Mojo."""
+    hashed = 0xCBF29CE484222325
+    for byte in name.encode():
+        hashed = ((hashed ^ byte) * 0x100000001B3) & _UINT64_MASK
+    return mix((mix(seed ^ hashed) + index) & _UINT64_MASK)
+
+
+# endregion Shared Settings
+
+
+def env_dims() -> list[int]:
+    """`USEARCH_DIMS`, one count like `128` or a comma list like `64,128`.
+
+    Unset, the counts bracket the SIMD register widths, where tail handling is most likely to diverge: below one
+    register, straddling one, and several whole ones.
+    """
+    text = env_text("USEARCH_DIMS")
+    if text is None:
+        return [1, 3, 15, 16, 17, 63, 64, 65, 97, 256]
+    pieces = text.split(",")
+    if not all(piece.isdigit() and int(piece) > 0 for piece in pieces):
+        exit_unparsed("USEARCH_DIMS", text, "positive counts like 64,128")
+    return [int(piece) for piece in pieces]
 
 
 @dataclass(frozen=True)
@@ -76,37 +147,21 @@ class Settings:
     """Every `USEARCH_*` variable the Python suite reads, parsed once at import."""
 
     seed: int
-    filter: re.Pattern[str] | str
-    """`USEARCH_FILTER` compiled, or its text when it is no valid regex."""
+    filter: Filter
+    scale: float
     dims: list[int]
 
-    def selects(self, name: str) -> bool:
-        """Whether `USEARCH_FILTER` selects the test `name`, as a regex or else as a substring."""
-        return self.filter in name if isinstance(self.filter, str) else bool(self.filter.search(name))
 
+SETTINGS = Settings(
+    seed=env_seed("USEARCH_SEED"),
+    filter=env_filter("USEARCH_FILTER"),
+    scale=env_real("USEARCH_SCALE", 1.0),
+    dims=env_dims(),
+)
 
-def read_settings() -> Settings:
-    """Reads every `USEARCH_*` variable, exiting with status 1 on the first that does not parse."""
-    text = env_text("USEARCH_FILTER") or ""
-    try:
-        filter = re.compile(text)
-    except re.error:
-        filter = text
-    return Settings(
-        seed=_RUN_SEED,
-        filter=filter,
-        # Dimension counts bracketing the SIMD register widths, where tail handling is most likely
-        # to diverge: below one register, straddling one, and several whole ones.
-        dims=env_parsed(
-            "USEARCH_DIMS", [1, 3, 15, 16, 17, 63, 64, 65, 97, 256], parse_dims, "positive counts like 64,128"
-        ),
-    )
-
-
-SETTINGS: Settings = read_settings()
-"""Every `USEARCH_*` variable, parsed once at import."""
-
-# endregion Settings
+BACKEND_AXES: set[str] = set()
+"""The axes the seed and the case cap leave out, so every backend draws the same inputs: none, as the Python suite
+sweeps no backend axis."""
 
 # region Matrices
 
@@ -129,11 +184,12 @@ signed integers, then unsigned. The order every dtype-indexed list in the projec
 SPATIAL_METRICS: list[DenseMetric] = [DenseMetric.INNER, DenseMetric.ANGULAR, DenseMetric.EUCLIDEAN]
 """The metrics over real-valued rows."""
 
-BITWISE_METRICS: list[DenseMetric] = [DenseMetric.HAMMING, DenseMetric.JACCARD]
-"""The metrics over packed bits, swept separately since their rows are bit vectors."""
-
 INPUT_DTYPES: list[type[np.generic]] = [np.float64, np.float32, np.float16, np.int8, np.uint8]
 """The input scalar types a caller is most likely to hand us, none of which need be the stored one."""
+
+MAX_CASES_PER_TEST = 60
+"""The most cases one test function may expand to, today's largest, so a new axis cannot multiply a matrix past it
+unnoticed."""
 
 # endregion Matrices
 
@@ -150,12 +206,9 @@ _RECALL_FLOORS: dict[Scalar, float] = {
     Scalar.U8: 0.85,
     Scalar.U1X8: 0.60,
 }
-"""Recall floors for a self-query at the default expansion over `_RECALL_ROWS` rows. Quantization
-is the only thing that moves them: a stored `e2m3` row keeps three mantissa bits, so ties it
-cannot distinguish are resolved arbitrarily."""
-
-_RECALL_ROWS: int = 512
-"""The rows a recall floor is measured over."""
+"""Recall floors for a self-query at the default expansion over 512 rows. Quantization is the only
+thing that moves them: a stored `e2m3` row keeps three mantissa bits, so ties it cannot distinguish
+are resolved arbitrarily."""
 
 
 def recall_floor(quantization: Scalar) -> float:
@@ -203,11 +256,9 @@ def bf16_rounded(rows: npt.ArrayLike) -> npt.NDArray[np.float32]:
 # region Gates
 
 
-def requires_capability(codename: str):
+def requires_capability(codename: str) -> pytest.MarkDecorator:
     """Skips when dispatch on this machine would not reach that kernel family."""
-    return pytest.mark.skipif(
-        codename not in usearch.capabilities_available(), reason=f"{codename} unavailable on this machine"
-    )
+    return pytest.mark.skipif(codename not in usearch.capabilities_available().split(","), reason=f"needs {codename}")
 
 
 # endregion Gates
@@ -220,7 +271,7 @@ def init_ram_or_skip(**options) -> DenseIndex:
     try:
         return DenseIndex.init_ram(**options)
     except UnsupportedError:
-        pytest.skip(f"this build leaves {options['quantization'].name} out")
+        pytest.skip(f"built without {options['quantization'].name.lower()} in USEARCH_DENSE_DTYPES")
 
 
 def build_index(
@@ -230,14 +281,15 @@ def build_index(
     *,
     metric: DenseMetric = DenseMetric.ANGULAR,
     quantization: Scalar = Scalar.BF16,
-    seed: int = 0,
+    seed: int,
     **options,
 ) -> tuple[DenseIndex, npt.NDArray[np.generic]]:
     """A reserved index holding *count* reproducible rows under the identities ``0..count``, inserted on *executor*.
 
     Returns the index and the rows it was built from, so a caller can query with either: `float32`
     rows, integer-valued for `i8` and `u8` storage, or packed `uint8` bits for a bitwise *metric*,
-    hence the generic dtype. Skips when this build's `USEARCH_DENSE_DTYPES` left *quantization* out.
+    hence the generic dtype. The *seed* is the test's own, from the `seed` fixture. Skips when this
+    build's `USEARCH_DENSE_DTYPES` left *quantization* out.
     """
     index = init_ram_or_skip(dimensions=dimensions, metric=metric, quantization=quantization, **options)
     index.reserve(count)

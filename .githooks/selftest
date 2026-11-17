@@ -27,6 +27,8 @@ first_sibling_directory=$(sed -n "s/^sibling_projects='\([a-z]*\).*/\1/p" "$hook
 first_sibling=$(printf '%s' "$first_sibling_directory" | tr '[:lower:]' '[:upper:]')
 macro_prefix=$(sed -n 's/^macro_prefix="\(.*\)"$/\1/p' "$hooks_directory/pre-commit")
 identity_header=$(sed -n 's/^identity_headers="\([^ "]*\).*/\1/p' "$hooks_directory/pre-commit")
+gpu_vendor_switches=$(sed -n "s/^gpu_vendor_switches='\(.*\)'$/\1/p" "$hooks_directory/pre-commit")
+python_scaffolding_path=$(sed -n 's/^python_test_scaffolding_paths="\([^ "]*\).*/\1/p' "$hooks_directory/pre-commit")
 
 # region Fixture Helpers
 
@@ -355,7 +357,7 @@ stage_sibling_with_header bench/harness.h <<'FIXTURE'
 int harness(void);
 FIXTURE
 run_precommit
-expect_acceptance "quoted header one directory above the including file"
+expect_rejection "quoted header one directory above the including file" "parent-directory hop"
 
 stage_fixture_with_header c/$project_directory/probe.h <<'FIXTURE'
 #include "probe_internal.h"
@@ -3342,14 +3344,6 @@ struct probe_t {
 };
 FIXTURE
 
-stage_fixture_verbatim .githooks/pre-commit < "$hooks_directory/pre-commit"
-run_precommit
-expect_acceptance "the hook's shared regions at their pinned sums"
-
-stage_fixture_verbatim .githooks/pre-commit < <(sed 's/^# Prints the reason and the first offending lines\./# Prints the reason and the offending lines./' "$hooks_directory/pre-commit")
-run_precommit
-expect_rejection "a shared region edited away from its pinned sum" "drifts from the sibling hooks' shared regions"
-
 # endregion Shared Region Fixtures
 
 # region Shared Build Fixtures
@@ -3451,6 +3445,324 @@ int main() {
     fmt::println("probe passed");
     return 0;
 }
+FIXTURE
+
+assert_rejects "a case summing its failures by hand" "sums a tally by hand" test/probe/probe.hpp <<FIXTURE
+namespace ${project_namespace}::test::probe {
+inline std::size_t test_probe() {
+    std::size_t failures = 0;
+    failures += !expect_true(true);
+    return failures;
+}
+} // namespace ${project_namespace}::test::probe
+FIXTURE
+
+assert_accepts "a case leaving the count to the run" test/probe/probe.hpp <<FIXTURE
+namespace ${project_namespace}::test::probe {
+inline void test_probe() { expect_true(true); }
+} // namespace ${project_namespace}::test::probe
+FIXTURE
+
+assert_rejects "a mutable global in a harness" "keeps mutable state at namespace scope" test/probe/probe.hpp <<FIXTURE
+namespace ${project_namespace}::test::probe {
+inline std::size_t probe_calls = 0;
+} // namespace ${project_namespace}::test::probe
+FIXTURE
+
+assert_accepts "the run singleton and a constant in a harness" test/probe/probe.hpp <<FIXTURE
+namespace ${project_namespace}::test::probe {
+inline constexpr std::size_t probe_limit_k = 4;
+inline test_run_t test_run;
+} // namespace ${project_namespace}::test::probe
+FIXTURE
+
+assert_rejects "a check spelled as a macro" "spells a check as a macro" test/probe/probe.hpp <<FIXTURE
+namespace ${project_namespace}::test::probe {
+#define expect_probe(condition) expect_true(condition)
+} // namespace ${project_namespace}::test::probe
+FIXTURE
+
+assert_accepts "a check written as a function" test/probe/probe.hpp <<FIXTURE
+namespace ${project_namespace}::test::probe {
+inline void expect_probe(int value, std::source_location where = std::source_location::current()) noexcept {
+    expect_true(value > 0, where);
+}
+} // namespace ${project_namespace}::test::probe
+FIXTURE
+
+assert_rejects "a message folded into a wrapped condition" "folds a message into a check's condition" test/probe/probe.hpp <<FIXTURE
+namespace ${project_namespace}::test::probe {
+inline void test_probe(int found) {
+    expect_true(found != 0 &&
+                "the key");
+}
+} // namespace ${project_namespace}::test::probe
+FIXTURE
+
+assert_accepts "a message passed as the trailing argument" test/probe/probe.hpp <<FIXTURE
+namespace ${project_namespace}::test::probe {
+inline void test_probe(int found) { expect_true(found != 0, "the key"); }
+} // namespace ${project_namespace}::test::probe
+FIXTURE
+
+assert_rejects "a prose case label on the line after the call" "labels a case with prose" test/probe.cpp <<'FIXTURE'
+int main(int argc, char** argv) {
+    run_test_case(
+        "Probe: empty input", test_probe);
+    return 0;
+}
+FIXTURE
+
+assert_accepts "a case label that spells a call" test/probe.cpp <<'FIXTURE'
+int main(int argc, char** argv) {
+    run_test_case("test_probe(probe_kind_t::empty_k)", test_probe, probe_kind_t::empty_k);
+    return 0;
+}
+FIXTURE
+
+assert_rejects "a retired context handed to a case" "spells a retired test name" test/probe/probe.hpp <<FIXTURE
+namespace ${project_namespace}::test::probe {
+inline void test_probe(test_context_t const& context) { expect_true(context.seed != 0); }
+} // namespace ${project_namespace}::test::probe
+FIXTURE
+
+assert_accepts "a retired name in a comment only" test/probe/probe.hpp <<FIXTURE
+namespace ${project_namespace}::test::probe {
+
+/** Draws from the case's own stream, where a @c test_context_t once handed it a seed. */
+inline void test_probe() { expect_true(case_stream_key() != 0); }
+} // namespace ${project_namespace}::test::probe
+FIXTURE
+
+assert_rejects "assert in a test" "asserts in a test" test/probe/probe.hpp <<FIXTURE
+namespace ${project_namespace}::test::probe {
+inline void test_probe(int value) { assert(value > 0); }
+} // namespace ${project_namespace}::test::probe
+FIXTURE
+
+assert_accepts "expect_true and static_assert in a test" test/probe/probe.hpp <<FIXTURE
+namespace ${project_namespace}::test::probe {
+inline void test_probe(int value) {
+    static_assert(sizeof(int) >= 4);
+    expect_true(value > 0);
+}
+} // namespace ${project_namespace}::test::probe
+FIXTURE
+
+stage_fixture_verbatim test/probe.cpp <<'FIXTURE'
+/**
+ *  @file test/probe.cpp
+ *  @author Selftest
+ *  @date January 1, 2026
+ *  @brief One staged fixture for one rule.
+ */
+#include <cstdio>
+FIXTURE
+run_precommit
+expect_rejection "test without NDEBUG undefined" "does not open with"
+
+stage_fixture_verbatim test/probe.cpp <<'FIXTURE'
+/**
+ *  @file test/probe.cpp
+ *  @author Selftest
+ *  @date January 1, 2026
+ *  @brief One staged fixture for one rule.
+ */
+#undef NDEBUG // ! A test's oracle must stay live in every build
+#include <cstdio>
+FIXTURE
+run_precommit
+expect_acceptance "test opening with NDEBUG undefined"
+
+assert_rejects "a test including a library source" "includes past the public surface" test/probe.cpp <<FIXTURE
+#include "${project_directory}/probe.cpp"
+FIXTURE
+
+assert_accepts "a test including a public header" test/probe.cpp <<FIXTURE
+#include "${project_directory}/probe.hpp"
+FIXTURE
+
+assert_rejects "function-like ALL_CAPS macro in a C test" "defines a function-like ALL_CAPS macro" test/probe.c <<'FIXTURE'
+#define PROBE_TWICE(value) ((value) * 2)
+FIXTURE
+
+assert_accepts "object-like macro and the file-local C generator" test/probe.c <<'FIXTURE'
+#define PROBE_LIMIT 64
+#define expect_(condition) expect_at((condition), __FILE__, __LINE__, #condition)
+#undef expect_
+FIXTURE
+
+assert_rejects "parent-directory hop in a Rust path" "parent-directory hop" rust/probe.rs <<'FIXTURE'
+const VERSION: &str = include_str!("../VERSION");
+FIXTURE
+
+assert_accepts "version read through Cargo" rust/probe.rs <<'FIXTURE'
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+FIXTURE
+
+assert_verbatim_accepts "testing.rs opening with its dead-code allowance" rust/testing.rs <<'FIXTURE'
+#![allow(dead_code, reason = "the Shared Testing region is the same in every sibling library, used or not")]
+//! Helpers the crate's tests share.
+//!
+//! File: rust/testing.rs
+//! Author: Selftest
+//! Date: January 1, 2026
+
+const SETTINGS_PREFIX: &str = "PROBE_";
+FIXTURE
+
+stage_fixture_with_header tools/probe.hpp <<FIXTURE
+#if ${macro_prefix}_ARCH_ROCM_
+inline int probe_kind() noexcept { return 1; }
+#elif ${macro_prefix}_ARCH_CUDA_
+inline int probe_kind() noexcept { return 2; }
+#endif
+FIXTURE
+run_precommit
+if [ -n "$gpu_vendor_switches" ]; then expect_rejection "GPU vendors chained through #elif" "makes GPU vendors exclude each other"
+else expect_acceptance "GPU vendors chained where the project has no GPU code"; fi
+
+stage_fixture_with_header tools/probe.hpp <<FIXTURE
+#if ${macro_prefix}_ARCH_METAL_ && !${macro_prefix}_ARCH_CUDA_
+inline int probe_kind() noexcept { return 3; }
+#endif
+FIXTURE
+run_precommit
+if [ -n "$gpu_vendor_switches" ]; then expect_rejection "a GPU vendor negated beside another" "makes GPU vendors exclude each other"
+else expect_acceptance "a GPU vendor negated where the project has no GPU code"; fi
+
+assert_accepts "one #if per GPU vendor behind a single-vendor #error" tools/probe.hpp <<FIXTURE
+#if ${macro_prefix}_ARCH_CUDA_ + ${macro_prefix}_ARCH_ROCM_ > 1
+#error "A probe unit compiles for one vendor"
+#endif
+#if ${macro_prefix}_ARCH_ROCM_
+inline int probe_kind() noexcept { return 1; }
+#endif
+#if ${macro_prefix}_ARCH_CUDA_
+inline int probe_kind() noexcept { return 2; }
+#endif
+#if !${macro_prefix}_ARCH_CUDA_ && !${macro_prefix}_ARCH_ROCM_
+inline int probe_kind() noexcept { return 0; }
+#endif
+FIXTURE
+
+assert_rejects "pytest.skip inside a test" "skips from inside a test" test/probe.py <<'FIXTURE'
+import pytest
+
+
+def test_probe():
+    """Probes nothing."""
+    pytest.skip("needs NumPy")
+FIXTURE
+
+assert_accepts "pytest.skip in a scaffolding fixture" "$python_scaffolding_path" <<'FIXTURE'
+import pytest
+
+
+@pytest.fixture
+def device():
+    """A GPU device, or a skip where the machine has none."""
+    pytest.skip("no GPU device")
+FIXTURE
+
+assert_rejects "a refused synonym as a parametrize axis" "names a parametrize axis with a refused synonym" test/probe.py <<'FIXTURE'
+import pytest
+
+
+@pytest.mark.parametrize(
+    ("dtype", "dims"),
+    [("f32", 3)],
+)
+def test_probe(dtype, dims):
+    """Probes one shape."""
+    assert dims > 0
+FIXTURE
+
+assert_accepts "the house names as parametrize axes" test/probe.py <<'FIXTURE'
+import pytest
+
+
+@pytest.mark.parametrize(("dtype", "ndim"), [("f32", 3)])
+def test_probe(dtype, ndim):
+    """Probes one shape."""
+    assert ndim > 0
+FIXTURE
+
+assert_rejects "a literal seed in a Python test" "seeds a generator with a literal" test/probe.py <<'FIXTURE'
+import random
+
+
+def test_probe():
+    """Draws one value."""
+    assert random.Random(7).random() < 1
+FIXTURE
+
+assert_accepts "a draw from the rng fixture" test/probe.py <<'FIXTURE'
+
+def test_probe(rng):
+    """Draws one value from the test's own generator."""
+    assert rng.random() < 1
+FIXTURE
+
+assert_rejects "a silent early return in a Rust test" "returns early from a Rust test in silence" rust/probe.rs <<'FIXTURE'
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn probes_the_first_device() {
+        let Some(device) = first_device() else { return };
+        assert!(device.ready());
+    }
+}
+FIXTURE
+
+assert_accepts "an announced skip in a Rust test" rust/probe.rs <<'FIXTURE'
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn probes_the_first_device() {
+        let Some(device) = first_device() else { return skipped("no GPU device") };
+        assert!(device.ready());
+    }
+}
+FIXTURE
+
+assert_rejects "a literal seed in a Rust test" "seeds a Rust test with a literal" rust/probe.rs <<'FIXTURE'
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn draws_below_the_bound() {
+        let mut generator = ChaCha8Rng::seed_from_u64(42);
+        assert!(generator.next_u64() >= 0);
+    }
+}
+FIXTURE
+
+assert_accepts "a Rust test seeded from its stream" rust/probe.rs <<'FIXTURE'
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn draws_below_the_bound() {
+        let mut generator = ChaCha8Rng::seed_from_u64(case_stream_key(0));
+        assert!(generator.next_u64() >= 0);
+    }
+}
+FIXTURE
+
+assert_rejects "a Mojo skip printed by hand" "prints a skip by hand" mojo/probe.mojo <<'FIXTURE'
+def test_probe() raises:
+    """Probes nothing."""
+    print("skipped: needs a GPU")
+FIXTURE
+
+assert_accepts "a Mojo skip through the helper" mojo/probe.mojo <<'FIXTURE'
+def _skipped(reason: String):
+    """Announces a skipped test."""
+    print("skipped:", reason)
+
+
+def test_probe() raises:
+    """Probes nothing."""
+    _skipped("needs a GPU")
 FIXTURE
 
 # endregion Shared Harness Fixtures
@@ -3852,15 +4164,6 @@ FIXTURE
 assert_accepts "tool including a drive utility and the SafeGraphs format" tools/probe.hpp <<'FIXTURE'
 #include "usearch/utilities/blocking_files.hpp"
 #include "usearch/utilities/safegraphs_format.hpp"
-FIXTURE
-
-assert_rejects "function-like ALL_CAPS macro" "defines a function-like ALL_CAPS macro" include/usearch/probe.hpp <<'FIXTURE'
-#define USEARCH_PROBE_TWICE(value) ((value) * 2)
-FIXTURE
-
-assert_accepts "object-like macro and a snake_case_ generator" include/usearch/probe.hpp <<'FIXTURE'
-#define USEARCH_PROBE_LIMIT 64
-#define probe_twice_(value) ((value) * 2)
 FIXTURE
 
 assert_rejects "spelled-out byte span" "spells out a byte span" include/usearch/probe.hpp <<'FIXTURE'

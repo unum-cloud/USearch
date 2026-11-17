@@ -21,6 +21,8 @@
  *  RAM index's poses come back within that band of each cloud's extent after each of three save and
  *  load cycles, and a reloaded index ranks within the distance band it implies.
  */
+#undef NDEBUG // ! A test's oracle must stay live in every build
+
 #include <cmath> // `std::sqrt` - a point's move from its coordinates' bands
 
 #include <algorithm> // `std::minmax_element` - a cloud's extent
@@ -61,7 +63,7 @@ struct shapes_tape_t {
  *  @p sizes ' fewest points or more under a hundredth of jitter. */
 static shapes_tape_t generate_shapes(std::size_t count, shapes_sizes_t const& sizes, u64_t seed) {
     constexpr std::size_t templates_k = 8;
-    splitmix64_t random_generator {seed};
+    split_mix_generator_t random_generator {seed};
     uniform_between<f64_t> const unit {-1, 1}, jitter {-0.01, 0.01};
     uniform_below<u32_t> const template_distribution {templates_k};
     uniform_below<u32_t> const kept_distribution {static_cast<u32_t>(sizes.points - sizes.fewest_points + 1)};
@@ -106,8 +108,8 @@ static double shapes_score_band(shapes_tape_t const& tape, double unit_roundoff)
 
 /** The coordinates the first @p count keys of @p index read back as in f32, end to end, each key's
  *  cloud starting at its entry of @p offsets, which ends with the total. */
-static std::vector<float> poses_of(handle<shapes_verbs_t>& index, std::size_t count, std::vector<std::size_t>& offsets,
-                                   std::size_t& failures) {
+static std::vector<float> poses_of(handle<shapes_verbs_t>& index, std::size_t count,
+                                   std::vector<std::size_t>& offsets) {
     std::vector<float> poses;
     offsets.assign(1, 0);
     for (std::size_t offset = 0; offset != count; ++offset) {
@@ -120,7 +122,8 @@ static std::vector<float> poses_of(handle<shapes_verbs_t>& index, std::size_t co
         get.shapes = &shapes, get.written = &written, get.arena = index.arena();
         get.outputs_scalar = usearch_scalar_f32_k;
         usearch_shapes_get(&get);
-        failures += check(outcome) + check(written == 1);
+        expect_success(outcome);
+        expect_true(written == 1);
         if (outcome.status != usearch_status_success_k || written != 1) break;
         float const* const coordinates = static_cast<float const*>(shapes.data);
         poses.insert(poses.end(), coordinates + tape_offset(shapes, 0) * 3, coordinates + tape_offset(shapes, 1) * 3);
@@ -131,105 +134,100 @@ static std::vector<float> poses_of(handle<shapes_verbs_t>& index, std::size_t co
 
 /** A RAM index's poses come back within their rounding band after each of three save and load
  *  cycles under @p stem. */
-static std::size_t expect_poses_round_trip(handle<shapes_verbs_t>& index, std::string const& stem) {
+static void expect_poses_round_trip(handle<shapes_verbs_t>& index, std::string const& stem) {
     constexpr std::size_t keys_k = 64, cycles_k = 3;
-    std::size_t failures = 0;
     double const unit_roundoff = unit_roundoff_of(index.geometry.quantization);
     std::vector<std::size_t> offsets, reloaded_offsets;
-    std::vector<float> const original = poses_of(index, keys_k, offsets, failures);
+    std::vector<float> const original = poses_of(index, keys_k, offsets);
+    if (!expect_equal(offsets.size(), keys_k + 1)) return;
     handle<shapes_verbs_t> cycled {nullptr, *index.session, usearch_residency_ram_k, index.geometry};
-    for (std::size_t cycle = 0; cycle != cycles_k && !failures; ++cycle) {
+    for (std::size_t cycle = 0; cycle != cycles_k; ++cycle) {
         handle<shapes_verbs_t>& source = cycle ? cycled : index;
         std::string const path = fmt::format("{}-cycle{}.safegraphs", stem, cycle);
         usearch_outcome_t outcome {};
         shapes_verbs_t::save(source.get(), source.executor(), bytes_view(path), &outcome);
-        failures += check(outcome);
+        if (!expect_success(outcome)) return;
         st::vector<std::int32_t> placement;
         shapes_verbs_t::index_t loaded = nullptr;
         shapes_verbs_t::load_ram(&loaded, index.session->executor, bytes_view(path),
                                  index.session->ram_options(0, placement), index.geometry, &outcome);
-        failures += check(outcome);
+        if (!expect_success(outcome)) return;
         cycled = {loaded, *index.session, usearch_residency_ram_k, index.geometry};
         if (cycled) {
-            std::vector<float> const reloaded = poses_of(cycled, keys_k, reloaded_offsets, failures);
-            failures += check(reloaded_offsets == offsets) +
-                        expect_poses_within_rounding(original, reloaded, offsets, unit_roundoff);
+            std::vector<float> const reloaded = poses_of(cycled, keys_k, reloaded_offsets);
+            if (!expect_true(reloaded_offsets == offsets)) return;
+            expect_poses_within_rounding(original, reloaded, offsets, unit_roundoff);
         }
         for (sz::string_t const& file : files_starting_with(fmt::format("{}-cycle{}", stem, cycle)))
             std::remove(file.c_str());
     }
-    return failures;
 }
 
-/** One metric of one cell, named @p name, as the file's docblock describes. */
-static std::size_t check_shapes_metric(sweep_cell_t const& cell, session_t& session, usearch_shapes_metadata_t geometry,
-                                       std::string const& name, u64_t seed) {
+/** One metric of one cell, as the file's docblock describes; GPUs serve the point-set metrics
+ *  alone, the alignments refusing at open. */
+static case_result_t test_shapes_metric(sweep_cell_t const& cell, usearch_shapes_metadata_t geometry, u64_t seed) {
+    bool const point_set = geometry.metric == usearch_shapes_metric_chamfer_k ||
+                           geometry.metric == usearch_shapes_metric_hausdorff_k;
+    if (cell.residency == usearch_residency_vram_k && !point_set)
+        return case_result_t::skipped("needs usearch_residency_ram_k");
+    session_t session = open_session(settings_of(session_settings(), cell), cell.cpu_class);
+    if (!expect_true(bool(session))) return {};
     bool const aligned = geometry.metric == usearch_shapes_metric_gromov_wasserstein_k ||
                          geometry.metric == usearch_shapes_metric_wasserstein_procrustes_k;
     shapes_sizes_t const sizes = aligned ? alignment_sizes_k : shapes_sizes_k;
     geometry.connectivity = sizes.connectivity;
     handle<shapes_verbs_t> index = open_index<shapes_verbs_t>(session, geometry, cell.shards);
-    if (!index) return 1;
+    if (!expect_true(bool(index))) return {};
     shapes_tape_t const shapes = generate_shapes(sizes.shapes + sizes.queries, sizes, seed);
     shapes_tape_t const second_source = generate_shapes(sizes.packed_shapes, sizes, ~seed);
     usearch_tape_view_t const queries = shapes_verbs_t::slice(shapes.view(), sizes.shapes);
 
-    std::size_t failures = expect_built(cell, index, shapes.view(), sizes.shapes);
-    if (failures) return failures;
-    failures += expect_walk_recall(index, queries, sizes.queries, shapes_expansion_k, 0.8);
+    if (!check_built(cell, index, shapes.view(), sizes.shapes)) return {};
+    expect_walk_recall(index, queries, sizes.queries, shapes_expansion_k, 0.8);
     // An NVMe cell builds in RAM and views its checkpoint only once saved, so it walks hinted.
-    failures += expect_hints(
-        index, queries, sizes.queries, shapes_expansion_k,
-        index.residency == usearch_residency_ram_k ? usearch_status_success_k : usearch_status_unsupported_k);
-    failures += expect_refined(index, queries, sizes.queries, shapes_expansion_k, usearch_status_success_k);
-    failures += expect_health(index, sizes.shapes);
-    failures += expect_cursor(index, sizes.shapes);
-    failures += expect_sample(index, sizes.shapes);
-    failures += expect_buffer_round_trip(index, queries, sizes.queries, shapes_expansion_k, 0.8,
-                                         usearch_status_unsupported_k);
-    std::string const stem = fmt::format("/tmp/usearch-abi-shapes-{:016x}", stream_key(seed, name));
-    if (cell.residency == usearch_residency_ram_k) failures += expect_poses_round_trip(index, stem + "-poses");
-    failures += expect_persistence(cell, index, shapes.view(), queries, sizes.queries, shapes_expansion_k, 0.8, stem,
-                                   saved_bytes_t::differing_k,
-                                   shapes_score_band(shapes, unit_roundoff_of(geometry.quantization)));
-    if (cell.residency == usearch_residency_nvme_k) return failures;
-    failures += expect_refine_plan(index, shapes.view(), sizes.shapes, usearch_status_success_k);
-    failures += expect_reshard_gather(index, second_source.view(), sizes.packed_shapes, sizes.shapes,
-                                      usearch_status_success_k);
-    failures += check(describe(index).total_points == shapes.offsets[sizes.shapes] + second_source.offsets.back());
-    failures += expect_reshard_cut(index, usearch_status_success_k);
-    return failures + expect_cleared(index, shapes.view());
+    expect_hints(index, queries, sizes.queries, shapes_expansion_k,
+                 index.residency == usearch_residency_ram_k ? usearch_status_success_k : usearch_status_unsupported_k);
+    expect_refined(index, queries, sizes.queries, shapes_expansion_k, usearch_status_success_k);
+    expect_health(index, sizes.shapes);
+    expect_cursor(index, sizes.shapes);
+    expect_sample(index, sizes.shapes);
+    expect_buffer_round_trip(index, queries, sizes.queries, shapes_expansion_k, 0.8, usearch_status_unsupported_k);
+    scratch_directory_t const scratch;
+    std::string const stem = scratch.path("checkpoint");
+    if (cell.residency == usearch_residency_ram_k) expect_poses_round_trip(index, stem + "-poses");
+    expect_persistence(cell, index, shapes.view(), queries, sizes.queries, shapes_expansion_k, 0.8, stem,
+                       saved_bytes_t::differing_k, shapes_score_band(shapes, unit_roundoff_of(geometry.quantization)));
+    if (cell.residency == usearch_residency_nvme_k) return {};
+    expect_refine_plan(index, shapes.view(), sizes.shapes, usearch_status_success_k);
+    expect_reshard_gather(index, second_source.view(), sizes.packed_shapes, sizes.shapes, usearch_status_success_k);
+    expect_true(describe(index).total_points == shapes.offsets[sizes.shapes] + second_source.offsets.back());
+    expect_reshard_cut(index, usearch_status_success_k);
+    expect_cleared(index, shapes.view());
+    return {};
 }
 
-std::size_t check_shapes_abi(settings_t const& settings) {
+void run_shapes_abi_cases() {
     constexpr std::array<usearch_shapes_metric_t, 4> metrics_k {
         usearch_shapes_metric_chamfer_k, usearch_shapes_metric_hausdorff_k, usearch_shapes_metric_gromov_wasserstein_k,
         usearch_shapes_metric_wasserstein_procrustes_k};
+    constexpr std::array<std::string_view, 4> metric_constants_k {
+        "usearch_shapes_metric_chamfer_k", "usearch_shapes_metric_hausdorff_k",
+        "usearch_shapes_metric_gromov_wasserstein_k", "usearch_shapes_metric_wasserstein_procrustes_k"};
+    // The streams keep the names the cells had before their labels spelled the constants.
     constexpr std::array<std::string_view, 4> metric_names_k {"chamfer", "hausdorff", "gromov-wasserstein",
                                                               "wasserstein-procrustes"};
-    constexpr std::size_t gpu_metrics_k = 2;
-    std::size_t failures = 0;
-    if (settings.filter.selects("shapes metric names"))
-        failures += report("shapes metric names", expect_metric_names<shapes_verbs_t>());
+    run_test_case("test_metric_names<shapes_verbs_t>", test_metric_names<shapes_verbs_t>);
     for (sweep_cell_t const& cell : diagonal_sweep(usearch_scalar_unknown_k)) {
         // The best class sweeps every metric, and a class set as the ceiling the first.
         std::size_t const metrics_count = cell.cpu_class == usearch_cpu_class_unknown_k ? metrics_k.size() : 1;
         for (std::size_t metric = 0; metric != metrics_count; ++metric) {
             std::string const name = fmt::format("shapes {} {}", name_of(cell), metric_names_k[metric]);
-            if (!settings.filter.selects(name)) continue;
-            // GPUs serve the point-set metrics alone; the alignments refuse at open.
-            if (cell.residency == usearch_residency_vram_k && metric >= gpu_metrics_k) {
-                report(name.c_str(), "served on the CPU alone");
-                continue;
-            }
-            session_t session = open_session(settings_of(settings, cell), cell.cpu_class);
             usearch_shapes_metadata_t const geometry {metrics_k[metric], usearch_scalar_f16_k, 0, 0};
-            failures += report(
-                name.c_str(),
-                session ? check_shapes_metric(cell, session, geometry, name, stream_key(settings.seed, name)) : 1);
+            std::string const label = fmt::format("test_shapes_metric({}, {}, {}, {})", constant_of(cell.residency),
+                                                  constant_of(cell.cpu_class), cell.shards, metric_constants_k[metric]);
+            run_test_case(label.c_str(), test_shapes_metric, cell, geometry, stream_key(test_run.settings.seed, name));
         }
     }
-    return failures;
 }
 
 } // namespace unum::usearch::test::abi

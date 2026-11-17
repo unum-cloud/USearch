@@ -37,6 +37,7 @@
 #include "usearch/geospatial_index.h"
 
 #include "abi.hpp"
+#include "harness.hpp" // `split_mix_generator_t`
 
 namespace unum::usearch::bench {
 using namespace unum::usearch::tools;
@@ -53,7 +54,7 @@ inline std::vector<usearch_geospatial_observation_t> generate_places(std::size_t
     constexpr f64_t degrees_k = 180.0 / 3.14159265358979323846;
     constexpr std::size_t places_per_town_k = 64;
     constexpr f64_t spread_degrees_k = 0.02;
-    splitmix64_t random_generator {seed};
+    split_mix_generator_t random_generator {seed};
     std::size_t const towns = max_of<std::size_t>(1, count / places_per_town_k);
     std::vector<std::array<f64_t, 2>> centres(towns);
     for (std::array<f64_t, 2>& centre : centres)

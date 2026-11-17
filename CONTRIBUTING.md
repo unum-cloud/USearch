@@ -60,23 +60,7 @@ cmake --build build_relwithdebinfo --config RelWithDebInfo
 build_relwithdebinfo/usearch_test
 ```
 
-`usearch_test` and `usearch_test_c` open by naming the build and the machine it runs on:
-
-```text
-USearch 3.0.0
-- Compiled for: serial,neon,neonsdot,neonbfdot,neonfhm,neonfp8
-- This machine: serial,neon,neonsdot,neonbfdot,neonfhm
-```
-
-Both lists come from the C interface, the same strings the bindings report.
-"Compiled for" is `usearch_capabilities_compiled()`, the NumKong capability levels this build carries kernels for, and "This machine" is `usearch_capabilities_available()`, those of them this processor can also run.
-`usearch_test_vram` runs on the GPUs `USEARCH_DEVICES` names, comma-separated USearch device ordinals like `0` or `0,2`, positions in the listing `usearch_gpu_devices` reports: NVIDIA devices first, then AMD, then Apple.
-Unset, it takes the first device of every vendor present, and an ordinal past the listing prints the listing and exits 1.
-It links one object library per vendor the build carries, and each device opens with its vendor's line: `- CUDA: <device> nvidia-<class> #<ordinal>, <N> SMs, <M> MiB`, `- ROCm: device #<ordinal> amd-cdna<N>` or `- Metal: device #<ordinal> apple-metal<N>`.
-Without any GPU it prints `- GPU: none listed` and exits 0, skipping every GPU test.
-`USEARCH_NVME_PATHS` names NVMe namespaces the same way, comma-separated in the grammar of `usearch_nvme_options_t::paths`: files, block devices or SPDK transport IDs like `trtype:PCIe traddr:0000:01:00.0`.
-Unset, the SPDK suite saves `usearch-nvme-spdk.safegraphs` under `TMPDIR` for a rig to copy onto a namespace, and the next run, naming that namespace, views the copy.
-`usearch_test_c` reads `USEARCH_SEED` and `USEARCH_FILTER` too, the filter as a substring of its test names.
+What the suites print, the variables they read, and how to write a case are under [Test Suites](#test-suites).
 
 Those three configurations, and the benchmarking one from [bench/README.md](bench/README.md), are also packaged as CMake presets, so the flag soup below is optional:
 
@@ -673,6 +657,162 @@ file build_artifacts/libusearch_shared.so # Verify the output
 
 The resulting `libusearch_shared.so` can be used in Android projects by placing it in `src/main/jniLibs/armeabi-v7a/` for 32-bit ARM or `arm64-v8a/` for 64-bit ARM.
 
+## Test Suites
+
+### Principles
+
+Tests reach the library through its public surface: the C interface in `c/usearch/*.h`, the headers under `include/usearch/`, and each binding's own API.
+The few private includes are listed under [Private Surface Waivers](#private-surface-waivers), each with what the public surface lacks.
+A kernel is never its own oracle: results are held to NumKong's kernels in the index's own metric, to exhaustive scans, or to known answers, and inputs are never drawn through the code under test.
+Oracles never compile out, so a test checks with `expect_true` and its siblings, never `assert`, and every C and C++ test unit opens with `#undef NDEBUG // ! A test's oracle must stay live in every build`.
+Harnesses hold one mutable global, `test_run`, the run in progress.
+Checks fire on worker threads and inside helpers as well as in a case's own body, so the run counts failed checks in one place and `run_test_case` diffs that count around each case, rather than threading a tally through every call.
+After a crash, `p test_run` in a core dump names the case in progress and the last failed check, and the signal handlers print the case too.
+The harness owns stdout, and case bodies write their diagnostics to stderr.
+Settings are read once, before the first case, and a value that does not parse prints one line naming it and exits 1.
+Skips are honest: a case that cannot run says why, as `needs <resource>`, `built without <SWITCH>`, `<facility> is refused on this machine` or `no <device>`, and a filter that selects nothing fails the run.
+Benchmarks never include `test/`, each tree keeps its own harness, and neither uses a test or benchmark framework.
+
+### Running
+
+```sh
+cmake --preset debug                    # Clang with AddressSanitizer
+cmake --build --preset debug
+ctest --preset debug
+```
+
+`usearch_test` holds the host suites, `usearch_test_vram` the GPU suites of every vendor the build carries, and `usearch_test_c` the C interface's.
+Each opens by naming the build, the machine and the settings:
+
+```text
+USearch 3.0.0
+- Compiled for: serial,neon,neonsdot,neonbfdot,neonfhm,neonfp8
+- This machine: serial,neon,neonsdot,neonbfdot,neonfhm
+- Seed: 42, scale: 1, filter: none
+```
+
+Both lists come from the C interface, the same strings the bindings report.
+"Compiled for" is `usearch_capabilities_compiled()`, the NumKong capability levels this build carries kernels for, and "This machine" is `usearch_capabilities_available()`, those of them this processor can also run.
+Every case then prints one verdict line, and a failed check prints where it failed, with what differed beneath it, while the case goes on, so one run lists every mismatch it reaches.
+A failed case prints a `rerun:` line naming the seed, a filter that selects it alone, and the binary, and the run ends with a summary:
+
+```text
+  check failed at test/dense.cpp:214
+    expected 10, got 9
+- test_ram_metric<nk::f32_t> ... FAILED: 1 failed check(s)
+  rerun: build_debug/usearch_test --seed 42 --filter '^test_ram_metric<nk::f32_t>$'
+- test_insert_accepts_every_quantization<e2m3_t> ... skipped: built without e2m3 in USEARCH_DENSE_DTYPES
+- test_search_finds_every_row ... ok (0.12 s)
+41 passed, 1 failed, 1 skipped, seed 42
+```
+
+A run exits with 1 when a case failed, a check failed outside any case, or nothing ran, with 3 when `USEARCH_NO_SKIPS` is set and a case skipped, and with 0 otherwise.
+The C suite prints the same lines, except that its `ok` carries no time.
+`USEARCH_TRAP_ON_FAILURE=1` raises `SIGTRAP` at the first failed check instead, which stops a debugger there, or dumps a core without one:
+
+```sh
+USEARCH_TRAP_ON_FAILURE=1 USEARCH_FILTER='^test_ram_' gdb -ex run --args build_debug/usearch_test
+```
+
+The bindings' suites run as their CI runs them:
+
+```sh
+python -X faulthandler -m pytest -x     # Python, after `uv pip install -e . --group test`
+cargo test -- --nocapture               # Rust, showing the `skipped:` lines libtest otherwise hides
+pixi run test                           # Mojo
+```
+
+pytest prints the same header, opening with `USearch <version> from <path>` and adding `- Dims:`, so a failure under a drawn seed reruns with the number it shows.
+
+### Environment
+
+| Variable                  | Flag                | Default                        | Meaning                                                                                               |
+| :------------------------ | :------------------ | :----------------------------- | :---------------------------------------------------------------------------------------------------- |
+| `USEARCH_SEED`            | `--seed`            | `42`                           | Seed every stream derives from, any unsigned 64-bit value, or `random` to draw one                    |
+| `USEARCH_FILTER`          | `--filter`          | unset                          | Cases to run: a regex searched in C++ labels and pytest node IDs, else a substring                    |
+| `USEARCH_SCALE`           | `--scale`           | `1`                            | Multiplier for every baseline iteration count in C++, like `0.1` or `10`; pytest prints it            |
+| `USEARCH_TRAP_ON_FAILURE` | `--trap-on-failure` | unset                          | C++ only: raises `SIGTRAP` at the first failed check, to stop there under a debugger                  |
+| `USEARCH_NO_SKIPS`        | `--no-skips`        | unset                          | C++ only: exits 3 when any case skipped, for a rig that must run everything                           |
+| `USEARCH_DEVICES`         | `--devices`         | first device of every vendor   | C++ only: comma-separated USearch device ordinals, like `0` or `0,2`, as [Devices](#devices) explains |
+| `USEARCH_NVME_PATHS`      | `--nvme-paths`      | unset                          | C++ only: comma-separated NVMe namespaces in the grammar of `usearch_nvme_options_t::paths`           |
+| `USEARCH_DIMS`            |                     | `1,3,15,16,17,63,64,65,97,256` | Python only: the dimension counts the dense tests sweep, one count or a comma list                    |
+
+A flag overrides its variable in the C++ suites and the benchmarks, as `--seed 7` or `--seed=7`; the C, Python, Rust and Mojo suites read the variables alone.
+The C suite matches `USEARCH_FILTER` as a substring, having no portable regex, and the Rust suite reads only `USEARCH_SEED`, filtering through `cargo test <name>` instead.
+The Mojo suite reads `USEARCH_SEED` as an integer, without `random`.
+A value that does not parse stops the run with one line naming it, like `USEARCH_SEED="abc" does not parse, expected an unsigned integer or random`.
+
+`USEARCH_SEED` keys every stream by a name, as `stream_key(seed, name, index)`, identical in C++, Python, Rust and Mojo, and the C++, Python and Rust suites name each case's streams after the case.
+A case's inputs therefore never depend on which cases ran before it, so the seed together with the filter reproduces a failure:
+
+```sh
+USEARCH_SEED=random build_debug/usearch_test                         # A fresh seed, which the header prints
+USEARCH_FILTER='^test_ram_' USEARCH_SCALE=0.1 build_debug/usearch_test   # A fast inner loop over the RAM cases
+USEARCH_SEED=1528003704 python -m pytest test/ --count 3             # Replays that seed, then two more repeats
+USEARCH_FILTER=quantization python -m pytest test/                   # Only the node IDs that mention it
+```
+
+### Writing a Test
+
+A C++ case is a `void test_<behaviour>(args…)`, or a `case_result_t test_<behaviour>(args…)` when it may skip, which `main` registers as `run_test_case("<label>", test_<behaviour>, args…)`.
+A label spells the code under test exactly, so grepping it lands on that code: a C ABI symbol like `usearch_init`, a qualified C++ name like `fu::flat_pool::for_n`, or the test function's own name like `test_open_clear_close`. A case run over a runtime choice is labelled in call notation with the exact constants, like `test_kit(row_kit_t::haswell_k)`, and one run over a template argument as written, like `test_metric_names<dense_verbs_t>`.
+A case takes no settings or context parameter, since the run is global, and checks with functions from `test/harness.hpp`, each of which counts a failed check, lets the case go on, and returns whether it held:
+
+- `expect_true(held)`, for any condition;
+- `expect_equal(actual, wanted)`, which prints `expected <wanted>, got <actual>`;
+- `expect_near(actual, wanted, tolerance)`, which holds when `|actual - wanted| <= tolerance * max(1, |actual|, |wanted|)`;
+- `expect_status(outcome, wanted)`, which prints both statuses by name, and `expect_success(outcome)`, its shorthand for success;
+- `expect_throws<E>(callable)`, whose subject is the failure.
+
+A message trails the arguments as a format string and its values, like `expect_true(held, "row {} of {}", row, rows)`, and is never folded into the condition as `held && "text"`.
+Where the step after a failed check would index past what it checked, the case stops on the check's answer, as in `if (!expect_equal(found.size(), wanted.size())) return;`.
+A case that cannot run returns `case_result_t::skipped(reason)`.
+Inputs come from `split_mix_generator_t {case_stream_key(index)}`, never from a literal seed, so a filtered run draws what an unfiltered one did.
+Loops size through `scaled_iterations(baseline)`, waits go through `spin_until(predicate)`, bounded by `wait_limit_k`, and files go in a `scratch_directory_t`, removed with it.
+
+A C case starts with `start_test_case("c.<case>")`, which answers whether the filter selects it, and ends with `finish_test_case(NULL)`, or with its reason when it skipped.
+It checks with `expect_(condition)`, or with `expect_at(held, __FILE__, __LINE__, "message")` where a message helps.
+
+A Python test draws from the `seed` or `rng` fixture, never from a literal seed, passing `seed=seed` to `build_index` and `random_vectors`, and `stream_key(seed, "<family>", index)` where it needs several streams.
+The seed is `stream_key(USEARCH_SEED, name, step)`, where `name` is the test function and its parameters, and `step` is the pytest-repeat step, so other parameters and repeats draw apart.
+Axis names follow one vocabulary: `count` for the rows in a batch, `ndim` for a vector's length, `dtype` for the scalar type a caller hands in, and `quantization` for the one the index stores.
+Parametrizes run top-down from `dtype` to `ndim` to `count` and then the rest, enum parameters are named by their lower-case members, and `MAX_CASES_PER_TEST` in `test/base.py` caps how many cases one test function expands to, so raising it is a decision for review.
+A test that needs an optional dependency says so where it is decided, as `pytest.importorskip("pyarrow", reason="PyArrow is not installed")`, one needing a kernel family takes `@requires_capability("<codename>")`, and `init_ram_or_skip` skips a quantization the build's `USEARCH_DENSE_DTYPES` left out.
+A test checking what a callback reported takes the `unraisable` fixture, which collects what `sys.unraisablehook` receives.
+
+A Rust test is named as a behaviour sentence, without a `test_` prefix, returns `()` and calls `.unwrap()`, which reports the caller's line.
+The helpers several modules' tests share live in `rust/testing.rs`: `skipped(reason)`, which a test that cannot run returns, `case_stream_key(index)`, which seeds its generators, `ScratchDirectory` for its files, `block_on` for its futures, and `assert_close` and `assert_close_rows`, which hold to the rule `expect_near` does.
+
+A Mojo test is registered in `main` by hand, since Mojo has no test discovery, and one that is not silently never runs.
+A test that cannot run calls `_skipped(reason)` and returns, `library_missing_k` being the reason when the shared library is not on the loader path, its generators start from `_stream_key(_run_seed(), "<family>", index)`, and its files go in a `mkdtemp()` directory.
+
+One behaviour carries one name in every language: the Rust test's, which C, C++, Python and Mojo spell `test_<name>`, as in `saves_and_loads_a_file` and `test_saves_and_loads_a_file`.
+
+### Benchmarks
+
+The benchmarks under `bench/` keep their own harness, `bench/harness.hpp`, which reads its settings through the same pinned readers, so `USEARCH_SEED`, `USEARCH_FILTER`, `USEARCH_DEVICES` and `USEARCH_NVME_PATHS` mean there what they mean here, and the same flags override them.
+Their rows take the label grammar of the tests, and they print the same header, while their timing tables keep their own layout.
+`bench/dense.py` reads the same names, and [bench/README.md](bench/README.md) covers building, running and the datasets.
+
+### Devices
+
+`usearch_test_vram` runs on the GPUs `USEARCH_DEVICES` names, comma-separated USearch device ordinals like `0` or `0,2`, positions in the listing `usearch_gpu_devices` reports: NVIDIA devices first, then AMD, then Apple.
+Unset, it takes the first device of every vendor present, and an ordinal past the listing prints the listing and exits 1.
+It links one object library per vendor the build carries, and each device opens with its vendor's line: `- CUDA: <device> nvidia-<class> #<ordinal>, <N> SMs, <M> MiB`, `- ROCm: device #<ordinal> amd-cdna<N>` or `- Metal: device #<ordinal> apple-metal<N>`.
+Without any GPU, every GPU case reports `skipped: no GPU device`.
+A vendor switch, `USEARCH_ARCH_CUDA_`, `USEARCH_ARCH_ROCM_` or `USEARCH_ARCH_METAL_`, is a fact about the unit, so each takes its own `#if`, never an `#elif` after another vendor's, and anything in a shared header whose meaning depends on the vendor takes internal linkage or the vendor's name, since the shards link into one binary.
+
+`USEARCH_NVME_PATHS` names NVMe namespaces the same way, comma-separated in the grammar of `usearch_nvme_options_t::paths`: files, block devices or SPDK transport IDs like `trtype:PCIe traddr:0000:01:00.0`.
+Unset, the SPDK suite saves `usearch-nvme-spdk.safegraphs` under `TMPDIR` for a rig to copy onto a namespace, and the next run, naming that namespace, views the copy, as [SPDK Builds](#spdk-builds) shows.
+
+### Private Surface Waivers
+
+These test files include a header from `src/`, which no public header declares, each for what that surface lacks:
+
+- `test/placement.cpp` includes `src/lib.hpp` for `resolve_placement`, `gpu_placement_t` and `gpu_class_bit`, the placement rules the C interface applies but does not export.
+- `test/dense/vram_nvidia.hpp`, `test/shapes/vram_index.cpp` and `test/sequence/vram_index.cpp` include `src/lib.hpp` for `gpu_class_t`, `pick_gpu_class` and `stringzilla_capabilities_of`, the class the library picks a GPU unit by, which the cells compare against.
+- `test/dense/ram_indexes.hpp` includes `src/dense_specializations.cuh` for `quads_kit_of` and its kin, the kits a CPU class runs a dtype on.
+
 ## Bindings
 
 Every binding is a thin layer over the C interface, and these rules hold in each of them.
@@ -742,17 +882,7 @@ uv pip install -e . --group test              # the suite and everything it impo
 python -X faulthandler -m pytest -x           # how the CI runs it
 ```
 
-The `seed` fixture hands a test 42, unless `USEARCH_SEED` names another seed or is `random`, which draws a fresh one per run.
-pytest prints every setting in its header, as `- Seed: <n>`, so a failure under a drawn seed reruns with that number.
-Under pytest-repeat, the fixture adds the repeat step to the seed, so repetitions differ and each one still reproduces.
-`USEARCH_DIMS` replaces the swept dimension counts, and `USEARCH_FILTER` keeps the tests whose node ID matches it, as a regex or else as a substring.
-A value that does not parse stops the run with `USEARCH_SEED="<value>" does not parse, expected an unsigned integer or random`.
-
-```sh
-USEARCH_SEED=random python -m pytest test/               # draws a seed and prints it in the header
-USEARCH_SEED=1528003704 python -m pytest test/ --count 3 # replays that seed, then the next two
-USEARCH_FILTER=quantization python -m pytest test/       # only the tests whose node id mentions it
-```
+The variables the suite reads, `USEARCH_SEED`, `USEARCH_FILTER` and `USEARCH_DIMS` among them, and the fixtures a test draws from are under [Test Suites](#test-suites).
 
 Linting:
 
@@ -843,6 +973,8 @@ cargo clippy --all-targets -- -D warnings   # how the CI lints
 cargo fmt --check
 ```
 
+The helpers the tests share and the seed they read are under [Test Suites](#test-suites).
+
 Publishing the crate is a bit more complicated than normally.
 If you simply pull the repository with submodules and run the following command it will list fewer files than expected:
 
@@ -897,7 +1029,7 @@ pixi run build
 pixi run mojo format -l 120 mojo/test.mojo
 ```
 
-Mojo 1.0 has no test discovery, so every check is registered in `main` by hand and one that is not silently never runs.
+Mojo has no test discovery, so every check is registered in `main` by hand and one that is not silently never runs, as [Test Suites](#test-suites) describes.
 
 ## Swift
 

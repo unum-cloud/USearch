@@ -32,6 +32,8 @@ mod dense_index;
 mod geospatial_index;
 mod sequence_index;
 mod shapes_index;
+#[cfg(test)]
+mod testing;
 mod types;
 
 // The C mirror items are public within their modules, so only these names leave the crate.

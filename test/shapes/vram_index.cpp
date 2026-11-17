@@ -13,10 +13,13 @@
  *  their own first byte, as an Arrow slice's do, so the later batches walk graphs whose reverse
  *  links earlier batches merged.
  */
+#undef NDEBUG // ! A test's oracle must stay live in every build
+
 #include <algorithm> // `std::nth_element`
 #include <array>     // `std::array` - the prototypes, one cloud a pack takes
 #include <limits>    // `std::numeric_limits` - the node-ID type's sentinel
 #include <span>      // `std::span`
+#include <string>    // `std::string` - the cases' labels
 #include <vector>    // `std::vector` - clouds, the tape, offsets, matches
 
 #include "usearch/shapes_index.h"
@@ -67,7 +70,7 @@ enum class cloud_kind_t { random_k, coincident_k, collinear_k, molecular_k };
 /** Draws @p count clouds of @p kind, @b [points,3] interleaved coordinates each. */
 static std::vector<std::vector<f64_t>> generate_clouds(cloud_kind_t kind, std::size_t count, u64_t seed) {
     constexpr std::size_t min_points_k = 10, max_points_k = 60, prototypes_k = 8, jittered_points_k = 4;
-    splitmix64_t random_generator {seed};
+    split_mix_generator_t random_generator {seed};
     uniform_between<f64_t> const centered {-1, 1};
     uniform_below<u32_t> const points_distribution {max_points_k - min_points_k + 1};
     uniform_below<u32_t> const prototype_distribution {prototypes_k};
@@ -132,7 +135,7 @@ static std::size_t matched_count(std::span<f64_t const> found, std::vector<dista
 
 /** What the NVIDIA collections build on: the executor, the face's storage and the contexts carved
  *  from the executor's run. */
-struct vram_cells_t {
+struct nvidia_cells_t {
     using executor_t = cuda_executor_t;
 
     static cuda_virtual_memory_allocator<byte_t> storage(executor_t& executor, int device) noexcept {
@@ -145,12 +148,13 @@ struct vram_cells_t {
     inline static constexpr gpu_vendor_t vendor_k = gpu_vendor_t::nvidia_k;
     inline static constexpr char runtime_k[] = "CUDA";
 };
+using cell_vendor_t = nvidia_cells_t;
 
 #elif USEARCH_ARCH_ROCM_
 
 /** What the AMD collections build on: the executor, the face's storage and the contexts carved from
  *  the executor's run. */
-struct vram_cells_t {
+struct amd_cells_t {
     using executor_t = hip_executor_t;
 
     static hip_virtual_memory_allocator<byte_t> storage(executor_t& executor, int device) noexcept {
@@ -163,12 +167,13 @@ struct vram_cells_t {
     inline static constexpr gpu_vendor_t vendor_k = gpu_vendor_t::amd_k;
     inline static constexpr char runtime_k[] = "ROCm";
 };
+using cell_vendor_t = amd_cells_t;
 
 #else
 
 /** What the Apple collections build on: the executor, the face's storage and the contexts over its
  *  stream. */
-struct vram_cells_t {
+struct apple_cells_t {
     using executor_t = metal_executor_t;
 
     static metal_shared_allocator_t storage(executor_t& executor, int) noexcept {
@@ -176,6 +181,7 @@ struct vram_cells_t {
     }
     static metal_stream_t arena(executor_t& executor) noexcept { return executor.stream(0).handle.share(); }
 };
+using cell_vendor_t = apple_cells_t;
 
 #endif
 
@@ -188,16 +194,16 @@ struct vram_cells_t {
  *  recall at ten must reach the RAM index's at the same breadth, give or take a twentieth.
  */
 template <typename scalar_type_, typename vram_index_type_>
-static std::size_t check_shapes_vram_collection(u64_t seed, vram_cells_t::executor_t& executor, nk_kernel_kind_t kernel,
-                                                cloud_kind_t kind, std::size_t count, std::size_t queries_count) {
+static void test_shapes_vram_collection(u64_t seed, cell_vendor_t::executor_t& executor, nk_kernel_kind_t kernel,
+                                        cloud_kind_t kind, std::size_t count, std::size_t queries_count) {
     using vram_index_t = vram_index_type_;
+    checks_held_t const held;
     using kit_t = typename shapes_ladder<scalar_type_, nk_cap_cpus_k>::kit_t;
     using serial_kit_t = typename shapes_ladder<scalar_type_, nk_cap_serial_k>::kit_t;
     using ram_index_t = ram_index<kit_t>;
     using value_t = typename ram_index_t::value_t;
     using distance_t = typename kit_t::distance_t;
     constexpr std::size_t wanted_k = 10, expansion_k = 64, batches_k = 3;
-    std::size_t failures = 0;
 
     std::vector<std::vector<f64_t>> const clouds = generate_clouds(kind, count + queries_count, seed);
     std::vector<std::vector<scalar_type_>> stored(clouds.size());
@@ -208,7 +214,7 @@ static std::size_t check_shapes_vram_collection(u64_t seed, vram_cells_t::execut
     }
     std::vector<byte_t, nk::aligned_allocator<byte_t>> tape(offsets.back());
     for (std::size_t entry = 0; entry != clouds.size(); ++entry)
-        failures += expect(!nk::failed(
+        expect_true(!nk::failed(
             nk::shapes_pack<scalar_type_>(reinterpret_cast<typename scalar_type_::raw_t const*>(stored[entry].data()),
                                           stored[entry].size() / 3, tape.data() + offsets[entry], 0)));
 
@@ -219,34 +225,34 @@ static std::size_t check_shapes_vram_collection(u64_t seed, vram_cells_t::execut
             void const* const query_pack = tape.data() + offsets[count + query];
             void const* const entry_pack = tape.data() + offsets[entry];
             distance_t const infinity = std::numeric_limits<distance_t>::infinity();
-            failures += expect(
-                (kernel == nk_kernel_hausdorffs_packed_k
-                     ? serial_kit_t::hausdorffs(&query_pack, 1, &entry_pack, 1, &exact[query][entry],
-                                                sizeof(distance_t), nullptr, &infinity, nullptr)
-                     : serial_kit_t::chamfers(&query_pack, 1, &entry_pack, 1, &exact[query][entry], sizeof(distance_t),
-                                              nullptr, &infinity, nullptr, 0, nullptr)) == nk_success_k);
+            expect_true((kernel == nk_kernel_hausdorffs_packed_k
+                             ? serial_kit_t::hausdorffs(&query_pack, 1, &entry_pack, 1, &exact[query][entry],
+                                                        sizeof(distance_t), nullptr, &infinity, nullptr)
+                             : serial_kit_t::chamfers(&query_pack, 1, &entry_pack, 1, &exact[query][entry],
+                                                      sizeof(distance_t), nullptr, &infinity, nullptr, 0, nullptr)) ==
+                        nk_success_k);
         }
 
     ram_index_t ram_index;
     shapes_metric<kit_t> metric {kernel, forkunion_allocator_t {}};
     typename ram_index_t::traversal_context_t ram_context {seed};
     typename value_t::allocator_type const value_allocator {ram_index.get_allocator()};
-    failures += expect(bool(ram_index.reserve(count)));
+    expect_true(bool(ram_index.reserve(count)));
     for (std::size_t entry = 0; entry != count; ++entry) {
         std::array const cloud {std::span<scalar_type_ const> {stored[entry]}};
         value_t value = value_t::make(cloud, value_allocator, 0).value;
         us::utilities::uuid128_t const key = uuid_of(entry);
-        failures += expect_eq(ram_index
-                                  .insert({&value, 1}, {&key, 1}, metric, {}, ram_context,
-                                          us::basic::keep_diverse_t {connectivity_32_k}, {expansion_k})
-                                  .status,
-                              status_t::success_k);
+        expect_equal(ram_index
+                         .insert({&value, 1}, {&key, 1}, metric, {}, ram_context,
+                                 us::basic::keep_diverse_t {connectivity_32_k}, {expansion_k})
+                         .status,
+                     status_t::success_k);
     }
     std::size_t ram_matched = 0;
     for (std::size_t query = 0; query != queries_count; ++query) {
         std::array const cloud {std::span<scalar_type_ const> {stored[count + query]}};
         value_t const value = value_t::make(cloud, value_allocator, 0).value;
-        failures += expect_eq(ram_index.search(value, {expansion_k}, metric, ram_context).status, status_t::success_k);
+        expect_equal(ram_index.search(value, {expansion_k}, metric, ram_context).status, status_t::success_k);
         std::vector<f64_t> found;
         for (std::size_t rank = 0; rank != min_of(wanted_k, ram_context.results.size()); ++rank)
             found.push_back(static_cast<f64_t>(ram_context.results[rank].distance));
@@ -254,55 +260,55 @@ static std::size_t check_shapes_vram_collection(u64_t seed, vram_cells_t::execut
     }
 
     int const device = executor.device(0);
-    vram_index_t vram_index {kernel, vram_cells_t::storage(executor, device)};
-    failures += expect_eq(vram_index.reserve({count, connectivity_32_k, offsets[count] - offsets[0]}).status,
-                          status_t::success_k);
+    vram_index_t vram_index {kernel, cell_vendor_t::storage(executor, device)};
+    expect_equal(vram_index.reserve({count, connectivity_32_k, offsets[count] - offsets[0]}).status,
+                 status_t::success_k);
     typename vram_index_t::insert_config_t const insert_config {expansion_k};
     std::vector<us::utilities::uuid128_t> keys(count);
     for (std::size_t entry = 0; entry != count; ++entry) keys[entry] = uuid_of(entry);
-    for (std::size_t batch = 0; batch != batches_k && !failures; ++batch) {
+    for (std::size_t batch = 0; batch != batches_k && held(); ++batch) {
         std::size_t const first = count * batch / batches_k, bound = count * (batch + 1) / batches_k;
         std::span<std::size_t const> const batch_offsets {offsets.data() + first, bound - first + 1};
-        failures += expect_eq(executor.reserve(vram_index.traversal_memory_usage(
-                                  tape_view<byte_t const> {tape.data(), batch_offsets}, insert_config)),
-                              status_t::success_k);
-        typename vram_index_t::traversal_context_t context {vram_cells_t::arena(executor)};
+        expect_equal(executor.reserve(vram_index.traversal_memory_usage(
+                         tape_view<byte_t const> {tape.data(), batch_offsets}, insert_config)),
+                     status_t::success_k);
+        typename vram_index_t::traversal_context_t context {cell_vendor_t::arena(executor)};
         auto const [inserted, status] = vram_index.insert({keys.data() + first, bound - first},
                                                           {tape.data(), batch_offsets}, context, insert_config);
-        failures += expect_eq(status, status_t::success_k);
-        failures += expect_eq(inserted.first_id, first);
-        failures += expect_eq(inserted.new_size, bound);
+        expect_equal(status, status_t::success_k);
+        expect_equal(inserted.first_id, first);
+        expect_equal(inserted.new_size, bound);
     }
-    failures += expect_eq(vram_index.size(), count);
+    expect_equal(vram_index.size(), count);
 
     std::vector<u32_t> ids(queries_count * wanted_k);
     std::vector<f32_t> distances(queries_count * wanted_k);
     std::span<std::size_t const> const query_offsets {offsets.data() + count, queries_count + 1};
     typename vram_index_t::search_config_t const search_config {expansion_k, wanted_k};
-    failures += expect_eq(executor.reserve(vram_index.traversal_memory_usage(
-                              tape_view<byte_t const> {tape.data(), query_offsets}, search_config)),
-                          status_t::success_k);
-    typename vram_index_t::traversal_context_t context {vram_cells_t::arena(executor)};
-    if (!failures)
-        failures += expect_eq(vram_index
-                                  .search({tape.data(), query_offsets}, {ids.data(), {queries_count, wanted_k}},
-                                          {distances.data(), {queries_count, wanted_k}}, search_config, context)
-                                  .status,
-                              status_t::success_k);
+    expect_equal(executor.reserve(vram_index.traversal_memory_usage(
+                     tape_view<byte_t const> {tape.data(), query_offsets}, search_config)),
+                 status_t::success_k);
+    typename vram_index_t::traversal_context_t context {cell_vendor_t::arena(executor)};
+    if (held())
+        expect_equal(vram_index
+                         .search({tape.data(), query_offsets}, {ids.data(), {queries_count, wanted_k}},
+                                 {distances.data(), {queries_count, wanted_k}}, search_config, context)
+                         .status,
+                     status_t::success_k);
     std::size_t vram_matched = 0;
     error_stats_t distance_errors;
-    for (std::size_t query = 0; query != queries_count && !failures; ++query) {
+    for (std::size_t query = 0; query != queries_count && held(); ++query) {
         std::vector<f64_t> found;
         for (std::size_t rank = 0; rank != wanted_k; ++rank) {
             u32_t const id = ids[query * wanted_k + rank];
             if (id == (std::numeric_limits<u32_t>::max)()) break;
             f64_t const distance = distances[query * wanted_k + rank];
-            failures += expect(id < count);
+            expect_true(id < count);
             if (id < count) distance_errors.add(distance, exact[query][id]);
-            failures += expect(found.empty() || found.back() <= distance);
+            expect_true(found.empty() || found.back() <= distance);
             found.push_back(distance);
         }
-        failures += expect_eq(found.size(), wanted_k);
+        expect_equal(found.size(), wanted_k);
         vram_matched += matched_count(std::span<f64_t const> {found}, exact[query], wanted_k);
     }
     f64_t const ram_recall = static_cast<f64_t>(ram_matched) / (queries_count * wanted_k);
@@ -310,9 +316,9 @@ static std::size_t check_shapes_vram_collection(u64_t seed, vram_cells_t::execut
     if (vram_recall + 0.05 < ram_recall)
         fmt::print(stderr, "  recall at ten on {} clouds: {:.3f} on the GPU, {:.3f} in RAM\n", count, vram_recall,
                    ram_recall);
-    failures += expect(vram_recall + 0.05 >= ram_recall);
-    return failures + expect_errors("vram shapes distances", comparison_family_t::approximate_k,
-                                    comparison_verdict_t::assert_k, distance_errors, 0);
+    expect_true(vram_recall + 0.05 >= ram_recall);
+    expect_errors("vram shapes distances", comparison_family_t::approximate_k, comparison_verdict_t::assert_k,
+                  distance_errors, 0);
 }
 
 #endif // USEARCH_ARCH_CUDA_ || USEARCH_ARCH_METAL_
@@ -321,16 +327,16 @@ static std::size_t check_shapes_vram_collection(u64_t seed, vram_cells_t::execut
 /** The NVIDIA face over packs of @p scalar_type_ under the kits of @p gpu_class_, whose
  *  capabilities are @p capabilities_. */
 template <typename scalar_type_, gpu_class_t gpu_class_, nk_capability_t capabilities_>
-using vram_face_t = vram_nvidia_index<typename shapes_ladder<scalar_type_, capabilities_>::kit_t, u32_t,
-                                      shapes_nvidia_fatbin<gpu_class_, scalar_type_::dtype()>>;
+using shapes_face_t = vram_nvidia_index<typename shapes_ladder<scalar_type_, capabilities_>::kit_t, u32_t,
+                                        shapes_nvidia_fatbin<gpu_class_, scalar_type_::dtype()>>;
 
 #elif USEARCH_ARCH_ROCM_
 
 /** The AMD face over packs of @p scalar_type_ under the kits of @p gpu_class_, whose capabilities
  *  are @p capabilities_. */
 template <typename scalar_type_, gpu_class_t gpu_class_, nk_capability_t capabilities_>
-using vram_face_t = vram_amd_index<typename shapes_ladder<scalar_type_, capabilities_>::kit_t, u32_t,
-                                   shapes_amd_code_object<gpu_class_, scalar_type_::dtype()>>;
+using shapes_face_t = vram_amd_index<typename shapes_ladder<scalar_type_, capabilities_>::kit_t, u32_t,
+                                     shapes_amd_code_object<gpu_class_, scalar_type_::dtype()>>;
 
 #endif
 #if USEARCH_ARCH_CUDA_ || USEARCH_ARCH_ROCM_
@@ -338,63 +344,66 @@ using vram_face_t = vram_amd_index<typename shapes_ladder<scalar_type_, capabili
 /** Every collection under the kits of @p gpu_class_, whose capabilities are @p capabilities_: the
  *  F16 ones, and the F32 one on the vendor-wide floor, which alone builds F32 packs. */
 template <gpu_class_t gpu_class_, nk_capability_t capabilities_>
-static std::size_t check_shapes_vram_class(settings_t const& settings, vram_cells_t::executor_t& executor,
-                                           char const* tier) {
+static void run_shapes_vram_class_cases(cell_vendor_t::executor_t& executor, char const* gpu_class) {
     constexpr nk_kernel_kind_t chamfer_k = nk_kernel_chamfers_packed_k, hausdorff_k = nk_kernel_hausdorffs_packed_k;
     struct cell_t {
         char const* name;
+        char const* kind_constant;
         nk_kernel_kind_t kernel;
         cloud_kind_t kind;
         std::size_t count, queries_count;
     };
-    cell_t const cells[] = {{"random", chamfer_k, cloud_kind_t::random_k, 1024, 64},
-                            {"coincident", hausdorff_k, cloud_kind_t::coincident_k, 256, 16},
-                            {"collinear", chamfer_k, cloud_kind_t::collinear_k, 1024, 64},
-                            {"molecular", hausdorff_k, cloud_kind_t::molecular_k, 1024, 64}};
-    std::size_t failures = 0;
+    cell_t const cells[] = {
+        {"random", "cloud_kind_t::random_k", chamfer_k, cloud_kind_t::random_k, 1024, 64},
+        {"coincident", "cloud_kind_t::coincident_k", hausdorff_k, cloud_kind_t::coincident_k, 256, 16},
+        {"collinear", "cloud_kind_t::collinear_k", chamfer_k, cloud_kind_t::collinear_k, 1024, 64},
+        {"molecular", "cloud_kind_t::molecular_k", hausdorff_k, cloud_kind_t::molecular_k, 1024, 64}};
+    u64_t const seed = test_run.settings.seed;
     for (cell_t const& cell : cells)
-        failures += report(fmt::format("shapes_vram {} {}", tier, cell.name).c_str(),
-                           check_shapes_vram_collection<nk::f16_t, vram_face_t<nk::f16_t, gpu_class_, capabilities_>>(
-                               stream_key(settings.seed, cell.name), executor, cell.kernel, cell.kind, cell.count,
-                               cell.queries_count));
+        run_test_case(
+            fmt::format("test_shapes_vram_collection<nk::f16_t>({}, {})", gpu_class, cell.kind_constant).c_str(),
+            test_shapes_vram_collection<nk::f16_t, shapes_face_t<nk::f16_t, gpu_class_, capabilities_>>,
+            stream_key(seed, cell.name), executor, cell.kernel, cell.kind, cell.count, cell.queries_count);
     if constexpr (gpu_class_ == gpu_class_t::nvidia_ampere_k || gpu_class_ == gpu_class_t::amd_cdna3_k)
-        failures += report(
-            fmt::format("shapes_vram {} f32", tier).c_str(),
-            check_shapes_vram_collection<nk::f32_t, vram_face_t<nk::f32_t, gpu_class_, capabilities_>>(
-                stream_key(settings.seed, "f32"), executor, chamfer_k, cloud_kind_t::molecular_k, 1024, 64));
-    return failures;
+        run_test_case(
+            fmt::format("test_shapes_vram_collection<nk::f32_t>({}, cloud_kind_t::molecular_k)", gpu_class).c_str(),
+            test_shapes_vram_collection<nk::f32_t, shapes_face_t<nk::f32_t, gpu_class_, capabilities_>>,
+            stream_key(seed, "f32"), executor, chamfer_k, cloud_kind_t::molecular_k, std::size_t {1024},
+            std::size_t {64});
 }
 
 /** Every class the device runs, as the dispatch ladder would admit it: the floor on any NVIDIA
  *  GPU, and datacenter Blackwell's packed kits on one; the CDNA3 floor on a 64-lane AMD GPU. */
 template <>
-std::size_t check_shapes_vram<vram_cells_t::executor_t>(settings_t const& settings, gpu_device_t const& device) {
-    if (device.vendor != vram_cells_t::vendor_k || !settings.filter.selects("shapes_vram")) return 0;
+void run_shapes_vram_cases<cell_vendor_t::executor_t>(gpu_device_t const& device) {
+    if (device.vendor != cell_vendor_t::vendor_k) return;
     int const ordinal = static_cast<int>(device.vendor_ordinal);
-    auto [executor, spawn_status] = vram_cells_t::executor_t::spawn(vram_cells_t::api(),
-                                                                    std::span<int const> {&ordinal, 1});
-    if (failed(spawn_status))
-        return fmt::println(stderr, "- {}: device #{} opens no stream", vram_cells_t::runtime_k, ordinal), 1;
+    auto [executor, spawn_status] = cell_vendor_t::executor_t::spawn(cell_vendor_t::api(),
+                                                                     std::span<int const> {&ordinal, 1});
+    if (!expect_true(succeeded(spawn_status), "{} device #{} opens no stream", cell_vendor_t::runtime_k, ordinal))
+        return;
 #if USEARCH_ARCH_CUDA_
     constexpr nk_capability_t ampere_k = nk_cap_cuda_k | nk_cap_ampere_k;
     constexpr nk_capability_t blackwell_k = ampere_k | nk_cap_ada_k | nk_cap_blackwell_k;
-    std::size_t failures = check_shapes_vram_class<gpu_class_t::nvidia_ampere_k, ampere_k>(settings, executor,
-                                                                                           "ampere");
+    run_shapes_vram_class_cases<gpu_class_t::nvidia_ampere_k, ampere_k>(executor, "gpu_class_t::nvidia_ampere_k");
     // A build that keeps no Blackwell class compiles no Blackwell shapes kits to link against.
     if constexpr (USEARCH_TARGET_NVIDIA_BLACKWELL)
         if (pick_gpu_class(device, usearch_gpu_class_unknown_k) == gpu_class_t::nvidia_blackwell_k)
-            failures += check_shapes_vram_class<gpu_class_t::nvidia_blackwell_k, blackwell_k>(settings, executor,
-                                                                                              "blackwell");
+            run_shapes_vram_class_cases<gpu_class_t::nvidia_blackwell_k, blackwell_k>(
+                executor, "gpu_class_t::nvidia_blackwell_k");
 #else
     // The AMD cells run the CDNA3 class's kits over 64-lane wavefronts, which CDNA3 and CDNA4 run.
-    if (device.warp_lanes != 64) return 0;
+    if (device.warp_lanes != 64)
+        return run_test_case("run_shapes_vram_cases(gpu_vendor_t::amd_k)",
+                             [] { return case_result_t::skipped(needs_64_lane_waves_k); });
     constexpr nk_capability_t cdna3_k = numkong_capabilities_of(gpu_class_t::amd_cdna3_k);
-    std::size_t failures = 0;
     // A build that keeps no CDNA3 class compiles no CDNA3 shapes kits to link against.
     if constexpr (USEARCH_TARGET_AMD_CDNA3)
-        failures = check_shapes_vram_class<gpu_class_t::amd_cdna3_k, cdna3_k>(settings, executor, "cdna3");
+        run_shapes_vram_class_cases<gpu_class_t::amd_cdna3_k, cdna3_k>(executor, "gpu_class_t::amd_cdna3_k");
+    else
+        run_test_case("run_shapes_vram_cases(gpu_vendor_t::amd_k)",
+                      [] { return case_result_t::skipped(built_without_cdna3_k); });
 #endif
-    return failures;
 }
 
 #elif USEARCH_ARCH_METAL_
@@ -402,32 +411,35 @@ std::size_t check_shapes_vram<vram_cells_t::executor_t>(settings_t const& settin
 /** The Apple cells: the F16 collections the NVIDIA floor checks, on the same clouds, judged the
  *  same, and the refusal of F32 clouds, which no Metal kernel scores to the F32 contract. */
 template <>
-std::size_t check_shapes_vram<metal_executor_t>(settings_t const& settings, gpu_device_t const& device) {
-    if (device.vendor != gpu_vendor_t::apple_k || !settings.filter.selects("shapes_vram")) return 0;
+void run_shapes_vram_cases<metal_executor_t>(gpu_device_t const& device) {
+    if (device.vendor != gpu_vendor_t::apple_k) return;
     int const ordinal = static_cast<int>(device.vendor_ordinal);
     auto [executor, spawn_status] = metal_executor_t::spawn(test::gpu_drivers().metal_contexts,
                                                             std::span<int const> {&ordinal, 1});
-    if (failed(spawn_status)) return fmt::println(stderr, "- Metal: device #{} opens no stream", ordinal), 1;
+    if (!expect_true(succeeded(spawn_status), "Metal device #{} opens no stream", ordinal)) return;
     constexpr nk_kernel_kind_t chamfer_k = nk_kernel_chamfers_packed_k, hausdorff_k = nk_kernel_hausdorffs_packed_k;
     struct cell_t {
         char const* name;
+        char const* kind_constant;
         nk_kernel_kind_t kernel;
         cloud_kind_t kind;
         std::size_t count, queries_count;
     };
-    cell_t const cells[] = {{"random", chamfer_k, cloud_kind_t::random_k, 1024, 64},
-                            {"coincident", hausdorff_k, cloud_kind_t::coincident_k, 256, 16},
-                            {"collinear", chamfer_k, cloud_kind_t::collinear_k, 1024, 64},
-                            {"molecular", hausdorff_k, cloud_kind_t::molecular_k, 1024, 64}};
-    std::size_t failures = 0;
+    cell_t const cells[] = {
+        {"random", "cloud_kind_t::random_k", chamfer_k, cloud_kind_t::random_k, 1024, 64},
+        {"coincident", "cloud_kind_t::coincident_k", hausdorff_k, cloud_kind_t::coincident_k, 256, 16},
+        {"collinear", "cloud_kind_t::collinear_k", chamfer_k, cloud_kind_t::collinear_k, 1024, 64},
+        {"molecular", "cloud_kind_t::molecular_k", hausdorff_k, cloud_kind_t::molecular_k, 1024, 64}};
+    u64_t const seed = test_run.settings.seed;
     for (cell_t const& cell : cells)
-        failures += report(fmt::format("shapes_vram apple {}", cell.name).c_str(),
-                           check_shapes_vram_collection<nk::f16_t, vram_apple_index<nk::f16_t, u32_t>>(
-                               stream_key(settings.seed, cell.name), executor, cell.kernel, cell.kind, cell.count,
-                               cell.queries_count));
+        run_test_case(
+            fmt::format("test_shapes_vram_collection<nk::f16_t>(gpu_vendor_t::apple_k, {})", cell.kind_constant)
+                .c_str(),
+            test_shapes_vram_collection<nk::f16_t, vram_apple_index<nk::f16_t, u32_t>>, stream_key(seed, cell.name),
+            executor, cell.kernel, cell.kind, cell.count, cell.queries_count);
     // The C interface names devices by their place in the listing, which `device` belongs to.
     std::int32_t const devices[] = {static_cast<std::int32_t>(&device - test::gpu_devices().data())};
-    failures += report("shapes_vram apple f32 refused", [&] {
+    run_test_case("usearch_shapes_init_vram", [&] {
         usearch_outcome_t outcome {};
         usearch_shapes_index_t index = nullptr;
         usearch_shapes_init_vram_t init {};
@@ -437,11 +449,10 @@ std::size_t check_shapes_vram<metal_executor_t>(settings_t const& settings, gpu_
         init.quantization = usearch_scalar_f32_k;
         init.vram = {devices, 1};
         usearch_shapes_init_vram(&init);
-        std::size_t const refused = expect(outcome.status == usearch_status_unsupported_k) + expect(!index);
+        expect_status(outcome, usearch_status_unsupported_k);
+        expect_true(!index);
         usearch_shapes_free(index);
-        return refused;
-    }());
-    return failures;
+    });
 }
 
 #endif // USEARCH_ARCH_CUDA_ || USEARCH_ARCH_ROCM_

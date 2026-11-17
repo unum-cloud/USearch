@@ -15,17 +15,16 @@
  *  measures one 16×16 tile of distances per call - gather, pack, and the depth walk - so the tile
  *  engine's primitive throughput reads next to 256 quads-path distances.
  *
- *  Rows are named `kernel/scalar/caps/shape/dimensions`, like `dot/f32/neon/1to4/768d`, and
- *  every flag has a default:
+ *  Rows are named <tt>dense.ram_metric.<kernel>.<scalar>.<caps>.<shape>.<dimensions></tt>, like
+ *  <tt>dense.ram_metric.dot.f32.neon.1to4.768d</tt>, and every setting has a default:
  *
  *  @verbatim
- *  --seed        42    Seed the row picks and the adjacency noise derive from, an unsigned integer or random
- *  --filter      none  Rows to run, as an ECMAScript regex or else a substring
- *  --warmup      1s    Untimed run ahead of each row
- *  --time-limit  10s   Timed run of each row
+ *  USEARCH_SEED        --seed        42    Seed the row picks and the adjacency noise derive from, or random
+ *  USEARCH_FILTER      --filter      none  Rows to run, as an ECMAScript regex or else a substring
+ *  USEARCH_WARMUP      --warmup      1s    Untimed run ahead of each row
+ *  USEARCH_TIME_LIMIT  --time-limit  10s   Timed run of each row
  *  @endverbatim
  */
-#include <cstdint> // `std::uint32_t`
 #include <cstring> // `std::strcmp`, `std::memcpy` - the dot lanes a finalizer takes
 
 #include <array>       // `std::array`
@@ -46,14 +45,11 @@
 #include "usearch/types.h" // `USEARCH_VERSION_MAJOR`
 #include "usearch/dense/ram_metric.hpp"
 
-#include "abi.hpp" // `flag_t`, `filter_t`, `parse_or_exit`
-#include "bench.hpp"
-#include "lib.hpp" // `dense_dtypes_t` - the storage dtypes the library compiles, in ladder order
+#include "harness.hpp" // `bench_settings_t`, `stream_key`, `split_mix_generator_t`
+#include "lib.hpp"     // `dense_dtypes_t` - the storage dtypes the library compiles, in ladder order
 
 namespace unum::usearch::bench {
 using namespace unum::usearch::dense;
-using tools::filter_t;
-using tools::flag_t;
 
 #pragma region Harness
 
@@ -164,37 +160,6 @@ class loop_t {
     }
 };
 
-/** Every flag this binary reads, its default as the initializer, filled once by @c read_settings. */
-struct settings_t {
-
-    /** Rows to run, by regex or else substring. Override: @c USEARCH_FILTER, then @c --filter. */
-    filter_t filter;
-
-    /** Seed the row picks and the adjacency noise derive from. Override: @c --seed, where random draws one. */
-    std::uint32_t seed = 42;
-
-    /** Untimed run ahead of each row. Override: @c --warmup. */
-    std::chrono::milliseconds warmup = std::chrono::seconds(1);
-
-    /** Timed run of each row. Override: @c --time-limit. */
-    std::chrono::milliseconds time_limit = std::chrono::seconds(10);
-};
-
-/** Parses the flags into one @ref settings_t. On `--help` prints the usage and exits with status 0; on a bad flag
- *  prints one line and exits with status 1. */
-inline settings_t read_settings(int argc, char const* const* argv) {
-    settings_t settings;
-    settings.filter = tools::filter_of(tools::environment_text("USEARCH_FILTER").value_or(""));
-    std::array<flag_t, 4> const flags {{
-        {"--seed", "seed", "seed of the row picks and the adjacency noise, or `random`; 42 by default", &settings.seed},
-        {"--filter", "pattern", "rows to run, as a regex or else a substring, like `dot/f32/serial`", &settings.filter},
-        {"--warmup", "duration", "untimed run ahead of each row, like `200ms`; 1s by default", &settings.warmup},
-        {"--time-limit", "duration", "timed run of each row, like `200ms`; 10s by default", &settings.time_limit},
-    }};
-    tools::parse_or_exit(argc, argv, "usearch_bench_dense_ram_metric [flags]", flags);
-    return settings;
-}
-
 /** Spells @p duration as a user types it: whole seconds as "10s", anything else as "1500ms". */
 inline std::string spell_duration(std::chrono::milliseconds duration) {
     auto const count = duration.count();
@@ -202,7 +167,7 @@ inline std::string spell_duration(std::chrono::milliseconds duration) {
 }
 
 /** Prints each setting as "- Name: value", in the grammar its flag parses from. */
-inline void print(settings_t const& settings) {
+inline void print(bench_settings_t const& settings) {
     fmt::println("- Seed: {}", settings.seed);
     fmt::println("- Filter: {}", settings.filter.pattern.empty() ? std::string_view("none") : settings.filter.pattern);
     fmt::println("- Warm-up: {}", spell_duration(settings.warmup));
@@ -235,7 +200,7 @@ inline void print(machine_t const& machine) {
 
 /** Everything a benchmark reads, built once in @c main and passed down by reference. */
 struct environment_t {
-    settings_t settings;
+    bench_settings_t settings;
     machine_t machine;
 };
 
@@ -248,14 +213,6 @@ void run_benchmark(environment_t const& env, std::string const& name, measure_ty
     measure(loop, env, arguments...);
     print(loop.row(name));
 }
-
-/** The key of one stream family under the run's @p seed: two mixes away from both, so neither adjacent seeds nor
- *  adjacent families yield related keys. */
-constexpr u64_t stream_key(u64_t seed, u64_t family) noexcept { return mix_bits(mix_bits(seed ^ family)); }
-
-/** Stream families: the candidate rows each call picks, and the adjacency noise pool. */
-constexpr u64_t rows_family_k = 0xDEADBEEFull;
-constexpr u64_t adjacency_family_k = 0xABCDEF01ull;
 
 #pragma endregion Harness
 
@@ -322,7 +279,7 @@ struct adjacency_simulator_t {
     std::vector<node_id_t> pool;
 
     explicit adjacency_simulator_t(u64_t seed) : pool(node_count_k * ids_per_node_k, 0) {
-        splitmix64_t seed_generator {seed};
+        split_mix_generator_t seed_generator {seed};
         for (auto& id : pool) id = static_cast<node_id_t>(seed_generator());
     }
 
@@ -391,8 +348,8 @@ static void measure_distance(loop_t& loop, environment_t const& env, std::size_t
     auto query_norms = norms<quads_kit_t>(query_view);
 
     std::size_t const row_index_mask = pool.matrix.extent(0) - 1;
-    splitmix64_t random_generator {stream_key(env.settings.seed, rows_family_k)};
-    adjacency_simulator_t adjacency {stream_key(env.settings.seed, adjacency_family_k)};
+    split_mix_generator_t random_generator {stream_key(env.settings.seed, "rows")};
+    adjacency_simulator_t adjacency {stream_key(env.settings.seed, "adjacency")};
     for ([[maybe_unused]] std::size_t call : loop) {
         std::size_t const row = random_generator() & row_index_mask;
         adjacency.touch(random_generator());
@@ -415,8 +372,8 @@ static void measure_distances_quad(loop_t& loop, environment_t const& env, std::
     auto query_norms = norms<quads_kit_t>(query_view);
 
     std::size_t const row_index_mask = pool.matrix.extent(0) - 1;
-    splitmix64_t random_generator {stream_key(env.settings.seed, rows_family_k)};
-    adjacency_simulator_t adjacency {stream_key(env.settings.seed, adjacency_family_k)};
+    split_mix_generator_t random_generator {stream_key(env.settings.seed, "rows")};
+    adjacency_simulator_t adjacency {stream_key(env.settings.seed, "adjacency")};
     for ([[maybe_unused]] std::size_t call : loop) {
         std::size_t const row0 = random_generator() & row_index_mask;
         std::size_t const row1 = random_generator() & row_index_mask;
@@ -445,8 +402,8 @@ static void measure_baseline(loop_t& loop, environment_t const& env, std::size_t
     auto query_view = query.view();
 
     std::size_t const row_index_mask = pool.matrix.extent(0) - 1;
-    splitmix64_t random_generator {stream_key(env.settings.seed, rows_family_k)};
-    adjacency_simulator_t adjacency {stream_key(env.settings.seed, adjacency_family_k)};
+    split_mix_generator_t random_generator {stream_key(env.settings.seed, "rows")};
+    adjacency_simulator_t adjacency {stream_key(env.settings.seed, "adjacency")};
     for ([[maybe_unused]] std::size_t call : loop) {
         std::size_t const row = random_generator() & row_index_mask;
         adjacency.touch(random_generator());
@@ -543,9 +500,11 @@ static void bench_quads(environment_t const& env, std::string_view kernel_name, 
                         std::string_view caps_name) {
     if constexpr (quads_supported<kernel_, scalar_, caps_>)
         for (std::size_t const dim : dimensions_to_bench) {
-            run_benchmark(env, fmt::format("{}/{}/{}/1to1/{}d", kernel_name, scalar_name, caps_name, dim),
+            run_benchmark(env,
+                          fmt::format("dense.ram_metric.{}.{}.{}.1to1.{}d", kernel_name, scalar_name, caps_name, dim),
                           measure_distance<kernel_, scalar_, caps_>, dim);
-            run_benchmark(env, fmt::format("{}/{}/{}/1to4/{}d", kernel_name, scalar_name, caps_name, dim),
+            run_benchmark(env,
+                          fmt::format("dense.ram_metric.{}.{}.{}.1to4.{}d", kernel_name, scalar_name, caps_name, dim),
                           measure_distances_quad<kernel_, scalar_, caps_>, dim);
         }
 }
@@ -556,7 +515,8 @@ static void bench_tiles(environment_t const& env, std::string_view kernel_name, 
                         std::string_view caps_name) {
     if constexpr (tiles_supported<kernel_, scalar_, caps_>)
         for (std::size_t const dim : dimensions_to_bench)
-            run_benchmark(env, fmt::format("{}/{}/{}/tiles/{}d", kernel_name, scalar_name, caps_name, dim),
+            run_benchmark(env,
+                          fmt::format("dense.ram_metric.{}.{}.{}.tiles.{}d", kernel_name, scalar_name, caps_name, dim),
                           measure_distances_tile<kernel_, scalar_, caps_>, dim);
 }
 
@@ -565,7 +525,7 @@ static void bench_kernel(environment_t const& env, std::string_view kernel_name,
     // The NumKong baseline is caps-agnostic: its `nk::default_capabilities()` mask picks the best backend it holds.
     if constexpr (quads_in_scope<kernel_, scalar_>)
         for (std::size_t const dim : dimensions_to_bench)
-            run_benchmark(env, fmt::format("{}/{}/numkong/1to1/{}d", kernel_name, scalar_name, dim),
+            run_benchmark(env, fmt::format("dense.ram_metric.{}.{}.numkong.1to1.{}d", kernel_name, scalar_name, dim),
                           measure_baseline<kernel_, scalar_>, dim);
     // Newest silicon first, every architecture's tiers in one list - the concept gates silently
     // absorb any tier without a kit, which is every tier of another architecture.
@@ -616,7 +576,7 @@ static void bench_stored_scalars(environment_t const& env, dtype_list<dtypes_...
 
 int main(int argc, char** argv) {
     using namespace unum::usearch::bench;
-    environment_t const env {read_settings(argc, argv), probe_machine()};
+    environment_t const env {read_bench_settings(argc, argv), probe_machine()};
     print(env.machine);
     print(env.settings);
 

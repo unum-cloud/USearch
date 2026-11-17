@@ -45,7 +45,7 @@
 #include <fmt/format.h>
 
 #include "abi.hpp"
-#include "bench.hpp" // `humanized`, `progress_bar_t`
+#include "harness.hpp" // `humanized`, `progress_bar_t`
 
 namespace unum::usearch::bench {
 using namespace unum::usearch::tools;
@@ -214,7 +214,8 @@ int bench_dense_index_search(int argc, char const* const* argv) {
         if (!index) return 1;
 
         usearch_traversal_stats_t built {};
-        progress_bar_t building {"build", rows, settings.terminal};
+        progress_bar_t building {"build", rows,
+                                 settings.terminal ? progress_style_t::bar_k : progress_style_t::deciles_k};
         std::chrono::steady_clock::time_point const build_start = std::chrono::steady_clock::now();
         usearch_outcome_t const inserted = insert_entries(index, vectors, rows, first_row, search.batch.value,
                                                           search.expansion_add.value, built,

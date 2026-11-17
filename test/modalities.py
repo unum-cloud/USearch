@@ -17,6 +17,7 @@ from operator import attrgetter
 import numpy as np
 import numpy.typing as npt
 import pytest
+from base import stream_key
 
 from usearch import (
     Arena,
@@ -77,16 +78,15 @@ def entries(modality: type, count: int, seed: int) -> object:
     return observations(generator.uniform(-60, 60, count).tolist(), generator.uniform(-180, 180, count).tolist())
 
 
-def build(modality: type, count: int, executor, first_key: int = 0, seed: int = 0):
+def build(modality: type, count: int, executor, *, first_key: int = 0, seed: int):
     """A host index of `modality` holding `count` random entries under consecutive keys from `first_key`."""
     index = modality.init_ram()
-    if count:
-        index.on(executor).insert(np.arange(first_key, first_key + count), entries(modality, count, seed))
+    index.on(executor).insert(np.arange(first_key, first_key + count), entries(modality, count, seed))
     return index
 
 
 @pytest.mark.parametrize("modality", MODALITIES, ids=attrgetter("__name__"))
-def test_direct_construction_names_the_factories(modality: type):
+def test_direct_construction_of_a_modality_names_the_factories(modality: type):
     """No modality is built by calling its type; the refusal says what to call instead."""
     with pytest.raises(TypeError) as refusal:
         modality()
@@ -108,7 +108,8 @@ def test_init_ram_starts_empty(index, description: type):
     described = created.describe()
     assert isinstance(described, description)
     assert described.size == len(created) == 0
-    assert described.cpu_class is not None and described.gpu_class is None
+    assert described.cpu_class is not None
+    assert described.gpu_class is None
 
 
 def test_init_ram_keeps_the_metric():
@@ -136,9 +137,12 @@ def test_init_vram_surfaces_the_library_status(modality: type):
     try:
         index = modality.init_vram()
     except Error as refusal:
-        assert isinstance(refusal.status, Status) and refusal.status not in (Status.SUCCESS, Status.DEFERRED)
+        status = refusal.status
+    else:
+        assert index.describe().gpu_class is not None
         return
-    assert index.describe().gpu_class is not None
+    assert isinstance(status, Status)
+    assert status not in (Status.SUCCESS, Status.DEFERRED)
 
 
 def test_sequence_search_finds_the_inserted_entry():
@@ -151,9 +155,9 @@ def test_sequence_search_finds_the_inserted_entry():
     assert np.asarray(matches.distances)[0, 0] == 0
 
 
-def test_shapes_search_finds_the_inserted_entry():
+def test_shapes_search_finds_the_inserted_entry(seed: int):
     """Shapes of different point counts share one batch, and each finds itself first."""
-    generator = np.random.default_rng(42)
+    generator = np.random.default_rng(seed)
     shapes = [generator.random((points, 3), dtype=np.float32) for points in (5, 9, 13)]
     index = ShapesIndex.init_ram()
     index.insert([1, 2, 3], shapes)
@@ -188,25 +192,27 @@ def test_geospatial_within_reports_only_the_entries_inside_the_radius():
 
 
 @pytest.mark.parametrize("modality", MODALITIES, ids=attrgetter("__name__"))
-def test_refine_reports_a_round_over_every_entry(modality: type, executor):
+def test_refine_reports_a_round_over_every_entry(modality: type, executor, seed: int):
     """A round reports what it did, its closing audit judging every entry, and leaves each entry findable."""
-    index = build(modality, 64, executor)
+    index = build(modality, 64, executor, seed=seed)
     report = index.on(executor).refine()
-    assert isinstance(report, RefineReport) and isinstance(report.verdict, RefineVerdict)
+    assert isinstance(report, RefineReport)
+    assert isinstance(report.verdict, RefineVerdict)
     assert report.changed <= report.reselected
     assert report.reachability.audited == len(index) == 64
     assert 17 in index
 
 
 @pytest.mark.parametrize("modality", MODALITIES, ids=attrgetter("__name__"))
-def test_refine_plan_resumes_and_finishes(modality: type, executor):
+def test_modality_refine_plan_resumes_and_finishes(modality: type, executor, seed: int):
     """A plan keeps a stopped round live for the next call, and the receiver closes it once, with the whole plan's
     report."""
-    index = build(modality, 64, executor)
+    index = build(modality, 64, executor, seed=seed)
     plan = PLANS[modality][0]()
     with contextlib.suppress(CancelledError):
         index.on(executor).refine(plan=plan, progress=lambda completed, total: False)
-    assert plan.phase is not Phase.DONE and plan.completed <= plan.total
+    assert plan.phase is not Phase.DONE
+    assert plan.completed <= plan.total
     index.on(executor).refine(plan=plan)
     assert plan.phase is Phase.DONE
     assert index.on(executor).refine_plan_finish(plan).reachability.audited == 64
@@ -217,7 +223,7 @@ def test_refine_plan_resumes_and_finishes(modality: type, executor):
 @pytest.mark.parametrize("modality", MODALITIES, ids=attrgetter("__name__"))
 def test_refine_plan_needs_an_executor(modality: type):
     """A plan lives across calls on one executor, so a call on the calling thread cannot open one."""
-    index = build(modality, 0, None)
+    index = modality.init_ram()
     with pytest.raises(InvalidArgumentError):
         index.refine(plan=PLANS[modality][0]())
 
@@ -228,10 +234,12 @@ def test_refine_plan_needs_an_executor(modality: type):
 
 
 @pytest.mark.parametrize("modality", MODALITIES, ids=attrgetter("__name__"))
-def test_reshard_gathers_every_source_into_the_target(modality: type, executor):
+def test_modality_reshard_gathers_every_source_into_the_target(modality: type, executor, seed: int):
     """Several sources into one target gather every entry there, and the other sources end empty and live."""
-    first = build(modality, 32, executor)
-    donors = [build(modality, 32, executor, first_key=32 * seed, seed=seed) for seed in (1, 2)]
+    first = build(modality, 32, executor, seed=seed)
+    donors = [
+        build(modality, 32, executor, first_key=32 * donor, seed=stream_key(seed, "donors", donor)) for donor in (1, 2)
+    ]
     report = first.on(executor).reshard([first, *donors], [first])
     assert isinstance(report, RefineReport)
     assert len(first) == 96
@@ -240,11 +248,11 @@ def test_reshard_gathers_every_source_into_the_target(modality: type, executor):
 
 
 @pytest.mark.parametrize("modality", MODALITIES, ids=attrgetter("__name__"))
-def test_reshard_cuts_one_source_into_several_targets(modality: type, executor):
+def test_reshard_cuts_one_source_into_several_targets(modality: type, executor, seed: int):
     """One source into several targets cuts it between them, and the source stays live but empty."""
-    source = build(modality, 64, executor)
+    source = build(modality, 64, executor, seed=seed)
     targets = [modality.init_ram() for _ in range(2)]
-    report = source.on(executor).reshard([source], targets, seed=7)
+    report = source.on(executor).reshard([source], targets, seed=seed)
     assert isinstance(report, RefineReport)
     assert sum(len(target) for target in targets) == 64
     assert all(len(target) for target in targets)
@@ -252,34 +260,36 @@ def test_reshard_cuts_one_source_into_several_targets(modality: type, executor):
 
 
 @pytest.mark.parametrize("modality", MODALITIES, ids=attrgetter("__name__"))
-def test_reshard_cut_runs_through_a_plan_and_a_deferred_finish(modality: type, executor):
+def test_reshard_cut_runs_through_a_plan_and_a_deferred_finish(modality: type, executor, seed: int):
     """A cut a stop interrupts keeps every entry moved, the next call naming the plan ends its rounds, and a deferred
     receiver closes it."""
-    source = build(modality, 64, executor)
+    source = build(modality, 64, executor, seed=seed)
     targets = [modality.init_ram() for _ in range(2)]
     plan = PLANS[modality][1]()
     with contextlib.suppress(CancelledError):
         source.on(executor).reshard([source], targets, progress=lambda completed, total: False, plan=plan)
-    assert sum(len(target) for target in targets) == 64 and plan.phase is not Phase.DONE
+    assert sum(len(target) for target in targets) == 64
+    assert plan.phase is not Phase.DONE
     source.on(executor).reshard([source], targets, plan=plan)
     assert plan.phase is Phase.DONE
     assert isinstance(source.deferred(executor).reshard_plan_finish(plan).wait(), RefineReport)
 
 
 @pytest.mark.parametrize("modality", MODALITIES, ids=attrgetter("__name__"))
-def test_reshard_recut_of_one_handle_is_unsupported(modality: type, executor):
+def test_reshard_recut_of_one_handle_is_unsupported(modality: type, executor, seed: int):
     """One index as its only source and target has a single shard to recut, which the library refuses."""
-    index = build(modality, 16, executor)
+    index = build(modality, 16, executor, seed=seed)
     with pytest.raises(UnsupportedError):
         index.on(executor).reshard([index], [index])
     assert len(index) == 16
 
 
 @pytest.mark.parametrize("modality", MODALITIES, ids=attrgetter("__name__"))
-def test_reshard_refuses_malformed_lists_and_moves_nothing(modality: type, executor):
+def test_reshard_refuses_malformed_lists_and_moves_nothing(modality: type, executor, seed: int):
     """Empty or repeated lists are malformed and a target holding foreign entries mismatches; every refusal leaves
     the entries where they were."""
-    first, second = build(modality, 8, executor), build(modality, 8, executor, first_key=8, seed=1)
+    first = build(modality, 8, executor, seed=seed)
+    second = build(modality, 8, executor, first_key=8, seed=stream_key(seed, "second"))
     with pytest.raises(InvalidArgumentError):
         first.on(executor).reshard([], [first])
     with pytest.raises(InvalidArgumentError):

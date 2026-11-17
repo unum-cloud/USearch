@@ -10,6 +10,8 @@
  *  adds: its header must say @c FixedSizeList where theirs say a prefix-sum list, and the same
  *  scenarios must carry it end to end.
  */
+#undef NDEBUG // ! A test's oracle must stay live in every build
+
 #include <cmath>   // `std::sqrt` - the angular oracle
 #include <cstdio>  // `std::snprintf`, `std::remove` - the saved monoliths and manifests
 #include <cstdlib> // `std::getenv` - the folder a direct read's file goes in
@@ -116,7 +118,7 @@ struct embeddings_fixture {
      *  so the graph has clusters to navigate. */
     static std::vector<embedding_t> make_values(std::size_t count, u64_t seed, typename index_t::allocator_t const&) {
         constexpr std::size_t prototypes_k = 6;
-        splitmix64_t random_generator {seed};
+        split_mix_generator_t random_generator {seed};
         uniform_below<u32_t> coordinate_distribution {2001};
         uniform_below<u32_t> prototype_distribution {prototypes_k};
         auto draw_signed = [&](f32_t amplitude) noexcept {
@@ -158,11 +160,10 @@ using widened_view_t = us::basic::nvme_indexes<embedding_codec_t, us::utilities:
  *  entry's nearest entries at the distances the saved index does.
  */
 template <typename fixture_type_>
-static std::size_t expect_keys_widen(u64_t seed, std::string_view label) {
+static void test_keys_widen(u64_t seed, std::string_view label) {
     using source_t = typename fixture_type_::index_t;
     using node_id_t = typename source_t::node_id_t;
     constexpr std::size_t nodes_k = 24, wanted_k = 4;
-    std::size_t failures = 0;
     allocation_ledger_t ledger;
     char path[64];
     std::snprintf(path, sizeof(path), "/tmp/usearch-widen-%08x.safegraphs",
@@ -195,62 +196,60 @@ static std::size_t expect_keys_widen(u64_t seed, std::string_view label) {
         angular_metric_t metric;
         typename source_t::traversal_context_t context {stream_key(seed, label), counting_allocator_t {ledger}};
         std::vector<node_id_t> assigned_ids;
-        failures += expect(bool(source.reserve(nodes_k)));
-        failures += basic_build<fixture_type_>(source, metric, values, assigned_ids, context, keep_diverse_t {4});
+        expect_true(bool(source.reserve(nodes_k)));
+        basic_build<fixture_type_>(source, metric, values, assigned_ids, context, keep_diverse_t {4});
         for (std::size_t query = 0; query != nodes_k; ++query) {
-            failures += expect_eq(source.search(values[query], {nodes_k}, metric, context).status, status_t::success_k);
+            expect_equal(source.search(values[query], {nodes_k}, metric, context).status, status_t::success_k);
             for (std::size_t rank = 0; rank != wanted_k && rank < context.results.size(); ++rank) {
                 auto const key = source.key_of(context.results[rank].node_id);
                 expected_keys[query * wanted_k + rank] = uuid_of(static_cast<u64_t>(key.value));
                 expected_distances[query * wanted_k + rank] = context.results[rank].distance;
             }
         }
-        failures += expect_eq(safegraphs_write_index(std::string_view {path}, source, embedding_codec_t {}, serial,
-                                                     save_config_t {}, embeddings_fixture_t::metric_k),
-                              status_t::success_k);
+        expect_equal(safegraphs_write_index(std::string_view {path}, source, embedding_codec_t {}, serial,
+                                            save_config_t {}, embeddings_fixture_t::metric_k),
+                     status_t::success_k);
     }
 
     // The RAM load widens every key and keeps the graph, so its walks rank alike.
     {
         auto [mapping, map_status] = mapped_file_t::read(path);
-        failures += expect(succeeded(map_status));
+        expect_true(succeeded(map_status));
         widened_index_t widened {counting_allocator_t {ledger}};
-        failures += expect_eq(
-            safegraphs_read_index(mapping.view(), widened, embedding_codec_t {}, serial, load_config_t {}),
-            status_t::success_k);
-        failures += expect_eq(widened.size(), nodes_k);
+        expect_equal(safegraphs_read_index(mapping.view(), widened, embedding_codec_t {}, serial, load_config_t {}),
+                     status_t::success_k);
+        expect_equal(widened.size(), nodes_k);
         angular_metric_t metric;
         widened_index_t::traversal_context_t context {stream_key(seed, label), counting_allocator_t {ledger}};
         for (std::size_t query = 0; query != nodes_k; ++query) {
-            failures += expect_eq(widened.search(values[query], {nodes_k}, metric, context).status,
-                                  status_t::success_k);
-            failures += expect(context.results.size() >= wanted_k);
+            expect_equal(widened.search(values[query], {nodes_k}, metric, context).status, status_t::success_k);
+            expect_true(context.results.size() >= wanted_k);
             if (context.results.size() < wanted_k) continue;
             std::array<us::utilities::uuid128_t, wanted_k> keys;
             std::array<f32_t, wanted_k> distances;
             for (std::size_t rank = 0; rank != wanted_k; ++rank)
                 keys[rank] = widened.key_of(context.results[rank].node_id).value,
                 distances[rank] = context.results[rank].distance;
-            failures += ranked_alike(query, keys, distances);
+            ranked_alike(query, keys, distances);
         }
     }
 
     // The view widens the same keys on storage: each counts once, and the walks rank alike.
     fu_topology_t topology = nullptr;
-    failures += expect(fu_topology_new(&topology) == fu_success_k);
+    expect_true(fu_topology_new(&topology) == fu_success_k);
     {
         io_engine_config_t config;
         config.queue_depth = 64;
         auto [executor, spawn_status] = widened_view_t::executor_t::spawn(topology, 1, config);
-        failures += expect_eq(spawn_status, status_t::success_k);
+        expect_equal(spawn_status, status_t::success_k);
         widened_view_t viewed {forkunion_allocator_t {}};
-        failures += expect_eq(viewed.view(path, {}, embeddings_fixture_t::metric_k, executor), status_t::success_k);
-        failures += expect_eq(viewed.size(), nodes_k);
+        expect_equal(viewed.view(path, {}, embeddings_fixture_t::metric_k, executor), status_t::success_k);
+        expect_equal(viewed.size(), nodes_k);
         std::vector<std::size_t> entries(expected_keys.size());
-        failures += expect_eq(
+        expect_equal(
             viewed.count(std::span<us::utilities::uuid128_t const> {expected_keys}, std::span {entries}, executor),
             status_t::success_k);
-        for (std::size_t const counted : entries) failures += expect_eq(counted, 1u);
+        for (std::size_t const counted : entries) expect_equal(counted, 1u);
         auto make_metric = [](auto const&, std::size_t) noexcept {
             return expected<angular_metric_t> {angular_metric_t {}, status_t::success_k};
         };
@@ -265,26 +264,24 @@ static std::size_t expect_keys_widen(u64_t seed, std::string_view label) {
         auto const [found, search_status] = viewed.search(
             nodes_k, make_metric, query_of, std::span<us::utilities::uuid128_t> {keys}, std::span<f32_t> {distances},
             std::span<std::size_t> {counts}, search_config, executor);
-        failures += expect_eq(search_status, status_t::success_k);
+        expect_equal(search_status, status_t::success_k);
         for (std::size_t query = 0; query != nodes_k; ++query)
-            failures += ranked_alike(
-                query, std::span<us::utilities::uuid128_t const> {keys}.subspan(query * wanted_k, wanted_k),
-                std::span<f32_t const> {distances}.subspan(query * wanted_k, wanted_k));
+            ranked_alike(query, std::span<us::utilities::uuid128_t const> {keys}.subspan(query * wanted_k, wanted_k),
+                         std::span<f32_t const> {distances}.subspan(query * wanted_k, wanted_k));
     }
     fu_topology_delete(topology);
     std::remove(path);
-    failures += expect_errors("widened distances", comparison_family_t::approximate_k, comparison_verdict_t::assert_k,
-                              distance_errors, 0);
-    return failures + expect_eq(ledger.live_bytes, 0);
+    expect_errors("widened distances", comparison_family_t::approximate_k, comparison_verdict_t::assert_k,
+                  distance_errors, 0);
+    expect_equal(ledger.live_bytes, 0);
 }
 
 /** A monolith of 64-bit node IDs reaches no reader of 32-bit ones: the UUID-keyed RAM load and the
  *  UUID-keyed view both refuse it as a mismatched configuration. */
-static std::size_t expect_wide_nodes_refused(u64_t seed) {
+static void test_wide_nodes_refused(u64_t seed) {
     using fixture_t = embeddings_fixture<u64_t, u64_t>;
     using source_t = fixture_t::index_t;
     constexpr std::size_t nodes_k = 16;
-    std::size_t failures = 0;
     allocation_ledger_t ledger;
     char path[64];
     std::snprintf(path, sizeof(path), "/tmp/usearch-wide-nodes-%08x.safegraphs",
@@ -298,43 +295,40 @@ static std::size_t expect_wide_nodes_refused(u64_t seed) {
         std::vector<embedding_t> values = fixture_t::make_values(nodes_k, stream_key(seed, "wide nodes"),
                                                                  counting_allocator_t {ledger});
         std::vector<u64_t> assigned_ids;
-        failures += expect(bool(source.reserve(nodes_k)));
-        failures += basic_build<fixture_t>(source, metric, values, assigned_ids, context, keep_diverse_t {4});
-        failures += expect_eq(safegraphs_write_index(std::string_view {path}, source, embedding_codec_t {}, serial,
-                                                     save_config_t {}, embeddings_fixture_t::metric_k),
-                              status_t::success_k);
+        expect_true(bool(source.reserve(nodes_k)));
+        basic_build<fixture_t>(source, metric, values, assigned_ids, context, keep_diverse_t {4});
+        expect_equal(safegraphs_write_index(std::string_view {path}, source, embedding_codec_t {}, serial,
+                                            save_config_t {}, embeddings_fixture_t::metric_k),
+                     status_t::success_k);
     }
     {
         auto [mapping, map_status] = mapped_file_t::read(path);
-        failures += expect(succeeded(map_status));
+        expect_true(succeeded(map_status));
         widened_index_t widened {counting_allocator_t {ledger}};
-        failures += expect_eq(
-            safegraphs_read_index(mapping.view(), widened, embedding_codec_t {}, serial, load_config_t {}),
-            status_t::config_mismatch_k);
+        expect_equal(safegraphs_read_index(mapping.view(), widened, embedding_codec_t {}, serial, load_config_t {}),
+                     status_t::config_mismatch_k);
     }
     fu_topology_t topology = nullptr;
-    failures += expect(fu_topology_new(&topology) == fu_success_k);
+    expect_true(fu_topology_new(&topology) == fu_success_k);
     {
         io_engine_config_t config;
         config.queue_depth = 64;
         auto [executor, spawn_status] = widened_view_t::executor_t::spawn(topology, 1, config);
-        failures += expect_eq(spawn_status, status_t::success_k);
+        expect_equal(spawn_status, status_t::success_k);
         widened_view_t viewed {forkunion_allocator_t {}};
-        failures += expect_eq(viewed.view(path, {}, embeddings_fixture_t::metric_k, executor),
-                              status_t::config_mismatch_k);
+        expect_equal(viewed.view(path, {}, embeddings_fixture_t::metric_k, executor), status_t::config_mismatch_k);
         // The little-endian header length follows the magic; 2^63 bytes is past any file.
         unsigned char const header_length[8] = {0, 0, 0, 0, 0, 0, 0, 0x80};
         std::FILE* const corrupted = std::fopen(path, "r+b");
-        failures += expect(corrupted != nullptr);
-        failures += expect(std::fseek(corrupted, 8, SEEK_SET) == 0 && std::fwrite(header_length, 1, 8, corrupted) == 8);
+        expect_true(corrupted != nullptr);
+        expect_true(std::fseek(corrupted, 8, SEEK_SET) == 0 && std::fwrite(header_length, 1, 8, corrupted) == 8);
         std::fclose(corrupted);
         widened_view_t corrupted_view {forkunion_allocator_t {}};
-        failures += expect_eq(corrupted_view.view(path, {}, embeddings_fixture_t::metric_k, executor),
-                              status_t::malformed_k);
+        expect_equal(corrupted_view.view(path, {}, embeddings_fixture_t::metric_k, executor), status_t::malformed_k);
     }
     fu_topology_delete(topology);
     std::remove(path);
-    return failures + expect_eq(ledger.live_bytes, 0);
+    expect_equal(ledger.live_bytes, 0);
 }
 
 /**
@@ -345,10 +339,9 @@ static std::size_t expect_wide_nodes_refused(u64_t seed) {
  *  The copy records what it read, from the source's start: a monolith reads nothing past its
  *  data offset, and a two-part buffer nothing but its manifest and each part's header.
  */
-static std::size_t expect_view_reads_headers_alone(u64_t seed) {
+static void test_view_reads_headers_alone(u64_t seed) {
     using index_t = embeddings_fixture_t::index_t;
     constexpr std::size_t nodes_k = 24, parts_k = 2;
-    std::size_t failures = 0;
     allocation_ledger_t ledger;
     std::vector<byte_t> monolith;
     {
@@ -359,16 +352,15 @@ static std::size_t expect_view_reads_headers_alone(u64_t seed) {
         std::vector<embedding_t> values = embeddings_fixture_t::make_values(nodes_k, stream_key(seed, "header alone"),
                                                                             counting_allocator_t {ledger});
         std::vector<u32_t> assigned_ids;
-        failures += expect(bool(index->reserve(nodes_k)));
-        failures += basic_build<embeddings_fixture_t>(*index, metric, values, assigned_ids, context,
-                                                      keep_diverse_t {4});
+        expect_true(bool(index->reserve(nodes_k)));
+        basic_build<embeddings_fixture_t>(*index, metric, values, assigned_ids, context, keep_diverse_t {4});
         auto const [bytes, measure_status] = safegraphs_storage_requirements(
             *index, embedding_codec_t {}, save_config_t {}, embeddings_fixture_t::metric_k);
-        failures += expect(succeeded(measure_status));
+        expect_true(succeeded(measure_status));
         monolith.resize(bytes);
-        failures += expect_eq(safegraphs_write_index(bytes_span_t {monolith}, *index, embedding_codec_t {}, serial,
-                                                     save_config_t {}, embeddings_fixture_t::metric_k),
-                              status_t::success_k);
+        expect_equal(safegraphs_write_index(bytes_span_t {monolith}, *index, embedding_codec_t {}, serial,
+                                            save_config_t {}, embeddings_fixture_t::metric_k),
+                     status_t::success_k);
     }
 
     byte_t const* origin = nullptr;
@@ -387,27 +379,27 @@ static std::size_t expect_view_reads_headers_alone(u64_t seed) {
         checkpoint_source_t const source {bytes_view_t {monolith}, 0};
         parts_t parts {counting_allocator_t {ledger}};
         extra_columns_t extra_columns {counting_allocator_t {ledger}};
-        failures += expect_eq(source.read_header(parts, extra_columns, device_copy, counting_allocator_t {ledger}),
-                              status_t::success_k);
-        failures += expect_eq(parts.size(), 1u);
-        if (parts.size() != 1) return failures;
+        expect_equal(source.read_header(parts, extra_columns, device_copy, counting_allocator_t {ledger}),
+                     status_t::success_k);
+        expect_equal(parts.size(), 1u);
+        if (parts.size() != 1) return;
         safegraphs_header_t const& header = parts[0].header;
-        failures += expect_eq(parts[0].nodes, nodes_k);
-        failures += expect(parts[0].monolith.data() == monolith.data());
-        failures += expect(parts[0].metric.view() == embeddings_fixture_t::metric_k);
-        for (iota_view<std::size_t> const range : crossed) failures += expect(range.bound <= header.data_offset);
+        expect_equal(parts[0].nodes, nodes_k);
+        expect_true(parts[0].monolith.data() == monolith.data());
+        expect_true(parts[0].metric.view() == embeddings_fixture_t::metric_k);
+        for (iota_view<std::size_t> const range : crossed) expect_true(range.bound <= header.data_offset);
 
         crossed.clear();
         std::vector<byte_t> keys(nodes_k * header.key.row_bytes()), host_keys(keys.size());
-        failures += expect_eq(source.copy_column(header, header.key, {0, nodes_k}, bytes_span_t {keys}, device_copy),
-                              status_t::success_k);
-        failures += expect_eq(crossed.size(), 1u);
+        expect_equal(source.copy_column(header, header.key, {0, nodes_k}, bytes_span_t {keys}, device_copy),
+                     status_t::success_k);
+        expect_equal(crossed.size(), 1u);
         // Host bytes copy without the callback, which this one would refuse.
         checkpoint_source_t const in_place {bytes_view_t {monolith}};
-        failures += expect_eq(
+        expect_equal(
             in_place.copy_column(header, header.key, {0, nodes_k}, bytes_span_t {host_keys}, no_device_copy_t {}),
             status_t::success_k);
-        failures += expect(keys == host_keys);
+        expect_true(keys == host_keys);
     }
 
     // Two copies of it behind a manifest leading one buffer: the manifest and each header cross.
@@ -417,9 +409,9 @@ static std::size_t expect_view_reads_headers_alone(u64_t seed) {
     };
     auto const [buffer_bytes, layout_status] = safegraphs_buffer_layout(
         parts_k, part_at, safegraphs_alignment_default_k, std::span<std::size_t> {offsets});
-    failures += expect_eq(layout_status, status_t::success_k);
+    expect_equal(layout_status, status_t::success_k);
     std::vector<byte_t> buffer(buffer_bytes);
-    failures += expect_eq(safegraphs_write_manifest(bytes_span_t {buffer}, parts_k, part_at), status_t::success_k);
+    expect_equal(safegraphs_write_manifest(bytes_span_t {buffer}, parts_k, part_at), status_t::success_k);
     for (std::size_t const offset : offsets) std::copy(monolith.begin(), monolith.end(), buffer.begin() + offset);
     origin = buffer.data();
     crossed.clear();
@@ -427,76 +419,71 @@ static std::size_t expect_view_reads_headers_alone(u64_t seed) {
         checkpoint_source_t const source {bytes_view_t {buffer}, 0};
         parts_t parts {counting_allocator_t {ledger}};
         extra_columns_t extra_columns {counting_allocator_t {ledger}};
-        failures += expect_eq(source.read_header(parts, extra_columns, device_copy, counting_allocator_t {ledger}),
-                              status_t::success_k);
-        failures += expect_eq(parts.size(), parts_k);
-        if (parts.size() != parts_k) return failures;
+        expect_equal(source.read_header(parts, extra_columns, device_copy, counting_allocator_t {ledger}),
+                     status_t::success_k);
+        expect_equal(parts.size(), parts_k);
+        if (parts.size() != parts_k) return;
         for (std::size_t part = 0; part != parts_k; ++part)
-            failures += expect(parts[part].monolith.data() == buffer.data() + offsets[part]);
+            expect_true(parts[part].monolith.data() == buffer.data() + offsets[part]);
         for (iota_view<std::size_t> const range : crossed) {
             bool inside = range.bound <= offsets[0];
             for (std::size_t part = 0; part != parts_k; ++part)
                 inside |= range.first >= offsets[part] && range.bound <= offsets[part] + parts[part].header.data_offset;
-            failures += expect(inside);
+            expect_true(inside);
         }
         auto const [metadata, metadata_status] = safegraphs_read_metadata(source, device_copy,
                                                                           counting_allocator_t {ledger});
-        failures += expect_eq(metadata_status, status_t::success_k);
-        failures += expect_eq(metadata.parts, parts_k);
-        failures += expect_eq(metadata.nodes, parts_k * nodes_k);
+        expect_equal(metadata_status, status_t::success_k);
+        expect_equal(metadata.parts, parts_k);
+        expect_equal(metadata.nodes, parts_k * nodes_k);
     }
-    return failures + expect_eq(ledger.live_bytes, 0);
+    expect_equal(ledger.live_bytes, 0);
 }
 
 /** A manifest replaces the one before it whole, through a sibling that never stays behind, while
  *  an address inside a device's span and a directory are refused, having no room for a sibling. */
-static std::size_t expect_manifest_replaced_durably(u64_t seed) {
+static void test_manifest_replaced_durably(u64_t seed) {
     char path[64], staged[72];
     std::snprintf(path, sizeof(path), "/tmp/usearch-manifest-%08x.json", static_cast<unsigned>(seed));
     std::snprintf(staged, sizeof(staged), "%s.tmp", path);
     constexpr std::string_view names[] = {"part-0.safegraphs", "part-1.safegraphs", "part-2.safegraphs"};
     auto part_at = [&](std::size_t part) noexcept { return safegraphs_part_t {names[part], 4096, 8, 0}; };
-    std::size_t failures = 0;
     for (std::size_t const parts : {std::size_t {3}, std::size_t {2}}) {
-        failures += expect_eq(safegraphs_write_manifest(std::string_view {path}, parts, part_at), status_t::success_k);
+        expect_equal(safegraphs_write_manifest(std::string_view {path}, parts, part_at), status_t::success_k);
         auto [mapping, map_status] = mapped_file_t::read(path);
-        failures += expect_eq(map_status, status_t::success_k);
+        expect_equal(map_status, status_t::success_k);
         std::string_view const json {reinterpret_cast<char const*>(mapping.view().data()), mapping.size()};
-        failures += expect(json.find(names[parts - 1]) != std::string_view::npos);
-        failures += expect((json.find(names[2]) != std::string_view::npos) == (parts == 3));
-        failures += expect(failed(seekable_file_t::open(staged, file_access_t::read_only_k).status));
+        expect_true(json.find(names[parts - 1]) != std::string_view::npos);
+        expect_true((json.find(names[2]) != std::string_view::npos) == (parts == 3));
+        expect_true(failed(seekable_file_t::open(staged, file_access_t::read_only_k).status));
     }
     char based[80];
     std::snprintf(based, sizeof(based), "%s@4096", path);
-    failures += expect_eq(safegraphs_write_manifest(std::string_view {based}, 2, part_at),
-                          status_t::invalid_argument_k);
-    failures += expect_eq(safegraphs_write_manifest(std::string_view {"/tmp"}, 2, part_at),
-                          status_t::invalid_argument_k);
+    expect_equal(safegraphs_write_manifest(std::string_view {based}, 2, part_at), status_t::invalid_argument_k);
+    expect_equal(safegraphs_write_manifest(std::string_view {"/tmp"}, 2, part_at), status_t::invalid_argument_k);
     std::remove(path);
-    return failures;
 }
 
 /** Rows read through a column source match the mapped bytes wherever they start, into a
  *  destination that shares their place within a page, whose whole pages come off the drive where
  *  @c TMPDIR's filesystem takes unbuffered reads, and into one that does not, which copies. */
-static std::size_t expect_column_rows_read_direct(u64_t seed) {
+static void test_column_rows_read_direct(u64_t seed) {
     constexpr std::size_t row_bytes = 48, rows = 1000, column_offset = 4096 + 160;
-    std::size_t failures = 0;
     char const* const folder = std::getenv("TMPDIR");
     char path[256];
     std::snprintf(path, sizeof(path), "%s/usearch-column-%08x.bin", folder ? folder : "/tmp",
                   static_cast<unsigned>(seed));
     {
         auto [written, write_status] = mapped_file_t::write(path, column_offset + rows * row_bytes + 77);
-        failures += expect(succeeded(write_status));
-        if (failed(write_status)) return failures;
+        expect_true(succeeded(write_status));
+        if (failed(write_status)) return;
         bytes_span_t const bytes = written.span();
         for (std::size_t byte = 0; byte != bytes.size(); ++byte)
             bytes[byte] = static_cast<byte_t>((byte * 131 + seed) & 0xFF);
-        failures += expect(succeeded(written.sync()));
+        expect_true(succeeded(written.sync()));
     }
     auto [mapping, map_status] = mapped_file_t::read(path);
-    failures += expect(succeeded(map_status));
+    expect_true(succeeded(map_status));
     seekable_file_t const direct = mapping.open_direct();
     bytes_view_t const column = mapping.view().subspan(column_offset, rows * row_bytes);
     column_source_t const source {
@@ -513,34 +500,34 @@ static std::size_t expect_column_rows_read_direct(u64_t seed) {
             std::size_t const lead = (page - reinterpret_cast<std::uintptr_t>(staged.data()) % page) % page;
             bytes_span_t const destination = bytes_span_t {staged}.subspan(lead + offset_in_page + shift,
                                                                            run.count * row_bytes);
-            failures += expect_eq(copy_entries(source, run.first, run.count, row_bytes, destination),
-                                  status_t::success_k);
-            failures += expect(
-                std::memcmp(destination.data(), column.data() + run.first * row_bytes, destination.size()) == 0);
+            expect_equal(copy_entries(source, run.first, run.count, row_bytes, destination), status_t::success_k);
+            expect_true(std::memcmp(destination.data(), column.data() + run.first * row_bytes, destination.size()) ==
+                        0);
         }
-    failures += expect_eq(copy_entries(source, 999, 2, row_bytes, bytes_span_t {staged}.first(2 * row_bytes)),
-                          status_t::config_mismatch_k);
+    expect_equal(copy_entries(source, 999, 2, row_bytes, bytes_span_t {staged}.first(2 * row_bytes)),
+                 status_t::config_mismatch_k);
     std::remove(path);
-    return failures;
 }
 
 /** The shared basic-tier scenarios over the embeddings fixture - a fixed-width value column, which
  *  no modality unit has: monolith, hostile header battery, and the distributed form, each at every
  *  alignment and executor the scenarios cover - then the narrower key columns widening into UUIDs,
  *  the wider node IDs refused, and a device's checkpoint read through its headers alone. */
-std::size_t test::utilities::check_safegraphs_format(settings_t const& settings) {
-    std::size_t failures = 0;
-    failures += test_basic_safegraphs_roundtrip<embeddings_fixture_t>(settings.seed, "u64",
-                                                                      embeddings_fixture_t::metric_k);
-    failures += test_basic_safegraphs_hostile<embeddings_fixture_t>(settings.seed, embeddings_fixture_t::metric_k);
-    failures += test_basic_safegraphs_distributed<embeddings_fixture_t>(settings.seed, embeddings_fixture_t::metric_k);
-    failures += expect_keys_widen<embeddings_fixture_t>(settings.seed, "u64 keys");
-    failures += expect_keys_widen<embeddings_fixture<u32_t, u32_t>>(settings.seed, "u32 keys");
-    failures += expect_wide_nodes_refused(settings.seed);
-    failures += expect_view_reads_headers_alone(settings.seed);
-    failures += expect_manifest_replaced_durably(settings.seed);
-    failures += expect_column_rows_read_direct(settings.seed);
-    return report("safegraphs format", failures);
+void test::utilities::run_safegraphs_format_cases() {
+    u64_t const seed = test_run.settings.seed;
+    run_test_case("test_basic_safegraphs_round_trip<embeddings_fixture_t>",
+                  test_basic_safegraphs_round_trip<embeddings_fixture_t>, seed, "u64", embeddings_fixture_t::metric_k);
+    run_test_case("test_basic_safegraphs_hostile<embeddings_fixture_t>",
+                  test_basic_safegraphs_hostile<embeddings_fixture_t>, seed, embeddings_fixture_t::metric_k);
+    run_test_case("test_basic_safegraphs_distributed<embeddings_fixture_t>",
+                  test_basic_safegraphs_distributed<embeddings_fixture_t>, seed, embeddings_fixture_t::metric_k);
+    run_test_case("test_keys_widen<embeddings_fixture_t>", test_keys_widen<embeddings_fixture_t>, seed, "u64 keys");
+    run_test_case("test_keys_widen<embeddings_fixture<u32_t, u32_t>>",
+                  test_keys_widen<embeddings_fixture<u32_t, u32_t>>, seed, "u32 keys");
+    run_test_case("test_wide_nodes_refused", test_wide_nodes_refused, seed);
+    run_test_case("test_view_reads_headers_alone", test_view_reads_headers_alone, seed);
+    run_test_case("test_manifest_replaced_durably", test_manifest_replaced_durably, seed);
+    run_test_case("test_column_rows_read_direct", test_column_rows_read_direct, seed);
 }
 
 #pragma endregion Embeddings

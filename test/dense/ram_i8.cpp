@@ -10,20 +10,20 @@
  *  CMake compiles the unit only when @c USEARCH_DENSE_DTYPES keeps i8, and the unit registers
  *  itself with the runner, which names no dtype.
  */
+#undef NDEBUG // ! A test's oracle must stay live in every build
 #include "ram_indexes.hpp"
 #include "ram_metric.hpp"
 
 namespace unum::usearch::test::dense {
 
-static std::size_t check_ram_i8(settings_t const& settings, gpu_device_t const&) {
-    if (!settings.filter.selects("ram_i8")) return 0;
-    std::size_t failures_count = check_named_scalar<nk::i8_t>(settings, "ram_i8 metric");
-    failures_count +=
-        test_ram_indexes_configuration<nk_i8_k, nk_kernel_dot_k, fu::standard_yield_t, cpu_class_t::intel_icelake_k>(
-            "ram_i8 sharded dot+icelake", settings.seed);
-    return failures_count;
+static void run_ram_i8_cases(gpu_device_t const&) {
+    run_test_case("test_ram_metric<nk::i8_t>", test_ram_metric<nk::i8_t>);
+    run_test_case(
+        "test_ram_indexes_configuration<nk_i8_k, nk_kernel_dot_k, fu::standard_yield_t, cpu_class_t::intel_icelake_k>",
+        test_ram_indexes_configuration<nk_i8_k, nk_kernel_dot_k, fu::standard_yield_t, cpu_class_t::intel_icelake_k>,
+        test_run.settings.seed);
 }
 
-static bool const ram_i8_registered = (registered_suites({gpu_vendor_t::unknown_k, &check_ram_i8}), true);
+static bool const ram_i8_registered = (registered_suites({gpu_vendor_t::unknown_k, &run_ram_i8_cases}), true);
 
 } // namespace unum::usearch::test::dense

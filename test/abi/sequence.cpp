@@ -18,6 +18,8 @@
  *  a plan, every key in one, a cleared index holds nothing and ends a cursor opened before it, and
  *  every metric's name reads back.
  */
+#undef NDEBUG // ! A test's oracle must stay live in every build
+
 #include <array>  // `std::array` - the templates, the window widths
 #include <string> // `std::string` - the strings, the cells' names
 #include <vector> // `std::vector` - the tape's offsets, the weights
@@ -55,7 +57,7 @@ static constexpr std::array<std::size_t, 2> sequence_window_widths_k {3, 5};
  *  sequence's symbols substituted, inserted or erased. */
 static std::vector<std::string> generate_nucleotides(std::size_t count, std::size_t length, u64_t seed) {
     constexpr std::size_t templates_k = 8;
-    splitmix64_t random_generator {seed};
+    split_mix_generator_t random_generator {seed};
     uniform_below<u32_t> const symbol_distribution {static_cast<u32_t>(nucleotides_k.size())};
     uniform_below<u32_t> const template_distribution {templates_k};
     uniform_below<u32_t> const edit_kind_distribution {3};
@@ -121,8 +123,8 @@ static std::vector<std::int8_t> nucleotide_similarities() {
 }
 
 /** Every key of the first @p count entries reads one sequence back, on host residencies. */
-static std::size_t expect_gets(handle<sequence_verbs_t>& index, std::size_t count) {
-    if (index.residency == usearch_residency_vram_k) return 0;
+static void expect_gets(handle<sequence_verbs_t>& index, std::size_t count) {
+    if (index.residency == usearch_residency_vram_k) return;
     std::size_t misread = 0;
     for (std::size_t offset = 0; offset != count; ++offset) {
         usearch_outcome_t outcome {};
@@ -135,12 +137,13 @@ static std::size_t expect_gets(handle<sequence_verbs_t>& index, std::size_t coun
         usearch_sequence_get(&get);
         misread += outcome.status != usearch_status_success_k || written != 1;
     }
-    return check(misread == 0);
+    expect_true(misread == 0);
 }
 
-/** One metric of one cell, named @p name, as the file's docblock describes. */
-static std::size_t check_sequence_metric(sweep_cell_t const& cell, session_t& session, sequence_geometry_t geometry,
-                                         std::string const& name, u64_t seed) {
+/** One metric of one cell, as the file's docblock describes. */
+static void test_sequence_metric(sweep_cell_t const& cell, sequence_geometry_t geometry, u64_t seed) {
+    session_t session = open_session(settings_of(session_settings(), cell), cell.cpu_class);
+    if (!expect_true(bool(session))) return;
     bool const aligned = geometry.metadata.metric == usearch_sequence_metric_needleman_wunsch_k;
     std::vector<std::int8_t> const similarities = nucleotide_similarities();
     usearch_sequence_weights_t const weights {similarities.data(), 2};
@@ -148,7 +151,7 @@ static std::size_t check_sequence_metric(sweep_cell_t const& cell, session_t& se
     if (geometry.metadata.metric == usearch_sequence_metric_overlap_k)
         geometry.window_widths = sequence_window_widths_k;
     handle<sequence_verbs_t> index = open_index<sequence_verbs_t>(session, geometry, cell.shards);
-    if (!index) return 1;
+    if (!expect_true(bool(index))) return;
     sequence_sizes_t const sizes = aligned ? aligned_sizes_k : sequence_sizes_k;
     nucleotides_layout_t const layout = aligned ? nucleotides_layout_t::packed_k : nucleotides_layout_t::bytes_k;
     sequence_tape_t const sequences = generate_sequences(
@@ -157,50 +160,49 @@ static std::size_t check_sequence_metric(sweep_cell_t const& cell, session_t& se
         generate_nucleotides(sizes.packed_sequences, sizes.length, ~seed), layout);
     usearch_tape_view_t const queries = sequence_verbs_t::slice(sequences.view(), sizes.sequences);
 
-    std::size_t failures = expect_built(cell, index, sequences.view(), sizes.sequences);
-    if (failures) return failures;
-    failures += expect_gets(index, sizes.sequences);
-    failures += expect_walk_recall(index, queries, sizes.queries, sequence_expansion_k, 0.8);
-    failures += expect_refined(index, queries, sizes.queries, sequence_expansion_k, usearch_status_success_k);
-    failures += expect_health(index, sizes.sequences);
-    failures += expect_cursor(index, sizes.sequences);
-    failures += expect_sample(index, sizes.sequences);
-    failures += expect_buffer_round_trip(index, queries, sizes.queries, sequence_expansion_k, 0.8,
-                                         usearch_status_unsupported_k);
-    std::string const stem = fmt::format("/tmp/usearch-abi-sequence-{:016x}", stream_key(seed, name));
-    failures += expect_persistence(cell, index, sequences.view(), queries, sizes.queries, sequence_expansion_k, 0.8,
-                                   stem, saved_bytes_t::identical_k, 0.0);
-    if (cell.residency == usearch_residency_nvme_k) return failures;
-    failures += expect_refine_plan(index, sequences.view(), sizes.sequences, usearch_status_success_k);
-    failures += expect_reshard_gather(index, second_source.view(), sizes.packed_sequences, sizes.sequences,
-                                      usearch_status_success_k);
-    failures += expect_reshard_cut(index, usearch_status_success_k);
-    return failures + expect_cleared(index, sequences.view());
+    if (!check_built(cell, index, sequences.view(), sizes.sequences)) return;
+    expect_gets(index, sizes.sequences);
+    expect_walk_recall(index, queries, sizes.queries, sequence_expansion_k, 0.8);
+    expect_refined(index, queries, sizes.queries, sequence_expansion_k, usearch_status_success_k);
+    expect_health(index, sizes.sequences);
+    expect_cursor(index, sizes.sequences);
+    expect_sample(index, sizes.sequences);
+    expect_buffer_round_trip(index, queries, sizes.queries, sequence_expansion_k, 0.8, usearch_status_unsupported_k);
+    scratch_directory_t const scratch;
+    std::string const stem = scratch.path("checkpoint");
+    expect_persistence(cell, index, sequences.view(), queries, sizes.queries, sequence_expansion_k, 0.8, stem,
+                       saved_bytes_t::identical_k, 0.0);
+    if (cell.residency == usearch_residency_nvme_k) return;
+    expect_refine_plan(index, sequences.view(), sizes.sequences, usearch_status_success_k);
+    expect_reshard_gather(index, second_source.view(), sizes.packed_sequences, sizes.sequences,
+                          usearch_status_success_k);
+    expect_reshard_cut(index, usearch_status_success_k);
+    expect_cleared(index, sequences.view());
 }
 
-std::size_t check_sequence_abi(settings_t const& settings) {
+void run_sequence_abi_cases() {
     constexpr std::array<usearch_sequence_metric_t, 4> metrics_k {
         usearch_sequence_metric_levenshtein_bytes_k, usearch_sequence_metric_levenshtein_utf8_k,
         usearch_sequence_metric_overlap_k, usearch_sequence_metric_needleman_wunsch_k};
+    constexpr std::array<std::string_view, 4> metric_constants_k {
+        "usearch_sequence_metric_levenshtein_bytes_k", "usearch_sequence_metric_levenshtein_utf8_k",
+        "usearch_sequence_metric_overlap_k", "usearch_sequence_metric_needleman_wunsch_k"};
+    // The streams keep the names the cells had before their labels spelled the constants.
     constexpr std::array<std::string_view, 4> metric_names_k {"levenshtein", "levenshtein-utf8", "overlap",
                                                               "needleman-wunsch"};
-    std::size_t failures = 0;
-    if (settings.filter.selects("sequence metric names"))
-        failures += report("sequence metric names", expect_metric_names<sequence_verbs_t>());
+    run_test_case("test_metric_names<sequence_verbs_t>", test_metric_names<sequence_verbs_t>);
     for (sweep_cell_t const& cell : diagonal_sweep(usearch_scalar_unknown_k)) {
         // The best class sweeps every metric, and a class set as the ceiling the first.
         std::size_t const metrics_count = cell.cpu_class == usearch_cpu_class_unknown_k ? metrics_k.size() : 1;
         for (std::size_t metric = 0; metric != metrics_count; ++metric) {
             std::string const name = fmt::format("sequence {} {}", name_of(cell), metric_names_k[metric]);
-            if (!settings.filter.selects(name)) continue;
-            session_t session = open_session(settings_of(settings, cell), cell.cpu_class);
             sequence_geometry_t const geometry {{metrics_k[metric], 0}, nullptr, {}};
-            failures += report(
-                name.c_str(),
-                session ? check_sequence_metric(cell, session, geometry, name, stream_key(settings.seed, name)) : 1);
+            std::string const label = fmt::format("test_sequence_metric({}, {}, {}, {})", constant_of(cell.residency),
+                                                  constant_of(cell.cpu_class), cell.shards, metric_constants_k[metric]);
+            run_test_case(label.c_str(), test_sequence_metric, cell, geometry,
+                          stream_key(test_run.settings.seed, name));
         }
     }
-    return failures;
 }
 
 } // namespace unum::usearch::test::abi
