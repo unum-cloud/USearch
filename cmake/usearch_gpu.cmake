@@ -24,18 +24,6 @@ set(usearch_cuda_architectures_)
 if (USEARCH_CUDA_ARCH STREQUAL "all")
     set(usearch_cuda_architectures_ 80-virtual 89-virtual 90a-real 100f-real 120-virtual)
 elseif (USEARCH_CUDA_ARCH STREQUAL "native")
-    set(usearch_cuda_native_codes_
-        75-real=75-real
-        80-real=80-real
-        86-real=86-real
-        89-real=89-real
-        90-real=90a-real
-        100-real=100f-real
-        103-real=103f-real
-        110-real=110f-real
-        120-real=120f-real
-        121-real=121f-real
-    )
     execute_process(
         COMMAND nvidia-smi --query-gpu=compute_cap --format=csv,noheader
         OUTPUT_VARIABLE usearch_cuda_visible_
@@ -48,12 +36,14 @@ elseif (USEARCH_CUDA_ARCH STREQUAL "native")
     foreach (visible_ IN LISTS usearch_cuda_visible_)
         set(native_code_)
         if (visible_ MATCHES "^([0-9]+)\\.([0-9])$")
-            set(visible_ "${CMAKE_MATCH_1}${CMAKE_MATCH_2}-real")
-            foreach (pair_ IN LISTS usearch_cuda_native_codes_)
-                if (pair_ MATCHES "^${visible_}=(.+)$")
-                    set(native_code_ ${CMAKE_MATCH_1})
-                endif ()
-            endforeach ()
+            set(code_ "${CMAKE_MATCH_1}${CMAKE_MATCH_2}")
+            if (code_ MATCHES "^(75|80|86|89)$")
+                set(native_code_ ${code_}-real)
+            elseif (code_ STREQUAL "90")
+                set(native_code_ 90a-real)
+            elseif (code_ MATCHES "^(100|103|110|120|121)$")
+                set(native_code_ ${code_}f-real)
+            endif ()
         endif ()
         if (NOT native_code_)
             message(

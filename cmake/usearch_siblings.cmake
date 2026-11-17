@@ -28,22 +28,28 @@ function (usearch_sibling name_ override_ repository_ tag_)
     FetchContent_MakeAvailable(${name_})
 endfunction ()
 
-# The siblings build for the floor, the build kind and the sanitizer USearch builds for.
-# ThreadSanitizer then sees their barriers, and ForkUnion leaves out the instructions it cannot see.
-# A sibling this project never adds leaves its switches unread.
-foreach (sibling_ IN ITEMS NUMKONG STRINGZILLA FORKUNION SMASHTABLE)
-    set(${sibling_}_MARCH "${USEARCH_MARCH}")
-    set(${sibling_}_MULTIVERSIONED "${USEARCH_MULTIVERSIONED}")
-    set(${sibling_}_BUILD_SANITIZERS "${USEARCH_BUILD_SANITIZERS}")
-endforeach ()
+# The siblings build for the floor, the build kind, the sanitizer and the GPU codes USearch builds for, each taking only
+# the switches it reads. ThreadSanitizer then sees their barriers, and ForkUnion leaves out the instructions it cannot
+# see.
+set(NUMKONG_MARCH "${USEARCH_MARCH}")
+set(NUMKONG_MULTIVERSIONED "${USEARCH_MULTIVERSIONED}")
+set(NUMKONG_BUILD_SANITIZERS "${USEARCH_BUILD_SANITIZERS}")
+set(NUMKONG_CUDA_ARCH "${USEARCH_CUDA_ARCH}")
+set(NUMKONG_ROCM_ARCH "${USEARCH_ROCM_ARCH}")
+set(NUMKONG_METAL_ARCH "${USEARCH_METAL_ARCH}")
+set(STRINGZILLA_MARCH "${USEARCH_MARCH}")
+set(STRINGZILLA_MULTIVERSIONED "${USEARCH_MULTIVERSIONED}")
+set(STRINGZILLA_BUILD_SANITIZERS "${USEARCH_BUILD_SANITIZERS}")
+set(STRINGZILLA_CUDA_ARCH "${USEARCH_CUDA_ARCH}")
+set(STRINGZILLA_ROCM_ARCH "${USEARCH_ROCM_ARCH}")
+set(STRINGZILLA_METAL_ARCH "${USEARCH_METAL_ARCH}")
+set(FORKUNION_MARCH "${USEARCH_MARCH}")
+set(FORKUNION_MULTIVERSIONED "${USEARCH_MULTIVERSIONED}")
+set(FORKUNION_BUILD_SANITIZERS "${USEARCH_BUILD_SANITIZERS}")
+set(SMASHTABLE_BUILD_SANITIZERS "${USEARCH_BUILD_SANITIZERS}")
+set(SMASHTABLE_CUDA_ARCH "${USEARCH_CUDA_ARCH}")
 
 # Everything below is this project's own: the siblings it builds on, at the commits their submodules pin.
-# The siblings build for the GPU codes USearch builds for, too.
-foreach (sibling_ IN ITEMS NUMKONG STRINGZILLA FORKUNION SMASHTABLE)
-    foreach (switch_ IN ITEMS CUDA_ARCH ROCM_ARCH METAL_ARCH)
-        set(${sibling_}_${switch_} "${USEARCH_${switch_}}")
-    endforeach ()
-endforeach ()
 
 # NumKong: the distance kits and tensors, header-only, as every unit inlines the kernels its CPU or GPU class runs.
 # ForkUnion: the thread pools, the memory topology, and the ISA-specific waiters and atomic references. StringZilla: the

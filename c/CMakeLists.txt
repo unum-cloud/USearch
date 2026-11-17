@@ -6,8 +6,6 @@ if (USEARCH_BUILD_TEST AND USEARCH_BUILD_SHARED)
     add_executable(usearch_test_c test.c)
     usearch_setup_target(usearch_test_c)
     target_link_libraries(usearch_test_c PRIVATE ${USEARCH_PUNNED_LIBRARIES})
-    include(CTest)
-    enable_testing()
     add_test(NAME usearch_test_c COMMAND usearch_test_c)
 
     # Export the dynamic symbol table so `backtrace_symbols_fd` can resolve function names when the in-test crash
@@ -22,8 +20,6 @@ if (USEARCH_BUILD_TEST AND USEARCH_BUILD_STUB)
     usearch_setup_target(usearch_test_c_stub)
     # The engine's test reaches libm through the punned libraries; the stand-in links none of them.
     target_link_libraries(usearch_test_c_stub PRIVATE usearch_shared_stub $<$<PLATFORM_ID:Linux,FreeBSD>:m>)
-    include(CTest)
-    enable_testing()
     add_test(NAME usearch_test_c_stub COMMAND usearch_test_c_stub)
     set_target_properties(usearch_test_c_stub PROPERTIES ENABLE_EXPORTS ON)
 endif ()
@@ -64,15 +60,6 @@ target_compile_options(
 target_compile_options(
     usearch_static INTERFACE "$<$<OR:$<COMPILE_LANG_AND_ID:C,MSVC>,$<COMPILE_LANG_AND_ID:CXX,MSVC>>:/utf-8>"
 )
-
-# Set the compile options for the static library
-if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    target_compile_options(usearch_static PRIVATE -static-libstdc++)
-    target_link_options(usearch_static PRIVATE -static-libstdc++)
-elseif (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-    target_compile_options(usearch_static PRIVATE -static)
-    target_link_options(usearch_static PRIVATE -static)
-endif ()
 
 usearch_setup_target(usearch_shared)
 usearch_setup_target(usearch_static)

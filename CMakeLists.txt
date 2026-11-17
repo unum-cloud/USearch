@@ -105,9 +105,10 @@ if (PROJECT_IS_TOP_LEVEL AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
     endif ()
 endif ()
 
-# The build type when the caller names none.
-if (NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE RelWithDebInfo)
+# The build type when the caller names none, on generators that take one.
+get_property(usearch_multi_config_ GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+if (NOT usearch_multi_config_ AND NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release)
 endif ()
 
 # Every artifact lands at the top of the build tree, however deep the directory that declares it - one `-L`, one path to
@@ -220,37 +221,12 @@ function (usearch_setup_target target_)
     cmake_parse_arguments(PARSE_ARGV 1 arg "HOST" "" "")
     # Compiler-specific options List of all possible compiler IDs:
     # https://cmake.org/cmake/help/latest/variable/CMAKE_LANG_COMPILER_ID.html
-    if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-        target_compile_options(
-            ${target_} PRIVATE $<$<COMPILE_LANGUAGE:C,CXX>:-ffast-math -fno-finite-math-only -fPIC
-                               -fmax-errors=${USEARCH_MAX_ERRORS} -fdiagnostics-color=always>
-        )
-        target_link_options(${target_} PRIVATE $<$<CONFIG:DEBUG>:-g> -fPIC)
-
+    if (CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang|AppleClang)$")
+        target_compile_options(${target_} PRIVATE $<$<COMPILE_LANGUAGE:C,CXX>:-ffast-math -fno-finite-math-only>)
         target_link_libraries(${target_} PRIVATE Threads::Threads)
-
-    elseif (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-        target_compile_options(
-            ${target_} PRIVATE $<$<COMPILE_LANGUAGE:C,CXX>:-ffast-math -fno-finite-math-only -fPIC -Wfatal-errors
-                               -fcolor-diagnostics>
-        )
-        target_link_options(${target_} PRIVATE $<$<CONFIG:DEBUG>:-g> -fPIC)
-
-        if (CMAKE_HOST_SYSTEM_NAME MATCHES "Darwin")
-            target_link_libraries(${target_} PRIVATE "-framework CoreFoundation" "-framework Security" Threads::Threads)
-        else ()
-            target_link_libraries(${target_} PRIVATE Threads::Threads)
-        endif ()
-
-    elseif (CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
-        target_compile_options(${target_} PRIVATE -w -ferror-limit=${USEARCH_MAX_ERRORS})
-
-    elseif (CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
-        # MSVC has no O3 optimization level
-        target_compile_options(
-            ${target_} PRIVATE $<$<CONFIG:DEBUG>:/DEBUG> $<$<CONFIG:RELEASE>:/O2> $<$<CONFIG:RELWITHDEBINFO>:/O2
-                               /DEBUG>
-        )
+    endif ()
+    if (CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND CMAKE_HOST_SYSTEM_NAME MATCHES "Darwin")
+        target_link_libraries(${target_} PRIVATE "-framework CoreFoundation" "-framework Security")
     endif ()
     target_link_libraries(${target_} PRIVATE $<BUILD_INTERFACE:usearch_warnings> $<BUILD_INTERFACE:usearch_sanitizers>)
 

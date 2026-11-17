@@ -27,6 +27,18 @@ else ()
     endif ()
 endif ()
 
+# Diagnostics stop after `USEARCH_MAX_ERRORS` errors and keep their colors through Ninja's buffered output.
+if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(
+        usearch_warnings
+        INTERFACE "$<$<COMPILE_LANGUAGE:C,CXX>:-fmax-errors=${USEARCH_MAX_ERRORS};-fdiagnostics-color=always>"
+    )
+elseif (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    target_compile_options(usearch_warnings INTERFACE "$<$<COMPILE_LANGUAGE:C,CXX>:-Wfatal-errors;-fcolor-diagnostics>")
+elseif (CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+    target_compile_options(usearch_warnings INTERFACE -w -ferror-limit=${USEARCH_MAX_ERRORS})
+endif ()
+
 # Sanitizers instrument USearch's own targets and the sibling headers they compile.
 # Fetched dependencies keep their own flags, and `usearch_siblings.cmake` hands the choice to the siblings' switches.
 # The build type alone picks the optimization level, so an instrumented RelWithDebInfo build stays comparable.
