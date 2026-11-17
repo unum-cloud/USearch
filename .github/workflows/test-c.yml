@@ -17,12 +17,12 @@ env:
 
 jobs:
   test_ubuntu_gcc:
-    name: Test on Ubuntu with GCC 15
+    name: Test on Ubuntu with GCC 16
     runs-on: ubuntu-26.04
     timeout-minutes: 40
     env:
-      CC: gcc-15
-      CXX: g++-15
+      CC: gcc-16
+      CXX: g++-16
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v7
@@ -31,8 +31,8 @@ jobs:
       - name: Build C/C++
         run: |
           sudo apt update
-          sudo apt install -y build-essential g++-15 lld libjemalloc-dev libomp-dev
-          cmake --preset relwithdebinfo -D CMAKE_C_COMPILER=gcc-15 -D CMAKE_CXX_COMPILER=g++-15 -D USEARCH_BUILD_SHARED=1 -D USEARCH_WITH_JEMALLOC=1
+          sudo apt install -y build-essential g++-16 lld libjemalloc-dev libomp-dev
+          cmake --preset relwithdebinfo -D CMAKE_C_COMPILER=gcc-16 -D CMAKE_CXX_COMPILER=g++-16 -D USEARCH_BUILD_SHARED=1 -D USEARCH_WITH_JEMALLOC=1
           cmake --build --preset relwithdebinfo
       - name: Test C and C++
         run: ctest --preset relwithdebinfo
@@ -59,49 +59,44 @@ jobs:
       - name: Test C/C++
         run: ctest --preset asan
 
-  verify_models:
-    name: Check Promela Models and GenMC Clients
+  # The mutex annotations in `sanitizers.hpp` only take effect under ThreadSanitizer.
+  test_ubuntu_tsan:
+    name: Test under TSan on Ubuntu
     runs-on: ubuntu-26.04
-    timeout-minutes: 45
+    container: ghcr.io/ashvardanian/fatwheels:cpu@sha256:d229196426ec02f358ab84b845434906180cd93d9ae37987651a078b277d17bb
+    timeout-minutes: 60
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v7
       - name: Pull Git Submodules
         run: git submodule update --init --recursive
-      - name: Install Spin, Clang and the GenMC Build Dependencies
+      - name: Build with Clang 23
         run: |
-          sudo apt update
-          sudo apt install -y spin cmake clang-20 llvm-20-dev libffi-dev zlib1g-dev libedit-dev
-      - name: Checkout GenMC
+          cmake --preset tsan -D CMAKE_C_COMPILER=clang-23 -D CMAKE_CXX_COMPILER=clang++-23
+          cmake --build --preset tsan
+      - name: Test C/C++
+        run: ctest --preset tsan
+
+  verify_models:
+    name: Check Promela Models and GenMC Clients
+    runs-on: ubuntu-26.04
+    container: ghcr.io/ashvardanian/fatwheels:verify@sha256:c29899edae67fe85f0fa80ec3dfaa577a24e297cd4796c0fcdddda60a9010415
+    timeout-minutes: 45
+    steps:
+      - name: Checkout Repository
         uses: actions/checkout@v7
-        with:
-          repository: MPI-SWS/genmc
-          ref: 9f6c4c0772d0c42b325681581acc6a0f3eb9b5f7
-          path: genmc
-      - name: Restore the GenMC Build
-        id: genmc
-        uses: actions/cache@v6
-        with:
-          path: genmc/build
-          key: genmc-9f6c4c0-clang-20
-      - name: Build GenMC
-        if: steps.genmc.outputs.cache-hit != 'true'
-        run: |
-          cmake -S genmc -B genmc/build -D CMAKE_BUILD_TYPE=Release -D CMAKE_C_COMPILER=clang-20 -D CMAKE_CXX_COMPILER=clang++-20 -D LLVM_DIR=/usr/lib/llvm-20/lib/cmake/llvm
-          cmake --build genmc/build --parallel
+      - name: Pull the ForkUnion Submodule
+        run: git submodule update --init forkunion
       - name: Check the Models and the Clients
         run: verification/check.sh
-        env:
-          GENMC: ${{ github.workspace }}/genmc/build/bin/genmc
-          GENMC_CLANG: clang++-20
 
   test_ubuntu_clang:
-    name: Test on Ubuntu with Clang 22
+    name: Test on Ubuntu with Clang 23
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     env:
-      CC: clang-22
-      CXX: clang++-22
+      CC: clang-23
+      CXX: clang++-23
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v7
@@ -109,9 +104,12 @@ jobs:
         run: git submodule update --init --recursive
       - name: Build C/C++
         run: |
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/llvm.gpg
+          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/resolute/ llvm-toolchain-resolute-23 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm.list > /dev/null
           sudo apt update
-          sudo apt install -y build-essential clang-22 lld libjemalloc-dev
-          cmake --preset relwithdebinfo -D CMAKE_C_COMPILER=clang-22 -D CMAKE_CXX_COMPILER=clang++-22 -D USEARCH_BUILD_SHARED=1 -D USEARCH_WITH_JEMALLOC=1
+          sudo apt install -y build-essential clang-23 lld libjemalloc-dev
+          cmake --preset relwithdebinfo -D CMAKE_C_COMPILER=clang-23 -D CMAKE_CXX_COMPILER=clang++-23 -D USEARCH_BUILD_SHARED=1 -D USEARCH_WITH_JEMALLOC=1
           cmake --build --preset relwithdebinfo
       - name: Test C and C++
         run: ctest --preset relwithdebinfo

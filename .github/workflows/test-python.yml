@@ -12,7 +12,7 @@ env:
 
 jobs:
   test_python_ubuntu_gcc:
-    name: Test Python ${{ matrix.python-version }} on Ubuntu with GCC 14
+    name: Test Python ${{ matrix.python-version }} on Ubuntu with GCC 16
     runs-on: ubuntu-26.04
     strategy:
       fail-fast: false
@@ -20,8 +20,8 @@ jobs:
         python-version: ["3.12", "3.15t"]
     timeout-minutes: 30
     env:
-      CC: gcc-14
-      CXX: g++-14
+      CC: gcc-16
+      CXX: g++-16
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v7
@@ -30,7 +30,7 @@ jobs:
       - name: Install Toolchain
         run: |
           sudo apt update
-          sudo apt install -y build-essential g++-14 lld libjemalloc-dev libomp-dev
+          sudo apt install -y build-essential g++-16 lld libjemalloc-dev libomp-dev
       - name: Set Up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v7
         with:
@@ -46,7 +46,7 @@ jobs:
         run: python -X faulthandler -m pytest -x
 
   test_python_ubuntu_clang:
-    name: Test Python ${{ matrix.python-version }} on Ubuntu with Clang 20
+    name: Test Python ${{ matrix.python-version }} on Ubuntu with Clang 23
     runs-on: ubuntu-26.04
     strategy:
       fail-fast: false
@@ -54,8 +54,8 @@ jobs:
         python-version: ["3.12", "3.15t"]
     timeout-minutes: 30
     env:
-      CC: clang-20
-      CXX: clang++-20
+      CC: clang-23
+      CXX: clang++-23
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v7
@@ -63,8 +63,11 @@ jobs:
         run: git submodule update --init --recursive
       - name: Install Toolchain
         run: |
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/llvm.gpg
+          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/resolute/ llvm-toolchain-resolute-23 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm.list > /dev/null
           sudo apt update
-          sudo apt install -y build-essential clang-20 lld libjemalloc-dev
+          sudo apt install -y build-essential clang-23 lld libjemalloc-dev
       - name: Set Up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v7
         with:
@@ -74,8 +77,8 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install --group test .
         env:
-          CXX: clang++
-          CC: clang++ # Override the default compiler
+          CXX: clang++-23
+          CC: clang++-23 # Override the default compiler
       - name: Assert the GIL Stays Disabled
         if: ${{ endsWith(matrix.python-version, 't') }}
         run: python -c "import sys, usearch; assert not sys._is_gil_enabled(), 'importing usearch re-enabled the GIL'"

@@ -2679,66 +2679,6 @@ __device__ __forceinline__ void vram_merge_attention(byte_t* blocks, u32_t rows,
 
 #pragma endregion Walks
 
-#pragma region Reverse Sweep
-
-/** Hands @p callback every link of a row of @p sweep 's sources into its tile the calling lane
- *  owns, one warp per row, as the linking row and the target's row in the tile. No row is written
- *  across a tile's launches, so the count and the scatter read the same links. */
-template <typename warp_type_, typename callback_type_>
-__device__ __forceinline__ void vram_for_each_tile_link(vram_sweep_t const& sweep, callback_type_&& callback) noexcept {
-    vram_grid_warp_t const warp = vram_grid_warp<warp_type_>();
-    for (u32_t row = sweep.sources_first + warp.index; row < sweep.sources_bound; row += warp.count)
-        vram_for_each_link<warp_type_>(sweep.neighbors, sweep.connectivity, sweep.rows_count, row, warp.lane,
-                                       [&](u32_t target) noexcept {
-                                           if (target >= sweep.targets_first && target < sweep.targets_bound)
-                                               callback(row, target - sweep.targets_first);
-                                       });
-}
-
-/** Counts every link into @p sweep 's tile in its row's offset. Each add stays a read-modify-write,
- *  never a posted reduction, so none is in flight past the launch boundary the offset kernel reads
- *  the counts behind. */
-template <typename warp_type_>
-__device__ __forceinline__ void vram_count_back_links(vram_sweep_t const& sweep) {
-    vram_for_each_tile_link<warp_type_>(
-        sweep, [&](u32_t, u32_t row) noexcept { warp_type_::fetch_add_relaxed(sweep.incoming_offsets[row], 1u); });
-}
-
-/** Turns the counts of @p sweep 's tile into each row's first link's offset, which the scatter
- *  advances to its end, from one lane: the tile ends before the first row whose links pass the
- *  tape, and a lone row past it keeps the tape's worth of them. Leaves the rows it kept and the
- *  links they take in @c swept, which the host reads. */
-template <typename warp_type_>
-__device__ __forceinline__ void vram_offset_back_links(vram_sweep_t const& sweep) {
-    if (blockIdx.x || threadIdx.x) return;
-    u32_t const tile_rows = sweep.targets_bound - sweep.targets_first;
-    u64_t offset = 0;
-    u32_t rows = 0;
-    for (; rows != tile_rows; ++rows) {
-        u64_t count = sweep.incoming_offsets[rows];
-        if (offset + count > sweep.tape_capacity) {
-            if (rows) break;
-            count = sweep.tape_capacity;
-        }
-        sweep.incoming_offsets[rows] = static_cast<u32_t>(offset);
-        offset += count;
-    }
-    sweep.swept[0] = rows ? rows : 1u;
-    sweep.swept[1] = static_cast<u32_t>(offset);
-}
-
-/** Places every linking row of @p sweep 's tile on its target's run, unscored; a link the tape has
- *  no room for is left out. */
-template <typename warp_type_>
-__device__ __forceinline__ void vram_scatter_back_links(vram_sweep_t const& sweep) {
-    vram_for_each_tile_link<warp_type_>(sweep, [&](u32_t source, u32_t row) noexcept {
-        u32_t const position = warp_type_::fetch_add_relaxed(sweep.incoming_offsets[row], 1u);
-        if (position < sweep.tape_capacity) sweep.back_links[position] = source;
-    });
-}
-
-#pragma endregion Reverse Sweep
-
 #pragma region Audits
 
 /** Marks @p seed_count stride-spread rows reached and in the first frontier - the audit's landmark

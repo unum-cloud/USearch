@@ -76,8 +76,9 @@ refused:
     done++
 }
 
-// `refine_one_` on row 0 between the closing and the reopening: the row staged before the walk,
-// then rewritten under its lock from the staged copy
+/** @c rewrite_row_ on row 0 between the closing and the reopening: the row staged by
+ *  @c stage_neighbors_ before its re-selection, then rewritten under its lock from
+ *  the staged copy. */
 proctype refiner(byte t) {
     int visible, expected, first, staged, displaced;
     bool closed, reopened;

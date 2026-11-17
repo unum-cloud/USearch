@@ -8,12 +8,12 @@ permissions:
 
 jobs:
   test_go_ubuntu_gcc:
-    name: Test Go on Ubuntu with GCC 14
+    name: Test Go on Ubuntu with GCC 16
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     env:
-      CC: gcc-14
-      CXX: g++-14
+      CC: gcc-16
+      CXX: g++-16
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v7
@@ -22,10 +22,10 @@ jobs:
       - name: Install Toolchain
         run: |
           sudo apt update
-          sudo apt install -y build-essential g++-14 lld libjemalloc-dev libomp-dev
+          sudo apt install -y build-essential g++-16 lld libjemalloc-dev libomp-dev
       - name: Build the Shared C Library
         run: |
-          cmake --preset relwithdebinfo -D CMAKE_C_COMPILER=gcc-14 -D CMAKE_CXX_COMPILER=g++-14 -D USEARCH_BUILD_SHARED=1 -D USEARCH_WITH_JEMALLOC=1
+          cmake --preset relwithdebinfo -D CMAKE_C_COMPILER=gcc-16 -D CMAKE_CXX_COMPILER=g++-16 -D USEARCH_BUILD_SHARED=1 -D USEARCH_WITH_JEMALLOC=1
           cmake --build --preset relwithdebinfo --target usearch_shared
       - name: Test GoLang
         run: |

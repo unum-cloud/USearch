@@ -4,9 +4,9 @@
  *  @date October 22, 2026
  *  @brief The shard set's generations from `include/usearch/utilities/ram_shards.hpp`.
  *
- *  Once the open generation's shards reach the bound, `open_generation_` appends one shard per
- *  placement, and only the newest generation takes insertions. One caller opens it: a
- *  compare-exchange takes `shards_count_` from the generation's first shard to the same count with
+ *  Once the open generation's shards reach the bound, @c open_shard_generation_ appends one shard
+ *  per placement, and only the newest generation takes insertions. One caller opens it: a
+ *  compare-exchange takes @c shards_count_ from the generation's first shard to the same count with
  *  the opening bit set, the caller builds the shards, and a release store publishes the count past
  *  them, or, when a build fails, puts the count back.
  *
@@ -101,10 +101,10 @@ inline store_count(t, value) {
     }
 }
 
-// `open_generation_` for the generation from shard @p first: the opening bit taken by one
-// compare-exchange, the count found already past @p first, or the bit's holder waited out and the
-// exchange tried again; then the build, which may fail when @p may_fail, and the count's store.
-// @p opened says whether the generation is open on return
+/** @c open_shard_generation_ for the generation from shard @p first: the opening bit taken by one
+ *  compare-exchange, the count found already past @p first, or the bit's holder waited out and the
+ *  exchange tried again; then the build, which may fail when @p may_fail, and the count's store.
+ *  @p opened says whether the generation is open on return. */
 inline open_generation(t, first, may_fail, opened) {
     do
     :: seen = first;
@@ -167,11 +167,12 @@ inline insert_row(t, may_fail) {
     done++
 }
 
-// `plan_insert` of @p rows, then its `insert` and `finish`: `room()` read off the open generation's
-// shard, the next generation opened for the rows past it, and both shards' claims in placement order
-// right after `open_generation_` answers, with no `size()` between, a refusal releasing the claim
-// granted; then both ranges dispensed in one step under the dispensing mutex, every turn awaited,
-// and the watermarks stored inside the bracket of the commit sequence word
+/** @c plan_insert of @p rows, then its @c insert and @c finish: <tt>room()</tt> read off the open
+ *  generation's shard, the next generation opened for the rows past it, and both shards' claims in
+ *  placement order right after @c open_shard_generation_ answers, with no <tt>size()</tt> between, a
+ *  refusal releasing the claim granted; then both ranges dispensed in one step under the
+ *  dispensing mutex, every turn awaited, and the watermarks stored inside the bracket of the
+ *  commit sequence word. */
 inline plan_batch(t, rows) {
     published_shards(t);
     touch(t, count - 1);

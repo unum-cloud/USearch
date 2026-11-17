@@ -111,7 +111,7 @@
 #define block_waits_first_shard true
 #endif
 
-byte claims[shards];          // per shard, its claim: `claimed_rows_`
+byte claims[shards];          // per shard, its claim word: `claims_`
 bool closed[shards];          // per shard, whether its dispenser holds the closed state
 byte owner[shards * shard_rows];   // one past the thread that took the row; zero while untaken
 #define owner_of(shard, id) owner[(shard) * shard_rows + (id)]

@@ -5,9 +5,9 @@
  *  @brief The load path's fan-out: two steps place one row each and tally it on `covered`, and the
  *      finisher publishes once the tally is whole.
  *
- *  `covered` stands for the `covered_vectors` and `covered_neighbors` each `load_plan_t::load` step
- *  adds to. The finisher acquires the tally and, when whole, bumps the dispenser and releases the
- *  watermark.
+ *  @c covered is @c load_plan_t::covered, which each @c load step adds its rows to in
+ *  @c settle_run_. The finisher acquires the tally and, when whole, bumps the dispenser and
+ *  releases the watermark.
  *
  *  @verify pass sc,rc11
  *  @verify fail rc11 covered_order=order_relaxed: relaxed, the searcher finds a row below the

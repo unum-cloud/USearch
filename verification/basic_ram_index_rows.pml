@@ -4,11 +4,11 @@
  *  @date September 11, 2026
  *  @brief The basic index's rows under their lock word, behind the gate's shared and unique sides.
  *
- *  One neighbor row from `include/usearch/basic/ram_index.hpp` under its node's `state` word,
- *  edited by the manual `link` and `unlink` and by an insert's `back_link_` behind the shared side
- *  of `basic::shared_mutex`, copied by the traversal's `copy_row_`, the cursor's `seek` and
- *  `degree_of` under the row lock alone, and read plain by `health` and `plan_save` on the unique
- *  side. `basic_ram_index_steps.pml` covers the load path.
+ *  One neighbor row from @c include/usearch/basic/ram_index.hpp under its node's @c state word,
+ *  edited by the manual @c link and @c unlink and by an insert's @c back_link_ behind the shared
+ *  side of @c basic::shared_mutex, copied by the traversal's @c copy_neighbors_, the cursor's
+ *  @c seek and @c degree_of under the row lock alone, and read plain by @c health and @c plan_save
+ *  on the unique side. @c basic_ram_index_steps.pml covers the load path.
  *
  *  - A copied row holds no unwritten slot, under the row lock or the unique side.
  *  - A reader that acquired the watermark reads the published key.
@@ -193,7 +193,8 @@ proctype inserter(byte t) {
     unlock_shared(t, observed)
 }
 
-// copy_row_, the cursor's seek and degree_of: one watermark snapshot, then the row under its lock
+/** @c copy_neighbors_, the cursor's @c seek and @c degree_of: one watermark snapshot, then the row
+ *  under its lock. */
 proctype reader(byte t) {
     int watermark, seen, size, first, second, displaced;
     atomic {

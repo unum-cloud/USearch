@@ -11,12 +11,12 @@ env:
 
 jobs:
   test_javascript_ubuntu_gcc:
-    name: Test JavaScript on Ubuntu with GCC 14
+    name: Test JavaScript on Ubuntu with GCC 16
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     env:
-      CC: gcc-14
-      CXX: g++-14
+      CC: gcc-16
+      CXX: g++-16
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v7
@@ -25,7 +25,7 @@ jobs:
       - name: Install Toolchain
         run: |
           sudo apt update
-          sudo apt install -y build-essential g++-14 lld libjemalloc-dev libomp-dev
+          sudo apt install -y build-essential g++-16 lld libjemalloc-dev libomp-dev
       - name: Set Up Node.js
         uses: actions/setup-node@v7
         with:
@@ -38,12 +38,12 @@ jobs:
         run: npm test
 
   test_javascript_ubuntu_clang:
-    name: Test JavaScript on Ubuntu with Clang 20
+    name: Test JavaScript on Ubuntu with Clang 23
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     env:
-      CC: clang-20
-      CXX: clang++-20
+      CC: clang-23
+      CXX: clang++-23
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v7
@@ -51,8 +51,11 @@ jobs:
         run: git submodule update --init --recursive
       - name: Install Toolchain
         run: |
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/llvm.gpg
+          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/resolute/ llvm-toolchain-resolute-23 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm.list > /dev/null
           sudo apt update
-          sudo apt install -y build-essential clang-20 lld libjemalloc-dev
+          sudo apt install -y build-essential clang-23 lld libjemalloc-dev
       - name: Set Up Node.js
         uses: actions/setup-node@v7
         with:

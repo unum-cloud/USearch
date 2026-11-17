@@ -4,11 +4,11 @@
  *  @date October 22, 2026
  *  @brief The sharded index's gate and epoch.
  *
- *  From `include/usearch/utilities/ram_shards.hpp` and `ram_indexes.hpp`: every mutator holds the
- *  gate's shared side for one call, every destructive window takes its unique side with `try_lock`
- *  and never waits, and every reader brackets its call with two loads of the epoch word instead of
- *  touching the gate. The gate is `basic::shared_mutex`, moved unchanged. `close` moves no epoch:
- *  it changes only dispensers, which no reader reads.
+ *  From @c include/usearch/utilities/ram_shards.hpp, @c ram_indexes.hpp and @c ram_reshard.hpp:
+ *  every mutator holds the gate's shared side for one call, every destructive window takes its
+ *  unique side with @c try_lock and never waits, and every reader brackets its call with two loads
+ *  of the epoch word instead of touching the gate. The gate is @c basic::shared_mutex, moved
+ *  unchanged. @c close moves no epoch: it changes only dispensers, which no reader reads.
  *
  *  - A dispense asserts that a claim still covers it, the invariant `claim_capacity` keeps.
  */
@@ -196,9 +196,10 @@ inline close_gated(t, refused) {
     fi
 }
 
-// `open_generation_` for the generation from shard @p first: the opening bit taken by one
-// compare-exchange, whose refusal acquires the word; a sealed count refuses, a count past @p first
-// answers success, and a held bit is waited out; the opener publishes the count past the new shard
+/** @c open_shard_generation_ for the generation from shard @p first: the opening bit taken by one
+ *  compare-exchange, whose refusal acquires the word; a sealed count refuses, a count past
+ *  @p first answers success, and a held bit is waited out; the opener publishes the count past
+ *  the new shard. */
 inline open_generation(t, first, refused) {
     refused = false;
     do
@@ -314,10 +315,10 @@ inline insert_row(t) {
     release_shared(t, observed)
 }
 
-// `plan_absorb` and its `run` for one donor: the donor closed at plan time or at `run`, the
-// moves packed against its count and watermarks, and at `run` every row it holds one they
-// packed. Its callers' locals are `observed`, `count`, `seen`, `shard`, `succeeded`, `refused`,
-// `packed_count` and `packed_rows`
+/** @c plan_reshard's @c open_pack_ and its @c run for one donor: the donor closed at plan time or
+ *  at @c run, the moves packed against its count and watermarks, and at @c run every row it holds
+ *  one they packed. Its callers' locals are @c observed, @c count, @c seen, @c shard, @c succeeded,
+ *  @c refused, @c packed_count and @c packed_rows. */
 inline absorb(t) {
     if
     :: donor_close == at_plan -> close_gated(t, refused)

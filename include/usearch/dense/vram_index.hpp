@@ -405,7 +405,6 @@ struct vram_arguments_t {
     vram_multiply_sink_t multiply_sink;
     vram_rescoring_t rescoring;
     vram_graph_t graph;
-    vram_sweep_t sweep;
     vram_health_t health;
     vram_gather_neighborhoods_t gather_neighborhoods;
     vram_restitch_t restitch;

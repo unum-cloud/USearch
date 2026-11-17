@@ -2,7 +2,7 @@
  *  @file verification/basic_shared_mutex.cpp
  *  @author Ash Vardanian
  *  @date September 9, 2026
- *  @brief GenMC client for `basic::shared_mutex` from `include/usearch/utilities/ram_device.hpp`,
+ *  @brief GenMC client for @c basic::shared_mutex from @c include/usearch/utilities/types.hpp,
  *      the real header: one mutator takes the shared side and writes a pair of rows inside it.
  *
  *  One prober brackets its reads with the wait-free snapshots. The mutant spells @c lock_shared's

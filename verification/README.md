@@ -13,7 +13,7 @@ Model checking for the index protocols: the gates, the watermarks, the capacity 
 - `dense_ram_index_watermark/`: the dense mono-index's publication protocol, with its keys, cursor, save, load and refinement.
 - `dense_ram_index_batches.pml`, `dense_ram_index_batches.cpp`: a batch's commit, one add for its range and one watermark turn.
 - `dense_ram_index_capacity/`: storage capacity grown on demand behind one elected grower.
-- `dense_ram_index_refine/`: one tile of a refinement's sweep, where `sweep.pml` counts the walked rows' links, scatters them onto the tape and merges each run beside a walk.
+- `dense_ram_index_refine.pml`: a refinement round's `rewrite_row_` relocking a row while a search walks it.
 - `dense_ram_indexes_claims.pml`: the sharded index's claims, beside a snapshot.
 - `dense_ram_indexes_commits.pml`: a batch's commit across the shards, behind one counted sequence word.
 - `dense_ram_indexes_plans/`: the sharded save and load plans.
@@ -22,7 +22,6 @@ Model checking for the index protocols: the gates, the watermarks, the capacity 
 - `dense_vram_index_claims.pml`: the CUDA index's host side, the claim, the growth, the turn and the admission ramp.
 - `dense_vram_index_locks.pml`: the CUDA index's rows, published by one release under the bounded slot-zero lock.
 - `dense_vram_index_merge.pml`: the Apple refine merging a re-selected row into the live one.
-- `dense_vram_index_sweep.pml`: the NVIDIA and AMD refines' first write, then tiles of target rows through the launches a stream orders.
 - `dense_vram_indexes/`: the sharded CUDA index's batches, load and save, and the await of a search across its shards' streams.
 - `nvme_ring.pml`: the io_uring words of `linux_uring_ring_t` behind the ring engines.
 - `ram_tables.pml`, `ram_tables_growth.pml`: `chunked_multimap`'s probes and its chunk growth.
@@ -52,9 +51,7 @@ ForkUnion's [verification README](https://github.com/ashvardanian/ForkUnion/blob
 - A cursor's `seek` refuses an ID at or past its snapshot, and `refresh` acquires the watermark: [`dense_ram_index_watermark/cursor.pml`](dense_ram_index_watermark/cursor.pml).
 - The load path's `finish` moves an open dispenser by one compare-exchange from its base: [`dense_ram_index_watermark/appender.pml`](dense_ram_index_watermark/appender.pml).
 - `keyed_nodes::assign` writes a row's key right after the dispense, and the turn holder publishes it into the map before the watermark: [`dense_ram_index_watermark/keyed.pml`](dense_ram_index_watermark/keyed.pml).
-- A sweep's count and scatter read the same links behind the executor's await, so every link takes one tape slot, and a run ends at its target's links or the tape: [`dense_ram_index_refine/sweep.pml`](dense_ram_index_refine/sweep.pml).
-- A sweep's count takes `fetch_add`, since a relaxed `add` is posted under RAO-INT and passes the await in flight: [`dense_ram_index_refine/sweep.pml`](dense_ram_index_refine/sweep.pml).
-- A walk reads a row's slots old or merged, mixed when it peeked the old slot zero, and whole once it acquires the merged one: [`dense_ram_index_refine/sweep.pml`](dense_ram_index_refine/sweep.pml).
+- A walk reads a row a round rewrites slot by slot old or merged, mixed when it peeked the old slot zero, and whole once it acquires the merged one: [`dense_ram_index_refine.pml`](dense_ram_index_refine.pml).
 - A walk admits a row past its snapshot only by an acquire of its slot zero: [`dense_ram_index_batches.pml`](dense_ram_index_batches.pml).
 - A turn's waiters re-read the watermark after arming, and the store that ends a turn wakes them: [`dense_ram_index_batches.pml`](dense_ram_index_batches.pml).
 - `release_capacity`'s subtract releases: [`dense_ram_index_capacity/`](dense_ram_index_capacity/).
@@ -82,14 +79,13 @@ ForkUnion's [verification README](https://github.com/ashvardanian/ForkUnion/blob
 - A save reads each pinned half of its bounce only after the event its copies recorded, the pending half in `finish`: [`dense_vram_indexes/saving.pml`](dense_vram_indexes/saving.pml).
 - A search's await queues every shard's event record before the first stream's wait on it, and every record releases: [`dense_vram_indexes/awaiting.pml`](dense_vram_indexes/awaiting.pml).
 - A refine's merge never stores the sentinel into slot zero: [`dense_vram_index_merge.pml`](dense_vram_index_merge.pml).
-- A device sweep's count takes a returning add, since a posted one passes the launch's end in flight, and a row counts as changed once, and only a walked one: [`dense_vram_index_sweep.pml`](dense_vram_index_sweep.pml).
 - `abandon_` waits out every read the kernel consumed before it drops their completions: [`nvme_ring.pml`](nvme_ring.pml).
 
 ## What Is Not Covered
 
 - The dense header's first chunk is more events than GenMC's execution graph holds, so the dense clients spell the counters' lines.
 - The far-memory results are Spin's alone: GenMC has no posted add.
-- `chunked_multimap` crashed GenMC 0.18's interpreter before the first insert, so the multimap has no client, and 0.19 is untried.
+- `chunked_multimap` has no client: `chunked_column` zeroes each fresh chunk with a `std::memset` of runtime length into heap memory, which GenMC 0.20 refuses to run, and its first chunk holds 2048 slots, more turns than `--unroll` gives a zeroing loop.
 - The rows model has no client either: the row lock sits inside `basic::ram_index`.
 - The executors' holds are plain try-locks around the per-thread arenas and are not modelled.
 - IMM may admit more than real Arm and POWER chips do, and nothing here runs on silicon.

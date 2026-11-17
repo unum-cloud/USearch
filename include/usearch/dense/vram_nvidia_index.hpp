@@ -90,8 +90,6 @@ constexpr u32_t cuda_resident_blocks(vram_kernel_t kernel, u32_t slots) noexcept
     case vram_kernel_t::reachability_sweep_k:
     case vram_kernel_t::reachability_back_sweep_k:
     case vram_kernel_t::reached_in_links_k:
-    case vram_kernel_t::count_back_links_k:
-    case vram_kernel_t::scatter_back_links_k:
     case vram_kernel_t::partition_propose_k:
     case vram_kernel_t::partition_count_k:
     case vram_kernel_t::partition_accept_k:

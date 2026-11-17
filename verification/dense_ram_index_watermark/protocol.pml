@@ -231,9 +231,9 @@ inline insert_dispensed(t, id, first_invisible, seen, displaced, watermark, chai
     fi
 }
 
-// `insert` of one row: identity, the key in `on_assigned`, the walk, the publication, the back-link,
-// the turn, and inside it the key into the map when @p keyed; a closed dispenser refuses it before
-// anything is written
+/** @c insert of one row: identity, the key in @c keyed_nodes::assign, the walk, the publication,
+ *  the back-link, the turn, and inside it the key into the map when @p keyed; a closed dispenser
+ *  refuses it before anything is written. */
 inline insert_keyed(t, keyed) {
     byte chain;
     int id, first_invisible, seen, displaced, watermark;
@@ -316,10 +316,10 @@ inline reopen_dispenser(t, visible, expected, reopened) {
     compare_exchange(t, next_dispensed_id, order_acq_rel, expected, visible, reopened)
 }
 
-// `refine_one_` on row 0, without its walk, which writes nothing: the lock, the tail rewritten
-// relaxed, and the unlock with the first neighbor the re-selection kept, the value the lock
-// displaced; then `back_link_neighbors` into row 1, which names row 0 already: the lock, and the
-// unlock with the value it held
+/** @c rewrite_row_ on row 0, without its re-selection, which writes nothing: the lock, the tail
+ *  rewritten relaxed, and the unlock with the first neighbor the re-selection kept, the value the
+ *  lock displaced; then @c add_or_swap_link_ into row 1, which names row 0 already: the lock, and
+ *  the unlock with the value it held. */
 inline refine(t) {
     int displaced;
     lock(t, 0, displaced);

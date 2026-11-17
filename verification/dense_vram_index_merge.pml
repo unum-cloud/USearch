@@ -5,9 +5,9 @@
  *  @brief The CUDA index's refine merging a re-selected row into the live one beside a walking reader
  *      and an insertion's back-link, the two mutators kept apart by the closed dispenser.
  *
- *  From `include/usearch/dense/vram_index.cuh`: `vram_merge_back_links_one` writes every slot of a
- *  live row, slot zero included and never the sentinel, with relaxed stores in any order, so a walk
- *  reads each slot old or new. A refine closes the shard's `claimed_rows_` before its pass and
+ *  From @c include/usearch/dense/vram_index.cuh: @c vram_stitch_entry writes every changed slot of
+ *  a live row, slot zero included and never the sentinel, with relaxed stores in any order, so a
+ *  walk reads each slot old or new. A refine closes the shard's @c claims_ before its pass and
  *  reopens it after, refused while a batch is in flight, and a batch's claim is refused while it is
  *  closed, so an insertion's back-links never arrive in a row the merge rewrites.
  *
@@ -43,15 +43,15 @@
 #define refine_closes true
 #endif
 
-byte claimed;     // the shard's `claimed_rows_`, a ghost each step on which is one compare-exchange
+byte claimed;     // the shard's `claims_`, a ghost each step on which is one compare-exchange
 bool closed;      // the dispenser holds the closed state
 byte done;        // the merger and the back-linker, once finished
 bool editing;     // the back-linker holds row 0's lock
 bool linked;      // the back-linker appended node 3 into row 0
 bool merge_saw;   // the merger staged node 3
 
-// `vram_merge_back_links_one` between the closing and the reopening: the staged row, then every
-// slot stored relaxed in either order, slot zero never the sentinel
+/** @c vram_stitch_entry between the closing and the reopening: the staged row, then every slot
+ *  stored relaxed in either order, slot zero never the sentinel. */
 proctype merger(byte t) {
     int visible, head, tail;
     // `close_`: from the watermark acquired, refused while a batch is in flight

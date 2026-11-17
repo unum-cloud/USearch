@@ -178,15 +178,16 @@
       "name": "tsan",
       "inherits": [
         "base",
-        "gcc"
+        "clang"
       ],
       "displayName": "Host TSan - concurrency suites under ThreadSanitizer",
-      "description": "GCC & -fsanitize=thread over RelWithDebInfo, apart from `asan`, as TSan cannot share a process with ASan & LSan. -O1 keeps the instrumented suites tolerable, and the mutex annotations in sanitizers.hpp light up under this preset alone. Built with GCC: Clang here ships no compiler-rt.",
+      "description": "ThreadSanitizer over RelWithDebInfo, apart from `asan`, as TSan cannot share a process with ASan & LSan. -O1 keeps the instrumented suites tolerable, and the mutex annotations in sanitizers.hpp light up under this preset alone. The siblings inherit it, so ForkUnion leaves out the atomics written in assembly, which TSan cannot see. Built with Clang, whose compiler-rt carries the TSan runtime.",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
-        "CMAKE_C_FLAGS_RELWITHDEBINFO": "-O1 -g -DNDEBUG -fsanitize=thread -fno-omit-frame-pointer",
-        "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O1 -g -DNDEBUG -fsanitize=thread -fno-omit-frame-pointer",
-        "USEARCH_BUILD_TEST": "ON"
+        "CMAKE_C_FLAGS_RELWITHDEBINFO": "-O1 -g -DNDEBUG -fno-omit-frame-pointer",
+        "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O1 -g -DNDEBUG -fno-omit-frame-pointer",
+        "USEARCH_BUILD_TEST": "ON",
+        "USEARCH_BUILD_SANITIZERS": "thread"
       }
     },
     {

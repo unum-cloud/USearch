@@ -6,11 +6,11 @@
  *      matrices grown by the claim holder alone, the watermark each batch turns after its drain as a
  *      search's bound, the closed dispenser, and the admission ramp.
  *
- *  From `include/usearch/dense/vram_nvidia_index.cuh`: `claimed_rows_` holds the rows claimed, or
- *  `node_id_unknown_k` while closed, and a claim is one compare-exchange of it from the watermark
- *  to the watermark past the batch, so it succeeds only when no batch is in flight and the
- *  dispenser is open. Two inserters each submit one batch of two rows. `far` is not run: the posted
- *  add is x86's, and the ramp's add runs on the GPU.
+ *  From @c include/usearch/dense/vram_index.hpp: @c claims_, a @c claim_word_t, holds the rows
+ *  claimed, or @c claim_word_t::closed_k while closed, and a claim is one compare-exchange of it
+ *  from the watermark to the watermark past the batch, so it succeeds only when no batch is in
+ *  flight and the dispenser is open. Two inserters each submit one batch of two rows. @c far is not
+ *  run: the posted add is x86's, and the ramp's add runs on the GPU.
  *
  *  - The bound a searcher acquired lies inside the flat matrices it sees mapped.
  *  - Every row below the bound is written, and a row the walk reads was written in a batch that turned.
