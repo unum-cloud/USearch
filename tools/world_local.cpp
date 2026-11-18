@@ -10,7 +10,7 @@
 
 namespace unum::usearch::tools {
 
-world_t::world_t(int&, char**&) noexcept {}
+world_t::world_t(std::span<char*> given) noexcept : arguments(given) {}
 world_t::~world_t() noexcept {}
 
 bool world_t::barrier(bool failed) noexcept { return failed; }

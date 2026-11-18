@@ -23,8 +23,7 @@
 
 #include <cassert> // `assert` - the CPU casts never refuse
 #include <cmath>   // `std::exp`, `std::fabs` - the search and algebra oracles
-#include <cstdint> // `std::uintptr_t` - the checkpoint paths' per-run salt
-#include <cstdio>  // `std::snprintf`, `std::remove` - the checkpoint round-trip's files
+#include <cstdio>  // `stderr` - the repeat warning
 #include <cstdlib> // `std::abs`
 #include <cstring> // `std::strlen`, `std::memcmp` - the fetched-row byte comparison
 
@@ -3270,15 +3269,11 @@ save_config_t dense_indexes_save_config() noexcept {
     return config;
 }
 
-/** The path one sharded checkpoint scenario writes, distinct per process so parallel suite runs
- *  never clobber each other: a lone shard's monolith, or a manifest with its parts beside it under
- *  the interchange's naming. */
+/** The path one sharded checkpoint scenario writes, in a scratch directory of its own: a lone
+ *  shard's monolith, or a manifest with its parts beside it under the interchange's naming. */
 struct dense_checkpoint_path_t {
-    char path[64] = {};
-
-    explicit dense_checkpoint_path_t(std::uintptr_t salt) noexcept {
-        std::snprintf(path, sizeof(path), "/tmp/usearch-%08x.safegraphs", static_cast<unsigned>(salt));
-    }
+    scratch_directory_t directory;
+    std::string path = directory.path("checkpoint.safegraphs");
 
     /** The file of part @p part among @p parts: the path itself for a lone part. */
     std::string part(std::size_t part, std::size_t parts) const {
@@ -3286,12 +3281,6 @@ struct dense_checkpoint_path_t {
         growing_buffer<char> part_path {global_allocator};
         auto const [named, status] = safegraphs_part_path(part_path, safegraphs_stem(path), part, parts);
         return succeeded(status) ? std::string {named} : std::string {};
-    }
-
-    /** Removes the checkpoint and its @p parts part files. */
-    void remove(std::size_t parts) const noexcept {
-        std::remove(path);
-        for (std::size_t part = 0; part != parts; ++part) std::remove(this->part(part, parts).c_str());
     }
 };
 
@@ -3795,7 +3784,7 @@ void test_dense_indexes_save_load(u64_t seed, placement_types_&... placement) {
     indexes_type_ indexes {kernel_, {dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
     dense_indexes_build(indexes, executor, vectors, keys, placement...);
     std::size_t const shards = indexes.shards_count();
-    dense_checkpoint_path_t const checkpoint {reinterpret_cast<std::uintptr_t>(&indexes)};
+    dense_checkpoint_path_t const checkpoint;
     save_config_t config = dense_indexes_save_config<indexes_type_>();
 
     // A cancelled save writes parts but no manifest or header, so the checkpoint reads as absent.
@@ -3859,8 +3848,6 @@ void test_dense_indexes_save_load(u64_t seed, placement_types_&... placement) {
             rows_driver.handle());
         expect_true(search_status == status_t::success_k && search_result.count > 0);
     }
-
-    checkpoint.remove(shards);
 }
 
 /** A load places each part on a shard of its own: a reservation smaller than the parts still fits
@@ -3883,7 +3870,7 @@ void test_dense_indexes_part_load(u64_t seed, placement_types_&... placement) {
     indexes_type_ indexes {kernel_, {dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
     dense_indexes_build(indexes, executor, vectors, keys, placement...);
     std::size_t const shards = indexes.shards_count();
-    dense_checkpoint_path_t const checkpoint {reinterpret_cast<std::uintptr_t>(&indexes)};
+    dense_checkpoint_path_t const checkpoint;
     expect_true(succeeded(indexes.save(checkpoint.path, dense_indexes_save_config<indexes_type_>(), executor)));
 
     indexes_type_ cramped {kernel_, {dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
@@ -3895,8 +3882,6 @@ void test_dense_indexes_part_load(u64_t seed, placement_types_&... placement) {
         expect_equal(cramped.shard(shard).size(), indexes.shard(shard).size());
     expect_equal(cramped.load(checkpoint.path, load_config_t {}, executor), status_t::config_mismatch_k);
     expect_equal(cramped.size(), rows);
-
-    checkpoint.remove(shards);
 }
 
 /** Any number of lanes may take tasks from one sharded plan: a shared cursor hands them
@@ -4192,7 +4177,7 @@ void test_dense_indexes_cancelled_load(u64_t seed, placement_types_&... placemen
     indexes_type_ indexes {kernel_, {dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
     dense_indexes_build(indexes, executor, vectors, keys, placement...);
     std::size_t const shards = indexes.shards_count();
-    dense_checkpoint_path_t const checkpoint {reinterpret_cast<std::uintptr_t>(&indexes)};
+    dense_checkpoint_path_t const checkpoint;
     expect_true(succeeded(indexes.save(checkpoint.path, dense_indexes_save_config<indexes_type_>(), executor)));
 
     for (std::size_t boundary = 0; boundary != shards; ++boundary) {
@@ -4207,8 +4192,6 @@ void test_dense_indexes_cancelled_load(u64_t seed, placement_types_&... placemen
         expect_true(succeeded(restored.load(checkpoint.path, load_config_t {}, executor)));
         dense_indexes_expect_restored(restored, vectors, keys, dimensions, executor, seed);
     }
-
-    checkpoint.remove(shards);
 }
 
 /**

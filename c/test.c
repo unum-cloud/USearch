@@ -22,9 +22,9 @@
 #undef NDEBUG // ! A test's oracle must stay live in every build
 
 #include <signal.h> // `signal`, `raise`, `SIGSEGV`
-#include <stdio.h>  // `printf`
+#include <stdio.h>  // `printf`, `snprintf`
 #include <stdlib.h> // `malloc`, `free`, `getenv`, `strtoull`, `srand`
-#include <string.h> // `memset`, `memcmp`, `strstr`
+#include <string.h> // `memset`, `memcmp`
 #include <time.h>   // `time`, for a drawn seed
 
 #include <inttypes.h> // `PRIu64` - the run's lines
@@ -61,7 +61,6 @@ static size_t failed_cases = 0;
 static size_t skipped_cases = 0;
 static char const* current_case = NULL;
 static char const* program_name = "";
-static char const* test_filter = NULL;
 static uint64_t test_seed = 42;
 static double test_scale = 1.0;
 static bool refuse_skips = false;
@@ -76,11 +75,22 @@ static inline uint64_t split_mix_bits(uint64_t value) {
     return value ^ (value >> 31);
 }
 
+/** Writes @p text to the standard error through a raw @c write, which a signal handler may call. */
+static void write_text(char const* text) {
+#if USEARCH_OS_WINDOWS_
+    (void)!_write(2, text, (unsigned)strlen(text));
+#else
+    (void)!write(STDERR_FILENO, text, strlen(text));
+#endif
+}
+
 /** Counts a failed check at @p file : @p line without stopping, so one run lists every mismatch. */
 static inline bool expect_at(bool is_met, char const* file, int line, char const* what) {
     if (is_met) return true;
     fflush(stdout);
-    fprintf(stderr, "  check failed at %s:%d\n    %s\n", file, line, what);
+    char message[512];
+    snprintf(message, sizeof message, "  check failed at %s:%d\n    %s\n", file, line, what);
+    write_text(message);
     ++failed_checks;
     return false;
 }
@@ -100,7 +110,9 @@ static inline char const* setting_text(int argc, char** argv, char const* variab
 
 /** Exits with one line naming a setting that does not parse, so a bad value never runs anything. */
 static inline void exit_unparsed(char const* variable, char const* text, char const* expected) {
-    fprintf(stderr, "%s=\"%s\" does not parse, expected %s\n", variable, text, expected);
+    char message[512];
+    snprintf(message, sizeof message, "%s=\"%s\" does not parse, expected %s\n", variable, text, expected);
+    write_text(message);
     exit(1);
 }
 
@@ -136,15 +148,13 @@ static inline bool read_flag_setting(int argc, char** argv, char const* variable
 static inline void start_test_run(int argc, char** argv) {
     program_name = argc != 0 ? argv[0] : "";
     read_test_settings(argc, argv);
-    printf("- Seed: %" PRIu64 ", scale: %g, filter: %s\n", test_seed, test_scale, test_filter ? test_filter : "none");
+    printf("- Seed: %" PRIu64 ", scale: %g\n", test_seed, test_scale);
 }
 
-/** Starts the case @p label unless the filter leaves it out, matched by substring. */
-static inline bool start_test_case(char const* label) {
-    if (test_filter && !strstr(label, test_filter)) return false;
+/** Starts the case @p label. */
+static inline void start_test_case(char const* label) {
     current_case = label;
     failed_checks_before_case = failed_checks;
-    return true;
 }
 
 /** Ends the case @ref start_test_case began: @p skip_reason when it skipped, NULL when it ran. */
@@ -161,8 +171,11 @@ static inline void finish_test_case(char const* skip_reason) {
     else {
         ++failed_cases;
         fflush(stdout);
-        fprintf(stderr, "- %s ... FAILED: %zu failed check(s)\n", current_case, failed);
-        fprintf(stderr, "  rerun: %s --seed %" PRIu64 " --filter '%s'\n", program_name, test_seed, current_case);
+        char message[512];
+        snprintf(message, sizeof message, "- %s ... FAILED: %zu failed check(s)\n", current_case, failed);
+        write_text(message);
+        snprintf(message, sizeof message, "  rerun: %s --seed %" PRIu64 "\n", program_name, test_seed);
+        write_text(message);
     }
     current_case = NULL;
 }
@@ -180,7 +193,6 @@ static inline int finish_test_run(void) {
 
 static void read_test_settings(int argc, char** argv) {
     test_seed = read_seed_setting(argc, argv, "USEARCH_SEED", "--seed");
-    test_filter = setting_text(argc, argv, "USEARCH_FILTER", "--filter");
     test_scale = read_real_setting(argc, argv, "USEARCH_SCALE", "--scale", 1.0);
     refuse_skips = read_flag_setting(argc, argv, "USEARCH_NO_SKIPS", "--no-skips", false);
 }
@@ -191,15 +203,6 @@ static void read_test_settings(int argc, char** argv) {
 static char const no_gpu_device_k[] = "no GPU device";
 static char const needs_nvme_k[] = "needs usearch_dense_view_nvme";
 static char const needs_arrow_k[] = "needs usearch_rows_view_to_arrow";
-
-/** Writes @p text to the standard error through a raw @c write, which a signal handler may call. */
-static void write_text(char const* text) {
-#if USEARCH_OS_WINDOWS_
-    [[maybe_unused]] int const written = _write(2, text, (unsigned)strlen(text));
-#else
-    [[maybe_unused]] ssize_t const written = write(STDERR_FILENO, text, strlen(text));
-#endif
-}
 
 /** Names the signal and the case in progress, prints a back-trace, then re-raises the signal, so a
  *  crash localizes itself and the shell still sees the true exit status. */
@@ -6318,10 +6321,15 @@ int main(int argc, char* argv[]) {
     start_test_run(argc, argv);
     srand((unsigned)test_seed);
 
-    if (start_test_case("test_library_probes")) test_library_probes(), finish_test_case(NULL);
-    if (start_test_case("test_names_round_trip_through_the_library_and_refuse_strangers"))
-        test_names_round_trip_through_the_library_and_refuse_strangers(), finish_test_case(NULL);
-    if (start_test_case("test_outcome_contract")) test_outcome_contract(64), finish_test_case(NULL);
+    start_test_case("test_library_probes");
+    test_library_probes();
+    finish_test_case(NULL);
+    start_test_case("test_names_round_trip_through_the_library_and_refuse_strangers");
+    test_names_round_trip_through_the_library_and_refuse_strangers();
+    finish_test_case(NULL);
+    start_test_case("test_outcome_contract");
+    test_outcome_contract(64);
+    finish_test_case(NULL);
 
     size_t const collection_sizes[] = {11, 512};
     size_t const dimension_counts[] = {83, 256};
@@ -6330,70 +6338,129 @@ int main(int argc, char* argv[]) {
         for (size_t dimension_index = 0; dimension_index != 2; ++dimension_index) {
             size_t const rows = collection_sizes[size_index], dimensions = dimension_counts[dimension_index];
             snprintf(label, sizeof(label), "test_init_ram_starts_empty(%zu, %zu)", rows, dimensions);
-            if (start_test_case(label)) test_init_ram_starts_empty(rows, dimensions), finish_test_case(NULL);
+            start_test_case(label);
+            test_init_ram_starts_empty(rows, dimensions);
+            finish_test_case(NULL);
             snprintf(label, sizeof(label), "test_add_and_search(%zu, %zu)", rows, dimensions);
-            if (start_test_case(label)) test_add_and_search(rows, dimensions), finish_test_case(NULL);
+            start_test_case(label);
+            test_add_and_search(rows, dimensions);
+            finish_test_case(NULL);
         }
-    if (start_test_case("test_empty_reads")) test_empty_reads(dimension_counts[0]), finish_test_case(NULL);
-    if (start_test_case("test_add_progress")) test_add_progress(), finish_test_case(NULL);
-    if (start_test_case("test_reshard_gather")) test_reshard_gather(dimension_counts[0]), finish_test_case(NULL);
-    if (start_test_case("test_refine_plan")) test_refine_plan(1536, 4096), finish_test_case(NULL);
-    if (start_test_case("test_reshard_cut_plan")) test_reshard_cut_plan(dimension_counts[0]), finish_test_case(NULL);
-    if (start_test_case("test_reshard")) test_reshard(dimension_counts[0]), finish_test_case(NULL);
-    if (start_test_case("test_sequence_reshard")) test_sequence_reshard(), finish_test_case(NULL);
+    start_test_case("test_empty_reads");
+    test_empty_reads(dimension_counts[0]);
+    finish_test_case(NULL);
+    start_test_case("test_add_progress");
+    test_add_progress();
+    finish_test_case(NULL);
+    start_test_case("test_reshard_gather");
+    test_reshard_gather(dimension_counts[0]);
+    finish_test_case(NULL);
+    start_test_case("test_refine_plan");
+    test_refine_plan(1536, 4096);
+    finish_test_case(NULL);
+    start_test_case("test_reshard_cut_plan");
+    test_reshard_cut_plan(dimension_counts[0]);
+    finish_test_case(NULL);
+    start_test_case("test_reshard");
+    test_reshard(dimension_counts[0]);
+    finish_test_case(NULL);
+    start_test_case("test_sequence_reshard");
+    test_sequence_reshard();
+    finish_test_case(NULL);
     for (size_t dimension_index = 0; dimension_index != 2; ++dimension_index) {
         snprintf(label, sizeof(label), "test_count_and_get(%zu)", dimension_counts[dimension_index]);
-        if (start_test_case(label)) test_count_and_get(dimension_counts[dimension_index]), finish_test_case(NULL);
+        start_test_case(label);
+        test_count_and_get(dimension_counts[dimension_index]);
+        finish_test_case(NULL);
     }
-    if (start_test_case("test_arenas")) test_arenas(dimension_counts[0]), finish_test_case(NULL);
-    if (start_test_case("test_walks_name_their_index"))
-        test_walks_name_their_index(dimension_counts[0]), finish_test_case(NULL);
-    if (start_test_case("test_sample")) finish_test_case(test_sample());
-    if (start_test_case("test_cursor_steps")) test_cursor_steps(), finish_test_case(NULL);
-    if (start_test_case("test_sequence_saves_and_loads_a_file"))
-        test_sequence_saves_and_loads_a_file(), finish_test_case(NULL);
-    if (start_test_case("test_sequence_shards")) test_sequence_shards(), finish_test_case(NULL);
-    if (start_test_case("test_sequence_vram")) finish_test_case(test_sequence_vram());
-    if (start_test_case("test_shapes_saves_and_loads_a_file"))
-        test_shapes_saves_and_loads_a_file(), finish_test_case(NULL);
-    if (start_test_case("test_shapes_vram")) finish_test_case(test_shapes_vram());
-    if (start_test_case("test_geospatial_saves_and_loads_a_file"))
-        test_geospatial_saves_and_loads_a_file(), finish_test_case(NULL);
-    if (start_test_case("test_shapes_and_geospatial_reshard"))
-        test_shapes_and_geospatial_reshard(), finish_test_case(NULL);
-    if (start_test_case("test_reshard_refusals")) test_reshard_refusals(), finish_test_case(NULL);
-    if (start_test_case("test_geospatial_vram")) finish_test_case(test_geospatial_vram());
+    start_test_case("test_arenas");
+    test_arenas(dimension_counts[0]);
+    finish_test_case(NULL);
+    start_test_case("test_walks_name_their_index");
+    test_walks_name_their_index(dimension_counts[0]);
+    finish_test_case(NULL);
+    start_test_case("test_sample");
+    finish_test_case(test_sample());
+    start_test_case("test_cursor_steps");
+    test_cursor_steps();
+    finish_test_case(NULL);
+    start_test_case("test_sequence_saves_and_loads_a_file");
+    test_sequence_saves_and_loads_a_file();
+    finish_test_case(NULL);
+    start_test_case("test_sequence_shards");
+    test_sequence_shards();
+    finish_test_case(NULL);
+    start_test_case("test_sequence_vram");
+    finish_test_case(test_sequence_vram());
+    start_test_case("test_shapes_saves_and_loads_a_file");
+    test_shapes_saves_and_loads_a_file();
+    finish_test_case(NULL);
+    start_test_case("test_shapes_vram");
+    finish_test_case(test_shapes_vram());
+    start_test_case("test_geospatial_saves_and_loads_a_file");
+    test_geospatial_saves_and_loads_a_file();
+    finish_test_case(NULL);
+    start_test_case("test_shapes_and_geospatial_reshard");
+    test_shapes_and_geospatial_reshard();
+    finish_test_case(NULL);
+    start_test_case("test_reshard_refusals");
+    test_reshard_refusals();
+    finish_test_case(NULL);
+    start_test_case("test_geospatial_vram");
+    finish_test_case(test_geospatial_vram());
 #if USEARCH_DENSE_DTYPES >= 2
-    if (start_test_case("test_multiply_packed")) test_multiply_packed(), finish_test_case(NULL);
+    start_test_case("test_multiply_packed");
+    test_multiply_packed();
+    finish_test_case(NULL);
 #else
-    if (start_test_case("test_multiply_packed"))
-        finish_test_case("built without usearch_scalar_u1x8_k in USEARCH_DENSE_DTYPES");
+    start_test_case("test_multiply_packed");
+    finish_test_case("built without usearch_scalar_u1x8_k in USEARCH_DENSE_DTYPES");
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-    if (start_test_case("test_attention_is_exact_over_every_key"))
-        test_attention_is_exact_over_every_key(), finish_test_case(NULL);
+    start_test_case("test_attention_is_exact_over_every_key");
+    test_attention_is_exact_over_every_key();
+    finish_test_case(NULL);
 #else
-    if (start_test_case("test_attention_is_exact_over_every_key"))
-        finish_test_case("built without usearch_scalar_i8_k in USEARCH_DENSE_DTYPES");
+    start_test_case("test_attention_is_exact_over_every_key");
+    finish_test_case("built without usearch_scalar_i8_k in USEARCH_DENSE_DTYPES");
 #endif
-    if (start_test_case("test_late_interaction_scores_over_documents"))
-        test_late_interaction_scores_over_documents(), finish_test_case(NULL);
-    if (start_test_case("test_nvme_view")) finish_test_case(test_nvme_view(dimension_counts[0]));
-    if (start_test_case("test_nvme_load")) finish_test_case(test_nvme_load(dimension_counts[0]));
-    if (start_test_case("test_nvme_view_narrow_keys")) finish_test_case(test_nvme_view_narrow_keys());
-    if (start_test_case("test_vram_parts_share_a_device"))
-        finish_test_case(test_vram_parts_share_a_device(collection_sizes[1], dimension_counts[1]));
-    if (start_test_case("test_vram_scan")) finish_test_case(test_vram_scan(collection_sizes[1], dimension_counts[1]));
-    if (start_test_case("test_ceilings_and_fill")) test_ceilings_and_fill(), finish_test_case(NULL);
-    if (start_test_case("test_deferred_search")) test_deferred_search(), finish_test_case(NULL);
-    if (start_test_case("test_deferred_polling")) test_deferred_polling(), finish_test_case(NULL);
-    if (start_test_case("test_contended_from_another_thread"))
-        test_contended_from_another_thread(), finish_test_case(NULL);
-    if (start_test_case("test_drain_then_mood")) test_drain_then_mood(), finish_test_case(NULL);
-    if (start_test_case("test_free_waits_for_named_call")) test_free_waits_for_named_call(), finish_test_case(NULL);
-    if (start_test_case("test_free_waits_for_call_without_executor"))
-        test_free_waits_for_call_without_executor(), finish_test_case(NULL);
-    if (start_test_case("test_deferred_holds_arena")) test_deferred_holds_arena(), finish_test_case(NULL);
+    start_test_case("test_late_interaction_scores_over_documents");
+    test_late_interaction_scores_over_documents();
+    finish_test_case(NULL);
+    start_test_case("test_nvme_view");
+    finish_test_case(test_nvme_view(dimension_counts[0]));
+    start_test_case("test_nvme_load");
+    finish_test_case(test_nvme_load(dimension_counts[0]));
+    start_test_case("test_nvme_view_narrow_keys");
+    finish_test_case(test_nvme_view_narrow_keys());
+    start_test_case("test_vram_parts_share_a_device");
+    finish_test_case(test_vram_parts_share_a_device(collection_sizes[1], dimension_counts[1]));
+    start_test_case("test_vram_scan");
+    finish_test_case(test_vram_scan(collection_sizes[1], dimension_counts[1]));
+    start_test_case("test_ceilings_and_fill");
+    test_ceilings_and_fill();
+    finish_test_case(NULL);
+    start_test_case("test_deferred_search");
+    test_deferred_search();
+    finish_test_case(NULL);
+    start_test_case("test_deferred_polling");
+    test_deferred_polling();
+    finish_test_case(NULL);
+    start_test_case("test_contended_from_another_thread");
+    test_contended_from_another_thread();
+    finish_test_case(NULL);
+    start_test_case("test_drain_then_mood");
+    test_drain_then_mood();
+    finish_test_case(NULL);
+    start_test_case("test_free_waits_for_named_call");
+    test_free_waits_for_named_call();
+    finish_test_case(NULL);
+    start_test_case("test_free_waits_for_call_without_executor");
+    test_free_waits_for_call_without_executor();
+    finish_test_case(NULL);
+    start_test_case("test_deferred_holds_arena");
+    test_deferred_holds_arena();
+    finish_test_case(NULL);
     // An implementation without Arrow, as the stand-in, answers every exchange unsupported.
     struct ArrowSchema probed_schema = {0};
     struct ArrowDeviceArray probed_array = {0};
@@ -6401,22 +6468,22 @@ int main(int argc, char* argv[]) {
                                                               &probed_array) == usearch_status_unsupported_k
                                        ? needs_arrow_k
                                        : NULL;
-    if (start_test_case("test_arrow_rows_and_keys")) {
-        if (!arrow_skip) test_arrow_rows_and_keys();
-        finish_test_case(arrow_skip);
-    }
-    if (start_test_case("test_arrow_refusals")) {
-        if (!arrow_skip) test_arrow_refusals();
-        finish_test_case(arrow_skip);
-    }
-    if (start_test_case("test_arrow_tapes")) {
-        if (!arrow_skip) test_arrow_tapes();
-        finish_test_case(arrow_skip);
-    }
-    if (start_test_case("test_arrow_matches")) {
-        if (!arrow_skip) test_arrow_matches();
-        finish_test_case(arrow_skip);
-    }
+    start_test_case("test_arrow_rows_and_keys");
+    if (!arrow_skip) test_arrow_rows_and_keys();
+    finish_test_case(arrow_skip);
+
+    start_test_case("test_arrow_refusals");
+    if (!arrow_skip) test_arrow_refusals();
+    finish_test_case(arrow_skip);
+
+    start_test_case("test_arrow_tapes");
+    if (!arrow_skip) test_arrow_tapes();
+    finish_test_case(arrow_skip);
+
+    start_test_case("test_arrow_matches");
+    if (!arrow_skip) test_arrow_matches();
+    finish_test_case(arrow_skip);
+
     return finish_test_run();
 }
 

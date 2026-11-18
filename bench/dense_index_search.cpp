@@ -172,7 +172,7 @@ int bench_dense_index_search(int argc, char const* const* argv) {
                  base.columns(), usearch_scalar_name(base.scalar()), usearch_scalar_name(stored),
                  usearch_dense_metric_name(metric));
 
-    session_t session = open_session(settings, settings.cpu_class_ceiling);
+    session_t session = open_session(settings, cpu_class_ceilings_k[settings.cpu_class_ceiling.selected]);
     if (!session) return 1;
     // A checkpoint holding a graph reopens as it is, so class and thread sweeps share one build.
     usearch_dense_metadata_t saved {};
@@ -194,7 +194,7 @@ int bench_dense_index_search(int argc, char const* const* argv) {
     // An NVMe run serves a view of what it built, from the checkpoint it saves.
     std::string const checkpoint =
         !settings.checkpoint.empty() ? std::string(settings.checkpoint)
-        : settings.residency == usearch_residency_nvme_k
+        : residencies_k[settings.residency.selected] == usearch_residency_nvme_k
             ? (std::filesystem::temp_directory_path() / "usearch-bench-dense.safegraphs").string()
             : std::string();
     handle<dense_verbs_t> index;
@@ -203,9 +203,10 @@ int bench_dense_index_search(int argc, char const* const* argv) {
                      usearch_dense_metric_name(saved.metric), saved.dimensions,
                      usearch_scalar_name(saved.quantization));
         std::chrono::steady_clock::time_point const reopen_start = std::chrono::steady_clock::now();
-        index = reopen<dense_verbs_t>(session, checkpoint, geometry, settings.residency, settings.shards.value);
+        index = reopen<dense_verbs_t>(session, checkpoint, geometry, residencies_k[settings.residency.selected],
+                                      settings.shards.value);
         if (!index) return 1;
-        fmt::println("- Reopened {} as {} in {:.2f} s", checkpoint, usearch_residency_name(settings.residency),
+        fmt::println("- Reopened {} as {} in {:.2f} s", checkpoint, residency_names_k[settings.residency.selected],
                      seconds_since(reopen_start));
         print_fill(index);
     }
@@ -231,9 +232,9 @@ int bench_dense_index_search(int argc, char const* const* argv) {
         print_fill(index);
         if (!checkpoint.empty()) {
             std::chrono::steady_clock::time_point const reopen_start = std::chrono::steady_clock::now();
-            index = save_and_reopen(std::move(index), checkpoint, settings.residency);
+            index = save_and_reopen(std::move(index), checkpoint, residencies_k[settings.residency.selected]);
             if (!index) return 1;
-            fmt::println("- Reopened {} as {} in {:.2f} s", checkpoint, usearch_residency_name(settings.residency),
+            fmt::println("- Reopened {} as {} in {:.2f} s", checkpoint, residency_names_k[settings.residency.selected],
                          seconds_since(reopen_start));
             print_fill(index);
         }
@@ -287,7 +288,7 @@ int bench_dense_index_search(int argc, char const* const* argv) {
     usearch_outcome_t const swept = sweep_recall(index, queries, queries_count, oracle, search.expansion_search.view(),
                                                  top_k, search.batch.value);
     if (report_failure(swept, "Searching")) return 1;
-    if (settings.residency == usearch_residency_nvme_k && settings.checkpoint.empty())
+    if (residencies_k[settings.residency.selected] == usearch_residency_nvme_k && settings.checkpoint.empty())
         for (sz::string_t const& file : files_starting_with(checkpoint.substr(0, checkpoint.rfind(".safegraphs"))))
             std::remove(file.c_str());
     return 0;

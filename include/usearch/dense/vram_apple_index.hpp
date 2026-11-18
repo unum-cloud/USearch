@@ -182,7 +182,7 @@ inline constexpr metal_rung<vram_dense_kernel_t> metal_dense_rungs[] = {
 inline void metal_kernel_symbol(vram_kernel_symbol_t& symbol, metal_rung<vram_kernel_t> rung) noexcept {
     symbol = {};
     switch (rung.kernel) {
-    case vram_kernel_t::insert_k: symbol.append("metal_insert_kernel_"); break;
+    case vram_kernel_t::insert_k: symbol.append("usearch_dense_insert_kernel_"); break;
     case vram_kernel_t::search_k: symbol.append("metal_search_kernel_"); break;
     case vram_kernel_t::back_link_k: symbol.append("metal_back_link_kernel"); return;
     case vram_kernel_t::partition_propose_k: symbol.append("metal_partition_propose_kernel"); return;

@@ -30,10 +30,10 @@ path = "rust/lib.rs"
 [dependencies]
 # Each `rev` is the one `cmake/usearch_siblings.cmake` pins, so the crates and the C library carry one
 # copy of every sibling; CMake builds each crate's tree in place of downloading it again.
-forkunion = { version = "4.0.0-rc.1", git = "https://github.com/ashvardanian/ForkUnion", rev = "2105dd71bbbe3e22c92cf4a4f332a579abb8b780", default-features = false }
-numkong = { version = "8.0.0-rc.1", git = "https://github.com/ashvardanian/NumKong", rev = "0d4115072efd2f8cb93c1c16e095742a9d5cccdf" }
-smashtable = { version = "1.0.0-rc.1", git = "https://github.com/ashvardanian/SmashTable", rev = "09caec7b2084dd20a6563c8f0e87448eebf90d43" }
-stringzilla = { version = "6.0.0-rc.1", git = "https://github.com/ashvardanian/StringZilla", rev = "a01d3e34da6049b871e3d647333688e216325f1b", default-features = false }
+forkunion = { version = "4.0.0-rc.1", git = "https://github.com/ashvardanian/ForkUnion", rev = "59662d01e66ee40a87d8f5b28387a29d16c78ddd", default-features = false }
+numkong = { version = "8.0.0-rc.1", git = "https://github.com/ashvardanian/NumKong", rev = "310ee417fa73bf85baaac7e707910f081427ede5" }
+smashtable = { version = "1.0.0-rc.1", git = "https://github.com/ashvardanian/SmashTable", rev = "e44798287a3aca9a263ba4fd7a98076d7a803f7f" }
+stringzilla = { version = "6.0.0-rc.1", git = "https://github.com/ashvardanian/StringZilla", rev = "135694cbbbb1b0fb06d807d7c1bf41596e98db82", default-features = false }
 
 # Which implementation of the C interface gets linked. Each is a whole implementation rather than
 # a knob on one, so they are mutually exclusive and `build.rs` refuses a pair rather than choosing.

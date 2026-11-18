@@ -34,6 +34,7 @@
 #include <type_traits> // `std::is_same_v`
 #include <vector>      // `std::vector`
 
+#include <fmt/chrono.h> // `std::chrono::milliseconds` through `{}`
 #include <fmt/format.h>
 
 #include <numkong/dot.hpp>
@@ -160,18 +161,13 @@ class loop_t {
     }
 };
 
-/** Spells @p duration as a user types it: whole seconds as "10s", anything else as "1500ms". */
-inline std::string spell_duration(std::chrono::milliseconds duration) {
-    auto const count = duration.count();
-    return count % 1000 ? std::to_string(count) + "ms" : std::to_string(count / 1000) + "s";
-}
-
 /** Prints each setting as "- Name: value", in the grammar its flag parses from. */
 inline void print(bench_settings_t const& settings) {
     fmt::println("- Seed: {}", settings.seed);
-    fmt::println("- Filter: {}", settings.filter.pattern.empty() ? std::string_view("none") : settings.filter.pattern);
-    fmt::println("- Warm-up: {}", spell_duration(settings.warmup));
-    fmt::println("- Time limit: {}", spell_duration(settings.time_limit));
+    fmt::println("- Filter: {}",
+                 settings.regex_filter.text.empty() ? std::string_view("none") : settings.regex_filter.text);
+    fmt::println("- Warm-up: {}", settings.warmup);
+    fmt::println("- Time limit: {}", settings.time_limit);
 }
 
 /** The capabilities this binary holds and this machine runs. */
@@ -208,7 +204,7 @@ struct environment_t {
 template <typename measure_type_, typename... arguments_types_>
 void run_benchmark(environment_t const& env, std::string const& name, measure_type_ measure,
                    arguments_types_... arguments) {
-    if (!env.settings.filter.selects(name)) return;
+    if (!env.settings.regex_filter.selects(name)) return;
     loop_t loop(env.settings.warmup, env.settings.time_limit);
     measure(loop, env, arguments...);
     print(loop.row(name));

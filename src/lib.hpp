@@ -2757,9 +2757,7 @@ inline std::string_view as_text(usearch_bytes_view_t bytes) noexcept {
 }
 
 /** The run read as the engine's bytes - a buffer the ABI spells in @c uint8_t. */
-inline bytes_view_t as_bytes(usearch_bytes_view_t bytes) noexcept {
-    return {reinterpret_cast<byte_t const*>(bytes.data), bytes.length};
-}
+inline bytes_view_t as_bytes(usearch_bytes_view_t bytes) noexcept { return bytes_of(bytes.data, bytes.length); }
 
 #pragma endregion Calls
 

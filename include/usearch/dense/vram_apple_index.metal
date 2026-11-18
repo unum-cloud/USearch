@@ -626,38 +626,38 @@ inline void metal_search(constant metal_arguments_t& arguments, device uint4* ve
  *  slot zero's arena frontier past the widest rung, each under the name the host looks it up by. */
 
 template <uint slots_>
-kernel void metal_insert_kernel(constant metal_arguments_t& arguments [[buffer(metal_arguments_buffer_k)]],
-                                device uint4* vectors [[buffer(metal_vectors_buffer_k)]],
-                                device norms_t* norms [[buffer(metal_norms_buffer_k)]],
-                                device uint* neighbors [[buffer(metal_neighbors_buffer_k)]],
-                                device uint4 const* staging [[buffer(metal_staging_buffer_k)]],
-                                device uchar* arena [[buffer(metal_arena_buffer_k)]],
-                                device atomic_uint* counters [[buffer(metal_counters_buffer_k)]],
-                                device uint* link_heads [[buffer(metal_link_heads_buffer_k)]],
-                                device uint* link_next [[buffer(metal_link_next_buffer_k)]],
-                                device uint* touched_ids [[buffer(metal_touched_ids_buffer_k)]],
-                                device atomic_uint* touched_count [[buffer(metal_touched_count_buffer_k)]],
-                                uint group [[threadgroup_position_in_grid]],
-                                uint simdgroup [[simdgroup_index_in_threadgroup]],
-                                uint lane [[thread_index_in_simdgroup]]) {
+kernel void usearch_dense_insert_kernel(constant metal_arguments_t& arguments [[buffer(metal_arguments_buffer_k)]],
+                                        device uint4* vectors [[buffer(metal_vectors_buffer_k)]],
+                                        device norms_t* norms [[buffer(metal_norms_buffer_k)]],
+                                        device uint* neighbors [[buffer(metal_neighbors_buffer_k)]],
+                                        device uint4 const* staging [[buffer(metal_staging_buffer_k)]],
+                                        device uchar* arena [[buffer(metal_arena_buffer_k)]],
+                                        device atomic_uint* counters [[buffer(metal_counters_buffer_k)]],
+                                        device uint* link_heads [[buffer(metal_link_heads_buffer_k)]],
+                                        device uint* link_next [[buffer(metal_link_next_buffer_k)]],
+                                        device uint* touched_ids [[buffer(metal_touched_ids_buffer_k)]],
+                                        device atomic_uint* touched_count [[buffer(metal_touched_count_buffer_k)]],
+                                        uint group [[threadgroup_position_in_grid]],
+                                        uint simdgroup [[simdgroup_index_in_threadgroup]],
+                                        uint lane [[thread_index_in_simdgroup]]) {
     metal_insert<slots_>(arguments, vectors, norms, neighbors, staging, arena, counters,
                          {link_heads, link_next, touched_ids, touched_count}, group * metal_simdgroups_k + simdgroup,
                          lane);
 }
 
-template [[host_name("metal_insert_kernel_0")]] kernel void metal_insert_kernel<0>(
+template [[host_name("usearch_dense_insert_kernel_0")]] kernel void usearch_dense_insert_kernel<0>(
     constant metal_arguments_t&, device uint4*, device norms_t*, device uint*, device uint4 const*, device uchar*,
     device atomic_uint*, device uint*, device uint*, device uint*, device atomic_uint*, uint, uint, uint);
-template [[host_name("metal_insert_kernel_2")]] kernel void metal_insert_kernel<2>(
+template [[host_name("usearch_dense_insert_kernel_2")]] kernel void usearch_dense_insert_kernel<2>(
     constant metal_arguments_t&, device uint4*, device norms_t*, device uint*, device uint4 const*, device uchar*,
     device atomic_uint*, device uint*, device uint*, device uint*, device atomic_uint*, uint, uint, uint);
-template [[host_name("metal_insert_kernel_4")]] kernel void metal_insert_kernel<4>(
+template [[host_name("usearch_dense_insert_kernel_4")]] kernel void usearch_dense_insert_kernel<4>(
     constant metal_arguments_t&, device uint4*, device norms_t*, device uint*, device uint4 const*, device uchar*,
     device atomic_uint*, device uint*, device uint*, device uint*, device atomic_uint*, uint, uint, uint);
-template [[host_name("metal_insert_kernel_8")]] kernel void metal_insert_kernel<8>(
+template [[host_name("usearch_dense_insert_kernel_8")]] kernel void usearch_dense_insert_kernel<8>(
     constant metal_arguments_t&, device uint4*, device norms_t*, device uint*, device uint4 const*, device uchar*,
     device atomic_uint*, device uint*, device uint*, device uint*, device atomic_uint*, uint, uint, uint);
-template [[host_name("metal_insert_kernel_16")]] kernel void metal_insert_kernel<16>(
+template [[host_name("usearch_dense_insert_kernel_16")]] kernel void usearch_dense_insert_kernel<16>(
     constant metal_arguments_t&, device uint4*, device norms_t*, device uint*, device uint4 const*, device uchar*,
     device atomic_uint*, device uint*, device uint*, device uint*, device atomic_uint*, uint, uint, uint);
 

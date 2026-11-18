@@ -166,9 +166,10 @@ void run_geospatial_abi_cases() {
     // Each stream keeps the name its cell had before the label spelled the constants.
     for (sweep_cell_t const& cell : diagonal_sweep(usearch_scalar_unknown_k)) {
         std::string const name = fmt::format("geospatial {} near", name_of(cell));
-        std::string const label = fmt::format("test_geospatial_behaviors({}, {}, {})", constant_of(cell.residency),
-                                              constant_of(cell.cpu_class), cell.shards);
-        run_test_case(label.c_str(), test_geospatial_behaviors, cell, stream_key(test_run.settings.seed, name));
+        run_test_case(fmt::format("test_geospatial_behaviors({}, {}, {})", constant_of(cell.residency),
+                                  constant_of(cell.cpu_class), cell.shards)
+                          .c_str(),
+                      test_geospatial_behaviors, cell, stream_key(test_run.settings.seed, name));
     }
 }
 

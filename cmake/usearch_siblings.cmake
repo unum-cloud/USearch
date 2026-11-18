@@ -57,19 +57,19 @@ set(SMASHTABLE_CUDA_ARCH "${USEARCH_CUDA_ARCH}")
 # directories of the NVMe indexes.
 usearch_sibling(
     numkong FETCHCONTENT_SOURCE_DIR_NUMKONG https://github.com/ashvardanian/NumKong
-    0d4115072efd2f8cb93c1c16e095742a9d5cccdf
+    310ee417fa73bf85baaac7e707910f081427ede5
 )
 usearch_sibling(
     forkunion FETCHCONTENT_SOURCE_DIR_FORKUNION https://github.com/ashvardanian/ForkUnion
-    2105dd71bbbe3e22c92cf4a4f332a579abb8b780
+    59662d01e66ee40a87d8f5b28387a29d16c78ddd
 )
 usearch_sibling(
     stringzilla FETCHCONTENT_SOURCE_DIR_STRINGZILLA https://github.com/ashvardanian/StringZilla
-    a01d3e34da6049b871e3d647333688e216325f1b
+    135694cbbbb1b0fb06d807d7c1bf41596e98db82
 )
 usearch_sibling(
     smashtable FETCHCONTENT_SOURCE_DIR_SMASHTABLE https://github.com/ashvardanian/SmashTable
-    09caec7b2084dd20a6563c8f0e87448eebf90d43
+    e44798287a3aca9a263ba4fd7a98076d7a803f7f
 )
 
 # The siblings are the engine rather than an option: every header reaches for them unguarded, so `usearch_header`

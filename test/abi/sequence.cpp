@@ -197,10 +197,10 @@ void run_sequence_abi_cases() {
         for (std::size_t metric = 0; metric != metrics_count; ++metric) {
             std::string const name = fmt::format("sequence {} {}", name_of(cell), metric_names_k[metric]);
             sequence_geometry_t const geometry {{metrics_k[metric], 0}, nullptr, {}};
-            std::string const label = fmt::format("test_sequence_metric({}, {}, {}, {})", constant_of(cell.residency),
-                                                  constant_of(cell.cpu_class), cell.shards, metric_constants_k[metric]);
-            run_test_case(label.c_str(), test_sequence_metric, cell, geometry,
-                          stream_key(test_run.settings.seed, name));
+            run_test_case(fmt::format("test_sequence_metric({}, {}, {}, {})", constant_of(cell.residency),
+                                      constant_of(cell.cpu_class), cell.shards, metric_constants_k[metric])
+                              .c_str(),
+                          test_sequence_metric, cell, geometry, stream_key(test_run.settings.seed, name));
         }
     }
 }

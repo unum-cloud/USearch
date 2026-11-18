@@ -181,7 +181,7 @@ static void expect_matches_round_trip(std::string const& stem, copied_matches_t 
 template <typename verbs_type_>
 static void test_arrow_round_trip() {
     settings_t const settings = session_settings();
-    session_t session = open_session(settings, settings.cpu_class_ceiling);
+    session_t session = open_session(settings, tools::cpu_class_ceilings_k[settings.cpu_class_ceiling.selected]);
     if (!expect_true(bool(session))) return;
     arrow_fixture<verbs_type_> const fixture {case_stream_key()};
     handle<verbs_type_> index = open_index<verbs_type_>(session, fixture.geometry, arrow_parts_k);
@@ -255,7 +255,7 @@ static void test_arrow_round_trip() {
  *  file is admitted as given. */
 static void test_slots_skip_foreign() {
     settings_t const settings = session_settings();
-    session_t session = open_session(settings, settings.cpu_class_ceiling);
+    session_t session = open_session(settings, tools::cpu_class_ceilings_k[settings.cpu_class_ceiling.selected]);
     if (!expect_true(bool(session))) return;
     arrow_fixture<dense_verbs_t> const fixture {case_stream_key()};
     handle<dense_verbs_t> index = open_index<dense_verbs_t>(session, fixture.geometry, 1);
@@ -264,8 +264,7 @@ static void test_slots_skip_foreign() {
     if (!expect_success(insert_entries(index, fixture.values(), arrow_entries_k, 0, cell_batch_k, 0, stats))) return;
 
     scratch_directory_t const scratch;
-    std::string const stem = scratch.path("slots");
-    std::string const saved = fmt::format("{}.safegraphs", stem), location = fmt::format("{}.drive", stem);
+    std::string const saved = scratch.path("slots.safegraphs"), location = scratch.path("slots.drive");
     usearch_outcome_t outcome {};
     dense_verbs_t::save(index.get(), index.executor(), bytes_view(saved), &outcome);
     expect_success(outcome);
@@ -431,14 +430,28 @@ static void expect_arrow_table(arrow_input_t& input, arrow_table_t const& table)
     expect_true(input.next(more).empty() && !more);
 }
 
+/** Every name a choice flag takes past its first, which leaves the choice to the verb, spells the
+ *  enumerator it selects as the library does. */
+static void test_choice_names_match_the_library() {
+    for (std::size_t index = 1; index != tools::residencies_k.size(); ++index)
+        expect_true(tools::residency_names_k[index] == usearch_residency_name(tools::residencies_k[index]));
+    for (std::size_t index = 1; index != tools::cpu_class_ceilings_k.size(); ++index)
+        expect_true(tools::cpu_class_ceiling_names_k[index] ==
+                    usearch_cpu_class_name(tools::cpu_class_ceilings_k[index]));
+    for (std::size_t index = 1; index != tools::gpu_class_ceilings_k.size(); ++index)
+        expect_true(tools::gpu_class_ceiling_names_k[index] ==
+                    usearch_gpu_class_name(tools::gpu_class_ceilings_k[index]));
+    for (std::size_t index = 1; index != tools::nvme_classes_k.size(); ++index)
+        expect_true(tools::nvme_class_names_k[index] == usearch_nvme_class_name(tools::nvme_classes_k[index]));
+}
+
 /** Arrow crosses real pipes on the standard descriptors in either framing, a stream cut before its
  *  end refuses instead of reading short, and Parquet refuses by name. */
 static void test_arrow_pipes() {
     arrow_table_t const table {case_stream_key()};
     scratch_directory_t const scratch;
-    std::string const stem = scratch.path("pipes");
     for (std::string_view const extension : {"arrow", "arrows"}) {
-        std::string const path = fmt::format("{}-table.{}", stem, extension);
+        std::string const path = scratch.path(fmt::format("pipes-table.{}", extension));
         expect_true(table.write(path).empty());
         piped_descriptor_t const piped {"r", path};
         arrow_input_t input;
@@ -454,7 +467,7 @@ static void test_arrow_pipes() {
                 !st::failed(found.scores.assign({&score, 1})));
     std::array<usearch_key_t, 2> const queries {std::bit_cast<usearch_key_t>(uuid_of(0)),
                                                 std::bit_cast<usearch_key_t>(uuid_of(1))};
-    std::string const piped_path = fmt::format("{}-piped.arrows", stem);
+    std::string const piped_path = scratch.path("pipes-piped.arrows");
     {
         piped_descriptor_t const piped {"w", piped_path};
         expect_true(arrow_matches_write("-", queries, found).empty());
@@ -462,7 +475,7 @@ static void test_arrow_pipes() {
     arrow_matches_t read;
     expect_true(arrow_matches_read(piped_path, read).empty() && same_matches(read.matches, found));
 
-    std::string const cut = fmt::format("{}-cut.arrows", stem);
+    std::string const cut = scratch.path("pipes-cut.arrows");
     expect_true(table.write(cut).empty());
     std::error_code sized;
     std::filesystem::resize_file(cut, std::filesystem::file_size(cut, sized) - sizeof(std::uint64_t), sized);
@@ -471,7 +484,7 @@ static void test_arrow_pipes() {
     expect_true(!sized && truncated.open(cut).empty() && truncated.next(more).empty() && more);
     expect_true(!truncated.next(more).empty());
 
-    std::string const parquet = fmt::format("{}.parquet", stem);
+    std::string const parquet = scratch.path("pipes.parquet");
     std::FILE* const file = std::fopen(parquet.c_str(), "wb");
     expect_true(file && std::fputs("PAR1 and no more", file) >= 0 && std::fclose(file) == 0);
     arrow_input_t refused;
@@ -487,9 +500,8 @@ static case_result_t test_tool_pipes(char const* binary) {
     if (!binary) return case_result_t::skipped("needs USEARCH_BINARY");
     arrow_table_t const table {case_stream_key()};
     scratch_directory_t const scratch;
-    std::string const stem = scratch.path("tool");
-    std::string const stream = fmt::format("{}.arrows", stem), index = fmt::format("{}.safegraphs", stem);
-    std::string const run = fmt::format("{}-run.arrows", stem), vectors = fmt::format("{}-vectors.arrow", stem);
+    std::string const stream = scratch.path("tool.arrows"), index = scratch.path("tool.safegraphs");
+    std::string const run = scratch.path("tool-run.arrows"), vectors = scratch.path("tool-vectors.arrow");
     expect_true(table.write(stream).empty());
     auto const run_shell = [&](std::string const& command) {
         expect_true(std::system(command.c_str()) == EXIT_SUCCESS, "{}", command);
@@ -497,12 +509,12 @@ static case_result_t test_tool_pipes(char const* binary) {
     run_shell(fmt::format("cat '{}' | '{}' dense insert --input - --keys-column id --stored-dtype bf16 --save - > '{}'",
                           stream, binary, index));
     run_shell(fmt::format("'{}' metadata - < '{}' > /dev/null", binary, index));
-    std::string const refined = fmt::format("{}-refined.safegraphs", stem);
+    std::string const refined = scratch.path("tool-refined.safegraphs");
     run_shell(
         fmt::format("'{}' dense refine '{}' --max-refines 2 --save '{}' > /dev/null && '{}' metadata '{}' > /dev/null",
                     binary, index, refined, binary, refined));
-    std::string const cut = fmt::format("{}-cut.json", stem), gathered = fmt::format("{}-gathered.safegraphs", stem);
-    std::string const recut = fmt::format("{}-recut.json", stem);
+    std::string const cut = scratch.path("tool-cut.json"), gathered = scratch.path("tool-gathered.safegraphs");
+    std::string const recut = scratch.path("tool-recut.json");
     run_shell(fmt::format("'{}' dense reshard '{}' --parts 2 --save '{}' > /dev/null && " //
                           "'{}' dense reshard '{}' --save '{}' > /dev/null && '{}' metadata '{}' > /dev/null",
                           binary, refined, cut, binary, cut, gathered, binary, gathered));
@@ -526,7 +538,7 @@ static case_result_t test_tool_pipes(char const* binary) {
         expect_true(std::memcmp(rows.data, table.embeddings.data(), table.embeddings.size() * sizeof(f32_t)) == 0);
 
     // Batches of a RetriEval file overlap their reads with the previous insert, never two inserts.
-    std::string const retrieval = fmt::format("{}.fbin", stem), batched = fmt::format("{}-batched.safegraphs", stem);
+    std::string const retrieval = scratch.path("tool.fbin"), batched = scratch.path("tool-batched.safegraphs");
     std::array<std::uint32_t, 2> const header {static_cast<std::uint32_t>(arrow_entries_k),
                                                static_cast<std::uint32_t>(arrow_dimensions_k)};
     std::FILE* const file = std::fopen(retrieval.c_str(), "wb");
@@ -561,6 +573,7 @@ int main(int argc, char** argv) {
     run_test_case("abi::test_arrow_round_trip<abi::geospatial_verbs_t>",
                   abi::test_arrow_round_trip<abi::geospatial_verbs_t>);
     run_test_case("abi::test_slots_skip_foreign", abi::test_slots_skip_foreign);
+    run_test_case("abi::test_choice_names_match_the_library", abi::test_choice_names_match_the_library);
     run_test_case("abi::test_arrow_pipes", abi::test_arrow_pipes);
     run_test_case("abi::test_tool_pipes", abi::test_tool_pipes, setting_text(argc, argv, "USEARCH_BINARY", "--binary"));
     return finish_test_run();

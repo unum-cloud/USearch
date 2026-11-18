@@ -82,8 +82,6 @@ gated_source_directories="include src src_stub"
 # "Private Surface Waivers"; adding one is a decision for review, so it lands with the include it waives.
 private_surface_tests="bench/dense/ram_metric.cpp test/dense/ram_indexes.hpp test/dense/vram_nvidia.hpp test/placement.cpp \
     test/sequence/vram_index.cpp test/shapes/vram_index.cpp"
-# The test units whose `#undef NDEBUG` opening another owner adds on its own schedule.
-ndebug_exempt_tests=""
 # The Python test files that are scaffolding, the only ones that may skip from inside a function.
 python_test_scaffolding_paths="test/conftest.py test/base.py"
 # The GPU vendors whose `<PREFIX>_ARCH_<VENDOR>_` switches one unit may carry together, empty without GPU code.
@@ -2046,8 +2044,8 @@ check_proper_names_capitalized() {
 # fires, so touching a line never forces a rename the commit is not about. A path HEAD lacks, whether new or a
 # rename git cannot pair, is weighed against every name in HEAD's headers, as it reuses the library's types.
 # A capitalized macro the file does not define, like the kernel's `RISCV_HWPROBE_EXT_ZABHA`, belongs to another
-# project and never fires, as do literal contents, names the standard qualifies as `std::align_val_t`, and names
-# under `third_party_identifier_prefixes`.
+# project and never fires, as do literal contents, names under a `std::` chain such as
+# `std::filesystem::temp_directory_path`, and names under `third_party_identifier_prefixes`.
 check_abbreviations_spelled_out() {
     local abbreviated previous_text
     previous_text=$(git show "HEAD:$staged_path" 2> /dev/null) ||
@@ -2082,11 +2080,11 @@ check_abbreviations_spelled_out() {
         FILENAME == ARGV[3] { original[FNR] = substr($0, 2); next }
         {
             prose = ($0 ~ /^\+[[:space:]]*(\*([[:space:]]|$)|\/\*|\/\/)/)
-            line = substr($0, 2); previous = ""
+            line = substr($0, 2); previous = ""; in_std_chain = 0
             if (prose) { gsub(/"[^"]*"/, "", line); gsub(/`[^`]*`/, "", line); gsub(/<\/tt>/, "\001", line); gsub(/<tt>[^\001]*\001/, "", line); gsub(/@[pc][[:space:]]+[^[:space:]]+/, "", line) }
             while (match(line, /[A-Za-z_][A-Za-z0-9_]*/)) {
                 token = substr(line, RSTART, RLENGTH); accessor = substr(line, 1, RSTART - 1); line = substr(line, RSTART + RLENGTH)
-                standard = accessor == "::" && previous == "std"; previous = token
+                standard = accessor == "::" && (previous == "std" || in_std_chain); in_std_chain = standard; previous = token
                 if (!has_banned_segment(token) || accessor ~ /(\.|->)$/ || standard || is_third_party(token)) continue
                 if (token == toupper(token) && !(token in defined)) continue
                 if (prose && (token in declared || token == toupper(token))) continue
@@ -3490,13 +3488,9 @@ check_test_oracle_never_compiled_out() {
 
 # Rejects a C or C++ test unit that does not open with `#undef NDEBUG // ! A test's oracle must stay live in every
 # build` below its file docblock, so the asserts inside the code under test stay live in Release builds too. Order
-# is context, so this reads the whole staged file; one opening with `#pragma once` is included, not compiled alone,
-# and `ndebug_exempt_tests` names the units another owner migrates.
+# is context, so this reads the whole staged file; one opening with `#pragma once` is included, not compiled alone.
 check_test_undefines_ndebug() {
-    local exempt opening
-    for exempt in $ndebug_exempt_tests; do
-        [ "$staged_path" != "$exempt" ] || return 0
-    done
+    local opening
     opening=$(< "$staged_text_path" "$fastest_awk" -v wanted="#undef NDEBUG // ! A test's oracle must stay live in every build" '
         in_comment { if ($0 ~ /\*\//) in_comment = 0; next }
         /^[[:space:]]*\/\*/ { if ($0 !~ /\*\//) in_comment = 1; next }
@@ -3931,8 +3925,41 @@ check_enable_if_and_tags_absent() {
         "            and leave an unconstrained fallback:"
 }
 
-# Routes one staged file through the gates when it sits in a gated directory.
+# Rejects a reference to a pointer, as in `char const*& cursor`, in every C and C++ source, tests included,
+# because a callee that moves the caller's pointer hides an output in a parameter: return the outputs first
+# and the status last, pass a view or a struct the callee advances, or name a container's slot by index.
+check_pointer_references() {
+    local bound
+    bound=$(blank_c_comments_preserving_columns literals < "$staged_added_code_path" |
+        grep -E '[A-Za-z0-9_>][[:space:]]*\*+[[:space:]]*(const[[:space:]]*)?&[[:space:]]*[A-Za-z_]' | grep -vE '&&' || true)
+    [ -z "$bound" ] || reject_with_reason "$bound" \
+        "$staged_path takes or binds a reference to a pointer; return the outputs, pass a view or a struct, or name" \
+        "            the slot by index:"
+}
+
+# Rejects a top-level namespace alias, using-directive or type alias above the file's last include, conditional ones
+# counted, so no header included after it reads the alias; it belongs below the includes.
+check_aliases_below_includes() {
+    local early
+    early=$(blank_c_comments_preserving_columns < "$staged_code_path" | scan_staged_file_marking_added_lines '
+        /^[[:space:]]*#[[:space:]]*include[[:space:]]*[<"]/ { last = FNR }
+        (FNR in added) && /^(namespace[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=|using[[:space:]]+namespace[[:space:]]|using[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=)/ {
+            early[FNR] = $0
+        }
+        END { for (line in early) if (line + 0 < last) printf "line %d: %s\n", line, early[line] }' - | sort -t' ' -k2 -n)
+    [ -z "$early" ] || reject_with_reason "$early" \
+        "$staged_path declares an alias above its last #include; move it below the includes, so no header reads it:"
+}
+
+# Routes one staged file through the gates when it sits in a gated directory, and every C and C++ source
+# through the pointer-reference and alias-placement checks.
 run_gate_checks() {
+    case "$staged_path" in
+    *.h | *.hpp | *.c | *.cpp | *.cc | *.cu | *.cuh | *.hip | *.metal)
+        check_pointer_references
+        check_aliases_below_includes
+        ;;
+    esac
     in_gated_sources || return 0
     check_constexpr_conditions_named
     check_constexpr_branches_flat

@@ -3129,7 +3129,7 @@ struct vram_shard_core {
                             std::span<softmax_state_t> carry, stream_handle_t stream) const noexcept {
         std::size_t const values = outputs.rows * dimensions();
         std::size_t const exported_row_bytes = packed_bytes(outputs.dtype, dimensions());
-        byte_t* exported = reinterpret_cast<byte_t*>(attended);
+        byte_t* exported = bytes_of(attended, values).data();
         if (outputs.dtype != nk_f32_k) {
             exported += blocks * (values * sizeof(f32_t) + outputs.rows * sizeof(softmax_state_t));
             if (status_t const cast = kernels_.launch_cast_(kernels, *this, attended, nk_f32_k, exported, outputs.dtype,
@@ -3386,7 +3386,7 @@ struct vram_shard_core {
         std::size_t const host_bytes = max_of(lay_out_round_(shape).host_bytes, pinned_floor);
         if (failed(pinned.resize_uninitialized(divide_round_up(host_bytes, sizeof(scored_node_t)))))
             return status_t::bad_alloc_k;
-        lay_out_round_(shape, nullptr, nullptr, reinterpret_cast<byte_t*>(pinned.data()), &plan.mirrors_);
+        lay_out_round_(shape, nullptr, nullptr, bytes_of(pinned.data(), pinned.size()).data(), &plan.mirrors_);
         // A restitch warp keeps its selection scratch in the block's shared memory when it fits,
         // aliasing the neighborhood's staged rows, which the scoring is done with by then.
         std::size_t const staged_row = staged_row_bytes_();
@@ -3695,7 +3695,7 @@ struct vram_shard_core {
         if (!split.device_bytes) return status_t::bad_alloc_k;
         growing_buffer<scored_node_t, typename vendor_t::pinned_allocator_t>& pinned = context.results.entries_;
         if (pinned.size() * sizeof(scored_node_t) < bytes.host_bytes) return status_t::bad_alloc_k;
-        split.host_bytes = reinterpret_cast<byte_t*>(pinned.data());
+        split.host_bytes = bytes_of(pinned.data(), pinned.size()).data();
         u32_t** const columns = reinterpret_cast<u32_t**>(split.host_bytes + bytes.host_columns);
         u32_t* const roots = reinterpret_cast<u32_t*>(split.host_bytes + bytes.host_roots);
         for (std::size_t part = 0; part != parts; ++part) {

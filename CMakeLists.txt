@@ -198,6 +198,7 @@ include(cmake/yyjson.cmake)
 if (USEARCH_BUILD_TEST
     OR USEARCH_BUILD_BENCH
     OR USEARCH_BUILD_TOOLS
+    OR USEARCH_BUILD_STUB
 )
     include(cmake/fmt.cmake)
 endif ()

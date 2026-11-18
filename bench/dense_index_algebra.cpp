@@ -409,7 +409,7 @@ int bench_dense_index_algebra(int argc, char const* const* argv) {
         usearch_scalar_from_name(bytes_view(algebra.stored_dtype_name), &stored) != usearch_status_success_k)
         return fmt::println(stderr, "--stored-dtype=\"{}\" names nothing", algebra.stored_dtype_name), 1;
 
-    session_t session = open_session(settings, settings.cpu_class_ceiling);
+    session_t session = open_session(settings, cpu_class_ceilings_k[settings.cpu_class_ceiling.selected]);
     if (!session) return 1;
     usearch_dense_metadata_t const geometry {usearch_dense_metric_inner_k, stored, base.columns(),
                                              algebra.connectivity.value};
@@ -423,12 +423,12 @@ int bench_dense_index_algebra(int argc, char const* const* argv) {
         return 1;
     fmt::println("- Build: {} rows in {:.2f} s", humanized(rows),
                  std::chrono::duration<double>(std::chrono::steady_clock::now() - build_start).count());
-    if (settings.residency == usearch_residency_nvme_k || !settings.checkpoint.empty()) {
+    if (residencies_k[settings.residency.selected] == usearch_residency_nvme_k || !settings.checkpoint.empty()) {
         std::string const checkpoint =
             settings.checkpoint.empty()
                 ? (std::filesystem::temp_directory_path() / "usearch-bench-algebra.safegraphs").string()
                 : std::string(settings.checkpoint);
-        index = save_and_reopen(std::move(index), checkpoint, settings.residency);
+        index = save_and_reopen(std::move(index), checkpoint, residencies_k[settings.residency.selected]);
         if (!index) return 1;
     }
     print_fill(index);
@@ -451,7 +451,7 @@ int bench_dense_index_algebra(int argc, char const* const* argv) {
     if (!run_multiply(index, queries, queries_count, algebra, judged, pairs)) return 1;
     if (!algebra.pairs.empty() && !save_scored_pairs(algebra.pairs, pairs))
         return fmt::println(stderr, "--pairs=\"{}\" could not be written", algebra.pairs), 1;
-    if (settings.residency == usearch_residency_vram_k)
+    if (residencies_k[settings.residency.selected] == usearch_residency_vram_k)
         return fmt::println("- Attend: skipped, a VRAM index looks values up on the device"), 0;
     return run_attend(index, vectors, rows, queries, queries_count, algebra, judged) ? 0 : 1;
 }

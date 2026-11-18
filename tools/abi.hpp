@@ -193,6 +193,76 @@ inline st::vector<std::int32_t> devices_from_environment() noexcept {
     return devices;
 }
 
+/** The names @c --residency takes, the library's own after "derived", in the order of
+ *  @c residencies_k. */
+inline constexpr std::array<std::string_view, 4> residency_names_k {"derived", "ram", "vram", "nvme"};
+
+/** The residency each name of @c residency_names_k selects; "derived" leaves the verb to pick
+ *  one. */
+inline constexpr std::array<usearch_residency_t, 4> residencies_k {usearch_residency_unknown_k, usearch_residency_ram_k,
+                                                                   usearch_residency_vram_k, usearch_residency_nvme_k};
+
+/** The names @c --cpu-class-ceiling takes, the library's own after "none", in the order of
+ *  @c cpu_class_ceilings_k. */
+inline constexpr std::array<std::string_view, 20> cpu_class_ceiling_names_k {
+    "none",      "serial",         "monoversioned", "intel-haswell", "intel-sierra", "intel-skylake",   "intel-icelake",
+    "amd-genoa", "intel-sapphire", "intel-granite", "intel-diamond", "aws-g2",       "apple-m2",        "apple-m4",
+    "aws-g5",    "nvidia-vera",    "alibaba-c930",  "ibm-power10",   "wasm32-v128",  "wasm64-extended",
+};
+
+/** The ceiling each name of @c cpu_class_ceiling_names_k selects. */
+inline constexpr std::array<usearch_cpu_class_t, 20> cpu_class_ceilings_k {
+    usearch_cpu_class_unknown_k,       usearch_cpu_class_serial_k,          usearch_cpu_class_monoversioned_k,
+    usearch_cpu_class_intel_haswell_k, usearch_cpu_class_intel_sierra_k,    usearch_cpu_class_intel_skylake_k,
+    usearch_cpu_class_intel_icelake_k, usearch_cpu_class_amd_genoa_k,       usearch_cpu_class_intel_sapphire_k,
+    usearch_cpu_class_intel_granite_k, usearch_cpu_class_intel_diamond_k,   usearch_cpu_class_aws_g2_k,
+    usearch_cpu_class_apple_m2_k,      usearch_cpu_class_apple_m4_k,        usearch_cpu_class_aws_g5_k,
+    usearch_cpu_class_nvidia_vera_k,   usearch_cpu_class_alibaba_c930_k,    usearch_cpu_class_ibm_power10_k,
+    usearch_cpu_class_wasm32_v128_k,   usearch_cpu_class_wasm64_extended_k,
+};
+
+/** The names @c --gpu-class-ceiling takes, the library's own after "none", in the order of
+ *  @c gpu_class_ceilings_k. */
+inline constexpr std::array<std::string_view, 13> gpu_class_ceiling_names_k {
+    "none",          "nvidia-ampere", "nvidia-ada", "nvidia-hopper", "nvidia-blackwell", "nvidia-blackwellrtx",
+    "nvidia-rubin",  "amd-cdna3",     "amd-cdna4",  "amd-cdna5",     "apple-metal7",     "apple-metal9",
+    "apple-metal10",
+};
+
+/** The ceiling each name of @c gpu_class_ceiling_names_k selects. */
+inline constexpr std::array<usearch_gpu_class_t, 13> gpu_class_ceilings_k {
+    usearch_gpu_class_unknown_k,       usearch_gpu_class_nvidia_ampere_k,    usearch_gpu_class_nvidia_ada_k,
+    usearch_gpu_class_nvidia_hopper_k, usearch_gpu_class_nvidia_blackwell_k, usearch_gpu_class_nvidia_blackwellrtx_k,
+    usearch_gpu_class_nvidia_rubin_k,  usearch_gpu_class_amd_cdna3_k,        usearch_gpu_class_amd_cdna4_k,
+    usearch_gpu_class_amd_cdna5_k,     usearch_gpu_class_apple_metal7_k,     usearch_gpu_class_apple_metal9_k,
+    usearch_gpu_class_apple_metal10_k,
+};
+
+/** The names @c --nvme-class takes, the library's own after "derived", in the order of
+ *  @c nvme_classes_k. */
+inline constexpr std::array<std::string_view, 7> nvme_class_names_k {
+    "derived", "posix", "linux-aio", "linux-uring", "linux-uring-passthrough", "linux-spdk", "windows-ioring",
+};
+
+/** The class each name of @c nvme_class_names_k selects. */
+inline constexpr std::array<usearch_nvme_class_t, 7> nvme_classes_k {
+    usearch_nvme_class_unknown_k,
+    usearch_nvme_class_posix_k,
+    usearch_nvme_class_linux_aio_k,
+    usearch_nvme_class_linux_uring_k,
+    usearch_nvme_class_linux_uring_passthrough_k,
+    usearch_nvme_class_linux_spdk_k,
+    usearch_nvme_class_windows_ioring_k,
+};
+
+/** The index @p table holds @p value at, which a @ref choice_t selects it by. */
+template <typename value_type_, std::size_t count_>
+constexpr std::size_t selected_of(std::array<value_type_, count_> const& table, value_type_ value) noexcept {
+    std::size_t index = 0;
+    while (index != count_ && table[index] != value) ++index;
+    return index;
+}
+
 /**
  *  @brief Every setting the suites, the benchmarks and the tools share, its default as the
  *      initializer, filled once by @ref read_settings.
@@ -205,10 +275,10 @@ struct settings_t {
     std::uint32_t seed = 42;
 
     /** Checks to run. Override: @c USEARCH_FILTER. */
-    filter_t filter;
+    regex_filter_t regex_filter;
 
-    /** Where an index lives. */
-    usearch_residency_t residency = usearch_residency_ram_k;
+    /** Where an index lives, one of @c residency_names_k. */
+    choice_t residency {residency_names_k, selected_of(residencies_k, usearch_residency_ram_k)};
 
     /** USearch device ordinals the GPU work runs on; none takes device zero, or every vendor's
      *  first in a suite. Override: @c USEARCH_DEVICES. */
@@ -218,14 +288,16 @@ struct settings_t {
      *  serves every shard where its checkpoint points. Override: @c USEARCH_NVME_PATHS. */
     st::vector<std::string_view> nvme_paths;
 
-    /** The newest CPU class to dispatch as, intersected with the CPU's own; unknown sets none. */
-    usearch_cpu_class_t cpu_class_ceiling = usearch_cpu_class_unknown_k;
+    /** The newest CPU class to dispatch as, intersected with the CPU's own, one of
+     *  @c cpu_class_ceiling_names_k; "none" sets none. */
+    choice_t cpu_class_ceiling {cpu_class_ceiling_names_k};
 
-    /** The newest GPU class to dispatch as, capping the devices' own; unknown sets none. */
-    usearch_gpu_class_t gpu_class_ceiling = usearch_gpu_class_unknown_k;
+    /** The newest GPU class to dispatch as, capping the devices' own, one of
+     *  @c gpu_class_ceiling_names_k; "none" sets none. */
+    choice_t gpu_class_ceiling {gpu_class_ceiling_names_k};
 
-    /** The NVMe class to submit through; unknown derives it. */
-    usearch_nvme_class_t nvme_class = usearch_nvme_class_unknown_k;
+    /** The NVMe class to submit through, one of @c nvme_class_names_k; "derived" derives it. */
+    choice_t nvme_class {nvme_class_names_k};
 
     /** Worker threads of a RAM or NVMe executor; absent derives from the domains or devices. */
     count_t threads {.minimum = 0};
@@ -278,7 +350,7 @@ inline std::array<flag_t, 4> session_flags(settings_t& settings) noexcept {
 inline std::array<flag_t, 11> settings_flags(settings_t& settings) noexcept {
     std::array<flag_t, 4> const session = session_flags(settings);
     return {{
-        {"--filter", "pattern", "checks to run, as a regex or a substring; every one by default", &settings.filter},
+        {"--filter", "pattern", "checks to run, as an ECMAScript regex; every one by default", &settings.regex_filter},
         session[0],
         {"--cpu-class-ceiling", "name",
          "newest CPU class to dispatch as, like intel-icelake or serial, within what the CPU runs; none by default",
@@ -327,7 +399,9 @@ inline bool huge_pages_provisioned(std::size_t expected) {
  *  parse; calls nothing of the library, so header-only suites read it too. */
 inline settings_t read_environment() {
     settings_t settings;
-    settings.filter = filter_of(environment_text("USEARCH_FILTER").value_or(""));
+    if (std::optional<std::string_view> const filter_text = environment_text("USEARCH_FILTER"))
+        if (filter_of(*filter_text, settings.regex_filter) != argument_status_t::parsed_k)
+            exit_unparsed("USEARCH_FILTER", *filter_text, "an ECMAScript regex");
     if (std::optional<std::string_view> const seed_text = environment_text("USEARCH_SEED")) {
         std::optional<std::uint32_t> const seed = parse_seed(*seed_text);
         if (!seed) exit_unparsed("USEARCH_SEED", *seed_text, "an unsigned integer or random");
@@ -384,7 +458,8 @@ inline std::string_view nvme_reads_name(std::string_view path) noexcept {
  *  print it too. */
 inline void print_environment(settings_t const& settings) {
     fmt::println("- Seed: {}", settings.seed);
-    fmt::println("- Filter: {}", settings.filter.pattern.empty() ? "none" : settings.filter.pattern);
+    fmt::println("- Filter: {}",
+                 settings.regex_filter.text.empty() ? std::string_view("none") : settings.regex_filter.text);
     if (settings.devices.empty()) fmt::println("- Devices: derived");
     else fmt::println("- Devices: {}", fmt::join(settings.devices, ","));
     if (settings.nvme_paths.empty()) return fmt::println("- NVMe paths: none");
@@ -395,15 +470,11 @@ inline void print_environment(settings_t const& settings) {
 /** Prints each setting as "- Name: value", in the grammar it parses from. */
 inline void print(settings_t const& settings) {
     print_environment(settings);
-    fmt::println("- Residency: {}", usearch_residency_name(settings.residency));
+    fmt::println("- Residency: {}", residency_names_k[settings.residency.selected]);
     // The index's "- Index:" line names the class dispatch picked under these ceilings.
-    fmt::println("- CPU class ceiling: {}", settings.cpu_class_ceiling == usearch_cpu_class_unknown_k
-                                                ? "none"
-                                                : usearch_cpu_class_name(settings.cpu_class_ceiling));
-    fmt::println("- GPU class ceiling: {}", settings.gpu_class_ceiling == usearch_gpu_class_unknown_k
-                                                ? "none"
-                                                : usearch_gpu_class_name(settings.gpu_class_ceiling));
-    fmt::println("- NVMe class: {}", usearch_nvme_class_name(settings.nvme_class));
+    fmt::println("- CPU class ceiling: {}", cpu_class_ceiling_names_k[settings.cpu_class_ceiling.selected]);
+    fmt::println("- GPU class ceiling: {}", gpu_class_ceiling_names_k[settings.gpu_class_ceiling.selected]);
+    fmt::println("- NVMe class: {}", usearch_nvme_class_name(nvme_classes_k[settings.nvme_class.selected]));
 }
 
 #pragma endregion Settings
@@ -575,10 +646,10 @@ inline sz::string_t character_sibling(std::string_view address) noexcept {
  *  that tests false. */
 inline session_t open_session(settings_t const& settings, usearch_cpu_class_t cpu_class_ceiling) {
     session_t session;
-    session.residency = settings.residency;
+    session.residency = residencies_k[settings.residency.selected];
     session.seed = settings.seed;
     session.cpu_class_ceiling = cpu_class_ceiling;
-    session.gpu_class_ceiling = settings.gpu_class_ceiling;
+    session.gpu_class_ceiling = gpu_class_ceilings_k[settings.gpu_class_ceiling.selected];
     session.shard_capacity = settings.shard_capacity.value;
     session.nvme_ram.memory_limit = settings.nvme_ram.value;
     fu_topology_t topology = nullptr;
@@ -594,7 +665,8 @@ inline session_t open_session(settings_t const& settings, usearch_cpu_class_t cp
     if (session.memory_domains.empty() && st::failed(session.memory_domains.push_back(0)))
         exit_out_of_memory("the memory domains");
     // Parts are written through block nodes, and passthrough reads them through character nodes.
-    bool const passthrough = settings.nvme_class == usearch_nvme_class_linux_uring_passthrough_k;
+    bool const passthrough = nvme_classes_k[settings.nvme_class.selected] ==
+                             usearch_nvme_class_linux_uring_passthrough_k;
     for (std::string_view const place : settings.nvme_paths) {
         sz::string_t sibling = character_sibling(place);
         if (!passthrough || sibling.empty()) sibling = formatted("{}", place);
@@ -634,7 +706,7 @@ inline session_t open_session(settings_t const& settings, usearch_cpu_class_t cp
                                                .outcome = &outcome,
                                                .nvme = session.nvme_options(),
                                                .threads = settings.threads.value,
-                                               .nvme_class = settings.nvme_class};
+                                               .nvme_class = nvme_classes_k[settings.nvme_class.selected]};
         usearch_executor_for_nvme(&placement);
         if (report_failure(outcome, "Opening the NVMe executor")) return session;
     }
@@ -2437,8 +2509,8 @@ inline sz::string_t name_of(sweep_cell_t const& cell) noexcept {
 inline settings_t settings_of(settings_t const& settings, sweep_cell_t const& cell) {
     settings_t of_cell {
         .seed = settings.seed,
-        .filter = settings.filter,
-        .residency = cell.residency,
+        .regex_filter = settings.regex_filter,
+        .residency = {residency_names_k, selected_of(residencies_k, cell.residency)},
         .devices = {},
         .nvme_paths = {},
         .cpu_class_ceiling = settings.cpu_class_ceiling,
@@ -2529,7 +2601,7 @@ int run_search_bench(settings_t const& settings, search_bench_settings_t const& 
                      typename verbs_type_::values_t entries, std::size_t base_count,
                      typename verbs_type_::queries_t queries, std::size_t queries_count, std::string_view checkpoint,
                      swept_type_&& on_swept = {}) {
-    session_t session = open_session(settings, settings.cpu_class_ceiling);
+    session_t session = open_session(settings, cpu_class_ceilings_k[settings.cpu_class_ceiling.selected]);
     if (!session) return 1;
     handle<verbs_type_> index = open_index<verbs_type_>(session, geometry, settings.shards.value);
     if (!index) return 1;
@@ -2548,15 +2620,15 @@ int run_search_bench(settings_t const& settings, search_bench_settings_t const& 
     print_fill(index);
 
     sz::string_t served_path = formatted("{}", checkpoint);
-    if (served_path.empty() && settings.residency == usearch_residency_nvme_k) {
+    if (served_path.empty() && residencies_k[settings.residency.selected] == usearch_residency_nvme_k) {
         sz::string_t const name = formatted("usearch-bench-{}.safegraphs", verbs_type_::name_k);
         served_path = formatted("{}", (std::filesystem::temp_directory_path() / std::string_view {name}).string());
     }
     if (!served_path.empty()) {
         index.geometry = served;
-        index = save_and_reopen(std::move(index), served_path, settings.residency);
+        index = save_and_reopen(std::move(index), served_path, residencies_k[settings.residency.selected]);
         if (!index) return 1;
-        fmt::println("- Reopened {} as {}", served_path, usearch_residency_name(settings.residency));
+        fmt::println("- Reopened {} as {}", served_path, residency_names_k[settings.residency.selected]);
     }
 
     copied_matches_t oracle;

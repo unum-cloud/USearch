@@ -227,7 +227,8 @@ int bench_sequence_index_search(int argc, char const* const* argv) {
                             alphabet_name),
                1;
     bool const reloaded = search_costs == "uniform";
-    if (search_costs != "alphabet" && (!reloaded || !aligned || settings.residency == usearch_residency_vram_k))
+    if (search_costs != "alphabet" &&
+        (!reloaded || !aligned || residencies_k[settings.residency.selected] == usearch_residency_vram_k))
         return fmt::println(
                    stderr, "--search-costs=\"{}\" must be alphabet, or uniform on a RAM or NVMe needleman-wunsch index",
                    search_costs),

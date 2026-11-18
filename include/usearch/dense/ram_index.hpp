@@ -5142,8 +5142,8 @@ struct ram_index {
             location_t const location = chunk_schedule_t::locate(node);
             std::size_t const run = min_of(nodes.bound - node,
                                            chunk_schedule_t::nodes_in(location.chunk) - location.offset);
-            if (node < vectors_bound) std::memset(vectors_[location], 0, run * vector_bytes);
-            if (node < norms_bound) std::memset(&norms_[location], 0, run * sizeof(vector_norms_t));
+            if (node < vectors_bound) std::memset(static_cast<void*>(vectors_[location]), 0, run * vector_bytes);
+            if (node < norms_bound) std::memset(static_cast<void*>(&norms_[location]), 0, run * sizeof(vector_norms_t));
             if (node < neighbors_bound) std::memset(neighbors_[location], 0xFF, run * neighbor_bytes);
             node += run;
         }
@@ -6069,7 +6069,7 @@ struct ram_index {
     }
 
     /** Bytes a stored row takes in the chunks, padded to whole kit tasks. */
-    std::size_t padded_row_bytes_() const noexcept { return vectors_.columns() * sizeof(scalar_t); }
+    std::size_t padded_row_bytes_() const noexcept { return padded_row_values(geometry_) * sizeof(scalar_t); }
 
     /** Queries one packed block of @p columns holds under @p cache_bytes. */
     std::size_t block_columns_(std::size_t columns, std::size_t cache_bytes) const noexcept {

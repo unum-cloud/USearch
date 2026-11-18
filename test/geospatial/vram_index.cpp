@@ -442,8 +442,7 @@ void run_geospatial_vram_cases<cell_executor_t>(gpu_device_t const& device) {
     u64_t const seed = test_run.settings.seed;
     char const* const vendor = constant_of(cell_vendor_k);
     auto const run = [&](char const* call, std::string_view arguments, auto&& check) {
-        std::string const label = fmt::format("{}({}, {})", call, vendor, arguments);
-        run_test_case(label.c_str(), check);
+        run_test_case(fmt::format("{}({}, {})", call, vendor, arguments).c_str(), check);
     };
     run("test_geospatial_vram_collection", "observations_kind_t::global_k, usearch_geospatial_relation_near_k", [&] {
         test_geospatial_vram_collection(stream_key(seed, "global"), ordinal, observations_kind_t::global_k, 4096, 128,

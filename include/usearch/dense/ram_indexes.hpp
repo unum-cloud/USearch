@@ -2126,8 +2126,8 @@ struct ram_indexes {
         }
 
         std::span<f32_t const> values_of(shard_node_t node) const noexcept {
-            rows_span_t const target {reinterpret_cast<byte_t*>(vector.data()), 1, vector.size(), vector.size_bytes(),
-                                      nk_f32_k};
+            rows_span_t const target {bytes_of(vector.data(), vector.size()).data(), 1, vector.size(),
+                                      vector.size_bytes(), nk_f32_k};
             export_row<elementwise_kit_t>(indexes.shards_[node.shard].index->vector(node.node).byte_data(),
                                           vector_dtype_k, target, 0);
             return vector;

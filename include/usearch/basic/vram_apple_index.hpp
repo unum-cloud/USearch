@@ -175,7 +175,7 @@ inline void metal_basic_kernel_symbol(vram_kernel_symbol_t& symbol, std::size_t 
     symbol = {};
     bool walks = true;
     switch (instantiated.kernel) {
-    case vram_kernel_t::insert_k: symbol.append("metal_insert_kernel_"); break;
+    case vram_kernel_t::insert_k: symbol.append("usearch_basic_insert_kernel_"); break;
     case vram_kernel_t::refine_k: symbol.append("metal_refine_kernel_"); break;
     case vram_kernel_t::search_k: symbol.append("metal_search_kernel_"); break;
     case vram_kernel_t::back_link_k: symbol.append("metal_back_link_kernel_"), walks = false; break;

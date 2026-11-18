@@ -218,7 +218,7 @@ int bench_nvme_device_reads(int argc, char const* const* argv) {
     if (memory_cap) std::from_chars(memory_cap->data(), memory_cap->data() + memory_cap->size(), memory_limit);
 
     for (engine_row_t const& engine : engines) {
-        if (!settings.filter.selects(engine.name)) continue;
+        if (!settings.regex_filter.selects(engine.name)) continue;
         if (engine.address.empty()) {
             fmt::println("- {}: skipped, {} has no generic character node", engine.name, location);
             continue;

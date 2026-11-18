@@ -24,7 +24,7 @@ foreach (target_ usearch_shared_stub usearch_static_stub)
     target_include_directories(
         ${target_} PRIVATE ${PROJECT_SOURCE_DIR}/c ${PROJECT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}
     )
-    target_link_libraries(${target_} PRIVATE Threads::Threads forkunion::header)
+    target_link_libraries(${target_} PRIVATE Threads::Threads forkunion::header fmt::fmt-header-only)
     target_compile_definitions(${target_} PRIVATE USEARCH_EXPORTING=1)
     set_target_properties(
         ${target_}

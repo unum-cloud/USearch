@@ -212,7 +212,7 @@ ignore = [
 ".cmake-format.py" = ["F821"] # cmake-format defines `section` when it runs the profile
 "!{python,test}/**" = ["D"]
 # Tests owe a docstring on every module-level function (D103) and nothing else from pydocstyle.
-"test/**" = ["D100", "D101", "D102", "D104", "D105", "D106", "D107", "D2", "D3", "D4"]
+"test/**" = ["D100", "D101", "D102", "D104", "D105", "D106", "D107", "D2", "D3", "D4", "PT011"]
 "*.pyi" = ["D"]
 
 [tool.ruff.lint.pydocstyle]

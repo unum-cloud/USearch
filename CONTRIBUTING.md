@@ -688,7 +688,8 @@ Each opens by naming the build, the machine and the settings:
 USearch 3.0.0
 - Compiled for: serial,neon,neonsdot,neonbfdot,neonfhm,neonfp8
 - This machine: serial,neon,neonsdot,neonbfdot,neonfhm
-- Seed: 42, scale: 1, filter: none
+- Seed: 42, scale: 1
+- Filter: none
 ```
 
 Both lists come from the C interface, the same strings the bindings report.
@@ -707,7 +708,7 @@ A failed case prints a `rerun:` line naming the seed, a filter that selects it a
 ```
 
 A run exits with 1 when a case failed, a check failed outside any case, or nothing ran, with 3 when `USEARCH_NO_SKIPS` is set and a case skipped, and with 0 otherwise.
-The C suite prints the same lines, except that its `ok` carries no time.
+The C suite prints the same lines, except that its `ok` carries no time and its `rerun:` line names only the seed, as it runs every case.
 `USEARCH_TRAP_ON_FAILURE=1` raises `SIGTRAP` at the first failed check instead, which stops a debugger there, or dumps a core without one:
 
 ```sh
@@ -729,7 +730,7 @@ pytest prints the same header, opening with `USearch <version> from <path>` and 
 | Variable                  | Flag                | Default                        | Meaning                                                                                               |
 | :------------------------ | :------------------ | :----------------------------- | :---------------------------------------------------------------------------------------------------- |
 | `USEARCH_SEED`            | `--seed`            | `42`                           | Seed every stream derives from, any unsigned 64-bit value, or `random` to draw one                    |
-| `USEARCH_FILTER`          | `--filter`          | unset                          | Cases to run: a regex searched in C++ labels and pytest node IDs, else a substring                    |
+| `USEARCH_FILTER`          | `--filter`          | unset                          | C++ only: cases and benchmark rows to run, a regex searched in their labels                           |
 | `USEARCH_SCALE`           | `--scale`           | `1`                            | Multiplier for every baseline iteration count in C++, like `0.1` or `10`; pytest prints it            |
 | `USEARCH_TRAP_ON_FAILURE` | `--trap-on-failure` | unset                          | C++ only: raises `SIGTRAP` at the first failed check, to stop there under a debugger                  |
 | `USEARCH_NO_SKIPS`        | `--no-skips`        | unset                          | C++ only: exits 3 when any case skipped, for a rig that must run everything                           |
@@ -738,7 +739,7 @@ pytest prints the same header, opening with `USearch <version> from <path>` and 
 | `USEARCH_DIMS`            |                     | `1,3,15,16,17,63,64,65,97,256` | Python only: the dimension counts the dense tests sweep, one count or a comma list                    |
 
 A flag overrides its variable in the C++ suites and the benchmarks, as `--seed 7` or `--seed=7`; the C, Python, Rust and Mojo suites read the variables alone.
-The C suite matches `USEARCH_FILTER` as a substring, having no portable regex, and the Rust suite reads only `USEARCH_SEED`, filtering through `cargo test <name>` instead.
+The C suite runs every case, pytest selects through its own `-k`, and the Rust suite reads only `USEARCH_SEED`, filtering through `cargo test <name>` instead.
 The Mojo suite reads `USEARCH_SEED` as an integer, without `random`.
 A value that does not parse stops the run with one line naming it, like `USEARCH_SEED="abc" does not parse, expected an unsigned integer or random`.
 
@@ -749,7 +750,7 @@ A case's inputs therefore never depend on which cases ran before it, so the seed
 USEARCH_SEED=random build_debug/usearch_test                         # A fresh seed, which the header prints
 USEARCH_FILTER='^test_ram_' USEARCH_SCALE=0.1 build_debug/usearch_test   # A fast inner loop over the RAM cases
 USEARCH_SEED=1528003704 python -m pytest test/ --count 3             # Replays that seed, then two more repeats
-USEARCH_FILTER=quantization python -m pytest test/                   # Only the node IDs that mention it
+python -m pytest test/ -k quantization                               # Only the tests whose names mention it
 ```
 
 ### Writing a Test
@@ -770,7 +771,7 @@ A case that cannot run returns `case_result_t::skipped(reason)`.
 Inputs come from `split_mix_generator_t {case_stream_key(index)}`, never from a literal seed, so a filtered run draws what an unfiltered one did.
 Loops size through `scaled_iterations(baseline)`, waits go through `spin_until(predicate)`, bounded by `wait_limit_k`, and files go in a `scratch_directory_t`, removed with it.
 
-A C case starts with `start_test_case("c.<case>")`, which answers whether the filter selects it, and ends with `finish_test_case(NULL)`, or with its reason when it skipped.
+A C case starts with `start_test_case("c.<case>")` and ends with `finish_test_case(NULL)`, or with its reason when it skipped.
 It checks with `expect_(condition)`, or with `expect_at(held, __FILE__, __LINE__, "message")` where a message helps.
 
 A Python test draws from the `seed` or `rng` fixture, never from a literal seed, passing `seed=seed` to `build_index` and `random_vectors`, and `stream_key(seed, "<family>", index)` where it needs several streams.
@@ -882,7 +883,7 @@ uv pip install -e . --group test              # the suite and everything it impo
 python -X faulthandler -m pytest -x           # how the CI runs it
 ```
 
-The variables the suite reads, `USEARCH_SEED`, `USEARCH_FILTER` and `USEARCH_DIMS` among them, and the fixtures a test draws from are under [Test Suites](#test-suites).
+The variables the suite reads, `USEARCH_SEED`, `USEARCH_SCALE` and `USEARCH_DIMS` among them, and the fixtures a test draws from are under [Test Suites](#test-suites).
 
 Linting:
 

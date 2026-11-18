@@ -790,9 +790,8 @@ void run_sequence_vram_cases<cell_vendor_t::executor_t>(gpu_device_t const& devi
         return;
     u64_t const seed = test_run.settings.seed;
     auto const run = [&](char const* call, std::string_view arguments, auto&& check) {
-        std::string const label = arguments.empty() ? fmt::format("{}({})", call, vendor)
-                                                    : fmt::format("{}({}, {})", call, vendor, arguments);
-        run_test_case(label.c_str(), check);
+        if (arguments.empty()) run_test_case(fmt::format("{}({})", call, vendor).c_str(), check);
+        else run_test_case(fmt::format("{}({}, {})", call, vendor, arguments).c_str(), check);
     };
     constexpr usearch_sequence_metric_t bytes_k = usearch_sequence_metric_levenshtein_bytes_k;
     constexpr usearch_sequence_metric_t runes_k = usearch_sequence_metric_levenshtein_utf8_k;
@@ -840,8 +839,7 @@ void run_sequence_vram_cases<metal_executor_t>(gpu_device_t const& device) {
     if (!expect_true(succeeded(spawn_status), "Metal device #{} opens no stream", ordinal)) return;
     u64_t const seed = test_run.settings.seed;
     auto const run = [&](char const* call, std::string_view arguments, auto&& check) {
-        std::string const label = fmt::format("{}(gpu_vendor_t::apple_k, {})", call, arguments);
-        run_test_case(label.c_str(), check);
+        run_test_case(fmt::format("{}(gpu_vendor_t::apple_k, {})", call, arguments).c_str(), check);
     };
     constexpr usearch_sequence_metric_t bytes_k = usearch_sequence_metric_levenshtein_bytes_k;
     constexpr usearch_sequence_metric_t runes_k = usearch_sequence_metric_levenshtein_utf8_k;

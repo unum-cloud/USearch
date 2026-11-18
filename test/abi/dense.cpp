@@ -226,9 +226,10 @@ void run_dense_abi_cases() {
     for (sweep_cell_t const& cell : diagonal_sweep(usearch_scalar_bf16_k)) {
         std::string const name = fmt::format("dense {}", name_of(cell));
         // The stream keeps the name the cell had before its label spelled the constants.
-        std::string const label = fmt::format("test_dense_behaviors({}, {}, {}, {})", constant_of(cell.residency),
-                                              constant_of(cell.scalar), constant_of(cell.cpu_class), cell.shards);
-        run_test_case(label.c_str(), test_dense_behaviors, cell, stream_key(test_run.settings.seed, name));
+        run_test_case(fmt::format("test_dense_behaviors({}, {}, {}, {})", constant_of(cell.residency),
+                                  constant_of(cell.scalar), constant_of(cell.cpu_class), cell.shards)
+                          .c_str(),
+                      test_dense_behaviors, cell, stream_key(test_run.settings.seed, name));
     }
 }
 

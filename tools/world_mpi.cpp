@@ -13,8 +13,11 @@
 
 namespace unum::usearch::tools {
 
-world_t::world_t(int& argc, char**& argv) noexcept {
+world_t::world_t(std::span<char*> given) noexcept {
+    int argc = static_cast<int>(given.size());
+    char** argv = given.data();
     MPI_Init(&argc, &argv);
+    arguments = {argv, static_cast<std::size_t>(argc)};
     int world_rank = 0, world_size = 1, node_rank = 0;
     MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
     MPI_Comm_size(MPI_COMM_WORLD, &world_size);

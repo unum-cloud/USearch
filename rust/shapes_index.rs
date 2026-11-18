@@ -1207,6 +1207,12 @@ impl ShapesIndex {
 type Answer<'index, Receiver, Inputs, Output> =
     <<Receiver as ShapesVerbs<'index>>::Completion as Completion>::Answer<'index, Inputs, Output>;
 
+/// What an insert keeps alive until it answers: the keys and the config holding the shapes.
+type InsertInputs<'config, Keys, Value, Offset> = (Keys, ShapesInsertConfig<'config, Value, Offset>);
+
+/// What a search keeps alive until it answers: the query tape and its config.
+type SearchInputs<'config, Value, Offset> = (Tape<'config, [Value; 3], Offset>, ShapesSearchConfig<'config>);
+
 /// Every shapes verb, written once for every receiver: `&ShapesIndex` blocks on the calling
 /// thread, and the [`On`] that [`ShapesIndex::on`] or [`ShapesIndex::deferred`] makes runs on
 /// an executor.
@@ -1318,7 +1324,7 @@ pub trait ShapesVerbs<'index>: Copy {
         self,
         keys: Keys,
         config: impl Into<ShapesInsertConfig<'config, Value, Offset>>,
-    ) -> Result<Answer<'index, Self, (Keys, ShapesInsertConfig<'config, Value, Offset>), ()>>
+    ) -> Result<Answer<'index, Self, InsertInputs<'config, Keys, Value, Offset>, ()>>
     where
         Self::Completion: Accepts<Keys> + Accepts<ShapesInsertConfig<'config, Value, Offset>>,
     {
@@ -1425,7 +1431,7 @@ pub trait ShapesVerbs<'index>: Copy {
         queries: Tape<'config, [Value; 3], Offset>,
         config: impl Into<ShapesSearchConfig<'config>>,
         arena: &'arena mut Arena,
-    ) -> Result<Answer<'index, Self, (Tape<'config, [Value; 3], Offset>, ShapesSearchConfig<'config>), Matches<'arena>>>
+    ) -> Result<Answer<'index, Self, SearchInputs<'config, Value, Offset>, Matches<'arena>>>
     where
         Self::Completion: Accepts<Tape<'config, [Value; 3], Offset>> + Accepts<ShapesSearchConfig<'config>>,
     {

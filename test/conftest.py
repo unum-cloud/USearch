@@ -1,6 +1,6 @@
 """Session-wide configuration for the Python side of the USearch test suite.
 
-Holds only what pytest itself loads: the report header, the filter and case cap, the seeding and unraisable
+Holds only what pytest itself loads: the report header, the case cap, the seeding and unraisable
 fixtures, and the executors every fanned-out verb runs on, which every module inherits without importing anything.
 Settings, matrices, oracle, and gates are plain values and functions, so they live in `base` and are imported by
 name.
@@ -33,14 +33,14 @@ def pytest_report_header() -> list[str]:
         f"USearch {usearch.version()} from {usearch.lib.__file__}",
         f"- Compiled for: {usearch.capabilities_compiled()}",
         f"- This machine: {usearch.capabilities_available()} on {platform.platform()}",
-        f"- Seed: {SETTINGS.seed}, scale: {SETTINGS.scale:g}, filter: {SETTINGS.filter.pattern or 'none'}",
+        f"- Seed: {SETTINGS.seed}, scale: {SETTINGS.scale:g}",
         f"- Dims: {','.join(map(str, SETTINGS.dims))}",
     ]
 
 
 # region Shared Pytest
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
-    """Refuses a test whose cases outgrow MAX_CASES_PER_TEST, then deselects what the filter setting leaves out."""
+    """Refuses a test whose cases outgrow MAX_CASES_PER_TEST."""
     variants: dict[tuple[str, str], set[str]] = collections.defaultdict(set)
     for item in items:
         callspec = getattr(item, "callspec", None)
@@ -55,10 +55,6 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     ]
     if oversized:
         raise pytest.UsageError(f"over MAX_CASES_PER_TEST={MAX_CASES_PER_TEST}: " + "; ".join(oversized))
-    deselected = [item for item in items if not SETTINGS.filter.selects(item.nodeid)]
-    if deselected:
-        config.hook.pytest_deselected(items=deselected)
-        items[:] = [item for item in items if SETTINGS.filter.selects(item.nodeid)]
 
 
 def pytest_make_parametrize_id(config: pytest.Config, val: object, argname: str) -> str | None:

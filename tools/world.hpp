@@ -58,7 +58,10 @@ struct world_t {
     /** This process among those sharing its node, which picks its GPU or memory domain. */
     std::size_t local_rank = 0;
 
-    world_t(int& argc, char**& argv) noexcept;
+    /** The program's arguments once the launcher took its own. */
+    std::span<char*> arguments {};
+
+    explicit world_t(std::span<char*> given) noexcept;
     world_t(world_t const&) = delete;
     world_t& operator=(world_t const&) = delete;
     ~world_t() noexcept;
@@ -231,6 +234,12 @@ inline void checkpoint_append_key(sz::string_t& text, uuid128_t const& key) noex
     for (std::byte const byte : key.bytes) append_formatted(text, "{:02x}", std::to_integer<unsigned>(byte));
 }
 
+/** The names @c --traversal takes, in the order of @c traversals_k. */
+inline constexpr std::array<std::string_view, 2> traversal_names_k {"walk", "scan"};
+
+/** The traversal each name of @c traversal_names_k selects. */
+inline constexpr std::array<usearch_traversal_t, 2> traversals_k {usearch_traversal_walk_k, usearch_traversal_scan_k};
+
 /** Every setting the checkpoint verbs take, each spelled as its flag with dashes; @c session holds
  *  the residency, the NVMe class, the threads and the devices a session opens with. */
 struct checkpoint_settings_t {
@@ -247,7 +256,7 @@ struct checkpoint_settings_t {
     count_t batch {.value = 65536};
     bytes_t memory_limit;
     std::string_view query_keys;
-    usearch_traversal_t traversal = usearch_traversal_walk_k;
+    choice_t traversal {traversal_names_k};
     std::string_view output;
     settings_t session;
 };
@@ -300,13 +309,14 @@ inline st::vector<flag_t> insert_flags(checkpoint_settings_t& settings,
         modality_flags);
 }
 
-/** What an insert indexes: the entries as the modality's verbs take them, how many there are, and
- *  the geometry the empty index opens with. */
+/** What an insert indexes: the entries as the modality's verbs take them, how many there are, the
+ *  geometry the empty index opens with, and each entry's key, or none when they arrive without. */
 template <typename verbs_type_>
 struct checkpoint_entries {
     typename verbs_type_::values_t values {};
     std::size_t count = 0;
     typename verbs_type_::geometry_t geometry {};
+    st::vector<usearch_key_t> keys {};
 };
 
 /** What a search asks: the queries as the modality's verbs take them, how many there are, and the
@@ -466,7 +476,7 @@ template <typename verbs_type_, typename open_entries_type_>
 int checkpoint_insert(world_t& world, int argc, char const* const* argv, std::string_view synopsis,
                       std::span<flag_t const> modality_flags, open_entries_type_&& open_entries) {
     checkpoint_settings_t settings;
-    settings.session.residency = usearch_residency_unknown_k;
+    settings.session.residency.selected = selected_of(residencies_k, usearch_residency_unknown_k);
     st::vector<flag_t> const flags = insert_flags(settings, modality_flags);
     std::array<std::string_view, 1> positionals;
     std::size_t given = 0;
@@ -477,9 +487,10 @@ int checkpoint_insert(world_t& world, int argc, char const* const* argv, std::st
         fmt::println(stderr, "the entries and --save are required");
         return EXIT_FAILURE;
     }
-    if (settings.session.residency == usearch_residency_unknown_k)
-        settings.session.residency = listed_devices().empty() ? usearch_residency_ram_k : usearch_residency_vram_k;
-    if (settings.session.residency == usearch_residency_nvme_k) {
+    if (residencies_k[settings.session.residency.selected] == usearch_residency_unknown_k)
+        settings.session.residency.selected = selected_of(
+            residencies_k, listed_devices().empty() ? usearch_residency_ram_k : usearch_residency_vram_k);
+    if (residencies_k[settings.session.residency.selected] == usearch_residency_nvme_k) {
         fmt::println(stderr, "--residency=nvme builds nothing; insert in ram or vram, then view the checkpoint");
         return EXIT_FAILURE;
     }
@@ -510,8 +521,10 @@ int checkpoint_insert(world_t& world, int argc, char const* const* argv, std::st
     std::size_t inserted = 0;
     while (inserted < count) {
         std::size_t const sliced = min_of(batch, count - inserted);
-        for (std::size_t position = 0; position != sliced; ++position)
-            keys[position] = std::bit_cast<usearch_key_t>(uuid_of(first + inserted + position));
+        for (std::size_t position = 0; position != sliced; ++position) {
+            std::size_t const entry = first + inserted + position;
+            keys[position] = entries->keys.size() ? entries->keys[entry] : std::bit_cast<usearch_key_t>(uuid_of(entry));
+        }
         usearch_outcome_t outcome {};
         verbs_type_::insert(index.get(), index.executor(), sliced, keys_view(std::span {keys}.first(sliced)),
                             verbs_type_::slice(entries->values, first + inserted), settings.expansion_add.value,
@@ -569,7 +582,7 @@ int checkpoint_refine(world_t& world, int argc, char const* const* argv) {
     if (std::optional<int> const exit = parse_verb(world, argc, argv, synopsis, flags, positionals, given))
         return *exit;
     if (!runs_alone(world)) return EXIT_FAILURE;
-    bool const in_place = settings.session.residency == usearch_residency_nvme_k;
+    bool const in_place = residencies_k[settings.session.residency.selected] == usearch_residency_nvme_k;
     if (given != 1 || settings.save.empty() != in_place) {
         fmt::println(stderr, "a checkpoint is required, and --save unless --residency=nvme refines it in place");
         return EXIT_FAILURE;
@@ -589,8 +602,9 @@ int checkpoint_refine(world_t& world, int argc, char const* const* argv) {
     session_t session = open_session(settings.session, usearch_cpu_class_unknown_k);
     if (!session) return EXIT_FAILURE;
     handle<verbs_type_> index = in_place ? checkpoint_load_nvme<verbs_type_>(session, positionals[0], steps)
-                                         : checkpoint_open<verbs_type_>(session, positionals[0],
-                                                                        settings.session.residency, widened, steps);
+                                         : checkpoint_open<verbs_type_>(
+                                               session, positionals[0],
+                                               residencies_k[settings.session.residency.selected], widened, steps);
     verb_phase_t phase {.name = "load", .unit = "entries", .stream = steps};
     bool const refined = index &&
                          checkpoint_refine_rounds(world, index, settings.max_refines.value,
@@ -659,7 +673,8 @@ int checkpoint_reshard(world_t& world, int argc, char const* const* argv, std::s
     st::vector<typename verbs_type_::index_t> source_indexes;
     std::size_t source_entries = 0;
     for (sz::string_t const& part : parts) {
-        handle<verbs_type_> source = checkpoint_open<verbs_type_>(session, part, settings.session.residency, {}, steps);
+        handle<verbs_type_> source = checkpoint_open<verbs_type_>(
+            session, part, residencies_k[settings.session.residency.selected], {}, steps);
         if (!source) return EXIT_FAILURE;
         source_entries += describe(source).size;
         if (st::failed(source_indexes.push_back(source.get())) || st::failed(sources.push_back(std::move(source))))
@@ -720,7 +735,7 @@ int checkpoint_reshard(world_t& world, int argc, char const* const* argv, std::s
 template <typename verbs_type_>
 int checkpoint_health(world_t& world, int argc, char const* const* argv) {
     checkpoint_settings_t settings;
-    settings.session.residency = usearch_residency_nvme_k;
+    settings.session.residency.selected = selected_of(residencies_k, usearch_residency_nvme_k);
     st::vector<flag_t> const flags = with_session_flags(settings.session, {});
     std::array<std::string_view, 1> positionals;
     std::size_t given = 0;
@@ -737,7 +752,8 @@ int checkpoint_health(world_t& world, int argc, char const* const* argv) {
     settings.session.devices = devices_from_environment();
     session_t session = open_session(settings.session, usearch_cpu_class_unknown_k);
     if (!session) return EXIT_FAILURE;
-    handle<verbs_type_> index = checkpoint_open<verbs_type_>(session, positionals[0], settings.session.residency);
+    handle<verbs_type_> index = checkpoint_open<verbs_type_>(session, positionals[0],
+                                                             residencies_k[settings.session.residency.selected]);
     if (!index) return EXIT_FAILURE;
     checkpoint_clock_t::time_point const started = checkpoint_clock_t::now();
     usearch_outcome_t outcome {};
@@ -908,8 +924,8 @@ int checkpoint_search(world_t& world, int argc, char const* const* argv, std::st
     settings.session.devices = devices_from_environment();
     session_t session = open_session(settings.session, usearch_cpu_class_unknown_k);
     if (!session) return EXIT_FAILURE;
-    handle<verbs_type_> index = checkpoint_open<verbs_type_>(session, given ? positionals[0] : index_address,
-                                                             settings.session.residency, {}, steps);
+    handle<verbs_type_> index = checkpoint_open<verbs_type_>(
+        session, given ? positionals[0] : index_address, residencies_k[settings.session.residency.selected], {}, steps);
     if (!index) return EXIT_FAILURE;
     checkpoint_clock_t::time_point const started = checkpoint_clock_t::now();
     copied_matches_t found;
@@ -917,7 +933,7 @@ int checkpoint_search(world_t& world, int argc, char const* const* argv, std::st
     verb_phase_t phase {.name = "search", .unit = "queries", .stream = steps};
     usearch_outcome_t const outcome = search_queries(index, queries->queries, queries->count, settings.batch.value,
                                                      settings.wanted.value, settings.expansion_search.value,
-                                                     settings.traversal, totals, found,
+                                                     traversals_k[settings.traversal.selected], totals, found,
                                                      hints_path.empty() ? nullptr : &hints, verb_progress_of(phase));
     // A stopped search writes none of its outputs, which would hold some of the queries alone.
     if (outcome.status == usearch_status_cancelled_k) {

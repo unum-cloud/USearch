@@ -13,8 +13,7 @@
 #undef NDEBUG // ! A test's oracle must stay live in every build
 
 #include <cmath>   // `std::sqrt` - the angular oracle
-#include <cstdio>  // `std::snprintf`, `std::remove` - the saved monoliths and manifests
-#include <cstdlib> // `std::getenv` - the folder a direct read's file goes in
+#include <cstdio>  // `std::fopen`, `std::fseek`, `std::fwrite` - the corrupted header
 #include <cstring> // `std::memcpy`, `std::memcmp` - the codec's views of stored entries, read rows
 
 #include <algorithm> // `std::find` - a query's saved keys
@@ -23,6 +22,8 @@
 #include <span>      // `std::span` - the metric's drain surface
 #include <tuple>     // `std::tuple_size_v` - the embedding's width
 #include <vector>    // `std::vector` - the staged batch & the generated values
+
+#include <fmt/format.h> // `fmt::format` - the address inside a device's span
 
 #include "basic.hpp"
 
@@ -165,9 +166,8 @@ static void test_keys_widen(u64_t seed, std::string_view label) {
     using node_id_t = typename source_t::node_id_t;
     constexpr std::size_t nodes_k = 24, wanted_k = 4;
     allocation_ledger_t ledger;
-    char path[64];
-    std::snprintf(path, sizeof(path), "/tmp/usearch-widen-%08x.safegraphs",
-                  static_cast<unsigned>(stream_key(seed, label) ^ reinterpret_cast<std::uintptr_t>(&ledger)));
+    scratch_directory_t const scratch;
+    std::string const path = scratch.path("widen.safegraphs");
     std::vector<embedding_t> values = fixture_type_::make_values(nodes_k, stream_key(seed, label),
                                                                  counting_allocator_t {ledger});
     std::vector<us::utilities::uuid128_t> expected_keys(nodes_k * wanted_k);
@@ -270,7 +270,6 @@ static void test_keys_widen(u64_t seed, std::string_view label) {
                          std::span<f32_t const> {distances}.subspan(query * wanted_k, wanted_k));
     }
     fu_topology_delete(topology);
-    std::remove(path);
     expect_errors("widened distances", comparison_family_t::approximate_k, comparison_verdict_t::assert_k,
                   distance_errors, 0);
     expect_equal(ledger.live_bytes, 0);
@@ -283,9 +282,8 @@ static void test_wide_nodes_refused(u64_t seed) {
     using source_t = fixture_t::index_t;
     constexpr std::size_t nodes_k = 16;
     allocation_ledger_t ledger;
-    char path[64];
-    std::snprintf(path, sizeof(path), "/tmp/usearch-wide-nodes-%08x.safegraphs",
-                  static_cast<unsigned>(stream_key(seed, "wide nodes") ^ reinterpret_cast<std::uintptr_t>(&ledger)));
+    scratch_directory_t const scratch;
+    std::string const path = scratch.path("wide-nodes.safegraphs");
     serial_executor_t serial;
     {
         std::unique_ptr<source_t> const source_ptr = fixture_t::make_index(ledger);
@@ -319,7 +317,7 @@ static void test_wide_nodes_refused(u64_t seed) {
         expect_equal(viewed.view(path, {}, embeddings_fixture_t::metric_k, executor), status_t::config_mismatch_k);
         // The little-endian header length follows the magic; 2^63 bytes is past any file.
         unsigned char const header_length[8] = {0, 0, 0, 0, 0, 0, 0, 0x80};
-        std::FILE* const corrupted = std::fopen(path, "r+b");
+        std::FILE* const corrupted = std::fopen(path.c_str(), "r+b");
         expect_true(corrupted != nullptr);
         expect_true(std::fseek(corrupted, 8, SEEK_SET) == 0 && std::fwrite(header_length, 1, 8, corrupted) == 8);
         std::fclose(corrupted);
@@ -327,7 +325,6 @@ static void test_wide_nodes_refused(u64_t seed) {
         expect_equal(corrupted_view.view(path, {}, embeddings_fixture_t::metric_k, executor), status_t::malformed_k);
     }
     fu_topology_delete(topology);
-    std::remove(path);
     expect_equal(ledger.live_bytes, 0);
 }
 
@@ -442,10 +439,9 @@ static void test_view_reads_headers_alone(u64_t seed) {
 
 /** A manifest replaces the one before it whole, through a sibling that never stays behind, while
  *  an address inside a device's span and a directory are refused, having no room for a sibling. */
-static void test_manifest_replaced_durably(u64_t seed) {
-    char path[64], staged[72];
-    std::snprintf(path, sizeof(path), "/tmp/usearch-manifest-%08x.json", static_cast<unsigned>(seed));
-    std::snprintf(staged, sizeof(staged), "%s.tmp", path);
+static void test_manifest_replaced_durably() {
+    scratch_directory_t const scratch;
+    std::string const path = scratch.path("manifest.json"), staged = scratch.path("manifest.json.tmp");
     constexpr std::string_view names[] = {"part-0.safegraphs", "part-1.safegraphs", "part-2.safegraphs"};
     auto part_at = [&](std::size_t part) noexcept { return safegraphs_part_t {names[part], 4096, 8, 0}; };
     for (std::size_t const parts : {std::size_t {3}, std::size_t {2}}) {
@@ -457,11 +453,8 @@ static void test_manifest_replaced_durably(u64_t seed) {
         expect_true((json.find(names[2]) != std::string_view::npos) == (parts == 3));
         expect_true(failed(seekable_file_t::open(staged, file_access_t::read_only_k).status));
     }
-    char based[80];
-    std::snprintf(based, sizeof(based), "%s@4096", path);
-    expect_equal(safegraphs_write_manifest(std::string_view {based}, 2, part_at), status_t::invalid_argument_k);
+    expect_equal(safegraphs_write_manifest(fmt::format("{}@4096", path), 2, part_at), status_t::invalid_argument_k);
     expect_equal(safegraphs_write_manifest(std::string_view {"/tmp"}, 2, part_at), status_t::invalid_argument_k);
-    std::remove(path);
 }
 
 /** Rows read through a column source match the mapped bytes wherever they start, into a
@@ -469,10 +462,8 @@ static void test_manifest_replaced_durably(u64_t seed) {
  *  @c TMPDIR's filesystem takes unbuffered reads, and into one that does not, which copies. */
 static void test_column_rows_read_direct(u64_t seed) {
     constexpr std::size_t row_bytes = 48, rows = 1000, column_offset = 4096 + 160;
-    char const* const folder = std::getenv("TMPDIR");
-    char path[256];
-    std::snprintf(path, sizeof(path), "%s/usearch-column-%08x.bin", folder ? folder : "/tmp",
-                  static_cast<unsigned>(seed));
+    scratch_directory_t const scratch;
+    std::string const path = scratch.path("column.bin");
     {
         auto [written, write_status] = mapped_file_t::write(path, column_offset + rows * row_bytes + 77);
         expect_true(succeeded(write_status));
@@ -506,7 +497,6 @@ static void test_column_rows_read_direct(u64_t seed) {
         }
     expect_equal(copy_entries(source, 999, 2, row_bytes, bytes_span_t {staged}.first(2 * row_bytes)),
                  status_t::config_mismatch_k);
-    std::remove(path);
 }
 
 /** The shared basic-tier scenarios over the embeddings fixture - a fixed-width value column, which
@@ -526,7 +516,7 @@ void test::utilities::run_safegraphs_format_cases() {
                   test_keys_widen<embeddings_fixture<u32_t, u32_t>>, seed, "u32 keys");
     run_test_case("test_wide_nodes_refused", test_wide_nodes_refused, seed);
     run_test_case("test_view_reads_headers_alone", test_view_reads_headers_alone, seed);
-    run_test_case("test_manifest_replaced_durably", test_manifest_replaced_durably, seed);
+    run_test_case("test_manifest_replaced_durably", test_manifest_replaced_durably);
     run_test_case("test_column_rows_read_direct", test_column_rows_read_direct, seed);
 }
 

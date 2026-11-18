@@ -509,9 +509,8 @@ static void test_positions_nvme_within(u64_t seed) {
     std::array<i64_t, 3> const radii_centimetres {200'000, 800'000, 2'500'000};
     std::size_t const queries_count = probes_k * radii_centimetres.size();
     allocation_ledger_t ledger;
-    char path[64];
-    std::snprintf(path, sizeof(path), "/tmp/usearch-within-%08x.safegraphs",
-                  static_cast<unsigned>(stream_key(seed, "within") ^ reinterpret_cast<std::uintptr_t>(&ledger)));
+    scratch_directory_t const scratch;
+    std::string const path = scratch.path("within.safegraphs");
     std::vector<earth_observation_t> queries;
     std::vector<std::vector<key_t>> walked(queries_count);
     {
@@ -584,7 +583,6 @@ static void test_positions_nvme_within(u64_t seed) {
         }
     }
     fu_topology_delete(topology);
-    std::remove(path);
 }
 
 void run_geospatial_cases() {

@@ -451,16 +451,21 @@ unsafe extern "C" {
     pub fn usearch_capabilities_compiled() -> *const c_char;
     pub fn usearch_capabilities_available() -> *const c_char;
     pub fn usearch_cpu_class_name(cpu_class: usearch_cpu_class_t) -> *const c_char;
+    // Only the class round-trip test reads these until the classes gain `FromStr`
+    #[cfg(test)]
     pub fn usearch_cpu_class_from_name(
         name: usearch_bytes_view_t,
         cpu_class: *mut usearch_cpu_class_t,
     ) -> usearch_status_t;
     pub fn usearch_gpu_class_name(gpu_class: usearch_gpu_class_t) -> *const c_char;
+    #[cfg(test)]
     pub fn usearch_gpu_class_from_name(
         name: usearch_bytes_view_t,
         gpu_class: *mut usearch_gpu_class_t,
     ) -> usearch_status_t;
+    #[cfg(test)]
     pub fn usearch_nvme_class_name(nvme_class: usearch_nvme_class_t) -> *const c_char;
+    #[cfg(test)]
     pub fn usearch_nvme_class_from_name(
         name: usearch_bytes_view_t,
         nvme_class: *mut usearch_nvme_class_t,

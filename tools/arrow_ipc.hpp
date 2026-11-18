@@ -1461,60 +1461,75 @@ constexpr std::size_t ipc_arrow_text_bytes(std::span<ipc_field_t const> fields) 
     return bytes;
 }
 
-/** Appends @p bytes at @p cursor, advancing it. */
-inline void ipc_append_text(char*& cursor, void const* bytes, std::size_t count) noexcept {
-    if (count) std::memcpy(cursor, bytes, count);
-    cursor += count;
-}
+/** Appends the strings of a C Data export into the text its storage sized beforehand. */
+struct ipc_writer_t {
+    std::span<char> remaining;
 
-/** Appends @p text and a terminator, answering where it starts. */
-inline char const* ipc_append_string(char*& cursor, std::string_view text) noexcept {
-    char const* const start = cursor;
-    ipc_append_text(cursor, text.data(), text.size());
-    *cursor++ = 0;
-    return start;
-}
-
-/** Appends @p pairs in the C Data encoding, whose integers are native-endian, and answers where
- *  they start, or null when there is no pair. */
-inline char const* ipc_append_metadata(char*& cursor, std::span<ipc_key_value_t const> pairs) noexcept {
-    if (pairs.empty()) return nullptr;
-    char const* const start = cursor;
-    std::int32_t const count = static_cast<std::int32_t>(pairs.size());
-    ipc_append_text(cursor, &count, 4);
-    for (ipc_key_value_t const& pair : pairs) {
-        std::int32_t const key_bytes = static_cast<std::int32_t>(pair.key.size());
-        std::int32_t const value_bytes = static_cast<std::int32_t>(pair.value.size());
-        ipc_append_text(cursor, &key_bytes, 4);
-        ipc_append_text(cursor, pair.key.data(), pair.key.size());
-        ipc_append_text(cursor, &value_bytes, 4);
-        ipc_append_text(cursor, pair.value.data(), pair.value.size());
+    /** Appends @p text without a terminator. */
+    void append_text(std::string_view text) noexcept {
+        if (!text.empty()) std::memcpy(remaining.data(), text.data(), text.size());
+        remaining = remaining.subspan(text.size());
     }
-    return start;
-}
+
+    /** Appends @p value in native byte order, as the C Data metadata encodes its integers. */
+    void append_integer(std::int32_t value) noexcept {
+        std::memcpy(remaining.data(), &value, sizeof(value));
+        remaining = remaining.subspan(sizeof(value));
+    }
+
+    /** Appends @p value in decimal, without a terminator. */
+    void append_decimal(std::uint32_t value) noexcept {
+        std::size_t const digits = ipc_decimal_digits(value);
+        for (std::size_t digit = digits; digit != 0; --digit, value /= 10)
+            remaining[digit - 1] = char('0' + value % 10);
+        remaining = remaining.subspan(digits);
+    }
+
+    /** Appends a terminator, answering where the string it ends starts. */
+    char const* terminate(char const* start) noexcept {
+        remaining[0] = 0;
+        remaining = remaining.subspan(1);
+        return start;
+    }
+
+    /** Appends @p text and a terminator, answering where it starts. */
+    char const* append_string(std::string_view text) noexcept {
+        char const* const start = remaining.data();
+        append_text(text);
+        return terminate(start);
+    }
+
+    /** Appends @p pairs in the C Data encoding and answers where they start, or null when there is
+     *  no pair. */
+    char const* append_metadata(std::span<ipc_key_value_t const> pairs) noexcept {
+        if (pairs.empty()) return nullptr;
+        char const* const start = remaining.data();
+        append_integer(static_cast<std::int32_t>(pairs.size()));
+        for (ipc_key_value_t const& pair : pairs) {
+            append_integer(static_cast<std::int32_t>(pair.key.size()));
+            append_text(pair.key);
+            append_integer(static_cast<std::int32_t>(pair.value.size()));
+            append_text(pair.value);
+        }
+        return start;
+    }
+};
 
 /** Exports @p fields into @p storage from entry @p first on, their children into the entries
  *  @p next hands out. */
 inline void ipc_export_schemas(std::span<ipc_field_t const> fields, std::size_t first, std::size_t& next,
-                               ipc_arrow_storage_t& storage, char*& cursor) noexcept {
+                               ipc_arrow_storage_t& storage, ipc_writer_t& writer) noexcept {
     for (std::size_t index = 0; index != fields.size(); ++index) {
         ipc_field_t const& field = fields[index];
         ArrowSchema& out = storage.schema_children[first + index];
         out = {};
         storage.schema_pointers[first + index] = &out;
-        std::string_view const format = ipc_arrow_format_of(field);
-        out.format = cursor;
-        ipc_append_text(cursor, format.data(), format.size());
-        if (ipc_arrow_format_has_width(field)) {
-            std::uint32_t value = static_cast<std::uint32_t>(field.width);
-            std::size_t const digits = ipc_decimal_digits(value);
-            for (std::size_t digit = digits; digit != 0; --digit, value /= 10)
-                cursor[digit - 1] = char('0' + value % 10);
-            cursor += digits;
-        }
-        *cursor++ = 0;
-        out.name = ipc_append_string(cursor, field.name);
-        out.metadata = ipc_append_metadata(cursor, field.metadata);
+        char const* const format = writer.remaining.data();
+        writer.append_text(ipc_arrow_format_of(field));
+        if (ipc_arrow_format_has_width(field)) writer.append_decimal(static_cast<std::uint32_t>(field.width));
+        out.format = writer.terminate(format);
+        out.name = writer.append_string(field.name);
+        out.metadata = writer.append_metadata(field.metadata);
         out.flags = field.nullability == ipc_nullability_t::nullable_k ? ARROW_FLAG_NULLABLE : 0;
         out.release = &ipc_release_schema;
         if (field.children.empty()) continue;
@@ -1522,7 +1537,7 @@ inline void ipc_export_schemas(std::span<ipc_field_t const> fields, std::size_t 
         next += field.children.size();
         out.n_children = static_cast<std::int64_t>(field.children.size());
         out.children = storage.schema_pointers + children;
-        ipc_export_schemas(field.children, children, next, storage, cursor);
+        ipc_export_schemas(field.children, children, next, storage, writer);
     }
 }
 
@@ -1532,13 +1547,13 @@ inline ipc_status_t ipc_schema_to_arrow(ipc_schema_t const& schema, ipc_arrow_st
     if (ipc_status_t const status = ipc_check_schema(schema); status != ipc_status_t::success_k) return status;
     if (ipc_arrow_metadata_bytes(schema.metadata) + ipc_arrow_text_bytes(schema.fields) > storage.text.size())
         return ipc_status_t::too_small_k;
-    char* cursor = storage.text.data();
+    ipc_writer_t writer {storage.text};
     std::size_t next = schema.fields.size();
-    ipc_export_schemas(schema.fields, 0, next, storage, cursor);
+    ipc_export_schemas(schema.fields, 0, next, storage, writer);
     arrow = {};
     arrow.format = "+s";
     arrow.name = "";
-    arrow.metadata = ipc_append_metadata(cursor, schema.metadata);
+    arrow.metadata = writer.append_metadata(schema.metadata);
     arrow.n_children = static_cast<std::int64_t>(schema.fields.size());
     arrow.children = storage.schema_pointers;
     arrow.release = &ipc_release_schema;

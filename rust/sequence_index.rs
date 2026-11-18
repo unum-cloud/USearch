@@ -1253,6 +1253,9 @@ impl SequenceIndex {
 type Answer<'index, Receiver, Inputs, Output> =
     <<Receiver as SequenceVerbs<'index>>::Completion as Completion>::Answer<'index, Inputs, Output>;
 
+/// What a search keeps alive until it answers: the query tape and its config.
+type SearchInputs<'config, Offset> = (Tape<'config, u8, Offset>, SequenceSearchConfig<'config>);
+
 /// Every sequence verb, written once for every receiver: `&SequenceIndex` blocks on the calling
 /// thread, and the [`On`] that [`SequenceIndex::on`] or [`SequenceIndex::deferred`] makes runs on
 /// an executor.
@@ -1469,7 +1472,7 @@ pub trait SequenceVerbs<'index>: Copy {
         queries: Tape<'config, u8, Offset>,
         config: impl Into<SequenceSearchConfig<'config>>,
         arena: &'arena mut Arena,
-    ) -> Result<Answer<'index, Self, (Tape<'config, u8, Offset>, SequenceSearchConfig<'config>), Matches<'arena>>>
+    ) -> Result<Answer<'index, Self, SearchInputs<'config, Offset>, Matches<'arena>>>
     where
         Self::Completion: Accepts<Tape<'config, u8, Offset>> + Accepts<SequenceSearchConfig<'config>>,
     {

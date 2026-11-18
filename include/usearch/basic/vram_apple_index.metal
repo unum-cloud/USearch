@@ -1993,20 +1993,22 @@ inline void metal_build(constant metal_basic_arguments_t& arguments, metal_ragge
 
 /** One walker per node of a wave on the register rung of @p slots_, inserting it. */
 template <uint rung_index_, uint slots_>
-kernel void metal_insert_kernel(constant metal_basic_arguments_t& arguments [[buffer(metal_basic_arguments_buffer_k)]],
-                                device uchar const* values [[buffer(metal_basic_values_buffer_k)]],
-                                device ulong const* offsets [[buffer(metal_basic_offsets_buffer_k)]],
-                                device uint* neighbors [[buffer(metal_basic_neighbors_buffer_k)]],
-                                device uchar* arena [[buffer(metal_basic_arena_buffer_k)]],
-                                device atomic_uint* counters [[buffer(metal_basic_counters_buffer_k)]],
-                                device uint* link_heads [[buffer(metal_basic_link_heads_buffer_k)]],
-                                device uint* link_next [[buffer(metal_basic_link_next_buffer_k)]],
-                                device uint* touched_ids [[buffer(metal_basic_touched_ids_buffer_k)]],
-                                device atomic_uint* touched_count [[buffer(metal_basic_touched_count_buffer_k)]],
-                                device uchar const* parameters [[buffer(metal_basic_parameters_buffer_k)]],
-                                uint group [[threadgroup_position_in_grid]],
-                                uint simdgroup [[simdgroup_index_in_threadgroup]],
-                                uint lane [[thread_index_in_simdgroup]]) {
+kernel void usearch_basic_insert_kernel(constant metal_basic_arguments_t& arguments
+                                        [[buffer(metal_basic_arguments_buffer_k)]],
+                                        device uchar const* values [[buffer(metal_basic_values_buffer_k)]],
+                                        device ulong const* offsets [[buffer(metal_basic_offsets_buffer_k)]],
+                                        device uint* neighbors [[buffer(metal_basic_neighbors_buffer_k)]],
+                                        device uchar* arena [[buffer(metal_basic_arena_buffer_k)]],
+                                        device atomic_uint* counters [[buffer(metal_basic_counters_buffer_k)]],
+                                        device uint* link_heads [[buffer(metal_basic_link_heads_buffer_k)]],
+                                        device uint* link_next [[buffer(metal_basic_link_next_buffer_k)]],
+                                        device uint* touched_ids [[buffer(metal_basic_touched_ids_buffer_k)]],
+                                        device atomic_uint* touched_count
+                                        [[buffer(metal_basic_touched_count_buffer_k)]],
+                                        device uchar const* parameters [[buffer(metal_basic_parameters_buffer_k)]],
+                                        uint group [[threadgroup_position_in_grid]],
+                                        uint simdgroup [[simdgroup_index_in_threadgroup]],
+                                        uint lane [[thread_index_in_simdgroup]]) {
     threadgroup typename metal_walkers<rung_index_>::schedule_t::shared_t posted;
     metal_build<rung_index_, slots_, metal_build_insert_k>(
         arguments, {values, offsets, parameters, arguments.metric}, neighbors, arena, counters,
@@ -2243,11 +2245,16 @@ kernel void metal_restitch_kernel(
         device uint *, device uint *, device uint *, device uint *, device uint const *, device uint const *,      \
         device uchar const *, uint, uint, uint
 
-template [[host_name("metal_insert_kernel_0_0")]] kernel void metal_insert_kernel<0, 0>(USEARCH_METAL_BUILD);
-template [[host_name("metal_insert_kernel_0_2")]] kernel void metal_insert_kernel<0, 2>(USEARCH_METAL_BUILD);
-template [[host_name("metal_insert_kernel_0_4")]] kernel void metal_insert_kernel<0, 4>(USEARCH_METAL_BUILD);
-template [[host_name("metal_insert_kernel_0_8")]] kernel void metal_insert_kernel<0, 8>(USEARCH_METAL_BUILD);
-template [[host_name("metal_insert_kernel_0_16")]] kernel void metal_insert_kernel<0, 16>(USEARCH_METAL_BUILD);
+template
+    [[host_name("usearch_basic_insert_kernel_0_0")]] kernel void usearch_basic_insert_kernel<0, 0>(USEARCH_METAL_BUILD);
+template
+    [[host_name("usearch_basic_insert_kernel_0_2")]] kernel void usearch_basic_insert_kernel<0, 2>(USEARCH_METAL_BUILD);
+template
+    [[host_name("usearch_basic_insert_kernel_0_4")]] kernel void usearch_basic_insert_kernel<0, 4>(USEARCH_METAL_BUILD);
+template
+    [[host_name("usearch_basic_insert_kernel_0_8")]] kernel void usearch_basic_insert_kernel<0, 8>(USEARCH_METAL_BUILD);
+template [[host_name("usearch_basic_insert_kernel_0_16")]] kernel void usearch_basic_insert_kernel<0, 16>(
+    USEARCH_METAL_BUILD);
 template [[host_name("metal_refine_kernel_0_0")]] kernel void metal_refine_kernel<0, 0>(USEARCH_METAL_BUILD);
 template [[host_name("metal_refine_kernel_0_2")]] kernel void metal_refine_kernel<0, 2>(USEARCH_METAL_BUILD);
 template [[host_name("metal_refine_kernel_0_4")]] kernel void metal_refine_kernel<0, 4>(USEARCH_METAL_BUILD);
@@ -2263,11 +2270,16 @@ template [[host_name("metal_gather_neighborhoods_kernel_0")]] kernel void metal_
 template [[host_name("metal_restitch_kernel_0")]] kernel void metal_restitch_kernel<0>(USEARCH_METAL_RESTITCH);
 
 #if USEARCH_METAL_KIT_RUNGS > 1
-template [[host_name("metal_insert_kernel_1_0")]] kernel void metal_insert_kernel<1, 0>(USEARCH_METAL_BUILD);
-template [[host_name("metal_insert_kernel_1_2")]] kernel void metal_insert_kernel<1, 2>(USEARCH_METAL_BUILD);
-template [[host_name("metal_insert_kernel_1_4")]] kernel void metal_insert_kernel<1, 4>(USEARCH_METAL_BUILD);
-template [[host_name("metal_insert_kernel_1_8")]] kernel void metal_insert_kernel<1, 8>(USEARCH_METAL_BUILD);
-template [[host_name("metal_insert_kernel_1_16")]] kernel void metal_insert_kernel<1, 16>(USEARCH_METAL_BUILD);
+template
+    [[host_name("usearch_basic_insert_kernel_1_0")]] kernel void usearch_basic_insert_kernel<1, 0>(USEARCH_METAL_BUILD);
+template
+    [[host_name("usearch_basic_insert_kernel_1_2")]] kernel void usearch_basic_insert_kernel<1, 2>(USEARCH_METAL_BUILD);
+template
+    [[host_name("usearch_basic_insert_kernel_1_4")]] kernel void usearch_basic_insert_kernel<1, 4>(USEARCH_METAL_BUILD);
+template
+    [[host_name("usearch_basic_insert_kernel_1_8")]] kernel void usearch_basic_insert_kernel<1, 8>(USEARCH_METAL_BUILD);
+template [[host_name("usearch_basic_insert_kernel_1_16")]] kernel void usearch_basic_insert_kernel<1, 16>(
+    USEARCH_METAL_BUILD);
 template [[host_name("metal_refine_kernel_1_0")]] kernel void metal_refine_kernel<1, 0>(USEARCH_METAL_BUILD);
 template [[host_name("metal_refine_kernel_1_2")]] kernel void metal_refine_kernel<1, 2>(USEARCH_METAL_BUILD);
 template [[host_name("metal_refine_kernel_1_4")]] kernel void metal_refine_kernel<1, 4>(USEARCH_METAL_BUILD);
@@ -2284,11 +2296,16 @@ template [[host_name("metal_restitch_kernel_1")]] kernel void metal_restitch_ker
 #endif
 
 #if USEARCH_METAL_KIT_RUNGS > 2
-template [[host_name("metal_insert_kernel_2_0")]] kernel void metal_insert_kernel<2, 0>(USEARCH_METAL_BUILD);
-template [[host_name("metal_insert_kernel_2_2")]] kernel void metal_insert_kernel<2, 2>(USEARCH_METAL_BUILD);
-template [[host_name("metal_insert_kernel_2_4")]] kernel void metal_insert_kernel<2, 4>(USEARCH_METAL_BUILD);
-template [[host_name("metal_insert_kernel_2_8")]] kernel void metal_insert_kernel<2, 8>(USEARCH_METAL_BUILD);
-template [[host_name("metal_insert_kernel_2_16")]] kernel void metal_insert_kernel<2, 16>(USEARCH_METAL_BUILD);
+template
+    [[host_name("usearch_basic_insert_kernel_2_0")]] kernel void usearch_basic_insert_kernel<2, 0>(USEARCH_METAL_BUILD);
+template
+    [[host_name("usearch_basic_insert_kernel_2_2")]] kernel void usearch_basic_insert_kernel<2, 2>(USEARCH_METAL_BUILD);
+template
+    [[host_name("usearch_basic_insert_kernel_2_4")]] kernel void usearch_basic_insert_kernel<2, 4>(USEARCH_METAL_BUILD);
+template
+    [[host_name("usearch_basic_insert_kernel_2_8")]] kernel void usearch_basic_insert_kernel<2, 8>(USEARCH_METAL_BUILD);
+template [[host_name("usearch_basic_insert_kernel_2_16")]] kernel void usearch_basic_insert_kernel<2, 16>(
+    USEARCH_METAL_BUILD);
 template [[host_name("metal_refine_kernel_2_0")]] kernel void metal_refine_kernel<2, 0>(USEARCH_METAL_BUILD);
 template [[host_name("metal_refine_kernel_2_2")]] kernel void metal_refine_kernel<2, 2>(USEARCH_METAL_BUILD);
 template [[host_name("metal_refine_kernel_2_4")]] kernel void metal_refine_kernel<2, 4>(USEARCH_METAL_BUILD);
@@ -2305,11 +2322,16 @@ template [[host_name("metal_restitch_kernel_2")]] kernel void metal_restitch_ker
 #endif
 
 #if USEARCH_METAL_KIT_RUNGS > 3
-template [[host_name("metal_insert_kernel_3_0")]] kernel void metal_insert_kernel<3, 0>(USEARCH_METAL_BUILD);
-template [[host_name("metal_insert_kernel_3_2")]] kernel void metal_insert_kernel<3, 2>(USEARCH_METAL_BUILD);
-template [[host_name("metal_insert_kernel_3_4")]] kernel void metal_insert_kernel<3, 4>(USEARCH_METAL_BUILD);
-template [[host_name("metal_insert_kernel_3_8")]] kernel void metal_insert_kernel<3, 8>(USEARCH_METAL_BUILD);
-template [[host_name("metal_insert_kernel_3_16")]] kernel void metal_insert_kernel<3, 16>(USEARCH_METAL_BUILD);
+template
+    [[host_name("usearch_basic_insert_kernel_3_0")]] kernel void usearch_basic_insert_kernel<3, 0>(USEARCH_METAL_BUILD);
+template
+    [[host_name("usearch_basic_insert_kernel_3_2")]] kernel void usearch_basic_insert_kernel<3, 2>(USEARCH_METAL_BUILD);
+template
+    [[host_name("usearch_basic_insert_kernel_3_4")]] kernel void usearch_basic_insert_kernel<3, 4>(USEARCH_METAL_BUILD);
+template
+    [[host_name("usearch_basic_insert_kernel_3_8")]] kernel void usearch_basic_insert_kernel<3, 8>(USEARCH_METAL_BUILD);
+template [[host_name("usearch_basic_insert_kernel_3_16")]] kernel void usearch_basic_insert_kernel<3, 16>(
+    USEARCH_METAL_BUILD);
 template [[host_name("metal_refine_kernel_3_0")]] kernel void metal_refine_kernel<3, 0>(USEARCH_METAL_BUILD);
 template [[host_name("metal_refine_kernel_3_2")]] kernel void metal_refine_kernel<3, 2>(USEARCH_METAL_BUILD);
 template [[host_name("metal_refine_kernel_3_4")]] kernel void metal_refine_kernel<3, 4>(USEARCH_METAL_BUILD);
@@ -2326,11 +2348,16 @@ template [[host_name("metal_restitch_kernel_3")]] kernel void metal_restitch_ker
 #endif
 
 #if USEARCH_METAL_KIT_RUNGS > 4
-template [[host_name("metal_insert_kernel_4_0")]] kernel void metal_insert_kernel<4, 0>(USEARCH_METAL_BUILD);
-template [[host_name("metal_insert_kernel_4_2")]] kernel void metal_insert_kernel<4, 2>(USEARCH_METAL_BUILD);
-template [[host_name("metal_insert_kernel_4_4")]] kernel void metal_insert_kernel<4, 4>(USEARCH_METAL_BUILD);
-template [[host_name("metal_insert_kernel_4_8")]] kernel void metal_insert_kernel<4, 8>(USEARCH_METAL_BUILD);
-template [[host_name("metal_insert_kernel_4_16")]] kernel void metal_insert_kernel<4, 16>(USEARCH_METAL_BUILD);
+template
+    [[host_name("usearch_basic_insert_kernel_4_0")]] kernel void usearch_basic_insert_kernel<4, 0>(USEARCH_METAL_BUILD);
+template
+    [[host_name("usearch_basic_insert_kernel_4_2")]] kernel void usearch_basic_insert_kernel<4, 2>(USEARCH_METAL_BUILD);
+template
+    [[host_name("usearch_basic_insert_kernel_4_4")]] kernel void usearch_basic_insert_kernel<4, 4>(USEARCH_METAL_BUILD);
+template
+    [[host_name("usearch_basic_insert_kernel_4_8")]] kernel void usearch_basic_insert_kernel<4, 8>(USEARCH_METAL_BUILD);
+template [[host_name("usearch_basic_insert_kernel_4_16")]] kernel void usearch_basic_insert_kernel<4, 16>(
+    USEARCH_METAL_BUILD);
 template [[host_name("metal_refine_kernel_4_0")]] kernel void metal_refine_kernel<4, 0>(USEARCH_METAL_BUILD);
 template [[host_name("metal_refine_kernel_4_2")]] kernel void metal_refine_kernel<4, 2>(USEARCH_METAL_BUILD);
 template [[host_name("metal_refine_kernel_4_4")]] kernel void metal_refine_kernel<4, 4>(USEARCH_METAL_BUILD);
@@ -2347,11 +2374,16 @@ template [[host_name("metal_restitch_kernel_4")]] kernel void metal_restitch_ker
 #endif
 
 #if USEARCH_METAL_KIT_RUNGS > 5
-template [[host_name("metal_insert_kernel_5_0")]] kernel void metal_insert_kernel<5, 0>(USEARCH_METAL_BUILD);
-template [[host_name("metal_insert_kernel_5_2")]] kernel void metal_insert_kernel<5, 2>(USEARCH_METAL_BUILD);
-template [[host_name("metal_insert_kernel_5_4")]] kernel void metal_insert_kernel<5, 4>(USEARCH_METAL_BUILD);
-template [[host_name("metal_insert_kernel_5_8")]] kernel void metal_insert_kernel<5, 8>(USEARCH_METAL_BUILD);
-template [[host_name("metal_insert_kernel_5_16")]] kernel void metal_insert_kernel<5, 16>(USEARCH_METAL_BUILD);
+template
+    [[host_name("usearch_basic_insert_kernel_5_0")]] kernel void usearch_basic_insert_kernel<5, 0>(USEARCH_METAL_BUILD);
+template
+    [[host_name("usearch_basic_insert_kernel_5_2")]] kernel void usearch_basic_insert_kernel<5, 2>(USEARCH_METAL_BUILD);
+template
+    [[host_name("usearch_basic_insert_kernel_5_4")]] kernel void usearch_basic_insert_kernel<5, 4>(USEARCH_METAL_BUILD);
+template
+    [[host_name("usearch_basic_insert_kernel_5_8")]] kernel void usearch_basic_insert_kernel<5, 8>(USEARCH_METAL_BUILD);
+template [[host_name("usearch_basic_insert_kernel_5_16")]] kernel void usearch_basic_insert_kernel<5, 16>(
+    USEARCH_METAL_BUILD);
 template [[host_name("metal_refine_kernel_5_0")]] kernel void metal_refine_kernel<5, 0>(USEARCH_METAL_BUILD);
 template [[host_name("metal_refine_kernel_5_2")]] kernel void metal_refine_kernel<5, 2>(USEARCH_METAL_BUILD);
 template [[host_name("metal_refine_kernel_5_4")]] kernel void metal_refine_kernel<5, 4>(USEARCH_METAL_BUILD);
@@ -2368,11 +2400,16 @@ template [[host_name("metal_restitch_kernel_5")]] kernel void metal_restitch_ker
 #endif
 
 #if USEARCH_METAL_KIT_RUNGS > 6
-template [[host_name("metal_insert_kernel_6_0")]] kernel void metal_insert_kernel<6, 0>(USEARCH_METAL_BUILD);
-template [[host_name("metal_insert_kernel_6_2")]] kernel void metal_insert_kernel<6, 2>(USEARCH_METAL_BUILD);
-template [[host_name("metal_insert_kernel_6_4")]] kernel void metal_insert_kernel<6, 4>(USEARCH_METAL_BUILD);
-template [[host_name("metal_insert_kernel_6_8")]] kernel void metal_insert_kernel<6, 8>(USEARCH_METAL_BUILD);
-template [[host_name("metal_insert_kernel_6_16")]] kernel void metal_insert_kernel<6, 16>(USEARCH_METAL_BUILD);
+template
+    [[host_name("usearch_basic_insert_kernel_6_0")]] kernel void usearch_basic_insert_kernel<6, 0>(USEARCH_METAL_BUILD);
+template
+    [[host_name("usearch_basic_insert_kernel_6_2")]] kernel void usearch_basic_insert_kernel<6, 2>(USEARCH_METAL_BUILD);
+template
+    [[host_name("usearch_basic_insert_kernel_6_4")]] kernel void usearch_basic_insert_kernel<6, 4>(USEARCH_METAL_BUILD);
+template
+    [[host_name("usearch_basic_insert_kernel_6_8")]] kernel void usearch_basic_insert_kernel<6, 8>(USEARCH_METAL_BUILD);
+template [[host_name("usearch_basic_insert_kernel_6_16")]] kernel void usearch_basic_insert_kernel<6, 16>(
+    USEARCH_METAL_BUILD);
 template [[host_name("metal_refine_kernel_6_0")]] kernel void metal_refine_kernel<6, 0>(USEARCH_METAL_BUILD);
 template [[host_name("metal_refine_kernel_6_2")]] kernel void metal_refine_kernel<6, 2>(USEARCH_METAL_BUILD);
 template [[host_name("metal_refine_kernel_6_4")]] kernel void metal_refine_kernel<6, 4>(USEARCH_METAL_BUILD);
@@ -2389,11 +2426,16 @@ template [[host_name("metal_restitch_kernel_6")]] kernel void metal_restitch_ker
 #endif
 
 #if USEARCH_METAL_KIT_RUNGS > 7
-template [[host_name("metal_insert_kernel_7_0")]] kernel void metal_insert_kernel<7, 0>(USEARCH_METAL_BUILD);
-template [[host_name("metal_insert_kernel_7_2")]] kernel void metal_insert_kernel<7, 2>(USEARCH_METAL_BUILD);
-template [[host_name("metal_insert_kernel_7_4")]] kernel void metal_insert_kernel<7, 4>(USEARCH_METAL_BUILD);
-template [[host_name("metal_insert_kernel_7_8")]] kernel void metal_insert_kernel<7, 8>(USEARCH_METAL_BUILD);
-template [[host_name("metal_insert_kernel_7_16")]] kernel void metal_insert_kernel<7, 16>(USEARCH_METAL_BUILD);
+template
+    [[host_name("usearch_basic_insert_kernel_7_0")]] kernel void usearch_basic_insert_kernel<7, 0>(USEARCH_METAL_BUILD);
+template
+    [[host_name("usearch_basic_insert_kernel_7_2")]] kernel void usearch_basic_insert_kernel<7, 2>(USEARCH_METAL_BUILD);
+template
+    [[host_name("usearch_basic_insert_kernel_7_4")]] kernel void usearch_basic_insert_kernel<7, 4>(USEARCH_METAL_BUILD);
+template
+    [[host_name("usearch_basic_insert_kernel_7_8")]] kernel void usearch_basic_insert_kernel<7, 8>(USEARCH_METAL_BUILD);
+template [[host_name("usearch_basic_insert_kernel_7_16")]] kernel void usearch_basic_insert_kernel<7, 16>(
+    USEARCH_METAL_BUILD);
 template [[host_name("metal_refine_kernel_7_0")]] kernel void metal_refine_kernel<7, 0>(USEARCH_METAL_BUILD);
 template [[host_name("metal_refine_kernel_7_2")]] kernel void metal_refine_kernel<7, 2>(USEARCH_METAL_BUILD);
 template [[host_name("metal_refine_kernel_7_4")]] kernel void metal_refine_kernel<7, 4>(USEARCH_METAL_BUILD);

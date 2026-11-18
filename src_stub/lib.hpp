@@ -27,13 +27,12 @@
 #include <cstdint> // `std::uint8_t`
 #include <cstring> // `std::memcmp`, `std::memcpy`
 
-#include <cstdio> // `std::snprintf` - a part's name and a manifest's entry
-
 #include <algorithm>        // `std::copy`, `std::sort`, `std::stable_sort`
 #include <array>            // `std::array`
 #include <bit>              // `std::bit_cast`
 #include <functional>       // `std::function`
 #include <initializer_list> // `std::initializer_list` - the inputs a call checks against its arena
+#include <iterator>         // `std::back_inserter` - a manifest's entries
 #include <limits>           // `std::numeric_limits`
 #include <memory>           // `std::unique_ptr` - a finished plan
 #include <mutex>            // `std::unique_lock`
@@ -50,6 +49,8 @@
 #include <utility>          // `std::move`
 #include <variant>          // `std::variant`
 #include <vector>           // `std::vector`
+
+#include <fmt/format.h> // `fmt::format`, `fmt::format_to` - a part's name and a manifest's entry
 
 #include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the serial class's reference over every shared word
 #include <forkunion/types.hpp>   // `fu::standard_yield_t` - the serial class's waiter
@@ -2187,9 +2188,7 @@ inline std::string stem_of(std::string_view path) {
 
 /** Part @p part of @p parts under @p stem, as <tt>stem-00001-of-00003.safegraphs</tt>. */
 inline std::string part_path(std::string const& stem, std::size_t part, std::size_t parts) {
-    char suffix[64];
-    std::snprintf(suffix, sizeof(suffix), "-%05zu-of-%05zu.safegraphs", part, parts);
-    return stem + suffix;
+    return fmt::format("{}-{:05}-of-{:05}.safegraphs", stem, part, parts);
 }
 
 /**
@@ -2229,10 +2228,8 @@ void save_parts(handle_ const& index, usearch_bytes_view_t path, usearch_progres
         if (!serialize(part, blob, outcome)) return;
         std::string const name = part_path(stem, shard + 1, shards);
         if (!write_file(as_path(name), blob, outcome)) return;
-        char entry[160];
-        std::snprintf(entry, sizeof(entry), "%s{\"path\":\"%s\",\"bytes\":%zu,\"nodes\":%zu}", shard ? "," : "",
-                      name.c_str() + directory_of(name).size(), blob.size(), end - begin);
-        manifest += entry;
+        fmt::format_to(std::back_inserter(manifest), R"({}{{"path":"{}","bytes":{},"nodes":{}}})", shard ? "," : "",
+                       std::string_view(name).substr(directory_of(name).size()), blob.size(), end - begin);
     }
     manifest += "]}";
     if (!write_file(path, bytes_view_t {reinterpret_cast<std::byte const*>(manifest.data()), manifest.size()}, outcome))

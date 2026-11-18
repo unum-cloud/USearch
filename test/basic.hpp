@@ -23,9 +23,8 @@
  */
 #pragma once
 
-#include <cmath>   // `std::isfinite` - the sampled coordinates
-#include <cstdint> // `std::uintptr_t` - per-process checkpoint paths
-#include <cstdio>  // `std::snprintf`, `std::remove`, `std::rename` - the checkpoint files
+#include <cmath>  // `std::isfinite` - the sampled coordinates
+#include <cstdio> // `std::rename` - the relocated part
 
 #include <algorithm>   // `std::sort`, `std::unique`, `std::any_of`, `std::equal`
 #include <array>       // `std::array` - handmade triples
@@ -3967,9 +3966,8 @@ void test_basic_safegraphs_round_trip(u64_t seed, std::string_view key_dtype_nam
         expect_true(pooled_monolith == monolith);
 
         // The file form: the same bytes on disk, written and restored through one mapping each.
-        char path[64];
-        std::snprintf(path, sizeof(path), "/tmp/usearch-basic-%08x.safegraphs",
-                      static_cast<unsigned>(stream_key(seed, "safegraphs") ^ reinterpret_cast<std::uintptr_t>(&index)));
+        scratch_directory_t const scratch;
+        std::string const path = scratch.path("basic.safegraphs");
         {
             auto [mapping, status] = mapped_file_t::write(path, monolith.size());
             expect_true(succeeded(status));
@@ -3989,7 +3987,6 @@ void test_basic_safegraphs_round_trip(u64_t seed, std::string_view key_dtype_nam
                          status_t::success_k);
             basic_expect_mirrored<fixture_type_>(restored, index, nodes_k);
         }
-        std::remove(path);
 
         // The reservation comes from the config when the index has none.
         std::unique_ptr<index_t> const roomy_ptr = fixture_type_::make_index(ledger);
@@ -4037,10 +4034,8 @@ void test_basic_safegraphs_distributed(u64_t seed, std::string_view metric_token
             basic_build<fixture_type_>(*indexes[part], metric, halves[part], assigned_ids, context, keep_diverse_t {4});
         }
 
-        char manifest_path[64];
-        std::snprintf(
-            manifest_path, sizeof(manifest_path), "/tmp/usearch-basic-%08x.safegraphs",
-            static_cast<unsigned>(stream_key(seed, "safegraphs") ^ reinterpret_cast<std::uintptr_t>(&indexes)));
+        scratch_directory_t const scratch;
+        std::string const manifest_path = scratch.path("basic.safegraphs");
         std::string_view const stem = safegraphs_stem(manifest_path);
         std::array<std::string, parts_k> part_paths;
         std::array<std::size_t, parts_k> part_bytes {};
@@ -4095,9 +4090,6 @@ void test_basic_safegraphs_distributed(u64_t seed, std::string_view metric_token
                          status_t::success_k);
             basic_expect_mirrored<fixture_type_>(restored, *indexes[part], half_k);
         }
-
-        std::remove(manifest_path);
-        for (std::string const& path : part_paths) std::remove(path.c_str());
     }
     expect_equal(ledger.live_bytes, 0);
 }
@@ -4264,7 +4256,7 @@ struct basic_nvme_reference {
     std::vector<value_t> queries;
     std::vector<node_id_t> watermarks;
     scratch_directory_t scratch;
-    std::string stem, path;
+    std::string path;
     fu_topology_t topology = nullptr;
     executor_t executor;
 
@@ -4294,8 +4286,7 @@ struct basic_nvme_reference {
         watermarks.resize(built.shards_count());
         expect_equal(built.snapshot(watermarks).status, status_t::success_k);
 
-        stem = scratch.path(scenario);
-        path = stem + ".safegraphs";
+        path = scratch.path(fmt::format("{}.safegraphs", scenario));
         serial_executor_t serial;
         expect_equal(built.save(path, fixture_t::ram_fixture_t::make_codec(), serial, save_config_t {},
                                 fixture_t::metric_token_k),
@@ -4855,7 +4846,7 @@ void test_basic_nvme_relocated(fixture_type_ const& fixture, u64_t seed) {
     std::size_t const count = fixture.size(), wanted = basic_connectivity_k;
     reference_t reference {fixture, "nvme_relocated", basic_nvme_parts_k, seed};
 
-    std::string const moved = reference.stem + "-moved.safegraphs";
+    std::string const moved = reference.scratch.path("moved.safegraphs");
     growing_buffer<char> part_path {global_allocator};
     expect_equal(std::rename(reference.part_path(part_path, 1).data(), moved.c_str()), 0);
     std::string const directory = reference.path.substr(0, reference.path.rfind('/'));
@@ -4899,9 +4890,8 @@ void test_basic_nvme_widened_keys(fixture_type_ const& fixture, u64_t seed) {
     static_assert(!std::is_same_v<node_id_t, u32_t>);
     std::size_t const count = fixture.size();
     allocation_ledger_t ledger;
-    std::string const path = fmt::format(
-        "/tmp/usearch-basic-nvme-ids-{:016x}.safegraphs",
-        split_mix_bits(stream_key(seed, "nvme_node_ids") ^ reinterpret_cast<std::uintptr_t>(&ledger)));
+    scratch_directory_t const scratch;
+    std::string const path = scratch.path("nvme-ids.safegraphs");
     {
         std::unique_ptr<index_t> const index_ptr = wide_fixture_t::make_index(ledger);
         index_t& index = *index_ptr;
@@ -4958,7 +4948,6 @@ void test_basic_nvme_widened_keys(fixture_type_ const& fixture, u64_t seed) {
         expect_equal(mismatched.size(), 0u);
     }
     fu_topology_delete(topology);
-    std::remove(path.c_str());
     expect_equal(ledger.live_bytes, 0);
 }
 
@@ -4992,24 +4981,24 @@ case_result_t test_basic_nvme_configuration(fixture_type_ const& fixture, u64_t 
  *  case labelled with the configuration it instantiates. */
 template <typename fixture_type_>
 void run_basic_nvme_cases(std::string_view fixture_name, fixture_type_ const& fixture, u64_t seed) {
-    std::string label = fmt::format("test_basic_nvme_configuration<blocking_files_engine<fu::standard_yield_t>, {}>",
-                                    fixture_name);
-    run_test_case(label.c_str(),
-                  test_basic_nvme_configuration<blocking_files_engine<fu::standard_yield_t>, fixture_type_>, fixture,
-                  seed, "blocking_files_engine is refused on this machine");
+    run_test_case(
+        fmt::format("test_basic_nvme_configuration<blocking_files_engine<fu::standard_yield_t>, {}>", fixture_name)
+            .c_str(),
+        test_basic_nvme_configuration<blocking_files_engine<fu::standard_yield_t>, fixture_type_>, fixture, seed,
+        "blocking_files_engine is refused on this machine");
 #if USEARCH_WITH_LINUX_AIO
-    label = fmt::format("test_basic_nvme_configuration<linux_aio_files_engine<fu::standard_yield_t>, {}>",
-                        fixture_name);
-    run_test_case(label.c_str(),
-                  test_basic_nvme_configuration<linux_aio_files_engine<fu::standard_yield_t>, fixture_type_>, fixture,
-                  seed, "linux_aio_files_engine is refused on this machine");
+    run_test_case(
+        fmt::format("test_basic_nvme_configuration<linux_aio_files_engine<fu::standard_yield_t>, {}>", fixture_name)
+            .c_str(),
+        test_basic_nvme_configuration<linux_aio_files_engine<fu::standard_yield_t>, fixture_type_>, fixture, seed,
+        "linux_aio_files_engine is refused on this machine");
 #endif
 #if USEARCH_WITH_LINUX_URING
-    label = fmt::format("test_basic_nvme_configuration<linux_uring_files_engine<fu::standard_yield_t>, {}>",
-                        fixture_name);
-    run_test_case(label.c_str(),
-                  test_basic_nvme_configuration<linux_uring_files_engine<fu::standard_yield_t>, fixture_type_>, fixture,
-                  seed, "linux_uring_files_engine is refused on this machine");
+    run_test_case(
+        fmt::format("test_basic_nvme_configuration<linux_uring_files_engine<fu::standard_yield_t>, {}>", fixture_name)
+            .c_str(),
+        test_basic_nvme_configuration<linux_uring_files_engine<fu::standard_yield_t>, fixture_type_>, fixture, seed,
+        "linux_uring_files_engine is refused on this machine");
 #endif
 }
 

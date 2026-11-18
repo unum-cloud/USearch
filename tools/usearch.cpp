@@ -87,9 +87,9 @@ namespace us = unum::usearch;
 int main(int argc, char** argv) {
     // Steps take minutes, so each line reaches a redirected log as it is printed.
     std::setvbuf(stdout, nullptr, _IOLBF, 0);
-    us::tools::world_t world {argc, argv};
+    us::tools::world_t world {std::span<char*> {argv, static_cast<std::size_t>(argc)}};
     std::signal(SIGINT, us::tools::request_stop);
     std::signal(SIGTERM, us::tools::request_stop);
-    int const exit = us::tools::run_verb(world, argc, argv);
+    int const exit = us::tools::run_verb(world, static_cast<int>(world.arguments.size()), world.arguments.data());
     return exit == EXIT_SUCCESS && us::tools::stop_requested ? us::tools::exit_stopped_k : exit;
 }

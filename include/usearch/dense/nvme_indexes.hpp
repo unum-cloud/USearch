@@ -2739,7 +2739,7 @@ struct nvme_indexes {
                 std::memset(projected.data(), 0, projected.size_bytes());
                 return projected;
             }
-            rows_span_t const target {reinterpret_cast<byte_t*>(projected.data()), 1, projected.size(),
+            rows_span_t const target {bytes_of(projected.data(), projected.size()).data(), 1, projected.size(),
                                       projected.size_bytes(), nk_f32_k};
             export_row<elementwise_kit_t>(row.data(), vector_dtype_k, target, 0);
             return projected;

@@ -1410,6 +1410,15 @@ impl GeospatialIndex {
 type Answer<'index, Receiver, Inputs, Output> =
     <<Receiver as GeospatialVerbs<'index>>::Completion as Completion>::Answer<'index, Inputs, Output>;
 
+/// What an insert keeps alive until it answers: the keys and the config holding the observations.
+type InsertInputs<'config, Keys, Observations> = (Keys, GeospatialInsertConfig<'config, Observations>);
+
+/// What a search keeps alive until it answers: the queries and their config.
+type SearchInputs<'config, Queries> = (Queries, GeospatialSearchConfig<'config>);
+
+/// What a relation query keeps alive until it answers: the queries and their config.
+type WithinInputs<'config, Queries> = (Queries, GeospatialWithinConfig<'config>);
+
 /// Every geospatial verb, written once for every receiver: `&GeospatialIndex` blocks on the calling
 /// thread, and the [`On`] that [`GeospatialIndex::on`] or [`GeospatialIndex::deferred`] makes runs
 /// on an executor.
@@ -1518,7 +1527,7 @@ pub trait GeospatialVerbs<'index>: Copy {
         self,
         keys: Keys,
         config: impl Into<GeospatialInsertConfig<'config, Observations>>,
-    ) -> Result<Answer<'index, Self, (Keys, GeospatialInsertConfig<'config, Observations>), ()>>
+    ) -> Result<Answer<'index, Self, InsertInputs<'config, Keys, Observations>, ()>>
     where
         Self::Completion: Accepts<Keys> + Accepts<GeospatialInsertConfig<'config, Observations>>,
     {
@@ -1626,7 +1635,7 @@ pub trait GeospatialVerbs<'index>: Copy {
         queries: Queries,
         config: impl Into<GeospatialSearchConfig<'config>>,
         arena: &'arena mut Arena,
-    ) -> Result<Answer<'index, Self, (Queries, GeospatialSearchConfig<'config>), Matches<'arena>>>
+    ) -> Result<Answer<'index, Self, SearchInputs<'config, Queries>, Matches<'arena>>>
     where
         Self::Completion: Accepts<Queries> + Accepts<GeospatialSearchConfig<'config>>,
     {
@@ -1666,7 +1675,7 @@ pub trait GeospatialVerbs<'index>: Copy {
         queries: Queries,
         config: impl Into<GeospatialWithinConfig<'config>>,
         arena: &'arena mut Arena,
-    ) -> Result<Answer<'index, Self, (Queries, GeospatialWithinConfig<'config>), GeospatialMatches<'arena>>>
+    ) -> Result<Answer<'index, Self, WithinInputs<'config, Queries>, GeospatialMatches<'arena>>>
     where
         Self::Completion: Accepts<Queries> + Accepts<GeospatialWithinConfig<'config>>,
     {

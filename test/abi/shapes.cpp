@@ -223,9 +223,10 @@ void run_shapes_abi_cases() {
         for (std::size_t metric = 0; metric != metrics_count; ++metric) {
             std::string const name = fmt::format("shapes {} {}", name_of(cell), metric_names_k[metric]);
             usearch_shapes_metadata_t const geometry {metrics_k[metric], usearch_scalar_f16_k, 0, 0};
-            std::string const label = fmt::format("test_shapes_metric({}, {}, {}, {})", constant_of(cell.residency),
-                                                  constant_of(cell.cpu_class), cell.shards, metric_constants_k[metric]);
-            run_test_case(label.c_str(), test_shapes_metric, cell, geometry, stream_key(test_run.settings.seed, name));
+            run_test_case(fmt::format("test_shapes_metric({}, {}, {}, {})", constant_of(cell.residency),
+                                      constant_of(cell.cpu_class), cell.shards, metric_constants_k[metric])
+                              .c_str(),
+                          test_shapes_metric, cell, geometry, stream_key(test_run.settings.seed, name));
         }
     }
 }

@@ -2915,12 +2915,13 @@ mod tests {
     }
 
     /// An empty index, or `None` when this build leaves its quantization out.
-    fn empty_index_or_skip(dimensions: usize, metric: DenseMetric, quantization: Scalar) -> Result<Option<DenseIndex>> {
+    fn empty_index_if_supported(
+        dimensions: usize,
+        metric: DenseMetric,
+        quantization: Scalar,
+    ) -> Result<Option<DenseIndex>> {
         match empty_index(dimensions, metric, quantization) {
-            Err(error) if error.status == Status::Unsupported => {
-                skipped(&format!("built without {quantization}"));
-                Ok(None)
-            }
+            Err(error) if error.status == Status::Unsupported => Ok(None),
             built => built.map(Some),
         }
     }
@@ -3025,7 +3026,8 @@ mod tests {
             Scalar::U4x2,
             Scalar::U1x8,
         ] {
-            let Some(index) = empty_index_or_skip(64, DenseMetric::Inner, quantization).unwrap() else {
+            let Some(index) = empty_index_if_supported(64, DenseMetric::Inner, quantization).unwrap() else {
+                skipped(&format!("built without {quantization}"));
                 continue;
             };
             let described = index.describe().unwrap();
@@ -3043,7 +3045,8 @@ mod tests {
             (DenseMetric::Hamming, Scalar::U1x8),
             (DenseMetric::Jaccard, Scalar::U1x8),
         ] {
-            let Some(index) = empty_index_or_skip(64, metric, quantization).unwrap() else {
+            let Some(index) = empty_index_if_supported(64, metric, quantization).unwrap() else {
+                skipped(&format!("built without {quantization}"));
                 continue;
             };
             let described = index.describe().unwrap();
@@ -3310,7 +3313,7 @@ mod tests {
     #[test]
     fn packed_bit_rows_cross_as_one_byte_per_eight_dimensions() {
         const DIMENSIONS: usize = 8;
-        let Some(index) = empty_index_or_skip(DIMENSIONS, DenseMetric::Hamming, Scalar::U1x8).unwrap() else {
+        let Some(index) = empty_index_if_supported(DIMENSIONS, DenseMetric::Hamming, Scalar::U1x8).unwrap() else {
             return skipped("built without u1x8");
         };
         let stored = bit_rows(&[0b0000_1111, 0b1111_0000]);
@@ -3332,7 +3335,7 @@ mod tests {
     #[test]
     fn gets_sub_byte_rows_at_their_logical_width() {
         const DIMENSIONS: usize = 16;
-        let Some(index) = empty_index_or_skip(DIMENSIONS, DenseMetric::Hamming, Scalar::U1x8).unwrap() else {
+        let Some(index) = empty_index_if_supported(DIMENSIONS, DenseMetric::Hamming, Scalar::U1x8).unwrap() else {
             return skipped("built without u1x8");
         };
         let key = Key::from(5u64);
@@ -3821,8 +3824,8 @@ mod tests {
         const DIMENSIONS: usize = 16;
         let scratch = ScratchDirectory::new("usearch-dense-reads_metadata_without_loading");
         let path = scratch.path().join("index.safegraphs");
-        if empty_index_or_skip(DIMENSIONS, DenseMetric::Euclidean, Scalar::I8).unwrap().is_none() {
-            return;
+        if empty_index_if_supported(DIMENSIONS, DenseMetric::Euclidean, Scalar::I8).unwrap().is_none() {
+            return skipped("built without i8");
         }
         let (index, _, _) = populated_index(8, DIMENSIONS, DenseMetric::Euclidean, Scalar::I8).unwrap();
         index.save(&path).unwrap();

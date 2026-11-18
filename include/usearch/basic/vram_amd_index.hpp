@@ -3475,7 +3475,7 @@ struct vram_amd_ragged_graph {
         std::size_t const host_bytes = max_of(lay_out_round_(shape).host_bytes, pinned_floor);
         if (failed(pinned.resize_uninitialized(divide_round_up(host_bytes, sizeof(scored_node_t)))))
             return status_t::bad_alloc_k;
-        lay_out_round_(shape, nullptr, nullptr, reinterpret_cast<byte_t*>(pinned.data()), &plan.mirrors_);
+        lay_out_round_(shape, nullptr, nullptr, bytes_of(pinned.data(), pinned.size()).data(), &plan.mirrors_);
         if (arena_bytes && !context.ensure_arena(arena_bytes)) return status_t::bad_alloc_k;
         return succeeded(hip_vendor_t::fill(api(), context.telemetry_.get(), 0, sizeof(vram_telemetry_block_t),
                                             context.stream()))
@@ -3971,7 +3971,7 @@ struct vram_amd_ragged_graph {
         growing_buffer<scored_node_t, hip_pinned_allocator_t>& pinned = context.results.entries_;
         if (failed(pinned.resize_uninitialized(divide_round_up(layout.host_bytes, sizeof(scored_node_t)))))
             return status_t::bad_alloc_k;
-        split.host_bytes = reinterpret_cast<byte_t*>(pinned.data());
+        split.host_bytes = bytes_of(pinned.data(), pinned.size()).data();
         split_scratch_t const carved = split_scratch_(split, parts);
         byte_t** const bases = reinterpret_cast<byte_t**>(split.host_bytes + layout.host_bases);
         u32_t* const roots = reinterpret_cast<u32_t*>(split.host_bytes + layout.host_roots);

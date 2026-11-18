@@ -66,29 +66,40 @@ consteval std::array<char, metadata_capacity_k> extension_metadata(std::string_v
     return encode_metadata({{"ARROW:extension:name", name}, {"ARROW:extension:metadata", ""}});
 }
 
-/** The next non-negative @c int32 of Arrow metadata at @p cursor, advancing it, or false. */
-static bool metadata_count_(char const*& cursor, std::size_t& count) noexcept {
-    std::int32_t signed_count = 0;
-    std::memcpy(&signed_count, cursor, sizeof(signed_count));
-    cursor += sizeof(signed_count);
-    count = static_cast<std::size_t>(signed_count);
-    return signed_count >= 0;
-}
+/** Reads Arrow metadata front to back; the C Data interface gives it no length, so its own counts
+ *  bound every read. */
+struct metadata_reader_t {
+    char const* cursor = nullptr;
+
+    /** The next @c int32 of the metadata, negative when the metadata is malformed. */
+    std::int32_t read_count() noexcept {
+        std::int32_t count = 0;
+        std::memcpy(&count, cursor, sizeof(count));
+        cursor += sizeof(count);
+        return count;
+    }
+
+    /** The next @p length bytes of the metadata. */
+    std::string_view read_text(std::int32_t length) noexcept {
+        std::string_view const text {cursor, static_cast<std::size_t>(length)};
+        cursor += length;
+        return text;
+    }
+};
 
 /** The name of the extension Arrow @p metadata tags a column with, or empty for none. */
 static std::string_view extension_of(char const* metadata) noexcept {
     if (!metadata) return {};
-    char const* cursor = metadata;
-    std::size_t pairs = 0;
-    if (!metadata_count_(cursor, pairs)) return {};
+    metadata_reader_t reader {metadata};
+    std::int32_t pairs = reader.read_count();
+    if (pairs < 0) return {};
     for (; pairs; --pairs) {
-        std::size_t key_length = 0, value_length = 0;
-        if (!metadata_count_(cursor, key_length)) return {};
-        std::string_view const key {cursor, key_length};
-        cursor += key_length;
-        if (!metadata_count_(cursor, value_length)) return {};
-        std::string_view const value {cursor, value_length};
-        cursor += value_length;
+        std::int32_t const key_length = reader.read_count();
+        if (key_length < 0) return {};
+        std::string_view const key = reader.read_text(key_length);
+        std::int32_t const value_length = reader.read_count();
+        if (value_length < 0) return {};
+        std::string_view const value = reader.read_text(value_length);
         if (key == "ARROW:extension:name") return value;
     }
     return {};

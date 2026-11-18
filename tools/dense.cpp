@@ -449,7 +449,7 @@ static bool dense_insert_setup(world_t const& world, dense_settings_t const& set
     usearch_gpu_devices(&devices);
     if (dense_failed(world, outcome, "listing GPUs")) return false;
 
-    usearch_residency_t const asked = settings.checkpoint.session.residency;
+    usearch_residency_t const asked = residencies_k[settings.checkpoint.session.residency.selected];
     session.residency = asked != usearch_residency_unknown_k
                             ? asked
                             : (devices_count ? usearch_residency_vram_k : usearch_residency_ram_k);
@@ -516,7 +516,7 @@ static bool dense_construct(world_t const& world, dense_settings_t const& settin
 
 int modality_insert(dense_verbs_t, world_t& world, int argc, char const* const* argv) {
     dense_settings_t settings;
-    settings.checkpoint.session.residency = usearch_residency_unknown_k;
+    settings.checkpoint.session.residency.selected = selected_of(residencies_k, usearch_residency_unknown_k);
     std::array<flag_t, 6> const modality_flags {{
         {"--keys", "path", "defaults to row numbers: a .u64bin or .u128bin of one key per vector row", &settings.keys},
         {"--input", "path", "an Arrow file or stream in place of a RetriEval file, or - for standard input",
@@ -796,8 +796,8 @@ int dense_get(world_t& world, int argc, char const* const* argv) {
     settings.session.devices = devices_from_environment();
     session_t session = open_session(settings.session, usearch_cpu_class_unknown_k);
     if (!session) return EXIT_FAILURE;
-    handle<dense_verbs_t> index = checkpoint_open<dense_verbs_t>(session, index_address, settings.session.residency, {},
-                                                                 steps);
+    handle<dense_verbs_t> index = checkpoint_open<dense_verbs_t>(
+        session, index_address, residencies_k[settings.session.residency.selected], {}, steps);
     if (!index) return EXIT_FAILURE;
     if (outputs == usearch_scalar_unknown_k) outputs = describe(index).metadata.quantization;
 

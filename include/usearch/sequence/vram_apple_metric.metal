@@ -23,6 +23,10 @@
  */
 #pragma once
 
+#if defined(__METAL_VERSION__)
+#include <metal_stdlib>
+#endif
+
 namespace unum::usearch::sequence {
 
 using namespace unum::usearch::utilities;
@@ -99,7 +103,6 @@ constexpr unsigned int metal_needleman_wunsch_span_bytes(unsigned int codes) {
 
 #if defined(__METAL_VERSION__)
 
-#include <metal_stdlib>
 using namespace metal;
 
 namespace unum::usearch::sequence {

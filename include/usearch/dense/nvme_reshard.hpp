@@ -1743,7 +1743,7 @@ struct [[nodiscard]] nvme_reshard_plan {
         std::array<staged_column_t, 3> columns {
             {{part.keys_begin, sizeof(key_t), keys},
              {part.values_begin, value_bytes, values},
-             {part.neighbors_begin, neighbor_bytes, reinterpret_cast<byte_t*>(neighbors)}}};
+             {part.neighbors_begin, neighbor_bytes, bytes_of(neighbors, count * connectivity_()).data()}}};
         // A part whose edges never survive reads no neighbors at all.
         std::size_t const scanned = source.kept.empty() ? 2 : 3;
         if (status_t const read = scan_rows_(*source.view, source.part, first, count,
@@ -1776,7 +1776,7 @@ struct [[nodiscard]] nvme_reshard_plan {
         // A block build writes every row's neighbors itself.
         if (succeeded(wrote) && !source.kept.empty())
             wrote = write_rows_(target, written.neighbors_begin, neighbor_bytes, target_first, count,
-                                reinterpret_cast<byte_t const*>(neighbors));
+                                bytes_of(neighbors, count * connectivity_()).data());
         return wrote;
     }
 
@@ -1825,7 +1825,8 @@ struct [[nodiscard]] nvme_reshard_plan {
                 for (; written != connectivity_(); ++written) out[written] = sentinel_k;
             }
             if (status_t const wrote = write_rows_(target, part_of_(target).neighbors_begin, neighbors_row_bytes_(),
-                                                   first + run, run_count, reinterpret_cast<byte_t const*>(staged));
+                                                   first + run, run_count,
+                                                   bytes_of(staged, run_count * connectivity_()).data());
                 failed(wrote))
                 return wrote;
         }
@@ -2057,8 +2058,7 @@ struct [[nodiscard]] nvme_reshard_plan {
     /** Reads the neighbors row of @p node of @p target into @p row. */
     status_t read_row_(target_t& target, std::size_t node, node_id_t* row) noexcept {
         std::size_t const row_bytes = neighbors_row_bytes_();
-        return target.file.read_at(part_of_(target).neighbors_begin + node * row_bytes,
-                                   bytes_span_t {reinterpret_cast<byte_t*>(row), row_bytes});
+        return target.file.read_at(part_of_(target).neighbors_begin + node * row_bytes, bytes_of(row, connectivity_()));
     }
 
     /** Sizes and places the round of target part @p target at the workspace front: as many hubs a
@@ -2291,7 +2291,7 @@ struct [[nodiscard]] nvme_reshard_plan {
         if (free_slot == connectivity) return {false, status_t::success_k};
         row[free_slot] = member;
         if (status_t const wrote = write_rows_(target, part_of_(target).neighbors_begin, neighbors_row_bytes_(), owner,
-                                               1, reinterpret_cast<byte_t const*>(row));
+                                               1, bytes_of(row, connectivity).data());
             failed(wrote))
             return {false, wrote};
         count_in_link_(member);
@@ -2650,8 +2650,7 @@ struct [[nodiscard]] nvme_reshard_plan {
             while (bound != taped_rows && slices.tape_rows[bound * tape_values] / tile_rows_ == tile) ++bound;
             std::size_t& run = tape_runs_[tile];
             if (run + (bound - first) > tile_rows_) return status_t::overflow_k;
-            bytes_view_t const taped {reinterpret_cast<byte_t const*>(slices.tape_rows + first * tape_values),
-                                      (bound - first) * tape_bytes};
+            bytes_view_t const taped = bytes_of(slices.tape_rows + first * tape_values, (bound - first) * tape_values);
             if (status_t const wrote = tape_.write_at((tile * tile_rows_ + run) * tape_bytes, taped); failed(wrote))
                 return wrote;
             run += bound - first;
@@ -2674,12 +2673,11 @@ struct [[nodiscard]] nvme_reshard_plan {
         write_slices_t const slices = write_slices_(count, carver);
         if (carver.bytes > round_spare_.size()) return status_t::bad_alloc_k;
         std::array<staged_column_t, 1> const columns {
-            {{neighbors_begin, neighbors_row_bytes_(), reinterpret_cast<byte_t*>(slices.neighbors)}}};
+            {{neighbors_begin, neighbors_row_bytes_(), bytes_of(slices.neighbors, count * connectivity).data()}}};
         if (status_t const read = scan_rows_(target.view, 0, first, count, columns, executor); failed(read))
             return read;
-        if (status_t const fetched = tape_.read_at(
-                task.position * tile_rows_ * tape_bytes,
-                bytes_span_t {reinterpret_cast<byte_t*>(slices.tape_rows), run * tape_bytes});
+        if (status_t const fetched = tape_.read_at(task.position * tile_rows_ * tape_bytes,
+                                                   bytes_of(slices.tape_rows, run * (1 + connectivity)));
             failed(fetched))
             return fetched;
         for (std::size_t taped = 0; taped != run; ++taped) {
@@ -2687,7 +2685,7 @@ struct [[nodiscard]] nvme_reshard_plan {
             std::memcpy(slices.neighbors + (row[0] - first) * connectivity, row + 1, neighbors_row_bytes_());
         }
         return write_rows_(target, neighbors_begin, neighbors_row_bytes_(), first, count,
-                           reinterpret_cast<byte_t const*>(slices.neighbors));
+                           bytes_of(slices.neighbors, count * connectivity).data());
     }
 
 #pragma endregion Rounds

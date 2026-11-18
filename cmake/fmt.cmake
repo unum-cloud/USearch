@@ -1,5 +1,5 @@
-# The pin for what only the suites, benchmarks and tools link: {fmt} for their output, as libstdc++ doesn't ship
-# `std::print` yet on our toolchains.
+# The pin for what only the suites, benchmarks, tools and the stand-in link: {fmt} for their output, as libstdc++
+# doesn't ship `std::print` yet on our toolchains.
 # `FIND_PACKAGE_ARGS` lets a system-provided {fmt} satisfy the dependency without touching the network, but only from
 # the pinned version up, since older copies predate `fmt::println` and would fail deep in the suites rather than here.
 # {fmt} turns itself into a C++20 module under Ninja with recent Clang or MSVC, which no unit here imports.

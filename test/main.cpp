@@ -99,17 +99,18 @@ static void run_device_cases() {
         registered_suite_t const* suite = nullptr;
         for (registered_suite_t const& registered : registered_suites())
             if (registered.vendor == device.vendor) suite = &registered;
-        std::string const label = fmt::format("registered_suite_t::run_cases({})", constant_of(device.vendor));
         if (suite) suite->run_cases(device);
-        else run_test_case(label.c_str(), skip_unbuilt_vendor, device.vendor);
+        else
+            run_test_case(fmt::format("registered_suite_t::run_cases({})", constant_of(device.vendor)).c_str(),
+                          skip_unbuilt_vendor, device.vendor);
     }
     // A vendor's cases that found no device of its own report as skipped rather than vanish.
     for (registered_suite_t const& registered : registered_suites())
         if (registered.vendor != gpu_vendor_t::unknown_k &&
             std::none_of(listed.begin(), listed.end(),
                          [&](gpu_device_t const& device) { return device.vendor == registered.vendor; })) {
-            std::string const label = fmt::format("registered_suite_t::run_cases({})", constant_of(registered.vendor));
-            run_test_case(label.c_str(), [] { return case_result_t::skipped(no_gpu_device_k); });
+            run_test_case(fmt::format("registered_suite_t::run_cases({})", constant_of(registered.vendor)).c_str(),
+                          [] { return case_result_t::skipped(no_gpu_device_k); });
         }
 }
 

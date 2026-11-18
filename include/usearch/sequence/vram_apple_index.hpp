@@ -304,7 +304,7 @@ struct vram_apple_kits {
         std::size_t const bytes = kit_type_::parameters_bytes(parameters);
         if (status_t const sized = host_parameters_.resize(divide_round_up(bytes, sizeof(u32_t))); failed(sized))
             return sized;
-        kit_type_::lay_out(parameters, reinterpret_cast<byte_t*>(host_parameters_.data()));
+        kit_type_::lay_out(parameters, bytes_of(host_parameters_.data(), host_parameters_.size()).data());
         if constexpr (std::is_same_v<parameters_t, std::span<u32_t const>>)
             kept_parameters_ = to_span(host_parameters_).subspan(1);
         else kept_parameters_ = parameters;
