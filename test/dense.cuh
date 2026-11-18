@@ -304,9 +304,10 @@ struct counting_device_allocator {
     std::size_t tallied_bytes_ = 0;
 
     counting_device_allocator() noexcept = default;
-    template <typename api_type_>
-    counting_device_allocator(allocation_ledger_t& ledger, api_type_ const& api, int device) noexcept
-        : virtual_memory_(api, device), ledger_(&ledger) {}
+    template <typename api_type_, typename extensions_type_>
+    counting_device_allocator(allocation_ledger_t& ledger, api_type_ const& api, extensions_type_ const& extensions,
+                              int device) noexcept
+        : virtual_memory_(api, extensions, device), ledger_(&ledger) {}
     counting_device_allocator(counting_device_allocator const& other) noexcept
         : virtual_memory_(other.virtual_memory_), ledger_(other.ledger_) {}
     template <typename other_>
@@ -330,6 +331,7 @@ struct counting_device_allocator {
     std::size_t committed_bytes() const noexcept { return virtual_memory_.committed_bytes(); }
     int device() const noexcept { return virtual_memory_.device(); }
     auto const& api() const noexcept { return virtual_memory_.api(); }
+    auto const& extensions() const noexcept { return virtual_memory_.extensions(); }
     void share_with(std::bitset<gpu_devices_capacity_k> devices) noexcept { virtual_memory_.share_with(devices); }
     bool shared_with(int device) const noexcept { return virtual_memory_.shared_with(device); }
     status_t grant(std::bitset<gpu_devices_capacity_k> devices) noexcept { return virtual_memory_.grant(devices); }

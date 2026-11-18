@@ -1349,7 +1349,7 @@ struct vram_amd_indexes {
                 for (std::size_t shard = 0; shard != plans.size(); ++shard) {
                     if (status_t const waited = plans[shard].wait(traversals[shard]); failed(waited))
                         return {{}, waited};
-                    running |= plans[shard].running();
+                    running |= plans[shard].advance();
                 }
             }
             reachability_t result;

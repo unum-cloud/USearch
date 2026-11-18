@@ -1196,7 +1196,7 @@ util::expected<std::size_t> get_entries(variant_type_& variant, usearch_key_t ke
             return {0, util::status_code_t::device_k};
         std::span<util::hip_scratch_t::traversal_context_t> const stream_traversals = util::to_writable_span(
             executor.stream(stream).memory.contexts);
-        util::hip_executor_t::traversal_context_t& context = stream_traversals[0];
+        util::hip_scratch_t::traversal_context_t& context = stream_traversals[0];
         util::byte_t* const staging = context.allocator().allocate(staging_bytes);
         util::u64_t* const host_offsets = carve<util::u64_t>(memory, count + 1);
         util::byte_t* const host_tape = carve<util::byte_t>(memory, tape_bytes);

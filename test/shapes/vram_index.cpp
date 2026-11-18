@@ -421,7 +421,10 @@ void run_shapes_vram_cases<cell_vendor_t::executor_t>(gpu_device_t const& device
 #if USEARCH_ARCH_CUDA_
     constexpr nk_capability_t ampere_k = nk_cap_cuda_k | nk_cap_ampere_k;
     constexpr nk_capability_t blackwell_k = ampere_k | nk_cap_ada_k | nk_cap_blackwell_k;
-    run_shapes_vram_class_cases<gpu_class_t::nvidia_ampere_k, ampere_k>(executor, "gpu_class_t::nvidia_ampere_k");
+    // A build without the Ampere floor is monoversioned, and compiles its one class's kits alone.
+    if constexpr (USEARCH_TARGET_NVIDIA_AMPERE)
+        run_shapes_vram_class_cases<gpu_class_t::nvidia_ampere_k, ampere_k>(executor, "gpu_class_t::nvidia_ampere_k");
+    else run_shapes_vram_class_cases<cuda_class_k, cuda_class_capabilities_k>(executor, "cuda_class_k");
     // A build that keeps no Blackwell class compiles no Blackwell shapes kits to link against.
     if constexpr (USEARCH_TARGET_NVIDIA_BLACKWELL)
         if (pick_gpu_class(device, usearch_gpu_class_unknown_k) == gpu_class_t::nvidia_blackwell_k)

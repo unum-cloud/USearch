@@ -989,12 +989,16 @@ struct vram_apple_indexes {
             return {std::move(plan), status_code_t::out_of_memory_k};
         for (vram_apple_indexes* source : sources) plan.sources_.push_back_reserved(source);
         for (vram_apple_indexes* target : targets) plan.targets_.push_back_reserved(target);
-        if (gathering) return {std::move(plan), open_gather_(plan, config, executor)};
-        // Every target answers before the gather empties a source, so a refused one moves nothing.
-        if (status_t const refused = refuses_cut_targets_(targets); failed(refused)) return {std::move(plan), refused};
-        if (status_t const gathered = gather_before_cut_(sources, config, executor); failed(gathered))
-            return {std::move(plan), gathered};
-        return {std::move(plan), open_cut_(plan, config, executor)};
+        if (!gathering) {
+            // Every target answers before the gather empties a source, so a refusal moves nothing.
+            if (status_t const refused = refuses_cut_targets_(targets); failed(refused))
+                return {std::move(plan), refused};
+            if (status_t const gathered = gather_before_cut_(sources, config, executor); failed(gathered))
+                return {std::move(plan), gathered};
+        }
+        // The aggregate moves the plan out before a later initializer runs, so it opens first.
+        status_t const opened = gathering ? open_gather_(plan, config, executor) : open_cut_(plan, config, executor);
+        return {std::move(plan), opened};
     }
 
     /** Moves @p sources into @p targets and links them in: @ref plan_reshard, then @c run and

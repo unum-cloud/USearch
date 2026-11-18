@@ -73,7 +73,8 @@ struct vram_cell<gpu_vendor_t::nvidia_k, dtype_, kernel_> {
     /** Builds the cell's index of @p geometry over @p ledger, on the stream's device. */
     std::unique_ptr<index_t> operator()(allocation_ledger_t& ledger,
                                         typename index_t::geometry_t geometry) const noexcept {
-        counting_cuda_allocator_t const allocator {ledger, stream.handle.api(), static_cast<int>(stream.ordinal)};
+        counting_cuda_allocator_t const allocator {ledger, stream.handle.api(), test::gpu_drivers().extensions.cuda,
+                                                   static_cast<int>(stream.ordinal)};
         return std::unique_ptr<index_t>(new (std::nothrow) index_t(kernel_, geometry, allocator, allocator));
     }
 
