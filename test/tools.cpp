@@ -555,6 +555,86 @@ static case_result_t test_tool_pipes(char const* binary) {
     return {};
 }
 
+/** Writes @p scalars to a RetriEval file at @p path, @p columns to a row. */
+template <typename scalar_type_>
+static void write_retrieval(std::string const& path, std::size_t columns, std::vector<scalar_type_> const& scalars) {
+    std::array<std::uint32_t, 2> const header {static_cast<std::uint32_t>(scalars.size() / columns),
+                                               static_cast<std::uint32_t>(columns)};
+    std::FILE* const file = std::fopen(path.c_str(), "wb");
+    expect_true(file && std::fwrite(header.data(), sizeof(header), 1, file) == 1 &&
+                    std::fwrite(scalars.data(), sizeof(scalar_type_), scalars.size(), file) == scalars.size() &&
+                    std::fclose(file) == 0,
+                "{}", path);
+}
+
+/** Writes a <tt>.u128bin</tt> at @p path of @p rows keys, the ones @c uuid_of names from 1000. */
+static void write_keys(std::string const& path, std::size_t rows) {
+    std::vector<std::uint64_t> integers;
+    for (std::uint64_t row = 0; row != rows; ++row) integers.insert(integers.end(), {1000 + row, 0});
+    std::array<std::uint32_t, 2> const header {static_cast<std::uint32_t>(rows), 1};
+    std::FILE* const file = std::fopen(path.c_str(), "wb");
+    expect_true(file && std::fwrite(header.data(), sizeof(header), 1, file) == 1 &&
+                    std::fwrite(integers.data(), sizeof(std::uint64_t), integers.size(), file) == integers.size() &&
+                    std::fclose(file) == 0,
+                "{}", path);
+}
+
+/** Three entries under a two-row @c --keys file are refused; under a three-row one each answers
+ *  its own key to an exact search, @p search_flags making the entries the queries. */
+static case_result_t expect_insert_keys(char const* binary, std::string const& modality, std::string const& entries,
+                                        std::string const& insert_flags, std::string const& search_flags) {
+    if (!binary) return case_result_t::skipped("needs USEARCH_BINARY");
+    scratch_directory_t const scratch;
+    std::string const stem = scratch.path("keys"), index = fmt::format("{}.safegraphs", stem);
+    std::string const two = fmt::format("{}-two.u128bin", stem), three = fmt::format("{}-three.u128bin", stem);
+    std::string const output = fmt::format("{}.arrow", stem);
+    write_keys(two, 2);
+    write_keys(three, 3);
+    std::string const insert = fmt::format("'{}' {} insert '{}' {} --save '{}' --keys ", binary, modality, entries,
+                                           insert_flags, index);
+    expect_true(std::system(fmt::format("{}'{}' > /dev/null 2>&1", insert, two).c_str()) != EXIT_SUCCESS);
+    expect_true(std::system(fmt::format("{}'{}' > /dev/null", insert, three).c_str()) == EXIT_SUCCESS);
+    expect_true(std::system(fmt::format("'{}' {} search '{}' {} --traversal scan --wanted 1 --output '{}' > /dev/null",
+                                        binary, modality, index, search_flags, output)
+                                .c_str()) == EXIT_SUCCESS);
+    arrow_matches_t searched;
+    if (expect_true(arrow_matches_read(output, searched).empty() && searched.matches.keys.size() == 3))
+        for (std::size_t entry = 0; entry != 3; ++entry)
+            expect_true(searched.matches.keys[entry] == util::uuid_of(1000 + entry), "entry {}", entry);
+    return {};
+}
+
+static case_result_t test_sequence_insert_keys(char const* binary) {
+    scratch_directory_t const scratch;
+    std::string const texts = scratch.path("texts.txt");
+    std::FILE* const file = std::fopen(texts.c_str(), "wb");
+    expect_true(file && std::fputs("AAAA\nACGT\nTTTT\n", file) >= 0 && std::fclose(file) == 0);
+    return expect_insert_keys(binary, "sequence", texts, "--metric levenshtein",
+                              fmt::format("--query-texts '{}'", texts));
+}
+
+static case_result_t test_shapes_insert_keys(char const* binary) {
+    scratch_directory_t const scratch;
+    std::string const points = scratch.path("points.fbin"), counts = scratch.path("counts.ibin");
+    write_retrieval(points, 3, std::vector<util::f32_t> {0, 0, 0, 1, 0, 0, 5, 5, 5, 5, 8, 5, 9, 0, 9, 9, 7, 16});
+    write_retrieval(counts, 1, std::vector<std::int32_t> {2, 2, 2});
+    return expect_insert_keys(binary, "shapes", points, fmt::format("--counts '{}'", counts),
+                              fmt::format("--query-points '{}' --query-counts '{}'", points, counts));
+}
+
+static case_result_t test_geospatial_insert_keys(char const* binary) {
+    scratch_directory_t const scratch;
+    std::string const observations = scratch.path("observations.f64bin");
+    constexpr util::f64_t nan_k = std::numeric_limits<util::f64_t>::quiet_NaN();
+    std::vector<util::f64_t> scalars;
+    for (util::f64_t const offset : {0.0, 0.01, 0.02})
+        scalars.insert(scalars.end(),
+                       {51.5 + offset, -0.1 - offset, nan_k, nan_k, nan_k, nan_k, nan_k, nan_k, nan_k, nan_k, nan_k});
+    write_retrieval(observations, 11, scalars);
+    return expect_insert_keys(binary, "geospatial", observations, "",
+                              fmt::format("--query-observations '{}'", observations));
+}
+
 } // namespace unum::usearch::test::abi
 
 using namespace unum::usearch;
@@ -580,5 +660,11 @@ int main(int argc, char** argv) {
     run_test_case("abi::test_choice_names_match_the_library", abi::test_choice_names_match_the_library);
     run_test_case("abi::test_arrow_pipes", abi::test_arrow_pipes);
     run_test_case("abi::test_tool_pipes", abi::test_tool_pipes, setting_text(argc, argv, "USEARCH_BINARY", "--binary"));
+    run_test_case("abi::test_sequence_insert_keys", abi::test_sequence_insert_keys,
+                  setting_text(argc, argv, "USEARCH_BINARY", "--binary"));
+    run_test_case("abi::test_shapes_insert_keys", abi::test_shapes_insert_keys,
+                  setting_text(argc, argv, "USEARCH_BINARY", "--binary"));
+    run_test_case("abi::test_geospatial_insert_keys", abi::test_geospatial_insert_keys,
+                  setting_text(argc, argv, "USEARCH_BINARY", "--binary"));
     return finish_test_run();
 }

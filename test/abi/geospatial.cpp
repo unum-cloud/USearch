@@ -156,6 +156,7 @@ static void test_geospatial_behaviors(sweep_cell_t const& cell, util::u64_t seed
                              usearch_status_unsupported_k);
     scratch_directory_t const scratch;
     std::string const stem = scratch.path("checkpoint");
+    expect_widened(index, stem + "-widened");
     expect_persistence(cell, index, points.data(), queries, recall_samples_k, geospatial_expansion_k, 0.8, stem,
                        saved_bytes_t::identical_k, 0.0);
     if (cell.residency == usearch_residency_nvme_k) return;

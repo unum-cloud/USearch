@@ -1589,8 +1589,8 @@ USEARCH_EXPORT void usearch_dense_load_ram(usearch_dense_load_ram_t* arguments) 
 USEARCH_EXPORT void usearch_dense_load_vram(usearch_dense_load_vram_t* arguments) {
     if (submitted<usearch_dense_load_vram>(arguments)) return;
     call_outcome_t outcome(*arguments);
-    load_dense_index(as_text(arguments->path), arguments->vram, 0, arguments->executor, arguments->progress,
-                     arguments->index, outcome);
+    load_dense_index(as_text(arguments->path), arguments->vram, arguments->connectivity, arguments->executor,
+                     arguments->progress, arguments->index, outcome);
 }
 
 USEARCH_EXPORT void usearch_dense_load_ram_buffer(usearch_dense_load_ram_buffer_t* arguments) {
@@ -1604,8 +1604,8 @@ USEARCH_EXPORT void usearch_dense_load_vram_buffer(usearch_dense_load_vram_buffe
     if (submitted<usearch_dense_load_vram_buffer>(arguments)) return;
     call_outcome_t outcome(*arguments);
     // A VRAM `usearch_dense_save_buffer` leaves its checkpoint on the device, where it is read.
-    load_dense_index(checkpoint_source_of(as_bytes(arguments->buffer)), arguments->vram, 0, arguments->executor,
-                     arguments->progress, arguments->index, outcome);
+    load_dense_index(checkpoint_source_of(as_bytes(arguments->buffer)), arguments->vram, arguments->connectivity,
+                     arguments->executor, arguments->progress, arguments->index, outcome);
 }
 
 USEARCH_EXPORT void usearch_dense_save(usearch_dense_save_t* arguments) {

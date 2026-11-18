@@ -79,6 +79,7 @@ pub struct usearch_shapes_load_ram_t {
     pub completion: usearch_completion_t,
     pub path: usearch_bytes_view_t,
     pub ram: usearch_ram_options_t,
+    pub connectivity: usize,
     pub values_per_key: usize,
     pub progress: usearch_progress_t,
 }
@@ -91,6 +92,7 @@ pub struct usearch_shapes_load_ram_buffer_t {
     pub completion: usearch_completion_t,
     pub buffer: usearch_bytes_view_t,
     pub ram: usearch_ram_options_t,
+    pub connectivity: usize,
     pub values_per_key: usize,
     pub progress: usearch_progress_t,
 }
@@ -103,6 +105,7 @@ pub struct usearch_shapes_load_vram_t {
     pub completion: usearch_completion_t,
     pub path: usearch_bytes_view_t,
     pub vram: usearch_vram_options_t,
+    pub connectivity: usize,
     pub values_per_key: usize,
     pub progress: usearch_progress_t,
 }
@@ -115,6 +118,7 @@ pub struct usearch_shapes_load_vram_buffer_t {
     pub completion: usearch_completion_t,
     pub buffer: usearch_bytes_view_t,
     pub vram: usearch_vram_options_t,
+    pub connectivity: usize,
     pub values_per_key: usize,
     pub progress: usearch_progress_t,
 }
@@ -1066,6 +1070,7 @@ impl ShapesIndex {
                 completion: usearch_completion_blocking_k,
                 path: path_view(config.path)?,
                 ram: ram_options(config.memory_domains, config.cpu_class_ceiling),
+                connectivity: 0,
                 values_per_key: config.values_per_key,
                 progress,
             })
@@ -1087,6 +1092,7 @@ impl ShapesIndex {
                 completion: usearch_completion_blocking_k,
                 path: path_view(config.path)?,
                 vram: vram_options(config.devices, config.gpu_class_ceiling),
+                connectivity: 0,
                 values_per_key: config.values_per_key,
                 progress,
             })
@@ -1108,6 +1114,7 @@ impl ShapesIndex {
                 completion: usearch_completion_blocking_k,
                 buffer: config.buffer.into(),
                 ram: ram_options(config.memory_domains, config.cpu_class_ceiling),
+                connectivity: 0,
                 values_per_key: config.values_per_key,
                 progress,
             })
@@ -1129,6 +1136,7 @@ impl ShapesIndex {
                 completion: usearch_completion_blocking_k,
                 buffer: config.buffer.into(),
                 vram: vram_options(config.devices, config.gpu_class_ceiling),
+                connectivity: 0,
                 values_per_key: config.values_per_key,
                 progress,
             })

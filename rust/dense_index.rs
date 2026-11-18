@@ -96,6 +96,7 @@ pub struct usearch_dense_load_vram_t {
     pub completion: usearch_completion_t,
     pub path: usearch_bytes_view_t,
     pub vram: usearch_vram_options_t,
+    pub connectivity: usize,
     pub values_per_key: usize,
     pub progress: usearch_progress_t,
 }
@@ -121,6 +122,7 @@ pub struct usearch_dense_load_vram_buffer_t {
     pub completion: usearch_completion_t,
     pub buffer: usearch_bytes_view_t,
     pub vram: usearch_vram_options_t,
+    pub connectivity: usize,
     pub values_per_key: usize,
     pub progress: usearch_progress_t,
 }
@@ -1893,6 +1895,7 @@ impl DenseIndex {
                 completion: usearch_completion_blocking_k,
                 path: path_view(config.path)?,
                 vram: vram_options(config.devices, config.gpu_class_ceiling),
+                connectivity: 0,
                 values_per_key: config.values_per_key,
                 progress,
             })
@@ -1936,6 +1939,7 @@ impl DenseIndex {
                 completion: usearch_completion_blocking_k,
                 buffer: config.buffer.into(),
                 vram: vram_options(config.devices, config.gpu_class_ceiling),
+                connectivity: 0,
                 values_per_key: config.values_per_key,
                 progress,
             })

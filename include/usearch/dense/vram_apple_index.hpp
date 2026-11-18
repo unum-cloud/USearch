@@ -503,6 +503,10 @@ struct vram_apple_index {
         bytes_view_t vectors;
         bytes_view_t neighbors;
         bytes_view_t norms;
+
+        /** Neighbor IDs per row of @c neighbors, at most the index's connectivity, a load padding
+         *  each row with empty slots for a refine to fill; zero reads the index's own. */
+        std::size_t connectivity = 0;
     };
 
 #pragma endregion Measures
@@ -2060,8 +2064,8 @@ struct vram_apple_index {
          *
          *  @par Statuses:
          *  - @c uninitialized_k The plan is empty or spent.
-         *  - @c config_mismatch_k The task is empty, @p columns cannot hold its rows, or the
-         *    rebased IDs pass the plan.
+         *  - @c config_mismatch_k The task is empty, @p columns cannot hold its rows or hold rows
+         *    wider than the index's, or the rebased IDs pass the plan.
          */
         template <typename key_of_type_>
         status_t load(task_t const& task, columns_view_t columns, iota_view<node_id_t> source_range,
@@ -2071,10 +2075,14 @@ struct vram_apple_index {
             if (range.empty()) return status_code_t::config_mismatch_k;
             std::size_t const scalar_row_bytes = index_->packed_row_bytes();
             std::size_t const connectivity = index_->connectivity();
+            std::size_t const column_connectivity = columns.connectivity ? columns.connectivity : connectivity;
+            if (column_connectivity > connectivity)
+                return {status_code_t::config_mismatch_k, "Neighbor rows wider than the index"};
             std::size_t const neighbors_row_bytes = connectivity * sizeof(node_id_t);
+            std::size_t const column_row_bytes = column_connectivity * sizeof(node_id_t);
             std::size_t const first = task.source_nodes.first;
             bytes_view_t const vectors_rows = flat_rows(columns.vectors, first, range.size(), scalar_row_bytes);
-            bytes_view_t const neighbors_rows = flat_rows(columns.neighbors, first, range.size(), neighbors_row_bytes);
+            bytes_view_t const neighbors_rows = flat_rows(columns.neighbors, first, range.size(), column_row_bytes);
             bytes_view_t const norms_rows = flat_rows(columns.norms, first, range.size(), sizeof(norms_t));
             if (vectors_rows.empty() || neighbors_rows.empty() || norms_rows.empty() != columns.norms.empty())
                 return status_code_t::config_mismatch_k;
@@ -2092,9 +2100,14 @@ struct vram_apple_index {
                             norms_rows.size());
                 fu::standard_atomic_ref<std::size_t> {covered_norms}.store_add(range.size(), std::memory_order_acq_rel);
             }
+            // The rebase reads whole rows, so a widened row's tail must hold the all-ones sentinel.
+            for (std::size_t row = 0; row != range.size(); ++row) {
+                byte_t* const neighbor_row = index_->neighbors_matrix_.host + (range.first + row) * neighbors_row_bytes;
+                std::memcpy(neighbor_row, neighbors_rows.data() + row * column_row_bytes, column_row_bytes);
+                std::memset(neighbor_row + column_row_bytes, 0xFF, neighbors_row_bytes - column_row_bytes);
+            }
             std::span<node_id_t> const copied_rows {index_->neighbor_rows_() + range.first * connectivity,
                                                     range.size() * connectivity};
-            std::memcpy(copied_rows.data(), neighbors_rows.data(), neighbors_rows.size());
             rebase_neighbors(copied_rows, source_range, shift, node_id_unknown_k);
             compact_neighbors(copied_rows, connectivity, range.first, node_id_unknown_k);
             for (node_id_t node = range.first; node != range.bound; ++node)
@@ -2227,16 +2240,18 @@ struct vram_apple_index {
      *
      *  @par Statuses:
      *  - @c uninitialized_k The index never grew.
-     *  - @c config_mismatch_k The @p columns are shorter than @p rows or hold norms the index
-     *    does not store, or @c status keeps it.
+     *  - @c config_mismatch_k The @p columns are shorter than @p rows, hold neighbor rows wider
+     *    than the index's or norms it does not store, or @c status keeps it.
      *  - @c contended_k Another batch or load is in flight.
      *  - @c overflow_k The rows pass the ceiling.
      *  - @c cancelled_k or @c unsupported_layout_k The index keeps it, as @c status says.
      */
     status_t load(columns_view_t columns, keys_view_t keys, std::size_t rows,
                   iota_view<node_id_t> source_range) noexcept {
+        std::size_t const column_connectivity = columns.connectivity ? columns.connectivity : connectivity();
         if (keys.size() < rows || columns.vectors.size() < rows * packed_row_bytes() ||
-            columns.neighbors.size() < rows * connectivity() * sizeof(node_id_t) ||
+            column_connectivity > connectivity() ||
+            columns.neighbors.size() < rows * column_connectivity * sizeof(node_id_t) ||
             (!columns.norms.empty() && (!stores_norms() || columns.norms.size() < rows * sizeof(norms_t))))
             return status_code_t::config_mismatch_k;
         auto [plan, status] = plan_load(rows);

@@ -38,7 +38,7 @@
  */
 #pragma once
 
-#include <cmath>   // `std::fabs`, `std::log2` - the score tolerance, the ranking discounts
+#include <cmath>   // `std::fabs`, `std::log2`, `std::sqrt` - the score tolerance, the ranking discounts, rooted truths
 #include <cstddef> // `std::size_t`
 #include <cstdint> // `std::int32_t`, `std::uint32_t`, `std::uint64_t`
 #include <cstdio>  // `std::remove`, `stdout`, `std::fopen` - the round-tripped checkpoints, the terminal probe, io.stat
@@ -49,7 +49,7 @@
 #include <unistd.h> // `isatty`
 #endif
 
-#include <algorithm>        // `std::equal`, `std::minmax_element`, `std::nth_element`, `std::sort`
+#include <algorithm>        // `std::equal`, `std::find`, `std::minmax_element`, `std::nth_element`, `std::sort`
 #include <array>            // `std::array`
 #include <bit>              // `std::bit_cast` - keys between the C struct and `uuid128_t`
 #include <charconv>         // `std::from_chars`
@@ -63,6 +63,7 @@
 #include <span>             // `std::span`
 #include <string_view>      // `std::string_view`
 #include <system_error>     // `std::errc`
+#include <type_traits>      // `std::is_same_v` - the metadata a geometry carries
 #include <utility>          // `std::exchange`, `std::move`
 
 #include <fmt/format.h>
@@ -867,11 +868,19 @@ struct dense_verbs_t {
         usearch_dense_save_buffer(&arguments);
     }
     static void load_ram_buffer(index_t* index, usearch_executor_t executor, usearch_bytes_view_t buffer,
-                                usearch_ram_options_t ram, geometry_t const&, usearch_outcome_t* outcome) noexcept {
+                                usearch_ram_options_t ram, geometry_t const& geometry,
+                                usearch_outcome_t* outcome) noexcept {
         usearch_dense_load_ram_buffer_t arguments {};
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome, arguments.buffer = buffer;
-        arguments.ram = ram;
+        arguments.ram = ram, arguments.connectivity = geometry.connectivity;
         usearch_dense_load_ram_buffer(&arguments);
+    }
+    static void metadata_read(usearch_executor_t executor, usearch_bytes_view_t path, metadata_t* metadata,
+                              usearch_outcome_t* outcome) noexcept {
+        usearch_dense_metadata_read_t arguments {};
+        arguments.executor = executor, arguments.outcome = outcome, arguments.path = path;
+        arguments.metadata = metadata;
+        usearch_dense_metadata_read(&arguments);
     }
     static void metadata_read_buffer(usearch_executor_t executor, usearch_bytes_view_t buffer, metadata_t* metadata,
                                      usearch_outcome_t* outcome) noexcept {
@@ -885,10 +894,11 @@ struct dense_verbs_t {
         return usearch_dense_metric_from_name(name, metric);
     }
     static void load_vram(index_t* index, usearch_executor_t executor, usearch_bytes_view_t path,
-                          usearch_vram_options_t vram, geometry_t const&, usearch_outcome_t* outcome) noexcept {
+                          usearch_vram_options_t vram, geometry_t const& geometry,
+                          usearch_outcome_t* outcome) noexcept {
         usearch_dense_load_vram_t arguments {};
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome, arguments.path = path;
-        arguments.vram = vram;
+        arguments.vram = vram, arguments.connectivity = geometry.connectivity;
         usearch_dense_load_vram(&arguments);
     }
     static void view_nvme(index_t* index, usearch_executor_t executor, usearch_bytes_view_t path,
@@ -1109,6 +1119,7 @@ struct sequence_verbs_t {
         usearch_sequence_load_ram_t arguments {};
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome, arguments.path = path;
         arguments.ram = ram, arguments.weights = geometry.weights;
+        arguments.connectivity = geometry.metadata.connectivity;
         usearch_sequence_load_ram(&arguments);
     }
     static void save_buffer(index_t index, usearch_executor_t executor, usearch_arena_t arena,
@@ -1124,7 +1135,15 @@ struct sequence_verbs_t {
         usearch_sequence_load_ram_buffer_t arguments {};
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome, arguments.buffer = buffer;
         arguments.ram = ram, arguments.weights = geometry.weights;
+        arguments.connectivity = geometry.metadata.connectivity;
         usearch_sequence_load_ram_buffer(&arguments);
+    }
+    static void metadata_read(usearch_executor_t executor, usearch_bytes_view_t path, metadata_t* metadata,
+                              usearch_outcome_t* outcome) noexcept {
+        usearch_sequence_metadata_read_t arguments {};
+        arguments.executor = executor, arguments.outcome = outcome, arguments.path = path;
+        arguments.metadata = metadata;
+        usearch_sequence_metadata_read(&arguments);
     }
     static void metadata_read_buffer(usearch_executor_t executor, usearch_bytes_view_t buffer, metadata_t* metadata,
                                      usearch_outcome_t* outcome) noexcept {
@@ -1143,6 +1162,7 @@ struct sequence_verbs_t {
         usearch_sequence_load_vram_t arguments {};
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome, arguments.path = path;
         arguments.vram = vram, arguments.weights = geometry.weights;
+        arguments.connectivity = geometry.metadata.connectivity;
         usearch_sequence_load_vram(&arguments);
     }
     static void view_nvme(index_t* index, usearch_executor_t executor, usearch_bytes_view_t path,
@@ -1305,10 +1325,10 @@ struct shapes_verbs_t {
         usearch_shapes_save(&arguments);
     }
     static void load_ram(index_t* index, usearch_executor_t executor, usearch_bytes_view_t path,
-                         usearch_ram_options_t ram, geometry_t const&, usearch_outcome_t* outcome) noexcept {
+                         usearch_ram_options_t ram, geometry_t const& geometry, usearch_outcome_t* outcome) noexcept {
         usearch_shapes_load_ram_t arguments {};
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome, arguments.path = path;
-        arguments.ram = ram;
+        arguments.ram = ram, arguments.connectivity = geometry.connectivity;
         usearch_shapes_load_ram(&arguments);
     }
     static void save_buffer(index_t index, usearch_executor_t executor, usearch_arena_t arena,
@@ -1319,11 +1339,19 @@ struct shapes_verbs_t {
         usearch_shapes_save_buffer(&arguments);
     }
     static void load_ram_buffer(index_t* index, usearch_executor_t executor, usearch_bytes_view_t buffer,
-                                usearch_ram_options_t ram, geometry_t const&, usearch_outcome_t* outcome) noexcept {
+                                usearch_ram_options_t ram, geometry_t const& geometry,
+                                usearch_outcome_t* outcome) noexcept {
         usearch_shapes_load_ram_buffer_t arguments {};
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome, arguments.buffer = buffer;
-        arguments.ram = ram;
+        arguments.ram = ram, arguments.connectivity = geometry.connectivity;
         usearch_shapes_load_ram_buffer(&arguments);
+    }
+    static void metadata_read(usearch_executor_t executor, usearch_bytes_view_t path, metadata_t* metadata,
+                              usearch_outcome_t* outcome) noexcept {
+        usearch_shapes_metadata_read_t arguments {};
+        arguments.executor = executor, arguments.outcome = outcome, arguments.path = path;
+        arguments.metadata = metadata;
+        usearch_shapes_metadata_read(&arguments);
     }
     static void metadata_read_buffer(usearch_executor_t executor, usearch_bytes_view_t buffer, metadata_t* metadata,
                                      usearch_outcome_t* outcome) noexcept {
@@ -1337,10 +1365,11 @@ struct shapes_verbs_t {
         return usearch_shapes_metric_from_name(name, metric);
     }
     static void load_vram(index_t* index, usearch_executor_t executor, usearch_bytes_view_t path,
-                          usearch_vram_options_t vram, geometry_t const&, usearch_outcome_t* outcome) noexcept {
+                          usearch_vram_options_t vram, geometry_t const& geometry,
+                          usearch_outcome_t* outcome) noexcept {
         usearch_shapes_load_vram_t arguments {};
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome, arguments.path = path;
-        arguments.vram = vram;
+        arguments.vram = vram, arguments.connectivity = geometry.connectivity;
         usearch_shapes_load_vram(&arguments);
     }
     static void view_nvme(index_t* index, usearch_executor_t executor, usearch_bytes_view_t path,
@@ -1526,6 +1555,7 @@ struct geospatial_verbs_t {
         usearch_geospatial_load_ram_t arguments {};
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome, arguments.path = path;
         arguments.ram = ram, arguments.terrain = geometry.terrain;
+        arguments.connectivity = geometry.metadata.connectivity;
         usearch_geospatial_load_ram(&arguments);
     }
     static void save_buffer(index_t index, usearch_executor_t executor, usearch_arena_t arena,
@@ -1541,7 +1571,15 @@ struct geospatial_verbs_t {
         usearch_geospatial_load_ram_buffer_t arguments {};
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome, arguments.buffer = buffer;
         arguments.ram = ram, arguments.terrain = geometry.terrain;
+        arguments.connectivity = geometry.metadata.connectivity;
         usearch_geospatial_load_ram_buffer(&arguments);
+    }
+    static void metadata_read(usearch_executor_t executor, usearch_bytes_view_t path, metadata_t* metadata,
+                              usearch_outcome_t* outcome) noexcept {
+        usearch_geospatial_metadata_read_t arguments {};
+        arguments.executor = executor, arguments.outcome = outcome, arguments.path = path;
+        arguments.metadata = metadata;
+        usearch_geospatial_metadata_read(&arguments);
     }
     static void metadata_read_buffer(usearch_executor_t executor, usearch_bytes_view_t buffer, metadata_t* metadata,
                                      usearch_outcome_t* outcome) noexcept {
@@ -1556,6 +1594,7 @@ struct geospatial_verbs_t {
         usearch_geospatial_load_vram_t arguments {};
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome, arguments.path = path;
         arguments.vram = vram, arguments.terrain = geometry.terrain;
+        arguments.connectivity = geometry.metadata.connectivity;
         usearch_geospatial_load_vram(&arguments);
     }
     static void view_nvme(index_t* index, usearch_executor_t executor, usearch_bytes_view_t path,
@@ -1815,6 +1854,34 @@ handle<verbs_type_> reopen(session_t& session, std::string_view path, typename v
     return opened;
 }
 
+/** The checkpoint metadata @p geometry carries: the geometry itself where a modality opens with
+ *  nothing more. */
+template <typename verbs_type_>
+typename verbs_type_::metadata_t& metadata_of(typename verbs_type_::geometry_t& geometry) noexcept {
+    if constexpr (std::is_same_v<typename verbs_type_::geometry_t, typename verbs_type_::metadata_t>) return geometry;
+    else return geometry.metadata;
+}
+
+template <typename verbs_type_>
+typename verbs_type_::metadata_t const& metadata_of(typename verbs_type_::geometry_t const& geometry) noexcept {
+    if constexpr (std::is_same_v<typename verbs_type_::geometry_t, typename verbs_type_::metadata_t>) return geometry;
+    else return geometry.metadata;
+}
+
+/** Whether the checkpoint at @p path recalls the metric and connectivity @p geometry names, a zero
+ *  connectivity taking any; prints what failed to read. */
+template <typename verbs_type_>
+bool checkpoint_matches_geometry(std::string_view path, typename verbs_type_::geometry_t const& geometry) {
+    typename verbs_type_::metadata_t recalled {};
+    usearch_outcome_t outcome {};
+    verbs_type_::metadata_read(nullptr, bytes_view(path), &recalled, &outcome);
+    if (report_failure(outcome, "Reading {}", path)) return false;
+    typename verbs_type_::metadata_t const& named = metadata_of<verbs_type_>(geometry);
+    bool same_metric = true;
+    if constexpr (requires { named.metric; }) same_metric = recalled.metric == named.metric;
+    return same_metric && (!named.connectivity || recalled.connectivity == named.connectivity);
+}
+
 /** Saves @p index under @p path and reopens it in @p residency on the same session, as @ref reopen
  *  does, first placing an NVMe save's parts on the session's places when it names any. Prints what
  *  failed and answers an empty handle. */
@@ -2012,6 +2079,182 @@ inline byte_tape_t lines_of(util::bytes_view_t text) noexcept {
     return lines;
 }
 
+/** The proteins' classes in BLOSUM62's order: 20 amino acids, then B, Z, X and the stop. */
+inline constexpr std::string_view protein_letters_k = "ARNDCQEGHILKMFPSTWYVBZX*";
+
+/** BLOSUM62 over @ref protein_letters_k, as NCBI publishes it. */
+inline constexpr std::int8_t blosum62_k[24][24] = {
+    {4, -1, -2, -2, 0, -1, -1, 0, -2, -1, -1, -1, -1, -2, -1, 1, 0, -3, -2, 0, -2, -1, 0, -4},
+    {-1, 5, 0, -2, -3, 1, 0, -2, 0, -3, -2, 2, -1, -3, -2, -1, -1, -3, -2, -3, -1, 0, -1, -4},
+    {-2, 0, 6, 1, -3, 0, 0, 0, 1, -3, -3, 0, -2, -3, -2, 1, 0, -4, -2, -3, 3, 0, -1, -4},
+    {-2, -2, 1, 6, -3, 0, 2, -1, -1, -3, -4, -1, -3, -3, -1, 0, -1, -4, -3, -3, 4, 1, -1, -4},
+    {0, -3, -3, -3, 9, -3, -4, -3, -3, -1, -1, -3, -1, -2, -3, -1, -1, -2, -2, -1, -3, -3, -2, -4},
+    {-1, 1, 0, 0, -3, 5, 2, -2, 0, -3, -2, 1, 0, -3, -1, 0, -1, -2, -1, -2, 0, 3, -1, -4},
+    {-1, 0, 0, 2, -4, 2, 5, -2, 0, -3, -3, 1, -2, -3, -1, 0, -1, -3, -2, -2, 1, 4, -1, -4},
+    {0, -2, 0, -1, -3, -2, -2, 6, -2, -4, -4, -2, -3, -3, -2, 0, -2, -2, -3, -3, -1, -2, -1, -4},
+    {-2, 0, 1, -1, -3, 0, 0, -2, 8, -3, -3, -1, -2, -1, -2, -1, -2, -2, 2, -3, 0, 0, -1, -4},
+    {-1, -3, -3, -3, -1, -3, -3, -4, -3, 4, 2, -3, 1, 0, -3, -2, -1, -3, -1, 3, -3, -3, -1, -4},
+    {-1, -2, -3, -4, -1, -2, -3, -4, -3, 2, 4, -2, 2, 0, -3, -2, -1, -2, -1, 1, -4, -3, -1, -4},
+    {-1, 2, 0, -1, -3, 1, 1, -2, -1, -3, -2, 5, -1, -3, -1, 0, -1, -3, -2, -2, 0, 1, -1, -4},
+    {-1, -1, -2, -3, -1, 0, -2, -3, -2, 1, 2, -1, 5, 0, -2, -1, -1, -1, -1, 1, -3, -1, -1, -4},
+    {-2, -3, -3, -3, -2, -3, -3, -3, -1, 0, 0, -3, 0, 6, -4, -2, -2, 1, 3, -1, -3, -3, -1, -4},
+    {-1, -2, -2, -1, -3, -1, -1, -2, -2, -3, -3, -1, -2, -4, 7, -1, -1, -4, -3, -2, -2, -1, -2, -4},
+    {1, -1, 1, 0, -1, 0, 0, 0, -1, -2, -2, 0, -1, -2, -1, 4, 1, -3, -2, -2, 0, 0, 0, -4},
+    {0, -1, 0, -1, -1, -1, -1, -2, -2, -1, -1, -1, -1, -2, -1, 1, 5, -2, -2, 0, -1, -1, 0, -4},
+    {-3, -3, -4, -4, -2, -2, -3, -2, -2, -3, -2, -3, -1, 1, -4, -3, -2, 11, 2, -3, -4, -3, -2, -4},
+    {-2, -2, -2, -3, -2, -1, -2, -3, 2, -1, -1, -2, -1, 3, -3, -2, -2, 2, 7, -1, -3, -2, -1, -4},
+    {0, -3, -3, -3, -1, -2, -2, -3, -3, 3, 1, -2, 1, -1, -2, -2, 0, -3, -1, 4, -3, -2, -1, -4},
+    {-2, -1, 3, 4, -3, 0, 1, -1, 0, -3, -4, 0, -3, -3, -2, 0, -1, -4, -3, -3, 4, 1, -1, -4},
+    {-1, 0, 0, 1, -3, 3, 4, -2, 0, -3, -3, 1, -1, -3, -1, 0, -1, -3, -2, -2, 1, 4, -1, -4},
+    {0, -1, -1, -1, -2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -2, 0, 0, -2, -1, -1, -1, -1, -1, -4},
+    {-4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, 1},
+};
+
+/** The classes text folds into: a-z, the space, any digit, and anything else. */
+inline constexpr std::size_t text_classes_k = 29;
+
+/** Whether an alphabet scores under its own costs or under unit costs over its classes. */
+enum class alphabet_costs_t : std::uint8_t { own_k, uniform_k };
+
+/** An alphabet's byte-to-class fold, and the weights its Needleman-Wunsch index takes. */
+struct alphabet_t {
+    std::array<std::uint8_t, 256> codes {};
+    std::array<std::int8_t, 256 * 256> similarities {};
+    std::size_t classes = 0;
+    std::int8_t gap = 0;
+
+    /** The weights the C interface reads, borrowing the similarities. */
+    usearch_sequence_weights_t weights() const noexcept { return {similarities.data(), gap}; }
+};
+
+/** The alphabet @p name spells, under its own costs or, when @p costs is uniform, unit costs
+ *  over its classes; no classes for a name it does not know. */
+inline alphabet_t alphabet_of(std::string_view name, alphabet_costs_t costs) {
+    alphabet_t alphabet;
+    if (name == "dna") {
+        alphabet.classes = 4, alphabet.gap = 2;
+        alphabet.codes.fill(3);
+        for (char const letter : {'A', 'C', 'G', 'T'}) {
+            std::uint8_t const code = static_cast<std::uint8_t>(std::string_view {"ACGT"}.find(letter));
+            alphabet.codes[static_cast<std::uint8_t>(letter)] = code;
+            alphabet.codes[static_cast<std::uint8_t>(letter | 0x20)] = code;
+        }
+        // Purines take even codes and pyrimidines odd, so a transition keeps half the self-score.
+        for (std::size_t first = 0; first != 4; ++first)
+            for (std::size_t second = 0; second != 4; ++second)
+                alphabet.similarities[first * 256 + second] = first == second ? 2 : (first & 1) == (second & 1) ? 1 : 0;
+    }
+    else if (name == "protein") {
+        alphabet.classes = protein_letters_k.size(), alphabet.gap = 7;
+        alphabet.codes.fill(static_cast<std::uint8_t>(protein_letters_k.find('X')));
+        for (std::size_t code = 0; code != protein_letters_k.size(); ++code) {
+            char const letter = protein_letters_k[code];
+            alphabet.codes[static_cast<std::uint8_t>(letter)] = static_cast<std::uint8_t>(code);
+            if (letter >= 'A' && letter <= 'Z')
+                alphabet.codes[static_cast<std::uint8_t>(letter | 0x20)] = static_cast<std::uint8_t>(code);
+        }
+        for (std::size_t first = 0; first != protein_letters_k.size(); ++first)
+            for (std::size_t second = 0; second != protein_letters_k.size(); ++second)
+                alphabet.similarities[first * 256 + second] = blosum62_k[first][second];
+    }
+    else if (name == "text") {
+        alphabet.classes = text_classes_k, alphabet.gap = 1;
+        alphabet.codes.fill(text_classes_k - 1);
+        for (char letter = 'a'; letter <= 'z'; ++letter)
+            alphabet.codes[static_cast<std::uint8_t>(letter)] = static_cast<std::uint8_t>(letter - 'a');
+        alphabet.codes[' '] = 26;
+        for (char digit = '0'; digit <= '9'; ++digit) alphabet.codes[static_cast<std::uint8_t>(digit)] = 27;
+        for (std::size_t code = 0; code != text_classes_k; ++code) alphabet.similarities[code * 256 + code] = 1;
+    }
+    if (costs == alphabet_costs_t::uniform_k) {
+        alphabet.gap = 1;
+        std::memset(alphabet.similarities.data(), 0, alphabet.similarities.size());
+        for (std::size_t code = 0; code != alphabet.classes; ++code) alphabet.similarities[code * 256 + code] = 1;
+    }
+    return alphabet;
+}
+
+/** Replaces the costs of @p alphabet with the file at @p path, 256x256 int8 similarities and
+ *  an int8 gap cost; false after printing why it cannot. */
+inline bool read_weights(std::string_view path, alphabet_t& alphabet) {
+    auto [file, status] = util::mapped_file_t::read(path);
+    if (failed(status) || file.view().size() != alphabet.similarities.size() + 1) {
+        fmt::println(stderr, "--weights=\"{}\" must hold 65,537 bytes: 256x256 int8 similarities and an int8 gap cost",
+                     path);
+        return false;
+    }
+    std::memcpy(alphabet.similarities.data(), file.view().data(), alphabet.similarities.size());
+    std::memcpy(&alphabet.gap, file.view().data() + alphabet.similarities.size(), 1);
+    return true;
+}
+
+/** Packs every entry of @p tape as its codes under @p alphabet, one packed row per entry, in the
+ *  layout of @c usearch_sequence_weights_t: two bits a code up to four classes and five past,
+ *  little-endian behind one byte counting the slots the last bytes leave unused. */
+inline byte_tape_t packed_codes_of(byte_tape_t const& tape, alphabet_t const& alphabet) {
+    std::size_t const code_bits = alphabet.classes <= 4 ? 2 : 5;
+    auto const bytes_of_row = [&](std::size_t row) {
+        return 1 + ((tape.offsets[row + 1] - tape.offsets[row]) * code_bits + 7) / 8;
+    };
+    byte_tape_t packed;
+    std::size_t total = 0;
+    for (std::size_t row = 0; row != tape.size(); ++row) total += bytes_of_row(row);
+    if (packed.bytes.resize(total) != sz::status_t::success_k || st::failed(packed.offsets.push_back(0)))
+        exit_out_of_memory("the packed codes");
+    std::memset(packed.bytes.data(), 0, total);
+    for (std::size_t row = 0; row != tape.size(); ++row) {
+        std::string_view const entry = std::string_view {tape.bytes}.substr(tape.offsets[row],
+                                                                            tape.offsets[row + 1] - tape.offsets[row]);
+        std::size_t const first = packed.offsets.back(), bytes = bytes_of_row(row);
+        char* const sequence = packed.bytes.data() + first;
+        sequence[0] = static_cast<char>((bytes - 1) * 8 / code_bits - entry.size());
+        for (std::size_t index = 0; index != entry.size(); ++index) {
+            std::size_t const bit = index * code_bits, byte = 1 + (bit >> 3);
+            unsigned const shifted = unsigned {alphabet.codes[static_cast<std::uint8_t>(entry[index])]} << (bit & 7u);
+            sequence[byte] |= static_cast<char>(shifted & 0xFFu);
+            if (shifted > 0xFFu) sequence[byte + 1] |= static_cast<char>(shifted >> 8);
+        }
+        if (st::failed(packed.offsets.push_back(first + bytes))) exit_out_of_memory("the packed codes");
+    }
+    return packed;
+}
+
+/** Bytes a key takes in the <tt>.u64bin</tt> or <tt>.u128bin</tt> at @p path, zero for any other name. */
+inline std::size_t key_width_of(std::string_view path) noexcept {
+    return path.ends_with(".u64bin") ? 8 : path.ends_with(".u128bin") ? 16 : 0;
+}
+
+/** The key the little-endian integer of @p width bytes at @p integer names, filling a key's low
+ *  bytes as row numbers do. */
+inline usearch_key_t key_of_integer(usearch_byte_t const* integer, std::size_t width) noexcept {
+    usearch_key_t key {};
+    for (std::size_t index = 0; index != width; ++index) key.bytes[sizeof(key.bytes) - 1 - index] = integer[index];
+    return key;
+}
+
+/** Reads the keys of the <tt>.u64bin</tt> or <tt>.u128bin</tt> at @p path, one little-endian integer
+ *  for each of @p rows rows after its two counters, as <tt>--keys</tt> reads them; none after
+ *  printing why it cannot. */
+inline std::optional<st::vector<usearch_key_t>> read_keys(std::string_view path, std::size_t rows) {
+    std::size_t const width = key_width_of(path);
+    if (!width) return fmt::println(stderr, "--keys={} is neither .u64bin nor .u128bin", path), std::nullopt;
+    auto [file, status] = util::mapped_file_t::read(path);
+    std::array<std::uint32_t, 2> counters {};
+    if (failed(status) || file.view().size() < sizeof(counters))
+        return fmt::println(stderr, "cannot read {}", path), std::nullopt;
+    std::memcpy(counters.data(), file.view().data(), sizeof(counters));
+    if (counters[0] != rows || counters[1] != 1 || file.view().size() < sizeof(counters) + rows * width)
+        return fmt::println(stderr, "{} holds {} rows of {} columns, not one key for each of {} rows", path,
+                            counters[0], counters[1], rows),
+               std::nullopt;
+    st::vector<usearch_key_t> keys;
+    if (st::failed(keys.resize(rows))) exit_out_of_memory("the keys");
+    for (std::size_t row = 0; row != rows; ++row)
+        keys[row] = key_of_integer(
+            reinterpret_cast<usearch_byte_t const*>(file.view().data()) + sizeof(counters) + row * width, width);
+    return keys;
+}
+
 /** Point clouds mapped from two RetriEval files, every cloud's points end to end and the points per
  *  cloud, and each cloud's first point, as a tape takes them. */
 struct point_clouds_t {
@@ -2165,10 +2408,14 @@ usearch_outcome_t scan_oracle(handle<verbs_type_>& index, typename verbs_type_::
     return search_queries(index, queries, judged, batch, wanted, 0, usearch_traversal_scan_k, stats, oracle);
 }
 
+/** How a ground-truth file stores its distances, against the ones the index reports. */
+enum class truth_distances_t { reported_k, squared_k };
+
 /** Fills @p oracle with the truth the first @p queries rows of the ground-truth file @p truth list:
  *  each row's neighbor offsets keyed by @ref key_of_offset under @p seed, at the @c f32 distances
- *  RetriEval and BigANN store past the rows; false for a file storing none. */
-inline bool truth_oracle(util::u64_t seed, mapped_rows_t const& truth, std::size_t queries,
+ *  RetriEval and BigANN store past the rows, rooted when @p stored says they hold the square of
+ *  the Euclidean distance the index reports; false for a file storing none. */
+inline bool truth_oracle(util::u64_t seed, mapped_rows_t const& truth, std::size_t queries, truth_distances_t stored,
                          copied_matches_t& oracle) noexcept {
     std::size_t const depth = truth.columns(), listed = queries * depth;
     util::bytes_view_t const distances = truth.trailing();
@@ -2183,7 +2430,7 @@ inline bool truth_oracle(util::u64_t seed, mapped_rows_t const& truth, std::size
         std::memcpy(&offset, offsets + match * sizeof(offset), sizeof(offset));
         std::memcpy(&distance, distances.data() + match * sizeof(distance), sizeof(distance));
         oracle.keys[match] = std::bit_cast<util::uuid128_t>(key_of_offset(seed, offset));
-        oracle.scores[match] = distance;
+        oracle.scores[match] = stored == truth_distances_t::squared_k ? std::sqrt(distance) : distance;
     }
     return true;
 }
@@ -2206,11 +2453,11 @@ inline st::vector<std::size_t> match_offsets(copied_matches_t const& copied) noe
  *  @brief Calls @p visit with each judged query's <tt>(expected, has_nearest, hits)</tt>.
  *
  *  Those are how many matches the exact @p oracle expects among the first @p k, whether any of
- *  the first @p k matches @p found holds lies within the true nearest distance, and whether each
- *  lies within the true k-th distance.
+ *  the first @p k matches @p found holds is the true nearest key or lies within its distance, and
+ *  whether each is among the true first @p k keys or lies within the true k-th distance.
  *
- *  Both sides hold exact distances, so a match tied with a true neighbor counts wherever the
- *  oracle broke the tie.
+ *  A key match counts whatever distance a re-packed graph reports, and a distance match counts a
+ *  tie with a true neighbor wherever the oracle broke it.
  */
 template <typename visit_type_>
 void judge_queries(std::size_t k, copied_matches_t const& found, copied_matches_t const& oracle, visit_type_&& visit) {
@@ -2222,12 +2469,15 @@ void judge_queries(std::size_t k, copied_matches_t const& found, copied_matches_
         std::size_t const truth_first = truth_offsets[query], found_first = found_offsets[query];
         std::size_t const ranked = util::min_of(k, found.counts[query]);
         double const nearest = oracle.scores[truth_first], farthest = oracle.scores[truth_first + expected - 1];
+        std::span<util::uuid128_t const> const true_top {oracle.keys.data() + truth_first, expected};
         bool has_nearest = false;
         hits.clear();
         if (st::failed(hits.resize(ranked, false))) exit_out_of_memory("the hits");
         for (std::size_t rank = 0; rank != ranked; ++rank) {
-            hits[rank] = within(found.scores[found_first + rank], farthest);
-            has_nearest = has_nearest || within(found.scores[found_first + rank], nearest);
+            util::uuid128_t const& key = found.keys[found_first + rank];
+            usearch_distance_t const score = found.scores[found_first + rank];
+            hits[rank] = within(score, farthest) || std::find(true_top.begin(), true_top.end(), key) != true_top.end();
+            has_nearest = has_nearest || within(score, nearest) || key == true_top.front();
         }
         visit(expected, has_nearest, hits);
     }
@@ -2609,7 +2859,7 @@ struct search_bench_settings_t {
     count_t queries {.value = 100000};
 
     /** Queries the exact scan judges. */
-    count_t oracle_queries {.value = 256};
+    count_t oracle_queries {.value = 256, .minimum = 0};
 
     /** Entries or queries per insert or search call. */
     count_t batch {.value = 65536};
@@ -2626,7 +2876,8 @@ inline std::array<flag_t, 9> search_bench_flags(search_bench_settings_t& search)
         {"--max-base-entries", "count", "cap on ingested entries; every entry the queries leave by default",
          &search.max_base_entries},
         {"--queries", "count", "entries held out of the file's tail as queries; 100,000 by default", &search.queries},
-        {"--oracle-queries", "count", "queries the exact scan judges; 256 by default", &search.oracle_queries},
+        {"--oracle-queries", "count", "queries the exact scan judges, none for 0; 256 by default",
+         &search.oracle_queries},
         {"--batch", "entries", "entries per insert or search call; 65536 by default", &search.batch},
     }};
 }
@@ -2652,38 +2903,62 @@ int run_search_bench(settings_t const& settings, search_bench_settings_t const& 
                      swept_type_&& on_swept = {}) {
     session_t session = open_session(settings, cpu_class_ceilings_k[settings.cpu_class_ceiling.selected]);
     if (!session) return 1;
-    handle<verbs_type_> index = open_index<verbs_type_>(session, geometry, settings.shards.value);
-    if (!index) return 1;
     fmt::println("- Base entries: {} · queries: {} · top-k: {}", base_count, queries_count, search.top_k.value);
-
-    usearch_traversal_stats_t built {};
-    std::chrono::steady_clock::time_point const build_start = std::chrono::steady_clock::now();
-    if (report_failure(
-            insert_entries(index, entries, base_count, 0, search.batch.value, search.expansion_add.value, built),
-            "Inserting"))
-        return 1;
-    double const build_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - build_start).count();
-    fmt::println("- Build: {} entries in {:.2f} s · {:.0f}/s · {:.0f} distances per entry", base_count, build_seconds,
-                 static_cast<double>(base_count) / build_seconds,
-                 static_cast<double>(built.computed_distances) / static_cast<double>(base_count));
-    print_fill(index);
-
     sz::string_t served_path = formatted("{}", checkpoint);
-    if (served_path.empty() && residencies_k[settings.residency.selected] == usearch_residency_nvme_k) {
-        sz::string_t const name = formatted("usearch-bench-{}.safegraphs", verbs_type_::name_k);
-        served_path = formatted("{}", (std::filesystem::temp_directory_path() / std::string_view {name}).string());
+    // A saved checkpoint reopens as is, so a RAM run can judge a graph built where no scan serves.
+    bool const reused = !checkpoint.empty() && std::filesystem::exists(served_path.c_str());
+    if (reused && !checkpoint_matches_geometry<verbs_type_>(checkpoint, geometry)) {
+        fmt::println(stderr, "{} was saved under another metric or connectivity", checkpoint);
+        return 1;
     }
-    if (!served_path.empty()) {
-        index.geometry = served;
-        index = save_and_reopen(std::move(index), served_path, residencies_k[settings.residency.selected]);
-        if (!index) return 1;
-        fmt::println("- Reopened {} as {}", served_path, residency_names_k[settings.residency.selected]);
+    handle<verbs_type_> index = reused ? reopen<verbs_type_>(session, checkpoint, served,
+                                                             residencies_k[settings.residency.selected],
+                                                             settings.shards.value)
+                                       : open_index<verbs_type_>(session, geometry, settings.shards.value);
+    if (!index) return 1;
+    if (reused)
+        fmt::println("- Reused {} as {}, nothing built", checkpoint, residency_names_k[settings.residency.selected]);
+    else {
+        usearch_traversal_stats_t built {};
+        std::chrono::steady_clock::time_point const build_start = std::chrono::steady_clock::now();
+        std::size_t reported_millions = 0;
+        // One line per million entries, so a long build's rate reads early.
+        auto const report_build = [&](std::size_t inserted) {
+            if (inserted / 1000000 == reported_millions) return;
+            reported_millions = inserted / 1000000;
+            double const seconds =
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - build_start).count();
+            fmt::println("  build: {} / {} · {:.0f}/s", inserted, base_count, static_cast<double>(inserted) / seconds);
+            std::fflush(stdout);
+        };
+        if (report_failure(insert_entries(index, entries, base_count, 0, search.batch.value, search.expansion_add.value,
+                                          built, report_build),
+                           "Inserting"))
+            return 1;
+        double const build_seconds =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - build_start).count();
+        fmt::println("- Build: {} entries in {:.2f} s · {:.0f}/s · {:.0f} distances per entry", base_count,
+                     build_seconds, static_cast<double>(base_count) / build_seconds,
+                     static_cast<double>(built.computed_distances) / static_cast<double>(base_count));
+        print_fill(index);
+
+        if (served_path.empty() && residencies_k[settings.residency.selected] == usearch_residency_nvme_k) {
+            sz::string_t const name = formatted("usearch-bench-{}.safegraphs", verbs_type_::name_k);
+            served_path = formatted("{}", (std::filesystem::temp_directory_path() / std::string_view {name}).string());
+        }
+        if (!served_path.empty()) {
+            index.geometry = served;
+            index = save_and_reopen(std::move(index), served_path, residencies_k[settings.residency.selected]);
+            if (!index) return 1;
+            fmt::println("- Reopened {} as {}", served_path, residency_names_k[settings.residency.selected]);
+        }
     }
 
     copied_matches_t oracle;
     std::size_t const judged = util::min_of(search.oracle_queries.value, queries_count);
     std::chrono::steady_clock::time_point const scan_start = std::chrono::steady_clock::now();
-    if (report_failure(scan_oracle(index, queries, judged, search.top_k.value, search.batch.value, oracle), "Scanning"))
+    if (judged &&
+        report_failure(scan_oracle(index, queries, judged, search.top_k.value, search.batch.value, oracle), "Scanning"))
         return 1;
     fmt::println("- Exact scan: {} queries in {:.2f} s", judged,
                  std::chrono::duration<double>(std::chrono::steady_clock::now() - scan_start).count());

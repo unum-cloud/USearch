@@ -52,7 +52,9 @@ int modality_insert(geospatial_verbs_t, world_t& world, int argc, char const* co
             usearch_geospatial_observation_t const* const observations = geospatial_open_observations(path, file);
             if (!observations) return std::nullopt;
             geospatial_geometry_t const geometry {{settings.connectivity.value}, {}};
-            return checkpoint_entries<geospatial_verbs_t> {observations, file.rows(), geometry};
+            std::optional<st::vector<usearch_key_t>> keys = checkpoint_read_keys(settings, file.rows());
+            if (!keys) return std::nullopt;
+            return checkpoint_entries<geospatial_verbs_t> {observations, file.rows(), geometry, std::move(*keys)};
         });
 }
 

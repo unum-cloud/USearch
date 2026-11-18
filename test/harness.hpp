@@ -34,6 +34,7 @@
 #include <filesystem>      // `std::filesystem::temp_directory_path` - the scratch directories
 #include <functional>      // `std::invoke` - the cases
 #include <limits>          // `std::numeric_limits` - the unbounded allocation budget
+#include <map>             // `std::map` - the links each entry holds
 #include <optional>        // `std::optional` - a yielded key's minted offset
 #include <random>          // `std::random_device` - a drawn seed, a scratch directory's name
 #include <regex>           // `std::regex` - the filter
@@ -1820,6 +1821,140 @@ void expect_buffer_round_trip(handle<verbs_type_>& index, typename verbs_type_::
     typename verbs_type_::description_t const original = describe(index), restored = describe(reloaded);
     expect_true(restored.size == original.size && restored.shards_count == original.shards_count);
     expect_walk_recall(reloaded, queries, count, expansion, floor);
+}
+
+/** The offsets each entry of @p index links to, sorted, under the entry's own offset, as a cursor
+ *  over the whole index reads them. */
+template <typename verbs_type_>
+std::map<util::u64_t, std::vector<util::u64_t>> links_by_offset(handle<verbs_type_>& index) {
+    std::map<util::u64_t, std::vector<util::u64_t>> rows;
+    usearch_outcome_t outcome {};
+    typename verbs_type_::cursor_t cursor = nullptr;
+    verbs_type_::cursor_init(index.get(), index.executor(), std::span<usearch_key_t const> {}, &cursor, &outcome);
+    if (!expect_success(outcome) || !cursor) return rows;
+    std::size_t written = 0;
+    while (true) {
+        usearch_keys_view_t keys {};
+        usearch_keys_tape_view_t links {};
+        verbs_type_::cursor_next(index.get(), index.executor(), index.arena(), cursor, cell_batch_k, &keys, &links,
+                                 &written, &outcome);
+        expect_success(outcome);
+        if (outcome.status != usearch_status_success_k || !written) break;
+        std::vector<usearch_key_t> batch(written);
+        std::vector<std::size_t> offsets(written + 1);
+        expect_true(download(batch.data(), keys.data, written * sizeof(usearch_key_t)));
+        expect_true(download(offsets.data(), links.offsets, offsets.size() * sizeof(std::size_t)));
+        std::vector<usearch_key_t> linked(offsets.back());
+        expect_true(download(linked.data(), links.keys, linked.size() * sizeof(usearch_key_t)));
+        for (std::size_t entry = 0; entry != written; ++entry) {
+            std::optional<util::u64_t> const offset = offset_of_key(index.session->seed, batch[entry]);
+            if (!expect_true(offset.has_value())) continue;
+            std::vector<util::u64_t>& row = rows[*offset];
+            for (std::size_t link = offsets[entry]; link != offsets[entry + 1]; ++link)
+                row.push_back(offset_of_key(index.session->seed, linked[link]).value_or(~util::u64_t {}));
+            std::sort(row.begin(), row.end());
+        }
+    }
+    verbs_type_::cursor_free(cursor);
+    return rows;
+}
+
+/** How many entries of @p reloaded hold other links than the same entry of @p original, or are
+ *  missing from one of them. */
+inline std::size_t rows_that_differ(std::map<util::u64_t, std::vector<util::u64_t>> const& original,
+                                    std::map<util::u64_t, std::vector<util::u64_t>> const& reloaded) {
+    std::size_t differing = 0;
+    for (auto const& [offset, row] : original) {
+        auto const found = reloaded.find(offset);
+        differing += found == reloaded.end() || found->second != row;
+    }
+    return differing + (reloaded.size() > original.size() ? reloaded.size() - original.size() : 0);
+}
+
+/** Widening: a checkpoint of @p index saved under @p stem , stored at some degree, loads into RAM
+ *  at twice it with every entry's links kept and the rest of its row empty, and one refinement
+ *  then fills more; at half of it the load is refused as @c config_mismatch. Where the session
+ *  has GPUs, a VRAM load at twice it saves and loads back into RAM with the same links, and
+ *  NVIDIA refuses an odd degree. */
+template <typename verbs_type_>
+void expect_widened(handle<verbs_type_>& index, std::string const& stem) {
+    session_t& session = *index.session;
+    sz::string_t const path = formatted("{}.safegraphs", stem);
+    usearch_outcome_t outcome {};
+    verbs_type_::save(index.get(), index.executor(), bytes_view(path), &outcome);
+    if (!expect_success(outcome)) return;
+    typename verbs_type_::metadata_t stored {};
+    verbs_type_::metadata_read(session.executor, bytes_view(path), &stored, &outcome);
+    if (!expect_success(outcome) || !expect_true(stored.connectivity > 1)) return;
+    std::size_t const parts = describe(index).shards_count;
+    std::size_t const widened_degree = 2 * stored.connectivity;
+    std::map<util::u64_t, std::vector<util::u64_t>> const original = links_by_offset(index);
+
+    st::vector<std::int32_t> placement;
+    auto const load_at = [&](std::size_t connectivity, usearch_residency_t residency, sz::string_t const& from,
+                             handle<verbs_type_>& loaded) {
+        typename verbs_type_::geometry_t geometry = index.geometry;
+        metadata_of<verbs_type_>(geometry).connectivity = connectivity;
+        typename verbs_type_::index_t opened = nullptr;
+        usearch_outcome_t loading {};
+        if (residency == usearch_residency_ram_k)
+            verbs_type_::load_ram(&opened, session.executor_for(residency), bytes_view(from),
+                                  session.ram_options(0, placement), geometry, &loading);
+        else
+            verbs_type_::load_vram(&opened, session.executor, bytes_view(from), session.vram_options(parts, placement),
+                                   geometry, &loading);
+        loaded = {opened, session, residency, geometry};
+        return loading;
+    };
+
+    handle<verbs_type_> widened;
+    if (expect_success(load_at(widened_degree, usearch_residency_ram_k, path, widened)) && widened) {
+        std::map<util::u64_t, std::vector<util::u64_t>> const kept = links_by_offset(widened);
+        std::size_t const differing = rows_that_differ(original, kept);
+        expect_true(differing == 0, "{} of {} rows changed or grew past their stored links on load_ram at {}",
+                    differing, original.size(), widened_degree);
+        std::size_t linked_before = 0, linked_after = 0;
+        for (auto const& [offset, row] : kept) linked_before += row.size();
+        usearch_refine_report_t report {};
+        verbs_type_::refine(widened.get(), widened.executor(), &report, &outcome);
+        expect_success(outcome);
+        for (auto const& [offset, row] : links_by_offset(widened)) linked_after += row.size();
+        expect_true(linked_after > linked_before, "refine kept {} links of {} at degree {}", linked_after,
+                    linked_before, widened_degree);
+    }
+
+    handle<verbs_type_> narrowed;
+    expect_status(load_at(stored.connectivity / 2, usearch_residency_ram_k, path, narrowed),
+                  usearch_status_config_mismatch_k);
+    expect_true(!narrowed, "load_ram at {} of a degree {} checkpoint returned an index", stored.connectivity / 2,
+                stored.connectivity);
+
+    if (!session.devices.empty()) {
+        st::vector<usearch_gpu_device_t> const listed = listed_devices();
+        bool const nvidia = listed[session.devices[0]].vendor == usearch_gpu_vendor_nvidia_k;
+        usearch_status_t const wanted = nvidia && !std::has_single_bit(widened_degree)
+                                            ? usearch_status_config_mismatch_k
+                                            : usearch_status_success_k;
+        handle<verbs_type_> on_device;
+        expect_status(load_at(widened_degree, usearch_residency_vram_k, path, on_device), wanted);
+        if (wanted == usearch_status_success_k && on_device) {
+            sz::string_t const resaved = formatted("{}-vram.safegraphs", stem);
+            verbs_type_::save(on_device.get(), on_device.executor(), bytes_view(resaved), &outcome);
+            handle<verbs_type_> returned;
+            if (expect_success(outcome) && expect_success(load_at(0, usearch_residency_ram_k, resaved, returned)) &&
+                returned) {
+                std::size_t const differing = rows_that_differ(original, links_by_offset(returned));
+                expect_true(differing == 0, "{} of {} rows changed through load_vram at {} and save", differing,
+                            original.size(), widened_degree);
+            }
+        }
+        if (nvidia) {
+            handle<verbs_type_> odd;
+            expect_status(load_at(widened_degree + 1, usearch_residency_vram_k, path, odd),
+                          usearch_status_config_mismatch_k);
+        }
+    }
+    for (sz::string_t const& file : files_starting_with(stem)) std::remove(file.c_str());
 }
 
 /** Every metric kind the modality spells reads back by its name, and "unknown" is refused with

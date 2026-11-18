@@ -743,6 +743,10 @@ struct vram_shard_core {
 
         /** The norms column, one @c norms_t per node, or empty to derive them from the vectors. */
         bytes_view_t norms;
+
+        /** Neighbor IDs per row of @c neighbors, at most the index's connectivity, a load padding
+         *  each row with empty slots for a refine to fill; zero reads the index's own. */
+        std::size_t connectivity = 0;
     };
 
     /** Bytes this index occupies - the committed device storage, the published-row count among
@@ -2642,11 +2646,12 @@ struct vram_shard_core {
          *      into the host's.
          *
          *  The vectors go into the fragment-padded matrix rows, whose fresh tails arrive zeroed,
-         *  and their norms where the columns hold them, then the neighbors, which
-         *  @c launch_rebase_links_ folds on the plan's stream, every ID inside @p source_range onto
-         *  the appended range and every other onto the sentinel. Columns stay alive until
-         *  @c finish, whose one wait covers every copy. A sharded plan drives it one part's slice
-         *  at a time, its task naming the rows in that part's row and ID spaces.
+         *  and their norms where the columns hold them, then the neighbors, narrower rows padded
+         *  with the sentinel, which @c launch_rebase_links_ folds on the plan's stream, every ID
+         *  inside @p source_range onto the appended range and every other onto the sentinel.
+         *  Columns stay alive until @c finish, whose one wait covers every copy. A sharded plan
+         *  drives it one part's slice at a time, its task naming the rows in the row and ID spaces
+         *  of that part.
          *
          *  @param[in] task The task to fill; its source nodes address @p columns.
          *  @param[in] columns The rows' columns, one part's under a sharded plan.
@@ -2655,8 +2660,8 @@ struct vram_shard_core {
          *
          *  @par Statuses:
          *  - @c uninitialized_k The plan is empty or spent.
-         *  - @c config_mismatch_k The task is empty, @p columns cannot hold its rows, or the
-         *    rebased IDs pass the plan.
+         *  - @c config_mismatch_k The task is empty, @p columns cannot hold its rows or hold rows
+         *    wider than the index's, or the rebased IDs pass the plan.
          *  - @c io_k A read into a staging slot ended short, which never restarts on the host.
          */
         template <typename key_of_type_>
@@ -2668,10 +2673,16 @@ struct vram_shard_core {
             iota_view<node_id_t> const range = task.index_nodes;
             if (range.empty()) return {status_code_t::config_mismatch_k, "Task covers no rows"};
             std::size_t const scalar_row_bytes = index_->packed_row_bytes();
-            std::size_t const neighbors_row_bytes = index_->connectivity() * sizeof(node_id_t);
+            std::size_t const connectivity = index_->connectivity();
+            std::size_t const column_connectivity = columns.connectivity ? columns.connectivity : connectivity;
+            if (column_connectivity > connectivity)
+                return {status_code_t::config_mismatch_k, "Neighbor rows wider than the index"};
+            std::size_t const neighbors_row_bytes = connectivity * sizeof(node_id_t);
+            std::size_t const column_row_bytes = column_connectivity * sizeof(node_id_t);
             std::size_t const first = task.source_nodes.first;
             bytes_view_t vectors_rows = flat_rows(columns.vectors, first, range.size(), scalar_row_bytes);
-            bytes_view_t neighbors_rows = flat_rows(columns.neighbors, first, range.size(), neighbors_row_bytes);
+            bytes_view_t neighbors_rows = flat_rows(columns.neighbors, first, range.size(), column_row_bytes);
+            byte_t* const neighbors_to = index_->neighbors_matrix_.base() + range.first * neighbors_row_bytes;
             bytes_view_t norms_rows = flat_rows(columns.norms, first, range.size(), sizeof(norms_t));
             if (vectors_rows.empty() || neighbors_rows.empty() || norms_rows.empty() != columns.norms.empty())
                 return {status_code_t::config_mismatch_k, "Task rows do not fit the columns"};
@@ -2696,9 +2707,12 @@ struct vram_shard_core {
                 (normed &&
                  failed(vendor_t::copy(index_->api(), index_->norms_column_.base() + range.first * sizeof(norms_t),
                                        norms_rows.data(), norms_rows.size(), stream))) ||
-                failed(vendor_t::copy(index_->api(),
-                                      index_->neighbors_matrix_.base() + range.first * neighbors_row_bytes,
-                                      neighbors_rows.data(), neighbors_rows.size(), stream)) ||
+                // The rebase reads whole rows, so a widened tail must hold the all-ones sentinel.
+                (column_row_bytes != neighbors_row_bytes &&
+                 failed(
+                     vendor_t::fill(index_->api(), neighbors_to, 0xFF, range.size() * neighbors_row_bytes, stream))) ||
+                failed(vendor_t::copy_2d(index_->api(), neighbors_to, neighbors_row_bytes, neighbors_rows.data(),
+                                         column_row_bytes, column_row_bytes, range.size(), stream)) ||
                 failed(index_->launch_rebase_links_(*kernels_, range, source_range, shift, stream)) ||
                 failed(drained_[slot].record(stream)))
                 return index_->fail_(status_code_t::device_k);
@@ -2904,8 +2918,8 @@ struct vram_shard_core {
      *
      *  @par Statuses:
      *  - @c uninitialized_k The index never grew, or @ref status keeps it.
-     *  - @c config_mismatch_k The @p columns or @p keys are shorter than @p rows, refused before a
-     *    row is claimed, or @ref status keeps it.
+     *  - @c config_mismatch_k The @p columns or @p keys are shorter than @p rows, or the neighbor
+     *    rows wider than the index's, refused before a row is claimed, or @ref status keeps it.
      *  - @c overflow_k The rows pass the ceiling or the reserved range, or @ref status keeps it.
      *  - @c contended_k A batch or load is in flight.
      *  - @c cancelled_k, @c unsupported_k or @c unsupported_layout_k The index keeps it, as @ref
@@ -2913,8 +2927,10 @@ struct vram_shard_core {
      */
     status_t load(columns_view_t columns, keys_view_t keys, std::size_t rows, iota_view<node_id_t> source_range,
                   typename executor_t::stream_t const& stream) noexcept {
+        std::size_t const column_connectivity = columns.connectivity ? columns.connectivity : connectivity();
         if (keys.size() < rows || columns.vectors.size() < rows * packed_row_bytes() ||
-            columns.neighbors.size() < rows * connectivity() * sizeof(node_id_t) ||
+            column_connectivity > connectivity() ||
+            columns.neighbors.size() < rows * column_connectivity * sizeof(node_id_t) ||
             (!columns.norms.empty() && (!stores_norms() || columns.norms.size() < rows * sizeof(norms_t))))
             return status_code_t::config_mismatch_k;
         auto [plan, status] = plan_load(rows, stream);

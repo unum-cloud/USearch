@@ -272,7 +272,10 @@ int bench_dense_index_search(int argc, char const* const* argv) {
         auto [truth, truth_status] = mapped_rows_t::open(search.query_neighbors);
         if (failed(truth_status) || truth.rows() < queries_count)
             return fmt::println(stderr, "--query-neighbors=\"{}\" holds no row per query", search.query_neighbors), 1;
-        if (!truth_oracle(settings.seed, truth, queries_count, oracle))
+        truth_distances_t const distances = geometry.metric == usearch_dense_metric_euclidean_k
+                                                ? truth_distances_t::squared_k
+                                                : truth_distances_t::reported_k;
+        if (!truth_oracle(settings.seed, truth, queries_count, distances, oracle))
             return fmt::println(stderr, "--query-neighbors=\"{}\" stores no distances past its neighbors",
                                 search.query_neighbors),
                    1;

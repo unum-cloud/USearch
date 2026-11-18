@@ -251,6 +251,7 @@ static void test_dense_behaviors(sweep_cell_t const& cell, util::u64_t seed) {
     expect_buffer_round_trip(index, rows, recall_samples_k, dense_expansion_k, 0.9, usearch_status_success_k);
     scratch_directory_t const scratch;
     std::string const stem = scratch.path("checkpoint");
+    expect_widened(index, stem + "-widened");
     expect_persistence(cell, index, rows, rows, recall_samples_k, dense_expansion_k, 0.9, stem,
                        saved_bytes_t::identical_k, 0.0);
     if (cell.residency == usearch_residency_nvme_k) return;

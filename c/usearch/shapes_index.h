@@ -347,6 +347,10 @@ typedef struct usearch_shapes_load_ram_t {
     /** The memory domains to place the parts on. */
     usearch_ram_options_t ram;
 
+    /** Neighbor IDs per node, at least the checkpoint's, whose wider rows keep the stored neighbors
+     *  and leave the rest empty for a refine to fill; zero keeps the checkpoint's. */
+    size_t connectivity;
+
     /** Upper bound on entries sharing one key, which no checkpoint records; zero is unbounded. */
     size_t values_per_key;
 
@@ -371,8 +375,8 @@ typedef struct usearch_shapes_load_ram_t {
  *  - @c usearch_status_unsupported_k A checkpoint storing points other than @c f16 or @c f32, or a
  *    @c cpu_class_ceiling below every compiled class this CPU runs.
  *  - @c usearch_status_uninitialized_k The executor holds no pool workers.
- *  - @c usearch_status_config_mismatch_k The checkpoint's columns differ from the shards' in
- *    dtype, shape or key width.
+ *  - @c usearch_status_config_mismatch_k A @c connectivity narrower than the checkpoint's, or the
+ *    checkpoint's columns differing from the shards' in dtype, shape or key width.
  *  - @c usearch_status_device_k The executor is not a RAM executor.
  *  - @c usearch_status_contended_k Another call holds the executor, or its pool runs another
  *    dispatch.
@@ -401,6 +405,9 @@ typedef struct usearch_shapes_load_ram_buffer_t {
     /** The memory domains to place the parts on. */
     usearch_ram_options_t ram;
 
+    /** Neighbor IDs per node, at least the checkpoint's, as @c usearch_shapes_load_ram takes it. */
+    size_t connectivity;
+
     /** Upper bound on entries sharing one key, which no checkpoint records; zero is unbounded. */
     size_t values_per_key;
 
@@ -423,8 +430,8 @@ typedef struct usearch_shapes_load_ram_buffer_t {
  *  - @c usearch_status_unsupported_k A checkpoint storing points other than @c f16 or @c f32, or a
  *    @c cpu_class_ceiling below every compiled class this CPU runs.
  *  - @c usearch_status_uninitialized_k The executor holds no pool workers.
- *  - @c usearch_status_config_mismatch_k The checkpoint's columns differ from the shards' in
- *    dtype, shape or key width.
+ *  - @c usearch_status_config_mismatch_k A @c connectivity narrower than the checkpoint's, or the
+ *    checkpoint's columns differing from the shards' in dtype, shape or key width.
  *  - @c usearch_status_device_k The executor is not a RAM executor.
  *  - @c usearch_status_contended_k Another call holds the executor, or its pool runs another
  *    dispatch.
@@ -453,6 +460,10 @@ typedef struct usearch_shapes_load_vram_t {
     /** The devices to place the parts on. */
     usearch_vram_options_t vram;
 
+    /** Neighbor IDs per node, at least the checkpoint's, whose wider rows keep the stored neighbors
+     *  and leave the rest empty for a refine to fill; zero keeps the checkpoint's. */
+    size_t connectivity;
+
     /** Upper bound on entries sharing one key, which no checkpoint records; zero is unbounded. */
     size_t values_per_key;
 
@@ -473,9 +484,9 @@ typedef struct usearch_shapes_load_vram_t {
  *  - @c usearch_status_unsupported_k A checkpoint of a kind other than Chamfer or Hausdorff or
  *    storing points other than @c f16 or @c f32, a @c values_per_key bound, devices that load no
  *    class under @c gpu_class_ceiling, or @c f32 points on Apple GPUs, short of the f32 contract.
- *  - @c usearch_status_config_mismatch_k Devices of two classes, the executor driving no stream on
- *    some shard's device, or the checkpoint's columns differing from the shards' in dtype, shape
- *    or key width.
+ *  - @c usearch_status_config_mismatch_k Devices of two classes, a @c connectivity narrower than
+ *    the checkpoint's or not a power of two, the executor driving no stream on some shard's
+ *    device, or the checkpoint's columns differing from the shards' in dtype, shape or key width.
  *  - @c usearch_status_device_k An ordinal past the listing, devices this build holds no kernels
  *    for, a build without GPU kernels, or an executor that is not a VRAM executor.
  *  - @c usearch_status_contended_k Another call holds the executor.
@@ -505,6 +516,9 @@ typedef struct usearch_shapes_load_vram_buffer_t {
     /** The devices to place the parts on. */
     usearch_vram_options_t vram;
 
+    /** Neighbor IDs per node, at least the checkpoint's, as @c usearch_shapes_load_ram takes it. */
+    size_t connectivity;
+
     /** Upper bound on entries sharing one key, which no checkpoint records; zero is unbounded. */
     size_t values_per_key;
 
@@ -525,9 +539,9 @@ typedef struct usearch_shapes_load_vram_buffer_t {
  *  - @c usearch_status_unsupported_k A @c buffer in device memory, a checkpoint of a kind other
  *    than Chamfer or Hausdorff or storing points other than @c f16 or @c f32, a @c values_per_key
  *    bound, devices that load no class under @c gpu_class_ceiling, or @c f32 points on Apple GPUs.
- *  - @c usearch_status_config_mismatch_k Devices of two classes, the executor driving no stream on
- *    some shard's device, or the checkpoint's columns differing from the shards' in dtype, shape
- *    or key width.
+ *  - @c usearch_status_config_mismatch_k Devices of two classes, a @c connectivity narrower than
+ *    the checkpoint's or not a power of two, the executor driving no stream on some shard's
+ *    device, or the checkpoint's columns differing from the shards' in dtype, shape or key width.
  *  - @c usearch_status_device_k An ordinal past the listing, devices this build holds no kernels
  *    for, a build without GPU kernels, or an executor that is not a VRAM executor.
  *  - @c usearch_status_contended_k Another call holds the executor.

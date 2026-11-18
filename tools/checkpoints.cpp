@@ -13,7 +13,7 @@
 #include <cstdio>  // `stderr`
 #include <cstdlib> // `EXIT_SUCCESS`, `EXIT_FAILURE`
 
-#include <algorithm>   // `std::count_if`, `std::max_element`, `std::min`, `std::ranges::equal`
+#include <algorithm>   // `std::find`, `std::max_element`, `std::min`, `std::ranges::equal`
 #include <array>       // `std::array`
 #include <memory>      // `std::unique_ptr` - the metadata executor, freed on every return
 #include <span>        // `std::span`
@@ -132,6 +132,18 @@ int checkpoints_metadata(world_t& world, int argc, char const* const* argv) {
     std::string_view const metric = header.metric.view();
     fmt::println("{}: {} nodes in {} parts, metric \"{}\", {} keys", address, header.nodes, header.parts, metric,
                  dtype_name(header.key_dtype));
+    // Counting links in fixed rows means scanning every slot for sentinels, so they report a width.
+    if (header.connectivity) fmt::println("{} slots per entry, fixed rows padded with sentinels", header.connectivity);
+    else {
+        auto const [graph, graph_status] = piped ? util::safegraphs_read_index_metadata(bytes_view_t {piped_bytes})
+                                                 : util::safegraphs_read_index_metadata(address);
+        if (util::failed(graph_status)) {
+            fmt::println(stderr, "{} holds neighbors columns that do not parse", address);
+            return EXIT_FAILURE;
+        }
+        fmt::println("{:.2f} links per entry over ragged rows",
+                     graph.nodes ? static_cast<double>(graph.neighbors) / static_cast<double>(graph.nodes) : 0.0);
+    }
 
     usearch_outcome_t outcome {};
     usearch_executor_t executor = nullptr;
@@ -292,15 +304,19 @@ int checkpoints_import(world_t& world, int argc, char const* const* argv) {
     return EXIT_SUCCESS;
 }
 
-/** Copies the distances of a query's matches into @p kept, past the one holding the query's own key
- *  at distance zero, which is the query finding itself; true when it dropped that one. */
+/** Copies the keys and distances of a query's matches into @p kept_keys and @p kept_distances, past
+ *  the one holding the query's own key at distance zero, which is the query finding itself; true
+ *  when it dropped that one. */
 static bool recall_keep(util::uuid128_t const& query, std::span<util::uuid128_t const> keys,
-                        std::span<usearch_distance_t const> distances, st::vector<usearch_distance_t>& kept) noexcept {
-    kept.clear();
+                        std::span<usearch_distance_t const> distances, st::vector<util::uuid128_t>& kept_keys,
+                        st::vector<usearch_distance_t>& kept_distances) noexcept {
+    kept_keys.clear(), kept_distances.clear();
     bool dropped = false;
     for (std::size_t match = 0; match != keys.size(); ++match) {
         if (!dropped && keys[match] == query && distances[match] == 0) dropped = true;
-        else if (st::failed(kept.push_back(usearch_distance_t {distances[match]}))) exit_out_of_memory("the distances");
+        else if (st::failed(kept_keys.push_back(util::uuid128_t {keys[match]})) ||
+                 st::failed(kept_distances.push_back(usearch_distance_t {distances[match]})))
+            exit_out_of_memory("the matches");
     }
     return dropped;
 }
@@ -337,6 +353,7 @@ int checkpoints_recall(world_t& world, int argc, char const* const* argv) {
     st::vector<std::size_t> const truth_offsets = match_offsets(truth.matches),
                                   run_offsets = match_offsets(run.matches);
     st::vector<usearch_distance_t> true_distances, run_distances;
+    st::vector<util::uuid128_t> true_keys, found_keys;
     std::array<double, counts_t::capacity_k> recalled {};
     std::size_t own_keys = 0;
     std::span<util::uuid128_t const> const truth_keys {truth.matches.keys}, run_keys {run.matches.keys};
@@ -345,9 +362,9 @@ int checkpoints_recall(world_t& world, int argc, char const* const* argv) {
         std::size_t const truth_first = truth_offsets[query], truth_count = truth.matches.counts[query];
         std::size_t const run_first = run_offsets[query], run_count = run.matches.counts[query];
         own_keys += recall_keep(truth.queries[query], truth_keys.subspan(truth_first, truth_count),
-                                truth_scores.subspan(truth_first, truth_count), true_distances);
+                                truth_scores.subspan(truth_first, truth_count), true_keys, true_distances);
         recall_keep(run.queries[query], run_keys.subspan(run_first, run_count),
-                    run_scores.subspan(run_first, run_count), run_distances);
+                    run_scores.subspan(run_first, run_count), found_keys, run_distances);
         if (true_distances.size() < pool) {
             fmt::println(stderr, "{} holds {} matches past query {}'s own key, fewer than the {} wanted",
                          positionals[0], true_distances.size(), query, pool);
@@ -355,12 +372,14 @@ int checkpoints_recall(world_t& world, int argc, char const* const* argv) {
         }
         if (st::failed(run_distances.resize(util::min_of(pool, run_distances.size()))))
             exit_out_of_memory("the distances");
-        // A match within the depth's true distance counts, so ties at the cut count either way.
+        // A match counts by key among the true top or within the true distance, so ties count.
         for (std::size_t index = 0; index != depths.size(); ++index) {
             usearch_distance_t const bound = true_distances[depths[index] - 1];
-            std::size_t const within_bound = std::count_if(
-                run_distances.begin(), run_distances.end(),
-                [&](usearch_distance_t found) { return within(found, bound); });
+            std::span<util::uuid128_t const> const true_top {true_keys.data(), depths[index]};
+            std::size_t within_bound = 0;
+            for (std::size_t match = 0; match != run_distances.size(); ++match)
+                within_bound += within(run_distances[match], bound) ||
+                                std::find(true_top.begin(), true_top.end(), found_keys[match]) != true_top.end();
             recalled[index] += static_cast<double>(std::min(within_bound, depths[index])) /
                                static_cast<double>(depths[index]);
         }

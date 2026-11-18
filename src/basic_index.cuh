@@ -354,6 +354,9 @@ void basic_load_ram(arguments_type_* arguments, checkpoint_type_ checkpoint) noe
     typename handle_t::traits_t::geometry_t geometry;
     if (util::status_t const recalled = handle_t::traits_t::recall(checkpoint, geometry); failed(recalled))
         return propagate_error(recalled, outcome), void();
+    if (arguments->connectivity && arguments->connectivity < geometry.connectivity)
+        return propagate_error(usearch_status_config_mismatch_k, outcome, "A load widens rows, never narrows"), void();
+    if (arguments->connectivity) geometry.connectivity = arguments->connectivity;
     auto load = [&](auto const& punned) noexcept {
         return basic_load_variant(punned, checkpoint, *arguments, outcome);
     };
@@ -387,6 +390,9 @@ void basic_load_vram(arguments_type_* arguments, [[maybe_unused]] checkpoint_typ
     typename handle_t::traits_t::geometry_t geometry;
     if (util::status_t const recalled = handle_t::traits_t::recall(checkpoint, geometry); failed(recalled))
         return propagate_error(recalled, outcome), void();
+    if (arguments->connectivity && arguments->connectivity < geometry.connectivity)
+        return propagate_error(usearch_status_config_mismatch_k, outcome, "A load widens rows, never narrows"), void();
+    if (arguments->connectivity) geometry.connectivity = arguments->connectivity;
     auto load = [&](auto const& punned) noexcept {
         return basic_load_variant(punned, checkpoint, *arguments, outcome);
     };

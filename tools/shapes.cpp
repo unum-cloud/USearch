@@ -48,7 +48,9 @@ int modality_insert(shapes_verbs_t, world_t& world, int argc, char const* const*
             }
             if (!open_point_clouds(path, counts_path, clouds)) return std::nullopt;
             usearch_shapes_metadata_t const geometry {metric, clouds.points.scalar(), 0, settings.connectivity.value};
-            return checkpoint_entries<shapes_verbs_t> {clouds.view(), clouds.size(), geometry};
+            std::optional<st::vector<usearch_key_t>> keys = checkpoint_read_keys(settings, clouds.size());
+            if (!keys) return std::nullopt;
+            return checkpoint_entries<shapes_verbs_t> {clouds.view(), clouds.size(), geometry, std::move(*keys)};
         });
 }
 

@@ -354,6 +354,7 @@ const usearch_shapes_load_ram_t = extern struct {
     completion: Completion,
     path: BytesView,
     ram: usearch_ram_options_t,
+    connectivity: usize,
     values_per_key: usize,
     progress: usearch_progress_t,
 };
@@ -365,6 +366,7 @@ const usearch_shapes_load_ram_buffer_t = extern struct {
     completion: Completion,
     buffer: BytesView,
     ram: usearch_ram_options_t,
+    connectivity: usize,
     values_per_key: usize,
     progress: usearch_progress_t,
 };
@@ -376,6 +378,7 @@ const usearch_shapes_load_vram_t = extern struct {
     completion: Completion,
     path: BytesView,
     vram: usearch_vram_options_t,
+    connectivity: usize,
     values_per_key: usize,
     progress: usearch_progress_t,
 };
@@ -387,6 +390,7 @@ const usearch_shapes_load_vram_buffer_t = extern struct {
     completion: Completion,
     buffer: BytesView,
     vram: usearch_vram_options_t,
+    connectivity: usize,
     values_per_key: usize,
     progress: usearch_progress_t,
 };
@@ -766,6 +770,7 @@ pub const ShapesIndex = extern struct {
             .completion = .blocking,
             .path = .of(path),
             .ram = .of(config.memory_domains),
+            .connectivity = 0,
             .values_per_key = config.values_per_key,
             .progress = .of(config.progress, config.progress_steps),
         };
@@ -785,6 +790,7 @@ pub const ShapesIndex = extern struct {
             .completion = .blocking,
             .path = .of(path),
             .vram = .of(config.devices),
+            .connectivity = 0,
             .values_per_key = config.values_per_key,
             .progress = .of(config.progress, config.progress_steps),
         };
@@ -804,6 +810,7 @@ pub const ShapesIndex = extern struct {
             .completion = .blocking,
             .buffer = .of(buffer),
             .ram = .of(config.memory_domains),
+            .connectivity = 0,
             .values_per_key = config.values_per_key,
             .progress = .of(config.progress, config.progress_steps),
         };
@@ -823,6 +830,7 @@ pub const ShapesIndex = extern struct {
             .completion = .blocking,
             .buffer = .of(buffer),
             .vram = .of(config.devices),
+            .connectivity = 0,
             .values_per_key = config.values_per_key,
             .progress = .of(config.progress, config.progress_steps),
         };

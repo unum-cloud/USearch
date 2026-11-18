@@ -331,6 +331,10 @@ typedef struct usearch_sequence_load_ram_t {
     /** The memory domains to place the parts on. */
     usearch_ram_options_t ram;
 
+    /** Neighbor IDs per node, at least the checkpoint's, whose wider rows keep the stored neighbors
+     *  and leave the rest empty for a refine to fill; zero keeps the checkpoint's. */
+    size_t connectivity;
+
     /** Upper bound on entries sharing one key, which no checkpoint records; zero is unbounded. */
     size_t values_per_key;
 
@@ -358,8 +362,9 @@ typedef struct usearch_sequence_load_ram_t {
  *  - @c usearch_status_uninitialized_k The executor holds no pool workers.
  *  - @c usearch_status_config_mismatch_k @c weights for a checkpoint of another kind than
  *    Needleman-Wunsch or folding into more than 32 classes, a negative gap or a pair above its
- *    mean self-score, a Needleman-Wunsch checkpoint recording no costs and given no weights, or
- *    the checkpoint's columns differing from the shards' in dtype, shape or key width.
+ *    mean self-score, a Needleman-Wunsch checkpoint recording no costs and given no weights, a
+ *    @c connectivity narrower than the checkpoint's, or the checkpoint's columns differing from
+ *    the shards' in dtype, shape or key width.
  *  - @c usearch_status_device_k The executor is not a RAM executor.
  *  - @c usearch_status_contended_k Another call holds the executor, or its pool runs another
  *    dispatch.
@@ -388,6 +393,9 @@ typedef struct usearch_sequence_load_ram_buffer_t {
     /** The memory domains to place the parts on. */
     usearch_ram_options_t ram;
 
+    /** Neighbor IDs per node, as @c usearch_sequence_load_ram takes it. */
+    size_t connectivity;
+
     /** Upper bound on entries sharing one key, which no checkpoint records; zero is unbounded. */
     size_t values_per_key;
 
@@ -412,9 +420,9 @@ typedef struct usearch_sequence_load_ram_buffer_t {
  *  - @c usearch_status_unknown_kind_k A checkpoint of an unknown metric.
  *  - @c usearch_status_unsupported_k A @c cpu_class_ceiling below every class compiled here.
  *  - @c usearch_status_uninitialized_k The executor holds no pool workers.
- *  - @c usearch_status_config_mismatch_k @c weights or recorded costs @c usearch_sequence_load_ram
- *    refuses for the same reasons, or the checkpoint's columns differing from the shards' in
- *    dtype, shape or key width.
+ *  - @c usearch_status_config_mismatch_k @c weights, recorded costs or a @c connectivity
+ *    @c usearch_sequence_load_ram refuses for the same reasons, or the checkpoint's columns
+ *    differing from the shards' in dtype, shape or key width.
  *  - @c usearch_status_device_k The executor is not a RAM executor.
  *  - @c usearch_status_contended_k Another call holds the executor, or its pool runs another
  *    dispatch.
@@ -443,6 +451,10 @@ typedef struct usearch_sequence_load_vram_t {
     /** The devices to place the parts on. */
     usearch_vram_options_t vram;
 
+    /** Neighbor IDs per node, at least the checkpoint's, whose wider rows keep the stored neighbors
+     *  and leave the rest empty for a refine to fill; zero keeps the checkpoint's. */
+    size_t connectivity;
+
     /** Zero alone: a GPU index keeps no key lookup, so it bounds no key's entries and refuses any
      *  bound it is given. */
     size_t values_per_key;
@@ -466,11 +478,14 @@ typedef struct usearch_sequence_load_vram_t {
  *  - @c usearch_status_unknown_kind_k A checkpoint of an unknown metric.
  *  - @c usearch_status_unsupported_k A @c values_per_key bound, or devices that load no class under
  *    @c gpu_class_ceiling.
- *  - @c usearch_status_config_mismatch_k Devices of two classes, @c weights for a checkpoint of
- *    another kind than Needleman-Wunsch or folding into more than 32 classes, a negative gap or a
- *    pair above its mean self-score, a Needleman-Wunsch checkpoint recording no costs and given
- *    no weights, the executor driving no stream on some shard's device, or the checkpoint's
- *    columns differing from the shards' in dtype, shape or key width.
+ *  - @c usearch_status_config_mismatch_k Devices of two classes, or the executor driving no stream
+ *    on some shard's device.
+ *  - @c usearch_status_config_mismatch_k @c weights for a checkpoint of another kind than
+ *    Needleman-Wunsch or folding into more than 32 classes, a negative gap or a pair above its mean
+ *    self-score, or a Needleman-Wunsch checkpoint recording no costs and given no weights.
+ *  - @c usearch_status_config_mismatch_k A @c connectivity narrower than the checkpoint's or not a
+ *    power of two, or the checkpoint's columns differing from the shards' in dtype, shape or key
+ *    width.
  *  - @c usearch_status_device_k An ordinal past the listing, devices this build holds no kernels
  *    for, a build without GPU kernels, or an executor that is not a VRAM executor.
  *  - @c usearch_status_contended_k Another call holds the executor.
@@ -500,6 +515,9 @@ typedef struct usearch_sequence_load_vram_buffer_t {
 
     /** The devices to place the parts on. */
     usearch_vram_options_t vram;
+
+    /** Neighbor IDs per node, as @c usearch_sequence_load_ram takes it. */
+    size_t connectivity;
 
     /** Zero alone: a GPU index keeps no key lookup, so it bounds no key's entries and refuses any
      *  bound it is given. */

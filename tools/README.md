@@ -24,7 +24,7 @@ The verbs are named after the C interface they call:
 - `usearch dense insert <vectors> --save <address>` creates an index, inserts a slice of one RetriEval file on a GPU or in RAM, and saves it.
   Each row is keyed by the same row of `--keys`, or by its dataset row number without one, so slices built apart keep distinct keys when merged.
   `--input` reads an Arrow file or stream in place of the RetriEval file, as [Arrow Pipes](#arrow-pipes) describes.
-- `usearch dense refine <address> --save <address>` runs refinement rounds, each one a health check, a heal, a draw of hubs, a gather into neighborhoods and a restitch of every neighborhood, until one answers other than improved or `--max-refines` rounds ran.
+- `usearch dense refine <address> --save <address>` runs refinement rounds, each one a health check, a heal, a draw of hubs, a gather into neighborhoods, a restitch of every neighborhood and a reach walking the island entries, until one answers other than improved or `--max-refines` rounds ran.
   The rounds share one plan, so every health check starts from the same root, and a loaded NVMe checkpoint's round is one pass over its parts.
   Each round prints its neighborhoods and the widest, the links it added and dropped, the entries it changed, and the unreached and stranded islands it closed and opened with.
   With a `--connectivity` wider than the checkpoint's, the load keeps every node's stored neighbors and leaves the new slots empty, and a round gives an entry the diverse links that lead somewhere new, so an M=32 graph widens toward an M=64 one without a rebuild.
@@ -41,6 +41,7 @@ The verbs are named after the C interface they call:
 - `usearch sequence`, `usearch shapes` and `usearch geospatial` take the same `insert`, `refine`, `reshard`, `health` and `search` verbs over texts, point clouds and observations, on one process.
   `usearch <modality> metadata <address>` is `usearch metadata <address>`.
 - `usearch metadata <address>` prints a monolith's or a manifest's nodes, parts, metric and keys, then reads its modality's metadata, picked by the metric its header names.
+  Ragged neighbors columns print their links per entry, and fixed ones their slots per entry, unused slots padded with sentinels.
   `usearch metadata -` reads the checkpoint off standard input.
 - `usearch copy <from> <to>` copies a checkpoint byte for byte, then reads it back and compares.
   A drive as the source copies the live file starting at its byte base, and a drive as the destination refuses to overlap a live slot; a drive named without a byte base takes the first free run of slots large enough.
@@ -49,7 +50,7 @@ The verbs are named after the C interface they call:
 - `usearch import <file.arrow> <address>` lays every record batch out as one part of a checkpoint in memory, loads it into RAM through the modality its metric names, and saves it at the address.
   `--metric` refuses a file recording another metric, and names one for a file recording none.
 - `usearch recall <truth.arrow> <run.arrow> --wanted 1,10` compares two searches' `--output` files over the same queries, on any modality.
-  An entry holding a query's own key at distance zero leaves both, a run's matches stop at the largest `--wanted`, and each depth d prints d-recall at the largest: the share of the true d nearest the run's matches reach within the true d-th distance, so ties at the cut count either way.
+  An entry holding a query's own key at distance zero leaves both, a run's matches stop at the largest `--wanted`, and each depth d prints d-recall at the largest: the share of the true d nearest the run's matches reach, by key or within the true d-th distance, so ties at the cut count either way.
   It refuses queries that differ, and a truth shallower than the largest `--wanted`, so a self-search asks for one match more.
 
 A RAM index lives in the machine's first memory domain, and a VRAM one on device 0, or on the first ordinal `USEARCH_DEVICES` lists.
@@ -251,6 +252,7 @@ Object storage joins at the edges: parts are written on a filesystem that admits
 - `--first-entry` defaults to `0`: the first row of the slice.
 - `--entries` defaults to every row past `--first-entry`: rows in the slice.
 - `--keys` defaults to row numbers: a `.u64bin` or `.u128bin` of one little-endian integer per vector row, so a UUID's 128-bit integer form keys its row whole.
+  Every modality's `insert` takes it, one little-endian integer per entry.
 - `--stored-dtype` defaults to the file's: `bf16`, `f16`, `e5m2`, `e4m3`, `e3m2`, `e2m3`, `i8`, `i4x2`, `u8`, `u4x2` or `u1x8`, cast on ingest; an `.fbin` file needs one.
 - `--metric` defaults to `angular`: `inner`, `angular`, `euclidean`, `hamming` or `jaccard`; the last two for `u1x8`.
 - `--residency` defaults to `vram` when a GPU is listed, and `ram` otherwise.
@@ -265,7 +267,8 @@ Object storage joins at the edges: parts are written on a filesystem that admits
 Every verb over a checkpoint opens the same session, so it takes `--residency`, `--nvme-class`, `--threads` and `--nvme-ram` alike, and every verb that refines takes `--expansion-refine` and `--memory-limit`.
 Beyond those, the other verbs take only what they move:
 
-- `reshard` and `refine` take `--save`, and `refine` also `--max-refines`, defaulting to `1`, and `--connectivity`, defaulting to the checkpoint's and only ever widening a dense one.
+- `reshard` and `refine` take `--save` and `--connectivity`, defaulting to the checkpoint's and only ever widening it in RAM or VRAM, and `refine` also `--max-refines`, defaulting to `1`.
+  A packing `reshard` widens its first part, the target, so the merge lands at the wider degree.
   Both default to `--residency ram`, and a residency that cannot refine refuses.
 - `reshard` also takes `--parts` of at least `2`, cutting its checkpoints, and `--save` then names the manifest.
 - `health` defaults to `--residency nvme`, viewing the checkpoint from storage.
@@ -280,9 +283,9 @@ Beyond those, the other verbs take only what they move:
 - `recall` takes `--wanted`, defaulting to `1,10`.
 - `metadata` and `copy` take no flags.
 
-The other modalities' `insert` takes the flags `dense insert` does but `--keys`, `--stored-dtype` and `--metric`, keys every entry by its number in the file, and reads its entries as the modality's benchmark does:
+The other modalities' `insert` takes the flags `dense insert` does but `--stored-dtype` and `--metric`, keys every entry by its number in the file unless `--keys` names a `.u64bin` or `.u128bin` of one key per entry, refused when its rows are not the file's entries, and reads its entries as the modality's benchmark does:
 
-- `sequence insert <texts>` reads one entry per line, a carriage return before a newline dropped, under `--metric` `levenshtein`, `levenshtein-utf8` or `overlap` with its `--window-widths`; `sequence search` takes `--query-texts`, and `sequence reshard --parts` takes the `--window-widths` an overlap checkpoint was built with.
+- `sequence insert <texts>` reads one entry per line, a carriage return before a newline dropped, under `--metric` `levenshtein`, `levenshtein-utf8`, `overlap` with its `--window-widths`, or `needleman-wunsch`, which requires `--alphabet` `dna`, `protein` or `text` to fold bytes into classes and pack the codes, and takes `--weights`, 65,537 bytes of 256x256 int8 similarities then an int8 gap cost, over the alphabet's own; `sequence search` takes `--query-texts` and the same `--alphabet` to pack them, and `sequence reshard --parts` takes the `--window-widths` an overlap checkpoint was built with.
 - `shapes insert <points> --counts <path>` reads every cloud's points end to end, an `.fbin` or `.f16bin` of 3 columns, and the points per cloud, an `.ibin` of 1 column, under `--metric` `chamfer`, `hausdorff`, `gromov-wasserstein` or `wasserstein-procrustes`; `shapes search` takes `--query-points` and `--query-counts`.
 - `geospatial insert <observations>` reads an `.f64bin` of eleven columns per observation, and builds without a terrain; `geospatial search` takes `--query-observations`, `--relation` `near`, `sees` or `seen`, and `--radius` in metres.
 

@@ -33,7 +33,7 @@
 #include <optional>         // `std::optional`
 #include <span>             // `std::span`
 #include <string_view>      // `std::string_view`
-#include <type_traits>      // `std::is_same_v` - the dense-only widening
+#include <type_traits>      // `std::is_same_v` - the dense-only writable NVMe load
 #include <utility>          // `std::move`
 
 #include <fmt/format.h>
@@ -249,6 +249,7 @@ inline constexpr std::array<usearch_traversal_t, 2> traversals_k {usearch_traver
  *  the residency, the NVMe class, the threads and the devices a session opens with. */
 struct checkpoint_settings_t {
     std::string_view save;
+    std::string_view keys;
     count_t first_entry {.minimum = 0};
     count_t entries {.minimum = 0};
     count_t parts {.minimum = 2};
@@ -301,6 +302,7 @@ inline st::vector<flag_t> insert_flags(checkpoint_settings_t& settings,
             {"--save", "address",
              "required: where the index is saved; several ranks save a manifest there, a part each beside it",
              &settings.save},
+            {"--keys", "path", "defaults to row numbers: a .u64bin or .u128bin of one key per entry", &settings.keys},
             {"--first-entry", "offset", "defaults to 0: the first entry of the slice to index", &settings.first_entry},
             {"--entries", "count", "defaults to every entry past --first-entry: entries in the slice",
              &settings.entries},
@@ -315,7 +317,7 @@ inline st::vector<flag_t> insert_flags(checkpoint_settings_t& settings,
 }
 
 /** What an insert indexes: the entries as the modality's verbs take them, how many there are, the
- *  geometry the empty index opens with, and each entry's key, or none when they arrive without. */
+ *  geometry the empty index opens with, and the keys @c --keys names, else empty. */
 template <typename verbs_type_>
 struct checkpoint_entries {
     typename verbs_type_::values_t values {};
@@ -323,6 +325,13 @@ struct checkpoint_entries {
     typename verbs_type_::geometry_t geometry {};
     st::vector<usearch_key_t> keys {};
 };
+
+/** The keys @c --keys names for @p entries entries, empty without it; none after printing why. */
+inline std::optional<st::vector<usearch_key_t>> checkpoint_read_keys(checkpoint_settings_t const& settings,
+                                                                     std::size_t entries) {
+    if (settings.keys.empty()) return st::vector<usearch_key_t> {};
+    return read_keys(settings.keys, entries);
+}
 
 /** What a search asks: the queries as the modality's verbs take them, how many there are, and the
  *  key of each when they arrive with theirs, else empty. */
@@ -564,9 +573,9 @@ handle<verbs_type_> checkpoint_load_nvme(session_t& session, std::string_view ad
     return {loaded, session, usearch_residency_nvme_k, {}};
 }
 
-/** Loads a checkpoint, a dense one widened to a larger connectivity when asked, re-selects its
- *  neighbors pass after pass, and saves it; with @c --residency=nvme it refines the manifest in
- *  place, which commits every pass itself. */
+/** Loads a checkpoint, widened to a larger connectivity when asked, re-selects its neighbors
+ *  pass after pass, and saves it; with @c --residency=nvme it refines the manifest in place,
+ *  which commits every pass itself. */
 template <typename verbs_type_>
 int checkpoint_refine(world_t& world, int argc, char const* const* argv) {
     checkpoint_settings_t settings;
@@ -576,7 +585,7 @@ int checkpoint_refine(world_t& world, int argc, char const* const* argv) {
         {
             {"--save", "address", "required unless --residency=nvme refines in place: where the refined index is saved",
              &settings.save},
-            {"--connectivity", "count", "defaults to the checkpoint's: a wider graph degree to refine a dense one into",
+            {"--connectivity", "count", "defaults to the checkpoint's: a wider graph degree to refine it into",
              &settings.connectivity},
             {"--max-refines", "count", "defaults to 1: refinement rounds, until one is not improved",
              &settings.max_refines},
@@ -594,9 +603,9 @@ int checkpoint_refine(world_t& world, int argc, char const* const* argv) {
         return EXIT_FAILURE;
     }
     typename verbs_type_::geometry_t widened {};
-    if constexpr (std::is_same_v<verbs_type_, dense_verbs_t>) widened.connectivity = settings.connectivity.value;
-    if (settings.connectivity.value && (in_place || !std::is_same_v<verbs_type_, dense_verbs_t>)) {
-        fmt::println(stderr, "--connectivity widens dense checkpoints loaded into RAM or VRAM only");
+    metadata_of<verbs_type_>(widened).connectivity = settings.connectivity.value;
+    if (settings.connectivity.value && in_place) {
+        fmt::println(stderr, "--connectivity widens checkpoints loaded into RAM or VRAM, never NVMe in place");
         return EXIT_FAILURE;
     }
     std::optional<sz::string_t> const admitted = in_place ? std::optional<sz::string_t> {}
@@ -640,6 +649,8 @@ int checkpoint_reshard(world_t& world, int argc, char const* const* argv, std::s
              &settings.save},
             {"--parts", "count", "cuts the parts into this many targets, at least 2, instead of packing",
              &settings.parts},
+            {"--connectivity", "count", "defaults to the checkpoint's: a wider graph degree to refine it into",
+             &settings.connectivity},
         },
         modality_flags);
     // Every argument is at most one positional, so the arguments bound the sources.
@@ -663,6 +674,11 @@ int checkpoint_reshard(world_t& world, int argc, char const* const* argv, std::s
         fmt::println(stderr, "{} part given: packing needs two or more, and --parts cuts any", parts.size());
         return EXIT_FAILURE;
     }
+    if (settings.connectivity.value &&
+        (split_into || residencies_k[settings.session.residency.selected] == usearch_residency_nvme_k)) {
+        fmt::println(stderr, "--connectivity widens a packed reshard loaded into RAM or VRAM, never a split or NVMe");
+        return EXIT_FAILURE;
+    }
     if (split_into && settings.save == "-") {
         fmt::println(stderr, "--save names a manifest with its parts beside it, which one pipe cannot hold");
         return EXIT_FAILURE;
@@ -678,9 +694,14 @@ int checkpoint_reshard(world_t& world, int argc, char const* const* argv, std::s
     st::vector<handle<verbs_type_>> sources;
     st::vector<typename verbs_type_::index_t> source_indexes;
     std::size_t source_entries = 0;
+    typename verbs_type_::geometry_t widened {};
+    metadata_of<verbs_type_>(widened).connectivity = settings.connectivity.value;
     for (sz::string_t const& part : parts) {
+        // The first part is the packed target, so widening it lands the merge at the wider degree.
+        bool const target = !split_into && &part == &parts[0];
         handle<verbs_type_> source = checkpoint_open<verbs_type_>(
-            session, part, residencies_k[settings.session.residency.selected], {}, steps);
+            session, part, residencies_k[settings.session.residency.selected],
+            target ? widened : typename verbs_type_::geometry_t {}, steps);
         if (!source) return EXIT_FAILURE;
         source_entries += describe(source).size;
         if (st::failed(source_indexes.push_back(source.get())) || st::failed(sources.push_back(std::move(source))))
@@ -708,13 +729,13 @@ int checkpoint_reshard(world_t& world, int argc, char const* const* argv, std::s
                          settings.expansion_refine.value, settings.memory_limit.value, verb_progress_of(phase), &plan,
                          &stopped_in);
     bool const stopped = outcome.status == usearch_status_cancelled_k;
+    if (!stopped && report_failure(outcome, "resharding {} parts", parts.size())) return EXIT_FAILURE;
     if (plan) {
         if (stopped && stopped_in.phase != usearch_phase_none_k) phase.name = usearch_phase_name(stopped_in.phase);
         usearch_outcome_t finished {};
         verbs_type_::reshard_plan_finish(sources[0].executor(), plan, &report, &finished);
         if (report_failure(finished, "finishing the reshard plan")) return EXIT_FAILURE;
     }
-    if (!stopped && report_failure(outcome, "resharding {} parts", parts.size())) return EXIT_FAILURE;
     fmt::println(steps, "resharded {} parts into {}: {} entries in {:.1f} s, {} changed, {} of {} reachable",
                  parts.size(), target_indexes.size(), source_entries, checkpoint_seconds_since(started), report.changed,
                  report.reachability.reachable, report.reachability.audited);

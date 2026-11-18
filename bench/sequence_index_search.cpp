@@ -41,127 +41,12 @@
 #include <vector>      // `std::vector` - the offsets, the similarities
 
 #include "usearch/sequence_index.h"
-#include "usearch/sequence/ram_metric.hpp"      // `pack_codes`, `packed_code_bits`, `packed_codes_bytes`
 #include "usearch/utilities/blocking_files.hpp" // `mapped_file_t`
 
 #include "abi.hpp"
 
 namespace unum::usearch::bench {
 using namespace unum::usearch::tools;
-
-/** The proteins' classes in BLOSUM62's order: 20 amino acids, then B, Z, X and the stop. */
-constexpr std::string_view protein_letters_k = "ARNDCQEGHILKMFPSTWYVBZX*";
-
-/** BLOSUM62 over @ref protein_letters_k, as NCBI publishes it. */
-constexpr std::int8_t blosum62_k[24][24] = {
-    {4, -1, -2, -2, 0, -1, -1, 0, -2, -1, -1, -1, -1, -2, -1, 1, 0, -3, -2, 0, -2, -1, 0, -4},
-    {-1, 5, 0, -2, -3, 1, 0, -2, 0, -3, -2, 2, -1, -3, -2, -1, -1, -3, -2, -3, -1, 0, -1, -4},
-    {-2, 0, 6, 1, -3, 0, 0, 0, 1, -3, -3, 0, -2, -3, -2, 1, 0, -4, -2, -3, 3, 0, -1, -4},
-    {-2, -2, 1, 6, -3, 0, 2, -1, -1, -3, -4, -1, -3, -3, -1, 0, -1, -4, -3, -3, 4, 1, -1, -4},
-    {0, -3, -3, -3, 9, -3, -4, -3, -3, -1, -1, -3, -1, -2, -3, -1, -1, -2, -2, -1, -3, -3, -2, -4},
-    {-1, 1, 0, 0, -3, 5, 2, -2, 0, -3, -2, 1, 0, -3, -1, 0, -1, -2, -1, -2, 0, 3, -1, -4},
-    {-1, 0, 0, 2, -4, 2, 5, -2, 0, -3, -3, 1, -2, -3, -1, 0, -1, -3, -2, -2, 1, 4, -1, -4},
-    {0, -2, 0, -1, -3, -2, -2, 6, -2, -4, -4, -2, -3, -3, -2, 0, -2, -2, -3, -3, -1, -2, -1, -4},
-    {-2, 0, 1, -1, -3, 0, 0, -2, 8, -3, -3, -1, -2, -1, -2, -1, -2, -2, 2, -3, 0, 0, -1, -4},
-    {-1, -3, -3, -3, -1, -3, -3, -4, -3, 4, 2, -3, 1, 0, -3, -2, -1, -3, -1, 3, -3, -3, -1, -4},
-    {-1, -2, -3, -4, -1, -2, -3, -4, -3, 2, 4, -2, 2, 0, -3, -2, -1, -2, -1, 1, -4, -3, -1, -4},
-    {-1, 2, 0, -1, -3, 1, 1, -2, -1, -3, -2, 5, -1, -3, -1, 0, -1, -3, -2, -2, 0, 1, -1, -4},
-    {-1, -1, -2, -3, -1, 0, -2, -3, -2, 1, 2, -1, 5, 0, -2, -1, -1, -1, -1, 1, -3, -1, -1, -4},
-    {-2, -3, -3, -3, -2, -3, -3, -3, -1, 0, 0, -3, 0, 6, -4, -2, -2, 1, 3, -1, -3, -3, -1, -4},
-    {-1, -2, -2, -1, -3, -1, -1, -2, -2, -3, -3, -1, -2, -4, 7, -1, -1, -4, -3, -2, -2, -1, -2, -4},
-    {1, -1, 1, 0, -1, 0, 0, 0, -1, -2, -2, 0, -1, -2, -1, 4, 1, -3, -2, -2, 0, 0, 0, -4},
-    {0, -1, 0, -1, -1, -1, -1, -2, -2, -1, -1, -1, -1, -2, -1, 1, 5, -2, -2, 0, -1, -1, 0, -4},
-    {-3, -3, -4, -4, -2, -2, -3, -2, -2, -3, -2, -3, -1, 1, -4, -3, -2, 11, 2, -3, -4, -3, -2, -4},
-    {-2, -2, -2, -3, -2, -1, -2, -3, 2, -1, -1, -2, -1, 3, -3, -2, -2, 2, 7, -1, -3, -2, -1, -4},
-    {0, -3, -3, -3, -1, -2, -2, -3, -3, 3, 1, -2, 1, -1, -2, -2, 0, -3, -1, 4, -3, -2, -1, -4},
-    {-2, -1, 3, 4, -3, 0, 1, -1, 0, -3, -4, 0, -3, -3, -2, 0, -1, -4, -3, -3, 4, 1, -1, -4},
-    {-1, 0, 0, 1, -3, 3, 4, -2, 0, -3, -3, 1, -1, -3, -1, 0, -1, -3, -2, -2, 1, 4, -1, -4},
-    {0, -1, -1, -1, -2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -2, 0, 0, -2, -1, -1, -1, -1, -1, -4},
-    {-4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, 1},
-};
-
-/** The classes text folds into: a-z, the space, any digit, and anything else. */
-constexpr std::size_t text_classes_k = 29;
-
-/** An alphabet's byte-to-class fold, and the weights its Needleman-Wunsch index takes. */
-struct alphabet_t {
-    std::array<std::uint8_t, 256> codes {};
-    std::vector<std::int8_t> similarities = std::vector<std::int8_t>(256 * 256);
-    std::size_t classes = 0;
-    std::int8_t gap = 0;
-
-    /** The weights the C interface reads, viewing the similarities. */
-    usearch_sequence_weights_t weights() const noexcept { return {similarities.data(), gap}; }
-};
-
-/** The alphabet @p name spells, under its own costs or, when @p uniform, unit costs over its
- *  classes; no classes for a name it does not know. */
-inline alphabet_t alphabet_of(std::string_view name, bool uniform) {
-    alphabet_t alphabet;
-    if (name == "dna") {
-        alphabet.classes = 4, alphabet.gap = 2;
-        alphabet.codes.fill(3);
-        for (char const letter : {'A', 'C', 'G', 'T'}) {
-            std::uint8_t const code = static_cast<std::uint8_t>(std::string_view {"ACGT"}.find(letter));
-            alphabet.codes[static_cast<std::uint8_t>(letter)] = code;
-            alphabet.codes[static_cast<std::uint8_t>(letter | 0x20)] = code;
-        }
-        // Purines take even codes and pyrimidines odd, so a transition keeps half the self-score.
-        for (std::size_t first = 0; first != 4; ++first)
-            for (std::size_t second = 0; second != 4; ++second)
-                alphabet.similarities[first * 256 + second] = first == second ? 2 : (first & 1) == (second & 1) ? 1 : 0;
-    }
-    else if (name == "protein") {
-        alphabet.classes = protein_letters_k.size(), alphabet.gap = 7;
-        alphabet.codes.fill(static_cast<std::uint8_t>(protein_letters_k.find('X')));
-        for (std::size_t code = 0; code != protein_letters_k.size(); ++code) {
-            char const letter = protein_letters_k[code];
-            alphabet.codes[static_cast<std::uint8_t>(letter)] = static_cast<std::uint8_t>(code);
-            if (letter >= 'A' && letter <= 'Z')
-                alphabet.codes[static_cast<std::uint8_t>(letter | 0x20)] = static_cast<std::uint8_t>(code);
-        }
-        for (std::size_t first = 0; first != protein_letters_k.size(); ++first)
-            for (std::size_t second = 0; second != protein_letters_k.size(); ++second)
-                alphabet.similarities[first * 256 + second] = blosum62_k[first][second];
-    }
-    else if (name == "text") {
-        alphabet.classes = text_classes_k, alphabet.gap = 1;
-        alphabet.codes.fill(text_classes_k - 1);
-        for (char letter = 'a'; letter <= 'z'; ++letter)
-            alphabet.codes[static_cast<std::uint8_t>(letter)] = static_cast<std::uint8_t>(letter - 'a');
-        alphabet.codes[' '] = 26;
-        for (char digit = '0'; digit <= '9'; ++digit) alphabet.codes[static_cast<std::uint8_t>(digit)] = 27;
-        for (std::size_t code = 0; code != text_classes_k; ++code) alphabet.similarities[code * 256 + code] = 1;
-    }
-    if (uniform) {
-        alphabet.gap = 1;
-        std::memset(alphabet.similarities.data(), 0, alphabet.similarities.size());
-        for (std::size_t code = 0; code != alphabet.classes; ++code) alphabet.similarities[code * 256 + code] = 1;
-    }
-    return alphabet;
-}
-
-/** Packs every entry of @p tape as its codes under @p alphabet, one packed row per entry. */
-inline byte_tape_t packed_codes_of(byte_tape_t const& tape, alphabet_t const& alphabet) {
-    util::u32_t const code_bits = sequence::packed_code_bits(alphabet.classes);
-    byte_tape_t packed;
-    std::size_t total = 0;
-    for (std::size_t row = 0; row != tape.size(); ++row)
-        total += sequence::packed_codes_bytes(tape.offsets[row + 1] - tape.offsets[row], code_bits);
-    if (packed.bytes.resize(total) != sz::status_t::success_k || st::failed(packed.offsets.push_back(0)))
-        exit_out_of_memory("the packed codes");
-    std::vector<std::uint8_t> codes;
-    for (std::size_t row = 0; row != tape.size(); ++row) {
-        std::string_view const entry = std::string_view {tape.bytes}.substr(tape.offsets[row],
-                                                                            tape.offsets[row + 1] - tape.offsets[row]);
-        codes.clear();
-        for (char const character : entry) codes.push_back(alphabet.codes[static_cast<std::uint8_t>(character)]);
-        std::size_t const first = packed.offsets.back(), bytes = sequence::packed_codes_bytes(codes.size(), code_bits);
-        sequence::pack_codes(codes, code_bits, util::bytes_of(packed.bytes.data() + first, bytes));
-        if (st::failed(packed.offsets.push_back(first + bytes))) exit_out_of_memory("the packed codes");
-    }
-    return packed;
-}
 
 /** Runs the sequence search benchmark over the flags in @p argv. */
 int bench_sequence_index_search(int argc, char const* const* argv) {
@@ -198,8 +83,9 @@ int bench_sequence_index_search(int argc, char const* const* argv) {
                    metric_name),
                1;
     bool const aligned = metric == usearch_sequence_metric_needleman_wunsch_k;
-    alphabet_t alphabet = alphabet_of(alphabet_name, false);
-    alphabet_t searched_alphabet = alphabet_of(alphabet_name, search_costs == "uniform");
+    alphabet_t alphabet = alphabet_of(alphabet_name, alphabet_costs_t::own_k);
+    alphabet_t searched_alphabet = alphabet_of(
+        alphabet_name, search_costs == "uniform" ? alphabet_costs_t::uniform_k : alphabet_costs_t::own_k);
     if (!classes_path.empty()) {
         auto [classes_file, classes_status] = util::mapped_file_t::read(classes_path);
         if (failed(classes_status) || classes_file.view().size() != alphabet.codes.size() || !aligned)
@@ -214,12 +100,8 @@ int bench_sequence_index_search(int argc, char const* const* argv) {
                 searched_alphabet.similarities[code * 256 + code] = 1;
     }
     if (!weights_path.empty()) {
-        auto [weights_file, weights_status] = util::mapped_file_t::read(weights_path);
-        if (failed(weights_status) || weights_file.view().size() != alphabet.similarities.size() + 1 || !aligned)
-            return fmt::println(stderr, "--weights=\"{}\" must hold 65,537 bytes for needleman-wunsch", weights_path),
-                   1;
-        std::memcpy(alphabet.similarities.data(), weights_file.view().data(), alphabet.similarities.size());
-        std::memcpy(&alphabet.gap, weights_file.view().data() + alphabet.similarities.size(), 1);
+        if (!aligned) return fmt::println(stderr, "--weights=\"{}\" is for needleman-wunsch alone", weights_path), 1;
+        if (!read_weights(weights_path, alphabet)) return 1;
         if (search_costs != "uniform") searched_alphabet = alphabet;
     }
     if (aligned != (alphabet.classes != 0))

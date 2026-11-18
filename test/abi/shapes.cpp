@@ -200,6 +200,7 @@ static case_result_t test_shapes_metric(sweep_cell_t const& cell, usearch_shapes
     scratch_directory_t const scratch;
     std::string const stem = scratch.path("checkpoint");
     if (cell.residency == usearch_residency_ram_k) expect_poses_round_trip(index, stem + "-poses");
+    expect_widened(index, stem + "-widened");
     expect_persistence(cell, index, shapes.view(), queries, recall_samples_k, shapes_expansion_k, 0.8, stem,
                        saved_bytes_t::differing_k, shapes_score_band(shapes, unit_roundoff_of(geometry.quantization)));
     if (cell.residency == usearch_residency_nvme_k) return {};

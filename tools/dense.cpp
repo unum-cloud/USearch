@@ -55,7 +55,6 @@ static constexpr std::size_t dense_header_bytes_k = 8;
  *  dashes. */
 struct dense_settings_t {
     checkpoint_settings_t checkpoint;
-    std::string_view keys;
     std::string_view stored_dtype;
     std::string_view metric = "angular";
     std::string_view input;
@@ -166,7 +165,7 @@ static bool dense_open_vectors(world_t const& world, std::string_view path, dens
  *  integer per row, as every RetriEval scalar is stored, filling a key's low bytes as row numbers
  *  do; a 128-bit integer fills the whole key, so a UUID's integer form keys its row. */
 static bool dense_open_keys(world_t const& world, std::string_view path, dense_source_t& source) {
-    source.key_bytes = path.ends_with(".u64bin") ? 8 : path.ends_with(".u128bin") ? 16 : 0;
+    source.key_bytes = key_width_of(path);
     if (!source.key_bytes) {
         fmt::println(stderr, "{}--keys={} is neither .u64bin nor .u128bin", rank_label(world), path);
         return false;
@@ -265,10 +264,8 @@ static bool dense_insert_slice(world_t const& world, dense_settings_t const& set
             }
             // Little-endian integers into keys stored most significant byte first.
             for (std::size_t position = 0; position != count; ++position) {
-                usearch_key_t& key = staging.keys[position];
-                key = {};
-                for (std::size_t byte_index = 0; byte_index != source.key_bytes; ++byte_index)
-                    key.bytes[15 - byte_index] = staging.key_integers[position * source.key_bytes + byte_index];
+                staging.keys[position] = key_of_integer(staging.key_integers.data() + position * source.key_bytes,
+                                                        source.key_bytes);
             }
         }
         else
@@ -414,7 +411,8 @@ static bool dense_insert_setup(world_t const& world, dense_settings_t const& set
     rank_label_t const rank = rank_label(world);
     if (settings.input.empty()) {
         if (!dense_open_vectors(world, vectors, source)) return false;
-        if (!settings.keys.empty() && !dense_open_keys(world, settings.keys, source)) return false;
+        if (!settings.checkpoint.keys.empty() && !dense_open_keys(world, settings.checkpoint.keys, source))
+            return false;
     }
     else if (!dense_open_arrow(world, settings, source, arrow)) return false;
     std::uint64_t const first = settings.checkpoint.first_entry.value;
@@ -517,8 +515,7 @@ static bool dense_construct(world_t const& world, dense_settings_t const& settin
 int modality_insert(dense_verbs_t, world_t& world, int argc, char const* const* argv) {
     dense_settings_t settings;
     settings.checkpoint.session.residency.selected = selected_of(residencies_k, usearch_residency_unknown_k);
-    std::array<flag_t, 6> const modality_flags {{
-        {"--keys", "path", "defaults to row numbers: a .u64bin or .u128bin of one key per vector row", &settings.keys},
+    std::array<flag_t, 5> const modality_flags {{
         {"--input", "path", "an Arrow file or stream in place of a RetriEval file, or - for standard input",
          &settings.input},
         {"--vectors-column", "name", "defaults to the only fixed-size column of rows in --input",
@@ -545,7 +542,8 @@ int modality_insert(dense_verbs_t, world_t& world, int argc, char const* const* 
         if (speaks) fmt::println(stderr, "the vectors or --input, and --save, are required");
         return EXIT_FAILURE;
     }
-    if (from_arrow ? !settings.keys.empty() : !settings.keys_column.empty() || !settings.vectors_column.empty()) {
+    if (from_arrow ? !settings.checkpoint.keys.empty()
+                   : !settings.keys_column.empty() || !settings.vectors_column.empty()) {
         if (speaks) fmt::println(stderr, "--keys reads a RetriEval file's keys, and the column flags --input's");
         return EXIT_FAILURE;
     }

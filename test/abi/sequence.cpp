@@ -171,6 +171,7 @@ static void test_sequence_metric(sweep_cell_t const& cell, sequence_geometry_t g
     expect_buffer_round_trip(index, queries, recall_samples_k, sequence_expansion_k, 0.8, usearch_status_unsupported_k);
     scratch_directory_t const scratch;
     std::string const stem = scratch.path("checkpoint");
+    expect_widened(index, stem + "-widened");
     expect_persistence(cell, index, sequences.view(), queries, recall_samples_k, sequence_expansion_k, 0.8, stem,
                        saved_bytes_t::identical_k, 0.0);
     if (cell.residency == usearch_residency_nvme_k) return;

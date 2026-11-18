@@ -459,6 +459,10 @@ typedef struct usearch_dense_load_vram_t {
      *  devices opened over them in turn. */
     usearch_vram_options_t vram;
 
+    /** Neighbor IDs per node, at least the checkpoint's, whose wider rows keep the stored neighbors
+     *  and leave the rest empty for a refine to fill; zero keeps the checkpoint's. */
+    size_t connectivity;
+
     /** Upper bound on entries sharing one key, which no checkpoint records; zero is unbounded. */
     size_t values_per_key;
 
@@ -480,9 +484,10 @@ typedef struct usearch_dense_load_vram_t {
  *    score, or a kernel a shard cannot finalize.
  *  - @c usearch_status_unsupported_k A quantization this build leaves out, or devices that load no
  *    class under @c gpu_class_ceiling.
- *  - @c usearch_status_config_mismatch_k Devices of more than one vendor or generation, the
- *    executor driving no stream on some shard's device, or the checkpoint's geometry, dtypes or
- *    metric differing from the shards'.
+ *  - @c usearch_status_config_mismatch_k Devices of more than one vendor or generation, a
+ *    @c connectivity narrower than the checkpoint's or not a power of two, the executor driving no
+ *    stream on some shard's device, or the checkpoint's geometry, dtypes or metric differing from
+ *    the shards'.
  *  - @c usearch_status_device_k An ordinal past the listing, devices this build holds no kernels
  *    for, or an executor that is not a VRAM executor.
  *  - @c usearch_status_contended_k Another call holds the executor.
@@ -573,6 +578,9 @@ typedef struct usearch_dense_load_vram_buffer_t {
     /** The devices to place shards on; part @c p is written whole on shard @c p. */
     usearch_vram_options_t vram;
 
+    /** Neighbor IDs per node, at least the checkpoint's, as @c usearch_dense_load_ram takes it. */
+    size_t connectivity;
+
     /** Upper bound on entries sharing one key, which no checkpoint records; zero is unbounded. */
     size_t values_per_key;
 
@@ -593,9 +601,10 @@ typedef struct usearch_dense_load_vram_buffer_t {
  *    score, or a kernel a shard cannot finalize.
  *  - @c usearch_status_unsupported_k A quantization this build leaves out, or devices that load no
  *    class under @c gpu_class_ceiling.
- *  - @c usearch_status_config_mismatch_k Devices of more than one vendor or generation, the
- *    executor driving no stream on some shard's device, or the checkpoint's geometry, dtypes or
- *    metric differing from the shards'.
+ *  - @c usearch_status_config_mismatch_k Devices of more than one vendor or generation, a
+ *    @c connectivity narrower than the checkpoint's or not a power of two, the executor driving no
+ *    stream on some shard's device, or the checkpoint's geometry, dtypes or metric differing from
+ *    the shards'.
  *  - @c usearch_status_device_k An ordinal past the listing, devices this build holds no kernels
  *    for, or an executor that is not a VRAM executor.
  *  - @c usearch_status_contended_k Another call holds the executor.
