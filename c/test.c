@@ -322,7 +322,7 @@ usearch_arena_t create_arena(usearch_executor_t const executor) {
     return arena;
 }
 
-/** A tape over @p offsets as a caller holding @c size_t offsets lends them, in their own width. */
+/** A tape over @p offsets as a caller holding @c size_t offsets passes them, in their own width. */
 usearch_tape_view_t tape_of(void const* data, size_t const* offsets, usearch_scalar_t scalar) {
     usearch_tape_view_t tape = {.data = data, .scalar = scalar};
     if (sizeof(size_t) == sizeof(uint64_t))
@@ -515,6 +515,16 @@ void test_empty_reads(size_t const dimensions) {
                                                               .vram = vram});
     expect_at(device_index || !devices_count || outcome.status == usearch_status_device_k, __FILE__, __LINE__,
               outcome.message ? outcome.message : "A listed GPU opens an index or answers no device");
+    // The caller's streams are taken, not refused; a NULL entry is CUDA's legacy stream.
+    void* const streams[1] = {NULL};
+    usearch_executor_t streamed_executor = NULL;
+    usearch_executor_for_vram(&(usearch_executor_for_vram_t) {.executor = &streamed_executor,
+                                                              .outcome = &outcome,
+                                                              .vram = vram,
+                                                              .streams = streams});
+    expect_at(streamed_executor || outcome.status == usearch_status_device_k, __FILE__, __LINE__,
+              outcome.message ? outcome.message : "The caller's streams open an executor or answer no device");
+    usearch_executor_free(streamed_executor);
     if (device_index) {
         usearch_executor_t device_executor = NULL;
         usearch_executor_for_vram(
@@ -4867,7 +4877,7 @@ char const* test_nvme_view_narrow_keys(void) {
  *  exercised here; the failing verbs are the ones @c src/ has yet to instantiate. */
 void test_outcome_contract(size_t const dimensions) {
 
-    // An outcome carrying an earlier failure must come back clean, not merely unchanged.
+    // An outcome holding an earlier failure must come back clean, not merely unchanged.
     usearch_outcome_t outcome = {usearch_status_io_k, "a stale message the call must overwrite"};
 
     usearch_dense_index_t index = NULL;
@@ -4878,14 +4888,14 @@ void test_outcome_contract(size_t const dimensions) {
                                                         .dimensions = dimensions});
     if (!expect_at(index != NULL, __FILE__, __LINE__, "Initialization returned no handle")) return;
     expect_at(outcome.status == usearch_status_success_k, __FILE__, __LINE__, "A successful call must report success");
-    expect_at(outcome.message == NULL, __FILE__, __LINE__, "A successful call must carry no message");
+    expect_at(outcome.message == NULL, __FILE__, __LINE__, "A successful call must hold no message");
 
     usearch_executor_t const executor = create_executor(0);
     outcome = (usearch_outcome_t) {usearch_status_io_k, "a stale message the call must overwrite"};
     usearch_dense_reserve(
         &(usearch_dense_reserve_t) {.index = index, .executor = executor, .outcome = &outcome, .capacity = 4});
     expect_at(outcome.status == usearch_status_success_k, __FILE__, __LINE__, "A successful call must report success");
-    expect_at(outcome.message == NULL, __FILE__, __LINE__, "A successful call must carry no message");
+    expect_at(outcome.message == NULL, __FILE__, __LINE__, "A successful call must hold no message");
 
     // A key the index never saw is a state, not a failure.
     size_t entries = 1;
@@ -6200,7 +6210,7 @@ void test_arrow_tapes(void) {
     if (!expect_at(!outcome.message, __FILE__, __LINE__, outcome.message)) return;
     bool const wide_outputs = sizeof(size_t) == sizeof(uint64_t);
     expect_at(got.layout == (wide_outputs ? usearch_tape_u64_k : usearch_tape_u32_k) && written == 1, __FILE__,
-              __LINE__, "Outputs carry offsets as wide as size_t");
+              __LINE__, "Outputs hold offsets as wide as size_t");
     struct ArrowSchema schema = {0};
     struct ArrowDeviceArray array = {0};
     if (!expect_at(usearch_tape_view_to_arrow(got, written, arena, &schema, &array) == usearch_status_success_k,

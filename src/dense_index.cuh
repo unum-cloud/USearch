@@ -53,8 +53,8 @@ using dense_variant_tables_t =
  *
  *  Variants exist per wired @c (dtype,class) pair whose kits a class unit compiles, never the full
  *  cross product; each keeps its metric as a runtime field, since only the distance epilogue reads
- *  it. The VRAM residencies come per GPU vendor the build carries, and the read-only NVMe
- *  residency wherever a CPU class picks a kit of its own.
+ *  it. The VRAM residencies come per GPU vendor the build holds, and the read-only NVMe residency
+ *  wherever a CPU class picks a kit of its own.
  */
 struct usearch_dense_index_handle_t {
 
@@ -124,7 +124,7 @@ struct nvme_placement_t {
     /** The newest class the view may dispatch as; @c usearch_cpu_class_unknown_k sets none. */
     usearch_cpu_class_t cpu_class_ceiling = usearch_cpu_class_unknown_k;
 
-    /** The RAM a key table may take, borrowed for the call; @c NULL holds none. */
+    /** The RAM a key table may take, read only during the call; @c NULL holds none. */
     usearch_ram_options_t const* ram = nullptr;
 
     /** The executor a key table fills on; @c NULL with no key table asked for. */
@@ -145,7 +145,7 @@ struct nvme_load_placement_t {
     /** The newest class the index may dispatch as; @c usearch_cpu_class_unknown_k sets none. */
     usearch_cpu_class_t cpu_class_ceiling = usearch_cpu_class_unknown_k;
 
-    /** The RAM a key table may take, borrowed for the call; @c NULL holds none. */
+    /** The RAM a key table may take, read only during the call; @c NULL holds none. */
     usearch_ram_options_t const* ram = nullptr;
 
     /** The executor a key table fills on; @c NULL with no key table asked for. */
@@ -221,7 +221,7 @@ static dense_verbs<residency_> const* pick_cpu_variant(cpu_ladder<classes_...>, 
 }
 
 /** The device variant of @p dtype on the newest rung of @p ladder at or under the class of
- *  @p placement whose unit every placed device loads, since only a class's own unit carries
+ *  @p placement whose unit every placed device loads, since only a class's own unit holds
  *  the kernels it dispatches. */
 template <vendored_residency_t residency_, gpu_class_t... classes_>
 static dense_verbs<residency_> const* pick_gpu_variant(gpu_ladder<classes_...>, nk_dtype_t dtype,
@@ -283,7 +283,7 @@ static usearch_dense_index_t make_index(usearch_dense_metadata_t const& geometry
     if (status == status_t::config_mismatch_k)
         return propagate_error(status, outcome, "One index spans one GPU vendor"), nullptr;
     if (status == status_t::invalid_argument_k || status == status_t::unsupported_k)
-        return propagate_error(status, outcome, "The devices share no class this build carries under the ceiling"),
+        return propagate_error(status, outcome, "The devices share no class this build holds under the ceiling"),
                nullptr;
     // Each ladder's rungs serve only their own vendor's devices, so at most one ladder answers.
     if (succeeded(status)) {
@@ -298,7 +298,7 @@ static usearch_dense_index_t make_index(usearch_dense_metadata_t const& geometry
             return make_dense_handle(geometry, vram, *verbs, kernel, outcome);
     }
     return propagate_error(usearch_status_device_k, outcome,
-                           "The devices are not listed, or this build carries no kernels for them"),
+                           "The devices are not listed, or this build holds no kernels for them"),
            nullptr;
 }
 
@@ -500,7 +500,7 @@ struct usearch_dense_reshard_plan_handle_t {
     held_plan<plan_operation_t::reshard_k, usearch_dense_index_handle_t, dense_variant_tables_t> held;
 };
 
-/** Fills every field a checkpoint holds; the type carries nothing a checkpoint cannot say. */
+/** Fills every field a checkpoint holds; the type holds nothing a checkpoint cannot say. */
 static void adopt_metadata(safegraphs_metadata_t const& source, usearch_dense_metadata_t* metadata) noexcept {
     metadata->dimensions = regular_width(source.value_shape).value_or(0);
     metadata->connectivity = source.connectivity;
@@ -1129,7 +1129,8 @@ USEARCH_EXPORT void usearch_dense_cursor_init(usearch_dense_cursor_init_t* argum
             static_assert(sizeof(key_t) == sizeof(usearch_key_t), "Start keys cross as the walk reads them");
             std::span<key_t const> const starts {reinterpret_cast<key_t const*>(arguments->starts),
                                                  arguments->starts_count};
-            auto const [walk, status] = verbs->cursor_init(handle.index, starts);
+            auto const [walk, status] = verbs->cursor_init(
+                handle.index, starts, forkunion_allocator_t {memory_domain_of(arguments->executor)});
             opened->walk = walk;
             return status;
         },
@@ -1384,9 +1385,9 @@ USEARCH_EXPORT void usearch_dense_attend(usearch_dense_attend_t* arguments) {
         value_lookup_t const value_lookup {arguments->value_lookup, arguments->value_lookup_state,
                                            usearch_scalar_of(punned.verbs.dtype), columns};
         us::dense::rows_span_t const outputs {output_bytes, count, columns, row_bytes, outputs_dtype};
-        // The engine's carry mirrors the C one, so it writes the caller's states in place.
-        std::span<us::dense::softmax_state_t> const carried {reinterpret_cast<us::dense::softmax_state_t*>(carry),
-                                                             carry ? count : 0};
+        // The engine's hold mirrors the C one, so it writes the caller's states in place.
+        std::span<us::dense::softmax_state_t> const held {reinterpret_cast<us::dense::softmax_state_t*>(carry),
+                                                          carry ? count : 0};
         f32_t const score_scale =
             requested_scale > 0 ? requested_scale
                                 : 1 / std::sqrt(static_cast<f32_t>(punned.verbs.geometry(punned.index).dimensions));
@@ -1395,7 +1396,7 @@ USEARCH_EXPORT void usearch_dense_attend(usearch_dense_attend_t* arguments) {
                         std::size_t resolved, std::size_t taking) noexcept {
             attention_arguments_t const attention {head_count, value_lookup, score_scale,
                                                    outputs.slice(resolved, taking),
-                                                   carried.empty() ? carried : carried.subspan(resolved, taking)};
+                                                   held.empty() ? held : held.subspan(resolved, taking)};
             return punned.verbs.attend(punned.index, chunk_rows, attention, config, predicate, executor);
         };
         if (!for_each_dense_chunk(punned, arguments->executor, count, arguments->queries, head_count,
@@ -1664,24 +1665,16 @@ USEARCH_EXPORT void usearch_executor_for_ram(usearch_executor_for_ram_t* argumen
     usearch_executor_t const executor = new (std::nothrow) usearch_executor_handle_t {};
     if (!executor)
         return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the executor"), void();
-    if (!spawn_ram_executor(*executor, arguments->threads, ceiling, arguments->ram, outcome))
+    if (!spawn_ram_executor(*executor, arguments->threads, ceiling, arguments->ram, arguments->scratch_limit, outcome))
         return delete executor, void();
     *arguments->executor = executor;
     propagate_error(usearch_status_success_k, outcome, nullptr);
-}
-
-USEARCH_EXPORT void usearch_executor_on_pool(usearch_executor_on_pool_t* arguments) {
-    call_outcome_t outcome(*arguments);
-    *arguments->executor = nullptr;
-    propagate_error(usearch_status_unsupported_k, outcome, "Borrowed pools are not wired yet");
 }
 
 USEARCH_EXPORT void usearch_executor_for_vram(usearch_executor_for_vram_t* arguments) {
     call_outcome_t outcome(*arguments);
     *arguments->executor = nullptr;
     usearch_vram_options_t const& vram = arguments->vram;
-    if (arguments->streams)
-        return propagate_error(usearch_status_unsupported_k, outcome, "Borrowed streams are not wired yet"), void();
     // The ABI names USearch ordinals, which the listing resolves to each vendor's own; the spawn
     // keeps one stream per distinct device.
     std::span<gpu_device_t const> const listed = gpu_devices();
@@ -1696,10 +1689,12 @@ USEARCH_EXPORT void usearch_executor_for_vram(usearch_executor_for_vram_t* argum
     }
     auto const [placement, placed_status] = resolve_placement(vram);
     if (failed(placed_status) && placed_status != status_t::config_mismatch_k)
-        return propagate_error(placed_status, outcome,
-                               "The devices share no class this build carries under the ceiling"),
+        return propagate_error(placed_status, outcome, "The devices share no class this build holds under the ceiling"),
                void();
-    auto [spawned, status] = spawn_gpu_executor(gpu_drivers(), devices, arguments->scratch_limit);
+    std::span<void* const> const streams = arguments->streams
+                                               ? std::span<void* const> {arguments->streams, devices.size()}
+                                               : std::span<void* const> {};
+    auto [spawned, status] = spawn_gpu_executor(gpu_drivers(), devices, arguments->scratch_limit, streams);
     if (status == status_t::config_mismatch_k)
         return propagate_error(status, outcome, "One executor drives one GPU vendor"), void();
     if (failed(status)) return propagate_error(status, outcome), void();
@@ -1764,7 +1759,7 @@ USEARCH_EXPORT void usearch_executor_for_nvme(usearch_executor_for_nvme_t* argum
                                "SPDK serves transport identifiers, and the kernel engines serve paths"),
                void();
     // Zero leaves each call's depth to the block queues of the media it reads.
-    io_engine_config_t config;
+    io_queue_config_t config;
     switch (nvme_class) {
     case usearch_nvme_class_posix_k: config.transport = io_transport_t::blocking_k; break;
     case usearch_nvme_class_linux_aio_k: config.transport = io_transport_t::linux_aio_k; break;
@@ -1792,7 +1787,8 @@ USEARCH_EXPORT void usearch_executor_for_nvme(usearch_executor_for_nvme_t* argum
     usearch_executor_t const executor = new (std::nothrow) usearch_executor_handle_t {};
     if (!executor)
         return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the executor"), void();
-    if (!spawn_nvme_executor(*executor, arguments->threads, {nvme.paths, nvme.paths_count}, config, ceiling, outcome))
+    if (!spawn_nvme_executor(*executor, arguments->threads, {nvme.paths, nvme.paths_count}, arguments->ram, config,
+                             ceiling, arguments->scratch_limit, outcome))
         return delete executor, void();
     *arguments->executor = executor;
     propagate_error(usearch_status_success_k, outcome, nullptr);
@@ -1808,8 +1804,7 @@ USEARCH_EXPORT void usearch_executor_drain(usearch_executor_drain_t* arguments) 
     await_delegated_call(executor);
     wait_while_claimed(executor);
     // Threads spin after every dispatch already, so only parking needs a word to them.
-    if (forkunion_executor_t* const threads = threads_of(executor);
-        threads && arguments->mood != usearch_mood_spinning_k)
+    if (ram_executor_t* const threads = threads_of(executor); threads && arguments->mood != usearch_mood_spinning_k)
         threads->park();
     propagate_error(visit_executor(executor, [](auto& typed) noexcept { return typed.wait(); }), outcome);
 }

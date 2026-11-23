@@ -11,7 +11,7 @@
  *  walks basic graphs share, or of @c amd_dense_kernel, for the rest, both over five arguments -
  *  the kernel, the capability ceiling, the dtype, the register rung and the attend value lookup -
  *  so @c vram_kernel_symbol spells its symbol here from those arguments alone, and one code object
- *  per class, which the face's kernels type names, carries every dtype.
+ *  per class, which the face's kernels type names, covers every dtype.
  */
 #pragma once
 
@@ -81,7 +81,7 @@ constexpr u32_t hip_resident_blocks(vram_dense_kernel_t kernel, u32_t slots) noe
     case vram_dense_kernel_t::fold_k: return 3;
     case vram_dense_kernel_t::search_indexer_k:
     case vram_dense_kernel_t::multiply_k: return slots <= 8 ? 4 : 3;
-    // The attend fold carries per-head state, which spills at 8 slots under four blocks' budget.
+    // The attend fold keeps per-head state, which spills at 8 slots under four blocks' budget.
     case vram_dense_kernel_t::attend_k: return slots <= 4 ? 4 : 3;
     case vram_dense_kernel_t::derive_norms_k:
     case vram_dense_kernel_t::cast_k:
@@ -416,7 +416,7 @@ struct vram_amd_kernels {
         std::size_t const arena_bytes_before = context.arena_bytes_;
         byte_t* const arena = context.ensure_arena(arena_warps * arena_shape.slice_bytes<node_id_t>());
         if (!arena) return {{}, status_t::bad_alloc_k};
-        // The staging holds the query rows and any head rows first, since they carry the widest
+        // The staging holds the query rows and any head rows first, since they need the widest
         // alignment, then the window importing them, the heads' weights, then the outputs; stream
         // order serializes its reuse across calls.
         std::size_t const rows_bytes = (queries_count + heads_rows) * core.row_bytes();

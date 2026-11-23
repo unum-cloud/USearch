@@ -319,10 +319,11 @@ static bool parse_prefix(dense_checkpoint_prefix_t& prefix, bytes_view_t blob, u
                      outcome);
 }
 
-/** @brief Describes a checkpoint, answering whether its metric is one we know.
+/**
+ *  @brief Describes a checkpoint, answering whether its metric is one we know.
  *
  *  Narrower than @c adopt: this fills only what a checkpoint froze, where that restores a handle's
- *  whole configuration including the bounds its mutable state carries.
+ *  whole configuration including the bounds its mutable state holds.
  */
 static bool describe(usearch_dense_metadata_t& metadata, dense_checkpoint_prefix_t const& prefix) {
     if (!known_metric(prefix.metric)) return false;
@@ -452,7 +453,7 @@ void usearch_dense_init_vram(usearch_dense_init_vram_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
     if (reject_ceiling(arguments->vram.gpu_class_ceiling, outcome)) return;
-    propagate_error(usearch_status_device_k, outcome, "This build carries no GPU backends");
+    propagate_error(usearch_status_device_k, outcome, "This build has no GPU backends");
 }
 
 void usearch_dense_load_ram(usearch_dense_load_ram_t* arguments) {
@@ -478,7 +479,7 @@ void usearch_dense_load_vram(usearch_dense_load_vram_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
     if (reject_ceiling(arguments->vram.gpu_class_ceiling, outcome)) return;
-    propagate_error(usearch_status_device_k, outcome, "This build carries no GPU backends");
+    propagate_error(usearch_status_device_k, outcome, "This build has no GPU backends");
 }
 
 void usearch_dense_load_ram_buffer(usearch_dense_load_ram_buffer_t* arguments) {
@@ -490,7 +491,7 @@ void usearch_dense_load_vram_buffer(usearch_dense_load_vram_buffer_t* arguments)
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
     if (reject_ceiling(arguments->vram.gpu_class_ceiling, outcome)) return;
-    propagate_error(usearch_status_device_k, outcome, "This build carries no GPU backends");
+    propagate_error(usearch_status_device_k, outcome, "This build has no GPU backends");
 }
 
 void usearch_dense_view_ram(usearch_dense_view_ram_t* arguments) {

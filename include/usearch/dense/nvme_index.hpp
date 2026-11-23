@@ -8,7 +8,7 @@
  *  graph walk is a chain of dependent reads, each bounded by device latency, so throughput comes
  *  from keeping many independent walks in flight. The walk logic is therefore a pure state machine
  *  that never performs I/O itself: it only emits read requests and consumes completions, and the
- *  engines of @c utilities/nvme_device.hpp submit those requests through whatever asynchronous
+ *  queues of @c utilities/nvme_device.hpp submit those requests through whatever asynchronous
  *  interface the platform offers.
  *
  *  @section dense_nvme_format Storage Format
@@ -36,8 +36,8 @@
  *
  *  The graph is immutable, so the index object holds no atomics, no locks, and no compare-and-swap
  *  loops. Its mutable state, the walks, the rows and the reads in flight, is carved per call from
- *  the arena of the executor thread that drives it, and every engine belongs to one thread, so no
- *  two threads ever share either. The only spinning in the design is the engine-side completion
+ *  the arena of the executor thread that drives it, and every queue belongs to one thread, so no
+ *  two threads ever share either. The only spinning in the design is the queue-side completion
  *  wait, delegated to the same ForkUnion monitor-waiter vocabulary the in-memory index uses for
  *  lock sentinels.
  */
@@ -103,23 +103,23 @@ struct nvme_part_t {
  *  @brief Vector Search index over one pre-constructed read-only SafeGraphs part on block storage.
  *
  *  The class itself is a thin frozen directory: the part's medium and its columns' offsets. Every
- *  call borrows an executor, attaches the medium to the executor's engines for its own duration,
- *  and carves its walks from the executor's arenas, so any executor serves any view, and one view
+ *  call uses an executor, attaches the medium to the executor's queues for its own duration, and
+ *  carves its walks from the executor's arenas, so any executor serves any view, and one view
  *  serves any number of executors in turn.
  *
  *  @section dense_nvme_index_walk Walk Shape
  *
- *  A walk is the in-memory index's best-first walk, cut at every read: a hop issues one read of
- *  the expanded node's neighbors row, then one read of every unvisited neighbor's value row, and
- *  the arrived rows are scored four at a time. Across the walks of a thread, everything overlaps.
- *  Rows fill an engine's queue first; whatever depth a short batch leaves idle lets each walk keep
- *  several hops in flight, expanding the next closest frontier nodes inside its candidates' radius
- *  before earlier hops arrive, so a full batch walks hop by hop and a lone query takes the queue.
+ *  A walk is the in-memory index's best-first walk, cut at every read: a hop issues one read of the
+ *  expanded node's neighbors row, then one read of every unvisited neighbor's value row, and the
+ *  arrived rows are scored four at a time. Across the walks of a thread, everything overlaps. Rows
+ *  fill an queue first; whatever depth a short batch leaves idle lets each walk keep several hops
+ *  in flight, expanding the next closest frontier nodes inside its candidates' radius before
+ *  earlier hops arrive, so a full batch walks hop by hop and a lone query takes the queue.
  */
 template <                                                                    //
     typename quads_kit_type_ = bf16_serial_quads_kit_t,                       //
     typename visits_kit_type_ = serial_visits_hash_set_kit_t,                 //
-    typename engine_type_ = default_io_engine<dummy_waiter_t>,                //
+    typename queue_type_ = default_io_queue<dummy_waiter_t>,                  //
     template <typename> class atomic_ref_template_ = fu::standard_atomic_ref, //
     typename wait_type_ = dummy_waiter_t                                      //
     >
@@ -136,9 +136,9 @@ struct nvme_index {
     using scalar_t = typename quads_kit_type_::scalar_t;
     inline static constexpr nk_dtype_t vector_dtype_k = scalar_t::dtype();
 
-    using engine_t = engine_type_;
-    using executor_t = nvme_executor<engine_t>;
-    using medium_t = typename engine_t::medium_t;
+    using queue_t = queue_type_;
+    using executor_t = nvme_executor<queue_t>;
+    using medium_t = typename queue_t::medium_t;
     using arena_t = typename executor_t::arena_t;
 
     /** The CPU class's reference over the words one call's threads share, and its waiter, as
@@ -218,7 +218,7 @@ struct nvme_index {
         /** Runs of whole rows a bulk scan of a column read. */
         nvme_reads_t scan_reads;
 
-        /** Submit-and-wait cycles of the engines, counted once for every row in flight through
+        /** Submit-and-wait cycles of the queues, counted once for every row in flight through
          *  each. */
         std::size_t round_trips = 0;
     };
@@ -242,9 +242,11 @@ struct nvme_index {
     vector_norms_t norms(vector_view_t row) const noexcept { return norms_(kernel_, row); }
 
     /**
-     *  Opens the SafeGraphs monolith at @p path, a file, a device or, in SPDK builds, a transport
-     *  ID with optional @c ns and @c base keys: its header, vetted against this instantiation and
-     *  its kernel, and its medium for the engines. A failed view leaves the index empty.
+     *  @brief Opens the SafeGraphs monolith at @p path: its header, vetted against this
+     *      instantiation and its kernel, and its medium for the queues.
+     *
+     *  The path names a file, a device or, in SPDK builds, a transport ID with optional @c ns and
+     *  @c base keys. A failed view leaves the index empty.
      *
      *  @par Statuses:
      *  - @c unknown_kind_k A kernel the dtype's kits cannot finalize.
@@ -254,13 +256,17 @@ struct nvme_index {
      *    unparsable transport ID.
      *  - @c malformed_k No monolith starts there, its header does not parse or cannot be read, or
      *    its columns have no width or too many rows.
-     *  - @c config_mismatch_k The engines read no such medium, the header names another metric,
+     *  - @c config_mismatch_k The queues read no such medium, the header names another metric,
      *    or its columns are not fixed rows of this scalar with @c u32 neighbors and one key per
      *    row.
+     *  - @c io_k The system refused entropy for the medium's identity.
      */
     status_t view(std::string_view path) noexcept {
         release();
         if (!kernel_supported<quads_kit_t>(kernel_)) return status_t::unknown_kind_k;
+        auto const [identity, identity_status] = media_identity_from_entropy();
+        if (failed(identity_status)) return identity_status;
+        media_identity_ = identity;
         return open_part_(path, dtype_t::unknown_k, kernel_, forkunion_allocator_t {}, medium_, part_);
     }
 
@@ -300,16 +306,16 @@ struct nvme_index {
      *  @param[out] counts Matches written per query.
      *  @param[in] config The walk breadth; @c scan_k is refused with @c unsupported_k, as exact
      *      scans run over @c nvme_indexes, which a monolith views as one shard.
-     *  @param[in,out] executor The threads, their engines and their scratch; held for the call.
+     *  @param[in,out] executor The threads, their queues and their scratch; held for the call.
      *
-     *  A failed read stops the call: the engines drain, every buffer returns, and the call answers
+     *  A failed read stops the call: the queues drain, every buffer returns, and the call answers
      *  @c io_k.
      *
      *  @par Statuses:
      *  - @c uninitialized_k Nothing is viewed, or @p executor holds no threads or pool workers.
      *  - @c unsupported_k @p config asks for a scan.
      *  - @c config_mismatch_k @p counts, @p node_ids or @p distances disagree with the batch or
-     *    each other, the queries are not as wide as the rows, or a medium the engines cannot read.
+     *    each other, the queries are not as wide as the rows, or a medium the queues cannot read.
      *  - @c unsupported_layout_k @p node_ids or @p distances are not packed along their rows.
      *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
      *  - @c overflow_k A staging region's byte count overflows.
@@ -396,7 +402,7 @@ struct nvme_index {
 #pragma region Opening
 
     /** Opens the part at @p path, a file or device or, in SPDK builds, a transport ID: its medium
-     *  for the engines, and its header vetted against this instantiation, against @p kernel unless
+     *  for the queues, and its header vetted against this instantiation, against @p kernel unless
      *  it is @c nk_kernel_unknown_k, which then takes the metric the header names, and, unless
      *  @p key_dtype is @c unknown_k, for a key column no wider than it. The header comes through
      *  the medium itself, in blocking block-aligned reads. */
@@ -555,7 +561,7 @@ struct nvme_index {
         /** Bytes every thread's arena carves for its walks, rows and flights. */
         std::size_t scratch_bytes = 0;
 
-        /** Staging buffers every engine holds: @c buffers_per_flight per flight. */
+        /** Staging buffers every queue holds: @c buffers_per_flight per flight. */
         std::size_t buffers = 0;
 
         /** Bytes of one staging buffer: the covering read of the widest row any part holds. */
@@ -588,7 +594,7 @@ struct nvme_index {
 
     /** The shape of a walk of @p queries_count queries of @p query_type_ over every part in
      *  @p parts, each walk @p expansion_factor wide and ranking by @p kernel, on @p threads
-     *  engines @p queue_depth reads deep, every row in flight staging @p staged_bytes of imported
+     *  queues @p queue_depth reads deep, every row in flight staging @p staged_bytes of imported
      *  queries. */
     template <typename query_type_>
     static walk_shape_t walk_shape_(std::span<medium_t const> media, std::span<nvme_part_t const> parts,
@@ -699,12 +705,14 @@ struct nvme_index {
     }
 
     /** The batch @ref query_walker::run_walks walks, inside a call of its own: @p queries_count
-     *  queries over every part in @p parts, each walk @p expansion_factor wide and ranking by
-     *  @p kernel, and each row staging @p staged_bytes of imported queries. */
+     *  queries over every part in @p parts on @p media, the list of @p media_list_key, each
+     *  walk @p expansion_factor wide and ranking by @p kernel, and each row staging
+     *  @p staged_bytes of the queries it imports. */
     template <typename query_type_>
-    static expected<search_result_t> walk_queries_(std::span<medium_t const> media, std::span<nvme_part_t const> parts,
-                                                   nk_kernel_kind_t kernel, executor_t& executor,
-                                                   std::size_t queries_count, std::size_t expansion_factor,
+    static expected<search_result_t> walk_queries_(std::span<medium_t const> media, media_list_key_t media_list_key,
+                                                   std::span<nvme_part_t const> parts, nk_kernel_kind_t kernel,
+                                                   executor_t& executor, std::size_t queries_count,
+                                                   std::size_t expansion_factor,
                                                    typename query_type_::inputs_t const& inputs,
                                                    std::size_t staged_bytes, std::span<std::size_t const> counts,
                                                    std::span<u64_t> latencies) noexcept {
@@ -713,8 +721,8 @@ struct nvme_index {
         std::size_t const queue_depth = nvme_call_depth(executor, media, parts);
         walk_shape_t const shape = walk_shape_<query_type_>(media, parts, kernel, queue_depth, executor.size(),
                                                             queries_count, expansion_factor, staged_bytes);
-        auto [call, call_status] = nvme_begin_call(executor, media, queue_depth, shape.scratch_bytes, shape.buffers,
-                                                   shape.buffer_bytes);
+        auto [call, call_status] = nvme_begin_call(executor, media, media_list_key, queue_depth, shape.scratch_bytes,
+                                                   shape.buffers, shape.buffer_bytes);
         if (failed(call_status)) return {{}, call_status};
         if constexpr (query_type_::admitting_k)
             if (status_t const opened = open_predicate(*inputs.predicate, executor); failed(opened))
@@ -793,15 +801,19 @@ struct nvme_index {
         if (queries_count && queries.extent(1) != dimensions()) return {{}, status_t::config_mismatch_k};
         using query_t = node_search_query<heads_type_>;
         typename query_t::inputs_t const inputs {queries, &heads, node_ids, distances, counts};
-        return walk_queries_<query_t>(std::span<medium_t const>(&medium_, 1), std::span<nvme_part_t const>(&part_, 1),
-                                      kernel_, executor, queries_count, non_zero_expansion_factor(config), inputs, 0,
-                                      counts, {});
+        return walk_queries_<query_t>(std::span<medium_t const>(&medium_, 1), media_list_key_t {media_identity_, 0},
+                                      std::span<nvme_part_t const>(&part_, 1), kernel_, executor, queries_count,
+                                      non_zero_expansion_factor(config), inputs, 0, counts, {});
     }
 
 #pragma endregion Rows
 
-    /** The part's file or device, open for the engines. */
+    /** The part's file or device, open for the queues. */
     medium_t medium_;
+
+    /** The identity @ref view drew for the medium, which keys the rings' file tables; a view never
+     *  swaps, so its epoch stays zero. */
+    u64_t media_identity_ = 0;
 
     /** Where the part keeps its columns. */
     nvme_part_t part_;

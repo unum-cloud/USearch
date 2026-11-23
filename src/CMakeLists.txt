@@ -13,7 +13,7 @@
 # override of its library. A multiversioned build keeps every class that exists. A monoversioned build keeps none, the
 # `serial` floor included, and compiles the one `monoversioned` class instead. The kept classes are the rung oracle at
 # unit granularity, which the dispatch unit reads as `USEARCH_TARGET_<CLASS>`, 1 or 0, the one gate every variant list
-# carries per class, collected in `usearch_cpu_gates_`.
+# holds per class, collected in `usearch_cpu_gates_`.
 set(usearch_class_serial_exists_ TRUE)
 set(usearch_class_serial_kept_ ${USEARCH_MULTIVERSIONED})
 set(usearch_class_serial_macro_ SERIAL)
@@ -112,7 +112,7 @@ function (usearch_cpu_class class_ target_macro_)
     )
 endfunction ()
 
-# A WebAssembly module carries the one SIMD capability its toolchain declares, so its verdicts read the compiler's own
+# A WebAssembly module holds the one SIMD capability its toolchain declares, so its verdicts read the compiler's own
 # macros rather than a probe that would pass the capability's flags itself.
 if (CMAKE_SYSTEM_NAME STREQUAL "Emscripten" OR CMAKE_SYSTEM_NAME STREQUAL "WASI")
     include(CheckCXXSourceCompiles)
@@ -390,12 +390,12 @@ function (usearch_rocm_codes output_)
 endfunction ()
 
 # The NVIDIA classes: one per GPU generation, its fatbin compiled for its own codes alone - the device twin of the CPU
-# classes' per-unit ISA flags - so no cubin carries another generation's kernels. A class is kept once
+# classes' per-unit ISA flags - so no cubin holds another generation's kernels. A class is kept once
 # `USEARCH_CUDA_ARCH` resolves to one of its @p selectors_, and compiles the codes that name it: in the release set the
 # lowest its kernels need, as PTX where a plain code suffices, otherwise the one named code as SASS. The oldest class is
 # the vendor's floor: in a multiversioned build it is always kept and also compiles the forward-compatible PTX it lists,
 # which a GPU newer than every class runs. A monoversioned build keeps only the newest class its architecture names,
-# which carries every variant. Either build refuses an architecture no class runs. Only a kept class enters the dispatch
+# which holds every variant. Either build refuses an architecture no class runs. Only a kept class enters the dispatch
 # units' ladders, through its gate `USEARCH_TARGET_NVIDIA_<CLASS>` in `usearch_gpu_gates_`, 1 or 0. NVCC is only a
 # device compiler here; the dispatch unit sees `USEARCH_ARCH_CUDA_` either way.
 set(usearch_gpu_gates_)
@@ -546,7 +546,7 @@ else ()
 endif ()
 
 # The Apple classes, one per Metal generation, whose kernels compile from embedded source at first use, one library per
-# dtype and class, so no Metal toolchain is needed to build them and a class carries no flags. A class is kept for `all`
+# dtype and class, so no Metal toolchain is needed to build them and a class holds no flags. A class is kept for `all`
 # or its own @p family_, and a monoversioned build keeps only the newest. Nothing links Metal, Foundation or `libobjc`,
 # which `metal_api` opens at first use.
 if (USEARCH_METAL_ARCH)
@@ -912,7 +912,7 @@ usearch_variants(shapes vram amd ${usearch_amd_classes_} KERNELS f16 f32)
 usearch_variants(geospatial vram amd ${usearch_amd_classes_})
 usearch_variants(basic vram amd ${usearch_amd_classes_})
 # On Apple GPUs the sequence and f16 shapes kits need nothing past the Apple7 floor, so both compile for it alone, and a
-# monoversioned build keeping a newer Apple class carries none; geospatial and f32 shapes have no Apple kernel meeting
+# monoversioned build keeping a newer Apple class holds none; geospatial and f32 shapes have no Apple kernel meeting
 # their numerics contract. The units splice StringZilla's and NumKong's Metal sources, which those headers embed by their
 # include paths.
 usearch_variants(

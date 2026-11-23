@@ -101,7 +101,7 @@ struct shard_set {
 
     using reserve_capacity_t = typename index_t::reserve_capacity_t;
 
-    /** One shard: the graph, which owns its keys and carries its own placement. */
+    /** One shard: the graph, which owns its keys and holds its own placement. */
     struct shard_t {
 
         /** The graph, growing on demand; an index holds atomics and never moves. */
@@ -270,7 +270,7 @@ struct shard_set {
     indexes_range<index_t> live_indexes() noexcept { return {this, retired_shards(), size()}; }
     indexes_range<index_t const> live_indexes() const noexcept { return {this, retired_shards(), size()}; }
 
-    /** The host allocator behind the shard table and every checkpoint catalog; the shards carry
+    /** The host allocator behind the shard table and every checkpoint catalog; the shards hold
      *  their own. */
     forkunion_allocator_t allocator() const noexcept { return allocator_; }
 
@@ -701,7 +701,7 @@ struct shard_set {
         atomic_ref<u64_t>(commit_sequence_).store_add(u64_t {1}, std::memory_order_release);
     }
 
-    /** Closes the commit @ref begin_commit opened; closing carries into the high half, so a reader
+    /** Closes the commit @ref begin_commit opened; closing holds into the high half, so a reader
      *  sees the word move even when two commits overlap. */
     void end_commit() noexcept {
         atomic_ref<u64_t>(commit_sequence_).store_add((u64_t {1} << 32) - 1, std::memory_order_release);

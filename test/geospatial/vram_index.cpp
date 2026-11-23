@@ -111,8 +111,8 @@ struct hills_t {
             heights.data(), rows_k, columns_k, grid.heights_stride, steps[0], steps[1], pack.data(), nullptr);
     }
 
-    /** The grid as a handle borrows it. */
-    usearch_geospatial_terrain_t borrowed() const noexcept {
+    /** A handle pointing at the grid, valid while the grid lives. */
+    usearch_geospatial_terrain_t terrain() const noexcept {
         return {.rows = rows_k,
                 .columns = columns_k,
                 .north_latitude_degrees = grid.north_latitude_degrees,
@@ -185,7 +185,7 @@ struct handle_matches_t {
  *      on the GPU and in RAM alike, searched under @p relation within @p radius_metres, over
  *      @p hills when given.
  *
- *  Every match the GPU reports must be admitted, carry the pair's exact chord in metres and ascend,
+ *  Every match the GPU reports must be admitted, hold the pair's exact chord in metres and ascend,
  *  and the GPU's recall at ten must reach the RAM index's at the same breadth, give or take a
  *  twentieth. A walk as wide as the collection must return the exact matches themselves.
  */
@@ -202,7 +202,7 @@ static void test_geospatial_vram_collection(u64_t seed, std::int32_t ordinal, ob
         observations[offset].altitude_metres = 60 + offset % 31;
     for (std::size_t offset = 1; hills && offset < queries_count; offset += 2)
         queries[offset].altitude_metres = 60 + offset % 31;
-    usearch_geospatial_terrain_t const terrain = hills ? hills->borrowed() : usearch_geospatial_terrain_t {};
+    usearch_geospatial_terrain_t const terrain = hills ? hills->terrain() : usearch_geospatial_terrain_t {};
     std::vector<usearch_key_t> keys(count);
     for (std::size_t offset = 0; offset != count; ++offset) keys[offset] = us::tools::key_of_offset(seed, offset);
     usearch_geospatial_tolerance_t const tolerance {radius_metres, 0};

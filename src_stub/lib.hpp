@@ -99,7 +99,7 @@ inline std::string_view as_text(usearch_bytes_view_t bytes) {
 inline bool named(usearch_bytes_view_t name, char const* spelling) { return as_text(name) == spelling; }
 
 /**
- *  @brief A C++ byte run lent to the C interface, which spells a byte @c uint8_t.
+ *  @brief A C++ byte run passed to the C interface, which spells a byte @c uint8_t.
  *
  *  The mirror of @c as_text, and the only place the two byte vocabularies meet: @c std::byte is
  *  the language's, @c uint8_t is the ABI's, and they are distinct types however alike they are.
@@ -108,7 +108,7 @@ inline usearch_bytes_view_t as_bytes(bytes_view_t bytes) {
     return {reinterpret_cast<std::uint8_t const*>(bytes.data()), bytes.size()};
 }
 
-/** The read-only twin, for the buffers a caller lends the engine to read. */
+/** The read-only twin, for the buffers a caller passes the engine to read. */
 inline bytes_view_t as_readable_bytes(usearch_bytes_view_t bytes) {
     return {reinterpret_cast<byte_t const*>(bytes.data), bytes.length};
 }
@@ -242,7 +242,7 @@ inline bool reject_tape(usearch_tape_view_t tape, std::size_t count, usearch_out
 }
 
 /** Ticks the caller's handler when @p completed closes one of its steps, and answers whether to
- *  carry on; a null handler always does. Every loop here advances a unit at a time, so the unit
+ *  continue; a null handler always does. Every loop here advances a unit at a time, so the unit
  *  that crosses into a new step is the one that reports. */
 inline bool keep_going(usearch_progress_t progress, std::size_t completed, std::size_t total) {
     if (!progress.callback || !completed) return true;
@@ -504,7 +504,7 @@ inline u16_t write_brain(double value) {
     u32_t const bits = std::bit_cast<u32_t>(static_cast<float>(value));
     bool const is_nan = (bits & 0x7F800000u) == 0x7F800000u && (bits & 0x007FFFFFu);
     if (is_nan) return static_cast<u16_t>((bits >> 16) | 0x0040u);
-    // The tie-breaking increment carries into the exponent on its own, so an overflow
+    // The tie-breaking increment holds into the exponent on its own, so an overflow
     // saturates to infinity without a branch.
     u32_t const rounded = bits + 0x7FFFu + ((bits >> 16) & 1u);
     return static_cast<u16_t>(rounded >> 16);
@@ -584,7 +584,7 @@ inline u8_t write_minifloat(double value, minifloat_t format) {
                                  ? ((saturated - 1) << format.mantissa_bits) | (mantissa_span - 1)
                              : format.specials == minifloat_specials_t::nan_only_k ? reserved - 1
                                                                                    : reserved;
-    // A kind reserving no code cannot carry a NaN, so it falls to zero.
+    // A kind reserving no code cannot hold a NaN, so it falls to zero.
     if (std::isnan(value))
         return static_cast<u8_t>(format.specials == minifloat_specials_t::none_k ? 0u : sign | reserved);
     if (std::isinf(value) && format.specials == minifloat_specials_t::inf_and_nan_k)
@@ -602,7 +602,7 @@ inline u8_t write_minifloat(double value, minifloat_t format) {
     double const truncated = std::floor(scaled);
     double const remainder = scaled - truncated;
     unsigned const carry = remainder > 0.5 || (remainder == 0.5 && std::fmod(truncated, 2.0) != 0.0) ? 1u : 0u;
-    // The significand carries into the exponent on its own, so neither overflow case needs an arm.
+    // The significand holds into the exponent on its own, so neither overflow case needs an arm.
     unsigned const significand = static_cast<unsigned>(truncated) + carry;
     unsigned const code = ((static_cast<unsigned>(exponent + bias) - 1) << format.mantissa_bits) + significand;
     return static_cast<u8_t>(sign | min_of(code, largest));
@@ -631,7 +631,7 @@ void widen_nibbles(bytes_view_t row, std::span<double> values) {
     u8_t const* packed = static_cast<u8_t const*>(static_cast<void const*>(row.data()));
     for (std::size_t position = 0; position != values.size(); ++position) {
         int const nibble = (packed[position / 2] >> ((1 - position % 2) * 4)) & 0xF;
-        // A signed nibble carries its sign in the high bit, so the upper half of the range wraps.
+        // A signed nibble holds its sign in the high bit, so the upper half of the range wraps.
         values[position] = std::is_signed_v<nibble_> && nibble >= 8 ? nibble - 16 : nibble;
     }
 }
@@ -850,7 +850,7 @@ struct handle {
 };
 
 /**
- *  @brief Refuses a batch that would carry any key past @p values_per_key entries, as the tape
+ *  @brief Refuses a batch that would hold any key past @p values_per_key entries, as the tape
  *      modalities' headers promise. A zeroed bound is none.
  *
  *  The whole batch is refused rather than the offending entry, since a smaller retry cannot help,
@@ -1745,7 +1745,7 @@ struct long_verb_plan {
     std::size_t swept = 0;
     std::size_t entries = 0;
 
-    /** Entries the moves carried, each one whose links changed. */
+    /** Entries the moves held, each one whose links changed. */
     std::size_t moved = 0;
 };
 
@@ -2112,7 +2112,7 @@ inline std::string directory_of(std::string_view path) {
 }
 
 /** The part paths a manifest at @p manifest_path names, each resolved beside it, in file order;
- *  empty once @p outcome records that it names none. A buffer manifest's entries carry offsets
+ *  empty once @p outcome records that it names none. A buffer manifest's entries hold offsets
  *  rather than paths and are passed over, as the engine passes over them. */
 inline std::vector<std::string> manifest_parts(bytes_view_t manifest, usearch_bytes_view_t manifest_path,
                                                usearch_outcome_t* outcome) {

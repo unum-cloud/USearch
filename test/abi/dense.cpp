@@ -14,9 +14,9 @@
  *  entry, cursors walk every entry and a sample draws distinct ones; the index saves into memory
  *  and back, and into every residency and as a view, and an NVMe view serves the same searches,
  *  audits, walks and samples and refuses every write; a refine plan holds the index closed while
- *  calls its handler cancels carry its round to the end; a second source gathers whole into the
+ *  calls its handler cancels hold its round to the end; a second source gathers whole into the
  *  index, a RAM index reshards into one shard in place, and the index reshards into two targets
- *  with every key in one, each through a plan its cancelled calls carry to the end; a cleared index
+ *  with every key in one, each through a plan its cancelled calls hold to the end; a cleared index
  *  holds nothing and ends a cursor opened before it; every metric's name reads back.
  */
 #undef NDEBUG // ! A test's oracle must stay live in every build
@@ -179,6 +179,33 @@ static void expect_repeatable_walks(handle<dense_verbs_t>& index, usearch_rows_v
     expect_true(std::ranges::equal(pooled.keys, alone.keys));
 }
 
+/** An executor whose threads may hold a page of scratch refuses an insert that needs more as out
+ *  of memory, rather than growing past it. */
+static void test_scratch_limit(u64_t seed) {
+    usearch_outcome_t outcome {};
+    usearch_executor_t executor = nullptr;
+    usearch_executor_for_ram_t spawn {};
+    spawn.executor = &executor, spawn.outcome = &outcome, spawn.threads = 1, spawn.scratch_limit = 4096;
+    usearch_executor_for_ram(&spawn);
+    if (!expect_success(outcome)) return;
+    usearch_dense_index_t index = nullptr;
+    usearch_dense_init_ram_t init {};
+    init.index = &index, init.outcome = &outcome, init.metric = usearch_dense_metric_angular_k;
+    init.quantization = usearch_scalar_bf16_k, init.dimensions = dense_dimensions_k;
+    usearch_dense_init_ram(&init);
+    nk::matrix<nk::f32_t> const vectors = dense_rows(usearch_scalar_bf16_k, dense_queries_k, seed);
+    std::vector<usearch_key_t> keys(dense_queries_k);
+    for (std::size_t offset = 0; offset != dense_queries_k; ++offset) keys[offset] = key_of_offset(seed, offset);
+    usearch_dense_insert_t insert {};
+    insert.index = index, insert.executor = executor, insert.outcome = &outcome;
+    insert.count = dense_queries_k, insert.keys = {keys.data(), sizeof(usearch_key_t)};
+    insert.vectors = rows_of(vectors);
+    if (expect_success(outcome)) usearch_dense_insert(&insert);
+    expect_status(outcome, usearch_status_out_of_memory_k);
+    usearch_dense_free(index);
+    usearch_executor_free(executor);
+}
+
 /** One cell of the dense diagonal, as the file's docblock describes. */
 static void test_dense_behaviors(sweep_cell_t const& cell, u64_t seed) {
     // A view holds a key table, so its key verbs and hints probe it rather than scan.
@@ -223,6 +250,8 @@ static void test_dense_behaviors(sweep_cell_t const& cell, u64_t seed) {
 
 void run_dense_abi_cases() {
     run_test_case("test_metric_names<dense_verbs_t>", test_metric_names<dense_verbs_t>);
+    run_test_case("usearch_executor_for_ram_t::scratch_limit", test_scratch_limit,
+                  stream_key(test_run.settings.seed, "usearch_executor_for_ram_t::scratch_limit"));
     for (sweep_cell_t const& cell : diagonal_sweep(usearch_scalar_bf16_k)) {
         std::string const name = fmt::format("dense {}", name_of(cell));
         // The stream keeps the name the cell had before its label spelled the constants.

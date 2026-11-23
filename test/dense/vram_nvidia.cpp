@@ -5,8 +5,8 @@
  *  @brief The NVIDIA suite's entry for the one VRAM runner: selects the device, then runs the dense
  *      rung cases and every modality's VRAM cases.
  *
- *  Clang compiles it host-only into the cells' index types, whose kernels the library's class
- *  fatbins carry.
+ *  Clang compiles it host-only into the cells' index types, whose kernels the library builds into
+ *  its class fatbins.
  */
 #undef NDEBUG // ! A test's oracle must stay live in every build
 #include <fmt/format.h>

@@ -132,7 +132,7 @@ struct f32_neon_shapes_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c shapes_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c shapes_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct f32_neon_shapes_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neon_k;
@@ -162,7 +162,7 @@ struct f32_haswell_shapes_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c shapes_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c shapes_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct f32_haswell_shapes_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
@@ -192,7 +192,7 @@ struct f32_skylake_shapes_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c shapes_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c shapes_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct f32_skylake_shapes_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
@@ -222,7 +222,7 @@ struct f32_rvv_shapes_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c shapes_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c shapes_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct f32_rvv_shapes_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_rvv_k;
@@ -252,7 +252,7 @@ struct f32_powervsx_shapes_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c shapes_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c shapes_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct f32_powervsx_shapes_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_powervsx_k;
@@ -282,7 +282,7 @@ struct f32_v128relaxed_shapes_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c shapes_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c shapes_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct f32_v128relaxed_shapes_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
@@ -331,7 +331,7 @@ struct f16_neon_shapes_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c shapes_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c shapes_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct f16_neon_shapes_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neon_k;
@@ -362,7 +362,7 @@ struct f16_neonfhm_shapes_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c shapes_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c shapes_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct f16_neonfhm_shapes_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonfhm_k;
@@ -392,7 +392,7 @@ struct f16_haswell_shapes_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c shapes_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c shapes_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct f16_haswell_shapes_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
@@ -422,7 +422,7 @@ struct f16_skylake_shapes_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c shapes_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c shapes_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct f16_skylake_shapes_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
@@ -452,7 +452,7 @@ struct f16_rvv_shapes_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c shapes_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c shapes_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct f16_rvv_shapes_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_rvv_k;
@@ -482,7 +482,7 @@ struct f16_powervsx_shapes_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c shapes_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c shapes_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct f16_powervsx_shapes_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_powervsx_k;
@@ -512,7 +512,7 @@ struct f16_v128relaxed_shapes_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c shapes_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c shapes_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct f16_v128relaxed_shapes_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
@@ -569,10 +569,10 @@ struct pack_view_t {
 };
 
 /**
- *  @brief One of four shape kinds over one quad of candidates: @c reset borrows the query
+ *  @brief One of four shape kinds over one quad of candidates: @c reset views the query
  *      pack, @c push stages up to a quad and then refuses, and @c drain scores what staged.
  *
- *  A borrowed pack stays valid until the drain that closes its quad, as the metric concept
+ *  A viewed pack stays valid until the drain that closes its quad, as the metric concept
  *  promises; a @b [points,3] cloud is packed into @c round_arena_, which every drain rewinds.
  */
 template <typename kit_type_, typename allocator_type_ = forkunion_allocator_t>

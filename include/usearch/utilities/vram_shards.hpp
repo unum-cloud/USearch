@@ -87,7 +87,7 @@ struct vram_shard_fanout {
 
     /**
      *  @brief Builds one traversal context per shard over its device's stream and run, for a plan
-     *      that keeps its own rather than borrowing the executor's, so it never shares scratch.
+     *      that owns its own rather than pointing at the executor's, so it never shares scratch.
      *
      *  @p usage, the arguments of a shard's @c traversal_memory_usage, sizes them for the widest
      *  shard, and every stream holds a context for each shard it serves.
@@ -171,7 +171,7 @@ struct vram_shard_fanout {
         if (failed(claim_status)) return claim_status;
         claim_ = std::move(claim);
         while (true) {
-            if (status_t const borrowed = borrow_traversals_(usage...); failed(borrowed)) return borrowed;
+            if (status_t const paired = pair_executor_traversals_(usage...); failed(paired)) return paired;
             std::size_t const shards = traversals_.size(), entries = shards * widest * wanted;
             if (failed(visible_.resize(shards)) || failed(shard_ids_.resize_uninitialized(entries)) ||
                 failed(shard_scores_.resize_uninitialized(entries)) ||
@@ -359,7 +359,7 @@ struct vram_shard_fanout {
     }
 
     /**
-     *  @brief Sizes every stream's run for @p usage and borrows the executor's persistent
+     *  @brief Sizes every stream's run for @p usage and points at the executor's persistent
      *      contexts, the k-th shard paired with a stream taking that stream's k-th context, so no
      *      two shards share scratch and a warm call opens none.
      *
@@ -370,7 +370,7 @@ struct vram_shard_fanout {
      *  - @c uninitialized_k The executor has no streams.
      */
     template <typename... usage_types_>
-    status_t borrow_traversals_(usage_types_ const&... usage) noexcept {
+    status_t pair_executor_traversals_(usage_types_ const&... usage) noexcept {
         // Counted once, so a shard generation opening meanwhile gets no context here.
         std::size_t const count = shards_.size(), served = shards_per_stream_(shards_, executor_);
         walk_bytes_per_shard_ = walk_bytes_(shards_, usage...);
@@ -401,7 +401,7 @@ struct vram_shard_fanout {
         merged.visited_saturations += spent.visited_saturations;
     }
 
-    /** The shards the batch reads; borrowed from the tower for the call. */
+    /** The shards the batch reads, which the tower owns past the call. */
     shards_t const& shards_;
 
     /** The executor every window queues on. */
@@ -410,7 +410,7 @@ struct vram_shard_fanout {
     /** The executor's hold, from @ref begin until the fan-out dies. */
     typename executor_t::claim_t claim_;
 
-    /** One of the executor's persistent contexts per shard, borrowed under the claim. */
+    /** One of the executor's persistent contexts per shard, valid while the claim holds. */
     growing_buffer<traversal_context_t*, forkunion_allocator_t> traversals_;
 
     /** The widest shard's traversal bytes @ref begin sized every run for, per shard it serves,

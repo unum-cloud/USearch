@@ -135,7 +135,7 @@ def test_fresh_index_inserts_without_a_reservation(seed: int):
         ({"metric": "angular"}, TypeError),  # Modes are enums, never strings.
         ({"quantization": "bf16"}, TypeError),
         ({"quantization": True}, TypeError),  # A bool would read as an enumerator.
-        ({"metric": 99}, UnknownKindError),  # An integer no enumerator carries.
+        ({"metric": 99}, UnknownKindError),  # An integer no enumerator holds.
         ({"quantization": Scalar.F32}, UnknownKindError),  # Rows cross the boundary as `f32` but are never stored so.
         ({"residency": Scalar.F32}, TypeError),  # The factory chooses the residency; no keyword does.
         ({"devices": [0]}, TypeError),  # A variant belonging to another residency.
@@ -198,7 +198,7 @@ def test_drain_takes_a_mood():
         pool.drain(7)
 
 
-def test_class_enums_carry_the_library_spellings():
+def test_class_enums_hold_the_library_spellings():
     """Every class member is named by the library's spelling of its value, in value order, and the values keep
     their registry numbers forever, so a new class renumbers none of its neighbours."""
     spellings = {
@@ -219,13 +219,6 @@ def test_nvme_executor_takes_an_nvme_class():
     assert isinstance(Executor.for_nvme(threads=1, nvme_class=NVMeClass.POSIX), Executor)
     with pytest.raises(TypeError):
         Executor.for_nvme(threads=1, nvme_class="posix")
-
-
-def test_borrowed_pool_must_be_named():
-    """A pool arrives by address, and a null one is refused rather than dereferenced, where the build
-    serves borrowed pools at all."""
-    with pytest.raises((InvalidArgumentError, UnsupportedError)):
-        Executor.on_pool(0)
 
 
 def test_executor_closes_with_its_block(seed: int):
@@ -269,8 +262,8 @@ def test_receivers_take_only_an_executor(executor, wrong, seed: int):
         index.deferred(wrong)
 
 
-def test_executor_is_borrowed_for_the_call(executor, seed: int):
-    """A verb borrows the workers for its call and never retains them, so a temporary one serves."""
+def test_executor_is_viewed_for_the_call(executor, seed: int):
+    """A verb uses the workers for its call and never retains them, so a temporary one serves."""
     index, vectors = build_index(16, 8, Executor.for_ram(), seed=seed)
     assert len(index) == 16
     assert len(index.on(executor).search(vectors[:1], 1, Arena(executor))) == 1
@@ -360,7 +353,7 @@ def test_deferred_call_is_deferred_until_waited(executor, seed: int):
 
 
 def test_deferred_call_owns_its_inputs(executor, seed: int):
-    """The rows a deferred call borrows stay exported inside its `Deferred`, so the caller may drop its own names."""
+    """The rows a deferred call views stay exported inside its `Deferred`, so the caller may drop its own names."""
     index = DenseIndex.init_ram(16, DenseMetric.ANGULAR, Scalar.BF16)
     index.reserve(4)
     rows = random_vectors(4, 16, seed=seed)
@@ -443,8 +436,8 @@ def test_dropped_deferred_in_a_cycle_is_collected_once_final(executor, seed: int
     assert alive() is None
 
 
-def test_deferred_call_borrows_its_arena(executor, seed: int):
-    """A deferred call borrows its arena as a blocking one does, refusing a second call until it is final."""
+def test_deferred_call_views_its_arena(executor, seed: int):
+    """A deferred call uses its arena as a blocking one does, refusing a second call until it is final."""
     index, vectors = build_index(4, 8, executor, seed=seed)
     arena = Arena(executor)
     entered, released = Event(), Event()
@@ -587,7 +580,7 @@ def test_insert_reports_telemetry(executor, seed: int):
 
 
 def test_insert_reports_progress(executor, seed: int):
-    """Reports never go backwards, the last one says the whole batch finished, and a handler answering None carries on."""
+    """Reports never go backwards, the last one says the whole batch finished, and a handler answering None continues."""
     index = DenseIndex.init_ram(dimensions=16, quantization=Scalar.BF16)
     index.reserve(64)
     seen: list[tuple[int, int]] = []
@@ -933,8 +926,8 @@ def test_iteration_walks_every_key(executor, seed: int):
     assert sorted(keys_to_integers(np.concatenate(walked)).tolist()) == list(range(300))
 
 
-def test_iteration_carries_links(executor, seed: int):
-    """A pull asked for links carries them as offsets and keys, and one asked for none carries keys alone."""
+def test_iteration_holds_links(executor, seed: int):
+    """A pull asked for links holds them as offsets and keys, and one asked for none holds keys alone."""
     index, _ = build_index(40, 12, executor, seed=seed)
     cursor, arena = index.cursor(), Arena()
     batch = cursor.next(16, arena, links=True)
@@ -1257,7 +1250,7 @@ _LATE_INTERACTION_DOCUMENTS: int = 6
 """The document keys a late-interaction index holds."""
 
 _LATE_INTERACTION_TOKENS: int = 3
-"""The token rows every document key carries."""
+"""The token rows every document key holds."""
 
 
 def late_interaction_index(executor, seed: int, dimensions: int = 16) -> tuple[DenseIndex, npt.NDArray[np.float32]]:

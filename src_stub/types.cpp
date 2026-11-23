@@ -175,16 +175,6 @@ void usearch_executor_for_ram(usearch_executor_for_ram_t* arguments) {
     *arguments->executor = executor;
 }
 
-void usearch_executor_on_pool(usearch_executor_on_pool_t* arguments) {
-    deferred_outcome_t outcome(arguments->outcome);
-    *arguments->executor = nullptr;
-    if (reject_if(!arguments->pool, usearch_status_invalid_argument_k, "The pool must not be null", outcome)) return;
-    // The pool is borrowed and never driven, every verb running on the thread that called it.
-    usearch_executor_handle_t* const executor = new (std::nothrow) usearch_executor_handle_t {};
-    if (reject_if(!executor, usearch_status_out_of_memory_k, "The executor could not be allocated", outcome)) return;
-    *arguments->executor = executor;
-}
-
 void usearch_executor_for_nvme(usearch_executor_for_nvme_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->executor = nullptr;
@@ -197,7 +187,7 @@ void usearch_executor_for_nvme(usearch_executor_for_nvme_t* arguments) {
                   usearch_status_invalid_argument_k, "The NVMe class is unknown", outcome))
         return;
     if (reject_if(arguments->nvme_class == usearch_nvme_class_linux_spdk_k, usearch_status_unsupported_k,
-                  "This build carries no SPDK", outcome))
+                  "This build holds no SPDK", outcome))
         return;
     // A checkpoint from storage is mapped and read on the host, so this executor is the RAM one.
     usearch_executor_handle_t* const executor = new (std::nothrow) usearch_executor_handle_t {};
@@ -210,7 +200,7 @@ void usearch_executor_for_vram(usearch_executor_for_vram_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->executor = nullptr;
     if (reject_ceiling(arguments->vram.gpu_class_ceiling, outcome)) return;
-    propagate_error(usearch_status_device_k, outcome, "This build carries no GPU backends");
+    propagate_error(usearch_status_device_k, outcome, "This build has no GPU backends");
 }
 
 void usearch_gpu_devices(usearch_gpu_devices_t* arguments) {

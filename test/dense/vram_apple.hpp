@@ -64,7 +64,7 @@ struct vram_cell<gpu_vendor_t::apple_k, dtype_, kernel_> {
     }
 
     /** A fresh traversal context submitting to the stream. */
-    typename index_t::traversal_context_t context() const noexcept { return {stream.handle.share()}; }
+    typename index_t::traversal_context_t context() const noexcept { return {stream.handle}; }
 };
 
 } // namespace unum::usearch::test::dense

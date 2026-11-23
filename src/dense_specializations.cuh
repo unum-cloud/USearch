@@ -64,8 +64,7 @@ template <nk_dtype_t dtype_, cpu_class_t cpu_class_>
 using nvme_indexes =
     dense::nvme_indexes<us::utilities::uuid128_t, quads_kit_of<dtype_, cpu_class_>, tiles_kit_of<dtype_, cpu_class_>,
                         elementwise_kit_of<cpu_class_>, rmscast_kit_of<dtype_, cpu_class_>, visits_kit_of<cpu_class_>,
-                        default_io_engine_t, atomic_ref_for_cpu_class<cpu_class_>::template type,
-                        waiter_of<cpu_class_>>;
+                        default_io_queue_t, atomic_ref_for_cpu_class<cpu_class_>::template type, waiter_of<cpu_class_>>;
 
 /** The start and end of every dtype's device code one GPU class unit embeds, in pairs in
  *  @c dense_dtypes_t order, as the table CMake writes for the class; each VRAM class unit
@@ -174,12 +173,11 @@ struct dense_scratch<indexes_type_> {
 
     growing_buffer<traversal_context_t, thread_allocator_t> traversals;
 
-    explicit dense_scratch(forkunion_executor_t& executor) noexcept
-        : traversals(thread_allocator_t {executor.arena(0)}) {}
+    explicit dense_scratch(ram_executor_t& executor) noexcept : traversals(thread_allocator_t {executor.arena(0)}) {}
 
     /** Rewinds every arena, keeping the high-water mark of earlier calls, and carves one context
      *  per thread; the verb sizes them. */
-    status_t prepare(forkunion_executor_t& executor) noexcept {
+    status_t prepare(ram_executor_t& executor) noexcept {
         if (status_t const rewound = executor.reserve(0); failed(rewound)) return rewound;
         if (failed(traversals.reserve_exactly(executor.size()))) return status_t::bad_alloc_k;
         for (std::size_t thread = 0; thread != executor.size(); ++thread)
@@ -761,11 +759,12 @@ struct specialized_index {
     }
 
     /** Opens a cursor over every entry, breadth-first from @p starts when it names any, which a
-     *  view resolves on its first pull; an index without a cursor answers @c unsupported_k. */
-    static expected<void*> cursor_init(void* index, std::span<key_t const> starts) noexcept {
+     *  view resolves on its first pull, its state placed through @p allocator; an index without a
+     *  cursor answers @c unsupported_k. */
+    static expected<void*> cursor_init(void* index, std::span<key_t const> starts,
+                                       forkunion_allocator_t allocator) noexcept {
         if constexpr (requires { typename index_t::cursor_t; }) {
-            typename index_t::cursor_t* const opened = new (std::nothrow)
-                typename index_t::cursor_t(forkunion_allocator_t {no_memory_domain_k});
+            typename index_t::cursor_t* const opened = new (std::nothrow) typename index_t::cursor_t(allocator);
             if (!opened) return {nullptr, status_t::bad_alloc_k};
             if (status_t const walking = opened->open(of(index), starts); failed(walking))
                 return delete opened, expected<void*> {nullptr, walking};
@@ -890,7 +889,7 @@ struct specialized_index {
  *  On RAM it does where its 4-way or tiles kit differs from the class it degrades to, or its
  *  ForkUnion mask does; on NVMe where its kit alone differs, as a storage walk shares a few
  *  counters and never waits, so its parent's reference serves; on a device always, since each
- *  class's unit alone carries kernels for its generation. The serial floor always compiles its
+ *  class's unit alone holds kernels for its generation. The serial floor always compiles its
  *  variants, and so does the monoversioned class, which has no parent; elsewhere a variant a class
  *  drops is its parent's, which the ladder reaches on the next rung.
  */

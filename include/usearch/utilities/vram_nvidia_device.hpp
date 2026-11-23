@@ -15,7 +15,7 @@
  *  Plain C++ needing no CUDA SDK, hence the @c .hpp extension: the few driver types, constants and
  *  prototypes USearch calls are spelled here, copied from the driver's stable ABI, so any host
  *  compiler builds it. The warp policy the shared walk code is written against lives in
- *  @c vram_nvidia_device.cuh. The flat @c cuda_allocator carries @c std::allocator's call surface
+ *  @c vram_nvidia_device.cuh. The flat @c cuda_allocator exposes @c std::allocator's call surface
  *  with the stream bound at construction; the @c cuda_reservable_allocator is the flat storage
  *  backend, a reserve-once / commit-on-demand range whose base survives growth. Nothing models
  *  both.
@@ -70,6 +70,10 @@ using cuda_stream_handle_t = struct cuda_stream_opaque_t*;
 using cuda_event_handle_t = struct cuda_event_opaque_t*;
 using cuda_module_handle_t = struct cuda_module_opaque_t*;
 using cuda_function_handle_t = struct cuda_function_opaque_t*;
+
+/** @c CU_STREAM_PER_THREAD, the calling thread's default stream on the current context, which no
+ *  one creates or destroys. */
+inline cuda_stream_handle_t const cuda_stream_per_thread_k = reinterpret_cast<cuda_stream_handle_t>(2);
 
 /** The @c CUdevice_attribute values USearch queries. */
 enum cuda_device_attribute_t : int {
@@ -151,7 +155,7 @@ struct cuda_launch_attribute_t {
  *  at entry may start while that predecessor drains. */
 inline constexpr int cuda_launch_programmatic_serialization_k = 6;
 
-/** One launch's geometry, @c CUlaunchConfig, and the attributes it carries. */
+/** One launch's geometry, @c CUlaunchConfig, and the attributes it holds. */
 struct cuda_launch_config_t {
     unsigned grid_x = 1, grid_y = 1, grid_z = 1;
     unsigned block_x = 1, block_y = 1, block_z = 1;
@@ -170,11 +174,10 @@ struct alignas(64) cuda_tensor_map_t {
 /** The @c CUtensorMapDataType USearch counts rows in, @c CU_TENSOR_MAP_DATA_TYPE_UINT64. */
 inline constexpr int cuda_tensor_map_u64_k = 4;
 
-/** The flags USearch passes: @c CU_STREAM_NON_BLOCKING, @c CU_EVENT_BLOCKING_SYNC,
- *  @c CU_EVENT_DISABLE_TIMING, @c CU_MEMHOSTALLOC_PORTABLE, which @c CU_MEMHOSTREGISTER_PORTABLE
- *  equals, @c CU_MEMHOSTREGISTER_READ_ONLY, @c CU_MEM_ATTACH_GLOBAL and
+/** The flags USearch passes: @c CU_EVENT_BLOCKING_SYNC, @c CU_EVENT_DISABLE_TIMING,
+ *  @c CU_MEMHOSTALLOC_PORTABLE, which @c CU_MEMHOSTREGISTER_PORTABLE equals,
+ *  @c CU_MEMHOSTREGISTER_READ_ONLY, @c CU_MEM_ATTACH_GLOBAL and
  *  @c CU_MEM_ALLOC_GRANULARITY_MINIMUM. */
-inline constexpr unsigned cuda_stream_non_blocking_k = 1;
 inline constexpr unsigned cuda_event_blocking_sync_k = 1;
 inline constexpr unsigned cuda_event_disable_timing_k = 2;
 inline constexpr unsigned cuda_host_portable_k = 1;
@@ -294,8 +297,6 @@ struct cuda_api_t {
     cuda_result_t (*fill)(cuda_device_address_t, unsigned char, std::size_t) = nullptr;
     cuda_result_t (*fill_async)(cuda_device_address_t, unsigned char, std::size_t, cuda_stream_handle_t) = nullptr;
     cuda_result_t (*fill_words_async)(cuda_device_address_t, unsigned, std::size_t, cuda_stream_handle_t) = nullptr;
-    cuda_result_t (*stream_create)(cuda_stream_handle_t*, unsigned) = nullptr;
-    cuda_result_t (*stream_destroy)(cuda_stream_handle_t) = nullptr;
     cuda_result_t (*stream_synchronize)(cuda_stream_handle_t) = nullptr;
     cuda_result_t (*stream_query)(cuda_stream_handle_t) = nullptr;
     cuda_result_t (*pointer_attribute)(void*, int, cuda_device_address_t) = nullptr;
@@ -373,8 +374,6 @@ struct cuda_api_t {
             library.resolve("cuMemcpy2DAsync_v2", api.copy_2d_async) && library.resolve("cuMemsetD8_v2", api.fill) &&
             library.resolve("cuMemsetD8Async", api.fill_async) &&
             library.resolve("cuMemsetD32Async", api.fill_words_async) &&
-            library.resolve("cuStreamCreate", api.stream_create) &&
-            library.resolve("cuStreamDestroy_v2", api.stream_destroy) &&
             library.resolve("cuStreamSynchronize", api.stream_synchronize) &&
             library.resolve("cuStreamQuery", api.stream_query) &&
             library.resolve("cuPointerGetAttribute", api.pointer_attribute) &&
@@ -1294,25 +1293,6 @@ struct cuda_pinned_slots_t {
     fu::spin_mutex_t guard_;
 };
 
-/** Owned non-blocking stream, born in the current context; destruction drains it first. */
-struct cuda_stream_t {
-    explicit cuda_stream_t(cuda_api_t const& api) noexcept : api_(&api) {
-        if (api) api.stream_create(&handle_, cuda_stream_non_blocking_k);
-    }
-    cuda_stream_t(cuda_stream_t&& other) noexcept : api_(other.api_), handle_(std::exchange(other.handle_, nullptr)) {}
-    cuda_stream_t(cuda_stream_t const&) = delete;
-    cuda_stream_t& operator=(cuda_stream_t const&) = delete;
-    ~cuda_stream_t() noexcept {
-        if (handle_) api_->stream_synchronize(handle_), api_->stream_destroy(handle_);
-    }
-
-    operator cuda_stream_handle_t() const noexcept { return handle_; }
-
-  private:
-    cuda_api_t const* api_ = nullptr;
-    cuda_stream_handle_t handle_ = nullptr;
-};
-
 /** Owned event, born in the current context, marking a point on a stream that the host polls or
  *  awaits; it blocks on sync, so a drain sleeps instead of spinning a core. Destruction never
  *  waits. */
@@ -1428,7 +1408,7 @@ struct cuda_device_arena_t {
     int device_ = 0;
 };
 
-/** The @c std::unique_ptr deleter carrying the allocator and the element count. */
+/** The @c std::unique_ptr deleter holding the allocator and the element count. */
 template <typename allocator_>
 struct cuda_deleter {
     allocator_ allocator;
@@ -1668,7 +1648,7 @@ struct cuda_traversal_context {
 
     /** Binds this context to @p allocator's stream and device, selecting that device first, since
      *  the event is born in the current context, allocates only the fixed-size counters from the
-     *  stream's pool, and borrows their host twins from the stream's pinned slots; sized buffers
+     *  stream's pool, and takes their host twins from the stream's pinned slots; sized buffers
      *  wait for the first verb. */
     cuda_traversal_context(allocator_t allocator) noexcept
         : results {growing_buffer<scored_node_t, cuda_pinned_allocator_t> {
@@ -1843,7 +1823,7 @@ struct cuda_traversal_context {
      *  it was queued. */
     cuda_unique_ptr<u32_t, counter_allocator_t> missed_;
 
-    /** Borrowed from the stream's page-locked slots, so the copies @ref record queues into it
+    /** Taken from the stream's page-locked slots, so the copies @ref record queues into it
      *  never wait on the device, and no context pins memory of its own. */
     host_counters_ptr_t host_counters_;
     device_bytes_ptr_t arena_;
@@ -1886,7 +1866,7 @@ struct cuda_traversal_context {
     /** Grows @p buffer to @p bytes when @p capacity falls short; @return the base, or null. */
     byte_t* ensure_(device_bytes_ptr_t& buffer, std::size_t& capacity, std::size_t bytes) noexcept {
         if (bytes <= capacity) return buffer.get();
-        // The deleter already carries the stream's pool, so only the allocation and its count
+        // The deleter already holds the stream's pool, so only the allocation and its count
         // change; the old one frees behind the work queued on it.
         buffer.reset(buffer.get_deleter().allocator.allocate(bytes));
         buffer.get_deleter().count = bytes;
@@ -1909,6 +1889,9 @@ struct cuda_executor_t {
     using device_arena_t = cuda_device_arena_t;
     inline static constexpr gpu_vendor_t vendor_k = gpu_vendor_t::nvidia_k;
 
+    /** A stream the caller names for @ref spawn to order work on. */
+    using stream_handle_t = cuda_stream_handle_t;
+
     /** One device's run of scratch, carved and rewound between calls; it only grows, by
      *  @ref reserve, since relocation would be a host loop over device bytes. */
     using arena_t = growing_arena<cuda_device_allocator_t>;
@@ -1919,9 +1902,9 @@ struct cuda_executor_t {
     /** One call's hold on the executor, released when it dies. */
     using claim_t = std::unique_lock<fu::spin_mutex_t>;
 
-    /** One shard's stream, run and contexts; the pinned slots are declared before the stream, so
-     *  they unpin only once it drained, then the arena and the contexts, so they free onto a live
-     *  stream, the contexts first. */
+    /** One shard's stream, run and contexts; the executor drains the stream before any of them
+     *  dies, and the pinned slots and kernel tables are declared first, so they go only after the
+     *  arena and the contexts freed onto the stream, the contexts first. */
     struct stream_t {
 
         /** The driver table every call on this stream goes through. */
@@ -1935,12 +1918,13 @@ struct cuda_executor_t {
         std::unique_ptr<cuda_pinned_slots_t> pinned_slots;
 
         /** The fatbins loaded on this device, one table each, held apart so the contexts keep
-         *  their address as the stream moves, and declared before the stream, so they unload only
-         *  once it drained. */
+         *  their address as the stream moves. */
         std::unique_ptr<cuda_kernel_tables_t> kernel_tables;
 
-        /** The ordering identity every transfer and launch on this device rides. */
-        cuda_stream_t handle;
+        /** The ordering identity every transfer and launch on this device rides: the device's
+         *  per-thread default stream, or a stream of the caller's, which the caller destroys
+         *  after freeing the executor. */
+        cuda_stream_handle_t handle = nullptr;
 
         /** The point @ref wait and the C layer's arena record and sleep on, so a wait frees its
          *  core. */
@@ -1953,11 +1937,11 @@ struct cuda_executor_t {
          *  across calls with their buffers, events and pinned slots. */
         growing_buffer<traversal_context_t> contexts {global_allocator};
 
-        /** Takes @p handle, opened on @p device through @p api, and binds the arena to it; the
-         *  event is born there too, so @p device must be current. */
-        stream_t(cuda_api_t const& api, int device, cuda_stream_t&& handle) noexcept
+        /** Orders on @p handle, a stream of @p device, through @p api, and binds the arena to it;
+         *  the event is born there too, so @p device must be current. */
+        stream_t(cuda_api_t const& api, int device, cuda_stream_handle_t handle) noexcept
             : api(&api), device(device), pinned_slots(new (std::nothrow) cuda_pinned_slots_t {api, device}),
-              kernel_tables(new (std::nothrow) cuda_kernel_tables_t), handle(std::move(handle)), event(api),
+              kernel_tables(new (std::nothrow) cuda_kernel_tables_t), handle(handle), event(api),
               arena(cuda_device_allocator_t {*this}) {}
 
         /**
@@ -1980,6 +1964,14 @@ struct cuda_executor_t {
     cuda_executor_t(cuda_executor_t const&) = delete;
     cuda_executor_t& operator=(cuda_executor_t const&) = delete;
 
+    /** Drains every stream, then frees each one's contexts and run with its device current, so the
+     *  runs, contexts and pinned slots die after the work on them; the streams themselves stay. */
+    ~cuda_executor_t() noexcept {
+        [[maybe_unused]] status_t const drained = wait();
+        for (stream_t& opened : streams_)
+            if (cuda_set_device(*api_, opened.device) == cuda_success_k) opened.contexts.reset(), opened.arena.reset();
+    }
+
     /** Exchanges the stream tables; @c held_ stays, since a move with a call in flight is
      *  misuse. */
     void swap(cuda_executor_t& other) noexcept {
@@ -2001,7 +1993,7 @@ struct cuda_executor_t {
     }
 
     /**
-     *  @brief Takes over streams the caller already opened, owned and destroyed here from now on.
+     *  @brief Builds the executor over @p streams, destroying none of the streams they order on.
      *
      *  @par Statuses:
      *  - @c config_mismatch_k The @p streams are empty.
@@ -2024,29 +2016,34 @@ struct cuda_executor_t {
     }
 
     /** Bytes of shared memory a block keeps to itself on the smallest of this executor's devices,
-     *  the twin of @c forkunion_executor_t::cache_bytes_per_core. */
+     *  the twin of @c ram_executor_t::cache_bytes_per_core. */
     std::size_t cache_bytes_per_core() const noexcept { return cache_bytes_per_core_; }
 
     /**
-     *  @brief Opens one stream per entry of @p devices through @p api, binding each first, since a
-     *      stream is born on the current device; their runs never grow past @p scratch_limit
-     *      bytes, zero for none.
+     *  @brief Orders work on @p streams through @p api, one per entry of @p devices, or on each
+     *      device's per-thread default stream when @p streams is empty.
+     *
+     *  Binds each device first, since its event is born on the current device, and creates and
+     *  destroys no stream; the runs never grow past @p scratch_limit bytes, zero for none.
      *
      *  @par Statuses:
-     *  - @c config_mismatch_k The @p devices are empty.
+     *  - @c config_mismatch_k The @p devices are empty, or @p streams holds another count.
      */
     static expected<cuda_executor_t> spawn(cuda_api_t const& api, std::span<int const> devices,
-                                           std::size_t scratch_limit = 0) noexcept {
-        growing_buffer<stream_t> streams {global_allocator};
-        if (failed(streams.reserve_exactly(devices.size()))) return {{}, status_t::bad_alloc_k};
-        for (int device : devices) {
+                                           std::size_t scratch_limit = 0,
+                                           std::span<cuda_stream_handle_t const> streams = {}) noexcept {
+        if (!streams.empty() && streams.size() != devices.size()) return {{}, status_t::config_mismatch_k};
+        growing_buffer<stream_t> bound {global_allocator};
+        if (failed(bound.reserve_exactly(devices.size()))) return {{}, status_t::bad_alloc_k};
+        for (std::size_t position = 0; position != devices.size(); ++position) {
+            int const device = devices[position];
             if (cuda_set_device(api, device) != cuda_success_k) return {{}, status_t::device_error_k};
-            stream_t opened {api, device, cuda_stream_t {api}};
-            if (!opened.pinned_slots || !opened.kernel_tables) return {{}, status_t::bad_alloc_k};
-            if (!opened.handle || !opened.event) return {{}, status_t::device_error_k};
-            streams.push_back_reserved(std::move(opened));
+            stream_t stream {api, device, streams.empty() ? cuda_stream_per_thread_k : streams[position]};
+            if (!stream.pinned_slots || !stream.kernel_tables) return {{}, status_t::bad_alloc_k};
+            if (!stream.event) return {{}, status_t::device_error_k};
+            bound.push_back_reserved(std::move(stream));
         }
-        auto [executor, status] = acquire(std::move(streams));
+        auto [executor, status] = acquire(std::move(bound));
         executor.scratch_limit_ = scratch_limit;
         return {std::move(executor), status};
     }
@@ -2066,6 +2063,8 @@ struct cuda_executor_t {
         if (streams_.empty()) return status_t::uninitialized_k;
         if (scratch_limit_ && bytes_per_stream > scratch_limit_) return status_t::bad_alloc_k;
         for (stream_t& opened : streams_) {
+            // A per-thread default stream is the current device's, so its run grows with it bound.
+            if (cuda_set_device(*api_, opened.device) != cuda_success_k) return status_t::device_error_k;
             opened.arena.clear();
             // A rewound run holds one chunk, its widest, which a wider call replaces whole.
             if (opened.arena.capacity() < bytes_per_stream) {
@@ -2073,7 +2072,6 @@ struct cuda_executor_t {
                 if (failed(opened.arena.reserve_exactly(bytes_per_stream))) return status_t::bad_alloc_k;
             }
             if (opened.contexts.size() >= contexts_per_stream) continue;
-            if (cuda_set_device(*api_, opened.device) != cuda_success_k) return status_t::device_error_k;
             if (failed(opened.contexts.reserve_exactly(contexts_per_stream))) return status_t::bad_alloc_k;
             while (opened.contexts.size() != contexts_per_stream) {
                 opened.contexts.push_back_reserved(traversal_context_t {cuda_arena_allocator_t {opened.arena, opened}});
@@ -2083,7 +2081,7 @@ struct cuda_executor_t {
         return status_t::success_k;
     }
 
-    /** The contexts @ref reserve keeps on stream @p index, the ones its shards borrow in the order
+    /** The contexts @ref reserve keeps on stream @p index, the ones its shards use in the order
      *  they are paired with it. */
     std::span<traversal_context_t> traversals(std::size_t index) noexcept {
         return to_writable_span(streams_[index].contexts);

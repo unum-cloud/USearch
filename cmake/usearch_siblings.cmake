@@ -61,7 +61,7 @@ usearch_sibling(
 )
 usearch_sibling(
     forkunion FETCHCONTENT_SOURCE_DIR_FORKUNION https://github.com/ashvardanian/ForkUnion
-    2105dd71bbbe3e22c92cf4a4f332a579abb8b780
+    6bd10ce124b3804719ca297ac61092ac5773d627
 )
 usearch_sibling(
     stringzilla FETCHCONTENT_SOURCE_DIR_STRINGZILLA https://github.com/ashvardanian/StringZilla
@@ -73,9 +73,9 @@ usearch_sibling(
 )
 
 # The siblings are the engine rather than an option: every header reaches for them unguarded, so `usearch_header`
-# carries them all. Include directories are copied onto it, because `usearch_setup_target` reads
+# holds them all. Include directories are copied onto it, because `usearch_setup_target` reads
 # `INTERFACE_INCLUDE_DIRECTORIES` directly, a genex that sees only what this target declares, to keep the C++20 feature
-# requirement off the pure-C targets. The export set collects them, as their interfaces carry a language level and
+# requirement off the pure-C targets. The export set collects them, as their interfaces hold a language level and
 # `Threads::Threads` the copied paths do not, and each sibling's `header` export takes a name that cannot collide with
 # ours under `usearch::`.
 set(usearch_sibling_targets_)

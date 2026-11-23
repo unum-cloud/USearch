@@ -36,8 +36,8 @@
 
 #include "usearch/usearch.h"                 // every modality's argument structures
 #include "usearch/dense/types.hpp"           // `dense::search_config_t` & kin - the configs every verb lowers
-#include "usearch/utilities/nvme_device.hpp" // `nvme_executor`, `default_io_engine`, `io_engine_config_t`
-#include "usearch/utilities/ram_device.hpp"  // `forkunion_executor_t`, `forkunion_allocator_t`, `no_memory_domain_k`
+#include "usearch/utilities/nvme_device.hpp" // `nvme_executor`, `default_io_queue`, `io_queue_config_t`
+#include "usearch/utilities/ram_device.hpp"  // `ram_executor_t`, `forkunion_allocator_t`, `no_memory_domain_k`
 #include "usearch/utilities/sample.hpp"      // `sample_inputs`, `sample_outputs` - what SAMPLE reads and writes
 #include "usearch/utilities/safegraphs_format.hpp" // `checkpoint_source_t` - a checkpoint on a device
 #include "usearch/utilities/vram_device.hpp"       // `gpu_executor_t`, `gpu_arena_t`
@@ -165,7 +165,7 @@ inline void accumulate_stats(usearch_traversal_stats_t* stats, result_type_ cons
     }
 }
 
-/** The traversal stats @p result carries: itself, the telemetry it holds, or its own counters. */
+/** The traversal stats @p result holds: itself, the telemetry it holds, or its own counters. */
 template <typename result_type_>
 inline traversal_stats_t traversal_stats_of(result_type_ const& result) noexcept {
     if constexpr (std::is_same_v<result_type_, traversal_stats_t>) return result;
@@ -221,18 +221,18 @@ inline forkunion_allocator_t host_allocator_of(residency_options_type_ const& op
     else return forkunion_allocator_t {no_memory_domain_k};
 }
 
-/** Whether a result carries traversal telemetry - one probe both crossings read. */
+/** Whether a result holds traversal telemetry - one probe both crossings read. */
 template <typename value_type_>
-concept carries_telemetry = requires(value_type_ const& value) { value.visited_members; } ||
-                            requires(value_type_ const& value) { value.telemetry.visited_members; } ||
-                            requires(value_type_ const& value) { value.traversal_stats.visited_members; };
+concept holds_telemetry = requires(value_type_ const& value) { value.visited_members; } ||
+                          requires(value_type_ const& value) { value.telemetry.visited_members; } ||
+                          requires(value_type_ const& value) { value.traversal_stats.visited_members; };
 
-/** The one crossing for a fallible step: folds telemetry into @p stats when the payload carries
+/** The one crossing for a fallible step: folds telemetry into @p stats when the payload holds
  *  any, finishes @p outcome only on failure, and answers whether @c .value is readable. */
 template <typename value_type_>
 inline bool crossed(expected<value_type_> const& result, usearch_traversal_stats_t* stats, usearch_outcome_t* outcome,
                     char const* message = nullptr) noexcept {
-    if constexpr (carries_telemetry<value_type_>) accumulate_stats(stats, result.value);
+    if constexpr (holds_telemetry<value_type_>) accumulate_stats(stats, result.value);
     return result || propagate_error(result.status, outcome, message);
 }
 
@@ -335,10 +335,10 @@ struct expensive_predicate {
 
     template <std::size_t extent_>
     void push(std::span<us::utilities::uuid128_t const, extent_> asked,
-              std::span<payload_type_ const, extent_> carried) noexcept {
+              std::span<payload_type_ const, extent_> held) noexcept {
         for (std::size_t lane = 0; lane != extent_; ++lane) {
             keys.push_back_reserved(std::bit_cast<usearch_key_t>(asked[lane]));
-            payloads.push_back_reserved(carried[lane]);
+            payloads.push_back_reserved(held[lane]);
         }
     }
 
@@ -665,7 +665,7 @@ enum class cpu_class_t : u32_t {
     aws_g2_k = usearch_cpu_class_aws_g2_k,
 
     /** Armv8.6+ NEON: dot products, @c bf16 & @c f16 fused multiplies. Named for Apple M2;
-     *  Cortex-A710 & X2 - Snapdragon 8 Gen 1, AmpereOne - carry the same. */
+     *  Cortex-A710 & X2 - Snapdragon 8 Gen 1, AmpereOne - hold the same. */
     apple_m2_k = usearch_cpu_class_apple_m2_k,
 
     /** Apple M4-class Arm: the @c apple_m2_k bundle plus the SME outer-product tiles,
@@ -1146,7 +1146,7 @@ inline std::size_t machine_cache_line_bytes() noexcept {
     return machine_line_bytes ? machine_line_bytes : default_alignment_k;
 }
 
-/** The spin hints every core of an architecture carries - PAUSE, YIELD, Zihintpause and Power's
+/** The spin hints every core of an architecture holds - PAUSE, YIELD, Zihintpause and Power's
  *  priority nops: the runtime confirms nothing about them, and a class that differs from another by
  *  one of them alone earns no rung. */
 inline constexpr fu::capabilities_t baseline_hints_k = fu::capability_x86_pause_k | fu::capability_arm64_yield_k |
@@ -1294,7 +1294,7 @@ consteval std::size_t compiled_rungs(cpu_ladder<classes_...>) noexcept {
     return (std::size_t {cpu_class_compiled(classes_)} + ... + 0);
 }
 
-/** Every class carrying variants, each lineage newest first and the serial floor last, or the one
+/** Every class holding variants, each lineage newest first and the serial floor last, or the one
  *  class of a monoversioned build; the walk, never the list, skips a rung the build left out. */
 #if USEARCH_TARGET_MONOVERSIONED
 using cpu_ladder_t = cpu_ladder<cpu_class_t::monoversioned_k>;
@@ -1495,18 +1495,18 @@ constexpr bool basic_class_compiled(cpu_class_t cpu_class) noexcept {
 
 #pragma region Residencies
 
-/** Every I/O engine this build admits, yielding between polls, since one NVMe executor serves every
+/** Every I/O queue this build admits, yielding between polls, since one NVMe executor serves every
  *  CPU class. */
-using default_io_engine_t = default_io_engine<fu::standard_yield_t>;
+using default_io_queue_t = default_io_queue<fu::standard_yield_t>;
 
 /** The executor over every engine this build admits, each thread's transport picked at spawn. */
-using nvme_executor_t = nvme_executor<default_io_engine_t>;
+using nvme_executor_t = nvme_executor<default_io_queue_t>;
 
 /** Residency discrimination off the alternative's own executor type - no second tag exists to
  *  disagree with the variant. */
 template <typename multi_type_>
 inline constexpr bool is_ram_index = requires {
-    requires std::is_same_v<typename multi_type_::executor_t, forkunion_executor_t>;
+    requires std::is_same_v<typename multi_type_::executor_t, ram_executor_t>;
 };
 
 /** Whether an executor drives GPUs: every vendor's names the vendor it drives. */
@@ -1535,7 +1535,7 @@ template <vendored_residency_t residency_>
 struct vendored_residency_executor;
 template <>
 struct vendored_residency_executor<vendored_residency_t::ram_k> {
-    using type = forkunion_executor_t;
+    using type = ram_executor_t;
 };
 template <>
 struct vendored_residency_executor<vendored_residency_t::nvme_k> {
@@ -1557,11 +1557,11 @@ struct vendored_residency_executor<vendored_residency_t::vram_apple_k> {
 /** The residency whose verbs take @p executor_type_. */
 template <typename executor_type_>
 inline constexpr vendored_residency_t vendored_residency_of =
-    std::is_same_v<executor_type_, forkunion_executor_t> ? vendored_residency_t::ram_k
-    : std::is_same_v<executor_type_, nvme_executor_t>    ? vendored_residency_t::nvme_k
-    : std::is_same_v<executor_type_, cuda_executor_t>    ? vendored_residency_t::vram_nvidia_k
-    : std::is_same_v<executor_type_, hip_executor_t>     ? vendored_residency_t::vram_amd_k
-                                                         : vendored_residency_t::vram_apple_k;
+    std::is_same_v<executor_type_, ram_executor_t>    ? vendored_residency_t::ram_k
+    : std::is_same_v<executor_type_, nvme_executor_t> ? vendored_residency_t::nvme_k
+    : std::is_same_v<executor_type_, cuda_executor_t> ? vendored_residency_t::vram_nvidia_k
+    : std::is_same_v<executor_type_, hip_executor_t>  ? vendored_residency_t::vram_amd_k
+                                                      : vendored_residency_t::vram_apple_k;
 
 /** A set of GPU classes, one bit per C enum value. */
 using gpu_class_mask_t = u32_t;
@@ -1769,7 +1769,7 @@ using apple_ladder_t =
     gpu_ladder<gpu_class_t::apple_metal10_k, gpu_class_t::apple_metal9_k, gpu_class_t::apple_metal7_k>;
 
 /** A basic modality's multiversioned ladder, or the vendor ladder in a monoversioned build, whose
- *  one kept class carries every modality. */
+ *  one kept class holds every modality. */
 #if USEARCH_TARGET_MONOVERSIONED
 template <typename multiversioned_ladder_type_>
 using basic_gpu_ladder = nvidia_ladder_t;
@@ -1792,7 +1792,7 @@ gpu_class_t pick_gpu_class(gpu_ladder<classes_...>, gpu_class_mask_t loaded, use
 }
 
 /** The class a device of @p vendor whose loader took @p loaded takes under @p ceiling, walking
- *  its own vendor's ladder; @c unknown_k when no unit this build carries runs on it, or none at
+ *  its own vendor's ladder; @c unknown_k when no unit this build holds runs on it, or none at
  *  or under the ceiling does. */
 inline gpu_class_t pick_gpu_class(gpu_vendor_t vendor, gpu_class_mask_t loaded, usearch_gpu_class_t ceiling) noexcept {
     switch (vendor) {
@@ -1837,7 +1837,7 @@ struct gpu_placement_t {
  *  - @c invalid_argument_k The ceiling is a value no class takes.
  *  - @c device_error_k An ordinal is past the listing.
  *  - @c config_mismatch_k The devices span vendors.
- *  - @c unsupported_k The devices share no class this build carries at or under the ceiling.
+ *  - @c unsupported_k The devices share no class this build holds at or under the ceiling.
  */
 inline expected<gpu_placement_t> resolve_placement(std::span<gpu_device_t const> table,
                                                    std::span<gpu_class_mask_t const> loaded,
@@ -2127,15 +2127,16 @@ struct usearch_executor_handle_t {
     /** The one call that holds the executor, from its claim to its end. */
     holding_call_t holding_call;
 
-    std::variant<forkunion_executor_t, nvme_executor_t, gpu_executor_t> executor;
+    std::variant<ram_executor_t, nvme_executor_t, gpu_executor_t> executor;
 };
 
 /** Discovers the topology and spawns @p threads over it into @p handle under @p ceiling, near the
- *  one memory domain @p ram names on a machine of several, answering @p handle, or null once the
- *  outcome records why not; one thread is the caller. */
+ *  one memory domain @p ram names on a machine of several, each thread's scratch holding at most
+ *  @p scratch_limit bytes, answering @p handle, or null once the outcome records why not; one
+ *  thread is the caller. */
 inline usearch_executor_t spawn_ram_executor(usearch_executor_handle_t& handle, std::size_t threads,
                                              cpu_ceiling_t ceiling, usearch_ram_options_t const& ram,
-                                             usearch_outcome_t* outcome) noexcept {
+                                             std::size_t scratch_limit, usearch_outcome_t* outcome) noexcept {
     fu_topology_t topology = nullptr;
     if (fu_topology_new(&topology) != fu_success_k)
         return propagate_error(usearch_status_device_k, outcome, "Topology discovery failed"), nullptr;
@@ -2144,26 +2145,30 @@ inline usearch_executor_t spawn_ram_executor(usearch_executor_handle_t& handle, 
     std::size_t domains_count = 0;
     bool const near_one = ram.memory_domains && ram.memory_domains_count == 1 &&
                           fu_memory_domains_count(topology, &domains_count) == fu_success_k && domains_count > 1;
-    auto [spawned, status] = near_one ? forkunion_executor_t::spawn_near(
-                                            topology, static_cast<fu_memory_domain_id_t>(ram.memory_domains[0]),
-                                            threads, forkunion_allowed_of(ceiling))
-                                      : forkunion_executor_t::spawn(topology, threads, forkunion_allowed_of(ceiling));
+    auto [spawned, status] =
+        near_one ? ram_executor_t::spawn_near(topology, static_cast<fu_memory_domain_id_t>(ram.memory_domains[0]),
+                                              threads, forkunion_allowed_of(ceiling), scratch_limit)
+                 : ram_executor_t::spawn(topology, threads, forkunion_allowed_of(ceiling), scratch_limit);
     if (failed(status)) return propagate_error(status, outcome), nullptr;
-    handle.executor.emplace<forkunion_executor_t>(std::move(spawned));
+    handle.executor.emplace<ram_executor_t>(std::move(spawned));
     return &handle;
 }
 
 /** What an NVMe executor spawns by: the fewest hardware queues of any disk or SPDK controller under
- *  its paths, zero when none answers, and the memory domain every one of them sits nearest, or
- *  @c no_memory_domain_k when they differ or none is known. */
+ *  its paths, zero when none answers, the memory domain every one of them sits nearest, or
+ *  @c no_memory_domain_k when they differ or none is known, and each path's block queue, which the
+ *  rings open deep and polled enough for. */
 struct nvme_media_shape_t {
     std::size_t fewest_queues = 0;
     fu_memory_domain_id_t memory_domain = no_memory_domain_k;
+    growing_buffer<io_device_queues_t> queues {global_allocator};
 };
 
 /** The shape of the media under @p paths, opened as views open them. */
 inline nvme_media_shape_t nvme_media_shape(std::span<usearch_bytes_view_t const> paths) noexcept {
     nvme_media_shape_t shape;
+    // Without room for the queues, the rings open one read deep and grow on the first call.
+    [[maybe_unused]] status_t const reserved = shape.queues.reserve_exactly(paths.size());
     for (std::size_t position = 0; position != paths.size(); ++position) {
         std::string_view const named {reinterpret_cast<char const*>(paths[position].data), paths[position].length};
         io_device_queues_t queues;
@@ -2181,6 +2186,7 @@ inline nvme_media_shape_t nvme_media_shape(std::span<usearch_bytes_view_t const>
         }
         if (queues.hardware_queues && (!shape.fewest_queues || queues.hardware_queues < shape.fewest_queues))
             shape.fewest_queues = queues.hardware_queues;
+        if (shape.queues.capacity() > position) shape.queues.push_back_reserved(queues);
         shape.memory_domain = !position || shape.memory_domain == domain ? domain : no_memory_domain_k;
     }
     return shape;
@@ -2190,17 +2196,20 @@ inline nvme_media_shape_t nvme_media_shape(std::span<usearch_bytes_view_t const>
  *  @p queues, the fewest hardware queues of its media, so no two threads share a queue; zero,
  *  ForkUnion's own default, when the cores are unknown. */
 inline std::size_t nvme_default_threads(fu_topology_t topology, std::size_t queues) noexcept {
-    auto const [cores, cores_status] = forkunion_executor_t::default_threads(topology);
+    auto const [cores, cores_status] = ram_executor_t::default_threads(topology);
     if (failed(cores_status)) return 0;
     return queues ? min_of(cores, queues) : cores;
 }
 
 /** Discovers the topology and spawns @p threads into @p handle under @p ceiling, each opening the
- *  engine @p config names, answering @p handle, or null once the outcome records why not; zero
- *  threads takes @ref nvme_default_threads over the media under @p paths. */
+ *  engine @p config names as deep and polled as the media under @p paths admit and holding at most
+ *  @p scratch_limit bytes of scratch, near the first memory domain @p ram names, else the media's,
+ *  answering @p handle, or null once the outcome records why not; zero threads takes
+ *  @ref nvme_default_threads over those media. */
 inline usearch_executor_t spawn_nvme_executor(usearch_executor_handle_t& handle, std::size_t threads,
                                               std::span<usearch_bytes_view_t const> paths,
-                                              io_engine_config_t const& config, cpu_ceiling_t ceiling,
+                                              usearch_ram_options_t const& ram, io_queue_config_t config,
+                                              cpu_ceiling_t ceiling, std::size_t scratch_limit,
                                               usearch_outcome_t* outcome) noexcept {
     fu_topology_t topology = nullptr;
     if (fu_topology_new(&topology) != fu_success_k)
@@ -2214,40 +2223,51 @@ inline usearch_executor_t spawn_nvme_executor(usearch_executor_handle_t& handle,
                                "More threads than the SPDK controller granted I/O queue pairs"),
                nullptr;
     if (!threads) threads = nvme_default_threads(topology, queues);
-    // Drives on one socket keep their issuers there; drives on several spread them machine-wide.
+    // A named domain wins; drives on one socket keep their issuers there, on several spread out.
     std::size_t domains_count = 0;
-    fu_memory_domain_id_t const near_domain = fu_memory_domains_count(topology, &domains_count) == fu_success_k &&
-                                                      domains_count > 1
-                                                  ? shape.memory_domain
-                                                  : no_memory_domain_k;
+    if (fu_memory_domains_count(topology, &domains_count) != fu_success_k) domains_count = 0;
+    fu_memory_domain_id_t const near_domain = ram.memory_domains && ram.memory_domains_count
+                                                  ? static_cast<fu_memory_domain_id_t>(ram.memory_domains[0])
+                                              : domains_count > 1 ? shape.memory_domain
+                                                                  : no_memory_domain_k;
+    std::span<io_device_queues_t const> const media_queues = to_span(shape.queues);
+    config.polling = nvme_polling(media_queues);
+    std::size_t const opening_depth = threads ? nvme_queue_depth(media_queues, threads) : 0;
     auto [spawned, status] = nvme_executor_t::spawn(topology, threads, config, forkunion_allowed_of(ceiling),
-                                                    near_domain);
+                                                    near_domain, scratch_limit, opening_depth);
     if (failed(status))
         return propagate_error(status, outcome, "No I/O engine opened on the executor's threads"), nullptr;
     handle.executor.emplace<nvme_executor_t>(std::move(spawned));
     return &handle;
 }
 
-/** The executor a null handle runs RAM work on: the calling thread, built into @p call_executor
- *  under the machine's own ceiling, since a pool of one never waits on another thread. */
+/** The executor a null handle runs RAM work on: the calling thread alone, built into
+ *  @p call_executor without a topology probe, a pool or a memory domain. */
 template <typename multi_type_>
     requires is_ram_index<multi_type_>
-inline usearch_executor_t call_executor_for(multi_type_&, usearch_executor_handle_t& call_executor,
-                                            usearch_outcome_t* outcome) noexcept {
-    return spawn_ram_executor(call_executor, 1, pick_cpu_ceiling(usearch_cpu_class_unknown_k).value,
-                              usearch_ram_options_t {}, outcome);
+inline usearch_executor_t make_call_executor(multi_type_&, usearch_executor_handle_t& call_executor,
+                                             usearch_outcome_t* outcome) noexcept {
+    auto [threads, status] = ram_executor_t::on_calling_thread();
+    if (failed(status)) return propagate_error(status, outcome), nullptr;
+    call_executor.executor.emplace<ram_executor_t>(std::move(threads));
+    return &call_executor;
 }
 
-/** The executor a null handle runs NVMe work on: one thread of synchronous reads. */
+/** The executor a null handle runs NVMe work on: one blocking queue on the calling thread alone,
+ *  so a call starts no OS thread. */
 template <typename multi_type_>
     requires is_nvme_index<multi_type_>
-inline usearch_executor_t call_executor_for(multi_type_&, usearch_executor_handle_t& call_executor,
-                                            usearch_outcome_t* outcome) noexcept {
+inline usearch_executor_t make_call_executor(multi_type_&, usearch_executor_handle_t& call_executor,
+                                             usearch_outcome_t* outcome) noexcept {
+    auto [threads, threads_status] = ram_executor_t::on_calling_thread();
+    if (failed(threads_status)) return propagate_error(threads_status, outcome), nullptr;
     // Zero leaves each call's depth to the block queues of the media it reads.
-    io_engine_config_t config;
+    io_queue_config_t config;
     config.transport = io_transport_t::blocking_k;
-    return spawn_nvme_executor(call_executor, 1, {}, config, pick_cpu_ceiling(usearch_cpu_class_unknown_k).value,
-                               outcome);
+    auto [opened, status] = nvme_executor_t::acquire(std::move(threads), config);
+    if (failed(status)) return propagate_error(status, outcome, "No I/O engine opened on the calling thread"), nullptr;
+    call_executor.executor.emplace<nvme_executor_t>(std::move(opened));
+    return &call_executor;
 }
 
 /** Applies @p visitor to whichever executor @p executor holds, a GPU one included; an empty GPU
@@ -2268,12 +2288,16 @@ inline status_t visit_executor(usearch_executor_handle_t& executor, visitor_type
         executor.executor);
 }
 
-/** The residency's executor inside @p executor 's variant: GPU executors nest one level deeper. */
+/** The residency's executor inside @p executor 's variant: an NVMe executor serves RAM work through
+ *  its threads, and GPU executors nest one level deeper. */
 template <typename executor_type_>
 inline executor_type_* residency_executor(usearch_executor_handle_t& executor) noexcept {
-    if constexpr (std::is_same_v<executor_type_, forkunion_executor_t> ||
-                  std::is_same_v<executor_type_, nvme_executor_t>)
-        return std::get_if<executor_type_>(&executor.executor);
+    if constexpr (std::is_same_v<executor_type_, ram_executor_t>) {
+        if (nvme_executor_t* const nvme = std::get_if<nvme_executor_t>(&executor.executor)) return &nvme->threads();
+        return std::get_if<ram_executor_t>(&executor.executor);
+    }
+    else if constexpr (std::is_same_v<executor_type_, nvme_executor_t>)
+        return std::get_if<nvme_executor_t>(&executor.executor);
     else {
         gpu_executor_t* const gpu = std::get_if<gpu_executor_t>(&executor.executor);
         return gpu ? std::get_if<executor_type_>(gpu) : nullptr;
@@ -2282,13 +2306,13 @@ inline executor_type_* residency_executor(usearch_executor_handle_t& executor) n
 
 /** The typed executor behind the C handle, or null with @c usearch_status_device_k on a kind
  *  mismatch. A null handle builds @p call_executor for this call alone, through the overload of
- *  @c call_executor_for its residency names, the VRAM ones defined beside the dense and the basic
+ *  @c make_call_executor its residency names, the VRAM ones defined beside the dense and the basic
  *  GPU variants. */
 template <typename multi_type_>
 inline typename multi_type_::executor_t* executor_of(multi_type_& variant, usearch_executor_t executor,
                                                      usearch_executor_handle_t& call_executor,
                                                      usearch_outcome_t* outcome) noexcept {
-    if (!executor) executor = call_executor_for(variant, call_executor, outcome);
+    if (!executor) executor = make_call_executor(variant, call_executor, outcome);
     if (!executor) return nullptr;
     typename multi_type_::executor_t* const typed = residency_executor<typename multi_type_::executor_t>(*executor);
     if (!typed)
@@ -2766,16 +2790,23 @@ inline bytes_view_t as_bytes(usearch_bytes_view_t bytes) noexcept {
 #pragma region Holding Calls
 
 /** The host threads behind @p executor, or null for a VRAM one, which has none. */
-inline forkunion_executor_t* threads_of(usearch_executor_handle_t& executor) noexcept {
-    if (forkunion_executor_t* const threads = std::get_if<forkunion_executor_t>(&executor.executor)) return threads;
+inline ram_executor_t* threads_of(usearch_executor_handle_t& executor) noexcept {
+    if (ram_executor_t* const threads = std::get_if<ram_executor_t>(&executor.executor)) return threads;
     if (nvme_executor_t* const nvme = std::get_if<nvme_executor_t>(&executor.executor)) return &nvme->threads();
     return nullptr;
+}
+
+/** The memory domain @p executor 's first thread sits on, where a handle opened on it keeps its
+ *  long-lived state; none for a @c NULL or a VRAM executor. */
+inline fu_memory_domain_id_t memory_domain_of(usearch_executor_t executor) noexcept {
+    ram_executor_t const* const threads = executor ? threads_of(*executor) : nullptr;
+    return threads && threads->size() ? threads->memory_domain(0) : no_memory_domain_k;
 }
 
 /** Whether @p executor hands deferred calls to its thread 0: a caller-exclusive pool does, while an
  *  inclusive one, a single thread, WebAssembly and a VRAM executor run them at submission. */
 inline bool delegates(usearch_executor_handle_t& executor) noexcept {
-    forkunion_executor_t const* const threads = threads_of(executor);
+    ram_executor_t const* const threads = threads_of(executor);
     return threads && threads->exclusivity() == fu_caller_exclusive_k;
 }
 
@@ -2789,7 +2820,7 @@ inline bool runs_holding_call(usearch_executor_handle_t& executor) noexcept {
 
 /** Waits out the tail of the last delegated call's slice on thread 0, after its status went out. */
 inline void await_delegated_call(usearch_executor_handle_t& executor) noexcept {
-    if (forkunion_executor_t* const threads = threads_of(executor)) threads->unsafe_await();
+    if (ram_executor_t* const threads = threads_of(executor)) threads->unsafe_await();
 }
 
 /** Returns once no call naming the handle that owns @p named_calls is left: what every free and

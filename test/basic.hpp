@@ -236,7 +236,7 @@ void basic_expect_mirrored(index_type_& mirrored, index_type_& original, std::si
     }
 }
 
-/** The exact oracle's verdict on one search: every returned ID must carry its true
+/** The exact oracle's verdict on one search: every returned ID must hold its true
  *  distance, and the best must match the graph-independent minimum. */
 template <typename fixture_type_, typename index_type_, typename query_type_>
 void basic_audit_search(index_type_ const& index, query_type_ const& query,
@@ -3875,7 +3875,7 @@ void test_basic_cursor(u64_t seed) {
  *  and at the floor, serial and pooled; and a fresh index restored from either mirrors the
  *  original. Composed per unit, never by @c test_basic_scenarios: the key dtype's name and
  *  the metric token are unit knowledge - sentences passes "u64", while bioinformatics and
- *  meshes both carry the @c uuid128_t key and pass "uuid". */
+ *  meshes both hold the @c uuid128_t key and pass "uuid". */
 template <typename fixture_type_>
 void test_basic_safegraphs_round_trip(u64_t seed, std::string_view key_dtype_name, std::string_view metric_token) {
     using index_t = typename fixture_type_::index_t;
@@ -3928,7 +3928,7 @@ void test_basic_safegraphs_round_trip(u64_t seed, std::string_view key_dtype_nam
                 expect_equal(header.key.data.size(), extents.nodes * sizeof(typename index_t::key_t));
                 expect_true(header.value.dtype == codec_t::value_dtype_k);
                 // A codec of fixed-width values writes a column addressed by multiplication;
-                // anything else carries the prefix sums that address its entries.
+                // anything else holds the prefix sums that address its entries.
                 expect_equal(header.value.offsets.has_value(), !safegraphs_value_is_fixed<codec_t>());
                 if (header.value.offsets) {
                     expect_true(header.value.offsets->dtype == dtype_t::u64_k);
@@ -4225,13 +4225,13 @@ using basic_nvme_scratch_t = arena_allocator<byte_t, forkunion_allocator_t>;
 /**
  *  @brief The RAM group an NVMe view is judged against: the fixture's entries keyed by @p key_of
  *      over @p shards shards, saved under @c /tmp as a monolith for one shard or as a manifest
- *      beside its parts, and an executor of @p engine_type_ to view it with.
+ *      beside its parts, and an executor of @p queue_type_ to view it with.
  *
  *  Each modality's suite defines its NVMe fixture beside its RAM ones and composes
  *  @ref run_basic_nvme_cases over it. A fixture names:
  *  - @c ram_fixture_t, the RAM fixture whose metric, codec and keys the RAM side builds with;
  *  - @c shard_index_t, the RAM shard over @c forkunion_allocator_t the sharded index holds, and
- *    @c nvme_t over an engine and node-ID width, the view of its checkpoint;
+ *    @c nvme_t over a queue and node-ID width, the view of its checkpoint;
  *  - @c scratch_metric_t and @c query_t, what a view's call scores with and queries by;
  *  - @c metric_token_k, the token the checkpoint records, and @c coordinates_t, a sample's fixed
  *    coordinates or @c no_fixed_coordinates_t;
@@ -4240,12 +4240,12 @@ using basic_nvme_scratch_t = arena_allocator<byte_t, forkunion_allocator_t>;
  *    stored view over the same arena, and @c matches between an entry and a stored view;
  *  - optionally @c wide_fixture_t, a RAM fixture of 64-bit node IDs, for the widened view.
  */
-template <typename fixture_type_, typename engine_type_>
+template <typename fixture_type_, typename queue_type_>
 struct basic_nvme_reference {
     using fixture_t = fixture_type_;
     using shard_index_t = typename fixture_t::shard_index_t;
     using ram_t = ram_indexes<shard_index_t>;
-    using nvme_t = typename fixture_t::template nvme_t<engine_type_>;
+    using nvme_t = typename fixture_t::template nvme_t<queue_type_>;
     using key_t = typename shard_index_t::key_t;
     using value_t = typename shard_index_t::value_t;
     using node_id_t = typename shard_index_t::node_id_t;
@@ -4302,7 +4302,7 @@ struct basic_nvme_reference {
                      status_t::success_k);
 
         expect_true(fu_topology_new(&topology) == fu_success_k);
-        auto [spawned, spawn_status] = executor_t::spawn(topology, 2, io_engine_config_t {});
+        auto [spawned, spawn_status] = executor_t::spawn(topology, 2, io_queue_config_t {});
         expect_equal(spawn_status, status_t::success_k);
         executor = std::move(spawned);
     }
@@ -4418,9 +4418,9 @@ struct per_query_metric {
  *  at a time or gathered per thread; @c count finds every key once and an absent one never, and
  *  @c get and @c read_entries hand back every entry's own value.
  */
-template <typename engine_type_, typename fixture_type_>
+template <typename queue_type_, typename fixture_type_>
 void test_basic_nvme_search(fixture_type_ const& fixture, u64_t seed) {
-    using reference_t = basic_nvme_reference<fixture_type_, engine_type_>;
+    using reference_t = basic_nvme_reference<fixture_type_, queue_type_>;
     using nvme_t = typename reference_t::nvme_t;
     using key_t = typename reference_t::key_t;
     using distance_t = typename reference_t::distance_t;
@@ -4573,9 +4573,9 @@ void test_basic_nvme_search(fixture_type_ const& fixture, u64_t seed) {
 
 /** A save of several shards viewed through its manifest: one shard per part, every entry counted,
  *  and the parts' merged rankings those of the RAM group's merged walks as wide as the index. */
-template <typename engine_type_, typename fixture_type_>
+template <typename queue_type_, typename fixture_type_>
 void test_basic_nvme_parts(fixture_type_ const& fixture, u64_t seed) {
-    using reference_t = basic_nvme_reference<fixture_type_, engine_type_>;
+    using reference_t = basic_nvme_reference<fixture_type_, queue_type_>;
     using key_t = typename reference_t::key_t;
     using distance_t = typename reference_t::distance_t;
     std::size_t const count = fixture.size(), wanted = basic_connectivity_k;
@@ -4596,9 +4596,9 @@ void test_basic_nvme_parts(fixture_type_ const& fixture, u64_t seed) {
 /** The key scans across parts against the RAM group's lookups, a key shared by every third entry
  *  and an absent key included: every count and verdict agrees, and @c get hands each key's earliest
  *  entries up to the wanted, each one's value an entry stored under that key. */
-template <typename engine_type_, typename fixture_type_>
+template <typename queue_type_, typename fixture_type_>
 void test_basic_nvme_key_scans(fixture_type_ const& fixture, u64_t seed) {
-    using reference_t = basic_nvme_reference<fixture_type_, engine_type_>;
+    using reference_t = basic_nvme_reference<fixture_type_, queue_type_>;
     using key_t = typename reference_t::key_t;
     using ram_fixture_t = typename fixture_type_::ram_fixture_t;
     constexpr std::size_t wanted_k = 2;
@@ -4642,9 +4642,9 @@ void test_basic_nvme_key_scans(fixture_type_ const& fixture, u64_t seed) {
 /** The cursor walks the parts as the RAM group's cursor walks its shards, pull for pull: every
  *  entry once as stored, then breadth-first from the first entry's key with every entry's links,
  *  the same keys, the same links and the same offsets. */
-template <typename engine_type_, typename fixture_type_>
+template <typename queue_type_, typename fixture_type_>
 void test_basic_nvme_cursor(fixture_type_ const& fixture, u64_t seed) {
-    using reference_t = basic_nvme_reference<fixture_type_, engine_type_>;
+    using reference_t = basic_nvme_reference<fixture_type_, queue_type_>;
     using nvme_t = typename reference_t::nvme_t;
     using ram_cursor_t = typename reference_t::ram_t::cursor_t;
     using nvme_cursor_t = typename nvme_t::cursor_t;
@@ -4691,9 +4691,9 @@ void test_basic_nvme_cursor(fixture_type_ const& fixture, u64_t seed) {
 
 /** The reachability audit of a whole graph agrees with the RAM index's: every entry audited, as
  *  many reached, through at least one sweep. */
-template <typename engine_type_, typename fixture_type_>
+template <typename queue_type_, typename fixture_type_>
 void test_basic_nvme_health(fixture_type_ const& fixture, u64_t seed) {
-    using reference_t = basic_nvme_reference<fixture_type_, engine_type_>;
+    using reference_t = basic_nvme_reference<fixture_type_, queue_type_>;
     reference_t reference {fixture, "nvme_health", 1, seed};
     typename reference_t::nvme_t viewed {forkunion_allocator_t {}};
     if (!expect_equal(reference.view(viewed), status_t::success_k)) return;
@@ -4708,9 +4708,9 @@ void test_basic_nvme_health(fixture_type_ const& fixture, u64_t seed) {
 
 /** A sample of the parts draws what the RAM group draws under the same seed: the same keys, entry
  *  ordinals and parents at the same parent distances, every draw at finite coordinates. */
-template <typename engine_type_, typename fixture_type_>
+template <typename queue_type_, typename fixture_type_>
 void test_basic_nvme_sample(fixture_type_ const& fixture, u64_t seed) {
-    using reference_t = basic_nvme_reference<fixture_type_, engine_type_>;
+    using reference_t = basic_nvme_reference<fixture_type_, queue_type_>;
     using key_t = typename reference_t::key_t;
     using coordinates_t = typename fixture_type_::coordinates_t;
     std::size_t const wanted = min_of(fixture.size(), basic_nvme_parts_k * basic_connectivity_k);
@@ -4754,9 +4754,9 @@ void test_basic_nvme_sample(fixture_type_ const& fixture, u64_t seed) {
 /** Reads by purpose over a monolith: a search reads one neighbors row per expansion, one value row
  *  per distance and one key per written result, and a filtered one reads a key beside every value
  *  row and one more per written result. */
-template <typename engine_type_, typename fixture_type_>
+template <typename queue_type_, typename fixture_type_>
 void test_basic_nvme_telemetry(fixture_type_ const& fixture, u64_t seed) {
-    using reference_t = basic_nvme_reference<fixture_type_, engine_type_>;
+    using reference_t = basic_nvme_reference<fixture_type_, queue_type_>;
     using key_t = typename reference_t::key_t;
     using distance_t = typename reference_t::distance_t;
     using nvme_t = typename reference_t::nvme_t;
@@ -4791,9 +4791,9 @@ void test_basic_nvme_telemetry(fixture_type_ const& fixture, u64_t seed) {
 /** A read that comes back short of its row stops the call: a part truncated under a live view fails
  *  search, filtered search and the key scans with @c io_k, again on every retry, and the very
  *  executor then serves an intact view exactly. */
-template <typename engine_type_, typename fixture_type_>
+template <typename queue_type_, typename fixture_type_>
 void test_basic_nvme_failed_read(fixture_type_ const& fixture, u64_t seed) {
-    using reference_t = basic_nvme_reference<fixture_type_, engine_type_>;
+    using reference_t = basic_nvme_reference<fixture_type_, queue_type_>;
     using key_t = typename reference_t::key_t;
     using distance_t = typename reference_t::distance_t;
     using nvme_t = typename reference_t::nvme_t;
@@ -4847,9 +4847,9 @@ void test_basic_nvme_failed_read(fixture_type_ const& fixture, u64_t seed) {
 /** Parts served from elsewhere than the manifest points: one moved under another name and named
  *  itself, the rest through the directory holding them. The view ranks exactly like the RAM group,
  *  while one naming too few parts is refused and one following the manifest fails to open. */
-template <typename engine_type_, typename fixture_type_>
+template <typename queue_type_, typename fixture_type_>
 void test_basic_nvme_relocated(fixture_type_ const& fixture, u64_t seed) {
-    using reference_t = basic_nvme_reference<fixture_type_, engine_type_>;
+    using reference_t = basic_nvme_reference<fixture_type_, queue_type_>;
     using key_t = typename reference_t::key_t;
     using distance_t = typename reference_t::distance_t;
     std::size_t const count = fixture.size(), wanted = basic_connectivity_k;
@@ -4885,15 +4885,15 @@ void test_basic_nvme_relocated(fixture_type_ const& fixture, u64_t seed) {
  *  Every entry finds itself at distance zero through candidates as wide as the graph, and the
  *  mismatched view answers @c config_mismatch_k and stays empty, as the RAM loader refuses it.
  */
-template <typename engine_type_, typename fixture_type_>
+template <typename queue_type_, typename fixture_type_>
 void test_basic_nvme_widened_keys(fixture_type_ const& fixture, u64_t seed) {
     using wide_fixture_t = typename fixture_type_::wide_fixture_t;
     using index_t = typename wide_fixture_t::index_t;
     using node_id_t = typename index_t::node_id_t;
     using context_t = typename index_t::traversal_context_t;
     using key_t = typename index_t::key_t;
-    using nvme_t = typename fixture_type_::template nvme_t<engine_type_, node_id_t>;
-    using mismatched_t = typename fixture_type_::template nvme_t<engine_type_, u32_t>;
+    using nvme_t = typename fixture_type_::template nvme_t<queue_type_, node_id_t>;
+    using mismatched_t = typename fixture_type_::template nvme_t<queue_type_, u32_t>;
     using distance_t = typename nvme_t::distance_t;
     using executor_t = typename nvme_t::executor_t;
     static_assert(!std::is_same_v<node_id_t, u32_t>);
@@ -4923,7 +4923,7 @@ void test_basic_nvme_widened_keys(fixture_type_ const& fixture, u64_t seed) {
     fu_topology_t topology = nullptr;
     expect_true(fu_topology_new(&topology) == fu_success_k);
     {
-        auto [executor, spawn_status] = executor_t::spawn(topology, 1, io_engine_config_t {});
+        auto [executor, spawn_status] = executor_t::spawn(topology, 1, io_queue_config_t {});
         expect_equal(spawn_status, status_t::success_k);
         nvme_t viewed {forkunion_allocator_t {}};
         expect_equal(viewed.view(path, {}, fixture_type_::metric_token_k, executor), status_t::success_k);
@@ -4962,54 +4962,53 @@ void test_basic_nvme_widened_keys(fixture_type_ const& fixture, u64_t seed) {
     expect_equal(ledger.live_bytes, 0);
 }
 
-/** Composes one engine's NVMe cell over @p fixture, skipped for @p refused where the host refuses
- *  the engine; the widened view runs where the fixture names a RAM index of 64-bit node IDs. */
-template <typename engine_type_, typename fixture_type_>
+/** Composes one queue's NVMe cell over @p fixture, skipped for @p refused where the host refuses
+ *  the queue; the widened view runs where the fixture names a RAM index of 64-bit node IDs. */
+template <typename queue_type_, typename fixture_type_>
 case_result_t test_basic_nvme_configuration(fixture_type_ const& fixture, u64_t seed, char const* refused) {
-    using executor_t = typename fixture_type_::template nvme_t<engine_type_>::executor_t;
+    using executor_t = typename fixture_type_::template nvme_t<queue_type_>::executor_t;
     {
         fu_topology_t topology = nullptr;
         if (!expect_true(fu_topology_new(&topology) == fu_success_k)) return {};
-        status_t const spawned = executor_t::spawn(topology, 1, io_engine_config_t {}).status;
+        status_t const spawned = executor_t::spawn(topology, 1, io_queue_config_t {}).status;
         fu_topology_delete(topology);
         if (failed(spawned)) return case_result_t::skipped(refused);
     }
-    test_basic_nvme_search<engine_type_>(fixture, seed);
-    test_basic_nvme_parts<engine_type_>(fixture, seed);
-    test_basic_nvme_key_scans<engine_type_>(fixture, seed);
-    test_basic_nvme_cursor<engine_type_>(fixture, seed);
-    test_basic_nvme_health<engine_type_>(fixture, seed);
-    test_basic_nvme_sample<engine_type_>(fixture, seed);
-    test_basic_nvme_telemetry<engine_type_>(fixture, seed);
-    test_basic_nvme_failed_read<engine_type_>(fixture, seed);
-    test_basic_nvme_relocated<engine_type_>(fixture, seed);
+    test_basic_nvme_search<queue_type_>(fixture, seed);
+    test_basic_nvme_parts<queue_type_>(fixture, seed);
+    test_basic_nvme_key_scans<queue_type_>(fixture, seed);
+    test_basic_nvme_cursor<queue_type_>(fixture, seed);
+    test_basic_nvme_health<queue_type_>(fixture, seed);
+    test_basic_nvme_sample<queue_type_>(fixture, seed);
+    test_basic_nvme_telemetry<queue_type_>(fixture, seed);
+    test_basic_nvme_failed_read<queue_type_>(fixture, seed);
+    test_basic_nvme_relocated<queue_type_>(fixture, seed);
     if constexpr (requires { typename fixture_type_::wide_fixture_t; })
-        test_basic_nvme_widened_keys<engine_type_>(fixture, seed);
+        test_basic_nvme_widened_keys<queue_type_>(fixture, seed);
     return {};
 }
 
-/** Every engine's NVMe cell over @p fixture , whose type the code spells @p fixture_name , each
+/** Every queue's NVMe cell over @p fixture , whose type the code spells @p fixture_name , each
  *  case labelled with the configuration it instantiates. */
 template <typename fixture_type_>
 void run_basic_nvme_cases(std::string_view fixture_name, fixture_type_ const& fixture, u64_t seed) {
-    std::string label = fmt::format("test_basic_nvme_configuration<blocking_files_engine<fu::standard_yield_t>, {}>",
+    std::string label = fmt::format("test_basic_nvme_configuration<blocking_files_queue<fu::standard_yield_t>, {}>",
                                     fixture_name);
     run_test_case(label.c_str(),
-                  test_basic_nvme_configuration<blocking_files_engine<fu::standard_yield_t>, fixture_type_>, fixture,
-                  seed, "blocking_files_engine is refused on this machine");
+                  test_basic_nvme_configuration<blocking_files_queue<fu::standard_yield_t>, fixture_type_>, fixture,
+                  seed, "blocking_files_queue is refused on this machine");
 #if USEARCH_WITH_LINUX_AIO
-    label = fmt::format("test_basic_nvme_configuration<linux_aio_files_engine<fu::standard_yield_t>, {}>",
-                        fixture_name);
+    label = fmt::format("test_basic_nvme_configuration<linux_aio_files_queue<fu::standard_yield_t>, {}>", fixture_name);
     run_test_case(label.c_str(),
-                  test_basic_nvme_configuration<linux_aio_files_engine<fu::standard_yield_t>, fixture_type_>, fixture,
-                  seed, "linux_aio_files_engine is refused on this machine");
+                  test_basic_nvme_configuration<linux_aio_files_queue<fu::standard_yield_t>, fixture_type_>, fixture,
+                  seed, "linux_aio_files_queue is refused on this machine");
 #endif
 #if USEARCH_WITH_LINUX_URING
-    label = fmt::format("test_basic_nvme_configuration<linux_uring_files_engine<fu::standard_yield_t>, {}>",
+    label = fmt::format("test_basic_nvme_configuration<linux_uring_files_queue<fu::standard_yield_t>, {}>",
                         fixture_name);
     run_test_case(label.c_str(),
-                  test_basic_nvme_configuration<linux_uring_files_engine<fu::standard_yield_t>, fixture_type_>, fixture,
-                  seed, "linux_uring_files_engine is refused on this machine");
+                  test_basic_nvme_configuration<linux_uring_files_queue<fu::standard_yield_t>, fixture_type_>, fixture,
+                  seed, "linux_uring_files_queue is refused on this machine");
 #endif
 }
 

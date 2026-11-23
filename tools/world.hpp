@@ -318,7 +318,7 @@ struct checkpoint_queries {
     st::vector<usearch_key_t> keys {};
 };
 
-/** Loads the checkpoint standard input carries into RAM on @p session; prints what failed and
+/** Loads the checkpoint standard input holds into RAM on @p session; prints what failed and
  *  answers an empty handle. */
 template <typename verbs_type_>
 handle<verbs_type_> checkpoint_read_piped(session_t& session, usearch_residency_t residency,
@@ -644,7 +644,7 @@ int checkpoint_reshard(world_t& world, int argc, char const* const* argv, std::s
         return EXIT_FAILURE;
     }
     if (split_into && settings.save == "-") {
-        fmt::println(stderr, "--save names a manifest with its parts beside it, which one pipe cannot carry");
+        fmt::println(stderr, "--save names a manifest with its parts beside it, which one pipe cannot hold");
         return EXIT_FAILURE;
     }
     std::optional<sz::string_t> const admitted = split_into ? std::optional<sz::string_t> {}
@@ -832,7 +832,7 @@ inline bool write_key_rows(std::string_view path, copied_matches_t const& found,
  *  flags name, each walk seeded by its row of <tt>--hints</tt>, and prints every query's keys and
  *  distances, then the throughput; <tt>--matches</tt> keeps the keys as <tt>--hints</tt> reads them, and
  *  <tt>--output</tt> keeps the matches as Arrow in place of the printed ones; under <tt>--output -</tt>, standard
- *  output carries only the Arrow bytes, and every step prints to standard error instead. */
+ *  output holds only the Arrow bytes, and every step prints to standard error instead. */
 template <typename verbs_type_, typename open_queries_type_>
 int checkpoint_search(world_t& world, int argc, char const* const* argv, std::string_view synopsis,
                       std::span<flag_t const> modality_flags, open_queries_type_&& open_queries,

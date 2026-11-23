@@ -11,8 +11,8 @@
  *  classes whose masks admit it, and compiles in every unit, since NumKong's building blocks
  *  compile wherever CUDA does. A ladder picks the first kit the class admits through
  *  @c highest_kit, and only the picked kit's instructions are emitted, so a unit compiled for one
- *  architecture carries no newer one's. Named device primitives hold the arithmetic, which each
- *  kit binds to its dtype.
+ *  architecture has no newer one's. Named device primitives hold the arithmetic, which each kit
+ *  binds to its dtype.
  *
  *  Kits stay pure arithmetic. How a warp's candidate rows reach shared memory is a separate
  *  @b schedule, picked by @c schedule_ladder the same way: @c cp.async commit groups through Ada,
@@ -1398,7 +1398,7 @@ struct e2m3_blackwell_quads_kit_t {
 #pragma region Packed Nibbles
 
 /** Unpacks a word of eight signed nibbles into two byte-lane words, sign-extended through an
- *  xor-add-xor bias, since a word-wide subtraction would borrow across lanes. */
+ *  xor-add-xor bias, since a word-wide subtraction lets one lane's underflow reach the next. */
 __device__ __forceinline__ uint2 cuda_unpack_i4x8_ampere(u32_t word) noexcept {
     u32_t const low = (((word & 0x0F0F0F0Fu) ^ 0x08080808u) + 0x78787878u) ^ 0x80808080u;
     u32_t const high = ((((word >> 4) & 0x0F0F0F0Fu) ^ 0x08080808u) + 0x78787878u) ^ 0x80808080u;
@@ -1654,7 +1654,7 @@ struct u1x8_ampere_quads_kit_t {
  *  @brief Scores a walk's batch through the kit's @c mma.sync step, fed straight from its loads.
  *
  *  A lane's 16-byte chunk is one tile's A fragment as loaded: words 0 and 2 come from row g, words
- *  1 and 3 in row g + 8, and the B columns carry the query's matching words by column parity, so
+ *  1 and 3 in row g + 8, and the B columns hold the query's matching words by column parity, so
  *  the query takes the rows' permutation of the dimensions and row g's candidate scores D[g][even]
  *  + D[g + 8][odd]. Each lane loads 32 bytes of a row a step, so @p lanes_per_row_ lanes make one
  *  request of 32 × @p lanes_per_row_ bytes per row: under 4, every group of 4 lanes owns one
@@ -2528,7 +2528,7 @@ struct blackwellrtx_tma_schedule_t {
 
 /*  Each ladder lists the newest kit first. The Blackwell kits serve datacenter and RTX Blackwell
  *  alike, so their @c capability_k names both bits, and a reader masks it with the class's
- *  ceiling to keep the one the class carries; each Blackwell has its own schedule. */
+ *  ceiling to keep the one the class has; each Blackwell has its own schedule. */
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cuda_k) != 0)

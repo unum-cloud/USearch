@@ -427,9 +427,9 @@ inline metal_buffer_t metal_allocate(metal_context_t& context, std::size_t bytes
     return buffer;
 }
 
-/** Owned @c id<MTLCommandQueue> on one Apple GPU, the twin of @c cuda_stream_t; null rides the
- *  device's default queue, which its @ref metal_context_t keeps, so the stream names its device
- *  and context. Move-only, and released when it dies. */
+/** An @c id<MTLCommandQueue> on one Apple GPU, the twin of a CUDA stream, which it never retains or
+ *  releases; null rides the device's default queue, which its @ref metal_context_t keeps, so the
+ *  stream names its device and context. */
 struct metal_stream_t {
 
     /** The Apple ordinal this stream submits to. */
@@ -438,26 +438,12 @@ struct metal_stream_t {
     /** A stream on no device, which only fills the default of a context built later. */
     metal_stream_t() noexcept = default;
 
-    /** Takes @p handle, owned and opened on @p device, whose context is @p context, or rides that
-     *  device's default queue when null. */
+    /** Rides @p handle, a queue of @p device whose context is @p context, or that device's default
+     *  queue when null. */
     metal_stream_t(metal_context_t& context, int device, void* handle = nullptr) noexcept
         : device(device), context_(&context), handle_(handle) {}
-    metal_stream_t(metal_stream_t&& other) noexcept
-        : device(other.device), context_(other.context_), handle_(std::exchange(other.handle_, nullptr)) {}
-    metal_stream_t(metal_stream_t const&) = delete;
-    metal_stream_t& operator=(metal_stream_t const&) = delete;
-    ~metal_stream_t() noexcept {
-        if (handle_) metal_send<void>(*context_->api, handle_, "release");
-    }
 
-    /** Another owner of the same queue, retained, so a context holds an executor's stream without
-     *  borrowing it. */
-    metal_stream_t share() const noexcept {
-        if (!context_) return {};
-        return metal_stream_t {*context_, device, handle_ ? metal_send(*context_->api, handle_, "retain") : nullptr};
-    }
-
-    /** The owned queue, or null for the device's default one. */
+    /** The caller's queue, or null for the device's default one. */
     void* handle() const noexcept { return handle_; }
 
     /** The context of the stream's device, or null for a stream on no device. */
@@ -631,6 +617,9 @@ struct metal_executor_t {
     using device_arena_t = metal_device_arena_t;
     inline static constexpr gpu_vendor_t vendor_k = gpu_vendor_t::apple_k;
 
+    /** A queue the caller names for @ref spawn to submit to. */
+    using stream_handle_t = void*;
+
     /** One device's run of scratch: one shared buffer, sized by @ref reserve. */
     using arena_t = metal_buffer_t;
 
@@ -640,14 +629,15 @@ struct metal_executor_t {
     /** One shard's stream and run. */
     struct stream_t {
 
-        /** The ordering identity every launch on this device rides, naming the device. */
+        /** The ordering identity every launch on this device rides, naming the device: its default
+         *  queue, or a queue the caller releases after freeing the executor. */
         metal_stream_t handle;
 
         /** The scratch a walk carves its state from, sized by @ref reserve. */
         arena_t arena;
 
-        /** Takes @p handle, whose run waits for @ref reserve. */
-        explicit stream_t(metal_stream_t&& handle) noexcept : handle(std::move(handle)) {}
+        /** Rides @p handle, whose run waits for @ref reserve. */
+        explicit stream_t(metal_stream_t handle) noexcept : handle(handle) {}
     };
 
     metal_executor_t() = default;
@@ -674,7 +664,7 @@ struct metal_executor_t {
     }
 
     /**
-     *  Takes over streams the caller already opened, owned and released here from now on.
+     *  @brief Builds the executor over @p streams, releasing none of the queues they ride.
      *
      *  @par Statuses:
      *  - @c config_mismatch_k The @p streams are empty.
@@ -701,25 +691,30 @@ struct metal_executor_t {
     std::size_t cache_bytes_per_core() const noexcept { return cache_bytes_per_core_; }
 
     /**
-     *  Opens one stream per entry of @p devices among @p contexts, whose scratch never grows past
-     *  @p scratch_limit bytes, zero for no ceiling.
+     *  @brief Submits to @p queues among @p contexts, one per entry of @p devices, or to each
+     *      device's default queue when @p queues is empty.
+     *
+     *  Metal has no per-thread queue, so the default is the one its context made when the process
+     *  listed the device; the executor creates and releases no queue, and its scratch never grows
+     *  past @p scratch_limit bytes, zero for no ceiling.
      *
      *  @par Statuses:
      *  - @c device_error_k A device is not listed.
-     *  - @c config_mismatch_k The @p devices are empty.
+     *  - @c config_mismatch_k The @p devices are empty, or @p queues holds another count.
      */
     static expected<metal_executor_t> spawn(metal_contexts_t& contexts, std::span<int const> devices,
-                                            std::size_t scratch_limit = 0) noexcept {
-        growing_buffer<stream_t> streams {global_allocator};
-        if (failed(streams.reserve_exactly(devices.size()))) return {{}, status_t::bad_alloc_k};
-        for (int const device : devices) {
+                                            std::size_t scratch_limit = 0,
+                                            std::span<void* const> queues = {}) noexcept {
+        if (!queues.empty() && queues.size() != devices.size()) return {{}, status_t::config_mismatch_k};
+        growing_buffer<stream_t> bound {global_allocator};
+        if (failed(bound.reserve_exactly(devices.size()))) return {{}, status_t::bad_alloc_k};
+        for (std::size_t position = 0; position != devices.size(); ++position) {
+            int const device = devices[position];
             metal_context_t* const context = contexts.context(device);
             if (!context) return {{}, status_t::device_error_k};
-            void* const queue = metal_send(*context->api, context->device, "newCommandQueue");
-            if (!queue) return {{}, status_t::device_error_k};
-            streams.push_back_reserved(stream_t {metal_stream_t {*context, device, queue}});
+            bound.push_back_reserved(stream_t {{*context, device, queues.empty() ? nullptr : queues[position]}});
         }
-        auto [executor, status] = acquire(std::move(streams));
+        auto [executor, status] = acquire(std::move(bound));
         executor.scratch_limit_ = scratch_limit;
         return {std::move(executor), status};
     }
@@ -838,7 +833,7 @@ struct metal_traversal_context {
 
     /** Binds the context to @p stream's device; buffers wait for the first verb. */
     metal_traversal_context(allocator_t stream = {}) noexcept
-        : stream_(std::move(stream)), context_(stream_.context()), buffers_allocator_(stream_) {
+        : stream_(stream), context_(stream_.context()), buffers_allocator_(stream_) {
         if (context_) counters_ = buffers_allocator_.allocate(metal_counter_words_k * sizeof(u32_t));
     }
     metal_traversal_context(metal_traversal_context&&) noexcept = default;

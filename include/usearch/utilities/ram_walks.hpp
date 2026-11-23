@@ -13,7 +13,7 @@
  */
 #pragma once
 
-#include <limits> // `std::numeric_limits` - the lanes one word of visited bits carries
+#include <limits> // `std::numeric_limits` - the lanes one word of visited bits holds
 #include <span>   // `std::span` - the shards' visible counts at open
 
 #include "usearch/utilities/types.hpp"       // `shard_node`, `u1x64_t`, `divide_round_up`
@@ -44,7 +44,7 @@ struct breadth_first_walk {
     using node_id_t = node_id_type_;
     using shard_node_t = shard_node<node_id_type_>;
 
-    /** Lanes one word of visited bits carries. */
+    /** Lanes one word of visited bits holds. */
     inline static constexpr std::size_t lanes_k = std::numeric_limits<u1x64_t>::digits;
 
     /** One bit per node of every shard, the shards' runs back to back from @c visited_bases_. */

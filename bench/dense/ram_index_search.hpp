@@ -7,7 +7,7 @@
  *
  *  The backend-neutral surface - settings, checkpoints, dataset streaming and the process setup -
  *  lives in @c dense.cuh, the telemetry and result judgment in @c dense_search.cuh; this header owns
- *  everything CPU: the ForkUnion run loops streaming one row or query per task, the NUMA-domain
+ *  everything CPU: the executor's run loops streaming one row or query per task, the NUMA-domain
  *  placement, and the compile-time cascade resolving the CLI into one concrete @c dense::ram_index
  *  instantiation, at the serial class or at the newest one its host compiled. The cascade ends in
  *  the workload its entry hop names, the timed search for this binary.
@@ -70,7 +70,7 @@ struct bench_context {
     using vectors_view_t = typename index_t::vectors_view_t;
     using distance_t = typename index_t::distance_t;
 
-    /** The parsed CLI, borrowed for the run's lifetime. */
+    /** The parsed CLI, read for the run's lifetime. */
     settings_t const& settings;
 
     /** The metric the index scores by - the CLI's, or dot where the workload pins it. */
@@ -79,7 +79,7 @@ struct bench_context {
     /** The one index under measurement; the indirection buys address stability. */
     std::unique_ptr<index_t> index;
 
-    /** One graph-walking context per pool thread, built by that thread on its own domain. */
+    /** One graph-walking context per executor thread, built by that thread on its own domain. */
     std::vector<std::unique_ptr<traversal_t>> traversals;
 
     /** Per-thread telemetry sums, padded apart to stay contention-free. */
@@ -91,10 +91,10 @@ struct bench_context {
     bench_context(settings_t const& settings, nk_kernel_kind_t kernel) noexcept : settings(settings), kernel(kernel) {}
 };
 
-/** Builds the index on the chosen memory domain, reserves it for the viewed rows, and sizes all
- *  per-thread state off the pool's thread count - everything fallible, before any clock starts. */
+/** Builds the index on the chosen memory domain, reserves it for the viewed rows, and sizes every
+ *  thread's state off the executor - everything fallible, before any clock starts. */
 template <typename streamed_dataset_type_>
-bool prepare(streamed_dataset_type_& streamed, fu_pool_t pool) {
+bool prepare(streamed_dataset_type_& streamed, ram_executor_t& executor) {
     using bench_t = typename streamed_dataset_type_::bench_t;
     using index_t = typename bench_t::index_t;
     using allocator_t = typename bench_t::allocator_t;
@@ -102,11 +102,7 @@ bool prepare(streamed_dataset_type_& streamed, fu_pool_t pool) {
     auto& bench = streamed.bench;
     std::size_t const rows = streamed.vectors.extent(0);
     std::size_t const dimensions = streamed.vectors.extent(1);
-    std::size_t threads = 0;
-    if (fu_pool_threads_count(pool, &threads) != fu_success_k) {
-        fmt::println("Failed to read the pool's shape");
-        return false;
-    }
+    std::size_t const threads = executor.size();
 
     connectivity_t const connectivity = connectivity_of(bench.settings.connectivity.value);
     if (connectivity == connectivity_unknown_k) {
@@ -149,8 +145,7 @@ bool prepare(streamed_dataset_type_& streamed, fu_pool_t pool) {
 
     // Each thread builds its own context, so the scratch sits on its local memory domain.
     bench.traversals.resize(threads);
-    auto traversals_init = [](fu_lambda_context_t punned, std::size_t thread, std::size_t) noexcept {
-        auto& bench = *static_cast<bench_t*>(punned);
+    status_t const initialized = executor.for_threads([&](std::size_t thread, std::size_t) noexcept {
         // AMX tile state needs a per-thread OS permission handshake before first use.
         nk_capability_t available = 0;
         if (nk_capabilities_enabled_cpu(&available) != nk_success_k) available = nk_cap_serial_k;
@@ -160,10 +155,9 @@ bool prepare(streamed_dataset_type_& streamed, fu_pool_t pool) {
                                                  : bench.settings.memory_domains.front();
         bench.traversals[thread] = std::make_unique<traversal_t>(
             typename traversal_t::allocator_t {allocator_t {domain}});
-    };
-    fu_pool_for_threads(pool, traversals_init, &bench);
+    });
     for (std::size_t thread = 0; thread != threads; ++thread)
-        if (!bench.traversals[thread]) {
+        if (failed(initialized) || !bench.traversals[thread]) {
             fmt::println("Failed to build the per-thread traversal contexts");
             return false;
         }
@@ -171,49 +165,15 @@ bool prepare(streamed_dataset_type_& streamed, fu_pool_t pool) {
     return true;
 }
 
-/** One vector per task: viewed in place when the scalars match, or cast through the thread's
- *  staging area, then inserted into the one index under measurement. */
+/** Inserts the rows past the loaded base, one vector per task: viewed in place when the scalars
+ *  match, or cast through the thread's staging area, then inserted into the one index. */
 template <typename streamed_dataset_type_>
-void insertion_callback(fu_lambda_context_t punned, std::size_t task, std::size_t thread, std::size_t) noexcept {
+bool run_insertion(streamed_dataset_type_& streamed, ram_executor_t& executor) {
+    using scalar_t = typename streamed_dataset_type_::scalar_t;
     using bench_t = typename streamed_dataset_type_::bench_t;
-    using index_t = typename bench_t::index_t;
     using candidates_count_t = typename bench_t::candidates_count_t;
     using vector_view_t = typename bench_t::vector_view_t;
     using vectors_view_t = typename bench_t::vectors_view_t;
-    streamed_dataset_type_& streamed = *static_cast<streamed_dataset_type_*>(punned);
-    auto& bench = streamed.bench;
-
-    typename index_t::insert_config_t config;
-    config.expansion_factor = static_cast<candidates_count_t>(bench.settings.expansion_add.value);
-    // With a loaded base, tasks cover only the topping - shift into absolute dataset rows.
-    std::size_t const row = task + bench.settings.skip_vectors.value;
-    vector_view_t vector;
-    if constexpr (streamed_dataset_type_::zero_copy_k) vector = streamed.vectors.row(row).as_vector();
-    else vector = streamed.stage(streamed.vectors.row(row).as_vector(), thread, task);
-
-    node_id_t local_id = 0;
-    typename index_t::key_t const key = uuid_of(bench.settings.first_vector.value + row);
-    vectors_view_t const one_row {vector.data(), 1, streamed.vectors.extent(1)};
-    auto const [result, status] = bench.index->insert({&key, std::size_t {1}}, one_row, {&local_id, std::size_t {1}},
-                                                      *bench.traversals[thread], config);
-    if (failed(status)) {
-        standard_atomic_ref<std::size_t>(bench.results.failed_tasks).fetch_add(1, std::memory_order_relaxed);
-        return;
-    }
-
-    telemetry_lane_t& lane = bench.lanes[thread];
-    lane.visited_members += result.visited_members;
-    lane.computed_distances += result.computed_distances;
-    lane.computed_distances_in_refines += result.computed_distances_in_refines;
-    lane.computed_distances_in_reverse_refines += result.computed_distances_in_reverse_refines;
-    lane.restarts += result.restarts;
-    lane.saturated_walks += result.saturated_walks;
-    streamed.id_to_row[local_id] = bench.settings.first_vector.value + row;
-}
-
-template <typename streamed_dataset_type_>
-bool run_insertion(streamed_dataset_type_& streamed, fu_pool_t pool) {
-    using scalar_t = typename streamed_dataset_type_::scalar_t;
     auto& bench = streamed.bench;
     std::size_t const rows = streamed.vectors.extent(0);
     std::size_t const inserted_rows = rows - bench.settings.skip_vectors.value;
@@ -223,17 +183,45 @@ bool run_insertion(streamed_dataset_type_& streamed, fu_pool_t pool) {
         return true;
     }
 
+    using index_t = typename bench_t::index_t;
+    typename index_t::insert_config_t config;
+    config.expansion_factor = static_cast<candidates_count_t>(bench.settings.expansion_add.value);
     auto started = steady_clock_t::now();
-    fu_pool_for_n_dynamic(pool, inserted_rows, &insertion_callback<streamed_dataset_type_>, &streamed);
+    status_t const dispatched = executor.for_tasks(
+        inserted_rows, [&](std::size_t task, std::size_t thread, std::size_t) noexcept {
+            // With a loaded base, tasks cover only the topping - shift into absolute dataset rows.
+            std::size_t const row = task + bench.settings.skip_vectors.value;
+            vector_view_t vector;
+            if constexpr (streamed_dataset_type_::zero_copy_k) vector = streamed.vectors.row(row).as_vector();
+            else vector = streamed.stage(streamed.vectors.row(row).as_vector(), thread, task);
+
+            node_id_t local_id = 0;
+            typename index_t::key_t const key = uuid_of(bench.settings.first_vector.value + row);
+            vectors_view_t const one_row {vector.data(), 1, streamed.vectors.extent(1)};
+            auto const [result, status] = bench.index->insert(
+                {&key, std::size_t {1}}, one_row, {&local_id, std::size_t {1}}, *bench.traversals[thread], config);
+            if (failed(status)) {
+                standard_atomic_ref<std::size_t>(bench.results.failed_tasks).fetch_add(1, std::memory_order_relaxed);
+                return;
+            }
+
+            telemetry_lane_t& lane = bench.lanes[thread];
+            lane.visited_members += result.visited_members;
+            lane.computed_distances += result.computed_distances;
+            lane.computed_distances_in_refines += result.computed_distances_in_refines;
+            lane.computed_distances_in_reverse_refines += result.computed_distances_in_reverse_refines;
+            lane.restarts += result.restarts;
+            lane.saturated_walks += result.saturated_walks;
+            streamed.id_to_row[local_id] = bench.settings.first_vector.value + row;
+        });
     double const seconds = stdc::duration<double>(steady_clock_t::now() - started).count();
 
-    if (std::size_t failures = bench.results.failed_tasks; failures) {
+    if (std::size_t failures = bench.results.failed_tasks; failed(dispatched) || failures) {
         fmt::println("Insertion failed on {} vectors", failures);
         return false;
     }
     telemetry_lane_t const sums = summed_lanes(bench.lanes);
 
-    using index_t = typename streamed_dataset_type_::bench_t::index_t;
     double const refine_share = sums.computed_distances ? 100.0 * double(sums.computed_distances_in_refines) /
                                                               double(sums.computed_distances)
                                                         : 0.0;
@@ -250,9 +238,7 @@ bool run_insertion(streamed_dataset_type_& streamed, fu_pool_t pool) {
     if (index_t::quads_kit_t::capability_k == nk_cap_serial_k &&
         (bench.settings.max_compute & available & ~nk_cap_serial_k))
         fmt::println("  ⚠ scalar fallback: no SIMD kit is adapted for this dtype & metric");
-    std::size_t reported_threads = 0;
-    [[maybe_unused]] fu_status_t const counted = fu_pool_threads_count(pool, &reported_threads);
-    fmt::println("  threads: {}", reported_threads);
+    fmt::println("  threads: {}", executor.size());
     fmt::println("  wall: {:.2f} s", seconds);
     fmt::println("  throughput: {} IPS", humanized(double(inserted_rows) / seconds));
     fmt::println("  distances: {} ({:.1f}% refines, {:.1f}% reverse)", humanized(sums.computed_distances), refine_share,
@@ -265,33 +251,10 @@ bool run_insertion(streamed_dataset_type_& streamed, fu_pool_t pool) {
     return true;
 }
 
-/** The state one refinement pass shares with its threads: the plan it drains, and the tasks that refused. */
-template <typename bench_type_>
-struct refinement_fanout {
-    using index_t = typename bench_type_::index_t;
-
-    /** The index under measurement and its per-thread traversal contexts. */
-    bench_type_& bench;
-
-    /** The pass in flight. */
-    typename index_t::refine_plan_t& plan;
-
-    /** Tasks that returned an error; any non-zero fails the run. */
-    std::size_t failures = 0;
-};
-
-/** One task of the plan's current phase, on the thread that pulled it. */
-template <typename bench_type_>
-void refinement_callback(fu_lambda_context_t punned, std::size_t task, std::size_t thread, std::size_t) noexcept {
-    auto& fanout = *static_cast<refinement_fanout<bench_type_>*>(punned);
-    if (failed(fanout.plan.run(fanout.plan[task], *fanout.bench.traversals[thread])))
-        standard_atomic_ref<std::size_t>(fanout.failures).fetch_add(1, std::memory_order_relaxed);
-}
-
 /** Refines every node, round after round, each one healing, gathering and re-stitching the graph,
  *  and stops at the first round that re-wires nothing. */
 template <typename streamed_dataset_type_>
-bool run_refinement(streamed_dataset_type_& streamed, fu_pool_t pool) {
+bool run_refinement(streamed_dataset_type_& streamed, ram_executor_t& executor) {
     using bench_t = typename streamed_dataset_type_::bench_t;
     using index_t = typename bench_t::index_t;
     using candidates_count_t = typename bench_t::candidates_count_t;
@@ -305,7 +268,7 @@ bool run_refinement(streamed_dataset_type_& streamed, fu_pool_t pool) {
     refinement_report_t report;
     report.nodes = nodes;
     report.expansion = bench.index->non_zero_expansion_factor(config);
-    [[maybe_unused]] fu_status_t const counted = fu_pool_threads_count(pool, &report.threads);
+    report.threads = executor.size();
 
     // The rounds' tasks cannot fail on contexts reserved for their selections.
     for (std::unique_ptr<typename bench_t::traversal_t> const& traversal : bench.traversals)
@@ -329,18 +292,23 @@ bool run_refinement(streamed_dataset_type_& streamed, fu_pool_t pool) {
                 fmt::println("Failed to reserve refinement round {}", pass);
                 return false;
             }
-        refinement_fanout<bench_t> fanout {bench, plan};
+        std::size_t failures = 0;
         auto started = steady_clock_t::now();
         do {
             // The health checks and the heal are the healing share of the wall time.
             phase_t const phase = plan.phase();
             bool const healing = phase == phase_t::health_k || phase == phase_t::heal_k;
-            fu_pool_for_n_dynamic(pool, plan.tasks().size(), &refinement_callback<bench_t>, &fanout);
+            status_t const dispatched = executor.for_tasks(
+                plan.tasks().size(), [&](std::size_t task, std::size_t thread, std::size_t) noexcept {
+                    if (failed(plan.run(plan[task], *bench.traversals[thread])))
+                        standard_atomic_ref<std::size_t>(failures).fetch_add(1, std::memory_order_relaxed);
+                });
+            if (failed(dispatched)) ++failures;
             (healing ? report.healing_seconds
                      : report.refining_seconds) += stdc::duration<double>(steady_clock_t::now() - started).count();
             started = steady_clock_t::now();
         } while (plan.advance());
-        if (std::size_t failures = fanout.failures; failures) {
+        if (failures) {
             fmt::println("Refinement failed on {} tasks", failures);
             return false;
         }
@@ -380,90 +348,74 @@ bool save_index(streamed_dataset_type_& streamed) {
     return true;
 }
 
-/** The search phase's shared state: the streamed dataset beside the indexer heads every walk ranks by, if any. */
-template <typename streamed_dataset_type_>
-struct search_task {
-    streamed_dataset_type_& streamed;
-    bench_indexer_heads<typename streamed_dataset_type_::scalar_t> const& heads;
-};
-
 /** Every query is one task: cast through the thread's staging area if needed - before the clock - then searched,
  *  ranked by its heads under an indexer, and translated through the ID → row map into the judged hits. */
 template <typename streamed_dataset_type_>
-void search_callback(fu_lambda_context_t punned, std::size_t query, std::size_t thread, std::size_t) noexcept {
+bool run_search(streamed_dataset_type_& streamed, ram_executor_t& executor) {
     using bench_t = typename streamed_dataset_type_::bench_t;
     using index_t = typename bench_t::index_t;
     using candidates_count_t = typename bench_t::candidates_count_t;
     using vector_view_t = typename bench_t::vector_view_t;
-    auto& task = *static_cast<search_task<streamed_dataset_type_>*>(punned);
-    streamed_dataset_type_& streamed = task.streamed;
-    auto& bench = streamed.bench;
-    telemetry_lane_t& lane = bench.lanes[thread];
-
-    typename index_t::search_config_t config;
-    config.expansion_factor = static_cast<candidates_count_t>(bench.settings.expansion_search.value);
-    // The search phase runs strictly after ingestion, so the mutation-free contract holds.
-    config.synchronization = synchronization_t::immutable_k;
-    std::size_t const dimensions = streamed.vectors.extent(1);
-    vector_view_t query_vector;
-    if (!task.heads.navigation.empty()) query_vector = {task.heads.navigation.data() + query * dimensions, dimensions};
-    else if constexpr (streamed_dataset_type_::zero_copy_k)
-        query_vector = searched_rows(streamed).row(query).as_vector();
-    else query_vector = streamed.stage(searched_rows(streamed).row(query).as_vector(), thread, query);
-
-    u64_t* const merged_rows = bench.results.hit_rows.row(query).data();
-    auto* const merged_distances = bench.results.hit_distances.row(query).data();
-
-    // The index stores no keys, so matches translate through the ID → row map on the way out.
-    typename bench_t::traversal_t& traversal = *bench.traversals[thread];
-    std::span<u64_t> const rows_span {merged_rows, bench.settings.top_k.value};
-    std::span<distance_t> const distances_span {merged_distances, bench.settings.top_k.value};
-    auto search = [&]() noexcept {
-        if constexpr (!nk::is_integral_dtype<typename index_t::scalar_t>())
-            if (task.heads.engaged())
-                return bench.index->search(query_vector, task.heads.rows(query, 1), config, traversal);
-        return bench.index->search(query_vector, config, traversal);
-    };
-    auto started = steady_clock_t::now();
-    auto const [result, status] = search();
-    if (failed(status)) {
-        standard_atomic_ref<std::size_t>(bench.results.failed_tasks).fetch_add(1, std::memory_order_relaxed);
-        return;
-    }
-    lane.visited_members += result.visited_members;
-    lane.computed_distances += result.computed_distances;
-    lane.restarts += result.restarts;
-    lane.saturated_walks += result.saturated_walks;
-    std::size_t const merged_count = merge_search_results(to_span(traversal.results), streamed.id_to_row.data(),
-                                                          rows_span, distances_span, std::size_t {0});
-    bench.results.latencies_us[query] = stdc::duration<float, std::micro>(steady_clock_t::now() - started).count();
-    bench.results.hit_counts[query] = static_cast<u32_t>(merged_count);
-}
-
-template <typename streamed_dataset_type_>
-bool run_search(streamed_dataset_type_& streamed, fu_pool_t pool) {
-    using index_t = typename streamed_dataset_type_::bench_t::index_t;
     auto& bench = streamed.bench;
     bench_indexer_heads<typename index_t::scalar_t> heads;
     if (!open_indexer_heads(*bench.index, streamed, heads)) return false;
     std::size_t const query_count = searched_count(streamed, heads);
     if (!reserve_results(bench.results, query_count, bench.settings.top_k.value)) return false;
     bench.results.latencies_us.resize(query_count);
-    search_task<streamed_dataset_type_> task {streamed, heads};
     for (telemetry_lane_t& lane : bench.lanes) lane = telemetry_lane_t {};
 
+    typename index_t::search_config_t config;
+    config.expansion_factor = static_cast<candidates_count_t>(bench.settings.expansion_search.value);
+    // The search phase runs strictly after ingestion, so the mutation-free contract holds.
+    config.synchronization = synchronization_t::immutable_k;
+    std::size_t const dimensions = streamed.vectors.extent(1);
     auto started = steady_clock_t::now();
-    fu_pool_for_n(pool, query_count, &search_callback<streamed_dataset_type_>, &task);
+    status_t const dispatched = executor.for_tasks(
+        query_count, [&](std::size_t query, std::size_t thread, std::size_t) noexcept {
+            telemetry_lane_t& lane = bench.lanes[thread];
+            vector_view_t query_vector;
+            if (!heads.navigation.empty()) query_vector = {heads.navigation.data() + query * dimensions, dimensions};
+            else if constexpr (streamed_dataset_type_::zero_copy_k)
+                query_vector = searched_rows(streamed).row(query).as_vector();
+            else query_vector = streamed.stage(searched_rows(streamed).row(query).as_vector(), thread, query);
+
+            u64_t* const merged_rows = bench.results.hit_rows.row(query).data();
+            auto* const merged_distances = bench.results.hit_distances.row(query).data();
+
+            // The index stores no keys, so matches leave through the ID → row map.
+            typename bench_t::traversal_t& traversal = *bench.traversals[thread];
+            std::span<u64_t> const rows_span {merged_rows, bench.settings.top_k.value};
+            std::span<distance_t> const distances_span {merged_distances, bench.settings.top_k.value};
+            auto search = [&]() noexcept {
+                if constexpr (!nk::is_integral_dtype<typename index_t::scalar_t>())
+                    if (heads.engaged())
+                        return bench.index->search(query_vector, heads.rows(query, 1), config, traversal);
+                return bench.index->search(query_vector, config, traversal);
+            };
+            auto query_started = steady_clock_t::now();
+            auto const [result, status] = search();
+            if (failed(status)) {
+                standard_atomic_ref<std::size_t>(bench.results.failed_tasks).fetch_add(1, std::memory_order_relaxed);
+                return;
+            }
+            lane.visited_members += result.visited_members;
+            lane.computed_distances += result.computed_distances;
+            lane.restarts += result.restarts;
+            lane.saturated_walks += result.saturated_walks;
+            std::size_t const merged_count = merge_search_results(to_span(traversal.results), streamed.id_to_row.data(),
+                                                                  rows_span, distances_span, std::size_t {0});
+            bench.results.latencies_us[query] =
+                stdc::duration<float, std::micro>(steady_clock_t::now() - query_started).count();
+            bench.results.hit_counts[query] = static_cast<u32_t>(merged_count);
+        });
     double const seconds = stdc::duration<double>(steady_clock_t::now() - started).count();
 
-    if (std::size_t failures = bench.results.failed_tasks; failures) {
+    if (std::size_t failures = bench.results.failed_tasks; failed(dispatched) || failures) {
         fmt::println("Search failed on {} queries", failures);
         return false;
     }
     telemetry_lane_t const sums = summed_lanes(bench.lanes);
-    std::size_t searching_threads = 0;
-    [[maybe_unused]] fu_status_t const counted = fu_pool_threads_count(pool, &searching_threads);
-    report_search_metrics(bench.settings, query_count, seconds, searching_threads, bench.index->memory_usage(), sums,
+    report_search_metrics(bench.settings, query_count, seconds, executor.size(), bench.index->memory_usage(), sums,
                           bench.results.latencies_us);
     judge_search(bench.settings, heads, bench.results, streamed.ground_truth, streamed.vectors, streamed.queries,
                  query_count);
@@ -479,8 +431,8 @@ struct search_workload_t {
     static constexpr bool dot_only_k = false;
 
     template <typename streamed_dataset_type_>
-    bool run(streamed_dataset_type_& streamed, fu_pool_t pool) const {
-        return run_search(streamed, pool);
+    bool run(streamed_dataset_type_& streamed, ram_executor_t& executor) const {
+        return run_search(streamed, executor);
     }
 };
 
@@ -542,11 +494,7 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const& launch, nk_kernel_ki
     // Owns the rescaling rows `streamed_dataset::rescaling` views.
     nk::tensor<nk::f32_t, std::allocator<nk::f32_t>, 3> rescaling_rows;
     if constexpr (!streamed_t::zero_copy_k) {
-        std::size_t threads = 0;
-        if (fu_pool_threads_count(launch.machine.pool, &threads) != fu_success_k || !threads) {
-            fmt::println("Failed to read the pool's thread count");
-            return 1;
-        }
+        std::size_t const threads = launch.executor.size();
         // Every task inserts or searches its one staged row before the thread stages the next.
         staging = nk::tensor<scalar_t, std::allocator<scalar_t>, 3>::zeros({threads, 1, dimensions}).value;
         if (staging.empty()) {
@@ -572,11 +520,11 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const& launch, nk_kernel_ki
         fmt::println(
             "Ground truth ignored: --max-base-vectors or --first-vector reshapes the graph it was computed for");
 
-    if (!prepare(streamed, launch.machine.pool)) return 1;
-    if (!run_insertion(streamed, launch.machine.pool)) return 1;
-    if (!run_refinement(streamed, launch.machine.pool)) return 1;
+    if (!prepare(streamed, launch.executor)) return 1;
+    if (!run_insertion(streamed, launch.executor)) return 1;
+    if (!run_refinement(streamed, launch.executor)) return 1;
     if (!launch.settings.save_name.empty() && !save_index(streamed)) return 1;
-    return workload.run(streamed, launch.machine.pool) ? 0 : 1;
+    return workload.run(streamed, launch.executor) ? 0 : 1;
 }
 
 /** Kernel axis: admits the runtime metric the stored dtype scores by, the terminal hop into

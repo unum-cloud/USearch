@@ -54,7 +54,7 @@ struct ram_cursor;
  *
  *  @section dense_ram_index_concurrency Concurrency & Transactions
  *
- *  Construction and traversal run simultaneously. Every node's neighbors carry that node's own
+ *  Construction and traversal run simultaneously. Every node's neighbors hold that node's own
  *  lock in their leading slot, placing locks at the start of independent cache lines; the rest
  *  of the book-keeping is a handful of atomics.
  *
@@ -1134,7 +1134,7 @@ struct ram_index {
 
     /** Whether rows keep norms: every metric but dot finalizes through them, and so does dot on a
      *  kit whose finalize subtracts the candidates' row sums. Otherwise the norms chunks stay
-     *  empty, and checkpoints carry no norms column. */
+     *  empty, and checkpoints hold no norms column. */
     bool stores_norms() const noexcept { return kernel_ != nk_kernel_dot_k || quads_compensated<quads_kit_t>; }
 
     /** Number of published vectors - the visibility watermark. */
@@ -1799,7 +1799,7 @@ struct ram_index {
             linked_from_component_k = 8,
         };
 
-        /** Lanes one word carries - what an ID splits on. */
+        /** Lanes one word holds - what an ID splits on. */
         inline static constexpr std::size_t lanes_k = std::numeric_limits<u64_t>::digits;
 
         /** Words one bitset over @p rows nodes takes. */
@@ -4264,7 +4264,7 @@ struct ram_index {
      *  @brief The compile-time form of @c search() & @c search_if(): one whole-traversal
      *      instantiation per @p synchronization_ contract, per fold type and per rescoring type.
      *
-     *  A marked contract thus carries no atomics, and @c dummy_fold_t & @c dummy_rescoring_t inline
+     *  A marked contract thus holds no atomics, and @c dummy_fold_t & @c dummy_rescoring_t inline
      *  away. The walk ends against @p bound once it fills - @c context.results itself for every
      *  walk but a filtered one.
      *
@@ -4297,7 +4297,7 @@ struct ram_index {
      *      of the first chunk's rows it hands out to any number of threads.
      *
      *  Vectors and sentinel-padded neighbor rows are what a snapshot holds, and the norms when the
-     *  columns carry one for them. A checkpointing reader, not a mutator: concurrent searches keep
+     *  columns hold one for them. A checkpointing reader, not a mutator: concurrent searches keep
      *  running on every mode. Under @c concurrent_k every row is copied under its slot-zero lock,
      *  as writers edit it, and @ref finish probes for settlement across the whole plan, since a
      *  later insert back-linking itself edits an earlier row; the marked modes read plain, and a
@@ -4529,7 +4529,7 @@ struct ram_index {
      *  another index's chunks, straight into chunk rows the plan covered unfilled, and files its
      *  keys before counting its rows. A source's IDs are local to the rows it delivers, so every
      *  run shifts them onto the appended range and folds every other ID onto the sentinel; norms go
-     *  beside the vectors, or re-derive from them where the source carries none. Repeated plans
+     *  beside the vectors, or re-derive from them where the source holds none. Repeated plans
      *  append, and one plan takes several parts when the caller slices its tasks between them. The
      *  plan owns the claim its rows ride in: one that dies before @c finish refills its rows as a
      *  growth leaves them, forgets their keys and releases them, so the next plan appends at the
@@ -4745,7 +4745,7 @@ struct ram_index {
         /**
          *  @brief Publishes the appended nodes once every run's vectors, neighbors and keys
          *      arrived: the claim consumed first, then identity, then the watermark last with a
-         *      release, which carries the keys every run filed.
+         *      release, which holds the keys every run filed.
          *
          *  The identity releases too, and moves only an open dispenser: a closed one stays closed
          *  for its closer to reopen past the rows. A success spends the plan; a refusal leaves it
@@ -4798,8 +4798,8 @@ struct ram_index {
      *
      *  It covers their chunks unfilled, then claims them through the ordinary capacity protocol, so
      *  a preceding @c reserve is consumed rather than duplicated and chunks grow only on a genuine
-     *  deficit. Runs hold the power of two nearest the rows a request of @p request_bytes carries
-     *  of the widest row, at least the first chunk's rows and at most a slab's. Refuses an insert
+     *  deficit. Runs hold the power of two nearest the rows a request of @p request_bytes holds of
+     *  the widest row, at least the first chunk's rows and at most a slab's. Refuses an insert
      *  mid-flight and rows past the ID space. The sharded index closes the dispenser first, so no
      *  insert arrives before @c finish; a direct caller keeps insertions out itself.
      *
@@ -5978,7 +5978,7 @@ struct ram_index {
         return {result, status_t::success_k};
     }
 
-    /** Rows @b [first,first+count) of @p rows in the stored scalar: borrowed when they already are,
+    /** Rows @b [first,first+count) of @p rows in the stored scalar: viewed when they already are,
      *  else imported into @p context 's staged queries, sized for them beforehand. */
     vectors_view_t import_rows_(rows_view_t rows, std::size_t first, std::size_t count,
                                 traversal_context_t& context) const noexcept {
@@ -6205,9 +6205,10 @@ struct ram_index {
         node_id_t sampling_bound() const noexcept { return first_invisible_id; }
     };
 
-    /** What an insertion walks: the IDs below its snapshot, and past it every row dispensed before the walk
-     *  began whose slot zero shows it published. The acquire of the dispenser carried those rows' chunks to
-     *  the walk, so batches wired side by side link to each other rather than forming islands. */
+    /** What an insertion walks: the IDs below its snapshot, and past it every row dispensed before
+     *  the walk began whose slot zero shows it published. The acquire of the dispenser held those
+     *  rows' chunks to the walk, so batches wired side by side link to each other rather than
+     *  forming separate islands. */
     struct dispensed_admission_t {
 
         /** The index the walk reads. */
@@ -6222,7 +6223,8 @@ struct ram_index {
         /** The walking row. */
         node_id_t node_id = 0;
 
-        /** Whether the walk may locate @p candidate_id; the acquire of its slot zero carries its payload. */
+        /** Whether the walk may locate @p candidate_id; the acquire of its slot zero holds its
+         *  payload. */
         bool admits(node_id_t candidate_id) const noexcept {
             if (candidate_id < first_invisible_id) return true;
             if (candidate_id >= first_undispensed_id) return false;
@@ -6462,7 +6464,7 @@ struct ram_index {
                     if (admission.admits(neighbor_id) && !visited.contains(neighbor_id))
                         prefetch_vector_(chunk_schedule_t::locate(neighbor_id));
                 }
-            // Idle threads lend the walk their share of the memory queues: keep `walk_width - 1`
+            // Idle threads give the walk their share of the memory queues: keep `walk_width - 1`
             // rows popped ahead inside the radius, their rows streaming toward L2.
             while (context.ahead.size() + 1 < context.walk_width && !frontier.empty() &&
                    !(bound_full && frontier.top().distance > bound.top().distance)) {

@@ -14,6 +14,7 @@
 
 #include <cstddef> // `std::size_t`
 
+#include <array>       // `std::array` - the devices a null handle's GPU executor spans
 #include <span>        // `std::span` - the search verbs' output matrices
 #include <string_view> // `std::string_view` - kernel tokens & checkpoint paths
 #include <type_traits> // `std::is_same_v` - a residency's executor
@@ -59,7 +60,7 @@ struct maxsim_queries_view_t {
 };
 
 /** What an attention reads besides its queries and where it writes: the heads each token's rows
- *  hold, the values a kept key weighs, the logits' scale, the outputs, and the carried softmax
+ *  hold, the values a kept key weighs, the logits' scale, the outputs, and the held softmax
  *  states, empty for none. */
 struct attention_arguments_t {
     std::size_t heads = 1;
@@ -192,7 +193,8 @@ struct dense_verbs {
     // Exploration
 
     /** Opens a walk over every entry as stored, or breadth-first from @p starts. */
-    expected<void*> (*cursor_init)(void* index, std::span<key_t const> starts) noexcept;
+    expected<void*> (*cursor_init)(void* index, std::span<key_t const> starts,
+                                   forkunion_allocator_t allocator) noexcept;
 
     /** Pulls the next entries' keys into @p keys, gathering their links into @p links where
      *  named. */
@@ -231,25 +233,28 @@ struct punned_dense_index {
     void* index;
 };
 
-/** The executor a null handle runs a device variant's work on: streams or queues of its own on its
- *  devices, one per distinct device every shard there shares, never a legacy default stream, which
- *  would wait on every blocking stream of the process. */
+/** The executor a null handle runs a device variant's work on: the per-thread default stream of
+ *  each distinct device its shards sit on, shared by every shard there and opened by no call. */
 template <vendored_residency_t residency_>
     requires is_gpu_executor<typename punned_dense_index<residency_>::executor_t>
-usearch_executor_t call_executor_for(punned_dense_index<residency_> const& punned,
-                                     usearch_executor_handle_t& call_executor, usearch_outcome_t* outcome) noexcept {
+usearch_executor_t make_call_executor(punned_dense_index<residency_> const& punned,
+                                      usearch_executor_handle_t& call_executor, usearch_outcome_t* outcome) noexcept {
     std::size_t const shards = punned.verbs.shards_count(punned.index);
-    growing_buffer<int> devices {global_allocator};
-    if (failed(devices.reserve_exactly(shards)))
-        return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to list the devices"), nullptr;
+    std::array<int, gpu_devices_capacity_k> devices;
+    std::size_t devices_count = 0;
     for (std::size_t shard = 0; shard != shards; ++shard) {
         int const device = static_cast<int>(punned.verbs.residency(punned.index, shard).device);
-        bool opened = false;
-        for (int const earlier : devices) opened |= earlier == device;
-        if (!opened) devices.push_back_reserved(device);
+        bool listed = false;
+        for (std::size_t earlier = 0; earlier != devices_count; ++earlier) listed |= devices[earlier] == device;
+        if (listed) continue;
+        if (devices_count == devices.size())
+            return propagate_error(usearch_status_device_k, outcome, "The shards sit on more devices than listed"),
+                   nullptr;
+        devices[devices_count++] = device;
     }
     using executor_t = typename punned_dense_index<residency_>::executor_t;
-    auto [built, status] = executor_t::spawn(driver_of(gpu_drivers(), std::type_identity<executor_t> {}), devices);
+    auto [built, status] = executor_t::spawn(driver_of(gpu_drivers(), std::type_identity<executor_t> {}),
+                                             std::span<int const> {devices.data(), devices_count});
     if (failed(status)) return propagate_error(status, outcome), nullptr;
     call_executor.executor.emplace<gpu_executor_t>(std::in_place_type<executor_t>, std::move(built));
     return &call_executor;

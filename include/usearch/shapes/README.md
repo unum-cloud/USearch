@@ -82,7 +82,7 @@ Moving such a workflow over changes four things:
   Results are distances, lower is better and zero is identical, not similarities in $[0, 1]$.
   Re-derive score cutoffs on a validation set instead of translating Tanimoto thresholds.
 - __Chemistry.__
-  Points carry no atom types or radii, so there is no color term; geometry alone ranks.
+  Points hold no atom types or radii, so there is no color term; geometry alone ranks.
   Keep the color or pharmacophore score as a re-ranking step over the top hits.
 - __Poses and mirror images.__
   Search returns keys and distances, not superposed poses; re-align the few hits you inspect with your existing overlay tool.

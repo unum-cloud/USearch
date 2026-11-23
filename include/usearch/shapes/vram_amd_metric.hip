@@ -10,7 +10,7 @@
  *  the 32-lane wavefronts of gfx1250 and gfx1251. The ROCm SIMT bodies score two packs in place,
  *  f16 packs in f32 math and f32 packs in f64 math as the CPU and NVIDIA kits do, and stop once a
  *  candidate lies past the walk's radius. One kit covers both metrics, picked at run time by the
- *  kernel kind the view carries, as dense quads kits pick their metric.
+ *  kernel kind the view names, as dense quads kits pick their metric.
  *
  *  A stored shape is its pack byte for byte, and a walk prepares one by copying it into its span,
  *  where the bodies read the same pack as in the tape. A team of 32 lanes scores one candidate, its

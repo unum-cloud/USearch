@@ -88,7 +88,7 @@ struct line_of_sight_buffers_t {
  *      metric one class's kit scores with, the terrain its lines of sight run over, and the tests
  *      a quad of stored observations passes.
  *
- *  A borrowed terrain is packed once, at @ref adopt_terrain, and read in place by every call; a
+ *  An in-place terrain is packed once, at @ref adopt_terrain, and read in place by every call; a
  *  terrain filled by a callback is filled and packed per call, over the window the call's positions
  *  span. Its verbs are instantiated in the class's unit beside the variants deriving from it.
  */
@@ -102,10 +102,10 @@ struct geospatial_terrain {
     /** The grid lines of sight run over, empty for none. */
     us::geospatial::terrain_t grid;
 
-    /** The maxima of a borrowed grid, packed once. */
+    /** The maxima of an in-place grid, packed once. */
     growing_buffer<byte_t, forkunion_allocator_t> terrain_pack {forkunion_allocator_t {}};
 
-    /** Adopts @p grid, packing it when it is borrowed whole; refuses a grid with no extent or
+    /** Adopts @p grid, packing it when it is read in place whole; refuses a grid with no extent or
      *  steps. */
     status_t adopt_terrain(us::geospatial::terrain_t const& adopted) noexcept;
 
@@ -131,7 +131,7 @@ struct geospatial_terrain {
 
     /** One line-of-sight scratch per thread of @p executor, each over that thread's arena. */
     static status_t prepare_sights(growing_buffer<line_of_sight_buffers_t, thread_allocator_t>& sights,
-                                   forkunion_executor_t& executor) noexcept;
+                                   ram_executor_t& executor) noexcept;
 
     /** Asks the relation about stored @p entries against @p query into @p admissions: the relation
      *  and time, then the terrain. */
@@ -153,7 +153,7 @@ struct geospatial_terrain {
  *  the terrain its lines of sight run over. */
 template <cpu_class_t cpu_class_>
 struct geospatial_ram_variant {
-    using executor_t = forkunion_executor_t;
+    using executor_t = ram_executor_t;
     template <typename word_type_>
     using atomic_ref = typename atomic_ref_for_cpu_class<cpu_class_>::template type<word_type_>;
     using kit_t = typename us::geospatial::geospatial_ladder<numkong_capabilities_of(cpu_class_)>::kit_t;
@@ -339,7 +339,7 @@ status_t geospatial_terrain<cpu_class_>::adopt_terrain(us::geospatial::terrain_t
 
 template <cpu_class_t cpu_class_>
 status_t geospatial_terrain<cpu_class_>::prepare_sights(
-    growing_buffer<line_of_sight_buffers_t, thread_allocator_t>& sights, forkunion_executor_t& executor) noexcept {
+    growing_buffer<line_of_sight_buffers_t, thread_allocator_t>& sights, ram_executor_t& executor) noexcept {
     if (failed(sights.reserve_exactly(executor.size()))) return status_t::bad_alloc_k;
     for (std::size_t thread = 0; thread != executor.size(); ++thread)
         sights.push_back_reserved(line_of_sight_buffers_t {thread_allocator_t {executor.arena(thread)}});
@@ -400,7 +400,7 @@ void geospatial_terrain<cpu_class_>::clear_sight_(relation_t relation, value_t c
     std::array<std::array<f64_t, 3>, extent_> entry_cells;
     for (std::size_t lane = 0; lane != extent_; ++lane) entry_cells[lane] = grid.grid_point(entries[lane].position);
 
-    // A borrowed grid is read in place; a filled one is fetched over the window the on-grid
+    // A grid the caller owns is read in place; a filled one is fetched over the window the on-grid
     // positions span.
     f32_t const* heights = grid.heights;
     byte_t const* pack = terrain_pack.data();
@@ -917,7 +917,7 @@ struct geospatial_nvme_variant {
     template <typename word_type_>
     using atomic_ref = typename atomic_ref_for_cpu_class<cpu_class_>::template type<word_type_>;
     using index_t = basic::nvme_indexes<us::geospatial::earth_observation_codec_t, us::utilities::uuid128_t, u32_t,
-                                        nk_u64_t, default_io_engine_t, row_kit_of<cpu_class_>,
+                                        nk_u64_t, default_io_queue_t, row_kit_of<cpu_class_>,
                                         atomic_ref_for_cpu_class<cpu_class_>::template type, waiter_of<cpu_class_>>;
     using value_t = us::geospatial::earth_observation_t;
     using relation_t = us::geospatial::relation_t;
@@ -1170,7 +1170,7 @@ struct geospatial_nvidia_fatbin_t {
 };
 
 /** The capabilities the geospatial kit compiles under on NVIDIA: the Ampere floor, which one cubin
- *  per class carries. */
+ *  per class holds. */
 inline constexpr nk_capability_t geospatial_nvidia_capabilities_k = nk_cap_cuda_k | nk_cap_ampere_k;
 
 /* The face's members reading the kit, defined in @c src/geospatial/vram_variants_nvidia.cu. */
@@ -1192,7 +1192,7 @@ struct geospatial_vram_nvidia_build_t {
 
 /** The geospatial alternative on one NVIDIA GPU of @p gpu_class_ : the basic VRAM shards over
  *  observations under the squared chord with 32-bit node IDs, and the kernel judging each walk's
- *  candidates under a search's relation, lines of sight over a borrowed terrain included. A batch
+ *  candidates under a search's relation, lines of sight over an in-place terrain included. A batch
  *  encodes its observations on the host, as the RAM variants do, standing those without an altitude
  *  on the terrain. The judging kernel and the terrain sit on one device, so a search judges the
  *  shards placed there. */
@@ -1259,9 +1259,9 @@ struct geospatial_vram_nvidia_variant {
         if (grid.callback) return status_t::unsupported_k;
         if (status_t const adopted = host_terrain.adopt_terrain(grid); failed(adopted)) return adopted;
         if (!host_terrain.has_terrain()) return status_t::success_k;
-        us::geospatial::terrain_t const& borrowed = host_terrain.grid;
-        std::size_t const heights_bytes = (borrowed.rows - 1) * borrowed.heights_stride +
-                                          borrowed.columns * sizeof(f32_t);
+        us::geospatial::terrain_t const& host_grid = host_terrain.grid;
+        std::size_t const heights_bytes = (host_grid.rows - 1) * host_grid.heights_stride +
+                                          host_grid.columns * sizeof(f32_t);
         std::size_t const pack_bytes = host_terrain.terrain_pack.size();
         cuda_api_t const& api = gpu_drivers().cuda;
         if (cuda_set_device(api, device) != cuda_success_k) return status_t::device_error_k;
@@ -1269,7 +1269,7 @@ struct geospatial_vram_nvidia_variant {
                                           divide_round_up(heights_bytes, sizeof(f32_t)));
         device_terrain_pack = cuda_make_unique(cuda_device_allocator_t {api}, pack_bytes);
         if (!device_heights || !device_terrain_pack) return status_t::bad_alloc_k;
-        if (cuda_copy(api, device_heights.get(), borrowed.heights, heights_bytes) != cuda_success_k ||
+        if (cuda_copy(api, device_heights.get(), host_grid.heights, heights_bytes) != cuda_success_k ||
             cuda_copy(api, device_terrain_pack.get(), host_terrain.terrain_pack.data(), pack_bytes) != cuda_success_k)
             return status_t::device_error_k;
         return status_t::success_k;
@@ -1379,13 +1379,13 @@ struct geospatial_vram_nvidia_variant {
         admitting.radius_metres = query_batch.tolerance.metres;
         admitting.slack_milliseconds = query_batch.tolerance.seconds * 1000.0;
         if (device_heights) {
-            us::geospatial::terrain_t const& borrowed = host_terrain.grid;
+            us::geospatial::terrain_t const& host_grid = host_terrain.grid;
             admitting.terrain_heights = device_heights.get();
             admitting.terrain_pack = device_terrain_pack.get();
-            admitting.north_latitude_degrees = borrowed.north_latitude_degrees;
-            admitting.west_longitude_degrees = borrowed.west_longitude_degrees;
-            admitting.row_step_degrees = borrowed.row_step_degrees;
-            admitting.column_step_degrees = borrowed.column_step_degrees;
+            admitting.north_latitude_degrees = host_grid.north_latitude_degrees;
+            admitting.west_longitude_degrees = host_grid.west_longitude_degrees;
+            admitting.row_step_degrees = host_grid.row_step_degrees;
+            admitting.column_step_degrees = host_grid.column_step_degrees;
             admitting.drop_scale = (1.0 - us::geospatial::terrain_refraction_k) / (2.0 * NUMKONG_EARTH_MEAN_RADIUS);
         }
         return admitting;
@@ -1398,7 +1398,7 @@ struct geospatial_vram_nvidia_variant {
         value_t* const values = carve<value_t>(pages, count);
         std::size_t* const offsets = carve<std::size_t>(pages, count + 1);
         if (!values || !offsets) return {{}, status_t::bad_alloc_k};
-        // A borrowed grid never grows the sight's buffers, which serve filled grids alone.
+        // An in-place grid never grows the sight's buffers, which serve filled grids alone.
         line_of_sight_buffers_t sight {thread_allocator_t {}};
         for (std::size_t offset = 0; offset != count; ++offset) {
             values[offset] = us::geospatial::to_earth_observation(
@@ -1711,7 +1711,7 @@ struct geospatial_vram_amd_build {
 
 /** The geospatial alternative on one AMD GPU of @p gpu_class_ : the basic VRAM shards over
  *  observations under the squared chord with 32-bit node IDs, and the kernel judging each walk's
- *  candidates under a search's relation, lines of sight over a borrowed terrain included. A batch
+ *  candidates under a search's relation, lines of sight over an in-place terrain included. A batch
  *  encodes its observations on the host, as the RAM variants do, standing those without an altitude
  *  on the terrain. The judging kernel and the terrain sit on one device, so a search judges the
  *  shards placed there. */
@@ -1781,9 +1781,9 @@ struct geospatial_vram_amd_variant {
         if (grid.callback) return status_t::unsupported_k;
         if (status_t const adopted = host_terrain.adopt_terrain(grid); failed(adopted)) return adopted;
         if (!host_terrain.has_terrain()) return status_t::success_k;
-        us::geospatial::terrain_t const& borrowed = host_terrain.grid;
-        std::size_t const heights_bytes = (borrowed.rows - 1) * borrowed.heights_stride +
-                                          borrowed.columns * sizeof(f32_t);
+        us::geospatial::terrain_t const& host_grid = host_terrain.grid;
+        std::size_t const heights_bytes = (host_grid.rows - 1) * host_grid.heights_stride +
+                                          host_grid.columns * sizeof(f32_t);
         std::size_t const pack_bytes = host_terrain.terrain_pack.size();
         hip_api_t const& api = gpu_drivers().hip;
         if (hip_set_device(api, device) != hip_success_k) return status_t::device_error_k;
@@ -1791,7 +1791,7 @@ struct geospatial_vram_amd_variant {
                                          divide_round_up(heights_bytes, sizeof(f32_t)));
         device_terrain_pack = hip_make_unique(hip_device_allocator_t {api}, pack_bytes);
         if (!device_heights || !device_terrain_pack) return status_t::bad_alloc_k;
-        if (api.copy(device_heights.get(), borrowed.heights, heights_bytes, hip_copy_default_k) != hip_success_k ||
+        if (api.copy(device_heights.get(), host_grid.heights, heights_bytes, hip_copy_default_k) != hip_success_k ||
             api.copy(device_terrain_pack.get(), host_terrain.terrain_pack.data(), pack_bytes, hip_copy_default_k) !=
                 hip_success_k)
             return status_t::device_error_k;
@@ -1900,13 +1900,13 @@ struct geospatial_vram_amd_variant {
         admitting.radius_metres = query_batch.tolerance.metres;
         admitting.slack_milliseconds = query_batch.tolerance.seconds * 1000.0;
         if (device_heights) {
-            us::geospatial::terrain_t const& borrowed = host_terrain.grid;
+            us::geospatial::terrain_t const& host_grid = host_terrain.grid;
             admitting.terrain_heights = device_heights.get();
             admitting.terrain_pack = device_terrain_pack.get();
-            admitting.north_latitude_degrees = borrowed.north_latitude_degrees;
-            admitting.west_longitude_degrees = borrowed.west_longitude_degrees;
-            admitting.row_step_degrees = borrowed.row_step_degrees;
-            admitting.column_step_degrees = borrowed.column_step_degrees;
+            admitting.north_latitude_degrees = host_grid.north_latitude_degrees;
+            admitting.west_longitude_degrees = host_grid.west_longitude_degrees;
+            admitting.row_step_degrees = host_grid.row_step_degrees;
+            admitting.column_step_degrees = host_grid.column_step_degrees;
             admitting.drop_scale = (1.0 - us::geospatial::terrain_refraction_k) / (2.0 * NUMKONG_EARTH_MEAN_RADIUS);
         }
         return admitting;
@@ -1919,7 +1919,7 @@ struct geospatial_vram_amd_variant {
         value_t* const values = carve<value_t>(pages, count);
         std::size_t* const offsets = carve<std::size_t>(pages, count + 1);
         if (!values || !offsets) return {{}, status_t::bad_alloc_k};
-        // A borrowed grid never grows the sight's buffers, which serve filled grids alone.
+        // An in-place grid never grows the sight's buffers, which serve filled grids alone.
         line_of_sight_buffers_t sight {thread_allocator_t {}};
         for (std::size_t offset = 0; offset != count; ++offset) {
             values[offset] = us::geospatial::to_earth_observation(

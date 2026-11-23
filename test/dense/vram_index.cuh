@@ -6,7 +6,7 @@
  *      register ladder and shared memory, composed over each vendor's cell.
  *
  *  The cell compiles once per vendor, instantiating the executor of the one vendor whose
- *  @c USEARCH_ARCH_<VENDOR>_ it carries, host-only through that vendor's compiler mode. A vendor's
+ *  @c USEARCH_ARCH_<VENDOR>_ it defines, host-only through that vendor's compiler mode. A vendor's
  *  test header, free of its SDK like the library's own, specializes @ref vram_cell with its
  *  ledgered index, its sharded collection and their factory over the stream its entry opened, so
  *  the scenarios stay templated on the index alone while the harness's live-bytes-must-balance
@@ -32,7 +32,7 @@
 
 namespace unum::usearch::test::dense {
 
-/** Whether this shard carries @p vendor_ 's GPUs; the others compose nothing. Each vendor's shard
+/** Whether this shard covers @p vendor_ 's GPUs; the others compose nothing. Each vendor's shard
  *  defines it differently, so it keeps internal linkage. */
 template <gpu_vendor_t vendor_>
 static constexpr bool vram_compiled = (vendor_ == gpu_vendor_t::nvidia_k && USEARCH_ARCH_CUDA_) ||

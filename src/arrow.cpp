@@ -103,11 +103,11 @@ struct scalar_layout_t {
     std::size_t element_bytes = 0;
     std::size_t columns_per_element = 1;
 
-    /** The metadata a column of these elements carries, null where Arrow names them. */
+    /** The metadata a column of these elements holds, null where Arrow names them. */
     char const* tag() const noexcept { return extension_of(metadata.data()).empty() ? nullptr : metadata.data(); }
 };
 
-/** Every scalar Arrow carries, the untagged first so a format alone finds them; @c u1x8 is a column
+/** Every scalar Arrow holds, the untagged first so a format alone finds them; @c u1x8 is a column
  *  of its own, never an element. */
 inline constexpr std::array<scalar_layout_t, 13> scalar_layouts_k {{
     {usearch_scalar_f64_k, "g", {}, 8, 1},
@@ -159,7 +159,7 @@ static std::size_t width_of(std::string_view format, std::string_view prefix) no
     return parsed.ec == std::errc {} && parsed.ptr == end ? width : 0;
 }
 
-/** Refuses a column of the right format that is dictionary-encoded, holds a null, or carries fewer
+/** Refuses a column of the right format that is dictionary-encoded, holds a null, or holds fewer
  *  than @p buffers buffers, reading only its lengths and pointers. */
 static usearch_status_t check_column(ArrowSchema const& schema, ArrowArray const& array,
                                      std::int64_t buffers) noexcept {

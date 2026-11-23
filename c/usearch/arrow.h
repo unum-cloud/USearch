@@ -246,7 +246,7 @@ USEARCH_EXPORT usearch_status_t usearch_keys_view_to_arrow(usearch_keys_view_t k
 /**
  *  @brief Exports @p count packed rows a call wrote into @p arena as one Arrow @c fixed_size_list
  *      column of their scalar, or a @c fixed_size_binary one for @c u1x8, in place.
- *  @return The statuses of @c usearch_keys_view_to_arrow, with a scalar Arrow carries no layout
+ *  @return The statuses of @c usearch_keys_view_to_arrow, with a scalar Arrow holds no layout
  *      for, or columns filling no whole element, refused as an unsupported layout.
  */
 USEARCH_EXPORT usearch_status_t usearch_rows_view_to_arrow(usearch_rows_view_t rows, size_t count,

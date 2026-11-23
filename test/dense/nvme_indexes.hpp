@@ -4,7 +4,7 @@
  *  @date October 10, 2026
  *  @brief The suite composers for @c dense::nvme_indexes and its rewrites: two-shard
  *      @c dense::ram_indexes saved as SafeGraphs parts and viewed back from storage, once per
- *      I/O engine the host admits.
+ *      I/O queue the host admits.
  *
  *  Parts go under @c TMPDIR, so a run that points it at a volume enforcing direct-I/O alignment
  *  checks every covering read against it. A walk as wide as the index scores every entry, so the
@@ -43,19 +43,19 @@ namespace unum::usearch::test::dense {
 /** The dense NVMe view over the kits the ladders pick for @p dtype_ under @p caps_, as @c src/
  *  spells them for a CPU class. */
 template <typename key_type_, nk_dtype_t dtype_, nk_capability_t caps_,
-          typename engine_type_ = default_io_engine<fu::standard_yield_t>>
+          typename queue_type_ = default_io_queue<fu::standard_yield_t>>
 using nvme_indexes_for = nvme_indexes<
     key_type_, typename quads_ladder<typename nk::type_for<dtype_>::type, caps_>::kit_t,
     typename tiles_ladder<typename nk::type_for<dtype_>::type, caps_>::kit_t, typename elementwise_ladder<caps_>::kit_t,
     typename rmscast_ladder<typename nk::type_for<dtype_>::type, caps_>::kit_t,
-    typename visits_hash_set_ladder<caps_>::kit_t, engine_type_, fu::standard_atomic_ref, fu::standard_yield_t>;
+    typename visits_hash_set_ladder<caps_>::kit_t, queue_type_, fu::standard_atomic_ref, fu::standard_yield_t>;
 
 /** Whether a sharded index reads its parts from storage: the NVMe residency. */
 template <typename indexes_type_>
 concept nvme_collection =
-    std::is_same_v<typename indexes_type_::executor_t, nvme_executor<typename indexes_type_::executor_t::engine_t>>;
+    std::is_same_v<typename indexes_type_::executor_t, nvme_executor<typename indexes_type_::executor_t::queue_t>>;
 
-/** Reads every engine of an NVMe scenario keeps outstanding: small enough that a walk's flights
+/** Reads every queue of an NVMe scenario keeps outstanding: small enough that a walk's flights
  *  outnumber it, so the staged reads wait for completions. */
 constexpr std::size_t nvme_queue_depth_k = 32;
 
@@ -416,7 +416,7 @@ void test_nvme_indexes_hints(u64_t seed) {
 }
 
 /** Expects @p index to rank @p queries under one gathering predicate per thread of @p executor,
- *  each carrying @p payload_type_ and admitting what @p per_key admits, as under @p per_key asked a
+ *  each holding @p payload_type_ and admitting what @p per_key admits, as under @p per_key asked a
  *  quad at a time; a RAM group also takes its @p traversals, one per thread. */
 template <typename payload_type_, typename reference_type_, typename index_type_, typename executor_type_,
           typename per_key_type_, typename... traversals_types_>
@@ -592,68 +592,69 @@ io_device_queues_t device_queues_of(nvme_reblocked_medium<block_bytes_> const& m
     return medium.file.queues;
 }
 
-/** The file a kernel engine reads a @ref nvme_reblocked_medium through. */
+/** The file a kernel queue reads a @ref nvme_reblocked_medium through. */
 template <typename wanted_type_, u32_t block_bytes_>
     requires std::is_same_v<wanted_type_, file_medium_t>
 file_medium_t const* medium_as(nvme_reblocked_medium<block_bytes_> const& medium) noexcept {
     return &medium.file;
 }
 
-/** @p engine_type_ reading @p medium_type_ media, every member forwarded, whose submits fail on
+/** @p queue_type_ reading @p medium_type_ media, every member forwarded, whose submits fail on
  *  request: the one that brings @ref submits_to_failure down to zero completes what it submitted,
  *  then drops it, as a refused submit does. */
-template <typename engine_type_, typename medium_type_ = typename engine_type_::medium_t>
-struct nvme_composed_engine {
-    using wait_t = typename engine_type_::wait_t;
-    using allocator_t = typename engine_type_::allocator_t;
+template <typename queue_type_, typename medium_type_ = typename queue_type_::medium_t>
+struct nvme_composed_queue {
+    using wait_t = typename queue_type_::wait_t;
+    using allocator_t = typename queue_type_::allocator_t;
     using medium_t = medium_type_;
-    using config_t = typename engine_type_::config_t;
+    using config_t = typename queue_type_::config_t;
 
-    /** Submits left until one fails, across every engine of this type; zero never fails. */
+    /** Submits left until one fails, across every queue of this type; zero never fails. */
     inline static std::size_t submits_to_failure = 0;
 
-    engine_type_ engine;
+    queue_type_ queue;
     std::size_t outstanding = 0;
 
-    explicit nvme_composed_engine(allocator_t const& allocator = {}) noexcept : engine(allocator) {}
+    explicit nvme_composed_queue(allocator_t const& allocator = {}) noexcept : queue(allocator) {}
 
-    static constexpr io_transport_t transport() noexcept { return engine_type_::transport(); }
-    status_t open(config_t const& config) noexcept { return engine.open(config); }
+    static constexpr io_transport_t transport() noexcept { return queue_type_::transport(); }
+    status_t open(config_t const& config) noexcept { return queue.open(config); }
     status_t reserve(std::size_t buffers, std::size_t buffer_bytes) noexcept {
-        return engine.reserve(buffers, buffer_bytes);
+        return queue.reserve(buffers, buffer_bytes);
     }
-    status_t attach(std::span<medium_t const> media) noexcept { return engine.attach(media); }
-    void detach() noexcept { engine.detach(); }
+    status_t register_media(std::span<medium_t const> media, media_list_key_t key) noexcept {
+        return queue.register_media(media, key);
+    }
     status_t enqueue_read(io_request_t request) noexcept {
-        status_t const enqueued = engine.enqueue_read(request);
+        status_t const enqueued = queue.enqueue_read(request);
         outstanding += succeeded(enqueued);
         return enqueued;
     }
     status_t submit(io_wait_t wait) noexcept {
         std::size_t const left = fu::standard_atomic_ref<std::size_t>(submits_to_failure)
                                      .fetch_sub_if_at_least(1, 0, std::memory_order_relaxed);
-        if (left != 1) return engine.submit(wait);
+        if (left != 1) return queue.submit(wait);
         std::array<io_completion_t, 16> dropped;
-        while (outstanding && succeeded(engine.submit(io_wait_t::blocking_k)))
-            outstanding -= engine.poll_completions(dropped);
+        while (outstanding && succeeded(queue.submit(io_wait_t::blocking_k)))
+            outstanding -= queue.poll_completions(dropped);
         outstanding = 0;
         return status_t::io_k;
     }
     std::size_t poll_completions(std::span<io_completion_t> completions) noexcept {
-        std::size_t const polled = engine.poll_completions(completions);
+        std::size_t const polled = queue.poll_completions(completions);
         outstanding -= polled;
         return polled;
     }
-    std::byte* buffer(io_buffer_id_t buffer) noexcept { return engine.buffer(buffer); }
+    std::byte* buffer(io_buffer_id_t buffer) noexcept { return queue.buffer(buffer); }
 };
 
 /** Covering reads around rows that straddle blocks: value rows of 100 storage values in columns
  *  aligned to only 64 bytes, read at 512- and 4096-byte blocks, rank every entry exactly like the
  *  RAM group. */
-template <typename engine_type_, nk_dtype_t dtype_, nk_kernel_kind_t kernel_, u32_t block_bytes_>
+template <typename queue_type_, nk_dtype_t dtype_, nk_kernel_kind_t kernel_, u32_t block_bytes_>
 void test_nvme_indexes_straddling(u64_t seed) {
-    using engine_t = nvme_composed_engine<engine_type_, nvme_reblocked_medium<block_bytes_>>;
-    using nvme_t = nvme_indexes_for<uuid128_t, dtype_, nk_cap_serial_k, engine_t>;
+    using queue_t = nvme_composed_queue<queue_type_, nvme_reblocked_medium<block_bytes_>>;
+    using nvme_t = nvme_indexes_for<uuid128_t, dtype_, nk_cap_serial_k, queue_t>;
     constexpr std::size_t rows_count = dense_thread_nodes_k, queries_count = 4, wanted = 8;
     std::size_t const dimensions = dense_dimensions_for<typename nvme_t::scalar_t>(100);
 
@@ -900,7 +901,7 @@ void test_nvme_indexes_telemetry(u64_t seed) {
 
 /** Views keep no executor: one executor serves a manifest view and a monolith view of the same rows
  *  in turn, and a second executor serves the first view alike; a claimed executor refuses a second
- *  caller, and one asked for a transport its engine does not drive refuses to spawn. */
+ *  caller, and one asked for a transport its queue does not drive refuses to spawn. */
 template <typename nvme_type_, nk_kernel_kind_t kernel_>
 void test_nvme_indexes_executors(u64_t seed) {
     using executor_t = typename nvme_type_::executor_t;
@@ -932,17 +933,16 @@ void test_nvme_indexes_executors(u64_t seed) {
     expect_equal(claim_status, status_t::success_k);
     expect_equal(nvme.search(parts, queries, first.executor, 0).status, status_t::contended_k);
 
-    io_engine_config_t foreign;
+    io_queue_config_t foreign;
     foreign.queue_depth = nvme_queue_depth_k;
-    foreign.transport = executor_t::engine_t::transport() == io_transport_t::blocking_k ? io_transport_t::linux_aio_k
-                                                                                        : io_transport_t::blocking_k;
+    foreign.transport = executor_t::queue_t::transport() == io_transport_t::blocking_k ? io_transport_t::linux_aio_k
+                                                                                       : io_transport_t::blocking_k;
     expect_equal(executor_t::spawn(first.topology, 1, foreign).status, status_t::unsupported_k);
 }
 
 /** A read that comes back short of its row stops the call: a part truncated under a live view fails
  *  search, filtered search and the key scans with @c io_k, again on every retry, and the very
- *  executor then serves an intact view exactly, so every engine drained and every buffer
- *  returned. */
+ *  executor then serves an intact view exactly, so all queues drain and all buffers return. */
 template <typename nvme_type_, nk_kernel_kind_t kernel_>
 void test_nvme_indexes_failed_read(u64_t seed) {
     using key_t = typename nvme_type_::key_t;
@@ -981,11 +981,11 @@ void test_nvme_indexes_failed_read(u64_t seed) {
 
 /** A submit failing midway, its reads issued and then dropped, fails a walk or a scan with @c io_k
  *  wherever it strikes, first submit or later, several hops of a walk in flight or one, and the
- *  very executors then serve both exactly, nothing stranded in an engine. */
-template <typename engine_type_, nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
+ *  very executors then serve both exactly, nothing stranded in a queue. */
+template <typename queue_type_, nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
 void test_nvme_indexes_failed_submit(u64_t seed) {
-    using engine_t = nvme_composed_engine<engine_type_>;
-    using nvme_t = nvme_indexes_for<uuid128_t, dtype_, nk_cap_serial_k, engine_t>;
+    using queue_t = nvme_composed_queue<queue_type_>;
+    using nvme_t = nvme_indexes_for<uuid128_t, dtype_, nk_cap_serial_k, queue_t>;
     using key_t = typename nvme_t::key_t;
     constexpr std::size_t rows_count = dense_thread_nodes_k, queries_count = 8, wanted = 8;
     std::size_t const dimensions = dense_dimensions_for<typename nvme_t::scalar_t>(dense_values_k);
@@ -1001,13 +1001,13 @@ void test_nvme_indexes_failed_submit(u64_t seed) {
     std::span<key_t const> const probed = std::span<key_t const> {reference.keys}.first(4);
     std::array<std::size_t, 4> entries {};
     for (std::size_t const countdown : {1, 4}) {
-        engine_t::submits_to_failure = countdown;
+        queue_t::submits_to_failure = countdown;
         expect_equal(nvme.search(viewed, queries, driver.executor, 0).status, status_t::io_k);
-        expect_equal(engine_t::submits_to_failure, 0u);
+        expect_equal(queue_t::submits_to_failure, 0u);
     }
-    engine_t::submits_to_failure = 1;
+    queue_t::submits_to_failure = 1;
     expect_equal(viewed.count(probed, std::span {entries}, driver.executor), status_t::io_k);
-    expect_equal(engine_t::submits_to_failure, 0u);
+    expect_equal(queue_t::submits_to_failure, 0u);
 
     // A lone query on a deep queue has several hops of its walks in flight by its second and third
     // submits.
@@ -1015,9 +1015,9 @@ void test_nvme_indexes_failed_submit(u64_t seed) {
     expect_equal(deep.status, status_t::success_k);
     nvme_rankings<nvme_t> lone {1, wanted};
     for (std::size_t const countdown : {2, 3}) {
-        engine_t::submits_to_failure = countdown;
+        queue_t::submits_to_failure = countdown;
         expect_equal(lone.search(viewed, reference.leading_rows(1), deep.executor, 0).status, status_t::io_k);
-        expect_equal(engine_t::submits_to_failure, 0u);
+        expect_equal(queue_t::submits_to_failure, 0u);
     }
 
     nvme_rankings<nvme_t> const ram = reference.exhaustive_rankings(queries, wanted);
@@ -1070,10 +1070,10 @@ void test_nvme_indexes_pipelined(u64_t seed) {
         pipelined_hits += hits(query), pipelined_trips += pipelined.round_trips;
     }
     expect_true(pipelined_hits >= hop_by_hop_hits);
-    // Kernel engines finish a submit's reads over several waits, in any order, and walks break
+    // Kernel queues finish a submit's reads over several waits, in any order, and walks break
     // distance ties by completion order, so only blocking reads count one round trip per hop and
     // replay a walk exactly.
-    if constexpr (nvme_type_::engine_t::transport() != io_transport_t::blocking_k) return;
+    if constexpr (nvme_type_::queue_t::transport() != io_transport_t::blocking_k) return;
     expect_true(pipelined_trips < hop_by_hop_trips);
 
     nvme_rankings<nvme_type_> hop_by_hop {queries_count, wanted}, full {queries_count, wanted};
@@ -1432,7 +1432,7 @@ struct rewrite_fixture {
     }
 };
 
-/** A lent workspace of @p bytes. */
+/** A passed workspace of @p bytes. */
 inline std::vector<byte_t> rewrite_workspace(std::size_t bytes) { return std::vector<byte_t>(bytes); }
 
 /** Resharding the two parts one RAM group saved yields one part over every entry, every key once,
@@ -1694,7 +1694,7 @@ template <typename nvme_type_, nk_kernel_kind_t kernel_>
 void test_nvme_rewrites_build(u64_t seed) {
     using scalar_t = typename nvme_type_::scalar_t;
     using ram_t = typename rewrite_fixture<nvme_type_>::ram_t;
-    using workspace_allocator_t = arena_allocator<byte_t, lent_allocator<byte_t>>;
+    using workspace_allocator_t = arena_allocator<byte_t, caller_span_allocator<byte_t>>;
     using block_index_t = ram_index<typename nvme_type_::quads_kit_t, typename nvme_type_::tiles_kit_t,
                                     typename nvme_type_::elementwise_kit_t, typename nvme_type_::rmscast_kit_t,
                                     typename nvme_type_::visits_kit_t, fu::standard_yield_t, fu::standard_atomic_ref,
@@ -1710,7 +1710,7 @@ void test_nvme_rewrites_build(u64_t seed) {
     if (!fixture.held()) return;
 
     std::vector<byte_t> probed(16u << 20);
-    typename workspace_allocator_t::arena_t probe_arena {lent_allocator<byte_t> {probed}};
+    typename workspace_allocator_t::arena_t probe_arena {caller_span_allocator<byte_t> {probed}};
     expect_equal(probe_arena.reserve_exactly(probed.size()), status_t::success_k);
     {
         workspace_allocator_t const allocator {probe_arena};
@@ -2191,10 +2191,10 @@ concept nvme_staged = nvme_collection<indexes_type_> && requires { typename inde
 /** A monolith keyed @c u32, as the benches write one, viewed by a @c uuid collection: the cursor,
  *  the key scans and a ranking's resolved keys read every key zero-extended, big-endian as the
  *  bindings render integer identities, at the distances the @c u32 view of the file ranks. */
-template <typename engine_type_, nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
+template <typename queue_type_, nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
 void test_nvme_widened_keys(u64_t seed) {
-    using narrow_t = nvme_indexes_for<u32_t, dtype_, nk_cap_serial_k, engine_type_>;
-    using wide_t = nvme_indexes_for<uuid128_t, dtype_, nk_cap_serial_k, engine_type_>;
+    using narrow_t = nvme_indexes_for<u32_t, dtype_, nk_cap_serial_k, queue_type_>;
+    using wide_t = nvme_indexes_for<uuid128_t, dtype_, nk_cap_serial_k, queue_type_>;
     using scalar_t = typename wide_t::scalar_t;
     constexpr std::size_t rows_count = 2 * dense_thread_nodes_k, queries_count = 8, wanted = 16;
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
@@ -2250,13 +2250,13 @@ void test_nvme_widened_keys(u64_t seed) {
     }
 }
 
-/** Composes one engine's NVMe cell: every read verb against the RAM group its parts came from,
+/** Composes one queue's NVMe cell: every read verb against the RAM group its parts came from,
  *  every rewrite under the angular kernel against a fresh RAM build, since a dot graph neither
  *  stays reachable through a reshard nor finds itself at distance zero, and a @c u32 monolith
- *  viewed through @c uuid128_t keys, skipped where the host refuses the engine. */
-template <typename engine_type_, nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
+ *  viewed through @c uuid128_t keys, skipped where the host refuses the queue. */
+template <typename queue_type_, nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
 case_result_t test_nvme_configuration(u64_t seed, char const* refused) {
-    using indexes_t = nvme_indexes_for<uuid128_t, dtype_, nk_cap_serial_k, engine_type_>;
+    using indexes_t = nvme_indexes_for<uuid128_t, dtype_, nk_cap_serial_k, queue_type_>;
     using staged_t = nvme_staged_indexes<indexes_t>;
     {
         dense_indexes_executor<indexes_t> probe;
@@ -2271,13 +2271,13 @@ case_result_t test_nvme_configuration(u64_t seed, char const* refused) {
     test_nvme_indexes_telemetry<indexes_t, kernel_>(seed);
     test_nvme_indexes_executors<indexes_t, kernel_>(seed);
     test_nvme_indexes_failed_read<indexes_t, kernel_>(seed);
-    test_nvme_indexes_failed_submit<engine_type_, dtype_, kernel_>(seed);
+    test_nvme_indexes_failed_submit<queue_type_, dtype_, kernel_>(seed);
     test_nvme_indexes_pipelined<indexes_t, kernel_>(seed);
     test_nvme_indexes_relocated<indexes_t, kernel_>(seed);
     test_nvme_indexes_byte_base<indexes_t, kernel_>(seed);
     test_nvme_index_search<indexes_t, kernel_>(seed);
-    test_nvme_indexes_straddling<engine_type_, dtype_, kernel_, 512>(seed);
-    test_nvme_indexes_straddling<engine_type_, dtype_, kernel_, 4096>(seed);
+    test_nvme_indexes_straddling<queue_type_, dtype_, kernel_, 512>(seed);
+    test_nvme_indexes_straddling<queue_type_, dtype_, kernel_, 4096>(seed);
     test_dense_indexes_scan<staged_t, kernel_>(seed);
     test_dense_indexes_products<staged_t, kernel_>(seed);
     test_dense_indexes_indexer_search<staged_t, kernel_>(seed);
@@ -2296,15 +2296,15 @@ case_result_t test_nvme_configuration(u64_t seed, char const* refused) {
     test_nvme_reshard_gathers<indexes_t, nk_kernel_angular_k>(seed);
     test_nvme_reshard_recuts<indexes_t, nk_kernel_angular_k>(seed);
     test_nvme_reshard_cuts<indexes_t, nk_kernel_angular_k>(seed);
-    test_nvme_widened_keys<engine_type_, dtype_, kernel_>(seed);
+    test_nvme_widened_keys<queue_type_, dtype_, kernel_>(seed);
     return {};
 }
 
 #if USEARCH_WITH_LINUX_SPDK
 
 /**
- *  @brief The SPDK engine over a monolith copied onto an NVMe namespace, judged against the
- *      blocking engine over the monolith's file, every verb alike.
+ *  @brief The SPDK queue over a monolith copied onto an NVMe namespace, judged against the
+ *      blocking queue over the monolith's file, every verb alike.
  *
  *  Runs in two passes around a rig: with no @p nvme_paths it saves the monolith as
  *  @c usearch-nvme-spdk.safegraphs under @c TMPDIR for the rig to copy onto a namespace, and skips
@@ -2313,8 +2313,8 @@ case_result_t test_nvme_configuration(u64_t seed, char const* refused) {
  */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
 case_result_t test_nvme_spdk_configuration(u64_t seed, std::span<std::string_view const> nvme_paths) {
-    using files_t = nvme_indexes_for<uuid128_t, dtype_, nk_cap_serial_k, blocking_files_engine<fu::standard_yield_t>>;
-    using spdk_t = nvme_indexes_for<uuid128_t, dtype_, nk_cap_serial_k, linux_spdk_engine<fu::standard_yield_t>>;
+    using files_t = nvme_indexes_for<uuid128_t, dtype_, nk_cap_serial_k, blocking_files_queue<fu::standard_yield_t>>;
+    using spdk_t = nvme_indexes_for<uuid128_t, dtype_, nk_cap_serial_k, linux_spdk_queue<fu::standard_yield_t>>;
     using key_t = typename files_t::key_t;
     using scalar_t = typename files_t::scalar_t;
     constexpr std::size_t rows_count = 2 * dense_thread_nodes_k, queries_count = 8, wanted = 16;
@@ -2405,7 +2405,7 @@ case_result_t test_nvme_spdk_configuration(u64_t seed, std::span<std::string_vie
 /*  The residency forms specialize templates of the enclosing @c test namespace, which only a scope
  *  enclosing it may do, so they follow the namespace at file scope and qualify what they name. */
 
-/** The NVMe form: two threads over a topology of its own, each opening the engine of the index's
+/** The NVMe form: two threads over a topology of its own, each opening the queue of the index's
  *  type, its queue @p queue_depth reads deep. */
 template <us::test::dense::nvme_collection indexes_type_>
 struct us::test::dense_indexes_executor<indexes_type_> {
@@ -2417,14 +2417,14 @@ struct us::test::dense_indexes_executor<indexes_type_> {
 
     explicit dense_indexes_executor(std::size_t queue_depth = us::test::dense::nvme_queue_depth_k) noexcept {
         if (fu_topology_new(&topology) != fu_success_k) return;
-        us::utilities::io_engine_config_t config;
+        us::utilities::io_queue_config_t config;
         config.queue_depth = queue_depth;
 #if USEARCH_WITH_LINUX_SPDK
-        // The SPDK engine shares the environment the views opened, over plain pages for fabrics.
+        // The SPDK queue shares the environment the views opened, over plain pages for fabrics.
         if constexpr (std::is_same_v<typename executor_t::medium_t, us::utilities::spdk_medium_t>) {
             us::utilities::linux_spdk_process_t::config_t environment;
             environment.memory = us::utilities::linux_spdk_memory_t::plain_pages_k;
-            // A refused start leaves the engines to answer why at spawn.
+            // A refused start leaves the queues to answer why at spawn.
             [[maybe_unused]] us::utilities::status_t const acquired =
                 us::utilities::linux_spdk_process_t::acquire<fu::standard_yield_t>(environment);
         }

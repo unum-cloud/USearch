@@ -13,16 +13,16 @@
  *
  *  @section sequence_stub_blind_spots What It Cannot Tell You
  *
- *  Search is an exact scan, so recall is trivially perfect and ties fall in insertion order.
- *  The alignment kernels are textbook dynamic programming with no band, no vectorization, and
- *  quadratic cost, so a corpus of long sequences is slow rather than wrong. Weighted scores are
- *  similarities and reported as their negation, which ranks correctly but is not the engine's
- *  scale. Refinement keeps no edges to re-select, so its @c changed is a constant zero rather than
- *  a settling signal, and a caller must not read it as one. A checkpoint carries its own weights,
- *  so a load or view checks only that weights are named where the kind needs them, and a view
- *  copies its checkpoint rather than mapping it. Traversal statistics are plausible fiction:
- *  shaped correctly, invented numerically. A checkpoint is a binary blob of this file's own memory
- *  image, readable by nothing else.
+ *  Search is an exact scan, so recall is trivially perfect and ties fall in insertion order. The
+ *  alignment kernels are textbook dynamic programming with no band, no vectorization, and quadratic
+ *  cost, so a corpus of long sequences is slow rather than wrong. Weighted scores are similarities
+ *  and reported as their negation, which ranks correctly but is not the engine's scale. Refinement
+ *  keeps no edges to re-select, so its @c changed is a constant zero rather than a settling signal,
+ *  and a caller must not read it as one. A checkpoint holds its own weights, so a load or view
+ *  checks only that weights are named where the kind needs them, and a view copies its checkpoint
+ *  rather than mapping it. Traversal statistics are plausible fiction: shaped correctly, invented
+ *  numerically. A checkpoint is a binary blob of this file's own memory image, readable by nothing
+ *  but this stub itself.
  *
  *  Keeping no edges, the stand-in links every one of its entries to its exact nearest at the frozen
  *  connectivity, the lists a perfect graph would hold where the engine's are the ones it stored. A
@@ -55,7 +55,7 @@ namespace stub {
 constexpr std::size_t alphabet_k = 256;
 
 /** What a handle froze at construction, or adopted from a checkpoint, with the scoring parameters
- *  only an alignment kind carries. */
+ *  only an alignment kind holds. */
 struct sequence_index_options_t {
 
     /** What entries are compared by. */
@@ -300,7 +300,7 @@ static std::size_t search_tape(sequence_index_t& index, usearch_tape_view_t quer
  *      image rather than a format: no magic, no version, and nothing else reads it back.
  *
  *  Entries are ragged, so the payload is a run of `{key, length, bytes}` records rather than
- *  fixed-width ones, and the prefix carries their summed extent to size the read.
+ *  fixed-width ones, and the prefix holds their summed extent to size the read.
  */
 struct sequence_checkpoint_prefix_t {
 
@@ -548,7 +548,7 @@ void usearch_sequence_init_ram(usearch_sequence_init_ram_t* arguments) {
     index->options.connectivity = arguments->connectivity ? arguments->connectivity : us::utilities::connectivity_16_k;
     index->options.values_per_key = arguments->values_per_key;
     if (weights) {
-        // Copied rather than borrowed, so a binding whose matrix dies after this call still scores.
+        // Copied rather than viewed, so a binding whose matrix dies after this call still scores.
         index->options.substitution.assign(weights->substitution_matrix,
                                            weights->substitution_matrix + alphabet_k * alphabet_k);
         index->options.gap = weights->gap;
@@ -561,7 +561,7 @@ void usearch_sequence_init_vram(usearch_sequence_init_vram_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
     if (reject_ceiling(arguments->vram.gpu_class_ceiling, outcome)) return;
-    propagate_error(usearch_status_device_k, outcome, "This build carries no GPU backends");
+    propagate_error(usearch_status_device_k, outcome, "This build has no GPU backends");
 }
 
 void usearch_sequence_load_vram(usearch_sequence_load_vram_t* arguments) {
@@ -569,7 +569,7 @@ void usearch_sequence_load_vram(usearch_sequence_load_vram_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
     if (reject_ceiling(arguments->vram.gpu_class_ceiling, outcome)) return;
-    propagate_error(usearch_status_device_k, outcome, "This build carries no GPU backends");
+    propagate_error(usearch_status_device_k, outcome, "This build has no GPU backends");
 }
 
 void usearch_sequence_load_ram(usearch_sequence_load_ram_t* arguments) {
@@ -604,7 +604,7 @@ void usearch_sequence_load_vram_buffer(usearch_sequence_load_vram_buffer_t* argu
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
     if (reject_ceiling(arguments->vram.gpu_class_ceiling, outcome)) return;
-    propagate_error(usearch_status_device_k, outcome, "This build carries no GPU backends");
+    propagate_error(usearch_status_device_k, outcome, "This build has no GPU backends");
 }
 
 void usearch_sequence_view_ram(usearch_sequence_view_ram_t* arguments) {

@@ -5,14 +5,14 @@
  *  @brief The refine and reshard plans that write new SafeGraphs parts from the parts of
  *      @c nvme_indexes views, freestanding or for a loaded index.
  *
- *  Every rewrite is an @c nvme_reshard_plan: phases of tasks that borrow an NVMe executor one at a
+ *  Every rewrite is an @c nvme_reshard_plan: phases of tasks that view an NVMe executor one at a
  *  time and write SafeGraphs parts beside a manifest. A rewrite never edits its sources. It lays
  *  its target out as spec-standard parts, keys, values, neighbors and the producer's norms, whose
  *  headers arrive last and the manifest after them, so a stopped rewrite reads as absent. Its RAM
- *  is the workspace the caller lends or the plan holds, the executor's arenas and its staging
+ *  is the workspace the caller passes or the plan holds, the executor's arenas and its staging
  *  buffers: the workspace keeps a changed bit per target row at its front, a streamed round its
  *  columns after them, and every task carves its blocks and batches off an arena over the rest,
- *  sized from it. Reads go through the executor's engines, the target's included, and writes are
+ *  sized from it. Reads go through the executor's queues, the target's included, and writes are
  *  blocking positional runs.
  *
  *  A reshard packs the source parts largest first into target parts of at most a shard capacity of
@@ -208,11 +208,11 @@ expected<nvme_refine_plan<indexes_type_>> plan_refine(indexes_type_& index, refi
  *  - @c contended_k A refine or reshard holds the writer.
  *  - Any status opening the rewrite answers, as @ref plan_reshard lists them.
  */
-template <typename indexes_type_, typename engine_type_>
-    requires std::is_same_v<nvme_executor<engine_type_>, typename indexes_type_::executor_t>
+template <typename indexes_type_, typename queue_type_>
+    requires std::is_same_v<nvme_executor<queue_type_>, typename indexes_type_::executor_t>
 expected<nvme_reshard_plan<indexes_type_>> plan_reshard(std::span<indexes_type_* const> sources,
                                                         std::span<indexes_type_* const> targets,
-                                                        nvme_executor<engine_type_>& executor,
+                                                        nvme_executor<queue_type_>& executor,
                                                         reshard_config_t config = {}) noexcept;
 
 /** Gives a loaded index's writer back as the plan that held it ends. */
@@ -327,7 +327,7 @@ struct [[nodiscard]] nvme_reshard_plan {
      *
      *  @par Statuses:
      *  - @c config_mismatch_k @p task lies past the current phase's tasks, a part rebuilt in RAM
-     *    disagrees with its rows, or a medium the engines cannot read.
+     *    disagrees with its rows, or a medium the queues cannot read.
      *  - @c uninitialized_k The plan is done, or @p executor holds no pool or workers.
      *  - @c contended_k Another call holds @p executor, or its pool runs another dispatch.
      *  - @c bad_alloc_k The workspace cannot hold the task's slices.
@@ -517,11 +517,11 @@ struct [[nodiscard]] nvme_reshard_plan {
     friend expected<nvme_reshard_plan<other_type_>> plan_build(std::span<std::string_view const>, std::string_view,
                                                                bytes_span_t, reshard_config_t const&,
                                                                save_config_t const&) noexcept;
-    template <typename other_type_, typename engine_type_>
-        requires std::is_same_v<nvme_executor<engine_type_>, typename other_type_::executor_t>
+    template <typename other_type_, typename queue_type_>
+        requires std::is_same_v<nvme_executor<queue_type_>, typename other_type_::executor_t>
     friend expected<nvme_reshard_plan<other_type_>> plan_reshard(std::span<other_type_* const>,
                                                                  std::span<other_type_* const>,
-                                                                 nvme_executor<engine_type_>&,
+                                                                 nvme_executor<queue_type_>&,
                                                                  reshard_config_t) noexcept;
 
     /** Opens a freestanding reshard of @p sources into the manifest @p target, as @ref plan_reshard
@@ -700,7 +700,7 @@ struct [[nodiscard]] nvme_reshard_plan {
     using paths_t = growing_buffer<char, forkunion_allocator_t>;
 
     /** The arena every task carves the workspace from, the workspace its only chunk. */
-    using workspace_upstream_t = lent_allocator<byte_t>;
+    using workspace_upstream_t = caller_span_allocator<byte_t>;
     using workspace_arena_t = growing_arena<workspace_upstream_t>;
     using workspace_allocator_t = arena_allocator<byte_t, workspace_upstream_t>;
 
@@ -879,7 +879,7 @@ struct [[nodiscard]] nvme_reshard_plan {
      *  @p buffer cannot grow. */
     std::string_view receiver_path_(paths_t& buffer, std::size_t receiver, std::string_view suffix) const noexcept {
         std::string_view const stem = path_of_(stem_);
-        // An empty view may carry a null pointer, which `%.*s` must never see.
+        // An empty view may hold a null pointer, which `%.*s` must never see.
         char const* const stem_chars = stem.empty() ? "" : stem.data();
         char const* const suffix_chars = suffix.empty() ? "" : suffix.data();
         auto print = [&](char* sink, std::size_t capacity) noexcept {
@@ -1067,6 +1067,9 @@ struct [[nodiscard]] nvme_reshard_plan {
             if (failed(target.view.media_.push_back(medium_t {std::move(file_medium)})) ||
                 failed(target.view.parts_.push_back(viewed)))
                 return status_t::bad_alloc_k;
+            auto const [identity, identity_status] = media_identity_from_entropy();
+            if (failed(identity_status)) return identity_status;
+            target.view.media_identity_ = identity;
         }
         std::size_t const changed_words = divide_round_up<std::size_t>(total, 64);
         std::size_t const changed_bytes = workspace_allocator_t::reserved_bytes(changed_words * sizeof(u64_t));
@@ -1214,7 +1217,7 @@ struct [[nodiscard]] nvme_reshard_plan {
     /** The distance kind of every source, which the targets name and their selections rank by. */
     nk_kernel_kind_t kernel_() const noexcept { return sources_[0].view->kernel(); }
 
-    /** Bytes of one norms row, zero when the kernel reads no norms and the targets carry no
+    /** Bytes of one norms row, zero when the kernel reads no norms and the targets hold no
      *  column. */
     std::size_t norms_bytes_() const noexcept { return sources_[0].view->stores_norms() ? sizeof(vector_norms_t) : 0; }
 
@@ -1330,7 +1333,7 @@ struct [[nodiscard]] nvme_reshard_plan {
     /** An arena whose only chunk is the whole of @p space, which starts on a boundary. */
     static workspace_arena_t arena_over_(bytes_span_t space) noexcept {
         workspace_arena_t arena {workspace_upstream_t {space}};
-        // Never refused: the upstream hands out exactly the span it lends.
+        // Never refused: the upstream hands out exactly the span it passes.
         [[maybe_unused]] status_t const seeded = arena.reserve_exactly(space.size());
         return arena;
     }
@@ -1930,8 +1933,8 @@ struct [[nodiscard]] nvme_reshard_plan {
         if (status_t const reserved = index.reserve({nodes}).status; failed(reserved)) return reserved;
         // One call holds the executor for the load, the refine and the writes; it reads no medium.
         typename ram_index_t::insert_config_t const sizing {static_cast<u32_t>(expansion_factor_())};
-        auto [call, call_status] = nvme_begin_call(executor, std::span<medium_t const> {}, executor.queue_depth(),
-                                                   index.traversal_memory_usage(sizing), 0, 0);
+        auto [call, call_status] = nvme_begin_call(executor, std::span<medium_t const> {}, media_list_key_t {},
+                                                   executor.queue_depth(), index.traversal_memory_usage(sizing), 0, 0);
         if (failed(call_status)) return call_status;
         traversals_t traversals {scratch_allocator_t {executor.arena(0)}};
         if (status_t const ready = traversals_(index, executor, traversals); failed(ready)) return ready;
@@ -2698,11 +2701,11 @@ struct [[nodiscard]] nvme_reshard_plan {
     /** The memory every task carves its blocks, batches and tables from. */
     bytes_span_t workspace_;
 
-    /** The caller's configurations, the provenance borrowed until the plan finishes. */
+    /** The caller's configurations, the provenance read until the plan finishes. */
     reshard_config_t config_;
     save_config_t save_;
 
-    /** The custom fields every target header carries. */
+    /** The custom fields every target header holds. */
     growing_buffer<safegraphs_custom_field_t, forkunion_allocator_t> fields_ {allocator_};
 
     /** The manifest's path, and the stem its parts are named after. */
@@ -2719,7 +2722,7 @@ struct [[nodiscard]] nvme_reshard_plan {
     growing_buffer<target_t, forkunion_allocator_t> targets_ {allocator_};
 
     /** One bit per target row, each target part's after every earlier part's, set once the row
-     *  counts as changed, at the front of the workspace the caller lent. */
+     *  counts as changed, at the front of the workspace the caller passed. */
     std::span<u64_t> changed_;
 
     /** Bytes of cache each core keeps to itself, which size a round's hubs and its neighborhood
@@ -2788,7 +2791,7 @@ struct [[nodiscard]] nvme_reshard_plan {
     growing_buffer<indexes_t*, forkunion_allocator_t> source_indexes_ {allocator_};
     growing_buffer<indexes_t*, forkunion_allocator_t> target_indexes_ {allocator_};
 
-    /** The workspace a reshard of loaded indexes holds; empty while a caller lends one. */
+    /** The workspace a reshard of loaded indexes holds; empty while a caller passes one. */
     growing_buffer<byte_t, forkunion_allocator_t> held_workspace_ {allocator_};
 
     /** The loaded index whose writer the plan holds: the one target, or the split's source. */
@@ -2906,9 +2909,8 @@ expected<reshard_report_t> nvme_drain_(expected<plan_type_>&& planned,
  *  - @c uninitialized_k A first source viewing nothing, sources holding no rows, or @p executor
  *    holds no pool or workers.
  *  - @c config_mismatch_k @p save names an alignment below the floor or not a power of two or a
- *    reserved provenance field, a source differs in kernel, geometry or key width from the first,
- *    a part rebuilt in RAM disagrees with its rows, a medium the engines cannot read, or a part
- *    header does not fit before its data.
+ *    reserved provenance field, a source differs in kernel, geometry or key width, a part rebuilt
+ *    in RAM disagrees with its rows, a medium the queues cannot read, or a header does not fit.
  *  - @c bad_alloc_k @p workspace cannot hold one row of some phase.
  *  - @c overflow_k A target part of zero rows or past the node ID space, a part rebuilt in RAM
  *    passing a bound, a staging region's byte count, or a write past a device's end.
@@ -2931,8 +2933,7 @@ expected<reshard_report_t> reshard(std::span<indexes_type_* const> sources, std:
  *    workers.
  *  - @c config_mismatch_k @p save names an alignment below the floor or not a power of two or a
  *    reserved provenance field, a part of @p source differs in geometry or key width, a part
- *    rebuilt in RAM disagrees with its rows, a medium the engines cannot read, or a part header
- *    does not fit before its data.
+ *    rebuilt in RAM disagrees with its rows, a medium the queues cannot read, or a bad header.
  *  - @c invalid_argument_k An empty @p target, or a target part or manifest path that does not
  *    parse.
  *  - @c bad_alloc_k @p workspace cannot hold one row of some phase.
@@ -2950,7 +2951,7 @@ expected<reshard_report_t> refine(indexes_type_ const& source, iota_view<std::si
 }
 
 /**
- *  The one-shot @c plan_build, drained over @p executor.
+ *  @brief The one-shot @c plan_build, drained over @p executor.
  *
  *  @par Statuses:
  *  - @c uninitialized_k No source, sources holding no rows, or @p executor holds no pool or
@@ -2962,7 +2963,7 @@ expected<reshard_report_t> refine(indexes_type_ const& source, iota_view<std::si
  *    part or framed target header has no width or too many rows.
  *  - @c config_mismatch_k A source part disagrees with the others or with this instantiation,
  *    @p save names an alignment below the floor or not a power of two or a reserved provenance
- *    field, a part rebuilt in RAM disagrees with its rows, a medium the engines cannot read, or a
+ *    field, a part rebuilt in RAM disagrees with its rows, a medium the queues cannot read, or a
  *    part header does not fit before its data.
  *  - @c unsupported_k A transport ID in a build without SPDK.
  *  - @c unknown_kind_k A kernel the stored scalar's kits cannot finalize, or a part rebuilt in RAM
@@ -3276,11 +3277,11 @@ expected<refine_report_t> refine(indexes_type_& index, refine_config_t config,
     return plan.finish(executor);
 }
 
-template <typename indexes_type_, typename engine_type_>
-    requires std::is_same_v<nvme_executor<engine_type_>, typename indexes_type_::executor_t>
+template <typename indexes_type_, typename queue_type_>
+    requires std::is_same_v<nvme_executor<queue_type_>, typename indexes_type_::executor_t>
 expected<nvme_reshard_plan<indexes_type_>> plan_reshard(std::span<indexes_type_* const> sources,
                                                         std::span<indexes_type_* const> targets,
-                                                        nvme_executor<engine_type_>& executor,
+                                                        nvme_executor<queue_type_>& executor,
                                                         reshard_config_t config) noexcept {
     nvme_reshard_plan<indexes_type_> plan;
     if (sources.empty() || targets.empty()) return {std::move(plan), status_t::invalid_argument_k};
@@ -3305,10 +3306,10 @@ expected<nvme_reshard_plan<indexes_type_>> plan_reshard(std::span<indexes_type_*
  *  - @c cancelled_k @p progress stopped the rewrite.
  *  - Any status @ref plan_reshard, its tasks or its finish answers.
  */
-template <typename indexes_type_, typename engine_type_, typename progress_type_ = dummy_progress_t>
-    requires std::is_same_v<nvme_executor<engine_type_>, typename indexes_type_::executor_t>
+template <typename indexes_type_, typename queue_type_, typename progress_type_ = dummy_progress_t>
+    requires std::is_same_v<nvme_executor<queue_type_>, typename indexes_type_::executor_t>
 expected<reshard_report_t> reshard(std::span<indexes_type_* const> sources, std::span<indexes_type_* const> targets,
-                                   nvme_executor<engine_type_>& executor, reshard_config_t config = {},
+                                   nvme_executor<queue_type_>& executor, reshard_config_t config = {},
                                    progress_type_&& progress = {}) noexcept {
     auto [plan, status] = plan_reshard(sources, targets, executor, config);
     if (failed(status)) return {{}, status};

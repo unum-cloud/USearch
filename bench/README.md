@@ -1,7 +1,7 @@
 # USearch Benchmarks
 
 Cross-engine comparisons live in [RetriEval](https://github.com/ashvardanian/RetriEval).
-It drives USearch, FAISS, cuVS and standalone databases through one harness over the BigANN binary layout, with shuffled parallel construction, incremental recall curves and machine-readable reports, and its README carries the dataset catalogue with download recipes and pre-computed ground truth.
+It drives USearch, FAISS, cuVS and standalone databases through one harness over the BigANN binary layout, with shuffled parallel construction, incremental recall curves and machine-readable reports, and its README holds the dataset catalogue with download recipes and pre-computed ground truth.
 Run RetriEval to answer _which engine_; run this directory to answer _which primitive_.
 
 The suite here is internal.
@@ -191,7 +191,7 @@ build_release/usearch_bench_dense_ram_metric --filter 'dot/bf16/.*/1to[14]/768d'
 ## Datasets
 
 Datasets live outside the repository and are reached through `data/<name>` symlinks, lowercase with dashes and the scale suffix last, such as `data/sift-10m`.
-The files follow the RetriEval layout: two little-endian `u32` counters, rows then columns, followed by the row-major payload, with the dtype carried by the extension, `.fbin` for `f32`, `.f16bin`, `.f64bin`, `.i8bin`, `.u8bin`, `.bf16bin`, `.b1bin` with columns counting bits, and `.ibin` for `u32` neighbor IDs.
+The files follow the RetriEval layout: two little-endian `u32` counters, rows then columns, followed by the row-major payload, with the dtype held by the extension, `.fbin` for `f32`, `.f16bin`, `.f64bin`, `.i8bin`, `.u8bin`, `.bf16bin`, `.b1bin` with columns counting bits, and `.ibin` for `u32` neighbor IDs.
 Datasets and ground truth stay in this layout, while every index the benchmarks save is SafeGraphs, as [Checkpoints](#checkpoints) describes.
 
 | Dataset                     | Stored dtype | Dimensions | Metric    | Scales        | Ground truth           |

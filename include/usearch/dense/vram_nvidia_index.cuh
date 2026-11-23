@@ -7,7 +7,7 @@
  *  The kernel side of the index: the exact scan, a round's gather and mates on the scan's step, and
  *  the two kernel templates, @c cuda_kernel for the walks basic graphs share and
  *  @c cuda_dense_kernel for the rest, over five arguments - the kernel, the capability ceiling, the
- *  dtype, the register rung and the attend value lookup - whose instantiations a fatbin carries.
+ *  dtype, the register rung and the attend value lookup - whose instantiations a fatbin contains.
  *  NVCC's device-only passes include it, one per dtype under one ceiling; each kernel turns the
  *  plain records of @c vram_index.hpp into the shared views of @c vram_index.cuh, runs the shared
  *  bodies there through @ref unum::usearch::utilities::cuda_warp_t, and the host finds it by the

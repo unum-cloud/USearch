@@ -37,7 +37,7 @@ endif ()
 # dependencies; the archive takes the objects themselves, since an archive links nothing - and linking a library instead
 # would drop every symbol nothing inside referenced, which is the entire C interface.
 #
-# For the same reason the archive carries its dependencies' objects: one leaving yyjson, NumKong or ForkUnion undefined
+# For the same reason the archive holds its dependencies' objects: one leaving yyjson, NumKong or ForkUnion undefined
 # makes every consumer hunt more archives out of the dependency tree to link one of ours.
 add_library(usearch_shared SHARED ${usearch_library_exclusion_})
 target_link_libraries(usearch_shared PRIVATE ${USEARCH_PUNNED_LIBRARIES})
@@ -91,7 +91,7 @@ if (USEARCH_WITH_JEMALLOC)
     target_link_libraries(usearch_shared PRIVATE ${USEARCH_JEMALLOC_LIBRARY})
 endif ()
 
-# `SOVERSION` carries the major alone, the only break the C ABI admits.
+# `SOVERSION` holds the major alone, the only break the C ABI admits.
 set_target_properties(usearch_shared PROPERTIES VERSION ${PROJECT_VERSION} SOVERSION ${PROJECT_VERSION_MAJOR})
 
 # Each flavor joins an export set, which the root's install lists name, so `find_package(usearch)` names them

@@ -6,12 +6,12 @@
  *
  *  The host face of the NVIDIA family, compiled by any C++ compiler: it fills the plain argument
  *  records of @c vram_index.hpp and launches the kernels of @c vram_nvidia_index.cuh by name
- *  through the driver table its storage carries, so it never sees a kit, a shared view or the CUDA
+ *  through the driver table its storage holds, so it never sees a kit, a shared view or the CUDA
  *  runtime. Every kernel is one instantiation of @c cuda_kernel, for the walks basic graphs share,
  *  or of @c cuda_dense_kernel, for the rest, both over five arguments - the kernel, the capability
  *  ceiling, the dtype, the register rung and the attend value lookup - so @c vram_kernel_symbol
  *  spells its symbol here from those arguments alone, and one fatbin per class, which the face's
- *  kernels type names, carries every dtype.
+ *  kernels type names, covers every dtype.
  */
 #pragma once
 
@@ -108,7 +108,7 @@ constexpr u32_t cuda_resident_blocks(vram_dense_kernel_t kernel, u32_t slots) no
     case vram_dense_kernel_t::search_indexer_k:
     case vram_dense_kernel_t::multiply_k: return slots <= 8 ? 4 : 3;
     case vram_dense_kernel_t::scan_k: return 3;
-    // The attend fold carries per-head state, which spills at 8 slots under four blocks' budget.
+    // The attend fold keeps per-head state, which spills at 8 slots under four blocks' budget.
     case vram_dense_kernel_t::attend_k: return slots <= 4 ? 4 : 3;
     case vram_dense_kernel_t::derive_norms_k:
     case vram_dense_kernel_t::cast_k:
@@ -201,7 +201,7 @@ constexpr bool cuda_overlaps_launches(nk_capability_t capability) noexcept {
 }
 
 /** Whether @p kernel walks, scoring its batches through the schedule, which may gather their rows
- *  through the tensor map the kernel's arguments carry. */
+ *  through the tensor map the kernel's arguments hold. */
 constexpr bool cuda_gathers_rows(vram_kernel_t kernel) noexcept {
     return kernel == vram_kernel_t::insert_k || kernel == vram_kernel_t::search_k;
 }
@@ -584,7 +584,7 @@ struct vram_nvidia_kernels {
         byte_t* const arena = walks ? context.ensure_arena(arena_warps * arena_shape.slice_bytes<node_id_t>())
                                     : nullptr;
         if (walks && !arena) return {{}, status_t::bad_alloc_k};
-        // The staging holds the query rows and any head rows first, since they carry the widest
+        // The staging holds the query rows and any head rows first, since they need the widest
         // alignment, then the window importing them, the heads' weights, then the outputs; stream
         // order serializes its reuse across calls.
         std::size_t const rows_bytes = (queries_count + heads_rows) * core.row_bytes();

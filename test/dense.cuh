@@ -44,7 +44,7 @@
 
 #include "harness.hpp"
 #include "usearch/utilities/types.hpp"
-#include "usearch/utilities/ram_device.hpp"        // `forkunion_executor_t` - the RAM residency's executor
+#include "usearch/utilities/ram_device.hpp"        // `ram_executor_t` - the RAM residency's executor
 #include "usearch/utilities/sanitizers.hpp"        // `assert_no_locks_held` - the racing threads' tail check
 #include "usearch/utilities/safegraphs_format.hpp" // `save_config_t`, `safegraphs_read_header` - the checkpoints' surface
 #include "usearch/dense/ram_metric.hpp"            // `dense::distance`, `dense::norms` - the oracle's kernels
@@ -87,7 +87,7 @@ constexpr std::size_t dense_tiny_values_k = 8;
 
 /** Logical dimensions spanned by @p values_count storage values of one dtype -
  *  NumKong's @c dimensions_per_value conversion, so every dtype gets the same storage
- *  budget: 16 i8 values carry 16 dimensions, 16 u1x8 values carry 128. */
+ *  budget: 16 i8 values hold 16 dimensions, 16 u1x8 values hold 128. */
 template <typename scalar_>
 constexpr std::size_t dense_dimensions_for(std::size_t values_count) noexcept {
     return values_count * nk::dimensions_per_value<scalar_>();
@@ -274,7 +274,7 @@ namespace dense {
 
 /**
  *  @brief One vendor's (dtype, kernel) cell: @c index_t over ledgered flat matrices, the sharded
- *      @c indexes_t, and the @c vendor_prefix_k its reports carry, built over the @c stream of the
+ *      @c indexes_t, and the @c vendor_prefix_k its reports print, built over the @c stream of the
  *      executor the vendor's entry opened.
  *
  *  A cell is the factory the shared scenarios take: called on a ledger it builds the index on the
@@ -342,7 +342,7 @@ struct counting_device_allocator {
 
 /** Whether a sharded index runs on ForkUnion threads - the RAM residency. */
 template <typename indexes_type_>
-concept ram_collection = std::is_same_v<typename indexes_type_::executor_t, forkunion_executor_t>;
+concept ram_collection = std::is_same_v<typename indexes_type_::executor_t, ram_executor_t>;
 
 /** The executor one sharded scenario drives, owned together with whatever it was spawned
  *  over; @c status reports the spawn. Defined per residency, each built from the @c placement
@@ -714,7 +714,7 @@ void test_dense_growth_and_recall(make_index_type_ const& make_index, u64_t seed
  *  The oracle scans every stored vector through the same free kernels the index picked - its quads
  *  kit - so its distances are bit-identical to the traversal's and the checks can be exact where
  *  approximation permits: a trivially-true predicate must reproduce @c search verbatim; every
- *  reported ID must satisfy its predicate and carry the oracle's distance for that ID, bit-for-bit;
+ *  reported ID must satisfy its predicate and hold the oracle's distance for that ID, bit-for-bit;
  *  the per-node and batched callable shapes must agree; excluded self-matches must never surface;
  *  recall of the true filtered nearest is held to the same bar as the unfiltered suite across three
  *  selectivity decades - every other node, one in 16, and one in 64; and an impossible predicate
@@ -785,7 +785,7 @@ void dense_expect_predicated_search(make_index_type_ const& make_index, allocati
         expect_equal(batched_context.results[match].node_id, scalar_context.results[match].node_id);
 
     // Three selectivity decades over sampled queries: every reported ID satisfies its
-    // predicate and carries the oracle's distance bit-for-bit; distances ascend; a query
+    // predicate and holds the oracle's distance bit-for-bit; distances ascend; a query
     // whose own ID is excluded never surfaces itself. Even samples query a matching row -
     // the filtered analog of the suite's self-recall bar, scored per decade on the two
     // denser ones; odd samples query an excluded row, auditing admission purity. The
@@ -1273,7 +1273,7 @@ bytes_view_t dense_matrix_bytes(nk::matrix_view<value_type_> view) noexcept {
     return {reinterpret_cast<byte_t const*>(view.byte_data()), dense_rows_bytes(view, view.extent(0))};
 }
 
-/** The bytes of a writable matrix span's rows - what a row-range slice hands back. */
+/** The bytes of a writable matrix span's rows - what a row-range slice returns. */
 template <typename value_type_>
 bytes_span_t dense_matrix_bytes(nk::matrix_span<value_type_> span) noexcept {
     return {reinterpret_cast<byte_t*>(span.data()), dense_rows_bytes(span, span.extent(0))};
@@ -1307,7 +1307,7 @@ std::size_t dense_plan_rows(plan_type_ const& plan) noexcept {
     return tasks.size() ? static_cast<std::size_t>(tasks[tasks.size() - 1].index_nodes.bound) : 0;
 }
 
-/** Any number of lanes may take chunks from one plan: a shared cursor hands them out,
+/** Any number of threads may take chunks from one plan: a shared cursor hands them out,
  *  and the bytes match the serial save. */
 template <typename index_type_, typename scalar_type_, typename node_id_type_>
 void dense_expect_pooled_save(index_type_& index, typename index_type_::saved_shape_t shape,
@@ -1340,7 +1340,7 @@ void dense_expect_pooled_save(index_type_& index, typename index_type_::saved_sh
 /** Round-trips the graph through one plan per direction: build, save into two host
  *  matrices chunk by chunk, load into a fresh reserved index the same way, and expect the
  *  restored graph to answer self-queries just as the original did - norms re-derive on
- *  load and are never serialized. On RAM a pool of lanes then takes chunks from one plan
+ *  load and are never serialized. On RAM a pool of threads then takes chunks from one plan
  *  by a shared cursor and must write the same bytes. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
 void dense_expect_save_load_round_trip(make_index_type_ const& make_index, allocation_ledger_t& ledger, u64_t seed) {
@@ -1393,7 +1393,7 @@ void dense_expect_save_load_round_trip(make_index_type_ const& make_index, alloc
     expect_true(std::memcmp(resaved_neighbors.data(), saved_neighbors.data(),
                             dense_rows_bytes(saved_neighbors.view(), shape.nodes)) == 0);
 
-    // Lanes take chunks from one plan only where the residency admits the concurrent mode.
+    // Threads take chunks from one plan only where the residency admits the concurrent mode.
     if constexpr (!dense_device_resident<index_type_>)
         dense_expect_pooled_save(restored, shape, saved_vectors, saved_neighbors);
 
@@ -2269,8 +2269,9 @@ inline f32_t dense_attend_scale(std::vector<dense_oracle_dot_t> const& dots) noe
     return widest > 0 ? static_cast<f32_t>(4 / widest) : 1;
 }
 
-/** Every head's attended row and carry equal exact softmax attention over every key, in f64. Rows of
- *  @p queries, @p outputs and @p carry are tasks t · @p head_count + h; @p value_of maps a key row to its value row. */
+/** Every head's attended row and hold equal exact softmax attention over every key, in f64. Rows of
+ *  @p queries, @p outputs and @p carry are tasks t · @p head_count + h; @p value_of maps a key row
+ *    to its value row. */
 template <typename scalar_type_, typename value_of_type_>
 void dense_expect_full_attention(nk::matrix_view<scalar_type_> keys, nk::matrix_view<scalar_type_> queries,
                                  std::size_t head_count, value_of_type_&& value_of, f32_t score_scale,
@@ -2309,7 +2310,7 @@ void dense_expect_full_attention(nk::matrix_view<scalar_type_> keys, nk::matrix_
     }
     expect_errors("attention outputs", comparison_family_t::normalized_reduction_k, comparison_verdict_t::assert_k,
                   output_errors, 0);
-    expect_errors("attention carries", comparison_family_t::approximate_k, comparison_verdict_t::assert_k, carry_errors,
+    expect_errors("attention holds", comparison_family_t::approximate_k, comparison_verdict_t::assert_k, carry_errors,
                   0);
 }
 
@@ -2361,7 +2362,7 @@ typename scalar_type_::dot_result_t dense_native_dot(nk::vector_view<scalar_type
 }
 
 /** One row of graph products: every kept pair names a distinct row of @p vectors, through @p row_of, and
- *  carries its exact dot against @p left. */
+ *  holds its exact dot against @p left. */
 template <std::size_t rows_count_, typename scalar_type_, typename id_type_, typename dot_type_, typename row_of_type_>
 void dense_expect_product_row(nk::vector_view<scalar_type_> left, nk::matrix_view<scalar_type_> vectors,
                               nk::vector_view<id_type_> ids, nk::vector_view<dot_type_> products,
@@ -3899,7 +3900,7 @@ void test_dense_indexes_part_load(u64_t seed, placement_types_&... placement) {
     checkpoint.remove(shards);
 }
 
-/** Any number of lanes may take tasks from one sharded plan: a shared cursor hands them
+/** Any number of threads may take tasks from one sharded plan: a shared cursor hands them
  *  out regardless of which shard they read, the plan finishes once, and the buffer they
  *  wrote restores into the same graph the one-shot save writes. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>

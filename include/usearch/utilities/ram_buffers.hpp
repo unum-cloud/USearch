@@ -387,7 +387,7 @@ class max_heap {
  *  pop are roughly the same as binary, just rearranged.
  *
  *  HNSW frontier inserts dominate pops (~M·2 pushes per pop), so the insert-side win
- *  carries the workload. Sweet spot is an @p arity_ of 4, 8, or 16 - d=2 falls back to
+ *  holds the workload. Sweet spot is an @p arity_ of 4, 8, or 16 - d=2 falls back to
  *  binary (and serves as a parity-check oracle), d=64+ blows up the pop sweep.
  */
 template <std::size_t arity_,                          //
@@ -1402,7 +1402,8 @@ inline void expand_entries_forward(bytes_span_t entries, std::size_t count, std:
 /** Per-thread bump arena: reservations bump inside the newest chunk, and one that cannot
  *  fit them stays alive under its slices while a chunk at least twice as wide opens - so
  *  addresses never move and slices outlive growth. The rewind keeps the widest chunk and
- *  drops the ones it outgrew; releasing a slice does nothing, the rewind is the release. */
+ *  drops the ones it outgrew; releasing a slice does nothing, the rewind is the release. The
+ *  live chunks never span more than the arena's limit together. */
 template <typename upstream_allocator_ = std::allocator<byte_t>>
 class growing_arena {
     using upstream_t = typename std::allocator_traits<upstream_allocator_>::template rebind_alloc<std::byte>;
@@ -1422,6 +1423,9 @@ class growing_arena {
     /** Places every run - the thread's memory domain. */
     upstream_t upstream_;
 
+    /** Bytes the live chunks may span together, past which growth is refused. */
+    std::size_t limit_ = (std::numeric_limits<std::size_t>::max)();
+
   public:
 
     /** Every arena names its upstream allocator; nothing is placed by default. */
@@ -1431,17 +1435,19 @@ class growing_arena {
     explicit growing_arena(global_allocator_t) noexcept
         requires std::default_initializable<upstream_t>
         : growing_arena(upstream_t {}) {}
-    explicit growing_arena(upstream_t upstream) noexcept
-        : runs_(empty_runs_(upstream, std::make_index_sequence<max_chunks_k> {})), upstream_(upstream) {}
+    explicit growing_arena(upstream_t upstream, std::size_t limit = (std::numeric_limits<std::size_t>::max)()) noexcept
+        : runs_(empty_runs_(upstream, std::make_index_sequence<max_chunks_k> {})), upstream_(upstream), limit_(limit) {}
 
     /** The allocator every chunk of this arena comes from. */
     upstream_t const& upstream() const noexcept { return upstream_; }
     growing_arena(growing_arena&& other) noexcept
-        : runs_(std::move(other.runs_)), chunks_(utilities::exchange(other.chunks_, 0)), upstream_(other.upstream_) {}
+        : runs_(std::move(other.runs_)), chunks_(utilities::exchange(other.chunks_, 0)), upstream_(other.upstream_),
+          limit_(other.limit_) {}
     growing_arena& operator=(growing_arena&& other) noexcept {
         std::swap(runs_, other.runs_);
         std::swap(chunks_, other.chunks_);
         std::swap(upstream_, other.upstream_);
+        std::swap(limit_, other.limit_);
         return *this;
     }
 
@@ -1466,13 +1472,14 @@ class growing_arena {
         return grow_(bytes);
     }
 
-    /** Hands out @p bytes on an @p alignment boundary from the newest chunk, growing by one
-     *  at least twice as wide when it cannot fit them; null when the upstream refuses. */
+    /** Hands out @p bytes on an @p alignment boundary from the newest chunk, growing by one at
+     *  least twice as wide, or as wide as the limit leaves, when it cannot fit them; null when the
+     *  limit or the upstream refuses. */
     std::byte* allocate(std::size_t bytes, std::size_t alignment) noexcept {
         if (chunks_)
             if (std::byte* const slice = slice_(runs_[chunks_ - 1], bytes, alignment)) return slice;
         std::size_t const last_width = chunks_ ? runs_[chunks_ - 1].capacity() : 0;
-        if (failed(grow_(max_of(last_width * 2u, bytes + alignment)))) return nullptr;
+        if (failed(grow_(max_of(min_of(last_width * 2u, limit_ - capacity()), bytes + alignment)))) return nullptr;
         return slice_(runs_[chunks_ - 1], bytes, alignment);
     }
 
@@ -1513,7 +1520,7 @@ class growing_arena {
 
     /** Grows by a chunk of @p width bytes, the newest from now on, the old ones kept behind. */
     status_t grow_(std::size_t width) noexcept {
-        if (chunks_ == max_chunks_k) return status_t::bad_alloc_k;
+        if (chunks_ == max_chunks_k || width > limit_ - capacity()) return status_t::bad_alloc_k;
         if (status_t const sized = runs_[chunks_].reserve_exactly(width); failed(sized)) return sized;
         ++chunks_;
         return status_t::success_k;
@@ -1531,22 +1538,25 @@ class growing_arena {
     }
 };
 
-/** Hands out the one span its caller lends, to a request of exactly its extent, and refuses every
- *  other; releasing does nothing. The upstream of a @ref growing_arena whose only chunk is borrowed
- *  memory: seeded by @ref growing_arena::reserve_exactly over the whole span, any later chunk would
- *  at least double it, so the span is never handed out twice. */
+/** Hands out the one span its caller owns, to a request of exactly its extent, and refuses every
+ *  other; releasing does nothing, and the caller frees the span after the arena is gone. The
+ *  upstream of a @ref growing_arena whose only chunk is that memory: seeded by
+ *  @ref growing_arena::reserve_exactly over the whole span, any later chunk would at least double
+ *  it, so the span is never handed out twice. */
 template <typename value_type_ = std::byte>
-struct lent_allocator {
+struct caller_span_allocator {
     using value_type = value_type_;
 
-    /** The lent memory; empty refuses every request. */
-    std::span<value_type_> lent;
+    /** The caller's memory; empty refuses every request. */
+    std::span<value_type_> caller_memory;
 
-    value_type_* allocate(std::size_t count) noexcept { return count == lent.size() ? lent.data() : nullptr; }
+    value_type_* allocate(std::size_t count) noexcept {
+        return count == caller_memory.size() ? caller_memory.data() : nullptr;
+    }
     void deallocate(value_type_*, std::size_t) noexcept {}
 };
 
-static_assert(buffer_allocator<lent_allocator<std::byte>>);
+static_assert(buffer_allocator<caller_span_allocator<std::byte>>);
 
 /** Hands out slices of one @ref growing_arena it points at but does not own. Copies share
  *  the arena by pointer, so containers built from one reserve disjoint slices; releasing a

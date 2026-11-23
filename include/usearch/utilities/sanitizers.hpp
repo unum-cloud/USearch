@@ -90,7 +90,7 @@ inline void annotate_unlock_started(void* mutex_address) noexcept { __tsan_mutex
 /** Closes an @c unlock bracket. */
 inline void annotate_unlock_finished(void* mutex_address) noexcept { __tsan_mutex_post_unlock(mutex_address, 0u); }
 
-/** The shared-side twin of @c annotate_lock_started, carrying the read-lock flag. */
+/** The shared-side twin of @c annotate_lock_started, holding the read-lock flag. */
 inline void annotate_lock_shared_started(void* mutex_address) noexcept {
     __tsan_mutex_pre_lock(mutex_address, __tsan_mutex_read_lock);
 }

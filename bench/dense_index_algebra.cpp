@@ -350,7 +350,7 @@ inline bool run_attend(handle<dense_verbs_t>& index, usearch_rows_view_t keys, s
                  seconds, humanized(double(tokens) / seconds),
                  humanized(double(totals.computed_distances) / double(tokens)));
 
-    // Softmax weights sum to one, so an attended row carries the values' shift and scale whole.
+    // Softmax weights sum to one, so an attended row holds the values' shift and scale whole.
     for (f32_t& value : attended) value = value / table.scale - table.offset;
     std::vector<exact_attention_t> exact;
     if (algebra.reference.empty()) exact = exact_attention(keys, keys_count, queries, judged, scale, values);

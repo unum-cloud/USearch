@@ -93,28 +93,39 @@ inline std::size_t list_gpu_devices(gpu_drivers_t const& drivers, std::span<gpu_
  *      vendor's driver in @p drivers.
  *
  *  One stream per distinct device over their vendor ordinals, which every shard there shares, its
- *  run never growing past @p scratch_limit bytes per stream, zero for no ceiling.
+ *  run never growing past @p scratch_limit bytes per stream, zero for no ceiling. A device orders
+ *  work on the entry of @p streams at its first position in @p devices, or on its per-thread
+ *  default stream when @p streams is empty; the executor never destroys one.
  *
  *  @par Statuses:
  *  - @c device_error_k No device is named, or the build drives no executor of their vendor.
- *  - @c config_mismatch_k The @p devices span vendors.
+ *  - @c config_mismatch_k The @p devices span vendors, or @p streams holds another count.
  */
 inline expected<gpu_executor_t> spawn_gpu_executor(gpu_drivers_t& drivers, std::span<gpu_device_t const> devices,
-                                                   std::size_t scratch_limit = 0) noexcept {
+                                                   std::size_t scratch_limit = 0,
+                                                   std::span<void* const> streams = {}) noexcept {
     if (devices.empty()) return {{}, status_t::device_error_k};
-    growing_buffer<int> ordinals {global_allocator};
-    if (failed(ordinals.reserve_exactly(devices.size()))) return {{}, status_t::bad_alloc_k};
-    for (gpu_device_t const& device : devices) {
+    if (!streams.empty() && streams.size() != devices.size()) return {{}, status_t::config_mismatch_k};
+    for (gpu_device_t const& device : devices)
         if (device.vendor != devices[0].vendor) return {{}, status_t::config_mismatch_k};
-        int const ordinal = static_cast<int>(device.vendor_ordinal);
-        bool opened = false;
-        for (int const earlier : ordinals) opened |= earlier == ordinal;
-        if (!opened) ordinals.push_back_reserved(ordinal);
-    }
     expected<gpu_executor_t> result {{}, status_t::device_error_k};
     auto const spawn = [&]<typename executor_type_>(std::type_identity<executor_type_> vendor) noexcept {
         if (executor_type_::vendor_k != devices[0].vendor) return false;
-        auto [spawned, status] = executor_type_::spawn(driver_of(drivers, vendor), to_span(ordinals), scratch_limit);
+        using stream_handle_t = typename executor_type_::stream_handle_t;
+        growing_buffer<int> ordinals {global_allocator};
+        growing_buffer<stream_handle_t> handles {global_allocator};
+        if (failed(ordinals.reserve_exactly(devices.size())) || failed(handles.reserve_exactly(streams.size())))
+            return result.status = status_t::bad_alloc_k, true;
+        for (std::size_t position = 0; position != devices.size(); ++position) {
+            int const ordinal = static_cast<int>(devices[position].vendor_ordinal);
+            bool opened = false;
+            for (int const earlier : ordinals) opened |= earlier == ordinal;
+            if (opened) continue;
+            ordinals.push_back_reserved(ordinal);
+            if (!streams.empty()) handles.push_back_reserved(static_cast<stream_handle_t>(streams[position]));
+        }
+        auto [spawned, status] = executor_type_::spawn(driver_of(drivers, vendor), to_span(ordinals), scratch_limit,
+                                                       to_span(handles));
         if (succeeded(status)) result.value.emplace<executor_type_>(std::move(spawned));
         result.status = status;
         return true;

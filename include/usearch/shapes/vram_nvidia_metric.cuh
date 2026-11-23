@@ -11,7 +11,7 @@
  *  f16 packs in f32 math and f32 packs in f64 math as the CPU kits do, and stop once a candidate
  *  lies past the walk's radius. Datacenter Blackwell scores f16 packs through packed f32x2 and
  *  mixed-precision math to the same bits. One kit covers both metrics, picked at run time by the
- *  kernel kind the view carries, as dense quads kits pick their metric.
+ *  kernel kind the view names, as dense quads kits pick their metric.
  *
  *  A stored shape is its NumKong pack byte for byte, and a walk prepares one by copying it into its
  *  span, so the bodies read the same pack either way. The whole warp scores one candidate, its

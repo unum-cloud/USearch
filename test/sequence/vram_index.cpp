@@ -254,7 +254,7 @@ struct apple_cells_t {
     static metal_shared_allocator_t storage(executor_t& executor, int) noexcept {
         return metal_shared_allocator_t {executor.stream(0).handle};
     }
-    static metal_stream_t arena(executor_t& executor) noexcept { return executor.stream(0).handle.share(); }
+    static metal_stream_t arena(executor_t& executor) noexcept { return executor.stream(0).handle; }
 };
 using cell_vendor_t = apple_cells_t;
 
@@ -280,7 +280,7 @@ enum class recall_reference_t {
  *  @brief One collection of @p count strings of about @p length bytes, held out @p queries_count
  *      queries, built on the GPU with @p node_id_type_ IDs and in RAM alike.
  *
- *  Every match the GPU reports must carry the pair's exact distance, ascending, and under
+ *  Every match the GPU reports must hold the pair's exact distance, ascending, and under
  *  @p reference the GPU's recall at ten must reach the RAM index's at the same breadth, give or
  *  take a twentieth.
  */

@@ -48,9 +48,9 @@
 #define USEARCH_ARCH_WASM_ 0
 #endif
 
-/*  GPU backends compiled into this unit: USEARCH_ARCH_CUDA_, USEARCH_ARCH_ROCM_,
+/** GPU backends compiled into this unit: USEARCH_ARCH_CUDA_, USEARCH_ARCH_ROCM_,
  *  USEARCH_ARCH_METAL_. CMake defines each from its `USEARCH_BUILD_*` option, since the toolchain
- *  alone cannot tell a dispatch unit that carries a vendor's variants from one that merely sees its
+ *  alone cannot tell a dispatch unit that holds a vendor's variants from one that merely sees its
  *  headers. */
 #if !defined(USEARCH_ARCH_CUDA_)
 #define USEARCH_ARCH_CUDA_ 0
@@ -201,8 +201,8 @@ inline std::string_view chars_of(bytes_view_t bytes) noexcept {
     return {reinterpret_cast<char const*>(bytes.data()), bytes.size()};
 }
 
-/** A borrowed tape: entries end to end in @c elements, entry @c i spanning @c offsets[i] up to
- *  @c offsets[i+1], so one offset more than entries closes the last. */
+/** A tape in memory its creator owns: entries end to end in @c elements, entry @c i spanning
+ *  @c offsets[i] up to @c offsets[i+1], so one offset more than entries closes the last. */
 template <typename element_type_>
 struct tape_view {
     element_type_* elements = nullptr;
@@ -283,71 +283,71 @@ struct dummy_fold_t {
  *  The set describes the project's failures, not this tier's exits: several enumerators name
  *  conditions only a binding or a higher layer can see, and are never returned from here.
  *
- *  The failures fall into five categories. Resources: @c bad_alloc_k, @c device_error_k and
- *  @c io_k. Input: @c shape_mismatch_k, @c unsupported_layout_k, @c unknown_kind_k,
- *  @c malformed_k and @c invalid_argument_k. State: @c uninitialized_k, @c config_mismatch_k,
- *  @c read_only_k, @c overflow_k, @c contended_k and @c unsupported_k. Interruptions:
- *  @c cancelled_k and @c deferred_k. Defects: @c internal_k. Any verb that allocates, binds a
- *  device or touches a file may also return a Resources status; any verb taking a progress
- *  callback may return @c cancelled_k. A verb's own block lists only what its contract adds.
+ *  The failures fall into five categories, and each enumerator's line opens with its own:
+ *  Resources, Input, State, Interruption and Defect. Any verb that allocates, binds a device or
+ *  touches a file may also return a Resources status; any verb taking a progress callback may
+ *  return @c cancelled_k. A verb's own block lists only what its contract adds.
  */
 enum class [[nodiscard]] status_t : int {
 
     /** The call completed and any paired value is meaningful. */
     success_k = usearch_status_success_k,
 
-    /** The underlying allocator failed to provide memory; retrying a smaller batch may succeed. */
+    /** Resources: the underlying allocator failed to provide memory; retrying a smaller batch
+     *  may succeed. */
     bad_alloc_k = usearch_status_out_of_memory_k,
 
-    /** Shapes, entry counts, or output capacity disagree. */
+    /** Input: shapes, entry counts, or output capacity disagree. */
     shape_mismatch_k = usearch_status_shape_mismatch_k,
 
-    /** A stride or packing no traversal can walk. */
+    /** Input: a stride or packing no traversal can walk. */
     unsupported_layout_k = usearch_status_unsupported_layout_k,
 
-    /** A scalar, metric, or residency tag this build does not know. */
+    /** Input: a scalar, metric, or residency tag this build does not know. */
     unknown_kind_k = usearch_status_unknown_kind_k,
 
-    /** A mutating verb on a structure that opens its checkpoint in place. */
+    /** State: a mutating verb on a structure that opens its checkpoint in place. */
     read_only_k = usearch_status_read_only_k,
 
-    /** A file could not be opened, read, written, or parsed. */
+    /** Resources: a file could not be opened, read, written, or parsed. */
     io_k = usearch_status_io_k,
 
-    /** An accelerator runtime call failed - the device state should be treated as
+    /** Resources: an accelerator runtime call failed - the device state should be treated as
      *  poisoned and the structure rebuilt. */
     device_error_k = usearch_status_device_k,
 
-    /** The serialized payload is truncated or does not describe this structure. */
+    /** Input: the serialized payload is truncated or does not describe this structure. */
     malformed_k = usearch_status_malformed_k,
 
-    /** Neither success nor a named failure was reported - a defect, not a state. */
+    /** Defect: neither success nor a named failure was reported - a defect, not a state. */
     internal_k = usearch_status_internal_k,
 
-    /** The structure reached a hard design ceiling, like the 2^32 ID space; retrying can't help. */
+    /** State: the structure reached a hard design ceiling, like the 2^32 ID space; retrying
+     *  can't help. */
     overflow_k = usearch_status_overflow_k,
 
-    /** The operation requires a prior successful @c reserve() -like initialization call. */
+    /** State: the operation requires a prior successful @c reserve() -like initialization call. */
     uninitialized_k = usearch_status_uninitialized_k,
 
-    /** The requested configuration contradicts an already-frozen one, like re-reserving
+    /** State: the requested configuration contradicts an already-frozen one, like re-reserving
      *  with a different geometry; pass matching parameters or start a fresh structure. */
     config_mismatch_k = usearch_status_config_mismatch_k,
 
-    /** A certified synchronization contract was violated by a concurrent operation;
+    /** State: a certified synchronization contract was violated by a concurrent operation;
      *  discard any produced output and retry in a quieter phase. */
     contended_k = usearch_status_contended_k,
 
-    /** A progress callback asked the operation to stop; it unwound without publishing,
-     *  so the structure carries whatever it did before the call. */
+    /** Interruption: a progress callback asked the operation to stop; it unwound without
+     *  publishing, so the structure holds whatever it did before the call. */
     cancelled_k = usearch_status_cancelled_k,
-    /** @brief The verb is declared for every residency but this one does not implement it. */
+
+    /** State: the verb is declared for every residency but this one does not implement it. */
     unsupported_k = usearch_status_unsupported_k,
 
-    /** The call was submitted deferred and is not final yet; never a final status. */
+    /** Interruption: the call was submitted deferred and is not final yet; never a final status. */
     deferred_k = usearch_status_deferred_k,
 
-    /** An argument breaks the verb's contract, like a required pointer left null. */
+    /** Input: an argument breaks the verb's contract, like a required pointer left null. */
     invalid_argument_k = usearch_status_invalid_argument_k,
 };
 
@@ -390,7 +390,7 @@ enum class admission_t : int {
     admit_k = usearch_admit_k,
 };
 
-/** Whether the operation a progress callback is watching carries on or unwinds.
+/** Whether the operation a progress callback is watching continues or unwinds.
  *  Mirrors @c usearch_continuation_t value for value, so the two enums cannot drift. */
 enum class continuation_t : int {
 
@@ -453,15 +453,14 @@ struct [[nodiscard]] expected {
     explicit operator bool() const noexcept { return succeeded(status); }
 };
 
-/** The borrowing face of @ref expected for reference results: there is no null
- *  reference, so the borrow is stored as an address and @c value() binds it only on
- *  @c success_k. */
+/** The face of @ref expected for reference results: there is no null reference, so the
+ *  referenced object is stored as an address and @c value() binds it only on @c success_k. */
 template <typename value_type_>
 struct [[nodiscard]] expected<value_type_&> {
-    value_type_* borrowed;
+    value_type_* address;
     status_t status;
 
-    value_type_& value() const noexcept { return *borrowed; }
+    value_type_& value() const noexcept { return *address; }
     explicit operator bool() const noexcept { return succeeded(status); }
 };
 
@@ -496,7 +495,7 @@ struct iota_view {
 template <typename owner_type_>
 struct indexed_range {
 
-    /** What the positions are read from; borrowed, never owned. */
+    /** What the positions are read from, which the caller owns. */
     owner_type_ const* owner = nullptr;
 
     /** Positions the range covers, from zero. */
@@ -601,7 +600,7 @@ enum connectivity_t : u32_t {
 constexpr std::size_t default_expansion_factor(std::size_t connectivity) noexcept { return connectivity * 2; }
 
 /** Element types USearch speaks when exchanging payloads - NumKong's numeric dtypes
- *  plus the packed, opaque, identity and text families that interchange formats carry
+ *  plus the packed, opaque, identity and text families that interchange formats hold
  *  and a compute library has no place for. Every storage width also has a neutral
  *  spelling naming that many opaque bits, and every other spelling is an alias adding
  *  a reading to the same width; this enum is the USearch-side vocabulary every reader
@@ -646,7 +645,7 @@ enum class dtype_t : u32_t {
     utf8_k,
 };
 
-/** The canonical spelling of @p dtype - the very strings interchange headers carry. */
+/** The canonical spelling of @p dtype - the very strings interchange headers hold. */
 constexpr char const* dtype_name(dtype_t dtype) noexcept {
     switch (dtype) {
     case dtype_t::f64_k: return "f64";
@@ -1123,7 +1122,7 @@ struct [[nodiscard]] refine_report_t {
 };
 
 /** The tail slots of a full neighbor list a heal may give up to islands, which spread over them by
- *  ID so islands sharing a list end apart: the farther half, keeping the nearer half that carries
+ *  ID so islands sharing a list end apart: the farther half, keeping the nearer half that holds
  *  search and slot 0, and nothing in a single-neighbor list. */
 template <typename size_type_>
 constexpr size_type_ heal_spread(size_type_ connectivity) noexcept {
@@ -1638,7 +1637,7 @@ struct dummy_predicate_t {
  *  together. */
 inline constexpr std::size_t quad_lanes_k = 4;
 
-/** The lanes one quad carries, one @p value_type_ each. */
+/** The lanes one quad holds, one @p value_type_ each. */
 template <typename value_type_>
 using quad = std::array<value_type_, quad_lanes_k>;
 
@@ -1803,7 +1802,7 @@ struct node_predicate {
     }
 };
 
-/** The compiled-out default progress watcher: always carries on, so an unwatched long
+/** The compiled-out default progress watcher: always continues, so an unwatched long
  *  verb runs to completion with no cancellation checks surviving inlining. */
 struct dummy_progress_t {
     template <typename... args_types_>
@@ -1890,7 +1889,7 @@ inline constexpr io_capability_t operator|(io_capability_t first, io_capability_
     return static_cast<io_capability_t>(static_cast<u32_t>(first) | static_cast<u32_t>(second));
 }
 
-/** Whether this build carries @p kit_ 's body: every kit but a stub, which alone states
+/** Whether this build holds @p kit_ 's body: every kit but a stub, which alone states
  *  @c compiled_k, as false. */
 template <typename kit_>
 inline constexpr bool kit_compiled = !requires { requires !kit_::compiled_k; };
@@ -1900,7 +1899,7 @@ inline constexpr bool kit_compiled = !requires { requires !kit_::compiled_k; };
  *      ladder's one closing @c >::type, with no nested @c std::conditional_t pile.
  *
  *  Every kit states @c capability_k, the capability it runs under. A kit whose target this build
- *  cannot carry is a stub of that member and @c compiled_k set to false, so naming it in a ladder
+ *  cannot hold is a stub of that member and @c compiled_k set to false, so naming it in a ladder
  *  never needs its body. @p caps_ is a NumKong or a StringZilla capability set, whichever the kits
  *  state theirs in.
  */

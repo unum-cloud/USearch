@@ -27,7 +27,7 @@ static_assert(hip_reservable_allocator<counting_hip_allocator_t>);
 /** The ceiling of the suite's own code object: the CDNA3 class's, which CDNA3 and CDNA4 run. */
 inline constexpr nk_capability_t dense_amd_capabilities_k = nk_cap_rocm_k | nk_cap_cdna3_k;
 
-/** The suite's own code object, carrying the cells' kernels; @c vram_amd.hip defines @c bytes
+/** The suite's own code object, holding the cells' kernels; @c vram_amd.hip defines @c bytes
  *  beside the bytes it embeds. */
 struct dense_amd_code_object_t {
     inline static constexpr nk_capability_t capability_k = dense_amd_capabilities_k;

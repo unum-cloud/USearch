@@ -29,7 +29,7 @@
 
 namespace unum::usearch::basic {
 
-/* Checked where only HIP builds compile, since wasm32 hosts carry the header but never a device. */
+/* Checked where only HIP builds compile, since wasm32 hosts see the header but never a device. */
 static_assert(sizeof(std::size_t) == sizeof(u64_t), "The caller's offsets cross as the device's words");
 
 /**

@@ -1647,7 +1647,7 @@ struct vram_apple_indexes {
             return {{}, status_t::config_mismatch_k};
         if (!rows_count) return {{}, status_t::success_k};
         if (queries.columns != dimensions()) return {{}, status_t::config_mismatch_k};
-        traversal_context_t traversal {executor.stream(fanout_t::stream_of(shards_, executor, 0)).handle.share()};
+        traversal_context_t traversal {executor.stream(fanout_t::stream_of(shards_, executor, 0)).handle};
         return shards_[0].index->attend(queries, head_count, std::forward<value_lookup_type_>(value_lookup),
                                         score_scale, outputs, carry, config, traversal);
     }
@@ -2133,7 +2133,7 @@ struct vram_apple_indexes {
             if (failed(traversals.reserve_exactly(shards.size()))) return status_t::bad_alloc_k;
             for (std::size_t shard = 0; shard != shards.size(); ++shard) {
                 traversals.push_back_reserved(
-                    traversal_context_t {executor.stream(stream_of(shards, executor, shard)).handle.share()});
+                    traversal_context_t {executor.stream(stream_of(shards, executor, shard)).handle});
                 if (!traversals.back()) return status_t::bad_alloc_k;
             }
             return status_t::success_k;
@@ -2261,7 +2261,7 @@ struct vram_apple_indexes {
 
       private:
 
-        /** The shards the batch reads; borrowed from the tower for the call. */
+        /** The shards the batch reads, which the tower owns past the call. */
         shards_t const& shards_;
 
         /** The executor every window queues on. */

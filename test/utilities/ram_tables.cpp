@@ -181,24 +181,24 @@ void test_multimap_probe_termination() noexcept {
     expect_equal(multimap.count(static_cast<u64_t>(capacity) + 1, all_visible_k), 0u); // Absent probes end.
 }
 
-/** N lanes file interleaved nodes of the same chunks under a shared key alphabet, several writers
+/** N threads file interleaved nodes of the same chunks under a shared key alphabet, several writers
  *  per chunk as a load's runs are: no lost inserts, no duplicates, and exact counts per key. */
 void test_multimap_concurrent_insert() noexcept {
     using multimap_t = chunked_multimap<u64_t, u32_t, std::hash<u64_t>, counting_allocator_t>;
     using nodes_schedule_t = typename multimap_t::nodes_schedule_t;
-    constexpr std::size_t lanes_k = 4;
+    constexpr std::size_t threads_k = 4;
     constexpr unsigned keys_alphabet_k = 16;
-    std::size_t const nodes = nodes_schedule_t::nodes_before(lanes_k);
+    std::size_t const nodes = nodes_schedule_t::nodes_before(threads_k);
     allocation_ledger_t ledger;
     {
         multimap_t multimap {counting_allocator_t {ledger}};
         expect_true(succeeded(multimap.reserve(nodes)));
 
         fu::flat_pool_t pool;
-        if (fu::failed(pool.spawn(lanes_k))) return void(expect_true(false));
-        pool.for_threads([&](std::size_t lane) noexcept {
-            if (lane >= lanes_k) return;
-            for (std::size_t node = lane; node < nodes; node += lanes_k)
+        if (fu::failed(pool.spawn(threads_k))) return void(expect_true(false));
+        pool.for_threads([&](std::size_t thread) noexcept {
+            if (thread >= threads_k) return;
+            for (std::size_t node = thread; node < nodes; node += threads_k)
                 multimap.insert(node % keys_alphabet_k, static_cast<u32_t>(node));
         });
 
@@ -217,7 +217,7 @@ void test_multimap_concurrent_insert() noexcept {
     expect_equal(ledger.live_bytes, 0);
 }
 
-/** A reader lane probes while each writer files the nodes of its own chunk: every observed node
+/** A reader thread probes while each writer files the nodes of its own chunk: every observed node
  *  must decode to the key it was filed under - so a slot being written never surfaces torn - and
  *  per-key counts must be monotone non-decreasing across successive reads. */
 void test_multimap_reader_during_writers() noexcept {
@@ -234,11 +234,11 @@ void test_multimap_reader_during_writers() noexcept {
     if (fu::failed(pool.spawn(writers_k + 1))) return void(expect_true(false));
     std::size_t writers_done = 0, torn_observations = 0, shrinking_counts = 0;
 
-    pool.for_threads([&](std::size_t lane) noexcept {
-        if (lane >= writers_k + 1) return;
-        if (lane != writers_k) {
-            for (std::size_t node = nodes_schedule_t::nodes_before(lane);
-                 node != nodes_schedule_t::nodes_before(lane + 1); ++node)
+    pool.for_threads([&](std::size_t thread) noexcept {
+        if (thread >= writers_k + 1) return;
+        if (thread != writers_k) {
+            for (std::size_t node = nodes_schedule_t::nodes_before(thread);
+                 node != nodes_schedule_t::nodes_before(thread + 1); ++node)
                 multimap.insert(node % keys_alphabet_k, static_cast<u32_t>(node));
             fu::standard_atomic_ref<std::size_t>(writers_done).store_add(1);
             return;

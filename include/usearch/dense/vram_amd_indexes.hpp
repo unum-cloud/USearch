@@ -2664,6 +2664,8 @@ struct vram_amd_indexes {
         for (shard_t const& shard : shaped.shards_)
             walk_bytes = max_of(walk_bytes, shard.index->traversal_memory_usage(plan.config_, parts));
         for (std::size_t shard = 0; shard != shards; ++shard) {
+            // The run grows on the per-thread default stream of whichever device is current.
+            if (status_t const entered = fanout_t::enter(shards_, shard); failed(entered)) return entered;
             typename executor_t::stream_t& stream = executor.stream(fanout_t::stream_of(shards_, executor, shard));
             plan.arenas_.push_back_reserved(typename executor_t::arena_t {stream.arena.upstream()});
             if (failed(plan.arenas_[shard].reserve_exactly(walk_bytes))) return status_t::bad_alloc_k;

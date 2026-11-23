@@ -55,7 +55,7 @@ namespace unum::usearch::dense {
 
 #pragma region Columns
 
-/** The value column's dtype: the stored scalar's own token, so a packed word's suffix carries the
+/** The value column's dtype: the stored scalar's own token, so a packed word's suffix holds the
  *  packing and the column's shape counts logical dimensions. */
 template <typename shards_type_>
 constexpr dtype_t shard_value_dtype() noexcept {
@@ -74,7 +74,7 @@ dtype_t shard_norms_dtype(shards_type_ const& shards) noexcept {
  *  product's dtype. */
 inline constexpr column_shape_t norms_column_shape_k = vector_shape_t {2};
 
-/** The name the norms column carries among a monolith's producer columns. */
+/** The name the norms column holds among a monolith's producer columns. */
 inline constexpr std::string_view norms_column_name_k = "norms";
 
 /** The norms column's bytes in @p monolith when they are the ones a reader keeping @p dtype norms
@@ -122,7 +122,7 @@ struct monolith_layout_t {
  *
  *  @param[in] layout The columns' extents and dtypes.
  *  @param[in] alignment The byte alignment of every column's start.
- *  @param[in] custom_fields The caller's own fields the header carries.
+ *  @param[in] custom_fields The caller's own fields the header holds.
  *  @param[out] norms The norms column, named, which the header's producer columns view; it must
  *      outlive the header, and stays unnamed when @p layout keeps no norms.
  *  @param[in] allocator Where the header's own storage is allocated.
@@ -161,7 +161,7 @@ expected<safegraphs_header_t> monolith_header(monolith_layout_t const& layout, s
     return {header, status};
 }
 
-/** The custom fields every monolith carries: the metric and the caller's provenance; the value
+/** The custom fields every monolith holds: the metric and the caller's provenance; the value
  *  column's own dtype names the stored scalar. */
 template <typename shards_type_>
 status_t shard_custom_fields(shards_type_ const& shards, save_config_t const& config,
@@ -578,7 +578,7 @@ struct [[nodiscard]] shard_save_plan {
     /** Where each part starts inside the caller's buffer; empty for a save to files. */
     growing_buffer<std::size_t, forkunion_allocator_t> offsets_;
 
-    /** The custom fields every header carries, outliving the plan's tasks. */
+    /** The custom fields every header holds, outliving the plan's tasks. */
     growing_buffer<safegraphs_custom_field_t, forkunion_allocator_t> fields_;
 
     /** The checkpoint's own path, copied so the plan outlives the caller's view. */

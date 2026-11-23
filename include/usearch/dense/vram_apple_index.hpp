@@ -269,7 +269,7 @@ struct vram_apple_index {
      *  fragments. */
     inline static constexpr std::size_t fragment_bytes_k = metal_fragment_bytes_k;
 
-    /** Rows one checkpoint batch carries between a matrix and the caller: one slab, the row
+    /** Rows one checkpoint batch moves between a matrix and the caller: one slab, the row
      *  granularity the RAM residency grows by. */
     inline static constexpr std::size_t batch_rows_log2_k = 20;
 
@@ -1102,7 +1102,7 @@ struct vram_apple_index {
         /** The depth the next expansion reaches from, and the depths each direction took. */
         std::size_t depth_ = 0, depth_from_root_ = 0, depth_to_root_ = 0;
 
-        /** The population counts the report carries, as @c reachability_t names them. */
+        /** The population counts the report holds, as @c reachability_t names them. */
         std::size_t unlinked_ = 0, underlinked_ = 0, unreached_islands_ = 0, stranded_islands_ = 0, components_ = 0;
 
         /** The pass within the components or labels the next batch queues. */
@@ -1997,7 +1997,7 @@ struct vram_apple_index {
 
     /** One load in flight: the rows it appends at the watermark, under its own claim or a claim
      *  word its caller closed, holding the growth hold for its whole life, since growth would
-     *  relocate the storage its tasks write; @ref finish derives the norms no task carried and
+     *  relocate the storage its tasks write; @ref finish derives the norms no task supplied and
      *  publishes. */
     struct [[nodiscard]] load_plan_t {
         node_id_t base = 0;
@@ -2048,7 +2048,7 @@ struct vram_apple_index {
 
         /**
          *  @brief Copies the task's rows out of @p columns into the storage: vectors padded, norms
-         *      where carried, neighbors rebased from @p source_range onto the appended range and
+         *      where supplied, neighbors rebased from @p source_range onto the appended range and
          *      compacted, and row @c r of the task's source nodes keyed <tt>key_of(r)</tt>.
          *
          *  @par Statuses:
@@ -2148,7 +2148,7 @@ struct vram_apple_index {
         }
 
         /**
-         *  @brief Derives the norms no task carried on the device, lifts the hold, and publishes
+         *  @brief Derives the norms no task supplied on the device, lifts the hold, and publishes
          *      the appended nodes with the keys @ref publish_keys filed.
          *
          *  @par Statuses:
@@ -2215,12 +2215,12 @@ struct vram_apple_index {
     }
 
     /**
-     *  Appends the whole source on the calling thread; columns shorter than @p rows are refused
-     *  before a row is claimed.
+     *  @brief Appends the whole source on the calling thread; columns shorter than @p rows are
+     *      refused before a row is claimed.
      *
      *  @par Statuses:
      *  - @c uninitialized_k The index never grew.
-     *  - @c config_mismatch_k The @p columns are shorter than @p rows or carry norms the index
+     *  - @c config_mismatch_k The @p columns are shorter than @p rows or hold norms the index
      *    does not store, or @c status keeps it.
      *  - @c contended_k Another batch or load is in flight.
      *  - @c overflow_k The rows pass the ceiling.
@@ -3379,7 +3379,7 @@ struct vram_apple_index {
         if (neighbors_allocator_.device() != device_.ordinal) return status_t::config_mismatch_k;
         metal_context_t* const context = vectors_allocator_.context();
         if (!context) return status_t::device_error_k;
-        // The pipelines report the simdgroup width the specification carries, so they build first.
+        // The pipelines report the simdgroup width the specification names, so they build first.
         if (status_t const loaded = load_pipelines_(); failed(loaded)) return loaded;
         auto const [specs, status] = metal_device_specs_t::query(*context, device_.ordinal);
         if (failed(status)) return status;

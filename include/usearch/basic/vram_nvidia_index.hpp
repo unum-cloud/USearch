@@ -28,7 +28,7 @@
 
 #include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the published words
 
-#include <numkong/capabilities.h> // `nk_kernel_kind_t` - the records carry the kernel kind
+#include <numkong/capabilities.h> // `nk_kernel_kind_t` - the records hold the kernel kind
 #include <numkong/tensor.hpp>     // `nk::matrix_span` - the outputs of a search
 
 #include "usearch/utilities/types.hpp"
@@ -1213,9 +1213,16 @@ struct vram_ragged_graph {
     using round_counters_ptr_t = std::unique_ptr<round_counters_t, round_counters_return_t>;
     static_assert(sizeof(round_counters_t) <= cuda_pinned_slots_t::slot_bytes_k, "A round's counters fit one slot");
 
-    /** Who holds the claim word of a refine plan's graph: the plan, as @ref plan_refine closes it,
-     *  or the reshard plan running its rounds. */
-    enum class claim_t : u8_t { borrowed_k, held_k };
+    /** Who reopens the claim word a refine plan's graph holds closed. */
+    enum class claim_t : u8_t {
+
+        /** The caller that closed it, such as the reshard plan running its rounds, or nobody for
+         *  an unbound plan. */
+        caller_reopens_k,
+
+        /** The plan at its death, since @ref plan_refine closed it. */
+        plan_reopens_k,
+    };
 
     /** How a round over @c entries entries sizes its columns: the hubs one gather draws at most and
      *  the most entries a neighborhood holds, as RAM names them, then the room for the starts with
@@ -1225,7 +1232,7 @@ struct vram_ragged_graph {
         std::size_t offsets = 0, hubs = 0, runs = 0;
     };
 
-    /** The page-locked host bytes a round's barriers order on, borrowed from its context's results:
+    /** The page-locked host bytes a round's barriers order on, inside its context's results:
      *  the entries by neighborhood, the starts with split room, the hubs, runs and entries before
      *  each run of the next gather, and each entry's neighborhood. */
     struct round_mirrors_t {
@@ -1239,7 +1246,7 @@ struct vram_ragged_graph {
 
     /** How a round's gather and restitch launch on the kit rung its longest value needs: the span
      *  one value prepares into, the selection's rows, its two halves of candidates, and each warp's
-     *  dynamic-shared scratch, zero when the arena slice carries it. */
+     *  dynamic-shared scratch, zero when the arena slice holds it. */
     struct round_launch_t {
         std::size_t rung = 0;
         u32_t span_bytes = 0, selection_nodes = 0, scratch_bytes_per_warp = 0;
@@ -1265,7 +1272,7 @@ struct vram_ragged_graph {
         /** The device scratch, laid out as @c split_scratch_ reads it. */
         typename traversal_context_t::bytes_ptr_t device_bytes;
 
-        /** Page-locked host bytes borrowed from the plan's context, laid out as @c split_layout_
+        /** Page-locked host bytes inside the plan's context results, laid out as @c split_layout_
          *  places them: the node parts, assigned into slots in place, the targets' offsets columns
          *  back to back, the source's value starts, the bases and the roots planning uploads, and
          *  the last growth's placed count. */
@@ -1506,8 +1513,8 @@ struct vram_ragged_graph {
         explicit refine_plan_t(health_plan_t&& health) noexcept : health(std::move(health)) {}
         refine_plan_t(refine_plan_t&& other) noexcept
             : health(std::move(other.health)), index_(std::exchange(other.index_, nullptr)),
-              claim_(std::exchange(other.claim_, claim_t::borrowed_k)), mirrors_(other.mirrors_), shape_(other.shape_),
-              neighborhoods_(other.neighborhoods_), runs_(other.runs_), hubs_(other.hubs_),
+              claim_(std::exchange(other.claim_, claim_t::caller_reopens_k)), mirrors_(other.mirrors_),
+              shape_(other.shape_), neighborhoods_(other.neighborhoods_), runs_(other.runs_), hubs_(other.hubs_),
               round_seed_(other.round_seed_), swept_after_(other.swept_after_), phase_(other.phase_),
               status_(other.status_), tally_(other.tally_) {}
         refine_plan_t& operator=(refine_plan_t&&) = delete;
@@ -1516,7 +1523,7 @@ struct vram_ragged_graph {
 
         /** Reopens the claim word @ref plan_refine closed, whether the round finished or not. */
         ~refine_plan_t() noexcept {
-            if (claim_ == claim_t::held_k) index_->reopen_();
+            if (claim_ == claim_t::plan_reopens_k) index_->reopen_();
         }
 
         /**
@@ -1784,8 +1791,8 @@ struct vram_ragged_graph {
 
         vram_ragged_graph* index_ = nullptr;
 
-        /** Who holds @c index_ 's claim word, which the plan reopens at its death when it does. */
-        claim_t claim_ = claim_t::borrowed_k;
+        /** Who reopens @c index_ 's claim word: the plan at its death, or its caller. */
+        claim_t claim_ = claim_t::caller_reopens_k;
 
         /** The page-locked mirrors the barriers order on. */
         round_mirrors_t mirrors_;
@@ -2079,7 +2086,7 @@ struct vram_ragged_graph {
         refine_plan_t plan {health_plan_t {empty_round_scratch_(context)}};
         if (status_t const refused = graph_kernels_(context).status; failed(refused)) return {std::move(plan), refused};
         if (status_t const closed = close_(); failed(closed)) return {std::move(plan), closed};
-        plan.index_ = this, plan.claim_ = claim_t::held_k;
+        plan.index_ = this, plan.claim_ = claim_t::plan_reopens_k;
         round_shape_t const shape = round_shape_(size(), mean_value_bytes_(), config.cache_bytes);
         std::size_t const arena_bytes = round_arena_bytes_(round_launch_(longest_value_, span_bytes_));
         // A refused plan keeps the claim word to reopen it, and its status to refuse every phase.
@@ -2277,18 +2284,21 @@ struct vram_ragged_graph {
         }
 
         /**
-         *  Copies the neighbor IDs and the values of @p nodes off the device into the slices the
-         *  prefix sums name, half a bounce at a time; the last half is still copying when it
-         *  returns.
+         *  @brief Copies the neighbor IDs and the values of @p nodes off the device into the slices
+         *      the prefix sums name, half a bounce at a time; the last half is still copying when
+         *      the call returns to its caller.
          *
          *  @par Statuses:
          *  - @c uninitialized_k The plan is empty or spent.
          *  - @c config_mismatch_k The @p nodes pass the plan, or a node's kept neighbors or its
          *    saved value disagree with the offsets the plan measured.
+         *  - @c device_error_k The device could not be selected, or a copy failed.
          */
         status_t save(iota_view<node_id_t> nodes) noexcept {
             if (!index_ || neighbor_offsets_.empty()) return status_t::uninitialized_k;
             if (nodes.bound < nodes.first || nodes.bound > extents.nodes) return status_t::config_mismatch_k;
+            if (cuda_set_device(index_->api(), index_->device_.ordinal) != cuda_success_k)
+                return status_t::device_error_k;
             for (node_id_t first = nodes.first; first != nodes.bound;) {
                 node_id_t const bound = crossing_end_(to_span(stored_offsets_), first, nodes.bound, half_nodes_,
                                                       half_bytes_);
@@ -2578,10 +2588,13 @@ struct vram_ragged_graph {
          *  - @c uninitialized_k The plan is empty or spent.
          *  - @c config_mismatch_k The @p range passes the plan.
          *  - @c io_k A read through cuFile ended short, which never restarts on the host.
+         *  - @c device_error_k The device could not be selected, or a copy or launch failed.
          */
         status_t load(iota_view<node_id_t> range) noexcept {
             if (!index_) return status_t::uninitialized_k;
             if (range.bound < range.first || range.bound > entries) return status_t::config_mismatch_k;
+            if (cuda_set_device(index_->api(), index_->device_.ordinal) != cuda_success_k)
+                return status_t::device_error_k;
             cuda_api_t const& api = index_->api();
             std::size_t const key_bytes = dtype_bytes(saved_.key_dtype);
             for (node_id_t first = range.first; first != range.bound;) {
@@ -2726,7 +2739,7 @@ struct vram_ragged_graph {
             return end;
         }
 
-        /** The saved columns, read in place from the mapping or the lent buffer. */
+        /** The saved columns, read in place from the mapping or the caller's buffer. */
         safegraphs_saved_columns<node_id_t> saved_;
 
         /** Each node's start in the tape, from the plan's first, @b [nodes+1]. */
@@ -2781,7 +2794,7 @@ struct vram_ragged_graph {
      *
      *  @param[in] saved The columns as the file holds them, saved by this face or any residency.
      *  @param[in,out] context The stream every copy and kernel queues on.
-     *  @param[in] sources The mapped parts the columns are read from, empty for a lent buffer.
+     *  @param[in] sources The mapped parts the columns are read from, empty for a caller's buffer.
      *
      *  @par Statuses:
      *  - @c uninitialized_k No @c reserve froze the connectivity yet.
@@ -2849,7 +2862,7 @@ struct vram_ragged_graph {
         plan.span_bytes_ = kits_.span_bytes_(plan.longest_);
         if (!entries) return {std::move(plan), status_t::success_k};
 
-        // A slot fits the run a save's crossing carries, and at least the widest node; a second
+        // A slot fits the run a save's crossing moves, and at least the widest node; a second
         // slot opens only for a second run.
         plan.slot_bytes_ = plan.run_bytes_(0, min_of(entries, power_of_two<std::size_t>(crossing_nodes_log2_k)));
         for (std::size_t node = 0; node != entries; ++node)
@@ -3187,12 +3200,12 @@ struct vram_ragged_graph {
         return status_t::success_k;
     }
 
-    /** Nodes one half of a save's or a load's bounce carries at most, so its two halves pin a few
+    /** Nodes one half of a save's or a load's bounce moves at most, so its two halves pin a few
      *  hundred megabytes at the widest nodes. */
     inline static constexpr u32_t crossing_nodes_log2_k = 19;
 
     /** Bytes of stored values one half of a bounce holds: a half's share of @p total over @p nodes,
-     *  and never less than the @p longest value, so every crossing carries at least one. */
+     *  and never less than the @p longest value, so every crossing moves at least one. */
     static std::size_t crossing_bytes_(std::size_t total, std::size_t longest, std::size_t nodes,
                                        std::size_t half_nodes) noexcept {
         if (!nodes) return 0;
@@ -3683,7 +3696,7 @@ struct vram_ragged_graph {
     }
 
     /** The arena a round's @p launch carves its warps' scratch from, grown at planning; null where
-     *  shared memory carries it, and on a refused growth. */
+     *  shared memory holds it, and on a refused growth. */
     byte_t* round_arena_(traversal_context_t& context, round_launch_t const& launch) const noexcept {
         return launch.arena_shape.scratch_bytes ? context.ensure_arena(round_arena_bytes_(launch)) : nullptr;
     }
@@ -3982,7 +3995,7 @@ struct vram_ragged_graph {
         return carved;
     }
 
-    /** Carves @p split 's device scratch from @p context 's allocator, borrows its pinned results
+    /** Carves @p split 's device scratch from @p context 's allocator, takes its pinned results
      *  as the host bytes, copies this graph's value starts into it, and queues the upload of the
      *  @p targets ' bases and the roots @p seed picks. */
     status_t carve_split_(split_t& split, std::span<vram_ragged_graph* const> targets, u64_t seed,

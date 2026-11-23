@@ -399,7 +399,7 @@ struct vram_apple_indexes {
 #pragma region Checkpoints
 
     /** What a checkpoint does on these shards' devices, for @ref save_shards and @c load_shards:
-     *  every shard's plans on a context over its own stream of @c executor, which carry its keys
+     *  every shard's plans on a context over its own stream of @c executor, which hold its keys
      *  too, and a load's reservation at the connectivity the checkpoint froze. Unified memory reads
      *  every part in place, so no part opens a source. */
     struct checkpoint_residency_t {
@@ -922,7 +922,7 @@ struct vram_apple_indexes {
         growing_buffer<vram_apple_indexes*, forkunion_allocator_t> targets_;
 
         /** A gather's source shards grouped by the live shard taking them in, or a cut's target
-         *  shards grouped by the live shard parting into them, which the shard plans borrow. */
+         *  shards grouped by the live shard parting into them, which the shard plans point at. */
         growing_buffer<index_t*, forkunion_allocator_t> slots_;
         vram_apple_indexes* owner_ = nullptr;
     };
@@ -1046,7 +1046,7 @@ struct vram_apple_indexes {
     traversal_context_t traversal_(executor_t& executor, std::size_t shard) const noexcept {
         std::size_t const stream = stream_of_(executor, shard);
         if (stream == executor.size()) return traversal_context_t {};
-        return traversal_context_t {executor.stream(stream).handle.share()};
+        return traversal_context_t {executor.stream(stream).handle};
     }
 
     /** The live shard at @p live, counted past the retired ones. */
