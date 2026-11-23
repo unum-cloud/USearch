@@ -1619,7 +1619,7 @@ struct vram_apple_indexes {
             };
             auto const [reduced, reduced_status] = for_each_window<search_result_t>(rows_count, window_rows,
                                                                                     maxsim_window);
-            if (succeeded(reduced_status)) matches.publish_runs(scored);
+            if (succeeded(reduced_status)) matches.publish_runs(scored, maxsim_config.wanted);
             return {reduced, reduced_status};
         });
     }

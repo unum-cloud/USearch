@@ -1440,7 +1440,7 @@ struct ram_indexes {
                                               index_t::chunk_schedule_t::nodes_in(0));
         auto const [ranked, status] = for_each_row_(divide_round_up(queries_count, block_queries), executor, traversals,
                                                     config, staged_bytes, maxsim_block, {}, predicate, candidates);
-        if (succeeded(status)) matches.publish_runs(scored);
+        if (succeeded(status)) matches.publish_runs(scored, wanted);
         return {ranked, status};
     }
 

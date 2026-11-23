@@ -336,11 +336,13 @@ struct products_tape {
     }
 
     /** Publishes every offset after the first from the one before it, each query keeping the
-     *  @p scored pairs it ranked, at most a stride, and moves each run from its staging down to
-     *  its offset, in order, so a move overwrites only runs already moved. */
-    void publish_runs(std::span<std::size_t const> scored) const noexcept {
+     *  @p scored pairs it ranked, at most @p wanted when bounded and a stride always. Each run
+     *  then moves from its staging down to its offset in query order, so a move only ever
+     *  overwrites runs that already moved. */
+    void publish_runs(std::span<std::size_t const> scored, std::size_t wanted = 0) const noexcept {
+        std::size_t const room = wanted ? min_of(wanted, stride) : stride;
         for (std::size_t query = 0; query != count(); ++query) {
-            std::size_t const kept = min_of(scored[query], stride), start = offsets[query];
+            std::size_t const kept = min_of(scored[query], room), start = offsets[query];
             std::size_t const staged = staging_of(query);
             offsets[query + 1] = start + kept;
             if (!kept || start == staged) continue;

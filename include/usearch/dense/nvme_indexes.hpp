@@ -923,7 +923,7 @@ struct nvme_indexes {
                                                       : walk_maxsim_(queries, query_offsets, query_rows,
                                                                      to_span(query_norms), shape, executor, wanted,
                                                                      scored, matches, predicate, latencies, hints);
-        if (succeeded(ranked_status)) matches.publish_runs(scored);
+        if (succeeded(ranked_status)) matches.publish_runs(scored, wanted);
         return {ranked, ranked_status};
     }
 

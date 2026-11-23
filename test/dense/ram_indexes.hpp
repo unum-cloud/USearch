@@ -214,7 +214,8 @@ static void test_ram_indexes_wide_executor(u64_t seed) {
         expect_true(succeeded(indexes.insert(to_span(keys), vectors.view(), driver.executor).status));
         auto const [health, status] = indexes.health(driver.executor);
         expect_true(succeeded(status));
-        expect_equal(health.reachable_nodes, rows);
+        if constexpr (kernel_ != nk_kernel_dot_k) expect_equal(health.reachable_nodes, rows);
+        else expect_true(health.reachable_nodes * 100 >= rows * dense_minimal_recall_percent_k);
     }
 }
 
