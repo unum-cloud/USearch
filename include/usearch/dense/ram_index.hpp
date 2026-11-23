@@ -623,7 +623,7 @@ struct attention_rescoring {
         });
         for (std::size_t position = 0; position != folded; ++position) {
             if (rows[position].size() != columns) {
-                status = status_t::shape_mismatch_k;
+                status = status_code_t::shape_mismatch_k;
                 return;
             }
             rows_bytes[position] = rows[position].byte_data();
@@ -899,71 +899,71 @@ struct traversal_context {
     /** Sizes every neighbor scratch for @p capacity entries through the context's own allocator;
      *  geometry is fixed at construction, so the tensors allocate once. */
     status_t reserve_neighbors(std::size_t capacity) noexcept {
-        if (selected_neighbors.capacity() >= capacity) return status_t::success_k;
+        if (selected_neighbors.capacity() >= capacity) return status_code_t::success_k;
         auto selected = selection_t::uninitialized({capacity}, candidates_allocator_t(allocator_));
         auto refined = selection_t::uninitialized({capacity}, candidates_allocator_t(allocator_));
         auto ids = ids_tensor_t::uninitialized({capacity}, ids_allocator_t(allocator_));
         auto views = views_tensor_t::uninitialized({capacity}, views_allocator_t(allocator_));
         auto norms = norms_tensor_t::uninitialized({capacity}, norms_allocator_t(allocator_));
-        if (!selected || !refined || !ids || !views || !norms) return status_t::bad_alloc_k;
+        if (!selected || !refined || !ids || !views || !norms) return status_code_t::out_of_memory_k;
         selected_neighbors = std::move(selected.value);
         refined_neighbors = std::move(refined.value);
         staged_ids = std::move(ids.value);
         staged_vectors = std::move(views.value);
         staged_norms = std::move(norms.value);
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Grows @c staged_queries to @p bytes through the context's own allocator; a grown buffer
      *  keeps nothing, so a verb sizes it before staging into it. */
     status_t reserve_queries(std::size_t bytes) noexcept {
-        if (staged_queries.numel() >= bytes) return status_t::success_k;
+        if (staged_queries.numel() >= bytes) return status_code_t::success_k;
         auto staged = bytes_tensor_t::uninitialized({bytes}, visits_allocator_t(allocator_));
-        if (!staged) return status_t::bad_alloc_k;
+        if (!staged) return status_code_t::out_of_memory_k;
         staged_queries = std::move(staged.value);
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Sizes the @p rows by @p columns dots tile a matrix engine answers; geometry is fixed at
      *  construction, so the tile allocates once per context. */
     status_t reserve_tiles(std::size_t rows, std::size_t columns) noexcept {
-        if (step_dots.numel() >= rows * columns) return status_t::success_k;
+        if (step_dots.numel() >= rows * columns) return status_code_t::success_k;
         auto dots = dots_tensor_t::uninitialized({rows, columns}, dots_allocator_t(allocator_));
-        if (!dots) return status_t::bad_alloc_k;
+        if (!dots) return status_code_t::out_of_memory_k;
         step_dots = std::move(dots.value);
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Sizes an exact scan's query norms and thresholds for @p columns queries, the distances one
      *  task of @p step_rows rows scores against them, and the dots tile of @p dots_columns a row
      *  a matrix engine answers; each grows to the widest group the context scans. */
     status_t reserve_scan(std::size_t columns, std::size_t step_rows, std::size_t dots_columns) noexcept {
-        if (failed(reserve_tiles(step_rows, dots_columns))) return status_t::bad_alloc_k;
+        if (failed(reserve_tiles(step_rows, dots_columns))) return status_code_t::out_of_memory_k;
         if (step_distances.extent(0) < step_rows || step_distances.extent(1) < columns) {
             auto distances = distances_tensor_t::uninitialized({step_rows, columns}, distances_allocator_t(allocator_));
-            if (!distances) return status_t::bad_alloc_k;
+            if (!distances) return status_code_t::out_of_memory_k;
             step_distances = std::move(distances.value);
         }
-        if (query_norms.extent(0) >= columns) return status_t::success_k;
+        if (query_norms.extent(0) >= columns) return status_code_t::success_k;
         auto norms = norms_tensor_t::uninitialized({columns}, norms_allocator_t(allocator_));
         auto limits = thresholds_tensor_t::uninitialized({columns}, distances_allocator_t(allocator_));
-        if (!norms || !limits) return status_t::bad_alloc_k;
+        if (!norms || !limits) return status_code_t::out_of_memory_k;
         query_norms = std::move(norms.value);
         thresholds = std::move(limits.value);
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Sizes a neighborhood's scratch for @p capacity entries under @p connectivity; each tensor
      *  grows once per context. */
     status_t reserve_neighborhoods(std::size_t capacity, std::size_t connectivity) noexcept {
         if (neighborhood_mates.numel() >= capacity * connectivity && neighborhood_norms.numel() >= capacity)
-            return status_t::success_k;
+            return status_code_t::success_k;
         auto mates = selection_t::uninitialized({capacity * connectivity}, candidates_allocator_t(allocator_));
         auto norms = norms_tensor_t::uninitialized({capacity}, norms_allocator_t(allocator_));
-        if (!mates || !norms) return status_t::bad_alloc_k;
+        if (!mates || !norms) return status_code_t::out_of_memory_k;
         neighborhood_mates = std::move(mates.value);
         neighborhood_norms = std::move(norms.value);
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Bytes @c reserve_neighbors reserves for @p capacity neighbors, each tensor on its own arena line. */
@@ -1205,9 +1205,10 @@ struct ram_index {
      *  @par Statuses:
      *  - @c config_mismatch_k @p node is at or past the watermark.
      */
-    expected<key_t> key_of(node_id_t node) const noexcept {
-        if (node >= size()) return {{}, status_t::config_mismatch_k};
-        return {keyed_[node], status_t::success_k};
+    expected<key_t, status_code_t> key_of(node_id_t node) const noexcept {
+        static_assert(sizeof(expected<key_t, status_code_t>) == sizeof(key_t) + sizeof(status_code_t));
+        if (node >= size()) return {{}, status_code_t::config_mismatch_k};
+        return {keyed_[node], status_code_t::success_k};
     }
 
     /** Invokes @p callback for every published node stored under @p key, as of one acquire of the
@@ -1372,7 +1373,7 @@ struct ram_index {
 
         while (true) {
             std::size_t const total_nodes = capacity();
-            if (total_nodes >= config.capacity) return {total_nodes, status_t::success_k};
+            if (total_nodes >= config.capacity) return {total_nodes, status_code_t::success_k};
 
             // Claim from the claimed rows up to the request, not the deficit alone: a deficit that
             // fits in the free rows is granted without a growth and released, forever. Only a claim
@@ -1474,7 +1475,7 @@ struct ram_index {
         std::size_t const landmarks = landmarks_count();
         if (nk::failed(context.hinted_ids.reserve(landmarks)) || nk::failed(context.hinted_held.reserve(landmarks)) ||
             nk::failed(context.hinted_ids.resize({landmarks})))
-            return status_t::bad_alloc_k;
+            return status_code_t::out_of_memory_k;
         return context.reserve_queries(staged_rows_bytes(vector_dtype_k, 1, geometry_.dimensions));
     }
 
@@ -1539,11 +1540,11 @@ struct ram_index {
                                      traversal_context_t& context, insert_config_t config = {}) noexcept {
 
         std::size_t const incoming_vectors_count = new_vectors.extent(0); // rows, not scalars
-        if (keys.size() != incoming_vectors_count) return {{size()}, status_t::config_mismatch_k};
-        if (!incoming_vectors_count) return {{size()}, status_t::success_k};
+        if (keys.size() != incoming_vectors_count) return {{size()}, status_code_t::config_mismatch_k};
+        if (!incoming_vectors_count) return {{size()}, status_code_t::success_k};
         bool const report_assigned_ids = assigned_ids.size() != 0;
         if (report_assigned_ids && assigned_ids.size() != incoming_vectors_count)
-            return {{size()}, status_t::config_mismatch_k};
+            return {{size()}, status_code_t::config_mismatch_k};
 
         // Snapshot the context's running telemetry, to report this batch's share on return.
         std::size_t const visited_members_before = context.visited_members;
@@ -1554,7 +1555,7 @@ struct ram_index {
         std::size_t const saturated_walks_before = context.saturated_walks;
 
         // Every row goes into a slot as wide as the geometry, so a wider row would overflow it.
-        if (new_vectors.extent(1) != dimensions()) return {{size()}, status_t::config_mismatch_k};
+        if (new_vectors.extent(1) != dimensions()) return {{size()}, status_code_t::config_mismatch_k};
 
         if (status_t const sized = reserve_traversal(context, config); failed(sized)) return {{size()}, sized};
 
@@ -1575,7 +1576,7 @@ struct ram_index {
                                                        reverse_refines_before;
         result.restarts = context.restarts - restarts_before;
         result.saturated_walks = context.saturated_walks - saturated_walks_before;
-        return {result, status_t::success_k};
+        return {result, status_code_t::success_k};
     }
 
     /** Entry removals are banned to simplify concurrency management. */
@@ -1645,7 +1646,7 @@ struct ram_index {
     expected<capacity_claim_t> claim(std::size_t count) noexcept {
         auto const [first_row, status] = claim_capacity(count);
         if (failed(status)) return {capacity_claim_t {}, status};
-        return {capacity_claim_t {*this, count, first_row}, status_t::success_k};
+        return {capacity_claim_t {*this, count, first_row}, status_code_t::success_k};
     }
 
     /**
@@ -1691,7 +1692,7 @@ struct ram_index {
         assert(claim.entries() == new_vectors.extent(0) && claim.entries() == keys.size() &&
                "A claim holds exactly its batch's rows and keys");
         // An empty range takes no turn: its first ID opens the next range too, which may publish first.
-        if (!claim) return status_t::success_k;
+        if (!claim) return status_code_t::success_k;
         bool const report_assigned_ids = assigned_ids.size() != 0;
         rows_view_t const new_rows = new_vectors;
         auto const [range, dispense_status] = dispense_(std::move(claim));
@@ -1705,7 +1706,7 @@ struct ram_index {
         await_turn_(range);
         keyed_.publish(range);
         publish_(range);
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
 #pragma endregion Insertion
@@ -1904,18 +1905,18 @@ struct ram_index {
          *  for an island node per bitset word.
          *
          *  @par Statuses:
-         *  - @c bad_alloc_k The bitsets, the depths or the islands' room cannot grow; the audit
+         *  - @c out_of_memory_k The bitsets, the depths or the islands' room cannot grow; the audit
          *    stays as it was.
          */
         status_t widen(node_id_t visible) noexcept {
-            if (visible <= this->visible) return status_t::success_k;
+            if (visible <= this->visible) return status_code_t::success_k;
             std::size_t const words = words_(), wider = words_for(visible);
             if (failed(bits_.reserve_exactly(bitsets_k * wider)) ||
                 failed(depths_from_root_.reserve_exactly(visible)) ||
                 failed(depths_to_root_.reserve_exactly(visible)) ||
                 failed(shallower_in_links_.reserve_exactly(visible)) || failed(in_links_.reserve_exactly(visible)) ||
                 failed(reserve_islands_(wider)))
-                return status_t::bad_alloc_k;
+                return status_code_t::out_of_memory_k;
             bits_.extend_uninitialized(bitsets_k * wider);
             // Back to front, each run moves up past where the next one lower still reads.
             for (std::size_t bitset = bitsets_k; bitset-- != 0;) {
@@ -1931,7 +1932,7 @@ struct ram_index {
             std::memset(shallower_in_links_.data() + this->visible, 0, added);
             std::memset(in_links_.data() + this->visible, 0, added);
             this->visible = visible;
-            return status_t::success_k;
+            return status_code_t::success_k;
         }
 
         /** Clears every column and starts from the root an earlier sweep kept, or else from a
@@ -2155,12 +2156,12 @@ struct ram_index {
          *
          *  @par Statuses:
          *  - @c uninitialized_k The audit is bound to no index.
-         *  - @c bad_alloc_k The islands' adjacency could not be placed.
+         *  - @c out_of_memory_k The islands' adjacency could not be placed.
          *  - @c overflow_k The islands hold more links than a node ID counts.
          */
         expected<reachability_t> finish() const noexcept {
-            if (!index_) return {{}, status_t::uninitialized_k};
-            if (step_ != step_t::done_k) return {{}, status_t::internal_k};
+            if (!index_) return {{}, status_code_t::uninitialized_k};
+            if (step_ != step_t::done_k) return {{}, status_code_t::internal_k};
             if (failed(islands_status_)) return {{}, islands_status_};
             reachability_t result;
             result.audited_nodes = visible;
@@ -2177,7 +2178,7 @@ struct ram_index {
             result.unreached_islands = unreached_islands_;
             result.stranded_islands = stranded_islands_;
             result.components = components_;
-            return {result, status_t::success_k};
+            return {result, status_code_t::success_k};
         }
 
       private:
@@ -2289,7 +2290,7 @@ struct ram_index {
             reached_in_depth_ = marked_in_depth_ = 0;
             swept_entries_ = root == node_id_unknown_k ? 0 : 2;
             depth_from_root_ = depth_to_root_ = depth_ = 0;
-            islands_status_ = status_t::success_k;
+            islands_status_ = status_code_t::success_k;
             root_ = root;
             step_ = root == node_id_unknown_k ? step_t::done_k : step_t::expand_k;
             if (root == node_id_unknown_k) return;
@@ -2418,7 +2419,7 @@ struct ram_index {
          *  which no sweep reached. */
         void gather_islands_(std::size_t islands) noexcept {
             if (failed(reserve_islands_(islands))) {
-                islands_status_ = status_t::bad_alloc_k;
+                islands_status_ = status_code_t::out_of_memory_k;
                 return;
             }
             std::size_t const words = words_();
@@ -2449,8 +2450,8 @@ struct ram_index {
             if (failed(island_nodes_.reserve_exactly(islands)) || failed(island_components_.reserve_exactly(islands)) ||
                 failed(island_parents_.reserve_exactly(islands)) || failed(island_entries_.reserve_exactly(islands)) ||
                 failed(island_roles_.reserve_exactly(islands)) || failed(island_walk_.reserve_exactly(5 * islands)))
-                return status_t::bad_alloc_k;
-            return status_t::success_k;
+                return status_code_t::out_of_memory_k;
+            return status_code_t::success_k;
         }
 
         /** The rank of island node @p node_id among the islands' nodes. */
@@ -2519,7 +2520,7 @@ struct ram_index {
             std::size_t const islands = island_nodes_.size();
             if (!islands) return;
             if (failed(island_walk_.resize(5 * islands)) || failed(island_components_.resize(islands))) {
-                islands_status_ = status_t::bad_alloc_k;
+                islands_status_ = status_code_t::out_of_memory_k;
                 return;
             }
             // Visit order from one, zero unvisited; the least order each node reaches on the
@@ -2561,7 +2562,7 @@ struct ram_index {
             components_ = 1;
             if (!islands) return;
             if (failed(island_entries_.resize(islands))) {
-                islands_status_ = status_t::bad_alloc_k;
+                islands_status_ = status_code_t::out_of_memory_k;
                 return;
             }
             constexpr u8_t component_roles_k = unreached_island_k | stranded_island_k;
@@ -2713,7 +2714,7 @@ struct ram_index {
         step_t step_ = step_t::done_k;
 
         /** Whether the islands' adjacency could be placed. */
-        status_t islands_status_ = status_t::success_k;
+        status_t islands_status_ = status_code_t::success_k;
     };
 
     /** Opens a reachability audit over the published nodes both ways from one drawn root, whose
@@ -2832,7 +2833,7 @@ struct ram_index {
          *  - @c uninitialized_k The plan is bound to no index.
          */
         status_t run(task_t const& task, traversal_context_t& context) noexcept {
-            if (!index_) return status_t::uninitialized_k;
+            if (!index_) return status_code_t::uninitialized_k;
             switch (phase_) {
             case phase_t::health_k: health.sweep(task); break;
             case phase_t::heal_k: heal_(task); break;
@@ -2840,7 +2841,7 @@ struct ram_index {
             case phase_t::restitch_k: restitch_neighborhoods_(task, context); break;
             default: break;
             }
-            return status_t::success_k;
+            return status_code_t::success_k;
         }
 
         /** The barrier between phases, one caller after every task of the current one ran: packs
@@ -2878,10 +2879,10 @@ struct ram_index {
          *  none of it.
          *
          *  @par Statuses:
-         *  - @c bad_alloc_k @p context cannot grow to a round's scratch.
+         *  - @c out_of_memory_k @p context cannot grow to a round's scratch.
          */
         status_t reserve(traversal_context_t& context) const noexcept {
-            if (!index_ || !neighborhood_capacity_) return status_t::success_k;
+            if (!index_ || !neighborhood_capacity_) return status_code_t::success_k;
             std::size_t const connectivity = index_->connectivity(), hubs = hubs_for_(health.visible);
             std::size_t const packed = scan_scorer_t::packs_bytes(max_of(hubs, neighborhood_capacity_),
                                                                   index_->dimensions());
@@ -2890,8 +2891,8 @@ struct ram_index {
                 failed(context.reserve_neighborhoods(neighborhood_capacity_, connectivity)) ||
                 failed(context.reserve_queries(gathered_packs_offset_() + packed)) ||
                 failed(context.results.reserve(2 * connectivity)))
-                return status_t::bad_alloc_k;
-            return status_t::success_k;
+                return status_code_t::out_of_memory_k;
+            return status_code_t::success_k;
         }
 
         /** Whether the plan is inside a round, whose every barrier a caller's progress hears. */
@@ -2936,7 +2937,7 @@ struct ram_index {
             // A refused widening re-checks the entries it held, and the round
             // re-stitches those alone.
             static_cast<void>(health.widen(static_cast<node_id_t>(index_->size())));
-            if (failed(reserve_round_(cache_bytes_))) return status_ = status_t::bad_alloc_k, void();
+            if (failed(reserve_round_(cache_bytes_))) return status_ = status_code_t::out_of_memory_k, void();
             open_health_(phase_t::none_k);
         }
 
@@ -2946,13 +2947,13 @@ struct ram_index {
          *  @par Statuses:
          *  - @c uninitialized_k The plan is bound to no index.
          *  - @c cancelled_k The round stopped before @ref advance answered false, or was stopped.
-         *  - @c bad_alloc_k A health check could not place its islands' adjacency.
+         *  - @c out_of_memory_k A health check could not place its islands' adjacency.
          */
         expected<refine_report_t> finish() const noexcept {
-            if (!index_) return {{}, status_t::uninitialized_k};
+            if (!index_) return {{}, status_code_t::uninitialized_k};
             if (failed(status_)) return {tally_, status_};
             bool const done = phase_ == phase_t::done_k && tally_.verdict != refine_verdict_t::stopped_k;
-            return {tally_, done ? status_t::success_k : status_t::cancelled_k};
+            return {tally_, done ? status_code_t::success_k : status_code_t::cancelled_k};
         }
 
       private:
@@ -3082,8 +3083,8 @@ struct ram_index {
                 failed(hub_norms_.reserve_exactly(hubs)) || failed(entry_neighborhoods_.resize(visible)) ||
                 failed(neighborhood_entries_.resize(visible)) ||
                 failed(neighborhood_offsets_.reserve_exactly(split_room(visible, hubs_per_draw_))))
-                return status_t::bad_alloc_k;
-            return status_t::success_k;
+                return status_code_t::out_of_memory_k;
+            return status_code_t::success_k;
         }
 
         /** Hubs one gather of @p entries draws: as many as make a neighborhood half its capacity on
@@ -3533,7 +3534,7 @@ struct ram_index {
 
         /** The first failure the plan met: an audit whose islands' adjacency could
          *  not be placed. */
-        status_t status_ = status_t::success_k;
+        status_t status_ = status_code_t::success_k;
 
         /** Bytes of cache each core keeps to itself, which sizes the hubs and a
          *  neighborhood's capacity. */
@@ -3575,17 +3576,17 @@ struct ram_index {
      *  @c refine_plan_t::reserve grows ahead of them.
      *
      *  @par Statuses:
-     *  - @c bad_alloc_k The audit or the round's columns cannot be placed.
+     *  - @c out_of_memory_k The audit or the round's columns cannot be placed.
      */
     expected<refine_plan_t> plan_refine(refine_config_t config = {}) noexcept {
         auto [health, status] = plan_health();
         refine_plan_t plan {std::move(health), typename refine_plan_t::part_bases_allocator_t {vectors_allocator_}};
         if (failed(status)) return {std::move(plan), status};
         plan.index_ = this;
-        if (failed(plan.reserve_round_(config.cache_bytes))) return {std::move(plan), status_t::bad_alloc_k};
+        if (failed(plan.reserve_round_(config.cache_bytes))) return {std::move(plan), status_code_t::out_of_memory_k};
         plan.swept_after_ = phase_t::none_k;
         plan.phase_ = phase_t::health_k;
-        return {std::move(plan), status_t::success_k};
+        return {std::move(plan), status_code_t::success_k};
     }
 
     /**
@@ -3597,18 +3598,26 @@ struct ram_index {
      *
      *  @par Statuses:
      *  - @c overflow_k A queue capacity of @p context wraps when rounded.
-     *  - @c bad_alloc_k The plan's columns cannot be placed, or @p context cannot fit a task.
+     *  - @c out_of_memory_k The plan's columns cannot be placed, or @p context cannot fit a task.
      */
     expected<refine_report_t> refine(refine_config_t config, traversal_context_t& context) noexcept {
         auto [plan, status] = plan_refine(config);
         if (failed(status)) return {{}, status};
         if (status_t const sized = reserve_traversal(context, insert_config_t {non_zero_expansion_factor(config)});
-            failed(sized))
-            return {plan.finish().value, sized};
-        if (status_t const sized = plan.reserve(context); failed(sized)) return {plan.finish().value, sized};
+            failed(sized)) {
+            [[maybe_unused]] auto const [report, report_status] = plan.finish();
+            return {report, sized};
+        }
+        if (status_t const sized = plan.reserve(context); failed(sized)) {
+            [[maybe_unused]] auto const [report, report_status] = plan.finish();
+            return {report, sized};
+        }
         do
             for (typename refine_plan_t::task_t const task : plan.tasks())
-                if (status_t const ran = plan.run(task, context); failed(ran)) return {plan.finish().value, ran};
+                if (status_t const ran = plan.run(task, context); failed(ran)) {
+                    [[maybe_unused]] auto const [report, report_status] = plan.finish();
+                    return {report, ran};
+                }
         while (plan.advance());
         return plan.finish();
     }
@@ -3683,14 +3692,14 @@ struct ram_index {
          *  - @c uninitialized_k The plan is bound to no source.
          */
         status_t run(task_t const& task, traversal_context_t& context) noexcept {
-            if (!rounds_.index_) return status_t::uninitialized_k;
+            if (!rounds_.index_) return status_code_t::uninitialized_k;
             switch (moves_) {
             case phase_t::partition_k: partition_(); break;
             case phase_t::scatter_k: scatter_(task); break;
             case phase_t::write_k: targets_[task.position]->keyed_.publish(task.nodes); break;
             default: return rounds_.run(task, context);
             }
-            return status_t::success_k;
+            return status_code_t::success_k;
         }
 
         /** The barrier between phases, one caller after every task of the current one ran:
@@ -3754,11 +3763,11 @@ struct ram_index {
          *  @par Statuses:
          *  - @c uninitialized_k The plan is bound to no source.
          *  - @c cancelled_k The moves or a round stopped before @ref advance answered false.
-         *  - @c bad_alloc_k A health check could not place its islands' adjacency.
+         *  - @c out_of_memory_k A health check could not place its islands' adjacency.
          */
         expected<refine_report_t> finish() const noexcept {
-            if (!rounds_.index_) return {{}, status_t::uninitialized_k};
-            if (moving()) return {{}, status_t::cancelled_k};
+            if (!rounds_.index_) return {{}, status_code_t::uninitialized_k};
+            if (moving()) return {{}, status_code_t::cancelled_k};
             return rounds_.finish();
         }
 
@@ -3980,29 +3989,25 @@ struct ram_index {
                                             part_bases_allocator_t {vectors_allocator_}},
                              part_bases_allocator_t {vectors_allocator_}};
         std::size_t const parts = targets.size();
-        if (sources.empty() || targets.empty()) return {std::move(plan), status_t::invalid_argument_k};
+        if (sources.empty() || targets.empty()) return {std::move(plan), status_code_t::invalid_argument_k};
         for (std::span<ram_index* const> const listed : {sources, targets})
-            for (std::size_t position = 0; position != listed.size(); ++position) {
-                if (!listed[position]) return {std::move(plan), status_t::invalid_argument_k};
-                for (std::size_t earlier = 0; earlier != position; ++earlier)
-                    if (listed[earlier] == listed[position]) return {std::move(plan), status_t::invalid_argument_k};
-            }
-        if (sources.size() > 1 && parts > 1) return {std::move(plan), status_t::unsupported_k};
-        if (sources.front() != this || parts < 2) return {std::move(plan), status_t::config_mismatch_k};
+            if (status_t const refused = listed_refusal(listed); failed(refused)) return {std::move(plan), refused};
+        if (sources.size() > 1 && parts > 1) return {std::move(plan), status_code_t::unsupported_k};
+        if (sources.front() != this || parts < 2) return {std::move(plan), status_code_t::config_mismatch_k};
         for (ram_index const* into : targets) {
             if (into == this || into->kernel_ != kernel_ || into->size() || into->geometry() != geometry_)
-                return {std::move(plan), status_t::config_mismatch_k};
-            if (!into->settled_()) return {std::move(plan), status_t::contended_k};
+                return {std::move(plan), status_code_t::config_mismatch_k};
+            if (!into->settled_()) return {std::move(plan), status_code_t::contended_k};
         }
-        if (!settled_()) return {std::move(plan), status_t::contended_k};
+        if (!settled_()) return {std::move(plan), status_code_t::contended_k};
 
         std::size_t const capacity = divide_round_up<std::size_t>(rows, parts);
         if (rows >= node_id_unknown_k || parts * capacity > static_cast<std::size_t>(node_id_unknown_k))
-            return {std::move(plan), status_t::overflow_k};
+            return {std::move(plan), status_code_t::overflow_k};
         if (failed(plan.targets_.reserve_exactly(parts)) || failed(plan.target_claims_.reserve_exactly(parts)) ||
             failed(plan.part_extents_.resize(parts)) || failed(plan.part_slots_.resize(rows)) ||
             failed(plan.part_members_.resize(parts * capacity)))
-            return {std::move(plan), status_t::bad_alloc_k};
+            return {std::move(plan), status_code_t::out_of_memory_k};
         for (ram_index* into : targets) plan.targets_.push_back_reserved(into);
         // One audit over a full part sweeps every target in turn, rebound as its turn comes.
         auto [health, health_status] = plan_audit_(static_cast<node_id_t>(capacity));
@@ -4015,17 +4020,17 @@ struct ram_index {
             if (failed(claim_status)) return {std::move(plan), claim_status};
             bool const based = claimed.base() == 0;
             plan.target_claims_.push_back_reserved(std::move(claimed));
-            if (!based) return {std::move(plan), status_t::contended_k};
+            if (!based) return {std::move(plan), status_code_t::contended_k};
         }
 
         // One round's columns over a full part serve every target in turn.
         plan.rounds_.index_ = targets[0];
         if (failed(plan.rounds_.reserve_round_(config.refine.cache_bytes)))
-            return {std::move(plan), status_t::bad_alloc_k};
+            return {std::move(plan), status_code_t::out_of_memory_k};
         plan.source_ = this;
         plan.seed_ = config.seed;
         plan.moves_ = phase_t::partition_k;
-        return {std::move(plan), status_t::success_k};
+        return {std::move(plan), status_code_t::success_k};
     }
 
     /** @ref plan_reshard of the rows this index holds now. */
@@ -4109,7 +4114,7 @@ struct ram_index {
                                      search_config_t config, traversal_context_t& context) noexcept
         requires floating_scalar<scalar_t>
     {
-        if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
+        if (kernel_ != nk_kernel_dot_k) return {{}, status_code_t::config_mismatch_k};
         return walk_(query_vector, dummy_fold_t {}, indexer_rescoring<quads_kit_t> {heads}, context, config,
                      static_cast<node_id_t>(size()));
     }
@@ -4190,11 +4195,12 @@ struct ram_index {
     expected<search_result_t> multiply(vector_view_t left, std::span<node_id_t> node_ids,
                                        std::span<dot_result_t> products, search_config_t config,
                                        traversal_context_t& context) noexcept {
-        if (kernel_ != nk_kernel_dot_k || products.size() != node_ids.size()) return {{}, status_t::config_mismatch_k};
+        if (kernel_ != nk_kernel_dot_k || products.size() != node_ids.size())
+            return {{}, status_code_t::config_mismatch_k};
         multiply_fold<node_id_t, dot_result_t> fold {node_ids, products};
-        expected<search_result_t> walked = search(left, fold, config, context);
-        walked.value.count = fold.scored;
-        return walked;
+        auto [walked, status] = search(left, fold, config, context);
+        walked.count = fold.scored;
+        return {walked, status};
     }
 
     /**
@@ -4229,13 +4235,13 @@ struct ram_index {
                                      f32_t score_scale, nk::matrix_span<f32_t> outputs,
                                      std::span<softmax_state_t> carry, search_config_t config,
                                      traversal_context_t& context) noexcept {
-        if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
+        if (kernel_ != nk_kernel_dot_k) return {{}, status_code_t::config_mismatch_k};
         std::size_t const rows_count = queries.extent(0), columns = queries.extent(1);
-        if (!head_count || rows_count % head_count) return {{}, status_t::shape_mismatch_k};
+        if (!head_count || rows_count % head_count) return {{}, status_code_t::shape_mismatch_k};
         if (outputs.extent(0) != rows_count || outputs.extent(1) != columns || carry.size() != rows_count)
-            return {{}, status_t::config_mismatch_k};
-        if (!outputs.is_contiguous()) return {{}, status_t::unsupported_layout_k};
-        status_t status = status_t::success_k;
+            return {{}, status_code_t::config_mismatch_k};
+        if (!outputs.is_contiguous()) return {{}, status_code_t::unsupported_layout_k};
+        status_t status = status_code_t::success_k;
         search_result_t attended;
         for (std::size_t first = 0; first != rows_count; first += head_count) {
             attention_rescoring<quads_kit_t, elementwise_kit_t, value_lookup_type_> const rescoring {
@@ -4246,18 +4252,18 @@ struct ram_index {
                 carry.subspan(first, head_count),
                 status};
             rescoring.clear();
-            expected<search_result_t> const walked = walk_(rescoring.queries.row(0).as_vector(), dummy_fold_t {},
-                                                           rescoring, context, config, static_cast<node_id_t>(size()));
-            if (!walked) return {attended, walked.status};
+            auto const [walked, walked_status] = walk_(rescoring.queries.row(0).as_vector(), dummy_fold_t {}, rescoring,
+                                                       context, config, static_cast<node_id_t>(size()));
+            if (failed(walked_status)) return {attended, walked_status};
             if (failed(status)) return {attended, status};
             rescoring.finish();
-            attended.visited_members += walked.value.visited_members;
-            attended.computed_distances += walked.value.computed_distances;
-            attended.restarts += walked.value.restarts;
-            attended.saturated_walks += walked.value.saturated_walks;
+            attended.visited_members += walked.visited_members;
+            attended.computed_distances += walked.computed_distances;
+            attended.restarts += walked.restarts;
+            attended.saturated_walks += walked.saturated_walks;
         }
         attended.count = rows_count;
-        return {attended, status_t::success_k};
+        return {attended, status_code_t::success_k};
     }
 
     /**
@@ -4386,9 +4392,9 @@ struct ram_index {
          *  - @c config_mismatch_k The task holds no rows, or its rows fall outside the columns.
          */
         status_t save(task_t const& task) noexcept {
-            if (!index_) return status_t::uninitialized_k;
+            if (!index_) return status_code_t::uninitialized_k;
             iota_view<node_id_t> const rows = task.index_nodes;
-            if (rows.empty()) return status_t::config_mismatch_k;
+            if (rows.empty()) return status_code_t::config_mismatch_k;
             geometry_t const geometry = index_->geometry();
             std::size_t const connectivity = geometry.connectivity;
             std::size_t const step_slots = rows.size() * connectivity;
@@ -4400,7 +4406,7 @@ struct ram_index {
                                                           connectivity * sizeof(node_id_t));
             bytes_span_t const norms_rows = flat_rows(columns.norms, first, rows.size(), sizeof(vector_norms_t));
             if (vectors_rows.empty() || neighbors_rows.empty() || norms_rows.empty() != columns.norms.empty())
-                return status_t::config_mismatch_k;
+                return status_code_t::config_mismatch_k;
 
             location_t const location = chunk_schedule_t::locate(rows.first);
             for (std::size_t row = 0; row != rows.size(); ++row)
@@ -4432,7 +4438,7 @@ struct ram_index {
                 for (std::size_t word = 0; word != step_slots; ++word) save_neighbor(word, source[word]);
             }
             atomic_ref<std::size_t>(covered).store_add(rows.size(), std::memory_order_release);
-            return status_t::success_k;
+            return status_code_t::success_k;
         }
 
         /**
@@ -4446,10 +4452,10 @@ struct ram_index {
          *  - @c contended_k Under @c concurrent_k, a counter moved during the plan.
          */
         status_t finish() noexcept {
-            if (!index_) return status_t::uninitialized_k;
+            if (!index_) return status_code_t::uninitialized_k;
             std::size_t const nodes = static_cast<std::size_t>(visible);
             if (atomic_ref<std::size_t>(covered).load(std::memory_order_acquire) != nodes)
-                return status_t::config_mismatch_k;
+                return status_code_t::config_mismatch_k;
             if (synchronization == synchronization_t::concurrent_k) {
                 // A row copy's lock acquired any back-link's unlock, so its dispense shows below.
                 // Closed holds no batch: a refine moves no counter, a load the watermark.
@@ -4460,10 +4466,10 @@ struct ram_index {
                     (dispensed_now == visible || dispensed_now == node_id_unknown_k) &&
                     atomic_ref<node_id_t const>(index_->last_allocated_id_).load(std::memory_order_relaxed) ==
                         allocated;
-                if (!settled) return status_t::contended_k;
+                if (!settled) return status_code_t::contended_k;
             }
             index_ = nullptr;
-            return status_t::success_k;
+            return status_code_t::success_k;
         }
 
       private:
@@ -4494,13 +4500,13 @@ struct ram_index {
         plan.visible = atomic_ref<node_id_t const>(last_visible_id_).load(std::memory_order_acquire);
         node_id_t const dispensed = atomic_ref<node_id_t const>(next_dispensed_id_).load(std::memory_order_acquire);
         plan.allocated = atomic_ref<node_id_t const>(last_allocated_id_).load(std::memory_order_acquire);
-        if (dispensed != plan.visible && dispensed != node_id_unknown_k) return {{}, status_t::contended_k};
+        if (dispensed != plan.visible && dispensed != node_id_unknown_k) return {{}, status_code_t::contended_k};
         std::size_t const rows = static_cast<std::size_t>(plan.visible);
         if (columns.vectors.size() < rows * stored_row_values(geometry_) * sizeof(scalar_t) ||
             columns.neighbors.size() < rows * geometry_.connectivity * sizeof(node_id_t) ||
             (!columns.norms.empty() && (!stores_norms() || columns.norms.size() < rows * sizeof(vector_norms_t))))
-            return {{}, status_t::config_mismatch_k};
-        return {std::move(plan), status_t::success_k};
+            return {{}, status_code_t::config_mismatch_k};
+        return {std::move(plan), status_code_t::success_k};
     }
 
     /**
@@ -4631,19 +4637,19 @@ struct ram_index {
         template <typename columns_type_, typename key_of_type_>
         status_t load(task_t const& task, columns_type_ const& columns, iota_view<node_id_t> source_range,
                       key_of_type_&& key_of) noexcept {
-            if (!index_) return status_t::uninitialized_k;
+            if (!index_) return status_code_t::uninitialized_k;
             iota_view<node_id_t> const range = task.index_nodes;
-            if (range.empty()) return status_t::config_mismatch_k;
+            if (range.empty()) return status_code_t::config_mismatch_k;
             geometry_t const geometry = index_->geometry();
             std::size_t const connectivity = geometry.connectivity;
             std::size_t const column_connectivity = columns.connectivity ? columns.connectivity : connectivity;
-            if (column_connectivity > connectivity) return status_t::config_mismatch_k;
+            if (column_connectivity > connectivity) return status_code_t::config_mismatch_k;
             // The part's rows go at this task's own index rows, so an ID's shift follows from
             // the task rather than from the plan's base - the two agree for a one-part plan.
             node_id_t const shift = static_cast<node_id_t>(range.first - task.source_nodes.first + source_range.first);
             // A rebased ID past this plan would name whichever row a later insert fills.
             if (static_cast<std::size_t>(shift) + source_range.size() > static_cast<std::size_t>(base) + rows)
-                return status_t::config_mismatch_k;
+                return status_code_t::config_mismatch_k;
 
             // Checkpoints keep logical rows, while chunk rows are padded to whole kit tasks.
             std::size_t const count = range.size(), first = task.source_nodes.first;
@@ -4684,7 +4690,7 @@ struct ram_index {
             for (node_id_t node = range.first; node != range.bound; ++node)
                 index_->keyed_.assign(node, key_of(static_cast<node_id_t>(first + node - range.first)));
             settle_run_(range);
-            return status_t::success_k;
+            return status_code_t::success_k;
         }
 
         /**
@@ -4708,14 +4714,14 @@ struct ram_index {
          *  - @c config_mismatch_k @p source_range rebases past the plan's rows.
          */
         status_t load(task_t const& task, ram_index const& source, iota_view<node_id_t> source_range) noexcept {
-            if (!index_) return status_t::uninitialized_k;
+            if (!index_) return status_code_t::uninitialized_k;
             iota_view<node_id_t> const range = task.index_nodes;
             geometry_t const geometry = index_->geometry();
             if (range.empty() || range.size() != task.source_nodes.size() || source.geometry() != geometry ||
                 source.stores_norms() != index_->stores_norms() || task.source_nodes.bound > source.size())
-                return status_t::config_mismatch_k;
+                return status_code_t::config_mismatch_k;
             node_id_t const shift = range.first - task.source_nodes.first + source_range.first;
-            if (shift + source_range.size() > base + rows) return status_t::config_mismatch_k;
+            if (shift + source_range.size() > base + rows) return status_code_t::config_mismatch_k;
             std::size_t const connectivity = geometry.connectivity;
             std::size_t const row_bytes = padded_row_values(geometry) * sizeof(scalar_t);
 
@@ -4739,7 +4745,7 @@ struct ram_index {
             rebase_neighbors(copied, source_range, shift, node_id_unknown_k);
             compact_neighbors(copied, connectivity, range.first, node_id_unknown_k);
             settle_run_(range);
-            return status_t::success_k;
+            return status_code_t::success_k;
         }
 
         /**
@@ -4756,9 +4762,9 @@ struct ram_index {
          *  - @c config_mismatch_k The tasks covered other than every row.
          */
         status_t finish() noexcept {
-            if (!index_) return status_t::uninitialized_k;
+            if (!index_) return status_code_t::uninitialized_k;
             if (atomic_ref<std::size_t>(covered).load(std::memory_order_acquire) != rows)
-                return status_t::config_mismatch_k;
+                return status_code_t::config_mismatch_k;
             if (rows) {
                 claim_.consume();
                 node_id_t dispensed = base;
@@ -4769,7 +4775,7 @@ struct ram_index {
                     .store(static_cast<node_id_t>(base + rows), std::memory_order_release);
             }
             index_ = nullptr;
-            return status_t::success_k;
+            return status_code_t::success_k;
         }
 
       private:
@@ -4821,14 +4827,14 @@ struct ram_index {
         std::size_t const nearest_rows = request_rows - below > 2 * below - request_rows ? 2 * below : below;
         std::size_t const run_rows = min_of(max_of(nearest_rows, chunk_schedule_t::nodes_in(0)),
                                             chunk_schedule_t::nodes_in(chunk_schedule_t::doubling_chunks_k));
-        if (!rows) return {load_plan_t {*this, visible, run_rows, {}}, status_t::success_k};
+        if (!rows) return {load_plan_t {*this, visible, run_rows, {}}, status_code_t::success_k};
         node_id_t const dispensed = atomic_ref<node_id_t>(next_dispensed_id_).load(std::memory_order_acquire);
-        if (dispensed != visible && dispensed != node_id_unknown_k) return {{}, status_t::contended_k};
-        if (rows > max_node_count_k - visible) return {{}, status_t::overflow_k};
+        if (dispensed != visible && dispensed != node_id_unknown_k) return {{}, status_code_t::contended_k};
+        if (rows > max_node_count_k - visible) return {{}, status_code_t::overflow_k};
         if (status_t const vetted = vet_growth_(); failed(vetted)) return {{}, vetted};
         std::size_t const loaded_rows = static_cast<std::size_t>(visible) + rows;
         if (loaded_rows > atomic_ref<std::size_t const>(ceiling_nodes_).load(std::memory_order_relaxed))
-            return {{}, status_t::overflow_k};
+            return {{}, status_code_t::overflow_k};
 
         // The tasks write every byte of their rows and fill the rest of the last chunk, so the
         // claim's growth finds these chunks published and leaves them unfilled.
@@ -4837,11 +4843,11 @@ struct ram_index {
         if (succeeded(covered)) covered = neighbors_.cover_uninitialized(loaded_rows, geometry_.connectivity);
         auto [capacity_claim, status] = succeeded(covered) ? claim(rows) : expected<capacity_claim_t> {{}, covered};
         if (succeeded(status) && capacity_claim.base() == visible)
-            return {load_plan_t {*this, visible, run_rows, std::move(capacity_claim)}, status_t::success_k};
+            return {load_plan_t {*this, visible, run_rows, std::move(capacity_claim)}, status_code_t::success_k};
         // A refused plan leaves what it covered as a growth would, and a claim that won elsewhere
         // dies, releasing its rows.
         refill_unpublished_({visible, rows_through_chunk_of_(loaded_rows - 1u)});
-        return {{}, failed(status) ? status : status_t::contended_k};
+        return {{}, failed(status) ? status : status_code_t::contended_k};
     }
 
     /**
@@ -4863,7 +4869,7 @@ struct ram_index {
             column_connectivity > geometry_.connectivity ||
             columns.neighbors.size() < rows * column_connectivity * sizeof(node_id_t) ||
             (!columns.norms.empty() && (!stores_norms() || columns.norms.size() < rows * sizeof(vector_norms_t))))
-            return status_t::config_mismatch_k;
+            return status_code_t::config_mismatch_k;
         auto [plan, status] = plan_load(rows);
         if (failed(status)) return status;
         for (typename load_plan_t::task_t const task : plan.tasks())
@@ -5095,7 +5101,7 @@ struct ram_index {
         while (added_capacity < minimal_capacity) {
             std::size_t const hosted_rows = chunk_schedule_t::nodes_before(chunks_count_);
             if (chunks_count_ == max_chunks_k || hosted_rows >= ceiling_rows)
-                return {added_capacity, status_t::overflow_k};
+                return {added_capacity, status_code_t::overflow_k};
 
             std::size_t const covered_rows = chunk_schedule_t::nodes_before(chunks_count_ + 1u);
             // Norms exist only when the finalize reads them, which a dot does on compensated kits
@@ -5115,19 +5121,19 @@ struct ram_index {
             // claim can dispense it and the dispenser never wraps.
             if (chunks_count_ == max_chunks_k) added_capacity -= 1;
         }
-        return {added_capacity, status_t::success_k};
+        return {added_capacity, status_code_t::success_k};
     }
 
     /** Refuses what every growth refuses, before any chunk is allocated: constructors allocate
      *  nothing, so the first growth or load is where a kernel the kits cannot finalize, or a
      *  malformed geometry, surfaces. */
     status_t vet_growth_() const noexcept {
-        if (!kernel_supported<quads_kit_t>(kernel_)) return status_t::unknown_kind_k;
+        if (!kernel_supported<quads_kit_t>(kernel_)) return status_code_t::unknown_kind_k;
         // Sub-byte rows fill whole storage values: a kernel's tail loads would drop a ragged tail.
         if (!geometry_.dimensions || geometry_.dimensions % nk::dimensions_per_value<scalar_t>() ||
             !std::has_single_bit(static_cast<u32_t>(geometry_.connectivity)))
-            return status_t::config_mismatch_k;
-        return status_t::success_k;
+            return status_code_t::config_mismatch_k;
+        return status_code_t::success_k;
     }
 
     /** Refills the rows of @p nodes each column's published chunks hold as a growth leaves them:
@@ -5193,7 +5199,7 @@ struct ram_index {
         // Rejected before the counter dance, so it neither grows the index in vain nor overflows
         // the signed capacity arithmetic below.
         if (count > atomic_ref<std::size_t const>(ceiling_nodes_).load(std::memory_order_relaxed))
-            return {node_id_unknown_k, status_t::overflow_k};
+            return {node_id_unknown_k, status_code_t::overflow_k};
         while (true) {
             // One unconditional subtract, and its sign says what happened; the deficit it can
             // leave behind is exactly the signal the waiters below watch.
@@ -5209,7 +5215,7 @@ struct ram_index {
                 // Only the deficit grows, so a claim the ceiling's truncated chunk fits succeeds.
                 auto [added_capacity,
                       chunk_status] = create_next_chunk(static_cast<std::size_t>(-new_remaining_capacity));
-                if (chunk_status != status_t::success_k) {
+                if (chunk_status != status_code_t::success_k) {
                     // Revert the claim, releasing any partially added chunks along the way.
                     atomic_ref<std::ptrdiff_t>(remaining_capacity_)
                         .store_add(count + added_capacity, std::memory_order_release);
@@ -5220,12 +5226,12 @@ struct ram_index {
                 node_id_t const first_id =
                     atomic_ref<node_id_t>(last_allocated_id_).fetch_add(count, std::memory_order_acq_rel);
                 atomic_ref<std::ptrdiff_t>(remaining_capacity_).store_add(added_capacity, std::memory_order_release);
-                return {first_id, status_t::success_k};
+                return {first_id, status_code_t::success_k};
             }
             // We may be lucky and the space is already reserved for the whole batch.
             else if (new_remaining_capacity >= 0) {
                 return {atomic_ref<node_id_t>(last_allocated_id_).fetch_add(count, std::memory_order_acquire),
-                        status_t::success_k};
+                        status_code_t::success_k};
             }
             // Even freshly added capacity may fall short of our own batch.
             else {
@@ -5507,9 +5513,9 @@ struct ram_index {
         // Claimed capacity keeps an open dispenser under the sentinel; only a closed one refuses.
         atomic_ref<node_id_t> const dispenser {next_dispensed_id_};
         node_id_t const first = dispenser.fetch_add_if_at_most(rows, node_id_unknown_k, std::memory_order_acq_rel);
-        if (first == node_id_unknown_k) return {{}, status_t::contended_k};
+        if (first == node_id_unknown_k) return {{}, status_code_t::contended_k};
         claim.consume();
-        return {{first, static_cast<node_id_t>(first + rows)}, status_t::success_k};
+        return {{first, static_cast<node_id_t>(first + rows)}, status_code_t::success_k};
     }
 
     /** Closes the dispenser at the watermark: one compare-exchange that succeeds only while every
@@ -5519,8 +5525,8 @@ struct ram_index {
         return atomic_ref<node_id_t>(next_dispensed_id_)
                        .compare_exchange_strong(visible, node_id_unknown_k, std::memory_order_acq_rel,
                                                 std::memory_order_relaxed)
-                   ? status_t::success_k
-                   : status_t::contended_k;
+                   ? status_code_t::success_k
+                   : status_code_t::contended_k;
     }
 
     /** Reopens a closed dispenser at the watermark, past every row a load published meanwhile; an
@@ -5639,9 +5645,9 @@ struct ram_index {
     expected<health_plan_t> plan_audit_(node_id_t visible) const noexcept {
         // An empty graph is audited, not refused: no words to sweep, no tasks, zero reached.
         health_plan_t plan {typename health_plan_t::bitset_allocator_t {vectors_allocator_}};
-        if (failed(plan.widen(visible))) return {std::move(plan), status_t::bad_alloc_k};
+        if (failed(plan.widen(visible))) return {std::move(plan), status_code_t::out_of_memory_k};
         plan.rebind(*this, visible);
-        return {std::move(plan), status_t::success_k};
+        return {std::move(plan), status_code_t::success_k};
     }
 
     /** Whether no insertion is in flight: every dispensed ID is published, or the dispenser is
@@ -5869,9 +5875,9 @@ struct ram_index {
                                             search_config_t config, fold_type_&& fold, results_array_t const& bound,
                                             rescoring_type_ const& rescoring, node_id_t first_invisible_id,
                                             std::span<node_id_t const> hinted) noexcept {
-        if (config.traversal != traversal_t::walk_k) return {{}, status_t::unsupported_k};
+        if (config.traversal != traversal_t::walk_k) return {{}, status_code_t::unsupported_k};
         // Every distance kernel takes its width from the geometry, so a narrower query would be over-read.
-        if (query_vector.size() != geometry_.dimensions) return {{}, status_t::config_mismatch_k};
+        if (query_vector.size() != geometry_.dimensions) return {{}, status_code_t::config_mismatch_k};
         std::size_t const expansion_factor = non_zero_expansion_factor(config);
 
         // The same reservations `insert` makes, which also size the buffer `search_if` admits into.
@@ -5883,7 +5889,7 @@ struct ram_index {
         context.visited.clear();
 
         // An empty snapshot has nothing to walk.
-        if (first_invisible_id == 0) return {{}, status_t::success_k};
+        if (first_invisible_id == 0) return {{}, status_code_t::success_k};
 
         // Snapshot the context's running telemetry, to report this query's share on return.
         std::size_t const visited_members_before = context.visited_members;
@@ -5905,7 +5911,7 @@ struct ram_index {
         result.computed_distances = context.computed_distances - computed_distances_before;
         result.restarts = context.restarts - restarts_before;
         result.saturated_walks = context.saturated_walks - saturated_walks_before;
-        return {result, status_t::success_k};
+        return {result, status_code_t::success_k};
     }
 
     /** The one dispatch of a walk under @p fold and @p rescoring onto @c search_below_, by the
@@ -5933,16 +5939,15 @@ struct ram_index {
         context.refining_candidates.clear();
         predicate_fold<predicate_type_, results_array_t> fold {predicate, context.refining_candidates,
                                                                non_zero_expansion_factor(config)};
-        expected<search_result_t> const result =
-            config.synchronization != synchronization_t::concurrent_k
-                ? search_below_<synchronization_t::immutable_k>(query_vector, context, config, fold,
-                                                                context.refining_candidates, dummy_rescoring_t {},
-                                                                first_invisible_id, hinted)
-                : search_below_<synchronization_t::concurrent_k>(query_vector, context, config, fold,
-                                                                 context.refining_candidates, dummy_rescoring_t {},
-                                                                 first_invisible_id, hinted);
+        auto const [result, status] = config.synchronization != synchronization_t::concurrent_k
+                                          ? search_below_<synchronization_t::immutable_k>(
+                                                query_vector, context, config, fold, context.refining_candidates,
+                                                dummy_rescoring_t {}, first_invisible_id, hinted)
+                                          : search_below_<synchronization_t::concurrent_k>(
+                                                query_vector, context, config, fold, context.refining_candidates,
+                                                dummy_rescoring_t {}, first_invisible_id, hinted);
         std::swap(context.results, context.refining_candidates);
-        return result;
+        return {result, status};
     }
 
     /** The exact sibling of @c walk_if_: one query against every row below @p first_invisible_id,
@@ -5950,13 +5955,13 @@ struct ram_index {
     template <typename admits_type_>
     expected<search_result_t> scan_if_(vector_view_t query_vector, admits_type_&& admits, traversal_context_t& context,
                                        search_config_t config, node_id_t first_invisible_id) noexcept {
-        if (query_vector.size() != geometry_.dimensions) return {{}, status_t::config_mismatch_k};
+        if (query_vector.size() != geometry_.dimensions) return {{}, status_code_t::config_mismatch_k};
         std::size_t const expansion_factor = non_zero_expansion_factor(config);
         if (status_t const sized = reserve_queues_(context, queue_sizes_(expansion_factor, connectivity()));
             failed(sized))
             return {{}, sized};
         context.results.clear();
-        if (first_invisible_id == 0) return {{}, status_t::success_k};
+        if (first_invisible_id == 0) return {{}, status_code_t::success_k};
 
         std::size_t const computed_distances_before = context.computed_distances;
         auto keep = [&](std::size_t, scored_node_t candidate) noexcept {
@@ -5966,7 +5971,7 @@ struct ram_index {
         };
         // The query scores where it lies, so the staged queries hold only its packs.
         if (failed(context.reserve_queries(scan_scorer_t::packs_bytes(1, geometry_.dimensions))))
-            return {{}, status_t::bad_alloc_k};
+            return {{}, status_code_t::out_of_memory_k};
         vectors_view_t const queries {query_vector.data(), 1, query_vector.size()};
         if (status_t const scanned = scan_queries_(queries, context.staged_queries.data(), admits, keep, context,
                                                    config.cache_bytes, first_invisible_id);
@@ -5975,7 +5980,7 @@ struct ram_index {
         search_result_t result;
         result.count = context.results.size();
         result.computed_distances = context.computed_distances - computed_distances_before;
-        return {result, status_t::success_k};
+        return {result, status_code_t::success_k};
     }
 
     /** Rows @b [first,first+count) of @p rows in the stored scalar: borrowed when they already are,
@@ -6032,10 +6037,10 @@ struct ram_index {
     template <typename admits_type_, typename keep_type_>
     status_t scan_(rows_view_t group, admits_type_&& admits, keep_type_&& keep, traversal_context_t& context,
                    search_config_t config, node_id_t first_invisible_id) noexcept {
-        if (!first_invisible_id) return status_t::success_k;
+        if (!first_invisible_id) return status_code_t::success_k;
         // Every kernel takes its width from the geometry, so a narrower group would be over-read.
-        if (group.columns != dimensions()) return status_t::config_mismatch_k;
-        if (failed(context.reserve_queries(scan_staged_bytes(group.rows)))) return status_t::bad_alloc_k;
+        if (group.columns != dimensions()) return status_code_t::config_mismatch_k;
+        if (failed(context.reserve_queries(scan_staged_bytes(group.rows)))) return status_code_t::out_of_memory_k;
         byte_t* const packs = context.staged_queries.data() +
                               staged_rows_bytes(vector_dtype_k, group.rows, group.columns);
         return scan_queries_(import_rows_(group, 0, group.rows, context), packs, admits, keep, context,
@@ -6056,7 +6061,7 @@ struct ram_index {
                            node_id_t first_invisible_id) noexcept {
         std::size_t const columns = queries.extent(0);
         if (failed(context.reserve_scan(columns, scan_scorer_t::step_rows_k, scan_scorer_t::dots_columns_k)))
-            return status_t::bad_alloc_k;
+            return status_code_t::out_of_memory_k;
         std::span<vector_norms_t> const query_norms {context.query_norms.data(), columns};
         std::span<distance_t> const thresholds {context.thresholds.data(), columns};
         for (std::size_t column = 0; column != columns; ++column)
@@ -6065,7 +6070,7 @@ struct ram_index {
         pack_queries_(queries, packs, cache_bytes);
         scan_rows_({0, first_invisible_id}, queries, query_norms, packs, thresholds, admits, keep, context,
                    cache_bytes);
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Bytes a stored row takes in the chunks, padded to whole kit tasks. */
@@ -6312,7 +6317,7 @@ struct ram_index {
             landmarks_norms[landmarks_in_batch] = norm_for(landmark_location);
             ++landmarks_in_batch;
         }
-        if (!landmarks_in_batch) return {walk_step_t::exhausted_k, status_t::success_k};
+        if (!landmarks_in_batch) return {walk_step_t::exhausted_k, status_code_t::success_k};
 
         // Pad the tail lanes with lane zero; the padded outputs are never consumed.
         for (candidates_count_t lane = landmarks_in_batch; lane != landmarks_ids.size(); ++lane) {
@@ -6331,7 +6336,7 @@ struct ram_index {
         // re-scores them and this is their one chance to be absorbed.
         if (fold.absorb(scored, std::span<dot_result_t const>(landmark_scores.dots).first(landmarks_in_batch)) ==
             walk_demand_t::sated_k)
-            return {walk_step_t::sated_k, status_t::success_k};
+            return {walk_step_t::sated_k, status_code_t::success_k};
         settle_fold(fold);
         network_sort(scored, closer_scored_node_t {});
         std::span<scored_node_t> admitted = scored;
@@ -6341,7 +6346,7 @@ struct ram_index {
         for (std::size_t lane = 0; lane != admitted.size(); ++lane)
             if (status_t const queued = frontier.insert(scored_node_t(admitted[lane])); failed(queued))
                 return {walk_step_t::advanced_k, queued};
-        return {walk_step_t::advanced_k, status_t::success_k};
+        return {walk_step_t::advanced_k, status_code_t::success_k};
     }
 
     /**
@@ -6391,7 +6396,7 @@ struct ram_index {
             auto const [seeding, seed_status] = sample_landmarks<synchronization_>(
                 query, query_norms, admission, expansion_factor, context, seeds, fold, rescoring);
             if (failed(seed_status)) return seed_status;
-            if (seeding == walk_step_t::sated_k) return status_t::success_k;
+            if (seeding == walk_step_t::sated_k) return status_code_t::success_k;
             if (seeding == walk_step_t::exhausted_k) break; // Everything published is already visited.
         }
 
@@ -6407,7 +6412,7 @@ struct ram_index {
                 auto const [seeding, seed_status] = sample_landmarks<synchronization_>(
                     query, query_norms, admission, expansion_factor, context, seeds, fold, rescoring);
                 if (failed(seed_status)) return seed_status;
-                if (seeding == walk_step_t::sated_k) return status_t::success_k;
+                if (seeding == walk_step_t::sated_k) return status_code_t::success_k;
                 if (seeding == walk_step_t::exhausted_k) break; // Nothing fresh left to restart from.
                 ++context.restarts;
                 continue;
@@ -6533,7 +6538,7 @@ struct ram_index {
                 // including what the candidates reject, and never decides where the walk routes.
                 if (fold.absorb(scored, std::span<dot_result_t const>(gathered_scores.dots).first(gathered_count)) ==
                     walk_demand_t::sated_k)
-                    return status_t::success_k;
+                    return status_code_t::success_k;
                 network_sort(scored, closer_scored_node_t {});
                 std::span<scored_node_t> admitted = scored;
                 if constexpr (std::is_same_v<rescoring_type_, single_zero_rescoring_t>)
@@ -6560,7 +6565,7 @@ struct ram_index {
             }
             settle_fold(fold);
         }
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
 #pragma endregion Search
@@ -6694,11 +6699,11 @@ struct ram_cursor {
     /** Sizes the staging for the index's connectivity through @p allocator - the index's
      *  traversals-side family by default; call once before any @c seek. */
     status_t reserve(allocator_t allocator = {}) noexcept {
-        if (staged_neighbors_.size() >= connectivity_) return status_t::success_k;
+        if (staged_neighbors_.size() >= connectivity_) return status_code_t::success_k;
         auto staged = ids_tensor_t::zeros({connectivity_}, ids_allocator_t(allocator));
-        if (!staged) return status_t::bad_alloc_k;
+        if (!staged) return status_code_t::out_of_memory_k;
         staged_neighbors_ = std::move(staged.value);
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Nodes visible to this cursor; IDs strictly below are readable. */
@@ -6737,8 +6742,8 @@ struct ram_cursor {
      *  - @c contended_k The index forgot @p node since the snapshot: a clear or a split emptied it.
      */
     status_t seek(node_id_t node) noexcept {
-        if (node >= visible_count_) return status_t::malformed_k;
-        if (staged_neighbors_.size() < connectivity_) return status_t::uninitialized_k;
+        if (node >= visible_count_) return status_code_t::malformed_k;
+        if (staged_neighbors_.size() < connectivity_) return status_code_t::uninitialized_k;
         location_t const location = index_t::chunk_schedule_t::locate(node);
         node_ids_view_t const row = index_.neighbors_for(location);
         // Slot 0 is the lock word: acquire it exactly once and never re-read it, so a fresh lock
@@ -6751,7 +6756,7 @@ struct ram_cursor {
                 first_value = atomic_ref<node_id_t const>(row[0]).load(std::memory_order_acquire);
             }
             // Forgetting drops the watermark before it refills the rows with the lock sentinel.
-            if (first_value == node_id_unknown_k) return status_t::contended_k;
+            if (first_value == node_id_unknown_k) return status_code_t::contended_k;
         }
         else first_value = row[0];
         current_ = node;
@@ -6771,7 +6776,7 @@ struct ram_cursor {
             while (live != connectivity_ && staged_neighbors_[live] != node_id_unknown_k) ++live;
             staged_count_ = live;
         }
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Moves to the next ID below the snapshot, or past the end; a staging refusal parks on the
@@ -6801,7 +6806,7 @@ struct ram_cursor {
      *  - @c malformed_k The neighbor is at or past this cursor's snapshot.
      */
     status_t follow(candidates_count_t slot) noexcept {
-        if (slot >= staged_count_) return status_t::malformed_k;
+        if (slot >= staged_count_) return status_code_t::malformed_k;
         return seek(staged_neighbors_[slot]);
     }
 };

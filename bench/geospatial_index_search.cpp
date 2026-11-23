@@ -44,35 +44,35 @@ using namespace unum::usearch::tools;
 
 /** A uniform real in @b [0,1) from the top 53 random bits. */
 template <typename generator_type_>
-f64_t uniform_unit(generator_type_& generator) noexcept {
-    return static_cast<f64_t>(generator() >> 11) * 0x1p-53;
+util::f64_t uniform_unit(generator_type_& generator) noexcept {
+    return static_cast<util::f64_t>(generator() >> 11) * 0x1p-53;
 }
 
 /** Draws @p count GeoNames-like places from @p seed, as the file's docblock describes. */
-inline std::vector<usearch_geospatial_observation_t> generate_places(std::size_t count, u64_t seed) {
-    constexpr f64_t nan_k = std::numeric_limits<f64_t>::quiet_NaN();
-    constexpr f64_t degrees_k = 180.0 / 3.14159265358979323846;
+inline std::vector<usearch_geospatial_observation_t> generate_places(std::size_t count, util::u64_t seed) {
+    constexpr util::f64_t nan_k = std::numeric_limits<util::f64_t>::quiet_NaN();
+    constexpr util::f64_t degrees_k = 180.0 / 3.14159265358979323846;
     constexpr std::size_t places_per_town_k = 64;
-    constexpr f64_t spread_degrees_k = 0.02;
+    constexpr util::f64_t spread_degrees_k = 0.02;
     split_mix_generator_t random_generator {seed};
-    std::size_t const towns = max_of<std::size_t>(1, count / places_per_town_k);
-    std::vector<std::array<f64_t, 2>> centres(towns);
-    for (std::array<f64_t, 2>& centre : centres)
+    std::size_t const towns = util::max_of<std::size_t>(1, count / places_per_town_k);
+    std::vector<std::array<util::f64_t, 2>> centres(towns);
+    for (std::array<util::f64_t, 2>& centre : centres)
         centre = {std::asin(2 * uniform_unit(random_generator) - 1) * degrees_k,
                   360 * uniform_unit(random_generator) - 180};
     std::vector<usearch_geospatial_observation_t> places(count);
     for (usearch_geospatial_observation_t& place : places) {
         // A log-uniform rank draws a town in inverse proportion to its rank.
-        std::size_t const town = min_of(
+        std::size_t const town = util::min_of(
             towns - 1,
-            static_cast<std::size_t>(std::pow(static_cast<f64_t>(towns), uniform_unit(random_generator))) - 1);
+            static_cast<std::size_t>(std::pow(static_cast<util::f64_t>(towns), uniform_unit(random_generator))) - 1);
         // The sum of three uniforms approximates a normal offset.
-        f64_t offsets[2];
-        for (f64_t& offset : offsets)
+        util::f64_t offsets[2];
+        for (util::f64_t& offset : offsets)
             offset = spread_degrees_k * (uniform_unit(random_generator) + uniform_unit(random_generator) +
                                          uniform_unit(random_generator) - 1.5);
-        f64_t const latitude = min_of(90.0, max_of(-90.0, centres[town][0] + offsets[0]));
-        f64_t const longitude = centres[town][1] + offsets[1];
+        util::f64_t const latitude = util::min_of(90.0, util::max_of(-90.0, centres[town][0] + offsets[0]));
+        util::f64_t const longitude = centres[town][1] + offsets[1];
         place = {latitude, longitude > 180 ? longitude - 360 : longitude,
                  nan_k,    nan_k,
                  nan_k,    nan_k,
@@ -84,11 +84,11 @@ inline std::vector<usearch_geospatial_observation_t> generate_places(std::size_t
 }
 
 /** The signed degrees @p text spells, or NaN when it spells none. */
-inline f64_t degrees_of(std::string_view text) noexcept {
+inline util::f64_t degrees_of(std::string_view text) noexcept {
     // Text values view the tail of their `argv` entry, so `strtod` stops at its terminator.
     char* end = nullptr;
-    f64_t const degrees = std::strtod(text.data(), &end);
-    return !text.empty() && end == text.data() + text.size() ? degrees : std::numeric_limits<f64_t>::quiet_NaN();
+    util::f64_t const degrees = std::strtod(text.data(), &end);
+    return !text.empty() && end == text.data() + text.size() ? degrees : std::numeric_limits<util::f64_t>::quiet_NaN();
 }
 
 /** Runs the geospatial search benchmark over the flags in @p argv. */
@@ -126,7 +126,7 @@ int bench_geospatial_index_search(int argc, char const* const* argv) {
     mapped_rows_t observations_file;
     std::vector<usearch_geospatial_observation_t> places;
     std::span<usearch_geospatial_observation_t const> observations;
-    constexpr std::size_t columns_k = sizeof(usearch_geospatial_observation_t) / sizeof(f64_t);
+    constexpr std::size_t columns_k = sizeof(usearch_geospatial_observation_t) / sizeof(util::f64_t);
     if (!observations_path.empty()) {
         auto [file, read_status] = mapped_rows_t::open(observations_path);
         if (failed(read_status) || file.scalar() != usearch_scalar_f64_k || file.columns() != columns_k)
@@ -147,7 +147,7 @@ int bench_geospatial_index_search(int argc, char const* const* argv) {
     mapped_rows_t terrain_file;
     usearch_geospatial_terrain_t terrain {};
     if (!terrain_path.empty()) {
-        f64_t const north = degrees_of(terrain_north_text), west = degrees_of(terrain_west_text);
+        util::f64_t const north = degrees_of(terrain_north_text), west = degrees_of(terrain_west_text);
         if (std::isnan(north) || std::isnan(west) || !(terrain_step > 0))
             return fmt::println(stderr,
                                 "--terrain needs --terrain-north, --terrain-west and a positive --terrain-step"),
@@ -172,8 +172,9 @@ int bench_geospatial_index_search(int argc, char const* const* argv) {
                             observations.size(), search.queries.value),
                1;
     std::size_t const query_first = observations.size() - search.queries.value;
-    std::size_t const base_count = search.max_base_entries.value ? min_of(search.max_base_entries.value, query_first)
-                                                                 : query_first;
+    std::size_t const base_count = search.max_base_entries.value
+                                       ? util::min_of(search.max_base_entries.value, query_first)
+                                       : query_first;
     fmt::println("- Observations: {} · relation: {} · radius: {} m · terrain: {} × {} heights",
                  observations_path.empty() ? std::string_view {"GeoNames-like"} : observations_path, relation_text,
                  radius_metres, terrain.rows, terrain.columns);
@@ -181,7 +182,7 @@ int bench_geospatial_index_search(int argc, char const* const* argv) {
     geospatial_geometry_t const geometry {{search.connectivity.value}, terrain};
     geospatial_queries_t const queries {observations.data() + query_first,
                                         relation,
-                                        {radius_metres, std::numeric_limits<f64_t>::infinity()}};
+                                        {radius_metres, std::numeric_limits<util::f64_t>::infinity()}};
     return run_search_bench<geospatial_verbs_t>(settings, search, geometry, geometry, observations.data(), base_count,
                                                 queries, search.queries.value, settings.checkpoint);
 }

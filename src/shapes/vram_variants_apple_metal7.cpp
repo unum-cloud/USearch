@@ -12,7 +12,7 @@
  */
 #include "shapes_specializations.cuh"
 
-template struct us::shapes::vram_apple_index<nk::f16_t, u32_t>;
-template struct us::shapes::vram_apple_kits<nk::f16_t, u32_t>;
+template struct us::shapes::vram_apple_index<nk::f16_t, util::u32_t>;
+template struct us::shapes::vram_apple_kits<nk::f16_t, util::u32_t>;
 
 template struct basic_class_tables<shapes_traits_t, vendored_residency_t::vram_apple_k, gpu_class_t::apple_metal7_k>;

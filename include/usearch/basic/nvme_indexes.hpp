@@ -292,7 +292,7 @@ class nvme_indexes {
      *  @par Statuses:
      *  - @c uninitialized_k Nothing is viewed, or the executor holds no threads or pool workers.
      *  - @c shape_mismatch_k An output's or the shown coordinates' length disagrees.
-     *  - @c bad_alloc_k The arenas cannot hold the scratch.
+     *  - @c out_of_memory_k The arenas cannot hold the scratch.
      *  - @c contended_k Another call holds the executor, or its pool is running another dispatch.
      *  - @c config_mismatch_k A medium the engines cannot read.
      *  - @c io_k A read came back short.
@@ -330,7 +330,7 @@ class nvme_indexes {
             !safegraphs_key_widens(columns.keys.dtype, safegraphs_key_dtype<key_t>()) ||
             columns.neighbors.dtype != safegraphs_node_id_dtype<node_id_t>() ||
             (!metric.empty() && !persisted.metric.empty() && persisted.metric.view() != metric))
-            return status_t::config_mismatch_k;
+            return status_code_t::config_mismatch_k;
         return catalog_t::open_part_(std::move(file), columns, chunk, allocator_, medium, part);
     }
 
@@ -338,8 +338,8 @@ class nvme_indexes {
      *  thread, then the parts open on the executor's threads, one at a time per thread. */
     status_t view_(std::string_view checkpoint, std::span<std::string_view const> paths, std::string_view metric,
                    executor_t& executor) noexcept {
-        if (checkpoint.empty()) return status_t::invalid_argument_k;
-        if (names_transport_id(checkpoint)) return status_t::unsupported_k;
+        if (checkpoint.empty()) return status_code_t::invalid_argument_k;
+        if (names_transport_id(checkpoint)) return status_code_t::unsupported_k;
         std::array<byte_t, safegraphs_prefix_t::magic_k.size()> magic {};
         {
             auto [file, open_status] = file_medium_t::open(checkpoint);
@@ -351,23 +351,23 @@ class nvme_indexes {
         growing_buffer<char, forkunion_allocator_t> names {allocator_};
         growing_buffer<iota_view<std::size_t>, forkunion_allocator_t> entries {allocator_};
         if (std::memcmp(magic.data(), safegraphs_prefix_t::magic_k.data(), magic.size()) == 0) {
-            if (failed(entries.push_back(iota_view<std::size_t> {0, 0}))) return status_t::bad_alloc_k;
+            if (failed(entries.push_back(iota_view<std::size_t> {0, 0}))) return status_code_t::out_of_memory_k;
         }
         else {
-            status_t kept = status_t::success_k;
+            status_t kept = status_code_t::success_k;
             auto per_part = [&](safegraphs_part_t entry) noexcept {
                 std::size_t const first = names.size();
                 for (char const character : entry.path)
-                    if (failed(names.push_back(character))) kept = status_t::bad_alloc_k;
+                    if (failed(names.push_back(character))) kept = status_code_t::out_of_memory_k;
                 if (failed(entries.push_back(iota_view<std::size_t> {first, names.size()})))
-                    kept = status_t::bad_alloc_k;
+                    kept = status_code_t::out_of_memory_k;
             };
             auto const [summary, summary_status] = safegraphs_read_manifest(checkpoint, allocator_, per_part);
             if (failed(summary_status)) return summary_status;
             if (failed(kept)) return kept;
-            if (entries.empty()) return status_t::malformed_k;
+            if (entries.empty()) return status_code_t::malformed_k;
         }
-        if (!paths.empty() && paths.size() != entries.size()) return status_t::config_mismatch_k;
+        if (!paths.empty() && paths.size() != entries.size()) return status_code_t::config_mismatch_k;
 
         // Every resolved path goes into one buffer, terminated for the OS, so the threads read them
         // as they are.
@@ -376,13 +376,13 @@ class nvme_indexes {
         growing_buffer<char, forkunion_allocator_t> resolved {allocator_};
         growing_buffer<char, forkunion_allocator_t> resolved_paths {allocator_};
         growing_buffer<iota_view<std::size_t>, forkunion_allocator_t> resolved_entries {allocator_};
-        if (failed(resolved_entries.reserve_exactly(entries.size()))) return status_t::bad_alloc_k;
+        if (failed(resolved_entries.reserve_exactly(entries.size()))) return status_code_t::out_of_memory_k;
         for (std::size_t part = 0; part != entries.size(); ++part) {
             std::string_view const relative = entries[part].empty()
                                                   ? checkpoint_name
                                                   : std::string_view {names.data() + entries[part].first,
                                                                       entries[part].size()};
-            status_t joined = status_t::success_k;
+            status_t joined = status_code_t::success_k;
             if (paths.empty())
                 joined = entries[part].empty() ? nvme_join_path_(resolved, {}, checkpoint)
                                                : nvme_join_path_(resolved, checkpoint_directory, relative);
@@ -395,23 +395,24 @@ class nvme_indexes {
             if (failed(joined)) return joined;
             std::size_t const first = resolved_paths.size();
             for (char const character : resolved)
-                if (failed(resolved_paths.push_back(character))) return status_t::bad_alloc_k;
+                if (failed(resolved_paths.push_back(character))) return status_code_t::out_of_memory_k;
             resolved_entries.push_back_reserved(iota_view<std::size_t> {first, resolved_paths.size() - 1});
         }
 
         if (failed(media_.resize(entries.size())) || failed(parts_.resize(entries.size())))
-            return status_t::bad_alloc_k;
+            return status_code_t::out_of_memory_k;
         auto [claim, claim_status] = executor.claim();
         if (failed(claim_status)) return claim_status;
         if (status_t const reserved = executor.reserve(catalog_t::scan_chunk_bytes_k + default_alignment_k, 0, 0);
             failed(reserved))
             return reserved;
         alignas(default_alignment_k) std::size_t cursor = 0;
-        status_t failure = status_t::success_k;
+        status_t failure = status_code_t::success_k;
         auto open_parts = [&](std::size_t thread, std::size_t) noexcept {
             growing_buffer<u64_t, scratch_allocator_t> chunk {scratch_allocator_t {executor.arena(thread)}};
             status_t opened = chunk.resize_uninitialized(catalog_t::scan_chunk_bytes_k / sizeof(u64_t));
-            while (succeeded(opened) && succeeded(atomic_ref<status_t>(failure).load(std::memory_order_relaxed))) {
+            while (succeeded(opened) &&
+                   succeeded(atomic_ref<status_code_t>(failure.code).load(std::memory_order_relaxed))) {
                 std::size_t const part = atomic_ref<std::size_t>(cursor).fetch_add(1, std::memory_order_relaxed);
                 if (part >= parts_.size()) return;
                 std::string_view const path {resolved_paths.data() + resolved_entries[part].first,

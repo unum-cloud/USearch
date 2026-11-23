@@ -210,11 +210,11 @@ class growing_hash_set {
      */
     status_t reserve(std::size_t new_capacity) noexcept {
         new_capacity = (new_capacity * 5u) / 3u;
-        if (new_capacity <= capacity_) return status_t::success_k;
+        if (new_capacity <= capacity_) return status_code_t::success_k;
 
         new_capacity = ceil2(new_capacity);
         element_t* new_slots = (element_t*)allocator_.allocate(new_capacity * sizeof(element_t));
-        if (!new_slots) return status_t::bad_alloc_k;
+        if (!new_slots) return status_code_t::out_of_memory_k;
 
         std::memset((void*)new_slots, 0xFF, new_capacity * sizeof(element_t));
         std::size_t new_count = count_;
@@ -230,7 +230,7 @@ class growing_hash_set {
         slots_ = new_slots;
         capacity_ = new_capacity;
         count_ = new_count;
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 };
 
@@ -333,7 +333,7 @@ class chunked_multimap {
      *  - @c overflow_k @p nodes passes the nodes the chunks can ever hold.
      */
     status_t reserve(std::size_t nodes) noexcept {
-        if (nodes > max_slots_k / 2) return status_t::overflow_k;
+        if (nodes > max_slots_k / 2) return status_code_t::overflow_k;
         // The control bytes first: a reader acquires the slots before the states, and stops at the
         // first missing.
         if (status_t const covered = states_.cover(nodes * 2); failed(covered)) return covered;
@@ -563,12 +563,12 @@ class fingerprint_multimap {
      *  @brief Sizes the table for @p nodes nodes and empties it, dropping whatever it held.
      *
      *  @par Statuses:
-     *  - @c bad_alloc_k The slots could not be allocated.
+     *  - @c out_of_memory_k The slots could not be allocated.
      */
     status_t reserve(std::size_t nodes) noexcept {
-        if (failed(entries_.resize_uninitialized(slots_for(nodes)))) return status_t::bad_alloc_k;
+        if (failed(entries_.resize_uninitialized(slots_for(nodes)))) return status_code_t::out_of_memory_k;
         std::memset(entries_.data(), 0xFF, entries_.size() * sizeof(u64_t));
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Files @p node under @p fingerprint, beside any number of threads filing others. */

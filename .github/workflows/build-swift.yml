@@ -85,26 +85,26 @@ jobs:
           for arch in arm64 x86_64; do
             slice "macos_$arch" -D CMAKE_OSX_ARCHITECTURES=$arch
             slice "catalyst_$arch" -D USEARCH_SWIFT_SDK=maccatalyst -D CMAKE_OSX_ARCHITECTURES=$arch \
-              -D "CMAKE_C_FLAGS=-target $arch-apple-ios18.0-macabi" -D "CMAKE_CXX_FLAGS=-target $arch-apple-ios18.0-macabi"
+              -D "CMAKE_C_FLAGS=-target $arch-apple-ios26.0-macabi" -D "CMAKE_CXX_FLAGS=-target $arch-apple-ios26.0-macabi"
             slice "iossim_$arch" -D CMAKE_SYSTEM_NAME=iOS -D CMAKE_OSX_SYSROOT=iphonesimulator \
-              -D USEARCH_SWIFT_SDK=iphonesimulator -D CMAKE_OSX_ARCHITECTURES=$arch -D CMAKE_OSX_DEPLOYMENT_TARGET=18.0 $no_sme
+              -D USEARCH_SWIFT_SDK=iphonesimulator -D CMAKE_OSX_ARCHITECTURES=$arch -D CMAKE_OSX_DEPLOYMENT_TARGET=26.0 $no_sme
             slice "tvossim_$arch" -D CMAKE_SYSTEM_NAME=tvOS -D CMAKE_OSX_SYSROOT=appletvsimulator \
-              -D USEARCH_SWIFT_SDK=appletvsimulator -D CMAKE_OSX_ARCHITECTURES=$arch -D CMAKE_OSX_DEPLOYMENT_TARGET=18.0 $no_sme
+              -D USEARCH_SWIFT_SDK=appletvsimulator -D CMAKE_OSX_ARCHITECTURES=$arch -D CMAKE_OSX_DEPLOYMENT_TARGET=26.0 $no_sme
             slice "watchsim_$arch" -D CMAKE_SYSTEM_NAME=watchOS -D CMAKE_OSX_SYSROOT=watchsimulator \
-              -D USEARCH_SWIFT_SDK=watchsimulator -D CMAKE_OSX_ARCHITECTURES=$arch -D CMAKE_OSX_DEPLOYMENT_TARGET=11.0 $no_sme
+              -D USEARCH_SWIFT_SDK=watchsimulator -D CMAKE_OSX_ARCHITECTURES=$arch -D CMAKE_OSX_DEPLOYMENT_TARGET=26.0 $no_sme
             slice "xrsim_$arch" -D CMAKE_SYSTEM_NAME=visionOS -D CMAKE_OSX_SYSROOT=xrsimulator \
-              -D USEARCH_SWIFT_SDK=xrsimulator -D CMAKE_OSX_ARCHITECTURES=$arch -D CMAKE_OSX_DEPLOYMENT_TARGET=2.0 $no_sme
+              -D USEARCH_SWIFT_SDK=xrsimulator -D CMAKE_OSX_ARCHITECTURES=$arch -D CMAKE_OSX_DEPLOYMENT_TARGET=26.0 $no_sme
           done
           slice watchos_arm64_32 -D CMAKE_SYSTEM_NAME=watchOS -D CMAKE_OSX_SYSROOT=watchos -D USEARCH_SWIFT_SDK=watchos \
-            -D CMAKE_OSX_ARCHITECTURES=arm64_32 -D CMAKE_OSX_DEPLOYMENT_TARGET=11.0 $no_sme
+            -D CMAKE_OSX_ARCHITECTURES=arm64_32 -D CMAKE_OSX_DEPLOYMENT_TARGET=26.0 $no_sme
           slice watchos_arm64 -D CMAKE_SYSTEM_NAME=watchOS -D CMAKE_OSX_SYSROOT=watchos -D USEARCH_SWIFT_SDK=watchos \
-            -D CMAKE_OSX_ARCHITECTURES=arm64 -D CMAKE_OSX_DEPLOYMENT_TARGET=11.0
+            -D CMAKE_OSX_ARCHITECTURES=arm64 -D CMAKE_OSX_DEPLOYMENT_TARGET=26.0
           slice ios -D CMAKE_SYSTEM_NAME=iOS -D CMAKE_OSX_SYSROOT=iphoneos -D USEARCH_SWIFT_SDK=iphoneos \
-            -D CMAKE_OSX_ARCHITECTURES=arm64 -D CMAKE_OSX_DEPLOYMENT_TARGET=18.0
+            -D CMAKE_OSX_ARCHITECTURES=arm64 -D CMAKE_OSX_DEPLOYMENT_TARGET=26.0
           slice tvos -D CMAKE_SYSTEM_NAME=tvOS -D CMAKE_OSX_SYSROOT=appletvos -D USEARCH_SWIFT_SDK=appletvos \
-            -D CMAKE_OSX_ARCHITECTURES=arm64 -D CMAKE_OSX_DEPLOYMENT_TARGET=18.0
+            -D CMAKE_OSX_ARCHITECTURES=arm64 -D CMAKE_OSX_DEPLOYMENT_TARGET=26.0
           slice xros -D CMAKE_SYSTEM_NAME=visionOS -D CMAKE_OSX_SYSROOT=xros -D USEARCH_SWIFT_SDK=xros \
-            -D CMAKE_OSX_ARCHITECTURES=arm64 -D CMAKE_OSX_DEPLOYMENT_TARGET=2.0
+            -D CMAKE_OSX_ARCHITECTURES=arm64 -D CMAKE_OSX_DEPLOYMENT_TARGET=26.0
           (cd build_swift && zip -qry ../USearchC.xcframework.zip USearchC.xcframework)
       - name: Upload XCFramework
         uses: actions/upload-artifact@v7

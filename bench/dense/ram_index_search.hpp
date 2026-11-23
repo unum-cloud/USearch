@@ -321,7 +321,7 @@ bool run_refinement(streamed_dataset_type_& streamed, fu_pool_t pool) {
     for (std::size_t pass = 0; pass != max_refines; ++pass) {
         auto [plan, plan_status] = bench.index->plan_refine(config);
         if (failed(plan_status)) {
-            fmt::println("Failed to open refinement round {}: status {}", pass, int(plan_status));
+            fmt::println("Failed to open refinement round {}: status {}", pass, int(plan_status.code));
             return false;
         }
         for (std::unique_ptr<typename bench_t::traversal_t> const& traversal : bench.traversals)
@@ -346,7 +346,7 @@ bool run_refinement(streamed_dataset_type_& streamed, fu_pool_t pool) {
         }
         auto const [pass_result, pass_status] = plan.finish();
         if (failed(pass_status)) {
-            fmt::println("Refinement pass {} failed: status {}", pass, int(pass_status));
+            fmt::println("Refinement pass {} failed: status {}", pass, int(pass_status.code));
             return false;
         }
         changed_per_pass.push_back(pass_result.changed_nodes);
@@ -548,19 +548,22 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const& launch, nk_kernel_ki
             return 1;
         }
         // Every task inserts or searches its one staged row before the thread stages the next.
-        staging = nk::tensor<scalar_t, std::allocator<scalar_t>, 3>::zeros({threads, 1, dimensions}).value;
-        if (staging.empty()) {
+        auto [made, made_status] = nk::tensor<scalar_t, std::allocator<scalar_t>, 3>::zeros({threads, 1, dimensions});
+        if (nk::failed(made_status)) {
             fmt::println("Failed to allocate {} staging rows of {}d {}", threads, dimensions, scalar_t::dtype_name());
             return 1;
         }
+        staging = std::move(made);
         streamed.staging = staging.span();
 
         if constexpr (streamed_t::scaled_k) {
-            rescaling_rows = nk::tensor<nk::f32_t, std::allocator<nk::f32_t>, 3>::zeros({threads, 1, dimensions}).value;
-            if (rescaling_rows.empty()) {
+            auto [rescaling, rescaling_status] = nk::tensor<nk::f32_t, std::allocator<nk::f32_t>, 3>::zeros(
+                {threads, 1, dimensions});
+            if (nk::failed(rescaling_status)) {
                 fmt::println("Failed to allocate {} rescaling rows of {}d f32", threads, dimensions);
                 return 1;
             }
+            rescaling_rows = std::move(rescaling);
             streamed.rescaling = rescaling_rows.span();
             streamed.establish_scale();
         }

@@ -31,11 +31,13 @@
 
 #pragma region Crossings
 
+namespace util = unum::usearch::utilities;
+
 /** Key @p offset of the caller's keys, through their stride; zero repeats the first. */
 inline usearch_key_t key_at(usearch_keys_view_t keys, std::size_t offset) noexcept {
     std::size_t const stride = keys.stride;
     usearch_key_t key;
-    std::memcpy(&key, reinterpret_cast<byte_t const*>(keys.data) + offset * stride, sizeof(key));
+    std::memcpy(&key, reinterpret_cast<util::byte_t const*>(keys.data) + offset * stride, sizeof(key));
     return key;
 }
 
@@ -61,26 +63,28 @@ inline bool known_layout(usearch_tape_layout_t layout) noexcept {
 
 /** Copies the offsets at @p source into @p widened, refusing one past what @c std::size_t holds. */
 template <typename offset_type_>
-status_t widen_offsets(offset_type_ const* source, std::span<std::size_t> widened) noexcept {
+util::status_t widen_offsets(offset_type_ const* source, std::span<std::size_t> widened) noexcept {
     for (std::size_t& offset : widened) {
-        if (*source > (std::numeric_limits<std::size_t>::max)()) return status_t::overflow_k;
+        if (*source > (std::numeric_limits<std::size_t>::max)()) return util::status_code_t::overflow_k;
         offset = static_cast<std::size_t>(*source++);
     }
-    return status_t::success_k;
+    return util::status_code_t::success_k;
 }
 
 /** The @p count + 1 offsets of the caller's @p tape as the engines read them: a u64 tape's in place
  *  where @c std::size_t matches it, and any other widened onto @p pages. */
-inline expected<std::span<std::size_t const>> offsets_of(usearch_tape_view_t const& tape, std::size_t count,
-                                                         growing_arena<forkunion_allocator_t>& pages) noexcept {
-    if constexpr (sizeof(std::size_t) == sizeof(u64_t))
+inline util::expected<std::span<std::size_t const>> offsets_of(
+    usearch_tape_view_t const& tape, std::size_t count,
+    util::growing_arena<util::forkunion_allocator_t>& pages) noexcept {
+    if constexpr (sizeof(std::size_t) == sizeof(util::u64_t))
         if (tape.layout == usearch_tape_u64_k)
-            return {{reinterpret_cast<std::size_t const*>(tape.offsets.u64), count + 1}, status_t::success_k};
+            return {{reinterpret_cast<std::size_t const*>(tape.offsets.u64), count + 1},
+                    util::status_code_t::success_k};
     std::size_t* const widened = carve<std::size_t>(pages, count + 1);
-    if (!widened) return {{}, status_t::bad_alloc_k};
+    if (!widened) return {{}, util::status_code_t::out_of_memory_k};
     std::span<std::size_t> const offsets {widened, count + 1};
-    status_t const status = tape.layout == usearch_tape_u64_k ? widen_offsets(tape.offsets.u64, offsets)
-                                                              : widen_offsets(tape.offsets.u32, offsets);
+    util::status_t const status = tape.layout == usearch_tape_u64_k ? widen_offsets(tape.offsets.u64, offsets)
+                                                                    : widen_offsets(tape.offsets.u32, offsets);
     return {offsets, status};
 }
 
@@ -89,8 +93,9 @@ inline expected<std::span<std::size_t const>> offsets_of(usearch_tape_view_t con
 inline void write_output_tape(void const* data, std::size_t const* offsets, usearch_scalar_t scalar,
                               usearch_tape_view_t& tape) noexcept {
     tape = {data, usearch_tape_u64_k, {}, scalar};
-    if constexpr (sizeof(std::size_t) == sizeof(u64_t)) tape.offsets.u64 = reinterpret_cast<u64_t const*>(offsets);
-    else tape.layout = usearch_tape_u32_k, tape.offsets.u32 = reinterpret_cast<u32_t const*>(offsets);
+    if constexpr (sizeof(std::size_t) == sizeof(util::u64_t))
+        tape.offsets.u64 = reinterpret_cast<util::u64_t const*>(offsets);
+    else tape.layout = usearch_tape_u32_k, tape.offsets.u32 = reinterpret_cast<util::u32_t const*>(offsets);
 }
 
 /** Raises @p word to @p value, if it is larger, from any thread, through the CPU class's reference;
@@ -144,8 +149,9 @@ inline std::size_t elements_in(caller_tape_t const& tape) noexcept {
 }
 
 /** Lowers the @p count entries of the caller's @p tape, widening its offsets onto @p pages. */
-inline expected<counted_tape_t> counted_tape_of(usearch_tape_view_t const& tape, std::size_t count,
-                                                growing_arena<forkunion_allocator_t>& pages) noexcept {
+inline util::expected<counted_tape_t> counted_tape_of(
+    usearch_tape_view_t const& tape, std::size_t count,
+    util::growing_arena<util::forkunion_allocator_t>& pages) noexcept {
     auto const [offsets, status] = offsets_of(tape, count, pages);
     return {{tape.data, offsets, tape.scalar}, status};
 }
@@ -157,8 +163,8 @@ inline std::string_view chars_at(counted_tape_t const& tape, std::size_t entry) 
 }
 
 /** The entries of the caller's byte tape @p tape, as the engines read tapes. */
-inline tape_view<byte_t const> bytes_tape_of(counted_tape_t const& tape) noexcept {
-    return {static_cast<byte_t const*>(tape.elements), tape.offsets};
+inline util::tape_view<util::byte_t const> bytes_tape_of(counted_tape_t const& tape) noexcept {
+    return {static_cast<util::byte_t const*>(tape.elements), tape.offsets};
 }
 
 /** Where a radius walk writes: a tape of matches per query in the arena, and how many it wrote. */
@@ -176,8 +182,8 @@ struct reserve_capacity_t {
 };
 
 /** What a basic SAMPLE reads and writes, in the keys every basic index stores. */
-using basic_sample_inputs_t = sample_inputs<us::utilities::uuid128_t>;
-using basic_sample_outputs_t = sample_outputs<us::utilities::uuid128_t>;
+using basic_sample_inputs_t = util::sample_inputs<util::uuid128_t>;
+using basic_sample_outputs_t = util::sample_outputs<util::uuid128_t>;
 
 /** What a modality's verbs do to one variant beyond its index: adopting a geometry, describing it,
  *  and writing, keeping and tallying its values; each modality's specializations define it
@@ -210,24 +216,24 @@ struct basic_verbs {
 
     /** The kind the variant's kernels fix, as the modality's C enumerator, or zero where it scores
      *  any. */
-    u32_t metric;
+    util::u32_t metric;
 
     // Lifetime
 
     /** Builds an unplaced variant of @p geometry, which adopts @p adopted: a host one keeping its
      *  tables through @p tables, a device one on @p residency 's device. */
-    expected<void*> (*create)(geometry_t geometry, typename traits_type_::geometry_extras_t const& adopted,
-                              arena_residency_t residency, forkunion_allocator_t tables) noexcept;
+    util::expected<void*> (*create)(geometry_t geometry, typename traits_type_::geometry_extras_t const& adopted,
+                                    arena_residency_t residency, util::forkunion_allocator_t tables) noexcept;
     void (*destroy)(void* variant) noexcept;
     void (*bound_shards)(void* variant, std::size_t nodes) noexcept;
 
     /** Appends one shard on a device, or on RAM on @p memory_domain. */
-    status_t (*emplace)(void* variant, arena_residency_t residency, fu_memory_domain_id_t memory_domain) noexcept;
+    util::status_t (*emplace)(void* variant, arena_residency_t residency, fu_memory_domain_id_t memory_domain) noexcept;
 
     /** Serves a checkpoint in place, an NVMe view through @p executor, which a host variant does
      *  without. */
-    status_t (*view)(void* variant, std::string_view path, std::span<std::string_view const> paths,
-                     executor_t* executor) noexcept;
+    util::status_t (*view)(void* variant, std::string_view path, std::span<std::string_view const> paths,
+                           executor_t* executor) noexcept;
 
     // Shape
 
@@ -244,82 +250,89 @@ struct basic_verbs {
     // Writes
 
     /** Whether the variant takes writes, which a view refuses with @c read_only_k. */
-    status_t (*serves_writes)(void const* variant) noexcept;
-    status_t (*reserve)(void* variant, reserve_capacity_t capacity) noexcept;
-    status_t (*clear)(void* variant) noexcept;
-    expected<traversal_stats_t> (*insert)(void* variant, usearch_keys_view_t keys, values_t values,
-                                          insert_config_t config, executor_t& executor,
-                                          progress_ticks_t& ticks) noexcept;
+    util::status_t (*serves_writes)(void const* variant) noexcept;
+    util::status_t (*reserve)(void* variant, reserve_capacity_t capacity) noexcept;
+    util::status_t (*clear)(void* variant) noexcept;
+    util::expected<util::traversal_stats_t> (*insert)(void* variant, usearch_keys_view_t keys, values_t values,
+                                                      insert_config_t config, executor_t& executor,
+                                                      progress_ticks_t& ticks) noexcept;
 
     // Refining
 
     /** Audits the reachability of every shard. */
-    expected<reachability_t> (*health)(void* variant, executor_t& executor) noexcept;
+    util::expected<util::reachability_t> (*health)(void* variant, executor_t& executor) noexcept;
 
     // Plans
 
     /** Opens a refine plan of rounds over the variant's shards. */
-    expected<void*> (*refine_plan_open)(void* variant, refine_config_t config, executor_t& executor) noexcept;
+    util::expected<void*> (*refine_plan_open)(void* variant, refine_config_t config, executor_t& executor) noexcept;
 
     /** Opens a reshard plan moving the entries of @p sources into @p targets, then running the
      *  rounds of every target that took entries; the plan keeps its own lists. */
-    expected<void*> (*reshard_plan_open)(variants_view_t sources, variants_view_t targets, reshard_options_t options,
-                                         executor_t& executor) noexcept;
+    util::expected<void*> (*reshard_plan_open)(variants_view_t sources, variants_view_t targets,
+                                               reshard_options_t options, executor_t& executor) noexcept;
     plan_verbs<executor_t> refine_plan;
     plan_verbs<executor_t> reshard_plan;
 
     // Lookups
-    status_t (*count)(void* variant, usearch_key_t key, typename traits_type_::key_stats_t& stats,
-                      executor_t& executor) noexcept;
+    util::status_t (*count)(void* variant, usearch_key_t key, typename traits_type_::key_stats_t& stats,
+                            executor_t& executor) noexcept;
 
     /** Writes the entries of @p key to @p outputs, carved from @p memory; answers how many. */
-    expected<std::size_t> (*get)(void* variant, usearch_key_t key, get_outputs_t outputs,
-                                 growing_arena<forkunion_allocator_t>& memory, executor_t& executor) noexcept;
+    util::expected<std::size_t> (*get)(void* variant, usearch_key_t key, get_outputs_t outputs,
+                                       util::growing_arena<util::forkunion_allocator_t>& memory,
+                                       executor_t& executor) noexcept;
 
     // Walks
 
     /** Whether the variant serves @p queries, past what the traits check without it. */
-    status_t (*serves_search)(void const* variant, queries_t const& queries) noexcept;
+    util::status_t (*serves_search)(void const* variant, queries_t const& queries) noexcept;
 
     /** A device walk stages its queries on the arena's host @p pages, where it writes its
      *  matches; a variant whose walks take no @p hints refuses them with @c unsupported_k. */
-    expected<traversal_stats_t> (*search)(void* variant, queries_t queries, usearch_matches_view_t const* hints,
-                                          matches_outputs_t& outputs, search_config_t config, predicate_t predicate,
-                                          growing_arena<forkunion_allocator_t>& pages, executor_t& executor,
-                                          progress_ticks_t& ticks) noexcept;
-    status_t (*serves_within)(void const* variant, within_queries_t const& queries,
-                              predicate_t const& predicate) noexcept;
-    expected<traversal_stats_t> (*within)(void* variant, within_queries_t queries, within_outputs_t& outputs,
-                                          search_config_t config, predicate_t predicate,
-                                          growing_arena<forkunion_allocator_t>& memory, executor_t& executor,
-                                          progress_ticks_t& ticks) noexcept;
+    util::expected<util::traversal_stats_t> (*search)(void* variant, queries_t queries,
+                                                      usearch_matches_view_t const* hints, matches_outputs_t& outputs,
+                                                      search_config_t config, predicate_t predicate,
+                                                      util::growing_arena<util::forkunion_allocator_t>& pages,
+                                                      executor_t& executor, progress_ticks_t& ticks) noexcept;
+    util::status_t (*serves_within)(void const* variant, within_queries_t const& queries,
+                                    predicate_t const& predicate) noexcept;
+    util::expected<util::traversal_stats_t> (*within)(void* variant, within_queries_t queries,
+                                                      within_outputs_t& outputs, search_config_t config,
+                                                      predicate_t predicate,
+                                                      util::growing_arena<util::forkunion_allocator_t>& memory,
+                                                      executor_t& executor, progress_ticks_t& ticks) noexcept;
 
     // Exploration
 
     /** Opens a walk over every entry as stored, or breadth-first from @p starts. */
-    expected<void*> (*cursor_init)(void* variant, std::span<usearch_key_t const> starts) noexcept;
+    util::expected<void*> (*cursor_init)(void* variant, std::span<usearch_key_t const> starts) noexcept;
 
     /** Pulls up to @p wanted next keys into @p memory, gathering their links into @p links where
      *  named. */
-    expected<std::span<usearch_key_t const>> (*cursor_next)(void* variant, void* cursor, links_outputs_t* links,
-                                                            std::size_t wanted,
-                                                            growing_arena<forkunion_allocator_t>& memory,
-                                                            executor_t& executor) noexcept;
+    util::expected<std::span<usearch_key_t const>> (*cursor_next)(
+        void* variant, void* cursor, links_outputs_t* links, std::size_t wanted,
+        util::growing_arena<util::forkunion_allocator_t>& memory, executor_t& executor) noexcept;
     void (*cursor_free)(void* cursor) noexcept;
 
     /** Draws up to the outputs' length around the focus keys, beside and placed among the shown
      *  ones, never scanning; a GPU variant does not sample yet. */
-    expected<sample_result_t> (*sample)(void* variant, basic_sample_inputs_t inputs, basic_sample_outputs_t outputs,
-                                        sample_config_t config, executor_t& executor) noexcept;
+    util::expected<util::sample_result_t> (*sample)(void* variant, basic_sample_inputs_t inputs,
+                                                    basic_sample_outputs_t outputs, util::sample_config_t config,
+                                                    executor_t& executor) noexcept;
 
     // Persistence
-    status_t (*load)(void* variant, std::string_view path, executor_t& executor, progress_ticks_t& ticks) noexcept;
-    status_t (*load_buffer)(void* variant, bytes_view_t buffer, executor_t& executor, progress_ticks_t& ticks) noexcept;
-    status_t (*save)(void* variant, std::string_view path, executor_t& executor, progress_ticks_t& ticks) noexcept;
+    util::status_t (*load)(void* variant, std::string_view path, executor_t& executor,
+                           progress_ticks_t& ticks) noexcept;
+    util::status_t (*load_buffer)(void* variant, util::bytes_view_t buffer, executor_t& executor,
+                                  progress_ticks_t& ticks) noexcept;
+    util::status_t (*save)(void* variant, std::string_view path, executor_t& executor,
+                           progress_ticks_t& ticks) noexcept;
 
     /** Writes the checkpoint into @p buffer, exactly @c storage_requirements bytes long. */
-    status_t (*save_buffer)(void* variant, bytes_span_t buffer, executor_t& executor, progress_ticks_t& ticks) noexcept;
-    expected<std::size_t> (*storage_requirements)(void const* variant) noexcept;
+    util::status_t (*save_buffer)(void* variant, util::bytes_span_t buffer, executor_t& executor,
+                                  progress_ticks_t& ticks) noexcept;
+    util::expected<std::size_t> (*storage_requirements)(void const* variant) noexcept;
 };
 
 /** The variants one modality's class unit compiles for one residency: @c find answers the verb
@@ -347,17 +360,17 @@ template <typename traits_type_, vendored_residency_t residency_>
     requires is_gpu_executor<typename punned_basic_index<traits_type_, residency_>::executor_t>
 usearch_executor_t call_executor_for(punned_basic_index<traits_type_, residency_> const& punned,
                                      usearch_executor_handle_t& call_executor, usearch_outcome_t* outcome) noexcept {
-    std::array<arena_residency_t, gpu_devices_capacity_k> residencies;
+    std::array<arena_residency_t, util::gpu_devices_capacity_k> residencies;
     std::size_t devices_count = punned.verbs.devices(punned.variant, residencies);
     if (!devices_count) residencies[devices_count++] = punned.verbs.residency(punned.variant);
-    std::array<int, gpu_devices_capacity_k> devices;
+    std::array<int, util::gpu_devices_capacity_k> devices;
     for (std::size_t device = 0; device != devices_count; ++device)
         devices[device] = static_cast<int>(residencies[device].device);
     using executor_t = typename punned_basic_index<traits_type_, residency_>::executor_t;
     auto [built, status] = executor_t::spawn(driver_of(gpu_drivers(), std::type_identity<executor_t> {}),
                                              std::span<int const> {devices.data(), devices_count});
     if (failed(status)) return propagate_error(status, outcome), nullptr;
-    call_executor.executor.emplace<gpu_executor_t>(std::in_place_type<executor_t>, std::move(built));
+    call_executor.executor.emplace<util::gpu_executor_t>(std::in_place_type<executor_t>, std::move(built));
     return &call_executor;
 }
 
@@ -392,11 +405,13 @@ struct sequence_geometry_t {
     usearch_sequence_metric_t metric = usearch_sequence_metric_unknown_k;
 
     /** The window widths the overlap kind hashes, in bytes; empty for every other kind. */
-    growing_buffer<std::size_t, forkunion_allocator_t> window_widths {forkunion_allocator_t {no_memory_domain_k}};
+    util::growing_buffer<std::size_t, util::forkunion_allocator_t> window_widths {
+        util::forkunion_allocator_t {util::no_memory_domain_k}};
 
     /** The folded substitution costs a checkpoint recorded, one hexadecimal digit per entry row by
      *  row, which a freeze unfolds; empty for a fresh index, whose weights a freeze folds. */
-    growing_buffer<char, forkunion_allocator_t> substitution_costs {forkunion_allocator_t {no_memory_domain_k}};
+    util::growing_buffer<char, util::forkunion_allocator_t> substitution_costs {
+        util::forkunion_allocator_t {util::no_memory_domain_k}};
 
     /** The gap cost a checkpoint recorded beside its substitution costs. */
     std::size_t gap_cost = 0;
@@ -475,9 +490,9 @@ struct sequence_traits_t {
     /** Reads the kind, widths, costs and connectivity @p checkpoint recorded, at a path or in a
      *  buffer: the widths spelled as decimals between commas, the costs kept for a freeze. */
     template <typename checkpoint_type_>
-    static status_t recall(checkpoint_type_ checkpoint, geometry_t& geometry) noexcept {
-        status_t fields_status = status_t::success_k;
-        auto per_field = [&](safegraphs_custom_field_t field) noexcept {
+    static util::status_t recall(checkpoint_type_ checkpoint, geometry_t& geometry) noexcept {
+        util::status_t fields_status = util::status_code_t::success_k;
+        auto per_field = [&](util::safegraphs_custom_field_t field) noexcept {
             if (field.key == "connectivity") geometry.connectivity = decimal_in(field.value);
             else if (field.key == "gap_cost") geometry.gap_cost = decimal_in(field.value);
             else if (field.key == "substitution_costs") {
@@ -496,8 +511,8 @@ struct sequence_traits_t {
                 }
             }
         };
-        auto const [metadata, status] = safegraphs_read_index_metadata(checkpoint, std::allocator<byte_t> {},
-                                                                       per_field);
+        auto const [metadata, status] = util::safegraphs_read_index_metadata(
+            checkpoint, std::allocator<util::byte_t> {}, per_field);
         geometry.metric = sequence_metric_of(metadata.metric.view());
         return failed(status) ? status : fields_status;
     }
@@ -551,8 +566,8 @@ struct sequence_traits_t {
     static values_t values_of(usearch_sequence_insert_t const& arguments) noexcept {
         return {arguments.sequences, arguments.count};
     }
-    static expected<queries_t> queries_of(usearch_sequence_search_t const& arguments,
-                                          growing_arena<forkunion_allocator_t>& pages) noexcept {
+    static util::expected<queries_t> queries_of(usearch_sequence_search_t const& arguments,
+                                                util::growing_arena<util::forkunion_allocator_t>& pages) noexcept {
         return counted_tape_of(arguments.queries, arguments.count, pages);
     }
     static reserve_capacity_t capacity_of(usearch_sequence_reserve_t const& arguments) noexcept {
@@ -674,17 +689,17 @@ struct shapes_traits_t {
     /** Reads the kind, scalar, point count and connectivity @p checkpoint recorded, at a path or in
      *  a buffer. */
     template <typename checkpoint_type_>
-    static status_t recall(checkpoint_type_ checkpoint, geometry_t& geometry) noexcept {
-        auto per_field = [&](safegraphs_custom_field_t field) noexcept {
+    static util::status_t recall(checkpoint_type_ checkpoint, geometry_t& geometry) noexcept {
+        auto per_field = [&](util::safegraphs_custom_field_t field) noexcept {
             if (field.key == "connectivity") geometry.connectivity = decimal_in(field.value);
             else if (field.key == "points") geometry.points = decimal_in(field.value);
         };
-        auto const [metadata, status] = safegraphs_read_index_metadata(checkpoint, std::allocator<byte_t> {},
-                                                                       per_field);
+        auto const [metadata, status] = util::safegraphs_read_index_metadata(
+            checkpoint, std::allocator<util::byte_t> {}, per_field);
         geometry.metric = shapes_metric_of(metadata.metric.view());
-        geometry.quantization = metadata.value_dtype == dtype_t::f16_k   ? usearch_scalar_f16_k
-                                : metadata.value_dtype == dtype_t::f32_k ? usearch_scalar_f32_k
-                                                                         : usearch_scalar_unknown_k;
+        geometry.quantization = metadata.value_dtype == util::dtype_t::f16_k   ? usearch_scalar_f16_k
+                                : metadata.value_dtype == util::dtype_t::f32_k ? usearch_scalar_f32_k
+                                                                               : usearch_scalar_unknown_k;
         return status;
     }
 
@@ -736,8 +751,8 @@ struct shapes_traits_t {
     static values_t values_of(usearch_shapes_insert_t const& arguments) noexcept {
         return {arguments.shapes, arguments.count};
     }
-    static expected<queries_t> queries_of(usearch_shapes_search_t const& arguments,
-                                          growing_arena<forkunion_allocator_t>& pages) noexcept {
+    static util::expected<queries_t> queries_of(usearch_shapes_search_t const& arguments,
+                                                util::growing_arena<util::forkunion_allocator_t>& pages) noexcept {
         return counted_tape_of(arguments.queries, arguments.count, pages);
     }
     static reserve_capacity_t capacity_of(usearch_shapes_reserve_t const& arguments) noexcept {
@@ -869,12 +884,12 @@ struct geospatial_traits_t {
     /** Reads the connectivity @p checkpoint recorded, at a path or in a buffer, the one field
      *  beside its observations. */
     template <typename checkpoint_type_>
-    static status_t recall(checkpoint_type_ checkpoint, geometry_t& geometry) noexcept {
-        auto per_field = [&](safegraphs_custom_field_t field) noexcept {
+    static util::status_t recall(checkpoint_type_ checkpoint, geometry_t& geometry) noexcept {
+        auto per_field = [&](util::safegraphs_custom_field_t field) noexcept {
             if (field.key == "connectivity") geometry.connectivity = decimal_in(field.value);
         };
-        auto const [metadata, status] = safegraphs_read_index_metadata(checkpoint, std::allocator<byte_t> {},
-                                                                       per_field);
+        auto const [metadata, status] = util::safegraphs_read_index_metadata(
+            checkpoint, std::allocator<util::byte_t> {}, per_field);
         return status;
     }
 
@@ -926,9 +941,10 @@ struct geospatial_traits_t {
         return {arguments.observations, arguments.count};
     }
     template <typename arguments_type_>
-    static expected<queries_t> queries_of(arguments_type_ const& arguments,
-                                          growing_arena<forkunion_allocator_t>&) noexcept {
-        return {{{arguments.queries, arguments.count}, arguments.relation, arguments.tolerance}, status_t::success_k};
+    static util::expected<queries_t> queries_of(arguments_type_ const& arguments,
+                                                util::growing_arena<util::forkunion_allocator_t>&) noexcept {
+        return {{{arguments.queries, arguments.count}, arguments.relation, arguments.tolerance},
+                util::status_code_t::success_k};
     }
     static reserve_capacity_t capacity_of(usearch_geospatial_reserve_t const& arguments) noexcept {
         return {arguments.entries, 0, 0};

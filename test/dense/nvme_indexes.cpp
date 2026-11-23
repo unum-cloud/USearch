@@ -38,18 +38,18 @@ static case_result_t test_uring_registered_pieces() {
     }
     {
         auto [medium, medium_status] = file_medium_t::open(path);
-        expect_equal(medium_status, status_t::success_k);
+        expect_equal(medium_status, status_code_t::success_k);
         linux_uring_files_engine<fu::standard_yield_t> engine {forkunion_allocator_t {}};
         io_engine_config_t config;
         config.transport = io_transport_t::linux_uring_k, config.queue_depth = 2;
         if (failed(engine.open(config)))
             return case_result_t::skipped("linux_uring_files_engine is refused on this machine");
-        expect_equal(engine.reserve(2, buffer_bytes), status_t::success_k);
+        expect_equal(engine.reserve(2, buffer_bytes), status_code_t::success_k);
         expect_true(engine.buffer_registration() == linux_uring_buffer_registration_t::fixed_k);
-        expect_equal(engine.attach(std::span<file_medium_t const> {&medium, 1}), status_t::success_k);
+        expect_equal(engine.attach(std::span<file_medium_t const> {&medium, 1}), status_code_t::success_k);
         expect_equal(engine.enqueue_read(io_request_t {0, static_cast<u32_t>(io_alignment_k), 0, 1, 7}),
-                     status_t::success_k);
-        expect_equal(engine.submit(io_wait_t::blocking_k), status_t::success_k);
+                     status_code_t::success_k);
+        expect_equal(engine.submit(io_wait_t::blocking_k), status_code_t::success_k);
         io_completion_t completion {};
         expect_equal(engine.poll_completions(std::span<io_completion_t> {&completion, 1}), 1u);
         expect_equal(completion.result, static_cast<i32_t>(io_alignment_k));

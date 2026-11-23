@@ -122,7 +122,7 @@ struct vram_amd_indexes {
      */
     status_t emplace(int device) noexcept {
         std::unique_ptr<index_t> shard = build_(device);
-        if (!shard) return status_t::bad_alloc_k;
+        if (!shard) return status_code_t::out_of_memory_k;
         return shards_.emplace(std::move(shard));
     }
 
@@ -202,7 +202,7 @@ struct vram_amd_indexes {
             shards_.end_window();
         }
         shards_.reopen();
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Invokes @p callback as <tt>callback(device)</tt> for the device of every shard, in placement
@@ -216,7 +216,7 @@ struct vram_amd_indexes {
     status_t status() const noexcept {
         for (shard_t const& one : shards_)
             if (status_t const kept = one.index->status(); failed(kept)) return kept;
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
 #pragma endregion Placement and Measures
@@ -266,28 +266,28 @@ struct vram_amd_indexes {
          *    the shard reserved.
          */
         expected<insert_result_t> insert(std::span<key_t const> keys, tape_view<byte_t const> tape) noexcept {
-            if (!owner_) return {{}, status_t::uninitialized_k};
-            if (keys.size() != entries_ || tape.size() != entries_) return {{}, status_t::config_mismatch_k};
+            if (!owner_) return {{}, status_code_t::uninitialized_k};
+            if (keys.size() != entries_ || tape.size() != entries_) return {{}, status_code_t::config_mismatch_k};
             vram_amd_indexes& owner = *std::exchange(owner_, nullptr);
             shards_t& shards = owner.shards_;
             insert_result_t result;
-            if (!entries_) return {result, status_t::success_k};
+            if (!entries_) return {result, status_code_t::success_k};
             traversals_t traversals {shards.allocator()};
             if (status_t const readied = fanout_t::reserve_traversals(shards, traversals, *executor_, tape, config_);
                 failed(readied))
                 return {result, readied};
-            status_t status = status_t::success_k;
+            status_t status = status_code_t::success_k;
             std::size_t first_offset = 0, drained = 0, launched = 0;
             for (; drained != shard_plans_.size(); ++drained) {
                 shard_insert_plan_t& shard_plan = shard_plans_[drained];
                 std::size_t const placed = first_ + drained, entries = shard_plan.entries;
                 if (!entries) continue;
                 if (status = fanout_t::enter(shards, placed); failed(status)) break;
-                expected<insert_result_t> const inserted = shards[placed].index->graph_.launch_(
+                auto const [inserted, inserted_status] = shards[placed].index->graph_.launch_(
                     shard_plan, keys.subspan(first_offset, entries), tape.subview(first_offset, entries),
                     traversals[placed], config_);
-                if (status = inserted.status; failed(status)) break;
-                result += inserted.value;
+                if (status = inserted_status; failed(status)) break;
+                result += inserted;
                 first_offset += entries;
                 ++launched;
             }
@@ -363,7 +363,7 @@ struct vram_amd_indexes {
         plan.executor_ = &executor;
         if (!entries) {
             plan.owner_ = this;
-            return {std::move(plan), status_t::success_k};
+            return {std::move(plan), status_code_t::success_k};
         }
         auto [claim, claim_status] = executor.claim();
         if (failed(claim_status)) return {{}, claim_status};
@@ -374,7 +374,7 @@ struct vram_amd_indexes {
         plan.first_ = batch_split.open_shard_generation.first;
 
         std::size_t const shards = batch_split.shards_spanned();
-        if (failed(plan.shard_plans_.reserve_exactly(shards))) return {{}, status_t::bad_alloc_k};
+        if (failed(plan.shard_plans_.reserve_exactly(shards))) return {{}, status_code_t::out_of_memory_k};
         for (std::size_t shard = 0; shard != shards; ++shard) {
             std::size_t const shard_entries = batch_split.entries_for_shard(shard);
             if (!shard_entries) {
@@ -387,7 +387,7 @@ struct vram_amd_indexes {
             plan.shard_plans_.push_back_reserved(std::move(shard_plan));
         }
         plan.owner_ = this;
-        return {std::move(plan), status_t::success_k};
+        return {std::move(plan), status_code_t::success_k};
     }
 
     /**
@@ -406,7 +406,7 @@ struct vram_amd_indexes {
      */
     expected<insert_result_t> insert(std::span<key_t const> keys, tape_view<byte_t const> tape, executor_t& executor,
                                      insert_config_t config = {}) noexcept {
-        if (keys.size() != tape.size()) return {{}, status_t::config_mismatch_k};
+        if (keys.size() != tape.size()) return {{}, status_code_t::config_mismatch_k};
         auto [plan, status] = plan_insert(tape.size(), executor, config);
         if (failed(status)) return {{}, status};
         return plan.insert(keys, tape);
@@ -428,13 +428,13 @@ struct vram_amd_indexes {
          *  reads no file itself. */
         status_t open_sources(std::span<mapped_file_t>) noexcept {
             owner->loaded_through_ = vram_load_path_t::host_copy_k;
-            return status_t::success_k;
+            return status_code_t::success_k;
         }
 
         template <typename codec_type_>
         expected<columns_extents_t> columns_extents(shards_t& shards, std::size_t shard, codec_type_ const&) noexcept {
             typename executor_t::stream_t* const stream = stream_(shards, shard);
-            if (!stream) return {{}, status_t::config_mismatch_k};
+            if (!stream) return {{}, status_code_t::config_mismatch_k};
             traversal_context_t context {typename traversal_context_t::allocator_t {stream->arena, *stream}};
             return shards[shard].index->columns_extents(context);
         }
@@ -443,14 +443,14 @@ struct vram_amd_indexes {
                                                                 columns<key_t, node_id_t, byte_t, u64_t> columns,
                                                                 codec_type_ const&) noexcept {
             typename executor_t::stream_t* const stream = stream_(shards, shard);
-            if (!stream) return {{}, status_t::config_mismatch_k};
+            if (!stream) return {{}, status_code_t::config_mismatch_k};
             traversal_context_t context {typename traversal_context_t::allocator_t {stream->arena, *stream}};
             return shards[shard].index->plan_save(columns, context);
         }
         expected<typename index_t::load_plan_t> open_shard_load(
             shards_t& shards, std::size_t shard, safegraphs_saved_columns<node_id_t> const& saved) noexcept {
             typename executor_t::stream_t* const stream = stream_(shards, shard);
-            if (!stream) return {{}, status_t::config_mismatch_k};
+            if (!stream) return {{}, status_code_t::config_mismatch_k};
             traversal_context_t context {typename traversal_context_t::allocator_t {stream->arena, *stream}};
             return shards[shard].index->plan_load(saved, context);
         }
@@ -471,7 +471,7 @@ struct vram_amd_indexes {
          *    from the one a placed shard froze.
          */
         status_t open_shard_for_part(shards_t& shards, std::size_t part) noexcept {
-            if (shards.retired_shards() + part < shards.size()) return status_t::success_k;
+            if (shards.retired_shards() + part < shards.size()) return status_code_t::success_k;
             for (std::size_t shard = shards.retired_shards(); shard != shards.size(); ++shard)
                 if (status_t const reserved = reserve(shards, shard, 0).status; failed(reserved)) return reserved;
             while (shards.size() <= shards.retired_shards() + part)
@@ -480,7 +480,7 @@ struct vram_amd_indexes {
                         [this](shard_t const& like) noexcept { return owner->build_shard_(like); });
                     failed(opened))
                     return opened;
-            return status_t::success_k;
+            return status_code_t::success_k;
         }
 
       private:
@@ -619,7 +619,7 @@ struct vram_amd_indexes {
             failed(refused))
             return {{}, refused};
         for (std::size_t& count : counts) count = 0;
-        if (!queries_count || !keys.extent(1)) return {{}, status_t::success_k};
+        if (!queries_count || !keys.extent(1)) return {{}, status_code_t::success_k};
         fanout_t fanout {shards_, executor};
         if (status_t const begun = fanout.begin(queries_count, keys.extent(1), usage...); failed(begun))
             return {{}, begun};
@@ -661,7 +661,7 @@ struct vram_amd_indexes {
      *  - @c contended_k Another call holds the @p executor, or a destructive window overlapped
      *    the read twice.
      *  - @c unsupported_k The shared kernels lack the node-ID type.
-     *  - @c bad_alloc_k A shard's columns or counters cannot be placed.
+     *  - @c out_of_memory_k A shard's columns or counters cannot be placed.
      */
     expected<reachability_t> health(executor_t& executor) noexcept {
         using health_plan_t = typename graph_t::health_plan_t;
@@ -679,7 +679,7 @@ struct vram_amd_indexes {
                 failed(ready))
                 return {{}, ready};
             growing_buffer<health_plan_t, forkunion_allocator_t> checks {shards_.allocator()};
-            if (failed(checks.reserve_exactly(traversals.size()))) return {{}, status_t::bad_alloc_k};
+            if (failed(checks.reserve_exactly(traversals.size()))) return {{}, status_code_t::out_of_memory_k};
             for (std::size_t shard = 0; shard != traversals.size(); ++shard) {
                 graph_t& graph = shards_[shard].index->graph_;
                 traversal_context_t& context = traversals[shard];
@@ -715,7 +715,7 @@ struct vram_amd_indexes {
                 if (failed(status)) return {{}, status};
                 result += checked;
             }
-            return {result, status_t::success_k};
+            return {result, status_code_t::success_k};
         });
     }
 
@@ -760,7 +760,7 @@ struct vram_amd_indexes {
          */
         template <typename progress_type_ = dummy_progress_t>
         status_t run(executor_t& executor, progress_type_&& on_visited = {}) noexcept {
-            if (!owner_) return status_t::uninitialized_k;
+            if (!owner_) return status_code_t::uninitialized_k;
             if (status_t const paired = fanout_t::pairs_with(owner_->shards_, executor); failed(paired)) return paired;
             auto [claim, claim_status] = executor.claim();
             if (failed(claim_status)) return claim_status;
@@ -775,14 +775,14 @@ struct vram_amd_indexes {
          *  - As @ref run, and the first shard plan's failure.
          */
         expected<refine_report_t> finish(executor_t& executor) noexcept {
-            if (!owner_) return {{}, status_t::uninitialized_k};
+            if (!owner_) return {{}, status_code_t::uninitialized_k};
             if (status_t const paired = fanout_t::pairs_with(owner_->shards_, executor); failed(paired))
                 return {{}, paired};
             auto [claim, claim_status] = executor.claim();
             if (failed(claim_status)) return {{}, claim_status};
-            expected<refine_report_t> const healed = owner_->close_shard_plans_(shard_plans_, traversals_);
+            auto const [healed, healed_status] = owner_->close_shard_plans_(shard_plans_, traversals_);
             release_();
-            return healed;
+            return {healed, healed_status};
         }
 
         /** The reports every shard plan holds so far, folded. */
@@ -846,7 +846,7 @@ struct vram_amd_indexes {
         /** Drives the shard plans, as @ref refine_plan_t::run does. */
         template <typename progress_type_ = dummy_progress_t>
         status_t run(executor_t& executor, progress_type_&& on_visited = {}) noexcept {
-            if (!owner_) return status_t::uninitialized_k;
+            if (!owner_) return status_code_t::uninitialized_k;
             if (status_t const paired = fanout_t::pairs_with(owner_->shards_, executor); failed(paired)) return paired;
             auto [claim, claim_status] = executor.claim();
             if (failed(claim_status)) return claim_status;
@@ -861,14 +861,14 @@ struct vram_amd_indexes {
          *  - As @ref refine_plan_t::finish.
          */
         expected<refine_report_t> finish(executor_t& executor) noexcept {
-            if (!owner_) return {{}, status_t::uninitialized_k};
+            if (!owner_) return {{}, status_code_t::uninitialized_k};
             if (status_t const paired = fanout_t::pairs_with(owner_->shards_, executor); failed(paired))
                 return {{}, paired};
             auto [claim, claim_status] = executor.claim();
             if (failed(claim_status)) return {{}, claim_status};
-            expected<refine_report_t> const healed = owner_->close_shard_plans_(shard_plans_, traversals_);
+            auto const [healed, healed_status] = owner_->close_shard_plans_(shard_plans_, traversals_);
             release_();
-            return healed;
+            return {healed, healed_status};
         }
 
         /** The reports every shard plan holds so far, folded. */
@@ -976,22 +976,18 @@ struct vram_amd_indexes {
                                           std::span<vram_amd_indexes* const> targets, reshard_config_t config,
                                           executor_t& executor) noexcept {
         reshard_plan_t plan {shards_.allocator()};
-        if (sources.empty() || targets.empty()) return {std::move(plan), status_t::invalid_argument_k};
+        if (sources.empty() || targets.empty()) return {std::move(plan), status_code_t::invalid_argument_k};
         for (std::span<vram_amd_indexes* const> const listed : {sources, targets})
-            for (std::size_t position = 0; position != listed.size(); ++position) {
-                if (!listed[position]) return {std::move(plan), status_t::invalid_argument_k};
-                std::size_t earlier = 0;
-                while (earlier != position && listed[earlier] != listed[position]) ++earlier;
-                if (earlier != position) return {std::move(plan), status_t::invalid_argument_k};
-            }
-        if (targets.size() > 1 && lists_share(sources, targets)) return {std::move(plan), status_t::config_mismatch_k};
-        if (config.shard_capacity) return {std::move(plan), status_t::unsupported_k};
+            if (status_t const refused = listed_refusal(listed); failed(refused)) return {std::move(plan), refused};
+        if (targets.size() > 1 && lists_share(sources, targets))
+            return {std::move(plan), status_code_t::config_mismatch_k};
+        if (config.shard_capacity) return {std::move(plan), status_code_t::unsupported_k};
         bool const gathering = targets.size() == 1 && targets[0] == this;
         bool const cutting = sources[0] == this && targets.size() > 1;
-        if (!gathering && !cutting) return {std::move(plan), status_t::config_mismatch_k};
+        if (!gathering && !cutting) return {std::move(plan), status_code_t::config_mismatch_k};
         if (failed(plan.sources_.reserve_exactly(sources.size())) ||
             failed(plan.targets_.reserve_exactly(targets.size())))
-            return {std::move(plan), status_t::bad_alloc_k};
+            return {std::move(plan), status_code_t::out_of_memory_k};
         for (vram_amd_indexes* source : sources) plan.sources_.push_back_reserved(source);
         for (vram_amd_indexes* target : targets) plan.targets_.push_back_reserved(target);
         if (gathering) return {std::move(plan), open_gather_(plan, config, executor)};
@@ -1051,7 +1047,7 @@ struct vram_amd_indexes {
     status_t drive_shard_plans_(plans_type_& plans,
                                 growing_buffer<traversal_context_t, forkunion_allocator_t>& traversals,
                                 progress_type_& on_visited) noexcept {
-        status_t outcome = status_t::success_k;
+        status_t outcome = status_code_t::success_k;
         std::size_t const first = shards_.retired_shards();
         for (bool advancing = true; advancing;) {
             for (std::size_t shard = 0; shard != plans.size(); ++shard) {
@@ -1072,7 +1068,7 @@ struct vram_amd_indexes {
             }
             advancing = advanced != 0;
             if (advancing && rounding && on_visited(completed, total) == continuation_t::cancel_k)
-                return status_t::cancelled_k;
+                return status_code_t::cancelled_k;
         }
         return outcome;
     }
@@ -1097,9 +1093,12 @@ struct vram_amd_indexes {
         plans_type_ const& plans,
         growing_buffer<traversal_context_t, forkunion_allocator_t> const& traversals) noexcept {
         refine_report_t result;
-        for (std::size_t shard = 0; shard != plans.size(); ++shard)
-            if (shard) result += plans[shard].finish(traversals[shard]).value;
-            else result = plans[shard].finish(traversals[shard]).value;
+        for (std::size_t shard = 0; shard != plans.size(); ++shard) {
+            // A shard mid-round answers cancelled_k, so the fold reads its report alone.
+            [[maybe_unused]] auto const [report, report_status] = plans[shard].finish(traversals[shard]);
+            if (shard) result += report;
+            else result = report;
+        }
         return result;
     }
 
@@ -1149,7 +1148,7 @@ struct vram_amd_indexes {
     status_t open_plan_(plan_type_& plan, refine_config_t config, executor_t& executor, std::size_t appended,
                         std::size_t targets, open_shard_type_&& open_shard) noexcept {
         std::size_t const live = live_shards_count(), first = shards_.retired_shards();
-        if (!live) return status_t::uninitialized_k;
+        if (!live) return status_code_t::uninitialized_k;
         if (status_t const paired = fanout_t::pairs_with(shards_, executor); failed(paired)) return paired;
         auto [claim, claim_status] = executor.claim();
         if (failed(claim_status)) return claim_status;
@@ -1161,22 +1160,22 @@ struct vram_amd_indexes {
                                                     : shard.traversal_memory_usage(config, widest + appended));
         if (failed(plan.arenas_.reserve_exactly(live)) || failed(plan.traversals_.reserve_exactly(live)) ||
             failed(plan.shard_plans_.reserve_exactly(live)))
-            return status_t::bad_alloc_k;
+            return status_code_t::out_of_memory_k;
         plan.owner_ = this;
         for (std::size_t shard = 0; shard != live; ++shard) {
             typename executor_t::stream_t& stream = executor.stream(
                 fanout_t::stream_of(shards_, executor, first + shard));
             plan.arenas_.push_back_reserved(typename executor_t::arena_t {stream.arena.upstream()});
-            if (failed(plan.arenas_[shard].reserve_exactly(walk_bytes))) return status_t::bad_alloc_k;
+            if (failed(plan.arenas_[shard].reserve_exactly(walk_bytes))) return status_code_t::out_of_memory_k;
             plan.traversals_.push_back_reserved(
                 traversal_context_t {typename traversal_context_t::allocator_t {plan.arenas_[shard], stream}});
-            if (!plan.traversals_.back()) return status_t::bad_alloc_k;
+            if (!plan.traversals_.back()) return status_code_t::out_of_memory_k;
             if (status_t const entered = fanout_t::enter(shards_, first + shard); failed(entered)) return entered;
             auto [shard_plan, status] = open_shard(*shards_[first + shard].index, plan.traversals_[shard], shard);
             if (failed(status)) return status;
             plan.shard_plans_.push_back_reserved(std::move(shard_plan));
         }
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Opens a gather of the plan's other sources into this index: each source shard enters the
@@ -1188,11 +1187,13 @@ struct vram_amd_indexes {
             if (source == this) continue;
             source_shards += source->live_shards_count();
             for (index_t const& shard : source->live_shards()) {
-                if (first_live_on_(shard.device_specs().ordinal) == shards_.size()) return status_t::config_mismatch_k;
+                if (first_live_on_(shard.device_specs().ordinal) == shards_.size())
+                    return status_code_t::config_mismatch_k;
                 source_entries += shard.size();
             }
         }
-        if (failed(plan.slots_.reserve_exactly(source_shards + live_shards_count()))) return status_t::bad_alloc_k;
+        if (failed(plan.slots_.reserve_exactly(source_shards + live_shards_count())))
+            return status_code_t::out_of_memory_k;
         std::size_t const first = shards_.retired_shards();
         typename index_t::reshard_config_t const shard_config {config.refine, 0, config.seed};
         status_t const opened = open_plan_(
@@ -1218,17 +1219,17 @@ struct vram_amd_indexes {
             source->shards_.forget_entries();
             source->shards_.end_window();
         }
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Gathers every other one of @p sources into this index before a cut, as a gather's planning
      *  appends them, its rounds dropped unrun; nothing to do with this index the only source. */
     status_t gather_before_cut_(std::span<vram_amd_indexes* const> sources, reshard_config_t const& config,
                                 executor_t& executor) noexcept {
-        if (sources.size() == 1) return status_t::success_k;
+        if (sources.size() == 1) return status_code_t::success_k;
         reshard_plan_t gathering {shards_.allocator()};
         if (failed(gathering.sources_.reserve_exactly(sources.size())) || failed(gathering.targets_.reserve_exactly(1)))
-            return status_t::bad_alloc_k;
+            return status_code_t::out_of_memory_k;
         for (vram_amd_indexes* source : sources) gathering.sources_.push_back_reserved(source);
         gathering.targets_.push_back_reserved(this);
         return open_gather_(gathering, config, executor);
@@ -1240,19 +1241,19 @@ struct vram_amd_indexes {
     status_t refuses_cut_targets_(std::span<vram_amd_indexes* const> targets) const noexcept {
         std::size_t const live = live_shards_count();
         for (vram_amd_indexes const* const target : targets) {
-            if (target->size() || target->live_shards_count() != live) return status_t::config_mismatch_k;
+            if (target->size() || target->live_shards_count() != live) return status_code_t::config_mismatch_k;
             for (std::size_t shard = 0; shard != live; ++shard)
                 if (target->live_shard_(shard).device_specs().ordinal != live_shard_(shard).device_specs().ordinal)
-                    return status_t::config_mismatch_k;
+                    return status_code_t::config_mismatch_k;
         }
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Opens a cut of this index into the plan's targets, which @ref refuses_cut_targets_ admitted:
      *  shard @c s parts its nodes among shard @c s of every target. */
     status_t open_cut_(reshard_plan_t& plan, reshard_config_t const& config, executor_t& executor) noexcept {
         std::size_t const live = live_shards_count(), targets = plan.targets_.size();
-        if (failed(plan.slots_.reserve_exactly(live * (targets + 1)))) return status_t::bad_alloc_k;
+        if (failed(plan.slots_.reserve_exactly(live * (targets + 1)))) return status_code_t::out_of_memory_k;
         typename index_t::reshard_config_t const shard_config {config.refine, 0, config.seed};
         return open_plan_(plan, config.refine, executor, 0, targets,
                           [&](index_t& shard, traversal_context_t& context, std::size_t at) noexcept {
@@ -1323,7 +1324,7 @@ struct vram_amd_indexes_cursor {
          *  @brief Takes the watermark of @p shard and sizes the staging for one block of its rows.
          *
          *  @par Statuses:
-         *  - @c bad_alloc_k The staging found no memory.
+         *  - @c out_of_memory_k The staging found no memory.
          */
         status_t open(index_t const& shard) noexcept {
             refresh(shard);
@@ -1346,10 +1347,10 @@ struct vram_amd_indexes_cursor {
          *  @par Statuses:
          *  - @c malformed_k The @p node is at or past the snapshot.
          *  - @c config_mismatch_k The shard holds fewer rows than the snapshot, as a clear left it.
-         *  - @c device_error_k The copy failed.
+         *  - @c device_k The copy failed.
          */
         status_t seek(index_t const& shard, node_id_t node) noexcept {
-            if (node >= visible_count_) return status_t::malformed_k;
+            if (node >= visible_count_) return status_code_t::malformed_k;
             std::size_t const row_ids = shard.connectivity();
             if (node < staged_first_ || node >= staged_first_ + staged_count_) {
                 node_id_t const first = static_cast<node_id_t>(node - node % walk_t::lanes_k);
@@ -1361,7 +1362,7 @@ struct vram_amd_indexes_cursor {
                 staged_count_ = count;
             }
             sought_row_ = to_span(staged_rows_).subspan((node - staged_first_) * row_ids, row_ids);
-            return status_t::success_k;
+            return status_code_t::success_k;
         }
 
       private:
@@ -1391,22 +1392,22 @@ struct vram_amd_indexes_cursor {
      *      shard holding it, and a key held nowhere starting nothing.
      *
      *  @par Statuses:
-     *  - @c bad_alloc_k A cursor, its staging, the visited bits or the frontier found no memory.
+     *  - @c out_of_memory_k A cursor, its staging, the visited bits or the frontier got no memory.
      */
     status_t open(indexes_t const& indexes, std::span<key_t const> starts) noexcept {
         epoch_ = indexes.read_epoch();
         first_shard_ = indexes.shards_.retired_shards();
         std::size_t const count = indexes.shards_count() - first_shard_;
-        if (failed(shard_cursors_.reserve_exactly(count))) return status_t::bad_alloc_k;
+        if (failed(shard_cursors_.reserve_exactly(count))) return status_code_t::out_of_memory_k;
         for (std::size_t shard = 0; shard != count; ++shard) {
             shard_cursors_.push_back_reserved(shard_cursor_t {allocator_});
             if (status_t const opened = shard_cursors_.back().open(shard_(indexes, shard)); failed(opened))
                 return opened;
         }
-        if (starts.empty()) return status_t::success_k;
+        if (starts.empty()) return status_code_t::success_k;
         order_ = cursor_order_t::breadth_first_k;
         growing_buffer<std::size_t, forkunion_allocator_t> visible {allocator_};
-        if (failed(visible.resize_uninitialized(count))) return status_t::bad_alloc_k;
+        if (failed(visible.resize_uninitialized(count))) return status_code_t::out_of_memory_k;
         for (std::size_t shard = 0; shard != count; ++shard) visible[shard] = shard_cursors_[shard].visible_count();
         if (status_t const opened = walk_.open(to_span(visible)); failed(opened)) return opened;
         for (key_t const& key : starts)
@@ -1419,7 +1420,7 @@ struct vram_amd_indexes_cursor {
                     return visited;
                 break;
             }
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /**
@@ -1428,8 +1429,8 @@ struct vram_amd_indexes_cursor {
      *      number of keys written.
      *
      *  @par Statuses:
-     *  - @c bad_alloc_k A link or a newly visited entry found no memory; the entries written stand.
-     *  - @c device_error_k A shard's rows did not copy; the entries written stand.
+     *  - @c out_of_memory_k No memory for a link or a newly visited entry; written entries stand.
+     *  - @c device_k A shard's rows did not copy; written entries stand.
      *  - @c contended_k A destructive window of @p indexes opened since the walk did; none stand.
      */
     expected<std::size_t> pull(indexes_t const& indexes, std::span<key_t> keys, links_keys_t* links_keys,
@@ -1441,28 +1442,30 @@ struct vram_amd_indexes_cursor {
             index_t const& shard = shard_(indexes, entry.shard);
             if (status_t const sought = cursor.seek(shard, entry.node); failed(sought))
                 return indexes.still_valid(epoch_) ? expected<std::size_t> {written, sought}
-                                                   : expected<std::size_t> {0, status_t::contended_k};
+                                                   : expected<std::size_t> {0, status_code_t::contended_k};
             std::span<node_id_t const> const neighbors = cursor.neighbors();
             if (links_keys && (failed(links_keys->reserve(links_keys->size() + neighbors.size())) ||
                                failed(links_offsets->reserve(links_offsets->size() + 1))))
-                return {written, status_t::bad_alloc_k};
+                return {written, status_code_t::out_of_memory_k};
             for (node_id_t const neighbor : neighbors) {
                 // Rows come raw: a self-loop links nowhere, and sentinels fail both bounds below.
                 if (neighbor == entry.node) continue;
                 // Breadth-first never refreshes, so the bits span the shard cursors' snapshots.
                 bool const walked = order_ == cursor_order_t::breadth_first_k && neighbor < cursor.visible_count();
-                status_t const visited = walked ? walk_.visit(entry.shard, neighbor) : status_t::success_k;
+                status_t const visited = walked ? walk_.visit(entry.shard, neighbor) : status_code_t::success_k;
                 if (failed(visited)) return {written, visited};
                 if (!links_keys) continue;
-                expected<key_t> const linked = shard.key_of(neighbor);
-                if (succeeded(linked.status)) links_keys->push_back_reserved(linked.value);
+                auto const [linked, linked_status] = shard.key_of(neighbor);
+                if (succeeded(linked_status)) links_keys->push_back_reserved(linked);
             }
             if (links_keys) links_offsets->push_back_reserved(links_keys->size());
-            keys[written++] = shard.key_of(entry.node).value;
+            auto const [key, key_status] = shard.key_of(entry.node);
+            if (failed(key_status)) return {written, key_status};
+            keys[written++] = key;
         }
         // Retired shards keep their storage, so a pull that ran past a window read nothing freed.
-        if (!indexes.still_valid(epoch_)) return {0, status_t::contended_k};
-        return {written, status_t::success_k};
+        if (!indexes.still_valid(epoch_)) return {0, status_code_t::contended_k};
+        return {written, status_code_t::success_k};
     }
 
   private:

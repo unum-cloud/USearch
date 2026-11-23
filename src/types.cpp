@@ -192,6 +192,21 @@ USEARCH_EXPORT usearch_status_t usearch_mood_from_name(usearch_bytes_view_t name
     return usearch_status_invalid_argument_k;
 }
 
+USEARCH_EXPORT char const* usearch_predicate_cost_name(usearch_predicate_cost_t cost) {
+    switch (cost) {
+    case usearch_predicate_cost_cheap_k: return "cheap";
+    case usearch_predicate_cost_expensive_k: return "expensive";
+    default: return "unknown";
+    }
+}
+
+USEARCH_EXPORT usearch_status_t usearch_predicate_cost_from_name(usearch_bytes_view_t name,
+                                                                 usearch_predicate_cost_t* cost) {
+    if (named(name, "cheap")) return *cost = usearch_predicate_cost_cheap_k, usearch_status_success_k;
+    if (named(name, "expensive")) return *cost = usearch_predicate_cost_expensive_k, usearch_status_success_k;
+    return usearch_status_invalid_argument_k;
+}
+
 USEARCH_EXPORT char const* usearch_refine_verdict_name(usearch_refine_verdict_t verdict) {
     switch (verdict) {
     case usearch_refine_none_k: return "none";

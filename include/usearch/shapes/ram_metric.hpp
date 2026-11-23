@@ -56,24 +56,24 @@ using namespace unum::usearch::utilities;
  *
  *  @par Statuses:
  *  - @c shape_mismatch_k NumKong found unexpected dimensions.
- *  - @c device_error_k NumKong found device code or memory of another device.
+ *  - @c device_k NumKong found device code or memory of another device.
  *  - @c unsupported_k NumKong is missing the kernel or its library.
  *  - @c unsupported_layout_k NumKong found misaligned memory.
  *  - @c malformed_k NumKong found a pack of another layout.
  */
 inline status_t status_of(nk_status_t status) noexcept {
     switch (status) {
-    case nk_success_k: return status_t::success_k;
-    case nk_bad_alloc_k: return status_t::bad_alloc_k;
-    case nk_unexpected_dimensions_k: return status_t::shape_mismatch_k;
+    case nk_success_k: return status_code_t::success_k;
+    case nk_bad_alloc_k: return status_code_t::out_of_memory_k;
+    case nk_unexpected_dimensions_k: return status_code_t::shape_mismatch_k;
     case nk_missing_gpu_k:
     case nk_device_code_mismatch_k:
-    case nk_device_memory_mismatch_k: return status_t::device_error_k;
+    case nk_device_memory_mismatch_k: return status_code_t::device_k;
     case nk_missing_kernel_k:
-    case nk_missing_library_k: return status_t::unsupported_k;
-    case nk_misaligned_k: return status_t::unsupported_layout_k;
-    case nk_pack_mismatch_k: return status_t::malformed_k;
-    default: return status_t::internal_k;
+    case nk_missing_library_k: return status_code_t::unsupported_k;
+    case nk_misaligned_k: return status_code_t::unsupported_layout_k;
+    case nk_pack_mismatch_k: return status_code_t::malformed_k;
+    default: return status_code_t::internal_k;
     }
 }
 
@@ -82,7 +82,7 @@ inline status_t status_of(nk_status_t status) noexcept {
  *
  *  @par Statuses:
  *  - @c shape_mismatch_k NumKong found unexpected dimensions.
- *  - @c device_error_k NumKong found device code or memory of another device.
+ *  - @c device_k NumKong found device code or memory of another device.
  *  - @c unsupported_k NumKong is missing the kernel or its library.
  *  - @c unsupported_layout_k NumKong found misaligned memory.
  *  - @c malformed_k NumKong found a pack of another layout.
@@ -612,7 +612,7 @@ class shapes_metric {
     growing_arena<allocator_t> round_arena_;
 
     /** How the last @ref reset or @ref drain fared. */
-    status_t last_status_ = status_t::success_k;
+    status_t last_status_ = status_code_t::success_k;
 
   public:
     explicit shapes_metric(nk_kernel_kind_t kernel, allocator_t const& allocator) noexcept
@@ -661,7 +661,7 @@ class shapes_metric {
         if (nk_status_t const sized = kit_t::pack_size(points, &pack_bytes); sized != nk_success_k)
             return last_status_ = status_of(sized), basic::metric_staging_t::refused_k;
         void* const pack = round_arena_.allocate(pack_bytes, nk_default_alignment_k);
-        if (!pack) return last_status_ = status_t::bad_alloc_k, basic::metric_staging_t::refused_k;
+        if (!pack) return last_status_ = status_code_t::out_of_memory_k, basic::metric_staging_t::refused_k;
         if (status_t const packed = status_of(kit_t::pack(cloud.raw_values_data(), points, pack, nullptr));
             failed(packed))
             last_status_ = packed;
@@ -705,7 +705,7 @@ class shapes_metric {
         add_query_(query_view(query));
     }
     void add_query_(query_view_t query) noexcept {
-        if (!query.pack) last_status_ = status_t::shape_mismatch_k;
+        if (!query.pack) last_status_ = status_code_t::shape_mismatch_k;
         else {
             queries_.push_back_reserved(query.pack);
             widest_points_ = max_of(widest_points_, query.points);
@@ -732,7 +732,7 @@ class shapes_metric {
                 : kit_t::gromovwassersteins_workspace_size(widest_points_, widest_points_, &bytes);
         if (sized != nk_success_k) return status_of(sized);
         void* const workspace = round_arena_.allocate(bytes, nk_default_alignment_k);
-        if (!workspace) return status_t::bad_alloc_k;
+        if (!workspace) return status_code_t::out_of_memory_k;
         if (kernel_ == nk_kernel_chamfers_packed_k)
             return status_of(kit_t::chamfers(queries, queries_count, candidates, count, results, stride, nullptr,
                                              &radius, workspace, bytes, nullptr));

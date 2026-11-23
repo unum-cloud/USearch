@@ -150,7 +150,7 @@ int bench_dense_index_search(int argc, char const* const* argv) {
     if (first_row >= base.rows())
         return fmt::println(stderr, "--first-vector {} is past the {} rows", first_row, base.rows()), 1;
     std::size_t const rows = search.max_base_vectors.value
-                                 ? min_of(search.max_base_vectors.value, base.rows() - first_row)
+                                 ? util::min_of(search.max_base_vectors.value, base.rows() - first_row)
                                  : base.rows() - first_row;
     usearch_rows_view_t const vectors = base.view(first_row, rows);
     if (!vectors.data)
@@ -244,7 +244,7 @@ int bench_dense_index_search(int argc, char const* const* argv) {
 
     mapped_rows_t query_file;
     usearch_rows_view_t queries = vectors;
-    std::size_t queries_count = min_of<std::size_t>(rows, 1000);
+    std::size_t queries_count = util::min_of<std::size_t>(rows, 1000);
     if (search.self_search == switch_t::present_k) queries_count = rows;
     else if (!search.query_vectors.empty()) {
         auto [opened, query_status] = mapped_rows_t::open(search.query_vectors);
@@ -263,8 +263,8 @@ int bench_dense_index_search(int argc, char const* const* argv) {
         if (st::failed(oracle.counts.resize(rows, 1)) || st::failed(oracle.scores.resize(rows, 0)))
             exit_out_of_memory("the oracle");
         for (std::size_t row = 0; row != rows; ++row)
-            if (st::failed(
-                    oracle.keys.push_back(std::bit_cast<uuid128_t>(key_of_offset(settings.seed, first_row + row)))))
+            if (st::failed(oracle.keys.push_back(
+                    std::bit_cast<util::uuid128_t>(key_of_offset(settings.seed, first_row + row)))))
                 exit_out_of_memory("the oracle");
     }
     else if (!search.query_neighbors.empty() && !first_row && !search.max_base_vectors.value) {
@@ -280,7 +280,7 @@ int bench_dense_index_search(int argc, char const* const* argv) {
         if (!search.query_neighbors.empty())
             fmt::println("- Ground truth ignored: --first-vector or --max-base-vectors reshapes its graph");
         std::chrono::steady_clock::time_point const scan_start = std::chrono::steady_clock::now();
-        std::size_t const judged = min_of(search.oracle_queries.value, queries_count);
+        std::size_t const judged = util::min_of(search.oracle_queries.value, queries_count);
         if (report_failure(scan_oracle(index, queries, judged, top_k, search.batch.value, oracle), "Scanning"))
             return 1;
         fmt::println("- Exact scan: {} queries in {:.2f} s", judged, seconds_since(scan_start));

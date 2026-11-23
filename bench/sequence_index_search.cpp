@@ -143,7 +143,7 @@ inline alphabet_t alphabet_of(std::string_view name, bool uniform) {
 
 /** Packs every entry of @p tape as its codes under @p alphabet, one packed row per entry. */
 inline byte_tape_t packed_codes_of(byte_tape_t const& tape, alphabet_t const& alphabet) {
-    u32_t const code_bits = sequence::packed_code_bits(alphabet.classes);
+    util::u32_t const code_bits = sequence::packed_code_bits(alphabet.classes);
     byte_tape_t packed;
     std::size_t total = 0;
     for (std::size_t row = 0; row != tape.size(); ++row)
@@ -157,7 +157,7 @@ inline byte_tape_t packed_codes_of(byte_tape_t const& tape, alphabet_t const& al
         codes.clear();
         for (char const character : entry) codes.push_back(alphabet.codes[static_cast<std::uint8_t>(character)]);
         std::size_t const first = packed.offsets.back(), bytes = sequence::packed_codes_bytes(codes.size(), code_bits);
-        sequence::pack_codes(codes, code_bits, bytes_of(packed.bytes.data() + first, bytes));
+        sequence::pack_codes(codes, code_bits, util::bytes_of(packed.bytes.data() + first, bytes));
         if (st::failed(packed.offsets.push_back(first + bytes))) exit_out_of_memory("the packed codes");
     }
     return packed;
@@ -201,7 +201,7 @@ int bench_sequence_index_search(int argc, char const* const* argv) {
     alphabet_t alphabet = alphabet_of(alphabet_name, false);
     alphabet_t searched_alphabet = alphabet_of(alphabet_name, search_costs == "uniform");
     if (!classes_path.empty()) {
-        auto [classes_file, classes_status] = mapped_file_t::read(classes_path);
+        auto [classes_file, classes_status] = util::mapped_file_t::read(classes_path);
         if (failed(classes_status) || classes_file.view().size() != alphabet.codes.size() || !aligned)
             return fmt::println(stderr, "--classes=\"{}\" must hold 256 bytes for needleman-wunsch", classes_path), 1;
         std::memcpy(alphabet.codes.data(), classes_file.view().data(), alphabet.codes.size());
@@ -214,7 +214,7 @@ int bench_sequence_index_search(int argc, char const* const* argv) {
                 searched_alphabet.similarities[code * 256 + code] = 1;
     }
     if (!weights_path.empty()) {
-        auto [weights_file, weights_status] = mapped_file_t::read(weights_path);
+        auto [weights_file, weights_status] = util::mapped_file_t::read(weights_path);
         if (failed(weights_status) || weights_file.view().size() != alphabet.similarities.size() + 1 || !aligned)
             return fmt::println(stderr, "--weights=\"{}\" must hold 65,537 bytes for needleman-wunsch", weights_path),
                    1;
@@ -234,7 +234,7 @@ int bench_sequence_index_search(int argc, char const* const* argv) {
                    search_costs),
                1;
     usearch_sequence_weights_t const weights = alphabet.weights(), searched_weights = searched_alphabet.weights();
-    auto [file, read_status] = mapped_file_t::read(base_texts_path);
+    auto [file, read_status] = util::mapped_file_t::read(base_texts_path);
     if (failed(read_status)) return fmt::println(stderr, "--base-texts=\"{}\" could not be read", base_texts_path), 1;
     byte_tape_t tape = lines_of(file.view());
     // The index reads the packed codes alone.
@@ -244,21 +244,22 @@ int bench_sequence_index_search(int argc, char const* const* argv) {
                             search.queries.value),
                1;
     std::size_t const query_first = tape.size() - search.queries.value;
-    std::size_t const base_count = search.max_base_entries.value ? min_of(search.max_base_entries.value, query_first)
-                                                                 : query_first;
+    std::size_t const base_count = search.max_base_entries.value
+                                       ? util::min_of(search.max_base_entries.value, query_first)
+                                       : query_first;
     if (aligned)
         fmt::println("- Alphabet: {} · {} classes · {} bytes packed · searched under {} costs", alphabet_name,
                      alphabet.classes, tape.bytes.size(), search_costs);
 
     // The base row each held-out query intends, judged by key at rank 1 and among the top-k.
-    std::vector<u64_t> query_targets;
+    std::vector<util::u64_t> query_targets;
     if (!query_targets_path.empty()) {
-        auto [targets_file, targets_status] = mapped_file_t::read(query_targets_path);
+        auto [targets_file, targets_status] = util::mapped_file_t::read(query_targets_path);
         if (failed(targets_status))
             return fmt::println(stderr, "--query-targets=\"{}\" could not be read", query_targets_path), 1;
         byte_tape_t const targets = lines_of(targets_file.view());
         for (std::size_t row = 0; row != targets.size(); ++row) {
-            u64_t target = 0;
+            util::u64_t target = 0;
             std::from_chars(targets.bytes.data() + targets.offsets[row],
                             targets.bytes.data() + targets.offsets[row + 1], target);
             query_targets.push_back(target);
@@ -277,7 +278,7 @@ int bench_sequence_index_search(int argc, char const* const* argv) {
                     if (match != offsets[query]) rows += ' ';
                     rows += fmt::format("{}",
                                         offset_of_key(settings.seed, std::bit_cast<usearch_key_t>(found.keys[match]))
-                                            .value_or(~u64_t {0}));
+                                            .value_or(~util::u64_t {0}));
                 }
                 rows += '\n';
             }

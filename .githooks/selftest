@@ -4403,6 +4403,38 @@ assert_accepts "owning tensor sliced directly" include/usearch/probe.hpp <<'FIXT
 inline void probe(tensor_t values) { values(range, slice); }
 FIXTURE
 
+assert_rejects "value unwrapped from a call result" "unwraps a call result" include/usearch/probe.hpp <<'FIXTURE'
+inline int probe(text_t text) { return parse(text).value; }
+FIXTURE
+
+assert_accepts "structured binding and a trait value" include/usearch/probe.hpp <<'FIXTURE'
+inline int probe(text_t text) { auto [value, status] = parse(text); static_assert(std::is_same_v<int, int> && std::is_integral<int>::value); return value; }
+FIXTURE
+
+assert_rejects "expected local spelling the return type twice" "declares an expected" include/usearch/probe.hpp <<'FIXTURE'
+    nk::expected<nk::matrix<f32_t>> made = nk::matrix<f32_t>::zeros({2, 3});
+FIXTURE
+
+assert_rejects "const expected local" "declares an expected" include/usearch/probe.hpp <<'FIXTURE'
+    expected<refine_report_t> const healed = heal_(shard_plans_);
+FIXTURE
+
+assert_rejects "expected local with brace initializer" "declares an expected" include/usearch/probe.hpp <<'FIXTURE'
+    sz::expected<text_t> joined {text_t::make("a")};
+FIXTURE
+
+assert_accepts "expected local bound as a structure" include/usearch/probe.hpp <<'FIXTURE'
+    auto [made, status] = nk::matrix<f32_t>::zeros({2, 3});
+FIXTURE
+
+assert_accepts "expected return type of a declaration" include/usearch/probe.hpp <<'FIXTURE'
+expected<index_t> make(config_t const &config) noexcept;
+FIXTURE
+
+assert_accepts "expected return type of a declaration with a defaulted parameter" include/usearch/probe.hpp <<'FIXTURE'
+    expected<cursor_t> cursor_init(std::span<key_t const> starts = {}) const noexcept;
+FIXTURE
+
 assert_rejects "iterator laundered through a reference" "launders an iterator through &*" include/usearch/probe.hpp <<'FIXTURE'
 inline int *probe(iterator_t first) { return &*first; }
 FIXTURE

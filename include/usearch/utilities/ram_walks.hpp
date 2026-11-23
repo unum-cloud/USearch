@@ -66,7 +66,7 @@ struct breadth_first_walk {
      *      clear and the frontier empty.
      *
      *  @par Statuses:
-     *  - @c bad_alloc_k The bits or their bases found no memory.
+     *  - @c out_of_memory_k The bits or their bases found no memory.
      */
     status_t open(std::span<std::size_t const> visible_per_shard) noexcept {
         return open(visible_per_shard.size(), [&](std::size_t shard) noexcept { return visible_per_shard[shard]; });
@@ -78,7 +78,7 @@ struct breadth_first_walk {
     status_t open(std::size_t shards_count, visible_of_type_&& visible_of) noexcept {
         frontier_.clear();
         expanded_ = 0;
-        if (failed(visited_bases_.resize(shards_count + 1))) return status_t::bad_alloc_k;
+        if (failed(visited_bases_.resize(shards_count + 1))) return status_code_t::out_of_memory_k;
         for (std::size_t shard = 0; shard != shards_count; ++shard)
             visited_bases_[shard + 1] = visited_bases_[shard] +
                                         divide_round_up<std::size_t>(visible_of(shard), lanes_k);
@@ -90,15 +90,15 @@ struct breadth_first_walk {
      *      before stays where it is.
      *
      *  @par Statuses:
-     *  - @c bad_alloc_k The frontier could not grow; the node stays unvisited.
+     *  - @c out_of_memory_k The frontier could not grow; the node stays unvisited.
      */
     status_t visit(u32_t shard, node_id_t node) noexcept {
         u1x64_t& word = visited_[visited_bases_[shard] + node / lanes_k];
         u1x64_t const bit = u1x64_t {1} << (node % lanes_k);
-        if (word & bit) return status_t::success_k;
+        if (word & bit) return status_code_t::success_k;
         if (status_t const queued = frontier_.push_back({shard, node}); failed(queued)) return queued;
         word |= bit;
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Takes the next unexpanded frontier node into @p next, answering false once none remain. */
@@ -129,7 +129,7 @@ struct cursor_walk {
      *      @p visible_of(s) nodes below its watermark; the starts follow through @ref visit.
      *
      *  @par Statuses:
-     *  - @c bad_alloc_k The visited bits or their bases found no memory.
+     *  - @c out_of_memory_k The visited bits or their bases found no memory.
      */
     template <typename visible_of_type_>
     status_t open_breadth_first(std::size_t shards_count, visible_of_type_&& visible_of) noexcept {

@@ -237,10 +237,10 @@ class nvme_parts_catalog {
         static_assert(!aggregating_predicate<std::remove_cvref_t<predicate_type_>, key_t, walk_payload_t> ||
                           per_thread_predicates<std::remove_cvref_t<predicate_type_>>,
                       "An engine driving its own threads takes an aggregating predicate per thread");
-        if (parts_.empty()) return {{}, status_t::uninitialized_k};
+        if (parts_.empty()) return {{}, status_code_t::uninitialized_k};
         if (counts.size() != count || keys.size() != distances.size() || (count && keys.size() % count))
-            return {{}, status_t::config_mismatch_k};
-        if (!count) return {{}, status_t::success_k};
+            return {{}, status_code_t::config_mismatch_k};
+        if (!count) return {{}, status_code_t::success_k};
         using query_t = search_query<std::remove_reference_t<make_metric_type_>,
                                      std::remove_reference_t<query_of_type_>, std::remove_reference_t<predicate_type_>,
                                      std::remove_reference_t<relation_type_>, score_type_>;
@@ -291,12 +291,12 @@ class nvme_parts_catalog {
             typename std::invoke_result_t<query_of_type_&, std::size_t, scratch_allocator_t const&>::value_t;
         constexpr bool filtered_k = !std::is_same_v<std::remove_cvref_t<predicate_type_>, dummy_predicate_t>;
         constexpr nvme_key_reads_t key_reads_k = filtered_k ? nvme_key_reads_t::scored_k : nvme_key_reads_t::outputs_k;
-        if (parts_.empty()) return {{}, status_t::uninitialized_k};
+        if (parts_.empty()) return {{}, status_code_t::uninitialized_k};
         if (counts.size() != count || keys.size() != distances.size() || (count && keys.size() % count))
-            return {{}, status_t::config_mismatch_k};
+            return {{}, status_code_t::config_mismatch_k};
         std::memset(counts.data(), 0, counts.size_bytes());
         std::size_t const wanted = count ? keys.size() / count : 0;
-        if (!count || !wanted || !size()) return {{}, status_t::success_k};
+        if (!count || !wanted || !size()) return {{}, status_code_t::success_k};
 
         // Every round of a run scores all queries, and an entry that would enter some query's
         // ranking is asked of the predicate once.
@@ -346,9 +346,9 @@ class nvme_parts_catalog {
         // Every query merges the threads' rankings into its ranking, the nearest kept, ascending,
         // and each kept entry then reads its key.
         std::size_t found = 0;
-        auto merge_shares = [&](std::span<scan_share_t const> shares) noexcept {
+        auto merge_shares = [&](std::span<scan_share_t const> shares) noexcept -> status_t {
             growing_buffer<shard_node_t, scratch_allocator_t> ranked {scratch_allocator_t {executor.arena(0)}};
-            if (failed(ranked.resize_uninitialized(count * wanted))) return status_t::bad_alloc_k;
+            if (failed(ranked.resize_uninitialized(count * wanted))) return status_code_t::out_of_memory_k;
             for (std::size_t query = 0; query != count; ++query) {
                 shard_node_t* const query_locators = ranked.data() + query * wanted;
                 score_type_* const query_distances = distances.data() + query * wanted;
@@ -362,10 +362,10 @@ class nvme_parts_catalog {
                 counts[query] = written;
                 found += written;
             }
-            status_t resolved = status_t::success_k;
+            status_t resolved = status_code_t::success_k;
             auto resolve_key = [&](std::size_t match, std::size_t thread, std::size_t) noexcept {
                 if (match % wanted >= counts[match / wanted]) return;
-                if (failed(atomic_ref<status_t>(resolved).load(std::memory_order_relaxed))) return;
+                if (failed(atomic_ref<status_code_t>(resolved.code).load(std::memory_order_relaxed))) return;
                 shard_node_t const locator = ranked[match];
                 part_t const& part = parts_[locator.shard];
                 auto const [key_row, key_status] = read_(executor, thread, locator.shard,
@@ -386,7 +386,7 @@ class nvme_parts_catalog {
         search_result_t result;
         result.count = found;
         result.computed_distances = size() * count;
-        return {result, status_t::success_k};
+        return {result, status_code_t::success_k};
     }
 
     /**
@@ -420,8 +420,8 @@ class nvme_parts_catalog {
         using query_t =
             typename std::invoke_result_t<query_of_type_&, std::size_t, scratch_allocator_t const&>::value_t;
         std::size_t const count = reaches.size();
-        if (parts_.empty()) return {{}, status_t::uninitialized_k};
-        if (!count || !size()) return {{}, status_t::success_k};
+        if (parts_.empty()) return {{}, status_code_t::uninitialized_k};
+        if (!count || !size()) return {{}, status_code_t::success_k};
 
         // Every query's entries within reach of a round go out a quad at a time.
         auto output_round = [&](std::size_t thread, scan_share_t& share, scan_round_t const& round,
@@ -451,14 +451,14 @@ class nvme_parts_catalog {
                 with_static_extent<quad_lanes_k>(filled, output_quad);
             }
         };
-        auto merge_nothing = [](std::span<scan_share_t const>) noexcept { return status_t::success_k; };
+        auto merge_nothing = [](std::span<scan_share_t const>) noexcept { return status_code_t::success_k; };
         dummy_predicate_t unfiltered;
         status_t const scanned = scan_runs_<nvme_key_reads_t::scored_k>(
             count, 0, reaches, unfiltered, make_metric, query_of, executor, output_round, merge_nothing);
         if (failed(scanned)) return {{}, scanned};
         search_result_t result;
         result.computed_distances = size() * count;
-        return {result, status_t::success_k};
+        return {result, status_code_t::success_k};
     }
 
     /**
@@ -478,10 +478,10 @@ class nvme_parts_catalog {
      *    full.
      */
     status_t count(std::span<key_t const> keys, std::span<std::size_t> entries, executor_t& executor) const noexcept {
-        if (entries.size() != keys.size()) return status_t::config_mismatch_k;
-        if (parts_.empty()) return status_t::uninitialized_k;
+        if (entries.size() != keys.size()) return status_code_t::config_mismatch_k;
+        if (parts_.empty()) return status_code_t::uninitialized_k;
         std::memset(entries.data(), 0, entries.size_bytes());
-        if (keys.empty()) return status_t::success_k;
+        if (keys.empty()) return status_code_t::success_k;
         auto [call, call_status] = begin_scans_(executor);
         if (failed(call_status)) return call_status;
         return scan_keys_(keys, executor, [&](std::size_t, std::size_t position, shard_node_t) noexcept {
@@ -505,7 +505,7 @@ class nvme_parts_catalog {
                       executor_t& executor) const noexcept {
         if (status_t const counted = count(keys, entries, executor); failed(counted)) return counted;
         for (std::size_t& entry : entries) entry = entry ? 1 : 0;
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /**
@@ -533,10 +533,10 @@ class nvme_parts_catalog {
     template <typename on_value_type_>
     status_t get(std::span<key_t const> keys, std::span<std::size_t> entries, std::size_t wanted, executor_t& executor,
                  on_value_type_&& on_value) const noexcept {
-        if (entries.size() != keys.size()) return status_t::config_mismatch_k;
-        if (parts_.empty()) return status_t::uninitialized_k;
+        if (entries.size() != keys.size()) return status_code_t::config_mismatch_k;
+        if (parts_.empty()) return status_code_t::uninitialized_k;
         std::memset(entries.data(), 0, entries.size_bytes());
-        if (keys.empty()) return status_t::success_k;
+        if (keys.empty()) return status_code_t::success_k;
         auto [call, call_status] = begin_scans_(executor);
         if (failed(call_status)) return call_status;
 
@@ -544,7 +544,7 @@ class nvme_parts_catalog {
         scratch_allocator_t const scratch {executor.arena(0)};
         growing_buffer<std::size_t, scratch_allocator_t> starts {scratch};
         growing_buffer<shard_node_t, scratch_allocator_t> listed {scratch};
-        if (failed(starts.resize(keys.size() + 1))) return status_t::bad_alloc_k;
+        if (failed(starts.resize(keys.size() + 1))) return status_code_t::out_of_memory_k;
         if (status_t const scanned = nvme_list_entries(keys, to_writable_span(starts), listed, executor,
                                                        [&](std::span<key_t const> scanned, auto&& on_hit) noexcept {
                                                            return scan_keys_(scanned, executor, on_hit);
@@ -554,11 +554,11 @@ class nvme_parts_catalog {
         for (std::size_t position = 0; position != keys.size(); ++position)
             entries[position] = starts[position + 1] - starts[position];
 
-        status_t failure = status_t::success_k;
+        status_t failure = status_code_t::success_k;
         auto read_value = [&](std::size_t read, std::size_t thread, std::size_t) noexcept {
             std::size_t const position = read / wanted, rank = read % wanted;
             if (rank >= min_of(entries[position], wanted)) return;
-            if (failed(atomic_ref<status_t>(failure).load(std::memory_order_relaxed))) return;
+            if (failed(atomic_ref<status_code_t>(failure.code).load(std::memory_order_relaxed))) return;
             shard_node_t const locator = listed[starts[position] + rank];
             part_t const& part = parts_[locator.shard];
             std::size_t const bytes = static_cast<std::size_t>(
@@ -597,14 +597,14 @@ class nvme_parts_catalog {
     template <typename on_value_type_>
     status_t read_entries(std::size_t first, std::span<key_t> keys, executor_t& executor,
                           on_value_type_&& on_value) const noexcept {
-        if (parts_.empty()) return status_t::uninitialized_k;
-        if (first + keys.size() > size()) return status_t::config_mismatch_k;
-        if (keys.empty()) return status_t::success_k;
+        if (parts_.empty()) return status_code_t::uninitialized_k;
+        if (first + keys.size() > size()) return status_code_t::config_mismatch_k;
+        if (keys.empty()) return status_code_t::success_k;
         auto [call, call_status] = begin_scans_(executor);
         if (failed(call_status)) return call_status;
-        status_t failure = status_t::success_k;
+        status_t failure = status_code_t::success_k;
         auto read_entry = [&](std::size_t entry, std::size_t thread, std::size_t) noexcept {
-            if (failed(atomic_ref<status_t>(failure).load(std::memory_order_relaxed))) return;
+            if (failed(atomic_ref<status_code_t>(failure.code).load(std::memory_order_relaxed))) return;
             u32_t shard = 0;
             std::size_t node = first + entry;
             while (node >= parts_[shard].nodes) node -= parts_[shard].nodes, ++shard;
@@ -654,9 +654,9 @@ class nvme_parts_catalog {
      */
     status_t find_first(std::span<key_t const> keys, std::span<shard_node_t> locators,
                         executor_t& executor) const noexcept {
-        if (locators.size() != keys.size()) return status_t::config_mismatch_k;
-        if (parts_.empty()) return status_t::uninitialized_k;
-        if (keys.empty()) return status_t::success_k;
+        if (locators.size() != keys.size()) return status_code_t::config_mismatch_k;
+        if (parts_.empty()) return status_code_t::uninitialized_k;
+        if (keys.empty()) return status_code_t::success_k;
         auto [call, call_status] = begin_scans_(executor);
         if (failed(call_status)) return call_status;
         return nvme_find_first<atomic_ref>(keys, locators, parts_, executor,
@@ -685,9 +685,9 @@ class nvme_parts_catalog {
      */
     status_t read_keys(std::span<shard_node_t const> nodes, std::span<key_t> keys,
                        executor_t& executor) const noexcept {
-        if (keys.size() != nodes.size()) return status_t::config_mismatch_k;
-        if (parts_.empty()) return status_t::uninitialized_k;
-        if (nodes.empty()) return status_t::success_k;
+        if (keys.size() != nodes.size()) return status_code_t::config_mismatch_k;
+        if (parts_.empty()) return status_code_t::uninitialized_k;
+        if (nodes.empty()) return status_code_t::success_k;
         auto [call, call_status] = begin_located_reads_(executor);
         if (failed(call_status)) return call_status;
         return nvme_read_located<atomic_ref>(
@@ -715,7 +715,7 @@ class nvme_parts_catalog {
      *  - @c config_mismatch_k @p offsets is not one longer than @p entries, or a medium the engines
      *    cannot read.
      *  - @c uninitialized_k No part is viewed, or @p executor holds no threads or pool workers.
-     *  - @c bad_alloc_k @p neighbors could not grow.
+     *  - @c out_of_memory_k @p neighbors could not grow.
      *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
      *  - @c overflow_k A staging region's byte count overflows, or a read overfills its engine's
      *    queue of reads.
@@ -725,8 +725,8 @@ class nvme_parts_catalog {
     status_t read_neighbors(std::span<shard_node_t const> entries, std::span<std::size_t> offsets,
                             growing_buffer<node_id_t, neighbors_allocator_type_>& neighbors,
                             executor_t& executor) const noexcept {
-        if (offsets.size() != entries.size() + 1) return status_t::config_mismatch_k;
-        if (parts_.empty()) return status_t::uninitialized_k;
+        if (offsets.size() != entries.size() + 1) return status_code_t::config_mismatch_k;
+        if (parts_.empty()) return status_code_t::uninitialized_k;
         offsets[0] = 0;
         for (std::size_t position = 0; position != entries.size(); ++position)
             offsets[position + 1] = offsets[position] +
@@ -734,8 +734,8 @@ class nvme_parts_catalog {
                                                                          nvme_purpose_t::expand_k,
                                                                          entries[position].node) /
                                                              sizeof(node_id_t));
-        if (failed(neighbors.resize_uninitialized(offsets.back()))) return status_t::bad_alloc_k;
-        if (!offsets.back()) return status_t::success_k;
+        if (failed(neighbors.resize_uninitialized(offsets.back()))) return status_code_t::out_of_memory_k;
+        if (!offsets.back()) return status_code_t::success_k;
         auto [call, call_status] = begin_located_reads_(executor);
         if (failed(call_status)) return call_status;
         return nvme_read_located<atomic_ref>(
@@ -772,13 +772,13 @@ class nvme_parts_catalog {
      *  - @c io_k A neighbors read came back short.
      */
     expected<reachability_t> health(executor_t& executor) const noexcept {
-        if (parts_.empty()) return {{}, status_t::uninitialized_k};
+        if (parts_.empty()) return {{}, status_code_t::uninitialized_k};
         node_id_t widest = 0;
         for (part_t const& part : parts_) widest = max_of(widest, part.nodes);
         auto [call, call_status] = begin_located_reads_(executor);
         if (failed(call_status)) return {{}, call_status};
         audit_columns_t const columns = audit_columns_t::carve(executor.arena(0), widest);
-        if (!columns.bitset_words) return {{}, status_t::bad_alloc_k};
+        if (!columns.bitset_words) return {{}, status_code_t::out_of_memory_k};
         reachability_t result;
         for (u32_t shard = 0; shard != parts_.size(); ++shard) {
             part_t const& part = parts_[shard];
@@ -794,7 +794,7 @@ class nvme_parts_catalog {
             if (failed(status)) return {{}, status};
             result += audited;
         }
-        return {result, status_t::success_k};
+        return {result, status_code_t::success_k};
     }
 
 #pragma endregion Health
@@ -826,7 +826,7 @@ class nvme_parts_catalog {
      *  @par Statuses:
      *  - @c uninitialized_k No part is viewed, or @p executor holds no threads or pool workers.
      *  - @c shape_mismatch_k An output's or the shown coordinates' length disagrees.
-     *  - @c bad_alloc_k The arenas cannot hold the scratch.
+     *  - @c out_of_memory_k The arenas cannot hold the scratch.
      *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
      *  - @c config_mismatch_k A medium the engines cannot read.
      *  - @c io_k A read came back short; the draws written stand, their later reads unscored.
@@ -846,7 +846,7 @@ class nvme_parts_catalog {
             auto [metric, metric_status] = make_metric(scratch, width);
             if (failed(metric_status)) return {{}, metric_status};
             growing_buffer<distance_t, scratch_allocator_t> drained {scratch};
-            if (failed(drained.resize_uninitialized(width))) return {{}, status_t::bad_alloc_k};
+            if (failed(drained.resize_uninitialized(width))) return {{}, status_code_t::out_of_memory_k};
             source_t const source {*this, executor, metric, query_of, coordinates_of, rows, to_writable_span(drained)};
             return nvme_draw_sample(source, inputs, outputs, config, executor, *rows.failure);
         };
@@ -872,7 +872,7 @@ class nvme_parts_catalog {
         growing_buffer<u32_t, scratch_allocator_t> kept_counts;
         growing_buffer<distance_t, scratch_allocator_t> thresholds;
         growing_buffer<distance_t, scratch_allocator_t> round_distances;
-        status_t failure = status_t::success_k;
+        status_t failure = status_code_t::success_k;
 
         explicit scan_share_t(scratch_allocator_t const& allocator) noexcept
             : kept_locators(allocator), kept_distances(allocator), kept_counts(allocator), thresholds(allocator),
@@ -884,9 +884,9 @@ class nvme_parts_catalog {
                 failed(kept_distances.resize_uninitialized(queries * wanted)) || failed(kept_counts.resize(queries)) ||
                 failed(thresholds.resize_uninitialized(queries)) ||
                 failed(round_distances.resize_uninitialized(queries * rows)))
-                return status_t::bad_alloc_k;
+                return status_code_t::out_of_memory_k;
             for (distance_t& threshold : thresholds) threshold = unbounded_radius<distance_t>();
-            return status_t::success_k;
+            return status_code_t::success_k;
         }
 
         /** Query @p query 's ranking of @p wanted, as @ref keep_ranked keeps it. */
@@ -1312,7 +1312,7 @@ class nvme_parts_catalog {
         scratch_allocator_t allocator;
         metric_t metric;
         query_t prepared {};
-        status_t status = status_t::success_k;
+        status_t status = status_code_t::success_k;
         growing_buffer<shard_node_t, scratch_allocator_t> locators;
         growing_buffer<distance_t, scratch_allocator_t> ranked_distances;
         growing_buffer<key_t, scratch_allocator_t> resolved;
@@ -1336,8 +1336,8 @@ class nvme_parts_catalog {
             if (failed(locators.resize_uninitialized(inputs.ranked)) ||
                 failed(ranked_distances.resize_uninitialized(inputs.ranked)) ||
                 failed(resolved.resize_uninitialized(inputs.ranked)))
-                return status_t::bad_alloc_k;
-            return status_t::success_k;
+                return status_code_t::out_of_memory_k;
+            return status_code_t::success_k;
         }
         void prime_query(std::size_t new_query_index) noexcept {
             query_index = new_query_index;
@@ -1426,8 +1426,8 @@ class nvme_parts_catalog {
         u64_t const skipped = absolute - request.offset;
         if (!engine.poll_completions(completions) || completions[0].result < 0 ||
             static_cast<u64_t>(completions[0].result) < skipped + bytes)
-            return {nullptr, status_t::io_k};
-        return {engine.buffer(buffer) + skipped, status_t::success_k};
+            return {nullptr, status_code_t::io_k};
+        return {engine.buffer(buffer) + skipped, status_code_t::success_k};
     }
 
     /** One round of rows a scan scores together: rows @c first_row up to @c end_row of a run of
@@ -1496,7 +1496,7 @@ class nvme_parts_catalog {
         metric_t* const metrics = arena_allocator<metric_t, forkunion_allocator_t> {first_arena}.allocate(threads);
         scan_share_t* const shares = arena_allocator<scan_share_t, forkunion_allocator_t> {first_arena}.allocate(
             threads);
-        if (!queries || !metrics || !shares) return status_t::bad_alloc_k;
+        if (!queries || !metrics || !shares) return status_code_t::out_of_memory_k;
         std::span<query_t const> const batch {queries, count};
         std::size_t built_queries = 0, built_metrics = 0, built_shares = 0;
         auto release = [&]() noexcept {
@@ -1504,7 +1504,7 @@ class nvme_parts_catalog {
             std::destroy_n(metrics, built_metrics);
             std::destroy_n(shares, built_shares);
         };
-        status_t built = status_t::success_k;
+        status_t built = status_code_t::success_k;
         for (; succeeded(built) && built_queries != count; ++built_queries) {
             auto [query, query_status] = query_of(built_queries, scratch_allocator_t {first_arena});
             new (queries + built_queries) query_t(std::move(query));
@@ -1532,7 +1532,7 @@ class nvme_parts_catalog {
 
         // Reads one run of entries that fits a staging buffer, its value rows in buffer zero and
         // its key rows in buffer one, and scores it a staged round at a time.
-        auto score_run = [&](std::size_t thread, u32_t shard, node_id_t first, node_id_t end) noexcept {
+        auto score_run = [&](std::size_t thread, u32_t shard, node_id_t first, node_id_t end) noexcept -> status_t {
             part_t const& part = parts_[shard];
             scan_share_t& share = shares[thread];
             std::size_t const staged = end - first;
@@ -1553,10 +1553,10 @@ class nvme_parts_catalog {
             for (; round.first_row != staged; round.first_row = round.end_row) {
                 round.end_row = score_queries(metrics[thread], batch, round, round.first_row, staged,
                                               to_span(share.thresholds), to_writable_span(share.round_distances));
-                if (round.end_row == round.first_row) return status_t::bad_alloc_k;
+                if (round.end_row == round.first_row) return status_code_t::out_of_memory_k;
                 on_round(thread, share, round, batch);
             }
-            return status_t::success_k;
+            return status_code_t::success_k;
         };
 
         // A chunk splits into runs at part ends and wherever its value bytes would outgrow a scan
@@ -1620,7 +1620,7 @@ class nvme_parts_catalog {
         scratch_allocator_t const scratch {executor.arena(0)};
         growing_buffer<std::size_t, scratch_allocator_t> heads {scratch}, chains {scratch};
         if (failed(heads.resize_uninitialized(slots_count)) || failed(chains.resize_uninitialized(keys.size())))
-            return status_t::bad_alloc_k;
+            return status_code_t::out_of_memory_k;
         for (std::size_t& head : heads) head = empty_k;
         auto slot_of = [&](key_t const& key) noexcept {
             std::size_t slot = mix_bits(std::hash<key_t> {}(key)) & mask;
@@ -1635,9 +1635,9 @@ class nvme_parts_catalog {
 
         std::size_t tasks = 0;
         for (part_t const& part : parts_) tasks += divide_round_up<std::size_t>(part.nodes, run_rows_(part));
-        status_t failure = status_t::success_k;
+        status_t failure = status_code_t::success_k;
         auto scan_run = [&](std::size_t task, std::size_t thread, std::size_t) noexcept {
-            if (failed(atomic_ref<status_t>(failure).load(std::memory_order_relaxed))) return;
+            if (failed(atomic_ref<status_code_t>(failure.code).load(std::memory_order_relaxed))) return;
             u32_t shard = 0;
             while (task >= divide_round_up<std::size_t>(parts_[shard].nodes, run_rows_(parts_[shard])))
                 task -= divide_round_up<std::size_t>(parts_[shard].nodes, run_rows_(parts_[shard])), ++shard;
@@ -1787,11 +1787,11 @@ class nvme_parts_catalog {
     /** The USearch status of a SmashTable one, as a directory build answers it. */
     static status_t status_of_(st::status_t status) noexcept {
         switch (status) {
-        case st::status_t::success_k: return status_t::success_k;
-        case st::status_t::out_of_memory_heap_k: return status_t::bad_alloc_k;
-        case st::status_t::input_output_k: return status_t::io_k;
-        case st::status_t::invalid_argument_k: return status_t::malformed_k;
-        default: return status_t::internal_k;
+        case st::status_t::success_k: return status_code_t::success_k;
+        case st::status_t::out_of_memory_heap_k: return status_code_t::out_of_memory_k;
+        case st::status_t::input_output_k: return status_code_t::io_k;
+        case st::status_t::invalid_argument_k: return status_code_t::malformed_k;
+        default: return status_code_t::internal_k;
         }
     }
 
@@ -1807,13 +1807,13 @@ class nvme_parts_catalog {
         std::size_t const sum_bytes = dtype_bytes(sums.dtype);
         std::size_t const element_bytes = dtype_bytes(column.dtype);
         if ((sums.dtype != dtype_t::u64_k && sums.dtype != dtype_t::u32_k) || !element_bytes)
-            return status_t::config_mismatch_k;
-        if (sums.bytes.size() != (rows + 1) * sum_bytes) return status_t::malformed_k;
+            return status_code_t::config_mismatch_k;
+        if (sums.bytes.size() != (rows + 1) * sum_bytes) return status_code_t::malformed_k;
         u64_t const sums_begin = sums.bytes.first;
         u64_t const extent = column.data.size() / element_bytes;
         // Reads `count` sums from `first` on into the chunk's front, widening narrower ones back to
         // front so no sum is overwritten before it widened.
-        auto read_sums = [&](std::size_t first, std::size_t count) noexcept {
+        auto read_sums = [&](std::size_t first, std::size_t count) noexcept -> status_t {
             bytes_span_t const target = bytes_of(chunk.data(), count).first(count * sum_bytes);
             if (status_t const read = medium.read_at(sums_begin + first * sum_bytes, target); failed(read)) return read;
             if (sum_bytes == sizeof(u64_t))
@@ -1824,11 +1824,11 @@ class nvme_parts_catalog {
                     std::memcpy(&narrow, target.data() + index * sizeof(u32_t), sizeof(narrow));
                     chunk[index] = little_endian(narrow);
                 }
-            return status_t::success_k;
+            return status_code_t::success_k;
         };
         if (status_t const read = read_sums(rows, 1); failed(read)) return read;
         u64_t const universe = chunk[0];
-        if (universe > extent) return status_t::malformed_k;
+        if (universe > extent) return status_code_t::malformed_k;
         u64_t previous = 0;
         widest = 0;
         auto fill = [&](std::size_t first) noexcept -> st::expected<std::span<u64_t const>> {
@@ -1843,7 +1843,7 @@ class nvme_parts_catalog {
         auto made = directory_t::make(rows + 1, universe, fill, forkunion_allocator<u64_t>(allocator));
         if (!made) return status_of_(made.status());
         directory = std::move(*made);
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Opens the part @p file holds as @p columns locate its rows: the directories of its ragged
@@ -1853,7 +1853,7 @@ class nvme_parts_catalog {
     static status_t open_part_(file_medium_t&& file, persisted_columns_t const& columns,
                                growing_buffer<u64_t, chunk_allocator_type_>& chunk, forkunion_allocator_t allocator,
                                medium_t& medium, part_t& part) noexcept {
-        if constexpr (!std::is_constructible_v<medium_t, file_medium_t&&>) return status_t::config_mismatch_k;
+        if constexpr (!std::is_constructible_v<medium_t, file_medium_t&&>) return status_code_t::config_mismatch_k;
         else {
             persisted_column_t const& keys = columns.keys;
             persisted_column_t const& values = columns.values;
@@ -1862,7 +1862,7 @@ class nvme_parts_catalog {
             std::size_t const value_element_bytes = dtype_bytes(values.dtype);
             if (neighbors.dtype != safegraphs_node_id_dtype<node_id_t>() || !key_bytes || keys.offsets ||
                 keys.row_width != 1 || !value_element_bytes || columns.nodes >= (std::numeric_limits<node_id_t>::max)())
-                return status_t::config_mismatch_k;
+                return status_code_t::config_mismatch_k;
             part.nodes = static_cast<node_id_t>(columns.nodes);
             part.key_row_bytes = static_cast<u32_t>(key_bytes);
             part.key_dtype = keys.dtype;
@@ -1891,7 +1891,7 @@ class nvme_parts_catalog {
                 part.connectivity = static_cast<u32_t>(max_of<u64_t>(widest, 1));
             }
             medium = medium_t {std::move(file)};
-            return status_t::success_k;
+            return status_code_t::success_k;
         }
     }
 
@@ -2156,7 +2156,7 @@ class nvme_index {
      *  @par Statuses:
      *  - @c uninitialized_k Nothing is opened, or the executor holds no threads or pool workers.
      *  - @c shape_mismatch_k An output's or the shown coordinates' length disagrees.
-     *  - @c bad_alloc_k The arenas cannot hold the scratch.
+     *  - @c out_of_memory_k The arenas cannot hold the scratch.
      *  - @c contended_k Another call holds the executor, or its pool is running another dispatch.
      *  - @c config_mismatch_k A medium the engines cannot read.
      *  - @c io_k A read came back short.

@@ -84,7 +84,7 @@ struct vram_amd_kits {
                                    basic::amd_rung_t instantiated) noexcept;
 
     /** The kits read no parameters on the device, so none upload. */
-    static status_t upload_parameters_(hip_api_t const&) noexcept { return status_t::success_k; }
+    static status_t upload_parameters_(hip_api_t const&) noexcept { return status_code_t::success_k; }
 
     /** The kits read no parameters on the device. */
     byte_t const* parameters_() const noexcept { return nullptr; }

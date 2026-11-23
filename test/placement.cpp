@@ -22,14 +22,14 @@
 namespace unum::usearch::test {
 
 struct profile_device_t {
-    gpu_vendor_t vendor;
+    util::gpu_vendor_t vendor;
     std::string_view architecture;
 };
 
 using emulated_machine_t = std::vector<profile_device_t>;
 
-static profile_device_t nvidia(std::string_view architecture) { return {gpu_vendor_t::nvidia_k, architecture}; }
-static profile_device_t amd(std::string_view architecture) { return {gpu_vendor_t::amd_k, architecture}; }
+static profile_device_t nvidia(std::string_view architecture) { return {util::gpu_vendor_t::nvidia_k, architecture}; }
+static profile_device_t amd(std::string_view architecture) { return {util::gpu_vendor_t::amd_k, architecture}; }
 
 struct class_codes_t {
     gpu_class_t gpu_class;
@@ -68,17 +68,17 @@ static gpu_class_mask_t loaded_on(profile_device_t const& device) {
 }
 
 struct outcome_t {
-    status_t status = status_t::success_k;
+    util::status_code_t status = util::status_code_t::success_k;
     gpu_class_t gpu_class = gpu_class_t::unknown_k;
 
     bool operator==(outcome_t const&) const noexcept = default;
 };
 
-static outcome_t outcome(gpu_class_t gpu_class) { return {status_t::success_k, gpu_class}; }
-static outcome_t outcome(status_t status) { return {status, gpu_class_t::unknown_k}; }
+static outcome_t outcome(gpu_class_t gpu_class) { return {util::status_code_t::success_k, gpu_class}; }
+static outcome_t outcome(util::status_code_t status) { return {status, gpu_class_t::unknown_k}; }
 
 static std::string format_as(outcome_t const& placed) {
-    return succeeded(placed.status) ? fmt::format("class {}", static_cast<u32_t>(placed.gpu_class))
+    return succeeded(placed.status) ? fmt::format("class {}", static_cast<util::u32_t>(placed.gpu_class))
                                     : std::string {status_to_string(placed.status)};
 }
 
@@ -86,7 +86,7 @@ static std::string format_as(outcome_t const& placed) {
  *  internal error. */
 static outcome_t place(emulated_machine_t const& machine, std::initializer_list<std::int32_t> devices,
                        usearch_gpu_class_t ceiling = usearch_gpu_class_unknown_k) {
-    std::vector<gpu_device_t> table(machine.size());
+    std::vector<util::gpu_device_t> table(machine.size());
     std::vector<gpu_class_mask_t> loaded(machine.size());
     for (std::size_t position = 0; position != machine.size(); ++position)
         table[position].vendor = machine[position].vendor, loaded[position] = loaded_on(machine[position]);
@@ -95,7 +95,7 @@ static outcome_t place(emulated_machine_t const& machine, std::initializer_list<
     vram.devices_count = devices.size();
     vram.gpu_class_ceiling = ceiling;
     auto const [placement, status] = resolve_placement(table, loaded, vram);
-    if (failed(status)) return outcome(status);
+    if (failed(status)) return outcome(status.code);
     bool placed = expect_true(devices.size() ? placement.positions.data() == devices.begin() &&
                                                    placement.positions.size() == devices.size()
                                              : placement.positions.size() == 1 && placement.positions[0] == 0);
@@ -103,7 +103,7 @@ static outcome_t place(emulated_machine_t const& machine, std::initializer_list<
         placed = expect_true(table[position].vendor == placement.vendor) && placed;
         placed = expect_true((loaded[position] & gpu_class_bit(placement.gpu_class)) != 0) && placed;
     }
-    return placed ? outcome(placement.gpu_class) : outcome(status_t::internal_k);
+    return placed ? outcome(placement.gpu_class) : outcome(util::status_code_t::internal_k);
 }
 
 /** Three vendors' classes side by side: each pair of devices places on the newest class all of
@@ -119,11 +119,12 @@ static void test_placement_rtx_h100_cdna3() {
     expect_equal(place(rtx_h100_cdna3, {1, 2}), outcome(gpu_class_t::nvidia_ada_k));
     expect_equal(place(rtx_h100_cdna3, {1, 2}, usearch_gpu_class_nvidia_ampere_k),
                  outcome(gpu_class_t::nvidia_ampere_k));
-    expect_equal(place(rtx_h100_cdna3, {0, 4}), outcome(status_t::config_mismatch_k));
-    expect_equal(place(rtx_h100_cdna3, {6}), outcome(status_t::device_error_k));
-    expect_equal(place(rtx_h100_cdna3, {2}, usearch_gpu_class_amd_cdna3_k), outcome(status_t::unsupported_k));
+    expect_equal(place(rtx_h100_cdna3, {0, 4}), outcome(util::status_code_t::config_mismatch_k));
+    expect_equal(place(rtx_h100_cdna3, {6}), outcome(util::status_code_t::device_k));
+    expect_equal(place(rtx_h100_cdna3, {2}, usearch_gpu_class_amd_cdna3_k),
+                 outcome(util::status_code_t::unsupported_k));
     expect_equal(place(rtx_h100_cdna3, {2}, static_cast<usearch_gpu_class_t>(13)),
-                 outcome(status_t::invalid_argument_k));
+                 outcome(util::status_code_t::invalid_argument_k));
 }
 
 /** An Ampere and an Ada device place alone on their own classes, and together on the older. */
@@ -136,7 +137,7 @@ static void test_placement_a100_l40s() {
 /** A CDNA2 device loads no class of the build, so only its CDNA3 neighbour places. */
 static void test_placement_mi250x_mi300x() {
     emulated_machine_t const mi250x_mi300x {amd("gfx90a"), amd("gfx942")};
-    expect_equal(place(mi250x_mi300x, {0}), outcome(status_t::unsupported_k));
+    expect_equal(place(mi250x_mi300x, {0}), outcome(util::status_code_t::unsupported_k));
     expect_equal(place(mi250x_mi300x, {1}), outcome(gpu_class_t::amd_cdna3_k));
 }
 
@@ -144,7 +145,7 @@ static void test_placement_mi250x_mi300x() {
 static void test_placement_mi400_mi300x() {
     emulated_machine_t const mi400_mi300x {amd("gfx1250"), amd("gfx942")};
     expect_equal(place(mi400_mi300x, {0}), outcome(gpu_class_t::amd_cdna5_k));
-    expect_equal(place(mi400_mi300x, {0, 1}), outcome(status_t::unsupported_k));
+    expect_equal(place(mi400_mi300x, {0, 1}), outcome(util::status_code_t::unsupported_k));
 }
 
 } // namespace unum::usearch::test

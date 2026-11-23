@@ -16,7 +16,7 @@ One header, `usearch/usearch.h`, pulls in every modality: `dense_index.h`, `sequ
 `ctest --test-dir build_release -R usearch_test_c` runs the smoke test in `c/test.c`.
 
 `-D USEARCH_INSTALL=1` adds the CMake package and a `.pc` file, and `cpack` then archives the preview SDK.
-It holds the stripped shared library, the C headers, the C++ wrappers in `cpp/usearch/`, the package, the `.pc` and the license, but neither the archive nor the header-only core.
+It holds both stripped libraries, the C headers, the C++ wrappers in `cpp/usearch/`, the package, the `.pc` and the license, but not the header-only templates.
 
 ```sh
 cmake -B build_release -D CMAKE_BUILD_TYPE=Release -D USEARCH_BUILD_SHARED=1 -D USEARCH_INSTALL=1 -D USEARCH_DENSE_DTYPES=11
@@ -24,8 +24,8 @@ cmake --build build_release --config Release
 cpack --config build_release/CPackConfig.cmake # usearch-<version>-<platform>-sdk.tar.gz, a ZIP on Windows
 ```
 
-Consumers link it as `usearch::shared` after `find_package(usearch)`, or through `pkg-config --cflags --libs usearch`.
-`cmake --install build_release --component static` adds `usearch::static`, and `--component core` the header-only templates as `usearch::header`.
+Consumers link `usearch::shared` or `usearch::static` after `find_package(usearch)`, `usearch::abi` for the C headers alone, and `usearch::cpp` for the C++ wrappers, or go through `pkg-config --cflags --libs usearch`.
+`cmake --install build_release --component templates` adds the header-only templates as `usearch::templates`.
 
 `-D USEARCH_BUILD_STUB=1` adds a brute-force stand-in under the same library names in `build_release/stub/`.
 It answers every verb of every modality by exhaustive scan with the C++ standard library alone, so a binding links and runs its suite in seconds without building the engine.
@@ -171,13 +171,13 @@ The exception is a VRAM verb that takes an arena: that arena must be a GPU arena
 A second call on a held executor finishes `usearch_status_contended_k`, so callers wanting real parallelism give each thread its own executor.
 `usearch_executor_drain` waits until no call holds the executor, then sets its threads' mood until the next call: `usearch_mood_parked_k`, the default, lets idle threads sleep in the kernel, `usearch_mood_spinning_k` keeps them hot.
 A blocking verb called from inside a progress handler or predicate of a call on the same executor reports `usearch_status_contended_k`, and so does a drain on the thread running that call's body; a drain from any other of its threads would wait on itself.
-`usearch_executor_free` waits out the call holding the executor before it releases the threads; host arenas the executor made stay valid until freed, and GPU arenas it made must be freed before it.
+`usearch_executor_free` waits out the call holding the executor before it releases the threads, and every arena it made must be freed before it.
 
 ## Arenas
 
 Every output whose length scales with the call lands in an arena: the matches of a search, every vector stored under one key, every pair a sparse product scored, a monolith, a cursor's batch.
 An arena is memory the library allocates and the caller passes to call after call, each of which rewinds it and writes views into it, growing only when the new outputs outsize everything it held.
-An executor makes it where it computes, and a `NULL` executor makes host pages for calls on the calling thread; an arena of host pages may outlive the executor that made it.
+An executor makes it where it computes, and a `NULL` executor makes host pages for calls on the calling thread; an arena never outlives the executor that made it, and one made without an executor lives until it is freed.
 Nothing is allocated until a call writes into it, and it keeps its high-water mark, so a steady loop allocates once.
 Only fixed-size reports, such as stats, descriptions and `written` counts, stay fields the caller points at.
 Arenas keep the interface at one verb per operation, never a twin per output style.
@@ -208,7 +208,7 @@ To keep one call's outputs alive past the next, pass the next call another arena
 An arena serves one call at a time: a call holds it until just before its final status, and a second call naming it meanwhile finishes `usearch_status_contended_k`.
 A `NULL` arena, or inputs pointing into the arena a call is about to rewind, refuse with `usearch_status_invalid_argument_k`, and a call that fails leaves its outputs `NULL`.
 A GPU arena grows, fills and frees on the first stream of the executor that made it, so it serves only calls on that executor, and any other executor, `NULL` included, is refused with `usearch_status_device_k`.
-Free a GPU arena before the executor that made it.
+Free every arena before the executor that made it.
 
 ## Keys
 
@@ -228,7 +228,7 @@ A batch passes its keys as a `usearch_keys_view_t`, a pointer and a byte stride,
 
 ## Errors
 
-The library never logs or aborts: every failure is a status in the call's `usearch_outcome_t`, with a static message carrying the detail the status cannot.
+The library never logs or aborts: every failure is a status in the call's `usearch_outcome_t`, with a static message naming what broke, a library invariant or a rule of the call, else the status's own name.
 Messages are never freed, and are `NULL` exactly on success.
 `usearch_status_name` spells a status as its lowercase dashed name, like `invalid-argument`, and `usearch_status_from_name` reads one back.
 The statuses worth branching on:
@@ -877,7 +877,7 @@ The remaining verbs are the shapes ones, where `get` returns observations within
 The engine serves every relation in RAM, on NVMe and on NVIDIA and AMD GPUs, answering `view_ram` and Apple GPUs with `usearch_status_unsupported_k`; `sample`, `health` and cursors with `starts` and `links` serve RAM indexes and NVMe views.
 The stand-in scans every entry exactly, keeps the doubles inserted, refuses every terrain and so `visible_k`, and refuses every VRAM verb with `usearch_status_device_k`.
 
-## What This Binding Does Not Expose
+## Left Unbound
 
 - __Batched admission.__
   The predicate is one call per key; the span-admission form exists only in the C++ layer, since a C callback per candidate batch would cost more than it amortizes.

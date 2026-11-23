@@ -8,11 +8,6 @@ find_package_handle_standard_args(@PROJECT_NAME@ CONFIG_MODE)
 include(CMakeFindDependencyMacro)
 find_dependency(Threads)
 
-# The shared library, the archive and the header-only core install as separate components, so any set may be absent.
-if(NOT TARGET @PROJECT_NAME@::shared)
-    include("${CMAKE_CURRENT_LIST_DIR}/@PROJECT_NAME@Targets.cmake" OPTIONAL)
-    include("${CMAKE_CURRENT_LIST_DIR}/@PROJECT_NAME@StaticTargets.cmake" OPTIONAL)
-endif()
-if(NOT TARGET @PROJECT_NAME@::header)
-    include("${CMAKE_CURRENT_LIST_DIR}/@PROJECT_NAME@HeaderTargets.cmake" OPTIONAL)
-endif()
+# The libraries and the header-only templates install as separate components, so either set may be absent.
+include("${CMAKE_CURRENT_LIST_DIR}/@PROJECT_NAME@Targets.cmake" OPTIONAL)
+include("${CMAKE_CURRENT_LIST_DIR}/@PROJECT_NAME@TemplatesTargets.cmake" OPTIONAL)

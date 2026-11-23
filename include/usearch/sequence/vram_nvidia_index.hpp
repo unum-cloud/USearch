@@ -38,7 +38,7 @@ struct vram_nvidia_kits {
      *      @c vram_nvidia_metric.cuh, as are the members below reading the kit.
      *
      *  @par Statuses:
-     *  - @c bad_alloc_k The host copy found no memory.
+     *  - @c out_of_memory_k The host copy found no memory.
      */
     status_t parameters(parameters_t parameters) noexcept;
 
@@ -63,7 +63,7 @@ struct vram_nvidia_kits {
     /** Bytes the @p stored sequence saves into: its own, since a sequence is its bytes, as a RAM
      *  string. */
     static expected<std::size_t> saved_bytes_(bytes_view_t stored) noexcept {
-        return {stored.size(), status_t::success_k};
+        return {stored.size(), status_code_t::success_k};
     }
 
     /**
@@ -75,7 +75,7 @@ struct vram_nvidia_kits {
     static status_t save_value_(bytes_view_t stored, bytes_span_t saved) noexcept { return copy_bytes(saved, stored); }
 
     /** Bytes a sequence of @p saved bytes stores into: its own. */
-    static expected<std::size_t> stored_bytes_(std::size_t saved) noexcept { return {saved, status_t::success_k}; }
+    static expected<std::size_t> stored_bytes_(std::size_t saved) noexcept { return {saved, status_code_t::success_k}; }
 
     /** Stores a step's sequences and sizes their spans as the kit's load hook queues them. */
     status_t queue_load_values_(basic::vram_load_step<node_id_type_> const& step) const noexcept;
@@ -162,10 +162,10 @@ struct vram_nvidia_index {
      *
      *  @par Statuses:
      *  - @c config_mismatch_k The index is reserved already.
-     *  - @c bad_alloc_k The host copy found no memory.
+     *  - @c out_of_memory_k The host copy found no memory.
      */
     status_t parameters(parameters_t parameters) noexcept {
-        if (graph_.connectivity()) return status_t::config_mismatch_k;
+        if (graph_.connectivity()) return status_code_t::config_mismatch_k;
         return graph_.kits().parameters(parameters);
     }
 

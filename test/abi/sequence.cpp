@@ -55,12 +55,12 @@ static constexpr std::array<std::size_t, 2> sequence_window_widths_k {3, 5};
 
 /** @p count sequences of about @p length nucleotides from eight templates, an eighth of every
  *  sequence's symbols substituted, inserted or erased. */
-static std::vector<std::string> generate_nucleotides(std::size_t count, std::size_t length, u64_t seed) {
+static std::vector<std::string> generate_nucleotides(std::size_t count, std::size_t length, util::u64_t seed) {
     constexpr std::size_t templates_k = 8;
     split_mix_generator_t random_generator {seed};
-    uniform_below<u32_t> const symbol_distribution {static_cast<u32_t>(nucleotides_k.size())};
-    uniform_below<u32_t> const template_distribution {templates_k};
-    uniform_below<u32_t> const edit_kind_distribution {3};
+    util::uniform_below<util::u32_t> const symbol_distribution {static_cast<util::u32_t>(nucleotides_k.size())};
+    util::uniform_below<util::u32_t> const template_distribution {templates_k};
+    util::uniform_below<util::u32_t> const edit_kind_distribution {3};
     std::array<std::string, templates_k> templates;
     for (std::string& symbols : templates)
         for (std::size_t symbol = 0; symbol != length; ++symbol)
@@ -69,7 +69,8 @@ static std::vector<std::string> generate_nucleotides(std::size_t count, std::siz
     for (std::string& symbols : strings) {
         symbols = templates[template_distribution(random_generator)];
         for (std::size_t edit = 0; edit != length / 8; ++edit) {
-            std::size_t const position = uniform_below<u32_t> {static_cast<u32_t>(symbols.size())}(random_generator);
+            std::size_t const position = util::uniform_below<util::u32_t> {static_cast<util::u32_t>(symbols.size())}(
+                random_generator);
             char const symbol = nucleotides_k[symbol_distribution(random_generator)];
             switch (edit_kind_distribution(random_generator)) {
             case 0: symbols[position] = symbol; break;
@@ -95,18 +96,18 @@ enum class nucleotides_layout_t : bool { bytes_k, packed_k };
 
 static sequence_tape_t generate_sequences(std::vector<std::string> const& strings, nucleotides_layout_t layout) {
     sequence_tape_t tape;
-    u32_t const code_bits = packed_code_bits(nucleotides_k.size());
-    std::vector<u8_t> codes;
+    util::u32_t const code_bits = packed_code_bits(nucleotides_k.size());
+    std::vector<util::u8_t> codes;
     for (std::string const& symbols : strings) {
         if (layout == nucleotides_layout_t::bytes_k) {
             tape.elements += symbols, tape.offsets.push_back(tape.elements.size());
             continue;
         }
         codes.clear();
-        for (char const symbol : symbols) codes.push_back(static_cast<u8_t>(nucleotides_k.find(symbol)));
+        for (char const symbol : symbols) codes.push_back(static_cast<util::u8_t>(nucleotides_k.find(symbol)));
         std::size_t const first = tape.elements.size(), bytes = packed_codes_bytes(codes.size(), code_bits);
         tape.elements.resize(first + bytes);
-        pack_codes(codes, code_bits, bytes_of(tape.elements.data() + first, bytes));
+        pack_codes(codes, code_bits, util::bytes_of(tape.elements.data() + first, bytes));
         tape.offsets.push_back(tape.elements.size());
     }
     return tape;
@@ -141,7 +142,7 @@ static void expect_gets(handle<sequence_verbs_t>& index, std::size_t count) {
 }
 
 /** One metric of one cell, as the file's docblock describes. */
-static void test_sequence_metric(sweep_cell_t const& cell, sequence_geometry_t geometry, u64_t seed) {
+static void test_sequence_metric(sweep_cell_t const& cell, sequence_geometry_t geometry, util::u64_t seed) {
     session_t session = open_session(settings_of(session_settings(), cell), cell.cpu_class);
     if (!expect_true(bool(session))) return;
     bool const aligned = geometry.metadata.metric == usearch_sequence_metric_needleman_wunsch_k;

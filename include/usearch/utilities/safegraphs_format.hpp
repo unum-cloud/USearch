@@ -86,11 +86,14 @@ struct save_config_t {
      *  - @c config_mismatch_k A provenance field names @c metric or @c alignment.
      */
     constexpr status_t validate() const noexcept {
-        if (alignment < safegraphs_alignment_floor_k || !std::has_single_bit(alignment))
-            return status_t::config_mismatch_k;
+        if (alignment < safegraphs_alignment_floor_k)
+            return {status_code_t::config_mismatch_k, "Alignment below the floor"};
+        if (!std::has_single_bit(alignment))
+            return {status_code_t::config_mismatch_k, "Alignment is not a power of two"};
         for (safegraphs_custom_field_t const& field : provenance)
-            if (field.key == "metric" || field.key == "alignment") return status_t::config_mismatch_k;
-        return status_t::success_k;
+            if (field.key == "metric" || field.key == "alignment")
+                return {status_code_t::config_mismatch_k, "Provenance names a reserved field"};
+        return status_code_t::success_k;
     }
 };
 
@@ -344,16 +347,16 @@ inline std::string_view safegraphs_string_(yyjson_val* value) noexcept {
 template <typename allocator_type_>
 expected<yyjson_doc*> safegraphs_read_document_(bytes_view_t json,
                                                 safegraphs_yyjson_allocator_<allocator_type_>& trampoline) noexcept {
-    if (json.empty()) return {nullptr, status_t::malformed_k};
+    if (json.empty()) return {nullptr, {status_code_t::malformed_k, "Header JSON is empty"}};
     yyjson_alc allocator_abi = trampoline.c_abi();
     char* text = static_cast<char*>(allocator_abi.malloc(allocator_abi.ctx, json.size()));
-    if (!text) return {nullptr, status_t::bad_alloc_k};
+    if (!text) return {nullptr, {status_code_t::out_of_memory_k, "No room for the header JSON copy"}};
     std::memcpy(text, json.data(), json.size());
     yyjson_doc* document = yyjson_read_opts(text, json.size(), 0, &allocator_abi, nullptr);
     allocator_abi.free(allocator_abi.ctx, text);
-    if (document && yyjson_is_obj(yyjson_doc_get_root(document))) return {document, status_t::success_k};
+    if (document && yyjson_is_obj(yyjson_doc_get_root(document))) return {document, status_code_t::success_k};
     yyjson_doc_free(document);
-    return {nullptr, status_t::malformed_k};
+    return {nullptr, {status_code_t::malformed_k, "Header is not a JSON object"}};
 }
 
 /** Reads one @b [begin,end] pair into @p begin and @p end; a missing or malformed pair
@@ -370,7 +373,7 @@ inline iota_view<std::size_t> safegraphs_parse_span_(yyjson_val* pair) noexcept 
  *  and the prefix sums are the one pair this file checks against each other. */
 inline expected<safegraphs_column_t> safegraphs_parse_column_(yyjson_val* object) noexcept {
     safegraphs_column_t column;
-    if (!yyjson_is_obj(object)) return {column, status_t::malformed_k};
+    if (!yyjson_is_obj(object)) return {column, {status_code_t::malformed_k, "Column is not an object"}};
     column.dtype = dtype_named(safegraphs_string_(yyjson_obj_get(object, "dtype")));
     column.data = safegraphs_parse_span_(yyjson_obj_get(object, "data"));
 
@@ -378,29 +381,33 @@ inline expected<safegraphs_column_t> safegraphs_parse_column_(yyjson_val* object
     // width; a two-element array is a matrix, whose leading zero marks the ragged axis.
     yyjson_val* const shape = yyjson_obj_get(object, "shape");
     std::size_t const axes = yyjson_is_arr(shape) ? yyjson_arr_size(shape) : 0;
-    if (axes > 2) return {column, status_t::malformed_k};
+    if (axes > 2) return {column, {status_code_t::malformed_k, "Column shape has over two axes"}};
     std::size_t rows = 0, columns = 0;
     if (axes == 2) {
         if (!safegraphs_addressable_(yyjson_get_uint(yyjson_arr_get(shape, 0)), rows))
-            return {column, status_t::malformed_k};
+            return {column, {status_code_t::malformed_k, "Matrix row count not addressable"}};
         if (!safegraphs_addressable_(yyjson_get_uint(yyjson_arr_get(shape, 1)), columns))
-            return {column, status_t::malformed_k};
+            return {column, {status_code_t::malformed_k, "Matrix column count not addressable"}};
         column.shape = matrix_shape_t {rows, columns};
     }
     else if (axes == 1) {
         if (!safegraphs_addressable_(yyjson_get_uint(yyjson_arr_get(shape, 0)), columns))
-            return {column, status_t::malformed_k};
+            return {column, {status_code_t::malformed_k, "Vector width not addressable"}};
         column.shape = vector_shape_t {columns};
     }
     else if (shape) {
-        if (!safegraphs_addressable_(yyjson_get_uint(shape), columns)) return {column, status_t::malformed_k};
+        if (!safegraphs_addressable_(yyjson_get_uint(shape), columns))
+            return {column, {status_code_t::malformed_k, "Bare shape width not addressable"}};
         column.shape = vector_shape_t {columns};
     }
 
     iota_view<std::size_t> const sums = safegraphs_parse_span_(yyjson_obj_get(object, "offsets"));
-    if (sums.empty()) return {column, regular_width(column.shape) ? status_t::success_k : status_t::malformed_k};
+    if (sums.empty()) {
+        if (!regular_width(column.shape)) return {column, {status_code_t::malformed_k, "Ragged column lacks offsets"}};
+        return {column, status_code_t::success_k};
+    }
     column.offsets = prefix_sums_t {dtype_named(safegraphs_string_(yyjson_obj_get(object, "offsets_dtype"))), sums};
-    return {column, status_t::success_k};
+    return {column, status_code_t::success_k};
 }
 
 /**
@@ -424,13 +431,16 @@ expected<safegraphs_header_t> safegraphs_read_header(
     bytes_view_t monolith, allocator_type_ allocator = {}, callback_type_&& per_custom_field = {},
     growing_buffer<safegraphs_named_column_t, allocator_type_>* extra_columns = nullptr) noexcept {
     safegraphs_header_t header;
-    if (monolith.size() < sizeof(safegraphs_prefix_t)) return {header, status_t::malformed_k};
+    if (monolith.size() < sizeof(safegraphs_prefix_t))
+        return {header, {status_code_t::malformed_k, "Bytes shorter than the prefix"}};
     std::array<std::byte, sizeof(safegraphs_prefix_t)> prefix_bytes {};
     std::memcpy(prefix_bytes.data(), monolith.data(), prefix_bytes.size());
     safegraphs_prefix_t const prefix = std::bit_cast<safegraphs_prefix_t>(prefix_bytes);
-    if (prefix.magic != safegraphs_prefix_t::magic_k) return {header, status_t::malformed_k};
+    if (prefix.magic != safegraphs_prefix_t::magic_k)
+        return {header, {status_code_t::malformed_k, "SafeGraphs prefix magic mismatch"}};
     std::size_t const header_length = static_cast<std::size_t>(little_endian(prefix.header_length));
-    if (header_length > monolith.size() - sizeof(prefix)) return {header, status_t::malformed_k};
+    if (header_length > monolith.size() - sizeof(prefix))
+        return {header, {status_code_t::malformed_k, "Header length past the buffer"}};
     safegraphs_yyjson_allocator_<allocator_type_> trampoline {allocator};
     auto [document, parse_status] = safegraphs_read_document_(monolith.subspan(sizeof(prefix), header_length),
                                                               trampoline);
@@ -443,7 +453,7 @@ expected<safegraphs_header_t> safegraphs_read_header(
             std::size_t declared = 0;
             if (!safegraphs_addressable_(yyjson_get_uint(alignment), declared) || !std::has_single_bit(declared)) {
                 yyjson_doc_free(document);
-                return {header, status_t::malformed_k};
+                return {header, {status_code_t::malformed_k, "Alignment is not a power of two"}};
             }
             header.alignment = max_of<std::size_t>(declared, safegraphs_alignment_floor_k);
         }
@@ -457,8 +467,8 @@ expected<safegraphs_header_t> safegraphs_read_header(
     auto const [value, value_status] = safegraphs_parse_column_(yyjson_obj_get(root, "value"));
     auto const [neighbors, neighbors_status] = safegraphs_parse_column_(yyjson_obj_get(root, "neighbors"));
     // Every other column object is a producer's, kept in header order when the caller takes them.
-    auto take_extra_columns = [&]() noexcept {
-        if (!extra_columns) return status_t::success_k;
+    auto take_extra_columns = [&]() noexcept -> status_t {
+        if (!extra_columns) return status_code_t::success_k;
         yyjson_obj_iter entries = yyjson_obj_iter_with(root);
         while (yyjson_val* name = yyjson_obj_iter_next(&entries)) {
             std::string_view const label = safegraphs_string_(name);
@@ -467,23 +477,27 @@ expected<safegraphs_header_t> safegraphs_read_header(
                 label == "neighbors")
                 continue;
             auto const [extra, extra_status] = safegraphs_parse_column_(object);
-            if (failed(extra_status) || label.size() >= safegraphs_name_capacity_k) return status_t::malformed_k;
+            if (failed(extra_status)) return extra_status;
+            if (label.size() >= safegraphs_name_capacity_k)
+                return {status_code_t::malformed_k, "Column name exceeds the capacity"};
             if (failed(extra_columns->push_back(safegraphs_named_column_t {safegraphs_name_t {label}, extra})))
-                return status_t::bad_alloc_k;
+                return {status_code_t::out_of_memory_k, "No room for the extra columns"};
         }
-        return status_t::success_k;
+        return status_code_t::success_k;
     };
     std::size_t const extras_first = extra_columns ? extra_columns->size() : 0;
     status_t const extras_status = take_extra_columns();
     yyjson_doc_free(document);
-    if (failed(key_status) || failed(value_status) || failed(neighbors_status)) return {header, status_t::malformed_k};
+    if (failed(key_status)) return {header, key_status};
+    if (failed(value_status)) return {header, value_status};
+    if (failed(neighbors_status)) return {header, neighbors_status};
     if (failed(extras_status)) return {header, extras_status};
     header.key = key, header.value = value, header.neighbors = neighbors;
     if (extra_columns) header.extra_columns = to_span(*extra_columns).subspan(extras_first);
 
     // The data segment starts on the declared alignment boundary at or past the JSON's end.
     header.data_offset = round_up_to_multiple<std::size_t>(sizeof(prefix) + header_length, header.alignment);
-    return {header, status_t::success_k};
+    return {header, status_code_t::success_k};
 }
 
 /**
@@ -556,14 +570,14 @@ inline yyjson_mut_doc* safegraphs_header_document_(safegraphs_header_t const& he
 }
 
 /** Serializes @p document, hands the text to @p consume, then frees both; a null document
- *  reports @c bad_alloc_k. */
+ *  reports @c out_of_memory_k. */
 template <typename consumer_type_>
 status_t safegraphs_print_(yyjson_mut_doc* document, yyjson_alc const& allocator_abi,
                            consumer_type_&& consume) noexcept {
     std::size_t length = 0;
     char* text = document ? yyjson_mut_write_opts(document, 0, &allocator_abi, &length, nullptr) : nullptr;
     yyjson_mut_doc_free(document);
-    if (!text) return status_t::bad_alloc_k;
+    if (!text) return status_code_t::out_of_memory_k;
     status_t const consumed = consume(std::string_view {text, length});
     allocator_abi.free(allocator_abi.ctx, text);
     return consumed;
@@ -579,16 +593,16 @@ template <typename allocator_type_ = std::allocator<byte_t>>
 expected<std::size_t> safegraphs_data_offset(safegraphs_header_t const& header,
                                              std::span<safegraphs_custom_field_t const> custom_fields = {},
                                              allocator_type_ allocator = {}) noexcept {
-    if (!std::has_single_bit(header.alignment)) return {0, status_t::config_mismatch_k};
+    if (!std::has_single_bit(header.alignment)) return {0, status_code_t::config_mismatch_k};
     safegraphs_yyjson_allocator_<allocator_type_> trampoline {allocator};
     yyjson_alc const allocator_abi = trampoline.c_abi();
     std::size_t json_bytes = 0;
     status_t const printed = safegraphs_print_(
         safegraphs_header_document_(header, custom_fields, allocator_abi), allocator_abi,
-        [&](std::string_view json) noexcept { return json_bytes = json.size(), status_t::success_k; });
+        [&](std::string_view json) noexcept { return json_bytes = json.size(), status_code_t::success_k; });
     if (failed(printed)) return {0, printed};
     return {round_up_to_multiple<std::size_t>(sizeof(safegraphs_prefix_t) + json_bytes, header.alignment),
-            status_t::success_k};
+            status_code_t::success_k};
 }
 
 /** Writes the prefix, the JSON, and space padding up to @c header.data_offset over the front of
@@ -605,19 +619,19 @@ template <typename bytes_type_, typename allocator_type_ = std::allocator<byte_t
 status_t safegraphs_write_header(bytes_type_ monolith, safegraphs_header_t const& header,
                                  std::span<safegraphs_custom_field_t const> custom_fields = {},
                                  allocator_type_ allocator = {}) noexcept {
-    if (header.data_offset < sizeof(safegraphs_prefix_t)) return status_t::config_mismatch_k;
-    if (monolith.size() < header.data_offset) return status_t::overflow_k;
+    if (header.data_offset < sizeof(safegraphs_prefix_t)) return status_code_t::config_mismatch_k;
+    if (monolith.size() < header.data_offset) return status_code_t::overflow_k;
     safegraphs_yyjson_allocator_<allocator_type_> trampoline {allocator};
     yyjson_alc const allocator_abi = trampoline.c_abi();
     growing_buffer<byte_t, allocator_type_> image {allocator};
-    if (failed(image.resize_uninitialized(header.data_offset))) return status_t::bad_alloc_k;
+    if (failed(image.resize_uninitialized(header.data_offset))) return status_code_t::out_of_memory_k;
     std::size_t const header_length = header.data_offset - sizeof(safegraphs_prefix_t);
     safegraphs_prefix_t prefix;
     prefix.header_length = little_endian(static_cast<u64_t>(header_length));
     status_t const staged = safegraphs_print_(
         safegraphs_header_document_(header, custom_fields, allocator_abi), allocator_abi,
         [&](std::string_view json) noexcept {
-            if (json.size() > header_length) return status_t::config_mismatch_k;
+            if (json.size() > header_length) return status_code_t::config_mismatch_k;
             auto const prefix_bytes = std::bit_cast<std::array<byte_t, sizeof(safegraphs_prefix_t)>>(prefix);
             bytes_span_t const staging = to_writable_span(image);
             [[maybe_unused]] status_t const framed = copy_bytes(staging.subspan(0, prefix_bytes.size()),
@@ -625,7 +639,7 @@ status_t safegraphs_write_header(bytes_type_ monolith, safegraphs_header_t const
             [[maybe_unused]] status_t const printed = copy_bytes(staging.subspan(sizeof(prefix), json.size()),
                                                                  std::as_bytes(std::span {json}));
             std::memset(image.data() + sizeof(prefix) + json.size(), ' ', header_length - json.size());
-            return status_t::success_k;
+            return status_code_t::success_k;
         });
     if (failed(staged)) return staged;
     return copy_bytes(monolith.subspan(0, header.data_offset), bytes_of(image.data(), image.size()));
@@ -756,10 +770,11 @@ expected<std::string_view> safegraphs_part_path(growing_buffer<char, allocator_t
                              stem.data(), part + 1, parts);
     };
     int const length = print(nullptr, 0);
-    if (length < 0) return {{}, status_t::io_k};
-    if (failed(buffer.resize_uninitialized(static_cast<std::size_t>(length) + 1))) return {{}, status_t::bad_alloc_k};
+    if (length < 0) return {{}, status_code_t::io_k};
+    if (failed(buffer.resize_uninitialized(static_cast<std::size_t>(length) + 1)))
+        return {{}, status_code_t::out_of_memory_k};
     print(buffer.data(), buffer.size());
-    return {std::string_view {buffer.data(), static_cast<std::size_t>(length)}, status_t::success_k};
+    return {std::string_view {buffer.data(), static_cast<std::size_t>(length)}, status_code_t::success_k};
 }
 
 /** Resolves an entry's @p relative path beside @p manifest_path into @p buffer. */
@@ -768,10 +783,11 @@ expected<std::string_view> safegraphs_sibling_path(growing_buffer<char, allocato
                                                    std::string_view manifest_path, std::string_view relative) noexcept {
     std::string_view const directory = manifest_path.substr(
         0, manifest_path.size() - safegraphs_basename(manifest_path).size());
-    if (failed(buffer.resize_uninitialized(directory.size() + relative.size()))) return {{}, status_t::bad_alloc_k};
+    if (failed(buffer.resize_uninitialized(directory.size() + relative.size())))
+        return {{}, status_code_t::out_of_memory_k};
     std::memcpy(buffer.data(), directory.data(), directory.size());
     std::memcpy(buffer.data() + directory.size(), relative.data(), relative.size());
-    return {to_string_view(buffer), status_t::success_k};
+    return {to_string_view(buffer), status_code_t::success_k};
 }
 
 /** Builds a manifest document; null when an allocation failed. It catalogs parts and nothing else:
@@ -820,7 +836,7 @@ expected<std::size_t> safegraphs_manifest_bytes(std::size_t parts, callback_type
     std::size_t json_bytes = 0;
     status_t const printed = safegraphs_print_(
         safegraphs_manifest_document_(parts, part_at, custom_fields, allocator_abi), allocator_abi,
-        [&](std::string_view json) noexcept { return json_bytes = json.size(), status_t::success_k; });
+        [&](std::string_view json) noexcept { return json_bytes = json.size(), status_code_t::success_k; });
     return {json_bytes, printed};
 }
 
@@ -873,7 +889,7 @@ expected<safegraphs_metadata_t> safegraphs_read_manifest(std::string_view path, 
         if (!safegraphs_addressable_(yyjson_get_uint(yyjson_obj_get(entry, "nodes")), nodes) ||
             !safegraphs_addressable_(yyjson_get_uint(yyjson_obj_get(entry, "bytes")), bytes)) {
             yyjson_doc_free(document);
-            return {metadata, status_t::malformed_k};
+            return {metadata, status_code_t::malformed_k};
         }
         metadata.nodes += nodes;
         per_part(safegraphs_part_t {relative, bytes, nodes});
@@ -883,7 +899,7 @@ expected<safegraphs_metadata_t> safegraphs_read_manifest(std::string_view path, 
     growing_buffer<char, allocator_type_> sibling {allocator};
     auto const [first_path, resolve_status] = safegraphs_sibling_path(sibling, path, first_relative);
     yyjson_doc_free(document); // Only now: `first_relative` points into it
-    if (first_relative.empty()) return {metadata, status_t::malformed_k};
+    if (first_relative.empty()) return {metadata, status_code_t::malformed_k};
     if (failed(resolve_status)) return {metadata, resolve_status};
     safegraphs_name_t metric;
     auto per_custom_field = [&](safegraphs_custom_field_t field) noexcept {
@@ -896,7 +912,7 @@ expected<safegraphs_metadata_t> safegraphs_read_manifest(std::string_view path, 
     metadata = safegraphs_metadata_of_(header, metric);
     metadata.parts = parts;
     metadata.nodes = nodes ? nodes : metadata.nodes;
-    return {metadata, status_t::success_k};
+    return {metadata, status_code_t::success_k};
 }
 
 /**
@@ -916,11 +932,11 @@ status_t safegraphs_write_manifest(std::string_view path, std::size_t parts, cal
     safegraphs_yyjson_allocator_<allocator_type_> trampoline {allocator};
     yyjson_alc const allocator_abi = trampoline.c_abi();
     return safegraphs_print_(safegraphs_manifest_document_(parts, part_at, custom_fields, allocator_abi), allocator_abi,
-                             [&](std::string_view json) noexcept {
+                             [&](std::string_view json) noexcept -> status_t {
                                  auto const [address, address_status] = parse_file_address(path);
                                  if (failed(address_status)) return address_status;
                                  if (address.byte_base || address.byte_limit || address.location.size() != path.size())
-                                     return status_t::invalid_argument_k;
+                                     return status_code_t::invalid_argument_k;
                                  return replace_file_durably(path, bytes_of(json.data(), json.size()), allocator);
                              });
 }
@@ -988,7 +1004,7 @@ struct safegraphs_manifest_lock_t {
      *
      *  @par Statuses:
      *  - @c invalid_argument_k The path does not parse, or addresses a device or a span of one.
-     *  - @c bad_alloc_k The path could not be terminated.
+     *  - @c out_of_memory_k The path could not be terminated.
      *  - @c io_k The manifest cannot be opened.
      *  - @c contended_k Another writer holds the lock, or on WASI, which locks nothing, always.
      */
@@ -997,18 +1013,18 @@ struct safegraphs_manifest_lock_t {
         auto const [address, address_status] = parse_file_address(path);
         if (failed(address_status)) return {safegraphs_manifest_lock_t {}, address_status};
         if (address.byte_base || address.byte_limit || address.location.size() != path.size())
-            return {safegraphs_manifest_lock_t {}, status_t::invalid_argument_k};
+            return {safegraphs_manifest_lock_t {}, status_code_t::invalid_argument_k};
         growing_buffer<char, allocator_type_> terminated {allocator};
         if (failed(terminated.resize_uninitialized(path.size() + 1)))
-            return {safegraphs_manifest_lock_t {}, status_t::bad_alloc_k};
+            return {safegraphs_manifest_lock_t {}, status_code_t::out_of_memory_k};
         terminated[path.copy(terminated.data(), path.size())] = '\0';
         for (;;) {
             auto [file, open_status] = seekable_file_t::open(path, file_access_t::read_only_k, allocator);
             if (failed(open_status)) return {safegraphs_manifest_lock_t {}, open_status};
             if (!safegraphs_lock_manifest_(file.descriptor()))
-                return {safegraphs_manifest_lock_t {}, status_t::contended_k};
+                return {safegraphs_manifest_lock_t {}, status_code_t::contended_k};
             if (safegraphs_names_open_file_(file.descriptor(), terminated.data()))
-                return {safegraphs_manifest_lock_t {std::move(file)}, status_t::success_k};
+                return {safegraphs_manifest_lock_t {std::move(file)}, status_code_t::success_k};
         }
     }
 
@@ -1021,7 +1037,7 @@ struct safegraphs_manifest_lock_t {
      *
      *  @par Statuses:
      *  - @c contended_k Another process holds the staged file's lock; nothing moved.
-     *  - @c bad_alloc_k The names the OS demands terminated could not be formed.
+     *  - @c out_of_memory_k The names the OS demands terminated could not be formed.
      *  - @c io_k The staged file could not be written, flushed or moved over the path, which still
      *    names the old manifest; or the directory could not be flushed after the move, which leaves
      *    the new manifest in place and this lock on it.
@@ -1031,7 +1047,7 @@ struct safegraphs_manifest_lock_t {
                      allocator_type_ allocator = {}) noexcept {
         safegraphs_yyjson_allocator_<allocator_type_> trampoline {allocator};
         yyjson_alc const allocator_abi = trampoline.c_abi();
-        auto stage_and_move = [&](std::string_view json) noexcept {
+        auto stage_and_move = [&](std::string_view json) noexcept -> status_t {
             constexpr std::string_view suffix = ".tmp";
             constexpr std::string_view separators = USEARCH_OS_WINDOWS_ ? "/\\" : "/";
             std::size_t const separator = path.find_last_of(separators);
@@ -1041,7 +1057,7 @@ struct safegraphs_manifest_lock_t {
             std::size_t const length = path.size();
             growing_buffer<char, allocator_type_> names {allocator};
             if (failed(names.resize_uninitialized(length + 1 + length + suffix.size() + 1 + parent.size() + 1)))
-                return status_t::bad_alloc_k;
+                return status_code_t::out_of_memory_k;
             char* const target = names.data();
             char* const staged = target + length + 1;
             char* const directory = staged + length + suffix.size() + 1;
@@ -1051,7 +1067,7 @@ struct safegraphs_manifest_lock_t {
             auto [staged_file, staged_status] = seekable_file_t::open(std::string_view {staged, length + suffix.size()},
                                                                       file_access_t::truncate_read_write_k, allocator);
             if (failed(staged_status)) return staged_status;
-            if (!safegraphs_lock_manifest_(staged_file.descriptor())) return status_t::contended_k;
+            if (!safegraphs_lock_manifest_(staged_file.descriptor())) return status_code_t::contended_k;
             status_t moved = staged_file.write_at(0, bytes_of(json.data(), json.size()));
             if (succeeded(moved)) moved = staged_file.flush();
             if (succeeded(moved)) moved = rename_file(staged, target);
@@ -1084,9 +1100,10 @@ template <typename callback_type_, typename allocator_type_ = std::allocator<byt
 expected<std::size_t> safegraphs_buffer_layout(std::size_t parts, callback_type_&& part_at, std::size_t alignment,
                                                std::span<std::size_t> offsets,
                                                allocator_type_ allocator = {}) noexcept {
-    if (!parts || offsets.size() < parts || !std::has_single_bit(alignment)) return {0, status_t::config_mismatch_k};
+    if (!parts || offsets.size() < parts || !std::has_single_bit(alignment))
+        return {0, status_code_t::config_mismatch_k};
     offsets[0] = 0;
-    if (parts == 1) return {part_at(0).bytes, status_t::success_k};
+    if (parts == 1) return {part_at(0).bytes, status_code_t::success_k};
     // Wider offsets print longer, so the manifest is measured again until the parts clear it.
     for (std::size_t lead = 0;;) {
         std::size_t end = 0;
@@ -1103,7 +1120,7 @@ expected<std::size_t> safegraphs_buffer_layout(std::size_t parts, callback_type_
         };
         auto const [manifest, status] = safegraphs_manifest_bytes(parts, entry_at, {}, allocator);
         if (failed(status)) return {0, status};
-        if (manifest <= lead) return {end, status_t::success_k};
+        if (manifest <= lead) return {end, status_code_t::success_k};
         lead = manifest;
     }
 }
@@ -1120,17 +1137,17 @@ expected<std::size_t> safegraphs_buffer_layout(std::size_t parts, callback_type_
 template <typename callback_type_, typename allocator_type_ = std::allocator<byte_t>>
 status_t safegraphs_write_manifest(bytes_span_t buffer, std::size_t parts, callback_type_&& part_at,
                                    allocator_type_ allocator = {}) noexcept {
-    if (!parts) return status_t::config_mismatch_k;
+    if (!parts) return status_code_t::config_mismatch_k;
     std::size_t const first = part_at(0).offset;
-    if (first > buffer.size()) return status_t::overflow_k;
+    if (first > buffer.size()) return status_code_t::overflow_k;
     safegraphs_yyjson_allocator_<allocator_type_> trampoline {allocator};
     yyjson_alc const allocator_abi = trampoline.c_abi();
     return safegraphs_print_(safegraphs_manifest_document_(parts, part_at, {}, allocator_abi), allocator_abi,
                              [&](std::string_view json) noexcept {
-                                 if (json.size() >= first) return status_t::overflow_k;
+                                 if (json.size() >= first) return status_code_t::overflow_k;
                                  std::memcpy(buffer.data(), json.data(), json.size());
                                  std::memset(buffer.data() + json.size(), 0, first - json.size());
-                                 return status_t::success_k;
+                                 return status_code_t::success_k;
                              });
 }
 
@@ -1140,7 +1157,7 @@ status_t safegraphs_write_manifest(bytes_span_t buffer, std::size_t parts, callb
 template <typename callback_type_, typename allocator_type_ = std::allocator<byte_t>>
 status_t safegraphs_commit_buffer(bytes_span_t buffer, std::size_t parts, callback_type_&& part_at,
                                   std::span<std::size_t const> offsets, allocator_type_ allocator = {}) noexcept {
-    if (parts == 1) return status_t::success_k;
+    if (parts == 1) return status_code_t::success_k;
     auto entry_at = [&](std::size_t part) noexcept {
         safegraphs_part_t entry = part_at(part);
         entry.offset = offsets[part];
@@ -1173,12 +1190,12 @@ status_t safegraphs_manifest_entries_(bytes_view_t json, std::size_t buffer_byte
             !safegraphs_addressable_(yyjson_get_uint(yyjson_obj_get(entry, "nodes")), found.nodes) ||
             found.offset < json.size() || found.offset > buffer_bytes || found.bytes > buffer_bytes - found.offset) {
             yyjson_doc_free(document);
-            return status_t::malformed_k;
+            return status_code_t::malformed_k;
         }
         per_part(found);
     }
     yyjson_doc_free(document);
-    return status_t::success_k;
+    return status_code_t::success_k;
 }
 
 /** Reads the manifest leading @p buffer, which ends at its first zero byte: @p per_part fires once
@@ -1196,7 +1213,7 @@ expected<safegraphs_metadata_t> safegraphs_read_manifest(bytes_view_t buffer, al
                                                          callback_type_&& per_part = {}) noexcept {
     safegraphs_metadata_t metadata;
     void const* const ending = std::memchr(buffer.data(), 0, buffer.size());
-    if (!ending) return {metadata, status_t::malformed_k};
+    if (!ending) return {metadata, status_code_t::malformed_k};
     std::size_t const json_bytes = static_cast<std::size_t>(static_cast<byte_t const*>(ending) - buffer.data());
     bytes_view_t first;
     status_t const listed = safegraphs_manifest_entries_(buffer.first(json_bytes), buffer.size(), allocator,
@@ -1207,7 +1224,7 @@ expected<safegraphs_metadata_t> safegraphs_read_manifest(bytes_view_t buffer, al
                                                              per_part(found);
                                                          });
     if (failed(listed)) return {metadata, listed};
-    if (first.empty()) return {metadata, status_t::malformed_k};
+    if (first.empty()) return {metadata, status_code_t::malformed_k};
 
     // The schema lives in the parts, so the first one's header answers every question about it.
     safegraphs_name_t metric;
@@ -1220,7 +1237,7 @@ expected<safegraphs_metadata_t> safegraphs_read_manifest(bytes_view_t buffer, al
     metadata = safegraphs_metadata_of_(header, metric);
     metadata.parts = parts;
     metadata.nodes = nodes;
-    return {metadata, status_t::success_k};
+    return {metadata, status_code_t::success_k};
 }
 
 /**
@@ -1240,7 +1257,7 @@ expected<safegraphs_metadata_t> safegraphs_read_metadata(bytes_view_t monolith,
     if (!safegraphs_is_monolith(monolith)) return safegraphs_read_manifest(monolith, allocator);
     auto const [header, parse_status] = safegraphs_read_header(monolith, allocator, per_custom_field);
     if (failed(parse_status)) return {safegraphs_metadata_t {}, parse_status};
-    return {safegraphs_metadata_of_(header, metric), status_t::success_k};
+    return {safegraphs_metadata_of_(header, metric), status_code_t::success_k};
 }
 
 /**
@@ -1285,9 +1302,9 @@ struct safegraphs_catalog_part_t {
 /** Copies @p path into @p buffer, so a plan outlives the caller's view of it. */
 template <typename allocator_type_>
 status_t safegraphs_keep_path(growing_buffer<char, allocator_type_>& buffer, std::string_view path) noexcept {
-    if (failed(buffer.reserve_exactly(path.size()))) return status_t::bad_alloc_k;
+    if (failed(buffer.reserve_exactly(path.size()))) return status_code_t::out_of_memory_k;
     for (char const character : path) buffer.push_back_reserved(character);
-    return status_t::success_k;
+    return status_code_t::success_k;
 }
 
 /**
@@ -1307,10 +1324,10 @@ status_t safegraphs_describe_part(safegraphs_catalog_part_t& part, bytes_view_t 
     };
     auto const [header, status] = safegraphs_read_header(leading, allocator, per_custom_field, &extra_columns);
     if (failed(status)) return status;
-    if (header.monolith_bytes() > part.monolith.size()) return status_t::malformed_k;
+    if (header.monolith_bytes() > part.monolith.size()) return status_code_t::malformed_k;
     part.header = header;
     part.nodes = header.nodes();
-    return status_t::success_k;
+    return status_code_t::success_k;
 }
 
 /**
@@ -1377,20 +1394,20 @@ status_t safegraphs_catalog(std::string_view path, growing_buffer<mapped_file_t,
     }
 
     growing_buffer<char, allocator_type_> paths_arena {allocator};
-    status_t kept = status_t::success_k;
+    status_t kept = status_code_t::success_k;
     auto per_part = [&](safegraphs_part_t entry) noexcept {
         std::size_t const offset = paths_arena.size();
         for (char const character : entry.path)
-            if (failed(paths_arena.push_back(character))) return kept = status_t::bad_alloc_k, void();
+            if (failed(paths_arena.push_back(character))) return kept = status_code_t::out_of_memory_k, void();
         safegraphs_catalog_part_t part;
         part.path = {offset, paths_arena.size()};
-        if (failed(parts.push_back(part))) kept = status_t::bad_alloc_k;
+        if (failed(parts.push_back(part))) kept = status_code_t::out_of_memory_k;
     };
     auto const [summary, summary_status] = safegraphs_read_manifest(path, allocator, per_part);
     if (failed(summary_status)) return summary_status;
     if (failed(kept)) return kept;
-    if (parts.empty()) return status_t::malformed_k;
-    if (failed(mappings.reserve_exactly(parts.size()))) return status_t::bad_alloc_k;
+    if (parts.empty()) return {status_code_t::malformed_k, "Manifest lists no parts"};
+    if (failed(mappings.reserve_exactly(parts.size()))) return status_code_t::out_of_memory_k;
     growing_buffer<char, allocator_type_> part_path {allocator};
     for (safegraphs_catalog_part_t& part : parts) {
         auto const [sibling, sibling_status] = safegraphs_sibling_path(
@@ -1405,7 +1422,7 @@ status_t safegraphs_catalog(std::string_view path, growing_buffer<mapped_file_t,
         mappings.push_back_reserved(std::move(part_mapping));
     }
     safegraphs_bind_extra_columns(parts, extra_columns);
-    return status_t::success_k;
+    return status_code_t::success_k;
 }
 
 /** The ordinal of host memory beside the vendor ordinals a device's memory carries, as the CUDA and
@@ -1414,7 +1431,7 @@ inline constexpr int host_device_k = -1;
 
 /** The copy a reader of host bytes takes: no host read calls it, and it reaches no device. */
 struct no_device_copy_t {
-    status_t operator()(bytes_span_t, bytes_view_t) const noexcept { return status_t::unsupported_k; }
+    status_t operator()(bytes_span_t, bytes_view_t) const noexcept { return status_code_t::unsupported_k; }
 };
 
 /**
@@ -1450,7 +1467,7 @@ struct checkpoint_source_t {
      *  @par Statuses:
      *  - @c malformed_k The manifest does not parse or lists no part, or a header does not parse or
      *    spans more bytes than its part.
-     *  - @c bad_alloc_k The host bytes a device's copy stages cannot be allocated.
+     *  - @c out_of_memory_k The host bytes a device's copy stages cannot be allocated.
      *  - Whatever @p copy answers.
      */
     template <typename copy_type_, typename allocator_type_>
@@ -1460,20 +1477,23 @@ struct checkpoint_source_t {
         growing_buffer<byte_t, allocator_type_> staged {allocator};
         // Each staged view lives until the next one, which reuses the same bytes.
         auto readable = [&](bytes_view_t slice) noexcept -> expected<bytes_view_t> {
-            if (device == host_device_k) return {slice, status_t::success_k};
-            if (failed(staged.resize_uninitialized(slice.size()))) return {{}, status_t::bad_alloc_k};
+            if (device == host_device_k) return {slice, status_code_t::success_k};
+            if (failed(staged.resize_uninitialized(slice.size()))) return {{}, status_code_t::out_of_memory_k};
             status_t const copied = copy(to_writable_span(staged), slice);
             return {to_span(staged), copied};
         };
-        auto describe = [&](safegraphs_catalog_part_t& part) noexcept {
+        auto describe = [&](safegraphs_catalog_part_t& part) noexcept -> status_t {
             safegraphs_prefix_t prefix;
-            if (part.monolith.size() < sizeof(prefix)) return status_t::malformed_k;
+            if (part.monolith.size() < sizeof(prefix))
+                return {status_code_t::malformed_k, "Part shorter than its prefix"};
             auto const [leading, leading_status] = readable(part.monolith.first(sizeof(prefix)));
             if (failed(leading_status)) return leading_status;
             std::memcpy(&prefix, leading.data(), sizeof(prefix));
             std::size_t const header_length = static_cast<std::size_t>(little_endian(prefix.header_length));
-            if (prefix.magic != safegraphs_prefix_t::magic_k || header_length > part.monolith.size() - sizeof(prefix))
-                return status_t::malformed_k;
+            if (prefix.magic != safegraphs_prefix_t::magic_k)
+                return {status_code_t::malformed_k, "Part prefix magic mismatch"};
+            if (header_length > part.monolith.size() - sizeof(prefix))
+                return {status_code_t::malformed_k, "Part header past its bytes"};
             auto const [header, header_status] = readable(part.monolith.first(sizeof(prefix) + header_length));
             if (failed(header_status)) return header_status;
             return safegraphs_describe_part(part, header, extra_columns, allocator);
@@ -1498,41 +1518,42 @@ struct checkpoint_source_t {
                 manifest = leading.first(static_cast<std::size_t>(static_cast<byte_t const*>(ending) - leading.data()));
                 break;
             }
-            if (window == bytes.size()) return status_t::malformed_k;
+            if (window == bytes.size()) return {status_code_t::malformed_k, "Manifest has no terminator"};
         }
-        status_t kept = status_t::success_k;
+        status_t kept = status_code_t::success_k;
         status_t const listed = safegraphs_manifest_entries_(
             manifest, bytes.size(), allocator, [&](safegraphs_part_t entry) noexcept {
                 safegraphs_catalog_part_t part;
                 part.monolith = bytes.subspan(entry.offset, entry.bytes);
-                if (failed(parts.push_back(part))) kept = status_t::bad_alloc_k;
+                if (failed(parts.push_back(part))) kept = status_code_t::out_of_memory_k;
             });
         if (failed(listed)) return listed;
         if (failed(kept)) return kept;
-        if (parts.empty()) return status_t::malformed_k;
+        if (parts.empty()) return {status_code_t::malformed_k, "Manifest lists no parts"};
         for (safegraphs_catalog_part_t& part : parts)
             if (status_t const described = describe(part); failed(described)) return described;
         safegraphs_bind_extra_columns(parts, extra_columns);
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /**
-     *  @brief Copies rows @p rows of the regular @p column, which @p header frames over @c bytes,
-     *      into @p destination.
+     *  @brief Copies the entries @p entries of the regular @p column, which @p header frames over
+     *      @c bytes, into @p destination.
      *
      *  By @c memcpy from host bytes into host memory, or through @p copy from a device's, into
      *  whatever memory @p copy reaches, another device's, a peer's or the host's own.
      *
      *  @par Statuses:
-     *  - @c config_mismatch_k The column is ragged, the rows fall outside it, or @p destination
+     *  - @c config_mismatch_k The column is ragged, the entries fall outside it, or @p destination
      *    holds another byte count.
      *  - Whatever @p copy answers.
      */
     template <typename copy_type_>
     status_t copy_column(safegraphs_header_t const& header, safegraphs_column_t const& column,
-                         iota_view<std::size_t> rows, bytes_span_t destination, copy_type_&& copy) const noexcept {
-        bytes_view_t const slice = header.rows_of(bytes, column, rows.first, rows.size());
-        if (slice.size() != destination.size() || (slice.empty() && !rows.empty())) return status_t::config_mismatch_k;
+                         iota_view<std::size_t> entries, bytes_span_t destination, copy_type_&& copy) const noexcept {
+        bytes_view_t const slice = header.rows_of(bytes, column, entries.first, entries.size());
+        if (slice.size() != destination.size() || (slice.empty() && !entries.empty()))
+            return status_code_t::config_mismatch_k;
         if (device == host_device_k) return copy_bytes(destination, slice);
         return copy(destination, slice);
     }
@@ -1559,7 +1580,7 @@ expected<safegraphs_metadata_t> safegraphs_read_metadata(checkpoint_source_t sou
     metadata.parts = parts.size();
     metadata.nodes = 0;
     for (safegraphs_catalog_part_t const& part : parts) metadata.nodes += part.nodes;
-    return {metadata, status_t::success_k};
+    return {metadata, status_code_t::success_k};
 }
 
 #pragma endregion Parts
@@ -1629,7 +1650,7 @@ expected<safegraphs_index_layout_t> safegraphs_index_layout(std::size_t nodes, s
     constexpr std::size_t element_bytes = dtype_bytes(value_dtype);
     constexpr bool fixed_width = safegraphs_value_is_fixed<codec_type_>();
     if (key_dtype == dtype_t::unknown_k || node_id_dtype == dtype_t::unknown_k || !element_bytes)
-        return {layout, status_t::config_mismatch_k};
+        return {layout, status_code_t::config_mismatch_k};
 
     std::size_t const alignment = config.alignment;
     std::size_t const sums_bytes = (nodes + 1) * sizeof(u64_t);
@@ -1643,7 +1664,8 @@ expected<safegraphs_index_layout_t> safegraphs_index_layout(std::size_t nodes, s
     value.dtype = value_dtype;
     value.shape = shape;
     if constexpr (fixed_width) {
-        if (value_bytes != nodes * *regular_width(shape) * element_bytes) return {layout, status_t::config_mismatch_k};
+        if (value_bytes != nodes * *regular_width(shape) * element_bytes)
+            return {layout, status_code_t::config_mismatch_k};
         value.data.first = round_up_to_multiple(header.key.data.bound, alignment);
     }
     else {
@@ -1667,7 +1689,7 @@ expected<safegraphs_index_layout_t> safegraphs_index_layout(std::size_t nodes, s
     if (failed(status)) return {layout, status};
     header.data_offset = data_offset;
     layout.monolith_bytes = header.data_offset + layout.segment_bytes;
-    return {layout, status_t::success_k};
+    return {layout, status_code_t::success_k};
 }
 
 /** The custom fields a columned index's monolith carries: the metric, the producer, and
@@ -1675,11 +1697,11 @@ expected<safegraphs_index_layout_t> safegraphs_index_layout(std::size_t nodes, s
 template <typename allocator_type_>
 status_t safegraphs_index_fields_(growing_buffer<safegraphs_custom_field_t, allocator_type_>& fields,
                                   std::string_view metric, save_config_t const& config) noexcept {
-    if (failed(fields.reserve_exactly(2 + config.provenance.size()))) return status_t::bad_alloc_k;
+    if (failed(fields.reserve_exactly(2 + config.provenance.size()))) return status_code_t::out_of_memory_k;
     fields.push_back_reserved({"metric", metric});
     fields.push_back_reserved({"created_by", "usearch"});
     for (safegraphs_custom_field_t const& field : config.provenance) fields.push_back_reserved(field);
-    return status_t::success_k;
+    return status_code_t::success_k;
 }
 
 /** A typed span over @p count elements of the data segment starting at byte @p start. */
@@ -1767,9 +1789,9 @@ status_t safegraphs_write_index(bytes_span_t monolith, index_type_& index, codec
 
     // The caller handed us the bytes, and a freshly grown file or buffer reads as zeros, so the
     // gaps between columns need no sweeping.
-    if (monolith.size() < layout.monolith_bytes) return status_t::overflow_k;
+    if (monolith.size() < layout.monolith_bytes) return status_code_t::overflow_k;
     bytes_span_t const segment = monolith.subspan(header.data_offset, layout.segment_bytes);
-    if (reinterpret_cast<std::uintptr_t>(segment.data()) % alignof(u64_t)) return status_t::config_mismatch_k;
+    if (reinterpret_cast<std::uintptr_t>(segment.data()) % alignof(u64_t)) return status_code_t::config_mismatch_k;
 
     // Neighbor sums count IDs on both sides, so the plan writes the monolith's own buffer. Value
     // sums count bytes here and elements on the wire, so a fixed column has none to write and a
@@ -1777,7 +1799,7 @@ status_t safegraphs_write_index(bytes_span_t monolith, index_type_& index, codec
     std::span<u64_t> const neighbor_sums = safegraphs_typed_span_<u64_t>(segment, header.neighbors.offsets->bytes.first,
                                                                          nodes + 1);
     growing_buffer<u64_t, allocator_type_> staged_value_sums {allocator};
-    if (failed(staged_value_sums.resize(nodes + 1))) return status_t::bad_alloc_k;
+    if (failed(staged_value_sums.resize(nodes + 1))) return status_code_t::out_of_memory_k;
     std::span<u64_t> const value_sums = element_bytes == 1 && header.value.offsets
                                             ? safegraphs_typed_span_<u64_t>(segment, header.value.offsets->bytes.first,
                                                                             nodes + 1)
@@ -1795,36 +1817,31 @@ status_t safegraphs_write_index(bytes_span_t monolith, index_type_& index, codec
     // One region per thread, so nothing allocates and the fan-out needs no scratch.
     std::size_t const regions = max_of<std::size_t>(executor.size(), 1);
     std::size_t const per_region = divide_round_up(nodes, regions);
-    using outcome_ref_t = fu::standard_atomic_ref<status_t>;
-    status_t outcome = status_t::success_k;
+    status_t outcome = status_code_t::success_k;
     auto save_region = [&](std::size_t region, std::size_t, std::size_t) noexcept {
-        if (failed(outcome_ref_t(outcome).load(std::memory_order_relaxed))) return;
+        if (failed(fu::standard_atomic_ref<status_code_t>(outcome.code).load(std::memory_order_relaxed))) return;
         std::size_t const first = min_of(region * per_region, nodes);
         std::size_t const bound = min_of(first + per_region, nodes);
         status_t saved = planned.value.save(
             iota_view<node_id_t> {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)}, codec);
-        if (succeeded(saved) && progress(region) == continuation_t::cancel_k) saved = status_t::cancelled_k;
-        status_t expected_status = status_t::success_k;
-        if (failed(saved))
-            outcome_ref_t(outcome).compare_exchange_strong(expected_status, saved, std::memory_order_relaxed,
-                                                           std::memory_order_relaxed);
+        if (succeeded(saved) && progress(region) == continuation_t::cancel_k) saved = status_code_t::cancelled_k;
+        keep_first_failure<fu::standard_atomic_ref>(outcome, saved);
     };
     if (status_t const fanned = executor.for_tasks(regions, save_region); failed(fanned)) return fanned;
-    if (status_t const settled = outcome_ref_t(outcome).load(std::memory_order_relaxed); failed(settled))
-        return settled;
+    if (failed(outcome)) return outcome;
     if (status_t const finished = planned.value.finish(); failed(finished)) return finished;
 
     // A fixed shape holds every value to its width; a wider ragged element scales the staged sums.
     if constexpr (safegraphs_value_is_fixed<codec_type_>()) {
         u64_t const row_bytes = *regular_width(shape) * element_bytes;
         for (std::size_t node = 0; node != nodes; ++node)
-            if (value_sums[node + 1] - value_sums[node] != row_bytes) return status_t::config_mismatch_k;
+            if (value_sums[node + 1] - value_sums[node] != row_bytes) return status_code_t::config_mismatch_k;
     }
     else if (element_bytes != 1) {
         std::span<u64_t> const value_elements = safegraphs_typed_span_<u64_t>(
             segment, header.value.offsets->bytes.first, nodes + 1);
         for (std::size_t node = 0; node <= nodes; ++node) {
-            if (value_sums[node] % element_bytes) return status_t::config_mismatch_k;
+            if (value_sums[node] % element_bytes) return status_code_t::config_mismatch_k;
             value_elements[node] = value_sums[node] / element_bytes;
         }
     }
@@ -1944,7 +1961,7 @@ expected<safegraphs_index_metadata_t> safegraphs_read_index_metadata(bytes_view_
     metadata.value_dtype = value.dtype;
     metadata.neighbors_dtype = header.neighbors.dtype;
     metadata.value_shape = value.shape;
-    return {metadata, status_t::success_k};
+    return {metadata, status_code_t::success_k};
 }
 
 /**
@@ -2017,23 +2034,18 @@ status_t safegraphs_load_regions_(plan_type_& plan, std::size_t nodes, codec_typ
                                   executor_type_& executor, progress_type_& progress) noexcept {
     std::size_t const regions = max_of<std::size_t>(executor.size(), 1);
     std::size_t const per_region = divide_round_up(nodes, regions);
-    using outcome_ref_t = fu::standard_atomic_ref<status_t>;
-    status_t outcome = status_t::success_k;
+    status_t outcome = status_code_t::success_k;
     auto load_region = [&](std::size_t region, std::size_t, std::size_t) noexcept {
-        if (failed(outcome_ref_t(outcome).load(std::memory_order_relaxed))) return;
+        if (failed(fu::standard_atomic_ref<status_code_t>(outcome.code).load(std::memory_order_relaxed))) return;
         std::size_t const first = min_of(region * per_region, nodes);
         std::size_t const bound = min_of(first + per_region, nodes);
         status_t loaded = plan.load(
             iota_view<node_id_type_> {static_cast<node_id_type_>(first), static_cast<node_id_type_>(bound)}, codec);
-        if (succeeded(loaded) && progress(region) == continuation_t::cancel_k) loaded = status_t::cancelled_k;
-        status_t expected_status = status_t::success_k;
-        if (failed(loaded))
-            outcome_ref_t(outcome).compare_exchange_strong(expected_status, loaded, std::memory_order_relaxed,
-                                                           std::memory_order_relaxed);
+        if (succeeded(loaded) && progress(region) == continuation_t::cancel_k) loaded = status_code_t::cancelled_k;
+        keep_first_failure<fu::standard_atomic_ref>(outcome, loaded);
     };
     if (status_t const fanned = executor.for_tasks(regions, load_region); failed(fanned)) return fanned;
-    if (status_t const settled = outcome_ref_t(outcome).load(std::memory_order_relaxed); failed(settled))
-        return settled;
+    if (failed(outcome)) return outcome;
     return plan.finish();
 }
 
@@ -2079,7 +2091,7 @@ status_t safegraphs_load_columns_(index_type_& index, safegraphs_saved_columns<n
         std::size_t kept = 0;
         for (node_id_type_ const neighbor : saved.neighbor_ids) kept += static_cast<std::size_t>(neighbor) < nodes;
         if (failed(staged_neighbor_sums.resize(nodes + 1)) || failed(staged_neighbor_ids.resize_uninitialized(kept)))
-            return status_t::bad_alloc_k;
+            return status_code_t::out_of_memory_k;
         kept = 0;
         for (std::size_t node = 0; node != nodes; ++node) {
             for (node_id_type_ const neighbor : saved.neighbor_ids.subspan(node * degree, degree))
@@ -2092,15 +2104,15 @@ status_t safegraphs_load_columns_(index_type_& index, safegraphs_saved_columns<n
     growing_buffer<u64_t, allocator_type_> staged_value_sums {allocator};
     std::span<u64_t const> value_sums = saved.value_offsets;
     if (saved.value_width) {
-        if (failed(staged_value_sums.resize(nodes + 1))) return status_t::bad_alloc_k;
+        if (failed(staged_value_sums.resize(nodes + 1))) return status_code_t::out_of_memory_k;
         for (std::size_t node = 0; node <= nodes; ++node) staged_value_sums[node] = node * saved.value_width;
         value_sums = std::span<u64_t const> {staged_value_sums};
     }
     else if (saved.element_bytes != 1) {
         std::size_t const elements = saved.values.size() / saved.element_bytes;
-        if (failed(staged_value_sums.resize(nodes + 1))) return status_t::bad_alloc_k;
+        if (failed(staged_value_sums.resize(nodes + 1))) return status_code_t::out_of_memory_k;
         for (std::size_t node = 0; node <= nodes; ++node) {
-            if (saved.value_offsets[node] > elements) return status_t::malformed_k;
+            if (saved.value_offsets[node] > elements) return status_code_t::malformed_k;
             staged_value_sums[node] = saved.value_offsets[node] * saved.element_bytes;
         }
         value_sums = std::span<u64_t const> {staged_value_sums};
@@ -2111,7 +2123,7 @@ status_t safegraphs_load_columns_(index_type_& index, safegraphs_saved_columns<n
         keys = safegraphs_typed_span_<key_t const>(saved.keys, 0, nodes);
     else {
         std::size_t const key_bytes = dtype_bytes(saved.key_dtype);
-        if (failed(staged_keys.resize(nodes))) return status_t::bad_alloc_k;
+        if (failed(staged_keys.resize(nodes))) return status_code_t::out_of_memory_k;
         for (std::size_t node = 0; node != nodes; ++node)
             staged_keys[node] = safegraphs_widened_key<key_t>(saved.keys.data() + node * key_bytes, saved.key_dtype);
         keys = std::span<key_t const> {staged_keys};
@@ -2177,44 +2189,44 @@ status_t safegraphs_read_index(bytes_view_t monolith, index_type_& index, codec_
     constexpr dtype_t wanted_key_dtype = safegraphs_key_dtype<key_t>();
     if (header.key.offsets || !safegraphs_key_widens(header.key.dtype, wanted_key_dtype) ||
         header.key.shape != column_shape_t {scalar_shape_t {}})
-        return status_t::config_mismatch_k;
+        return status_code_t::config_mismatch_k;
     std::size_t const key_bytes = dtype_bytes(header.key.dtype);
-    if (header.key.data.size() % key_bytes) return status_t::malformed_k;
+    if (header.key.data.size() % key_bytes) return status_code_t::malformed_k;
     std::size_t const nodes = header.key.data.size() / key_bytes;
     // A narrower key column that miscounts the other columns' rows is another dtype relabelled.
     if (header.key.dtype != wanted_key_dtype && (header.value.nodes() != nodes || header.neighbors.nodes() != nodes))
-        return status_t::config_mismatch_k;
+        return status_code_t::config_mismatch_k;
     std::size_t const sums_bytes = (nodes + 1) * sizeof(u64_t);
     if (value.dtype != codec_type_::value_dtype_k || value.offsets.has_value() == fixed_width || value.shape != shape)
-        return status_t::config_mismatch_k;
+        return status_code_t::config_mismatch_k;
     std::size_t const degree = std::holds_alternative<vector_shape_t>(adjacency.shape) && !adjacency.offsets
                                    ? std::get<vector_shape_t>(adjacency.shape).columns
                                    : 0;
     if (adjacency.dtype != safegraphs_node_id_dtype<node_id_t>() ||
         (adjacency.offsets ? adjacency.shape != column_shape_t {scalar_shape_t {}} : !degree))
-        return status_t::config_mismatch_k;
+        return status_code_t::config_mismatch_k;
     if constexpr (fixed_width) {
-        if (value.data.size() != nodes * *regular_width(shape) * element_bytes) return status_t::malformed_k;
+        if (value.data.size() != nodes * *regular_width(shape) * element_bytes) return status_code_t::malformed_k;
     }
     else {
-        if (value.offsets->dtype != dtype_t::u64_k) return status_t::config_mismatch_k;
+        if (value.offsets->dtype != dtype_t::u64_k) return status_code_t::config_mismatch_k;
         if (value.offsets->bytes.size() != sums_bytes || value.data.size() % element_bytes)
-            return status_t::malformed_k;
+            return status_code_t::malformed_k;
     }
     if (degree) {
-        if (adjacency.data.size() != nodes * degree * sizeof(node_id_t)) return status_t::malformed_k;
+        if (adjacency.data.size() != nodes * degree * sizeof(node_id_t)) return status_code_t::malformed_k;
     }
     else {
-        if (adjacency.offsets->dtype != dtype_t::u64_k) return status_t::config_mismatch_k;
+        if (adjacency.offsets->dtype != dtype_t::u64_k) return status_code_t::config_mismatch_k;
         if (adjacency.offsets->bytes.size() != sums_bytes || adjacency.data.size() % sizeof(node_id_t))
-            return status_t::malformed_k;
+            return status_code_t::malformed_k;
     }
     if (header.key.data.first % alignof(u64_t) || value.data.first % alignof(u64_t) ||
         adjacency.data.first % alignof(u64_t) ||
         (adjacency.offsets && adjacency.offsets->bytes.first % alignof(u64_t)) ||
         (value.offsets && value.offsets->bytes.first % alignof(u64_t)))
-        return status_t::config_mismatch_k;
-    if (header.monolith_bytes() > monolith.size()) return status_t::malformed_k;
+        return status_code_t::config_mismatch_k;
+    if (header.monolith_bytes() > monolith.size()) return status_code_t::malformed_k;
     std::size_t const segment_bytes = header.monolith_bytes() - header.data_offset;
 
     if (!index.capacity())
@@ -2223,7 +2235,7 @@ status_t safegraphs_read_index(bytes_view_t monolith, index_type_& index, codec_
             return reserved.status;
 
     bytes_view_t const segment = monolith.subspan(header.data_offset, segment_bytes);
-    if (reinterpret_cast<std::uintptr_t>(segment.data()) % alignof(u64_t)) return status_t::config_mismatch_k;
+    if (reinterpret_cast<std::uintptr_t>(segment.data()) % alignof(u64_t)) return status_code_t::config_mismatch_k;
 
     // What the file holds, unconverted: an index that takes these converts them itself.
     safegraphs_saved_columns<node_id_t> const saved {
@@ -2347,17 +2359,17 @@ expected<safegraphs_persisted_part_t> safegraphs_persisted_part(bytes_view_t hea
                               std::get<vector_shape_t>(adjacency.shape).columns;
     if (header.key.offsets || header.key.shape != column_shape_t {scalar_shape_t {}} ||
         (adjacency.offsets ? adjacency.shape != column_shape_t {scalar_shape_t {}} : !degree_fixed))
-        return {part, status_t::config_mismatch_k};
+        return {part, status_code_t::config_mismatch_k};
     std::size_t const nodes = header.nodes();
     if (header.value.nodes() != nodes || adjacency.nodes() != nodes || !header.key.row_bytes())
-        return {part, status_t::malformed_k};
+        return {part, status_code_t::malformed_k};
     auto const sums_cover = [nodes](std::optional<prefix_sums_t> const& sums) noexcept {
         return !sums || sums->bytes.size() == (nodes + 1) * dtype_bytes(sums->dtype);
     };
-    if (!sums_cover(header.value.offsets) || !sums_cover(adjacency.offsets)) return {part, status_t::malformed_k};
+    if (!sums_cover(header.value.offsets) || !sums_cover(adjacency.offsets)) return {part, status_code_t::malformed_k};
     part.columns = safegraphs_header_columns(header);
     part.value_shape = header.value.shape;
-    return {part, status_t::success_k};
+    return {part, status_code_t::success_k};
 }
 
 #pragma endregion Columned Indexes

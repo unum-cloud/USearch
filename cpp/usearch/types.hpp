@@ -2,132 +2,301 @@
  *  @file cpp/usearch/types.hpp
  *  @author Ash Vardanian
  *  @date November 16, 2026
- *  @brief The pieces every C++ index wrapper shares: outcomes and deferred calls, element types,
- *      rows and tapes, handlers, executors, arenas, plans and cursors, adding no ABI of their own
- *      and throwing nothing.
+ *  @brief The pieces every C++ index wrapper shares: statuses, expected values and deferred calls,
+ *      element types, rows and tapes, handlers, executors, arenas, plans and owners, adding no ABI
+ *      of their own and throwing nothing.
  *
- *  Every index wrapper answers its verbs through a receiver whose type picks how they complete:
- *  a blocking receiver answers an @c outcome, a deferred one answers a @c deferred call its one
- *  owner polls or waits on. Handlers are @c noexcept callables borrowed for one call, so no
- *  fault ever unwinds through the library.
+ *  Every index wrapper answers its verbs through a receiver whose type picks how they complete: a
+ *  blocking receiver answers a @c status_t or an @c expected, a deferred one answers a @c deferred
+ *  call its one owner polls, waits on or awaits. Handlers are @c noexcept callables borrowed for
+ *  one call, so no fault ever unwinds through the library.
  */
 #pragma once
 
-#include <cstddef> // `std::size_t`
-#include <cstdint> // `std::uint8_t`, `std::uint16_t`, `std::uint32_t`, `std::uint64_t`, `std::int8_t`
+#include <cstddef> // `std::size_t`, `std::ptrdiff_t`
+#include <cstdint> // `std::uint8_t`, `std::uint16_t`, `std::uint32_t`, `std::uint64_t`, `std::int8_t`, `std::int32_t`
 
+#include <concepts>    // `std::invocable`
+#include <coroutine>   // `std::coroutine_handle`
 #include <span>        // `std::span`
-#include <type_traits> // `std::conditional_t`, `std::is_nothrow_invocable_r_v`, `std::is_void_v`
+#include <string_view> // `std::string_view`
+#include <type_traits> // `std::conditional_t`, `std::is_void_v`, `std::is_nothrow_invocable_r_v`
 #include <utility>     // `std::exchange`, `std::move`, `std::swap`
 
-#include "usearch/types.h"
+#include "usearch/types.h" // `usearch_outcome_t`, `usearch_outcome_status`, `usearch_outcome_wait`
 
 namespace unum::usearch {
 
-/** A call's first output beside its status and static message, decomposed as <tt>auto
- *  [value, status, message]</tt>; the value is meaningful only on success. */
-template <typename value_type_ = void>
-struct [[nodiscard]] outcome {
+/** What went wrong, with one enumerator per status the library reports. */
+enum class status_code_t : int {
+    success_k = usearch_status_success_k,
+    deferred_k = usearch_status_deferred_k,
+    out_of_memory_k = usearch_status_out_of_memory_k,
+    shape_mismatch_k = usearch_status_shape_mismatch_k,
+    unsupported_layout_k = usearch_status_unsupported_layout_k,
+    unknown_kind_k = usearch_status_unknown_kind_k,
+    read_only_k = usearch_status_read_only_k,
+    io_k = usearch_status_io_k,
+    device_k = usearch_status_device_k,
+    malformed_k = usearch_status_malformed_k,
+    internal_k = usearch_status_internal_k,
+    overflow_k = usearch_status_overflow_k,
+    uninitialized_k = usearch_status_uninitialized_k,
+    config_mismatch_k = usearch_status_config_mismatch_k,
+    contended_k = usearch_status_contended_k,
+    cancelled_k = usearch_status_cancelled_k,
+    unsupported_k = usearch_status_unsupported_k,
+    invalid_argument_k = usearch_status_invalid_argument_k,
+};
+
+#pragma region Shared Core
+
+/** Why a call failed: a code recovery branches on, and an optional static note naming the broken
+ *  invariant, step or resource, for logs and regression analysis. */
+struct [[nodiscard]] status_t {
+    status_code_t code = status_code_t::success_k;
+    char const* note = nullptr;
+
+    constexpr status_t() noexcept = default;
+    constexpr status_t(status_code_t reason, char const* detail = nullptr) noexcept : code(reason), note(detail) {}
+    constexpr bool succeeded() const noexcept { return code == status_code_t::success_k; }
+    constexpr bool failed() const noexcept { return code != status_code_t::success_k; }
+    friend constexpr bool operator==(status_t const& status, status_code_t code) noexcept {
+        return status.code == code;
+    }
+};
+
+static_assert(sizeof(status_t) == 2 * sizeof(void*) && std::is_trivially_copyable_v<status_t>,
+              "a status is a code and a note pointer, returned in two registers");
+
+/** A call's value beside its status, bound natively as <tt>auto [value, status]</tt>. */
+template <typename value_type_>
+struct [[nodiscard]] expected {
     value_type_ value {};
-    usearch_status_t status = usearch_status_success_k;
-    char const* message = nullptr;
-
-    explicit operator bool() const noexcept { return status == usearch_status_success_k; }
+    status_t status {};
 };
 
-/** The outcome of a call that outputs nothing but its status. */
+/** Where a call writes what @p value_type_ is made of. */
+template <typename value_type_>
+struct outputs {
+
+    /** The answer, which the call writes in place. */
+    value_type_ value {};
+
+    value_type_ answer() const noexcept { return value; }
+};
+
+/** A call that outputs nothing but its status. */
 template <>
-struct [[nodiscard]] outcome<void> {
-    usearch_status_t status = usearch_status_success_k;
-    char const* message = nullptr;
+struct outputs<void> {};
 
-    explicit operator bool() const noexcept { return status == usearch_status_success_k; }
+/** Runs @p poll with @p state later on its own loop, storing the two words and allocating
+ *  nothing. */
+template <typename scheduler_type_>
+concept scheduler = requires(scheduler_type_& loop, void (*poll)(void*) noexcept, void* state) {
+    loop.post(poll, state);
 };
 
-/** The output slot of a call that outputs nothing but its status. */
-struct nothing_t {};
+template <typename value_type_, scheduler scheduler_type_>
+class awaiter;
 
 /**
- *  @brief A submitted call: its outcome and its output slot, owned until the call is final, while
- *      the arena, the handles, the inputs and the handlers it was handed stay borrowed until then.
+ *  @brief A submitted call: its outcome and its outputs, owned until the call is final, while the
+ *      receiver, the inputs, the arena and the handlers it was handed stay borrowed until then.
  *
- *  It never moves, as the library writes into it, and its one owner polls @c status or blocks in
- *  @c wait; destruction waits the same way.
+ *  It never moves, as the library writes into it, and its one owner polls @c status, blocks in
+ *  @c wait or awaits @c wait on its own loop; destruction waits, so nothing the call writes into
+ *  goes away under it.
  */
 template <typename value_type_ = void>
 class [[nodiscard]] deferred {
-    using slot_type_ = std::conditional_t<std::is_void_v<value_type_>, nothing_t, value_type_>;
+    usearch_outcome_t outcome_ {};
+    outputs<value_type_> outputs_ {};
 
   public:
-    /** Runs @p submit with this call's outcome and output slot, where the library reports. */
+    /** What @c wait answers: what the blocking call would have. */
+    using answer_type = std::conditional_t<std::is_void_v<value_type_>, status_t, expected<value_type_>>;
+
+    /** An empty slot, final from the start, which @c resubmit fills. */
+    deferred() noexcept = default;
+
+    /** Runs @p submit with this call's outcome and outputs, where the library reports. */
     template <typename submit_type_>
+        requires std::invocable<submit_type_ const&, usearch_outcome_t*, outputs<value_type_>*>
     explicit deferred(submit_type_ const& submit) noexcept {
-        submit(&outcome_, &slot_);
+        submit(&outcome_, &outputs_);
+    }
+
+    /** Waits only while the slot's previous call still runs, then runs @p submit in its place. */
+    template <typename submit_type_>
+        requires std::invocable<submit_type_ const&, usearch_outcome_t*, outputs<value_type_>*>
+    void resubmit(submit_type_ const& submit) noexcept {
+        usearch_outcome_wait(&outcome_);
+        outcome_ = {};
+        outputs_ = {};
+        submit(&outcome_, &outputs_);
     }
 
     /** A call refused before it crossed, final from the start. */
-    deferred(usearch_status_t status, char const* message) noexcept : outcome_ {status, message} {}
+    explicit deferred(status_t status) noexcept : outcome_ {static_cast<usearch_status_t>(status.code), status.note} {}
 
     deferred(deferred const&) = delete;
     deferred& operator=(deferred const&) = delete;
     ~deferred() noexcept { usearch_outcome_wait(&outcome_); }
 
-    /** @c usearch_status_deferred_k until the call is final, then its final status. */
-    usearch_status_t status() noexcept { return usearch_outcome_status(&outcome_); }
+    /** @c status_code_t::deferred_k until the call is final, then its final status, polled without
+     *  blocking. */
+    status_code_t status() noexcept { return static_cast<status_code_t>(usearch_outcome_status(&outcome_)); }
 
     /** Blocks until the call is final and answers what a blocking call would have. */
-    outcome<value_type_> wait() noexcept {
+    answer_type wait() noexcept {
         usearch_outcome_wait(&outcome_);
-        if constexpr (std::is_void_v<value_type_>) return {outcome_.status, outcome_.message};
-        else return {slot_, outcome_.status, outcome_.message};
+        status_t const status {static_cast<status_code_t>(outcome_.status), outcome_.message};
+        if constexpr (std::is_void_v<value_type_>) return status;
+        else if (status.failed()) return {{}, status};
+        else return {outputs_.answer()};
     }
 
-  private:
-    usearch_outcome_t outcome_ {};
-    slot_type_ slot_ {};
+    /** Awaits the call on @p loop, which polls its status until it is final. */
+    template <scheduler scheduler_type_>
+    awaiter<value_type_, scheduler_type_> wait(scheduler_type_& loop) noexcept {
+        return {*this, loop};
+    }
 };
 
-/** A blocking call's outcome, or a deferred call the caller holds, as @p completion_ says. */
-template <usearch_completion_t completion_, typename value_type_>
-using answer =
-    std::conditional_t<completion_ == usearch_completion_deferred_k, deferred<value_type_>, outcome<value_type_>>;
+/** A @c deferred being awaited, living in the awaiting coroutine's frame: each poll reads the
+ *  status word, and one not yet final posts itself again. */
+template <typename value_type_, scheduler scheduler_type_>
+class awaiter {
+    deferred<value_type_>& call_;
+    scheduler_type_& loop_;
+    std::coroutine_handle<> caller_ {};
 
-/** Runs @p submit with an outcome and an output slot: on the stack when blocking, inside the
- *  answered @c deferred otherwise. Every receiver's verbs answer through it. */
-template <usearch_completion_t completion_, typename value_type_, typename submit_type_>
-answer<completion_, value_type_> answered_(submit_type_ const& submit) noexcept {
-    if constexpr (completion_ == usearch_completion_deferred_k) return deferred<value_type_>(submit);
+    static void poll_(void* state) noexcept {
+        awaiter& awaited = *static_cast<awaiter*>(state);
+        if (awaited.await_ready()) return awaited.caller_.resume();
+        awaited.loop_.post(&poll_, state);
+    }
+
+  public:
+    awaiter(deferred<value_type_>& call, scheduler_type_& loop) noexcept : call_(call), loop_(loop) {}
+    bool await_ready() noexcept { return call_.status() != status_code_t::deferred_k; }
+    void await_suspend(std::coroutine_handle<> caller) noexcept {
+        caller_ = caller;
+        loop_.post(&poll_, this);
+    }
+    typename deferred<value_type_>::answer_type await_resume() noexcept { return call_.wait(); }
+};
+
+/** Whether @p answer_type_ is a call the caller holds rather than a final answer. */
+template <typename answer_type_>
+inline constexpr bool is_deferred = false;
+template <typename value_type_>
+inline constexpr bool is_deferred<deferred<value_type_>> = true;
+
+/** What a final @p answer_type_ carries beside its status, @c void for a bare @c status_t. */
+template <typename answer_type_>
+struct answer_value {
+    using type = void;
+};
+template <typename value_type_>
+struct answer_value<expected<value_type_>> {
+    using type = value_type_;
+};
+template <typename answer_type_>
+using answer_value_t = typename answer_value<answer_type_>::type;
+
+/** Answers @p answer_type_ from a verb's @p body: a deferred call lends C its own outcome and
+ *  outputs; a blocking call writes its outputs in place, then takes the C outcome's two words once
+ *  it is final. */
+template <typename answer_type_, typename body_type_>
+answer_type_ answered_(body_type_ const& body) noexcept {
+    if constexpr (is_deferred<answer_type_>) return answer_type_(body);
     else {
+        using value_type = answer_value_t<answer_type_>;
         usearch_outcome_t reported {};
-        if constexpr (std::is_void_v<value_type_>) {
-            nothing_t nothing;
-            submit(&reported, &nothing);
-            return {reported.status, reported.message};
-        }
-        else {
-            value_type_ value {};
-            submit(&reported, &value);
-            return {value, reported.status, reported.message};
-        }
+        outputs<value_type> written {};
+        body(&reported, &written);
+        status_t const status {static_cast<status_code_t>(reported.status), reported.message};
+        if constexpr (std::is_void_v<value_type>) return status;
+        else if (status.failed()) return {{}, status};
+        else return {written.answer()};
     }
 }
 
-/** Answers a call refused before it crossed. */
-template <usearch_completion_t completion_, typename value_type_>
-answer<completion_, value_type_> refused_(usearch_status_t status, char const* message) noexcept {
-    if constexpr (completion_ == usearch_completion_deferred_k) return deferred<value_type_>(status, message);
-    else if constexpr (std::is_void_v<value_type_>) return {status, message};
-    else return {value_type_ {}, status, message};
+/** Answers a call refused before it crossed, final from the start. */
+template <typename answer_type_>
+answer_type_ answered_(status_t refused) noexcept {
+    if constexpr (is_deferred<answer_type_> || std::is_same_v<answer_type_, status_t>) return answer_type_(refused);
+    else return {{}, refused};
 }
 
-/** Runs a verb with no deferred form with @p arguments, which name everything but the outcome. */
-template <typename arguments_type_>
-outcome<> called_(void (*verb)(arguments_type_*), arguments_type_& arguments) noexcept {
-    usearch_outcome_t reported {};
-    arguments.outcome = &reported;
-    verb(&arguments);
-    return {reported.status, reported.message};
+/** Owns one handle of @p handle_type_, which @p free_ releases, moving it and never copying it. */
+template <typename handle_type_, void (*free_)(handle_type_)>
+class owner {
+    handle_type_ handle_ = nullptr;
+
+  public:
+    owner() noexcept = default;
+    owner(owner&& other) noexcept : handle_(std::exchange(other.handle_, nullptr)) {}
+    owner& operator=(owner&& other) noexcept {
+        std::swap(handle_, other.handle_);
+        return *this;
+    }
+    owner(owner const&) = delete;
+    owner& operator=(owner const&) = delete;
+    ~owner() noexcept { free_(handle_); }
+
+    handle_type_ handle() const noexcept { return handle_; }
+
+    /** The output field a lifecycle verb writes the new handle into. */
+    handle_type_* handle_field() noexcept { return &handle_; }
+};
+
+/** Creates an @p owner_type_ through @p verb, which writes the new handle into @p field of
+ *  @p arguments. */
+template <typename owner_type_, typename arguments_type_, typename handle_type_>
+expected<owner_type_> opened_(void (*verb)(arguments_type_*), arguments_type_& arguments,
+                              handle_type_* arguments_type_::* field) noexcept {
+    expected<owner_type_> opened;
+    arguments.*field = opened.value.handle_field();
+    opened.status = answered_<status_t>([&](usearch_outcome_t* outcome, outputs<void>*) noexcept {
+        arguments.outcome = outcome;
+        verb(&arguments);
+    });
+    return opened;
 }
+
+#pragma endregion Shared Core
+
+/** A blocking call's answer, a bare status for void verbs, or a deferred call the caller holds. */
+template <typename value_type_ = void, usearch_completion_t completion_ = usearch_completion_blocking_k>
+using deferrable = std::conditional_t<completion_ == usearch_completion_deferred_k, deferred<value_type_>,
+                                      std::conditional_t<std::is_void_v<value_type_>, status_t, expected<value_type_>>>;
+
+/** A handle owned, moved and never copied, whose verbs block on the calling thread. */
+template <typename handle_type_, void (*free_)(handle_type_)>
+struct owning {
+    static constexpr usearch_completion_t completion = usearch_completion_blocking_k;
+    owner<handle_type_, free_> owner_;
+    handle_type_ handle() const noexcept { return owner_.handle(); }
+    usearch_executor_t executor() const noexcept { return nullptr; }
+    handle_type_* handle_field() noexcept { return owner_.handle_field(); }
+};
+
+/** A borrowed handle and the executor its verbs run on, completing as @p completion_ says. */
+template <typename handle_type_, usearch_completion_t completion_>
+struct borrowing {
+    static constexpr usearch_completion_t completion = completion_;
+    handle_type_ handle_ = nullptr;
+    usearch_executor_t executor_ = nullptr;
+    handle_type_ handle() const noexcept { return handle_; }
+    usearch_executor_t executor() const noexcept { return executor_; }
+};
+
+/** Only an owning receiver opens, loads and hands out cursors. */
+template <typename receiver_type_>
+concept owns_handle = requires(receiver_type_& receiver) { receiver.handle_field(); };
 
 #pragma region Scalars Rows and Tapes
 
@@ -206,6 +375,11 @@ inline constexpr std::size_t values_per_element<u4x2_t> = 2;
 template <>
 inline constexpr std::size_t values_per_element<u1x8_t> = 8;
 
+/** The bytes of @p text as a call takes a path, a name or a buffer, borrowed for the call. */
+inline usearch_bytes_view_t bytes_view(std::string_view text) noexcept {
+    return {reinterpret_cast<std::uint8_t const*>(text.data()), text.size()};
+}
+
 /** Rows of @p element_type_ the caller lends a call, along its batch axis. */
 template <element element_type_>
 struct rows_view {
@@ -269,8 +443,10 @@ struct tape_view {
           offsets_u64(offsets.data()) {}
 
     usearch_tape_view_t view() const noexcept {
-        usearch_tape_view_t tape {};
-        tape.data = first_element, tape.layout = layout, tape.scalar = scalar_of<element_type_>;
+        usearch_tape_view_t tape {.data = first_element,
+                                  .layout = layout,
+                                  .offsets = {},
+                                  .scalar = scalar_of<element_type_>};
         if (layout == usearch_tape_u32_k) tape.offsets.u32 = offsets_u32;
         else tape.offsets.u64 = offsets_u64;
         return tape;
@@ -290,11 +466,44 @@ struct tape_entries {
 
     /** The values of the entry at @p position, below @c written. */
     std::span<element_type_ const> entry(std::size_t position) const noexcept {
-        std::size_t begin = 0, end = 0;
-        if (view.layout == usearch_tape_u32_k) begin = view.offsets.u32[position], end = view.offsets.u32[position + 1];
-        else begin = view.offsets.u64[position], end = view.offsets.u64[position + 1];
+        std::size_t const begin = offset_(position), end = offset_(position + 1);
         element_type_ const* first = static_cast<element_type_ const*>(view.data);
         return {first + begin * lanes_, (end - begin) * lanes_};
+    }
+
+    /** Walks the entries in order, each read as @c entry reads it. */
+    class iterator {
+        tape_entries const* entries_ = nullptr;
+        std::size_t position_ = 0;
+
+      public:
+        using value_type = std::span<element_type_ const>;
+        using difference_type = std::ptrdiff_t;
+
+        iterator() noexcept = default;
+        iterator(tape_entries const& entries, std::size_t position) noexcept
+            : entries_(&entries), position_(position) {}
+
+        value_type operator*() const noexcept { return entries_->entry(position_); }
+        iterator& operator++() noexcept {
+            ++position_;
+            return *this;
+        }
+        iterator operator++(int) noexcept {
+            iterator const previous = *this;
+            ++position_;
+            return previous;
+        }
+        bool operator==(iterator const&) const noexcept = default;
+    };
+
+    iterator begin() const noexcept { return {*this, 0}; }
+    iterator end() const noexcept { return {*this, written}; }
+
+  private:
+    std::size_t offset_(std::size_t index) const noexcept {
+        if (view.layout == usearch_tape_u32_k) return view.offsets.u32[index];
+        return view.offsets.u64[index];
     }
 };
 
@@ -320,10 +529,14 @@ template <typename handler_type_>
 concept progress_handler =
     std::is_nothrow_invocable_r_v<usearch_continuation_t, handler_type_&, std::size_t, std::size_t>;
 
-/** A predicate handler: writes one admission per key it is asked about. */
+/** A per-key predicate handler: answers whether one candidate key may be reported. */
 template <typename handler_type_>
-concept predicate_handler =
-    std::is_nothrow_invocable_r_v<void, handler_type_&, usearch_key_t const*, usearch_admission_t*, std::size_t>;
+concept key_predicate_handler = std::is_nothrow_invocable_r_v<bool, handler_type_&, usearch_key_t>;
+
+/** A batch predicate handler: writes one admission per key of a batch it is asked about. */
+template <typename handler_type_>
+concept keys_predicate_handler =
+    std::is_nothrow_invocable_r_v<void, handler_type_&, std::span<usearch_key_t const>, std::span<usearch_admission_t>>;
 
 /** A progress handler borrowed for one call as its own state; empty hears nothing. */
 class progress_t {
@@ -351,18 +564,32 @@ class predicate_t {
   public:
     predicate_t() noexcept = default;
 
-    /** Asks @p handler about candidates as @p cost says. */
-    template <predicate_handler handler_type_>
-    predicate_t(handler_type_& handler, usearch_predicate_cost_t cost = usearch_predicate_cost_cheap_k) noexcept
-        : raw_ {&trampoline_<handler_type_>, &handler, cost} {}
+    /** Asks @p handler one key at a time, which is cheap, as candidates are scored. */
+    template <key_predicate_handler handler_type_>
+    predicate_t(handler_type_& handler) noexcept
+        : raw_ {&each_<handler_type_>, &handler, usearch_predicate_cost_cheap_k} {}
+
+    /** Asks @p handler a batch at a time, once per round unless @p cost says it is cheap. */
+    template <keys_predicate_handler handler_type_>
+    predicate_t(handler_type_& handler, usearch_predicate_cost_t cost = usearch_predicate_cost_expensive_k) noexcept
+        : raw_ {&batch_<handler_type_>, &handler, cost} {}
 
     usearch_predicate_t raw() const noexcept { return raw_; }
 
   private:
     template <typename handler_type_>
-    static void trampoline_(usearch_key_t const* keys, usearch_admission_t* admissions, std::size_t count,
-                            void* state) noexcept {
-        (*static_cast<handler_type_*>(state))(keys, admissions, count);
+    static void each_(usearch_key_t const* keys, usearch_admission_t* admissions, std::size_t count,
+                      void* state) noexcept {
+        handler_type_& handler = *static_cast<handler_type_*>(state);
+        for (std::size_t position = 0; position != count; ++position)
+            admissions[position] = handler(keys[position]) ? usearch_admit_k : usearch_reject_k;
+    }
+
+    template <typename handler_type_>
+    static void batch_(usearch_key_t const* keys, usearch_admission_t* admissions, std::size_t count,
+                       void* state) noexcept {
+        (*static_cast<handler_type_*>(state))(std::span<usearch_key_t const> {keys, count},
+                                              std::span<usearch_admission_t> {admissions, count});
     }
 
     usearch_predicate_t raw_ {};
@@ -374,100 +601,112 @@ class predicate_t {
 
 /** Owns one executor; an empty one runs every call on the caller's own thread. */
 class executor_t {
+    owner<usearch_executor_t, usearch_executor_free> owner_;
+
   public:
-    executor_t() noexcept = default;
-    executor_t(executor_t&& other) noexcept : handle_(std::exchange(other.handle_, nullptr)) {}
-    executor_t& operator=(executor_t&& other) noexcept { return std::swap(handle_, other.handle_), *this; }
-    executor_t(executor_t const&) = delete;
-    executor_t& operator=(executor_t const&) = delete;
-    ~executor_t() noexcept { usearch_executor_free(handle_); }
+    usearch_executor_t handle() const noexcept { return owner_.handle(); }
+
+    /** The output field a constructor writes the new executor into. */
+    usearch_executor_t* handle_field() noexcept { return owner_.handle_field(); }
 
     /** Creates an executor of host threads for RAM-resident indexes, interleaved across the compute
-     *  domains local to the memory domains @p options names. */
-    static outcome<executor_t> for_ram(usearch_executor_for_ram_t options = {}) noexcept {
-        return spawned_(usearch_executor_for_ram, options);
+     *  domains local to the memory domains @p arguments names. */
+    static expected<executor_t> for_ram(usearch_executor_for_ram_t arguments = {}) noexcept {
+        return opened_<executor_t>(usearch_executor_for_ram, arguments, &usearch_executor_for_ram_t::executor);
     }
 
     /** Wraps a thread pool the caller lends, so libraries in one process share its threads. */
-    static outcome<executor_t> on_pool(usearch_executor_on_pool_t options) noexcept {
-        return spawned_(usearch_executor_on_pool, options);
+    static expected<executor_t> on_pool(usearch_executor_on_pool_t arguments) noexcept {
+        return opened_<executor_t>(usearch_executor_on_pool, arguments, &usearch_executor_on_pool_t::executor);
     }
 
-    /** Opens one submission stream on every distinct device @p options names. */
-    static outcome<executor_t> for_vram(usearch_executor_for_vram_t options = {}) noexcept {
-        return spawned_(usearch_executor_for_vram, options);
+    /** Opens one submission stream on every distinct device @p arguments names. */
+    static expected<executor_t> for_vram(usearch_executor_for_vram_t arguments = {}) noexcept {
+        return opened_<executor_t>(usearch_executor_for_vram, arguments, &usearch_executor_for_vram_t::executor);
     }
 
     /** Creates an executor of host threads for NVMe-resident indexes, one submission ring
      *  apiece, interleaved across the compute domains local to the devices the paths name. */
-    static outcome<executor_t> for_nvme(usearch_executor_for_nvme_t options = {}) noexcept {
-        return spawned_(usearch_executor_for_nvme, options);
+    static expected<executor_t> for_nvme(usearch_executor_for_nvme_t arguments = {}) noexcept {
+        return opened_<executor_t>(usearch_executor_for_nvme, arguments, &usearch_executor_for_nvme_t::executor);
     }
 
     /** Waits until no call holds the executor, then sets its threads' idle mood. */
-    outcome<> drain(usearch_executor_drain_t arguments = {}) noexcept {
-        arguments.executor = handle_;
-        return called_(usearch_executor_drain, arguments);
+    status_t drain(usearch_executor_drain_t arguments = {}) noexcept {
+        arguments.executor = handle();
+        return answered_<status_t>([&](usearch_outcome_t* outcome, outputs<void>*) noexcept {
+            arguments.outcome = outcome;
+            usearch_executor_drain(&arguments);
+        });
     }
-
-    usearch_executor_t handle() const noexcept { return handle_; }
-
-  private:
-    template <typename options_type_>
-    static outcome<executor_t> spawned_(void (*verb)(options_type_*), options_type_& options) noexcept {
-        executor_t spawned;
-        options.executor = &spawned.handle_;
-        outcome<> const reported = called_(verb, options);
-        return {std::move(spawned), reported.status, reported.message};
-    }
-
-    usearch_executor_t handle_ = nullptr;
 };
+
+/** Creates an @p owner_type_ through @p verb, blocking on @p executor, or on the calling thread
+ *  without one, as every open and load does. */
+template <typename owner_type_, typename arguments_type_, typename handle_type_>
+expected<owner_type_> opened_(void (*verb)(arguments_type_*), arguments_type_ arguments,
+                              handle_type_* arguments_type_::* field, executor_t const& executor) noexcept {
+    arguments.executor = executor.handle();
+    arguments.completion = usearch_completion_blocking_k;
+    return opened_<owner_type_>(verb, arguments, field);
+}
+
+/** Creates an @p owner_type_ through @p verb as the overload above does, reporting to @p progress
+ *  as a load does. */
+template <typename owner_type_, typename arguments_type_, typename handle_type_>
+expected<owner_type_> opened_(void (*verb)(arguments_type_*), arguments_type_ arguments,
+                              handle_type_* arguments_type_::* field, executor_t const& executor,
+                              progress_t progress) noexcept {
+    arguments.progress = progress.raw();
+    return opened_<owner_type_>(verb, arguments, field, executor);
+}
 
 /** Owns one arena; every call writing outputs into it rewinds it first. */
 class arena_t {
-  public:
-    arena_t() noexcept = default;
-    arena_t(arena_t&& other) noexcept : handle_(std::exchange(other.handle_, nullptr)) {}
-    arena_t& operator=(arena_t&& other) noexcept { return std::swap(handle_, other.handle_), *this; }
-    arena_t(arena_t const&) = delete;
-    arena_t& operator=(arena_t const&) = delete;
-    ~arena_t() noexcept { usearch_arena_free(handle_); }
+    owner<usearch_arena_t, usearch_arena_free> owner_;
 
-    /** Creates an empty arena where the executor @p options names computes. */
-    static outcome<arena_t> make(usearch_arena_init_t options = {}) noexcept {
-        arena_t made;
-        options.arena = &made.handle_;
-        outcome<> const reported = called_(usearch_arena_init, options);
-        return {std::move(made), reported.status, reported.message};
+  public:
+    usearch_arena_t handle() const noexcept { return owner_.handle(); }
+
+    /** The output field @c make writes the new arena into. */
+    usearch_arena_t* handle_field() noexcept { return owner_.handle_field(); }
+
+    /** Creates an empty arena where the executor @p arguments names computes. */
+    static expected<arena_t> make(usearch_arena_init_t arguments = {}) noexcept {
+        return opened_<arena_t>(usearch_arena_init, arguments, &usearch_arena_init_t::arena);
     }
 
-    usearch_arena_t handle() const noexcept { return handle_; }
-
-  private:
-    usearch_arena_t handle_ = nullptr;
+    /** Reports where the arena's outputs live, which decides whether host code may read them. */
+    expected<usearch_arena_description_t> describe() const noexcept {
+        return answered_<expected<usearch_arena_description_t>>(
+            [&](usearch_outcome_t* outcome, outputs<usearch_arena_description_t>* written) noexcept {
+                usearch_arena_describe_t arguments {.arena = owner_.handle(),
+                                                    .outcome = outcome,
+                                                    .description = &written->value};
+                usearch_arena_describe(&arguments);
+            });
+    }
 };
 
-/** Creates an @p owner_type_ through @p verb, whose @p options name everything but the outcome and
- *  the new handle. */
-template <typename owner_type_, typename options_type_>
-outcome<owner_type_> opened_(void (*verb)(options_type_*), options_type_& options) noexcept {
-    owner_type_ opened;
-    options.index = opened.handle_field();
-    outcome<> const reported = called_(verb, options);
-    return {std::move(opened), reported.status, reported.message};
+/** Fills @p devices with the GPUs this process can drive, NVIDIA first, then AMD, then Apple, so a
+ *  device's position is the ordinal @c executor_t::for_vram names it by, answering how many there
+ *  are, which may exceed what @p devices holds. */
+inline expected<std::size_t> gpu_devices(std::span<usearch_gpu_device_t> devices) noexcept {
+    return answered_<expected<std::size_t>>([&](usearch_outcome_t* outcome, outputs<std::size_t>* written) noexcept {
+        usearch_gpu_devices_t arguments {.outcome = outcome,
+                                         .devices = devices.data(),
+                                         .devices_capacity = devices.size(),
+                                         .devices_count = &written->value};
+        usearch_gpu_devices(&arguments);
+    });
 }
 
-/** Creates an @p owner_type_ through a verb that could defer, blocking, as the handle answers. */
-template <typename owner_type_, typename options_type_>
-outcome<owner_type_> loaded_(void (*verb)(options_type_*), options_type_& options) noexcept {
-    options.completion = usearch_completion_blocking_k;
-    return opened_<owner_type_>(verb, options);
-}
+/** The linked library's version, a release-candidate suffix included. */
+inline std::string_view version_name() noexcept { return usearch_version_name(); }
 
 #pragma endregion Executors and Arenas
 
-#pragma region Plans and Cursors
+#pragma region Plans and Configs
 
 /**
  *  @brief A long operation in flight behind @p handle_type_, which its verb opens on the first call
@@ -482,7 +721,9 @@ class plan {
     plan() noexcept = default;
     plan(plan&& other) noexcept : handle_(std::exchange(other.handle_, nullptr)), phase_(other.phase_) {}
     plan& operator=(plan&& other) noexcept {
-        return std::swap(handle_, other.handle_), std::swap(phase_, other.phase_), *this;
+        std::swap(handle_, other.handle_);
+        std::swap(phase_, other.phase_);
+        return *this;
     }
     plan(plan const&) = delete;
     plan& operator=(plan const&) = delete;
@@ -503,51 +744,31 @@ class plan {
     usearch_phase_progress_t phase_ {};
 };
 
-/** Owns one cursor behind @p handle_type_, which @p free_ releases, opened by an index's
- *  @c cursor_init. */
-template <typename handle_type_, void (*free_)(handle_type_)>
-class cursor {
-  public:
-    cursor() noexcept = default;
-    cursor(cursor&& other) noexcept : handle_(std::exchange(other.handle_, nullptr)) {}
-    cursor& operator=(cursor&& other) noexcept { return std::swap(handle_, other.handle_), *this; }
-    cursor(cursor const&) = delete;
-    cursor& operator=(cursor const&) = delete;
-    ~cursor() noexcept { free_(handle_); }
+/** The handle field of @p live, or @c nullptr when a call names no plan. */
+template <typename handle_type_>
+handle_type_* handle_field_of(plan<handle_type_>* live) noexcept {
+    return live ? live->handle_field() : nullptr;
+}
 
-    handle_type_ handle() const noexcept { return handle_; }
-
-    /** The output field @c cursor_init writes the opened cursor into. */
-    handle_type_* handle_field() noexcept { return &handle_; }
-
-  private:
-    handle_type_ handle_ = nullptr;
-};
-
-/** Opens a cursor through @p verb, whose @p arguments name everything but the outcome and the
- *  output field. */
-template <typename cursor_type_, typename arguments_type_>
-outcome<cursor_type_> cursor_opened_(void (*verb)(arguments_type_*), arguments_type_& arguments) noexcept {
-    cursor_type_ opened;
-    arguments.cursor = opened.handle_field();
-    outcome<> const reported = called_(verb, arguments);
-    return {std::move(opened), reported.status, reported.message};
+/** The progress field of @p live, or @c nullptr when a call names no plan. */
+template <typename handle_type_>
+usearch_phase_progress_t* phase_field_of(plan<handle_type_>* live) noexcept {
+    return live ? live->phase_field() : nullptr;
 }
 
 /** Reads a checkpoint's frozen metadata through @p verb, blocking, as the metadata answers it. */
 template <typename metadata_type_, typename arguments_type_>
-outcome<metadata_type_> metadata_read_(void (*verb)(arguments_type_*), arguments_type_& arguments,
-                                       usearch_executor_t executor) noexcept {
-    metadata_type_ metadata {};
-    arguments.executor = executor, arguments.metadata = &metadata;
-    arguments.completion = usearch_completion_blocking_k;
-    outcome<> const reported = called_(verb, arguments);
-    return {metadata, reported.status, reported.message};
+expected<metadata_type_> metadata_read_(void (*verb)(arguments_type_*), arguments_type_& arguments,
+                                        usearch_executor_t executor) noexcept {
+    return answered_<expected<metadata_type_>>(
+        [&](usearch_outcome_t* outcome, outputs<metadata_type_>* written) noexcept {
+            arguments.executor = executor;
+            arguments.outcome = outcome;
+            arguments.completion = usearch_completion_blocking_k;
+            arguments.metadata = &written->value;
+            verb(&arguments);
+        });
 }
-
-#pragma endregion Plans and Cursors
-
-#pragma region Configs
 
 /** The knobs of @c insert. */
 struct insert_config_t {
@@ -625,7 +846,7 @@ struct sample_config_t {
     usearch_traversal_stats_t* stats = nullptr;
 };
 
-#pragma endregion Configs
+#pragma endregion Plans and Configs
 
 #pragma region Samples
 
@@ -661,30 +882,43 @@ arguments_type_ sample_arguments_(index_type_ index, usearch_executor_t executor
                                   usearch_completion_t completion, std::size_t wanted, arena_t& arena,
                                   sample_config_t const& config, sample_t* sample) noexcept {
     arguments_type_ arguments {};
-    arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
+    arguments.index = index;
+    arguments.executor = executor;
+    arguments.outcome = outcome;
     arguments.completion = completion;
     arguments.shown_count = config.shown.size();
     arguments.shown = {config.shown.data(), sizeof(usearch_key_t)};
     arguments.shown_coordinates = config.shown_coordinates.view();
     arguments.focus_count = config.focus.size();
     arguments.focus = {config.focus.data(), sizeof(usearch_key_t)};
-    arguments.keys = &sample->keys, arguments.entry_ordinals = &sample->entry_ordinals;
-    arguments.parents = &sample->parents, arguments.coordinates = &sample->coordinates;
-    arguments.written = &sample->written, arguments.arena = arena.handle();
-    arguments.wanted = wanted, arguments.seed = config.seed;
+    arguments.keys = &sample->keys;
+    arguments.entry_ordinals = &sample->entry_ordinals;
+    arguments.parents = &sample->parents;
+    arguments.coordinates = &sample->coordinates;
+    arguments.written = &sample->written;
+    arguments.arena = arena.handle();
+    arguments.wanted = wanted;
+    arguments.seed = config.seed;
     arguments.expansion_factor = config.expansion_factor;
-    arguments.progress = config.progress.raw(), arguments.stats = config.stats;
+    arguments.progress = config.progress.raw();
+    arguments.stats = config.stats;
     return arguments;
+}
+
+/** The status a converter answered, with @p message beside a failure. */
+inline status_t converted_(usearch_status_t status, char const* message) noexcept {
+    if (status == usearch_status_success_k) return {};
+    return {static_cast<status_code_t>(status), message};
 }
 
 /** Reads a metric kind spelled @p name back through @p verb, as a modality's
  *  @c metric_from_name does. */
 template <typename metric_type_>
-outcome<metric_type_> metric_read_(usearch_status_t (*verb)(usearch_bytes_view_t, metric_type_*),
-                                   usearch_bytes_view_t name) noexcept {
+expected<metric_type_> metric_read_(usearch_status_t (*verb)(usearch_bytes_view_t, metric_type_*),
+                                    usearch_bytes_view_t name) noexcept {
     metric_type_ metric {};
-    usearch_status_t const status = verb(name, &metric);
-    return {metric, status, status == usearch_status_success_k ? nullptr : "The name spells no metric kind"};
+    status_t const status = converted_(verb(name, &metric), "The name spells no metric kind");
+    return {metric, status};
 }
 
 #pragma endregion Samples

@@ -166,10 +166,10 @@ expected<safegraphs_header_t> monolith_header(monolith_layout_t const& layout, s
 template <typename shards_type_>
 status_t shard_custom_fields(shards_type_ const& shards, save_config_t const& config,
                              growing_buffer<safegraphs_custom_field_t, forkunion_allocator_t>& fields) noexcept {
-    if (failed(fields.reserve_exactly(1 + config.provenance.size()))) return status_t::bad_alloc_k;
+    if (failed(fields.reserve_exactly(1 + config.provenance.size()))) return status_code_t::out_of_memory_k;
     fields.push_back_reserved({"metric", nk_kernel_name(shards[0].index->kernel())});
     for (safegraphs_custom_field_t const& field : config.provenance) fields.push_back_reserved(field);
-    return status_t::success_k;
+    return status_code_t::success_k;
 }
 
 /** Shards past the retired ones: the parts a save writes. */
@@ -213,7 +213,7 @@ expected<safegraphs_header_t> shard_monolith_header(shards_type_ const& shards, 
  */
 template <typename shards_type_>
 expected<std::size_t> shard_storage_requirements(shards_type_ const& shards, save_config_t const& config) noexcept {
-    if (shards.empty() || !shards[0].index->dimensions()) return {0, status_t::uninitialized_k};
+    if (shards.empty() || !shards[0].index->dimensions()) return {0, status_code_t::uninitialized_k};
     if (status_t const valid = config.validate(); failed(valid)) return {0, valid};
     growing_buffer<safegraphs_custom_field_t, forkunion_allocator_t> fields {shards.allocator()};
     if (status_t const named = shard_custom_fields(shards, config, fields); failed(named)) return {0, named};
@@ -221,7 +221,7 @@ expected<std::size_t> shard_storage_requirements(shards_type_ const& shards, sav
 
     // A header that cannot be formatted is an allocation failure the caller must see, never a zero
     // it would size a buffer by.
-    status_t framing = status_t::success_k;
+    status_t framing = status_code_t::success_k;
     std::size_t const retired = shards.retired_shards(), parts = live_shards_(shards);
     auto part_at = [&](std::size_t part) noexcept {
         std::size_t const nodes = shards[retired + part].index->size();
@@ -231,7 +231,7 @@ expected<std::size_t> shard_storage_requirements(shards_type_ const& shards, sav
         return safegraphs_part_t {{}, failed(status) ? 0 : header.monolith_bytes(), nodes};
     };
     growing_buffer<std::size_t, forkunion_allocator_t> offsets {shards.allocator()};
-    if (failed(offsets.resize(parts))) return {0, status_t::bad_alloc_k};
+    if (failed(offsets.resize(parts))) return {0, status_code_t::out_of_memory_k};
     auto const [bytes, status] = safegraphs_buffer_layout(parts, part_at, config.alignment, to_writable_span(offsets));
     if (failed(framing)) return {0, framing};
     return {bytes, status};
@@ -314,7 +314,7 @@ struct [[nodiscard]] shard_save_plan {
         if (status_t const ready = saveable_(shards, config); failed(ready)) return {{}, ready};
         if (status_t const kept = safegraphs_keep_path(plan.path_, path); failed(kept)) return {{}, kept};
         if (status_t const opened = plan.open_files_(config); failed(opened)) return {{}, opened};
-        return {std::move(plan), status_t::success_k};
+        return {std::move(plan), status_code_t::success_k};
     }
 
     /** Opens a save of @p shards into @p buffer - the in-memory sibling of the path form: a lone
@@ -337,7 +337,7 @@ struct [[nodiscard]] shard_save_plan {
         plan.shards_ = &shards;
         if (status_t const ready = saveable_(shards, config); failed(ready)) return {{}, ready};
         if (status_t const opened = plan.open_buffer_(buffer, config); failed(opened)) return {{}, opened};
-        return {std::move(plan), status_t::success_k};
+        return {std::move(plan), status_code_t::success_k};
     }
 
     /** Task @p position of the plan; an empty one past the last. */
@@ -379,16 +379,16 @@ struct [[nodiscard]] shard_save_plan {
      *    columns cannot hold them.
      */
     status_t save(task_t const& task) noexcept {
-        if (!shards_) return status_t::uninitialized_k;
+        if (!shards_) return status_code_t::uninitialized_k;
         std::size_t const part = task.shard - shards_->retired_shards();
-        if (task.shard < shards_->retired_shards() || part >= plans_.size()) return status_t::config_mismatch_k;
+        if (task.shard < shards_->retired_shards() || part >= plans_.size()) return status_code_t::config_mismatch_k;
         if (status_t const saved = plans_[part].save(task.inner); failed(saved)) return saved;
         // The key column is chunked, so the task's keys go run by run beside its rows.
         iota_view<node_id_t> const rows = task.inner.index_nodes;
         safegraphs_header_t const& header = headers_[part];
         bytes_span_t const key_rows = header.rows_of(target_(part), header.key, rows.first, rows.size());
         std::size_t written = 0;
-        status_t wrote = status_t::success_k;
+        status_t wrote = status_code_t::success_k;
         (*shards_)[task.shard].index->keys().column().for_each_span(
             {rows.first, rows.bound}, [&](std::span<key_t const> run) noexcept {
                 if (succeeded(wrote))
@@ -416,7 +416,7 @@ struct [[nodiscard]] shard_save_plan {
      */
     template <typename progress_type_ = dummy_progress_t>
     status_t finish(progress_type_&& on_saved = {}) noexcept {
-        if (!shards_) return status_t::uninitialized_k;
+        if (!shards_) return status_code_t::uninitialized_k;
         std::span<safegraphs_custom_field_t const> const fields = to_span(fields_);
         std::size_t const retired = shards_->retired_shards();
         for (std::size_t part = 0; part != plans_.size(); ++part) {
@@ -425,13 +425,13 @@ struct [[nodiscard]] shard_save_plan {
             // follow.
             if (plans_.size() > 1)
                 if (status_t const framed = frame_part_(part, fields); failed(framed)) return framed;
-            if (on_saved(retired + part) == continuation_t::cancel_k) return status_t::cancelled_k;
+            if (on_saved(retired + part) == continuation_t::cancel_k) return status_code_t::cancelled_k;
         }
         if (status_t const committed = plans_.size() > 1 ? write_manifest_() : frame_part_(0, fields);
             failed(committed))
             return committed;
         residency_.end_save(*std::exchange(shards_, nullptr));
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
   private:
@@ -439,8 +439,8 @@ struct [[nodiscard]] shard_save_plan {
     /** Whether @p shards can write @p config: placed, reserved, tokenized, and legal. */
     static status_t saveable_(shards_type_ const& shards, save_config_t const& config) noexcept {
         static_assert(safegraphs_key_dtype<key_t>() != dtype_t::unknown_k, "The key type has no interchange token");
-        if (shards.empty() || !shards[0].index->dimensions()) return status_t::uninitialized_k;
-        if (shard_value_dtype<shards_type_>() == dtype_t::unknown_k) return status_t::unknown_kind_k;
+        if (shards.empty() || !shards[0].index->dimensions()) return status_code_t::uninitialized_k;
+        if (shard_value_dtype<shards_type_>() == dtype_t::unknown_k) return status_code_t::unknown_kind_k;
         return config.validate();
     }
 
@@ -448,7 +448,7 @@ struct [[nodiscard]] shard_save_plan {
     status_t frame_part_(std::size_t part, std::span<safegraphs_custom_field_t const> fields) noexcept {
         if (status_t const framed = safegraphs_write_header(target_(part), headers_[part], fields); failed(framed))
             return framed;
-        if (mappings_.empty()) return status_t::success_k;
+        if (mappings_.empty()) return status_code_t::success_k;
         return mappings_[part].sync();
     }
 
@@ -466,7 +466,7 @@ struct [[nodiscard]] shard_save_plan {
         if (status_t const named = shard_custom_fields(shards, config, fields_); failed(named)) return named;
         if (failed(plans_.reserve_exactly(parts)) || failed(headers_.reserve_exactly(parts)) ||
             failed(norms_columns_.reserve_exactly(parts)))
-            return status_t::bad_alloc_k;
+            return status_code_t::out_of_memory_k;
         for (std::size_t part = 0; part != parts; ++part) {
             norms_columns_.push_back_reserved(safegraphs_named_column_t {});
             auto const [header, status] = shard_monolith_header(shards, shards[retired + part].index->size(), config,
@@ -474,7 +474,7 @@ struct [[nodiscard]] shard_save_plan {
             if (failed(status)) return status;
             headers_.push_back_reserved(header);
         }
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Opens each live shard's own save plan over the columns of its part. */
@@ -492,7 +492,7 @@ struct [[nodiscard]] shard_save_plan {
             if (failed(status)) return status;
             plans_.push_back_reserved(std::move(inner));
         }
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Frames and maps a lone shard's monolith at the plan's path, or one part per live shard
@@ -500,7 +500,7 @@ struct [[nodiscard]] shard_save_plan {
     status_t open_files_(save_config_t const& config) noexcept {
         if (status_t const framed = frame_parts_(config); failed(framed)) return framed;
         std::size_t const parts = headers_.size();
-        if (failed(mappings_.reserve_exactly(parts))) return status_t::bad_alloc_k;
+        if (failed(mappings_.reserve_exactly(parts))) return status_code_t::out_of_memory_k;
         std::string_view const path = to_string_view(path_);
         std::string_view const stem = safegraphs_stem(path);
         growing_buffer<char, forkunion_allocator_t> part_path {shards_->allocator()};
@@ -523,12 +523,12 @@ struct [[nodiscard]] shard_save_plan {
     status_t open_buffer_(bytes_span_t buffer, save_config_t const& config) noexcept {
         if (status_t const framed = frame_parts_(config); failed(framed)) return framed;
         std::size_t const parts = headers_.size();
-        if (failed(offsets_.resize(parts))) return status_t::bad_alloc_k;
+        if (failed(offsets_.resize(parts))) return status_code_t::out_of_memory_k;
         auto const entry_at = [this](std::size_t part) noexcept { return part_entry_(part); };
         auto const [bytes, status] = safegraphs_buffer_layout(parts, entry_at, config.alignment,
                                                               to_writable_span(offsets_));
         if (failed(status)) return status;
-        if (buffer.size() < bytes) return status_t::overflow_k;
+        if (buffer.size() < bytes) return status_code_t::overflow_k;
         // What the caller's bytes held must not read as a checkpoint until the commit is written.
         std::memset(buffer.data(), 0, parts > 1 ? offsets_[0] : sizeof(safegraphs_prefix_t));
         buffer_ = buffer;
@@ -707,11 +707,12 @@ struct [[nodiscard]] shard_load_plan {
             if (status_t const opened = plan.residency_.open_sources(to_writable_span(plan.mappings_)); failed(opened))
                 return {{}, opened};
         if constexpr (loads_in_runs<index_t>) {
-            if (failed(plan.directs_.reserve_exactly(plan.mappings_.size()))) return {{}, status_t::bad_alloc_k};
+            if (failed(plan.directs_.reserve_exactly(plan.mappings_.size())))
+                return {{}, status_code_t::out_of_memory_k};
             for (mapped_file_t const& mapping : plan.mappings_) plan.directs_.push_back_reserved(mapping.open_direct());
         }
         if (status_t const opened = plan.open_shards_(config); failed(opened)) return {{}, opened};
-        return {std::move(plan), status_t::success_k};
+        return {std::move(plan), status_code_t::success_k};
     }
 
     /**
@@ -763,7 +764,7 @@ struct [[nodiscard]] shard_load_plan {
         if (status_t const opened = plan.open_shards_(config); failed(opened)) return {{}, opened};
         if (source.device != host_device_k)
             if (status_t const staged = plan.stage_keys_(source.device, copy); failed(staged)) return {{}, staged};
-        return {std::move(plan), status_t::success_k};
+        return {std::move(plan), status_code_t::success_k};
     }
 
     /** Rows the checkpoint loads across every shard - what its headers said. */
@@ -827,8 +828,8 @@ struct [[nodiscard]] shard_load_plan {
      *  - @c io_k On NVIDIA, a read through cuFile ended short, which never restarts on the host.
      */
     status_t load(task_t const& task) noexcept {
-        if (!shards_) return status_t::uninitialized_k;
-        if (task.shard >= plans_.size() || task.part >= parts_.size()) return status_t::config_mismatch_k;
+        if (!shards_) return status_code_t::uninitialized_k;
+        if (task.shard >= plans_.size() || task.part >= parts_.size()) return status_code_t::config_mismatch_k;
         safegraphs_catalog_part_t const& part = parts_[task.part];
         typename index_t::columns_view_t columns {
             part.header.data_of(part.monolith, part.header.value),
@@ -858,8 +859,8 @@ struct [[nodiscard]] shard_load_plan {
      *    hold them, its IDs rebase past the plan, or @p staging is too short.
      */
     status_t load(task_t const& task, bytes_span_t staging) noexcept {
-        if (!shards_) return status_t::uninitialized_k;
-        if (task.shard >= plans_.size() || task.part >= parts_.size()) return status_t::config_mismatch_k;
+        if (!shards_) return status_code_t::uninitialized_k;
+        if (task.shard >= plans_.size() || task.part >= parts_.size()) return status_code_t::config_mismatch_k;
         safegraphs_catalog_part_t const& part = parts_[task.part];
         file_view_t const file = task.part < directs_.size() && directs_[task.part]
                                      ? file_view_t {&directs_[task.part], 0, part.monolith.size()}
@@ -877,7 +878,7 @@ struct [[nodiscard]] shard_load_plan {
         std::size_t const stored_bytes = part.header.key.row_bytes(), first = task.inner.source_nodes.first;
         std::size_t const count = task.inner.source_nodes.size(), page = fu::ram_page_size();
         std::size_t const skipped = (page - reinterpret_cast<std::uintptr_t>(staging.data()) % page) % page;
-        if (staging.size() < skipped + count * stored_bytes) return status_t::config_mismatch_k;
+        if (staging.size() < skipped + count * stored_bytes) return status_code_t::config_mismatch_k;
         bytes_span_t const keys = staging.subspan(skipped, count * stored_bytes);
         if (status_t const read = copy_entries(source_of(keys_of_(task.part)), first, count, stored_bytes, keys);
             failed(read))
@@ -899,23 +900,23 @@ struct [[nodiscard]] shard_load_plan {
      *  @par Statuses:
      *  - @c uninitialized_k The plan is empty or spent.
      *  - @c config_mismatch_k A shard's tasks never copied all its rows.
-     *  - @c device_error_k On NVIDIA or AMD, a shard's keys never reached the device.
+     *  - @c device_k On NVIDIA or AMD, a shard's keys never reached the device.
      *  - @c unsupported_k or @c unsupported_layout_k On NVIDIA or AMD, a shard keeps this earlier
      *    refusal.
      */
     template <typename progress_type_ = dummy_progress_t>
     status_t finish(progress_type_&& on_loaded = {}) noexcept {
-        if (!shards_) return status_t::uninitialized_k;
+        if (!shards_) return status_code_t::uninitialized_k;
         for (std::size_t shard = 0; shard != plans_.size(); ++shard) {
             // Every plan finishes, an empty one included, since finishing releases the claim.
             if constexpr (!loads_in_runs<index_t>) plans_[shard].publish_keys();
             if (status_t const finished = plans_[shard].finish(); failed(finished)) return finished;
         }
         for (std::size_t shard = 0; shard != plans_.size(); ++shard)
-            if (on_loaded(shard) == continuation_t::cancel_k) return status_t::cancelled_k;
+            if (on_loaded(shard) == continuation_t::cancel_k) return status_code_t::cancelled_k;
         shards_->reset_routing(rows());
         std::exchange(shards_, nullptr)->reopen();
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
   private:
@@ -924,10 +925,10 @@ struct [[nodiscard]] shard_load_plan {
      *  unique side, the plan's death reopening them, and checks emptiness beneath them, where no
      *  batch can insert before the load does. */
     status_t gate_(shards_type_& shards) noexcept {
-        if (shards.empty()) return status_t::uninitialized_k;
+        if (shards.empty()) return status_code_t::uninitialized_k;
         if (status_t const closed = residency_.close(shards); failed(closed)) return closed;
         shards_ = &shards;
-        return shards.entries() ? status_t::config_mismatch_k : status_t::success_k;
+        return shards.entries() ? status_code_t::config_mismatch_k : status_code_t::success_k;
     }
 
     /** Whether @p part can load onto the shards: three regular columns of their own dtypes, its
@@ -935,19 +936,22 @@ struct [[nodiscard]] shard_load_plan {
      *  holds, and every column describing the same rows. */
     status_t vetted_part_(safegraphs_catalog_part_t const& part, safegraphs_header_t const& first) const noexcept {
         safegraphs_header_t const& header = part.header;
-        if (header.key.offsets || header.value.offsets || header.neighbors.offsets ||
-            (!part.metric.empty() &&
-             nk_kernel_named(part.metric.characters, part.metric.view().size()) != (*shards_)[0].index->kernel()) ||
-            !safegraphs_key_widens(header.key.dtype, safegraphs_key_dtype<key_t>()) ||
-            header.value.dtype != shard_value_dtype<shards_type_>() || header.neighbors.dtype != dtype_t::u32_k ||
-            header.key.shape != column_shape_t {scalar_shape_t {}} || header.value.shape != first.value.shape ||
+        if (header.key.offsets || header.value.offsets || header.neighbors.offsets)
+            return {status_code_t::config_mismatch_k, "Part holds a ragged column"};
+        if (!part.metric.empty() &&
+            nk_kernel_named(part.metric.characters, part.metric.view().size()) != (*shards_)[0].index->kernel())
+            return {status_code_t::config_mismatch_k, "Part metric differs from the shards"};
+        if (!safegraphs_key_widens(header.key.dtype, safegraphs_key_dtype<key_t>()) ||
+            header.value.dtype != shard_value_dtype<shards_type_>() || header.neighbors.dtype != dtype_t::u32_k)
+            return {status_code_t::config_mismatch_k, "Part column types differ from the shards"};
+        if (header.key.shape != column_shape_t {scalar_shape_t {}} || header.value.shape != first.value.shape ||
             header.neighbors.shape != first.neighbors.shape)
-            return status_t::config_mismatch_k;
+            return {status_code_t::config_mismatch_k, "Part column shapes are inconsistent"};
         if (header.key.nodes() != part.nodes || header.value.nodes() != part.nodes ||
             header.neighbors.nodes() != part.nodes ||
             header.rows_of(part.monolith, header.key, 0, part.nodes).size() != part.nodes * header.key.row_bytes())
-            return status_t::malformed_k;
-        return status_t::success_k;
+            return {status_code_t::malformed_k, "Part columns disagree with its node count"};
+        return status_code_t::success_k;
     }
 
     /**
@@ -961,18 +965,20 @@ struct [[nodiscard]] shard_load_plan {
      */
     status_t open_shards_(load_config_t const& config) noexcept {
         shards_type_& shards = *shards_;
-        if (parts_.empty()) return status_t::malformed_k;
+        if (parts_.empty()) return {status_code_t::malformed_k, "Checkpoint holds no parts"};
         safegraphs_header_t const& first = parts_[0].header;
         for (safegraphs_catalog_part_t const& part : parts_)
             if (status_t const vetted = vetted_part_(part, first); failed(vetted)) return vetted;
         connectivity_t const connectivity = static_cast<connectivity_t>(
             regular_width(first.neighbors.shape).value_or(0));
         std::size_t const dimensions = regular_width(first.value.shape).value_or(0);
-        if (!std::has_single_bit(static_cast<u32_t>(connectivity)) || !dimensions) return status_t::malformed_k;
+        if (!std::has_single_bit(static_cast<u32_t>(connectivity)))
+            return {status_code_t::malformed_k, "Part connectivity is not a power of two"};
+        if (!dimensions) return {status_code_t::malformed_k, "Part vectors have zero dimensions"};
         std::size_t const bound = shards.shard_capacity(), retired = shards.retired_shards();
         std::size_t total = 0;
         for (safegraphs_catalog_part_t const& part : parts_) {
-            if (part.nodes > bound) return status_t::overflow_k;
+            if (part.nodes > bound) return status_code_t::overflow_k;
             total += part.nodes;
         }
 
@@ -981,8 +987,8 @@ struct [[nodiscard]] shard_load_plan {
         std::size_t const shard_connectivity = shards[0].index->connectivity();
         if (dimensions != shards[0].index->dimensions() || connectivity > shard_connectivity ||
             (connectivity != shard_connectivity && !widens_neighbors<index_t>))
-            return status_t::config_mismatch_k;
-        if (!shards.capacity() && !total && !config.capacity) return status_t::success_k;
+            return {status_code_t::config_mismatch_k, "Shard geometry differs from the parts"};
+        if (!shards.capacity() && !total && !config.capacity) return status_code_t::success_k;
 
         // The shards the parts open past the present ones are built like the rest, and each shard
         // grows to its own part's rows or its share of the config's, under the bound.
@@ -998,13 +1004,13 @@ struct [[nodiscard]] shard_load_plan {
         auto share_of = [&](std::size_t part) noexcept {
             return min_of(max_of(part < parts_.size() ? parts_[part].nodes : 0, share), bound);
         };
-        auto reserve_live = [&](auto capacity_of) noexcept {
+        auto reserve_live = [&](auto capacity_of) noexcept -> status_t {
             for (std::size_t shard = retired; shard != shards_count; ++shard) {
                 per_shard.capacity = capacity_of(shard - retired);
                 if (status_t const reserved = shards[shard].index->reserve(per_shard).status; failed(reserved))
                     return reserved;
             }
-            return status_t::success_k;
+            return status_code_t::success_k;
         };
         // A device's plans need their storage grown ahead, while plans that load in runs cover
         // their part's rows unfilled: ahead of those a shard takes its ceiling alone, and after
@@ -1013,7 +1019,7 @@ struct [[nodiscard]] shard_load_plan {
                                                                : reserve_live(share_of);
         if (failed(reserved_ahead)) return reserved_ahead;
 
-        if (failed(plans_.reserve_exactly(shards_count))) return status_t::bad_alloc_k;
+        if (failed(plans_.reserve_exactly(shards_count))) return status_code_t::out_of_memory_k;
         for (std::size_t shard = 0; shard != shards_count; ++shard) {
             std::size_t const part = shard - retired;
             std::size_t const rows = shard >= retired && part < parts_.size() ? parts_[part].nodes : 0;
@@ -1021,7 +1027,7 @@ struct [[nodiscard]] shard_load_plan {
             if (failed(status)) return status;
             plans_.push_back_reserved(std::move(inner));
         }
-        return loads_in_runs<index_t> ? reserve_live(share_of) : status_t::success_k;
+        return loads_in_runs<index_t> ? reserve_live(share_of) : status_code_t::success_k;
     }
 
     /** Copies every part's key column off device @p device into @c keys_, in part order, so a
@@ -1030,7 +1036,7 @@ struct [[nodiscard]] shard_load_plan {
     status_t stage_keys_(int device, copy_type_& copy) noexcept {
         std::size_t total = 0;
         for (safegraphs_catalog_part_t const& part : parts_) total += part.nodes * part.header.key.row_bytes();
-        if (failed(keys_.resize_uninitialized(total))) return status_t::bad_alloc_k;
+        if (failed(keys_.resize_uninitialized(total))) return status_code_t::out_of_memory_k;
         std::size_t first = 0;
         for (safegraphs_catalog_part_t const& part : parts_) {
             std::size_t const bytes = part.nodes * part.header.key.row_bytes();
@@ -1041,7 +1047,7 @@ struct [[nodiscard]] shard_load_plan {
                 return copied;
             first += bytes;
         }
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Part @p part 's key rows on the host: read in place, or staged off a device at opening. */

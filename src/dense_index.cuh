@@ -40,6 +40,8 @@
 
 #pragma region Sharded Index
 
+namespace util = unum::usearch::utilities;
+
 /** The verb table of every residency, one of which a handle holds. */
 using dense_variant_tables_t =
     std::variant<dense_verbs<vendored_residency_t::ram_k> const*, dense_verbs<vendored_residency_t::nvme_k> const*,
@@ -64,7 +66,7 @@ struct usearch_dense_index_handle_t {
     void* index = nullptr;
 
     /** Executor calls naming the handle that have not ended, which its free waits out. */
-    u32_t named_calls = 0;
+    util::u32_t named_calls = 0;
 
     usearch_dense_index_handle_t(dense_variant_tables_t picked, void* created) noexcept
         : tables(picked), index(created) {}
@@ -102,17 +104,18 @@ static void* same_punned_index(punned_dense_index<residency_> const& punned,
 /** Appends one RAM shard per named memory domain - or one per allocatable domain of a transient
  *  topology when the list is empty, so a bare init still spans the machine. */
 template <vendored_residency_t residency_>
-static status_t place_shards(punned_dense_index<residency_> const& punned, usearch_ram_options_t const& ram) noexcept {
+static util::status_t place_shards(punned_dense_index<residency_> const& punned,
+                                   usearch_ram_options_t const& ram) noexcept {
     punned.verbs.bound_shards(punned.index, ram.shard_capacity);
     auto const emplace = [&](fu_memory_domain_id_t domain) noexcept {
         return punned.verbs.emplace(punned.index, ram_residency_k, domain);
     };
     if (!ram.memory_domains || !ram.memory_domains_count) return emplace_on_every_domain(emplace);
     for (std::size_t position = 0; position != ram.memory_domains_count; ++position)
-        if (status_t const placed = emplace(static_cast<fu_memory_domain_id_t>(ram.memory_domains[position]));
+        if (util::status_t const placed = emplace(static_cast<fu_memory_domain_id_t>(ram.memory_domains[position]));
             failed(placed))
             return placed;
-    return status_t::success_k;
+    return util::status_code_t::success_k;
 }
 
 /** Where an NVMe view's parts come from: the checkpoint, and one device or directory per part when
@@ -133,7 +136,8 @@ struct nvme_placement_t {
 
 /** Opens every part of the checkpoint @p nvme names, served in place, keys held when asked. */
 template <vendored_residency_t residency_>
-static status_t place_shards(punned_dense_index<residency_> const& punned, nvme_placement_t const& nvme) noexcept {
+static util::status_t place_shards(punned_dense_index<residency_> const& punned,
+                                   nvme_placement_t const& nvme) noexcept {
     return punned.verbs.view(punned.index, nvme.path, nvme.paths, nvme.ram, nvme.executor);
 }
 
@@ -154,25 +158,26 @@ struct nvme_load_placement_t {
 
 /** Opens the manifest @p nvme names as a writable index, keys held when asked. */
 template <vendored_residency_t residency_>
-static status_t place_shards(punned_dense_index<residency_> const& punned, nvme_load_placement_t const& nvme) noexcept {
+static util::status_t place_shards(punned_dense_index<residency_> const& punned,
+                                   nvme_load_placement_t const& nvme) noexcept {
     return punned.verbs.load_nvme(punned.index, nvme.path, nvme.ram, nvme.executor);
 }
 
 /** Appends one VRAM shard per named USearch device ordinal, on that device's vendor ordinal. */
 template <vendored_residency_t residency_>
-static status_t place_shards(punned_dense_index<residency_> const& punned,
-                             usearch_vram_options_t const& vram) noexcept {
+static util::status_t place_shards(punned_dense_index<residency_> const& punned,
+                                   usearch_vram_options_t const& vram) noexcept {
     punned.verbs.bound_shards(punned.index, vram.shard_capacity);
-    std::span<gpu_device_t const> const devices = gpu_devices();
+    std::span<util::gpu_device_t const> const devices = gpu_devices();
     for (std::size_t shard = 0; shard != named_count(vram); ++shard) {
         std::size_t const ordinal = named_ordinal(vram, shard);
-        if (ordinal >= devices.size()) return status_t::device_error_k;
-        if (status_t const placed = punned.verbs.emplace(punned.index, vram_residency(devices[ordinal].vendor_ordinal),
-                                                         no_memory_domain_k);
+        if (ordinal >= devices.size()) return util::status_code_t::device_k;
+        if (util::status_t const placed = punned.verbs.emplace(
+                punned.index, vram_residency(devices[ordinal].vendor_ordinal), util::no_memory_domain_k);
             failed(placed))
             return placed;
     }
-    return status_t::success_k;
+    return util::status_code_t::success_k;
 }
 
 /** Creates the index of the variant @p verbs, scoring under @p kernel, and places its shards where
@@ -183,8 +188,9 @@ static usearch_dense_index_t make_dense_handle(usearch_dense_metadata_t const& g
                                                residency_options_type_ const& options,
                                                dense_verbs<residency_> const& verbs, nk_kernel_kind_t kernel,
                                                usearch_outcome_t* outcome) noexcept {
-    connectivity_t const connectivity = geometry.connectivity ? static_cast<connectivity_t>(geometry.connectivity)
-                                                              : connectivity_32_k;
+    util::connectivity_t const connectivity = geometry.connectivity
+                                                  ? static_cast<util::connectivity_t>(geometry.connectivity)
+                                                  : util::connectivity_32_k;
     void* const created = verbs.create(kernel, {geometry.dimensions, connectivity}, host_allocator_of(options));
     if (!created)
         return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the index"), nullptr;
@@ -194,7 +200,7 @@ static usearch_dense_index_t make_dense_handle(usearch_dense_metadata_t const& g
                propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the index"), nullptr;
     // Placement is init's job, so a bad domain fails here rather than at the first reservation.
     punned_dense_index<residency_> const punned {verbs, created};
-    if (status_t const placed = place_shards(punned, options); failed(placed))
+    if (util::status_t const placed = place_shards(punned, options); failed(placed))
         return delete handle, propagate_error(placed, outcome), nullptr;
     return handle;
 }
@@ -242,8 +248,7 @@ static usearch_dense_index_t make_index(usearch_dense_metadata_t const& geometry
                                         nk_dtype_t dtype, nk_kernel_kind_t kernel,
                                         usearch_outcome_t* outcome) noexcept {
     auto const [ceiling, pick_status] = pick_cpu_ceiling(ram.cpu_class_ceiling);
-    if (failed(pick_status))
-        return propagate_error(pick_status, outcome, "No compiled class fits under the CPU class ceiling"), nullptr;
+    if (failed(pick_status)) return propagate_error(pick_status, outcome), nullptr;
     dense_verbs<vendored_residency_t::ram_k> const* const verbs = pick_cpu_variant<vendored_residency_t::ram_k>(
         cpu_ladder_t {}, dtype, ceiling);
     if (!verbs)
@@ -262,8 +267,7 @@ static usearch_dense_index_t make_index(usearch_dense_metadata_t const& geometry
                                         nk_dtype_t dtype, nk_kernel_kind_t kernel,
                                         usearch_outcome_t* outcome) noexcept {
     auto const [ceiling, pick_status] = pick_cpu_ceiling(nvme.cpu_class_ceiling);
-    if (failed(pick_status))
-        return propagate_error(pick_status, outcome, "No compiled class fits under the CPU class ceiling"), nullptr;
+    if (failed(pick_status)) return propagate_error(pick_status, outcome), nullptr;
     dense_verbs<vendored_residency_t::nvme_k> const* const verbs = pick_cpu_variant<vendored_residency_t::nvme_k>(
         cpu_ladder_t {}, dtype, ceiling);
     if (!verbs)
@@ -280,26 +284,18 @@ static usearch_dense_index_t make_index(usearch_dense_metadata_t const& geometry
                                         nk_dtype_t dtype, nk_kernel_kind_t kernel,
                                         usearch_outcome_t* outcome) noexcept {
     auto const [placement, status] = resolve_placement(vram);
-    if (status == status_t::config_mismatch_k)
-        return propagate_error(status, outcome, "One index spans one GPU vendor"), nullptr;
-    if (status == status_t::invalid_argument_k || status == status_t::unsupported_k)
-        return propagate_error(status, outcome, "The devices share no class this build carries under the ceiling"),
-               nullptr;
+    if (failed(status)) return propagate_error(status, outcome), nullptr;
     // Each ladder's rungs serve only their own vendor's devices, so at most one ladder answers.
-    if (succeeded(status)) {
-        if (dense_verbs<vendored_residency_t::vram_nvidia_k> const* const verbs =
-                pick_gpu_variant<vendored_residency_t::vram_nvidia_k>(nvidia_ladder_t {}, dtype, placement))
-            return make_dense_handle(geometry, vram, *verbs, kernel, outcome);
-        if (dense_verbs<vendored_residency_t::vram_amd_k> const* const verbs =
-                pick_gpu_variant<vendored_residency_t::vram_amd_k>(amd_ladder_t {}, dtype, placement))
-            return make_dense_handle(geometry, vram, *verbs, kernel, outcome);
-        if (dense_verbs<vendored_residency_t::vram_apple_k> const* const verbs =
-                pick_gpu_variant<vendored_residency_t::vram_apple_k>(apple_ladder_t {}, dtype, placement))
-            return make_dense_handle(geometry, vram, *verbs, kernel, outcome);
-    }
-    return propagate_error(usearch_status_device_k, outcome,
-                           "The devices are not listed, or this build carries no kernels for them"),
-           nullptr;
+    if (dense_verbs<vendored_residency_t::vram_nvidia_k> const* const verbs =
+            pick_gpu_variant<vendored_residency_t::vram_nvidia_k>(nvidia_ladder_t {}, dtype, placement))
+        return make_dense_handle(geometry, vram, *verbs, kernel, outcome);
+    if (dense_verbs<vendored_residency_t::vram_amd_k> const* const verbs =
+            pick_gpu_variant<vendored_residency_t::vram_amd_k>(amd_ladder_t {}, dtype, placement))
+        return make_dense_handle(geometry, vram, *verbs, kernel, outcome);
+    if (dense_verbs<vendored_residency_t::vram_apple_k> const* const verbs =
+            pick_gpu_variant<vendored_residency_t::vram_apple_k>(apple_ladder_t {}, dtype, placement))
+        return make_dense_handle(geometry, vram, *verbs, kernel, outcome);
+    return propagate_error(usearch_status_device_k, outcome, "This build carries no kernels for the devices"), nullptr;
 }
 
 /** Refuses at init, before any variant is picked or device touched, a geometry the engines would
@@ -312,7 +308,7 @@ static bool refuses_geometry(usearch_dense_metadata_t const& geometry, usearch_o
     bool const stored = dense_dtypes_t::index_of(dtype) != dense_dtypes_t::size_k;
     bool const filled = !stored || geometry.dimensions % nk_dimensions_per_value(dtype) == 0;
     bool const shaped = !connectivity || (std::has_single_bit(connectivity) &&
-                                          connectivity == static_cast<connectivity_t>(connectivity));
+                                          connectivity == static_cast<util::connectivity_t>(connectivity));
     if (geometry.dimensions && filled && shaped) return false;
     return !propagate_error(usearch_status_config_mismatch_k, outcome,
                             "The dimensions or connectivity cannot shape a graph");
@@ -364,7 +360,7 @@ static usearch_dense_index_t with_variant(usearch_dense_metadata_t const& geomet
 
 /** @p count rows of the C view @p rows as the engines take them, their scalar riding along. */
 static us::dense::rows_view_t rows_of(usearch_rows_view_t const& rows, std::size_t count) noexcept {
-    return {static_cast<byte_t const*>(rows.data), count, rows.columns, rows.stride, nk_dtype_of(rows.scalar)};
+    return {static_cast<util::byte_t const*>(rows.data), count, rows.columns, rows.stride, nk_dtype_of(rows.scalar)};
 }
 
 /** The dtype of rows in @p scalar, @p columns wide, or unknown once @p outcome refuses a
@@ -412,12 +408,11 @@ static bool for_each_dense_chunk(punned_dense_index<residency_> punned, usearch_
     std::size_t const chunk = rows_per_query * ticks.slice();
     us::dense::rows_view_t const all = rows_of(rows, rows_count);
     for (std::size_t resolved = 0; resolved != rows_count;) {
-        std::size_t const taking = min_of(chunk, rows_count - resolved);
-        expected<traversal_stats_t> const found = sink(all.slice(resolved, taking), *executor, config, resolved,
-                                                       taking);
-        if (!crossed(found, stats, outcome)) return false;
+        std::size_t const taking = util::min_of(chunk, rows_count - resolved);
+        if (!crossed(sink(all.slice(resolved, taking), *executor, config, resolved, taking), stats, outcome))
+            return false;
         resolved += taking;
-        if (ticks(resolved / rows_per_query, queries) == continuation_t::cancel_k)
+        if (ticks(resolved / rows_per_query, queries) == util::continuation_t::cancel_k)
             return propagate_error(usearch_status_cancelled_k, outcome, "The handler stopped the call");
     }
     return true;
@@ -438,7 +433,7 @@ static bool match_dense_rows(punned_dense_index<residency_> punned, usearch_exec
     static_assert(sizeof(key_t) == sizeof(usearch_key_t), "Keys land in the arena as the walk writes them");
     std::size_t const wanted = outputs.wanted;
     nk::matrix_span<key_t> const keys {reinterpret_cast<key_t*>(outputs.keys), count, wanted};
-    nk::matrix_span<f64_t> const scores {outputs.scores, count, wanted};
+    nk::matrix_span<util::f64_t> const scores {outputs.scores, count, wanted};
     auto sink = [&](us::dense::rows_view_t chunk_rows, typename punned_dense_index<residency_>::executor_t& executor,
                     search_config_t chunk_config, std::size_t resolved, std::size_t taking) noexcept {
         std::size_t const first = resolved / rows_per_query, matched = taking / rows_per_query;
@@ -461,7 +456,7 @@ static bool hints_of_view(usearch_matches_view_t const* given, std::size_t count
                           usearch_outcome_t* outcome) noexcept {
     if (rejects_hints(given, count, outcome)) return false;
     if (given && count)
-        hints = {{reinterpret_cast<us::utilities::uuid128_t const*>(given->keys), count, given->columns},
+        hints = {{reinterpret_cast<util::uuid128_t const*>(given->keys), count, given->columns},
                  {given->counts, count}};
     return true;
 }
@@ -478,10 +473,10 @@ struct usearch_dense_cursor_handle_t {
     usearch_dense_index_handle_t const* opened_on = nullptr;
 
     /** Set while a pull runs, so an overlapping one is refused rather than racing it. */
-    u32_t busy = 0;
+    util::u32_t busy = 0;
 
     /** Executor calls naming the cursor that have not ended, which its free waits out. */
-    u32_t named_calls = 0;
+    util::u32_t named_calls = 0;
 
     usearch_dense_cursor_handle_t(dense_variant_tables_t picked, usearch_dense_index_handle_t const* index) noexcept
         : tables(picked), opened_on(index) {}
@@ -501,7 +496,7 @@ struct usearch_dense_reshard_plan_handle_t {
 };
 
 /** Fills every field a checkpoint holds; the type carries nothing a checkpoint cannot say. */
-static void adopt_metadata(safegraphs_metadata_t const& source, usearch_dense_metadata_t* metadata) noexcept {
+static void adopt_metadata(util::safegraphs_metadata_t const& source, usearch_dense_metadata_t* metadata) noexcept {
     metadata->dimensions = regular_width(source.value_shape).value_or(0);
     metadata->connectivity = source.connectivity;
     metadata->quantization = usearch_scalar_of(dense::nk_dtype_of(source.value_dtype));
@@ -525,7 +520,7 @@ static void load_dense_index(source_type_ source, residency_options_type_ const&
     if (empty)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The checkpoint must not be empty"), void();
     auto const [checkpoint, read_status] = [&]() noexcept {
-        if constexpr (from_path_k) return safegraphs_read_metadata(source);
+        if constexpr (from_path_k) return util::safegraphs_read_metadata(source);
         else return safegraphs_read_metadata(source, copy_off_device);
     }();
     if (failed(read_status)) return propagate_error(read_status, outcome), void();
@@ -535,7 +530,7 @@ static void load_dense_index(source_type_ source, residency_options_type_ const&
     if (connectivity) geometry.connectivity = connectivity;
     // More parts than named devices keep a shard each, part `p` on device `p` modulo their count.
     residency_options_type_ placed = options;
-    growing_buffer<int32_t> part_devices {global_allocator};
+    util::growing_buffer<int32_t> part_devices {util::global_allocator};
     if constexpr (std::is_same_v<residency_options_type_, usearch_vram_options_t>)
         if (checkpoint.parts > named_count(options)) {
             if (failed(part_devices.resize(checkpoint.parts)))
@@ -555,7 +550,7 @@ static void load_dense_index(source_type_ source, residency_options_type_ const&
                                                                                        outcome);
         if (!typed) return;
         progress_ticks_t ticks {progress, punned.verbs.shards_count(punned.index)};
-        status_t const status = [&]() noexcept {
+        util::status_t const status = [&]() noexcept {
             if constexpr (std::is_same_v<source_type_, std::string_view>)
                 return punned.verbs.load(punned.index, source, *typed, ticks);
             else return punned.verbs.load_buffer(punned.index, source, *typed, ticks);
@@ -593,9 +588,9 @@ static bool accepts_dense_reshard(punned_dense_index<residency_> const& punned,
                                                                 std::span {arguments.targets, arguments.targets_count}})
         for (usearch_dense_index_t const handle : listed)
             visit_punned(*handle, [&]<vendored_residency_t own_>(punned_dense_index<own_> own) noexcept {
-                read_only |= own.verbs.serves_writes(own.index) == status_t::read_only_k;
+                read_only |= own.verbs.serves_writes(own.index) == util::status_code_t::read_only_k;
             });
-    if (read_only) return propagate_error(status_t::read_only_k, outcome);
+    if (read_only) return propagate_error(util::status_code_t::read_only_k, outcome);
     for (std::size_t source = 0; source != arguments.sources_count; ++source)
         if (!accepts(arguments.sources[source])) return false;
     for (std::size_t target = 0; target != arguments.targets_count; ++target) {
@@ -613,44 +608,45 @@ static bool accepts_dense_reshard(punned_dense_index<residency_> const& punned,
 /** The variant a reshard's CPU class @p ceiling resolves to among @p verbs ' residency, as creating
  *  a handle with it would; @p verbs itself when it sets no ceiling. */
 template <vendored_residency_t residency_>
-static expected<dense_verbs<residency_> const*> ceiling_cpu_variant(dense_verbs<residency_> const& verbs,
-                                                                    usearch_cpu_class_t ceiling) noexcept {
-    if (ceiling == usearch_cpu_class_unknown_k) return {&verbs, status_t::success_k};
+static util::expected<dense_verbs<residency_> const*> ceiling_cpu_variant(dense_verbs<residency_> const& verbs,
+                                                                          usearch_cpu_class_t ceiling) noexcept {
+    if (ceiling == usearch_cpu_class_unknown_k) return {&verbs, util::status_code_t::success_k};
     auto const [picked, status] = pick_cpu_ceiling(ceiling);
     if (failed(status)) return {nullptr, status};
-    return {pick_cpu_variant<residency_>(cpu_ladder_t {}, verbs.dtype, picked), status_t::success_k};
+    return {pick_cpu_variant<residency_>(cpu_ladder_t {}, verbs.dtype, picked), util::status_code_t::success_k};
 }
 
 /** The variant a reshard's @p vram ceiling resolves to on @p ladder, as creating a handle with it
  *  would; @p verbs itself when it sets no ceiling. */
 template <vendored_residency_t residency_, gpu_class_t... classes_>
-static expected<dense_verbs<residency_> const*> ceiling_gpu_variant(dense_verbs<residency_> const& verbs,
-                                                                    gpu_ladder<classes_...> ladder,
-                                                                    usearch_vram_options_t const* vram) noexcept {
-    if (!vram || vram->gpu_class_ceiling == usearch_gpu_class_unknown_k) return {&verbs, status_t::success_k};
+static util::expected<dense_verbs<residency_> const*> ceiling_gpu_variant(dense_verbs<residency_> const& verbs,
+                                                                          gpu_ladder<classes_...> ladder,
+                                                                          usearch_vram_options_t const* vram) noexcept {
+    if (!vram || vram->gpu_class_ceiling == usearch_gpu_class_unknown_k)
+        return {&verbs, util::status_code_t::success_k};
     auto const [placement, status] = resolve_placement(*vram);
     if (failed(status)) return {nullptr, status};
-    return {pick_gpu_variant<residency_>(ladder, verbs.dtype, placement), status_t::success_k};
+    return {pick_gpu_variant<residency_>(ladder, verbs.dtype, placement), util::status_code_t::success_k};
 }
 
 /** The variant a reshard placement's class ceiling resolves to, one overload per residency. */
-static expected<dense_verbs<vendored_residency_t::ram_k> const*> ceiling_variant(
+static util::expected<dense_verbs<vendored_residency_t::ram_k> const*> ceiling_variant(
     dense_verbs<vendored_residency_t::ram_k> const& verbs, usearch_dense_reshard_t const& arguments) noexcept {
     return ceiling_cpu_variant(verbs, arguments.ram ? arguments.ram->cpu_class_ceiling : usearch_cpu_class_unknown_k);
 }
-static expected<dense_verbs<vendored_residency_t::nvme_k> const*> ceiling_variant(
+static util::expected<dense_verbs<vendored_residency_t::nvme_k> const*> ceiling_variant(
     dense_verbs<vendored_residency_t::nvme_k> const& verbs, usearch_dense_reshard_t const& arguments) noexcept {
     return ceiling_cpu_variant(verbs, arguments.nvme ? arguments.nvme->cpu_class_ceiling : usearch_cpu_class_unknown_k);
 }
-static expected<dense_verbs<vendored_residency_t::vram_nvidia_k> const*> ceiling_variant(
+static util::expected<dense_verbs<vendored_residency_t::vram_nvidia_k> const*> ceiling_variant(
     dense_verbs<vendored_residency_t::vram_nvidia_k> const& verbs, usearch_dense_reshard_t const& arguments) noexcept {
     return ceiling_gpu_variant(verbs, nvidia_ladder_t {}, arguments.vram);
 }
-static expected<dense_verbs<vendored_residency_t::vram_amd_k> const*> ceiling_variant(
+static util::expected<dense_verbs<vendored_residency_t::vram_amd_k> const*> ceiling_variant(
     dense_verbs<vendored_residency_t::vram_amd_k> const& verbs, usearch_dense_reshard_t const& arguments) noexcept {
     return ceiling_gpu_variant(verbs, amd_ladder_t {}, arguments.vram);
 }
-static expected<dense_verbs<vendored_residency_t::vram_apple_k> const*> ceiling_variant(
+static util::expected<dense_verbs<vendored_residency_t::vram_apple_k> const*> ceiling_variant(
     dense_verbs<vendored_residency_t::vram_apple_k> const& verbs, usearch_dense_reshard_t const& arguments) noexcept {
     return ceiling_gpu_variant(verbs, apple_ladder_t {}, arguments.vram);
 }
@@ -662,7 +658,7 @@ template <vendored_residency_t residency_>
 static bool places_as_handles(dense_verbs<residency_> const& verbs, usearch_dense_reshard_t const& arguments,
                               usearch_outcome_t* outcome) noexcept {
     auto const [placed, status] = ceiling_variant(verbs, arguments);
-    if (failed(status)) return propagate_error(status, outcome, "The class ceiling does not resolve here");
+    if (failed(status)) return propagate_error(status, outcome);
     if (placed != &verbs)
         return propagate_error(usearch_status_config_mismatch_k, outcome,
                                "The class ceiling resolves to another variant than the handles'");
@@ -680,11 +676,11 @@ inline variants_view_t view_dense_variants(usearch_dense_index_t const* others, 
 /** The tape of @p count queries, @p stride pairs of room each, carved where @p arena hands outputs
  *  out, on its device when it has one and on its host pages otherwise, its first offset zeroed
  *  there; the verbs hand every window of it the whole keys and scores with its own offsets. */
-static expected<products_tape_t> carve_products_tape(usearch_arena_handle_t& arena, std::size_t count,
-                                                     std::size_t stride) noexcept {
-    using key_t = us::utilities::uuid128_t;
+static util::expected<products_tape_t> carve_products_tape(usearch_arena_handle_t& arena, std::size_t count,
+                                                           std::size_t stride) noexcept {
+    using key_t = util::uuid128_t;
     static_assert(sizeof(key_t) == sizeof(usearch_key_t), "Keys land in the arena as the walk writes them");
-    if (wraps_on_multiply(count, stride)) return {products_tape_t {}, status_t::overflow_k};
+    if (util::wraps_on_multiply(count, stride)) return {products_tape_t {}, util::status_code_t::overflow_k};
     std::size_t const room = count * stride;
     products_tape_t tape;
     tape.stride = stride;
@@ -702,13 +698,13 @@ static expected<products_tape_t> carve_products_tape(usearch_arena_handle_t& are
         keys = carve<key_t>(arena.memory, room);
         scores = carve<usearch_distance_t>(arena.memory, room);
     }
-    if (!offsets || (room && (!keys || !scores))) return {tape, status_t::bad_alloc_k};
+    if (!offsets || (room && (!keys || !scores))) return {tape, util::status_code_t::out_of_memory_k};
     tape.offsets = {offsets, count + 1};
     tape.keys = {keys, room};
     tape.scores = {scores, room};
     if (!arena.device_memory) {
         tape.offsets.front() = base;
-        return {tape, status_t::success_k};
+        return {tape, util::status_code_t::success_k};
     }
     return {tape, drained(arena, arena.device_memory.upload(offsets, &base, sizeof(base)))};
 }
@@ -768,13 +764,13 @@ USEARCH_EXPORT void usearch_dense_view_nvme(usearch_dense_view_nvme_t* arguments
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The paths must name storage"), void();
 
     std::size_t const paths_count = nvme.paths ? nvme.paths_count : 0;
-    growing_buffer<std::string_view> paths {global_allocator};
+    util::growing_buffer<std::string_view> paths {util::global_allocator};
     if (failed(paths.resize(paths_count)))
         return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to list the paths"), void();
     for (std::size_t path = 0; path != paths_count; ++path) paths[path] = as_text(nvme.paths[path]);
 
     // The view's own header read, so a transport ID names a checkpoint as a file path does.
-    auto const [checkpoint, read_status] = nvme_read_metadata<fu::standard_yield_t>(as_text(arguments->path));
+    auto const [checkpoint, read_status] = util::nvme_read_metadata<fu::standard_yield_t>(as_text(arguments->path));
     if (failed(read_status)) return propagate_error(read_status, outcome), void();
     usearch_dense_metadata_t geometry {};
     adopt_metadata(checkpoint, &geometry);
@@ -801,7 +797,7 @@ USEARCH_EXPORT void usearch_dense_load_nvme(usearch_dense_load_nvme_t* arguments
                                "A loaded index serves its parts where the manifest it rewrites points"),
                void();
     std::string_view const path = as_text(arguments->path);
-    auto const [checkpoint, read_status] = nvme_read_metadata<fu::standard_yield_t>(path);
+    auto const [checkpoint, read_status] = util::nvme_read_metadata<fu::standard_yield_t>(path);
     if (failed(read_status)) return propagate_error(read_status, outcome), void();
     usearch_dense_metadata_t geometry {};
     adopt_metadata(checkpoint, &geometry);
@@ -886,7 +882,7 @@ USEARCH_EXPORT void usearch_dense_describe(usearch_dense_describe_t* arguments) 
 USEARCH_EXPORT void usearch_dense_count(usearch_dense_count_t* arguments) {
     if (submitted<usearch_dense_count>(arguments)) return;
     call_outcome_t outcome(*arguments);
-    us::utilities::uuid128_t const key = uuid_of(arguments->key);
+    util::uuid128_t const key = uuid_of(arguments->key);
     *arguments->entries = 0;
     visit_punned(
         *arguments->index, [&]<vendored_residency_t residency_>(punned_dense_index<residency_> punned) noexcept {
@@ -945,9 +941,9 @@ USEARCH_EXPORT void usearch_dense_insert(usearch_dense_insert_t* arguments) {
         nk::vector_view<key_t> const uuids {reinterpret_cast<char const*>(keys.data), count, keys.stride};
         progress_ticks_t ticks {arguments->progress, count};
         insert_config_t const config {static_cast<candidates_count_t>(arguments->expansion_factor)};
-        expected<traversal_stats_t> const inserted = punned.verbs.insert(punned.index, uuids, rows_of(vectors, count),
-                                                                         config, *executor, ticks);
-        if (crossed(inserted, stats, outcome)) propagate_error(usearch_status_success_k, outcome, nullptr);
+        if (crossed(punned.verbs.insert(punned.index, uuids, rows_of(vectors, count), config, *executor, ticks), stats,
+                    outcome))
+            propagate_error(usearch_status_success_k, outcome, nullptr);
     });
 }
 
@@ -964,13 +960,13 @@ USEARCH_EXPORT void usearch_dense_refine(usearch_dense_refine_t* arguments) {
             if (!executor) return;
             progress_ticks_t ticks {arguments->progress, punned.verbs.size(punned.index)};
             refine_config_t const config = refine_config_of(arguments->refine);
-            usearch_dense_refine_plan_t const live = arguments->plan ? *arguments->plan : nullptr;
-            expected<void*> const opened = live ? expected<void*> {live->held.engine_plan, status_t::success_k}
-                                                : punned.verbs.refine_plan_open(punned.index, config, *executor);
+            auto const open_plan = [&]() noexcept {
+                return punned.verbs.refine_plan_open(punned.index, config, *executor);
+            };
             publish_refined(
                 *arguments,
                 drive_planned(arguments->plan, punned.verbs.refine_plan, arguments->index->tables, arguments->index,
-                              arguments->executor, *executor, ticks, arguments->phase, opened),
+                              arguments->executor, *executor, ticks, arguments->phase, open_plan),
                 outcome);
         });
 }
@@ -1023,8 +1019,7 @@ USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments) {
                 // No walk serves zero matches or an empty index, whose shards may not have grown
                 // on any device yet; the counts are zeros staged on the host.
                 auto const [zeros, carve_status] = carve_matches(arena->memory, count, 0);
-                if (failed(carve_status))
-                    return propagate_error(carve_status, outcome, "Failed to grow the arena"), void();
+                if (failed(carve_status)) return propagate_error(carve_status, outcome), void();
                 for (std::size_t query = 0; query != count; ++query) zeros.counts[query] = 0;
                 auto const [matches, publish_status] = publish_matches(*arena, zeros, count);
                 if (failed(publish_status)) return propagate_error(publish_status, outcome), void();
@@ -1035,7 +1030,7 @@ USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments) {
             // merge in place.
             auto [outputs, carve_status] = arena->device_memory ? carve_matches(arena->device_memory, count, wanted)
                                                                 : carve_matches(arena->memory, count, wanted);
-            if (failed(carve_status)) return propagate_error(carve_status, outcome, "Failed to grow the arena"), void();
+            if (failed(carve_status)) return propagate_error(carve_status, outcome), void();
             bool const searched = match_dense_rows(
                 punned, arguments->executor, count, arguments->queries, 1, hints, outputs,
                 search_config_of(arguments->expansion_factor, arguments->traversal), arguments->progress,
@@ -1053,7 +1048,7 @@ USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments) {
 USEARCH_EXPORT void usearch_dense_get(usearch_dense_get_t* arguments) {
     if (submitted<usearch_dense_get>(arguments)) return;
     call_outcome_t outcome(*arguments);
-    us::utilities::uuid128_t const key = uuid_of(arguments->key);
+    util::uuid128_t const key = uuid_of(arguments->key);
     usearch_scalar_t const scalar = arguments->outputs_scalar;
     *arguments->vectors = {};
     if (arguments->written) *arguments->written = 0;
@@ -1071,13 +1066,13 @@ USEARCH_EXPORT void usearch_dense_get(usearch_dense_get_t* arguments) {
             if (!executor) return;
             // The single key rides the batched lookups: they size the outputs, then fill them.
             std::size_t entries = 0;
-            if (status_t const counted = punned.verbs.count(punned.index, {&key, 1}, {&entries, 1}, *executor);
+            if (util::status_t const counted = punned.verbs.count(punned.index, {&key, 1}, {&entries, 1}, *executor);
                 failed(counted))
                 return propagate_error(counted, outcome), void();
             if (!entries) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
             std::size_t const row_bytes = us::dense::packed_bytes(target_dtype, dimensions);
             // Every residency casts into the rows itself, a device gathering into its arena.
-            if (wraps_on_multiply(entries, row_bytes))
+            if (util::wraps_on_multiply(entries, row_bytes))
                 return propagate_error(usearch_status_overflow_k, outcome, "The entries overflow the address space"),
                        void();
             std::byte* const rows = arena->device_memory ? carve<std::byte>(arena->device_memory, entries * row_bytes)
@@ -1086,11 +1081,12 @@ USEARCH_EXPORT void usearch_dense_get(usearch_dense_get_t* arguments) {
                 return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
             std::size_t total = 0;
             us::dense::rows_span_t const target {rows, entries, dimensions, row_bytes, target_dtype};
-            if (status_t const got = punned.verbs.get(punned.index, {&key, 1}, target, {&total, 1}, entries, *executor);
+            if (util::status_t const got = punned.verbs.get(punned.index, {&key, 1}, target, {&total, 1}, entries,
+                                                            *executor);
                 failed(got))
-                return propagate_error(got, outcome, "Failed to export the rows"), void();
+                return propagate_error(got, outcome), void();
             *arguments->vectors = {rows, row_bytes, dimensions, scalar};
-            if (arguments->written) *arguments->written = min_of(total, entries);
+            if (arguments->written) *arguments->written = util::min_of(total, entries);
             propagate_error(usearch_status_success_k, outcome, nullptr);
         });
 }
@@ -1123,9 +1119,9 @@ USEARCH_EXPORT void usearch_dense_cursor_init(usearch_dense_cursor_init_t* argum
     usearch_dense_cursor_t const opened = new (std::nothrow) usearch_dense_cursor_handle_t(handle.tables, &handle);
     if (!opened)
         return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the cursor"), void();
-    status_t const placed = std::visit(
+    util::status_t const placed = std::visit(
         [&](auto const* verbs) noexcept {
-            using key_t = us::utilities::uuid128_t;
+            using key_t = util::uuid128_t;
             static_assert(sizeof(key_t) == sizeof(usearch_key_t), "Start keys cross as the walk reads them");
             std::span<key_t const> const starts {reinterpret_cast<key_t const*>(arguments->starts),
                                                  arguments->starts_count};
@@ -1151,7 +1147,7 @@ USEARCH_EXPORT void usearch_dense_cursor_next(usearch_dense_cursor_next_t* argum
     if (arguments->index != arguments->cursor->opened_on)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The cursor was opened on another index"),
                void();
-    fu::standard_atomic_ref<u32_t> const busy {arguments->cursor->busy};
+    fu::standard_atomic_ref<util::u32_t> const busy {arguments->cursor->busy};
     if (busy.fetch_test_and_set_bit(0, std::memory_order_acquire))
         return propagate_error(usearch_status_contended_k, outcome, "Another pull is still running on the cursor"),
                void();
@@ -1176,19 +1172,19 @@ USEARCH_EXPORT void usearch_dense_cursor_next(usearch_dense_cursor_next_t* argum
             links_outputs_t links {arena->memory};
             if (arguments->links && failed(links.open()))
                 return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
-            expected<std::size_t> const read = punned.verbs.cursor_next(
-                punned.index, arguments->cursor->walk, identities, arguments->links ? &links : nullptr, *executor);
-            if (!read) return propagate_error(read.status, outcome, "Failed to export the keys"), void();
-            auto const [published_keys, published_keys_status] = publish(*arena, keys, read.value);
+            auto const [read, read_status] = punned.verbs.cursor_next(punned.index, arguments->cursor->walk, identities,
+                                                                      arguments->links ? &links : nullptr, *executor);
+            if (failed(read_status)) return propagate_error(read_status, outcome), void();
+            auto const [published_keys, published_keys_status] = publish(*arena, keys, read);
             auto const [published_links, published_links_status] = publish_links(*arena, links);
-            if (status_t const drained_status = drained(*arena,
-                                                        first_failure({published_keys_status, published_links_status}));
+            if (util::status_t const drained_status = drained(
+                    *arena, first_failure({published_keys_status, published_links_status}));
                 failed(drained_status))
-                return propagate_error(drained_status, outcome, "Failed to upload the keys to the device"), void();
+                return propagate_error(drained_status, outcome), void();
             if (arguments->links) *arguments->links = published_links;
-            if (read.value) {
+            if (read) {
                 *arguments->keys = {published_keys, sizeof(usearch_key_t)};
-                *arguments->written = read.value;
+                *arguments->written = read;
             }
             propagate_error(usearch_status_success_k, outcome, nullptr);
         });
@@ -1224,15 +1220,15 @@ USEARCH_EXPORT void usearch_dense_reshard(usearch_dense_reshard_t* arguments) {
             progress_ticks_t ticks {arguments->progress, population};
             reshard_options_t const options {arguments->ram, arguments->vram, arguments->nvme,
                                              refine_config_of(arguments->refine), arguments->seed};
-            expected<void*> const opened = live ? expected<void*> {live->held.engine_plan, status_t::success_k}
-                                                : verbs->reshard_plan_open(
-                                                      view_dense_variants(arguments->sources, arguments->sources_count),
-                                                      view_dense_variants(arguments->targets, arguments->targets_count),
-                                                      options, *executor);
+            auto const open_plan = [&]() noexcept {
+                return verbs->reshard_plan_open(view_dense_variants(arguments->sources, arguments->sources_count),
+                                                view_dense_variants(arguments->targets, arguments->targets_count),
+                                                options, *executor);
+            };
             publish_refined(*arguments,
                             drive_planned(arguments->plan, verbs->reshard_plan, dense_variant_tables_t {verbs},
                                           usearch_dense_index_t {}, arguments->executor, *executor, ticks,
-                                          arguments->phase, opened),
+                                          arguments->phase, open_plan),
                             outcome);
         },
         first ? first->tables : live->held.tables);
@@ -1260,12 +1256,12 @@ USEARCH_EXPORT void usearch_dense_sample(usearch_dense_sample_t* arguments) {
             auto const [staging, carve_status] = carve_sample(arena->memory, arguments->wanted);
             if (failed(view_status) || failed(carve_status))
                 return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
-            sample_config_t const config {arguments->seed, arguments->expansion_factor};
+            util::sample_config_t const config {arguments->seed, arguments->expansion_factor};
             auto const [sampled, status] = punned.verbs.sample(punned.index, inputs, staging.template outputs<key_t>(),
                                                                config, *executor);
             if (failed(status)) return propagate_error(status, outcome), void();
             progress_ticks_t ticks {arguments->progress, arguments->wanted};
-            if (sampled.written && ticks(sampled.written, arguments->wanted) == continuation_t::cancel_k)
+            if (sampled.written && ticks(sampled.written, arguments->wanted) == util::continuation_t::cancel_k)
                 return propagate_error(usearch_status_cancelled_k, outcome, "The caller's handler stopped the work"),
                        void();
             publish_sample(*arguments, staging, sampled);
@@ -1307,7 +1303,7 @@ USEARCH_EXPORT void usearch_dense_multiply(usearch_dense_multiply_t* arguments) 
             // Every query keeps up to `width` of the pairs its walks scored, from its offset.
             auto walk = [&](std::size_t width, usearch_progress_t progress) noexcept {
                 auto const [carved, carve_status] = carve_products_tape(*arena, count, width);
-                if (failed(carve_status)) return propagate_error(carve_status, outcome, "Failed to grow the arena");
+                if (failed(carve_status)) return propagate_error(carve_status, outcome);
                 tape = carved;
                 auto sink = [&](us::dense::rows_view_t chunk_rows,
                                 typename punned_dense_index<residency_>::executor_t& executor, search_config_t config,
@@ -1325,12 +1321,13 @@ USEARCH_EXPORT void usearch_dense_multiply(usearch_dense_multiply_t* arguments) 
             std::size_t width = arguments->wanted;
             if (!width) {
                 if (!walk(0, usearch_progress_t {})) return;
-                for (std::size_t const query_scored : std::span {scored, count}) width = max_of(width, query_scored);
+                for (std::size_t const query_scored : std::span {scored, count})
+                    width = util::max_of(width, query_scored);
             }
             if (!walk(width, arguments->progress)) return;
             std::size_t written = 0, required = 0;
             for (std::size_t const query_scored : std::span {scored, count})
-                written += min_of(query_scored, width), required += query_scored;
+                written += util::min_of(query_scored, width), required += query_scored;
             *arguments->products = tape_view_of(tape, written);
             if (arguments->written) *arguments->written = written;
             if (arguments->required) *arguments->required = required;
@@ -1344,7 +1341,7 @@ USEARCH_EXPORT void usearch_dense_attend(usearch_dense_attend_t* arguments) {
     if (submitted<usearch_dense_attend>(arguments)) return;
     call_outcome_t outcome(*arguments);
     usearch_dense_softmax_state_t* const carry = arguments->carry;
-    std::size_t const count = arguments->count, head_count = max_of<std::size_t>(arguments->head_count, 1);
+    std::size_t const count = arguments->count, head_count = util::max_of<std::size_t>(arguments->head_count, 1);
     usearch_scalar_t const outputs_scalar = arguments->outputs_scalar ? arguments->outputs_scalar
                                                                       : arguments->queries.scalar;
     if (arguments->stats) *arguments->stats = {};
@@ -1358,7 +1355,7 @@ USEARCH_EXPORT void usearch_dense_attend(usearch_dense_attend_t* arguments) {
         return propagate_error(usearch_status_shape_mismatch_k, outcome, "The heads must divide the rows"), void();
     if (rejects_columns(*arguments->index, count, columns, outcome)) return;
     std::size_t const row_bytes = us::dense::packed_bytes(outputs_dtype, columns);
-    f32_t const requested_scale = arguments->score_scale;
+    util::f32_t const requested_scale = arguments->score_scale;
     predicate_t const predicate = predicate_of(arguments->predicate);
 
     visit_punned(*arguments->index, [&]<vendored_residency_t residency_>(
@@ -1387,9 +1384,9 @@ USEARCH_EXPORT void usearch_dense_attend(usearch_dense_attend_t* arguments) {
         // The engine's carry mirrors the C one, so it writes the caller's states in place.
         std::span<us::dense::softmax_state_t> const carried {reinterpret_cast<us::dense::softmax_state_t*>(carry),
                                                              carry ? count : 0};
-        f32_t const score_scale =
-            requested_scale > 0 ? requested_scale
-                                : 1 / std::sqrt(static_cast<f32_t>(punned.verbs.geometry(punned.index).dimensions));
+        util::f32_t const score_scale = requested_scale > 0 ? requested_scale
+                                                            : 1 / std::sqrt(static_cast<util::f32_t>(
+                                                                      punned.verbs.geometry(punned.index).dimensions));
         auto sink = [&](us::dense::rows_view_t chunk_rows,
                         typename punned_dense_index<residency_>::executor_t& executor, search_config_t config,
                         std::size_t resolved, std::size_t taking) noexcept {
@@ -1444,7 +1441,7 @@ USEARCH_EXPORT void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
             if (query_offsets[query + 1] <= query_offsets[query])
                 return propagate_error(usearch_status_shape_mismatch_k, outcome, "Every query needs at least one row"),
                        void();
-            longest = max_of(longest, query_offsets[query + 1] - query_offsets[query]);
+            longest = util::max_of(longest, query_offsets[query + 1] - query_offsets[query]);
         }
         if (rejects_columns(*arguments->index, query_offsets.back(), arguments->queries.columns, outcome)) return;
         usearch_rows_view_t const& rows = arguments->queries;
@@ -1467,9 +1464,9 @@ USEARCH_EXPORT void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
         else if (!wanted) {
             std::size_t const connectivity = punned.verbs.geometry(punned.index).connectivity;
             std::size_t const breadth = arguments->expansion_factor ? arguments->expansion_factor
-                                                                    : default_expansion_factor(connectivity);
+                                                                    : util::default_expansion_factor(connectivity);
             std::size_t const shards = punned.verbs.shards_count(punned.index);
-            if (wraps_on_multiply(longest, shards) || wraps_on_multiply(longest * shards, breadth))
+            if (util::wraps_on_multiply(longest, shards) || util::wraps_on_multiply(longest * shards, breadth))
                 return propagate_error(usearch_status_overflow_k, outcome, "The products overflow the address space"),
                        void();
             stride = longest * shards * breadth;
@@ -1486,7 +1483,7 @@ USEARCH_EXPORT void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
         progress_ticks_t ticks {arguments->progress, count};
         std::size_t const step = ticks.slice();
         for (std::size_t first = 0; first != count;) {
-            std::size_t const taking = min_of(step, count - first), first_row = query_offsets[first];
+            std::size_t const taking = util::min_of(step, count - first), first_row = query_offsets[first];
             for (std::size_t query = 0; query <= taking; ++query)
                 rebased[query] = query_offsets[first + query] - first_row;
             products_tape_t const window {tape.keys, tape.scores, tape.offsets.subspan(first, taking + 1), stride};
@@ -1495,18 +1492,20 @@ USEARCH_EXPORT void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
                                                         ? ranked_hints_view_t {}
                                                         : ranked_hints_view_t {hints.keys(chunk_range, nk::slice),
                                                                                hints.counts.subspan(first, taking)};
-            expected<traversal_stats_t> const found = punned.verbs.maxsim(
-                punned.index,
-                maxsim_queries_view_t {all.slice(first_row, rebased[taking]), {rebased, taking + 1}, chunk_hints},
-                window, {scored + first, taking}, wanted, config, predicate, *executor);
-            if (!crossed(found, arguments->stats, outcome)) return;
+            maxsim_queries_view_t const queries {all.slice(first_row, rebased[taking]),
+                                                 {rebased, taking + 1},
+                                                 chunk_hints};
+            if (!crossed(punned.verbs.maxsim(punned.index, queries, window, {scored + first, taking}, wanted, config,
+                                             predicate, *executor),
+                         arguments->stats, outcome))
+                return;
             first += taking;
-            if (ticks(first, count) == continuation_t::cancel_k)
+            if (ticks(first, count) == util::continuation_t::cancel_k)
                 return propagate_error(usearch_status_cancelled_k, outcome, "The handler stopped the call"), void();
         }
         std::size_t written = 0, required = 0;
         for (std::size_t const query_scored : std::span {scored, count})
-            written += min_of(query_scored, stride), required += query_scored;
+            written += util::min_of(query_scored, stride), required += query_scored;
         *arguments->matches = tape_view_of(tape, written);
         if (arguments->written) *arguments->written = written;
         if (arguments->required) *arguments->required = required;
@@ -1535,7 +1534,7 @@ USEARCH_EXPORT void usearch_dense_load_vram(usearch_dense_load_vram_t* arguments
 USEARCH_EXPORT void usearch_dense_load_ram_buffer(usearch_dense_load_ram_buffer_t* arguments) {
     if (submitted<usearch_dense_load_ram_buffer>(arguments)) return;
     call_outcome_t outcome(*arguments);
-    load_dense_index(checkpoint_source_t {as_bytes(arguments->buffer)}, arguments->ram, arguments->connectivity,
+    load_dense_index(util::checkpoint_source_t {as_bytes(arguments->buffer)}, arguments->ram, arguments->connectivity,
                      arguments->executor, arguments->progress, arguments->index, outcome);
 }
 
@@ -1579,7 +1578,7 @@ USEARCH_EXPORT void usearch_dense_save_buffer(usearch_dense_save_buffer_t* argum
             progress_ticks_t ticks {arguments->progress, punned.verbs.shards_count(punned.index)};
             save_into_arena(
                 *arena, punned.verbs.storage_requirements(punned.index),
-                [&](bytes_span_t checkpoint) noexcept {
+                [&](util::bytes_span_t checkpoint) noexcept {
                     return punned.verbs.save_buffer(punned.index, checkpoint, *executor, ticks);
                 },
                 *arguments->monolith, outcome);
@@ -1592,7 +1591,7 @@ USEARCH_EXPORT void usearch_dense_metadata_read(usearch_dense_metadata_read_t* a
     if (!arguments->path.data || !arguments->path.length)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The path must not be empty"), void();
     // Through the medium a view reads, since a generic char node maps nothing and reports no size.
-    auto const [source, status] = nvme_read_metadata<fu::standard_yield_t>(as_text(arguments->path));
+    auto const [source, status] = util::nvme_read_metadata<fu::standard_yield_t>(as_text(arguments->path));
     if (failed(status)) return propagate_error(status, outcome), void();
     adopt_metadata(source, arguments->metadata);
     propagate_error(usearch_status_success_k, outcome, nullptr);
@@ -1603,7 +1602,7 @@ USEARCH_EXPORT void usearch_dense_metadata_read_buffer(usearch_dense_metadata_re
     call_outcome_t outcome(*arguments);
     if (!arguments->buffer.data || !arguments->buffer.length)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The buffer must not be empty"), void();
-    auto const [source, status] = safegraphs_read_metadata(as_bytes(arguments->buffer));
+    auto const [source, status] = util::safegraphs_read_metadata(as_bytes(arguments->buffer));
     if (failed(status)) return propagate_error(status, outcome), void();
     adopt_metadata(source, arguments->metadata);
     propagate_error(usearch_status_success_k, outcome, nullptr);
@@ -1629,8 +1628,8 @@ USEARCH_EXPORT void usearch_arena_init(usearch_arena_init_t* arguments) {
     // A VRAM executor writes its outputs on its vendor's first stream; every other executor
     // computes on the host.
     if (arguments->executor)
-        if (gpu_executor_t* const devices = std::get_if<gpu_executor_t>(&arguments->executor->executor)) {
-            arena->device_memory = gpu_arena_t::on(*devices);
+        if (util::gpu_executor_t* const devices = std::get_if<util::gpu_executor_t>(&arguments->executor->executor)) {
+            arena->device_memory = util::gpu_arena_t::on(*devices);
             arena->residency = vram_residency(static_cast<std::size_t>(arena->device_memory.device()));
             arena->executor = arguments->executor;
         }
@@ -1659,8 +1658,7 @@ USEARCH_EXPORT void usearch_executor_for_ram(usearch_executor_for_ram_t* argumen
     call_outcome_t outcome(*arguments);
     *arguments->executor = nullptr;
     auto const [ceiling, pick_status] = pick_cpu_ceiling(arguments->ram.cpu_class_ceiling);
-    if (failed(pick_status))
-        return propagate_error(pick_status, outcome, "No compiled class fits under the CPU class ceiling"), void();
+    if (failed(pick_status)) return propagate_error(pick_status, outcome), void();
     usearch_executor_t const executor = new (std::nothrow) usearch_executor_handle_t {};
     if (!executor)
         return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the executor"), void();
@@ -1684,8 +1682,8 @@ USEARCH_EXPORT void usearch_executor_for_vram(usearch_executor_for_vram_t* argum
         return propagate_error(usearch_status_unsupported_k, outcome, "Borrowed streams are not wired yet"), void();
     // The ABI names USearch ordinals, which the listing resolves to each vendor's own; the spawn
     // keeps one stream per distinct device.
-    std::span<gpu_device_t const> const listed = gpu_devices();
-    growing_buffer<gpu_device_t> devices {global_allocator};
+    std::span<util::gpu_device_t const> const listed = gpu_devices();
+    util::growing_buffer<util::gpu_device_t> devices {util::global_allocator};
     if (failed(devices.resize(named_count(vram))))
         return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to list the devices"), void();
     for (std::size_t shard = 0; shard != devices.size(); ++shard) {
@@ -1695,29 +1693,27 @@ USEARCH_EXPORT void usearch_executor_for_vram(usearch_executor_for_vram_t* argum
         devices[shard] = listed[ordinal];
     }
     auto const [placement, placed_status] = resolve_placement(vram);
-    if (failed(placed_status) && placed_status != status_t::config_mismatch_k)
-        return propagate_error(placed_status, outcome,
-                               "The devices share no class this build carries under the ceiling"),
-               void();
+    if (failed(placed_status) && placed_status != util::status_code_t::config_mismatch_k)
+        return propagate_error(placed_status, outcome), void();
     auto [spawned, status] = spawn_gpu_executor(gpu_drivers(), devices, arguments->scratch_limit);
-    if (status == status_t::config_mismatch_k)
-        return propagate_error(status, outcome, "One executor drives one GPU vendor"), void();
+    if (status == util::status_code_t::config_mismatch_k)
+        return propagate_error(usearch_status_config_mismatch_k, outcome, "One executor drives one GPU vendor"), void();
     if (failed(status)) return propagate_error(status, outcome), void();
     usearch_executor_t const executor = new (std::nothrow) usearch_executor_handle_t {};
     if (!executor)
         return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the executor"), void();
-    executor->executor.emplace<gpu_executor_t>(std::move(spawned));
+    executor->executor.emplace<util::gpu_executor_t>(std::move(spawned));
     *arguments->executor = executor;
     propagate_error(usearch_status_success_k, outcome, nullptr);
 }
 
 USEARCH_EXPORT void usearch_gpu_devices(usearch_gpu_devices_t* arguments) {
     call_outcome_t outcome(*arguments);
-    std::span<gpu_device_t const> const listed = gpu_devices();
+    std::span<util::gpu_device_t const> const listed = gpu_devices();
     std::span<gpu_class_mask_t const> const loaded = gpu_classes_loaded();
-    std::size_t const copied = arguments->devices ? min_of(listed.size(), arguments->devices_capacity) : 0;
+    std::size_t const copied = arguments->devices ? util::min_of(listed.size(), arguments->devices_capacity) : 0;
     for (std::size_t position = 0; position != copied; ++position) {
-        gpu_device_t const& device = listed[position];
+        util::gpu_device_t const& device = listed[position];
         usearch_gpu_device_t& entry = arguments->devices[position];
         gpu_class_t const gpu_class = pick_gpu_class(device.vendor, loaded[position], usearch_gpu_class_unknown_k);
         entry = {static_cast<usearch_gpu_vendor_t>(device.vendor),
@@ -1739,8 +1735,7 @@ USEARCH_EXPORT void usearch_executor_for_nvme(usearch_executor_for_nvme_t* argum
     if (nvme.paths_count && !nvme.paths)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The paths must name storage"), void();
     auto const [ceiling, pick_status] = pick_cpu_ceiling(nvme.cpu_class_ceiling);
-    if (failed(pick_status))
-        return propagate_error(pick_status, outcome, "No compiled class fits under the CPU class ceiling"), void();
+    if (failed(pick_status)) return propagate_error(pick_status, outcome), void();
 
     // A transport identifier names a namespace the kernel no longer owns, which only a userspace
     // engine reaches, so one executor serves either kernel paths or transport identifiers, never
@@ -1748,7 +1743,7 @@ USEARCH_EXPORT void usearch_executor_for_nvme(usearch_executor_for_nvme_t* argum
     std::size_t transport_ids = 0, pcie_ids = 0;
     for (std::size_t path = 0; path != nvme.paths_count; ++path) {
         std::string_view const named = as_text(nvme.paths[path]);
-        transport_ids += names_transport_id(named);
+        transport_ids += util::names_transport_id(named);
         pcie_ids += named.starts_with("spdk://") || named.find("trtype:PCIe") != std::string_view::npos;
     }
     if (transport_ids && transport_ids != nvme.paths_count)
@@ -1764,13 +1759,15 @@ USEARCH_EXPORT void usearch_executor_for_nvme(usearch_executor_for_nvme_t* argum
                                "SPDK serves transport identifiers, and the kernel engines serve paths"),
                void();
     // Zero leaves each call's depth to the block queues of the media it reads.
-    io_engine_config_t config;
+    util::io_engine_config_t config;
     switch (nvme_class) {
-    case usearch_nvme_class_posix_k: config.transport = io_transport_t::blocking_k; break;
-    case usearch_nvme_class_linux_aio_k: config.transport = io_transport_t::linux_aio_k; break;
-    case usearch_nvme_class_linux_uring_k: config.transport = io_transport_t::linux_uring_k; break;
-    case usearch_nvme_class_linux_uring_passthrough_k: config.transport = io_transport_t::linux_uring_nvme_k; break;
-    case usearch_nvme_class_windows_ioring_k: config.transport = io_transport_t::windows_ioring_k; break;
+    case usearch_nvme_class_posix_k: config.transport = util::io_transport_t::blocking_k; break;
+    case usearch_nvme_class_linux_aio_k: config.transport = util::io_transport_t::linux_aio_k; break;
+    case usearch_nvme_class_linux_uring_k: config.transport = util::io_transport_t::linux_uring_k; break;
+    case usearch_nvme_class_linux_uring_passthrough_k:
+        config.transport = util::io_transport_t::linux_uring_nvme_k;
+        break;
+    case usearch_nvme_class_windows_ioring_k: config.transport = util::io_transport_t::windows_ioring_k; break;
     default: break;
     }
     if (transport_ids) {
@@ -1781,7 +1778,7 @@ USEARCH_EXPORT void usearch_executor_for_nvme(usearch_executor_for_nvme_t* argum
         environment.memory = pcie_ids ? linux_spdk_memory_t::hugepages_k : linux_spdk_memory_t::plain_pages_k;
         if (status_t const acquired = linux_spdk_process_t::acquire<fu::standard_yield_t>(environment);
             failed(acquired))
-            return propagate_error(acquired, outcome, "The SPDK environment did not start"), void();
+            return propagate_error(acquired, outcome), void();
         config.transport = io_transport_t::linux_spdk_k;
 #else
         (void)pcie_ids;
@@ -1808,7 +1805,7 @@ USEARCH_EXPORT void usearch_executor_drain(usearch_executor_drain_t* arguments) 
     await_delegated_call(executor);
     wait_while_claimed(executor);
     // Threads spin after every dispatch already, so only parking needs a word to them.
-    if (forkunion_executor_t* const threads = threads_of(executor);
+    if (util::forkunion_executor_t* const threads = threads_of(executor);
         threads && arguments->mood != usearch_mood_spinning_k)
         threads->park();
     propagate_error(visit_executor(executor, [](auto& typed) noexcept { return typed.wait(); }), outcome);

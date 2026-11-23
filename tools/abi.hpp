@@ -81,25 +81,24 @@
 #include "arguments.hpp" // `flag_t`, `count_t`, `parse_or_exit`, `bytes_view`, `formatted`, `exit_out_of_memory`
 
 namespace unum::usearch::tools {
-using namespace unum::usearch::utilities;
 
 #pragma region Keys
 
 /** Offsets below this bound get keys: a version-4 UUID leaves 62 bits beside its variant. */
-inline constexpr u64_t key_offsets_k = u64_t {1} << 62;
+inline constexpr util::u64_t key_offsets_k = util::u64_t {1} << 62;
 
 /** The odd multipliers of the offset mix, SplitMix64's. */
-inline constexpr u64_t key_multipliers_k[2] = {0xbf58476d1ce4e5b9ull, 0x94d049bb133111ebull};
+inline constexpr util::u64_t key_multipliers_k[2] = {0xbf58476d1ce4e5b9ull, 0x94d049bb133111ebull};
 
 /** The inverse of the odd @p multiplier modulo 2^64, by Newton's iteration. */
-constexpr u64_t inverse_of_(u64_t multiplier) noexcept {
-    u64_t inverse = multiplier;
+constexpr util::u64_t inverse_of_(util::u64_t multiplier) noexcept {
+    util::u64_t inverse = multiplier;
     for (int step = 0; step != 5; ++step) inverse *= 2 - multiplier * inverse;
     return inverse;
 }
 
 /** SplitMix64's finalizer. */
-constexpr u64_t mix_(u64_t word) noexcept {
+constexpr util::u64_t mix_(util::u64_t word) noexcept {
     word = (word ^ word >> 30) * key_multipliers_k[0];
     word = (word ^ word >> 27) * key_multipliers_k[1];
     return word ^ word >> 31;
@@ -107,8 +106,8 @@ constexpr u64_t mix_(u64_t word) noexcept {
 
 /** The leading eight bytes of a key whose trailing eight are @p trailing : a version-4 tag over a
  *  mix of those and @p seed, which @ref offset_of_key checks. */
-constexpr u64_t leading_word_(u64_t seed, u64_t trailing) noexcept {
-    return (mix_(trailing ^ mix_(seed)) & ~u64_t {0xF000}) | 0x4000;
+constexpr util::u64_t leading_word_(util::u64_t seed, util::u64_t trailing) noexcept {
+    return (mix_(trailing ^ mix_(seed)) & ~util::u64_t {0xF000}) | 0x4000;
 }
 
 /**
@@ -119,11 +118,12 @@ constexpr u64_t leading_word_(u64_t seed, u64_t trailing) noexcept {
  *  and the leading eight a mix of them, so @ref offset_of_key inverts the first and checks the
  *  second.
  */
-inline usearch_key_t key_of_offset(u64_t seed, u64_t offset) noexcept {
-    u64_t mixed = (offset ^ mix_(seed)) & (key_offsets_k - 1);
-    for (u64_t const multiplier : key_multipliers_k) mixed = (mixed ^ mixed >> 31) * multiplier & (key_offsets_k - 1);
-    u64_t const trailing = u64_t {2} << 62 | (mixed ^ mixed >> 31);
-    u64_t const leading = leading_word_(seed, trailing);
+inline usearch_key_t key_of_offset(util::u64_t seed, util::u64_t offset) noexcept {
+    util::u64_t mixed = (offset ^ mix_(seed)) & (key_offsets_k - 1);
+    for (util::u64_t const multiplier : key_multipliers_k)
+        mixed = (mixed ^ mixed >> 31) * multiplier & (key_offsets_k - 1);
+    util::u64_t const trailing = util::u64_t {2} << 62 | (mixed ^ mixed >> 31);
+    util::u64_t const leading = leading_word_(seed, trailing);
     usearch_key_t key;
     for (std::size_t byte = 0; byte != 8; ++byte) {
         key.bytes[7 - byte] = static_cast<usearch_byte_t>(leading >> (byte * 8));
@@ -134,12 +134,12 @@ inline usearch_key_t key_of_offset(u64_t seed, u64_t offset) noexcept {
 
 /** The offset @ref key_of_offset minted @p key for under @p seed , or none for a key it never
  *  minted. */
-inline std::optional<u64_t> offset_of_key(u64_t seed, usearch_key_t const& key) noexcept {
-    u64_t leading = 0, trailing = 0;
+inline std::optional<util::u64_t> offset_of_key(util::u64_t seed, usearch_key_t const& key) noexcept {
+    util::u64_t leading = 0, trailing = 0;
     for (std::size_t byte = 0; byte != 8; ++byte)
         leading = leading << 8 | key.bytes[byte], trailing = trailing << 8 | key.bytes[8 + byte];
     if (trailing >> 62 != 2 || leading != leading_word_(seed, trailing)) return std::nullopt;
-    u64_t mixed = trailing & (key_offsets_k - 1);
+    util::u64_t mixed = trailing & (key_offsets_k - 1);
     mixed ^= mixed >> 31;
     for (std::size_t round = std::size(key_multipliers_k); round--;) {
         mixed = mixed * inverse_of_(key_multipliers_k[round]) & (key_offsets_k - 1);
@@ -154,7 +154,7 @@ inline usearch_keys_view_t keys_view(std::span<usearch_key_t const> keys) noexce
 }
 
 /** @p bytes as the C interface borrows a buffer. */
-inline usearch_bytes_view_t bytes_view(bytes_view_t bytes) noexcept {
+inline usearch_bytes_view_t bytes_view(util::bytes_view_t bytes) noexcept {
     return {reinterpret_cast<usearch_byte_t const*>(bytes.data()), bytes.size()};
 }
 
@@ -447,10 +447,10 @@ inline settings_t read_settings(int argc, char const* const* argv, std::string_v
 /** How a view reads @p path: "direct" past the page cache, "buffered" through it, or "unopened"
  *  before it opens; a transport ID reads directly and stays closed, as SPDK starts once. */
 inline std::string_view nvme_reads_name(std::string_view path) noexcept {
-    if (names_transport_id(path)) return "direct";
-    auto const [medium, open_status] = file_medium_t::open(path);
-    if (failed(open_status)) return "unopened";
-    return reads_directly(medium) ? "direct" : "buffered";
+    if (util::names_transport_id(path)) return "direct";
+    auto const [medium, open_status] = util::file_medium_t::open(path);
+    if (util::failed(open_status)) return "unopened";
+    return util::reads_directly(medium) ? "direct" : "buffered";
 }
 
 /** Prints each setting @ref read_environment reads as "- Name: value", in the grammar it parses
@@ -508,7 +508,7 @@ inline st::vector<usearch_gpu_device_t> listed_devices() noexcept {
                                    .devices_capacity = count,
                                    .devices_count = &count};
     usearch_gpu_devices(&listing);
-    if (st::failed(devices.resize(min_of(count, devices.size())))) exit_out_of_memory("the devices");
+    if (st::failed(devices.resize(util::min_of(count, devices.size())))) exit_out_of_memory("the devices");
     return devices;
 }
 
@@ -727,8 +727,8 @@ inline session_t open_session(settings_t const& settings, usearch_cpu_class_t cp
 
 /** Every vendor's driver table and Apple's contexts, loaded once by the first harness step that
  *  touches a device. */
-inline gpu_drivers_t& gpu_drivers() noexcept {
-    static gpu_drivers_t drivers;
+inline util::gpu_drivers_t& gpu_drivers() noexcept {
+    static util::gpu_drivers_t drivers;
     return drivers;
 }
 
@@ -737,11 +737,11 @@ inline gpu_drivers_t& gpu_drivers() noexcept {
  *  when the copy failed. */
 inline bool download(void* destination, void const* source, std::size_t bytes) noexcept {
     if (!bytes) return true;
-    gpu_drivers_t const& drivers = gpu_drivers();
-    if (cuda_device_of(drivers.cuda, source) >= 0)
-        return cuda_copy(drivers.cuda, destination, source, bytes) == cuda_success_k;
-    if (hip_device_of(drivers.hip, source) >= 0)
-        return drivers.hip.copy(destination, source, bytes, hip_copy_device_to_host_k) == hip_success_k;
+    util::gpu_drivers_t const& drivers = gpu_drivers();
+    if (util::cuda_device_of(drivers.cuda, source) >= 0)
+        return util::cuda_copy(drivers.cuda, destination, source, bytes) == util::cuda_success_k;
+    if (util::hip_device_of(drivers.hip, source) >= 0)
+        return drivers.hip.copy(destination, source, bytes, util::hip_copy_device_to_host_k) == util::hip_success_k;
     std::memcpy(destination, source, bytes);
     return true;
 }
@@ -1653,7 +1653,7 @@ struct handle {
 
     /** The block every read of a view covers, which counts the bytes a process read as reads; zero
      *  outside a view. */
-    u64_t block_bytes = 0;
+    util::u64_t block_bytes = 0;
 
     handle() = default;
     handle(index_t index, session_t& session, usearch_residency_t residency, geometry_t const& geometry) noexcept
@@ -1705,16 +1705,16 @@ handle<verbs_type_> open_index(session_t& session, typename verbs_type_::geometr
  *  @p index in batches of @p batch, keyed by @ref key_of_offset from offset @p first_offset on,
  *  summing every batch's telemetry into @p totals and reporting each inserted count to
  *  @p progress. */
-template <typename verbs_type_, typename progress_type_ = dummy_progress_t>
+template <typename verbs_type_, typename progress_type_ = util::dummy_progress_t>
 usearch_outcome_t insert_entries(handle<verbs_type_>& index, typename verbs_type_::values_t inputs, std::size_t count,
                                  std::size_t first_offset, std::size_t batch, std::size_t expansion,
                                  usearch_traversal_stats_t& totals, progress_type_&& progress = {}) {
     usearch_outcome_t outcome {};
-    std::size_t const batch_entries = max_of<std::size_t>(1, min_of(batch, count));
+    std::size_t const batch_entries = util::max_of<std::size_t>(1, util::min_of(batch, count));
     st::vector<usearch_key_t> keys;
     if (st::failed(keys.resize(batch_entries))) exit_out_of_memory("the keys");
     for (std::size_t first = 0; first < count; first += batch_entries) {
-        std::size_t const entries = min_of(batch_entries, count - first);
+        std::size_t const entries = util::min_of(batch_entries, count - first);
         std::span<usearch_key_t> const batch_keys = std::span {keys}.first(entries);
         for (std::size_t offset = 0; offset != entries; ++offset)
             batch_keys[offset] = key_of_offset(index.session->seed, first_offset + first + offset);
@@ -1769,9 +1769,9 @@ handle<verbs_type_> reopen(session_t& session, std::string_view path, typename v
                               geometry, &outcome);
     report_failure(outcome, "Reopening {}", path);
     handle<verbs_type_> opened {reopened, session, residency, geometry};
-    if (residency == usearch_residency_nvme_k && !names_transport_id(path)) {
-        auto const [medium, medium_status] = file_medium_t::open(path);
-        if (succeeded(medium_status)) opened.block_bytes = block_bytes_of(medium);
+    if (residency == usearch_residency_nvme_k && !util::names_transport_id(path)) {
+        auto const [medium, medium_status] = util::file_medium_t::open(path);
+        if (util::succeeded(medium_status)) opened.block_bytes = util::block_bytes_of(medium);
     }
     return opened;
 }
@@ -1860,14 +1860,14 @@ inline std::size_t row_bytes_of(usearch_scalar_t scalar, std::size_t columns) no
     case usearch_scalar_unknown_k: return columns * 4;
     case usearch_scalar_bf16_k:
     case usearch_scalar_f16_k: return columns * 2;
-    case usearch_scalar_u1x8_k: return divide_round_up<std::size_t>(columns, 8);
+    case usearch_scalar_u1x8_k: return util::divide_round_up<std::size_t>(columns, 8);
     default: return columns;
     }
 }
 
 /** One mapped RetriEval part file and the rows of the whole matrix it holds. */
 struct mapped_part_t {
-    mapped_file_t mapping;
+    util::mapped_file_t mapping;
     std::size_t first_row = 0;
     std::size_t rows = 0;
 };
@@ -1885,35 +1885,36 @@ class mapped_rows_t {
     usearch_scalar_t scalar_ = usearch_scalar_unknown_k;
     std::size_t rows_ = 0, columns_ = 0, row_bytes_ = 0;
 
-    status_t append_(std::string_view path) noexcept {
-        auto [mapping, read_status] = mapped_file_t::read(path);
-        if (failed(read_status)) return read_status;
-        bytes_view_t const bytes = mapping.view();
+    util::status_t append_(std::string_view path) noexcept {
+        auto [mapping, read_status] = util::mapped_file_t::read(path);
+        if (util::failed(read_status)) return read_status;
+        util::bytes_view_t const bytes = mapping.view();
         std::uint32_t counters[2] = {};
-        if (bytes.size() < sizeof(counters)) return status_t::malformed_k;
+        if (bytes.size() < sizeof(counters)) return util::status_code_t::malformed_k;
         std::memcpy(counters, bytes.data(), sizeof(counters));
-        if (!parts_.empty() && counters[1] != columns_) return status_t::config_mismatch_k;
+        if (!parts_.empty() && counters[1] != columns_) return util::status_code_t::config_mismatch_k;
         columns_ = counters[1];
         row_bytes_ = row_bytes_of(scalar_, columns_);
         if (bytes.size() < sizeof(counters) + static_cast<std::size_t>(counters[0]) * row_bytes_)
-            return status_t::malformed_k;
-        if (st::failed(parts_.push_back({std::move(mapping), rows_, counters[0]}))) return status_t::bad_alloc_k;
+            return util::status_code_t::malformed_k;
+        if (st::failed(parts_.push_back({std::move(mapping), rows_, counters[0]})))
+            return util::status_code_t::out_of_memory_k;
         rows_ += counters[0];
-        return status_t::success_k;
+        return util::status_code_t::success_k;
     }
 
   public:
 
     /** Maps the parts @p pattern names, failing on an unreadable part or a column mismatch. */
-    static expected<mapped_rows_t> open(std::string_view pattern) noexcept {
+    static util::expected<mapped_rows_t> open(std::string_view pattern) noexcept {
         mapped_rows_t mapped;
         mapped.scalar_ = scalar_of_extension(pattern);
         st::vector<sz::string_t> parts = matching_files(pattern);
         // With no match the pattern stands for itself, so a missing file fails like its mapping.
         if (parts.empty() && st::failed(parts.push_back(formatted("{}", pattern))))
-            return {std::move(mapped), status_t::bad_alloc_k};
-        status_t status = status_t::success_k;
-        for (std::size_t part = 0; succeeded(status) && part != parts.size(); ++part)
+            return {std::move(mapped), util::status_code_t::out_of_memory_k};
+        util::status_t status = util::status_code_t::success_k;
+        for (std::size_t part = 0; util::succeeded(status) && part != parts.size(); ++part)
             status = mapped.append_(parts[part]);
         return {std::move(mapped), status};
     }
@@ -1923,7 +1924,7 @@ class mapped_rows_t {
     usearch_rows_view_t view(std::size_t first_row, std::size_t count) const noexcept {
         for (mapped_part_t const& part : parts_) {
             if (first_row < part.first_row || first_row + count > part.first_row + part.rows) continue;
-            byte_t const* const payload = part.mapping.view().data() + 2 * sizeof(std::uint32_t);
+            util::byte_t const* const payload = part.mapping.view().data() + 2 * sizeof(std::uint32_t);
             return {payload + (first_row - part.first_row) * row_bytes_, row_bytes_, columns_, scalar_};
         }
         return {nullptr, row_bytes_, columns_, scalar_};
@@ -1935,7 +1936,7 @@ class mapped_rows_t {
     explicit operator bool() const noexcept { return !parts_.empty(); }
 
     /** The bytes past the rows of the last part, where a ground-truth file stores its distances. */
-    bytes_view_t trailing() const noexcept {
+    util::bytes_view_t trailing() const noexcept {
         if (parts_.empty()) return {};
         mapped_part_t const& last = parts_.back();
         return last.mapping.view().subspan(2 * sizeof(std::uint32_t) + last.rows * row_bytes_);
@@ -1952,12 +1953,12 @@ struct byte_tape_t {
 };
 
 /** The lines of @p text as entries, each newline dropped with a carriage return before it. */
-inline byte_tape_t lines_of(bytes_view_t text) noexcept {
+inline byte_tape_t lines_of(util::bytes_view_t text) noexcept {
     byte_tape_t lines;
     if (lines.bytes.resize(text.size()) != sz::status_t::success_k || st::failed(lines.offsets.push_back(0)))
         exit_out_of_memory("the lines");
     std::size_t length = 0;
-    for (byte_t const byte : text) {
+    for (util::byte_t const byte : text) {
         char const character = static_cast<char>(byte);
         if (character != '\n') {
             lines.bytes[length++] = character;
@@ -1989,13 +1990,13 @@ struct point_clouds_t {
  *  column per cloud, into @p clouds; false after printing why it cannot. */
 inline bool open_point_clouds(std::string_view points_path, std::string_view counts_path, point_clouds_t& clouds) {
     auto [points, points_status] = mapped_rows_t::open(points_path);
-    if (failed(points_status) || points.columns() != 3 ||
+    if (util::failed(points_status) || points.columns() != 3 ||
         (points.scalar() != usearch_scalar_f32_k && points.scalar() != usearch_scalar_f16_k)) {
         fmt::println(stderr, "{} must hold 3 f32 or f16 columns per point", points_path);
         return false;
     }
     auto [counts, counts_status] = mapped_rows_t::open(counts_path);
-    if (failed(counts_status) || counts.columns() != 1) {
+    if (util::failed(counts_status) || counts.columns() != 1) {
         fmt::println(stderr, "{} must hold 1 column per cloud", counts_path);
         return false;
     }
@@ -2030,7 +2031,7 @@ inline usearch_geospatial_relation_t geospatial_relation_of(std::string_view nam
 /** The matches searches wrote, copied off their arena: every query's keys and scores end to end,
  *  and how many each query holds, so whole searches compare and judge. */
 struct copied_matches_t {
-    st::vector<uuid128_t> keys;
+    st::vector<util::uuid128_t> keys;
     st::vector<usearch_distance_t> scores;
     st::vector<std::size_t> counts;
 };
@@ -2043,7 +2044,7 @@ inline bool same_matches(copied_matches_t const& first, copied_matches_t const& 
 
 /** Appends one match, @p key at @p score, to @p copied. */
 inline void append_match(copied_matches_t& copied, usearch_key_t const& key, usearch_distance_t score) noexcept {
-    if (st::failed(copied.keys.push_back(std::bit_cast<uuid128_t>(key))) ||
+    if (st::failed(copied.keys.push_back(std::bit_cast<util::uuid128_t>(key))) ||
         st::failed(copied.scores.push_back(usearch_distance_t {score})))
         exit_out_of_memory("the matches");
 }
@@ -2093,9 +2094,9 @@ usearch_outcome_t search_queries(handle<verbs_type_>& index, typename verbs_type
                                  copied_matches_t& copied, usearch_matches_view_t const* hints = nullptr,
                                  usearch_progress_t progress = {}) {
     usearch_outcome_t outcome {};
-    std::size_t const batch_queries = max_of<std::size_t>(1, min_of(batch, count));
+    std::size_t const batch_queries = util::max_of<std::size_t>(1, util::min_of(batch, count));
     for (std::size_t first = 0; first < count; first += batch_queries) {
-        std::size_t const sliced = min_of(batch_queries, count - first);
+        std::size_t const sliced = util::min_of(batch_queries, count - first);
         usearch_matches_view_t matches {};
         usearch_traversal_stats_t stats {};
         usearch_matches_view_t const sliced_hints = hints
@@ -2128,12 +2129,12 @@ usearch_outcome_t scan_oracle(handle<verbs_type_>& index, typename verbs_type_::
 /** Fills @p oracle with the truth the first @p queries rows of the ground-truth file @p truth list:
  *  each row's neighbor offsets keyed by @ref key_of_offset under @p seed, at the @c f32 distances
  *  RetriEval and BigANN store past the rows; false for a file storing none. */
-inline bool truth_oracle(u64_t seed, mapped_rows_t const& truth, std::size_t queries,
+inline bool truth_oracle(util::u64_t seed, mapped_rows_t const& truth, std::size_t queries,
                          copied_matches_t& oracle) noexcept {
     std::size_t const depth = truth.columns(), listed = queries * depth;
-    bytes_view_t const distances = truth.trailing();
+    util::bytes_view_t const distances = truth.trailing();
     if (distances.size() < truth.rows() * depth * sizeof(float)) return false;
-    byte_t const* const offsets = static_cast<byte_t const*>(truth.view(0, queries).data);
+    util::byte_t const* const offsets = static_cast<util::byte_t const*>(truth.view(0, queries).data);
     if (st::failed(oracle.counts.resize(queries, depth)) || st::failed(oracle.keys.resize(listed)) ||
         st::failed(oracle.scores.resize(listed)))
         exit_out_of_memory("the ground truth");
@@ -2142,7 +2143,7 @@ inline bool truth_oracle(u64_t seed, mapped_rows_t const& truth, std::size_t que
         float distance = 0;
         std::memcpy(&offset, offsets + match * sizeof(offset), sizeof(offset));
         std::memcpy(&distance, distances.data() + match * sizeof(distance), sizeof(distance));
-        oracle.keys[match] = std::bit_cast<uuid128_t>(key_of_offset(seed, offset));
+        oracle.keys[match] = std::bit_cast<util::uuid128_t>(key_of_offset(seed, offset));
         oracle.scores[match] = distance;
     }
     return true;
@@ -2150,7 +2151,7 @@ inline bool truth_oracle(u64_t seed, mapped_rows_t const& truth, std::size_t que
 
 /** Whether @p found ranks no further than @p exact, within the rounding two kits may differ by. */
 inline bool within(double found, double exact) noexcept {
-    return found <= exact + 1e-6 * max_of(1.0, std::fabs(exact));
+    return found <= exact + 1e-6 * util::max_of(1.0, std::fabs(exact));
 }
 
 /** The offset of every query's first match in @p copied. */
@@ -2176,11 +2177,11 @@ template <typename visit_type_>
 void judge_queries(std::size_t k, copied_matches_t const& found, copied_matches_t const& oracle, visit_type_&& visit) {
     st::vector<std::size_t> const found_offsets = match_offsets(found), truth_offsets = match_offsets(oracle);
     st::vector<bool> hits;
-    for (std::size_t query = 0; query != min_of(found.counts.size(), oracle.counts.size()); ++query) {
-        std::size_t const expected = min_of(k, oracle.counts[query]);
+    for (std::size_t query = 0; query != util::min_of(found.counts.size(), oracle.counts.size()); ++query) {
+        std::size_t const expected = util::min_of(k, oracle.counts[query]);
         if (!expected) continue;
         std::size_t const truth_first = truth_offsets[query], found_first = found_offsets[query];
-        std::size_t const ranked = min_of(k, found.counts[query]);
+        std::size_t const ranked = util::min_of(k, found.counts[query]);
         double const nearest = oracle.scores[truth_first], farthest = oracle.scores[truth_first + expected - 1];
         bool has_nearest = false;
         hits.clear();
@@ -2213,7 +2214,7 @@ inline double k_recall_at(std::size_t k, copied_matches_t const& found, copied_m
     judge_queries(k, found, oracle, [&](std::size_t expected, bool, std::span<bool const> hits) {
         std::size_t hit_count = 0;
         for (bool const hit : hits) hit_count += hit;
-        recall += static_cast<double>(min_of(hit_count, expected)) / static_cast<double>(expected);
+        recall += static_cast<double>(util::min_of(hit_count, expected)) / static_cast<double>(expected);
         ++answerable;
     });
     return answerable ? recall / static_cast<double>(answerable) : 0;
@@ -2239,8 +2240,8 @@ inline double ndcg_at(std::size_t k, copied_matches_t const& found, copied_match
 
 /** Reads and bytes the block layer counted for this process's cgroup, summed over its disks. */
 struct cgroup_reads_t {
-    u64_t reads = 0;
-    u64_t bytes = 0;
+    util::u64_t reads = 0;
+    util::u64_t bytes = 0;
 };
 
 /** The text of the file @p name in this process's cgroup v2 directory, none where the kernel keeps
@@ -2259,7 +2260,7 @@ inline std::optional<sz::string_t> cgroup_text(std::string_view name) noexcept {
 
 /** What @c /proc/self/io counts this process fetched from the block layer so far, every kernel
  *  engine's reads included, as reads of @p block_bytes each; none off Linux or without a block. */
-inline std::optional<cgroup_reads_t> process_reads(u64_t block_bytes) noexcept {
+inline std::optional<cgroup_reads_t> process_reads(util::u64_t block_bytes) noexcept {
     std::optional<sz::string_t> const io = read_text("/proc/self/io");
     if (!io) return std::nullopt;
     std::string_view const counters {*io};
@@ -2277,26 +2278,26 @@ inline std::optional<cgroup_reads_t> process_reads(u64_t block_bytes) noexcept {
 /** What this process's cgroup @c io.stat counts so far, every kernel engine's reads on every
  *  disk, or what @ref process_reads counts in @p block_bytes reads under a user scope that keeps
  *  no such file. */
-inline std::optional<cgroup_reads_t> cgroup_reads(u64_t block_bytes) {
+inline std::optional<cgroup_reads_t> cgroup_reads(util::u64_t block_bytes) {
     std::optional<sz::string_t> const stat = cgroup_text("io.stat");
     if (!stat) return process_reads(block_bytes);
     cgroup_reads_t counted;
     std::string_view text {*stat};
     while (!text.empty()) {
-        std::size_t const space = min_of(text.find_first_of(" \n"), text.size());
+        std::size_t const space = util::min_of(text.find_first_of(" \n"), text.size());
         std::string_view const token = text.substr(0, space);
         std::string_view const digits = token.substr(token.find('=') + 1);
-        u64_t value = 0;
+        util::u64_t value = 0;
         std::from_chars_result const parsed = std::from_chars(digits.data(), digits.data() + digits.size(), value);
         if (parsed.ec == std::errc {} && token.starts_with("rbytes=")) counted.bytes += value;
         if (parsed.ec == std::errc {} && token.starts_with("rios=")) counted.reads += value;
-        text.remove_prefix(min_of(space + 1, text.size()));
+        text.remove_prefix(util::min_of(space + 1, text.size()));
     }
     return counted;
 }
 
 /** The @p quantile of @p samples, reordering them around it. */
-inline double percentile(std::span<u64_t> samples, double quantile) noexcept {
+inline double percentile(std::span<util::u64_t> samples, double quantile) noexcept {
     std::size_t const rank = static_cast<std::size_t>(quantile * static_cast<double>(samples.size() - 1));
     std::nth_element(samples.begin(), samples.begin() + rank, samples.end());
     return static_cast<double>(samples[rank]);
@@ -2307,7 +2308,7 @@ inline double percentile(std::span<u64_t> samples, double quantile) noexcept {
 template <typename verbs_type_>
 usearch_outcome_t time_single_queries(handle<verbs_type_>& index, typename verbs_type_::queries_t queries,
                                       std::size_t count, std::size_t wanted, std::size_t expansion,
-                                      std::chrono::steady_clock::duration budget, st::vector<u64_t>& latencies) {
+                                      std::chrono::steady_clock::duration budget, st::vector<util::u64_t>& latencies) {
     usearch_outcome_t outcome {};
     latencies.clear();
     if (st::failed(latencies.reserve(count))) exit_out_of_memory("the latencies");
@@ -2318,7 +2319,7 @@ usearch_outcome_t time_single_queries(handle<verbs_type_>& index, typename verbs
         std::chrono::steady_clock::time_point const started = std::chrono::steady_clock::now();
         verbs_type_::search(index.get(), index.executor(), index.arena(), 1, verbs_type_::slice(queries, query), wanted,
                             expansion, usearch_traversal_walk_k, &matches, &stats, &outcome);
-        if (st::failed(latencies.push_back(static_cast<u64_t>(
+        if (st::failed(latencies.push_back(static_cast<util::u64_t>(
                 std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started)
                     .count()))))
             exit_out_of_memory("the latencies");
@@ -2333,12 +2334,12 @@ usearch_outcome_t time_single_queries(handle<verbs_type_>& index, typename verbs
  *  A view on NVMe also prints the reads and bytes its cgroup's @c io.stat counted per query, and
  *  the p50 and p99 of single-query calls over judged queries, timed after the throughput pass for
  *  as long as that pass took, since each one walks alone. */
-template <typename verbs_type_, typename swept_type_ = dummy_progress_t>
+template <typename verbs_type_, typename swept_type_ = util::dummy_progress_t>
 usearch_outcome_t sweep_recall(handle<verbs_type_>& index, typename verbs_type_::queries_t queries, std::size_t count,
                                copied_matches_t const& oracle, std::span<std::size_t const> expansions,
                                std::size_t wanted, std::size_t batch, swept_type_&& on_swept = {}) {
     usearch_outcome_t outcome {};
-    st::vector<u64_t> latencies;
+    st::vector<util::u64_t> latencies;
     for (std::size_t const expansion : expansions) {
         copied_matches_t found;
         usearch_traversal_stats_t stats {};
@@ -2366,7 +2367,7 @@ usearch_outcome_t sweep_recall(handle<verbs_type_>& index, typename verbs_type_:
                          static_cast<double>(reads_after->reads - reads_before->reads) * per_query,
                          static_cast<double>(reads_after->bytes - reads_before->bytes) * per_query / 1024);
         if (index.residency == usearch_residency_nvme_k) {
-            std::size_t const judged = min_of(count, oracle.counts.size());
+            std::size_t const judged = util::min_of(count, oracle.counts.size());
             outcome = time_single_queries(index, queries, judged, wanted, expansion, batched, latencies);
             if (outcome.status != usearch_status_success_k) return outcome;
             if (!latencies.empty())
@@ -2595,7 +2596,7 @@ inline std::array<flag_t, 9> search_bench_flags(search_bench_settings_t& search)
  *
  *  @return The process exit code.
  */
-template <typename verbs_type_, typename swept_type_ = dummy_progress_t>
+template <typename verbs_type_, typename swept_type_ = util::dummy_progress_t>
 int run_search_bench(settings_t const& settings, search_bench_settings_t const& search,
                      typename verbs_type_::geometry_t const& geometry, typename verbs_type_::geometry_t const& served,
                      typename verbs_type_::values_t entries, std::size_t base_count,
@@ -2632,7 +2633,7 @@ int run_search_bench(settings_t const& settings, search_bench_settings_t const& 
     }
 
     copied_matches_t oracle;
-    std::size_t const judged = min_of(search.oracle_queries.value, queries_count);
+    std::size_t const judged = util::min_of(search.oracle_queries.value, queries_count);
     std::chrono::steady_clock::time_point const scan_start = std::chrono::steady_clock::now();
     if (report_failure(scan_oracle(index, queries, judged, search.top_k.value, search.batch.value, oracle), "Scanning"))
         return 1;

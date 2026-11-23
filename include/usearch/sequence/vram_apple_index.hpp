@@ -298,7 +298,7 @@ struct vram_apple_kits {
      *  @brief Keeps the parameters the kit scores with, uploaded at the first @c reserve.
      *
      *  @par Statuses:
-     *  - @c bad_alloc_k The host copy found no memory.
+     *  - @c out_of_memory_k The host copy found no memory.
      */
     status_t parameters(parameters_t parameters) noexcept {
         std::size_t const bytes = kit_type_::parameters_bytes(parameters);
@@ -308,7 +308,7 @@ struct vram_apple_kits {
         if constexpr (std::is_same_v<parameters_t, std::span<u32_t const>>)
             kept_parameters_ = to_span(host_parameters_).subspan(1);
         else kept_parameters_ = parameters;
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
   private:
@@ -334,7 +334,7 @@ struct vram_apple_kits {
 
     /** A sequence saves as its bytes, as a RAM string. */
     static expected<std::size_t> saved_bytes_(bytes_view_t stored) noexcept {
-        return {stored.size(), status_t::success_k};
+        return {stored.size(), status_code_t::success_k};
     }
 
     /**
@@ -346,7 +346,7 @@ struct vram_apple_kits {
     static status_t save_value_(bytes_view_t stored, bytes_span_t saved) noexcept { return copy_bytes(saved, stored); }
 
     /** Bytes a sequence of @p saved bytes stores into: its own. */
-    static expected<std::size_t> stored_bytes_(std::size_t saved) noexcept { return {saved, status_t::success_k}; }
+    static expected<std::size_t> stored_bytes_(std::size_t saved) noexcept { return {saved, status_code_t::success_k}; }
 
     /** A load stores sequences as saved, on the host over unified memory, then raises the widest
      *  span to the widest its sequences prepare into. */
@@ -358,7 +358,7 @@ struct vram_apple_kits {
             widest = max_of(widest, span_bytes_(step.stored + (first - step.stored_offsets[0]), bytes));
         }
         *step.span_bytes = max_of(*step.span_bytes, widest);
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /**
@@ -366,16 +366,16 @@ struct vram_apple_kits {
      *
      *  @par Statuses:
      *  - @c uninitialized_k The kit takes parameters, and none were set.
-     *  - @c bad_alloc_k The device found no memory.
+     *  - @c out_of_memory_k The device found no memory.
      */
     status_t upload_parameters_(metal_context_t& context) noexcept {
         if (host_parameters_.empty())
-            return std::is_empty_v<parameters_t> ? status_t::success_k : status_t::uninitialized_k;
+            return std::is_empty_v<parameters_t> ? status_code_t::success_k : status_code_t::uninitialized_k;
         std::size_t const bytes = host_parameters_.size() * sizeof(u32_t);
         device_parameters_ = metal_allocate(context, bytes);
-        if (!device_parameters_) return status_t::bad_alloc_k;
+        if (!device_parameters_) return status_code_t::out_of_memory_k;
         std::memcpy(device_parameters_.host, host_parameters_.data(), bytes);
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** The kit's parameters on the device, empty for a kit taking none. */
@@ -440,10 +440,10 @@ struct vram_apple_index {
      *
      *  @par Statuses:
      *  - @c config_mismatch_k The index is reserved already.
-     *  - @c bad_alloc_k The host copy found no memory.
+     *  - @c out_of_memory_k The host copy found no memory.
      */
     status_t parameters(parameters_t parameters) noexcept {
-        if (graph_.connectivity()) return status_t::config_mismatch_k;
+        if (graph_.connectivity()) return status_code_t::config_mismatch_k;
         return graph_.kits().parameters(parameters);
     }
 

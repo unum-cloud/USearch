@@ -235,12 +235,12 @@ class max_heap {
      *  - @c overflow_k The rounded capacity wraps.
      */
     status_t reserve(std::size_t new_capacity) noexcept {
-        if (new_capacity <= capacity_) return status_t::success_k;
+        if (new_capacity <= capacity_) return status_code_t::success_k;
 
-        if (ceil2(new_capacity) == 0) return status_t::overflow_k;
+        if (ceil2(new_capacity) == 0) return status_code_t::overflow_k;
         new_capacity = max_of<std::size_t>(reserved_capacity(new_capacity), capacity_ * 2u);
         auto new_elements = allocator_.allocate(new_capacity);
-        if (!new_elements) return status_t::bad_alloc_k;
+        if (!new_elements) return status_code_t::out_of_memory_k;
 
         if (elements_) {
             std::memcpy(new_elements, elements_, size_ * sizeof(element_t));
@@ -248,7 +248,7 @@ class max_heap {
         }
         elements_ = new_elements;
         capacity_ = new_capacity;
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /**
@@ -261,7 +261,7 @@ class max_heap {
         if (status_t const grown = reserve(size_ + 1); failed(grown)) return grown;
 
         insert_reserved(std::move(element));
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Inserts an element into the heap without reserving additional space. */
@@ -290,7 +290,7 @@ class max_heap {
      *  - @c overflow_k The rounded capacity wraps.
      */
     status_t insert_many(element_t const* new_elements, std::size_t count) noexcept {
-        if (count == 0) return status_t::success_k;
+        if (count == 0) return status_code_t::success_k;
         if (status_t const grown = reserve(size_ + count); failed(grown)) return grown;
         std::memcpy(&elements_[size_], new_elements, count * sizeof(element_t));
         size_ += count;
@@ -304,7 +304,7 @@ class max_heap {
             for (std::size_t appended_index = size_ - count; appended_index < size_; ++appended_index)
                 shift_up(appended_index);
         }
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /**
@@ -482,18 +482,18 @@ class max_heap_dary {
      *  - @c overflow_k The rounded capacity wraps.
      */
     status_t reserve(std::size_t new_capacity) noexcept {
-        if (new_capacity <= capacity_) return status_t::success_k;
-        if (ceil2(new_capacity) == 0) return status_t::overflow_k;
+        if (new_capacity <= capacity_) return status_code_t::success_k;
+        if (ceil2(new_capacity) == 0) return status_code_t::overflow_k;
         new_capacity = max_of<std::size_t>(reserved_capacity(new_capacity), capacity_ * 2u);
         auto new_elements = allocator_.allocate(new_capacity);
-        if (!new_elements) return status_t::bad_alloc_k;
+        if (!new_elements) return status_code_t::out_of_memory_k;
         if (elements_) {
             std::memcpy(new_elements, elements_, size_ * sizeof(element_t));
             allocator_.deallocate(elements_, capacity_);
         }
         elements_ = new_elements;
         capacity_ = new_capacity;
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /**
@@ -505,7 +505,7 @@ class max_heap_dary {
     status_t insert(element_t&& element) noexcept {
         if (status_t const grown = reserve(size_ + 1); failed(grown)) return grown;
         insert_reserved(std::move(element));
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     void insert_reserved(element_t&& element) noexcept {
@@ -523,7 +523,7 @@ class max_heap_dary {
      *  - @c overflow_k The rounded capacity wraps.
      */
     status_t insert_many(element_t const* new_elements, std::size_t count) noexcept {
-        if (count == 0) return status_t::success_k;
+        if (count == 0) return status_code_t::success_k;
         if (status_t const grown = reserve(size_ + count); failed(grown)) return grown;
         std::memcpy(&elements_[size_], new_elements, count * sizeof(element_t));
         size_ += count;
@@ -531,7 +531,7 @@ class max_heap_dary {
         if (use_floyd_rebuild) rebuild_();
         else
             for (std::size_t appended = size_ - count; appended < size_; ++appended) shift_up(appended);
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /**
@@ -692,19 +692,19 @@ class sorted_buffer {
      *  - @c overflow_k The rounded capacity wraps.
      */
     status_t reserve(std::size_t new_capacity) noexcept {
-        if (new_capacity <= capacity_) return status_t::success_k;
+        if (new_capacity <= capacity_) return status_code_t::success_k;
 
-        if (ceil2(new_capacity) == 0) return status_t::overflow_k;
+        if (ceil2(new_capacity) == 0) return status_code_t::overflow_k;
         new_capacity = max_of<std::size_t>(reserved_capacity(new_capacity), capacity_ * 2u);
         auto new_elements = allocator_.allocate(new_capacity);
-        if (!new_elements) return status_t::bad_alloc_k;
+        if (!new_elements) return status_code_t::out_of_memory_k;
 
         if (size_) std::memcpy(new_elements, elements_, size_ * sizeof(element_t));
         if (elements_) allocator_.deallocate(elements_, capacity_);
 
         elements_ = new_elements;
         capacity_ = new_capacity;
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     inline void insert_reserved(element_t&& element) noexcept {
@@ -912,18 +912,18 @@ class growing_buffer {
      *  - @c overflow_k The rounded capacity wraps.
      */
     status_t reserve(std::size_t new_capacity) noexcept {
-        if (new_capacity <= capacity_) return status_t::success_k;
+        if (new_capacity <= capacity_) return status_code_t::success_k;
 
-        if (ceil2(new_capacity) == 0) return status_t::overflow_k;
+        if (ceil2(new_capacity) == 0) return status_code_t::overflow_k;
         return reserve_exactly(max_of<std::size_t>(reserved_capacity(new_capacity), capacity_ * 2u));
     }
 
     /** Grows capacity to exactly @p new_capacity, without the rounding @ref reserve applies -
      *  the sizing form for a table whose extent the caller already knows and then freezes. */
     status_t reserve_exactly(std::size_t new_capacity) noexcept {
-        if (new_capacity <= capacity_) return status_t::success_k;
+        if (new_capacity <= capacity_) return status_code_t::success_k;
         auto new_elements = allocator_.allocate(new_capacity);
-        if (!new_elements) return status_t::bad_alloc_k;
+        if (!new_elements) return status_code_t::out_of_memory_k;
 
         // A fresh region arrives fully addressable, so poison its slack first; the used
         // prefix stays open for the relocating constructions below.
@@ -938,7 +938,7 @@ class growing_buffer {
 
         elements_ = new_elements;
         capacity_ = new_capacity;
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Sizes to exactly @p count value-initialized elements, discarding any prior contents and
@@ -946,7 +946,7 @@ class growing_buffer {
      *  @c memset. */
     status_t resize(std::size_t count) noexcept {
         clear();
-        if (count == 0) return status_t::success_k;
+        if (count == 0) return status_code_t::success_k;
         if (status_t const sized = reserve_exactly(count); failed(sized)) return sized;
         annotate_container(elements_, elements_ + capacity_, elements_ + size_, elements_ + count);
         if constexpr (std::is_trivially_default_constructible<element_t>())
@@ -954,7 +954,7 @@ class growing_buffer {
         else
             for (std::size_t position = 0; position != count; ++position) new (elements_ + position) element_t();
         size_ = count;
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /**
@@ -964,10 +964,10 @@ class growing_buffer {
      */
     status_t resize_uninitialized(std::size_t count) noexcept {
         clear();
-        if (count == 0) return status_t::success_k;
+        if (count == 0) return status_code_t::success_k;
         if (status_t const sized = reserve_exactly(count); failed(sized)) return sized;
         extend_uninitialized(count);
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Moves the fill to @p count within reserved capacity, leaving the bytes untouched -
@@ -1000,7 +1000,7 @@ class growing_buffer {
         if (size_ == capacity_)
             if (status_t const grown = reserve(size_ + 1); failed(grown)) return grown;
         push_back_reserved(std::move(element));
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     inline element_t pop_back() noexcept {
@@ -1231,19 +1231,19 @@ class chunked_column {
      *  need and is missing; a chunk a peer published first goes back. */
     template <typename prepare_type_>
     status_t cover_(std::size_t nodes, prepare_type_&& prepare) noexcept {
-        if (nodes > max_nodes_) return status_t::overflow_k;
+        if (nodes > max_nodes_) return status_code_t::overflow_k;
         for (std::size_t chunk = 0, chunks = schedule_t::chunks_for(nodes); chunk != chunks; ++chunk) {
             atomic_ref<value_t*> slot {chunks_[chunk]};
             if (slot.load(std::memory_order_acquire)) continue;
             value_t* const fresh = allocator_.allocate(schedule_t::nodes_in(chunk));
-            if (!fresh) return status_t::bad_alloc_k;
+            if (!fresh) return status_code_t::out_of_memory_k;
             prepare(std::span<value_t> {fresh, schedule_t::nodes_in(chunk)});
             value_t* expected_empty = nullptr;
             if (!slot.compare_exchange_strong(expected_empty, fresh, std::memory_order_release,
                                               std::memory_order_acquire))
                 release_(fresh, schedule_t::nodes_in(chunk));
         }
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Destroys the @p count values a cover built, if it built any, and returns their chunk. */
@@ -1342,21 +1342,21 @@ class chunked_matrix {
      *  of @p columns values need and is missing; a chunk a peer published first goes back. */
     template <typename prepare_type_>
     status_t cover_(std::size_t nodes, std::size_t columns, prepare_type_&& prepare) noexcept {
-        if (nodes > max_nodes_) return status_t::overflow_k;
+        if (nodes > max_nodes_) return status_code_t::overflow_k;
         if (columns_ != columns) columns_ = columns;
         for (std::size_t chunk = 0, chunks = schedule_t::chunks_for(nodes); chunk != chunks; ++chunk) {
             atomic_ref<value_t*> slot {chunks_[chunk]};
             if (slot.load(std::memory_order_acquire)) continue;
             std::size_t const values = schedule_t::nodes_in(chunk) * columns;
             value_t* const fresh = allocator_.allocate(values);
-            if (!fresh) return status_t::bad_alloc_k;
+            if (!fresh) return status_code_t::out_of_memory_k;
             prepare(std::span<value_t> {fresh, values});
             value_t* expected_empty = nullptr;
             if (!slot.compare_exchange_strong(expected_empty, fresh, std::memory_order_release,
                                               std::memory_order_acquire))
                 allocator_.deallocate(fresh, values);
         }
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** One pointer per chunk, sized once and never reallocated; a null entry is a chunk no cover
@@ -1379,7 +1379,7 @@ class chunked_matrix {
 inline status_t copy_entries(bytes_view_t matrix, std::size_t first, std::size_t count, std::size_t entry_bytes,
                              bytes_span_t destination) noexcept {
     bytes_view_t const entries = flat_rows(matrix, first, count, entry_bytes);
-    if (entries.size() != count * entry_bytes) return status_t::config_mismatch_k;
+    if (entries.size() != count * entry_bytes) return status_code_t::config_mismatch_k;
     return copy_bytes(destination, entries);
 }
 
@@ -1462,7 +1462,7 @@ class growing_arena {
     /** Opens the seed chunk at @p bytes, the width every later chunk doubles from; a
      *  seeded arena answers in one compare. */
     status_t reserve_exactly(std::size_t bytes) noexcept {
-        if (chunks_) return status_t::success_k;
+        if (chunks_) return status_code_t::success_k;
         return grow_(bytes);
     }
 
@@ -1513,10 +1513,10 @@ class growing_arena {
 
     /** Grows by a chunk of @p width bytes, the newest from now on, the old ones kept behind. */
     status_t grow_(std::size_t width) noexcept {
-        if (chunks_ == max_chunks_k) return status_t::bad_alloc_k;
+        if (chunks_ == max_chunks_k) return status_code_t::out_of_memory_k;
         if (status_t const sized = runs_[chunks_].reserve_exactly(width); failed(sized)) return sized;
         ++chunks_;
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** The address-aligned slice at the end of @p run, or null when it cannot fit @p bytes. */
@@ -1539,14 +1539,27 @@ template <typename value_type_ = std::byte>
 struct lent_allocator {
     using value_type = value_type_;
 
+    /** The span travels with the chunk taken from it, so no two containers hand out one span. */
+    using propagate_on_container_move_assignment = std::true_type;
+    using propagate_on_container_swap = std::true_type;
+    using is_always_equal = std::false_type;
+
     /** The lent memory; empty refuses every request. */
     std::span<value_type_> lent;
 
     value_type_* allocate(std::size_t count) noexcept { return count == lent.size() ? lent.data() : nullptr; }
     void deallocate(value_type_*, std::size_t) noexcept {}
+
+    /** Whether both lend the same span. */
+    bool operator==(lent_allocator const& other) const noexcept {
+        return lent.data() == other.lent.data() && lent.size() == other.lent.size();
+    }
 };
 
 static_assert(buffer_allocator<lent_allocator<std::byte>>);
+static_assert(std::allocator_traits<lent_allocator<std::byte>>::propagate_on_container_move_assignment::value &&
+              std::allocator_traits<lent_allocator<std::byte>>::propagate_on_container_swap::value &&
+              !std::allocator_traits<lent_allocator<std::byte>>::is_always_equal::value);
 
 /** Hands out slices of one @ref growing_arena it points at but does not own. Copies share
  *  the arena by pointer, so containers built from one reserve disjoint slices; releasing a
@@ -1559,6 +1572,12 @@ struct arena_allocator {
     using value_type = value_type_;
     using size_type = std::size_t;
     using arena_t = growing_arena<upstream_allocator_>;
+
+    /** A slice never leaves its arena, so a moved or swapped container takes the arena of the
+     *  storage it receives, and allocators over two arenas never compare equal. */
+    using propagate_on_container_move_assignment = std::true_type;
+    using propagate_on_container_swap = std::true_type;
+    using is_always_equal = std::false_type;
 
     /** Spelled out because the alignment's non-type parameter defeats the traits'
      *  automatic first-argument replacement; the upstream and the alignment ride along. */
@@ -1592,12 +1611,18 @@ struct arena_allocator {
         return reinterpret_cast<value_type_*>(arena->allocate(count * sizeof(value_type_), alignment_k));
     }
     void deallocate(value_type_*, std::size_t) noexcept {}
-    bool operator==(arena_allocator const& other) const noexcept { return arena == other.arena; }
+    template <typename other_type_>
+    bool operator==(arena_allocator<other_type_, upstream_allocator_, alignment_> const& other) const noexcept {
+        return arena == other.arena;
+    }
 };
 
 static_assert(buffer_allocator<arena_allocator<std::byte>>);
 static_assert(std::same_as<std::allocator_traits<arena_allocator<std::byte>>::rebind_alloc<int>, //
                            arena_allocator<int>>);
+static_assert(std::allocator_traits<arena_allocator<std::byte>>::propagate_on_container_move_assignment::value &&
+              std::allocator_traits<arena_allocator<std::byte>>::propagate_on_container_swap::value &&
+              !std::allocator_traits<arena_allocator<std::byte>>::is_always_equal::value);
 
 /** Whether bit @p index of the run @p bits is set; a plain read, for a run no writer shares, and
  *  clear past the run's end. */

@@ -61,17 +61,37 @@
 #include "usearch/utilities/ram_buffers.hpp"    // `growing_arena` - the engine's arena, `contains` included
 #include "usearch/utilities/types.hpp"
 
+namespace util = unum::usearch::utilities;
+
 namespace us = unum::usearch;
+namespace fu = ashvardanian::forkunion;
 
 /** What @c usearch_arena_t owns: host memory that one call at a time rewinds and refills. */
 struct usearch_arena_handle_t {
-    us::utilities::growing_arena<> memory {us::utilities::global_allocator};
+    util::growing_arena<> memory {util::global_allocator};
 
     /** The outcome of the call holding the arena, from its claim or deferred submission until just
      *  before its final status; null while free. Touched through @c serial_atomic_ref, since calls
      *  on several threads may name it. */
     usearch_outcome_t const* holder = nullptr;
 };
+
+/** What @c src/arrow.cpp asks of an arena, as @c src/lib.hpp answers it: whether it holds an
+ *  address, which device it sits on, and a copy off that device, which host pages never need. */
+inline bool arena_contains(usearch_arena_handle_t const& arena, void const* address) noexcept {
+    return arena.memory.contains(address);
+}
+
+struct arrow_device_t {
+    ArrowDeviceType type = ARROW_DEVICE_CPU;
+    std::int64_t ordinal = -1;
+};
+
+inline arrow_device_t arrow_device_of(usearch_arena_handle_t const&) noexcept { return {}; }
+
+inline util::status_t copy_off_device(util::bytes_span_t, util::bytes_view_t) noexcept {
+    return util::status_code_t::unsupported_k;
+}
 
 namespace unum {
 namespace usearch {
@@ -82,7 +102,6 @@ namespace stub {
 template <typename value_type_>
 using serial_atomic_ref = fu::standard_atomic_ref<value_type_>;
 using serial_waiter_t = fu::standard_yield_t;
-using namespace unum::usearch::utilities;
 
 #pragma region Vocabulary and Outcomes
 
@@ -105,13 +124,13 @@ inline bool named(usearch_bytes_view_t name, char const* spelling) { return as_t
  *  The mirror of @c as_text, and the only place the two byte vocabularies meet: @c std::byte is
  *  the language's, @c uint8_t is the ABI's, and they are distinct types however alike they are.
  */
-inline usearch_bytes_view_t as_bytes(bytes_view_t bytes) {
+inline usearch_bytes_view_t as_bytes(util::bytes_view_t bytes) {
     return {reinterpret_cast<std::uint8_t const*>(bytes.data()), bytes.size()};
 }
 
 /** The read-only twin, for the buffers a caller lends the engine to read. */
-inline bytes_view_t as_readable_bytes(usearch_bytes_view_t bytes) {
-    return {reinterpret_cast<byte_t const*>(bytes.data), bytes.length};
+inline util::bytes_view_t as_readable_bytes(usearch_bytes_view_t bytes) {
+    return {reinterpret_cast<util::byte_t const*>(bytes.data), bytes.length};
 }
 
 /** Marks @p outcome deferred - every verb's first act, so a waiter never reads a stale status. */
@@ -255,7 +274,7 @@ inline bool keep_going(usearch_progress_t progress, std::size_t completed, std::
 
 /** Reports a handler's cancellation once a loop stopped short, and answers whether it did. */
 inline bool reject_cancelled(std::size_t completed, std::size_t total, usearch_outcome_t* outcome) {
-    return reject_if(completed < total, usearch_status_cancelled_k, "The caller's handler stopped the work", outcome);
+    return reject_if(completed < total, usearch_status_cancelled_k, "The handler stopped the call", outcome);
 }
 
 #pragma endregion Runs
@@ -417,7 +436,7 @@ inline usearch_arena_handle_t* claim_arena(usearch_arena_t arena, usearch_outcom
 /** Carves @p count values of @c value_type_ out of a claimed @p arena; null once @p outcome records why not. */
 template <typename value_type_>
 value_type_* carve(usearch_arena_handle_t& arena, std::size_t count, usearch_outcome_t* outcome) {
-    std::byte* const carved = arena.memory.allocate(count * sizeof(value_type_), default_alignment_k);
+    std::byte* const carved = arena.memory.allocate(count * sizeof(value_type_), util::default_alignment_k);
     if (!carved) propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena");
     return reinterpret_cast<value_type_*>(carved);
 }
@@ -465,16 +484,16 @@ inline std::size_t dimensions_per_value(usearch_scalar_t kind) {
  *  eightfold and walks a caller's rows apart.
  */
 inline std::size_t row_extent(usearch_scalar_t kind, std::size_t dimensions) {
-    return divide_round_up(dimensions, dimensions_per_value(kind)) * scalar_bytes(kind);
+    return util::divide_round_up(dimensions, dimensions_per_value(kind)) * scalar_bytes(kind);
 }
 
 /** Rejects a kind that names no scalar, rather than reading it as @c f32 - a wrong
  *  row-byte computation would otherwise pass. */
 inline bool reject_scalar(usearch_scalar_t kind, usearch_outcome_t* outcome) {
-    return reject_if(!scalar_bytes(kind), usearch_status_unknown_kind_k, "The kind names no scalar", outcome);
+    return reject_if(!scalar_bytes(kind), usearch_status_unknown_kind_k, "Unknown scalar kind", outcome);
 }
 
-inline double read_half(u16_t bits) {
+inline double read_half(util::u16_t bits) {
     int const sign = (bits >> 15) & 1;
     int const exponent = (bits >> 10) & 0x1F;
     int const mantissa = bits & 0x3FF;
@@ -487,28 +506,28 @@ inline double read_half(u16_t bits) {
     return sign ? -value : value;
 }
 
-inline u16_t write_half(double value) {
-    u32_t const bits = std::bit_cast<u32_t>(static_cast<float>(value));
-    u32_t const sign = (bits >> 16) & 0x8000;
-    i32_t const exponent = static_cast<i32_t>((bits >> 23) & 0xFF) - 127 + 15;
-    u32_t const mantissa = (bits >> 13) & 0x3FF;
-    if (exponent <= 0) return static_cast<u16_t>(sign);
-    if (exponent >= 31) return static_cast<u16_t>(sign | 0x7C00);
-    return static_cast<u16_t>(sign | (static_cast<u32_t>(exponent) << 10) | mantissa);
+inline util::u16_t write_half(double value) {
+    util::u32_t const bits = std::bit_cast<util::u32_t>(static_cast<float>(value));
+    util::u32_t const sign = (bits >> 16) & 0x8000;
+    util::i32_t const exponent = static_cast<util::i32_t>((bits >> 23) & 0xFF) - 127 + 15;
+    util::u32_t const mantissa = (bits >> 13) & 0x3FF;
+    if (exponent <= 0) return static_cast<util::u16_t>(sign);
+    if (exponent >= 31) return static_cast<util::u16_t>(sign | 0x7C00);
+    return static_cast<util::u16_t>(sign | (static_cast<util::u32_t>(exponent) << 10) | mantissa);
 }
 
 /** A brain float is the high half of a single, so widening is a shift. */
-inline double read_brain(u16_t bits) { return std::bit_cast<float>(static_cast<u32_t>(bits) << 16); }
+inline double read_brain(util::u16_t bits) { return std::bit_cast<float>(static_cast<util::u32_t>(bits) << 16); }
 
 /** Narrows to the high half, rounding half to even and keeping a NaN a NaN. */
-inline u16_t write_brain(double value) {
-    u32_t const bits = std::bit_cast<u32_t>(static_cast<float>(value));
+inline util::u16_t write_brain(double value) {
+    util::u32_t const bits = std::bit_cast<util::u32_t>(static_cast<float>(value));
     bool const is_nan = (bits & 0x7F800000u) == 0x7F800000u && (bits & 0x007FFFFFu);
-    if (is_nan) return static_cast<u16_t>((bits >> 16) | 0x0040u);
+    if (is_nan) return static_cast<util::u16_t>((bits >> 16) | 0x0040u);
     // The tie-breaking increment carries into the exponent on its own, so an overflow
     // saturates to infinity without a branch.
-    u32_t const rounded = bits + 0x7FFFu + ((bits >> 16) & 1u);
-    return static_cast<u16_t>(rounded >> 16);
+    util::u32_t const rounded = bits + 0x7FFFu + ((bits >> 16) & 1u);
+    return static_cast<util::u16_t>(rounded >> 16);
 }
 
 /** Which of a mini-float's codes name something other than a number. */
@@ -553,7 +572,7 @@ inline minifloat_t minifloat_of(usearch_scalar_t kind) {
  *
  *  One decoder serves all four kinds: they differ only in what @p format names.
  */
-inline double read_minifloat(u8_t bits, minifloat_t format) {
+inline double read_minifloat(util::u8_t bits, minifloat_t format) {
     unsigned const width = 1 + format.exponent_bits + format.mantissa_bits;
     unsigned const mantissa_span = 1u << format.mantissa_bits;
     unsigned const saturated = (1u << format.exponent_bits) - 1;
@@ -574,7 +593,7 @@ inline double read_minifloat(u8_t bits, minifloat_t format) {
 }
 
 /** Narrows to the nearest code, ties to even, saturating rather than wrapping. */
-inline u8_t write_minifloat(double value, minifloat_t format) {
+inline util::u8_t write_minifloat(double value, minifloat_t format) {
     unsigned const width = 1 + format.exponent_bits + format.mantissa_bits;
     unsigned const mantissa_span = 1u << format.mantissa_bits;
     unsigned const saturated = (1u << format.exponent_bits) - 1;
@@ -587,18 +606,18 @@ inline u8_t write_minifloat(double value, minifloat_t format) {
                                                                                    : reserved;
     // A kind reserving no code cannot carry a NaN, so it falls to zero.
     if (std::isnan(value))
-        return static_cast<u8_t>(format.specials == minifloat_specials_t::none_k ? 0u : sign | reserved);
+        return static_cast<util::u8_t>(format.specials == minifloat_specials_t::none_k ? 0u : sign | reserved);
     if (std::isinf(value) && format.specials == minifloat_specials_t::inf_and_nan_k)
-        return static_cast<u8_t>(sign | (saturated << format.mantissa_bits));
-    if (std::isinf(value)) return static_cast<u8_t>(sign | largest);
+        return static_cast<util::u8_t>(sign | (saturated << format.mantissa_bits));
+    if (std::isinf(value)) return static_cast<util::u8_t>(sign | largest);
 
     double const magnitude = std::fabs(value);
     // A zero has no leading bit for `frexp` to find, so its code is the sign and nothing else.
-    if (magnitude == 0) return static_cast<u8_t>(sign);
+    if (magnitude == 0) return static_cast<util::u8_t>(sign);
     int leading = 0;
     // `frexp` answers one above the leading bit's exponent; below the smallest normal the step is fixed.
     std::frexp(magnitude, &leading);
-    int const exponent = max_of(leading - 1, 1 - bias);
+    int const exponent = util::max_of(leading - 1, 1 - bias);
     double const scaled = std::ldexp(magnitude, static_cast<int>(format.mantissa_bits) - exponent);
     double const truncated = std::floor(scaled);
     double const remainder = scaled - truncated;
@@ -606,30 +625,30 @@ inline u8_t write_minifloat(double value, minifloat_t format) {
     // The significand carries into the exponent on its own, so neither overflow case needs an arm.
     unsigned const significand = static_cast<unsigned>(truncated) + carry;
     unsigned const code = ((static_cast<unsigned>(exponent + bias) - 1) << format.mantissa_bits) + significand;
-    return static_cast<u8_t>(sign | min_of(code, largest));
+    return static_cast<util::u8_t>(sign | util::min_of(code, largest));
 }
 
 /** Widens a bit-set row, eight dimensions a byte from the high bit down, as NumKong packs them. */
-inline void widen_bits(bytes_view_t row, std::span<double> values) {
-    u8_t const* packed = static_cast<u8_t const*>(static_cast<void const*>(row.data()));
+inline void widen_bits(util::bytes_view_t row, std::span<double> values) {
+    util::u8_t const* packed = static_cast<util::u8_t const*>(static_cast<void const*>(row.data()));
     for (std::size_t position = 0; position != values.size(); ++position)
         values[position] = (packed[position / 8] >> (7 - position % 8)) & 1 ? 1.0 : 0.0;
 }
 
 /** Narrows to a bit-set row, where every value that is not a zero sets its bit. */
-inline void narrow_bits(bytes_span_t row, std::span<double const> values) {
-    u8_t* packed = static_cast<u8_t*>(static_cast<void*>(row.data()));
+inline void narrow_bits(util::bytes_span_t row, std::span<double const> values) {
+    util::u8_t* packed = static_cast<util::u8_t*>(static_cast<void*>(row.data()));
     // The row's own extent is the packed byte count every caller sized through `row_extent`, so
     // the partial byte a ragged width leaves is cleared without rounding the count up again here.
-    std::fill_n(packed, row.size(), u8_t {0});
+    std::fill_n(packed, row.size(), util::u8_t {0});
     for (std::size_t position = 0; position != values.size(); ++position)
-        if (values[position] != 0) packed[position / 8] |= static_cast<u8_t>(1u << (7 - position % 8));
+        if (values[position] != 0) packed[position / 8] |= static_cast<util::u8_t>(1u << (7 - position % 8));
 }
 
 /** Widens a nibble row, even dimensions in the high half of each byte, as NumKong packs them. */
 template <typename nibble_>
-void widen_nibbles(bytes_view_t row, std::span<double> values) {
-    u8_t const* packed = static_cast<u8_t const*>(static_cast<void const*>(row.data()));
+void widen_nibbles(util::bytes_view_t row, std::span<double> values) {
+    util::u8_t const* packed = static_cast<util::u8_t const*>(static_cast<void const*>(row.data()));
     for (std::size_t position = 0; position != values.size(); ++position) {
         int const nibble = (packed[position / 2] >> ((1 - position % 2) * 4)) & 0xF;
         // A signed nibble carries its sign in the high bit, so the upper half of the range wraps.
@@ -639,27 +658,27 @@ void widen_nibbles(bytes_view_t row, std::span<double> values) {
 
 /** Narrows into a nibble row, clamping to the four bits each dimension is given. */
 template <typename nibble_>
-void narrow_nibbles(bytes_span_t row, std::span<double const> values) {
+void narrow_nibbles(util::bytes_span_t row, std::span<double const> values) {
     double const floor_value = std::is_signed_v<nibble_> ? -8.0 : 0.0;
     double const ceiling_value = std::is_signed_v<nibble_> ? 7.0 : 15.0;
-    u8_t* packed = static_cast<u8_t*>(static_cast<void*>(row.data()));
-    std::fill_n(packed, row.size(), u8_t {0});
+    util::u8_t* packed = static_cast<util::u8_t*>(static_cast<void*>(row.data()));
+    std::fill_n(packed, row.size(), util::u8_t {0});
     for (std::size_t position = 0; position != values.size(); ++position) {
         int const clamped = static_cast<int>(std::clamp(values[position], floor_value, ceiling_value));
-        packed[position / 2] |= static_cast<u8_t>((clamped & 0xF) << ((1 - position % 2) * 4));
+        packed[position / 2] |= static_cast<util::u8_t>((clamped & 0xF) << ((1 - position % 2) * 4));
     }
 }
 
 /** Widens a whole row stored as @c scalar_, converting each element to a double. */
 template <typename scalar_>
-void widen_into(bytes_view_t row, std::span<double> values) {
+void widen_into(util::bytes_view_t row, std::span<double> values) {
     scalar_ const* typed = static_cast<scalar_ const*>(static_cast<void const*>(row.data()));
     for (std::size_t position = 0; position != values.size(); ++position) values[position] = typed[position];
 }
 
 /** Narrows a whole row of doubles back into storage as @c scalar_. */
 template <typename scalar_>
-void narrow_from(bytes_span_t row, std::span<double const> values) {
+void narrow_from(util::bytes_span_t row, std::span<double const> values) {
     scalar_* typed = static_cast<scalar_*>(static_cast<void*>(row.data()));
     for (std::size_t position = 0; position != values.size(); ++position)
         typed[position] = static_cast<scalar_>(values[position]);
@@ -669,15 +688,15 @@ void narrow_from(bytes_span_t row, std::span<double const> values) {
  *  fixed for the whole row, so it is switched on once here rather than once per element.
  *  Callers gate on @c scalar_bytes first, so an unreachable arm leaves @p values untouched
  *  rather than silently reinterpreting the row as another width. */
-inline void read_row(bytes_view_t row, usearch_scalar_t kind, std::span<double> values) {
+inline void read_row(util::bytes_view_t row, usearch_scalar_t kind, std::span<double> values) {
     switch (kind) {
     case usearch_scalar_f64_k: return widen_into<double>(row, values);
     case usearch_scalar_f32_k: return widen_into<float>(row, values);
-    case usearch_scalar_i8_k: return widen_into<i8_t>(row, values);
-    case usearch_scalar_i32_k: return widen_into<i32_t>(row, values);
-    case usearch_scalar_u8_k: return widen_into<u8_t>(row, values);
-    case usearch_scalar_i4x2_k: return widen_nibbles<i8_t>(row, values);
-    case usearch_scalar_u4x2_k: return widen_nibbles<u8_t>(row, values);
+    case usearch_scalar_i8_k: return widen_into<util::i8_t>(row, values);
+    case usearch_scalar_i32_k: return widen_into<util::i32_t>(row, values);
+    case usearch_scalar_u8_k: return widen_into<util::u8_t>(row, values);
+    case usearch_scalar_i4x2_k: return widen_nibbles<util::i8_t>(row, values);
+    case usearch_scalar_u4x2_k: return widen_nibbles<util::u8_t>(row, values);
     case usearch_scalar_u1x8_k: return widen_bits(row, values);
     case usearch_scalar_e5m2_k:
     case usearch_scalar_e4m3_k:
@@ -685,7 +704,7 @@ inline void read_row(bytes_view_t row, usearch_scalar_t kind, std::span<double> 
     case usearch_scalar_e2m3_k: {
         // The mini-floats decode from one byte apiece, their shape read once for the whole row.
         minifloat_t const format = minifloat_of(kind);
-        u8_t const* typed = static_cast<u8_t const*>(static_cast<void const*>(row.data()));
+        util::u8_t const* typed = static_cast<util::u8_t const*>(static_cast<void const*>(row.data()));
         for (std::size_t position = 0; position != values.size(); ++position)
             values[position] = read_minifloat(typed[position], format);
         return;
@@ -695,28 +714,28 @@ inline void read_row(bytes_view_t row, usearch_scalar_t kind, std::span<double> 
     default: return;
     }
     // The half kinds decode rather than load, so they convert element by element.
-    u16_t const* typed = static_cast<u16_t const*>(static_cast<void const*>(row.data()));
+    util::u16_t const* typed = static_cast<util::u16_t const*>(static_cast<void const*>(row.data()));
     for (std::size_t position = 0; position != values.size(); ++position)
         values[position] = kind == usearch_scalar_bf16_k ? read_brain(typed[position]) : read_half(typed[position]);
 }
 
 /** Quantizes @p values back into one stored row, switching on the kind once. */
-inline void write_row(bytes_span_t row, usearch_scalar_t kind, std::span<double const> values) {
+inline void write_row(util::bytes_span_t row, usearch_scalar_t kind, std::span<double const> values) {
     switch (kind) {
     case usearch_scalar_f64_k: return narrow_from<double>(row, values);
     case usearch_scalar_f32_k: return narrow_from<float>(row, values);
-    case usearch_scalar_i8_k: return narrow_from<i8_t>(row, values);
-    case usearch_scalar_i32_k: return narrow_from<i32_t>(row, values);
-    case usearch_scalar_u8_k: return narrow_from<u8_t>(row, values);
-    case usearch_scalar_i4x2_k: return narrow_nibbles<i8_t>(row, values);
-    case usearch_scalar_u4x2_k: return narrow_nibbles<u8_t>(row, values);
+    case usearch_scalar_i8_k: return narrow_from<util::i8_t>(row, values);
+    case usearch_scalar_i32_k: return narrow_from<util::i32_t>(row, values);
+    case usearch_scalar_u8_k: return narrow_from<util::u8_t>(row, values);
+    case usearch_scalar_i4x2_k: return narrow_nibbles<util::i8_t>(row, values);
+    case usearch_scalar_u4x2_k: return narrow_nibbles<util::u8_t>(row, values);
     case usearch_scalar_u1x8_k: return narrow_bits(row, values);
     case usearch_scalar_e5m2_k:
     case usearch_scalar_e4m3_k:
     case usearch_scalar_e3m2_k:
     case usearch_scalar_e2m3_k: {
         minifloat_t const format = minifloat_of(kind);
-        u8_t* typed = static_cast<u8_t*>(static_cast<void*>(row.data()));
+        util::u8_t* typed = static_cast<util::u8_t*>(static_cast<void*>(row.data()));
         for (std::size_t position = 0; position != values.size(); ++position)
             typed[position] = write_minifloat(values[position], format);
         return;
@@ -725,7 +744,7 @@ inline void write_row(bytes_span_t row, usearch_scalar_t kind, std::span<double 
     case usearch_scalar_f16_k: break;
     default: return;
     }
-    u16_t* typed = static_cast<u16_t*>(static_cast<void*>(row.data()));
+    util::u16_t* typed = static_cast<util::u16_t*>(static_cast<void*>(row.data()));
     for (std::size_t position = 0; position != values.size(); ++position)
         typed[position] = kind == usearch_scalar_bf16_k ? write_brain(values[position]) : write_half(values[position]);
 }
@@ -757,7 +776,7 @@ struct entry {
 
 /** The project's own key type, which already knows how to hash and compare itself.
  *  Layout-identical to @c usearch_key_t, so the conversion is a reinterpretation. */
-inline uuid128_t uuid_of(usearch_key_t const& key) noexcept { return std::bit_cast<uuid128_t>(key); }
+inline util::uuid128_t uuid_of(usearch_key_t const& key) noexcept { return std::bit_cast<util::uuid128_t>(key); }
 
 /**
  *  @brief One handle's whole state. Readers hold @c mutex shared and writers exclusively, which
@@ -776,13 +795,13 @@ struct handle {
     std::vector<entry<payload_>> entries;
 
     /** Entry positions under each key, so a lookup is not a scan; keys need not be unique. */
-    std::unordered_multimap<uuid128_t, std::size_t> by_key;
+    std::unordered_multimap<util::uuid128_t, std::size_t> by_key;
 
     /** Held shared by every reader, exclusively by every mutation. */
     std::shared_mutex mutex;
 
     /** The checkpoint a @c view_ram verb serves from, whose presence refuses every mutating verb. */
-    mapped_file_t served;
+    util::mapped_file_t served;
 
     /** The residency the handle answers as, so an NVMe view refuses a save as the engine's does. */
     usearch_residency_t residency = usearch_residency_ram_k;
@@ -804,7 +823,8 @@ struct handle {
      *  the least. */
     std::size_t shards() const noexcept {
         std::size_t const capacity = shard_capacity ? shard_capacity : (std::numeric_limits<std::size_t>::max)();
-        return max_of(max_of(std::size_t {1}, parts_opened), divide_round_up(entries.size(), capacity));
+        return util::max_of(util::max_of(std::size_t {1}, parts_opened),
+                            util::divide_round_up(entries.size(), capacity));
     }
 
     /** Drops every entry, which @c clear promises without touching the frozen options. */
@@ -861,9 +881,9 @@ template <typename handle_>
 bool reject_oversubscribed(handle_ const& index, usearch_keys_view_t keys, std::size_t count,
                            std::size_t values_per_key, usearch_outcome_t* outcome) {
     if (!values_per_key) return false;
-    std::unordered_map<uuid128_t, std::size_t> admitted;
+    std::unordered_map<util::uuid128_t, std::size_t> admitted;
     for (std::size_t offset = 0; offset != count; ++offset) {
-        uuid128_t const key = uuid_of(key_at(keys, offset));
+        util::uuid128_t const key = uuid_of(key_at(keys, offset));
         std::size_t const held = index.by_key.count(key) + ++admitted[key];
         if (reject_if(held > values_per_key, usearch_status_overflow_k,
                       "A key would hold more entries than the index admits", outcome))
@@ -902,14 +922,14 @@ std::vector<std::size_t> nodes_of(handle_ const& index, usearch_key_t key) {
 
 /** Writes @p value's own bytes at the head of @p target - the serializer's one primitive. */
 template <typename value_>
-void write_pod(bytes_span_t target, value_ const& value) {
+void write_pod(util::bytes_span_t target, value_ const& value) {
     std::array<std::byte, sizeof(value_)> const raw = std::bit_cast<std::array<std::byte, sizeof(value_)>>(value);
     std::copy(raw.begin(), raw.end(), target.begin());
 }
 
 /** Reads one @c value_ back from the head of @p source. */
 template <typename value_>
-value_ read_pod(bytes_view_t source) {
+value_ read_pod(util::bytes_view_t source) {
     std::array<std::byte, sizeof(value_)> raw {};
     std::copy_n(source.begin(), sizeof(value_), raw.begin());
     return std::bit_cast<value_>(raw);
@@ -948,7 +968,7 @@ struct matches_outputs_t {
     /** Writes the first @c wanted of @p ranked as the matches of @p query, and their number as its
      *  count. */
     void write(std::size_t query, std::span<match_t const> ranked) const noexcept {
-        std::size_t const found = min_of(wanted, ranked.size());
+        std::size_t const found = util::min_of(wanted, ranked.size());
         for (std::size_t match = 0; match != found; ++match)
             keys[query * wanted + match] = ranked[match].key, scores[query * wanted + match] = ranked[match].distance;
         counts[query] = found;
@@ -971,20 +991,29 @@ inline bool carve_ranked(usearch_arena_handle_t& arena, std::size_t count, std::
            (outputs.counts = carve<std::size_t>(arena, count, outcome));
 }
 
-/** Scores the @p entries that @p predicate admits, judged a quad at a time as the engine asks, into
- *  @p ranked, nearest first. The sort is stable because every modality's docblock promises ties
- *  fall in insertion order. */
+/** Asks @p predicate about @p keys into @p admissions, each rejected before the call as the engine
+ *  pre-fills them: a cheap handler a quad at a time, an expensive one once about every key, as a
+ *  single round of the engine's would gather them. */
+inline void ask_predicate(usearch_predicate_t const& predicate, std::span<usearch_key_t const> keys,
+                          std::vector<usearch_admission_t>& admissions) {
+    admissions.assign(keys.size(), predicate.callback ? usearch_reject_k : usearch_admit_k);
+    if (!predicate.callback || keys.empty()) return;
+    std::size_t const per_call = predicate.cost == usearch_predicate_cost_expensive_k ? keys.size() : 4;
+    for (std::size_t first = 0; first < keys.size(); first += per_call)
+        predicate.callback(keys.data() + first, admissions.data() + first,
+                           util::min_of<std::size_t>(per_call, keys.size() - first), predicate.state);
+}
+
+/** Scores the @p entries that @p predicate admits, asked as the engine asks, into @p ranked,
+ *  nearest first. The sort is stable because every modality's docblock promises that ties keep
+ *  their insertion order. */
 template <typename payload_>
 void rank(std::span<entry<payload_> const> entries, usearch_predicate_t predicate,
           std::function<double(payload_ const&)> const& score, std::vector<match_t>& ranked) {
-    std::vector<usearch_admission_t> admissions(entries.size(), usearch_admit_k);
-    if (predicate.callback && !entries.empty()) {
-        std::vector<usearch_key_t> keys(entries.size());
-        for (std::size_t entry = 0; entry != entries.size(); ++entry) keys[entry] = entries[entry].key;
-        for (std::size_t first = 0; first < keys.size(); first += 4)
-            predicate.callback(keys.data() + first, admissions.data() + first,
-                               min_of<std::size_t>(4, keys.size() - first), predicate.state);
-    }
+    std::vector<usearch_key_t> keys(entries.size());
+    for (std::size_t entry = 0; entry != entries.size(); ++entry) keys[entry] = entries[entry].key;
+    std::vector<usearch_admission_t> admissions;
+    ask_predicate(predicate, keys, admissions);
     ranked.clear();
     ranked.reserve(entries.size());
     for (std::size_t entry = 0; entry != entries.size(); ++entry)
@@ -1010,7 +1039,7 @@ std::vector<std::size_t> links_of(handle_ const& index, std::size_t from, std::s
     nearest.reserve(limit);
     for (std::size_t node = 0; node != limit; ++node)
         if (node != from) nearest.push_back({score(index.entries[from].payload, index.entries[node].payload), node});
-    std::size_t const kept = min_of(nearest.size(), index.options.connectivity);
+    std::size_t const kept = util::min_of(nearest.size(), index.options.connectivity);
     std::partial_sort(nearest.begin(), nearest.begin() + static_cast<std::ptrdiff_t>(kept), nearest.end());
     std::vector<std::size_t> linked(kept);
     for (std::size_t link = 0; link != kept; ++link) linked[link] = nearest[link].second;
@@ -1045,7 +1074,7 @@ struct graph_cursor {
     std::unordered_map<std::size_t, std::vector<std::size_t>> links;
 
     /** Bit zero is set while a pull runs, so an overlapping pull is refused instead of racing. */
-    u32_t pulling = 0;
+    util::u32_t pulling = 0;
 };
 
 /** Opens @p cursor on @p index: a scan without @p starts, else a walk beginning with the start
@@ -1084,7 +1113,7 @@ void pull_walk(arguments_ const& arguments, graph_cursor<handle_>& cursor, score
     std::size_t const wanted = arguments.wanted;
     std::vector<std::size_t> nodes;
     if (cursor.visited.empty()) {
-        std::size_t const taking = min_of(wanted, cursor.limit - min_of(cursor.position, cursor.limit));
+        std::size_t const taking = util::min_of(wanted, cursor.limit - util::min_of(cursor.position, cursor.limit));
         for (std::size_t offset = 0; offset != taking; ++offset) nodes.push_back(cursor.position + offset);
     }
     else {
@@ -1093,7 +1122,7 @@ void pull_walk(arguments_ const& arguments, graph_cursor<handle_>& cursor, score
                 if (!cursor.visited[linked]) cursor.visited[linked] = 1, cursor.order.push_back(linked);
             ++cursor.expanded;
         }
-        std::size_t const end = min_of(cursor.order.size(), cursor.position + wanted);
+        std::size_t const end = util::min_of(cursor.order.size(), cursor.position + wanted);
         nodes.assign(cursor.order.begin() + static_cast<std::ptrdiff_t>(cursor.position),
                      cursor.order.begin() + static_cast<std::ptrdiff_t>(end));
     }
@@ -1139,12 +1168,14 @@ inline constexpr std::size_t sample_expansion_factor_k = 16;
 
 /** SplitMix64's output at @p counter of the stream @p seed starts: its state after @p counter + 1
  *  steps, mixed. */
-constexpr u64_t splitmix64_at(u64_t seed, u64_t counter) noexcept {
-    return mix_bits(seed + (counter + 1) * golden_ratio_u64_k);
+constexpr util::u64_t splitmix64_at(util::u64_t seed, util::u64_t counter) noexcept {
+    return util::mix_bits(seed + (counter + 1) * util::golden_ratio_u64_k);
 }
 
 /** The top 53 bits of @p bits as a double in (0, 1]: ((bits >> 11) + 1) · 2⁻⁵³. */
-constexpr f64_t uniform_unit_f64(u64_t bits) noexcept { return static_cast<f64_t>((bits >> 11) + 1) * 0x1p-53; }
+constexpr util::f64_t uniform_unit_f64(util::u64_t bits) noexcept {
+    return static_cast<util::f64_t>((bits >> 11) + 1) * 0x1p-53;
+}
 
 /**
  *  @brief Projects one row to three coordinates through a dense Gaussian matrix no one stores:
@@ -1155,22 +1186,23 @@ constexpr f64_t uniform_unit_f64(u64_t bits) noexcept { return static_cast<f64_t
  *  in f64, d ascending then c, each adding (value · sqrt(−2 ln u₁)) · cos(2π u₂); each divides by
  *  sqrt(dimensions) in f64 and rounds to f32 once. A row of no dimensions sits at the origin.
  */
-inline void sample_projection(f32_t const* vector, std::size_t dimensions, u64_t seed, f32_t* coordinates) noexcept {
+inline void sample_projection(util::f32_t const* vector, std::size_t dimensions, util::u64_t seed,
+                              util::f32_t* coordinates) noexcept {
 #pragma float_control(precise, on)
 #pragma clang fp contract(off)
-    std::array<f64_t, 3> sums {0, 0, 0};
+    std::array<util::f64_t, 3> sums {0, 0, 0};
     for (std::size_t dimension = 0; dimension != dimensions; ++dimension) {
-        f64_t const value = vector[dimension];
+        util::f64_t const value = vector[dimension];
         for (std::size_t column = 0; column != 3; ++column) {
-            u64_t const counter = 2 * (3 * static_cast<u64_t>(dimension) + column);
-            f64_t const radius = std::sqrt(-2.0 * std::log(uniform_unit_f64(splitmix64_at(seed, counter))));
-            f64_t const angle = 2.0 * std::numbers::pi * uniform_unit_f64(splitmix64_at(seed, counter + 1));
+            util::u64_t const counter = 2 * (3 * static_cast<util::u64_t>(dimension) + column);
+            util::f64_t const radius = std::sqrt(-2.0 * std::log(uniform_unit_f64(splitmix64_at(seed, counter))));
+            util::f64_t const angle = 2.0 * std::numbers::pi * uniform_unit_f64(splitmix64_at(seed, counter + 1));
             sums[column] += value * radius * std::cos(angle);
         }
     }
-    f64_t const root = std::sqrt(static_cast<f64_t>(dimensions));
+    util::f64_t const root = std::sqrt(static_cast<util::f64_t>(dimensions));
     for (std::size_t column = 0; column != 3; ++column)
-        coordinates[column] = dimensions ? static_cast<f32_t>(sums[column] / root) : 0.0f;
+        coordinates[column] = dimensions ? static_cast<util::f32_t>(sums[column] / root) : 0.0f;
 }
 
 /**
@@ -1194,8 +1226,8 @@ inline void sample_projection(f32_t const* vector, std::size_t dimensions, u64_t
  *  4. It solves (H + λI) s = −g, λ = 0.001 · trace(H), by Cramer's rule, and moves p by s; a
  *     determinant that is zero or not finite stops the steps.
  */
-inline void sample_gauss_newton(f32_t const* anchors, f32_t const* distances, std::size_t references_count,
-                                u64_t key_seed, f32_t* coordinates) noexcept {
+inline void sample_gauss_newton(util::f32_t const* anchors, util::f32_t const* distances, std::size_t references_count,
+                                util::u64_t key_seed, util::f32_t* coordinates) noexcept {
 #pragma float_control(precise, on)
 #pragma clang fp contract(off)
     for (std::size_t anchor = 0; anchor != references_count; ++anchor) {
@@ -1203,60 +1235,62 @@ inline void sample_gauss_newton(f32_t const* anchors, f32_t const* distances, st
         for (std::size_t column = 0; column != 3; ++column) coordinates[column] = anchors[anchor * 3 + column];
         return;
     }
-    f32_t weights = 0.0f, nearest = distances[0];
-    std::array<f32_t, 3> point {0.0f, 0.0f, 0.0f};
+    util::f32_t weights = 0.0f, nearest = distances[0];
+    std::array<util::f32_t, 3> point {0.0f, 0.0f, 0.0f};
     for (std::size_t anchor = 0; anchor != references_count; ++anchor) {
-        f32_t const weight = 1.0f / distances[anchor];
+        util::f32_t const weight = 1.0f / distances[anchor];
         weights += weight;
         for (std::size_t column = 0; column != 3; ++column) point[column] += weight * anchors[anchor * 3 + column];
-        nearest = min_of(nearest, distances[anchor]);
+        nearest = util::min_of(nearest, distances[anchor]);
     }
     for (std::size_t column = 0; column != 3; ++column) {
-        f32_t const unit = static_cast<f32_t>(uniform_unit_f64(splitmix64_at(key_seed, column)));
+        util::f32_t const unit = static_cast<util::f32_t>(uniform_unit_f64(splitmix64_at(key_seed, column)));
         point[column] = point[column] / weights + 0.01f * nearest * (2.0f * unit - 1.0f);
     }
 
     for (std::size_t step = 0; step != sample_gauss_newton_steps_k; ++step) {
-        f32_t hessian_00 = 0.0f, hessian_01 = 0.0f, hessian_02 = 0.0f, hessian_11 = 0.0f, hessian_12 = 0.0f,
-              hessian_22 = 0.0f;
-        f32_t gradient_0 = 0.0f, gradient_1 = 0.0f, gradient_2 = 0.0f;
+        util::f32_t hessian_00 = 0.0f, hessian_01 = 0.0f, hessian_02 = 0.0f, hessian_11 = 0.0f, hessian_12 = 0.0f,
+                    hessian_22 = 0.0f;
+        util::f32_t gradient_0 = 0.0f, gradient_1 = 0.0f, gradient_2 = 0.0f;
         for (std::size_t anchor = 0; anchor != references_count; ++anchor) {
-            f32_t const offset_0 = point[0] - anchors[anchor * 3 + 0];
-            f32_t const offset_1 = point[1] - anchors[anchor * 3 + 1];
-            f32_t const offset_2 = point[2] - anchors[anchor * 3 + 2];
-            f32_t const reach = std::sqrt(offset_0 * offset_0 + offset_1 * offset_1 + offset_2 * offset_2);
+            util::f32_t const offset_0 = point[0] - anchors[anchor * 3 + 0];
+            util::f32_t const offset_1 = point[1] - anchors[anchor * 3 + 1];
+            util::f32_t const offset_2 = point[2] - anchors[anchor * 3 + 2];
+            util::f32_t const reach = std::sqrt(offset_0 * offset_0 + offset_1 * offset_1 + offset_2 * offset_2);
             if (!(reach > 0.0f)) continue;
-            f32_t const wanted = distances[anchor];
-            f32_t const scale = 1.0f / (reach * wanted);
-            f32_t const jacobian_0 = offset_0 * scale, jacobian_1 = offset_1 * scale, jacobian_2 = offset_2 * scale;
-            f32_t const error = (reach - wanted) / wanted;
+            util::f32_t const wanted = distances[anchor];
+            util::f32_t const scale = 1.0f / (reach * wanted);
+            util::f32_t const jacobian_0 = offset_0 * scale, jacobian_1 = offset_1 * scale,
+                              jacobian_2 = offset_2 * scale;
+            util::f32_t const error = (reach - wanted) / wanted;
             hessian_00 += jacobian_0 * jacobian_0, hessian_01 += jacobian_0 * jacobian_1,
                 hessian_02 += jacobian_0 * jacobian_2, hessian_11 += jacobian_1 * jacobian_1,
                 hessian_12 += jacobian_1 * jacobian_2, hessian_22 += jacobian_2 * jacobian_2;
             gradient_0 += jacobian_0 * error, gradient_1 += jacobian_1 * error, gradient_2 += jacobian_2 * error;
         }
-        f32_t const damping = 0.001f * (hessian_00 + hessian_11 + hessian_22);
-        f32_t const damped_00 = hessian_00 + damping, damped_11 = hessian_11 + damping,
-                    damped_22 = hessian_22 + damping;
-        f32_t const cofactor_0 = damped_11 * damped_22 - hessian_12 * hessian_12,
-                    cofactor_1 = hessian_01 * damped_22 - hessian_12 * hessian_02,
-                    cofactor_2 = hessian_01 * hessian_12 - damped_11 * hessian_02;
-        f32_t const determinant = damped_00 * cofactor_0 - hessian_01 * cofactor_1 + hessian_02 * cofactor_2;
+        util::f32_t const damping = 0.001f * (hessian_00 + hessian_11 + hessian_22);
+        util::f32_t const damped_00 = hessian_00 + damping, damped_11 = hessian_11 + damping,
+                          damped_22 = hessian_22 + damping;
+        util::f32_t const cofactor_0 = damped_11 * damped_22 - hessian_12 * hessian_12,
+                          cofactor_1 = hessian_01 * damped_22 - hessian_12 * hessian_02,
+                          cofactor_2 = hessian_01 * hessian_12 - damped_11 * hessian_02;
+        util::f32_t const determinant = damped_00 * cofactor_0 - hessian_01 * cofactor_1 + hessian_02 * cofactor_2;
         if (determinant == 0.0f || !std::isfinite(determinant)) break;
-        f32_t const negative_gradient_0 = -gradient_0, negative_gradient_1 = -gradient_1,
-                    negative_gradient_2 = -gradient_2;
-        f32_t const step_0 = (negative_gradient_0 * cofactor_0 -
-                              hessian_01 * (negative_gradient_1 * damped_22 - hessian_12 * negative_gradient_2) +
-                              hessian_02 * (negative_gradient_1 * hessian_12 - damped_11 * negative_gradient_2)) /
-                             determinant;
-        f32_t const step_1 = (damped_00 * (negative_gradient_1 * damped_22 - hessian_12 * negative_gradient_2) -
-                              negative_gradient_0 * cofactor_1 +
-                              hessian_02 * (hessian_01 * negative_gradient_2 - negative_gradient_1 * hessian_02)) /
-                             determinant;
-        f32_t const step_2 = (damped_00 * (damped_11 * negative_gradient_2 - negative_gradient_1 * hessian_12) -
-                              hessian_01 * (hessian_01 * negative_gradient_2 - negative_gradient_1 * hessian_02) +
-                              negative_gradient_0 * cofactor_2) /
-                             determinant;
+        util::f32_t const negative_gradient_0 = -gradient_0, negative_gradient_1 = -gradient_1,
+                          negative_gradient_2 = -gradient_2;
+        util::f32_t const step_0 = (negative_gradient_0 * cofactor_0 -
+                                    hessian_01 * (negative_gradient_1 * damped_22 - hessian_12 * negative_gradient_2) +
+                                    hessian_02 * (negative_gradient_1 * hessian_12 - damped_11 * negative_gradient_2)) /
+                                   determinant;
+        util::f32_t const step_1 = (damped_00 * (negative_gradient_1 * damped_22 - hessian_12 * negative_gradient_2) -
+                                    negative_gradient_0 * cofactor_1 +
+                                    hessian_02 *
+                                        (hessian_01 * negative_gradient_2 - negative_gradient_1 * hessian_02)) /
+                                   determinant;
+        util::f32_t const step_2 = (damped_00 * (damped_11 * negative_gradient_2 - negative_gradient_1 * hessian_12) -
+                                    hessian_01 * (hessian_01 * negative_gradient_2 - negative_gradient_1 * hessian_02) +
+                                    negative_gradient_0 * cofactor_2) /
+                                   determinant;
         point[0] += step_0, point[1] += step_1, point[2] += step_2;
     }
     for (std::size_t column = 0; column != 3; ++column) coordinates[column] = point[column];
@@ -1291,32 +1325,32 @@ struct sample_plan {
     usearch_key_t* keys;
     std::size_t* entry_ordinals;
     usearch_key_t* parents;
-    f32_t* parent_distances;
-    f32_t* coordinates;
+    util::f32_t* parent_distances;
+    util::f32_t* coordinates;
 
     std::vector<std::size_t> drawn {};
     std::unordered_map<std::size_t, std::size_t> drawn_at {};
-    std::unordered_map<uuid128_t, std::size_t> shown_rows {};
+    std::unordered_map<util::uuid128_t, std::size_t> shown_rows {};
     std::vector<std::size_t> shown_nodes {}, shown_offsets {};
     std::vector<std::size_t> nearest_shown {};
-    std::vector<f32_t> nearest_shown_distances {};
+    std::vector<util::f32_t> nearest_shown_distances {};
     std::vector<std::size_t> roots {}, root_draws {};
-    std::vector<f32_t> root_radii {};
+    std::vector<util::f32_t> root_radii {};
     std::unordered_set<std::size_t> shown_roots {};
     std::unordered_map<std::size_t, std::vector<std::size_t>> links {};
     std::size_t nearest_shown_count = 0;
     std::size_t visited_members = 0, computed_distances = 0;
 
-    static u64_t key_hash(usearch_key_t const& key) noexcept {
-        return static_cast<u64_t>(std::hash<uuid128_t> {}(uuid_of(key)));
+    static util::u64_t key_hash(usearch_key_t const& key) noexcept {
+        return static_cast<util::u64_t>(std::hash<util::uuid128_t> {}(uuid_of(key)));
     }
     usearch_key_t shown_key(std::size_t row) const noexcept {
         std::span<usearch_key_t const> const keys = row_at<usearch_key_t>(arguments.shown.data, row,
                                                                           arguments.shown.stride, 1);
         return keys[0];
     }
-    f32_t const* shown_coordinates_of(std::size_t row) const noexcept {
-        return row_at<f32_t>(arguments.shown_coordinates.data, row, arguments.shown_coordinates.stride, 3).data();
+    util::f32_t const* shown_coordinates_of(std::size_t row) const noexcept {
+        return row_at<util::f32_t>(arguments.shown_coordinates.data, row, arguments.shown_coordinates.stride, 3).data();
     }
     usearch_key_t focus_key(std::size_t row) const noexcept {
         std::span<usearch_key_t const> const keys = row_at<usearch_key_t>(arguments.focus.data, row,
@@ -1325,9 +1359,9 @@ struct sample_plan {
     }
     bool shown(usearch_key_t const& key) const noexcept { return shown_rows.contains(uuid_of(key)); }
 
-    f32_t distance(std::size_t from, std::size_t to) noexcept {
+    util::f32_t distance(std::size_t from, std::size_t to) noexcept {
         ++computed_distances;
-        return static_cast<f32_t>(score(index.entries[from].payload, index.entries[to].payload));
+        return static_cast<util::f32_t>(score(index.entries[from].payload, index.entries[to].payload));
     }
     std::vector<std::size_t> const& neighbors(std::size_t node) {
         auto found = links.find(node);
@@ -1345,12 +1379,13 @@ struct sample_plan {
     std::vector<std::size_t> walk(std::size_t from, std::size_t toward) {
         std::vector<std::size_t> chain;
         std::size_t current = from;
-        f32_t current_distance = static_cast<f32_t>(score(index.entries[toward].payload, index.entries[from].payload));
+        util::f32_t current_distance = static_cast<util::f32_t>(
+            score(index.entries[toward].payload, index.entries[from].payload));
         while (current != toward) {
             std::size_t best = current;
-            f32_t best_distance = current_distance;
+            util::f32_t best_distance = current_distance;
             for (std::size_t next : neighbors(current)) {
-                f32_t const reach = static_cast<f32_t>(
+                util::f32_t const reach = static_cast<util::f32_t>(
                     score(index.entries[toward].payload, index.entries[next].payload));
                 if (reach < best_distance) best = next, best_distance = reach;
             }
@@ -1373,11 +1408,11 @@ struct sample_plan {
         entry_ordinals[at] = static_cast<std::size_t>(std::find(entries.begin(), entries.end(), node) -
                                                       entries.begin());
         if (!nearest_shown_count) return at;
-        f32_t* const kept_distances = nearest_shown_distances.data() + at * sample_nearest_shown_k;
+        util::f32_t* const kept_distances = nearest_shown_distances.data() + at * sample_nearest_shown_k;
         std::size_t* const kept_rows = nearest_shown.data() + at * sample_nearest_shown_k;
         std::size_t kept = 0;
         for (std::size_t anchor = 0; anchor != shown_nodes.size(); ++anchor) {
-            f32_t const reach = distance(node, shown_nodes[anchor]);
+            util::f32_t const reach = distance(node, shown_nodes[anchor]);
             if (kept == nearest_shown_count && !(reach < kept_distances[kept - 1])) continue;
             std::size_t slot = kept == nearest_shown_count ? kept - 1 : kept++;
             for (; slot && reach < kept_distances[slot - 1]; --slot)
@@ -1391,13 +1426,13 @@ struct sample_plan {
         std::size_t const at = draw(node);
         if (at == none_k) return none_k;
         usearch_key_t parent = keys[at];
-        f32_t parent_distance = 0, best = std::numeric_limits<f32_t>::infinity();
+        util::f32_t parent_distance = 0, best = std::numeric_limits<util::f32_t>::infinity();
         if (nearest_shown_count) {
             best = parent_distance = nearest_shown_distances[at * sample_nearest_shown_k];
             parent = shown_key(shown_offsets[nearest_shown[at * sample_nearest_shown_k]]);
         }
         for (std::size_t earlier = 0; earlier != at; ++earlier)
-            if (f32_t const reach = distance(node, drawn[earlier]); reach < best)
+            if (util::f32_t const reach = distance(node, drawn[earlier]); reach < best)
                 best = parent_distance = reach, parent = keys[earlier];
         parents[at] = parent;
         parent_distances[at] = parent_distance;
@@ -1417,21 +1452,21 @@ struct sample_plan {
     void file_root(std::size_t node, std::size_t at) {
         roots.push_back(node);
         root_draws.push_back(at);
-        root_radii.push_back(std::numeric_limits<f32_t>::infinity());
+        root_radii.push_back(std::numeric_limits<util::f32_t>::infinity());
     }
 
     /** Attaches root @p root to its nearest earlier one, lowest first on ties, exactly as the
      *  library itself does. */
     void attach_root(std::size_t root) {
         if (!root) return;
-        std::vector<f32_t> reach(root);
+        std::vector<util::f32_t> reach(root);
         for (std::size_t earlier = 0; earlier != root; ++earlier)
             reach[earlier] = distance(roots[root], roots[earlier]);
         std::size_t nearest = 0;
         for (std::size_t earlier = 1; earlier != root; ++earlier)
             if (reach[earlier] < reach[nearest]) nearest = earlier;
-        root_radii[root] = min_of(root_radii[root], reach[nearest]);
-        root_radii[nearest] = min_of(root_radii[nearest], reach[nearest]);
+        root_radii[root] = util::min_of(root_radii[root], reach[nearest]);
+        root_radii[nearest] = util::min_of(root_radii[nearest], reach[nearest]);
         walk_between(roots[nearest], roots[root]);
     }
 
@@ -1445,7 +1480,7 @@ struct sample_plan {
             shown_nodes.push_back(entries.front());
             shown_offsets.push_back(row);
         }
-        nearest_shown_count = min_of(sample_nearest_shown_k, shown_nodes.size());
+        nearest_shown_count = util::min_of(sample_nearest_shown_k, shown_nodes.size());
         nearest_shown.resize(wanted * sample_nearest_shown_k);
         nearest_shown_distances.resize(wanted * sample_nearest_shown_k);
         if (!wanted) return;
@@ -1465,7 +1500,7 @@ struct sample_plan {
             if (!arguments.focus_count)
                 while (roots.size() != quota && position != limit && drawn.size() != wanted) {
                     std::size_t const node = static_cast<std::size_t>(
-                        seeded_bijection(position++, limit, arguments.seed));
+                        util::seeded_bijection(position++, limit, arguments.seed));
                     if (std::size_t const at = draw_nearest(node); at != none_k) file_root(node, at);
                 }
             std::size_t const first_new = attached;
@@ -1478,16 +1513,16 @@ struct sample_plan {
             for (std::size_t root = 0; root != roots.size() && drawn.size() != wanted; ++root)
                 draw_region(roots[root], root_radii[root], quota);
             if (drawn.size() == wanted) break;
-            std::size_t const next = min_of(2 * quota, drawn.size() + 1);
+            std::size_t const next = util::min_of(2 * quota, drawn.size() + 1);
             if (drawn.size() == before && next == quota) break;
             quota = next;
         }
     }
 
-    void draw_region(std::size_t root, f32_t radius, std::size_t quota) {
-        std::size_t const room = min_of(visits, quota * (visits / wanted));
+    void draw_region(std::size_t root, util::f32_t radius, std::size_t quota) {
+        std::size_t const room = util::min_of(visits, quota * (visits / wanted));
         std::vector<std::size_t> visited {root};
-        std::vector<f32_t> visited_distances {0};
+        std::vector<util::f32_t> visited_distances {0};
         std::unordered_set<std::size_t> reached {root};
         for (std::size_t head = 0; head != visited.size(); ++head) {
             if (visited_distances[head] > radius) continue;
@@ -1499,45 +1534,45 @@ struct sample_plan {
                 }
         }
         // Rank, then node: the library's order, its one shard leaving the node to break ties.
-        std::vector<std::pair<u64_t, std::size_t>> candidates;
+        std::vector<std::pair<util::u64_t, std::size_t>> candidates;
         for (std::size_t visit = 1; visit != visited.size(); ++visit) {
             std::size_t const node = visited[visit];
             if (!(visited_distances[visit] <= radius) || drawn_at.contains(node)) continue;
             usearch_key_t const& key = index.entries[node].key;
             if (!shown(key)) candidates.push_back({splitmix64_at(arguments.seed, key_hash(key)), node});
         }
-        std::size_t const kept = min_of(candidates.size(), quota);
+        std::size_t const kept = util::min_of(candidates.size(), quota);
         std::partial_sort(candidates.begin(), candidates.begin() + static_cast<std::ptrdiff_t>(kept), candidates.end());
         for (std::size_t candidate = 0; candidate != kept; ++candidate) draw_nearest(candidates[candidate].second);
     }
 
-    u64_t coordinates_seed(std::size_t at) const noexcept {
+    util::u64_t coordinates_seed(std::size_t at) const noexcept {
         return splitmix64_at(splitmix64_at(arguments.seed, key_hash(keys[at])), entry_ordinals[at]);
     }
 
-    f32_t shown_scale() {
-        std::size_t const pairs = min_of(shown_nodes.size(), sample_scaling_draws_k + 1) - 1;
-        f64_t shown_sum = 0, measured = 0;
+    util::f32_t shown_scale() {
+        std::size_t const pairs = util::min_of(shown_nodes.size(), sample_scaling_draws_k + 1) - 1;
+        util::f64_t shown_sum = 0, measured = 0;
         for (std::size_t pair = 0; pair != pairs; ++pair) {
-            f32_t const reach = distance(shown_nodes[pair], shown_nodes[pair + 1]);
-            f32_t const* first = shown_coordinates_of(shown_offsets[pair]);
-            f32_t const* second = shown_coordinates_of(shown_offsets[pair + 1]);
-            f64_t squares = 0;
+            util::f32_t const reach = distance(shown_nodes[pair], shown_nodes[pair + 1]);
+            util::f32_t const* first = shown_coordinates_of(shown_offsets[pair]);
+            util::f32_t const* second = shown_coordinates_of(shown_offsets[pair + 1]);
+            util::f64_t squares = 0;
             for (std::size_t column = 0; column != 3; ++column) {
-                f64_t const offset = f64_t {first[column]} - f64_t {second[column]};
+                util::f64_t const offset = util::f64_t {first[column]} - util::f64_t {second[column]};
                 squares += offset * offset;
             }
             shown_sum += std::sqrt(squares), measured += reach;
         }
-        return shown_sum > 0 && measured > 0 ? static_cast<f32_t>(shown_sum / measured) : 1.0f;
+        return shown_sum > 0 && measured > 0 ? static_cast<util::f32_t>(shown_sum / measured) : 1.0f;
     }
 
-    void place_among_shown(std::size_t at, f32_t scale) {
-        std::array<f32_t, sample_nearest_shown_k * 3> anchor_coordinates;
-        std::array<f32_t, sample_nearest_shown_k> distances;
+    void place_among_shown(std::size_t at, util::f32_t scale) {
+        std::array<util::f32_t, sample_nearest_shown_k * 3> anchor_coordinates;
+        std::array<util::f32_t, sample_nearest_shown_k> distances;
         for (std::size_t anchor = 0; anchor != nearest_shown_count; ++anchor) {
             std::size_t const kept = at * sample_nearest_shown_k + anchor;
-            f32_t const* shown_at = shown_coordinates_of(shown_offsets[nearest_shown[kept]]);
+            util::f32_t const* shown_at = shown_coordinates_of(shown_offsets[nearest_shown[kept]]);
             for (std::size_t column = 0; column != 3; ++column)
                 anchor_coordinates[anchor * 3 + column] = shown_at[column];
             distances[anchor] = nearest_shown_distances[kept] * scale;
@@ -1547,39 +1582,39 @@ struct sample_plan {
     }
 
     void scale_classically() {
-        std::size_t const anchors = min_of(drawn.size(), sample_scaling_draws_k);
-        std::vector<f32_t> centered(anchors * anchors), vector(anchors), product(anchors);
+        std::size_t const anchors = util::min_of(drawn.size(), sample_scaling_draws_k);
+        std::vector<util::f32_t> centered(anchors * anchors), vector(anchors), product(anchors);
         for (std::size_t row = 0; row != anchors; ++row)
             for (std::size_t column = 0; column != anchors; ++column) {
-                f32_t const reach = distance(drawn[row], drawn[column]);
+                util::f32_t const reach = distance(drawn[row], drawn[column]);
                 centered[row * anchors + column] = reach * reach;
             }
-        f32_t total = 0;
+        util::f32_t total = 0;
         for (std::size_t row = 0; row != anchors; ++row) {
-            f32_t sum = 0;
+            util::f32_t sum = 0;
             for (std::size_t column = 0; column != anchors; ++column) {
-                f32_t const square = 0.5f * (centered[row * anchors + column] + centered[column * anchors + row]);
+                util::f32_t const square = 0.5f * (centered[row * anchors + column] + centered[column * anchors + row]);
                 sum += square;
             }
-            product[row] = sum / static_cast<f32_t>(anchors);
+            product[row] = sum / static_cast<util::f32_t>(anchors);
             total += product[row];
         }
-        total /= static_cast<f32_t>(anchors);
+        total /= static_cast<util::f32_t>(anchors);
         for (std::size_t row = 0; row != anchors; ++row)
             for (std::size_t column = row; column != anchors; ++column) {
-                f32_t const square = 0.5f * (centered[row * anchors + column] + centered[column * anchors + row]);
-                f32_t const entry = -0.5f * (square - product[row] - product[column] + total);
+                util::f32_t const square = 0.5f * (centered[row * anchors + column] + centered[column * anchors + row]);
+                util::f32_t const entry = -0.5f * (square - product[row] - product[column] + total);
                 centered[row * anchors + column] = centered[column * anchors + row] = entry;
             }
         for (std::size_t axis = 0; axis != 3; ++axis) {
             for (std::size_t row = 0; row != anchors; ++row)
-                vector[row] = 2.0f * static_cast<f32_t>(
+                vector[row] = 2.0f * static_cast<util::f32_t>(
                                          uniform_unit_f64(splitmix64_at(arguments.seed, axis * anchors + row))) -
                               1.0f;
             auto const multiply = [&]() noexcept {
-                f32_t squares = 0;
+                util::f32_t squares = 0;
                 for (std::size_t row = 0; row != anchors; ++row) {
-                    f32_t sum = 0;
+                    util::f32_t sum = 0;
                     for (std::size_t column = 0; column != anchors; ++column)
                         sum += centered[row * anchors + column] * vector[column];
                     product[row] = sum, squares += sum * sum;
@@ -1587,16 +1622,16 @@ struct sample_plan {
                 return std::sqrt(squares);
             };
             for (std::size_t iteration = 0; iteration != 64; ++iteration) {
-                f32_t const norm = multiply();
+                util::f32_t const norm = multiply();
                 if (!(norm > 0)) break;
                 for (std::size_t row = 0; row != anchors; ++row) vector[row] = product[row] / norm;
             }
             // The Rayleigh quotient keeps the sign a norm would lose, so deflation subtracts the
             // pair with the right sign.
             multiply();
-            f32_t eigenvalue = 0;
+            util::f32_t eigenvalue = 0;
             for (std::size_t row = 0; row != anchors; ++row) eigenvalue += vector[row] * product[row];
-            f32_t const spread = std::sqrt(max_of(eigenvalue, 0.0f));
+            util::f32_t const spread = std::sqrt(util::max_of(eigenvalue, 0.0f));
             for (std::size_t row = 0; row != anchors; ++row) {
                 coordinates[row * 3 + axis] = vector[row] * spread;
                 for (std::size_t column = 0; column != anchors; ++column)
@@ -1604,14 +1639,14 @@ struct sample_plan {
             }
         }
 
-        std::array<f32_t, sample_nearest_shown_k * 3> anchor_coordinates;
-        std::array<f32_t, sample_nearest_shown_k> kept_distances;
-        std::size_t const nearest = min_of(sample_nearest_shown_k, anchors);
+        std::array<util::f32_t, sample_nearest_shown_k * 3> anchor_coordinates;
+        std::array<util::f32_t, sample_nearest_shown_k> kept_distances;
+        std::size_t const nearest = util::min_of(sample_nearest_shown_k, anchors);
         for (std::size_t at = anchors; at != drawn.size(); ++at) {
             std::array<std::size_t, sample_nearest_shown_k> kept_anchors;
             std::size_t kept = 0;
             for (std::size_t anchor = 0; anchor != anchors; ++anchor) {
-                f32_t const reach = distance(drawn[at], drawn[anchor]);
+                util::f32_t const reach = distance(drawn[at], drawn[anchor]);
                 if (kept == nearest && !(reach < kept_distances[kept - 1])) continue;
                 std::size_t slot = kept == nearest ? kept - 1 : kept++;
                 for (; slot && reach < kept_distances[slot - 1]; --slot)
@@ -1631,12 +1666,12 @@ struct sample_plan {
             for (std::size_t at = 0; at != drawn.size(); ++at)
                 coordinates_kind.coordinates_of(index.entries[drawn[at]].payload, coordinates + at * 3);
         else if (nearest_shown_count) {
-            f32_t const scale = shown_scale();
+            util::f32_t const scale = shown_scale();
             for (std::size_t at = 0; at != drawn.size(); ++at) place_among_shown(at, scale);
         }
         else if constexpr (requires { coordinates_kind.vector_of(index.entries[0].payload); })
             for (std::size_t at = 0; at != drawn.size(); ++at) {
-                std::vector<f32_t> const row = coordinates_kind.vector_of(index.entries[drawn[at]].payload);
+                std::vector<util::f32_t> const row = coordinates_kind.vector_of(index.entries[drawn[at]].payload);
                 sample_projection(row.data(), row.size(), arguments.seed, coordinates + at * 3);
             }
         else if (!drawn.empty()) scale_classically();
@@ -1656,7 +1691,7 @@ bool reject_sample(arguments_ const& arguments, usearch_outcome_t* outcome) {
                      usearch_status_unsupported_layout_k, "The key stride is shorter than a key", outcome) ||
            reject_if(arguments.shown_count &&
                          (!coordinates.data || coordinates.columns != 3 || coordinates.scalar != usearch_scalar_f32_k ||
-                          (coordinates.stride && coordinates.stride < 3 * sizeof(f32_t))),
+                          (coordinates.stride && coordinates.stride < 3 * sizeof(util::f32_t))),
                      usearch_status_invalid_argument_k, "The shown coordinates must be three f32 values per key",
                      outcome);
 }
@@ -1686,9 +1721,9 @@ void draw_sample(arguments_ const& arguments, handle_& index, score_ const& scor
     usearch_key_t* const parents = entry_ordinals ? carve<usearch_key_t>(*arena, wanted, outcome) : nullptr;
     usearch_distance_t* const scores = parents ? carve<usearch_distance_t>(*arena, wanted, outcome) : nullptr;
     std::size_t* const counts = scores ? carve<std::size_t>(*arena, wanted, outcome) : nullptr;
-    f32_t* const coordinates = counts ? carve<f32_t>(*arena, wanted * 3, outcome) : nullptr;
+    util::f32_t* const coordinates = counts ? carve<util::f32_t>(*arena, wanted * 3, outcome) : nullptr;
     if (!coordinates) return;
-    std::vector<f32_t> parent_distances(wanted);
+    std::vector<util::f32_t> parent_distances(wanted);
     sample_plan<arguments_, handle_, score_, coordinates_kind_> plan {
         arguments, index,          score,   index.entries.size(),    wanted,     wanted * expansion,
         keys,      entry_ordinals, parents, parent_distances.data(), coordinates};
@@ -1711,7 +1746,7 @@ void draw_sample(arguments_ const& arguments, handle_& index, score_ const& scor
     *arguments.keys = {keys, sizeof(usearch_key_t)};
     *arguments.entry_ordinals = entry_ordinals;
     *arguments.parents = {parents, scores, counts, 1};
-    *arguments.coordinates = {coordinates, 3 * sizeof(f32_t), 3, usearch_scalar_f32_k};
+    *arguments.coordinates = {coordinates, 3 * sizeof(util::f32_t), 3, usearch_scalar_f32_k};
     *arguments.written = written;
 }
 
@@ -1803,11 +1838,12 @@ void sweep_round(arguments_ const& arguments, long_verb_plan<handle_>& plan, use
     while (plan.swept != plan.entries && !cancelled)
         cancelled = !keep_going(arguments.progress, ++plan.swept, plan.entries);
     bool const ended = plan.swept == plan.entries;
-    if (arguments.stats) arguments.stats->visited_members = plan.entries;
+    if (arguments.stats)
+        arguments.stats->visited_members = plan.entries, arguments.stats->computed_distances = plan.swept;
     if (arguments.phase)
         *arguments.phase = {ended ? usearch_phase_done_k : usearch_phase_gather_k, ended ? 0u : 4u, plan.swept,
                             plan.entries};
-    report_round(arguments.report, plan.entries, plan.swept, min_of(plan.moved, plan.swept));
+    report_round(arguments.report, plan.entries, plan.swept, util::min_of(plan.moved, plan.swept));
     reject_if(cancelled && (!arguments.plan || !ended), usearch_status_cancelled_k,
               "The caller's handler stopped the round", outcome);
 }
@@ -1847,8 +1883,8 @@ bool names_each_once(std::span<handle_* const> handles, char const* null_refusal
 
 /** Where @p slot falls in the sequence @p seed names: SplitMix64's output at that slot of the
  *  seed's stream, so equal seeds draw split roots in one order and distinct seeds in others. */
-inline u64_t draw_rank(u64_t seed, std::size_t slot) noexcept {
-    u64_t mixed = seed + (static_cast<u64_t>(slot) + 1) * 0x9E3779B97F4A7C15ull;
+inline util::u64_t draw_rank(util::u64_t seed, std::size_t slot) noexcept {
+    util::u64_t mixed = seed + (static_cast<util::u64_t>(slot) + 1) * 0x9E3779B97F4A7C15ull;
     mixed = (mixed ^ (mixed >> 30)) * 0xBF58476D1CE4E5B9ull;
     mixed = (mixed ^ (mixed >> 27)) * 0x94D049BB133111EBull;
     return mixed ^ (mixed >> 31);
@@ -1856,13 +1892,13 @@ inline u64_t draw_rank(u64_t seed, std::size_t slot) noexcept {
 
 /** The entries below @p count that @p within admits, in the order @p seed draws them. */
 template <typename within_>
-std::vector<std::size_t> drawing_order(std::size_t count, u64_t seed, within_ const& within) {
+std::vector<std::size_t> drawing_order(std::size_t count, util::u64_t seed, within_ const& within) {
     std::vector<std::size_t> order;
     for (std::size_t entry = 0; entry != count; ++entry)
         if (within(entry)) order.push_back(entry);
     // The slot breaks a tie between equal ranks, so the order is total and repeats exactly.
     std::sort(order.begin(), order.end(), [seed](std::size_t first, std::size_t second) {
-        u64_t const first_rank = draw_rank(seed, first), second_rank = draw_rank(seed, second);
+        util::u64_t const first_rank = draw_rank(seed, first), second_rank = draw_rank(seed, second);
         return first_rank != second_rank ? first_rank < second_rank : first < second;
     });
     return order;
@@ -1872,14 +1908,15 @@ std::vector<std::size_t> drawing_order(std::size_t count, u64_t seed, within_ co
  *  breadth-first over the links from its root, one node per part per round and capped at an equal
  *  share, and every node no root reached falling to the smallest part. */
 template <typename handle_, typename score_>
-std::vector<std::size_t> partition_nodes(handle_ const& index, std::size_t parts, u64_t seed, score_ const& score) {
+std::vector<std::size_t> partition_nodes(handle_ const& index, std::size_t parts, util::u64_t seed,
+                                         score_ const& score) {
     std::size_t const nodes = index.entries.size();
     std::size_t const unassigned = (std::numeric_limits<std::size_t>::max)();
-    std::size_t const cap = divide_round_up(nodes, parts);
+    std::size_t const cap = util::divide_round_up(nodes, parts);
     std::vector<std::size_t> part_of(nodes, unassigned), sizes(parts, 0), heads(parts, 0);
     std::vector<std::vector<std::size_t>> frontiers(parts);
     std::vector<std::size_t> const order = drawing_order(nodes, seed, [](std::size_t) { return true; });
-    for (std::size_t part = 0; part != min_of(parts, nodes); ++part)
+    for (std::size_t part = 0; part != util::min_of(parts, nodes); ++part)
         part_of[order[part]] = part, sizes[part] = 1, frontiers[part].push_back(order[part]);
     for (bool grew = true; grew;) {
         grew = false;
@@ -1905,7 +1942,7 @@ std::vector<std::size_t> partition_nodes(handle_ const& index, std::size_t parts
  *  target @c p in storage order, and empties @p source; false once @p outcome records why not,
  *  having moved nothing. Keeping no edges, a part loses none to rebase. */
 template <typename handle_, typename score_>
-bool cut_into(handle_& source, std::span<handle_* const> targets, u64_t seed, score_ const& score,
+bool cut_into(handle_& source, std::span<handle_* const> targets, util::u64_t seed, score_ const& score,
               usearch_outcome_t* outcome) {
     std::vector<std::size_t> const part_of = partition_nodes(source, targets.size(), seed, score);
     std::vector<std::size_t> sizes(targets.size(), 0);
@@ -2026,7 +2063,7 @@ void finish_plan(arguments_* arguments) {
         if (reject_if(arguments->index != plan->opened_on, usearch_status_invalid_argument_k,
                       "The plan was opened on another index", outcome))
             return;
-    report_round(arguments->report, plan->entries, plan->swept, min_of(plan->moved, plan->swept));
+    report_round(arguments->report, plan->entries, plan->swept, util::min_of(plan->moved, plan->swept));
 }
 
 #pragma endregion Plans
@@ -2043,7 +2080,7 @@ inline std::optional<std::size_t> blob_bytes(std::size_t prefix, std::size_t cou
 /** Whether @p blob is long enough for @p count records of @p each bytes past @p header,
  *  reporting through @p outcome which way it fell short. Every modality's @c parse_prefix
  *  ends in this check; only the extent it computes differs. */
-inline bool fits_blob(bytes_view_t blob, std::size_t header, std::size_t count, std::size_t each,
+inline bool fits_blob(util::bytes_view_t blob, std::size_t header, std::size_t count, std::size_t each,
                       usearch_outcome_t* outcome) {
     std::optional<std::size_t> const needed = blob_bytes(header, count, each);
     if (reject_if(!needed, usearch_status_overflow_k, "The checkpoint claims more than can be addressed", outcome))
@@ -2053,18 +2090,18 @@ inline bool fits_blob(bytes_view_t blob, std::size_t header, std::size_t count, 
 }
 
 inline bool read_file(usearch_bytes_view_t path, std::vector<std::byte>& blob, usearch_outcome_t* outcome) {
-    auto [file, status] = seekable_file_t::open(as_text(path), file_access_t::read_only_k);
-    if (failed(status)) {
+    auto [file, status] = util::seekable_file_t::open(as_text(path), util::file_access_t::read_only_k);
+    if (util::failed(status)) {
         propagate_error(usearch_status_io_k, outcome, "The checkpoint could not be opened for reading");
         return false;
     }
     auto const [bytes, length_status] = file.length();
-    if (failed(length_status)) {
+    if (util::failed(length_status)) {
         propagate_error(usearch_status_io_k, outcome, "The checkpoint could not be read");
         return false;
     }
     blob.resize(bytes);
-    if (failed(file.read_at(0, bytes_span_t {blob}))) {
+    if (util::failed(file.read_at(0, util::bytes_span_t {blob}))) {
         propagate_error(usearch_status_io_k, outcome, "The checkpoint could not be read");
         return false;
     }
@@ -2072,23 +2109,23 @@ inline bool read_file(usearch_bytes_view_t path, std::vector<std::byte>& blob, u
 }
 
 /** Maps the checkpoint at @p path for a view to serve from; empty once the outcome records why not. */
-inline mapped_file_t map_file(usearch_bytes_view_t path, usearch_outcome_t* outcome) {
-    auto [mapping, status] = mapped_file_t::read(as_text(path));
+inline util::mapped_file_t map_file(usearch_bytes_view_t path, usearch_outcome_t* outcome) {
+    auto [mapping, status] = util::mapped_file_t::read(as_text(path));
     // An empty file maps nothing, which is the short checkpoint every parser would refuse.
-    if (status == status_t::malformed_k)
+    if (status == util::status_code_t::malformed_k)
         propagate_error(usearch_status_malformed_k, outcome, "The checkpoint ends early");
-    else if (failed(status))
+    else if (util::failed(status))
         propagate_error(usearch_status_io_k, outcome, "The checkpoint could not be opened for reading");
     return std::move(mapping);
 }
 
-inline bool write_file(usearch_bytes_view_t path, bytes_view_t blob, usearch_outcome_t* outcome) {
-    auto [file, status] = seekable_file_t::open(as_text(path), file_access_t::truncate_read_write_k);
-    if (failed(status)) {
+inline bool write_file(usearch_bytes_view_t path, util::bytes_view_t blob, usearch_outcome_t* outcome) {
+    auto [file, status] = util::seekable_file_t::open(as_text(path), util::file_access_t::truncate_read_write_k);
+    if (util::failed(status)) {
         propagate_error(usearch_status_io_k, outcome, "The checkpoint could not be opened for writing");
         return false;
     }
-    if (failed(file.write_at(0, blob)) || failed(file.close())) {
+    if (util::failed(file.write_at(0, blob)) || util::failed(file.close())) {
         propagate_error(usearch_status_io_k, outcome, "The checkpoint could not be written");
         return false;
     }
@@ -2102,7 +2139,7 @@ inline usearch_bytes_view_t as_path(std::string const& text) noexcept {
 
 /** Whether @p blob opens as a JSON object, which only a manifest does; a stand-in monolith opens
  *  with a connectivity word. */
-inline bool is_manifest(bytes_view_t blob) noexcept {
+inline bool is_manifest(util::bytes_view_t blob) noexcept {
     return blob.size() > 1 && static_cast<char>(blob[0]) == '{' && static_cast<char>(blob[1]) == '"';
 }
 
@@ -2115,7 +2152,7 @@ inline std::string directory_of(std::string_view path) {
 /** The part paths a manifest at @p manifest_path names, each resolved beside it, in file order;
  *  empty once @p outcome records that it names none. A buffer manifest's entries carry offsets
  *  rather than paths and are passed over, as the engine passes over them. */
-inline std::vector<std::string> manifest_parts(bytes_view_t manifest, usearch_bytes_view_t manifest_path,
+inline std::vector<std::string> manifest_parts(util::bytes_view_t manifest, usearch_bytes_view_t manifest_path,
                                                usearch_outcome_t* outcome) {
     std::string_view const json {reinterpret_cast<char const*>(manifest.data()), manifest.size()};
     std::string const directory = directory_of(as_text(manifest_path));
@@ -2144,7 +2181,7 @@ inline bool read_first_part(std::vector<std::byte>& blob, usearch_bytes_view_t p
  *  part a manifest names, each opened on its own and appended in file order into the first; null
  *  once @p outcome records why not. */
 template <typename handle_, typename open_>
-handle_* open_parts(bytes_view_t blob, usearch_bytes_view_t path, open_ const& open, usearch_outcome_t* outcome) {
+handle_* open_parts(util::bytes_view_t blob, usearch_bytes_view_t path, open_ const& open, usearch_outcome_t* outcome) {
     std::string_view const magic {"SAFEGRPH"};
     if (reject_if(blob.size() >= magic.size() && std::memcmp(blob.data(), magic.data(), magic.size()) == 0,
                   usearch_status_unsupported_k, "The stand-in reads its own image, not a SafeGraphs monolith", outcome))
@@ -2215,14 +2252,14 @@ void save_parts(handle_ const& index, usearch_bytes_view_t path, usearch_progres
     }
     std::string const stem = stem_of(as_text(path));
     std::size_t const total = index.entries.size();
-    std::size_t const per_shard = index.shard_capacity ? index.shard_capacity : divide_round_up(total, shards);
+    std::size_t const per_shard = index.shard_capacity ? index.shard_capacity : util::divide_round_up(total, shards);
     std::string manifest = "{\"files\":[";
     for (std::size_t shard = 0; shard != shards; ++shard) {
         if (!keep_going(progress, shard, shards))
             return propagate_error(usearch_status_cancelled_k, outcome, "The caller's handler stopped the checkpoint");
         handle_ part;
         part.options = index.options;
-        std::size_t const begin = min_of(shard * per_shard, total), end = min_of(begin + per_shard, total);
+        std::size_t const begin = util::min_of(shard * per_shard, total), end = util::min_of(begin + per_shard, total);
         part.entries.assign(index.entries.begin() + static_cast<std::ptrdiff_t>(begin),
                             index.entries.begin() + static_cast<std::ptrdiff_t>(end));
         if (!serialize(part, blob, outcome)) return;
@@ -2232,7 +2269,8 @@ void save_parts(handle_ const& index, usearch_bytes_view_t path, usearch_progres
                        std::string_view(name).substr(directory_of(name).size()), blob.size(), end - begin);
     }
     manifest += "]}";
-    if (!write_file(path, bytes_view_t {reinterpret_cast<std::byte const*>(manifest.data()), manifest.size()}, outcome))
+    if (!write_file(path, util::bytes_view_t {reinterpret_cast<std::byte const*>(manifest.data()), manifest.size()},
+                    outcome))
         return;
     keep_going(progress, shards, shards);
 }
@@ -2259,7 +2297,7 @@ void save_buffer(arguments_* arguments, serialize_ const& serialize) {
     std::byte* const monolith = carve<std::byte>(*arena, blob.size(), outcome);
     if (!monolith) return;
     std::memcpy(monolith, blob.data(), blob.size());
-    *arguments->monolith = as_bytes(bytes_view_t {monolith, blob.size()});
+    *arguments->monolith = as_bytes(util::bytes_view_t {monolith, blob.size()});
     keep_going(arguments->progress, 1, 1);
 }
 
@@ -2286,7 +2324,7 @@ void load_ram_buffer(arguments_* arguments, open_ const& open) {
 /** The body of every modality's @c metadata_read_buffer: the prefix @p parse reads from the call's
  *  buffer, written out by @p describe, which answers false for a metric this build lacks. */
 template <auto verb_, typename arguments_, typename prefix_, typename metadata_>
-void metadata_read_buffer(arguments_* arguments, bool (*parse)(prefix_&, bytes_view_t, usearch_outcome_t*),
+void metadata_read_buffer(arguments_* arguments, bool (*parse)(prefix_&, util::bytes_view_t, usearch_outcome_t*),
                           bool (*describe)(metadata_&, prefix_ const&)) {
     if (through_executor<verb_>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);

@@ -169,7 +169,7 @@ inline native_file_t open_native_file(char const* path, file_access_t access, fi
 
 /** Makes every write so far durable, as far as the volume reports it so. */
 inline status_t flush_native_file(native_file_t file) noexcept {
-    return ::FlushFileBuffers(file) ? status_t::success_k : status_t::io_k;
+    return ::FlushFileBuffers(file) ? status_code_t::success_k : status_code_t::io_k;
 }
 
 #elif USEARCH_OS_APPLE_
@@ -186,8 +186,8 @@ inline native_file_t open_native_file(char const* path, file_access_t access, fi
 /** Makes every write so far durable past the drive's cache, or as far as @c fsync reaches where
  *  the filesystem has no such barrier. */
 inline status_t flush_native_file(native_file_t file) noexcept {
-    if (::fcntl(file, F_FULLFSYNC) == 0) return status_t::success_k;
-    return errno == ENOTSUP && ::fsync(file) == 0 ? status_t::success_k : status_t::io_k;
+    if (::fcntl(file, F_FULLFSYNC) == 0) return status_code_t::success_k;
+    return errno == ENOTSUP && ::fsync(file) == 0 ? status_code_t::success_k : status_code_t::io_k;
 }
 
 #elif USEARCH_OS_LINUX_ || USEARCH_OS_FREEBSD_
@@ -200,7 +200,7 @@ inline native_file_t open_native_file(char const* path, file_access_t access, fi
 
 /** Makes every write so far durable, without waiting on metadata a read does not need. */
 inline status_t flush_native_file(native_file_t file) noexcept {
-    return ::fdatasync(file) == 0 ? status_t::success_k : status_t::io_k;
+    return ::fdatasync(file) == 0 ? status_code_t::success_k : status_code_t::io_k;
 }
 
 #else
@@ -213,7 +213,7 @@ inline native_file_t open_native_file(char const* path, file_access_t access, fi
 
 /** Makes every write so far durable, without waiting on metadata a read does not need. */
 inline status_t flush_native_file(native_file_t file) noexcept {
-    return ::fdatasync(file) == 0 ? status_t::success_k : status_t::io_k;
+    return ::fdatasync(file) == 0 ? status_code_t::success_k : status_code_t::io_k;
 }
 
 #endif // USEARCH_OS_WINDOWS_
@@ -251,7 +251,7 @@ inline std::size_t direct_write_block_bytes_(int) noexcept { return 0; }
 
 /** Closes @p file, surfacing a failure the kernel reports. */
 inline status_t close_native_file(native_file_t file) noexcept {
-    return ::CloseHandle(file) ? status_t::success_k : status_t::io_k;
+    return ::CloseHandle(file) ? status_code_t::success_k : status_code_t::io_k;
 }
 
 /** Reads @p destination at @p offset of @p file, waiting on @p event, answering the bytes moved,
@@ -308,8 +308,8 @@ inline i64_t write_native_file(native_file_t file, native_file_event_t const& ev
 /** Bytes @p file spans. */
 inline expected<u64_t> native_file_capacity(native_file_t file) noexcept {
     LARGE_INTEGER size {};
-    if (!::GetFileSizeEx(file, &size)) return {0, status_t::io_k};
-    return {static_cast<u64_t>(size.QuadPart), status_t::success_k};
+    if (!::GetFileSizeEx(file, &size)) return {0, status_code_t::io_k};
+    return {static_cast<u64_t>(size.QuadPart), status_code_t::success_k};
 }
 
 /** The process's standard input, which a pipe or a console reads in order, ignoring offsets. */
@@ -328,7 +328,7 @@ inline bool names_regular_file_or_nothing_(char const* path) noexcept {
 
 /** Closes @p file, surfacing a failure the kernel reports. */
 inline status_t close_native_file(native_file_t file) noexcept {
-    return ::close(file) == 0 ? status_t::success_k : status_t::io_k;
+    return ::close(file) == 0 ? status_code_t::success_k : status_code_t::io_k;
 }
 
 /** Reads @p destination at @p offset of @p file, answering the bytes moved, fewer only where the
@@ -370,9 +370,9 @@ inline i64_t write_native_file(native_file_t file, native_file_event_t const&, b
 /** Bytes @p file spans: a regular file's length, or a block device's where the kernel says. */
 inline expected<u64_t> native_file_capacity(native_file_t file) noexcept {
     struct stat description;
-    if (::fstat(file, &description) != 0) return {0, status_t::io_k};
-    if (S_ISBLK(description.st_mode)) return {block_device_bytes_(file), status_t::success_k};
-    return {static_cast<u64_t>(description.st_size), status_t::success_k};
+    if (::fstat(file, &description) != 0) return {0, status_code_t::io_k};
+    if (S_ISBLK(description.st_mode)) return {block_device_bytes_(file), status_code_t::success_k};
+    return {static_cast<u64_t>(description.st_size), status_code_t::success_k};
 }
 
 /** The process's standard input, which a pipe or a terminal reads in order, ignoring offsets. */
@@ -518,7 +518,7 @@ inline expected<file_address_t> parse_file_address(std::string_view path) noexce
         std::size_t const plus = extent.find('+');
         if ((plus != std::string_view::npos && !parse_byte_count_(extent.substr(plus + 1), parsed.byte_limit)) ||
             !parse_byte_count_(extent.substr(0, plus), parsed.byte_base))
-            return {parsed, status_t::invalid_argument_k};
+            return {parsed, status_code_t::invalid_argument_k};
         location = location.substr(0, at);
     }
     std::string_view const scheme = "spdk://";
@@ -528,12 +528,12 @@ inline expected<file_address_t> parse_file_address(std::string_view path) noexce
         parsed.namespace_id = 1;
         if (slash != std::string_view::npos) {
             if (!parse_address_key_(location.substr(slash + 1), "", parsed.namespace_id))
-                return {parsed, status_t::invalid_argument_k};
+                return {parsed, status_code_t::invalid_argument_k};
             location = location.substr(0, slash);
         }
     }
     parsed.location = location;
-    return {parsed, location.empty() ? status_t::invalid_argument_k : status_t::success_k};
+    return {parsed, location.empty() ? status_code_t::invalid_argument_k : status_code_t::success_k};
 }
 
 /** An owned file descriptor with positional verbs only - no cursor, so any thread reads or
@@ -576,7 +576,7 @@ struct seekable_file_t {
         chars_allocator_t chars {allocator};
         std::size_t const length = parsed.location.size();
         char* terminated = chars.allocate(length + 1);
-        if (!terminated) return {seekable_file_t {}, status_t::bad_alloc_k};
+        if (!terminated) return {seekable_file_t {}, status_code_t::out_of_memory_k};
         std::memcpy(terminated, parsed.location.data(), length);
         terminated[length] = '\0';
         seekable_file_t file;
@@ -584,7 +584,7 @@ struct seekable_file_t {
         file.byte_base_ = parsed.byte_base;
         file.byte_limit_ = parsed.byte_limit;
         chars.deallocate(terminated, length + 1);
-        status_t const opened = file ? status_t::success_k : status_t::io_k;
+        status_t const opened = file ? status_code_t::success_k : status_code_t::io_k;
         return {std::move(file), opened};
     }
 
@@ -593,7 +593,7 @@ struct seekable_file_t {
     static expected<seekable_file_t> open_terminated(char const* path, file_access_t access) noexcept {
         seekable_file_t file;
         file.descriptor_ = open_(path, access, 0);
-        status_t const opened = file ? status_t::success_k : status_t::io_k;
+        status_t const opened = file ? status_code_t::success_k : status_code_t::io_k;
         return {std::move(file), opened};
     }
 
@@ -626,7 +626,7 @@ struct seekable_file_t {
 
     /** Closes, surfacing the failure the destructor would swallow. */
     status_t close() noexcept {
-        if (descriptor_ == invalid_native_file_k) return status_t::success_k;
+        if (descriptor_ == invalid_native_file_k) return status_code_t::success_k;
         return close_native_file(std::exchange(descriptor_, invalid_native_file_k));
     }
 
@@ -665,39 +665,41 @@ struct seekable_file_t {
 
 inline status_t seekable_file_t::write_at(std::size_t offset, bytes_view_t source) noexcept {
     i64_t const moved = write_native_file(descriptor_, native_file_event_t {}, source, byte_base_ + offset);
-    return moved == static_cast<i64_t>(source.size()) ? status_t::success_k : status_t::io_k;
+    return moved == static_cast<i64_t>(source.size()) ? status_code_t::success_k : status_code_t::io_k;
 }
 
 inline status_t seekable_file_t::read_at(std::size_t offset, bytes_span_t destination) const noexcept {
     i64_t const moved = read_native_file(descriptor_, native_file_event_t {}, destination, byte_base_ + offset);
-    return moved == static_cast<i64_t>(destination.size()) ? status_t::success_k : status_t::io_k;
+    return moved == static_cast<i64_t>(destination.size()) ? status_code_t::success_k : status_code_t::io_k;
 }
 
 inline expected<std::size_t> seekable_file_t::length() const noexcept {
     auto const [bytes, capacity_status] = native_file_capacity(descriptor_);
     if (failed(capacity_status)) return {0, capacity_status};
-    return {static_cast<std::size_t>(bytes - min_of(bytes, byte_base_)), status_t::success_k};
+    return {static_cast<std::size_t>(bytes - min_of(bytes, byte_base_)), status_code_t::success_k};
 }
 
 #if USEARCH_OS_WINDOWS_
 
 inline status_t seekable_file_t::truncate(std::size_t bytes) noexcept {
-    if (byte_limit_ && bytes > byte_limit_) return status_t::overflow_k;
+    if (byte_limit_ && bytes > byte_limit_) return status_code_t::overflow_k;
     LARGE_INTEGER distance;
     distance.QuadPart = static_cast<LONGLONG>(byte_base_ + bytes);
-    if (!::SetFilePointerEx(descriptor_, distance, nullptr, FILE_BEGIN)) return status_t::io_k;
-    return ::SetEndOfFile(descriptor_) ? status_t::success_k : status_t::io_k;
+    if (!::SetFilePointerEx(descriptor_, distance, nullptr, FILE_BEGIN)) return status_code_t::io_k;
+    return ::SetEndOfFile(descriptor_) ? status_code_t::success_k : status_code_t::io_k;
 }
 
 #else
 
 inline status_t seekable_file_t::truncate(std::size_t bytes) noexcept {
-    if (byte_limit_ && bytes > byte_limit_) return status_t::overflow_k;
+    if (byte_limit_ && bytes > byte_limit_) return status_code_t::overflow_k;
     struct stat description;
-    if (::fstat(descriptor_, &description) != 0) return status_t::io_k;
+    if (::fstat(descriptor_, &description) != 0) return status_code_t::io_k;
     if (S_ISBLK(description.st_mode))
-        return byte_base_ + bytes <= block_device_bytes_(descriptor_) ? status_t::success_k : status_t::overflow_k;
-    return ::ftruncate(descriptor_, static_cast<off_t>(byte_base_ + bytes)) == 0 ? status_t::success_k : status_t::io_k;
+        return byte_base_ + bytes <= block_device_bytes_(descriptor_) ? status_code_t::success_k
+                                                                      : status_code_t::overflow_k;
+    return ::ftruncate(descriptor_, static_cast<off_t>(byte_base_ + bytes)) == 0 ? status_code_t::success_k
+                                                                                 : status_code_t::io_k;
 }
 
 #endif // USEARCH_OS_WINDOWS_
@@ -795,9 +797,9 @@ struct file_span_t {
  *  - @c uninitialized_k A non-empty @p destination names no file.
  */
 inline status_t copy_bytes(file_span_t destination, bytes_view_t source) noexcept {
-    if (destination.size() != source.size()) return status_t::config_mismatch_k;
-    if (source.empty()) return status_t::success_k;
-    if (!destination.file) return status_t::uninitialized_k;
+    if (destination.size() != source.size()) return status_code_t::config_mismatch_k;
+    if (source.empty()) return status_code_t::success_k;
+    if (!destination.file) return status_code_t::uninitialized_k;
     return destination.file->write_at(destination.begin, source);
 }
 
@@ -810,9 +812,9 @@ inline status_t copy_bytes(file_span_t destination, bytes_view_t source) noexcep
  *  - @c io_k The read reaches the end of the file first.
  */
 inline status_t copy_bytes(bytes_span_t destination, file_view_t source) noexcept {
-    if (destination.size() != source.size()) return status_t::malformed_k;
-    if (destination.empty()) return status_t::success_k;
-    if (!source.file) return status_t::uninitialized_k;
+    if (destination.size() != source.size()) return status_code_t::malformed_k;
+    if (destination.empty()) return status_code_t::success_k;
+    if (!source.file) return status_code_t::uninitialized_k;
     return source.file->read_at(source.begin, destination);
 }
 
@@ -932,44 +934,44 @@ inline expected<mapped_file_t> mapped_file_t::read(std::string_view path) noexce
     if (failed(open_status)) return {std::move(mapping), open_status};
     auto const [bytes, length_status] = file.length();
     if (failed(length_status)) return {std::move(mapping), length_status};
-    if (!bytes) return {std::move(mapping), status_t::malformed_k};
+    if (!bytes) return {std::move(mapping), status_code_t::malformed_k};
     u64_t const byte_base = file.byte_base();
     mapping.file_handle_ = file.release();
     mapping.mapping_handle_ = ::CreateFileMappingA(mapping.file_handle_, nullptr, PAGE_READONLY, 0, 0, nullptr);
-    if (!mapping.mapping_handle_) return {std::move(mapping), status_t::io_k};
+    if (!mapping.mapping_handle_) return {std::move(mapping), status_code_t::io_k};
     void* base = ::MapViewOfFile(mapping.mapping_handle_, FILE_MAP_READ, static_cast<DWORD>(byte_base >> 32),
                                  static_cast<DWORD>(byte_base), bytes);
-    if (!base) return {std::move(mapping), status_t::io_k};
+    if (!base) return {std::move(mapping), status_code_t::io_k};
     mapping.data_ = static_cast<byte_t*>(base);
     mapping.bytes_ = bytes;
-    return {std::move(mapping), status_t::success_k};
+    return {std::move(mapping), status_code_t::success_k};
 }
 
 inline expected<mapped_file_t> mapped_file_t::write(std::string_view path, std::size_t bytes) noexcept {
     mapped_file_t mapping;
-    if (!bytes) return {std::move(mapping), status_t::config_mismatch_k};
+    if (!bytes) return {std::move(mapping), status_code_t::config_mismatch_k};
     auto [file, status] = seekable_file_t::open(path, file_access_t::truncate_read_write_k);
     if (failed(status)) return {std::move(mapping), status};
     if (status_t const sized = file.truncate(bytes); failed(sized)) return {std::move(mapping), sized};
     u64_t const byte_base = file.byte_base();
     mapping.file_handle_ = file.release();
     mapping.mapping_handle_ = ::CreateFileMappingA(mapping.file_handle_, nullptr, PAGE_READWRITE, 0, 0, nullptr);
-    if (!mapping.mapping_handle_) return {std::move(mapping), status_t::io_k};
+    if (!mapping.mapping_handle_) return {std::move(mapping), status_code_t::io_k};
     void* base = ::MapViewOfFile(mapping.mapping_handle_, FILE_MAP_WRITE, static_cast<DWORD>(byte_base >> 32),
                                  static_cast<DWORD>(byte_base), bytes);
-    if (!base) return {std::move(mapping), status_t::io_k};
+    if (!base) return {std::move(mapping), status_code_t::io_k};
     mapping.data_ = static_cast<byte_t*>(base);
     mapping.bytes_ = bytes;
     mapping.access_ = file_access_t::truncate_read_write_k;
-    return {std::move(mapping), status_t::success_k};
+    return {std::move(mapping), status_code_t::success_k};
 }
 
 inline status_t mapped_file_t::sync() noexcept {
-    if (!data_) return status_t::success_k;
-    status_t flushed = status_t::success_k;
+    if (!data_) return status_code_t::success_k;
+    status_t flushed = status_code_t::success_k;
     // The view's flush hands its pages to the file system; the handle's flush makes them durable.
     if (access_ != file_access_t::read_only_k)
-        flushed = ::FlushViewOfFile(data_, bytes_) ? flush_native_file(file_handle_) : status_t::io_k;
+        flushed = ::FlushViewOfFile(data_, bytes_) ? flush_native_file(file_handle_) : status_code_t::io_k;
     unmap_();
     return flushed;
 }
@@ -1004,37 +1006,37 @@ inline expected<mapped_file_t> mapped_file_t::read(std::string_view path) noexce
     if (failed(open_status)) return {std::move(mapping), open_status};
     auto const [bytes, length_status] = file.length();
     if (failed(length_status)) return {std::move(mapping), length_status};
-    if (!bytes) return {std::move(mapping), status_t::malformed_k};
+    if (!bytes) return {std::move(mapping), status_code_t::malformed_k};
     byte_t* base = std::allocator<byte_t> {}.allocate(bytes);
-    if (!base) return {std::move(mapping), status_t::bad_alloc_k};
+    if (!base) return {std::move(mapping), status_code_t::out_of_memory_k};
     if (status_t const filled = file.read_at(0, bytes_span_t {base, bytes}); failed(filled)) {
         std::allocator<byte_t> {}.deallocate(base, bytes);
         return {std::move(mapping), filled};
     }
     mapping.data_ = base;
     mapping.bytes_ = bytes;
-    return {std::move(mapping), status_t::success_k};
+    return {std::move(mapping), status_code_t::success_k};
 }
 
 inline expected<mapped_file_t> mapped_file_t::write(std::string_view path, std::size_t bytes) noexcept {
     mapped_file_t mapping;
-    if (!bytes) return {std::move(mapping), status_t::config_mismatch_k};
+    if (!bytes) return {std::move(mapping), status_code_t::config_mismatch_k};
     auto [file, status] = seekable_file_t::open(path, file_access_t::truncate_read_write_k);
     if (failed(status)) return {std::move(mapping), status};
     if (status_t const sized = file.truncate(bytes); failed(sized)) return {std::move(mapping), sized};
     byte_t* base = std::allocator<byte_t> {}.allocate(bytes);
-    if (!base) return {std::move(mapping), status_t::bad_alloc_k};
+    if (!base) return {std::move(mapping), status_code_t::out_of_memory_k};
     std::memset(base, 0, bytes);
     mapping.file_ = std::move(file);
     mapping.data_ = base;
     mapping.bytes_ = bytes;
     mapping.access_ = file_access_t::truncate_read_write_k;
-    return {std::move(mapping), status_t::success_k};
+    return {std::move(mapping), status_code_t::success_k};
 }
 
 inline status_t mapped_file_t::sync() noexcept {
-    if (!data_) return status_t::success_k;
-    status_t flushed = status_t::success_k;
+    if (!data_) return status_code_t::success_k;
+    status_t flushed = status_code_t::success_k;
     if (access_ != file_access_t::read_only_k) flushed = file_.write_at(0, bytes_view_t {data_, bytes_});
     if (access_ != file_access_t::read_only_k && succeeded(flushed)) flushed = file_.flush();
     unmap_();
@@ -1059,19 +1061,19 @@ inline expected<mapped_file_t> mapped_file_t::read(std::string_view path) noexce
     if (failed(open_status)) return {std::move(mapping), open_status};
     auto const [bytes, length_status] = file.length();
     if (failed(length_status)) return {std::move(mapping), length_status};
-    if (!bytes) return {std::move(mapping), status_t::malformed_k};
+    if (!bytes) return {std::move(mapping), status_code_t::malformed_k};
     off_t const byte_base = static_cast<off_t>(file.byte_base());
     mapping.descriptor_ = file.release();
     void* base = ::mmap(nullptr, bytes, PROT_READ, MAP_SHARED, mapping.descriptor_, byte_base);
-    if (base == MAP_FAILED) return {std::move(mapping), status_t::io_k};
+    if (base == MAP_FAILED) return {std::move(mapping), status_code_t::io_k};
     mapping.data_ = static_cast<byte_t*>(base);
     mapping.bytes_ = bytes;
-    return {std::move(mapping), status_t::success_k};
+    return {std::move(mapping), status_code_t::success_k};
 }
 
 inline expected<mapped_file_t> mapped_file_t::write(std::string_view path, std::size_t bytes) noexcept {
     mapped_file_t mapping;
-    if (!bytes) return {std::move(mapping), status_t::config_mismatch_k};
+    if (!bytes) return {std::move(mapping), status_code_t::config_mismatch_k};
     auto [file, status] = seekable_file_t::open(path, file_access_t::truncate_read_write_k);
     if (failed(status)) return {std::move(mapping), status};
     if (status_t const sized = file.truncate(bytes); failed(sized)) return {std::move(mapping), sized};
@@ -1085,28 +1087,28 @@ inline expected<mapped_file_t> mapped_file_t::write(std::string_view path, std::
                                                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)
                                        : ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, mapping.descriptor_,
                                                 static_cast<off_t>(mapping.byte_base_));
-    if (base == MAP_FAILED) return {std::move(mapping), status_t::io_k};
+    if (base == MAP_FAILED) return {std::move(mapping), status_code_t::io_k};
     mapping.data_ = static_cast<byte_t*>(base);
     mapping.bytes_ = bytes;
     mapping.access_ = file_access_t::truncate_read_write_k;
-    return {std::move(mapping), status_t::success_k};
+    return {std::move(mapping), status_code_t::success_k};
 }
 
 inline status_t mapped_file_t::write_staged_() noexcept {
     // The tail past the part's last byte up to its block boundary goes out as zeros.
     i64_t const moved = write_native_file(descriptor_, native_file_event_t {}, bytes_view_t {data_, staged_bytes_},
                                           byte_base_);
-    if (moved != static_cast<i64_t>(staged_bytes_)) return status_t::io_k;
+    if (moved != static_cast<i64_t>(staged_bytes_)) return status_code_t::io_k;
     return flush_native_file(descriptor_);
 }
 
 inline status_t mapped_file_t::sync() noexcept {
-    if (!data_) return status_t::success_k;
-    status_t flushed = status_t::success_k;
+    if (!data_) return status_code_t::success_k;
+    status_t flushed = status_code_t::success_k;
     // `msync` hands the pages to the file system; Darwin's stay in the drive's cache until flushed.
     if (access_ != file_access_t::read_only_k && staged_bytes_) flushed = write_staged_();
     else if (access_ != file_access_t::read_only_k)
-        flushed = ::msync(data_, bytes_, MS_SYNC) == 0 ? flush_native_file(descriptor_) : status_t::io_k;
+        flushed = ::msync(data_, bytes_, MS_SYNC) == 0 ? flush_native_file(descriptor_) : status_code_t::io_k;
     unmap_();
     return flushed;
 }
@@ -1166,7 +1168,7 @@ inline status_t copy_entries(column_source_t const& source, std::size_t first, s
                              std::size_t entry_bytes, bytes_span_t destination) noexcept {
     bytes_view_t const entries = flat_rows(source.mapped, first, count, entry_bytes);
     if (entries.size() != count * entry_bytes || destination.size() != entries.size())
-        return status_t::config_mismatch_k;
+        return status_code_t::config_mismatch_k;
     std::size_t const page = fu::ram_page_size();
     std::size_t const offset = source.direct.begin + first * entry_bytes;
     std::size_t const leading = round_up_to_multiple(offset, page) - offset;
@@ -1179,7 +1181,7 @@ inline status_t copy_entries(column_source_t const& source, std::size_t first, s
     std::memcpy(destination.data(), entries.data(), leading);
     std::memcpy(destination.data() + leading + paged, entries.data() + leading + paged,
                 entries.size() - leading - paged);
-    return status_t::success_k;
+    return status_code_t::success_k;
 }
 
 #pragma endregion Slices and Mappings
@@ -1190,8 +1192,8 @@ inline status_t copy_entries(column_source_t const& source, std::size_t first, s
 
 /** Moves @p source over @p target in one step, replacing it, and returns once it is on disk. */
 inline status_t rename_file(char const* source, char const* target) noexcept {
-    return ::MoveFileExA(source, target, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) ? status_t::success_k
-                                                                                             : status_t::io_k;
+    return ::MoveFileExA(source, target, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) ? status_code_t::success_k
+                                                                                             : status_code_t::io_k;
 }
 
 /** Makes the entries of the directory at @p path durable, as a rename into it needs. */
@@ -1200,7 +1202,7 @@ inline status_t sync_directory(char const* path) noexcept {
     native_file_t const directory = ::CreateFileA(path, GENERIC_WRITE,
                                                   FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
                                                   OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
-    if (directory == invalid_native_file_k) return status_t::io_k;
+    if (directory == invalid_native_file_k) return status_code_t::io_k;
     status_t const flushed = flush_native_file(directory);
     status_t const closed = close_native_file(directory);
     return failed(flushed) ? flushed : closed;
@@ -1210,17 +1212,17 @@ inline status_t sync_directory(char const* path) noexcept {
 
 /** Moves @p source over @p target in one step, replacing it. */
 inline status_t rename_file(char const* source, char const* target) noexcept {
-    return std::rename(source, target) == 0 ? status_t::success_k : status_t::io_k;
+    return std::rename(source, target) == 0 ? status_code_t::success_k : status_code_t::io_k;
 }
 
 /** Makes the entries of the directory at @p path durable, as a rename into it needs. */
 inline status_t sync_directory(char const* path) noexcept {
     native_file_t const directory = ::open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (directory == invalid_native_file_k) return status_t::io_k;
+    if (directory == invalid_native_file_k) return status_code_t::io_k;
     // Darwin's `fsync` stops at the drive's cache; ext4 commits an entry only on a full `fsync`.
     status_t const flushed = USEARCH_OS_APPLE_         ? flush_native_file(directory)
-                             : ::fsync(directory) == 0 ? status_t::success_k
-                                                       : status_t::io_k;
+                             : ::fsync(directory) == 0 ? status_code_t::success_k
+                                                       : status_code_t::io_k;
     status_t const closed = close_native_file(directory);
     return failed(flushed) ? flushed : closed;
 }
@@ -1231,12 +1233,12 @@ inline status_t sync_directory(char const* path) noexcept {
  *  durable in @p directory, removing @p staged on any failure before the move. */
 inline status_t replace_file_durably_(char const* target, char const* staged, char const* directory,
                                       bytes_view_t bytes) noexcept {
-    if (!names_regular_file_or_nothing_(target)) return status_t::invalid_argument_k;
+    if (!names_regular_file_or_nothing_(target)) return status_code_t::invalid_argument_k;
     native_file_t const file = open_native_file(staged, file_access_t::truncate_read_write_k,
                                                 file_buffering_t::buffered_k);
-    if (file == invalid_native_file_k) return status_t::io_k;
+    if (file == invalid_native_file_k) return status_code_t::io_k;
     i64_t const written = write_native_file(file, native_file_event_t {}, bytes, 0);
-    status_t replaced = written == static_cast<i64_t>(bytes.size()) ? status_t::success_k : status_t::io_k;
+    status_t replaced = written == static_cast<i64_t>(bytes.size()) ? status_code_t::success_k : status_code_t::io_k;
     if (succeeded(replaced)) replaced = flush_native_file(file);
     status_t const closed = close_native_file(file);
     if (succeeded(replaced)) replaced = closed;
@@ -1260,14 +1262,14 @@ inline status_t replace_file_durably_(char const* target, char const* staged, ch
  *  @par Statuses:
  *  - @c invalid_argument_k @p path is empty, or names a directory, a device or anything but a
  *    regular file.
- *  - @c bad_alloc_k The names could not be terminated.
+ *  - @c out_of_memory_k The names could not be terminated.
  *  - @c io_k A write, a flush, the rename or the directory's flush failed.
  */
 template <typename allocator_type_ = std::allocator<byte_t>>
 status_t replace_file_durably(std::string_view path, bytes_view_t bytes, allocator_type_ allocator = {}) noexcept {
     constexpr std::string_view suffix = ".tmp";
     constexpr std::string_view separators = USEARCH_OS_WINDOWS_ ? "/\\" : "/";
-    if (path.empty()) return status_t::invalid_argument_k;
+    if (path.empty()) return status_code_t::invalid_argument_k;
     std::size_t const separator = path.find_last_of(separators);
     std::string_view const parent = separator == std::string_view::npos
                                         ? std::string_view {"."}
@@ -1277,7 +1279,7 @@ status_t replace_file_durably(std::string_view path, bytes_view_t bytes, allocat
     using chars_allocator_t = typename std::allocator_traits<allocator_type_>::template rebind_alloc<char>;
     chars_allocator_t chars {allocator};
     char* const target = chars.allocate(capacity);
-    if (!target) return status_t::bad_alloc_k;
+    if (!target) return status_code_t::out_of_memory_k;
     char* const staged = target + length + 1;
     char* const directory = staged + length + suffix.size() + 1;
     target[path.copy(target, length)] = '\0';

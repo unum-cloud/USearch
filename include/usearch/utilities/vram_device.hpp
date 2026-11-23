@@ -96,32 +96,33 @@ inline std::size_t list_gpu_devices(gpu_drivers_t const& drivers, std::span<gpu_
  *  run never growing past @p scratch_limit bytes per stream, zero for no ceiling.
  *
  *  @par Statuses:
- *  - @c device_error_k No device is named, or the build drives no executor of their vendor.
+ *  - @c device_k No device is named, or the build drives no executor of their vendor.
  *  - @c config_mismatch_k The @p devices span vendors.
  */
 inline expected<gpu_executor_t> spawn_gpu_executor(gpu_drivers_t& drivers, std::span<gpu_device_t const> devices,
                                                    std::size_t scratch_limit = 0) noexcept {
-    if (devices.empty()) return {{}, status_t::device_error_k};
+    if (devices.empty()) return {{}, status_code_t::device_k};
     growing_buffer<int> ordinals {global_allocator};
-    if (failed(ordinals.reserve_exactly(devices.size()))) return {{}, status_t::bad_alloc_k};
+    if (failed(ordinals.reserve_exactly(devices.size()))) return {{}, status_code_t::out_of_memory_k};
     for (gpu_device_t const& device : devices) {
-        if (device.vendor != devices[0].vendor) return {{}, status_t::config_mismatch_k};
+        if (device.vendor != devices[0].vendor) return {{}, status_code_t::config_mismatch_k};
         int const ordinal = static_cast<int>(device.vendor_ordinal);
         bool opened = false;
         for (int const earlier : ordinals) opened |= earlier == ordinal;
         if (!opened) ordinals.push_back_reserved(ordinal);
     }
-    expected<gpu_executor_t> result {{}, status_t::device_error_k};
+    gpu_executor_t executor;
+    status_t spawning = status_code_t::device_k;
     auto const spawn = [&]<typename executor_type_>(std::type_identity<executor_type_> vendor) noexcept {
         if (executor_type_::vendor_k != devices[0].vendor) return false;
         auto [spawned, status] = executor_type_::spawn(driver_of(drivers, vendor), to_span(ordinals), scratch_limit);
-        if (succeeded(status)) result.value.emplace<executor_type_>(std::move(spawned));
-        result.status = status;
+        if (succeeded(status)) executor.emplace<executor_type_>(std::move(spawned));
+        spawning = status;
         return true;
     };
     spawn(std::type_identity<cuda_executor_t> {}) || spawn(std::type_identity<hip_executor_t> {}) ||
         spawn(std::type_identity<metal_executor_t> {});
-    return result;
+    return {std::move(executor), spawning};
 }
 
 /** Device memory a C-layer call writes its outputs to, on the vendor and first stream of the
@@ -186,16 +187,16 @@ struct gpu_arena_t {
     }
 
     /**
-     *  Queues a copy of @p bytes of host memory at @p source to @p destination in the arena on its
-     *  executor's first stream; @p source must stay alive until @ref wait.
+     *  @brief Queues a copy of @p bytes of host memory at @p source to @p destination in the arena
+     *      on its executor's first stream; @p source must stay alive until @ref wait.
      *
      *  @par Statuses:
-     *  - @c device_error_k The arena has no device.
+     *  - @c device_k The arena has no device.
      */
     status_t upload(void* destination, void const* source, std::size_t bytes) noexcept {
         return std::visit(
-            [&]<typename arena_type_>(arena_type_& typed) noexcept {
-                if constexpr (std::is_same_v<arena_type_, std::monostate>) return status_t::device_error_k;
+            [&]<typename arena_type_>(arena_type_& typed) noexcept -> status_t {
+                if constexpr (std::is_same_v<arena_type_, std::monostate>) return status_code_t::device_k;
                 else return typed.upload(destination, source, bytes);
             },
             arena);
@@ -205,8 +206,8 @@ struct gpu_arena_t {
      *  device. */
     status_t wait() noexcept {
         return std::visit(
-            []<typename arena_type_>(arena_type_& typed) noexcept {
-                if constexpr (std::is_same_v<arena_type_, std::monostate>) return status_t::success_k;
+            []<typename arena_type_>(arena_type_& typed) noexcept -> status_t {
+                if constexpr (std::is_same_v<arena_type_, std::monostate>) return status_code_t::success_k;
                 else return typed.wait();
             },
             arena);

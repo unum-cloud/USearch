@@ -3,8 +3,8 @@
  *  @author Ash Vardanian
  *  @date October 14, 2026
  *  @brief The smoke test of the C++ wrappers: one dense round trip through every handle they own,
- *      then the sequence, shapes and geospatial cases the Python modality suite runs, against
- *      both the engine and the brute-force stub.
+ *      an awaited deferred call, then the sequence, shapes and geospatial cases the Python modality
+ *      suite runs, against both the engine and the brute-force stub.
  */
 #undef NDEBUG // ! A test's oracle must stay live in every build
 
@@ -17,9 +17,11 @@
 #include <cstring> // `std::memcmp`, `std::strcmp`, `std::strlen`
 
 #include <algorithm>       // `std::max`
+#include <array>           // `std::array` - the test loop's ring
 #include <atomic>          // `std::atomic` - the run's failed checks
 #include <charconv>        // `std::from_chars` - the settings
 #include <chrono>          // `std::chrono::steady_clock` - case timings and the wait limit
+#include <coroutine>       // `std::suspend_never` - the awaiting test task
 #include <functional>      // `std::invoke` - the cases
 #include <limits>          // `std::numeric_limits`
 #include <random>          // `std::mt19937`, `std::normal_distribution`, `std::uniform_int_distribution`
@@ -32,10 +34,7 @@
 
 #include <fmt/format.h>
 
-#include "usearch/dense_index.hpp"
-#include "usearch/geospatial_index.hpp"
-#include "usearch/sequence_index.hpp"
-#include "usearch/shapes_index.hpp"
+#include "usearch/usearch.hpp" // `us::dense_index_t`, `us::deferred`, `us::awaiter` and the other modalities
 
 #if USEARCH_OS_WINDOWS_
 #include <io.h> // `_write`
@@ -514,15 +513,19 @@ bool expect_true(bool is_satisfied, located_format<std::type_identity_t<args_typ
     return false;
 }
 
-/** Holds when @p reported succeeded; otherwise counts a failed check and prints @p context
- *  with its status. */
-template <typename outcome_type_>
-bool expect_success(outcome_type_ const& reported, located_format<> context) noexcept {
-    if (reported) return true;
+/** Holds when @p status succeeded; otherwise counts a failed check and prints @p context. */
+inline bool expect_success(us::status_t const& status, located_format<> context) noexcept {
+    if (!status.failed()) return true;
     record_failed_check(context.location);
     fmt::println(stderr, "    {}: {}", context.format.get(),
-                 reported.message ? reported.message : usearch_status_name(reported.status));
+                 status.note ? status.note : usearch_status_name(static_cast<usearch_status_t>(status.code)));
     return false;
+}
+
+/** Holds when @p result carries a value; otherwise counts a failed check and prints @p context. */
+template <typename value_type_>
+bool expect_success(us::expected<value_type_> const& result, located_format<> context) noexcept {
+    return expect_success(result.status, context);
 }
 
 /** The key spelling @p offset as big-endian bytes, so keys made from offsets order as they do. */
@@ -535,10 +538,6 @@ static usearch_key_t key_of(std::size_t offset) {
 
 static bool same_key(usearch_key_t const& first, usearch_key_t const& second) {
     return std::memcmp(first.bytes, second.bytes, sizeof(first.bytes)) == 0;
-}
-
-static usearch_bytes_view_t bytes_of(char const* text) {
-    return {reinterpret_cast<std::uint8_t const*>(text), std::strlen(text)};
 }
 
 /** A cancel at the first barrier a call reports, so a plan stops with work still ahead. */
@@ -554,6 +553,7 @@ static constexpr std::size_t fixture_capacity = 64;
 /** Random lowercase words of 8 to 16 bytes, as one byte tape. */
 struct sequence_fixture_t {
     using index_t = us::sequence_index_t;
+    using on_t = us::sequence_index_on<usearch_completion_blocking_k>;
     using refine_plan_t = us::sequence_refine_plan_t;
     using reshard_plan_t = us::sequence_reshard_plan_t;
     using raw_t = usearch_sequence_index_t;
@@ -574,18 +574,16 @@ struct sequence_fixture_t {
         }
     }
     us::tape_view<std::uint8_t> batch() const { return {bytes, std::span<std::uint64_t const>(offsets, entries + 1)}; }
-    static us::outcome<index_t> init() {
+    static us::expected<index_t> init() {
         return index_t::init_ram({.metric = usearch_sequence_metric_levenshtein_bytes_k});
     }
-    template <typename on_type_>
-    auto insert(on_type_ const& on, std::span<usearch_key_t const> keys) const {
-        return on.insert(keys, batch());
-    }
+    us::status_t insert(on_t const& on, std::span<usearch_key_t const> keys) const { return on.insert(keys, batch()); }
 };
 
 /** Random clouds of 4 to 12 points in the unit cube, as one point tape. */
 struct shapes_fixture_t {
     using index_t = us::shapes_index_t;
+    using on_t = us::shapes_index_on<usearch_completion_blocking_k>;
     using refine_plan_t = us::shapes_refine_plan_t;
     using reshard_plan_t = us::shapes_reshard_plan_t;
     using raw_t = usearch_shapes_index_t;
@@ -607,12 +605,11 @@ struct shapes_fixture_t {
         }
     }
     us::tape_view<float> batch() const { return {points, std::span<std::uint64_t const>(offsets, entries + 1)}; }
-    static us::outcome<index_t> init() {
+    static us::expected<index_t> init() {
         return index_t::init_ram({.metric = usearch_shapes_metric_chamfer_k, .quantization = usearch_scalar_f32_k});
     }
-    template <typename on_type_>
-    auto insert(on_type_ const& on, std::span<usearch_key_t const> keys) const {
-        return on.template insert<float>(keys, batch());
+    us::status_t insert(on_t const& on, std::span<usearch_key_t const> keys) const {
+        return on.insert<float>(keys, batch());
     }
 };
 
@@ -626,6 +623,7 @@ static usearch_geospatial_observation_t observation_at(double latitude, double l
 /** Random positions between the 60th parallels, every other field unrecorded. */
 struct geospatial_fixture_t {
     using index_t = us::geospatial_index_t;
+    using on_t = us::geospatial_index_on<usearch_completion_blocking_k>;
     using refine_plan_t = us::geospatial_refine_plan_t;
     using reshard_plan_t = us::geospatial_reshard_plan_t;
     using raw_t = usearch_geospatial_index_t;
@@ -641,9 +639,8 @@ struct geospatial_fixture_t {
         for (std::size_t entry = 0; entry != count; ++entry)
             observations[entry] = observation_at(latitude(generator), longitude(generator));
     }
-    static us::outcome<index_t> init() { return index_t::init_ram({}); }
-    template <typename on_type_>
-    auto insert(on_type_ const& on, std::span<usearch_key_t const> keys) const {
+    static us::expected<index_t> init() { return index_t::init_ram({}); }
+    us::status_t insert(on_t const& on, std::span<usearch_key_t const> keys) const {
         return on.insert(keys, std::span<usearch_geospatial_observation_t const>(observations, entries));
     }
 };
@@ -653,19 +650,20 @@ struct geospatial_fixture_t {
 template <typename fixture_type_>
 static typename fixture_type_::index_t built(us::executor_t const& executor, std::size_t count,
                                              std::size_t first_key = 0, std::uint32_t seed = 0) {
-    us::outcome<typename fixture_type_::index_t> index = fixture_type_::init();
-    expect_success(index, "creating a modality index");
-    if (count == 0) return std::move(index.value);
+    auto [index, index_status] = fixture_type_::init();
+    expect_success(index_status, "creating a modality index");
+    if (count == 0) return std::move(index);
     usearch_key_t keys[fixture_capacity] {};
     for (std::size_t entry = 0; entry != count; ++entry) keys[entry] = key_of(first_key + entry);
-    expect_success(fixture_type_(count, seed).insert(index.value.on(executor), {keys, count}),
-                   "inserting modality entries");
-    return std::move(index.value);
+    expect_success(fixture_type_(count, seed).insert(index.on(executor), {keys, count}), "inserting modality entries");
+    return std::move(index);
 }
 
 template <typename index_type_>
 static std::size_t size_of(index_type_ const& index) {
-    return index.on().describe().value.size;
+    auto [description, describe_status] = index.describe();
+    expect_success(describe_status, "describing an index");
+    return description.size;
 }
 
 #pragma endregion Modality Fixtures
@@ -673,12 +671,12 @@ static std::size_t size_of(index_type_ const& index) {
 /** A metric kind reads back from its own spelling, and a word no kind spells is refused. */
 template <typename metric_type_>
 static void check_metric_name(char const* (*name_of)(metric_type_),
-                              us::outcome<metric_type_> (*from_name)(usearch_bytes_view_t), metric_type_ metric) {
+                              us::expected<metric_type_> (*from_name)(usearch_bytes_view_t), metric_type_ metric) {
     char const* const spelled = name_of(metric);
     expect_true(spelled && std::strlen(spelled) != 0, "Every metric kind has a name");
-    us::outcome<metric_type_> const read = from_name(bytes_of(spelled));
-    expect_true(read && read.value == metric, "A metric kind reads back from its own name");
-    expect_true(from_name(bytes_of("no-such-metric")).status == usearch_status_invalid_argument_k,
+    auto [read, status] = from_name(us::bytes_view(spelled));
+    expect_true(!status.failed() && read == metric, "A metric kind reads back from its own name");
+    expect_true(from_name(us::bytes_view("no-such-metric")).status == us::status_code_t::invalid_argument_k,
                 "A word no metric kind spells must be refused");
 }
 
@@ -687,53 +685,60 @@ static void check_metric_name(char const* (*name_of)(metric_type_),
 template <typename index_type_>
 static void check_sample(index_type_ const& index, us::executor_t const& executor, us::arena_t& arena) {
     constexpr std::size_t wanted = 8;
-    auto const on = index.on(executor);
-    us::outcome<us::sample_t> const first = on.sample(wanted, arena, {.seed = 3});
-    expect_success(first, "sampling an index");
-    expect_true(first.value.written == wanted && first.value.coordinates.columns == 3,
-                "A sample of a populated index draws every key wanted, in three dimensions");
     usearch_key_t shown[wanted] {};
     float placed[wanted][3] {};
-    for (std::size_t draw = 0; draw != wanted; ++draw) {
-        shown[draw] = first.value.keys.data[draw];
-        std::memcpy(placed[draw], first.value.coordinate(draw), sizeof(placed[draw]));
+    {
+        auto [first, status] = index.on(executor).sample(wanted, arena, {.seed = 3});
+        expect_success(status, "sampling an index");
+        expect_true(first.written == wanted && first.coordinates.columns == 3,
+                    "A sample of a populated index draws every key wanted, in three dimensions");
+        for (std::size_t draw = 0; draw != first.written; ++draw) {
+            shown[draw] = first.keys.data[draw];
+            std::memcpy(placed[draw], first.coordinate(draw), sizeof(placed[draw]));
+        }
     }
-    us::outcome<us::sample_t> const again = on.sample(wanted, arena, {.seed = 3});
-    expect_true(again && again.value.written == wanted && same_key(again.value.keys.data[0], shown[0]),
-                "Equal seeds over an unchanged index draw equally");
-
-    us::outcome<us::sample_t> const next = on.sample(
-        wanted, arena, {.shown = shown, .shown_coordinates = {&placed[0][0], wanted, 3}, .seed = 3});
-    expect_success(next, "sampling around shown keys");
-    for (std::size_t draw = 0; draw != next.value.written; ++draw)
-        for (usearch_key_t const& key : shown)
-            expect_true(!same_key(next.value.keys.data[draw], key), "A shown key must never be drawn again");
-    expect_true(on.sample(wanted, arena, {.shown = shown}).status == usearch_status_invalid_argument_k,
-                "Shown keys without coordinates must be refused");
+    {
+        auto [again, status] = index.on(executor).sample(wanted, arena, {.seed = 3});
+        expect_true(!status.failed() && again.written == wanted && same_key(again.keys.data[0], shown[0]),
+                    "Equal seeds over an unchanged index draw equally");
+    }
+    {
+        auto [next, status] = index.on(executor).sample(
+            wanted, arena, {.shown = shown, .shown_coordinates = {&placed[0][0], wanted, 3}, .seed = 3});
+        expect_success(status, "sampling around shown keys");
+        for (std::size_t draw = 0; draw != next.written; ++draw)
+            for (usearch_key_t const& key : shown)
+                expect_true(!same_key(next.keys.data[draw], key), "A shown key must never be drawn again");
+    }
+    expect_true(
+        index.on(executor).sample(wanted, arena, {.shown = shown}).status == us::status_code_t::invalid_argument_k,
+        "Shown keys without coordinates must be refused");
 }
 
 /** The plan and reshard cases of <tt>test/modalities.py</tt>, which each modality answers alike. */
 template <typename fixture_type_>
 static void test_plans_and_reshards(us::executor_t const& executor) {
     using index_t = typename fixture_type_::index_t;
+    using on_t = typename fixture_type_::on_t;
     using raw_t = typename fixture_type_::raw_t;
 
     // A sample draws keys from the graph of every modality alike.
     {
         index_t index = built<fixture_type_>(executor, 64);
-        us::outcome<us::arena_t> arena = us::arena_t::make({.executor = executor.handle()});
-        expect_success(arena, "making a sample arena");
-        check_sample(index, executor, arena.value);
+        auto [arena, arena_status] = us::arena_t::make({.executor = executor.handle()});
+        expect_success(arena_status, "making a sample arena");
+        check_sample(index, executor, arena);
     }
 
     // A round reports what it did, its closing audit judging every entry.
     {
         index_t index = built<fixture_type_>(executor, 64);
-        us::outcome<usearch_refine_report_t> const report = index.on(executor).refine();
-        expect_success(report, "refining a modality index");
-        expect_true(report.value.changed <= report.value.reselected, "A round changes only entries it reselected");
-        expect_true(report.value.reachability.audited == 64, "A round's closing audit must judge every entry");
-        expect_true(index.on().count(key_of(17)).value.entries == 1, "A refined index keeps every entry");
+        auto [report, refine_status] = index.on(executor).refine();
+        expect_success(refine_status, "refining a modality index");
+        expect_true(report.changed <= report.reselected, "A round changes only entries it reselected");
+        expect_true(report.reachability.audited == 64, "A round's closing audit must judge every entry");
+        auto [counted, count_status] = index.count(key_of(17));
+        expect_true(!count_status.failed() && counted.entries == 1, "A refined index keeps every entry");
     }
 
     // A plan keeps a stopped round live, and its finish closes it once.
@@ -741,25 +746,26 @@ static void test_plans_and_reshards(us::executor_t const& executor) {
         index_t index = built<fixture_type_>(executor, 64);
         typename fixture_type_::refine_plan_t plan;
         cancel_at_first_t cancel;
-        us::outcome<usearch_refine_report_t> const stopped = index.on(executor).refine(
-            {.progress = {cancel}, .plan = &plan});
-        expect_true(stopped.status == usearch_status_cancelled_k, "A cancel must stop the planned round");
+        expect_true(
+            index.on(executor).refine({.progress = {cancel}, .plan = &plan}).status == us::status_code_t::cancelled_k,
+            "A cancel must stop the planned round");
         expect_true(plan.phase().phase != usearch_phase_done_k && plan.phase().completed <= plan.phase().total,
                     "A stopped plan must sit before its end");
         expect_success(index.on(executor).refine({.plan = &plan}), "continuing the planned round");
         expect_true(plan.phase().phase == usearch_phase_done_k, "A continued round must run to its end");
-        us::outcome<usearch_refine_report_t> const finished = index.on(executor).refine_plan_finish(std::move(plan));
-        expect_success(finished, "finishing the refine plan");
-        expect_true(finished.value.reachability.audited == 64, "A finish reports the whole plan");
-        expect_true(index.on(executor).refine_plan_finish(std::move(plan)).status == usearch_status_invalid_argument_k,
-                    "A finished plan must not finish again");
+        auto [finished, finish_status] = index.on(executor).refine_plan_finish(std::move(plan));
+        expect_success(finish_status, "finishing the refine plan");
+        expect_true(finished.reachability.audited == 64, "A finish reports the whole plan");
+        expect_true(
+            index.on(executor).refine_plan_finish(std::move(plan)).status == us::status_code_t::invalid_argument_k,
+            "A finished plan must not finish again");
     }
 
     // A plan lives across calls on one executor, so the calling thread cannot open one.
     {
         index_t index = built<fixture_type_>(executor, 0);
         typename fixture_type_::refine_plan_t plan;
-        expect_true(index.on().refine({.plan = &plan}).status == usearch_status_invalid_argument_k,
+        expect_true(index.refine({.plan = &plan}).status == us::status_code_t::invalid_argument_k,
                     "A plan without an executor must be refused");
     }
 
@@ -772,8 +778,11 @@ static void test_plans_and_reshards(us::executor_t const& executor) {
         expect_success(first.on(executor).reshard(sources, {sources, 1}), "gathering three sources");
         expect_true(size_of(first) == 96 && size_of(second) == 0 && size_of(third) == 0,
                     "A gather must move every entry into its target");
-        expect_true(first.on().count(key_of(40)).value.entries == 1 && first.on().count(key_of(80)).value.entries == 1,
-                    "A gathered target must hold every source's keys");
+        auto [fortieth, fortieth_status] = first.count(key_of(40));
+        auto [eightieth, eightieth_status] = first.count(key_of(80));
+        expect_true(
+            !fortieth_status.failed() && fortieth.entries == 1 && !eightieth_status.failed() && eightieth.entries == 1,
+            "A gathered target must hold every source's keys");
     }
 
     // One source into several targets cuts it between them, leaving the source live but empty.
@@ -797,9 +806,8 @@ static void test_plans_and_reshards(us::executor_t const& executor) {
         raw_t const into[2] = {first.handle(), second.handle()};
         typename fixture_type_::reshard_plan_t plan;
         cancel_at_first_t cancel;
-        us::outcome<usearch_refine_report_t> const stopped = source.on(executor).reshard(
-            from, into, {.progress = {cancel}, .plan = &plan});
-        expect_true(stopped.status == usearch_status_cancelled_k || stopped.status == usearch_status_success_k,
+        auto [stopped, stopped_status] = source.on(executor).reshard(from, into, {.progress = {cancel}, .plan = &plan});
+        expect_true(stopped_status == us::status_code_t::cancelled_k || stopped_status == us::status_code_t::success_k,
                     "A cancelled cut either stops its rounds or had none to stop");
         expect_true(size_of(first) + size_of(second) == 64, "A stopped cut keeps every entry it moved");
         expect_success(source.on(executor).reshard(from, into, {.plan = &plan}), "continuing the planned cut");
@@ -813,7 +821,7 @@ static void test_plans_and_reshards(us::executor_t const& executor) {
     {
         index_t index = built<fixture_type_>(executor, 16);
         raw_t const both[1] = {index.handle()};
-        expect_true(index.on(executor).reshard(both, both).status == usearch_status_unsupported_k,
+        expect_true(index.on(executor).reshard(both, both).status == us::status_code_t::unsupported_k,
                     "A recut of one handle must be unsupported");
         expect_true(size_of(index) == 16, "A refused recut moves nothing");
     }
@@ -824,12 +832,12 @@ static void test_plans_and_reshards(us::executor_t const& executor) {
         index_t second = built<fixture_type_>(executor, 8, 8, 1);
         raw_t const firsts[2] = {first.handle(), first.handle()};
         raw_t const seconds[1] = {second.handle()};
-        auto const on = first.on(executor);
-        expect_true(on.reshard({}, {firsts, 1}).status == usearch_status_invalid_argument_k,
+        on_t const on = first.on(executor);
+        expect_true(on.reshard({}, {firsts, 1}).status == us::status_code_t::invalid_argument_k,
                     "An empty source list is malformed");
-        expect_true(on.reshard(firsts, {firsts, 1}).status == usearch_status_invalid_argument_k,
+        expect_true(on.reshard(firsts, {firsts, 1}).status == us::status_code_t::invalid_argument_k,
                     "A repeated source is malformed");
-        expect_true(on.reshard({firsts, 1}, seconds).status == usearch_status_config_mismatch_k,
+        expect_true(on.reshard({firsts, 1}, seconds).status == us::status_code_t::config_mismatch_k,
                     "A target holding foreign entries mismatches");
         expect_true(size_of(first) == 8 && size_of(second) == 8, "A refusal moves nothing");
     }
@@ -838,93 +846,117 @@ static void test_plans_and_reshards(us::executor_t const& executor) {
 /** Every sequence searched for comes back first under its own key, at distance zero, and survives a
  *  checkpoint. */
 static void test_sequences(us::executor_t const& executor, us::arena_t& arena) {
-    us::outcome<us::sequence_index_t> index = us::sequence_index_t::init_ram(
-        {.metric = usearch_sequence_metric_levenshtein_utf8_k});
-    expect_success(index, "creating a sequence index");
-    auto const on = index.value.on(executor);
-    us::outcome<usearch_sequence_index_description_t> const empty = on.describe();
-    expect_true(empty.value.size == 0 && empty.value.gpu_class == usearch_gpu_class_unknown_k,
-                "A fresh host index is empty and on no GPU");
-    expect_true(empty.value.metadata.metric == usearch_sequence_metric_levenshtein_utf8_k,
-                "The frozen metric reads back");
+    auto [index, index_status] = us::sequence_index_t::init_ram({.metric = usearch_sequence_metric_levenshtein_utf8_k});
+    expect_success(index_status, "creating a sequence index");
+    us::sequence_index_on<usearch_completion_blocking_k> const on = index.on(executor);
+    {
+        auto [empty, status] = on.describe();
+        expect_true(!status.failed() && empty.size == 0 && empty.gpu_class == usearch_gpu_class_unknown_k,
+                    "A fresh host index is empty and on no GPU");
+        expect_true(empty.metadata.metric == usearch_sequence_metric_levenshtein_utf8_k,
+                    "The frozen metric reads back");
+    }
 
     std::uint8_t const words[] = {'k', 'i', 't', 't', 'e', 'n', 's', 'i', 't', 't',
                                   'i', 'n', 'g', 'm', 'i', 't', 't', 'e', 'n'};
     std::uint64_t const offsets[] = {0, 6, 13, 19};
     usearch_key_t const keys[] = {key_of(1), key_of(2), key_of(3)};
     expect_success(on.insert(keys, {words, offsets}), "inserting sequences");
-    expect_true(on.insert({keys, 1}, {words, offsets}).status == usearch_status_shape_mismatch_k,
+    expect_true(on.insert({keys, 1}, {words, offsets}) == us::status_code_t::shape_mismatch_k,
                 "Keys and sequences of different counts must be refused before the call crosses");
 
     std::uint64_t const query_offsets[] = {0, 7};
-    us::outcome<usearch_matches_view_t> const found = on.search({words + 6, query_offsets}, 1, arena);
-    expect_success(found, "searching a sequence");
-    expect_true(same_key(found.value.keys[0], keys[1]) && found.value.scores[0] == 0,
-                "A stored sequence must find itself first, at distance zero");
-
-    us::outcome<usearch_sequence_key_stats_t> const counted = on.count(keys[1]);
-    expect_true(counted && counted.value.entries == 1 && counted.value.total_bytes == 7, "A key's bytes are counted");
-    us::outcome<us::sequence_entries_t> const fetched = on.get(keys[1], arena);
-    expect_true(fetched && fetched.value.written == 1 && fetched.value.entry(0).size() == 7 &&
-                    std::memcmp(fetched.value.entry(0).data(), "sitting", 7) == 0,
-                "A key's sequence must come back whole");
+    {
+        auto [found, status] = on.search({words + 6, query_offsets}, 1, arena);
+        expect_success(status, "searching a sequence");
+        expect_true(same_key(found.keys[0], keys[1]) && found.scores[0] == 0,
+                    "A stored sequence must find itself first, at distance zero");
+    }
+    {
+        auto [counted, status] = on.count(keys[1]);
+        expect_true(!status.failed() && counted.entries == 1 && counted.total_bytes == 7, "A key's bytes are counted");
+    }
+    {
+        auto [fetched, status] = on.get(keys[1], arena);
+        expect_true(!status.failed() && fetched.written == 1 && fetched.entry(0).size() == 7 &&
+                        std::memcmp(fetched.entry(0).data(), "sitting", 7) == 0,
+                    "A key's sequence must come back whole");
+    }
 
     char const* const path = "usearch_test_cpp.sequences";
-    expect_success(on.save(bytes_of(path)), "saving sequences");
-    us::outcome<usearch_sequence_metadata_t> const metadata = us::sequence_index_t::metadata_read(
-        {.path = bytes_of(path)});
-    expect_true(metadata && metadata.value.metric == usearch_sequence_metric_levenshtein_utf8_k,
-                "A checkpoint reports its metric");
-    us::outcome<us::sequence_index_t> const loaded = us::sequence_index_t::load_ram({.path = bytes_of(path)});
-    expect_success(loaded, "loading sequences");
-    expect_true(size_of(loaded.value) == 3, "A loaded checkpoint keeps every entry");
+    expect_success(on.save(us::bytes_view(path)), "saving sequences");
+    {
+        auto [metadata, status] = us::sequence_index_t::metadata_read({.path = us::bytes_view(path)});
+        expect_true(!status.failed() && metadata.metric == usearch_sequence_metric_levenshtein_utf8_k,
+                    "A checkpoint reports its metric");
+    }
+    {
+        auto [loaded, status] = us::sequence_index_t::load_ram({.path = us::bytes_view(path)});
+        expect_success(status, "loading sequences");
+        expect_true(size_of(loaded) == 3, "A loaded checkpoint keeps every entry");
+    }
     std::remove(path);
-    us::outcome<usearch_bytes_view_t> const monolith = on.save_buffer(arena);
-    expect_success(monolith, "saving sequences into a buffer");
-    us::outcome<us::sequence_index_t> const reloaded = us::sequence_index_t::load_ram_buffer(
-        {.buffer = monolith.value});
-    expect_true(reloaded && size_of(reloaded.value) == 3, "A buffer reloads every entry");
+    {
+        auto [monolith, status] = on.save_buffer(arena);
+        expect_success(status, "saving sequences into a buffer");
+        auto [reloaded, load_status] = us::sequence_index_t::load_ram_buffer({.buffer = monolith});
+        expect_true(!load_status.failed() && size_of(reloaded) == 3, "A buffer reloads every entry");
+    }
 
     // A VRAM index either opens on a GPU or answers the library's own refusal.
-    us::outcome<us::sequence_index_t> const device = us::sequence_index_t::init_vram({});
-    expect_true(device ? device.value.on().describe().value.gpu_class != usearch_gpu_class_unknown_k
-                       : device.status != usearch_status_deferred_k,
-                "A VRAM index opens on a GPU or forwards the library's status");
+    {
+        auto [device, status] = us::sequence_index_t::init_vram({});
+        if (status.failed()) expect_true(status.code != us::status_code_t::deferred_k, "A refusal is final");
+        else {
+            auto [described, describe_status] = device.describe();
+            expect_true(!describe_status.failed() && described.gpu_class != usearch_gpu_class_unknown_k,
+                        "A VRAM index opens on a GPU or forwards the library's status");
+        }
+    }
     check_metric_name(us::sequence_metric_name, us::sequence_metric_from_name,
                       usearch_sequence_metric_levenshtein_utf8_k);
 }
 
 /** Shapes of different point counts share one batch, and each finds itself first. */
 static void test_shapes(us::executor_t const& executor, us::arena_t& arena) {
-    us::outcome<us::shapes_index_t> index = us::shapes_index_t::init_ram(
+    auto [index, index_status] = us::shapes_index_t::init_ram(
         {.metric = usearch_shapes_metric_hausdorff_k, .quantization = usearch_scalar_f32_k});
-    expect_success(index, "creating a shapes index");
-    auto const on = index.value.on(executor);
-    expect_true(on.describe().value.metadata.metric == usearch_shapes_metric_hausdorff_k,
-                "The frozen metric reads back");
+    expect_success(index_status, "creating a shapes index");
+    us::shapes_index_on<usearch_completion_blocking_k> const on = index.on(executor);
 
     shapes_fixture_t const clouds(3, 42);
     usearch_key_t const keys[] = {key_of(1), key_of(2), key_of(3)};
     expect_success(on.insert<float>(keys, clouds.batch()), "inserting shapes");
-    us::outcome<usearch_shapes_index_description_t> const described = on.describe();
-    expect_true(described.value.size == 3 && described.value.total_points == clouds.offsets[clouds.entries],
-                "Every point of every shape is stored");
+    {
+        auto [described, status] = on.describe();
+        expect_true(!status.failed() && described.metadata.metric == usearch_shapes_metric_hausdorff_k,
+                    "The frozen metric reads back");
+        expect_true(described.size == 3 && described.total_points == clouds.offsets[clouds.entries],
+                    "Every point of every shape is stored");
+    }
 
-    std::uint64_t const last_offsets[] = {0, clouds.offsets[3] - clouds.offsets[2]};
-    us::outcome<usearch_matches_view_t> const found = on.search<float>(
-        {clouds.points + clouds.offsets[2] * 3, last_offsets}, 1, arena);
-    expect_true(found && same_key(found.value.keys[0], keys[2]), "A stored shape must find itself first");
-
-    us::outcome<us::shapes_entries<float>> const fetched = on.get<float>(keys[2], arena);
     std::size_t const last_points = clouds.offsets[3] - clouds.offsets[2];
-    expect_true(fetched && fetched.value.written == 1 && fetched.value.entry(0).size() == last_points * 3,
-                "A key's shape must come back with every point");
-    expect_true(on.count(keys[2]).value.largest_points == last_points, "A key's points are counted");
+    std::uint64_t const last_offsets[] = {0, last_points};
+    {
+        auto [found, status] = on.search<float>({clouds.points + clouds.offsets[2] * 3, last_offsets}, 1, arena);
+        expect_true(!status.failed() && same_key(found.keys[0], keys[2]), "A stored shape must find itself first");
+    }
+    {
+        auto [fetched, status] = on.get<float>(keys[2], arena);
+        expect_true(!status.failed() && fetched.written == 1 && fetched.entry(0).size() == last_points * 3,
+                    "A key's shape must come back with every point");
+    }
+    {
+        auto [counted, status] = on.count(keys[2]);
+        expect_true(!status.failed() && counted.largest_points == last_points, "A key's points are counted");
+    }
 
     char const* const path = "usearch_test_cpp.shapes";
-    expect_success(on.save(bytes_of(path)), "saving shapes");
-    us::outcome<us::shapes_index_t> const loaded = us::shapes_index_t::load_ram({.path = bytes_of(path)});
-    expect_true(loaded && size_of(loaded.value) == 3, "A loaded checkpoint keeps every entry");
+    expect_success(on.save(us::bytes_view(path)), "saving shapes");
+    {
+        auto [loaded, status] = us::shapes_index_t::load_ram({.path = us::bytes_view(path)});
+        expect_true(!status.failed() && size_of(loaded) == 3, "A loaded checkpoint keeps every entry");
+    }
     std::remove(path);
     check_metric_name(us::shapes_metric_name, us::shapes_metric_from_name, usearch_shapes_metric_hausdorff_k);
     check_metric_name(us::shapes_metric_name, us::shapes_metric_from_name, usearch_shapes_metric_gromov_wasserstein_k);
@@ -936,35 +968,43 @@ static void test_shapes(us::executor_t const& executor, us::arena_t& arena) {
 /** An observation searched for comes back first at zero chord metres, and a radius admits only
  *  the entries inside it. */
 static void test_geospatial(us::executor_t const& executor, us::arena_t& arena) {
-    us::outcome<us::geospatial_index_t> index = us::geospatial_index_t::init_ram({});
-    expect_success(index, "creating a geospatial index");
-    auto const on = index.value.on(executor);
+    auto [index, index_status] = us::geospatial_index_t::init_ram({});
+    expect_success(index_status, "creating a geospatial index");
+    us::geospatial_index_on<usearch_completion_blocking_k> const on = index.on(executor);
 
     usearch_geospatial_observation_t const places[] = {observation_at(48.8566, 2.3522), observation_at(48.8656, 2.3522),
                                                        observation_at(52.52, 13.405)};
     usearch_key_t const keys[] = {key_of(1), key_of(2), key_of(3)};
     expect_success(on.insert(keys, places), "inserting observations");
-    expect_true(size_of(index.value) == 3, "Every observation is stored");
+    expect_true(size_of(index) == 3, "Every observation is stored");
 
-    us::outcome<usearch_matches_view_t> const found = on.search({places + 2, 1}, usearch_geospatial_relation_near_k, {},
-                                                                1, arena);
-    expect_true(found && same_key(found.value.keys[0], keys[2]) && found.value.scores[0] == 0,
-                "A stored observation must find itself first, at zero metres");
-
-    us::outcome<us::geospatial_within_t> const nearby = on.within({places, 1}, usearch_geospatial_relation_near_k,
-                                                                  {.metres = 2000}, arena);
-    expect_success(nearby, "reporting observations within a radius");
-    expect_true(nearby.value.view.offsets[1] == 2, "A two-kilometre radius admits the two Paris observations only");
-
-    us::outcome<us::geospatial_observations_t> const fetched = on.get(keys[2], arena);
-    expect_true(fetched && fetched.value.written == 1 && std::abs(fetched.value.first->latitude_degrees - 52.52) < 1e-6,
-                "A key's observation must come back within the stored rounding");
-    expect_true(on.count(keys[2]).value.entries == 1, "A key's observations are counted");
+    {
+        auto [found, status] = on.search({places + 2, 1}, usearch_geospatial_relation_near_k, {}, 1, arena);
+        expect_true(!status.failed() && same_key(found.keys[0], keys[2]) && found.scores[0] == 0,
+                    "A stored observation must find itself first, at zero metres");
+    }
+    {
+        auto [nearby, status] = on.within({places, 1}, usearch_geospatial_relation_near_k, {.metres = 2000}, arena);
+        expect_success(status, "reporting observations within a radius");
+        expect_true(nearby.view.offsets[1] == 2, "A two-kilometre radius admits the two Paris observations only");
+    }
+    {
+        auto [fetched, status] = on.get(keys[2], arena);
+        expect_true(
+            !status.failed() && fetched.written == 1 && std::abs(fetched.first->latitude_degrees - 52.52) < 1e-6,
+            "A key's observation must come back within the stored rounding");
+    }
+    {
+        auto [counted, status] = on.count(keys[2]);
+        expect_true(!status.failed() && counted.entries == 1, "A key's observations are counted");
+    }
 
     char const* const path = "usearch_test_cpp.geospatial";
-    expect_success(on.save(bytes_of(path)), "saving observations");
-    us::outcome<us::geospatial_index_t> const loaded = us::geospatial_index_t::load_ram({.path = bytes_of(path)});
-    expect_true(loaded && size_of(loaded.value) == 3, "A loaded checkpoint keeps every entry");
+    expect_success(on.save(us::bytes_view(path)), "saving observations");
+    {
+        auto [loaded, status] = us::geospatial_index_t::load_ram({.path = us::bytes_view(path)});
+        expect_true(!status.failed() && size_of(loaded) == 3, "A loaded checkpoint keeps every entry");
+    }
     std::remove(path);
 }
 
@@ -973,28 +1013,179 @@ static void test_geospatial(us::executor_t const& executor, us::arena_t& arena) 
  *  @c std::printf becomes @c fmt::println and also writes the count into @p found, and the
  *  includes and the namespace alias sit at the top of this file. */
 static int quickstart(std::size_t& found) {
-    // Threads live in the executor, the data lives in the index, and outputs land in the arena.
-    auto [executor, executor_status, executor_message] = us::executor_t::for_ram();
-    auto [arena, arena_status, arena_message] = us::arena_t::make({.executor = executor.handle()});
-    auto [index, index_status, index_message] = us::dense_index_t::init_ram(
-        {.metric = usearch_dense_metric_angular_k, .quantization = usearch_scalar_bf16_k, .dimensions = 128});
-    if (index_status != usearch_status_success_k) return 1;
+    auto [index, index_status] = us::dense_index_t::init_ram(
+        {.metric = usearch_dense_metric_angular_k, .quantization = usearch_scalar_i8_k, .dimensions = 4});
+    if (index_status.failed()) return 1;
+    us::status_t const reserved = index.reserve(1000); // the calling thread; inserts grow on demand anyway
 
     usearch_key_t keys[2] {};
-    keys[0].bytes[15] = 1, keys[1].bytes[15] = 2;
-    float vectors[2][128] = {{1}, {0, 1}};
-    if (!index.on(executor).insert<float>(keys, {&vectors[0][0], 2, 128})) return 1;
+    keys[0].bytes[15] = 42;
+    keys[1].bytes[15] = 43;
+    float const slab[8] = {0.2f, 0.1f, 0.2f, 0.1f, 0.1f, 0.2f, 0.1f, 0.2f};
+    if (reserved.failed() || index.insert<float>(keys, {slab, 2, 4}).failed()) return 1;
 
-    auto [matches, status, message] = index.on(executor).search<float>({&vectors[0][0], 1, 128}, 10, arena);
-    if (status != usearch_status_success_k) return 1;
-    fmt::println("Found {} matches", found = matches.counts[0]);
+    auto [executor, executor_status] = us::executor_t::for_ram();
+    auto [arena, arena_status] = us::arena_t::make({.executor = executor.handle()});
+    auto [local_arena, local_arena_status] = us::arena_t::make();
+    float const query[4] = {0.2f, 0.1f, 0.2f, 0.1f};
+    auto [local, local_status] = index.search<float>({query, 1, 4}, 10, local_arena);          // the calling thread
+    auto [pooled, pooled_status] = index.on(executor).search<float>({query, 1, 4}, 10, arena); // blocks on the executor
+    if (local_status.failed() || pooled_status.failed()) return 1;
+    us::deferred<usearch_matches_view_t> call = index.deferred(executor).search<float>({slab, 2, 4}, 10, arena);
+    auto [matches, status] = call.wait(); // blocks until final; destruction waits too
+    if (status.failed()) return 1;
+    fmt::println("Found {} and {} matches", local.counts[0], found = matches.counts[1]);
     return 0;
+}
+
+/** A host arena reports host memory, a GPU-less listing answers a count, and the linked library
+ *  names its version. */
+static void test_arena_devices_and_version() {
+    auto [arena, arena_status] = us::arena_t::make();
+    expect_success(arena_status, "making a host arena");
+    auto [description, describe_status] = arena.describe();
+    expect_success(describe_status, "describing the arena");
+    expect_true(description.residency == usearch_residency_ram_k, "A host arena must hold host memory");
+    expect_true(us::arena_t {}.describe().status == us::status_code_t::invalid_argument_k,
+                "An empty arena must be refused");
+    expect_success(us::gpu_devices({}).status, "counting the GPUs");
+    expect_true(!us::version_name().empty(), "The library must name its version");
 }
 
 /** The README's Quickstart finds both of its entries. */
 static void test_readme_quickstart() {
     std::size_t found = 0;
     expect_true(quickstart(found) == 0 && found == 2, "The README's Quickstart must find both entries");
+}
+
+/** A fixed ring of posted polls, the loop a deferred call is awaited on, allocating nothing. */
+struct test_loop_t {
+    struct posted_t {
+        void (*poll)(void*) noexcept;
+        void* poll_state;
+    };
+    std::array<posted_t, 64> ring {};
+    std::size_t head = 0, tail = 0;
+
+    void post(void (*poll)(void*) noexcept, void* state) noexcept {
+        expect_true(tail - head < ring.size(), "The test loop's ring must never overflow");
+        ring[tail++ % ring.size()] = {poll, state};
+    }
+    void run() noexcept {
+        while (head != tail) {
+            posted_t const next = ring[head++ % ring.size()];
+            next.poll(next.poll_state);
+        }
+    }
+};
+
+/** A coroutine that starts at once and runs to its end on whatever resumes it. */
+struct test_task_t {
+    struct promise_type {
+        test_task_t get_return_object() noexcept { return {}; }
+        std::suspend_never initial_suspend() noexcept { return {}; }
+        std::suspend_never final_suspend() noexcept { return {}; }
+        void return_void() noexcept {}
+        void unhandled_exception() noexcept { std::abort(); }
+    };
+};
+
+/** Plays an engine whose deferred call finishes only after @c turns_left more turns of the loop,
+ *  as a real one finishes while its caller polls. */
+struct late_engine_t {
+    usearch_outcome_t* outcome = nullptr;
+    std::size_t* written = nullptr;
+    std::size_t turns_left = 3;
+    test_loop_t* loop = nullptr;
+
+    static void turn(void* state) noexcept {
+        late_engine_t& engine = *static_cast<late_engine_t*>(state);
+        if (--engine.turns_left != 0) return engine.loop->post(&turn, state);
+        *engine.written = 42;
+        engine.outcome->status = usearch_status_success_k;
+    }
+};
+
+/** Awaits a deferred audit of @p index on @p loop, writing what it judged into @p audited. */
+static test_task_t awaited_health(us::dense_index_t const& index, us::executor_t const& executor, test_loop_t& loop,
+                                  std::size_t& audited) {
+    us::deferred<usearch_reachability_t> call = index.deferred(executor).health();
+    auto [reachability, status] = co_await call.wait(loop); // or: call.wait()
+    expect_success(status, "awaiting a deferred audit");
+    audited = reachability.audited;
+}
+
+/** Searches two shards at once on @p loop, as the README's fan-out does, writing both match counts
+ *  into @p found. */
+static test_task_t awaited_fan_out(us::dense_index_t const& east, us::dense_index_t const& west,
+                                   us::executor_t const& east_executor, us::executor_t const& west_executor,
+                                   us::rows_view<float> queries, test_loop_t& loop, std::size_t& found) {
+    auto [east_arena, east_arena_status] = us::arena_t::make({.executor = east_executor.handle()});
+    auto [west_arena, west_arena_status] = us::arena_t::make({.executor = west_executor.handle()});
+    expect_success(east_arena_status, "making the east arena");
+    expect_success(west_arena_status, "making the west arena");
+    us::deferred<usearch_matches_view_t> east_call =
+        east.deferred(east_executor).search<float>(queries, 10, east_arena);
+    us::deferred<usearch_matches_view_t> west_call =
+        west.deferred(west_executor).search<float>(queries, 10, west_arena);
+    auto [east_matches, east_status] = co_await east_call.wait(loop); // both shards were already running
+    auto [west_matches, west_status] = co_await west_call.wait(loop);
+    expect_success(east_status, "awaiting the east shard");
+    expect_success(west_status, "awaiting the west shard");
+    if (east_status.failed() || west_status.failed()) co_return;
+    found = east_matches.counts[0] + west_matches.counts[0];
+}
+
+/** Awaits a call @p engine finishes later on @p loop and writes its answer into @p answered. */
+static test_task_t awaited_late_call(late_engine_t& engine, test_loop_t& loop, std::size_t& answered) {
+    us::deferred<std::size_t> call([&](usearch_outcome_t* outcome, us::outputs<std::size_t>* written) noexcept {
+        engine.outcome = outcome;
+        engine.written = &written->value;
+        outcome->status = usearch_status_deferred_k;
+    });
+    loop.post(&late_engine_t::turn, &engine);
+    auto [value, status] = co_await call.wait(loop);
+    expect_success(status, "awaiting a call that finishes later");
+    answered = value;
+}
+
+/** A coroutine awaits a deferred call through the loop's ring, suspending only while the call is
+ *  not final, and gets what a blocking call would have answered. */
+static void test_awaited_calls() {
+    auto [executor, executor_status] = us::executor_t::for_ram();
+    expect_success(executor_status, "spawning an executor");
+    auto [index, index_status] = us::dense_index_t::init_ram(
+        {.metric = usearch_dense_metric_angular_k, .quantization = usearch_scalar_bf16_k, .dimensions = 4});
+    expect_success(index_status, "creating an index");
+    usearch_key_t const keys[2] = {key_of(1), key_of(2)};
+    float const rows[2][4] = {{1, 0, 0, 0}, {0, 1, 0, 0}};
+    expect_success(index.on(executor).insert<float>(keys, {&rows[0][0], 2, 4}), "inserting the rows");
+
+    test_loop_t loop;
+    std::size_t audited = 0;
+    awaited_health(index, executor, loop, audited);
+    loop.run();
+    expect_true(audited == 2, "An awaited audit must see every entry");
+
+    auto [west_executor, west_executor_status] = us::executor_t::for_ram();
+    expect_success(west_executor_status, "spawning a second executor");
+    auto [west, west_status] = us::dense_index_t::init_ram(
+        {.metric = usearch_dense_metric_angular_k, .quantization = usearch_scalar_bf16_k, .dimensions = 4});
+    expect_success(west_status, "creating a second shard");
+    usearch_key_t const west_keys[1] = {key_of(3)};
+    expect_success(west.insert<float>(west_keys, {&rows[1][0], 1, 4}), "inserting on the calling thread");
+    std::size_t found = 0;
+    awaited_fan_out(index, west, executor, west_executor, {&rows[0][0], 1, 4}, loop, found);
+    loop.run();
+    expect_true(found == 3, "A fan-out must answer every entry of both shards");
+
+    late_engine_t engine {.loop = &loop};
+    std::size_t answered = 0;
+    awaited_late_call(engine, loop, answered);
+    expect_true(answered == 0, "An awaited call must not resume before it is final");
+    loop.run();
+    expect_true(answered == 42 && engine.turns_left == 0, "An awaited call must resume once final, with its outputs");
+    expect_true(loop.head == loop.tail, "The loop must drain every poll it was posted");
 }
 
 /** One dense round trip through every handle the wrappers own. */
@@ -1008,55 +1199,62 @@ static void test_dense_round_trip() {
     for (std::size_t row = 0; row != rows; ++row) keys[row] = key_of(row);
     us::rows_view<float> const all_rows {vectors.data(), rows, dimensions};
 
-    us::outcome<us::executor_t> const executor = us::executor_t::for_ram();
-    expect_success(executor, "spawning an executor");
-    us::outcome<us::arena_t> arena = us::arena_t::make({.executor = executor.value.handle()});
-    expect_success(arena, "making an arena");
+    auto [executor, executor_status] = us::executor_t::for_ram();
+    expect_success(executor_status, "spawning an executor");
+    auto [arena, arena_status] = us::arena_t::make({.executor = executor.handle()});
+    expect_success(arena_status, "making an arena");
     usearch_dense_init_ram_t const geometry {.metric = usearch_dense_metric_angular_k,
                                              .quantization = usearch_scalar_bf16_k,
                                              .dimensions = dimensions,
                                              .connectivity = 16};
-    us::outcome<us::dense_index_t> index = us::dense_index_t::init_ram(geometry);
-    expect_success(index, "creating an index");
-    auto const on = index.value.on(executor.value);
+    auto [index, index_status] = us::dense_index_t::init_ram(geometry);
+    expect_success(index_status, "creating an index");
+    us::dense_index_on<usearch_completion_blocking_k> const on = index.on(executor);
 
     expect_success(on.reserve(rows), "reserving the entries");
     expect_success(on.insert<float>(keys, all_rows), "inserting the rows");
-    us::outcome<usearch_dense_index_description_t> const described = on.describe();
-    expect_success(described, "describing the index");
-    expect_true(described.value.size == rows, "An insertion is all-or-nothing, so every entry must be published");
-    expect_true(on.insert<float>({keys.data(), 1}, all_rows).status == usearch_status_shape_mismatch_k,
+    {
+        auto [described, status] = on.describe();
+        expect_success(status, "describing the index");
+        expect_true(described.size == rows, "An insertion is all-or-nothing, so every entry must be published");
+    }
+    expect_true(on.insert<float>({keys.data(), 1}, all_rows) == us::status_code_t::shape_mismatch_k,
                 "Keys and rows of different counts must be refused before the call crosses");
 
-    us::outcome<usearch_matches_view_t> const matches = on.search<float>(all_rows, 1, arena.value);
-    expect_success(matches, "searching every row");
-    std::size_t recalled = 0;
-    for (std::size_t row = 0; row != rows; ++row) recalled += same_key(matches.value.keys[row], keys[row]);
-    expect_true(recalled * 10 >= rows * 9, "Self-recall collapsed below 90%");
-
-    us::outcome<std::size_t> const counted = on.count(keys[probe]);
-    expect_success(counted, "counting a key");
-    expect_true(counted.value == 1, "Unique keys hold one entry apiece");
-    us::outcome<us::dense_vectors<float>> const fetched = on.get<float>(keys[probe], arena.value);
-    expect_success(fetched, "getting a key");
-    float const* const fetched_row = fetched.value.row(0);
-    expect_true(fetched.value.written == 1 && fetched.value.view.columns == dimensions && fetched_row[0] != 0,
-                "A key's one row must come back whole");
+    {
+        auto [matches, status] = on.search<float>(all_rows, 1, arena);
+        expect_success(status, "searching every row");
+        std::size_t recalled = 0;
+        for (std::size_t row = 0; row != rows; ++row) recalled += same_key(matches.keys[row], keys[row]);
+        expect_true(recalled * 10 >= rows * 9, "Self-recall collapsed below 90%");
+    }
+    {
+        auto [counted, status] = on.count(keys[probe]);
+        expect_success(status, "counting a key");
+        expect_true(counted == 1, "Unique keys hold one entry apiece");
+    }
+    {
+        auto [fetched, status] = on.get<float>(keys[probe], arena);
+        expect_success(status, "getting a key");
+        float const* const fetched_row = fetched.row(0);
+        expect_true(fetched.written == 1 && fetched.view.columns == dimensions && fetched_row[0] != 0,
+                    "A key's one row must come back whole");
+    }
 
     // The receiver's type picks the completion, and the deferred call's owner waits on it.
     {
-        us::deferred<usearch_reachability_t> audit = index.value.deferred(executor.value).health();
-        us::outcome<usearch_reachability_t> const audited = audit.wait();
-        expect_success(audited, "auditing deferred");
-        expect_true(audited.value.audited == rows, "A deferred audit must see every entry");
+        us::deferred<usearch_reachability_t> audit = index.deferred(executor).health();
+        auto [audited, status] = audit.wait();
+        expect_success(status, "auditing deferred");
+        expect_true(audited.audited == rows, "A deferred audit must see every entry");
     }
 
     // A sample draws from the graph, and a deferred one answers what the blocking one would have.
-    check_sample(index.value, executor.value, arena.value);
+    check_sample(index, executor, arena);
     {
-        us::deferred<us::sample_t> drawing = index.value.deferred(executor.value).sample(16, arena.value);
-        us::outcome<us::sample_t> const drawn = drawing.wait();
-        expect_true(drawn && drawn.value.written == 16, "A deferred sample draws every key wanted");
+        us::deferred<us::sample_t> drawing = index.deferred(executor).sample(16, arena);
+        auto [drawn, status] = drawing.wait();
+        expect_true(!status.failed() && drawn.written == 16, "A deferred sample draws every key wanted");
     }
     check_metric_name(us::dense_metric_name, us::dense_metric_from_name, usearch_dense_metric_angular_k);
     check_metric_name(us::dense_metric_name, us::dense_metric_from_name, usearch_dense_metric_jaccard_k);
@@ -1067,61 +1265,64 @@ static void test_dense_round_trip() {
     auto cancel_first = [&](std::size_t, std::size_t) noexcept {
         return reports++ == 0 ? usearch_cancel_k : usearch_continue_k;
     };
-    us::outcome<usearch_refine_report_t> const stopped = on.refine(
-        {.refine = {.memory_limit = 0}, .progress = {cancel_first}, .plan = &refine_plan});
-    expect_true(stopped.status == usearch_status_cancelled_k, "A cancel must stop the planned round");
+    expect_true(on.refine({.refine = {.memory_limit = 0}, .progress = {cancel_first}, .plan = &refine_plan}).status ==
+                    us::status_code_t::cancelled_k,
+                "A cancel must stop the planned round");
     expect_true(refine_plan.handle() != nullptr, "A cancel must leave the plan live");
     expect_success(on.refine({.plan = &refine_plan}), "continuing the planned round");
     expect_true(refine_plan.phase().phase == usearch_phase_done_k, "A continued round must run to its end");
-    us::outcome<usearch_refine_report_t> const finished = on.refine_plan_finish(std::move(refine_plan));
-    expect_success(finished, "finishing the refine plan");
-    expect_true(std::strlen(usearch_refine_verdict_name(finished.value.verdict)) != 0, "Every verdict has a name");
+    {
+        auto [finished, status] = on.refine_plan_finish(std::move(refine_plan));
+        expect_success(status, "finishing the refine plan");
+        expect_true(std::strlen(usearch_refine_verdict_name(finished.verdict)) != 0, "Every verdict has a name");
+    }
 
     char const* const path = "usearch_test_cpp.safegraphs";
-    usearch_bytes_view_t const path_view {reinterpret_cast<std::uint8_t const*>(path), std::strlen(path)};
-    expect_success(on.save(path_view), "saving a monolith");
+    expect_success(on.save(us::bytes_view(path)), "saving a monolith");
     // RAM copies a checkpoint in, so a view in place serves it from storage.
-    us::outcome<us::executor_t> const storage = us::executor_t::for_nvme({.threads = 1});
-    expect_success(storage, "spawning a storage executor");
-    us::outcome<us::dense_index_t> viewed = us::dense_index_t::view_nvme({.path = path_view}, storage.value);
-    expect_success(viewed, "viewing the monolith");
-    auto const on_storage = viewed.value.on(storage.value);
-    us::outcome<> const refused = on_storage.insert<float>({keys.data(), 1}, {vectors.data(), 1, dimensions});
-    expect_true(refused.status == usearch_status_read_only_k, "A viewed handle must refuse every mutation");
-    us::outcome<usearch_matches_view_t> const found = on_storage.search<float>(
-        {vectors.data() + probe * dimensions, 1, dimensions}, 1, arena.value);
-    expect_success(found, "searching the view");
-    expect_true(same_key(found.value.keys[0], keys[probe]), "The view must find a stored entry at itself");
-
-    us::outcome<us::dense_cursor_t> const cursor = index.value.cursor_init();
-    expect_success(cursor, "opening a cursor");
-    us::outcome<us::cursor_batch_t> const pulled = on.cursor_next(cursor.value, rows, arena.value);
-    expect_success(pulled, "pulling every entry through the cursor");
-    expect_true(pulled.value.written == rows, "One pull wide enough must export every entry");
+    {
+        auto [storage, storage_status] = us::executor_t::for_nvme({.threads = 1});
+        expect_success(storage_status, "spawning a storage executor");
+        auto [viewed, view_status] = us::dense_index_t::view_nvme({.path = us::bytes_view(path)}, storage);
+        expect_success(view_status, "viewing the monolith");
+        us::dense_index_on<usearch_completion_blocking_k> const on_storage = viewed.on(storage);
+        expect_true(on_storage.insert<float>({keys.data(), 1}, {vectors.data(), 1, dimensions}) ==
+                        us::status_code_t::read_only_k,
+                    "A viewed handle must refuse every mutation");
+        auto [found, status] = on_storage.search<float>({vectors.data() + probe * dimensions, 1, dimensions}, 1, arena);
+        expect_success(status, "searching the view");
+        expect_true(same_key(found.keys[0], keys[probe]), "The view must find a stored entry at itself");
+    }
+    {
+        auto [cursor, cursor_status] = index.cursor_init();
+        expect_success(cursor_status, "opening a cursor");
+        auto [pulled, status] = on.cursor_next(cursor, rows, arena);
+        expect_success(status, "pulling every entry through the cursor");
+        expect_true(pulled.written == rows, "One pull wide enough must export every entry");
+    }
 
     constexpr std::size_t gathered_rows = 10;
     usearch_key_t gathered_keys[gathered_rows];
     for (std::size_t row = 0; row != gathered_rows; ++row) gathered_keys[row] = key_of(rows + row);
-    us::outcome<us::dense_index_t> other = us::dense_index_t::init_ram(geometry);
-    expect_success(other, "creating a second index");
-    expect_success(
-        other.value.on(executor.value).insert<float>(gathered_keys, {vectors.data(), gathered_rows, dimensions}),
-        "inserting into the second index");
-    usearch_dense_index_t const gathered[2] = {index.value.handle(), other.value.handle()};
+    auto [other, other_status] = us::dense_index_t::init_ram(geometry);
+    expect_success(other_status, "creating a second index");
+    expect_success(other.on(executor).insert<float>(gathered_keys, {vectors.data(), gathered_rows, dimensions}),
+                   "inserting into the second index");
+    usearch_dense_index_t const gathered[2] = {index.handle(), other.handle()};
     expect_success(on.reshard({gathered, 2}, {gathered, 1}), "gathering two sources into one");
-    expect_true(on.describe().value.size == rows + gathered_rows, "A gather keeps every entry of its sources");
+    expect_true(size_of(index) == rows + gathered_rows, "A gather keeps every entry of its sources");
 
     // A cut moves one source into several targets, emptying it.
-    us::outcome<us::dense_index_t> first_part = us::dense_index_t::init_ram(geometry);
-    us::outcome<us::dense_index_t> second_part = us::dense_index_t::init_ram(geometry);
-    expect_success(first_part, "creating the first part");
-    expect_success(second_part, "creating the second part");
-    usearch_dense_index_t const source[1] = {index.value.handle()};
-    usearch_dense_index_t const parts[2] = {first_part.value.handle(), second_part.value.handle()};
+    auto [first_part, first_part_status] = us::dense_index_t::init_ram(geometry);
+    auto [second_part, second_part_status] = us::dense_index_t::init_ram(geometry);
+    expect_success(first_part_status, "creating the first part");
+    expect_success(second_part_status, "creating the second part");
+    usearch_dense_index_t const source[1] = {index.handle()};
+    usearch_dense_index_t const parts[2] = {first_part.handle(), second_part.handle()};
     expect_success(on.reshard(source, parts, {.seed = 7}), "cutting one source into two targets");
-    std::size_t const first_size = first_part.value.on(executor.value).describe().value.size;
-    std::size_t const second_size = second_part.value.on(executor.value).describe().value.size;
-    expect_true(on.describe().value.size == 0, "A cut source must end empty");
+    std::size_t const first_size = size_of(first_part);
+    std::size_t const second_size = size_of(second_part);
+    expect_true(size_of(index) == 0, "A cut source must end empty");
     expect_true(first_size + second_size == rows + gathered_rows, "A cut keeps every entry of its source");
     expect_true(first_size != 0 && second_size != 0, "A cut must give every target a part");
 
@@ -1131,19 +1332,19 @@ static void test_dense_round_trip() {
 int main(int argc, char** argv) {
     start_test_run(argc, argv);
     run_test_case("test_readme_quickstart", test_readme_quickstart);
+    run_test_case("test_arena_devices_and_version", test_arena_devices_and_version);
+    run_test_case("test_awaited_calls", test_awaited_calls);
     run_test_case("test_dense_round_trip", test_dense_round_trip);
-    us::outcome<us::executor_t> const executor = us::executor_t::for_ram();
-    us::outcome<us::arena_t> arena = us::arena_t::make({.executor = executor.value.handle()});
-    if (!expect_success(executor, "spawning an executor") || !expect_success(arena, "making an arena"))
-        return finish_test_run();
-    run_test_case("test_sequences", test_sequences, executor.value, arena.value);
-    run_test_case("test_shapes", test_shapes, executor.value, arena.value);
-    run_test_case("test_geospatial", test_geospatial, executor.value, arena.value);
-    run_test_case("test_plans_and_reshards<sequence_fixture_t>", test_plans_and_reshards<sequence_fixture_t>,
-                  executor.value);
-    run_test_case("test_plans_and_reshards<shapes_fixture_t>", test_plans_and_reshards<shapes_fixture_t>,
-                  executor.value);
+    auto [executor, executor_status] = us::executor_t::for_ram();
+    if (!expect_success(executor_status, "spawning an executor")) return finish_test_run();
+    auto [arena, arena_status] = us::arena_t::make({.executor = executor.handle()});
+    if (!expect_success(arena_status, "making an arena")) return finish_test_run();
+    run_test_case("test_sequences", test_sequences, executor, arena);
+    run_test_case("test_shapes", test_shapes, executor, arena);
+    run_test_case("test_geospatial", test_geospatial, executor, arena);
+    run_test_case("test_plans_and_reshards<sequence_fixture_t>", test_plans_and_reshards<sequence_fixture_t>, executor);
+    run_test_case("test_plans_and_reshards<shapes_fixture_t>", test_plans_and_reshards<shapes_fixture_t>, executor);
     run_test_case("test_plans_and_reshards<geospatial_fixture_t>", test_plans_and_reshards<geospatial_fixture_t>,
-                  executor.value);
+                  executor);
     return finish_test_run();
 }

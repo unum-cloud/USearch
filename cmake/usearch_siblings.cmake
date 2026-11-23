@@ -72,7 +72,7 @@ usearch_sibling(
     e44798287a3aca9a263ba4fd7a98076d7a803f7f
 )
 
-# The siblings are the engine rather than an option: every header reaches for them unguarded, so `usearch_header`
+# The siblings are the engine rather than an option: every header reaches for them unguarded, so `usearch_templates`
 # carries them all. Include directories are copied onto it, because `usearch_setup_target` reads
 # `INTERFACE_INCLUDE_DIRECTORIES` directly, a genex that sees only what this target declares, to keep the C++20 feature
 # requirement off the pure-C targets. The export set collects them, as their interfaces carry a language level and
@@ -80,9 +80,9 @@ usearch_sibling(
 # ours under `usearch::`.
 set(usearch_sibling_targets_)
 foreach (sibling_ IN ITEMS numkong forkunion stringzilla smashtable)
-    target_link_libraries(usearch_header INTERFACE ${sibling_}::header)
+    target_link_libraries(usearch_templates INTERFACE ${sibling_}::header)
     target_include_directories(
-        usearch_header SYSTEM INTERFACE $<TARGET_PROPERTY:${sibling_}::header,INTERFACE_INCLUDE_DIRECTORIES>
+        usearch_templates SYSTEM INTERFACE $<TARGET_PROPERTY:${sibling_}::header,INTERFACE_INCLUDE_DIRECTORIES>
     )
     get_target_property(sibling_target_ ${sibling_}::header ALIASED_TARGET)
     if (NOT sibling_target_)

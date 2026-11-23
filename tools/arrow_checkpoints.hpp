@@ -63,7 +63,6 @@
 #include "arrow_ipc.hpp" // `ipc_write_batch`, `ipc_read_footer`, `ipc_validate_batch`
 
 namespace unum::usearch::tools {
-using namespace unum::usearch::utilities;
 
 #pragma region Columns
 
@@ -98,18 +97,18 @@ struct arrow_summary_t {
 };
 
 /** @p shape as the @c safegraphs:shape metadata spells it. */
-inline sz::string_t arrow_shape_text(column_shape_t shape) noexcept {
-    if (auto const* matrix = std::get_if<matrix_shape_t>(&shape))
+inline sz::string_t arrow_shape_text(util::column_shape_t shape) noexcept {
+    if (auto const* matrix = std::get_if<util::matrix_shape_t>(&shape))
         return formatted("[{},{}]", matrix->rows, matrix->columns);
-    if (auto const* vector = std::get_if<vector_shape_t>(&shape)) return formatted("[{}]", vector->columns);
+    if (auto const* vector = std::get_if<util::vector_shape_t>(&shape)) return formatted("[{}]", vector->columns);
     return formatted("[]");
 }
 
 /** The shape @p text spells as @ref arrow_shape_text does, or nothing. */
-inline std::optional<column_shape_t> arrow_shape_of(std::string_view text) {
+inline std::optional<util::column_shape_t> arrow_shape_of(std::string_view text) {
     if (text.size() < 2 || text.front() != '[' || text.back() != ']') return std::nullopt;
     text = text.substr(1, text.size() - 2);
-    if (text.empty()) return scalar_shape_t {};
+    if (text.empty()) return util::scalar_shape_t {};
     std::array<std::size_t, 2> axes {};
     std::size_t count = 0;
     for (char const* cursor = text.data(); count != axes.size(); ++cursor) {
@@ -119,8 +118,8 @@ inline std::optional<column_shape_t> arrow_shape_of(std::string_view text) {
         if (cursor == text.data() + text.size()) break;
         if (*cursor != ',') return std::nullopt;
     }
-    if (count == 1) return vector_shape_t {axes[0]};
-    return matrix_shape_t {axes[0], axes[1]};
+    if (count == 1) return util::vector_shape_t {axes[0]};
+    return util::matrix_shape_t {axes[0], axes[1]};
 }
 
 /** The value of @p key among @p pairs, empty when absent. */
@@ -133,53 +132,55 @@ inline std::string_view arrow_metadata_value(std::span<ipc_key_value_t const> pa
 /** Types @p element as one element of @p dtype: an integer or a float where Arrow has one, the
  *  UUID extension, or fixed-size binary of its bytes; false for a packed dtype, whose elements
  *  share a byte. */
-inline bool arrow_element_of(dtype_t dtype, ipc_field_t& element) noexcept {
-    std::int32_t const bits = static_cast<std::int32_t>(dtype_bits(dtype));
+inline bool arrow_element_of(util::dtype_t dtype, ipc_field_t& element) noexcept {
+    std::int32_t const bits = static_cast<std::int32_t>(util::dtype_bits(dtype));
     switch (dtype) {
-    case dtype_t::f64_k:
-    case dtype_t::f32_k:
-    case dtype_t::f16_k: element.type = ipc_type_t::floating_point_k, element.width = bits; return true;
-    case dtype_t::i64_k:
-    case dtype_t::i32_k:
-    case dtype_t::i16_k:
-    case dtype_t::i8_k:
+    case util::dtype_t::f64_k:
+    case util::dtype_t::f32_k:
+    case util::dtype_t::f16_k: element.type = ipc_type_t::floating_point_k, element.width = bits; return true;
+    case util::dtype_t::i64_k:
+    case util::dtype_t::i32_k:
+    case util::dtype_t::i16_k:
+    case util::dtype_t::i8_k:
         element.type = ipc_type_t::int_k, element.width = bits, element.signedness = ipc_signedness_t::signed_k;
         return true;
-    case dtype_t::u64_k:
-    case dtype_t::u32_k:
-    case dtype_t::u16_k:
-    case dtype_t::u8_k: element.type = ipc_type_t::int_k, element.width = bits; return true;
-    case dtype_t::uuid_k: element.metadata = arrow_uuid_metadata_k; break;
+    case util::dtype_t::u64_k:
+    case util::dtype_t::u32_k:
+    case util::dtype_t::u16_k:
+    case util::dtype_t::u8_k: element.type = ipc_type_t::int_k, element.width = bits; return true;
+    case util::dtype_t::uuid_k: element.metadata = arrow_uuid_metadata_k; break;
     default: break;
     }
-    if (!dtype_bytes(dtype)) return false;
-    element.type = ipc_type_t::fixed_size_binary_k, element.width = static_cast<std::int32_t>(dtype_bytes(dtype));
+    if (!util::dtype_bytes(dtype)) return false;
+    element.type = ipc_type_t::fixed_size_binary_k, element.width = static_cast<std::int32_t>(util::dtype_bytes(dtype));
     return true;
 }
 
 /** The dtype a foreign producer's @p element holds: an integer or a float by its width, a UUID by
  *  its extension, UTF-8 text, or bytes; unknown otherwise. */
-inline dtype_t arrow_dtype_of(ipc_field_t const& element) noexcept {
+inline util::dtype_t arrow_dtype_of(ipc_field_t const& element) noexcept {
     bool const signed_integer = element.signedness == ipc_signedness_t::signed_k;
     switch (element.type) {
     case ipc_type_t::floating_point_k:
-        return element.width == 64 ? dtype_t::f64_k : element.width == 32 ? dtype_t::f32_k : dtype_t::f16_k;
+        return element.width == 64   ? util::dtype_t::f64_k
+               : element.width == 32 ? util::dtype_t::f32_k
+                                     : util::dtype_t::f16_k;
     case ipc_type_t::int_k:
         switch (element.width) {
-        case 64: return signed_integer ? dtype_t::i64_k : dtype_t::u64_k;
-        case 32: return signed_integer ? dtype_t::i32_k : dtype_t::u32_k;
-        case 16: return signed_integer ? dtype_t::i16_k : dtype_t::u16_k;
-        default: return signed_integer ? dtype_t::i8_k : dtype_t::u8_k;
+        case 64: return signed_integer ? util::dtype_t::i64_k : util::dtype_t::u64_k;
+        case 32: return signed_integer ? util::dtype_t::i32_k : util::dtype_t::u32_k;
+        case 16: return signed_integer ? util::dtype_t::i16_k : util::dtype_t::u16_k;
+        default: return signed_integer ? util::dtype_t::i8_k : util::dtype_t::u8_k;
         }
     case ipc_type_t::fixed_size_binary_k:
         return arrow_metadata_value(element.metadata, ipc_extension_name_key_k) == ipc_extension_uuid_k
-                   ? dtype_t::uuid_k
-                   : dtype_t::unknown_k;
+                   ? util::dtype_t::uuid_k
+                   : util::dtype_t::unknown_k;
     case ipc_type_t::utf8_k:
-    case ipc_type_t::large_utf8_k: return dtype_t::utf8_k;
+    case ipc_type_t::large_utf8_k: return util::dtype_t::utf8_k;
     case ipc_type_t::binary_k:
-    case ipc_type_t::large_binary_k: return dtype_t::u8_k;
-    default: return dtype_t::unknown_k;
+    case ipc_type_t::large_binary_k: return util::dtype_t::u8_k;
+    default: return util::dtype_t::unknown_k;
     }
 }
 
@@ -215,7 +216,7 @@ struct arrow_field_t {
  *  @param[out] laid The field, its child and its metadata.
  *  @return False for a column Arrow has no layout for: a ragged packed dtype, or narrow sums.
  */
-inline bool arrow_field_of(std::string_view name, safegraphs_column_t const& column, arrow_field_t& laid) {
+inline bool arrow_field_of(std::string_view name, util::safegraphs_column_t const& column, arrow_field_t& laid) {
     ipc_field_t element {.name = arrow_child_name_k};
     bool const typed = arrow_element_of(column.dtype, element);
     std::size_t pairs = 0;
@@ -227,10 +228,11 @@ inline bool arrow_field_of(std::string_view name, safegraphs_column_t const& col
     laid.field = {.name = name, .metadata = metadata.last(2)};
 
     if (column.offsets) {
-        dtype_t const sums = column.offsets->dtype;
-        if (!typed || (sums != dtype_t::u64_k && sums != dtype_t::u32_k)) return false;
-        bool const wide = sums == dtype_t::u64_k;
-        if (column.dtype == dtype_t::utf8_k) laid.field.type = wide ? ipc_type_t::large_utf8_k : ipc_type_t::utf8_k;
+        util::dtype_t const sums = column.offsets->dtype;
+        if (!typed || (sums != util::dtype_t::u64_k && sums != util::dtype_t::u32_k)) return false;
+        bool const wide = sums == util::dtype_t::u64_k;
+        if (column.dtype == util::dtype_t::utf8_k)
+            laid.field.type = wide ? ipc_type_t::large_utf8_k : ipc_type_t::utf8_k;
         else {
             laid.child = element;
             laid.field.type = wide ? ipc_type_t::large_list_k : ipc_type_t::list_k;
@@ -238,7 +240,7 @@ inline bool arrow_field_of(std::string_view name, safegraphs_column_t const& col
         }
         return true;
     }
-    std::size_t const width = regular_width(column.shape).value_or(0);
+    std::size_t const width = util::regular_width(column.shape).value_or(0);
     if (!width) return false;
     if (!typed) {
         laid.field.type = ipc_type_t::fixed_size_binary_k;
@@ -258,7 +260,8 @@ inline bool arrow_field_of(std::string_view name, safegraphs_column_t const& col
 }
 
 /** Whether two parts lay a column out alike, so one schema describes both. */
-inline bool arrow_same_layout(safegraphs_column_t const& first, safegraphs_column_t const& second) noexcept {
+inline bool arrow_same_layout(util::safegraphs_column_t const& first,
+                              util::safegraphs_column_t const& second) noexcept {
     if (first.dtype != second.dtype || first.shape != second.shape || bool(first.offsets) != bool(second.offsets))
         return false;
     return !first.offsets || first.offsets->dtype == second.offsets->dtype;
@@ -276,8 +279,8 @@ struct arrow_batch_t {
     std::size_t buffers_count = 0;
 
     /** Appends @p column of @p monolith, laid out as @p laid, holding @p rows rows. */
-    void append(arrow_field_t const& laid, safegraphs_header_t const& header, bytes_view_t monolith,
-                safegraphs_column_t const& column, std::size_t rows) noexcept {
+    void append(arrow_field_t const& laid, util::safegraphs_header_t const& header, bytes_view_t monolith,
+                util::safegraphs_column_t const& column, std::size_t rows) noexcept {
         bytes_view_t const values = header.data_of(monolith, column);
         std::int64_t const length = static_cast<std::int64_t>(rows);
         nodes[nodes_count++] = {length, 0};
@@ -292,7 +295,7 @@ struct arrow_batch_t {
         case ipc_type_t::list_k:
         case ipc_type_t::large_list_k:
             buffers[buffers_count++] = header.offsets_of(monolith, column);
-            nodes[nodes_count++] = {static_cast<std::int64_t>(values.size() / dtype_bytes(column.dtype)), 0};
+            nodes[nodes_count++] = {static_cast<std::int64_t>(values.size() / util::dtype_bytes(column.dtype)), 0};
             buffers[buffers_count++] = {};
             buffers[buffers_count++] = values;
             return;
@@ -316,18 +319,19 @@ enum class arrow_framing_t { file_k, stream_k };
 
 /** Writes @p schema and @p batches to @p file from @p position on, counting the bytes into it;
  *  false once a write failed. */
-inline bool arrow_write_messages(native_file_t file, arrow_framing_t framing, ipc_schema_t const& schema,
+inline bool arrow_write_messages(util::native_file_t file, arrow_framing_t framing, ipc_schema_t const& schema,
                                  std::span<ipc_batch_t const> batches, std::size_t& position) {
-    static constexpr std::array<byte_t, ipc_alignment_default_k> zeros_k {};
+    static constexpr std::array<util::byte_t, ipc_alignment_default_k> zeros_k {};
     ipc_options_t const options {};
-    native_file_event_t const event;
+    util::native_file_event_t const event;
     bool written = true;
     auto write = [&](bytes_view_t bytes) {
-        written = written && write_native_file(file, event, bytes, position) == static_cast<i64_t>(bytes.size());
+        written = written &&
+                  util::write_native_file(file, event, bytes, position) == static_cast<util::i64_t>(bytes.size());
         position += bytes.size();
     };
     // Each writer measures on an empty output first, answering the bytes it needs.
-    st::vector<byte_t> metadata;
+    st::vector<util::byte_t> metadata;
     auto measured = [&](std::size_t needed) noexcept {
         if (st::failed(metadata.resize(needed))) exit_out_of_memory("the Arrow metadata");
         return bytes_span_t {metadata};
@@ -361,7 +365,7 @@ inline bool arrow_write_messages(native_file_t file, arrow_framing_t framing, ip
             write(gathers[buffer].bytes), write(std::span {zeros_k}.first(gathers[buffer].padding));
     }
 
-    std::array<byte_t, 8> end_of_stream {};
+    std::array<util::byte_t, 8> end_of_stream {};
     if (status == ipc_status_t::success_k) status = ipc_write_end_of_stream(end_of_stream, metadata_written);
     if (status == ipc_status_t::success_k) write(end_of_stream);
     if (!footed) return status == ipc_status_t::success_k && written;
@@ -384,31 +388,32 @@ inline bool arrow_write_messages(native_file_t file, arrow_framing_t framing, ip
  *  @return Why the export stopped, leaving no file, or nothing once the file is complete.
  */
 inline sz::string_t arrow_export(std::string_view checkpoint, std::string_view arrow_path, arrow_summary_t& summary) {
-    using allocator_t = std::allocator<byte_t>;
-    growing_buffer<mapped_file_t, allocator_t> mappings {allocator_t {}};
-    growing_buffer<safegraphs_catalog_part_t, allocator_t> parts {allocator_t {}};
-    growing_buffer<safegraphs_named_column_t, allocator_t> extra_columns {allocator_t {}};
-    if (status_t const listed = safegraphs_catalog(checkpoint, mappings, parts, extra_columns, allocator_t {});
-        failed(listed))
-        return formatted("{} holds no SafeGraphs checkpoint: {}", checkpoint, status_to_string(listed));
+    using allocator_t = std::allocator<util::byte_t>;
+    util::growing_buffer<util::mapped_file_t, allocator_t> mappings {allocator_t {}};
+    util::growing_buffer<util::safegraphs_catalog_part_t, allocator_t> parts {allocator_t {}};
+    util::growing_buffer<util::safegraphs_named_column_t, allocator_t> extra_columns {allocator_t {}};
+    if (util::status_t const listed = util::safegraphs_catalog(checkpoint, mappings, parts, extra_columns,
+                                                               allocator_t {});
+        util::failed(listed))
+        return formatted("{} holds no SafeGraphs checkpoint: {}", checkpoint, util::status_to_string(listed));
 
     // Every part carries the whole schema, so the first one's header and string metadata name it.
-    safegraphs_header_t const& first = parts[0].header;
+    util::safegraphs_header_t const& first = parts[0].header;
     st::vector<arrow_custom_field_t> custom_fields;
-    auto keep_field = [&](safegraphs_custom_field_t field) noexcept {
+    auto keep_field = [&](util::safegraphs_custom_field_t field) noexcept {
         if (st::failed(custom_fields.push_back({formatted("{}", field.key), formatted("{}", field.value)})))
             exit_out_of_memory("the metadata");
     };
-    if (status_t const read = safegraphs_read_header(parts[0].monolith, allocator_t {}, keep_field).status;
-        failed(read))
-        return formatted("{} has a header that does not parse: {}", checkpoint, status_to_string(read));
+    if (util::status_t const read = util::safegraphs_read_header(parts[0].monolith, allocator_t {}, keep_field).status;
+        util::failed(read))
+        return formatted("{} has a header that does not parse: {}", checkpoint, util::status_to_string(read));
     st::vector<ipc_key_value_t> schema_metadata;
     for (arrow_custom_field_t const& field : custom_fields)
         if (st::failed(schema_metadata.push_back({field.key, field.value}))) exit_out_of_memory("the metadata");
 
     std::size_t const columns_count = 3 + first.extra_columns.size();
     st::vector<std::string_view> names;
-    st::vector<safegraphs_column_t const*> columns;
+    st::vector<util::safegraphs_column_t const*> columns;
     st::vector<arrow_field_t> laid;
     st::vector<ipc_field_t> fields;
     if (st::failed(names.resize(columns_count)) || st::failed(columns.resize(columns_count)) ||
@@ -430,8 +435,8 @@ inline sz::string_t arrow_export(std::string_view checkpoint, std::string_view a
         return formatted("{} holds {} columns, more than an Arrow schema here takes", checkpoint, columns_count);
 
     // A part whose columns or rows disagree with the schema would make a batch no reader accepts.
-    for (safegraphs_catalog_part_t const& part : parts) {
-        safegraphs_header_t const& header = part.header;
+    for (util::safegraphs_catalog_part_t const& part : parts) {
+        util::safegraphs_header_t const& header = part.header;
         bool alike = header.extra_columns.size() == first.extra_columns.size() &&
                      arrow_same_layout(header.key, first.key) && arrow_same_layout(header.value, first.value) &&
                      arrow_same_layout(header.neighbors, first.neighbors);
@@ -439,7 +444,7 @@ inline sz::string_t arrow_export(std::string_view checkpoint, std::string_view a
             alike = header.extra_columns[extra].name.view() == first.extra_columns[extra].name.view() &&
                     arrow_same_layout(header.extra_columns[extra].column, first.extra_columns[extra].column);
         alike = alike && header.value.nodes() == part.nodes && header.neighbors.nodes() == part.nodes;
-        for (safegraphs_named_column_t const& extra : header.extra_columns)
+        for (util::safegraphs_named_column_t const& extra : header.extra_columns)
             alike = alike && extra.column.nodes() == part.nodes;
         if (!alike) return formatted("{} holds parts whose columns differ", checkpoint);
     }
@@ -450,8 +455,8 @@ inline sz::string_t arrow_export(std::string_view checkpoint, std::string_view a
     if (st::failed(batches.resize(parts.size())) || st::failed(views.resize(parts.size())))
         exit_out_of_memory("the batches");
     for (std::size_t part = 0; part != parts.size(); ++part) {
-        safegraphs_catalog_part_t const& source = parts[part];
-        safegraphs_header_t const& header = source.header;
+        util::safegraphs_catalog_part_t const& source = parts[part];
+        util::safegraphs_header_t const& header = source.header;
         arrow_batch_t& batch = batches[part];
         batch.append(laid[0], header, source.monolith, header.key, source.nodes);
         batch.append(laid[1], header, source.monolith, header.value, source.nodes);
@@ -463,12 +468,12 @@ inline sz::string_t arrow_export(std::string_view checkpoint, std::string_view a
     }
 
     sz::string_t const terminated = formatted("{}", arrow_path);
-    native_file_t const file = open_native_file(terminated.c_str(), file_access_t::truncate_read_write_k,
-                                                file_buffering_t::buffered_k);
-    if (file == invalid_native_file_k) return formatted("cannot create {}", arrow_path);
+    util::native_file_t const file = util::open_native_file(
+        terminated.c_str(), util::file_access_t::truncate_read_write_k, util::file_buffering_t::buffered_k);
+    if (file == util::invalid_native_file_k) return formatted("cannot create {}", arrow_path);
     std::size_t position = 0;
     bool const framed = arrow_write_messages(file, arrow_framing_t::file_k, schema, views, position);
-    if (failed(close_native_file(file)) || !framed) {
+    if (util::failed(util::close_native_file(file)) || !framed) {
         std::remove(terminated.c_str());
         return formatted("writing {} failed", arrow_path);
     }
@@ -486,15 +491,16 @@ inline sz::string_t arrow_export(std::string_view checkpoint, std::string_view a
 inline sz::string_t arrow_write_batch(std::string_view path, ipc_schema_t const& schema, ipc_batch_t const& batch) {
     bool const piped = path == "-";
     sz::string_t const arrow_path = formatted("{}", path);
-    native_file_t const file = piped ? standard_output_native_file()
-                                     : open_native_file(arrow_path.c_str(), file_access_t::truncate_read_write_k,
-                                                        file_buffering_t::buffered_k);
-    if (file == invalid_native_file_k) return formatted("cannot create {}", path);
+    util::native_file_t const file = piped ? util::standard_output_native_file()
+                                           : util::open_native_file(arrow_path.c_str(),
+                                                                    util::file_access_t::truncate_read_write_k,
+                                                                    util::file_buffering_t::buffered_k);
+    if (file == util::invalid_native_file_k) return formatted("cannot create {}", path);
     arrow_framing_t const framing = piped || path.ends_with(".arrows") ? arrow_framing_t::stream_k
                                                                        : arrow_framing_t::file_k;
     std::size_t position = 0;
     bool const framed = arrow_write_messages(file, framing, schema, {&batch, 1}, position);
-    if ((!piped && failed(close_native_file(file))) || !framed) {
+    if ((!piped && util::failed(util::close_native_file(file))) || !framed) {
         if (!piped) std::remove(arrow_path.c_str());
         return formatted("writing {} failed", path);
     }
@@ -594,15 +600,15 @@ inline constexpr std::size_t arrow_no_column_k = (std::numeric_limits<std::size_
 
 /** Reads standard input to its end into @p bytes, as a checkpoint piped in arrives; false once a
  *  read failed. */
-inline bool read_standard_input(st::vector<byte_t>& bytes) noexcept {
-    native_file_event_t const event;
+inline bool read_standard_input(st::vector<util::byte_t>& bytes) noexcept {
+    util::native_file_event_t const event;
     std::size_t length = 0;
     if (st::failed(bytes.resize(st::assume_uninitialized, std::size_t {1} << 20))) exit_out_of_memory("standard input");
     while (true) {
         if (length == bytes.size() && st::failed(bytes.resize(st::assume_uninitialized, bytes.size() * 2)))
             exit_out_of_memory("standard input");
-        i64_t const landed = read_native_file(standard_input_native_file(), event, bytes_span_t {bytes}.subspan(length),
-                                              length);
+        util::i64_t const landed = util::read_native_file(util::standard_input_native_file(), event,
+                                                          bytes_span_t {bytes}.subspan(length), length);
         if (landed < 0) return false;
         if (!landed) break;
         length += static_cast<std::size_t>(landed);
@@ -622,17 +628,17 @@ inline bool read_standard_input(st::vector<byte_t>& bytes) noexcept {
  */
 class arrow_input_t {
     sz::string_t name_;
-    mapped_file_t mapping_;
+    util::mapped_file_t mapping_;
     bytes_view_t remaining_;
-    native_file_t descriptor_ = invalid_native_file_k;
-    native_file_t owned_descriptor_ = invalid_native_file_k;
-    native_file_event_t event_;
-    u64_t position_ = 0;
-    std::array<byte_t, 8> sniffed_ {};
+    util::native_file_t descriptor_ = util::invalid_native_file_k;
+    util::native_file_t owned_descriptor_ = util::invalid_native_file_k;
+    util::native_file_event_t event_;
+    util::u64_t position_ = 0;
+    std::array<util::byte_t, 8> sniffed_ {};
     std::size_t sniffed_size_ = 0;
     std::size_t sniffed_taken_ = 0;
 
-    st::vector<byte_t> schema_metadata_, metadata_, body_;
+    st::vector<util::byte_t> schema_metadata_, metadata_, body_;
     std::array<ipc_field_t, ipc_fields_max_k> fields_ {};
     std::array<ipc_key_value_t, 4 * ipc_fields_max_k> pairs_ {};
     std::array<ipc_node_t, ipc_fields_max_k> nodes_ {};
@@ -647,8 +653,8 @@ class arrow_input_t {
 
     /** Fills @p bytes off the input, answering how many landed, fewer only at its end. */
     std::size_t read_(bytes_span_t bytes) noexcept {
-        if (descriptor_ == invalid_native_file_k) {
-            std::size_t const landed = min_of(bytes.size(), remaining_.size());
+        if (descriptor_ == util::invalid_native_file_k) {
+            std::size_t const landed = util::min_of(bytes.size(), remaining_.size());
             if (landed) std::memcpy(bytes.data(), remaining_.data(), landed);
             remaining_ = remaining_.subspan(landed);
             return landed;
@@ -657,19 +663,19 @@ class arrow_input_t {
         for (; sniffed_taken_ != sniffed_size_ && filled != bytes.size(); ++filled)
             bytes[filled] = sniffed_[sniffed_taken_++];
         while (filled != bytes.size()) {
-            i64_t const landed = read_native_file(descriptor_, event_, bytes.subspan(filled), position_);
+            util::i64_t const landed = util::read_native_file(descriptor_, event_, bytes.subspan(filled), position_);
             if (landed <= 0) break;
             filled += static_cast<std::size_t>(landed);
-            position_ += static_cast<u64_t>(landed);
+            position_ += static_cast<util::u64_t>(landed);
         }
         return filled;
     }
 
     /** The next @p count bytes, viewing the mapping or read into @p storage, fewer only at the
      *  end. */
-    bytes_view_t take_(std::size_t count, st::vector<byte_t>& storage) noexcept {
-        if (descriptor_ == invalid_native_file_k) {
-            bytes_view_t const taken = remaining_.first(min_of(count, remaining_.size()));
+    bytes_view_t take_(std::size_t count, st::vector<util::byte_t>& storage) noexcept {
+        if (descriptor_ == util::invalid_native_file_k) {
+            bytes_view_t const taken = remaining_.first(util::min_of(count, remaining_.size()));
             remaining_ = remaining_.subspan(taken.size());
             return taken;
         }
@@ -692,8 +698,9 @@ class arrow_input_t {
 
     /** Reads the next message into @p message, its metadata kept in @p metadata and its body in
      *  @p body; @p ended turns true at the end of the stream. */
-    sz::string_t read_message_(st::vector<byte_t>& metadata, ipc_message_t& message, bytes_view_t& body, bool& ended) {
-        std::array<byte_t, 8> prefix {};
+    sz::string_t read_message_(st::vector<util::byte_t>& metadata, ipc_message_t& message, bytes_view_t& body,
+                               bool& ended) {
+        std::array<util::byte_t, 8> prefix {};
         bytes_span_t const whole {prefix};
         std::uint32_t metadata_bytes = 0;
         std::size_t prefix_bytes = 0;
@@ -716,8 +723,8 @@ class arrow_input_t {
 
     /** Sniffs the first bytes, then reads the schema that leads every Arrow input. */
     sz::string_t start_() {
-        bytes_view_t head = remaining_.first(min_of(sniffed_.size(), remaining_.size()));
-        if (descriptor_ != invalid_native_file_k) {
+        bytes_view_t head = remaining_.first(util::min_of(sniffed_.size(), remaining_.size()));
+        if (descriptor_ != util::invalid_native_file_k) {
             sniffed_size_ = read_(sniffed_);
             head = bytes_view_t {sniffed_}.first(sniffed_size_);
         }
@@ -727,7 +734,7 @@ class arrow_input_t {
         if (opens_with("PAR1"))
             return formatted("{} is Parquet, which this tool has no reader for; rewrite it as Arrow IPC", name_);
         if (opens_with(ipc_file_magic_k.substr(0, 6))) {
-            std::array<byte_t, ipc_file_magic_k.size()> magic {};
+            std::array<util::byte_t, ipc_file_magic_k.size()> magic {};
             if (read_(magic) != magic.size()) return refused_(ipc_status_t::truncated_k);
         }
         else if (!opens_with("\xFF\xFF\xFF\xFF"))
@@ -756,27 +763,28 @@ class arrow_input_t {
     arrow_input_t(arrow_input_t const&) = delete;
     arrow_input_t& operator=(arrow_input_t const&) = delete;
     ~arrow_input_t() noexcept {
-        if (owned_descriptor_ != invalid_native_file_k) [[maybe_unused]]
-            status_t const closed = close_native_file(owned_descriptor_);
+        if (owned_descriptor_ != util::invalid_native_file_k) [[maybe_unused]]
+            util::status_t const closed = util::close_native_file(owned_descriptor_);
     }
 
     /** Opens @p path, standard input for @c -, and reads its schema; answers why it cannot. */
     sz::string_t open(std::string_view path) {
         name_ = formatted("{}", path == "-" ? std::string_view {"standard input"} : path);
         if (path == "-") {
-            descriptor_ = standard_input_native_file();
+            descriptor_ = util::standard_input_native_file();
             return start_();
         }
         std::error_code unknown;
         if (std::filesystem::is_regular_file(std::filesystem::path {path}, unknown)) {
-            auto [mapping, status] = mapped_file_t::read(path);
-            if (failed(status)) return formatted("cannot read {}: {}", name_, status_to_string(status));
+            auto [mapping, status] = util::mapped_file_t::read(path);
+            if (util::failed(status)) return formatted("cannot read {}: {}", name_, util::status_to_string(status));
             mapping_ = std::move(mapping);
             remaining_ = mapping_.view();
             return start_();
         }
-        owned_descriptor_ = open_native_file(name_.c_str(), file_access_t::read_only_k, file_buffering_t::buffered_k);
-        if (owned_descriptor_ == invalid_native_file_k) return formatted("cannot read {}", name_);
+        owned_descriptor_ = util::open_native_file(name_.c_str(), util::file_access_t::read_only_k,
+                                                   util::file_buffering_t::buffered_k);
+        if (owned_descriptor_ == util::invalid_native_file_k) return formatted("cannot read {}", name_);
         descriptor_ = owned_descriptor_;
         return start_();
     }
@@ -888,13 +896,13 @@ inline sz::string_t arrow_keys_of(arrow_input_t const& input, std::size_t column
     ArrowArray const& integers = *input.column_array(column);
     std::size_t const rows = static_cast<std::size_t>(integers.length);
     if (rows && !integers.buffers[1]) return arrow_column_refused(input, field.name, usearch_status_malformed_k);
-    auto const* const bytes = static_cast<byte_t const*>(integers.buffers[1]);
+    auto const* const bytes = static_cast<util::byte_t const*>(integers.buffers[1]);
     if (st::failed(widened.resize(rows))) exit_out_of_memory("the keys");
     for (std::size_t row = 0; row != rows; ++row) {
         std::uint64_t const integer = ipc_load_little<std::uint64_t>(bytes + row * sizeof(std::uint64_t));
         if (field.signedness == ipc_signedness_t::signed_k && static_cast<std::int64_t>(integer) < 0)
             return formatted("{} holds a negative key in {}", input.name(), field.name);
-        widened[row] = std::bit_cast<usearch_key_t>(uuid_of(integer));
+        widened[row] = std::bit_cast<usearch_key_t>(util::uuid_of(integer));
     }
     keys = {widened.data(), sizeof(usearch_key_t)};
     return {};
@@ -908,11 +916,11 @@ inline sz::string_t arrow_keys_of(arrow_input_t const& input, std::size_t column
  *  start in every batch. */
 struct arrow_column_t {
     ipc_field_t const* field = nullptr;
-    dtype_t dtype = dtype_t::unknown_k;
-    column_shape_t shape;
+    util::dtype_t dtype = util::dtype_t::unknown_k;
+    util::column_shape_t shape;
 
     /** The prefix sums' dtype, @c u32_k or @c u64_k; unknown for a regular column. */
-    dtype_t sums_dtype = dtype_t::unknown_k;
+    util::dtype_t sums_dtype = util::dtype_t::unknown_k;
 
     /** Bytes of one row of a regular column, or of one element of a ragged one. */
     std::size_t element_bytes = 0;
@@ -942,36 +950,38 @@ inline bool arrow_column_of(ipc_field_t const& field, arrow_column_t& column) {
     ipc_field_t const& element = field.children.empty() ? field : field.children[0];
     column.field = &field;
     column.dtype = arrow_dtype_of(element);
-    column.shape = scalar_shape_t {};
+    column.shape = util::scalar_shape_t {};
     switch (field.type) {
     case ipc_type_t::utf8_k:
     case ipc_type_t::binary_k:
-    case ipc_type_t::list_k: column.sums_dtype = dtype_t::u32_k; break;
+    case ipc_type_t::list_k: column.sums_dtype = util::dtype_t::u32_k; break;
     case ipc_type_t::large_utf8_k:
     case ipc_type_t::large_binary_k:
-    case ipc_type_t::large_list_k: column.sums_dtype = dtype_t::u64_k; break;
-    case ipc_type_t::fixed_size_list_k: column.shape = vector_shape_t {static_cast<std::size_t>(field.width)}; break;
+    case ipc_type_t::large_list_k: column.sums_dtype = util::dtype_t::u64_k; break;
+    case ipc_type_t::fixed_size_list_k:
+        column.shape = util::vector_shape_t {static_cast<std::size_t>(field.width)};
+        break;
     case ipc_type_t::struct_k: return false;
     default: break;
     }
     if (std::string_view const named = arrow_metadata_value(field.metadata, arrow_dtype_key_k); !named.empty())
-        column.dtype = dtype_named(named);
+        column.dtype = util::dtype_named(named);
     if (std::string_view const spelled = arrow_metadata_value(field.metadata, arrow_shape_key_k); !spelled.empty()) {
-        std::optional<column_shape_t> const shape = arrow_shape_of(spelled);
+        std::optional<util::column_shape_t> const shape = arrow_shape_of(spelled);
         if (!shape) return false;
         column.shape = *shape;
     }
-    if (column.dtype == dtype_t::unknown_k) return false;
+    if (column.dtype == util::dtype_t::unknown_k) return false;
 
     // The Arrow bytes of a row, or of an element, hold the column to the dtype and shape it names.
     std::size_t const arrow_element_bytes = ipc_type_is_fixed(element.type) ? ipc_value_bytes(element) : 1;
-    if (column.sums_dtype != dtype_t::unknown_k) {
-        column.element_bytes = dtype_bytes(column.dtype);
+    if (column.sums_dtype != util::dtype_t::unknown_k) {
+        column.element_bytes = util::dtype_bytes(column.dtype);
         return column.element_bytes && column.element_bytes == arrow_element_bytes;
     }
     if (!ipc_type_is_fixed(element.type)) return false;
     std::size_t const arrow_row_bytes = arrow_element_bytes * (field.children.empty() ? 1 : field.width);
-    column.element_bytes = safegraphs_column_t {.dtype = column.dtype, .shape = column.shape}.row_bytes();
+    column.element_bytes = util::safegraphs_column_t {.dtype = column.dtype, .shape = column.shape}.row_bytes();
     return column.element_bytes && column.element_bytes == arrow_row_bytes;
 }
 
@@ -982,9 +992,9 @@ struct arrow_part_t {
     ipc_batch_t batch;
 
     /** Every column the batch restores, in the schema's order. */
-    st::vector<safegraphs_column_t> columns;
-    st::vector<safegraphs_named_column_t> extra_columns;
-    safegraphs_header_t header;
+    st::vector<util::safegraphs_column_t> columns;
+    st::vector<util::safegraphs_named_column_t> extra_columns;
+    util::safegraphs_header_t header;
 
     /** Bytes of the monolith, and where it starts in the checkpoint. */
     std::size_t bytes = 0;
@@ -1005,10 +1015,11 @@ struct arrow_part_t {
  *  @param[out] summary What the checkpoint holds.
  *  @return Why the import stopped, or nothing.
  */
-inline sz::string_t arrow_import(std::string_view arrow_path, std::string_view metric, st::vector<byte_t>& checkpoint,
-                                 arrow_summary_t& summary) {
-    auto [mapping, mapping_status] = mapped_file_t::read(arrow_path);
-    if (failed(mapping_status)) return formatted("cannot read {}: {}", arrow_path, status_to_string(mapping_status));
+inline sz::string_t arrow_import(std::string_view arrow_path, std::string_view metric,
+                                 st::vector<util::byte_t>& checkpoint, arrow_summary_t& summary) {
+    auto [mapping, mapping_status] = util::mapped_file_t::read(arrow_path);
+    if (util::failed(mapping_status))
+        return formatted("cannot read {}: {}", arrow_path, util::status_to_string(mapping_status));
     bytes_view_t const file = mapping.view();
 
     std::array<ipc_field_t, ipc_fields_max_k> fields_pool {};
@@ -1033,7 +1044,7 @@ inline sz::string_t arrow_import(std::string_view arrow_path, std::string_view m
         ipc_field_t const& field = schema.fields[index];
         if (!arrow_column_of(field, columns[index]))
             return formatted("{} holds a {} column no SafeGraphs column lays out like", arrow_path, field.name);
-        if (field.name.size() >= safegraphs_name_capacity_k)
+        if (field.name.size() >= util::safegraphs_name_capacity_k)
             return formatted("{} names a column {}, longer than a SafeGraphs name", arrow_path, field.name);
         columns[index].first_buffer = first_buffer;
         first_buffer += ipc_buffers_of(field.type) + ipc_buffers_of(field.children);
@@ -1047,7 +1058,7 @@ inline sz::string_t arrow_import(std::string_view arrow_path, std::string_view m
     std::string_view const recorded = arrow_metadata_value(schema.metadata, "metric");
     if (!metric.empty() && !recorded.empty() && metric != recorded)
         return formatted("{} records the {} metric, not {}", arrow_path, recorded, metric);
-    st::vector<safegraphs_custom_field_t> custom_fields;
+    st::vector<util::safegraphs_custom_field_t> custom_fields;
     if (recorded.empty() && !metric.empty() && st::failed(custom_fields.push_back({"metric", metric})))
         exit_out_of_memory("the metadata");
     for (ipc_key_value_t const& pair : schema.metadata)
@@ -1056,7 +1067,7 @@ inline sz::string_t arrow_import(std::string_view arrow_path, std::string_view m
 
     st::vector<arrow_part_t> parts;
     if (st::failed(parts.resize(blocks_count))) exit_out_of_memory("the parts");
-    std::size_t const alignment = safegraphs_alignment_default_k;
+    std::size_t const alignment = util::safegraphs_alignment_default_k;
     for (std::size_t index = 0; index != blocks_count; ++index) {
         arrow_part_t& part = parts[index];
         ipc_block_t const& block = blocks[index];
@@ -1080,14 +1091,14 @@ inline sz::string_t arrow_import(std::string_view arrow_path, std::string_view m
         std::size_t const rows = static_cast<std::size_t>(part.batch.length);
         std::size_t end = 0;
         auto place = [&](std::size_t bytes) {
-            std::size_t const start = round_up_to_multiple(end, alignment);
-            return end = start + bytes, iota_view<std::size_t> {start, end};
+            std::size_t const start = util::round_up_to_multiple(end, alignment);
+            return end = start + bytes, util::iota_view<std::size_t> {start, end};
         };
         for (std::size_t column_index = 0; column_index != columns.size(); ++column_index) {
             arrow_column_t const& column = columns[column_index];
-            safegraphs_column_t restored {.dtype = column.dtype, .shape = column.shape};
-            if (column.sums_dtype != dtype_t::unknown_k) {
-                std::size_t const sum_bytes = dtype_bytes(column.sums_dtype);
+            util::safegraphs_column_t restored {.dtype = column.dtype, .shape = column.shape};
+            if (column.sums_dtype != util::dtype_t::unknown_k) {
+                std::size_t const sum_bytes = util::dtype_bytes(column.sums_dtype);
                 bytes_view_t const sums = part.batch.buffers[column.first_buffer + 1];
                 auto sum_at = [&](std::size_t row) -> std::uint64_t {
                     return sum_bytes == 8 ? ipc_load_little<std::uint64_t>(sums.data() + 8 * row)
@@ -1098,14 +1109,15 @@ inline sz::string_t arrow_import(std::string_view arrow_path, std::string_view m
                     return formatted("{} holds a {} column whose offsets start past zero", arrow_path,
                                      column.field->name);
                 std::uint64_t const elements = rows ? sum_at(rows) : 0;
-                restored.offsets = prefix_sums_t {column.sums_dtype, place((rows + 1) * sum_bytes)};
+                restored.offsets = util::prefix_sums_t {column.sums_dtype, place((rows + 1) * sum_bytes)};
                 restored.data = place(static_cast<std::size_t>(elements) * column.element_bytes);
             }
             else restored.data = place(rows * column.element_bytes);
-            if (st::failed(part.columns.push_back(safegraphs_column_t {restored}))) exit_out_of_memory("the columns");
+            if (st::failed(part.columns.push_back(util::safegraphs_column_t {restored})))
+                exit_out_of_memory("the columns");
             if (column_index != graph_columns[0] && column_index != graph_columns[1] &&
                 column_index != graph_columns[2] &&
-                st::failed(part.extra_columns.push_back({safegraphs_name_t {column.field->name}, restored})))
+                st::failed(part.extra_columns.push_back({util::safegraphs_name_t {column.field->name}, restored})))
                 exit_out_of_memory("the columns");
         }
         part.header.key = part.columns[graph_columns[0]];
@@ -1113,8 +1125,9 @@ inline sz::string_t arrow_import(std::string_view arrow_path, std::string_view m
         part.header.neighbors = part.columns[graph_columns[2]];
         part.header.alignment = alignment;
         part.header.extra_columns = part.extra_columns;
-        auto const [data_offset, offset_status] = safegraphs_data_offset(part.header, custom_fields);
-        if (failed(offset_status)) return formatted("cannot lay out a header: {}", status_to_string(offset_status));
+        auto const [data_offset, offset_status] = util::safegraphs_data_offset(part.header, custom_fields);
+        if (util::failed(offset_status))
+            return formatted("cannot lay out a header: {}", util::status_to_string(offset_status));
         part.header.data_offset = data_offset;
         part.bytes = data_offset + end;
         summary.nodes += rows;
@@ -1124,11 +1137,12 @@ inline sz::string_t arrow_import(std::string_view arrow_path, std::string_view m
     st::vector<std::size_t> offsets;
     if (st::failed(offsets.resize(parts.size()))) exit_out_of_memory("the part offsets");
     auto part_at = [&](std::size_t part) {
-        return safegraphs_part_t {.bytes = parts[part].bytes,
-                                  .nodes = static_cast<std::size_t>(parts[part].batch.length)};
+        return util::safegraphs_part_t {.bytes = parts[part].bytes,
+                                        .nodes = static_cast<std::size_t>(parts[part].batch.length)};
     };
-    auto const [total, layout_status] = safegraphs_buffer_layout(parts.size(), part_at, alignment, offsets);
-    if (failed(layout_status)) return formatted("cannot lay out a manifest: {}", status_to_string(layout_status));
+    auto const [total, layout_status] = util::safegraphs_buffer_layout(parts.size(), part_at, alignment, offsets);
+    if (util::failed(layout_status))
+        return formatted("cannot lay out a manifest: {}", util::status_to_string(layout_status));
     checkpoint.clear();
     if (st::failed(checkpoint.resize(total))) exit_out_of_memory("the checkpoint");
     bytes_span_t const buffer {checkpoint};
@@ -1138,21 +1152,23 @@ inline sz::string_t arrow_import(std::string_view arrow_path, std::string_view m
         bytes_span_t const monolith = buffer.subspan(part.offset, part.bytes);
         bytes_span_t const segment = monolith.subspan(part.header.data_offset);
         // An empty batch may carry no offsets at all, and its one zero sum is already in place.
-        auto copy = [&](iota_view<std::size_t> range, bytes_view_t source) {
-            if (std::size_t const bytes = min_of(range.size(), source.size()))
+        auto copy = [&](util::iota_view<std::size_t> range, bytes_view_t source) {
+            if (std::size_t const bytes = util::min_of(range.size(), source.size()))
                 std::memcpy(segment.data() + range.first, source.data(), bytes);
         };
         for (std::size_t column_index = 0; column_index != columns.size(); ++column_index) {
             arrow_column_t const& column = columns[column_index];
-            safegraphs_column_t const& restored = part.columns[column_index];
+            util::safegraphs_column_t const& restored = part.columns[column_index];
             if (restored.offsets) copy(restored.offsets->bytes, part.batch.buffers[column.first_buffer + 1]);
             copy(restored.data, part.batch.buffers[column.values_buffer()]);
         }
-        if (status_t const framed = safegraphs_write_header(monolith, part.header, custom_fields); failed(framed))
-            return formatted("cannot write a header: {}", status_to_string(framed));
+        if (util::status_t const framed = util::safegraphs_write_header(monolith, part.header, custom_fields);
+            util::failed(framed))
+            return formatted("cannot write a header: {}", util::status_to_string(framed));
     }
-    if (status_t const led = safegraphs_commit_buffer(buffer, parts.size(), part_at, offsets); failed(led))
-        return formatted("cannot write the manifest: {}", status_to_string(led));
+    if (util::status_t const led = util::safegraphs_commit_buffer(buffer, parts.size(), part_at, offsets);
+        util::failed(led))
+        return formatted("cannot write the manifest: {}", util::status_to_string(led));
 
     summary.parts = parts.size(), summary.bytes = checkpoint.size();
     summary.metric = formatted("{}", metric.empty() ? recorded : metric);
@@ -1161,13 +1177,13 @@ inline sz::string_t arrow_import(std::string_view arrow_path, std::string_view m
 
 /** What @ref arrow_matches_read answers: the key of every query, and what each one found. */
 struct arrow_matches_t {
-    st::vector<uuid128_t> queries;
+    st::vector<util::uuid128_t> queries;
     copied_matches_t matches;
 };
 
 /** Whether @p field holds one key per row, as @ref arrow_matches_write lays them out. */
 inline bool arrow_field_holds_keys(ipc_field_t const& field) noexcept {
-    return field.type == ipc_type_t::fixed_size_binary_k && field.width == sizeof(uuid128_t);
+    return field.type == ipc_type_t::fixed_size_binary_k && field.width == sizeof(util::uuid128_t);
 }
 
 /** Whether @p fields are the columns @ref arrow_matches_write lays out, whoever wrote them. */
@@ -1189,8 +1205,8 @@ inline void arrow_append_matches(ipc_batch_t const& batch, arrow_matches_t& read
     bytes_view_t const keys = batch.buffers[6], distances = batch.buffers[8];
     std::size_t const rows = static_cast<std::size_t>(batch.length);
     for (std::size_t row = 0; row != rows; ++row) {
-        uuid128_t query;
-        std::memcpy(query.bytes, queries.data() + row * sizeof(uuid128_t), sizeof(uuid128_t));
+        util::uuid128_t query;
+        std::memcpy(query.bytes, queries.data() + row * sizeof(util::uuid128_t), sizeof(util::uuid128_t));
         if (st::failed(read.queries.push_back(std::move(query)))) exit_out_of_memory("the queries");
         std::int64_t const first = ipc_load_little<std::int64_t>(offsets.data() + row * sizeof(std::int64_t));
         std::int64_t const last = ipc_load_little<std::int64_t>(offsets.data() + (row + 1) * sizeof(std::int64_t));
@@ -1198,9 +1214,9 @@ inline void arrow_append_matches(ipc_batch_t const& batch, arrow_matches_t& read
             exit_out_of_memory("the matches");
         for (std::size_t match = static_cast<std::size_t>(first); match != static_cast<std::size_t>(last); ++match) {
             usearch_key_t key;
-            std::memcpy(key.bytes, keys.data() + match * sizeof(uuid128_t), sizeof(uuid128_t));
+            std::memcpy(key.bytes, keys.data() + match * sizeof(util::uuid128_t), sizeof(util::uuid128_t));
             std::uint64_t const bits = ipc_load_little<std::uint64_t>(distances.data() + match * sizeof(std::uint64_t));
-            append_match(read.matches, key, std::bit_cast<f64_t>(bits));
+            append_match(read.matches, key, std::bit_cast<util::f64_t>(bits));
         }
     }
 }

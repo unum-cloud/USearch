@@ -15,12 +15,14 @@
  */
 #undef NDEBUG // ! A test's oracle must stay live in every build
 
+#include <cstring> // `std::memcpy` - coincident points, prototypes and each query's exact row
+
 #include <algorithm> // `std::nth_element`
-#include <array>     // `std::array` - the prototypes, one cloud a pack takes
+#include <array>     // `std::array` - the prototypes' point counts, one cloud a pack takes
 #include <limits>    // `std::numeric_limits` - the node-ID type's sentinel
 #include <span>      // `std::span`
 #include <string>    // `std::string` - the cases' labels
-#include <vector>    // `std::vector` - clouds, the tape, offsets, matches
+#include <vector>    // `std::vector` - the tape and its offsets
 
 #include "usearch/shapes_index.h"
 #include "usearch/shapes/ram_index.hpp"
@@ -39,11 +41,13 @@
 
 #if USEARCH_ARCH_CUDA_
 
+namespace util = unum::usearch::utilities;
+
 /** The library's fatbin of one class's shapes kits over one dtype, defined in that class's
  *  @c src/shapes/vram_variants_nvidia*.cpp unit. */
 template <gpu_class_t gpu_class_, nk_dtype_t dtype_>
 struct shapes_nvidia_fatbin {
-    static us::utilities::bytes_view_t bytes() noexcept;
+    static bytes_view_t bytes() noexcept;
 };
 
 #endif
@@ -54,7 +58,7 @@ struct shapes_nvidia_fatbin {
 template <gpu_class_t gpu_class_, nk_dtype_t dtype_>
 struct shapes_amd_code_object {
     inline static constexpr nk_capability_t capability_k = numkong_capabilities_of(gpu_class_);
-    static us::utilities::bytes_view_t bytes() noexcept;
+    static bytes_view_t bytes() noexcept;
 };
 
 #endif
@@ -67,49 +71,61 @@ using namespace unum::usearch::shapes;
 /** How a collection draws its clouds, as the file's docblock describes. */
 enum class cloud_kind_t { random_k, coincident_k, collinear_k, molecular_k };
 
-/** Draws @p count clouds of @p kind, @b [points,3] interleaved coordinates each. */
-static std::vector<std::vector<f64_t>> generate_clouds(cloud_kind_t kind, std::size_t count, u64_t seed) {
-    constexpr std::size_t min_points_k = 10, max_points_k = 60, prototypes_k = 8, jittered_points_k = 4;
+/** The fewest and the most points a drawn cloud holds. */
+constexpr std::size_t shapes_min_points_k = 10, shapes_max_points_k = 60;
+
+/** Draws a cloud of @p kind into every row of @p clouds, @b [clouds,points·3] interleaved
+ *  coordinates from the row's start in rows @c shapes_max_points_k points wide, and its point count
+ *  into @p points. */
+static void generate_clouds(cloud_kind_t kind, u64_t seed, nk::matrix_span<f64_t> clouds,
+                            std::span<std::size_t> points) {
+    constexpr std::size_t prototypes_k = 8, jittered_points_k = 4;
     split_mix_generator_t random_generator {seed};
     uniform_between<f64_t> const centered {-1, 1};
-    uniform_below<u32_t> const points_distribution {max_points_k - min_points_k + 1};
+    uniform_below<u32_t> const points_distribution {shapes_max_points_k - shapes_min_points_k + 1};
     uniform_below<u32_t> const prototype_distribution {prototypes_k};
     uniform_below<u32_t> const mirror_distribution {4};
-    std::array<std::vector<f64_t>, prototypes_k> prototypes;
-    for (std::vector<f64_t>& prototype : prototypes) {
-        prototype.resize(3 * (min_points_k + points_distribution(random_generator)));
-        for (f64_t& coordinate : prototype) coordinate = 2 * centered(random_generator);
+    nk::matrix<f64_t> prototypes = make_matrix<f64_t>(prototypes_k, shapes_max_points_k * 3);
+    std::array<std::size_t, prototypes_k> prototype_points;
+    for (std::size_t prototype = 0; prototype != prototypes_k; ++prototype) {
+        prototype_points[prototype] = shapes_min_points_k + points_distribution(random_generator);
+        for (std::size_t coordinate = 0; coordinate != prototype_points[prototype] * 3; ++coordinate)
+            prototypes(prototype, coordinate) = 2 * centered(random_generator);
     }
-    std::vector<std::vector<f64_t>> clouds(count);
-    for (std::vector<f64_t>& cloud : clouds) {
-        std::size_t const points = min_points_k + points_distribution(random_generator);
+    for (std::size_t entry = 0; entry != clouds.extent(0); ++entry) {
+        f64_t* const cloud = clouds.row(entry).data();
+        std::size_t const drawn_points = shapes_min_points_k + points_distribution(random_generator);
         std::array<f64_t, 3> const origin {centered(random_generator), centered(random_generator),
                                            centered(random_generator)};
         std::array<f64_t, 3> const direction {centered(random_generator), centered(random_generator),
                                               centered(random_generator)};
+        points[entry] = drawn_points;
         switch (kind) {
         case cloud_kind_t::random_k:
-            cloud.resize(points * 3);
-            for (f64_t& coordinate : cloud) coordinate = 4 * centered(random_generator);
+            for (std::size_t coordinate = 0; coordinate != drawn_points * 3; ++coordinate)
+                cloud[coordinate] = 4 * centered(random_generator);
             break;
         case cloud_kind_t::coincident_k:
-            for (std::size_t point = 0; point != points; ++point)
-                cloud.insert(cloud.end(), origin.begin(), origin.end());
+            for (std::size_t point = 0; point != drawn_points; ++point)
+                std::memcpy(cloud + point * 3, origin.data(), sizeof(origin));
             break;
         case cloud_kind_t::collinear_k:
-            for (std::size_t point = 0; point != points; ++point) {
+            for (std::size_t point = 0; point != drawn_points; ++point) {
                 f64_t const step = 4 * centered(random_generator);
-                for (std::size_t axis = 0; axis != 3; ++axis) cloud.push_back(origin[axis] + step * direction[axis]);
+                for (std::size_t axis = 0; axis != 3; ++axis)
+                    cloud[point * 3 + axis] = origin[axis] + step * direction[axis];
             }
             break;
         case cloud_kind_t::molecular_k: {
-            cloud = prototypes[prototype_distribution(random_generator)];
-            uniform_below<u32_t> const point_distribution {static_cast<u32_t>(cloud.size() / 3)};
+            std::size_t const prototype = prototype_distribution(random_generator);
+            points[entry] = prototype_points[prototype];
+            std::memcpy(cloud, prototypes.row(prototype).data(), points[entry] * 3 * sizeof(f64_t));
+            uniform_below<u32_t> const point_distribution {static_cast<u32_t>(points[entry])};
             for (std::size_t jitter = 0; jitter != jittered_points_k; ++jitter)
                 for (std::size_t axis = 0, point = point_distribution(random_generator); axis != 3; ++axis)
                     cloud[point * 3 + axis] += 0.15 * centered(random_generator);
             f64_t const mirror = mirror_distribution(random_generator) == 0 ? -1 : 1;
-            for (std::size_t point = 0; point != cloud.size() / 3; ++point) {
+            for (std::size_t point = 0; point != points[entry]; ++point) {
                 cloud[point * 3] *= mirror;
                 for (std::size_t axis = 0; axis != 3; ++axis) cloud[point * 3 + axis] += 4 * origin[axis];
             }
@@ -117,15 +133,11 @@ static std::vector<std::vector<f64_t>> generate_clouds(cloud_kind_t kind, std::s
         }
         }
     }
-    return clouds;
 }
 
-/** Matches, of @p wanted at most, whose distances reach no further than the @p wanted -th exact
- *  one, within the float tolerance: ties make the IDs ambiguous, the distances never. */
-template <typename distance_type_>
-static std::size_t matched_count(std::span<f64_t const> found, std::vector<distance_type_> exact, std::size_t wanted) {
-    std::nth_element(exact.begin(), exact.begin() + (wanted - 1), exact.end());
-    f64_t const reach = static_cast<f64_t>(exact[wanted - 1]);
+/** Matches, of @p wanted at most, whose distances reach no further than @p reach, the @p wanted -th
+ *  exact one, within the float tolerance: ties make the IDs ambiguous, the distances never. */
+static std::size_t matched_count(std::span<f64_t const> found, f64_t reach, std::size_t wanted) {
     std::size_t matched = 0;
     for (f64_t const distance : found) matched += distance <= reach + 1e-3 * std::fmax(reach, 1.0);
     return min_of(matched, wanted);
@@ -205,33 +217,50 @@ static void test_shapes_vram_collection(u64_t seed, cell_vendor_t::executor_t& e
     using distance_t = typename kit_t::distance_t;
     constexpr std::size_t wanted_k = 10, expansion_k = 64, batches_k = 3;
 
-    std::vector<std::vector<f64_t>> const clouds = generate_clouds(kind, count + queries_count, seed);
-    std::vector<std::vector<scalar_type_>> stored(clouds.size());
+    std::size_t const clouds_count = count + queries_count;
+    nk::matrix<f64_t> clouds = make_matrix<f64_t>(clouds_count, shapes_max_points_k * 3);
+    nk::matrix<scalar_type_> stored = make_matrix<scalar_type_>(clouds_count, shapes_max_points_k * 3);
+    nk::vector<std::size_t> points = make_vector<std::size_t>(clouds_count);
     std::vector<std::size_t> offsets {nk_default_alignment_k};
-    for (std::size_t entry = 0; entry != clouds.size(); ++entry) {
-        for (f64_t const coordinate : clouds[entry]) stored[entry].push_back(scalar_type_(coordinate));
-        offsets.push_back(offsets.back() + nk::shapes_pack_size<scalar_type_>(clouds[entry].size() / 3, 0).value);
+    generate_clouds(kind, seed, clouds.span(), to_writable_span(points));
+    for (std::size_t entry = 0; entry != clouds_count; ++entry) {
+        for (std::size_t coordinate = 0; coordinate != points[entry] * 3; ++coordinate)
+            stored(entry, coordinate) = scalar_type_(clouds(entry, coordinate));
+        auto const [pack_bytes, pack_size_status] = nk::shapes_pack_size<scalar_type_>(points[entry], 0);
+        if (!expect_true(succeeded(pack_size_status))) return;
+        offsets.push_back(offsets.back() + pack_bytes);
     }
+    auto stored_cloud = [&](std::size_t entry) noexcept {
+        return to_span(stored.view().row(entry).as_vector()).first(points[entry] * 3);
+    };
     std::vector<byte_t, nk::aligned_allocator<byte_t>> tape(offsets.back());
-    for (std::size_t entry = 0; entry != clouds.size(); ++entry)
-        expect_true(!nk::failed(
-            nk::shapes_pack<scalar_type_>(reinterpret_cast<typename scalar_type_::raw_t const*>(stored[entry].data()),
-                                          stored[entry].size() / 3, tape.data() + offsets[entry], 0)));
+    for (std::size_t entry = 0; entry != clouds_count; ++entry)
+        expect_true(!nk::failed(nk::shapes_pack<scalar_type_>(
+            reinterpret_cast<typename scalar_type_::raw_t const*>(stored_cloud(entry).data()), points[entry],
+            tape.data() + offsets[entry], 0)));
 
-    // The serial distances of every query to every stored cloud, over the packs the GPU stores.
-    std::vector<std::vector<distance_t>> exact(queries_count, std::vector<distance_t>(count));
-    for (std::size_t query = 0; query != queries_count; ++query)
+    // The serial distances of every query to every stored cloud, over the packs the GPU stores, and
+    // the `wanted_k`-th of each query's, which bounds a match.
+    nk::matrix<distance_t> exact = make_matrix<distance_t>(queries_count, count);
+    nk::vector<distance_t> ranked = make_vector<distance_t>(count);
+    nk::vector<f64_t> reaches = make_vector<f64_t>(queries_count);
+    for (std::size_t query = 0; query != queries_count; ++query) {
         for (std::size_t entry = 0; entry != count; ++entry) {
             void const* const query_pack = tape.data() + offsets[count + query];
             void const* const entry_pack = tape.data() + offsets[entry];
             distance_t const infinity = std::numeric_limits<distance_t>::infinity();
             expect_true((kernel == nk_kernel_hausdorffs_packed_k
-                             ? serial_kit_t::hausdorffs(&query_pack, 1, &entry_pack, 1, &exact[query][entry],
+                             ? serial_kit_t::hausdorffs(&query_pack, 1, &entry_pack, 1, &exact(query, entry),
                                                         sizeof(distance_t), nullptr, &infinity, nullptr)
-                             : serial_kit_t::chamfers(&query_pack, 1, &entry_pack, 1, &exact[query][entry],
+                             : serial_kit_t::chamfers(&query_pack, 1, &entry_pack, 1, &exact(query, entry),
                                                       sizeof(distance_t), nullptr, &infinity, nullptr, 0, nullptr)) ==
                         nk_success_k);
         }
+        std::span<distance_t> const nearest = to_writable_span(ranked);
+        std::memcpy(nearest.data(), exact.view().row(query).data(), count * sizeof(distance_t));
+        std::nth_element(nearest.begin(), nearest.begin() + (wanted_k - 1), nearest.end());
+        reaches[query] = static_cast<f64_t>(nearest[wanted_k - 1]);
+    }
 
     ram_index_t ram_index;
     shapes_metric<kit_t> metric {kernel, forkunion_allocator_t {}};
@@ -239,77 +268,79 @@ static void test_shapes_vram_collection(u64_t seed, cell_vendor_t::executor_t& e
     typename value_t::allocator_type const value_allocator {ram_index.get_allocator()};
     expect_true(bool(ram_index.reserve(count)));
     for (std::size_t entry = 0; entry != count; ++entry) {
-        std::array const cloud {std::span<scalar_type_ const> {stored[entry]}};
-        value_t value = value_t::make(cloud, value_allocator, 0).value;
-        us::utilities::uuid128_t const key = uuid_of(entry);
+        std::array const cloud {stored_cloud(entry)};
+        auto [value, pack_status] = value_t::make(cloud, value_allocator, 0);
+        if (!expect_true(succeeded(pack_status))) return;
+        util::uuid128_t const key = uuid_of(entry);
         expect_equal(ram_index
                          .insert({&value, 1}, {&key, 1}, metric, {}, ram_context,
                                  us::basic::keep_diverse_t {connectivity_32_k}, {expansion_k})
                          .status,
-                     status_t::success_k);
+                     status_code_t::success_k);
     }
     std::size_t ram_matched = 0;
+    nk::vector<f64_t> found = make_vector<f64_t>(wanted_k);
     for (std::size_t query = 0; query != queries_count; ++query) {
-        std::array const cloud {std::span<scalar_type_ const> {stored[count + query]}};
-        value_t const value = value_t::make(cloud, value_allocator, 0).value;
-        expect_equal(ram_index.search(value, {expansion_k}, metric, ram_context).status, status_t::success_k);
-        std::vector<f64_t> found;
-        for (std::size_t rank = 0; rank != min_of(wanted_k, ram_context.results.size()); ++rank)
-            found.push_back(static_cast<f64_t>(ram_context.results[rank].distance));
-        ram_matched += matched_count(std::span<f64_t const> {found}, exact[query], wanted_k);
+        std::array const cloud {stored_cloud(count + query)};
+        auto const [value, pack_status] = value_t::make(cloud, value_allocator, 0);
+        if (!expect_true(succeeded(pack_status))) return;
+        expect_equal(ram_index.search(value, {expansion_k}, metric, ram_context).status, status_code_t::success_k);
+        std::size_t const found_count = min_of(wanted_k, ram_context.results.size());
+        for (std::size_t rank = 0; rank != found_count; ++rank)
+            found[rank] = static_cast<f64_t>(ram_context.results[rank].distance);
+        ram_matched += matched_count(to_span(found).first(found_count), reaches[query], wanted_k);
     }
 
     int const device = executor.device(0);
     vram_index_t vram_index {kernel, cell_vendor_t::storage(executor, device)};
     expect_equal(vram_index.reserve({count, connectivity_32_k, offsets[count] - offsets[0]}).status,
-                 status_t::success_k);
+                 status_code_t::success_k);
     typename vram_index_t::insert_config_t const insert_config {expansion_k};
-    std::vector<us::utilities::uuid128_t> keys(count);
+    nk::vector<util::uuid128_t> keys = make_vector<util::uuid128_t>(count);
     for (std::size_t entry = 0; entry != count; ++entry) keys[entry] = uuid_of(entry);
     for (std::size_t batch = 0; batch != batches_k && held(); ++batch) {
         std::size_t const first = count * batch / batches_k, bound = count * (batch + 1) / batches_k;
         std::span<std::size_t const> const batch_offsets {offsets.data() + first, bound - first + 1};
         expect_equal(executor.reserve(vram_index.traversal_memory_usage(
                          tape_view<byte_t const> {tape.data(), batch_offsets}, insert_config)),
-                     status_t::success_k);
+                     status_code_t::success_k);
         typename vram_index_t::traversal_context_t context {cell_vendor_t::arena(executor)};
         auto const [inserted, status] = vram_index.insert({keys.data() + first, bound - first},
                                                           {tape.data(), batch_offsets}, context, insert_config);
-        expect_equal(status, status_t::success_k);
+        expect_equal(status, status_code_t::success_k);
         expect_equal(inserted.first_id, first);
         expect_equal(inserted.new_size, bound);
     }
     expect_equal(vram_index.size(), count);
 
-    std::vector<u32_t> ids(queries_count * wanted_k);
-    std::vector<f32_t> distances(queries_count * wanted_k);
+    nk::matrix<u32_t> ids = make_matrix<u32_t>(queries_count, wanted_k);
+    nk::matrix<f32_t> distances = make_matrix<f32_t>(queries_count, wanted_k);
     std::span<std::size_t const> const query_offsets {offsets.data() + count, queries_count + 1};
     typename vram_index_t::search_config_t const search_config {expansion_k, wanted_k};
     expect_equal(executor.reserve(vram_index.traversal_memory_usage(
                      tape_view<byte_t const> {tape.data(), query_offsets}, search_config)),
-                 status_t::success_k);
+                 status_code_t::success_k);
     typename vram_index_t::traversal_context_t context {cell_vendor_t::arena(executor)};
     if (held())
-        expect_equal(vram_index
-                         .search({tape.data(), query_offsets}, {ids.data(), {queries_count, wanted_k}},
-                                 {distances.data(), {queries_count, wanted_k}}, search_config, context)
-                         .status,
-                     status_t::success_k);
+        expect_equal(
+            vram_index.search({tape.data(), query_offsets}, ids.span(), distances.span(), search_config, context)
+                .status,
+            status_code_t::success_k);
     std::size_t vram_matched = 0;
     error_stats_t distance_errors;
     for (std::size_t query = 0; query != queries_count && held(); ++query) {
-        std::vector<f64_t> found;
+        std::size_t found_count = 0;
         for (std::size_t rank = 0; rank != wanted_k; ++rank) {
-            u32_t const id = ids[query * wanted_k + rank];
+            u32_t const id = ids(query, rank);
             if (id == (std::numeric_limits<u32_t>::max)()) break;
-            f64_t const distance = distances[query * wanted_k + rank];
+            f64_t const distance = distances(query, rank);
             expect_true(id < count);
-            if (id < count) distance_errors.add(distance, exact[query][id]);
-            expect_true(found.empty() || found.back() <= distance);
-            found.push_back(distance);
+            if (id < count) distance_errors.add(distance, exact(query, id));
+            expect_true(found_count == 0 || found[found_count - 1] <= distance);
+            found[found_count++] = distance;
         }
-        expect_equal(found.size(), wanted_k);
-        vram_matched += matched_count(std::span<f64_t const> {found}, exact[query], wanted_k);
+        expect_equal(found_count, wanted_k);
+        vram_matched += matched_count(to_span(found).first(found_count), reaches[query], wanted_k);
     }
     f64_t const ram_recall = static_cast<f64_t>(ram_matched) / (queries_count * wanted_k);
     f64_t const vram_recall = static_cast<f64_t>(vram_matched) / (queries_count * wanted_k);

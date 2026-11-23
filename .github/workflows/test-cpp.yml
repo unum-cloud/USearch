@@ -1,0 +1,61 @@
+name: Test C++
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  # What configuring the project looks for beyond Clang, the one line the four products' C++ workflows differ by.
+  UBUNTU_PACKAGES: ninja-build lld-23
+
+jobs:
+  # The stand-in builds without the engine, so an SDK header reaching past `c/` fails here before the engine builds.
+  test_cpp_stub:
+    name: Test C++ on Ubuntu against the Stub Library
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - name: Install Clang 23
+        run: |
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/llvm.gpg
+          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/resolute/ llvm-toolchain-resolute-23 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm.list > /dev/null
+          sudo apt-get update && sudo apt-get install -y clang-23 ${{ env.UBUNTU_PACKAGES }}
+      - name: Compile Each Header Alone
+        run: for header in cpp/usearch/*.hpp; do clang++-23 -std=c++20 -fsyntax-only -I c -I cpp -x c++ "$header"; done
+      - name: Build the Stub Suite
+        run: |
+          cmake --preset debug -D CMAKE_C_COMPILER=clang-23 -D CMAKE_CXX_COMPILER=clang++-23 -D USEARCH_BUILD_STUB=ON -D USEARCH_BUILD_TEST=ON
+          cmake --build --preset debug --target usearch_test_cpp_stub
+      - name: Test the Stub Suite
+        run: ctest --preset debug --tests-regex '^usearch_test_cpp_stub$' --no-tests=error --output-on-failure
+
+  test_cpp_engine:
+    name: Test C++ on Ubuntu against the Engine
+    needs: test_cpp_stub
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - name: Install Clang 23
+        run: |
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/llvm.gpg
+          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/resolute/ llvm-toolchain-resolute-23 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm.list > /dev/null
+          sudo apt-get update && sudo apt-get install -y clang-23 ${{ env.UBUNTU_PACKAGES }}
+      # The whole tree builds, so the fixtures the engine suite requires, like a seeded checkpoint, build with it.
+      - name: Build the Engine Suite
+        run: |
+          cmake --preset debug -D CMAKE_C_COMPILER=clang-23 -D CMAKE_CXX_COMPILER=clang++-23 -D USEARCH_BUILD_SHARED=ON -D USEARCH_BUILD_TEST=ON
+          cmake --build --preset debug
+      - name: Test the Engine Suite
+        run: ctest --preset debug --tests-regex '^usearch_test_cpp$' --no-tests=error --output-on-failure

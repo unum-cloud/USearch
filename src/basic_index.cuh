@@ -26,6 +26,8 @@
 
 #pragma region Handles
 
+namespace util = unum::usearch::utilities;
+
 /** The verb table of every residency one modality compiles, one of which a handle holds. */
 template <typename traits_type_>
 using basic_variant_tables = std::variant<basic_verbs<traits_type_, vendored_residency_t::ram_k> const*,
@@ -69,7 +71,7 @@ struct basic_cursor {
     handle_type_* index = nullptr;
 
     /** Set while a pull runs, so an overlapping one is refused rather than racing it. */
-    u32_t busy = 0;
+    util::u32_t busy = 0;
 
     ~basic_cursor() noexcept {
         if (cursor) std::visit([&](auto const* verbs) noexcept { verbs->cursor_free(cursor); }, tables);
@@ -121,19 +123,19 @@ inline void const* address_of(void const* values) noexcept { return values; }
  *  does.
  */
 template <typename traits_type_, vendored_residency_t residency_>
-status_t place_shards(punned_basic_index<traits_type_, residency_> const& punned,
-                      usearch_ram_options_t const& ram) noexcept {
+util::status_t place_shards(punned_basic_index<traits_type_, residency_> const& punned,
+                            usearch_ram_options_t const& ram) noexcept {
     punned.verbs.bound_shards(punned.variant, ram.shard_capacity);
     if (!ram.memory_domains || !ram.memory_domains_count)
         return emplace_on_every_domain([&](fu_memory_domain_id_t domain) noexcept {
             return punned.verbs.emplace(punned.variant, ram_residency_k, domain);
         });
     for (std::size_t position = 0; position != ram.memory_domains_count; ++position)
-        if (status_t const placed = punned.verbs.emplace(
+        if (util::status_t const placed = punned.verbs.emplace(
                 punned.variant, ram_residency_k, static_cast<fu_memory_domain_id_t>(ram.memory_domains[position]));
             failed(placed))
             return placed;
-    return status_t::success_k;
+    return util::status_code_t::success_k;
 }
 
 /** The RAM or NVMe variant of @p traits_type_ serving @p geometry on the newest rung of @p ladder
@@ -185,8 +187,7 @@ handle_type_* make_basic_cpu_handle(typename handle_type_::traits_t::geometry_t&
     using traits_t = typename handle_type_::traits_t;
     if (!traits_t::admits(geometry, arguments, outcome)) return nullptr;
     auto const [ceiling, pick_status] = pick_cpu_ceiling(ram.cpu_class_ceiling);
-    if (failed(pick_status))
-        return propagate_error(pick_status, outcome, "No compiled class fits under the CPU class ceiling"), nullptr;
+    if (failed(pick_status)) return propagate_error(pick_status, outcome), nullptr;
     basic_verbs<traits_t, residency_> const* const verbs = pick_basic_cpu_variant<traits_t, residency_>(
         cpu_ladder_t {}, geometry, ceiling);
     if (!verbs)
@@ -202,7 +203,7 @@ handle_type_* make_basic_cpu_handle(typename handle_type_::traits_t::geometry_t&
     punned_basic_index<traits_t, residency_> const punned {*verbs, created};
     // A view reads its shards from its files, so only a RAM variant places any.
     if constexpr (residency_ == vendored_residency_t::ram_k)
-        if (status_t const placed = place_shards(punned, ram); failed(placed))
+        if (util::status_t const placed = place_shards(punned, ram); failed(placed))
             return propagate_error(placed, outcome), delete handle, nullptr;
     if (!fill(punned)) return delete handle, nullptr;
     return handle;
@@ -236,12 +237,13 @@ bool basic_load_variant(punned_basic_index<traits_type_, residency_> punned, che
         punned, arguments.executor, call_executor, outcome);
     if (!executor) return false;
     progress_ticks_t ticks {arguments.progress, executor->size()};
-    status_t loaded = status_t::success_k;
-    if constexpr (std::is_same_v<checkpoint_type_, bytes_view_t>)
+    util::status_t loaded = util::status_code_t::success_k;
+    if constexpr (std::is_same_v<checkpoint_type_, util::bytes_view_t>)
         loaded = punned.verbs.load_buffer(punned.variant, checkpoint, *executor, ticks);
     else loaded = punned.verbs.load(punned.variant, checkpoint, *executor, ticks);
-    if (loaded == status_t::config_mismatch_k &&
-        safegraphs_read_metadata(checkpoint).value.neighbors_dtype == dtype_t::u64_k)
+    if (loaded != util::status_code_t::config_mismatch_k) return propagate_error(loaded, outcome);
+    auto const [metadata, metadata_status] = util::safegraphs_read_metadata(checkpoint);
+    if (succeeded(metadata_status) && metadata.neighbors_dtype == util::dtype_t::u64_k)
         return propagate_error(usearch_status_config_mismatch_k, outcome,
                                "The checkpoint's node IDs are 64-bit; the library's shards hold 32-bit IDs");
     return propagate_error(loaded, outcome);
@@ -253,16 +255,17 @@ bool basic_load_variant(punned_basic_index<traits_type_, residency_> punned, che
  *  named device, on that device's vendor ordinal; the caller checked every named ordinal against
  *  the listing. */
 template <typename traits_type_, vendored_residency_t residency_>
-status_t place_shards(punned_basic_index<traits_type_, residency_> const& punned,
-                      usearch_vram_options_t const& vram) noexcept {
+util::status_t place_shards(punned_basic_index<traits_type_, residency_> const& punned,
+                            usearch_vram_options_t const& vram) noexcept {
     punned.verbs.bound_shards(punned.variant, vram.shard_capacity);
-    std::span<gpu_device_t const> const devices = gpu_devices();
+    std::span<util::gpu_device_t const> const devices = gpu_devices();
     for (std::size_t shard = 0; shard != named_count(vram); ++shard)
-        if (status_t const placed = punned.verbs.emplace(
-                punned.variant, vram_residency(devices[named_ordinal(vram, shard)].vendor_ordinal), no_memory_domain_k);
+        if (util::status_t const placed = punned.verbs.emplace(
+                punned.variant, vram_residency(devices[named_ordinal(vram, shard)].vendor_ordinal),
+                util::no_memory_domain_k);
             failed(placed))
             return placed;
-    return status_t::success_k;
+    return util::status_code_t::success_k;
 }
 
 /**
@@ -287,16 +290,7 @@ handle_type_* make_basic_vram_handle(typename handle_type_::traits_t::geometry_t
         return propagate_error(usearch_status_unsupported_k, outcome, "A GPU index bounds no key's entries"), nullptr;
     usearch_vram_options_t const& vram = arguments.vram;
     auto const [placement, placed_status] = resolve_placement(vram);
-    if (placed_status == status_t::invalid_argument_k)
-        return propagate_error(placed_status, outcome, "No GPU class has that value"), nullptr;
-    if (placed_status == status_t::device_error_k)
-        return propagate_error(placed_status, outcome, "A device ordinal is past the listing"), nullptr;
-    if (placed_status == status_t::config_mismatch_k)
-        return propagate_error(placed_status, outcome, "The devices must share one vendor"), nullptr;
-    if (failed(placed_status))
-        return propagate_error(placed_status, outcome,
-                               "The devices share no class this build carries under the ceiling"),
-               nullptr;
+    if (failed(placed_status)) return propagate_error(placed_status, outcome), nullptr;
     // Each vendor's ladder serves only its own devices, so at most one of them picks a variant.
     handle_type_* index = nullptr;
     bool picked = false;
@@ -314,7 +308,7 @@ handle_type_* make_basic_vram_handle(typename handle_type_::traits_t::geometry_t
             return verbs->destroy(created),
                    propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the index"), void();
         punned_basic_index<traits_t, residency_> const punned {*verbs, created};
-        if (status_t const placed = place_shards(punned, vram); failed(placed))
+        if (util::status_t const placed = place_shards(punned, vram); failed(placed))
             return propagate_error(placed, outcome), delete std::exchange(index, nullptr), void();
         if (!fill(punned)) delete std::exchange(index, nullptr);
     };
@@ -358,7 +352,7 @@ void basic_load_ram(arguments_type_* arguments, checkpoint_type_ checkpoint) noe
     if (checkpoint.empty())
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The checkpoint must not be empty"), void();
     typename handle_t::traits_t::geometry_t geometry;
-    if (status_t const recalled = handle_t::traits_t::recall(checkpoint, geometry); failed(recalled))
+    if (util::status_t const recalled = handle_t::traits_t::recall(checkpoint, geometry); failed(recalled))
         return propagate_error(recalled, outcome), void();
     auto load = [&](auto const& punned) noexcept {
         return basic_load_variant(punned, checkpoint, *arguments, outcome);
@@ -370,8 +364,8 @@ void basic_load_ram(arguments_type_* arguments, checkpoint_type_ checkpoint) noe
 
 /** Whether the checkpoint @p bytes sit on the host, where a basic GPU variant reads one; false once
  *  @p outcome records why not. */
-inline bool accepts_host_checkpoint(bytes_view_t bytes, usearch_outcome_t* outcome) noexcept {
-    if (checkpoint_source_of(bytes).device == host_device_k) return true;
+inline bool accepts_host_checkpoint(util::bytes_view_t bytes, usearch_outcome_t* outcome) noexcept {
+    if (checkpoint_source_of(bytes).device == util::host_device_k) return true;
     return propagate_error(usearch_status_unsupported_k, outcome, "A basic checkpoint loads from host memory");
 }
 
@@ -391,7 +385,7 @@ void basic_load_vram(arguments_type_* arguments, [[maybe_unused]] checkpoint_typ
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The checkpoint must not be empty"), void();
     if (!accepts_host_checkpoint(checkpoint, outcome)) return;
     typename handle_t::traits_t::geometry_t geometry;
-    if (status_t const recalled = handle_t::traits_t::recall(checkpoint, geometry); failed(recalled))
+    if (util::status_t const recalled = handle_t::traits_t::recall(checkpoint, geometry); failed(recalled))
         return propagate_error(recalled, outcome), void();
     auto load = [&](auto const& punned) noexcept {
         return basic_load_variant(punned, checkpoint, *arguments, outcome);
@@ -411,7 +405,7 @@ void basic_view_ram(arguments_type_* arguments) noexcept {
     *arguments->index = nullptr;
     std::string_view const path = as_text(arguments->path);
     typename handle_t::traits_t::geometry_t geometry;
-    if (status_t const recalled = handle_t::traits_t::recall(path, geometry); failed(recalled))
+    if (util::status_t const recalled = handle_t::traits_t::recall(path, geometry); failed(recalled))
         return propagate_error(recalled, outcome), void();
     auto view = [&](auto const& punned) noexcept {
         return propagate_error(punned.verbs.view(punned.variant, path, {}, nullptr), outcome);
@@ -437,14 +431,14 @@ void basic_view_nvme(arguments_type_* arguments) noexcept {
     if (!arguments->path.data || !arguments->path.length || (nvme.paths_count && !nvme.paths))
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The paths must name storage"), void();
     std::size_t const paths_count = nvme.paths ? nvme.paths_count : 0;
-    growing_buffer<std::string_view> paths {global_allocator};
+    util::growing_buffer<std::string_view> paths {util::global_allocator};
     if (failed(paths.resize(paths_count)))
         return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to list the paths"), void();
     for (std::size_t path = 0; path != paths_count; ++path) paths[path] = as_text(nvme.paths[path]);
 
     std::string_view const path = as_text(arguments->path);
     typename handle_t::traits_t::geometry_t geometry;
-    if (status_t const recalled = handle_t::traits_t::recall(path, geometry); failed(recalled))
+    if (util::status_t const recalled = handle_t::traits_t::recall(path, geometry); failed(recalled))
         return propagate_error(recalled, outcome), void();
     auto view = [&](auto punned) noexcept {
         usearch_executor_handle_t call_executor;
@@ -500,7 +494,7 @@ bool accepts_basic_reshard(punned_basic_index<traits_type_, residency_> const& p
         if (!typed || !punned.verbs.matches(punned.variant, typed))
             return propagate_error(usearch_status_config_mismatch_k, outcome,
                                    "Every handle must share the first source's residency, class and geometry");
-        if (status_t const served = punned.verbs.serves_writes(typed); failed(served))
+        if (util::status_t const served = punned.verbs.serves_writes(typed); failed(served))
             return propagate_error(served, outcome);
         // Calls already naming the handle end first; the caller keeps it alive past the plan's
         // finish, as the headers require, so no count follows the plan.
@@ -545,13 +539,13 @@ void basic_refine(arguments_type_* arguments) noexcept {
         if (!executor) return;
         refine_config_t const config = refine_config_of(arguments->refine);
         progress_ticks_t ticks {arguments->progress, 0};
-        auto const live = arguments->plan ? *arguments->plan : nullptr;
-        expected<void*> const opened = live ? expected<void*> {live->held.engine_plan, status_t::success_k}
-                                            : punned.verbs.refine_plan_open(punned.variant, config, *executor);
+        auto const open_plan = [&]() noexcept {
+            return punned.verbs.refine_plan_open(punned.variant, config, *executor);
+        };
         publish_refined(
             *arguments,
             drive_planned(arguments->plan, punned.verbs.refine_plan, arguments->index->basic.tables, arguments->index,
-                          arguments->executor, *executor, ticks, arguments->phase, opened),
+                          arguments->executor, *executor, ticks, arguments->phase, open_plan),
             outcome);
     });
 }
@@ -579,15 +573,15 @@ void basic_reshard(arguments_type_* arguments) noexcept {
             reshard_options_t const options {nullptr, nullptr, nullptr, refine_config_of(arguments->refine),
                                              arguments->seed};
             progress_ticks_t ticks {arguments->progress, 0};
-            expected<void*> const opened = live ? expected<void*> {live->held.engine_plan, status_t::success_k}
-                                                : verbs->reshard_plan_open(
-                                                      view_basic_variants(arguments->sources, arguments->sources_count),
-                                                      view_basic_variants(arguments->targets, arguments->targets_count),
-                                                      options, *executor);
+            auto const open_plan = [&]() noexcept {
+                return verbs->reshard_plan_open(view_basic_variants(arguments->sources, arguments->sources_count),
+                                                view_basic_variants(arguments->targets, arguments->targets_count),
+                                                options, *executor);
+            };
             publish_refined(*arguments,
                             drive_planned(arguments->plan, verbs->reshard_plan, basic_variant_tables<traits_t> {verbs},
                                           static_cast<handle_type_ const*>(nullptr), arguments->executor, *executor,
-                                          ticks, arguments->phase, opened),
+                                          ticks, arguments->phase, open_plan),
                             outcome);
         },
         first ? first->basic.tables : live->held.tables);
@@ -694,10 +688,10 @@ void basic_search(arguments_type_* arguments) noexcept {
         if (!traits_t::accepts(*arguments, outcome)) return;
         auto const [queries, queries_status] = traits_t::queries_of(*arguments, arena->memory);
         if (failed(queries_status)) return propagate_error(queries_status, outcome), void();
-        if (status_t const admitted = punned.verbs.serves_search(punned.variant, queries); failed(admitted))
+        if (util::status_t const admitted = punned.verbs.serves_search(punned.variant, queries); failed(admitted))
             return propagate_error(admitted, outcome), void();
         auto [outputs, carve_status] = carve_matches(arena->memory, count, wanted);
-        if (failed(carve_status)) return propagate_error(carve_status, outcome, "Failed to grow the arena"), void();
+        if (failed(carve_status)) return propagate_error(carve_status, outcome), void();
         usearch_executor_handle_t call_executor;
         typename punned_type_::executor_t* const executor = executor_of(punned, arguments->executor, call_executor,
                                                                         outcome);
@@ -712,8 +706,7 @@ void basic_search(arguments_type_* arguments) noexcept {
                      arguments->stats, outcome))
             return;
         auto const [matches, publish_status] = publish_matches(*arena, outputs, count);
-        if (failed(publish_status))
-            return propagate_error(publish_status, outcome, "Failed to land the matches on the device"), void();
+        if (failed(publish_status)) return propagate_error(publish_status, outcome), void();
         *arguments->matches = matches;
         propagate_error(usearch_status_success_k, outcome, nullptr);
     });
@@ -742,7 +735,8 @@ void basic_within(arguments_type_* arguments) noexcept {
         auto const [queries, queries_status] = traits_t::queries_of(*arguments, arena->memory);
         if (failed(queries_status)) return propagate_error(queries_status, outcome), void();
         predicate_t const predicate = predicate_of(arguments->predicate);
-        if (status_t const admitted = punned.verbs.serves_within(punned.variant, queries, predicate); failed(admitted))
+        if (util::status_t const admitted = punned.verbs.serves_within(punned.variant, queries, predicate);
+            failed(admitted))
             return propagate_error(admitted, outcome), void();
         usearch_executor_handle_t call_executor;
         typename punned_type_::executor_t* const executor = executor_of(punned, arguments->executor, call_executor,
@@ -802,7 +796,7 @@ void basic_cursor_init(arguments_type_* arguments) noexcept {
         return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the cursor"), void();
     cursor->basic.index = arguments->index;
     cursor->basic.tables = arguments->index->basic.tables;
-    status_t opened = status_t::success_k;
+    util::status_t opened = util::status_code_t::success_k;
     visit_basic(*arguments->index, [&](auto punned) noexcept {
         auto const [walk, status] = punned.verbs.cursor_init(punned.variant,
                                                              {arguments->starts, arguments->starts_count});
@@ -828,7 +822,7 @@ void basic_cursor_next(arguments_type_* arguments) noexcept {
     if (cursor.index != arguments->index)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The cursor was opened on another index"),
                void();
-    if (fu::standard_atomic_ref<u32_t>(cursor.busy).fetch_test_and_set_bit(0, std::memory_order_acquire))
+    if (fu::standard_atomic_ref<util::u32_t>(cursor.busy).fetch_test_and_set_bit(0, std::memory_order_acquire))
         return propagate_error(usearch_status_contended_k, outcome, "Another pull holds the cursor"), void();
     visit_basic(*arguments->index, [&]<typename punned_type_>(punned_type_ punned) noexcept {
         usearch_arena_handle_t* const arena = claim_arena(
@@ -848,16 +842,16 @@ void basic_cursor_next(arguments_type_* arguments) noexcept {
         if (failed(status)) return propagate_error(status, outcome), void();
         auto const [published_keys, published_keys_status] = publish(*arena, keys.data(), keys.size());
         auto const [published_links, published_links_status] = publish_links(*arena, links);
-        if (status_t const drained_status = drained(*arena,
-                                                    first_failure({published_keys_status, published_links_status}));
+        if (util::status_t const drained_status = drained(
+                *arena, first_failure({published_keys_status, published_links_status}));
             failed(drained_status))
-            return propagate_error(drained_status, outcome, "Failed to upload the keys to the device"), void();
+            return propagate_error(drained_status, outcome), void();
         if (arguments->links) *arguments->links = published_links;
         *arguments->keys = {published_keys, sizeof(usearch_key_t)};
         *arguments->written = keys.size();
         propagate_error(usearch_status_success_k, outcome, nullptr);
     });
-    fu::standard_atomic_ref<u32_t>(cursor.busy).clear_bits(1, std::memory_order_release);
+    fu::standard_atomic_ref<util::u32_t>(cursor.busy).clear_bits(1, std::memory_order_release);
 }
 
 template <auto verb_, typename arguments_type_>
@@ -893,7 +887,7 @@ void basic_save_buffer(arguments_type_* arguments) noexcept {
         progress_ticks_t ticks {arguments->progress, executor->size()};
         save_into_arena(
             *arena, punned.verbs.storage_requirements(punned.variant),
-            [&](bytes_span_t checkpoint) noexcept {
+            [&](util::bytes_span_t checkpoint) noexcept {
                 return punned.verbs.save_buffer(punned.variant, checkpoint, *executor, ticks);
             },
             *arguments->monolith, outcome);
@@ -909,7 +903,7 @@ void basic_sample(arguments_type_* arguments) noexcept {
     reset_sample(*arguments);
     if (!accepts_sample(*arguments, outcome)) return;
     visit_basic(*arguments->index, [&]<typename punned_type_>(punned_type_ punned) noexcept {
-        using key_t = us::utilities::uuid128_t;
+        using key_t = util::uuid128_t;
         usearch_executor_handle_t call_executor;
         typename punned_type_::executor_t* const executor = executor_of(punned, arguments->executor, call_executor,
                                                                         outcome);
@@ -922,12 +916,12 @@ void basic_sample(arguments_type_* arguments) noexcept {
         auto const [staging, carve_status] = carve_sample(arena->memory, arguments->wanted);
         if (failed(view_status) || failed(carve_status))
             return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
-        sample_config_t const config {arguments->seed, arguments->expansion_factor};
+        util::sample_config_t const config {arguments->seed, arguments->expansion_factor};
         auto const [sampled, status] = punned.verbs.sample(punned.variant, inputs, staging.template outputs<key_t>(),
                                                            config, *executor);
         if (failed(status)) return propagate_error(status, outcome), void();
         progress_ticks_t ticks {arguments->progress, arguments->wanted};
-        if (sampled.written && ticks(sampled.written, arguments->wanted) == continuation_t::cancel_k)
+        if (sampled.written && ticks(sampled.written, arguments->wanted) == util::continuation_t::cancel_k)
             return propagate_error(usearch_status_cancelled_k, outcome, "The caller's handler stopped the work"),
                    void();
         publish_sample(*arguments, staging, sampled);
@@ -945,7 +939,7 @@ void basic_metadata_read(arguments_type_* arguments, checkpoint_type_ checkpoint
     if (checkpoint.empty())
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The checkpoint must not be empty"), void();
     typename traits_type_::geometry_t geometry;
-    if (status_t const recalled = traits_type_::recall(checkpoint, geometry); failed(recalled))
+    if (util::status_t const recalled = traits_type_::recall(checkpoint, geometry); failed(recalled))
         return propagate_error(recalled, outcome), void();
     *arguments->metadata = traits_type_::metadata_of(geometry);
     propagate_error(usearch_status_success_k, outcome, nullptr);

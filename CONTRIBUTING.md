@@ -335,6 +335,16 @@ A library leaves out the ones it cannot answer but never renumbers the rest, and
 Enums pass as enum types; only the metrics and dtypes the CLI parses have a `_from_name`.
 CPU and GPU class values are ABI: each class keeps the number USearch gives the same hardware, written explicitly, with unused numbers reserved rather than reused.
 
+### Notes
+
+A failure is `status_t {code, note}`, two words: recovery branches on the code, and the note, a literal or other static text, names the broken invariant, step or resource for logs and regression analysis.
+Codes use the C interface's spellings and numbers, and the SDK in `cpp/` keeps an identical copy of `status_t`, so a status reads the same on both sides of the C layer.
+A note is 2 to 8 words in sentence case with no closing period, never restates the code, and never carries a value that differs per call, such as a path, an error number, a size or an identifier.
+A failure forwards whole, as `if (x.failed()) return x;`, a site that returns its own code writes its own note, and no site hides a callee's more specific failure behind a code of its own.
+A call made once per candidate, neighbor, match or key may answer `expected<value_type_, status_code_t>`, the bare code, and the note is attached once where the loop's failure leaves it.
+An atomic status word holds the code alone, and only the thread whose compare-exchange wins writes the note.
+The C outcome's message is the note, else the rule of the call that was broken, else the status's own `usearch_status_name`.
+
 ### Compile-Time Choices
 
 Code picks between alternatives at compile time through three gates, each for one kind of choice.
@@ -828,7 +838,7 @@ Nothing in a binding takes a lock, sends a notification or adds synchronization 
 The object that submitted a deferred call is the only one that polls its outcome, so no other thread ever waits on it, and whatever a second caller asks, the library answers.
 A blocking `wait` calls `usearch_outcome_wait`.
 An asynchronous bridge never parks a thread: it reads `usearch_outcome_status` and, while the call is deferred, yields to its runtime.
-A runtime with a timer pauses between reads with a backoff growing from about 1 µs to 1 ms, like Python's `asyncio.sleep`, Swift's `Task.sleep`, JavaScript's `setTimeout` and C#'s `Task.Delay`.
+A runtime that can reschedule a task reads again on its next turn with no sleep, like Python's `loop.call_soon`, a C++ scheduler's `post(poll, state)` and Mojo's runtime, while one that resumes only on a timer pauses with a backoff growing from about 1 µs to 1 ms, like Swift's `Task.sleep`, JavaScript's `setTimeout` and C#'s `Task.Delay`.
 A Rust future yields only: `poll` reads the status and, while it is deferred, calls `wake_by_ref` and returns `Poll::Pending`, with no sleep and no timer thread.
 
 A callback never raises into the library.
@@ -844,7 +854,7 @@ Where a binding's own types carry two lengths, like a slice of keys beside a mat
 
 Each verb has one body, which fills the C struct and calls the library with no layers in between.
 What it returns is read from the struct's output slot, a trampoline receives the handler itself as its state with no hub around it, and whether a call blocks or defers follows from the type of the receiver it is called on, never from a flag.
-Verbs are never shared through a base class; a trait whose default methods hold the one body per verb is fine, like Rust's and Mojo's, since each receiver supplies only its handle.
+Verbs are never shared through a base class; a trait whose default methods hold the one body per verb is fine, like Rust's and Mojo's, since each receiver supplies only its handle, and C++ writes each handle and its receivers as one class template over what the receiver holds, so the handle carries the verbs as Rust's `&Handle` does.
 
 A typed binding takes the scalar as a type parameter of each call, like `search::<f32>`, rather than letting a handle's type fix one.
 A deferred Rust call owns what it lends the library until the call is final, since the borrow checker cannot see the library holding it.
@@ -854,6 +864,13 @@ A dynamic binding publishes every field of every report the library fills.
 A type the binding hands to C by cast is a transparent wrapper over the C struct, like Rust's `#[repr(transparent)]` newtype, so the cast is sound by construction and nothing asserts its size or alignment.
 Tests never restate a struct's layout that the compiler already pins: no `offset_of!`, `size_of`, `MemoryLayout` or `Marshal.SizeOf` asserts against the C structs; `offsetof` tables that declare members are declarations, not tests.
 Tests of how names print and parse, and of an engine run again through the binding, stay.
+A binding test asserts a status, or the exception or error type mapped from it, and never the wording of a message or note, in any language: no pytest `match=`, no comparison of `error.message`, `err.Error()` or a note's text, and no substring search in them, since engines refine their notes over time.
+
+A verb called on the handle itself runs on the calling thread, `on(executor)` blocks on an executor, and `deferred(executor)` submits there, with the same arguments in every language.
+A deferred call allocates nothing in C++, Rust or Mojo: C++ and Mojo construct it immovable where the caller holds it and submit at once, while a Rust `Deferred` submits on its first poll or `wait`, once pinned in place.
+A callback crosses as the C struct it lowers to, built by one generic constructor per handler shape with a trampoline made per handler type, never a trait object, a box or an enum.
+A per-key predicate lowers as cheap, and a batch predicate as expensive unless the caller says it is cheap.
+An arena never outlives the executor that made it: Rust's `Arena<'executor>` and Mojo's arena origin enforce the order, and the other bindings document it.
 
 `.githooks/pre-commit` refuses locks in binding sources, throwing callback types, caught unwinds and kept exceptions.
 

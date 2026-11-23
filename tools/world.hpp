@@ -176,30 +176,34 @@ inline void verb_stopped(verb_phase_t const& phase) noexcept {
 }
 
 /** The path of part @p part, counted from zero, of the @p parts the manifest at @p manifest_path
- *  commits; empty when it cannot be formatted. */
-inline sz::string_t checkpoint_part_path(std::string_view manifest_path, std::size_t part, std::size_t parts) noexcept {
-    growing_buffer<char> named {global_allocator};
-    return formatted("{}", safegraphs_part_path(named, safegraphs_stem(manifest_path), part, parts).value);
+ *  commits, or the status of formatting it. */
+inline util::expected<sz::string_t> checkpoint_part_path(std::string_view manifest_path, std::size_t part,
+                                                         std::size_t parts) noexcept {
+    util::growing_buffer<char> named {util::global_allocator};
+    auto const [path, status] = safegraphs_part_path(named, util::safegraphs_stem(manifest_path), part, parts);
+    if (failed(status)) return {{}, status};
+    return {formatted("{}", path), status};
 }
 
 /** Appends the parts the checkpoint at @p address spans to @p parts: each part a manifest names,
  *  beside it, or the address itself for a monolith, a transport ID or standard input; answers
  *  false after printing why. */
 inline bool checkpoint_parts_of(std::string_view address, st::vector<sz::string_t>& parts) noexcept {
-    if (address != "-" && !names_transport_id(address)) {
-        auto const [mapping, map_status] = mapped_file_t::read(address);
+    if (address != "-" && !util::names_transport_id(address)) {
+        auto const [mapping, map_status] = util::mapped_file_t::read(address);
         if (failed(map_status)) {
             fmt::println(stderr, "cannot read {}", address);
             return false;
         }
-        if (!safegraphs_is_monolith(mapping.view())) {
-            std::string_view const directory = address.substr(0, address.size() - safegraphs_basename(address).size());
-            auto per_part = [&](safegraphs_part_t part) noexcept {
+        if (!util::safegraphs_is_monolith(mapping.view())) {
+            std::string_view const directory = address.substr(
+                0, address.size() - util::safegraphs_basename(address).size());
+            auto per_part = [&](util::safegraphs_part_t part) noexcept {
                 if (st::failed(parts.push_back(formatted("{}{}", directory, part.path))))
                     exit_out_of_memory("the parts");
             };
-            auto const [summary, summary_status] = safegraphs_read_manifest(address, std::allocator<byte_t> {},
-                                                                            per_part);
+            auto const [summary, summary_status] = util::safegraphs_read_manifest(
+                address, std::allocator<util::byte_t> {}, per_part);
             if (failed(summary_status)) fmt::println(stderr, "{} holds no SafeGraphs monolith or manifest", address);
             return succeeded(summary_status);
         }
@@ -217,20 +221,21 @@ inline std::uint64_t checkpoint_file_bytes(sz::string_t const& path) noexcept {
 
 /** Commits the checkpoint: the manifest at @p manifest_path naming each of @p parts beside it, with
  *  its bytes and nodes. */
-inline bool checkpoint_write_manifest(std::string_view manifest_path, std::span<safegraphs_part_t const> parts) {
-    std::string_view const stem = safegraphs_basename(safegraphs_stem(manifest_path));
-    growing_buffer<char> named {global_allocator};
-    return succeeded(safegraphs_write_manifest(manifest_path, parts.size(), [&](std::size_t part) noexcept {
-        safegraphs_part_t entry = parts[part];
-        entry.path = safegraphs_part_path(named, stem, part, parts.size()).value;
+inline bool checkpoint_write_manifest(std::string_view manifest_path, std::span<util::safegraphs_part_t const> parts) {
+    std::string_view const stem = util::safegraphs_basename(util::safegraphs_stem(manifest_path));
+    util::growing_buffer<char> named {util::global_allocator};
+    return succeeded(util::safegraphs_write_manifest(manifest_path, parts.size(), [&](std::size_t part) noexcept {
+        util::safegraphs_part_t entry = parts[part];
+        auto const [path, status] = safegraphs_part_path(named, stem, part, parts.size());
+        entry.path = succeeded(status) ? path : std::string_view {};
         return entry;
     }));
 }
 
 /** Appends the text @p key prints as to @p text: the entry number it was minted from, or its 32 hex
  *  digits. */
-inline void checkpoint_append_key(sz::string_t& text, uuid128_t const& key) noexcept {
-    if (std::optional<u64_t> const number = identity_of(key)) return append_formatted(text, "{}", *number);
+inline void checkpoint_append_key(sz::string_t& text, util::uuid128_t const& key) noexcept {
+    if (std::optional<util::u64_t> const number = identity_of(key)) return append_formatted(text, "{}", *number);
     for (std::byte const byte : key.bytes) append_formatted(text, "{:02x}", std::to_integer<unsigned>(byte));
 }
 
@@ -338,7 +343,7 @@ handle<verbs_type_> checkpoint_read_piped(session_t& session, usearch_residency_
                      usearch_residency_name(residency));
         return {};
     }
-    st::vector<byte_t> bytes;
+    st::vector<util::byte_t> bytes;
     if (!read_standard_input(bytes)) {
         fmt::println(stderr, "cannot read a checkpoint off standard input");
         return {};
@@ -385,7 +390,7 @@ bool checkpoint_save_piped(handle<verbs_type_> const& index, std::FILE* stream) 
     usearch_bytes_view_t monolith {};
     verbs_type_::save_buffer(index.get(), index.executor(), index.session->arena, &monolith, &outcome);
     if (report_failure(outcome, "saving to standard output")) return false;
-    st::vector<byte_t> copied;
+    st::vector<util::byte_t> copied;
     void const* bytes = monolith.data;
     if (index.residency == usearch_residency_vram_k) {
         if (st::failed(copied.resize(st::assume_uninitialized, monolith.length))) exit_out_of_memory("the checkpoint");
@@ -451,18 +456,18 @@ bool checkpoint_refine_rounds(world_t const& world, handle<verbs_type_> const& i
             if (stopped.phase != usearch_phase_none_k) phase.name = usearch_phase_name(stopped.phase);
             if (!finish_plan(&report)) return false;
         }
-        fmt::println(phase.stream,
-                     "{}refined round {}: {}; {} neighborhoods, widest {}; "               //
-                     "{} links added, {} dropped, {} of {} entries changed; "              //
-                     "{} of {} in one component in {:.1f} s, {:.1f} distances per entry; " //
-                     "{} unreached and {} stranded islands, opened with {} and {}",
-                     rank_label(world), round + 1, usearch_refine_verdict_name(report.verdict), report.neighborhoods,
-                     report.widest_neighborhood, report.added_links, report.dropped_links, report.changed,
-                     report.reselected, report.reachability.reachable, report.reachability.audited,
-                     checkpoint_seconds_since(started),
-                     double(stats.computed_distances) / double(max_of<std::size_t>(report.reachability.audited, 1)),
-                     report.reachability.unreached_islands, report.reachability.stranded_islands,
-                     report.opening.unreached_islands, report.opening.stranded_islands);
+        fmt::println(
+            phase.stream,
+            "{}refined round {}: {}; {} neighborhoods, widest {}; "               //
+            "{} links added, {} dropped, {} of {} entries changed; "              //
+            "{} of {} in one component in {:.1f} s, {:.1f} distances per entry; " //
+            "{} unreached and {} stranded islands, opened with {} and {}",
+            rank_label(world), round + 1, usearch_refine_verdict_name(report.verdict), report.neighborhoods,
+            report.widest_neighborhood, report.added_links, report.dropped_links, report.changed, report.reselected,
+            report.reachability.reachable, report.reachability.audited, checkpoint_seconds_since(started),
+            double(stats.computed_distances) / double(util::max_of<std::size_t>(report.reachability.audited, 1)),
+            report.reachability.unreached_islands, report.reachability.stranded_islands,
+            report.opening.unreached_islands, report.opening.stranded_islands);
         if (report.verdict != usearch_refine_improved_k) break;
     }
     if (!finish_plan(nullptr)) return false;
@@ -520,10 +525,11 @@ int checkpoint_insert(world_t& world, int argc, char const* const* argv, std::st
     verb_phase_t phase {.name = "insert", .unit = "entries", .stream = steps};
     std::size_t inserted = 0;
     while (inserted < count) {
-        std::size_t const sliced = min_of(batch, count - inserted);
+        std::size_t const sliced = util::min_of(batch, count - inserted);
         for (std::size_t position = 0; position != sliced; ++position) {
             std::size_t const entry = first + inserted + position;
-            keys[position] = entries->keys.size() ? entries->keys[entry] : std::bit_cast<usearch_key_t>(uuid_of(entry));
+            keys[position] = entries->keys.size() ? entries->keys[entry]
+                                                  : std::bit_cast<usearch_key_t>(util::uuid_of(entry));
         }
         usearch_outcome_t outcome {};
         verbs_type_::insert(index.get(), index.executor(), sliced, keys_view(std::span {keys}.first(sliced)),
@@ -715,10 +721,14 @@ int checkpoint_reshard(world_t& world, int argc, char const* const* argv, std::s
     if (stopped) verb_stopped(phase);
     if (!split_into) return checkpoint_save(world, sources[0], *admitted, steps) ? EXIT_SUCCESS : EXIT_FAILURE;
 
-    st::vector<safegraphs_part_t> saved;
+    st::vector<util::safegraphs_part_t> saved;
     if (st::failed(saved.resize(split_into))) exit_out_of_memory("the parts");
     for (std::size_t part = 0; part != split_into; ++part) {
-        sz::string_t const part_path = checkpoint_part_path(settings.save, part, split_into);
+        auto const [part_path, path_status] = checkpoint_part_path(settings.save, part, split_into);
+        if (failed(path_status)) {
+            fmt::println(stderr, "cannot name part {} of {}", part, settings.save);
+            return EXIT_FAILURE;
+        }
         std::size_t const nodes = describe(targets[part]).size;
         if (!checkpoint_save(world, targets[part], part_path)) return EXIT_FAILURE;
         saved[part] = {.bytes = checkpoint_file_bytes(part_path), .nodes = nodes};
@@ -777,7 +787,7 @@ inline constexpr std::size_t key_rows_header_bytes_k = 2 * sizeof(std::uint32_t)
  *  why, or when it holds other than @p rows rows. */
 inline bool read_key_rows(std::string_view path, std::size_t rows, st::vector<usearch_key_t>& keys,
                           std::size_t& columns, st::vector<std::size_t>& counts) noexcept {
-    auto const [file, status] = mapped_file_t::read(path);
+    auto const [file, status] = util::mapped_file_t::read(path);
     bytes_view_t const bytes = file.view();
     std::array<std::uint32_t, 2> counters {};
     if (failed(status) || bytes.size() < key_rows_header_bytes_k) {
@@ -795,7 +805,7 @@ inline bool read_key_rows(std::string_view path, std::size_t rows, st::vector<us
     }
     counts.clear();
     if (st::failed(keys.resize(rows * columns)) || st::failed(counts.resize(rows, columns))) exit_out_of_memory(path);
-    byte_t const* const integers = bytes.data() + key_rows_header_bytes_k;
+    util::byte_t const* const integers = bytes.data() + key_rows_header_bytes_k;
     // Little-endian integers into keys stored most significant byte first.
     for (std::size_t key = 0; key != keys.size(); ++key)
         for (std::size_t byte = 0; byte != sizeof(usearch_key_t); ++byte)
@@ -816,12 +826,12 @@ inline bool read_key_rows(std::string_view path, std::size_t rows, st::vector<us
 inline bool write_key_rows(std::string_view path, copied_matches_t const& found, std::size_t columns) {
     std::size_t const rows = found.counts.size();
     std::size_t const keys_bytes = key_rows_header_bytes_k + rows * columns * sizeof(usearch_key_t);
-    auto [file, status] = mapped_file_t::write(path, keys_bytes + rows * sizeof(std::uint32_t));
+    auto [file, status] = util::mapped_file_t::write(path, keys_bytes + rows * sizeof(std::uint32_t));
     if (failed(status)) {
         fmt::println(stderr, "cannot write {}", path);
         return false;
     }
-    byte_t* const bytes = file.span().data();
+    util::byte_t* const bytes = file.span().data();
     std::array<std::uint32_t, 2> const counters {static_cast<std::uint32_t>(rows), static_cast<std::uint32_t>(columns)};
     std::memcpy(bytes, counters.data(), key_rows_header_bytes_k);
     st::vector<std::size_t> const offsets = match_offsets(found);
@@ -830,8 +840,9 @@ inline bool write_key_rows(std::string_view path, copied_matches_t const& found,
         std::memcpy(bytes + keys_bytes + row * sizeof(std::uint32_t), &count, sizeof(count));
         if (!count) continue;
         for (std::size_t column = 0; column != columns; ++column) {
-            uuid128_t const& key = found.keys[offsets[row] + min_of<std::size_t>(column, count - 1)];
-            byte_t* const integer = bytes + key_rows_header_bytes_k + (row * columns + column) * sizeof(usearch_key_t);
+            util::uuid128_t const& key = found.keys[offsets[row] + util::min_of<std::size_t>(column, count - 1)];
+            util::byte_t* const integer = bytes + key_rows_header_bytes_k +
+                                          (row * columns + column) * sizeof(usearch_key_t);
             for (std::size_t byte = 0; byte != sizeof(usearch_key_t); ++byte)
                 integer[byte] = key.bytes[sizeof(usearch_key_t) - 1 - byte];
         }
@@ -909,7 +920,7 @@ int checkpoint_search(world_t& world, int argc, char const* const* argv, std::st
     if (st::failed(query_keys.assign(queries->keys))) exit_out_of_memory("the query keys");
     if (query_keys.empty() && settings.query_keys.empty()) {
         for (std::size_t query = 0; query != queries->count; ++query)
-            if (st::failed(query_keys.push_back(std::bit_cast<usearch_key_t>(uuid_of(query)))))
+            if (st::failed(query_keys.push_back(std::bit_cast<usearch_key_t>(util::uuid_of(query)))))
                 exit_out_of_memory("the query keys");
     }
     else if (query_keys.empty() &&

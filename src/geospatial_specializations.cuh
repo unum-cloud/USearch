@@ -34,6 +34,8 @@
 
 #pragma region Geospatial Variants
 
+namespace util = unum::usearch::utilities;
+
 /** The engine's form of a C observation, field by field. */
 inline us::geospatial::geodetic_observation_t geodetic_of(
     usearch_geospatial_observation_t const& observation) noexcept {
@@ -76,8 +78,8 @@ struct geospatial_within_match_t {
 
 /** One thread's line-of-sight scratch, kept across quads and calls. */
 struct line_of_sight_buffers_t {
-    growing_buffer<f32_t, thread_allocator_t> window_heights;
-    growing_buffer<byte_t, thread_allocator_t> window_pack;
+    util::growing_buffer<util::f32_t, thread_allocator_t> window_heights;
+    util::growing_buffer<util::byte_t, thread_allocator_t> window_pack;
 
     explicit line_of_sight_buffers_t(thread_allocator_t const& allocator) noexcept
         : window_heights(allocator), window_pack(allocator) {}
@@ -103,11 +105,11 @@ struct geospatial_terrain {
     us::geospatial::terrain_t grid;
 
     /** The maxima of a borrowed grid, packed once. */
-    growing_buffer<byte_t, forkunion_allocator_t> terrain_pack {forkunion_allocator_t {}};
+    util::growing_buffer<util::byte_t, util::forkunion_allocator_t> terrain_pack {util::forkunion_allocator_t {}};
 
     /** Adopts @p grid, packing it when it is borrowed whole; refuses a grid with no extent or
      *  steps. */
-    status_t adopt_terrain(us::geospatial::terrain_t const& adopted) noexcept;
+    util::status_t adopt_terrain(us::geospatial::terrain_t const& adopted) noexcept;
 
     /** Whether a terrain was adopted, which lines of sight need. */
     bool has_terrain() const noexcept { return !grid.empty(); }
@@ -117,27 +119,28 @@ struct geospatial_terrain {
 
     /** The terrain's height under @p observation when it records no altitude, else zero; the
      *  ellipsoid's own zero off the grid or beside a missing cell. */
-    f64_t ground_metres(usearch_geospatial_observation_t const& observation,
-                        line_of_sight_buffers_t& sight) const noexcept;
+    util::f64_t ground_metres(usearch_geospatial_observation_t const& observation,
+                              line_of_sight_buffers_t& sight) const noexcept;
 
     /** A factory of the variant's metric over a thread's arena, sized for a round of candidates. */
     static auto metric_factory() noexcept {
         return [](thread_allocator_t const& allocator, std::size_t staging) noexcept {
             metric_t made {allocator};
-            status_t const ready = made.init(staging);
-            return expected<metric_t> {std::move(made), ready};
+            util::status_t const ready = made.init(staging);
+            return util::expected<metric_t> {std::move(made), ready};
         };
     }
 
     /** One line-of-sight scratch per thread of @p executor, each over that thread's arena. */
-    static status_t prepare_sights(growing_buffer<line_of_sight_buffers_t, thread_allocator_t>& sights,
-                                   forkunion_executor_t& executor) noexcept;
+    static util::status_t prepare_sights(util::growing_buffer<line_of_sight_buffers_t, thread_allocator_t>& sights,
+                                         util::forkunion_executor_t& executor) noexcept;
 
     /** Asks the relation about stored @p entries against @p query into @p admissions: the relation
      *  and time, then the terrain. */
     template <std::size_t extent_>
     void ask_relation_values(relation_t relation, usearch_geospatial_tolerance_t tolerance, value_t const& query,
-                             std::span<value_t const, extent_> entries, std::span<admission_t, extent_> admissions,
+                             std::span<value_t const, extent_> entries,
+                             std::span<util::admission_t, extent_> admissions,
                              line_of_sight_buffers_t& sight) const noexcept;
 
   private:
@@ -146,21 +149,21 @@ struct geospatial_terrain {
      *  @p relation, rejecting the rest; a pair off the grid counts as clear. */
     template <std::size_t extent_>
     void clear_sight_(relation_t relation, value_t const& query, std::span<value_t const, extent_> entries,
-                      std::span<admission_t, extent_> admissions, line_of_sight_buffers_t& sight) const noexcept;
+                      std::span<util::admission_t, extent_> admissions, line_of_sight_buffers_t& sight) const noexcept;
 };
 
 /** One geospatial variant: the basic shards over observations, scored with one class's kit, with
  *  the terrain its lines of sight run over. */
 template <cpu_class_t cpu_class_>
 struct geospatial_ram_variant {
-    using executor_t = forkunion_executor_t;
+    using executor_t = util::forkunion_executor_t;
     template <typename word_type_>
     using atomic_ref = typename atomic_ref_for_cpu_class<cpu_class_>::template type<word_type_>;
     using kit_t = typename us::geospatial::geospatial_ladder<numkong_capabilities_of(cpu_class_)>::kit_t;
     using cache_hints_t = typename cache_hints_for_cpu_class<cpu_class_>::type;
-    using shard_t = us::geospatial::ram_index<us::utilities::uuid128_t, waiter_of<cpu_class_>,
+    using shard_t = us::geospatial::ram_index<util::uuid128_t, waiter_of<cpu_class_>,
                                               atomic_ref_for_cpu_class<cpu_class_>::template type,
-                                              forkunion_allocator_t, cache_hints_t>;
+                                              util::forkunion_allocator_t, cache_hints_t>;
     using index_t = basic::ram_indexes<shard_t>;
     using value_t = us::geospatial::earth_observation_t;
     using node_id_t = typename shard_t::node_id_t;
@@ -179,22 +182,22 @@ struct geospatial_ram_variant {
 
     /** The largest stored deviation in whole metres, raised through @c atomic_ref; it widens every
      *  radius walk. */
-    u32_t largest_deviation_metres = 0;
+    util::u32_t largest_deviation_metres = 0;
 
-    status_t adopt_terrain(us::geospatial::terrain_t const& grid) noexcept { return terrain.adopt_terrain(grid); }
+    util::status_t adopt_terrain(us::geospatial::terrain_t const& grid) noexcept { return terrain.adopt_terrain(grid); }
     bool has_terrain() const noexcept { return terrain.has_terrain(); }
     std::size_t terrain_memory_usage() const noexcept { return terrain.terrain_memory_usage(); }
 
-    explicit geospatial_ram_variant(forkunion_allocator_t const& allocator) noexcept
+    explicit geospatial_ram_variant(util::forkunion_allocator_t const& allocator) noexcept
         : index(allocator, machine_cache_line_bytes()) {}
 
     /** Reserves the entries @p capacity names. */
-    status_t reserve(reserve_capacity_t capacity) noexcept { return index.reserve(capacity.entries).status; }
+    util::status_t reserve(reserve_capacity_t capacity) noexcept { return index.reserve(capacity.entries).status; }
 
     /** Empties the index and forgets its largest deviation. */
-    status_t clear() noexcept {
-        status_t const cleared = index.clear();
-        if (succeeded(cleared)) atomic_ref<u32_t>(largest_deviation_metres).store(0, std::memory_order_relaxed);
+    util::status_t clear() noexcept {
+        util::status_t const cleared = index.clear();
+        if (succeeded(cleared)) atomic_ref<util::u32_t>(largest_deviation_metres).store(0, std::memory_order_relaxed);
         return cleared;
     }
 
@@ -207,14 +210,15 @@ struct geospatial_ram_variant {
     /** The widest neighbor list a walk copies, which sizes every round's staging. */
     std::size_t widest_list() const noexcept { return geometry.connectivity + long_links(); }
 
-    expected<traversal_stats_t> insert(usearch_keys_view_t keys, observations_view_t observations,
-                                       insert_config_t config, executor_t& executor, progress_ticks_t& ticks) noexcept;
-    expected<traversal_stats_t> search(geospatial_queries_t query_batch, matches_outputs_t& outputs,
-                                       search_config_t search, predicate_t const& predicate, executor_t& executor,
-                                       progress_ticks_t& ticks) noexcept;
+    util::expected<traversal_stats_t> insert(usearch_keys_view_t keys, observations_view_t observations,
+                                             insert_config_t config, executor_t& executor,
+                                             progress_ticks_t& ticks) noexcept;
+    util::expected<traversal_stats_t> search(geospatial_queries_t query_batch, matches_outputs_t& outputs,
+                                             search_config_t search, predicate_t const& predicate, executor_t& executor,
+                                             progress_ticks_t& ticks) noexcept;
 
     /** Opens one round of every live shard in place under the config's cache. */
-    expected<refine_plan_t> plan_refine(refine_config_t config) noexcept {
+    util::expected<refine_plan_t> plan_refine(refine_config_t config) noexcept {
         typename shard_t::traversal_context_t planning {index.size(), index.get_allocator()};
         return index.plan_refine({config.cache_bytes}, us::geospatial::surface_keep_octants_t {geometry.connectivity},
                                  us::geospatial::earth_observation_codec_t {}, planning);
@@ -223,8 +227,8 @@ struct geospatial_ram_variant {
     /** Opens a reshard of @p sources into @p targets driven by this index, the one target of a
      *  pack or the one source of a split, a split's part roots drawn from @p seed, then one round
      *  per shard that took entries. */
-    expected<reshard_plan_t> plan_reshard(std::span<index_t* const> sources, std::span<index_t* const> targets,
-                                          refine_config_t config, u64_t seed) noexcept {
+    util::expected<reshard_plan_t> plan_reshard(std::span<index_t* const> sources, std::span<index_t* const> targets,
+                                                refine_config_t config, util::u64_t seed) noexcept {
         typename shard_t::traversal_context_t planning {index.size(), index.get_allocator()};
         return index.plan_reshard(sources, targets, {{config.cache_bytes}, 0, seed},
                                   us::geospatial::surface_keep_octants_t {geometry.connectivity},
@@ -234,50 +238,51 @@ struct geospatial_ram_variant {
     /** Drives @p plan, then draws every node's long links again by the insertion's rule and seeds,
      *  since the cone selector keeps only the longest of the drawn and selected links together. */
     template <typename plan_type_>
-    status_t drive(plan_type_& plan, executor_t& executor, progress_ticks_t& ticks) noexcept;
+    util::status_t drive(plan_type_& plan, executor_t& executor, progress_ticks_t& ticks) noexcept;
 
     /** Widens the largest deviation to an emptied @p source 's, whose nodes this index holds. */
     void count_packed_source(geospatial_ram_variant const& source) noexcept {
-        raise_to<atomic_ref>(largest_deviation_metres,
-                             atomic_ref<u32_t const>(source.largest_deviation_metres).load(std::memory_order_relaxed));
+        raise_to<atomic_ref>(
+            largest_deviation_metres,
+            atomic_ref<util::u32_t const>(source.largest_deviation_metres).load(std::memory_order_relaxed));
     }
 
     /** Bounds the deviation of the part @p target now holds by this index's, which held it. */
     void count_split_target(geospatial_ram_variant& target) const noexcept { target.count_packed_source(*this); }
 
-    expected<traversal_stats_t> within(geospatial_queries_t query_batch, within_outputs_t& outputs,
-                                       search_config_t search, predicate_t const& predicate,
-                                       growing_arena<forkunion_allocator_t>& staging, executor_t& executor,
-                                       progress_ticks_t& ticks) noexcept;
+    util::expected<traversal_stats_t> within(geospatial_queries_t query_batch, within_outputs_t& outputs,
+                                             search_config_t search, predicate_t const& predicate,
+                                             util::growing_arena<util::forkunion_allocator_t>& staging,
+                                             executor_t& executor, progress_ticks_t& ticks) noexcept;
 
     /** Writes the checkpoint under a path, or into a buffer of @ref storage_requirements bytes. */
     template <typename checkpoint_type_>
-    status_t save(checkpoint_type_ checkpoint, executor_t& executor, progress_ticks_t& ticks) noexcept;
+    util::status_t save(checkpoint_type_ checkpoint, executor_t& executor, progress_ticks_t& ticks) noexcept;
 
     /** Reads the checkpoint at a path or in a buffer, then widens to its largest deviation. */
     template <typename checkpoint_type_>
-    status_t load(checkpoint_type_ checkpoint, executor_t& executor, progress_ticks_t& ticks) noexcept;
+    util::status_t load(checkpoint_type_ checkpoint, executor_t& executor, progress_ticks_t& ticks) noexcept;
 
     /** The bytes a save into memory takes, under the provenance the save records. */
-    expected<std::size_t> storage_requirements() const noexcept;
+    util::expected<std::size_t> storage_requirements() const noexcept;
 
     /** Serving a checkpoint in place answers @c unsupported_k until the index serves it. */
-    status_t view(std::string_view) noexcept { return status_t::unsupported_k; }
-    expected<sample_result_t> sample(basic_sample_inputs_t inputs, basic_sample_outputs_t outputs,
-                                     sample_config_t config, executor_t& executor) noexcept;
+    util::status_t view(std::string_view) noexcept { return util::status_code_t::unsupported_k; }
+    util::expected<util::sample_result_t> sample(basic_sample_inputs_t inputs, basic_sample_outputs_t outputs,
+                                                 util::sample_config_t config, executor_t& executor) noexcept;
 
   private:
 
     /** Draws the long links of every published node in @p nodes of @p shard, each from a generator
      *  keyed by its ID, so a redraw over a re-selected neighbor list draws exactly what the
      *  insertion's draws drew. */
-    status_t draw_long_links_(shard_t& shard, iota_view<node_id_t> nodes, thread_scratch<shard_t, metric_t>& scratch,
-                              executor_t& executor) noexcept;
+    util::status_t draw_long_links_(shard_t& shard, util::iota_view<node_id_t> nodes,
+                                    thread_scratch<shard_t, metric_t>& scratch, executor_t& executor) noexcept;
 
     /** One shard's IDs a batch inserted, kept for the long links drawn once it publishes. */
     struct inserted_range_t {
         shard_t* shard = nullptr;
-        iota_view<node_id_t> nodes {};
+        util::iota_view<node_id_t> nodes {};
     };
 
     /** The relation, time and terrain against @c query as a predicate over a quad of node IDs of
@@ -292,7 +297,7 @@ struct geospatial_ram_variant {
 
         template <std::size_t extent_>
         void operator()(std::span<node_id_t const, extent_> nodes,
-                        std::span<admission_t, extent_> admissions) const noexcept {
+                        std::span<util::admission_t, extent_> admissions) const noexcept {
             std::array<value_t, extent_> entries;
             for (std::size_t lane = 0; lane != extent_; ++lane) entries[lane] = shard.published_value_of(nodes[lane]);
             variant.terrain.ask_relation_values(relation, tolerance, query, std::span<value_t const, extent_>(entries),
@@ -303,8 +308,8 @@ struct geospatial_ram_variant {
     /** One thread's share of a containment call, kept across the queries it takes: the matches it
      *  found, the ball a scan collects and its line-of-sight scratch. */
     struct within_share_t {
-        growing_buffer<geospatial_within_match_t, thread_allocator_t> found;
-        growing_buffer<scored_node_t, thread_allocator_t> ball;
+        util::growing_buffer<geospatial_within_match_t, thread_allocator_t> found;
+        util::growing_buffer<scored_node_t, thread_allocator_t> ball;
         line_of_sight_buffers_t sight;
 
         explicit within_share_t(thread_allocator_t const& allocator) noexcept
@@ -315,113 +320,121 @@ struct geospatial_ram_variant {
      *  as far as the relation and @p admits let in; an aggregating @p admits answers at most
      *  @p round_capacity candidates a call. */
     template <typename admits_type_>
-    status_t write_related_matches_(shard_t const& shard, relation_t relation, usearch_geospatial_tolerance_t tolerance,
-                                    value_t const& query, std::size_t query_index, std::span<scored_node_t const> ball,
-                                    admits_type_&& admits, std::size_t round_capacity,
-                                    within_share_t& share) const noexcept;
+    util::status_t write_related_matches_(shard_t const& shard, relation_t relation,
+                                          usearch_geospatial_tolerance_t tolerance, value_t const& query,
+                                          std::size_t query_index, std::span<scored_node_t const> ball,
+                                          admits_type_&& admits, std::size_t round_capacity,
+                                          within_share_t& share) const noexcept;
 };
 
 template <cpu_class_t cpu_class_>
-status_t geospatial_terrain<cpu_class_>::adopt_terrain(us::geospatial::terrain_t const& adopted) noexcept {
-    if (adopted.empty()) return status_t::success_k;
-    if (!(adopted.row_step_degrees > 0) || !(adopted.column_step_degrees > 0)) return status_t::config_mismatch_k;
+util::status_t geospatial_terrain<cpu_class_>::adopt_terrain(us::geospatial::terrain_t const& adopted) noexcept {
+    if (adopted.empty()) return util::status_code_t::success_k;
+    if (!(adopted.row_step_degrees > 0) || !(adopted.column_step_degrees > 0))
+        return util::status_code_t::config_mismatch_k;
     grid = adopted;
-    if (!grid.heights_stride) grid.heights_stride = grid.columns * sizeof(f32_t);
-    if (!grid.heights) return status_t::success_k;
+    if (!grid.heights_stride) grid.heights_stride = grid.columns * sizeof(util::f32_t);
+    if (!grid.heights) return util::status_code_t::success_k;
     nk_size_t bytes = 0;
     if (nk_status_t const sized = kit_t::terrain_pack_size(grid.rows, grid.columns, &bytes); sized != nk_success_k)
         return us::shapes::status_of(sized);
-    if (status_t const reserved = terrain_pack.resize_uninitialized(bytes); failed(reserved)) return reserved;
-    std::array<f64_t, 2> const steps = grid.step_metres();
+    if (util::status_t const reserved = terrain_pack.resize_uninitialized(bytes); failed(reserved)) return reserved;
+    std::array<util::f64_t, 2> const steps = grid.step_metres();
     return us::shapes::status_of(kit_t::terrain_pack(grid.heights, grid.rows, grid.columns, grid.heights_stride,
                                                      steps[0], steps[1], terrain_pack.data(), nullptr));
 }
 
 template <cpu_class_t cpu_class_>
-status_t geospatial_terrain<cpu_class_>::prepare_sights(
-    growing_buffer<line_of_sight_buffers_t, thread_allocator_t>& sights, forkunion_executor_t& executor) noexcept {
-    if (failed(sights.reserve_exactly(executor.size()))) return status_t::bad_alloc_k;
+util::status_t geospatial_terrain<cpu_class_>::prepare_sights(
+    util::growing_buffer<line_of_sight_buffers_t, thread_allocator_t>& sights,
+    util::forkunion_executor_t& executor) noexcept {
+    if (failed(sights.reserve_exactly(executor.size()))) return util::status_code_t::out_of_memory_k;
     for (std::size_t thread = 0; thread != executor.size(); ++thread)
         sights.push_back_reserved(line_of_sight_buffers_t {thread_allocator_t {executor.arena(thread)}});
-    return status_t::success_k;
+    return util::status_code_t::success_k;
 }
 
 template <cpu_class_t cpu_class_>
-f64_t geospatial_terrain<cpu_class_>::ground_metres(usearch_geospatial_observation_t const& observation,
-                                                    line_of_sight_buffers_t& sight) const noexcept {
+util::f64_t geospatial_terrain<cpu_class_>::ground_metres(usearch_geospatial_observation_t const& observation,
+                                                          line_of_sight_buffers_t& sight) const noexcept {
     if (grid.empty() || observation.altitude_metres == observation.altitude_metres) return 0;
-    std::array<f64_t, 2> const cell = grid.grid_point(observation.latitude_degrees, observation.longitude_degrees);
-    f64_t const last_row = static_cast<f64_t>(grid.rows - 1), last_column = static_cast<f64_t>(grid.columns - 1);
+    std::array<util::f64_t, 2> const cell = grid.grid_point(observation.latitude_degrees,
+                                                            observation.longitude_degrees);
+    util::f64_t const last_row = static_cast<util::f64_t>(grid.rows - 1),
+                      last_column = static_cast<util::f64_t>(grid.columns - 1);
     if (!(cell[0] >= 0 && cell[0] <= last_column && cell[1] >= 0 && cell[1] <= last_row)) return 0;
-    f32_t height = 0;
+    util::f32_t height = 0;
     if (grid.heights) {
-        std::array<f32_t, 2> const point {static_cast<f32_t>(cell[0]), static_cast<f32_t>(cell[1])};
+        std::array<util::f32_t, 2> const point {static_cast<util::f32_t>(cell[0]), static_cast<util::f32_t>(cell[1])};
         if (kit_t::terrain_heights(grid.heights, terrain_pack.data(), point.data(), 1, &height, nullptr) !=
             nk_success_k)
             return 0;
     }
     else {
         // A filled grid answers for the two-by-two window around the point, packed on its own.
-        std::size_t const first_column = min_of(static_cast<std::size_t>(cell[0]),
-                                                grid.columns > 1 ? grid.columns - 2 : 0);
-        std::size_t const first_row = min_of(static_cast<std::size_t>(cell[1]), grid.rows > 1 ? grid.rows - 2 : 0);
-        std::size_t const window_rows = min_of<std::size_t>(2, grid.rows),
-                          window_columns = min_of<std::size_t>(2, grid.columns);
+        std::size_t const first_column = util::min_of(static_cast<std::size_t>(cell[0]),
+                                                      grid.columns > 1 ? grid.columns - 2 : 0);
+        std::size_t const first_row = util::min_of(static_cast<std::size_t>(cell[1]),
+                                                   grid.rows > 1 ? grid.rows - 2 : 0);
+        std::size_t const window_rows = util::min_of<std::size_t>(2, grid.rows),
+                          window_columns = util::min_of<std::size_t>(2, grid.columns);
         nk_size_t bytes = 0;
         if (failed(sight.window_heights.resize_uninitialized(window_rows * window_columns)) ||
             kit_t::terrain_pack_size(window_rows, window_columns, &bytes) != nk_success_k ||
             failed(sight.window_pack.resize_uninitialized(bytes)))
             return 0;
         grid.callback(first_row, first_column, window_rows, window_columns, sight.window_heights.data(),
-                      window_columns * sizeof(f32_t), grid.state);
-        std::array<f64_t, 2> const steps = grid.step_metres();
+                      window_columns * sizeof(util::f32_t), grid.state);
+        std::array<util::f64_t, 2> const steps = grid.step_metres();
         if (kit_t::terrain_pack(sight.window_heights.data(), window_rows, window_columns,
-                                window_columns * sizeof(f32_t), steps[0], steps[1], sight.window_pack.data(),
+                                window_columns * sizeof(util::f32_t), steps[0], steps[1], sight.window_pack.data(),
                                 nullptr) != nk_success_k)
             return 0;
-        std::array<f32_t, 2> const point {static_cast<f32_t>(cell[0] - static_cast<f64_t>(first_column)),
-                                          static_cast<f32_t>(cell[1] - static_cast<f64_t>(first_row))};
+        std::array<util::f32_t, 2> const point {
+            static_cast<util::f32_t>(cell[0] - static_cast<util::f64_t>(first_column)),
+            static_cast<util::f32_t>(cell[1] - static_cast<util::f64_t>(first_row))};
         if (kit_t::terrain_heights(sight.window_heights.data(), sight.window_pack.data(), point.data(), 1, &height,
                                    nullptr) != nk_success_k)
             return 0;
     }
-    return height == height ? static_cast<f64_t>(height) : 0;
+    return height == height ? static_cast<util::f64_t>(height) : 0;
 }
 
 template <cpu_class_t cpu_class_>
 template <std::size_t extent_>
 void geospatial_terrain<cpu_class_>::clear_sight_(relation_t relation, value_t const& query,
                                                   std::span<value_t const, extent_> entries,
-                                                  std::span<admission_t, extent_> admissions,
+                                                  std::span<util::admission_t, extent_> admissions,
                                                   line_of_sight_buffers_t& sight) const noexcept {
     // The query looks at the entries, except under `sees`, where every entry looks at the query.
     bool const entries_look = relation == relation_t::sees_k;
-    std::array<f64_t, 3> const query_cell = grid.grid_point(query.position);
-    std::array<std::array<f64_t, 3>, extent_> entry_cells;
+    std::array<util::f64_t, 3> const query_cell = grid.grid_point(query.position);
+    std::array<std::array<util::f64_t, 3>, extent_> entry_cells;
     for (std::size_t lane = 0; lane != extent_; ++lane) entry_cells[lane] = grid.grid_point(entries[lane].position);
 
     // A borrowed grid is read in place; a filled one is fetched over the window the on-grid
     // positions span.
-    f32_t const* heights = grid.heights;
-    byte_t const* pack = terrain_pack.data();
-    f64_t first_row = 0, first_column = 0;
+    util::f32_t const* heights = grid.heights;
+    util::byte_t const* pack = terrain_pack.data();
+    util::f64_t first_row = 0, first_column = 0;
     if (!heights) {
-        f64_t const last_row = static_cast<f64_t>(grid.rows - 1), last_column = static_cast<f64_t>(grid.columns - 1);
-        f64_t low_row = last_row, high_row = 0, low_column = last_column, high_column = 0;
-        auto span_cell = [&](std::array<f64_t, 3> const& cell) noexcept {
+        util::f64_t const last_row = static_cast<util::f64_t>(grid.rows - 1),
+                          last_column = static_cast<util::f64_t>(grid.columns - 1);
+        util::f64_t low_row = last_row, high_row = 0, low_column = last_column, high_column = 0;
+        auto span_cell = [&](std::array<util::f64_t, 3> const& cell) noexcept {
             if (!(cell[0] >= 0 && cell[0] <= last_column && cell[1] >= 0 && cell[1] <= last_row)) return;
             low_column = std::fmin(low_column, cell[0]), high_column = std::fmax(high_column, cell[0]);
             low_row = std::fmin(low_row, cell[1]), high_row = std::fmax(high_row, cell[1]);
         };
         span_cell(query_cell);
-        for (std::array<f64_t, 3> const& entry_cell : entry_cells) span_cell(entry_cell);
+        for (std::array<util::f64_t, 3> const& entry_cell : entry_cells) span_cell(entry_cell);
         if (low_row > high_row || low_column > high_column) return;
         first_row = std::floor(low_row), first_column = std::floor(low_column);
-        std::size_t const window_rows = min_of<std::size_t>(static_cast<std::size_t>(std::ceil(high_row)) + 1,
-                                                            grid.rows) -
+        std::size_t const window_rows = util::min_of<std::size_t>(static_cast<std::size_t>(std::ceil(high_row)) + 1,
+                                                                  grid.rows) -
                                         static_cast<std::size_t>(first_row);
-        std::size_t const window_columns = min_of<std::size_t>(static_cast<std::size_t>(std::ceil(high_column)) + 1,
-                                                               grid.columns) -
+        std::size_t const window_columns = util::min_of<std::size_t>(
+                                               static_cast<std::size_t>(std::ceil(high_column)) + 1, grid.columns) -
                                            static_cast<std::size_t>(first_column);
         nk_size_t bytes = 0;
         if (failed(sight.window_heights.resize_uninitialized(window_rows * window_columns)) ||
@@ -429,37 +442,37 @@ void geospatial_terrain<cpu_class_>::clear_sight_(relation_t relation, value_t c
             failed(sight.window_pack.resize_uninitialized(bytes)))
             return;
         grid.callback(static_cast<std::size_t>(first_row), static_cast<std::size_t>(first_column), window_rows,
-                      window_columns, sight.window_heights.data(), window_columns * sizeof(f32_t), grid.state);
-        std::array<f64_t, 2> const steps = grid.step_metres();
+                      window_columns, sight.window_heights.data(), window_columns * sizeof(util::f32_t), grid.state);
+        std::array<util::f64_t, 2> const steps = grid.step_metres();
         if (kit_t::terrain_pack(sight.window_heights.data(), window_rows, window_columns,
-                                window_columns * sizeof(f32_t), steps[0], steps[1], sight.window_pack.data(),
+                                window_columns * sizeof(util::f32_t), steps[0], steps[1], sight.window_pack.data(),
                                 nullptr) != nk_success_k)
             return;
         heights = sight.window_heights.data(), pack = sight.window_pack.data();
     }
-    auto to_point = [&](std::array<f64_t, 3> const& cell) noexcept {
-        return std::array<f32_t, 3> {static_cast<f32_t>(cell[0] - first_column),
-                                     static_cast<f32_t>(cell[1] - first_row), static_cast<f32_t>(cell[2])};
+    auto to_point = [&](std::array<util::f64_t, 3> const& cell) noexcept {
+        return std::array<util::f32_t, 3> {static_cast<util::f32_t>(cell[0] - first_column),
+                                           static_cast<util::f32_t>(cell[1] - first_row),
+                                           static_cast<util::f32_t>(cell[2])};
     };
-    std::array<f32_t, 3> const query_point = to_point(query_cell);
-    std::array<f32_t, extent_ * 3> entry_points;
+    std::array<util::f32_t, 3> const query_point = to_point(query_cell);
+    std::array<util::f32_t, extent_ * 3> entry_points;
     for (std::size_t lane = 0; lane != extent_; ++lane) {
-        std::array<f32_t, 3> const point = to_point(entry_cells[lane]);
+        std::array<util::f32_t, 3> const point = to_point(entry_cells[lane]);
         entry_points[lane * 3 + 0] = point[0], entry_points[lane * 3 + 1] = point[1],
                                 entry_points[lane * 3 + 2] = point[2];
     }
-    constexpr f64_t refraction_k = us::geospatial::terrain_refraction_k;
-    std::array<f32_t, extent_> clearances;
-    nk_status_t const tested = entries_look ? kit_t::clearances(heights, pack, entry_points.data(), nullptr, extent_,
-                                                                query_point.data(), 1, refraction_k, clearances.data(),
-                                                                sizeof(f32_t), nullptr)
-                                            : kit_t::clearances(heights, pack, query_point.data(), nullptr, 1,
-                                                                entry_points.data(), extent_, refraction_k,
-                                                                clearances.data(), extent_ * sizeof(f32_t), nullptr);
+    constexpr util::f64_t refraction_k = us::geospatial::terrain_refraction_k;
+    std::array<util::f32_t, extent_> clearances;
+    nk_status_t const tested =
+        entries_look ? kit_t::clearances(heights, pack, entry_points.data(), nullptr, extent_, query_point.data(), 1,
+                                         refraction_k, clearances.data(), sizeof(util::f32_t), nullptr)
+                     : kit_t::clearances(heights, pack, query_point.data(), nullptr, 1, entry_points.data(), extent_,
+                                         refraction_k, clearances.data(), extent_ * sizeof(util::f32_t), nullptr);
     if (tested != nk_success_k) return;
     // A negative clearance is an obstruction; NaN leaves the grid, which no terrain can block.
     for (std::size_t lane = 0; lane != extent_; ++lane)
-        if (clearances[lane] < 0) admissions[lane] = admission_t::reject_k;
+        if (clearances[lane] < 0) admissions[lane] = util::admission_t::reject_k;
 }
 
 template <cpu_class_t cpu_class_>
@@ -467,43 +480,41 @@ template <std::size_t extent_>
 void geospatial_terrain<cpu_class_>::ask_relation_values(relation_t relation, usearch_geospatial_tolerance_t tolerance,
                                                          value_t const& query,
                                                          std::span<value_t const, extent_> entries,
-                                                         std::span<admission_t, extent_> admissions,
+                                                         std::span<util::admission_t, extent_> admissions,
                                                          line_of_sight_buffers_t& sight) const noexcept {
     for (std::size_t lane = 0; lane != extent_; ++lane)
         admissions[lane] = us::geospatial::admits(relation, tolerance.metres, tolerance.seconds * 1000.0, query,
                                                   entries[lane])
-                               ? admission_t::admit_k
-                               : admission_t::reject_k;
+                               ? util::admission_t::admit_k
+                               : util::admission_t::reject_k;
     if (relation != relation_t::near_k && !grid.empty()) clear_sight_(relation, query, entries, admissions, sight);
 }
 
 template <cpu_class_t cpu_class_>
 template <typename admits_type_>
-status_t geospatial_ram_variant<cpu_class_>::write_related_matches_(shard_t const& shard, relation_t relation,
-                                                                    usearch_geospatial_tolerance_t tolerance,
-                                                                    value_t const& query, std::size_t query_index,
-                                                                    std::span<scored_node_t const> ball,
-                                                                    admits_type_&& admits, std::size_t round_capacity,
-                                                                    within_share_t& share) const noexcept {
+util::status_t geospatial_ram_variant<cpu_class_>::write_related_matches_(
+    shard_t const& shard, relation_t relation, usearch_geospatial_tolerance_t tolerance, value_t const& query,
+    std::size_t query_index, std::span<scored_node_t const> ball, admits_type_&& admits, std::size_t round_capacity,
+    within_share_t& share) const noexcept {
     relation_predicate_t const related {*this, shard, relation, tolerance, query, share.sight};
-    status_t appended = status_t::success_k;
+    util::status_t appended = util::status_code_t::success_k;
     auto const write_match = [&](scored_node_t const& match) noexcept {
         if (failed(appended)) return;
         appended = share.found.push_back(
             {query_index, std::bit_cast<usearch_key_t>(shard.key_of(match.node_id).value),
-             std::sqrt(static_cast<f64_t>(match.distance)) / us::geospatial::centimetres_per_metre_k});
+             std::sqrt(static_cast<util::f64_t>(match.distance)) / us::geospatial::centimetres_per_metre_k});
     };
     std::size_t gathered = 0;
     auto const ask_related = [&]<std::size_t extent_>(std::span<scored_node_t const, extent_> scored) noexcept {
         std::array<node_id_t, extent_> ids;
         for (std::size_t lane = 0; lane != extent_; ++lane) ids[lane] = scored[lane].node_id;
-        std::array<admission_t, extent_> related_admissions;
-        related(std::span<node_id_t const, extent_>(ids), std::span<admission_t, extent_>(related_admissions));
+        std::array<util::admission_t, extent_> related_admissions;
+        related(std::span<node_id_t const, extent_>(ids), std::span<util::admission_t, extent_>(related_admissions));
         std::array<node_id_t, extent_> kept_ids;
         std::array<scored_node_t, extent_> kept_scored;
         std::size_t kept = 0;
         for (std::size_t lane = 0; lane != extent_; ++lane) {
-            if (related_admissions[lane] != admission_t::admit_k) continue;
+            if (related_admissions[lane] != util::admission_t::admit_k) continue;
             kept_ids[kept] = ids[lane];
             kept_scored[kept] = scored[lane];
             ++kept;
@@ -514,16 +525,16 @@ status_t geospatial_ram_variant<cpu_class_>::write_related_matches_(shard_t cons
             settle_predicate(admits, write_match);
             gathered = 0;
         }
-        with_static_extent<extent_>(kept, [&]<std::size_t kept_extent_>() noexcept {
+        util::with_static_extent<extent_>(kept, [&]<std::size_t kept_extent_>() noexcept {
             ask_quad(admits, std::span<node_id_t const, kept_extent_>(kept_ids.data(), kept_extent_),
                      std::span<scored_node_t const, kept_extent_>(kept_scored.data(), kept_extent_), write_match);
         });
         gathered += kept;
     };
     std::size_t first = 0;
-    for (; ball.size() - first >= quad_lanes_k; first += quad_lanes_k)
-        ask_related(std::span<scored_node_t const, quad_lanes_k>(ball.data() + first, quad_lanes_k));
-    with_static_extent<quad_lanes_k>(ball.size() - first, [&]<std::size_t extent_>() noexcept {
+    for (; ball.size() - first >= util::quad_lanes_k; first += util::quad_lanes_k)
+        ask_related(std::span<scored_node_t const, util::quad_lanes_k>(ball.data() + first, util::quad_lanes_k));
+    util::with_static_extent<util::quad_lanes_k>(ball.size() - first, [&]<std::size_t extent_>() noexcept {
         ask_related(std::span<scored_node_t const, extent_>(ball.data() + first, extent_));
     });
     settle_predicate(admits, write_match);
@@ -531,85 +542,88 @@ status_t geospatial_ram_variant<cpu_class_>::write_related_matches_(shard_t cons
 }
 
 template <cpu_class_t cpu_class_>
-expected<traversal_stats_t> geospatial_ram_variant<cpu_class_>::insert(usearch_keys_view_t keys,
-                                                                       observations_view_t observations,
-                                                                       insert_config_t insert, executor_t& executor,
-                                                                       progress_ticks_t& ticks) noexcept {
+util::expected<traversal_stats_t> geospatial_ram_variant<cpu_class_>::insert(usearch_keys_view_t keys,
+                                                                             observations_view_t observations,
+                                                                             insert_config_t insert,
+                                                                             executor_t& executor,
+                                                                             progress_ticks_t& ticks) noexcept {
     using key_t = typename index_t::key_t;
     std::size_t const count = observations.size();
     std::size_t const breadth = insert.expansion_factor ? insert.expansion_factor
                                                         : us::geospatial::surface_keep_octants_t::exact_candidates_k;
     std::size_t const list_width = widest_list();
     thread_scratch<shard_t, metric_t> scratch {executor};
-    if (status_t const prepared = scratch.prepare(executor, executor.size(), list_width, breadth, index.size(),
-                                                  terrain.metric_factory());
+    if (util::status_t const prepared = scratch.prepare(executor, executor.size(), list_width, breadth, index.size(),
+                                                        terrain.metric_factory());
         failed(prepared))
         return {{}, prepared};
 
     thread_allocator_t const caller {executor.arena(0)};
-    growing_buffer<key_t, thread_allocator_t> identities {caller};
-    growing_buffer<value_t, thread_allocator_t> values {caller};
-    growing_buffer<line_of_sight_buffers_t, thread_allocator_t> sights {caller};
+    util::growing_buffer<key_t, thread_allocator_t> identities {caller};
+    util::growing_buffer<value_t, thread_allocator_t> values {caller};
+    util::growing_buffer<line_of_sight_buffers_t, thread_allocator_t> sights {caller};
     if (failed(identities.reserve_exactly(count)) || failed(values.reserve_exactly(count)))
-        return {{}, status_t::bad_alloc_k};
-    if (status_t const prepared = terrain.prepare_sights(sights, executor); failed(prepared)) return {{}, prepared};
+        return {{}, util::status_code_t::out_of_memory_k};
+    if (util::status_t const prepared = terrain.prepare_sights(sights, executor); failed(prepared))
+        return {{}, prepared};
     for (std::size_t offset = 0; offset != count; ++offset) {
         identities.push_back_reserved(uuid_of(key_at(keys, offset)));
         values.push_back_reserved(value_t {});
     }
-    if (status_t const placed = drain_in_order<atomic_ref_for_cpu_class<cpu_class_>::template type>(
+    if (util::status_t const placed = drain_in_order<atomic_ref_for_cpu_class<cpu_class_>::template type>(
             executor, count,
             [&](std::size_t offset, std::size_t thread) noexcept {
-                f64_t const ground = terrain.ground_metres(observations[offset], sights[thread]);
+                util::f64_t const ground = terrain.ground_metres(observations[offset], sights[thread]);
                 values[offset] = us::geospatial::to_earth_observation(geodetic_of(observations[offset]), ground);
             });
         failed(placed))
         return {{}, placed};
-    u32_t deviation = 0;
-    for (value_t const& value : values) deviation = max_of<u32_t>(deviation, value.deviation_metres);
+    util::u32_t deviation = 0;
+    for (value_t const& value : values) deviation = util::max_of<util::u32_t>(deviation, value.deviation_metres);
 
     auto [plan, plan_status] = index.plan_insert(count);
     if (failed(plan_status)) return {{}, plan_status};
     us::geospatial::surface_keep_octants_t const selector {geometry.connectivity};
     typename index_t::insert_config_t const config {breadth};
-    if (status_t const inserted = drain_in_order<atomic_ref_for_cpu_class<cpu_class_>::template type>(
+    if (util::status_t const inserted = drain_in_order<atomic_ref_for_cpu_class<cpu_class_>::template type>(
             executor, count,
             [&](std::size_t offset, std::size_t thread) noexcept {
                 plan.insert(offset, to_writable_span(values).subspan(offset, 1), to_span(identities).subspan(offset, 1),
                             scratch.metrics[thread], scratch.traversals[thread], selector, config);
-                [[maybe_unused]] continuation_t const heard = ticks(offset);
+                [[maybe_unused]] util::continuation_t const heard = ticks(offset);
             });
         failed(inserted))
         return {{}, inserted};
     // Every shard's range is kept before the plan publishes and forgets them; a range the buffer
     // cannot keep goes undrawn, and the batch still publishes, as its entries are already inserted.
-    growing_buffer<inserted_range_t, thread_allocator_t> ranges {caller};
-    status_t recorded = status_t::success_k;
-    plan.for_each_range([&](shard_t& shard, iota_view<node_id_t> nodes) noexcept {
+    util::growing_buffer<inserted_range_t, thread_allocator_t> ranges {caller};
+    util::status_t recorded = util::status_code_t::success_k;
+    plan.for_each_range([&](shard_t& shard, util::iota_view<node_id_t> nodes) noexcept {
         keep_first_failure<atomic_ref>(recorded, ranges.push_back({&shard, nodes}));
     });
-    if (status_t const finished = plan.finish(); failed(finished)) return {{}, finished};
+    if (util::status_t const finished = plan.finish(); failed(finished)) return {{}, finished};
     raise_to<atomic_ref>(largest_deviation_metres, deviation);
     if (failed(recorded)) return {{}, recorded};
 
     // Long links reach across the published graph, so they are drawn once the whole batch is
     // visible.
     for (inserted_range_t const& range : ranges)
-        if (status_t const linked = draw_long_links_(*range.shard, range.nodes, scratch, executor); failed(linked))
+        if (util::status_t const linked = draw_long_links_(*range.shard, range.nodes, scratch, executor);
+            failed(linked))
             return {{}, linked};
-    return {scratch.telemetry(), status_t::success_k};
+    return {scratch.telemetry(), util::status_code_t::success_k};
 }
 
 template <cpu_class_t cpu_class_>
-status_t geospatial_ram_variant<cpu_class_>::draw_long_links_(shard_t& shard, iota_view<node_id_t> nodes,
-                                                              thread_scratch<shard_t, metric_t>& scratch,
-                                                              executor_t& executor) noexcept {
+util::status_t geospatial_ram_variant<cpu_class_>::draw_long_links_(shard_t& shard, util::iota_view<node_id_t> nodes,
+                                                                    thread_scratch<shard_t, metric_t>& scratch,
+                                                                    executor_t& executor) noexcept {
     std::size_t const draws = long_links();
-    status_t linked = status_t::success_k;
-    status_t const forked = drain_in_order<atomic_ref_for_cpu_class<cpu_class_>::template type>(
+    util::status_t linked = util::status_code_t::success_k;
+    util::status_t const forked = drain_in_order<atomic_ref_for_cpu_class<cpu_class_>::template type>(
         executor, nodes.size(), [&](std::size_t position, std::size_t thread) noexcept {
             node_id_t const node = static_cast<node_id_t>(nodes.first + position);
-            splitmix64_t generator = seeded_stream(static_cast<u64_t>(node));
+            util::splitmix64_t generator = util::seeded_stream(static_cast<util::u64_t>(node));
             keep_first_failure<atomic_ref>(linked,
                                            us::geospatial::draw_long_links(shard, node, draws, scratch.metrics[thread],
                                                                            scratch.traversals[thread], generator));
@@ -619,26 +633,26 @@ status_t geospatial_ram_variant<cpu_class_>::draw_long_links_(shard_t& shard, io
 
 template <cpu_class_t cpu_class_>
 template <typename plan_type_>
-status_t geospatial_ram_variant<cpu_class_>::drive(plan_type_& plan, executor_t& executor,
-                                                   progress_ticks_t& ticks) noexcept {
+util::status_t geospatial_ram_variant<cpu_class_>::drive(plan_type_& plan, executor_t& executor,
+                                                         progress_ticks_t& ticks) noexcept {
     auto [scratch, prepare_status] = prepare_refinement<shard_t>(plan, widest_list(), terrain.metric_factory(),
                                                                  executor);
     if (failed(prepare_status)) return prepare_status;
-    if (status_t const refined = drive_refinement(
+    if (util::status_t const refined = drive_refinement(
             plan, scratch, us::geospatial::surface_keep_octants_t {geometry.connectivity}, ticks, executor);
         failed(refined))
         return refined;
     // The round kept the cone winners and the longest of the rest, so the drawn links of every
     // node it rewrote are drawn again by the insertion's rule.
-    status_t linked = status_t::success_k;
-    plan.for_each_shard_range([&](shard_t& shard, iota_view<node_id_t> nodes) noexcept {
+    util::status_t linked = util::status_code_t::success_k;
+    plan.for_each_shard_range([&](shard_t& shard, util::iota_view<node_id_t> nodes) noexcept {
         keep_first_failure<atomic_ref>(linked, draw_long_links_(shard, nodes, scratch, executor));
     });
     return linked;
 }
 
 template <cpu_class_t cpu_class_>
-expected<traversal_stats_t> geospatial_ram_variant<cpu_class_>::search(
+util::expected<traversal_stats_t> geospatial_ram_variant<cpu_class_>::search(
     geospatial_queries_t query_batch, matches_outputs_t& outputs, search_config_t search, predicate_t const& predicate,
     executor_t& executor, progress_ticks_t& ticks) noexcept {
     usearch_geospatial_observation_t const* const queries = query_batch.observations.data();
@@ -649,34 +663,37 @@ expected<traversal_stats_t> geospatial_ram_variant<cpu_class_>::search(
     using distance_t = typename index_t::distance_t;
     static_assert(sizeof(key_t) == sizeof(usearch_key_t), "Keys land in the arena as the merges resolve them");
     // Candidates fewer than the ranking they fill would short every query.
-    std::size_t const breadth = max_of(expansion ? expansion : default_expansion_factor(widest_list()), wanted);
+    std::size_t const breadth = util::max_of(expansion ? expansion : util::default_expansion_factor(widest_list()),
+                                             wanted);
     thread_scratch<shard_t, metric_t> scratch {executor};
-    if (status_t const prepared = scratch.prepare(executor, executor.size(), widest_list(), breadth, index.size(),
-                                                  terrain.metric_factory());
+    if (util::status_t const prepared = scratch.prepare(executor, executor.size(), widest_list(), breadth, index.size(),
+                                                        terrain.metric_factory());
         failed(prepared))
         return {{}, prepared};
     thread_allocator_t const caller {executor.arena(0)};
-    growing_buffer<line_of_sight_buffers_t, thread_allocator_t> sights {caller};
-    if (status_t const prepared = terrain.prepare_sights(sights, executor); failed(prepared)) return {{}, prepared};
-    growing_buffer<node_id_t, thread_allocator_t> watermarks {caller};
-    growing_buffer<distance_t, thread_allocator_t> distances {caller};
-    if (failed(distances.resize_uninitialized(executor.size() * wanted))) return {{}, status_t::bad_alloc_k};
-    if (status_t const taken = snapshot_shards(index, watermarks); failed(taken)) return {{}, taken};
+    util::growing_buffer<line_of_sight_buffers_t, thread_allocator_t> sights {caller};
+    if (util::status_t const prepared = terrain.prepare_sights(sights, executor); failed(prepared))
+        return {{}, prepared};
+    util::growing_buffer<node_id_t, thread_allocator_t> watermarks {caller};
+    util::growing_buffer<distance_t, thread_allocator_t> distances {caller};
+    if (failed(distances.resize_uninitialized(executor.size() * wanted)))
+        return {{}, util::status_code_t::out_of_memory_k};
+    if (util::status_t const taken = snapshot_shards(index, watermarks); failed(taken)) return {{}, taken};
     typename index_t::search_config_t const config {breadth};
     using traversal_context_t = typename thread_scratch<shard_t, metric_t>::traversal_context_t;
-    status_t searched = status_t::success_k;
-    bool const scanning = search.traversal == traversal_t::scan_k;
-    status_t const asked = with_key_predicates<scored_node_t>(
+    util::status_t searched = util::status_code_t::success_k;
+    bool const scanning = search.traversal == util::traversal_t::scan_k;
+    util::status_t const asked = with_key_predicates<scored_node_t>(
         predicate, scratch.round_capacity, executor, [&](auto&& admits_of) noexcept {
-            status_t const forked = drain_in_order<atomic_ref_for_cpu_class<cpu_class_>::template type>(
+            util::status_t const forked = drain_in_order<atomic_ref_for_cpu_class<cpu_class_>::template type>(
                 executor, query_batch.observations.size(), [&](std::size_t query_index, std::size_t thread) noexcept {
-                    if (failed(atomic_ref<status_t>(searched).load(std::memory_order_relaxed))) return;
+                    if (failed(atomic_ref<util::status_code_t>(searched.code).load(std::memory_order_relaxed))) return;
                     line_of_sight_buffers_t& sight = sights[thread];
                     value_t const query = us::geospatial::to_earth_observation(
                         geodetic_of(queries[query_index]), terrain.ground_metres(queries[query_index], sight));
                     traversal_context_t& context = scratch.traversals[thread];
                     // Landmarks follow the query, not its thread, so walks repeat run to run.
-                    context.random_generator = seeded_stream(u64_t(query_index) + 1);
+                    context.random_generator = util::seeded_stream(util::u64_t(query_index) + 1);
                     metric_t& metric = scratch.metrics[thread];
                     auto const relate = [&](shard_t const& shard) noexcept {
                         return relation_predicate_t {*this, shard, relation, tolerance, query, sight};
@@ -694,42 +711,43 @@ expected<traversal_stats_t> geospatial_ram_variant<cpu_class_>::search(
                             std::sqrt(static_cast<usearch_distance_t>(scores[match])) /
                             us::geospatial::centimetres_per_metre_k;
                     outputs.counts[query_index] = found;
-                    if (ticks(query_index) == continuation_t::cancel_k)
-                        keep_first_failure<atomic_ref>(searched, status_t::cancelled_k);
+                    if (ticks(query_index) == util::continuation_t::cancel_k)
+                        keep_first_failure<atomic_ref>(searched, util::status_code_t::cancelled_k);
                 });
             keep_first_failure<atomic_ref>(searched, forked);
         });
     if (failed(asked)) return {{}, asked};
     if (failed(searched)) return {{}, searched};
-    return {scratch.telemetry(), status_t::success_k};
+    return {scratch.telemetry(), util::status_code_t::success_k};
 }
 
 /** Places each draw at its Earth-fixed position in Earth radii and reports each parent's chord in
  *  metres, as search does, whichever residency's walk @p sample runs, called as
  *  <tt>sample(coordinates_of) → expected<sample_result_t></tt>. */
 template <typename sample_type_>
-expected<sample_result_t> sample_on_earth(basic_sample_outputs_t outputs, sample_type_&& sample) noexcept {
-    constexpr f64_t radius_centimetres_k = NUMKONG_EARTH_ELLIPSOID_EQUATORIAL_RADIUS *
-                                           us::geospatial::centimetres_per_metre_k;
-    auto const coordinates_of = [](us::geospatial::earth_observation_t const& value, std::span<f32_t, 3> xyz) noexcept {
-        xyz[0] = static_cast<f32_t>(value.position.x_centimetres / radius_centimetres_k);
-        xyz[1] = static_cast<f32_t>(value.position.y_centimetres / radius_centimetres_k);
-        xyz[2] = static_cast<f32_t>(value.position.z_centimetres / radius_centimetres_k);
+util::expected<util::sample_result_t> sample_on_earth(basic_sample_outputs_t outputs, sample_type_&& sample) noexcept {
+    constexpr util::f64_t radius_centimetres_k = NUMKONG_EARTH_ELLIPSOID_EQUATORIAL_RADIUS *
+                                                 us::geospatial::centimetres_per_metre_k;
+    auto const coordinates_of = [](us::geospatial::earth_observation_t const& value,
+                                   std::span<util::f32_t, 3> xyz) noexcept {
+        xyz[0] = static_cast<util::f32_t>(value.position.x_centimetres / radius_centimetres_k);
+        xyz[1] = static_cast<util::f32_t>(value.position.y_centimetres / radius_centimetres_k);
+        xyz[2] = static_cast<util::f32_t>(value.position.z_centimetres / radius_centimetres_k);
     };
-    expected<sample_result_t> const sampled = sample(coordinates_of);
-    if (failed(sampled.status)) return sampled;
+    auto const [sampled, sampled_status] = sample(coordinates_of);
+    if (failed(sampled_status)) return {sampled, sampled_status};
     // The metric scores squared centimetres, which search reports as metres.
-    for (f32_t& distance : outputs.parent_distances.first(sampled.value.written))
-        distance = static_cast<f32_t>(std::sqrt(static_cast<f64_t>(distance)) /
-                                      us::geospatial::centimetres_per_metre_k);
-    return sampled;
+    for (util::f32_t& distance : outputs.parent_distances.first(sampled.written))
+        distance = static_cast<util::f32_t>(std::sqrt(static_cast<util::f64_t>(distance)) /
+                                            us::geospatial::centimetres_per_metre_k);
+    return {sampled, sampled_status};
 }
 
 template <cpu_class_t cpu_class_>
-expected<sample_result_t> geospatial_ram_variant<cpu_class_>::sample(basic_sample_inputs_t inputs,
-                                                                     basic_sample_outputs_t outputs,
-                                                                     sample_config_t config,
-                                                                     executor_t& executor) noexcept {
+util::expected<util::sample_result_t> geospatial_ram_variant<cpu_class_>::sample(basic_sample_inputs_t inputs,
+                                                                                 basic_sample_outputs_t outputs,
+                                                                                 util::sample_config_t config,
+                                                                                 executor_t& executor) noexcept {
     return sample_on_earth(outputs, [&](auto const& coordinates_of) noexcept {
         return sample_entries(index, widest_list(), terrain.metric_factory(), inputs, outputs, config, executor,
                               coordinates_of);
@@ -737,81 +755,83 @@ expected<sample_result_t> geospatial_ram_variant<cpu_class_>::sample(basic_sampl
 }
 
 template <cpu_class_t cpu_class_>
-expected<traversal_stats_t> geospatial_ram_variant<cpu_class_>::within(
+util::expected<traversal_stats_t> geospatial_ram_variant<cpu_class_>::within(
     geospatial_queries_t query_batch, within_outputs_t& outputs, search_config_t search, predicate_t const& predicate,
-    growing_arena<forkunion_allocator_t>& staging, executor_t& executor, progress_ticks_t& ticks) noexcept {
+    util::growing_arena<util::forkunion_allocator_t>& staging, executor_t& executor, progress_ticks_t& ticks) noexcept {
     usearch_geospatial_observation_t const* const queries = query_batch.observations.data();
     std::size_t const count = query_batch.observations.size();
     relation_t const relation = static_cast<relation_t>(query_batch.relation);
     usearch_geospatial_tolerance_t const tolerance = query_batch.tolerance;
     using distance_t = typename shard_t::distance_t;
     using traversal_context_t = typename thread_scratch<shard_t, metric_t>::traversal_context_t;
-    using ball_t = growing_buffer<scored_node_t, thread_allocator_t>;
+    using ball_t = util::growing_buffer<scored_node_t, thread_allocator_t>;
 
     // Collects every scanned entry within `reach_squared`, the containment a scan reports.
     struct ball_fold_t {
         ball_t& ball;
         distance_t reach_squared;
-        status_t status = status_t::success_k;
+        util::status_t status = util::status_code_t::success_k;
 
-        walk_demand_t absorb(std::span<node_id_t const> node_ids, std::span<distance_t const> distances) noexcept {
+        util::walk_demand_t absorb(std::span<node_id_t const> node_ids,
+                                   std::span<distance_t const> distances) noexcept {
             for (std::size_t lane = 0; lane != node_ids.size(); ++lane)
                 if (!(distances[lane] > reach_squared))
                     if (status = ball.push_back({node_ids[lane], distances[lane]}); failed(status))
-                        return walk_demand_t::sated_k;
-            return walk_demand_t::continue_k;
+                        return util::walk_demand_t::sated_k;
+            return util::walk_demand_t::continue_k;
         }
     };
     thread_scratch<shard_t, metric_t> scratch {executor};
     std::size_t breadth = 0;
     for (shard_t const& one : index.live_shards())
-        breadth = max_of(breadth, one.non_zero_expansion_factor(typename shard_t::search_config_t {}));
-    if (status_t const prepared = scratch.prepare(executor, executor.size(), widest_list(), breadth, index.size(),
-                                                  terrain.metric_factory());
+        breadth = util::max_of(breadth, one.non_zero_expansion_factor(typename shard_t::search_config_t {}));
+    if (util::status_t const prepared = scratch.prepare(executor, executor.size(), widest_list(), breadth, index.size(),
+                                                        terrain.metric_factory());
         failed(prepared))
         return {{}, prepared};
-    growing_buffer<within_share_t, thread_allocator_t> shares {thread_allocator_t {executor.arena(0)}};
-    if (failed(shares.reserve_exactly(executor.size()))) return {{}, status_t::bad_alloc_k};
+    util::growing_buffer<within_share_t, thread_allocator_t> shares {thread_allocator_t {executor.arena(0)}};
+    if (failed(shares.reserve_exactly(executor.size()))) return {{}, util::status_code_t::out_of_memory_k};
     for (std::size_t thread = 0; thread != executor.size(); ++thread)
         shares.push_back_reserved(within_share_t {thread_allocator_t {executor.arena(thread)}});
-    f64_t const largest_deviation = atomic_ref<u32_t>(largest_deviation_metres).load(std::memory_order_relaxed);
+    util::f64_t const largest_deviation =
+        atomic_ref<util::u32_t>(largest_deviation_metres).load(std::memory_order_relaxed);
 
-    status_t walked = status_t::success_k;
-    status_t const asked = with_key_predicates<scored_node_t>(
+    util::status_t walked = util::status_code_t::success_k;
+    util::status_t const asked = with_key_predicates<scored_node_t>(
         predicate, scratch.round_capacity, executor,
         [&]<typename admits_of_type_>(admits_of_type_&& admits_of) noexcept {
             using admits_t = std::invoke_result_t<admits_of_type_&, std::size_t>;
-            status_t const forked = drain_in_order<atomic_ref_for_cpu_class<cpu_class_>::template type>(
+            util::status_t const forked = drain_in_order<atomic_ref_for_cpu_class<cpu_class_>::template type>(
                 executor, count, [&](std::size_t query_index, std::size_t thread) noexcept {
-                    if (failed(atomic_ref<status_t>(walked).load(std::memory_order_relaxed))) return;
+                    if (failed(atomic_ref<util::status_code_t>(walked.code).load(std::memory_order_relaxed))) return;
                     within_share_t& share = shares[thread];
                     value_t const query = us::geospatial::to_earth_observation(
                         geodetic_of(queries[query_index]), terrain.ground_metres(queries[query_index], share.sight));
                     // The walk reaches as far as the widest pair could match, and `admits` tightens
                     // back to each pair's own.
-                    f64_t const deviations = std::sqrt(static_cast<f64_t>(query.deviation_metres) *
-                                                           query.deviation_metres +
-                                                       largest_deviation * largest_deviation);
-                    i64_t const reach = static_cast<i64_t>(
+                    util::f64_t const deviations = std::sqrt(static_cast<util::f64_t>(query.deviation_metres) *
+                                                                 query.deviation_metres +
+                                                             largest_deviation * largest_deviation);
+                    util::i64_t const reach = static_cast<util::i64_t>(
                         std::ceil((tolerance.metres + 3 * deviations) * us::geospatial::centimetres_per_metre_k));
                     traversal_context_t& context = scratch.traversals[thread];
                     // Landmarks follow the query, not its thread, so walks repeat run to run.
-                    context.random_generator = seeded_stream(u64_t(query_index) + 1);
+                    context.random_generator = util::seeded_stream(util::u64_t(query_index) + 1);
                     admits_t admits = admits_of(thread);
                     // Each shard's ball appends to the query's matches, ascending within the shard.
                     for (shard_t& one : index.live_shards()) {
                         // A walk leaves the ball at the front of the candidates; a scan collects it
                         // from every entry.
                         std::span<scored_node_t const> ball;
-                        if (search.traversal == traversal_t::scan_k) {
+                        if (search.traversal == util::traversal_t::scan_k) {
                             share.ball.clear();
                             ball_fold_t fold {share.ball, static_cast<distance_t>(reach) * reach};
                             auto const [found_entries, status] = one.scan(query.position, fold, scratch.metrics[thread],
                                                                           context);
                             if (failed(status)) return keep_first_failure<atomic_ref>(walked, status);
                             if (failed(fold.status)) return keep_first_failure<atomic_ref>(walked, fold.status);
-                            partial_sort(to_writable_span(share.ball), share.ball.size(),
-                                         typename scored_node_t::closer_t {});
+                            util::partial_sort(to_writable_span(share.ball), share.ball.size(),
+                                               typename scored_node_t::closer_t {});
                             ball = to_span(share.ball);
                         }
                         else {
@@ -823,12 +843,12 @@ expected<traversal_stats_t> geospatial_ram_variant<cpu_class_>::within(
                         }
                         auto const key_of = [&one](node_id_t node_id) noexcept { return one.key_of(node_id).value; };
                         keep_first_failure<atomic_ref>(
-                            walked,
-                            write_related_matches_(one, relation, tolerance, query, query_index, ball,
-                                                   node_predicate {admits, key_of}, scratch.round_capacity, share));
+                            walked, write_related_matches_(one, relation, tolerance, query, query_index, ball,
+                                                           util::node_predicate {admits, key_of},
+                                                           scratch.round_capacity, share));
                     }
-                    if (ticks(query_index) == continuation_t::cancel_k)
-                        keep_first_failure<atomic_ref>(walked, status_t::cancelled_k);
+                    if (ticks(query_index) == util::continuation_t::cancel_k)
+                        keep_first_failure<atomic_ref>(walked, util::status_code_t::cancelled_k);
                 });
             keep_first_failure<atomic_ref>(walked, forked);
         });
@@ -838,7 +858,7 @@ expected<traversal_stats_t> geospatial_ram_variant<cpu_class_>::within(
     // Each query ranked whole on one thread in ascending order, so counting per query places every
     // match.
     std::size_t* const offsets = carve<std::size_t>(staging, count + 1);
-    if (!offsets) return {{}, status_t::bad_alloc_k};
+    if (!offsets) return {{}, util::status_code_t::out_of_memory_k};
     for (std::size_t query = 0; query != count + 1; ++query) offsets[query] = 0;
     std::size_t total = 0;
     for (within_share_t const& share : shares)
@@ -846,9 +866,9 @@ expected<traversal_stats_t> geospatial_ram_variant<cpu_class_>::within(
     for (std::size_t query = 0; query != count; ++query) offsets[query + 1] += offsets[query];
     usearch_key_t* const keys = carve<usearch_key_t>(staging, total);
     usearch_distance_t* const scores = carve<usearch_distance_t>(staging, total);
-    growing_buffer<std::size_t, thread_allocator_t> cursors {thread_allocator_t {executor.arena(0)}};
+    util::growing_buffer<std::size_t, thread_allocator_t> cursors {thread_allocator_t {executor.arena(0)}};
     if ((total && (!keys || !scores)) || failed(cursors.resize_uninitialized(count)))
-        return {{}, status_t::bad_alloc_k};
+        return {{}, util::status_code_t::out_of_memory_k};
     for (std::size_t query = 0; query != count; ++query) cursors[query] = offsets[query];
     for (within_share_t const& share : shares)
         for (geospatial_within_match_t const& match : share.found) {
@@ -857,54 +877,56 @@ expected<traversal_stats_t> geospatial_ram_variant<cpu_class_>::within(
         }
     outputs.matches = {keys, scores, offsets};
     outputs.written = total;
-    return {scratch.telemetry(), status_t::success_k};
+    return {scratch.telemetry(), util::status_code_t::success_k};
 }
 
 /** Hands @p write, as <tt>write(config) → status_t</tt>, the save configuration recording the
  *  connectivity @p geometry froze, as every residency's checkpoint records it. */
 template <typename write_type_>
-status_t with_geospatial_provenance(geospatial_geometry_t const& geometry, write_type_&& write) noexcept {
+util::status_t with_geospatial_provenance(geospatial_geometry_t const& geometry, write_type_&& write) noexcept {
     std::array<char, 24> connectivity_text;
-    std::array<safegraphs_custom_field_t, 1> const fields {
+    std::array<util::safegraphs_custom_field_t, 1> const fields {
         {{"connectivity", decimal_of(geometry.connectivity, connectivity_text)}}};
-    save_config_t config;
+    util::save_config_t config;
     config.provenance = fields;
     return write(config);
 }
 
 template <cpu_class_t cpu_class_>
 template <typename checkpoint_type_>
-status_t geospatial_ram_variant<cpu_class_>::save(checkpoint_type_ checkpoint, executor_t& executor,
-                                                  progress_ticks_t& ticks) noexcept {
-    return with_geospatial_provenance(geometry, [&](save_config_t const& config) noexcept {
+util::status_t geospatial_ram_variant<cpu_class_>::save(checkpoint_type_ checkpoint, executor_t& executor,
+                                                        progress_ticks_t& ticks) noexcept {
+    return with_geospatial_provenance(geometry, [&](util::save_config_t const& config) noexcept {
         return index.save(checkpoint, us::geospatial::earth_observation_codec_t {}, executor, config,
                           token_of(geometry), ticks);
     });
 }
 
 template <cpu_class_t cpu_class_>
-expected<std::size_t> geospatial_ram_variant<cpu_class_>::storage_requirements() const noexcept {
-    expected<std::size_t> required {0, status_t::success_k};
-    status_t const sized = with_geospatial_provenance(geometry, [&](save_config_t const& config) noexcept {
-        required = index.storage_requirements(us::geospatial::earth_observation_codec_t {}, config, token_of(geometry));
-        return required.status;
+util::expected<std::size_t> geospatial_ram_variant<cpu_class_>::storage_requirements() const noexcept {
+    std::size_t required = 0;
+    util::status_t const sized = with_geospatial_provenance(geometry, [&](util::save_config_t const& config) noexcept {
+        auto const [bytes, bytes_status] = index.storage_requirements(us::geospatial::earth_observation_codec_t {},
+                                                                      config, token_of(geometry));
+        required = bytes;
+        return bytes_status;
     });
-    return {required.value, sized};
+    return {required, sized};
 }
 
 template <cpu_class_t cpu_class_>
 template <typename checkpoint_type_>
-status_t geospatial_ram_variant<cpu_class_>::load(checkpoint_type_ checkpoint, executor_t& executor,
-                                                  progress_ticks_t& ticks) noexcept {
-    if (status_t const loaded = index.load(checkpoint, us::geospatial::earth_observation_codec_t {}, executor,
-                                           load_config_t {}, ticks);
+util::status_t geospatial_ram_variant<cpu_class_>::load(checkpoint_type_ checkpoint, executor_t& executor,
+                                                        progress_ticks_t& ticks) noexcept {
+    if (util::status_t const loaded = index.load(checkpoint, us::geospatial::earth_observation_codec_t {}, executor,
+                                                 util::load_config_t {}, ticks);
         failed(loaded))
         return loaded;
     for (shard_t const& one : index.live_shards())
         for (std::size_t node = 0; node != one.size(); ++node)
             raise_to<atomic_ref>(largest_deviation_metres,
                                  one.published_value_of(static_cast<node_id_t>(node)).deviation_metres);
-    return status_t::success_k;
+    return util::status_code_t::success_k;
 }
 
 /** One geospatial alternative on block storage: the basic NVMe index over the observations a RAM
@@ -916,7 +938,7 @@ struct geospatial_nvme_variant {
     using executor_t = nvme_executor_t;
     template <typename word_type_>
     using atomic_ref = typename atomic_ref_for_cpu_class<cpu_class_>::template type<word_type_>;
-    using index_t = basic::nvme_indexes<us::geospatial::earth_observation_codec_t, us::utilities::uuid128_t, u32_t,
+    using index_t = basic::nvme_indexes<us::geospatial::earth_observation_codec_t, util::uuid128_t, util::u32_t,
                                         nk_u64_t, default_io_engine_t, row_kit_of<cpu_class_>,
                                         atomic_ref_for_cpu_class<cpu_class_>::template type, waiter_of<cpu_class_>>;
     using value_t = us::geospatial::earth_observation_t;
@@ -929,40 +951,42 @@ struct geospatial_nvme_variant {
     /** The metric, the terrain and the relation tests every call of the view reads. */
     geospatial_terrain<cpu_class_> terrain;
 
-    explicit geospatial_nvme_variant(forkunion_allocator_t const& allocator) noexcept : index(allocator) {}
+    explicit geospatial_nvme_variant(util::forkunion_allocator_t const& allocator) noexcept : index(allocator) {}
 
-    status_t adopt_terrain(us::geospatial::terrain_t const& grid) noexcept { return terrain.adopt_terrain(grid); }
+    util::status_t adopt_terrain(us::geospatial::terrain_t const& grid) noexcept { return terrain.adopt_terrain(grid); }
     bool has_terrain() const noexcept { return terrain.has_terrain(); }
     std::size_t terrain_memory_usage() const noexcept { return terrain.terrain_memory_usage(); }
 
     /** Serves the checkpoint at @p path in place, its parts from @p paths when any are named. */
-    status_t view(std::string_view path, std::span<std::string_view const> paths, executor_t& executor) noexcept {
+    util::status_t view(std::string_view path, std::span<std::string_view const> paths, executor_t& executor) noexcept {
         return index.view(path, paths, token_of(geometry), executor);
     }
 
-    expected<traversal_stats_t> search(geospatial_queries_t query_batch, matches_outputs_t& outputs,
-                                       search_config_t search, predicate_t const& predicate, executor_t& executor,
-                                       progress_ticks_t& ticks) noexcept;
+    util::expected<traversal_stats_t> search(geospatial_queries_t query_batch, matches_outputs_t& outputs,
+                                             search_config_t search, predicate_t const& predicate, executor_t& executor,
+                                             progress_ticks_t& ticks) noexcept;
 
     /** Reports every entry within the tolerance that the relation and @p predicate admit through
      *  one exact scan of every entry, whichever traversal @p search asks: a view holds no radius
      *  walk, and the scan reports the set the complete walk would, ascending per query. */
-    expected<traversal_stats_t> within(geospatial_queries_t query_batch, within_outputs_t& outputs,
-                                       search_config_t search, predicate_t const& predicate,
-                                       growing_arena<forkunion_allocator_t>& staging, executor_t& executor,
-                                       progress_ticks_t& ticks) noexcept;
+    util::expected<traversal_stats_t> within(geospatial_queries_t query_batch, within_outputs_t& outputs,
+                                             search_config_t search, predicate_t const& predicate,
+                                             util::growing_arena<util::forkunion_allocator_t>& staging,
+                                             executor_t& executor, progress_ticks_t& ticks) noexcept;
 
     /** A view already is its checkpoint, so saving answers @c unsupported_k. */
-    status_t save(std::string_view, executor_t&, progress_ticks_t&) noexcept { return status_t::unsupported_k; }
-    expected<sample_result_t> sample(basic_sample_inputs_t inputs, basic_sample_outputs_t outputs,
-                                     sample_config_t config, executor_t& executor) noexcept;
+    util::status_t save(std::string_view, executor_t&, progress_ticks_t&) noexcept {
+        return util::status_code_t::unsupported_k;
+    }
+    util::expected<util::sample_result_t> sample(basic_sample_inputs_t inputs, basic_sample_outputs_t outputs,
+                                                 util::sample_config_t config, executor_t& executor) noexcept;
 
   private:
 
     /** One thread's share of a containment scan: the matches it found and its line-of-sight
      *  scratch. */
     struct within_share_t {
-        growing_buffer<geospatial_within_match_t, thread_allocator_t> found;
+        util::growing_buffer<geospatial_within_match_t, thread_allocator_t> found;
         line_of_sight_buffers_t sight;
 
         explicit within_share_t(thread_allocator_t const& allocator) noexcept : found(allocator), sight(allocator) {}
@@ -978,7 +1002,7 @@ struct geospatial_nvme_variant {
 
         template <std::size_t extent_>
         void operator()(value_t const& query, std::span<value_t const, extent_> entries,
-                        std::span<admission_t, extent_> admissions) noexcept {
+                        std::span<util::admission_t, extent_> admissions) noexcept {
             variant.terrain.ask_relation_values(relation, tolerance, query, entries, admissions, sight);
         }
     };
@@ -991,17 +1015,17 @@ struct geospatial_nvme_variant {
         geospatial_nvme_variant const& variant;
         relation_t relation;
         usearch_geospatial_tolerance_t tolerance;
-        growing_buffer<thread_relation_t, forkunion_allocator_t> threads {forkunion_allocator_t {}};
+        util::growing_buffer<thread_relation_t, util::forkunion_allocator_t> threads {util::forkunion_allocator_t {}};
 
         /** Builds one relation per thread of @p executor, each over that thread's arena. */
-        status_t prepare(executor_t& executor) noexcept {
+        util::status_t prepare(executor_t& executor) noexcept {
             threads.clear();
-            if (failed(threads.reserve_exactly(executor.size()))) return status_t::bad_alloc_k;
+            if (failed(threads.reserve_exactly(executor.size()))) return util::status_code_t::out_of_memory_k;
             for (std::size_t thread = 0; thread != executor.size(); ++thread)
                 threads.push_back_reserved(
                     thread_relation_t {variant, relation, tolerance,
                                        line_of_sight_buffers_t {thread_allocator_t {executor.arena(thread)}}});
-            return status_t::success_k;
+            return util::status_code_t::success_k;
         }
 
         thread_relation_t& of_thread(std::size_t thread) noexcept { return threads[thread]; }
@@ -1009,9 +1033,9 @@ struct geospatial_nvme_variant {
 };
 
 template <cpu_class_t cpu_class_>
-expected<traversal_stats_t> geospatial_nvme_variant<cpu_class_>::within(
+util::expected<traversal_stats_t> geospatial_nvme_variant<cpu_class_>::within(
     geospatial_queries_t query_batch, within_outputs_t& outputs, search_config_t, predicate_t const& predicate,
-    growing_arena<forkunion_allocator_t>& staging, executor_t& executor, progress_ticks_t& ticks) noexcept {
+    util::growing_arena<util::forkunion_allocator_t>& staging, executor_t& executor, progress_ticks_t& ticks) noexcept {
     usearch_geospatial_observation_t const* const queries = query_batch.observations.data();
     std::size_t const count = query_batch.observations.size();
     relation_t const relation = static_cast<relation_t>(query_batch.relation);
@@ -1022,12 +1046,12 @@ expected<traversal_stats_t> geospatial_nvme_variant<cpu_class_>::within(
     // relation tightens each pair to its own reach.
     distance_t* const reaches = carve<distance_t>(staging, count);
     value_t* const observations = carve<value_t>(staging, count);
-    if (!reaches || !observations) return {{}, status_t::bad_alloc_k};
+    if (!reaches || !observations) return {{}, util::status_code_t::out_of_memory_k};
     for (std::size_t query = 0; query != count; ++query) reaches[query] = basic::unbounded_radius<distance_t>();
     // The scan rewinds every thread's arena before it writes anything, so the shares stay empty
     // until then.
-    growing_buffer<within_share_t, forkunion_allocator_t> shares {forkunion_allocator_t {}};
-    if (failed(shares.reserve_exactly(executor.size()))) return {{}, status_t::bad_alloc_k};
+    util::growing_buffer<within_share_t, util::forkunion_allocator_t> shares {util::forkunion_allocator_t {}};
+    if (failed(shares.reserve_exactly(executor.size()))) return {{}, util::status_code_t::out_of_memory_k};
     for (std::size_t thread = 0; thread != executor.size(); ++thread)
         shares.push_back_reserved(within_share_t {thread_allocator_t {executor.arena(thread)}});
 
@@ -1035,9 +1059,9 @@ expected<traversal_stats_t> geospatial_nvme_variant<cpu_class_>::within(
         line_of_sight_buffers_t sight {scratch};
         observations[query_index] = us::geospatial::to_earth_observation(
             geodetic_of(queries[query_index]), terrain.ground_metres(queries[query_index], sight));
-        return expected<value_t> {observations[query_index], status_t::success_k};
+        return util::expected<value_t> {observations[query_index], util::status_code_t::success_k};
     };
-    status_t appended = status_t::success_k;
+    util::status_t appended = util::status_code_t::success_k;
     auto scan_with = [&]<typename predicate_type_>(predicate_type_& admits) noexcept {
         return index.scan_within(
             std::span<distance_t const>(reaches, count), terrain.metric_factory(), query_of,
@@ -1045,21 +1069,21 @@ expected<traversal_stats_t> geospatial_nvme_variant<cpu_class_>::within(
                                      std::span<value_t const, extent_> values,
                                      std::span<distance_t const, extent_> distances) noexcept {
                 within_share_t& share = shares[thread];
-                std::array<admission_t, extent_> related;
+                std::array<util::admission_t, extent_> related;
                 terrain.ask_relation_values(relation, tolerance, observations[query], values,
-                                            std::span<admission_t, extent_>(related), share.sight);
+                                            std::span<util::admission_t, extent_>(related), share.sight);
                 std::array<key_t, extent_> kept_keys;
                 std::array<geospatial_within_match_t, extent_> kept_matches;
                 std::size_t kept = 0;
                 for (std::size_t lane = 0; lane != extent_; ++lane) {
-                    if (related[lane] != admission_t::admit_k) continue;
+                    if (related[lane] != util::admission_t::admit_k) continue;
                     kept_keys[kept] = keys[lane];
                     kept_matches[kept] = {
                         query, std::bit_cast<usearch_key_t>(keys[lane]),
-                        std::sqrt(static_cast<f64_t>(distances[lane])) / us::geospatial::centimetres_per_metre_k};
+                        std::sqrt(static_cast<util::f64_t>(distances[lane])) / us::geospatial::centimetres_per_metre_k};
                     ++kept;
                 }
-                with_static_extent<extent_>(kept, [&]<std::size_t kept_extent_>() noexcept {
+                util::with_static_extent<extent_>(kept, [&]<std::size_t kept_extent_>() noexcept {
                     ask_quad(
                         admits, std::span<key_t const, kept_extent_>(kept_keys.data(), kept_extent_),
                         std::span<geospatial_within_match_t const, kept_extent_>(kept_matches.data(), kept_extent_),
@@ -1072,21 +1096,20 @@ expected<traversal_stats_t> geospatial_nvme_variant<cpu_class_>::within(
     };
     // Every quad answers before its entries' buffers recycle, so a predicate of either cost is
     // asked a quad at a time.
-    dummy_predicate_t no_predicate;
+    util::dummy_predicate_t no_predicate;
     cheap_predicate_t cheap {};
     if (cheap_predicate_t const* const named = std::get_if<cheap_predicate_t>(&predicate)) cheap = *named;
     if (expensive_predicate_t const* const named = std::get_if<expensive_predicate_t>(&predicate))
         cheap = {named->predicate};
-    expected<typename index_t::search_result_t> const scanned = cheap.predicate.callback ? scan_with(cheap)
-                                                                                         : scan_with(no_predicate);
-    if (failed(scanned.status)) return {{}, scanned.status};
+    auto const [scanned, scan_status] = cheap.predicate.callback ? scan_with(cheap) : scan_with(no_predicate);
+    if (failed(scan_status)) return {{}, scan_status};
     if (failed(appended)) return {{}, appended};
-    [[maybe_unused]] continuation_t const heard = ticks(count, count);
+    [[maybe_unused]] util::continuation_t const heard = ticks(count, count);
 
     // Threads land a query's matches in any order, so counting per query places every match, and
     // each query's matches then sort ascending, as the RAM variant writes them.
     std::size_t* const offsets = carve<std::size_t>(staging, count + 1);
-    if (!offsets) return {{}, status_t::bad_alloc_k};
+    if (!offsets) return {{}, util::status_code_t::out_of_memory_k};
     for (std::size_t query = 0; query != count + 1; ++query) offsets[query] = 0;
     std::size_t total = 0;
     for (within_share_t const& share : shares)
@@ -1094,11 +1117,12 @@ expected<traversal_stats_t> geospatial_nvme_variant<cpu_class_>::within(
     for (std::size_t query = 0; query != count; ++query) offsets[query + 1] += offsets[query];
     usearch_key_t* const keys = carve<usearch_key_t>(staging, total);
     usearch_distance_t* const scores = carve<usearch_distance_t>(staging, total);
-    growing_buffer<std::size_t, thread_allocator_t> cursors {thread_allocator_t {executor.arena(0)}};
-    growing_buffer<geospatial_within_match_t, thread_allocator_t> ordered {thread_allocator_t {executor.arena(0)}};
+    util::growing_buffer<std::size_t, thread_allocator_t> cursors {thread_allocator_t {executor.arena(0)}};
+    util::growing_buffer<geospatial_within_match_t, thread_allocator_t> ordered {
+        thread_allocator_t {executor.arena(0)}};
     if ((total && (!keys || !scores)) || failed(cursors.resize_uninitialized(count)) ||
         failed(ordered.resize_uninitialized(total)))
-        return {{}, status_t::bad_alloc_k};
+        return {{}, util::status_code_t::out_of_memory_k};
     for (std::size_t query = 0; query != count; ++query) cursors[query] = offsets[query];
     for (within_share_t const& share : shares)
         for (geospatial_within_match_t const& match : share.found) ordered[cursors[match.query]++] = match;
@@ -1108,19 +1132,19 @@ expected<traversal_stats_t> geospatial_nvme_variant<cpu_class_>::within(
     for (std::size_t query = 0; query != count; ++query) {
         std::span<geospatial_within_match_t> const query_matches = to_writable_span(ordered).subspan(
             offsets[query], offsets[query + 1] - offsets[query]);
-        partial_sort(query_matches, query_matches.size(), closer);
+        util::partial_sort(query_matches, query_matches.size(), closer);
     }
     for (std::size_t slot = 0; slot != total; ++slot)
         keys[slot] = ordered[slot].key, scores[slot] = ordered[slot].score;
     outputs.matches = {keys, scores, offsets};
     outputs.written = total;
     traversal_stats_t telemetry;
-    telemetry.computed_distances = scanned.value.computed_distances;
-    return {telemetry, status_t::success_k};
+    telemetry.computed_distances = scanned.computed_distances;
+    return {telemetry, util::status_code_t::success_k};
 }
 
 template <cpu_class_t cpu_class_>
-expected<traversal_stats_t> geospatial_nvme_variant<cpu_class_>::search(
+util::expected<traversal_stats_t> geospatial_nvme_variant<cpu_class_>::search(
     geospatial_queries_t query_batch, matches_outputs_t& outputs, search_config_t search, predicate_t const& predicate,
     executor_t& executor, progress_ticks_t& ticks) noexcept {
     usearch_geospatial_observation_t const* const queries = query_batch.observations.data();
@@ -1134,26 +1158,26 @@ expected<traversal_stats_t> geospatial_nvme_variant<cpu_class_>::search(
         line_of_sight_buffers_t sight {scratch};
         value_t const query = us::geospatial::to_earth_observation(geodetic_of(queries[query_index]),
                                                                    terrain.ground_metres(queries[query_index], sight));
-        return expected<value_t> {query, status_t::success_k};
+        return util::expected<value_t> {query, util::status_code_t::success_k};
     };
     geospatial_relations_t relations {*this, relation, tolerance};
-    expected<traversal_stats_t> const ranked = rank_nvme_queries(index, count, make_metric, query_of, relations,
-                                                                 outputs, search, predicate, executor, ticks);
-    if (failed(ranked.status)) return ranked;
+    auto const [ranked, ranked_status] = rank_nvme_queries(index, count, make_metric, query_of, relations, outputs,
+                                                           search, predicate, executor, ticks);
+    if (failed(ranked_status)) return {ranked, ranked_status};
     for (std::size_t query = 0; query != count; ++query)
         for (std::size_t match = 0; match != outputs.counts[query]; ++match)
             outputs.scores[query * wanted + match] = std::sqrt(outputs.scores[query * wanted + match]) /
                                                      us::geospatial::centimetres_per_metre_k;
-    return ranked;
+    return {ranked, ranked_status};
 }
 
 template <cpu_class_t cpu_class_>
-expected<sample_result_t> geospatial_nvme_variant<cpu_class_>::sample(basic_sample_inputs_t inputs,
-                                                                      basic_sample_outputs_t outputs,
-                                                                      sample_config_t config,
-                                                                      executor_t& executor) noexcept {
+util::expected<util::sample_result_t> geospatial_nvme_variant<cpu_class_>::sample(basic_sample_inputs_t inputs,
+                                                                                  basic_sample_outputs_t outputs,
+                                                                                  util::sample_config_t config,
+                                                                                  executor_t& executor) noexcept {
     auto query_of = [](value_t const& stored, thread_allocator_t const&) noexcept {
-        return expected<value_t> {stored, status_t::success_k};
+        return util::expected<value_t> {stored, util::status_code_t::success_k};
     };
     return sample_on_earth(outputs, [&](auto const& coordinates_of) noexcept {
         return sample_entries(*this, terrain.metric_factory(), query_of, inputs, outputs, config, executor,
@@ -1200,7 +1224,7 @@ template <gpu_class_t gpu_class_>
 struct geospatial_vram_nvidia_variant {
     using executor_t = cuda_executor_t;
     using face_t = geospatial_vram_nvidia_build_t::face_t;
-    using index_t = basic::vram_nvidia_indexes<face_t, us::utilities::uuid128_t, geospatial_vram_nvidia_build_t, f64_t>;
+    using index_t = basic::vram_nvidia_indexes<face_t, util::uuid128_t, geospatial_vram_nvidia_build_t, f64_t>;
     using refine_plan_t = index_t::refine_plan_t;
     using value_t = us::geospatial::earth_observation_t;
     using node_id_t = face_t::node_id_t;
@@ -1246,7 +1270,7 @@ struct geospatial_vram_nvidia_variant {
                            itanium_type<us::geospatial::geospatial_ladder<geospatial_nvidia_capabilities_k>::kit_t> {},
                            itanium_type<node_id_t> {});
         admit = admit_module.function(symbol.text);
-        return admit ? status_t::success_k : status_t::device_error_k;
+        return admit ? status_code_t::success_k : status_code_t::device_k;
     }
 
     status_t reserve(reserve_capacity_t capacity) noexcept {
@@ -1256,23 +1280,23 @@ struct geospatial_vram_nvidia_variant {
     /** Adopts @p grid on the host and copies its heights and pack to the index's device, whose
      *  kernels must be loaded; refuses a grid filled by a callback, which no device can call. */
     status_t adopt_terrain(us::geospatial::terrain_t const& grid) noexcept {
-        if (grid.callback) return status_t::unsupported_k;
+        if (grid.callback) return status_code_t::unsupported_k;
         if (status_t const adopted = host_terrain.adopt_terrain(grid); failed(adopted)) return adopted;
-        if (!host_terrain.has_terrain()) return status_t::success_k;
+        if (!host_terrain.has_terrain()) return status_code_t::success_k;
         us::geospatial::terrain_t const& borrowed = host_terrain.grid;
         std::size_t const heights_bytes = (borrowed.rows - 1) * borrowed.heights_stride +
                                           borrowed.columns * sizeof(f32_t);
         std::size_t const pack_bytes = host_terrain.terrain_pack.size();
         cuda_api_t const& api = gpu_drivers().cuda;
-        if (cuda_set_device(api, device) != cuda_success_k) return status_t::device_error_k;
+        if (cuda_set_device(api, device) != cuda_success_k) return status_code_t::device_k;
         device_heights = cuda_make_unique(cuda_device_allocator<f32_t> {api},
                                           divide_round_up(heights_bytes, sizeof(f32_t)));
         device_terrain_pack = cuda_make_unique(cuda_device_allocator_t {api}, pack_bytes);
-        if (!device_heights || !device_terrain_pack) return status_t::bad_alloc_k;
+        if (!device_heights || !device_terrain_pack) return status_code_t::out_of_memory_k;
         if (cuda_copy(api, device_heights.get(), borrowed.heights, heights_bytes) != cuda_success_k ||
             cuda_copy(api, device_terrain_pack.get(), host_terrain.terrain_pack.data(), pack_bytes) != cuda_success_k)
-            return status_t::device_error_k;
-        return status_t::success_k;
+            return status_code_t::device_k;
+        return status_code_t::success_k;
     }
 
     /** Whether a terrain was adopted, which lines of sight need. */
@@ -1329,15 +1353,15 @@ struct geospatial_vram_nvidia_variant {
         // The observations went straight to the device, so their deviations come back once.
         growing_buffer<value_t, forkunion_allocator_t> stored {forkunion_allocator_t {no_memory_domain_k}};
         for (face_t const& shard : index.live_shards()) {
-            if (failed(stored.resize_uninitialized(shard.size()))) return status_t::bad_alloc_k;
+            if (failed(stored.resize_uninitialized(shard.size()))) return status_code_t::out_of_memory_k;
             if (stored.empty()) continue;
             if (cuda_copy(shard.api(), stored.data(), shard.storage().values, stored.size() * sizeof(value_t)) !=
                 cuda_success_k)
-                return status_t::device_error_k;
+                return status_code_t::device_k;
             for (value_t const& value : stored)
                 raise_to<fu::standard_atomic_ref>(largest_deviation_metres, u32_t {value.deviation_metres});
         }
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Empties the index and its largest deviation, retiring every shard behind a fresh shard
@@ -1364,7 +1388,7 @@ struct geospatial_vram_nvidia_variant {
     /** Sampling answers @c unsupported_k until the shards sample on their devices. */
     expected<sample_result_t> sample(basic_sample_inputs_t, basic_sample_outputs_t, sample_config_t,
                                      executor_t&) noexcept {
-        return {{}, status_t::unsupported_k};
+        return {{}, status_code_t::unsupported_k};
     }
 
   private:
@@ -1397,7 +1421,7 @@ struct geospatial_vram_nvidia_variant {
                                               growing_arena<forkunion_allocator_t>& pages) const noexcept {
         value_t* const values = carve<value_t>(pages, count);
         std::size_t* const offsets = carve<std::size_t>(pages, count + 1);
-        if (!values || !offsets) return {{}, status_t::bad_alloc_k};
+        if (!values || !offsets) return {{}, status_code_t::out_of_memory_k};
         // A borrowed grid never grows the sight's buffers, which serve filled grids alone.
         line_of_sight_buffers_t sight {thread_allocator_t {}};
         for (std::size_t offset = 0; offset != count; ++offset) {
@@ -1406,7 +1430,7 @@ struct geospatial_vram_nvidia_variant {
             offsets[offset] = offset * sizeof(value_t);
         }
         offsets[count] = count * sizeof(value_t);
-        return {{reinterpret_cast<byte_t const*>(values), {offsets, count + 1}}, status_t::success_k};
+        return {{reinterpret_cast<byte_t const*>(values), {offsets, count + 1}}, status_code_t::success_k};
     }
 };
 
@@ -1438,7 +1462,7 @@ expected<traversal_stats_t> geospatial_vram_nvidia_variant<gpu_class_>::search(
                       expansion = search.expansion_factor;
     if (!wanted) {
         for (std::size_t query = 0; query != count; ++query) outputs.counts[query] = 0;
-        return {{}, status_t::success_k};
+        return {{}, status_code_t::success_k};
     }
     auto const [queries, encode_status] = encode_(query_batch.observations.data(), count, pages);
     if (failed(encode_status)) return {{}, encode_status};
@@ -1461,7 +1485,7 @@ expected<traversal_stats_t> geospatial_vram_nvidia_variant<gpu_class_>::search(
                      std::size_t) noexcept -> status_t {
         // The judging kernel and the terrain load on one device, which every shard it judges
         // shares.
-        if (face.device_specs().ordinal != device) return status_t::unsupported_k;
+        if (face.device_specs().ordinal != device) return status_code_t::unsupported_k;
         face_t::traversal_context_t::allocator_t const allocator = context.allocator();
         value_t* const device_queries = cuda_arena_allocator<value_t>(allocator).allocate(count);
         f64_t* const matched_metres = cuda_arena_allocator<f64_t>(allocator).allocate(judged);
@@ -1471,7 +1495,7 @@ expected<traversal_stats_t> geospatial_vram_nvidia_variant<gpu_class_>::search(
         node_id_t* const matched_ids = cuda_arena_allocator<node_id_t>(allocator).allocate(judged);
         if (!device_queries || !matched_metres || !matched_counts || !candidate_ids || !candidate_distances ||
             !matched_ids)
-            return status_t::bad_alloc_k;
+            return status_code_t::out_of_memory_k;
         us::geospatial::cuda_admit_arguments<node_id_t> admitting = admitting_(face, query_batch);
         admitting.queries = device_queries;
         admitting.candidate_ids = candidate_ids;
@@ -1484,7 +1508,7 @@ expected<traversal_stats_t> geospatial_vram_nvidia_variant<gpu_class_>::search(
         cuda_api_t const& api = admit_module.api();
         if (cuda_copy_async(api, device_queries, queries.elements, count * sizeof(value_t), context.stream()) !=
             cuda_success_k)
-            return status_t::device_error_k;
+            return status_code_t::device_k;
         if (status_t const searched = face.search(queries, {candidate_ids, {count, candidates_count}},
                                                   {candidate_distances, {count, candidates_count}}, config, context)
                                           .status;
@@ -1501,13 +1525,12 @@ expected<traversal_stats_t> geospatial_vram_nvidia_variant<gpu_class_>::search(
                 cuda_success_k ||
             cuda_copy_async(api, host_counts.data(), matched_counts, count * sizeof(u64_t), context.stream()) !=
                 cuda_success_k)
-            return status_t::device_error_k;
+            return status_code_t::device_k;
         return context.wait();
     };
     auto const [found, status] = index.search_every_shard(
         count, executor, judge,
-        nk::matrix_span<us::utilities::uuid128_t> {reinterpret_cast<us::utilities::uuid128_t*>(outputs.keys), count,
-                                                   wanted},
+        nk::matrix_span<util::uuid128_t> {reinterpret_cast<util::uuid128_t*>(outputs.keys), count, wanted},
         nk::matrix_span<f64_t> {outputs.scores, count, wanted}, std::span<std::size_t> {outputs.counts, count}, queries,
         config, judging_bytes);
     if (failed(status)) return {{}, status};
@@ -1515,7 +1538,7 @@ expected<traversal_stats_t> geospatial_vram_nvidia_variant<gpu_class_>::search(
     return {{.computed_distances = found.computed_distances,
              .visited_members = found.visited_members,
              .restarts = found.restarts},
-            status_t::success_k};
+            status_code_t::success_k};
 }
 
 template <gpu_class_t gpu_class_>
@@ -1523,18 +1546,18 @@ expected<traversal_stats_t> geospatial_vram_nvidia_variant<gpu_class_>::within(
     geospatial_queries_t query_batch, within_outputs_t& outputs, search_config_t search, predicate_t const&,
     growing_arena<forkunion_allocator_t>& pages, executor_t& executor, progress_ticks_t& ticks) noexcept {
     std::size_t const count = query_batch.observations.size(), shards = index.live_shards_count();
-    if (search.traversal == traversal_t::scan_k) return {{}, status_t::unsupported_k};
+    if (search.traversal == traversal_t::scan_k) return {{}, status_code_t::unsupported_k};
     std::size_t* const offsets = carve<std::size_t>(pages, count + 1);
-    if (!offsets) return {{}, status_t::bad_alloc_k};
+    if (!offsets) return {{}, status_code_t::out_of_memory_k};
     for (std::size_t query = 0; query != count + 1; ++query) offsets[query] = 0;
     outputs = {{nullptr, nullptr, offsets}, 0};
-    if (!count || !shards) return {{}, status_t::success_k};
+    if (!count || !shards) return {{}, status_code_t::success_k};
     auto const [queries, encode_status] = encode_(query_batch.observations.data(), count, pages);
     if (failed(encode_status)) return {{}, encode_status};
     // The squared chord each query's candidates must pass, the walk's reach as the RAM variants
     // take it, widened by the cone graph's spanner bound.
     f64_t* const covering_chords = carve<f64_t>(pages, count);
-    if (!covering_chords) return {{}, status_t::bad_alloc_k};
+    if (!covering_chords) return {{}, status_code_t::out_of_memory_k};
     value_t const* const encoded = reinterpret_cast<value_t const*>(queries.elements);
     f64_t const largest_deviation =
         fu::standard_atomic_ref<u32_t>(largest_deviation_metres).load(std::memory_order_relaxed);
@@ -1547,10 +1570,10 @@ expected<traversal_stats_t> geospatial_vram_nvidia_variant<gpu_class_>::within(
         covering_chords[query] = widened * widened;
     }
     // The fan-out's own rankings stay one entry wide and empty, since every shard keeps its run.
-    us::utilities::uuid128_t* const unused_keys = carve<us::utilities::uuid128_t>(pages, count);
+    util::uuid128_t* const unused_keys = carve<util::uuid128_t>(pages, count);
     f64_t* const unused_scores = carve<f64_t>(pages, count);
     std::size_t* const unused_counts = carve<std::size_t>(pages, count);
-    if (!unused_keys || !unused_scores || !unused_counts) return {{}, status_t::bad_alloc_k};
+    if (!unused_keys || !unused_scores || !unused_counts) return {{}, status_code_t::out_of_memory_k};
     auto const aligned = [](std::size_t bytes) noexcept { return round_up_to_multiple(bytes, default_alignment_k); };
     std::size_t const published = index.size();
     std::size_t breadth = search.expansion_factor ? search.expansion_factor
@@ -1573,7 +1596,7 @@ expected<traversal_stats_t> geospatial_vram_nvidia_variant<gpu_class_>::within(
         runs_faces = carve<face_t const*>(pages, shards);
         f32_t* const runs_distances = carve<f32_t>(pages, shards * listed_count);
         if (!runs_offsets || !runs_ids || !runs_metres || !runs_faces || !runs_distances)
-            return {{}, status_t::bad_alloc_k};
+            return {{}, status_code_t::out_of_memory_k};
         std::size_t const judging_bytes =
             aligned(count * sizeof(value_t)) + aligned(count * sizeof(u64_t)) + aligned((count + 1) * sizeof(u64_t)) +
             aligned(listed_count * sizeof(node_id_t)) + aligned(listed_count * sizeof(f32_t)) +
@@ -1582,7 +1605,7 @@ expected<traversal_stats_t> geospatial_vram_nvidia_variant<gpu_class_>::within(
                          std::span<std::size_t> host_counts, face_t::traversal_context_t& context,
                          std::size_t) noexcept -> status_t {
             for (std::size_t& counted : host_counts) counted = 0;
-            if (face.device_specs().ordinal != device) return status_t::unsupported_k;
+            if (face.device_specs().ordinal != device) return status_code_t::unsupported_k;
             std::size_t const run = walked++;
             runs_faces[run] = &face;
             u64_t* const run_offsets = runs_offsets + run * (count + 1);
@@ -1596,7 +1619,7 @@ expected<traversal_stats_t> geospatial_vram_nvidia_variant<gpu_class_>::within(
             f64_t* const matched_metres = cuda_arena_allocator<f64_t>(allocator).allocate(listed_count);
             if (!device_queries || !matched_counts || !matched_offsets || !candidate_ids || !candidate_distances ||
                 !matched_ids || !matched_metres)
-                return status_t::bad_alloc_k;
+                return status_code_t::out_of_memory_k;
             us::geospatial::cuda_admit_arguments<node_id_t> admitting = admitting_(face, query_batch);
             admitting.queries = device_queries;
             admitting.candidate_ids = candidate_ids;
@@ -1611,7 +1634,7 @@ expected<traversal_stats_t> geospatial_vram_nvidia_variant<gpu_class_>::within(
             if (cuda_copy_async(api, device_queries, queries.elements, count * sizeof(value_t), context.stream()) !=
                     cuda_success_k ||
                 cuda_copy_async(api, matched_offsets, run_offsets, sizeof(u64_t), context.stream()) != cuda_success_k)
-                return status_t::device_error_k;
+                return status_code_t::device_k;
             if (status_t const searched = face.search(queries, {candidate_ids, {count, breadth}},
                                                       {candidate_distances, {count, breadth}}, config, context)
                                               .status;
@@ -1623,18 +1646,18 @@ expected<traversal_stats_t> geospatial_vram_nvidia_variant<gpu_class_>::within(
                     cuda_success_k ||
                 cuda_copy_async(api, runs_distances + run * listed_count, candidate_distances,
                                 listed_count * sizeof(f32_t), context.stream()) != cuda_success_k)
-                return status_t::device_error_k;
+                return status_code_t::device_k;
             if (status_t const waited = context.wait(); failed(waited)) return waited;
             std::size_t const admitted = static_cast<std::size_t>(run_offsets[count]);
             if (cuda_copy_async(api, runs_ids + run * listed_count, matched_ids, admitted * sizeof(node_id_t),
                                 context.stream()) != cuda_success_k ||
                 cuda_copy_async(api, runs_metres + run * listed_count, matched_metres, admitted * sizeof(f64_t),
                                 context.stream()) != cuda_success_k)
-                return status_t::device_error_k;
+                return status_code_t::device_k;
             return context.wait();
         };
         auto const [found, status] = index.search_every_shard(
-            count, executor, judge, nk::matrix_span<us::utilities::uuid128_t> {unused_keys, count, 1},
+            count, executor, judge, nk::matrix_span<util::uuid128_t> {unused_keys, count, 1},
             nk::matrix_span<f64_t> {unused_scores, count, 1}, std::span<std::size_t> {unused_counts, count}, queries,
             config, judging_bytes);
         if (failed(status)) return {{}, status};
@@ -1659,7 +1682,7 @@ expected<traversal_stats_t> geospatial_vram_nvidia_variant<gpu_class_>::within(
     std::size_t const total = offsets[count];
     usearch_key_t* const keys = carve<usearch_key_t>(pages, total);
     usearch_distance_t* const scores = carve<usearch_distance_t>(pages, total);
-    if (total && (!keys || !scores)) return {{}, status_t::bad_alloc_k};
+    if (total && (!keys || !scores)) return {{}, status_code_t::out_of_memory_k};
     for (std::size_t query = 0, slot = 0; query != count; ++query)
         for (std::size_t run = 0; run != walked; ++run) {
             u64_t const* const run_offsets = runs_offsets + run * (count + 1);
@@ -1671,7 +1694,7 @@ expected<traversal_stats_t> geospatial_vram_nvidia_variant<gpu_class_>::within(
         }
     outputs = {{keys, scores, offsets}, total};
     [[maybe_unused]] continuation_t const heard = ticks(count - 1);
-    return {stats, status_t::success_k};
+    return {stats, status_code_t::success_k};
 }
 
 #endif
@@ -1719,8 +1742,7 @@ template <gpu_class_t gpu_class_>
 struct geospatial_vram_amd_variant {
     using executor_t = hip_executor_t;
     using face_t = typename geospatial_vram_amd_build<gpu_class_>::face_t;
-    using index_t =
-        basic::vram_amd_indexes<face_t, us::utilities::uuid128_t, geospatial_vram_amd_build<gpu_class_>, f64_t>;
+    using index_t = basic::vram_amd_indexes<face_t, util::uuid128_t, geospatial_vram_amd_build<gpu_class_>, f64_t>;
     using refine_plan_t = typename index_t::refine_plan_t;
     using value_t = us::geospatial::earth_observation_t;
     using node_id_t = typename face_t::node_id_t;
@@ -1768,7 +1790,7 @@ struct geospatial_vram_amd_variant {
             itanium_type<typename us::geospatial::geospatial_ladder<geospatial_amd_capabilities<gpu_class_>>::kit_t> {},
             itanium_type<node_id_t> {});
         admit = admit_module.function(symbol.text);
-        return admit ? status_t::success_k : status_t::device_error_k;
+        return admit ? status_code_t::success_k : status_code_t::device_k;
     }
 
     status_t reserve(reserve_capacity_t capacity) noexcept {
@@ -1778,24 +1800,24 @@ struct geospatial_vram_amd_variant {
     /** Adopts @p grid on the host and copies its heights and pack to the index's device, whose
      *  kernels must be loaded; refuses a grid filled by a callback, which no device can call. */
     status_t adopt_terrain(us::geospatial::terrain_t const& grid) noexcept {
-        if (grid.callback) return status_t::unsupported_k;
+        if (grid.callback) return status_code_t::unsupported_k;
         if (status_t const adopted = host_terrain.adopt_terrain(grid); failed(adopted)) return adopted;
-        if (!host_terrain.has_terrain()) return status_t::success_k;
+        if (!host_terrain.has_terrain()) return status_code_t::success_k;
         us::geospatial::terrain_t const& borrowed = host_terrain.grid;
         std::size_t const heights_bytes = (borrowed.rows - 1) * borrowed.heights_stride +
                                           borrowed.columns * sizeof(f32_t);
         std::size_t const pack_bytes = host_terrain.terrain_pack.size();
         hip_api_t const& api = gpu_drivers().hip;
-        if (hip_set_device(api, device) != hip_success_k) return status_t::device_error_k;
+        if (hip_set_device(api, device) != hip_success_k) return status_code_t::device_k;
         device_heights = hip_make_unique(hip_device_allocator<f32_t> {api},
                                          divide_round_up(heights_bytes, sizeof(f32_t)));
         device_terrain_pack = hip_make_unique(hip_device_allocator_t {api}, pack_bytes);
-        if (!device_heights || !device_terrain_pack) return status_t::bad_alloc_k;
+        if (!device_heights || !device_terrain_pack) return status_code_t::out_of_memory_k;
         if (api.copy(device_heights.get(), borrowed.heights, heights_bytes, hip_copy_default_k) != hip_success_k ||
             api.copy(device_terrain_pack.get(), host_terrain.terrain_pack.data(), pack_bytes, hip_copy_default_k) !=
                 hip_success_k)
-            return status_t::device_error_k;
-        return status_t::success_k;
+            return status_code_t::device_k;
+        return status_code_t::success_k;
     }
 
     /** Whether a terrain was adopted, which lines of sight need. */
@@ -1852,15 +1874,15 @@ struct geospatial_vram_amd_variant {
         // The observations went straight to the device, so their deviations come back once.
         growing_buffer<value_t, forkunion_allocator_t> stored {forkunion_allocator_t {no_memory_domain_k}};
         for (face_t const& shard : index.live_shards()) {
-            if (failed(stored.resize_uninitialized(shard.size()))) return status_t::bad_alloc_k;
+            if (failed(stored.resize_uninitialized(shard.size()))) return status_code_t::out_of_memory_k;
             if (stored.empty()) continue;
             if (shard.api().copy(stored.data(), shard.storage().values, stored.size() * sizeof(value_t),
                                  hip_copy_default_k) != hip_success_k)
-                return status_t::device_error_k;
+                return status_code_t::device_k;
             for (value_t const& value : stored)
                 raise_to<fu::standard_atomic_ref>(largest_deviation_metres, u32_t {value.deviation_metres});
         }
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Empties the index and its largest deviation, retiring every shard behind a fresh shard
@@ -1885,7 +1907,7 @@ struct geospatial_vram_amd_variant {
     /** Sampling answers @c unsupported_k until the shards sample on their devices. */
     expected<sample_result_t> sample(basic_sample_inputs_t, basic_sample_outputs_t, sample_config_t,
                                      executor_t&) noexcept {
-        return {{}, status_t::unsupported_k};
+        return {{}, status_code_t::unsupported_k};
     }
 
   private:
@@ -1918,7 +1940,7 @@ struct geospatial_vram_amd_variant {
                                               growing_arena<forkunion_allocator_t>& pages) const noexcept {
         value_t* const values = carve<value_t>(pages, count);
         std::size_t* const offsets = carve<std::size_t>(pages, count + 1);
-        if (!values || !offsets) return {{}, status_t::bad_alloc_k};
+        if (!values || !offsets) return {{}, status_code_t::out_of_memory_k};
         // A borrowed grid never grows the sight's buffers, which serve filled grids alone.
         line_of_sight_buffers_t sight {thread_allocator_t {}};
         for (std::size_t offset = 0; offset != count; ++offset) {
@@ -1927,7 +1949,7 @@ struct geospatial_vram_amd_variant {
             offsets[offset] = offset * sizeof(value_t);
         }
         offsets[count] = count * sizeof(value_t);
-        return {{reinterpret_cast<byte_t const*>(values), {offsets, count + 1}}, status_t::success_k};
+        return {{reinterpret_cast<byte_t const*>(values), {offsets, count + 1}}, status_code_t::success_k};
     }
 };
 
@@ -1959,7 +1981,7 @@ expected<traversal_stats_t> geospatial_vram_amd_variant<gpu_class_>::search(
                       expansion = search.expansion_factor;
     if (!wanted) {
         for (std::size_t query = 0; query != count; ++query) outputs.counts[query] = 0;
-        return {{}, status_t::success_k};
+        return {{}, status_code_t::success_k};
     }
     auto const [queries, encode_status] = encode_(query_batch.observations.data(), count, pages);
     if (failed(encode_status)) return {{}, encode_status};
@@ -1982,7 +2004,7 @@ expected<traversal_stats_t> geospatial_vram_amd_variant<gpu_class_>::search(
                      std::span<std::size_t> host_counts, typename face_t::traversal_context_t& context,
                      std::size_t) noexcept -> status_t {
         // The judging kernel and the terrain sit on one device, where every judged shard sits too.
-        if (face.device_specs().ordinal != device) return status_t::unsupported_k;
+        if (face.device_specs().ordinal != device) return status_code_t::unsupported_k;
         typename face_t::traversal_context_t::allocator_t const allocator = context.allocator();
         value_t* const device_queries = hip_arena_allocator<value_t>(allocator).allocate(count);
         f64_t* const matched_metres = hip_arena_allocator<f64_t>(allocator).allocate(judged);
@@ -1992,7 +2014,7 @@ expected<traversal_stats_t> geospatial_vram_amd_variant<gpu_class_>::search(
         node_id_t* const matched_ids = hip_arena_allocator<node_id_t>(allocator).allocate(judged);
         if (!device_queries || !matched_metres || !matched_counts || !candidate_ids || !candidate_distances ||
             !matched_ids)
-            return status_t::bad_alloc_k;
+            return status_code_t::out_of_memory_k;
         us::geospatial::hip_admit_arguments<node_id_t> admitting = admitting_(face, query_batch);
         admitting.queries = device_queries;
         admitting.candidate_ids = candidate_ids;
@@ -2005,7 +2027,7 @@ expected<traversal_stats_t> geospatial_vram_amd_variant<gpu_class_>::search(
         hip_api_t const& api = admit_module.api();
         if (failed(
                 hip_vendor_t::copy(api, device_queries, queries.elements, count * sizeof(value_t), context.stream())))
-            return status_t::device_error_k;
+            return status_code_t::device_k;
         if (status_t const searched = face.search(queries, {candidate_ids, {count, candidates_count}},
                                                   {candidate_distances, {count, candidates_count}}, config, context)
                                           .status;
@@ -2022,13 +2044,12 @@ expected<traversal_stats_t> geospatial_vram_amd_variant<gpu_class_>::search(
                                       context.stream())) ||
             failed(
                 hip_vendor_t::copy(api, host_counts.data(), matched_counts, count * sizeof(u64_t), context.stream())))
-            return status_t::device_error_k;
+            return status_code_t::device_k;
         return context.wait();
     };
     auto const [found, status] = index.search_every_shard(
         count, executor, judge,
-        nk::matrix_span<us::utilities::uuid128_t> {reinterpret_cast<us::utilities::uuid128_t*>(outputs.keys), count,
-                                                   wanted},
+        nk::matrix_span<util::uuid128_t> {reinterpret_cast<util::uuid128_t*>(outputs.keys), count, wanted},
         nk::matrix_span<f64_t> {outputs.scores, count, wanted}, std::span<std::size_t> {outputs.counts, count}, queries,
         config, judging_bytes);
     if (failed(status)) return {{}, status};
@@ -2036,7 +2057,7 @@ expected<traversal_stats_t> geospatial_vram_amd_variant<gpu_class_>::search(
     return {{.computed_distances = found.computed_distances,
              .visited_members = found.visited_members,
              .restarts = found.restarts},
-            status_t::success_k};
+            status_code_t::success_k};
 }
 
 template <gpu_class_t gpu_class_>
@@ -2044,18 +2065,18 @@ expected<traversal_stats_t> geospatial_vram_amd_variant<gpu_class_>::within(
     geospatial_queries_t query_batch, within_outputs_t& outputs, search_config_t search, predicate_t const&,
     growing_arena<forkunion_allocator_t>& pages, executor_t& executor, progress_ticks_t& ticks) noexcept {
     std::size_t const count = query_batch.observations.size(), shards = index.live_shards_count();
-    if (search.traversal == traversal_t::scan_k) return {{}, status_t::unsupported_k};
+    if (search.traversal == traversal_t::scan_k) return {{}, status_code_t::unsupported_k};
     std::size_t* const offsets = carve<std::size_t>(pages, count + 1);
-    if (!offsets) return {{}, status_t::bad_alloc_k};
+    if (!offsets) return {{}, status_code_t::out_of_memory_k};
     for (std::size_t query = 0; query != count + 1; ++query) offsets[query] = 0;
     outputs = {{nullptr, nullptr, offsets}, 0};
-    if (!count || !shards) return {{}, status_t::success_k};
+    if (!count || !shards) return {{}, status_code_t::success_k};
     auto const [queries, encode_status] = encode_(query_batch.observations.data(), count, pages);
     if (failed(encode_status)) return {{}, encode_status};
     // The squared chord each query's candidates must pass, the walk's reach as the RAM variants
     // take it, widened by the cone graph's spanner bound.
     f64_t* const covering_chords = carve<f64_t>(pages, count);
-    if (!covering_chords) return {{}, status_t::bad_alloc_k};
+    if (!covering_chords) return {{}, status_code_t::out_of_memory_k};
     value_t const* const encoded = reinterpret_cast<value_t const*>(queries.elements);
     f64_t const largest_deviation =
         fu::standard_atomic_ref<u32_t>(largest_deviation_metres).load(std::memory_order_relaxed);
@@ -2068,10 +2089,10 @@ expected<traversal_stats_t> geospatial_vram_amd_variant<gpu_class_>::within(
         covering_chords[query] = widened * widened;
     }
     // The fan-out's own rankings stay one entry wide and empty, since every shard keeps its run.
-    us::utilities::uuid128_t* const unused_keys = carve<us::utilities::uuid128_t>(pages, count);
+    util::uuid128_t* const unused_keys = carve<util::uuid128_t>(pages, count);
     f64_t* const unused_scores = carve<f64_t>(pages, count);
     std::size_t* const unused_counts = carve<std::size_t>(pages, count);
-    if (!unused_keys || !unused_scores || !unused_counts) return {{}, status_t::bad_alloc_k};
+    if (!unused_keys || !unused_scores || !unused_counts) return {{}, status_code_t::out_of_memory_k};
     auto const aligned = [](std::size_t bytes) noexcept { return round_up_to_multiple(bytes, default_alignment_k); };
     std::size_t const published = index.size();
     std::size_t breadth = search.expansion_factor ? search.expansion_factor
@@ -2094,7 +2115,7 @@ expected<traversal_stats_t> geospatial_vram_amd_variant<gpu_class_>::within(
         runs_faces = carve<face_t const*>(pages, shards);
         f32_t* const runs_distances = carve<f32_t>(pages, shards * listed_count);
         if (!runs_offsets || !runs_ids || !runs_metres || !runs_faces || !runs_distances)
-            return {{}, status_t::bad_alloc_k};
+            return {{}, status_code_t::out_of_memory_k};
         std::size_t const judging_bytes =
             aligned(count * sizeof(value_t)) + aligned(count * sizeof(u64_t)) + aligned((count + 1) * sizeof(u64_t)) +
             aligned(listed_count * sizeof(node_id_t)) + aligned(listed_count * sizeof(f32_t)) +
@@ -2103,7 +2124,7 @@ expected<traversal_stats_t> geospatial_vram_amd_variant<gpu_class_>::within(
                          std::span<std::size_t> host_counts, typename face_t::traversal_context_t& context,
                          std::size_t) noexcept -> status_t {
             for (std::size_t& counted : host_counts) counted = 0;
-            if (face.device_specs().ordinal != device) return status_t::unsupported_k;
+            if (face.device_specs().ordinal != device) return status_code_t::unsupported_k;
             std::size_t const run = walked++;
             runs_faces[run] = &face;
             u64_t* const run_offsets = runs_offsets + run * (count + 1);
@@ -2117,7 +2138,7 @@ expected<traversal_stats_t> geospatial_vram_amd_variant<gpu_class_>::within(
             f64_t* const matched_metres = hip_arena_allocator<f64_t>(allocator).allocate(listed_count);
             if (!device_queries || !matched_counts || !matched_offsets || !candidate_ids || !candidate_distances ||
                 !matched_ids || !matched_metres)
-                return status_t::bad_alloc_k;
+                return status_code_t::out_of_memory_k;
             us::geospatial::hip_admit_arguments<node_id_t> admitting = admitting_(face, query_batch);
             admitting.queries = device_queries;
             admitting.candidate_ids = candidate_ids;
@@ -2132,7 +2153,7 @@ expected<traversal_stats_t> geospatial_vram_amd_variant<gpu_class_>::within(
             if (failed(hip_vendor_t::copy(api, device_queries, queries.elements, count * sizeof(value_t),
                                           context.stream())) ||
                 failed(hip_vendor_t::copy(api, matched_offsets, run_offsets, sizeof(u64_t), context.stream())))
-                return status_t::device_error_k;
+                return status_code_t::device_k;
             if (status_t const searched = face.search(queries, {candidate_ids, {count, breadth}},
                                                       {candidate_distances, {count, breadth}}, config, context)
                                               .status;
@@ -2144,18 +2165,18 @@ expected<traversal_stats_t> geospatial_vram_amd_variant<gpu_class_>::within(
                                           context.stream())) ||
                 failed(hip_vendor_t::copy(api, runs_distances + run * listed_count, candidate_distances,
                                           listed_count * sizeof(f32_t), context.stream())))
-                return status_t::device_error_k;
+                return status_code_t::device_k;
             if (status_t const waited = context.wait(); failed(waited)) return waited;
             std::size_t const admitted = static_cast<std::size_t>(run_offsets[count]);
             if (failed(hip_vendor_t::copy(api, runs_ids + run * listed_count, matched_ids, admitted * sizeof(node_id_t),
                                           context.stream())) ||
                 failed(hip_vendor_t::copy(api, runs_metres + run * listed_count, matched_metres,
                                           admitted * sizeof(f64_t), context.stream())))
-                return status_t::device_error_k;
+                return status_code_t::device_k;
             return context.wait();
         };
         auto const [found, status] = index.search_every_shard(
-            count, executor, judge, nk::matrix_span<us::utilities::uuid128_t> {unused_keys, count, 1},
+            count, executor, judge, nk::matrix_span<util::uuid128_t> {unused_keys, count, 1},
             nk::matrix_span<f64_t> {unused_scores, count, 1}, std::span<std::size_t> {unused_counts, count}, queries,
             config, judging_bytes);
         if (failed(status)) return {{}, status};
@@ -2180,7 +2201,7 @@ expected<traversal_stats_t> geospatial_vram_amd_variant<gpu_class_>::within(
     std::size_t const total = offsets[count];
     usearch_key_t* const keys = carve<usearch_key_t>(pages, total);
     usearch_distance_t* const scores = carve<usearch_distance_t>(pages, total);
-    if (total && (!keys || !scores)) return {{}, status_t::bad_alloc_k};
+    if (total && (!keys || !scores)) return {{}, status_code_t::out_of_memory_k};
     for (std::size_t query = 0, slot = 0; query != count; ++query)
         for (std::size_t run = 0; run != walked; ++run) {
             u64_t const* const run_offsets = runs_offsets + run * (count + 1);
@@ -2192,7 +2213,7 @@ expected<traversal_stats_t> geospatial_vram_amd_variant<gpu_class_>::within(
         }
     outputs = {{keys, scores, offsets}, total};
     [[maybe_unused]] continuation_t const heard = ticks(count - 1);
-    return {stats, status_t::success_k};
+    return {stats, status_code_t::success_k};
 }
 
 #endif
@@ -2246,9 +2267,10 @@ inline us::geospatial::terrain_t terrain_of(usearch_geospatial_terrain_t const& 
 /** Whether @p variant serves @p relation, which the traits already know: lines of sight need its
  *  terrain, so @c visible without one answers @c unsupported_k. */
 template <typename variant_type_>
-status_t serves_relation(variant_type_ const& variant, usearch_geospatial_relation_t relation) noexcept {
-    if (relation != usearch_geospatial_relation_visible_k || variant.has_terrain()) return status_t::success_k;
-    return status_t::unsupported_k;
+util::status_t serves_relation(variant_type_ const& variant, usearch_geospatial_relation_t relation) noexcept {
+    if (relation != usearch_geospatial_relation_visible_k || variant.has_terrain())
+        return util::status_code_t::success_k;
+    return util::status_code_t::unsupported_k;
 }
 
 /** What the geospatial verbs do to one variant: adopt its terrain, describe it, walk a radius, and
@@ -2277,8 +2299,8 @@ struct variant_bodies<geospatial_traits_t> {
 
     /** Takes @p geometry into the CPU @p variant, which adopts @p terrain. */
     template <typename variant_type_>
-    static status_t adopt(variant_type_& variant, geometry_t const& geometry,
-                          geometry_extras_t const& terrain) noexcept {
+    static util::status_t adopt(variant_type_& variant, geometry_t const& geometry,
+                                geometry_extras_t const& terrain) noexcept {
         variant.geometry.connectivity = connectivity_of(geometry);
         return variant.adopt_terrain(terrain_of(terrain));
     }
@@ -2314,41 +2336,41 @@ struct variant_bodies<geospatial_traits_t> {
     }
 
     template <typename variant_type_>
-    static status_t serves_search(variant_type_ const& variant, geospatial_queries_t const& queries) noexcept {
+    static util::status_t serves_search(variant_type_ const& variant, geospatial_queries_t const& queries) noexcept {
         return serves_relation(variant, queries.relation);
     }
 
-    static status_t keep(nvme_executor_t&, std::size_t, kept_t const& stored, kept_t& kept) noexcept {
+    static util::status_t keep(nvme_executor_t&, std::size_t, kept_t const& stored, kept_t& kept) noexcept {
         kept = stored;
-        return status_t::success_k;
+        return util::status_code_t::success_k;
     }
 
     /** A device's stored observation, decoded by the codec its checkpoints write. */
-    static status_t keep_stored(bytes_view_t stored, kept_t& kept) noexcept {
+    static util::status_t keep_stored(util::bytes_view_t stored, kept_t& kept) noexcept {
         return us::geospatial::earth_observation_codec_t {}.load(stored, kept);
     }
 
     /** Whether @p variant walks the radius @p queries ask: a relation it serves, and no host
      *  predicate on a device. */
     template <typename variant_type_>
-    static status_t serves_within(variant_type_ const& variant, geospatial_queries_t const& queries,
-                                  predicate_t const& predicate) noexcept {
+    static util::status_t serves_within(variant_type_ const& variant, geospatial_queries_t const& queries,
+                                        predicate_t const& predicate) noexcept {
         if (!std::holds_alternative<no_predicate_t>(predicate) && arena_residency_of(variant) != ram_residency_k)
-            return status_t::unsupported_k;
+            return util::status_code_t::unsupported_k;
         return serves_relation(variant, queries.relation);
     }
 
     /** Writes @p count observations, the @c i th as @p value_at hands it, in @p memory. */
     template <typename variant_type_, typename value_at_type_>
-    static status_t write_values(variant_type_ const&, std::size_t count, value_at_type_&& value_at,
-                                 growing_arena<forkunion_allocator_t>& memory,
-                                 usearch_geospatial_observation_t const** outputs) noexcept {
+    static util::status_t write_values(variant_type_ const&, std::size_t count, value_at_type_&& value_at,
+                                       util::growing_arena<util::forkunion_allocator_t>& memory,
+                                       usearch_geospatial_observation_t const** outputs) noexcept {
         usearch_geospatial_observation_t* const observations = carve<usearch_geospatial_observation_t>(memory, count);
-        if (count && !observations) return status_t::bad_alloc_k;
+        if (count && !observations) return util::status_code_t::out_of_memory_k;
         for (std::size_t entry = 0; entry != count; ++entry)
             observations[entry] = observation_of(us::geospatial::to_geodetic_observation(value_at(entry)));
         *outputs = observations;
-        return status_t::success_k;
+        return util::status_code_t::success_k;
     }
 };
 

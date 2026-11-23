@@ -112,7 +112,7 @@ static bool adopt_terrain(terrain_grid_t& terrain, usearch_geospatial_terrain_t 
     if (reject_if(given.path.data != nullptr, usearch_status_unsupported_k, "No residency reads a terrain path yet",
                   outcome) ||
         reject_if(given.heights && given.callback, usearch_status_invalid_argument_k,
-                  "A terrain is borrowed or filled, never both", outcome))
+                  "A terrain is either borrowed or filled, never both", outcome))
         return false;
     if (!given.heights && !given.callback) return true;
     if (reject_if(!given.rows || !given.columns || !(given.row_step_degrees > 0) || !(given.column_step_degrees > 0),
@@ -170,7 +170,7 @@ static bool reject_relation(geospatial_index_t const& index, usearch_geospatial_
     return reject_if(relation != usearch_geospatial_relation_near_k && relation != usearch_geospatial_relation_sees_k &&
                          relation != usearch_geospatial_relation_seen_k &&
                          relation != usearch_geospatial_relation_visible_k,
-                     usearch_status_unknown_kind_k, "The relation is not one this ABI names", outcome);
+                     usearch_status_unknown_kind_k, "Unknown geospatial relation", outcome);
 }
 
 #pragma endregion Storage
@@ -262,8 +262,8 @@ static bool clear_sight(terrain_grid_t const& terrain, placed_t const& from, pla
     if (chord == 0) return true;
     // Two samples per cell, so a ridge one cell wide is never stepped over.
     constexpr double metres_per_degree_k = 111320.0, refraction_k = 0.13, earth_radius_k = 6371000.0;
-    double const cell = min_of(terrain.row_step, terrain.column_step) * metres_per_degree_k;
-    std::size_t const samples = min_of<std::size_t>(1u << 16, static_cast<std::size_t>(2 * chord / cell) + 2);
+    double const cell = util::min_of(terrain.row_step, terrain.column_step) * metres_per_degree_k;
+    std::size_t const samples = util::min_of<std::size_t>(1u << 16, static_cast<std::size_t>(2 * chord / cell) + 2);
     for (std::size_t sample = 1; sample != samples; ++sample) {
         double const share = static_cast<double>(sample) / static_cast<double>(samples);
         std::array<double, 3> const point {from.position[0] + share * offset[0], from.position[1] + share * offset[1],
@@ -367,9 +367,9 @@ static std::optional<std::size_t> serialized_bytes(std::size_t entries) {
     return blob_bytes(sizeof(geospatial_checkpoint_prefix_t), entries, record_bytes_k);
 }
 
-static void write_into(geospatial_index_t const& index, std::size_t entries, bytes_span_t target) {
+static void write_into(geospatial_index_t const& index, std::size_t entries, util::bytes_span_t target) {
     write_pod(target, geospatial_checkpoint_prefix_t {index.options.connectivity, entries});
-    bytes_span_t cursor = target.subspan(sizeof(geospatial_checkpoint_prefix_t));
+    util::bytes_span_t cursor = target.subspan(sizeof(geospatial_checkpoint_prefix_t));
     for (std::size_t position = 0; position != entries; ++position) {
         write_pod(cursor, index.entries[position].key);
         write_pod(cursor.subspan(sizeof(usearch_key_t)), index.entries[position].payload);
@@ -378,7 +378,7 @@ static void write_into(geospatial_index_t const& index, std::size_t entries, byt
 }
 
 /** Reads the prefix and checks the blob is long enough for what it claims. */
-static bool parse_prefix(geospatial_checkpoint_prefix_t& prefix, bytes_view_t blob, usearch_outcome_t* outcome) {
+static bool parse_prefix(geospatial_checkpoint_prefix_t& prefix, util::bytes_view_t blob, usearch_outcome_t* outcome) {
     if (reject_if(blob.size() < sizeof(geospatial_checkpoint_prefix_t), usearch_status_malformed_k,
                   "The checkpoint ends early", outcome))
         return false;
@@ -388,7 +388,7 @@ static bool parse_prefix(geospatial_checkpoint_prefix_t& prefix, bytes_view_t bl
 
 /** Fills a fresh @p index from a checkpoint, which no other thread can see yet. The bound on
  *  entries per key is the loader's to choose, since no checkpoint records it. */
-static bool read_from(geospatial_index_t& index, bytes_view_t blob, usearch_outcome_t* outcome) {
+static bool read_from(geospatial_index_t& index, util::bytes_view_t blob, usearch_outcome_t* outcome) {
     geospatial_checkpoint_prefix_t prefix {};
     if (!parse_prefix(prefix, blob, outcome)) return false;
     index.reset();
@@ -397,7 +397,7 @@ static bool read_from(geospatial_index_t& index, bytes_view_t blob, usearch_outc
         return false;
     }
     index.options.connectivity = prefix.connectivity;
-    bytes_view_t cursor = blob.subspan(sizeof(geospatial_checkpoint_prefix_t));
+    util::bytes_view_t cursor = blob.subspan(sizeof(geospatial_checkpoint_prefix_t));
     for (std::size_t position = 0; position != prefix.entries; ++position) {
         usearch_key_t const key = read_pod<usearch_key_t>(cursor);
         index.append(key, read_pod<usearch_geospatial_observation_t>(cursor.subspan(sizeof(usearch_key_t))));
@@ -425,7 +425,7 @@ static bool serialize_shard(geospatial_index_t const& shard, std::vector<std::by
 
 /** A new handle holding the checkpoint in @p blob, or null once the outcome records why not. */
 template <typename index_type_>
-static index_type_* open_checkpoint(bytes_view_t blob, usearch_outcome_t* outcome) {
+static index_type_* open_checkpoint(util::bytes_view_t blob, usearch_outcome_t* outcome) {
     index_type_* const index = new (std::nothrow) index_type_();
     if (reject_if(!index, usearch_status_out_of_memory_k, "The handle could not be allocated", outcome)) return nullptr;
     if (read_from(*index, blob, outcome)) return index;
@@ -481,7 +481,8 @@ void usearch_geospatial_load_ram(usearch_geospatial_load_ram_t* arguments) {
     if (!read_file(arguments->path, blob, outcome)) return;
     usearch_geospatial_index_handle_t* const index = open_parts<usearch_geospatial_index_handle_t>(
         blob, arguments->path,
-        [&](bytes_view_t part) { return open_checkpoint<usearch_geospatial_index_handle_t>(part, outcome); }, outcome);
+        [&](util::bytes_view_t part) { return open_checkpoint<usearch_geospatial_index_handle_t>(part, outcome); },
+        outcome);
     if (!index) return;
     index->options.values_per_key = arguments->values_per_key;
     keep_going(arguments->progress, 1, 1);
@@ -491,7 +492,7 @@ void usearch_geospatial_load_ram(usearch_geospatial_load_ram_t* arguments) {
 
 void usearch_geospatial_load_ram_buffer(usearch_geospatial_load_ram_buffer_t* arguments) {
     load_ram_buffer<usearch_geospatial_load_ram_buffer>(
-        arguments, [&](bytes_view_t blob, usearch_outcome_t* outcome) -> usearch_geospatial_index_handle_t* {
+        arguments, [&](util::bytes_view_t blob, usearch_outcome_t* outcome) -> usearch_geospatial_index_handle_t* {
             terrain_grid_t terrain;
             if (!adopt_terrain(terrain, arguments->terrain, outcome)) return nullptr;
             usearch_geospatial_index_handle_t* const index = open_checkpoint<usearch_geospatial_index_handle_t>(
@@ -523,13 +524,14 @@ void usearch_geospatial_view_ram(usearch_geospatial_view_ram_t* arguments) {
     if (reject_ceiling(arguments->ram.cpu_class_ceiling, outcome)) return;
     terrain_grid_t terrain;
     if (!adopt_terrain(terrain, arguments->terrain, outcome)) return;
-    mapped_file_t served = map_file(arguments->path, outcome);
+    util::mapped_file_t served = map_file(arguments->path, outcome);
     if (!served) return;
     // Entries are still copied out of the mapping, so only the view's refusals are mirrored, not
     // its zero cost.
     usearch_geospatial_index_handle_t* const index = open_parts<usearch_geospatial_index_handle_t>(
         served.view(), arguments->path,
-        [&](bytes_view_t part) { return open_checkpoint<usearch_geospatial_index_handle_t>(part, outcome); }, outcome);
+        [&](util::bytes_view_t part) { return open_checkpoint<usearch_geospatial_index_handle_t>(part, outcome); },
+        outcome);
     if (!index) return;
     index->served = std::move(served);
     index->options.terrain = std::move(terrain);
@@ -543,12 +545,13 @@ void usearch_geospatial_view_nvme(usearch_geospatial_view_nvme_t* arguments) {
     if (reject_ceiling(arguments->nvme.cpu_class_ceiling, outcome)) return;
     terrain_grid_t terrain;
     if (!adopt_terrain(terrain, arguments->terrain, outcome)) return;
-    mapped_file_t served = map_file(arguments->path, outcome);
+    util::mapped_file_t served = map_file(arguments->path, outcome);
     if (!served) return;
     // Serves the drives' checkpoint as the RAM view does, mirroring only the residency's refusals.
     usearch_geospatial_index_handle_t* const index = open_parts<usearch_geospatial_index_handle_t>(
         served.view(), arguments->path,
-        [&](bytes_view_t part) { return open_checkpoint<usearch_geospatial_index_handle_t>(part, outcome); }, outcome);
+        [&](util::bytes_view_t part) { return open_checkpoint<usearch_geospatial_index_handle_t>(part, outcome); },
+        outcome);
     if (!index) return;
     index->served = std::move(served);
     index->residency = usearch_residency_nvme_k;
@@ -832,12 +835,12 @@ void usearch_geospatial_cursor_next(usearch_geospatial_cursor_next_t* arguments)
     usearch_geospatial_index_handle_t& index = *arguments->index;
     usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, {}, outcome);
     if (!arena) return;
-    if (reject_if(serial_atomic_ref<u32_t>(cursor.pulling).fetch_test_and_set_bit(0, std::memory_order_acquire),
+    if (reject_if(serial_atomic_ref<util::u32_t>(cursor.pulling).fetch_test_and_set_bit(0, std::memory_order_acquire),
                   usearch_status_contended_k, "Another pull is still running on the cursor", outcome))
         return;
     std::shared_lock readers(index.mutex);
     pull_walk(*arguments, cursor, chord_between, *arena, outcome);
-    serial_atomic_ref<u32_t>(cursor.pulling).clear_bits(1, std::memory_order_release);
+    serial_atomic_ref<util::u32_t>(cursor.pulling).clear_bits(1, std::memory_order_release);
 }
 
 void usearch_geospatial_cursor_free(usearch_geospatial_cursor_t handle) {
@@ -848,12 +851,12 @@ void usearch_geospatial_cursor_free(usearch_geospatial_cursor_t handle) {
 /** Places a geospatial draw at its Earth-fixed position in Earth radii, the semi-major axis,
  *  from the whole centimetres the library stores. */
 struct earth_fixed_coordinates_t {
-    static void coordinates_of(geospatial_payload_t const& payload, f32_t* coordinates) {
+    static void coordinates_of(geospatial_payload_t const& payload, util::f32_t* coordinates) {
         constexpr double semi_major_centimetres_k = 6378137.0 * 100.0;
         placed_t const at = placed(payload);
         for (std::size_t axis = 0; axis != 3; ++axis)
-            coordinates[axis] = static_cast<f32_t>(static_cast<double>(std::llround(at.position[axis] * 100.0)) /
-                                                   semi_major_centimetres_k);
+            coordinates[axis] = static_cast<util::f32_t>(static_cast<double>(std::llround(at.position[axis] * 100.0)) /
+                                                         semi_major_centimetres_k);
     }
 };
 

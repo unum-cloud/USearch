@@ -76,16 +76,16 @@ struct sentence_codec_t {
 
     std::size_t storage_requirements(std::string const& value) const noexcept { return value.size(); }
     status_t save(std::string const& value, bytes_span_t output) const noexcept {
-        if (output.size() < value.size()) return status_t::overflow_k;
+        if (output.size() < value.size()) return status_code_t::overflow_k;
         for (std::size_t position = 0; position != value.size(); ++position)
             output[position] = static_cast<std::byte>(value[position]);
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
     status_t load(bytes_view_t input, std::string& value) const noexcept {
         for (std::byte const byte : input)
-            if (byte == std::byte {0xFF}) return status_t::malformed_k;
+            if (byte == std::byte {0xFF}) return status_code_t::malformed_k;
         value.assign(reinterpret_cast<char const*>(input.data()), input.size());
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 };
 
@@ -181,7 +181,7 @@ static void test_sentences_transparent_search(u64_t seed) {
         basic_build<sentences_fixture_t>(index, metric, values, assigned_ids, context, keep_diverse_t {4});
 
         auto const [result, status] = index.search(std::string_view {copied_value}, {}, metric, context);
-        expect_equal(status, status_t::success_k);
+        expect_equal(status, status_code_t::success_k);
         expect_true(result.count > 0);
         expect_equal(context.results[0].distance, u64_t {0});
     }
@@ -213,7 +213,7 @@ static void test_sentences_codec_poison(u64_t seed) {
         auto const poisoned_ptr = sentences_fixture_t::make_index(ledger);
         auto& poisoned = *poisoned_ptr;
         expect_true(bool(poisoned.reserve(values.size())));
-        expect_equal(poisoned.load(columns.view(), codec), status_t::malformed_k);
+        expect_equal(poisoned.load(columns.view(), codec), status_code_t::malformed_k);
 
         // The dead plan decoded every entry but the last, so the IDs an insert now dispenses held
         // its keys and values.
@@ -223,10 +223,11 @@ static void test_sentences_codec_poison(u64_t seed) {
                                                sentences_fixture_t::make_key(values.size() + 1)};
         auto const [inserted, insert_status] = poisoned.insert(std::span(fresh_values), std::span(fresh_keys), metric,
                                                                {}, context, keep_diverse_t {4});
-        expect_equal(insert_status, status_t::success_k);
+        expect_equal(insert_status, status_code_t::success_k);
         expect_true(!poisoned.contains(sentences_fixture_t::make_key(0)));
-        expect_equal(poisoned.degree_of(0).value, 1u);
-        expect_equal(poisoned.health(context).status, status_t::success_k);
+        auto const [poisoned_degree, degree_status] = poisoned.degree_of(0);
+        expect_true(succeeded(degree_status) && poisoned_degree == 1);
+        expect_equal(poisoned.health(context).status, status_code_t::success_k);
     }
     expect_equal(ledger.live_bytes, 0);
 }
@@ -258,7 +259,7 @@ static void test_sentences_whole_batch(u64_t seed) {
                 context_t context {stream_key(seed, "whole_batch", 1), counting_allocator_t {ledger}};
                 auto const [result, status] = index.insert(std::span(values), std::span(keys), gated, {}, context,
                                                            keep_diverse_t {4});
-                if (status != status_t::success_k) thread_failures.store_add(1);
+                if (status != status_code_t::success_k) thread_failures.store_add(1);
                 return;
             }
             if (!spin_until([&]() noexcept { return entered.load(std::memory_order_acquire); })) {
@@ -273,7 +274,9 @@ static void test_sentences_whole_batch(u64_t seed) {
         expect_equal(thread_failures_count, 0u);
         expect_equal(index.size(), 2u);
         expect_true(index.contains(keys[1]));
-        expect_equal(index.degree_of(1).value, 1u); // Linked to the first entry before either published.
+        // Linked to the first entry before either published.
+        auto const [second_degree, degree_status] = index.degree_of(1);
+        expect_true(succeeded(degree_status) && second_degree == 1);
     }
     expect_equal(ledger.live_bytes, 0);
 }

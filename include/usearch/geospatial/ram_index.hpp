@@ -621,7 +621,7 @@ struct earth_observation_codec_t {
      *  - @c overflow_k @p output is shorter than one observation.
      */
     status_t save(earth_observation_t const& value, bytes_span_t output) const noexcept {
-        if (output.size() < sizeof(earth_observation_t)) return status_t::overflow_k;
+        if (output.size() < sizeof(earth_observation_t)) return status_code_t::overflow_k;
         bytes_image_t const image = std::bit_cast<bytes_image_t>(value);
         return copy_bytes(output.first(image.size()), image);
     }
@@ -633,11 +633,11 @@ struct earth_observation_codec_t {
      *  - @c malformed_k @p input is not exactly one observation long.
      */
     status_t load(bytes_view_t input, earth_observation_t& value) const noexcept {
-        if (input.size() != sizeof(earth_observation_t)) return status_t::malformed_k;
+        if (input.size() != sizeof(earth_observation_t)) return status_code_t::malformed_k;
         bytes_image_t image;
         if (status_t const copied = copy_bytes(image, input); failed(copied)) return copied;
         value = std::bit_cast<earth_observation_t>(image);
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** What @ref view hands out for a stored position. */
@@ -708,11 +708,11 @@ status_t draw_long_links(index_type_& index, typename index_type_::node_id_t nod
     for (std::size_t position = 0; position != around.value.count && spacing == 0; ++position)
         if (context.results[position].node_id != node && context.results[position].distance > 0)
             spacing = std::sqrt(static_cast<f64_t>(context.results[position].distance));
-    if (spacing == 0) return status_t::success_k;
+    if (spacing == 0) return status_code_t::success_k;
     // Half the equatorial circumference is the longest range a long link draws.
     f64_t const log_reach = std::log(std::numbers::pi * NUMKONG_EARTH_ELLIPSOID_EQUATORIAL_RADIUS *
                                      centimetres_per_metre_k / spacing);
-    if (log_reach <= 0) return status_t::success_k;
+    if (log_reach <= 0) return status_code_t::success_k;
 
     for (std::size_t draw = 0; draw != draws; ++draw) {
         f64_t const range = spacing * std::exp(uniform_unit(generator) * log_reach);
@@ -726,7 +726,7 @@ status_t draw_long_links(index_type_& index, typename index_type_::node_id_t nod
         auto const linked = index.link(node, target);
         if (failed(linked.status)) return linked.status;
     }
-    return status_t::success_k;
+    return status_code_t::success_k;
 }
 
 /** How far a radius walk widens its candidates before trusting them complete. */
@@ -747,7 +747,7 @@ constexpr f64_t cone_graph_stretch_k = 2.4;
 struct [[nodiscard]] radius_result_t {
 
     /** @c success_k, or why the walk could not run. */
-    status_t status = status_t::success_k;
+    status_t status = status_code_t::success_k;
 
     /** Leading entries of @c context.results within the radius. */
     std::size_t count = 0;
@@ -785,7 +785,7 @@ radius_result_t within(index_type_& index, query_type_ const& query, i64_t radiu
                        std::size_t widest_list, metric_type_& metric, context_type_& context) noexcept {
     using search_config_t = typename index_type_::search_config_t;
     using distance_t = typename index_type_::distance_t;
-    if (metric.staging_limit() < widest_list) return {status_t::config_mismatch_k, 0, 0};
+    if (metric.staging_limit() < widest_list) return {status_code_t::config_mismatch_k, 0, 0};
     f64_t const radius = static_cast<f64_t>(radius_centimetres);
     f64_t const widened = margin == radius_margin_t::spanner_k ? radius * (1.0 + 2.0 * cone_graph_stretch_k) : radius;
     f64_t const widened_squared = widened * widened;
@@ -808,7 +808,7 @@ radius_result_t within(index_type_& index, query_type_ const& query, i64_t radiu
     }
     std::size_t count = 0;
     while (count != candidates_count && context.results[count].distance <= radius_squared) ++count;
-    return {status_t::success_k, count, candidates_count};
+    return {status_code_t::success_k, count, candidates_count};
 }
 
 #pragma endregion Walks

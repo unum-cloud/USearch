@@ -84,7 +84,7 @@ struct vram_apple_kits {
                 pack_kit_t::packed_shape(stored.data(), &points, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr));
             failed(read))
             return {0, read};
-        return {points * 3 * sizeof(typename scalar_::raw_t), status_t::success_k};
+        return {points * 3 * sizeof(typename scalar_::raw_t), status_code_t::success_k};
     }
 
     /**
@@ -101,11 +101,11 @@ struct vram_apple_kits {
      *  whole points. */
     static expected<std::size_t> stored_bytes_(std::size_t saved) noexcept {
         constexpr std::size_t point_bytes_k = 3 * sizeof(typename scalar_::raw_t);
-        if (saved % point_bytes_k) return {0, status_t::malformed_k};
+        if (saved % point_bytes_k) return {0, status_code_t::malformed_k};
         nk_size_t bytes = 0;
         if (status_t const sized = status_of(pack_kit_t::pack_size(saved / point_bytes_k, &bytes)); failed(sized))
             return {0, sized};
-        return {bytes, status_t::success_k};
+        return {bytes, status_code_t::success_k};
     }
 
     /** Packs a step's clouds on the host, straight into their planned starts in the unified tape:
@@ -120,11 +120,11 @@ struct vram_apple_kits {
                                      step.stored_offsets[node + 1] - step.stored_offsets[node]};
             if (status_t const packed = codec<pack_kit_t>::load_pack(pose, pack); failed(packed)) return packed;
         }
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** The kit reads no parameters, so none upload. */
-    static status_t upload_parameters_(metal_context_t&) noexcept { return status_t::success_k; }
+    static status_t upload_parameters_(metal_context_t&) noexcept { return status_code_t::success_k; }
 
     /** The kit reads no parameters; the graph binds the tape in their slot. */
     metal_buffer_t const& parameters_() const noexcept { return none_; }
@@ -182,7 +182,7 @@ struct vram_apple_index {
      *  - @c unsupported_k The clouds are f32, which no Metal body scores to CUDA's f32 guarantee.
      */
     expected<std::size_t> reserve(reserve_capacity_t config) noexcept {
-        if constexpr (!std::is_same_v<scalar_, nk::f16_t>) return {0, status_t::unsupported_k};
+        if constexpr (!std::is_same_v<scalar_, nk::f16_t>) return {0, status_code_t::unsupported_k};
         else return graph_.reserve(config);
     }
 

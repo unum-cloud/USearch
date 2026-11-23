@@ -58,11 +58,11 @@ namespace unum::usearch::sequence {
  */
 inline status_t status_of(sz::status_t status) noexcept {
     switch (status) {
-    case sz::status_t::success_k: return status_t::success_k;
-    case sz::status_t::bad_alloc_k: return status_t::bad_alloc_k;
-    case sz::status_t::overflow_risk_k: return status_t::overflow_k;
-    case sz::status_t::unexpected_dimensions_k: return status_t::shape_mismatch_k;
-    default: return status_t::internal_k;
+    case sz::status_t::success_k: return status_code_t::success_k;
+    case sz::status_t::bad_alloc_k: return status_code_t::out_of_memory_k;
+    case sz::status_t::overflow_risk_k: return status_code_t::overflow_k;
+    case sz::status_t::unexpected_dimensions_k: return status_code_t::shape_mismatch_k;
+    default: return status_code_t::internal_k;
     }
 }
 

@@ -38,14 +38,14 @@ int checkpoints_copy(world_t& world, int argc, char const* const* argv) {
         return *exit;
     if (!runs_alone(world)) return EXIT_FAILURE;
     std::string_view const from = positionals[0], to = positionals[1];
-    if (given != 2 || utilities::names_transport_id(from) || utilities::names_transport_id(to)) {
+    if (given != 2 || util::names_transport_id(from) || util::names_transport_id(to)) {
         fmt::println(stderr, "a source and a destination the kernel reaches are required");
         return EXIT_FAILURE;
     }
-    auto const [source_address, source_status] = utilities::parse_file_address(from);
-    auto const [target_address, target_status] = utilities::parse_file_address(to);
-    if (utilities::failed(source_status) || utilities::failed(target_status)) {
-        fmt::println(stderr, "{} is no address", utilities::failed(source_status) ? from : to);
+    auto const [source_address, source_status] = util::parse_file_address(from);
+    auto const [target_address, target_status] = util::parse_file_address(to);
+    if (util::failed(source_status) || util::failed(target_status)) {
+        fmt::println(stderr, "{} is no address", util::failed(source_status) ? from : to);
         return EXIT_FAILURE;
     }
 
@@ -53,8 +53,8 @@ int checkpoints_copy(world_t& world, int argc, char const* const* argv) {
     std::string_view const source_location = source_address.location;
     slot_drive_t source;
     if (!slot_open(source_location, source)) return EXIT_FAILURE;
-    u64_t const source_base = source_address.byte_base;
-    u64_t length = source.bytes - min_of(source_base, source.bytes);
+    util::u64_t const source_base = source_address.byte_base;
+    util::u64_t length = source.bytes - util::min_of(source_base, source.bytes);
     if (slot_names_device(source_location)) {
         slot_file_t file;
         if (!slot_probe(source, source_base, file) || std::string_view {file.owner} == slot_foreign_k) {
@@ -65,12 +65,12 @@ int checkpoints_copy(world_t& world, int argc, char const* const* argv) {
     }
 
     std::string_view const target_location = target_address.location;
-    u64_t target_base = target_address.byte_base;
+    util::u64_t target_base = target_address.byte_base;
     if (slot_names_device(target_location)) {
         slot_drive_t target;
         st::vector<slot_file_t> files;
         if (!slot_open(target_location, target) || !slot_map(target, target_location, files)) return EXIT_FAILURE;
-        u64_t const slots = target.bytes / slot_bytes_k, needed = slots_covered(length);
+        util::u64_t const slots = target.bytes / slot_bytes_k, needed = slots_covered(length);
         if (target_address.location.size() == to.size())
             target_base = slot_free_run(files, slots, needed) * slot_bytes_k;
         if (target_base % slot_bytes_k || target_base / slot_bytes_k + needed > slots) {
@@ -112,25 +112,25 @@ int checkpoints_metadata(world_t& world, int argc, char const* const* argv) {
         return *exit;
     if (!runs_alone(world)) return EXIT_FAILURE;
     std::string_view const address = positionals[0];
-    if (given != 1 || utilities::names_transport_id(address)) {
+    if (given != 1 || util::names_transport_id(address)) {
         fmt::println(stderr, "a monolith or manifest the kernel reaches, or - for standard input, is required");
         return EXIT_FAILURE;
     }
     bool const piped = address == "-";
-    st::vector<byte_t> piped_bytes;
+    st::vector<util::byte_t> piped_bytes;
     if (piped && !read_standard_input(piped_bytes)) {
         fmt::println(stderr, "cannot read a checkpoint off standard input");
         return EXIT_FAILURE;
     }
-    auto const [header, header_status] = piped ? utilities::safegraphs_read_metadata(bytes_view_t {piped_bytes})
-                                               : utilities::nvme_read_metadata<fu::standard_yield_t>(address);
-    if (utilities::failed(header_status)) {
+    auto const [header, header_status] = piped ? util::safegraphs_read_metadata(bytes_view_t {piped_bytes})
+                                               : util::nvme_read_metadata<fu::standard_yield_t>(address);
+    if (util::failed(header_status)) {
         fmt::println(stderr, "{} holds no SafeGraphs header or manifest", address);
         return EXIT_FAILURE;
     }
     std::string_view const metric = header.metric.view();
     fmt::println("{}: {} nodes in {} parts, metric \"{}\", {} keys", address, header.nodes, header.parts, metric,
-                 utilities::dtype_name(header.key_dtype));
+                 dtype_name(header.key_dtype));
 
     usearch_outcome_t outcome {};
     usearch_bytes_view_t const path = bytes_view(address);
@@ -187,7 +187,7 @@ int checkpoints_export(world_t& world, int argc, char const* const* argv) {
         return *exit;
     if (!runs_alone(world)) return EXIT_FAILURE;
     std::string_view const address = positionals[0];
-    if (given != 2 || utilities::names_transport_id(address)) {
+    if (given != 2 || util::names_transport_id(address)) {
         fmt::println(stderr, "a monolith or manifest the kernel reaches and an Arrow file are required");
         return EXIT_FAILURE;
     }
@@ -234,7 +234,7 @@ int checkpoints_import(world_t& world, int argc, char const* const* argv) {
     }
     std::optional<sz::string_t> const admitted = checkpoints_admit_save(positionals[1]);
     if (!admitted) return EXIT_FAILURE;
-    st::vector<byte_t> checkpoint;
+    st::vector<util::byte_t> checkpoint;
     arrow_summary_t summary;
     if (sz::string_t const failure = arrow_import(positionals[0], metric, checkpoint, summary); !failure.empty()) {
         fmt::println(stderr, "{}", failure);
@@ -275,7 +275,7 @@ int checkpoints_import(world_t& world, int argc, char const* const* argv) {
 
 /** Copies the distances of a query's matches into @p kept, past the one holding the query's own key
  *  at distance zero, which is the query finding itself; true when it dropped that one. */
-static bool recall_keep(uuid128_t const& query, std::span<uuid128_t const> keys,
+static bool recall_keep(util::uuid128_t const& query, std::span<util::uuid128_t const> keys,
                         std::span<usearch_distance_t const> distances, st::vector<usearch_distance_t>& kept) noexcept {
     kept.clear();
     bool dropped = false;
@@ -320,7 +320,7 @@ int checkpoints_recall(world_t& world, int argc, char const* const* argv) {
     st::vector<usearch_distance_t> true_distances, run_distances;
     std::array<double, counts_t::capacity_k> recalled {};
     std::size_t own_keys = 0;
-    std::span<uuid128_t const> const truth_keys {truth.matches.keys}, run_keys {run.matches.keys};
+    std::span<util::uuid128_t const> const truth_keys {truth.matches.keys}, run_keys {run.matches.keys};
     std::span<usearch_distance_t const> const truth_scores {truth.matches.scores}, run_scores {run.matches.scores};
     for (std::size_t query = 0; query != truth.queries.size(); ++query) {
         std::size_t const truth_first = truth_offsets[query], truth_count = truth.matches.counts[query];
@@ -334,7 +334,8 @@ int checkpoints_recall(world_t& world, int argc, char const* const* argv) {
                          positionals[0], true_distances.size(), query, pool);
             return EXIT_FAILURE;
         }
-        if (st::failed(run_distances.resize(min_of(pool, run_distances.size())))) exit_out_of_memory("the distances");
+        if (st::failed(run_distances.resize(util::min_of(pool, run_distances.size()))))
+            exit_out_of_memory("the distances");
         // A match within the depth's true distance counts, so ties at the cut count either way.
         for (std::size_t index = 0; index != depths.size(); ++index) {
             usearch_distance_t const bound = true_distances[depths[index] - 1];

@@ -67,7 +67,7 @@ struct calls_t {
     std::mutex guard;
 
     /** Counted up whenever a running call becomes final, under @c guard; waiters read it bare. */
-    u32_t finished = 0;
+    util::u32_t finished = 0;
 
     /** Calls running on some caller's thread right now, each owned by the frame that runs it. */
     std::vector<call_t const*> running;
@@ -80,15 +80,16 @@ static void run_listed(call_t& call) {
     std::visit([&](auto& arguments) { call.verb(&arguments); }, call.arguments);
     std::lock_guard<std::mutex> lock(calls.guard);
     calls.running.erase(std::find(calls.running.begin(), calls.running.end(), &call));
-    serial_atomic_ref<u32_t>(calls.finished).store_add(1, std::memory_order_release);
+    serial_atomic_ref<util::u32_t>(calls.finished).store_add(1, std::memory_order_release);
 }
 
 void run_holding(call_t call, usearch_outcome_t* outcome) {
     {
         std::lock_guard<std::mutex> lock(calls.guard);
-        if (std::any_of(calls.running.begin(), calls.running.end(),
-                        [&](call_t const* running) { return running->held_executor == call.held_executor; }))
-            return propagate_error(usearch_status_contended_k, outcome, "Another call holds the executor"), void();
+        if (reject_if(std::any_of(calls.running.begin(), calls.running.end(),
+                                  [&](call_t const* running) { return running->held_executor == call.held_executor; }),
+                      usearch_status_contended_k, "Another call holds the executor", outcome))
+            return;
         calls.running.push_back(&call);
     }
     run_listed(call);
@@ -101,9 +102,9 @@ void wait_for_calls_using(void const* handle) {
     };
     std::unique_lock<std::mutex> lock(calls.guard);
     while (std::any_of(calls.running.begin(), calls.running.end(), uses_handle)) {
-        u32_t const finished_before = calls.finished;
+        util::u32_t const finished_before = calls.finished;
         lock.unlock(); // the running call delists itself under this lock
-        serial_atomic_ref<u32_t const> const finished {calls.finished};
+        serial_atomic_ref<util::u32_t const> const finished {calls.finished};
         while (finished.load(std::memory_order_acquire) == finished_before)
             serial_waiter_t {}(&calls.finished, finished_before, 0u, fu::wait_capped_t {});
         lock.lock();
@@ -194,7 +195,7 @@ void usearch_executor_for_nvme(usearch_executor_for_nvme_t* arguments) {
         return;
     if (reject_if(arguments->nvme_class != usearch_nvme_class_unknown_k &&
                       std::ranges::count(nvme_classes_k, arguments->nvme_class) == 0,
-                  usearch_status_invalid_argument_k, "The NVMe class is unknown", outcome))
+                  usearch_status_invalid_argument_k, "Unknown NVMe class", outcome))
         return;
     if (reject_if(arguments->nvme_class == usearch_nvme_class_linux_spdk_k, usearch_status_unsupported_k,
                   "This build carries no SPDK", outcome))
@@ -348,6 +349,20 @@ usearch_status_t usearch_mood_from_name(usearch_bytes_view_t name, usearch_mood_
     return usearch_status_invalid_argument_k;
 }
 
+char const* usearch_predicate_cost_name(usearch_predicate_cost_t cost) {
+    switch (cost) {
+    case usearch_predicate_cost_cheap_k: return "cheap";
+    case usearch_predicate_cost_expensive_k: return "expensive";
+    default: return "unknown";
+    }
+}
+
+usearch_status_t usearch_predicate_cost_from_name(usearch_bytes_view_t name, usearch_predicate_cost_t* cost) {
+    if (named(name, "cheap")) return *cost = usearch_predicate_cost_cheap_k, usearch_status_success_k;
+    if (named(name, "expensive")) return *cost = usearch_predicate_cost_expensive_k, usearch_status_success_k;
+    return usearch_status_invalid_argument_k;
+}
+
 char const* usearch_refine_verdict_name(usearch_refine_verdict_t verdict) {
     switch (verdict) {
     case usearch_refine_none_k: return "none";
@@ -479,39 +494,5 @@ usearch_status_t usearch_nvme_class_from_name(usearch_bytes_view_t name, usearch
 }
 
 #pragma endregion Vocabulary
-
-#pragma region Arrow
-
-usearch_status_t usearch_keys_view_from_arrow(ArrowSchema const*, ArrowArray const*, usearch_keys_view_t*, size_t*) {
-    return usearch_status_unsupported_k;
-}
-usearch_status_t usearch_rows_view_from_arrow(ArrowSchema const*, ArrowArray const*, usearch_rows_view_t*, size_t*) {
-    return usearch_status_unsupported_k;
-}
-usearch_status_t usearch_tape_view_from_arrow(ArrowSchema const*, ArrowArray const*, usearch_tape_view_t*, size_t*) {
-    return usearch_status_unsupported_k;
-}
-usearch_status_t usearch_keys_view_to_arrow(usearch_keys_view_t, size_t, usearch_arena_t, ArrowSchema*,
-                                            ArrowDeviceArray*) {
-    return usearch_status_unsupported_k;
-}
-usearch_status_t usearch_rows_view_to_arrow(usearch_rows_view_t, size_t, usearch_arena_t, ArrowSchema*,
-                                            ArrowDeviceArray*) {
-    return usearch_status_unsupported_k;
-}
-usearch_status_t usearch_tape_view_to_arrow(usearch_tape_view_t, size_t, usearch_arena_t, ArrowSchema*,
-                                            ArrowDeviceArray*) {
-    return usearch_status_unsupported_k;
-}
-usearch_status_t usearch_keys_tape_view_to_arrow(usearch_keys_tape_view_t, size_t, usearch_arena_t, ArrowSchema*,
-                                                 ArrowDeviceArray*) {
-    return usearch_status_unsupported_k;
-}
-usearch_status_t usearch_matches_tape_view_to_arrow(usearch_matches_tape_view_t, size_t, usearch_arena_t, ArrowSchema*,
-                                                    ArrowDeviceArray*) {
-    return usearch_status_unsupported_k;
-}
-
-#pragma endregion Arrow
 
 } // extern "C"

@@ -18,7 +18,8 @@
  */
 #undef NDEBUG // ! A test's oracle must stay live in every build
 
-#include <cstdio> // `std::remove` - a reloaded checkpoint's files
+#include <cstdio>  // `std::remove` - a reloaded checkpoint's files
+#include <cstring> // `std::memcpy`, `std::memcmp` - a query's exact distances, a gathered sequence
 
 #include <algorithm>   // `std::nth_element`
 #include <array>       // `std::array` - the templates
@@ -28,7 +29,7 @@
 #include <string>      // `std::string` - the tape and the generated strings
 #include <string_view> // `std::string_view` - a case label's arguments
 #include <type_traits> // `std::conditional_t` - the GPU kit of a kind
-#include <vector>      // `std::vector` - strings, offsets, matches
+#include <vector>      // `std::vector` - strings, offsets, found distances
 
 #include "usearch/sequence_index.h"
 #include "usearch/sequence/ram_index.hpp"
@@ -49,11 +50,13 @@
 
 #if USEARCH_ARCH_CUDA_
 
+namespace util = unum::usearch::utilities;
+
 /** The library's fatbin of one kind's sequence kits, defined in
  *  @c src/sequence/vram_variants_nvidia.cpp. */
 template <usearch_sequence_metric_t metric_>
 struct sequence_nvidia_fatbin {
-    static us::utilities::bytes_view_t bytes() noexcept;
+    static bytes_view_t bytes() noexcept;
 };
 
 #endif
@@ -64,7 +67,7 @@ struct sequence_nvidia_fatbin {
 template <usearch_sequence_metric_t metric_, gpu_class_t gpu_class_>
 struct sequence_amd_code_object {
     inline static constexpr nk_capability_t capability_k = numkong_capabilities_of(gpu_class_);
-    static us::utilities::bytes_view_t bytes() noexcept;
+    static bytes_view_t bytes() noexcept;
 };
 
 #endif
@@ -151,12 +154,12 @@ template <usearch_sequence_metric_t metric_, sz_capability_t capability_>
 static auto make_sequence_metric(std::size_t staging) {
     if constexpr (metric_ == usearch_sequence_metric_overlap_k) {
         overlap_metric<typename overlap_ladder<capability_>::kit_t> metric;
-        expect_equal(metric.init(staging, vram_overlap_widths_k), status_t::success_k);
+        expect_equal(metric.init(staging, vram_overlap_widths_k), status_code_t::success_k);
         return metric;
     }
     else if constexpr (metric_ == usearch_sequence_metric_needleman_wunsch_k) {
         needleman_wunsch_metric<typename needleman_wunsch_ladder<capability_>::kit_t> metric;
-        expect_equal(metric.init(staging, vram_nucleotide_costs_k), status_t::success_k);
+        expect_equal(metric.init(staging, vram_nucleotide_costs_k), status_code_t::success_k);
         return metric;
     }
     else {
@@ -164,7 +167,7 @@ static auto make_sequence_metric(std::size_t staging) {
                                                          ? sz_levenshtein_runes_k
                                                          : sz_levenshtein_bytes_k;
         levenshtein_metric<typename levenshtein_ladder<symbol_k, capability_>::kit_t> metric;
-        expect_equal(metric.init(staging), status_t::success_k);
+        expect_equal(metric.init(staging), status_code_t::success_k);
         return metric;
     }
 }
@@ -199,7 +202,7 @@ struct nvidia_cells_t {
     /** The sharded collections' shards, their storage on a device alone, and the runtime opening
      *  the executor. */
     template <typename index_type_, typename build_type_>
-    using indexes_t = us::basic::vram_nvidia_indexes<index_type_, us::utilities::uuid128_t, build_type_>;
+    using indexes_t = us::basic::vram_nvidia_indexes<index_type_, util::uuid128_t, build_type_>;
     static cuda_virtual_memory_allocator<byte_t> storage(int device) noexcept {
         return cuda_virtual_memory_allocator<byte_t> {test::gpu_drivers().cuda, device};
     }
@@ -231,7 +234,7 @@ struct amd_cells_t {
     /** The sharded collections' shards, their storage on a device alone, and the runtime opening
      *  the executor. */
     template <typename index_type_, typename build_type_>
-    using indexes_t = us::basic::vram_amd_indexes<index_type_, us::utilities::uuid128_t, build_type_>;
+    using indexes_t = us::basic::vram_amd_indexes<index_type_, util::uuid128_t, build_type_>;
     static hip_virtual_memory_allocator<byte_t> storage(int device) noexcept {
         return hip_virtual_memory_allocator<byte_t> {test::gpu_drivers().hip, device};
     }
@@ -262,10 +265,14 @@ using cell_vendor_t = apple_cells_t;
 
 /** Matches, of @p wanted at most, whose distances reach no further than the @p wanted -th exact
  *  one: ties make the IDs ambiguous, the distances never. */
-static std::size_t matched_count(std::span<sz_size_t const> found, std::vector<sz_size_t> exact, std::size_t wanted) {
-    std::nth_element(exact.begin(), exact.begin() + (wanted - 1), exact.end());
+static std::size_t matched_count(std::span<sz_size_t const> found, nk::vector_view<sz_size_t> exact,
+                                 std::size_t wanted) {
+    nk::vector<sz_size_t> ranked = make_vector<sz_size_t>(exact.size());
+    std::memcpy(ranked.data(), exact.data(), exact.size() * sizeof(sz_size_t));
+    std::span<sz_size_t> const nearest = to_writable_span(ranked);
+    std::nth_element(nearest.begin(), nearest.begin() + (wanted - 1), nearest.end());
     std::size_t matched = 0;
-    for (sz_size_t const distance : found) matched += distance <= exact[wanted - 1];
+    for (sz_size_t const distance : found) matched += distance <= nearest[wanted - 1];
     return min_of(matched, wanted);
 }
 
@@ -288,7 +295,7 @@ template <usearch_sequence_metric_t metric_, typename node_id_type_ = u32_t>
 static void test_sequence_vram_collection(u64_t seed, cell_vendor_t::executor_t& executor, std::size_t count,
                                           std::size_t length, std::size_t queries_count,
                                           recall_reference_t reference = recall_reference_t::ram_index_k) {
-    using ram_index_t = ram_index<us::utilities::uuid128_t, u32_t>;
+    using ram_index_t = ram_index<util::uuid128_t, u32_t>;
     using vram_index_t = typename cell_vendor_t::template index_t<metric_, node_id_type_>;
     constexpr std::size_t wanted_k = 10, expansion_k = 64, batches_k = 3, origin_k = 3;
     checks_held_t const held;
@@ -302,12 +309,13 @@ static void test_sequence_vram_collection(u64_t seed, cell_vendor_t::executor_t&
     byte_t const* const tape_bytes = reinterpret_cast<byte_t const*>(tape.data());
 
     // The exact distances of every query to every stored string, through the serial kit.
-    std::vector<std::vector<sz_size_t>> exact(queries_count, std::vector<sz_size_t>(count));
+    nk::matrix<sz_size_t> exact = make_matrix<sz_size_t>(queries_count, count);
     auto serial_metric = make_sequence_metric<metric_, sz_cap_serial_k>(count);
     for (std::size_t query = 0; query != queries_count; ++query) {
         serial_metric.reset(std::string_view {strings[count + query]});
         for (std::size_t entry = 0; entry != count; ++entry) serial_metric.push(std::string_view {strings[entry]});
-        serial_metric.drain(exact[query], us::basic::unbounded_radius<sz_size_t>());
+        nk::vector_span<sz_size_t> const distances = exact.span().row(query).as_vector();
+        serial_metric.drain(to_writable_span(distances), us::basic::unbounded_radius<sz_size_t>());
     }
 
     // The RAM index over the same sequences, at the same breadth, which an exact-distance reference
@@ -321,21 +329,21 @@ static void test_sequence_vram_collection(u64_t seed, cell_vendor_t::executor_t&
         for (std::size_t entry = 0; entry != count; ++entry) {
             ram_index_t::value_t value;
             [[maybe_unused]] sz::status_t const assigned = value.assign(strings[entry]);
-            us::utilities::uuid128_t const key = uuid_of(entry);
+            util::uuid128_t const key = uuid_of(entry);
             expect_equal(ram_index
                              .insert({&value, 1}, {&key, 1}, metric, {}, ram_context,
                                      us::basic::keep_diverse_t {connectivity_32_k}, {expansion_k})
                              .status,
-                         status_t::success_k);
+                         status_code_t::success_k);
         }
         for (std::size_t query = 0; query != queries_count; ++query) {
             expect_equal(
                 ram_index.search(std::string_view {strings[count + query]}, {expansion_k}, metric, ram_context).status,
-                status_t::success_k);
+                status_code_t::success_k);
             std::vector<sz_size_t> found;
             for (std::size_t rank = 0; rank != min_of(wanted_k, ram_context.results.size()); ++rank)
                 found.push_back(ram_context.results[rank].distance);
-            ram_matched += matched_count(found, exact[query], wanted_k);
+            ram_matched += matched_count(found, exact.view().row(query).as_vector(), wanted_k);
         }
     }
 
@@ -346,63 +354,62 @@ static void test_sequence_vram_collection(u64_t seed, cell_vendor_t::executor_t&
         u32_t widths[std::size(vram_overlap_widths_k)];
         for (std::size_t window = 0; window != std::size(widths); ++window)
             widths[window] = static_cast<u32_t>(vram_overlap_widths_k[window]);
-        expect_equal(vram_index.parameters(widths), status_t::success_k);
+        expect_equal(vram_index.parameters(widths), status_code_t::success_k);
     }
     if constexpr (metric_ == usearch_sequence_metric_needleman_wunsch_k)
-        expect_equal(vram_index.parameters(vram_nucleotide_costs_k), status_t::success_k);
+        expect_equal(vram_index.parameters(vram_nucleotide_costs_k), status_code_t::success_k);
     expect_equal(vram_index.reserve({count, connectivity_32_k, offsets[count] - offsets[0]}).status,
-                 status_t::success_k);
+                 status_code_t::success_k);
     typename vram_index_t::insert_config_t const insert_config {expansion_k};
-    std::vector<us::utilities::uuid128_t> keys(count);
+    nk::vector<util::uuid128_t> keys = make_vector<util::uuid128_t>(count);
     for (std::size_t entry = 0; entry != count; ++entry) keys[entry] = uuid_of(entry);
     for (std::size_t batch = 0; batch != batches_k && held(); ++batch) {
         std::size_t const first = count * batch / batches_k, bound = count * (batch + 1) / batches_k;
         std::span<std::size_t const> const batch_offsets {offsets.data() + first, bound - first + 1};
         expect_equal(executor.reserve(vram_index.traversal_memory_usage(
                          tape_view<byte_t const> {tape_bytes, batch_offsets}, insert_config)),
-                     status_t::success_k);
+                     status_code_t::success_k);
         typename vram_index_t::traversal_context_t context {cell_vendor_t::arena(executor)};
         auto const [inserted, status] = vram_index.insert({keys.data() + first, bound - first},
                                                           {tape_bytes, batch_offsets}, context, insert_config);
-        expect_equal(status, status_t::success_k);
+        expect_equal(status, status_code_t::success_k);
         expect_equal(inserted.first_id, first);
         expect_equal(inserted.new_size, bound);
         expect_true(inserted.computed_distances > 0);
     }
     expect_equal(vram_index.size(), count);
 
-    std::vector<node_id_type_> ids(queries_count * wanted_k);
-    std::vector<f32_t> distances(queries_count * wanted_k);
+    nk::matrix<node_id_type_> ids = make_matrix<node_id_type_>(queries_count, wanted_k);
+    nk::matrix<f32_t> distances = make_matrix<f32_t>(queries_count, wanted_k);
     std::span<std::size_t const> const query_offsets {offsets.data() + count, queries_count + 1};
     typename vram_index_t::search_config_t const search_config {expansion_k, wanted_k};
     expect_equal(executor.reserve(vram_index.traversal_memory_usage(tape_view<byte_t const> {tape_bytes, query_offsets},
                                                                     search_config)),
-                 status_t::success_k);
+                 status_code_t::success_k);
     typename vram_index_t::traversal_context_t context {cell_vendor_t::arena(executor)};
     if (held())
-        expect_equal(vram_index
-                         .search({tape_bytes, query_offsets}, {ids.data(), {queries_count, wanted_k}},
-                                 {distances.data(), {queries_count, wanted_k}}, search_config, context)
-                         .status,
-                     status_t::success_k);
+        expect_equal(
+            vram_index.search({tape_bytes, query_offsets}, ids.span(), distances.span(), search_config, context).status,
+            status_code_t::success_k);
     std::size_t vram_matched = 0;
     error_stats_t distance_errors;
     for (std::size_t query = 0; query != queries_count && held(); ++query) {
         std::vector<sz_size_t> found;
         for (std::size_t rank = 0; rank != wanted_k; ++rank) {
-            node_id_type_ const id = ids[query * wanted_k + rank];
+            node_id_type_ const id = ids(query, rank);
             if (id == (std::numeric_limits<node_id_type_>::max)()) break;
             // The candidates keep 31 bits of a float, so the overlap kind's fixed point loses a
             // mantissa bit more on the device.
-            f32_t const distance = distances[query * wanted_k + rank];
+            f32_t const distance = distances(query, rank);
             if (!expect_true(id < count)) break;
-            distance_errors.add(distance, static_cast<f32_t>(exact[query][id]));
-            expect_true(found.empty() || found.back() <= exact[query][id]);
-            expect_true(vram_index.key_of(id).value == keys[id]);
-            found.push_back(exact[query][id]);
+            distance_errors.add(distance, static_cast<f32_t>(exact(query, id)));
+            expect_true(found.empty() || found.back() <= exact(query, id));
+            auto const [stored_key, key_status] = vram_index.key_of(id);
+            expect_true(succeeded(key_status) && stored_key == keys[id]);
+            found.push_back(exact(query, id));
         }
         expect_equal(found.size(), wanted_k);
-        vram_matched += matched_count(found, exact[query], wanted_k);
+        vram_matched += matched_count(found, exact.view().row(query).as_vector(), wanted_k);
     }
     f64_t const ram_recall = static_cast<f64_t>(ram_matched) / (queries_count * wanted_k);
     f64_t const vram_recall = static_cast<f64_t>(vram_matched) / (queries_count * wanted_k);
@@ -440,14 +447,14 @@ static void expect_sequence_vram_reloaded(indexes_type_& saved, std::size_t shar
     std::string const second_path = scratch.path("resaved.safegraphs");
     save_config_t config;
     config.synchronization = synchronization_t::immutable_k;
-    expect_equal(saved.save(first_path, codec_t {}, executor, config, "levenshtein"), status_t::success_k);
+    expect_equal(saved.save(first_path, codec_t {}, executor, config, "levenshtein"), status_code_t::success_k);
     indexes_type_ loaded {forkunion_allocator_t {no_memory_domain_k}, sequence_vram_shards_t {}};
     loaded.bound_shards(shard_capacity);
-    expect_equal(loaded.emplace(executor.stream(0).device), status_t::success_k);
+    expect_equal(loaded.emplace(executor.stream(0).device), status_code_t::success_k);
     expect_equal(loaded.load(std::string_view {first_path}, codec_t {}, executor, load_config_t {}, connectivity_32_k),
-                 status_t::success_k);
+                 status_code_t::success_k);
     expect_equal(loaded.size(), saved.size());
-    expect_equal(loaded.save(second_path, codec_t {}, executor, config, "levenshtein"), status_t::success_k);
+    expect_equal(loaded.save(second_path, codec_t {}, executor, config, "levenshtein"), status_code_t::success_k);
     std::size_t const parts = saved.shards_count();
     growing_buffer<char> first_part {global_allocator}, second_part {global_allocator};
     for (std::size_t part = 0; part != parts; ++part) {
@@ -455,6 +462,7 @@ static void expect_sequence_vram_reloaded(indexes_type_& saved, std::size_t shar
                                                                       parts);
         auto const [second_named, second_status] = safegraphs_part_path(second_part, safegraphs_stem(second_path), part,
                                                                         parts);
+        expect_true(succeeded(first_status) && succeeded(second_status));
         std::string const first_name {parts == 1 ? std::string_view {first_path} : first_named};
         std::string const second_name {parts == 1 ? std::string_view {second_path} : second_named};
         auto const [first_mapping, first_map_status] = mapped_file_t::read(first_name);
@@ -484,75 +492,71 @@ static void test_sequence_vram_sharded(u64_t seed, cell_vendor_t::executor_t& ex
     byte_t const* const tape_bytes = reinterpret_cast<byte_t const*>(tape.data());
     tape_view<byte_t const> const sequences {tape_bytes, {offsets.data(), entries_k + 1}};
     tape_view<byte_t const> const queries {tape_bytes, {offsets.data() + entries_k, queries_k + 1}};
-    std::vector<std::vector<sz_size_t>> exact(queries_k, std::vector<sz_size_t>(entries_k));
+    nk::matrix<sz_size_t> exact = make_matrix<sz_size_t>(queries_k, entries_k);
     auto serial_metric = make_sequence_metric<usearch_sequence_metric_levenshtein_bytes_k, sz_cap_serial_k>(entries_k);
     for (std::size_t query = 0; query != queries_k; ++query) {
         serial_metric.reset(std::string_view {strings[entries_k + query]});
         for (std::size_t entry = 0; entry != entries_k; ++entry) serial_metric.push(std::string_view {strings[entry]});
-        serial_metric.drain(exact[query], us::basic::unbounded_radius<sz_size_t>());
+        nk::vector_span<sz_size_t> const distances = exact.span().row(query).as_vector();
+        serial_metric.drain(to_writable_span(distances), us::basic::unbounded_radius<sz_size_t>());
     }
-    std::vector<us::utilities::uuid128_t> keys(entries_k);
+    nk::vector<util::uuid128_t> keys = make_vector<util::uuid128_t>(entries_k);
     for (std::size_t entry = 0; entry != entries_k; ++entry) keys[entry] = uuid_of(entry);
 
     indexes_t indexes {forkunion_allocator_t {no_memory_domain_k}, sequence_vram_shards_t {}};
     indexes.bound_shards(shard_capacity_k);
-    expect_equal(indexes.emplace(executor.stream(0).device), status_t::success_k);
-    expect_equal(indexes.emplace(executor.stream(0).device), status_t::success_k);
-    expect_equal(indexes.reserve({entries_k, connectivity_32_k, offsets[entries_k]}).status, status_t::success_k);
-    auto const [inserted, insert_status] = indexes.insert(keys, sequences, executor, {expansion_k});
-    expect_equal(insert_status, status_t::success_k);
+    expect_equal(indexes.emplace(executor.stream(0).device), status_code_t::success_k);
+    expect_equal(indexes.emplace(executor.stream(0).device), status_code_t::success_k);
+    expect_equal(indexes.reserve({entries_k, connectivity_32_k, offsets[entries_k]}).status, status_code_t::success_k);
+    auto const [inserted, insert_status] = indexes.insert(to_span(keys), sequences, executor, {expansion_k});
+    expect_equal(insert_status, status_code_t::success_k);
     expect_true(inserted.computed_distances > 0);
     expect_equal(indexes.shards_count(), std::size_t {6});
     expect_equal(indexes.size(), entries_k);
     std::size_t miscounted = 0;
-    for (us::utilities::uuid128_t const& key : keys) miscounted += indexes.count(key) != 1;
+    for (util::uuid128_t const& key : keys) miscounted += indexes.count(key) != 1;
     expect_equal(miscounted, std::size_t {0});
     auto const [health, health_status] = indexes.health(executor);
-    expect_equal(health_status, status_t::success_k);
+    expect_equal(health_status, status_code_t::success_k);
     expect_equal(health.audited_nodes, entries_k);
     expect_equal(health.reachable_nodes, entries_k);
 
-    std::vector<us::utilities::uuid128_t> found_keys(queries_k * wanted_k);
-    std::vector<f32_t> found_distances(queries_k * wanted_k);
-    std::vector<std::size_t> counts(queries_k);
+    nk::matrix<util::uuid128_t> found_keys = make_matrix<util::uuid128_t>(queries_k, wanted_k);
+    nk::matrix<f32_t> found_distances = make_matrix<f32_t>(queries_k, wanted_k);
+    nk::vector<std::size_t> counts = make_vector<std::size_t>(queries_k);
     typename index_t::search_config_t const search_config {expansion_k, wanted_k};
     expect_equal(indexes
-                     .search(queries, {found_keys.data(), {queries_k, wanted_k}},
-                             nk::matrix_span<f32_t> {found_distances.data(), {queries_k, wanted_k}}, counts,
+                     .search(queries, found_keys.span(), found_distances.span(), to_writable_span(counts),
                              search_config, executor)
                      .status,
-                 status_t::success_k);
+                 status_code_t::success_k);
     std::size_t sharded_matched = 0;
     for (std::size_t query = 0; query != queries_k; ++query) {
         std::vector<sz_size_t> found;
         for (std::size_t rank = 0; rank != counts[query]; ++rank)
-            found.push_back(static_cast<sz_size_t>(found_distances[query * wanted_k + rank]));
-        sharded_matched += matched_count(found, exact[query], wanted_k);
+            found.push_back(static_cast<sz_size_t>(found_distances(query, rank)));
+        sharded_matched += matched_count(found, exact.view().row(query).as_vector(), wanted_k);
     }
 
     index_t single {cell_vendor_t::storage(executor, executor.device(0))};
-    expect_equal(single.reserve({0, connectivity_32_k, 0}).status, status_t::success_k);
+    expect_equal(single.reserve({0, connectivity_32_k, 0}).status, status_code_t::success_k);
     typename index_t::insert_config_t const insert_config {expansion_k};
     expect_equal(executor.reserve(max_of(single.traversal_memory_usage(sequences, insert_config),
                                          single.traversal_memory_usage(queries, search_config))),
-                 status_t::success_k);
+                 status_code_t::success_k);
     typename index_t::traversal_context_t context {cell_vendor_t::arena(executor)};
-    expect_equal(single.insert(keys, sequences, context, insert_config).status, status_t::success_k);
-    for (us::utilities::uuid128_t const& key : keys) miscounted += single.count(key) != 1;
+    expect_equal(single.insert(to_span(keys), sequences, context, insert_config).status, status_code_t::success_k);
+    for (util::uuid128_t const& key : keys) miscounted += single.count(key) != 1;
     expect_equal(miscounted, std::size_t {0});
-    std::vector<u32_t> ids(queries_k * wanted_k);
-    expect_equal(single
-                     .search(queries, {ids.data(), {queries_k, wanted_k}},
-                             {found_distances.data(), {queries_k, wanted_k}}, search_config, context)
-                     .status,
-                 status_t::success_k);
+    nk::matrix<u32_t> ids = make_matrix<u32_t>(queries_k, wanted_k);
+    expect_equal(single.search(queries, ids.span(), found_distances.span(), search_config, context).status,
+                 status_code_t::success_k);
     std::size_t single_matched = 0;
     for (std::size_t query = 0; query != queries_k; ++query) {
         std::vector<sz_size_t> found;
-        for (std::size_t rank = 0;
-             rank != wanted_k && ids[query * wanted_k + rank] != (std::numeric_limits<u32_t>::max)(); ++rank)
-            found.push_back(static_cast<sz_size_t>(found_distances[query * wanted_k + rank]));
-        single_matched += matched_count(found, exact[query], wanted_k);
+        for (std::size_t rank = 0; rank != wanted_k && ids(query, rank) != (std::numeric_limits<u32_t>::max)(); ++rank)
+            found.push_back(static_cast<sz_size_t>(found_distances(query, rank)));
+        single_matched += matched_count(found, exact.view().row(query).as_vector(), wanted_k);
     }
     expect_true(sharded_matched + rewrite_recall_margin_k * queries_k * wanted_k >= single_matched);
     expect_sequence_vram_reloaded(indexes, shard_capacity_k, executor);
@@ -576,21 +580,21 @@ static void test_sequence_vram_rounds(u64_t seed, cell_vendor_t::executor_t& exe
     for (std::string const& symbols : strings) tape += symbols, offsets.push_back(tape.size());
     tape_view<byte_t const> const sequences {reinterpret_cast<byte_t const*>(tape.data()),
                                              {offsets.data(), entries_k + 1}};
-    std::vector<us::utilities::uuid128_t> keys(entries_k);
+    nk::vector<util::uuid128_t> keys = make_vector<util::uuid128_t>(entries_k);
     for (std::size_t entry = 0; entry != entries_k; ++entry) keys[entry] = uuid_of(entry);
 
     auto placed = [&]() {
         auto indexes = std::make_unique<indexes_t>(forkunion_allocator_t {no_memory_domain_k},
                                                    sequence_vram_shards_t {});
-        expect_equal(indexes->emplace(executor.stream(0).device), status_t::success_k);
-        expect_equal(indexes->emplace(executor.stream(0).device), status_t::success_k);
+        expect_equal(indexes->emplace(executor.stream(0).device), status_code_t::success_k);
+        expect_equal(indexes->emplace(executor.stream(0).device), status_code_t::success_k);
         return indexes;
     };
     std::unique_ptr<indexes_t> const source = placed(), first = placed(), second = placed(), lone = placed();
-    expect_equal(source->reserve({entries_k, connectivity_32_k, offsets[entries_k]}).status, status_t::success_k);
-    expect_equal(source->insert(keys, sequences, executor, {expansion_k}).status, status_t::success_k);
+    expect_equal(source->reserve({entries_k, connectivity_32_k, offsets[entries_k]}).status, status_code_t::success_k);
+    expect_equal(source->insert(to_span(keys), sequences, executor, {expansion_k}).status, status_code_t::success_k);
     auto narrow = std::make_unique<indexes_t>(forkunion_allocator_t {no_memory_domain_k}, sequence_vram_shards_t {});
-    expect_equal(narrow->emplace(executor.stream(0).device), status_t::success_k);
+    expect_equal(narrow->emplace(executor.stream(0).device), status_code_t::success_k);
 
     // The second source holds keys of its own, so a refusal that moved it would show in its size.
     std::vector<std::string> const lone_strings = generate_nucleotides(lone_k, 100, seed + 1);
@@ -599,24 +603,25 @@ static void test_sequence_vram_rounds(u64_t seed, cell_vendor_t::executor_t& exe
     for (std::string const& symbols : lone_strings) lone_tape += symbols, lone_offsets.push_back(lone_tape.size());
     tape_view<byte_t const> const lone_sequences {reinterpret_cast<byte_t const*>(lone_tape.data()),
                                                   {lone_offsets.data(), lone_k + 1}};
-    std::vector<us::utilities::uuid128_t> lone_keys(lone_k);
+    nk::vector<util::uuid128_t> lone_keys = make_vector<util::uuid128_t>(lone_k);
     for (std::size_t entry = 0; entry != lone_k; ++entry) lone_keys[entry] = uuid_of(entries_k + entry);
-    expect_equal(lone->reserve({lone_k, connectivity_32_k, lone_offsets[lone_k]}).status, status_t::success_k);
-    expect_equal(lone->insert(lone_keys, lone_sequences, executor, {expansion_k}).status, status_t::success_k);
+    expect_equal(lone->reserve({lone_k, connectivity_32_k, lone_offsets[lone_k]}).status, status_code_t::success_k);
+    expect_equal(lone->insert(to_span(lone_keys), lone_sequences, executor, {expansion_k}).status,
+                 status_code_t::success_k);
 
     {
         auto [plan, plan_status] = source->plan_refine({}, executor);
-        expect_equal(plan_status, status_t::success_k);
-        expect_equal(plan.run(executor), status_t::success_k);
-        us::utilities::refine_report_t const round = plan.running();
-        expect_true(round.verdict == us::utilities::refine_verdict_t::improved_k ||
-                    round.verdict == us::utilities::refine_verdict_t::converged_k);
+        expect_equal(plan_status, status_code_t::success_k);
+        expect_equal(plan.run(executor), status_code_t::success_k);
+        util::refine_report_t const round = plan.running();
+        expect_true(round.verdict == util::refine_verdict_t::improved_k ||
+                    round.verdict == util::refine_verdict_t::converged_k);
         expect_true(round.neighborhoods != 0 && round.opening.audited_nodes == entries_k);
         plan.next_round();
-        expect_equal(plan.run(executor), status_t::success_k);
-        expect_equal(plan.finish(executor).status, status_t::success_k);
-        expect_equal(plan.run(executor), status_t::uninitialized_k);
-        expect_equal(plan.finish(executor).status, status_t::uninitialized_k);
+        expect_equal(plan.run(executor), status_code_t::success_k);
+        expect_equal(plan.finish(executor).status, status_code_t::success_k);
+        expect_equal(plan.run(executor), status_code_t::uninitialized_k);
+        expect_equal(plan.finish(executor).status, status_code_t::uninitialized_k);
     }
 
     using listed_t = std::span<indexes_t* const>;
@@ -627,36 +632,36 @@ static void test_sequence_vram_rounds(u64_t seed, cell_vendor_t::executor_t& exe
     indexes_t* const one[1] = {lone.get()};
     indexes_t* const uneven[2] = {first.get(), narrow.get()};
     expect_equal(source->plan_reshard(listed_t {sources}, listed_t {}, {}, executor).status,
-                 status_t::invalid_argument_k);
+                 status_code_t::invalid_argument_k);
     expect_equal(source->plan_reshard(listed_t {sources}, listed_t {repeated}, {}, executor).status,
-                 status_t::invalid_argument_k);
+                 status_code_t::invalid_argument_k);
     expect_equal(source->plan_reshard(listed_t {sources}, listed_t {targets}, {{}, 16, 0}, executor).status,
-                 status_t::unsupported_k);
+                 status_code_t::unsupported_k);
     expect_equal(source->plan_reshard(listed_t {sources}, listed_t {one}, {}, executor).status,
-                 status_t::config_mismatch_k);
+                 status_code_t::config_mismatch_k);
     expect_equal(source->plan_reshard(listed_t {several}, listed_t {uneven}, {}, executor).status,
-                 status_t::config_mismatch_k);
+                 status_code_t::config_mismatch_k);
     expect_equal(source->size(), entries_k);
     expect_equal(lone->size(), lone_k);
 
     auto const [cut, cut_status] = source->reshard(listed_t {several}, listed_t {targets}, {}, executor);
-    expect_equal(cut_status, status_t::success_k);
-    expect_true(cut.verdict != us::utilities::refine_verdict_t::none_k && cut.neighborhoods != 0);
+    expect_equal(cut_status, status_code_t::success_k);
+    expect_true(cut.verdict != util::refine_verdict_t::none_k && cut.neighborhoods != 0);
     expect_equal(source->size() + lone->size(), std::size_t {0});
     expect_equal(first->size() + second->size(), entries_k + lone_k);
 
     // The first target cuts back into the emptied sources, one source into several targets.
     indexes_t* const back[1] = {first.get()};
     auto const [recut, recut_status] = first->reshard(listed_t {back}, listed_t {several}, {}, executor);
-    expect_equal(recut_status, status_t::success_k);
+    expect_equal(recut_status, status_code_t::success_k);
     expect_equal(first->size(), std::size_t {0});
     expect_equal(source->size() + lone->size() + second->size(), entries_k + lone_k);
     std::size_t miscounted = 0;
-    auto const landed = [&](us::utilities::uuid128_t const& key) {
+    auto const landed = [&](util::uuid128_t const& key) {
         return source->count(key) + lone->count(key) + second->count(key);
     };
-    for (us::utilities::uuid128_t const& key : keys) miscounted += landed(key) != 1;
-    for (us::utilities::uuid128_t const& key : lone_keys) miscounted += landed(key) != 1;
+    for (util::uuid128_t const& key : keys) miscounted += landed(key) != 1;
+    for (util::uuid128_t const& key : lone_keys) miscounted += landed(key) != 1;
     expect_equal(miscounted, std::size_t {0});
 }
 
@@ -673,27 +678,27 @@ static void test_sequence_vram_cut_refused(u64_t seed, cell_vendor_t::executor_t
     for (std::string const& symbols : strings) tape += symbols, offsets.push_back(tape.size());
     tape_view<byte_t const> const sequences {reinterpret_cast<byte_t const*>(tape.data()),
                                              {offsets.data(), entries_k + 1}};
-    std::vector<us::utilities::uuid128_t> keys(entries_k);
+    nk::vector<util::uuid128_t> keys = make_vector<util::uuid128_t>(entries_k);
     for (std::size_t entry = 0; entry != entries_k; ++entry) keys[entry] = uuid_of(entry);
 
     indexes_t source {forkunion_allocator_t {no_memory_domain_k}, sequence_vram_shards_t {}};
     indexes_t lone {forkunion_allocator_t {no_memory_domain_k}, sequence_vram_shards_t {}};
     for (indexes_t* placed : {&source, &lone}) {
-        expect_equal(placed->emplace(executor.stream(0).device), status_t::success_k);
-        expect_equal(placed->emplace(executor.stream(0).device), status_t::success_k);
+        expect_equal(placed->emplace(executor.stream(0).device), status_code_t::success_k);
+        expect_equal(placed->emplace(executor.stream(0).device), status_code_t::success_k);
     }
-    expect_equal(source.reserve({entries_k, connectivity_32_k, offsets[entries_k]}).status, status_t::success_k);
-    expect_equal(source.insert(keys, sequences, executor, {expansion_k}).status, status_t::success_k);
+    expect_equal(source.reserve({entries_k, connectivity_32_k, offsets[entries_k]}).status, status_code_t::success_k);
+    expect_equal(source.insert(to_span(keys), sequences, executor, {expansion_k}).status, status_code_t::success_k);
 
     indexes_t* const sources[1] = {&source};
     indexes_t* const targets[1] = {&lone};
     expect_equal(
         source.plan_reshard(std::span<indexes_t* const> {sources}, std::span<indexes_t* const> {targets}, {}, executor)
             .status,
-        status_t::config_mismatch_k);
+        status_code_t::config_mismatch_k);
     expect_equal(source.size(), entries_k);
     std::size_t miscounted = 0;
-    for (us::utilities::uuid128_t const& key : keys) miscounted += source.count(key) != 1;
+    for (util::uuid128_t const& key : keys) miscounted += source.count(key) != 1;
     expect_equal(miscounted, std::size_t {0});
 }
 
@@ -707,7 +712,7 @@ static void test_sequence_vram_get(u64_t seed, std::int32_t ordinal) {
     std::string tape;
     std::vector<std::size_t> offsets {0};
     for (std::string const& symbols : strings) tape += symbols, offsets.push_back(tape.size());
-    std::vector<usearch_key_t> keys(entries_k);
+    nk::vector<usearch_key_t> keys = make_vector<usearch_key_t>(entries_k);
     for (std::size_t entry = 0; entry != entries_k; ++entry) keys[entry] = us::tools::key_of_offset(seed, entry);
 
     usearch_outcome_t outcome {};

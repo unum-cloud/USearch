@@ -66,7 +66,7 @@ struct positions_handmade_t {
 
 struct positions_fixture_t {
     using index_t =
-        geospatial::ram_index<us::utilities::uuid128_t, flaky_waiter_t, fu::standard_atomic_ref, counting_allocator_t>;
+        geospatial::ram_index<util::uuid128_t, flaky_waiter_t, fu::standard_atomic_ref, counting_allocator_t>;
     using value_t = typename index_t::value_t;
     using allocator_t = typename index_t::allocator_t;
     using metric_t = chord_metric_t;
@@ -76,8 +76,8 @@ struct positions_fixture_t {
     }
     static metric_t make_metric() { return make_chord_metric(); }
     static earth_observation_codec_t make_codec() { return {}; }
-    static us::utilities::uuid128_t make_key(std::size_t ordinal) {
-        return std::bit_cast<us::utilities::uuid128_t>(
+    static util::uuid128_t make_key(std::size_t ordinal) {
+        return std::bit_cast<util::uuid128_t>(
             std::array<u64_t, 2> {split_mix_bits(ordinal ^ 0x6E0ull), 0x6E05ull ^ ordinal});
     }
     static nk_u64_t oracle(earth_observation_t const& query, earth_observation_t const& stored) noexcept {
@@ -279,13 +279,13 @@ static void test_positions_long_links(u64_t seed) {
             index_t::node_id_t const node = assigned_ids[probe];
             auto const before = index.degree_of(node);
             expect_true(bool(before));
-            expect_equal(draw_long_links(index, node, draws_k, metric, context, generator), status_t::success_k);
+            expect_equal(draw_long_links(index, node, draws_k, metric, context, generator), status_code_t::success_k);
             auto const after = index.degree_of(node);
             expect_true(bool(after));
             expect_true(after.value >= before.value);
             expect_true(after.value <= before.value + draws_k);
             us::basic::ram_cursor<index_t> cursor {index, counting_allocator_t {ledger}};
-            expect_equal(cursor.seek(node), status_t::success_k);
+            expect_equal(cursor.seek(node), status_code_t::success_k);
             for (index_t::node_id_t const neighbor : cursor.neighbors()) {
                 expect_true(neighbor != node);
                 expect_true(static_cast<std::size_t>(neighbor) < index.size());
@@ -302,8 +302,10 @@ static void test_positions_long_links(u64_t seed) {
         std::vector<index_t::node_id_t> assigned_ids;
         basic_build<positions_fixture_t>(index, metric, values, assigned_ids, context, surface_keep_octants_t {});
         split_mix_generator_t generator {stream_key(seed, "lone node")};
-        expect_equal(draw_long_links(index, assigned_ids[0], draws_k, metric, context, generator), status_t::success_k);
-        expect_equal(index.degree_of(assigned_ids[0]).value, 0u);
+        expect_equal(draw_long_links(index, assigned_ids[0], draws_k, metric, context, generator),
+                     status_code_t::success_k);
+        auto const [lone_degree, degree_status] = index.degree_of(assigned_ids[0]);
+        expect_true(succeeded(degree_status) && lone_degree == 0);
     }
     expect_equal(ledger.live_bytes, std::ptrdiff_t {0});
 }
@@ -433,10 +435,10 @@ static void test_observations_admits() {
 struct positions_nvme_fixture_t {
     using ram_fixture_t = positions_fixture_t;
     using shard_index_t =
-        geospatial::ram_index<us::utilities::uuid128_t, flaky_waiter_t, fu::standard_atomic_ref, forkunion_allocator_t>;
+        geospatial::ram_index<util::uuid128_t, flaky_waiter_t, fu::standard_atomic_ref, forkunion_allocator_t>;
     template <typename engine_type_, typename node_id_type_ = u32_t>
-    using nvme_t = us::basic::nvme_indexes<earth_observation_codec_t, us::utilities::uuid128_t, node_id_type_, nk_u64_t,
-                                           engine_type_>;
+    using nvme_t =
+        us::basic::nvme_indexes<earth_observation_codec_t, util::uuid128_t, node_id_type_, nk_u64_t, engine_type_>;
     using scratch_metric_t = chord_metric<i32_serial_geospatial_kit_t, basic_nvme_scratch_t>;
     using query_t = earth_observation_t;
     static constexpr std::string_view metric_token_k = "chord";
@@ -469,10 +471,10 @@ struct positions_nvme_fixture_t {
         return {std::move(metric), ready};
     }
     expected<query_t> query_of(std::size_t entry, basic_nvme_scratch_t const&) const noexcept {
-        return {values[entry], status_t::success_k};
+        return {values[entry], status_code_t::success_k};
     }
     static expected<query_t> stored_query(earth_observation_t const& stored, basic_nvme_scratch_t const&) noexcept {
-        return {stored, status_t::success_k};
+        return {stored, status_code_t::success_k};
     }
     bool matches(std::size_t entry, earth_observation_t const& view) const noexcept { return view == values[entry]; }
 };
@@ -481,10 +483,10 @@ struct positions_nvme_fixture_t {
  *  own position. */
 static void test_positions_sample(u64_t seed) {
     using index_t =
-        geospatial::ram_index<us::utilities::uuid128_t, flaky_waiter_t, fu::standard_atomic_ref, forkunion_allocator_t>;
+        geospatial::ram_index<util::uuid128_t, flaky_waiter_t, fu::standard_atomic_ref, forkunion_allocator_t>;
     constexpr std::size_t entries_k = basic_recall_samples_k * basic_connectivity_k;
     allocation_ledger_t ledger;
-    std::vector<us::utilities::uuid128_t> keys(entries_k);
+    std::vector<util::uuid128_t> keys(entries_k);
     for (std::size_t entry = 0; entry != entries_k; ++entry) keys[entry] = positions_fixture_t::make_key(entry);
     auto make_values = [&] {
         return positions_fixture_t::make_values(entries_k, stream_key(seed, "plural_sample"),
@@ -492,8 +494,7 @@ static void test_positions_sample(u64_t seed) {
     };
     chord_metric_t metric = make_chord_metric();
     return test_basic_sharded_sample<us::basic::ram_indexes<index_t>>(
-        seed, metric, std::span<us::utilities::uuid128_t const> {keys}, make_values,
-        positions_nvme_fixture_t::coordinates_t {});
+        seed, metric, std::span<util::uuid128_t const> {keys}, make_values, positions_nvme_fixture_t::coordinates_t {});
 }
 
 /** Containment over storage finds what the radius walk finds in RAM: for every probe and radius, a
@@ -501,7 +502,7 @@ static void test_positions_sample(u64_t seed) {
 static void test_positions_nvme_within(u64_t seed) {
     using scratch_t = arena_allocator<byte_t, forkunion_allocator_t>;
     using metric_t = chord_metric<i32_serial_geospatial_kit_t, scratch_t>;
-    using nvme_indexes_t = us::basic::nvme_indexes<earth_observation_codec_t, us::utilities::uuid128_t, u32_t, nk_u64_t,
+    using nvme_indexes_t = us::basic::nvme_indexes<earth_observation_codec_t, util::uuid128_t, u32_t, nk_u64_t,
                                                    blocking_files_engine<fu::standard_yield_t>>;
     using index_t = positions_fixture_t::index_t;
     using key_t = index_t::key_t;
@@ -532,13 +533,15 @@ static void test_positions_nvme_within(u64_t seed) {
             radius_result_t const complete = within(index, queries[query].position, radius, radius_margin_t::spanner_k,
                                                     widest_list, metric, context);
             expect_true(bool(complete));
-            for (std::size_t position = 0; position != complete.count; ++position)
-                walked[query].push_back(index.key_of(context.results[position].node_id).value);
+            for (std::size_t position = 0; position != complete.count; ++position) {
+                auto const [walked_key, key_status] = index.key_of(context.results[position].node_id);
+                if (expect_true(succeeded(key_status))) walked[query].push_back(walked_key);
+            }
         }
         serial_executor_t serial;
         expect_equal(safegraphs_write_index(std::string_view {path}, index, positions_fixture_t::make_codec(), serial,
                                             save_config_t {}, "chord"),
-                     status_t::success_k);
+                     status_code_t::success_k);
     }
 
     fu_topology_t topology = nullptr;
@@ -547,16 +550,16 @@ static void test_positions_nvme_within(u64_t seed) {
         io_engine_config_t config;
         config.queue_depth = 64;
         auto [executor, spawn_status] = nvme_indexes_t::executor_t::spawn(topology, 1, config);
-        expect_equal(spawn_status, status_t::success_k);
+        expect_equal(spawn_status, status_code_t::success_k);
         nvme_indexes_t viewed {forkunion_allocator_t {}};
-        expect_equal(viewed.view(path, {}, "chord", executor), status_t::success_k);
+        expect_equal(viewed.view(path, {}, "chord", executor), status_code_t::success_k);
         auto make_metric = [](scratch_t const& allocator, std::size_t staging) noexcept {
             metric_t made {allocator};
             status_t const ready = made.init(staging);
             return expected<metric_t> {std::move(made), ready};
         };
         auto query_of = [&](std::size_t query, scratch_t const&) noexcept {
-            return expected<earth_observation_t> {queries[query], status_t::success_k};
+            return expected<earth_observation_t> {queries[query], status_code_t::success_k};
         };
         // Every reach is exclusive, so an entry exactly at the radius is kept as the walk keeps it.
         std::vector<nk_u64_t> reaches(queries_count);
@@ -572,7 +575,7 @@ static void test_positions_nvme_within(u64_t seed) {
         };
         auto const [found, status] = viewed.scan_within(std::span<nk_u64_t const> {reaches}, make_metric, query_of,
                                                         collect, executor);
-        expect_equal(status, status_t::success_k);
+        expect_equal(status, status_code_t::success_k);
         for (std::size_t query = 0; query != queries_count; ++query) {
             expect_equal(scanned[query].size(), walked[query].size());
             for (key_t const& key : scanned[query]) {

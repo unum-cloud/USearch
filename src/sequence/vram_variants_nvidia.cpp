@@ -14,13 +14,13 @@
 
 /** The bounds of each kind's fatbin, linked in as raw bytes, from the table CMake writes for the
  *  class this unit compiles as; the other classes' tables stay unreferenced. */
-extern "C" byte_t const* const sequence_nvidia_ampere_bundles[];
-extern "C" byte_t const* const sequence_nvidia_ada_bundles[];
-extern "C" byte_t const* const sequence_nvidia_hopper_bundles[];
-extern "C" byte_t const* const sequence_nvidia_blackwell_bundles[];
-extern "C" byte_t const* const sequence_nvidia_blackwellrtx_bundles[];
+extern "C" util::byte_t const* const sequence_nvidia_ampere_bundles[];
+extern "C" util::byte_t const* const sequence_nvidia_ada_bundles[];
+extern "C" util::byte_t const* const sequence_nvidia_hopper_bundles[];
+extern "C" util::byte_t const* const sequence_nvidia_blackwell_bundles[];
+extern "C" util::byte_t const* const sequence_nvidia_blackwellrtx_bundles[];
 template <gpu_class_t gpu_class_>
-byte_t const* const* sequence_bundles() noexcept {
+util::byte_t const* const* sequence_bundles() noexcept {
     if constexpr (gpu_class_ == gpu_class_t::nvidia_ada_k) return sequence_nvidia_ada_bundles;
     else if constexpr (gpu_class_ == gpu_class_t::nvidia_hopper_k) return sequence_nvidia_hopper_bundles;
     else if constexpr (gpu_class_ == gpu_class_t::nvidia_blackwell_k) return sequence_nvidia_blackwell_bundles;
@@ -29,7 +29,7 @@ byte_t const* const* sequence_bundles() noexcept {
 }
 
 template <>
-bytes_view_t sequence_nvidia_fatbin<usearch_sequence_metric_levenshtein_bytes_k>::bytes() noexcept {
+util::bytes_view_t sequence_nvidia_fatbin<usearch_sequence_metric_levenshtein_bytes_k>::bytes() noexcept {
     byte_t const* const* const bounds = sequence_bundles<cuda_class_k>();
     return {bounds[0], bounds[1]};
 }
@@ -39,7 +39,7 @@ template struct us::sequence::vram_nvidia_kits<sequence_nvidia_kit<usearch_seque
                                                sequence_nvidia_fatbin<usearch_sequence_metric_levenshtein_bytes_k>>;
 
 template <>
-bytes_view_t sequence_nvidia_fatbin<usearch_sequence_metric_levenshtein_utf8_k>::bytes() noexcept {
+util::bytes_view_t sequence_nvidia_fatbin<usearch_sequence_metric_levenshtein_utf8_k>::bytes() noexcept {
     byte_t const* const* const bounds = sequence_bundles<cuda_class_k>();
     return {bounds[2], bounds[3]};
 }
@@ -49,7 +49,7 @@ template struct us::sequence::vram_nvidia_kits<sequence_nvidia_kit<usearch_seque
                                                sequence_nvidia_fatbin<usearch_sequence_metric_levenshtein_utf8_k>>;
 
 template <>
-bytes_view_t sequence_nvidia_fatbin<usearch_sequence_metric_overlap_k>::bytes() noexcept {
+util::bytes_view_t sequence_nvidia_fatbin<usearch_sequence_metric_overlap_k>::bytes() noexcept {
     byte_t const* const* const bounds = sequence_bundles<cuda_class_k>();
     return {bounds[4], bounds[5]};
 }
@@ -59,7 +59,7 @@ template struct us::sequence::vram_nvidia_kits<sequence_nvidia_kit<usearch_seque
                                                sequence_nvidia_fatbin<usearch_sequence_metric_overlap_k>>;
 
 template <>
-bytes_view_t sequence_nvidia_fatbin<usearch_sequence_metric_needleman_wunsch_k>::bytes() noexcept {
+util::bytes_view_t sequence_nvidia_fatbin<usearch_sequence_metric_needleman_wunsch_k>::bytes() noexcept {
     byte_t const* const* const bounds = sequence_bundles<cuda_class_k>();
     return {bounds[6], bounds[7]};
 }

@@ -63,7 +63,8 @@ struct arrow_fixture<dense_verbs_t> {
     nk::matrix<nk::f32_t> vectors;
     usearch_dense_metadata_t geometry {usearch_dense_metric_angular_k, usearch_scalar_bf16_k, arrow_dimensions_k, 0};
 
-    explicit arrow_fixture(u64_t seed) : vectors(make_vectors<nk::f32_t>(arrow_entries_k, arrow_dimensions_k, seed)) {}
+    explicit arrow_fixture(util::u64_t seed)
+        : vectors(make_vectors<nk::f32_t>(arrow_entries_k, arrow_dimensions_k, seed)) {}
     usearch_rows_view_t values() const noexcept {
         return {vectors.data(), static_cast<std::size_t>(vectors.stride_bytes(0)), arrow_dimensions_k,
                 usearch_scalar_f32_k};
@@ -77,9 +78,9 @@ struct arrow_fixture<sequence_verbs_t> {
     std::vector<std::size_t> offsets {0};
     sequence_geometry_t geometry {{usearch_sequence_metric_levenshtein_bytes_k, 0}, nullptr, {}};
 
-    explicit arrow_fixture(u64_t seed) {
+    explicit arrow_fixture(util::u64_t seed) {
         split_mix_generator_t random_generator {seed};
-        uniform_below<u32_t> const symbol {4};
+        util::uniform_below<util::u32_t> const symbol {4};
         for (std::size_t entry = 0; entry != arrow_entries_k; ++entry) {
             for (std::size_t byte = 0; byte != arrow_sequence_bytes_k; ++byte)
                 symbols += "ACGT"[symbol(random_generator)];
@@ -92,15 +93,15 @@ struct arrow_fixture<sequence_verbs_t> {
 
 template <>
 struct arrow_fixture<shapes_verbs_t> {
-    std::vector<f32_t> coordinates;
+    std::vector<util::f32_t> coordinates;
     std::vector<std::size_t> offsets {0};
     usearch_shapes_metadata_t geometry {usearch_shapes_metric_chamfer_k, usearch_scalar_f32_k, 0, 0};
 
-    explicit arrow_fixture(u64_t seed) {
+    explicit arrow_fixture(util::u64_t seed) {
         split_mix_generator_t random_generator {seed};
-        uniform_between<f64_t> const unit {-1, 1};
+        uniform_between<util::f64_t> const unit {-1, 1};
         coordinates.resize(arrow_entries_k * arrow_cloud_points_k * 3);
-        for (f32_t& coordinate : coordinates) coordinate = static_cast<f32_t>(unit(random_generator));
+        for (util::f32_t& coordinate : coordinates) coordinate = static_cast<util::f32_t>(unit(random_generator));
         for (std::size_t entry = 0; entry != arrow_entries_k; ++entry)
             offsets.push_back(offsets.back() + arrow_cloud_points_k);
     }
@@ -115,10 +116,10 @@ struct arrow_fixture<geospatial_verbs_t> {
     std::vector<usearch_geospatial_observation_t> points;
     geospatial_geometry_t geometry {};
 
-    explicit arrow_fixture(u64_t seed) : points(arrow_entries_k) {
-        constexpr f64_t nan_k = std::numeric_limits<f64_t>::quiet_NaN();
+    explicit arrow_fixture(util::u64_t seed) : points(arrow_entries_k) {
+        constexpr util::f64_t nan_k = std::numeric_limits<util::f64_t>::quiet_NaN();
         split_mix_generator_t random_generator {seed};
-        uniform_between<f64_t> const across {-1, 1};
+        uniform_between<util::f64_t> const across {-1, 1};
         for (usearch_geospatial_observation_t& point : points)
             point = {51.5 + across(random_generator) * 0.0045,
                      -0.1 + across(random_generator) * 0.0072,
@@ -140,7 +141,7 @@ struct arrow_fixture<geospatial_verbs_t> {
  *  and a dense one its vectors as fixed-size lists of bf16 elements. */
 template <typename verbs_type_>
 static void expect_arrow_schema(std::string const& arrow_path) {
-    auto [mapping, mapping_status] = mapped_file_t::read(arrow_path);
+    auto [mapping, mapping_status] = util::mapped_file_t::read(arrow_path);
     if (failed(mapping_status)) return void(expect_true(false));
     std::array<ipc_field_t, ipc_fields_max_k> fields {};
     std::array<ipc_key_value_t, 4 * ipc_fields_max_k> pairs {};
@@ -165,7 +166,7 @@ static void expect_arrow_schema(std::string const& arrow_path) {
 static void expect_matches_round_trip(std::string const& stem, copied_matches_t const& found) {
     std::vector<usearch_key_t> queries;
     for (std::size_t query = 0; query != found.counts.size(); ++query)
-        queries.push_back(std::bit_cast<usearch_key_t>(uuid_of(query)));
+        queries.push_back(std::bit_cast<usearch_key_t>(util::uuid_of(query)));
     for (std::string_view const extension : {"arrow", "arrows"}) {
         std::string const path = fmt::format("{}-matches.{}", stem, extension);
         arrow_matches_t read;
@@ -173,7 +174,7 @@ static void expect_matches_round_trip(std::string const& stem, copied_matches_t 
         if (failure.empty()) failure = arrow_matches_read(path, read);
         if (!failure.empty()) fmt::println(stderr, "  {}", failure);
         expect_true(failure.empty() && same_matches(read.matches, found) && read.queries.size() == queries.size() &&
-                    read.queries.back() == uuid_of(queries.size() - 1));
+                    read.queries.back() == util::uuid_of(queries.size() - 1));
     }
 }
 
@@ -198,7 +199,7 @@ static void test_arrow_round_trip() {
     expect_success(outcome);
 
     arrow_summary_t exported, imported;
-    st::vector<byte_t> checkpoint;
+    st::vector<util::byte_t> checkpoint;
     sz::string_t failure = arrow_export(saved, arrow_path, exported);
     if (failure.empty()) failure = arrow_import(arrow_path, "", checkpoint, imported);
     if (!failure.empty()) fmt::println(stderr, "  {}", failure);
@@ -238,7 +239,7 @@ static void test_arrow_round_trip() {
         std::string const resaved_path = fmt::format("{}.safegraphs", resaved_stem);
         verbs_type_::save(reloaded.get(), reloaded.executor(), bytes_view(resaved_path), &outcome);
         expect_success(outcome);
-        growing_buffer<char> original_path {global_allocator}, resaved_part {global_allocator};
+        util::growing_buffer<char> original_path {util::global_allocator}, resaved_part {util::global_allocator};
         for (std::size_t part = 0; part != arrow_parts_k && !std::is_same_v<verbs_type_, shapes_verbs_t>; ++part) {
             auto const [first, first_status] = safegraphs_part_path(original_path, stem, part, arrow_parts_k);
             auto const [second, second_status] = safegraphs_part_path(resaved_part, resaved_stem, part, arrow_parts_k);
@@ -271,8 +272,8 @@ static void test_slots_skip_foreign() {
     std::error_code sized;
     std::uintmax_t const monolith_bytes = std::filesystem::file_size(saved, sized);
     expect_true(!sized && slot_copy(saved, location, 0, monolith_bytes));
-    auto [foreign, foreign_status] = mapped_file_t::write(fmt::format("{}@{}", location, 2 * slot_bytes_k),
-                                                          slot_probe_bytes_k);
+    auto [foreign, foreign_status] = util::mapped_file_t::write(fmt::format("{}@{}", location, 2 * slot_bytes_k),
+                                                                slot_probe_bytes_k);
     if (succeeded(foreign_status)) std::memset(foreign.span().data(), 0x5a, slot_probe_bytes_k);
     expect_true(succeeded(foreign_status) && succeeded(foreign.sync()));
     std::filesystem::resize_file(location, 3 * slot_bytes_k, sized);
@@ -349,12 +350,12 @@ struct piped_descriptor_t {
  *  one @c cat drains into @p path, for mode @c w, until destroyed, which closes the pipe and waits
  *  for the command. */
 struct piped_descriptor_t {
-    native_file_t descriptor;
-    native_file_t saved;
+    util::native_file_t descriptor;
+    util::native_file_t saved;
     std::FILE* pipe;
 
     piped_descriptor_t(char const* mode, std::string const& path)
-        : descriptor(*mode == 'r' ? standard_input_native_file() : standard_output_native_file()),
+        : descriptor(*mode == 'r' ? util::standard_input_native_file() : util::standard_output_native_file()),
           saved(dup(descriptor)), pipe(popen(fmt::format("cat {}'{}'", *mode == 'r' ? "" : "> ", path).c_str(), mode)) {
         // What the suite printed so far stays out of the pipe.
         std::fflush(stdout);
@@ -375,18 +376,19 @@ struct piped_descriptor_t {
  *  as Arrow lays out a fixed-size list. */
 struct arrow_table_t {
     std::vector<std::int64_t> identifiers;
-    std::vector<f32_t> embeddings;
+    std::vector<util::f32_t> embeddings;
 
-    explicit arrow_table_t(u64_t seed) {
+    explicit arrow_table_t(util::u64_t seed) {
         nk::matrix<nk::f32_t> const vectors = make_vectors<nk::f32_t>(arrow_entries_k, arrow_dimensions_k, seed);
         embeddings.resize(arrow_entries_k * arrow_dimensions_k);
         for (std::size_t entry = 0; entry != arrow_entries_k; ++entry) {
             identifiers.push_back(static_cast<std::int64_t>(entry) * 7 + 3);
             std::memcpy(embeddings.data() + entry * arrow_dimensions_k,
                         reinterpret_cast<char const*>(vectors.data()) + entry * vectors.stride_bytes(0),
-                        arrow_dimensions_k * sizeof(f32_t));
+                        arrow_dimensions_k * sizeof(util::f32_t));
         }
-        for (f32_t& value : embeddings) value = std::bit_cast<f32_t>(std::bit_cast<std::uint32_t>(value) & 0xFFFF0000u);
+        for (util::f32_t& value : embeddings)
+            value = std::bit_cast<util::f32_t>(std::bit_cast<std::uint32_t>(value) & 0xFFFF0000u);
     }
 
     sz::string_t write(std::string_view path) const {
@@ -425,8 +427,9 @@ static void expect_arrow_table(arrow_input_t& input, arrow_table_t const& table)
                      arrow_keys_of(input, identifiers, widened, keys).empty()))
         return;
     expect_true(rows.columns == arrow_dimensions_k && rows.scalar == usearch_scalar_f32_k &&
-                std::memcmp(rows.data, table.embeddings.data(), table.embeddings.size() * sizeof(f32_t)) == 0);
-    expect_true(std::bit_cast<uuid128_t>(keys.data[1]) == uuid_of(static_cast<u64_t>(table.identifiers[1])));
+                std::memcmp(rows.data, table.embeddings.data(), table.embeddings.size() * sizeof(util::f32_t)) == 0);
+    expect_true(std::bit_cast<util::uuid128_t>(keys.data[1]) ==
+                util::uuid_of(static_cast<util::u64_t>(table.identifiers[1])));
     expect_true(input.next(more).empty() && !more);
 }
 
@@ -461,12 +464,12 @@ static void test_arrow_pipes() {
 
     copied_matches_t found;
     std::array<std::size_t, 2> const counts {1, 0};
-    uuid128_t const key = uuid_of(5);
+    util::uuid128_t const key = util::uuid_of(5);
     usearch_distance_t const score = 0.25;
     expect_true(!st::failed(found.counts.assign(counts)) && !st::failed(found.keys.assign({&key, 1})) &&
                 !st::failed(found.scores.assign({&score, 1})));
-    std::array<usearch_key_t, 2> const queries {std::bit_cast<usearch_key_t>(uuid_of(0)),
-                                                std::bit_cast<usearch_key_t>(uuid_of(1))};
+    std::array<usearch_key_t, 2> const queries {std::bit_cast<usearch_key_t>(util::uuid_of(0)),
+                                                std::bit_cast<usearch_key_t>(util::uuid_of(1))};
     std::string const piped_path = scratch.path("pipes-piped.arrows");
     {
         piped_descriptor_t const piped {"w", piped_path};
@@ -535,7 +538,8 @@ static case_result_t test_tool_pipes(char const* binary) {
     usearch_rows_view_t rows {};
     if (expect_true(retrieved.open(vectors).empty() && arrow_pick_column(retrieved, "vector", rows_column).empty()) &&
         expect_true(retrieved.next(more).empty() && more && arrow_rows_of(retrieved, rows_column, rows).empty()))
-        expect_true(std::memcmp(rows.data, table.embeddings.data(), table.embeddings.size() * sizeof(f32_t)) == 0);
+        expect_true(std::memcmp(rows.data, table.embeddings.data(), table.embeddings.size() * sizeof(util::f32_t)) ==
+                    0);
 
     // Batches of a RetriEval file overlap their reads with the previous insert, never two inserts.
     std::string const retrieval = scratch.path("tool.fbin"), batched = scratch.path("tool-batched.safegraphs");
@@ -543,7 +547,7 @@ static case_result_t test_tool_pipes(char const* binary) {
                                                static_cast<std::uint32_t>(arrow_dimensions_k)};
     std::FILE* const file = std::fopen(retrieval.c_str(), "wb");
     expect_true(file && std::fwrite(header.data(), sizeof(header), 1, file) == 1 &&
-                std::fwrite(table.embeddings.data(), sizeof(f32_t), table.embeddings.size(), file) ==
+                std::fwrite(table.embeddings.data(), sizeof(util::f32_t), table.embeddings.size(), file) ==
                     table.embeddings.size() &&
                 std::fclose(file) == 0);
     run_shell(fmt::format("'{}' dense insert '{}' --stored-dtype bf16 --batch 7 --save '{}' > /dev/null", binary,

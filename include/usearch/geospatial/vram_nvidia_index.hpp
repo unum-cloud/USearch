@@ -58,7 +58,7 @@ struct vram_nvidia_kits {
 
     /** Bytes the @p stored observation saves into: its own 32, as the RAM codec saves it. */
     static expected<std::size_t> saved_bytes_(bytes_view_t stored) noexcept {
-        return {stored.size(), status_t::success_k};
+        return {stored.size(), status_code_t::success_k};
     }
 
     /**
@@ -71,8 +71,8 @@ struct vram_nvidia_kits {
 
     /** Bytes an observation of @p saved bytes stores into, its own; @c malformed_k unless whole. */
     static expected<std::size_t> stored_bytes_(std::size_t saved) noexcept {
-        if (saved != sizeof(earth_observation_t)) return {0, status_t::malformed_k};
-        return {saved, status_t::success_k};
+        if (saved != sizeof(earth_observation_t)) return {0, status_code_t::malformed_k};
+        return {saved, status_code_t::success_k};
     }
 
     /** Stores a step's observations as saved, one copy of their run into the tape; an observation
@@ -90,7 +90,7 @@ struct vram_nvidia_kits {
                                    basic::cuda_rung_t instantiated) noexcept;
 
     /** The kits read no parameters on the device, so none upload. */
-    static status_t upload_parameters_(cuda_api_t const&) noexcept { return status_t::success_k; }
+    static status_t upload_parameters_(cuda_api_t const&) noexcept { return status_code_t::success_k; }
 
     /** The kit reads no parameters on the device. */
     byte_t const* parameters_() const noexcept { return nullptr; }
@@ -295,8 +295,8 @@ struct vram_nvidia_index {
         vram_kernel_symbol(symbol, "geospatial", "cuda_within", {"cuda_admit_arguments", 1}, itanium_type<kit_type_> {},
                            itanium_type<node_id_type_> {}, kernel);
         cuda_function_handle_t const function = graph_t::kits_symbol_function_(*kits, symbol.text);
-        if (!function) return status_t::unsupported_k;
-        if (!arguments.queries_count) return status_t::success_k;
+        if (!function) return status_code_t::unsupported_k;
+        if (!arguments.queries_count) return status_code_t::success_k;
         u32_t const blocks = min_of<u32_t>(divide_round_up<u32_t>(arguments.queries_count, vram_warps_per_block_k),
                                            device_specs().multiprocessor_count * 8);
         return cuda_launch(api(), function, blocks, vram_warps_per_block_k * 32, 0, context.stream(),

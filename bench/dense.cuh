@@ -181,7 +181,7 @@ inline fu_capabilities_t effective_schedule(fu_capabilities_t allow) noexcept {
  *  line, or the default alignment where no platform source names one. */
 inline std::size_t machine_cache_line_bytes() noexcept {
     std::size_t const machine_line_bytes = fu::cache_line_bytes();
-    return machine_line_bytes ? machine_line_bytes : default_alignment_k;
+    return machine_line_bytes ? machine_line_bytes : util::default_alignment_k;
 }
 
 /** Every schedule bit except the waiter hints - the floor a `--max-schedule` ceiling builds on,
@@ -459,13 +459,13 @@ inline std::array<flag_t, 21> common_flags(settings_t& settings) noexcept {
 /** Rows each insert call takes: `--inserts-per-core` for every core the run drives, capped by
  *  @p total_rows. */
 inline std::size_t insert_batch_rows(settings_t const& settings, std::size_t total_rows) noexcept {
-    return min_of(settings.inserts_per_core.value * settings.cores, total_rows);
+    return util::min_of(settings.inserts_per_core.value * settings.cores, total_rows);
 }
 
 /** Queries each search call takes: `--queries-per-core` for every core the run drives, capped by
  *  @p total_rows. */
 inline std::size_t query_batch_rows(settings_t const& settings, std::size_t total_rows) noexcept {
-    return min_of(settings.queries_per_core.value * settings.cores, total_rows);
+    return util::min_of(settings.queries_per_core.value * settings.cores, total_rows);
 }
 
 /** The flags every binary takes to rank its searches by a lightning indexer's heads instead of plain rows, and the
@@ -668,17 +668,17 @@ std::string checkpoint_path_of(settings_t const& settings, index_type_ const& in
 /** The norms column dtype a single index's checkpoint carries: the dot product's own token where
  *  the index keeps norms, @c unknown_k where it keeps none. */
 template <typename index_type_>
-dtype_t checkpoint_norms_dtype(index_type_ const& index) noexcept {
+util::dtype_t checkpoint_norms_dtype(index_type_ const& index) noexcept {
     using dot_result_t = typename index_type_::scalar_t::dot_result_t;
-    return index.stores_norms() ? usearch::dense::dtype_of(dot_result_t::dtype()) : dtype_t::unknown_k;
+    return index.stores_norms() ? usearch::dense::dtype_of(dot_result_t::dtype()) : util::dtype_t::unknown_k;
 }
 
 /** Maps the CLI neighbor-list degree onto the closed @c connectivity_t tiling set. */
-inline connectivity_t connectivity_of(std::size_t degree) noexcept {
-    if (degree == 16) return connectivity_16_k;
-    if (degree == 32) return connectivity_32_k;
-    if (degree == 128) return connectivity_128_k;
-    return connectivity_unknown_k;
+inline util::connectivity_t connectivity_of(std::size_t degree) noexcept {
+    if (degree == 16) return util::connectivity_16_k;
+    if (degree == 32) return util::connectivity_32_k;
+    if (degree == 128) return util::connectivity_128_k;
+    return util::connectivity_unknown_k;
 }
 
 /**
@@ -701,43 +701,45 @@ static bool load_checkpoint(settings_t const& settings, index_type_& index, std:
     typename index_type_::saved_shape_t const shape = index.saved_shape();
     std::string const monolith_path = checkpoint_path_of(settings, index, settings.load_name);
     std::vector<std::string> part_paths;
-    auto per_part = [&](safegraphs_part_t part) {
+    auto per_part = [&](util::safegraphs_part_t part) {
         part_paths.push_back((checkpoints_folder(settings) / part.path).string());
     };
-    if (failed(safegraphs_read_manifest(monolith_path, std::allocator<byte_t> {}, per_part).status))
+    if (failed(util::safegraphs_read_manifest(monolith_path, std::allocator<util::byte_t> {}, per_part).status))
         part_paths = {monolith_path};
 
     std::size_t loaded = 0;
     for (std::string const& path : part_paths) {
-        auto [mapping, map_status] = mapped_file_t::read(path);
+        auto [mapping, map_status] = util::mapped_file_t::read(path);
         if (failed(map_status)) {
             fmt::println("Failed to map {}: {}", path, status_to_string(map_status));
             return false;
         }
-        bytes_view_t const monolith = mapping.view();
-        growing_buffer<safegraphs_named_column_t, std::allocator<byte_t>> extra_columns {std::allocator<byte_t> {}};
-        auto const [header, header_status] = safegraphs_read_header(monolith, std::allocator<byte_t> {},
-                                                                    dummy_callback_t {}, &extra_columns);
+        util::bytes_view_t const monolith = mapping.view();
+        util::growing_buffer<util::safegraphs_named_column_t, std::allocator<util::byte_t>> extra_columns {
+            std::allocator<util::byte_t> {}};
+        auto const [header, header_status] = safegraphs_read_header(monolith, std::allocator<util::byte_t> {},
+                                                                    util::dummy_callback_t {}, &extra_columns);
         std::size_t const nodes = header.nodes();
         if (failed(header_status) || header.key.offsets || header.value.offsets || header.neighbors.offsets ||
-            !safegraphs_key_widens(header.key.dtype, dtype_t::u64_k) ||
+            !safegraphs_key_widens(header.key.dtype, util::dtype_t::u64_k) ||
             header.value.dtype != usearch::dense::dtype_of(scalar_t::dtype()) ||
-            header.neighbors.dtype != dtype_t::u32_k || regular_width(header.value.shape) != shape.dimensions ||
+            header.neighbors.dtype != util::dtype_t::u32_k || regular_width(header.value.shape) != shape.dimensions ||
             regular_width(header.neighbors.shape) != shape.connectivity || header.monolith_bytes() > monolith.size() ||
             nodes > id_to_row.size() - loaded) {
             fmt::println("Checkpoint {} disagrees with the run's geometry", path);
             return false;
         }
         // A `u32` key column zero-extends into the `u64` rows, which the index files as its keys.
-        byte_t const* const key_column = header.data_of(monolith, header.key).data();
+        util::byte_t const* const key_column = header.data_of(monolith, header.key).data();
         std::size_t const key_bytes = dtype_bytes(header.key.dtype);
         std::vector<typename index_type_::key_t> keys(nodes);
         for (std::size_t node = 0; node != nodes; ++node) {
-            id_to_row[loaded + node] = safegraphs_widened_key<u64_t>(key_column + node * key_bytes, header.key.dtype);
-            keys[node] = uuid_of(id_to_row[loaded + node]);
+            id_to_row[loaded + node] = safegraphs_widened_key<util::u64_t>(key_column + node * key_bytes,
+                                                                           header.key.dtype);
+            keys[node] = util::uuid_of(id_to_row[loaded + node]);
         }
         // Each part's IDs are its own, so it appends as one source past every earlier part.
-        status_t const restored = index.load(
+        util::status_t const restored = index.load(
             {header.data_of(monolith, header.value), header.data_of(monolith, header.neighbors),
              usearch::dense::norms_column_of(header, monolith, checkpoint_norms_dtype(index))},
             {keys.data(), nodes}, nodes, {0, static_cast<node_id_t>(nodes)}, stream...);
@@ -771,32 +773,33 @@ static std::size_t save_checkpoint(settings_t const& settings, index_type_& inde
     typename index_type_::saved_shape_t const shape = index.saved_shape();
     std::string const path = checkpoint_path_of(settings, index, settings.save_name);
     std::string const scale_text = fmt::format("{}", scale);
-    safegraphs_custom_field_t const fields[] = {{"metric", nk_kernel_name(index.kernel())}, {"scale", scale_text}};
-    safegraphs_named_column_t norms;
+    util::safegraphs_custom_field_t const fields[] = {{"metric", nk_kernel_name(index.kernel())},
+                                                      {"scale", scale_text}};
+    util::safegraphs_named_column_t norms;
     auto const [header, header_status] = usearch::dense::monolith_header(
-        {shape.nodes, dtype_t::u64_k, usearch::dense::dtype_of(scalar_t::dtype()), shape.dimensions, dtype_t::u32_k,
-         shape.connectivity, checkpoint_norms_dtype(index)},
-        safegraphs_alignment_default_k, fields, norms);
+        {shape.nodes, util::dtype_t::u64_k, usearch::dense::dtype_of(scalar_t::dtype()), shape.dimensions,
+         util::dtype_t::u32_k, shape.connectivity, checkpoint_norms_dtype(index)},
+        util::safegraphs_alignment_default_k, fields, norms);
     if (failed(header_status) || id_to_row.size() < shape.nodes) {
         fmt::println("Failed to frame {} rows for {}", shape.nodes, path);
         return 0;
     }
-    auto [file, map_status] = mapped_file_t::write(path, header.monolith_bytes());
+    auto [file, map_status] = util::mapped_file_t::write(path, header.monolith_bytes());
     if (failed(map_status)) {
         fmt::println("Failed to map {}", path);
         return 0;
     }
-    bytes_span_t const monolith = file.span();
-    status_t const saved = index.save({header.rows_of(monolith, header.value, 0, shape.nodes),
-                                       header.rows_of(monolith, header.neighbors, 0, shape.nodes),
-                                       header.rows_of(monolith, norms.column, 0, shape.nodes)},
-                                      synchronization_t::immutable_k, stream...);
+    util::bytes_span_t const monolith = file.span();
+    util::status_t const saved = index.save({header.rows_of(monolith, header.value, 0, shape.nodes),
+                                             header.rows_of(monolith, header.neighbors, 0, shape.nodes),
+                                             header.rows_of(monolith, norms.column, 0, shape.nodes)},
+                                            util::synchronization_t::immutable_k, stream...);
     if (failed(saved)) {
         fmt::println("Failed to serialize the index: {}", status_to_string(saved));
         return 0;
     }
     std::memcpy(header.rows_of(monolith, header.key, 0, shape.nodes).data(), id_to_row.data(),
-                shape.nodes * sizeof(u64_t));
+                shape.nodes * sizeof(util::u64_t));
     if (failed(safegraphs_write_header(monolith, header, fields)) || failed(file.sync())) {
         fmt::println("Failed to commit {}", path);
         return 0;
@@ -810,7 +813,7 @@ static std::size_t save_checkpoint(settings_t const& settings, index_type_& inde
 
 /** @p row widened into @p widened, through NumKong's serial casts. */
 template <typename scalar_type_>
-void widen_row(nk::vector_view<scalar_type_> row, std::span<f32_t> widened) noexcept {
+void widen_row(nk::vector_view<scalar_type_> row, std::span<util::f32_t> widened) noexcept {
     [[maybe_unused]] nk_status_t const cast = nk_cast_serial(row.data(), scalar_type_::dtype(), widened.data(),
                                                              nk_f32_k, widened.size(), nullptr);
 }
@@ -818,8 +821,8 @@ void widen_row(nk::vector_view<scalar_type_> row, std::span<f32_t> widened) noex
 /** @p rows in @c f32, multiplied by @p scale and cast to the stored scalar, which is the staging
  *  every row goes through. */
 template <typename scalar_type_>
-std::vector<scalar_type_> stage_widened(std::vector<f32_t> rows, f32_t scale) {
-    for (f32_t& value : rows) value *= scale;
+std::vector<scalar_type_> stage_widened(std::vector<util::f32_t> rows, util::f32_t scale) {
+    for (util::f32_t& value : rows) value *= scale;
     std::vector<scalar_type_> staged(rows.size());
     [[maybe_unused]] nk_status_t const cast = nk_cast_serial(rows.data(), nk_f32_k, staged.data(),
                                                              scalar_type_::dtype(), rows.size(), nullptr);
@@ -828,9 +831,9 @@ std::vector<scalar_type_> stage_widened(std::vector<f32_t> rows, f32_t scale) {
 
 /** Every row of @p rows cast to the stored scalar under @p scale, row-major. */
 template <typename scalar_type_, typename dataset_scalar_type_>
-std::vector<scalar_type_> stage_rows(nk::matrix_view<dataset_scalar_type_> rows, f32_t scale) {
+std::vector<scalar_type_> stage_rows(nk::matrix_view<dataset_scalar_type_> rows, util::f32_t scale) {
     std::size_t const dimensions = rows.extent(1);
-    std::vector<f32_t> widened(rows.extent(0) * dimensions);
+    std::vector<util::f32_t> widened(rows.extent(0) * dimensions);
     for (std::size_t row = 0; row != rows.extent(0); ++row)
         widen_row(rows.row(row).as_vector(), std::span {widened}.subspan(row * dimensions, dimensions));
     return stage_widened<scalar_type_>(std::move(widened), scale);
@@ -878,10 +881,10 @@ struct streamed_dataset {
 
     /** The @b [queries,depth] expected neighbors; empty when absent or when the viewed rows reshape the graph it
      *  was computed for. */
-    nk::matrix_view<u32_t> ground_truth;
+    nk::matrix_view<util::u32_t> ground_truth;
 
     /** The @b [rows] recall bookkeeping: dense node ID → global dataset row, filled while inserting. */
-    std::vector<u64_t> id_to_row;
+    std::vector<util::u64_t> id_to_row;
 
     /** The @b [threads,rows_per_thread,dimensions] staging trampoline rows. */
     nk::tensor_span<scalar_t, 3> staging;
@@ -905,8 +908,8 @@ struct streamed_dataset {
                 fmt::println("Rescaling skipped: {}", nk::status_name(status));
                 return;
             }
-            float const max_amplitude = max_of(std::abs(float(extremes.min_value)),
-                                               std::abs(float(extremes.max_value)));
+            float const max_amplitude = util::max_of(std::abs(float(extremes.min_value)),
+                                                     std::abs(float(extremes.max_value)));
             // The stored dtype's largest magnitude; not a constant expression for nvcc's byte floats.
             float const target_amplitude = component_max<scalar_t>();
             if (max_amplitude > 0) scale = target_amplitude / max_amplitude;
@@ -1016,8 +1019,8 @@ struct mapped_dataset {
 
     /** Opens the triple, failing on a dimensionality mismatch between the base and the queries, or
      *  a row-count mismatch between the queries and the ground truth. */
-    static expected<mapped_dataset> open(std::string_view vectors_path, std::string_view queries_path,
-                                         std::string_view neighbors_path) noexcept {
+    static util::expected<mapped_dataset> open(std::string_view vectors_path, std::string_view queries_path,
+                                               std::string_view neighbors_path) noexcept {
         mapped_dataset dataset;
         auto [base, base_status] = tools::mapped_rows_t::open(vectors_path);
         if (failed(base_status)) return {std::move(dataset), base_status};
@@ -1025,17 +1028,18 @@ struct mapped_dataset {
         if (!queries_path.empty()) {
             auto [queries, queries_status] = tools::mapped_rows_t::open(queries_path);
             if (failed(queries_status)) return {std::move(dataset), queries_status};
-            if (queries.columns() != dataset.base.columns()) return {std::move(dataset), status_t::config_mismatch_k};
+            if (queries.columns() != dataset.base.columns())
+                return {std::move(dataset), util::status_code_t::config_mismatch_k};
             dataset.query_rows = std::move(queries);
         }
         if (!neighbors_path.empty()) {
             auto [neighbors, neighbors_status] = tools::mapped_rows_t::open(neighbors_path);
             if (failed(neighbors_status)) return {std::move(dataset), neighbors_status};
             if (dataset.query_rows && neighbors.rows() != dataset.query_rows.rows())
-                return {std::move(dataset), status_t::config_mismatch_k};
+                return {std::move(dataset), util::status_code_t::config_mismatch_k};
             dataset.neighbor_rows = std::move(neighbors);
         }
-        return {std::move(dataset), status_t::success_k};
+        return {std::move(dataset), util::status_code_t::success_k};
     }
 
     /** Base rows `[first_row, first_row + rows)`, viewed in place when one part holds them all;
@@ -1049,9 +1053,9 @@ struct mapped_dataset {
         usearch_rows_view_t const viewed = query_rows.view(0, query_rows.rows());
         return {static_cast<scalar_type_ const*>(viewed.data), query_rows.rows(), query_rows.columns()};
     }
-    nk::matrix_view<u32_t> neighbors() const noexcept {
+    nk::matrix_view<util::u32_t> neighbors() const noexcept {
         usearch_rows_view_t const viewed = neighbor_rows.view(0, neighbor_rows.rows());
-        return {static_cast<u32_t const*>(viewed.data), neighbor_rows.rows(), neighbor_rows.columns()};
+        return {static_cast<util::u32_t const*>(viewed.data), neighbor_rows.rows(), neighbor_rows.columns()};
     }
 
     bool has_queries() const noexcept { return static_cast<bool>(query_rows); }
@@ -1081,7 +1085,7 @@ int open_dataset(std::string_view path, std::string_view queries_path, std::stri
         [&](auto dtype) {
             auto [dataset, status] = mapped_dataset<typename nk::type_for<dtype.value>::type>::open(path, queries_path,
                                                                                                     neighbors_path);
-            if (status != status_t::success_k) {
+            if (status != util::status_code_t::success_k) {
                 fmt::println("Failed to open {}", path);
                 return 1;
             }
@@ -1138,13 +1142,14 @@ int run_cpu_bench(int argc, char const* const* argv, char const* binary_name, on
                     continue;
                 local_cores += domain_cores;
             }
-            settings.threads.value = max_of<std::size_t>(1, local_cores * 7 / 8);
+            settings.threads.value = util::max_of<std::size_t>(1, local_cores * 7 / 8);
         }
         spawned = fu_pool_spawn_near_memory_domain(machine.topology, machine.pool, settings.memory_domains.front(),
                                                    settings.threads.value, fu_caller_inclusive_k) == fu_success_k;
     }
     else {
-        if (!settings.threads.value) settings.threads.value = max_of<std::size_t>(1, machine.logical_cores * 7 / 8);
+        if (!settings.threads.value)
+            settings.threads.value = util::max_of<std::size_t>(1, machine.logical_cores * 7 / 8);
         spawned = fu_pool_spawn(machine.topology, machine.pool, settings.threads.value, fu_caller_inclusive_k) ==
                   fu_success_k;
     }

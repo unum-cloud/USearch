@@ -31,6 +31,11 @@ jobs:
     needs: hooks
     uses: ./.github/workflows/test-c.yml
 
+  test_cpp:
+    name: Test C++
+    needs: hooks
+    uses: ./.github/workflows/test-cpp.yml
+
   test_python:
     name: Test Python
     needs: hooks

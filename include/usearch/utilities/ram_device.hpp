@@ -11,6 +11,7 @@
  */
 #pragma once
 
+#include <memory>      // `std::allocator_traits` - the placing allocator's propagation
 #include <mutex>       // `std::unique_lock`, `std::adopt_lock` - the executor's one-caller hold
 #include <new>         // `std::align_val_t`, `std::nothrow` - the heap fallback of a domainless allocator
 #include <type_traits> // `std::remove_reference_t`, `std::true_type`, `std::is_same_v` - callbacks, moves, hints
@@ -56,8 +57,12 @@ template <typename value_type_ = byte_t>
 struct forkunion_allocator {
     using value_type = value_type_;
 
-    /** A moved container keeps freeing on the domain its storage came from, rather than the target's default heap. */
+    /** A moved or swapped container keeps freeing on the domain its storage came from. */
     using propagate_on_container_move_assignment = std::true_type;
+    using propagate_on_container_swap = std::true_type;
+
+    /** A domain unmaps the pages the heap would delete, so only one domain's allocators match. */
+    using is_always_equal = std::false_type;
 
     /** The OS memory-domain ID storage is claimed on. */
     fu_memory_domain_id_t memory_domain = no_memory_domain_k;
@@ -99,7 +104,10 @@ struct forkunion_allocator {
         fu_free_on_domain_id(memory_domain, pointer, aligned_bytes_(count));
     }
 
-    bool operator==(forkunion_allocator const& other) const noexcept { return memory_domain == other.memory_domain; }
+    template <typename other_type_>
+    bool operator==(forkunion_allocator<other_type_> const& other) const noexcept {
+        return memory_domain == other.memory_domain;
+    }
 
   private:
 
@@ -145,6 +153,9 @@ struct forkunion_allocator {
 using forkunion_allocator_t = forkunion_allocator<byte_t>;
 
 static_assert(buffer_allocator<forkunion_allocator_t>);
+static_assert(std::allocator_traits<forkunion_allocator_t>::propagate_on_container_move_assignment::value &&
+              std::allocator_traits<forkunion_allocator_t>::propagate_on_container_swap::value &&
+              !std::allocator_traits<forkunion_allocator_t>::is_always_equal::value);
 
 #pragma endregion Placement
 
@@ -213,12 +224,12 @@ struct forkunion_executor_t {
         executor.topology_ = topology;
         std::size_t threads = 0;
         if (fu_pool_threads_count(taken, &threads) != fu_success_k)
-            return {std::move(executor), status_t::uninitialized_k};
+            return {std::move(executor), status_code_t::uninitialized_k};
         if (fu_pool_caller_exclusivity(taken, &executor.exclusivity_) != fu_success_k)
-            return {std::move(executor), status_t::uninitialized_k};
+            return {std::move(executor), status_code_t::uninitialized_k};
         // Each thread names its own memory domain; the arenas are then placed on those in order.
         growing_buffer<fu_memory_domain_id_t> domains {global_allocator};
-        if (failed(domains.resize(threads))) return {std::move(executor), status_t::bad_alloc_k};
+        if (failed(domains.resize(threads))) return {std::move(executor), status_code_t::out_of_memory_k};
         for (fu_memory_domain_id_t& domain : domains) domain = no_memory_domain_k;
         status_t const status = executor.for_threads([&](std::size_t thread, std::size_t compute_domain) noexcept {
             std::size_t memory_index = 0;
@@ -230,11 +241,11 @@ struct forkunion_executor_t {
         });
         if (failed(status)) return {std::move(executor), status};
         if (failed(executor.arenas_per_thread_.reserve_exactly(threads)))
-            return {std::move(executor), status_t::bad_alloc_k};
+            return {std::move(executor), status_code_t::out_of_memory_k};
         for (fu_memory_domain_id_t const domain : domains)
             executor.arenas_per_thread_.push_back_reserved(arena_t {forkunion_allocator_t(domain)});
         executor.cache_bytes_per_core_ = smallest_cache_bytes_per_core(topology);
-        return {std::move(executor), status_t::success_k};
+        return {std::move(executor), status_code_t::success_k};
     }
 
     /** Relinquishes the pool without deleting it - the inverse of @ref acquire, so the
@@ -249,10 +260,10 @@ struct forkunion_executor_t {
     /** The thread count a zero ask means: every core but one in @ref idle_cores_denominator_k, or
      *  the caller alone in a build without OS threads. */
     static expected<std::size_t> default_threads(fu_topology_t topology) noexcept {
-        if (!(fu_comptime_capabilities() & fu_capability_os_threads_k)) return {1, status_t::success_k};
+        if (!(fu_comptime_capabilities() & fu_capability_os_threads_k)) return {1, status_code_t::success_k};
         std::size_t cores = 0;
-        if (fu_logical_cores_count(topology, &cores) != fu_success_k) return {0, status_t::uninitialized_k};
-        return {cores - cores / idle_cores_denominator_k, status_t::success_k};
+        if (fu_logical_cores_count(topology, &cores) != fu_success_k) return {0, status_code_t::uninitialized_k};
+        return {cores - cores / idle_cores_denominator_k, status_code_t::success_k};
     }
 
     /**
@@ -264,7 +275,7 @@ struct forkunion_executor_t {
      */
     static expected<forkunion_executor_t> spawn(fu_topology_t topology, std::size_t threads,
                                                 fu_capabilities_t allowed = fu_capabilities_all_k) noexcept {
-        auto const [count, status] = threads ? expected<std::size_t> {threads, status_t::success_k}
+        auto const [count, status] = threads ? expected<std::size_t> {threads, status_code_t::success_k}
                                              : default_threads(topology);
         if (failed(status)) return {{}, status};
         bool const os_threads = fu_comptime_capabilities() & fu_capability_os_threads_k;
@@ -292,9 +303,10 @@ struct forkunion_executor_t {
         if (exclusivity == fu_caller_inclusive_k)
             allowed = static_cast<fu_capabilities_t>(allowed & ~fu_capability_place_memory_on_domain_k);
         fu_pool_t created = nullptr;
-        if (fu_pool_new(executor_name_k, allowed, &created) != fu_success_k) return {{}, status_t::bad_alloc_k};
+        if (fu_pool_new(executor_name_k, allowed, &created) != fu_success_k)
+            return {{}, status_code_t::out_of_memory_k};
         if (fu_pool_spawn(topology, created, threads, exclusivity) != fu_success_k)
-            return fu_pool_delete(created), expected<forkunion_executor_t> {{}, status_t::uninitialized_k};
+            return fu_pool_delete(created), expected<forkunion_executor_t> {{}, status_code_t::uninitialized_k};
         return acquire(topology, created);
     }
 
@@ -311,11 +323,12 @@ struct forkunion_executor_t {
      */
     static expected<forkunion_executor_t> spawn_near(fu_topology_t topology, fu_memory_domain_id_t memory_domain,
                                                      std::size_t threads, fu_capabilities_t allowed) noexcept {
-        auto const [count, count_status] = threads ? expected<std::size_t> {threads, status_t::success_k}
+        auto const [count, count_status] = threads ? expected<std::size_t> {threads, status_code_t::success_k}
                                                    : default_threads(topology);
         if (failed(count_status)) return {{}, count_status};
         fu_pool_t created = nullptr;
-        if (fu_pool_new(executor_name_k, allowed, &created) != fu_success_k) return {{}, status_t::bad_alloc_k};
+        if (fu_pool_new(executor_name_k, allowed, &created) != fu_success_k)
+            return {{}, status_code_t::out_of_memory_k};
         status_t const spawned = dispatch_status_(
             fu_pool_spawn_near_memory_domain(topology, created, memory_domain, count, fu_caller_exclusive_k));
         if (failed(spawned)) return fu_pool_delete(created), expected<forkunion_executor_t> {{}, spawned};
@@ -329,8 +342,8 @@ struct forkunion_executor_t {
      *  - @c contended_k Another call holds the executor.
      */
     expected<claim_t> claim() noexcept {
-        if (!held_.lock_if_free()) return {{}, status_t::contended_k};
-        return {claim_t {held_, std::adopt_lock}, status_t::success_k};
+        if (!held_.lock_if_free()) return {{}, status_code_t::contended_k};
+        return {claim_t {held_, std::adopt_lock}, status_code_t::success_k};
     }
 
     /** Rewinds every thread's arena and seeds it at @p bytes_per_thread, the first chunk's
@@ -341,12 +354,12 @@ struct forkunion_executor_t {
      *  - @c uninitialized_k The executor holds no arenas.
      */
     status_t reserve(std::size_t bytes_per_thread) noexcept {
-        if (arenas_per_thread_.empty()) return status_t::uninitialized_k;
+        if (arenas_per_thread_.empty()) return status_code_t::uninitialized_k;
         for (arena_t& arena : arenas_per_thread_) {
             arena.clear();
-            if (failed(arena.reserve_exactly(bytes_per_thread))) return status_t::bad_alloc_k;
+            if (failed(arena.reserve_exactly(bytes_per_thread))) return status_code_t::out_of_memory_k;
         }
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Thread @p thread 's own arena; no two threads share one. */
@@ -390,7 +403,7 @@ struct forkunion_executor_t {
     void park() noexcept { fu_pool_sleep(threads_, 0); }
 
     /** Nothing is ever pending: every fan-out blocks inside, so a drain is a no-op. */
-    status_t wait() noexcept { return status_t::success_k; }
+    status_t wait() noexcept { return status_code_t::success_k; }
 
     /**
      *  Runs @p callback on every thread with the thread index and its compute domain; must be
@@ -402,7 +415,7 @@ struct forkunion_executor_t {
      */
     template <typename callback_type_>
     status_t for_threads(callback_type_&& callback) noexcept {
-        if (!threads_) return status_t::uninitialized_k;
+        if (!threads_) return status_code_t::uninitialized_k;
         fu_for_threads_t const trampoline = [](fu_lambda_context_t context, std::size_t thread,
                                                std::size_t compute_domain) {
             (*static_cast<std::remove_reference_t<callback_type_>*>(context))(thread, compute_domain);
@@ -420,8 +433,8 @@ struct forkunion_executor_t {
      */
     template <typename callback_type_>
     status_t for_tasks(std::size_t tasks, callback_type_&& callback) noexcept {
-        if (!threads_) return status_t::uninitialized_k;
-        if (!tasks) return status_t::success_k;
+        if (!threads_) return status_code_t::uninitialized_k;
+        if (!tasks) return status_code_t::success_k;
         fu_for_task_t const trampoline = [](fu_lambda_context_t context, std::size_t task, std::size_t thread,
                                             std::size_t compute_domain) {
             (*static_cast<std::remove_reference_t<callback_type_>*>(context))(task, thread, compute_domain);
@@ -435,13 +448,13 @@ struct forkunion_executor_t {
      *  @c contended_k, a pool without workers @c uninitialized_k. */
     static status_t dispatch_status_(fu_status_t status) noexcept {
         switch (status) {
-        case fu_success_k: return status_t::success_k;
-        case fu_contended_k: return status_t::contended_k;
-        case fu_not_spawned_k: return status_t::uninitialized_k;
-        case fu_invalid_argument_k: return status_t::invalid_argument_k;
-        case fu_unsupported_k: return status_t::unsupported_k;
-        case fu_config_mismatch_k: return status_t::config_mismatch_k;
-        default: return status_t::internal_k;
+        case fu_success_k: return status_code_t::success_k;
+        case fu_contended_k: return status_code_t::contended_k;
+        case fu_not_spawned_k: return status_code_t::uninitialized_k;
+        case fu_invalid_argument_k: return status_code_t::invalid_argument_k;
+        case fu_unsupported_k: return status_code_t::unsupported_k;
+        case fu_config_mismatch_k: return status_code_t::config_mismatch_k;
+        default: return status_code_t::internal_k;
         }
     }
 

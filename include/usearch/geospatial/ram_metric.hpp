@@ -259,11 +259,11 @@ class chord_metric {
      *  - @c config_mismatch_k A zero @p staging_limit.
      */
     status_t init(std::size_t staging_limit) noexcept {
-        if (!staging_limit) return status_t::config_mismatch_k;
+        if (!staging_limit) return status_code_t::config_mismatch_k;
         if (status_t const queried = query_coordinates_.reserve(3); failed(queried)) return queried;
         if (status_t const staged = staged_.resize_uninitialized(staging_limit * 3); failed(staged)) return staged;
         staging_limit_ = staging_limit;
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** The position the current round scores against. */

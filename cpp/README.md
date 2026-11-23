@@ -1,259 +1,671 @@
 # USearch for C++
 
-The C++ wrapper is a header-only layer over the C interface in `c/usearch/`, living in `cpp/usearch/` and linking the same `libusearch_shared` or `libusearch_static`.
-It needs a C++20 compiler and adds no ABI of its own: every verb fills the C argument struct and calls the C function, with no layers in between.
-It throws nothing, as each verb answers an `outcome` or a `deferred` call carrying the library's status.
-
-- `dense_index_t` holds fixed-width vectors under one metric, in RAM, VRAM or on NVMe.
-- `sequence_index_t`, `shapes_index_t` and `geospatial_index_t` hold byte strings, 3D point clouds and observations on the Earth.
-- `executor_t` owns the threads or streams a call runs on, and `arena_t` the outputs it writes.
-- `outcome<T>` and `deferred<T>` carry each call's answer, blocking or submitted.
+The C++ SDK is a header-only C++20 layer over the stable C ABI in `c/usearch/`, linking the same pre-instantiated `libusearch_static` or `libusearch_shared`, so no index template is instantiated in your build.
+It includes nothing but the C headers and the standard library, throws nothing, and allocates nothing on any call path.
+It exposes dense, sequence, shape and geospatial indexes, and the Apache Arrow converters.
+Every symbol is documented in its header under `cpp/usearch/`, and `usearch/usearch.hpp` includes them all.
 
 ## Installation
 
-Build the C library and add both `c/` and `cpp/` to the include path, or `include/` once installed, where the SDK places `usearch/*.hpp` beside the C headers:
-
 ```sh
-cmake -B build_release -D CMAKE_BUILD_TYPE=Release -D USEARCH_BUILD_SHARED=1 -D USEARCH_BUILD_TEST=1 -D USEARCH_DENSE_DTYPES=11
-cmake --build build_release --config Release --target usearch_shared usearch_test_cpp
-ctest --test-dir build_release -R usearch_test_cpp
+cmake -B build_release -D CMAKE_BUILD_TYPE=Release -D USEARCH_BUILD_SHARED=1 && cmake --build build_release
 ```
 
-Consumers link `usearch::shared` after `find_package(usearch)`, as the C ones do, and include `usearch/dense_index.hpp` or the header of the modality they use.
-`cpp/test.cpp` runs the same checks against the engine and against the brute-force stand-in `-D USEARCH_BUILD_STUB=1` builds.
+That build compiles the four most common dense storage types, `bf16`, `u1x8`, `i8` and `e4m3`, and an index over any other is refused with `status_code_t::unsupported_k`; `-D USEARCH_DENSE_DTYPES=11` compiles all eleven.
+`cmake --install build_release --component sdk` places `usearch/*.hpp` beside the C headers and both libraries, and `find_package(usearch)` or a `FetchContent` or `add_subdirectory` of this repository names the SDK `usearch::cpp`.
+`usearch::cpp` carries the `cpp/` include path, the C headers of `usearch::abi` and the archive `usearch::static`, and nothing of the engine's headers.
+
+`-D USEARCH_BUILD_STUB=1` builds `usearch::static_stub`, a brute-force stand-in that answers the same verbs over the standard library alone, with exact search, seconds to build and no submodules, for testing a caller and never for shipping.
+`cpp/test.cpp` runs against both, as `usearch_test_cpp` and `usearch_test_cpp_stub`.
 
 ## Quickstart
 
+Every batch input is a `rows_view<T>` of a base pointer, a row count, the values per row and an optional byte stride, so a memory-mapped dataset feeds the index with no reshape and no copy.
+An index owns entries, an `executor_t` owns the threads or streams a call runs on, and an `arena_t` holds what a call writes back.
+
 ```cpp
-#include <cstdio>                  // For printing.
-#include <usearch/dense_index.hpp> // For the win 🚀
+#include <cstdio>              // `std::printf`
+#include <usearch/usearch.hpp> // `us::dense_index_t`, `us::executor_t`, `us::arena_t`, `us::deferred`
 
 namespace us = unum::usearch;
 
 int main() {
-    // Threads live in the executor, the data lives in the index, and outputs land in the arena.
-    auto [executor, executor_status, executor_message] = us::executor_t::for_ram();
-    auto [arena, arena_status, arena_message] = us::arena_t::make({.executor = executor.handle()});
-    auto [index, index_status, index_message] = us::dense_index_t::init_ram(
-        {.metric = usearch_dense_metric_angular_k, .quantization = usearch_scalar_bf16_k, .dimensions = 128});
-    if (index_status != usearch_status_success_k) return 1;
+    auto [index, index_status] = us::dense_index_t::init_ram(
+        {.metric = usearch_dense_metric_angular_k, .quantization = usearch_scalar_i8_k, .dimensions = 4});
+    if (index_status.failed()) return 1;
+    us::status_t const reserved = index.reserve(1000); // the calling thread; inserts grow on demand anyway
 
     usearch_key_t keys[2] {};
-    keys[0].bytes[15] = 1, keys[1].bytes[15] = 2;
-    float vectors[2][128] = {{1}, {0, 1}};
-    if (!index.on(executor).insert<float>(keys, {&vectors[0][0], 2, 128})) return 1;
+    keys[0].bytes[15] = 42;
+    keys[1].bytes[15] = 43;
+    float const slab[8] = {0.2f, 0.1f, 0.2f, 0.1f, 0.1f, 0.2f, 0.1f, 0.2f};
+    if (reserved.failed() || index.insert<float>(keys, {slab, 2, 4}).failed()) return 1;
 
-    auto [matches, status, message] = index.on(executor).search<float>({&vectors[0][0], 1, 128}, 10, arena);
-    if (status != usearch_status_success_k) return 1;
-    std::printf("Found %zu matches\n", matches.counts[0]);
+    auto [executor, executor_status] = us::executor_t::for_ram();
+    auto [arena, arena_status] = us::arena_t::make({.executor = executor.handle()});
+    auto [local_arena, local_arena_status] = us::arena_t::make();
+    float const query[4] = {0.2f, 0.1f, 0.2f, 0.1f};
+    auto [local, local_status] = index.search<float>({query, 1, 4}, 10, local_arena);          // the calling thread
+    auto [pooled, pooled_status] = index.on(executor).search<float>({query, 1, 4}, 10, arena); // blocks on the executor
+    if (local_status.failed() || pooled_status.failed()) return 1;
+    us::deferred<usearch_matches_view_t> call = index.deferred(executor).search<float>({slab, 2, 4}, 10, arena);
+    auto [matches, status] = call.wait(); // blocks until final; destruction waits too
+    if (status.failed()) return 1;
+    std::printf("Found %zu and %zu matches\n", local.counts[0], matches.counts[1]);
     return 0;
 }
 ```
 
-Each verb names the scalar of the rows it passes, as in `insert<float>`, and answers its first output beside its status and the library's static message.
+Each verb names the scalar of the rows it passes, as in `insert<float>`, and every fallible call answers its value beside a `status_t`, unpacked as `auto [value, status]`.
+The index itself runs its verbs on the calling thread, and an arena made without an executor is host pages for it.
 
 ## Receivers & Deferred Calls
 
-The receiver chooses how a verb completes, and the verb stays the same.
-`index.on()` runs it on the calling thread, `index.on(executor)` blocks on an executor and answers an `outcome`, and `index.deferred(executor)` submits it there and answers a `deferred`:
+The receiver decides where a verb runs and how it completes, while the verb and its arguments stay the same:
+
+- `index.search<float>(..)` runs on the calling thread.
+- `index.on(executor).search<float>(..)` blocks on the executor.
+- `index.deferred(executor).search<float>(..)` submits the call and answers a `deferred`.
+
+All three are one class template over its receiver, `dense_index<receiver>`, so each verb is written once: `dense_index_t` owns the index, while `on` and `deferred` answer a `dense_index_on<completion>` that borrows it with the executor.
+Only the owning `dense_index_t` opens, loads and hands out cursors and streams.
+A blocking verb answers a `status_t` when it outputs nothing else and an `expected<T>` otherwise, so nothing about asynchrony reaches a caller who never asks for it.
+Each class spells that choice once, as its `deferrable<T>`, which names a `deferred<T>` under a deferred receiver.
+A borrowing receiver borrows the index and the executor, so neither may die while it, or a `deferred` it submitted, lives.
+
+Any coroutine type awaits a deferred call, with any loop offering `post(void (*)(void*) noexcept, void*)`, so two shards are searched at once:
 
 ```cpp
-auto audited = index.on(executor).health();             // us::outcome<usearch_reachability_t>
-us::deferred<usearch_reachability_t> audit = index.deferred(executor).health();
-if (audit.status() == usearch_status_deferred_k) { /* other work */ }
-auto [reachability, status, message] = audit.wait();     // what the blocking call would have answered
+app::task search_both(us::dense_index_t const& east, us::dense_index_t const& west,
+                      us::executor_t const& east_executor, us::executor_t const& west_executor,
+                      us::rows_view<float> queries, app::loop& loop) {
+    auto [east_arena, east_arena_status] = us::arena_t::make({.executor = east_executor.handle()});
+    auto [west_arena, west_arena_status] = us::arena_t::make({.executor = west_executor.handle()});
+    us::deferred<usearch_matches_view_t> east_call = east.deferred(east_executor).search<float>(queries, 10, east_arena);
+    us::deferred<usearch_matches_view_t> west_call = west.deferred(west_executor).search<float>(queries, 10, west_arena);
+    auto [east_matches, east_status] = co_await east_call.wait(loop); // both shards were already running
+    auto [west_matches, west_status] = co_await west_call.wait(loop);
+    if (east_status.failed() || west_status.failed()) co_return;
+    merge(east_matches, west_matches);
+}
 ```
 
-Both receivers are one class template over the completion, so each verb has one body that fills the C struct and lands its result in the call's output slot.
-A `deferred` owns its outcome and output slot and never moves, since the library writes into it; the arena, handles, inputs and handlers it was handed stay borrowed until it is final.
-Its one owner polls `status` or blocks in `wait`, and destruction waits the same way, so a scope ending is a join.
-The full rules live in the [C README](../c/README.md#receivers--deferred-calls).
+A `deferred` holds the outcome and the outputs the library writes until the call is final, and never moves, so it lives on the caller's stack or in the awaiting coroutine's frame.
+The waited result is what a blocking search answers, borrowing the same arena.
+`status` answers `status_code_t::deferred_k` while the call is not final, then its final status.
+Inside a coroutine, `co_await call.wait(loop)` posts a poll to `loop` that reads the status and posts itself again until the call is final, so other tasks run meanwhile, while `call.wait()` blocks the thread without spinning.
+A `loop` is any type with `post(void (*poll)(void*) noexcept, void* state)` that later runs `poll(state)` on its own thread, storing the two words; a fixed ring of them, like `test_loop_t` in `cpp/test.cpp`, is enough.
+The SDK starts no thread and keeps no task, so the coroutine type and its frame are yours.
+Destroying an unfinished `deferred` waits for the call.
+
+The library reads a deferred call's inputs after the verb returns, so the keys, rows, configs, handlers and plans a deferred receiver is handed stay alive and unchanged until the call is final.
+A deferred call allocates nothing: its outcome and outputs live inside the `deferred`, wherever the caller put it.
+
+One call holds an executor at a time, so a second call finding it held finishes at once with `status_code_t::contended_k`, and nothing queues.
+A deferred call on a caller-exclusive pool runs on the pool's thread 0, so polling alone finishes it, and its progress handler and predicate run on the pool's threads; an inclusive pool, a single thread, WebAssembly and a VRAM executor run it at submission.
+Calls depending on each other are ordered by waiting on the first before submitting the second, since no call carries an ordering field.
 
 ## Executors
 
-One executor serves any number of indexes, and its kind must match their residency.
-An empty `executor_t` runs every call on the calling thread:
+An executor owns host threads or device streams, and the traversal scratch each of them walks with, grown to a high-water mark.
+One executor serves any number of indexes, and its residency must match the one their handles were built for.
+There is a constructor per residency, each taking only what its own hardware has, and the placement lists are the ones the indexes were built with, which keeps compute and memory domains in agreement.
 
 ```cpp
-auto threads = us::executor_t::for_ram({.threads = 8});   // zero takes 7/8 of the cores
-auto rings = us::executor_t::for_nvme({.threads = 4});    // one submission ring per thread
-auto streams = us::executor_t::for_vram({});              // one stream per device
-auto drained = threads.value.drain({.mood = usearch_mood_spinning_k});
+std::int32_t const nodes[2] = {0, 1}, devices[2] = {0, 1};
+usearch_bytes_view_t const drives[1] = {us::bytes_view("/mnt/nvme0")};
+
+// Eight workers, where zero takes 7/8 of the cores, and threads interleaved across two NUMA nodes.
+auto [threads, threads_status] = us::executor_t::for_ram({.threads = 8});
+auto [domains, domains_status] = us::executor_t::for_ram({.ram = {.memory_domains = nodes, .memory_domains_count = 2}});
+// Waiters and atomics no newer than Haswell.
+auto [capped, capped_status] = us::executor_t::for_ram({.ram = {.cpu_class_ceiling = usearch_cpu_class_intel_haswell_k}});
+auto [rings, rings_status] = us::executor_t::for_nvme({.nvme = {.paths = drives, .paths_count = 1}, .threads = 4});
+auto [streams, streams_status] = us::executor_t::for_vram({.vram = {.devices = devices, .devices_count = 2}});
+auto [shared, shared_status] = us::executor_t::on_pool({.pool = pool}); // the threads another library spawned
+us::executor_t const local;                                              // owns nothing, runs on the calling thread
+
+us::status_t const drained = threads.drain({.mood = usearch_mood_spinning_k}); // waits out the holding call, then spins
 ```
 
-One call holds an executor at a time; a second answers `usearch_status_contended_k` at once and nothing queues.
-Threads that genuinely overlap take one executor apiece, while index handles stay freely concurrent.
+`for_ram` and `for_nvme` take a thread count, where zero derives one, and `for_nvme` gives every thread one submission ring.
+`for_vram` takes none, since one host thread drives one stream per device, and its `streams` borrow your CUDA streams instead, one per device.
+Borrowed streams and `on_pool` must outlive the executor; the engine wires neither borrowing yet and answers `status_code_t::unsupported_k`.
+A default `executor_t` owns nothing and runs every call handed to it on the calling thread.
+One call holds an executor at a time, so two threads that genuinely overlap take one apiece, while index handles stay freely shared.
+`drain` waits until no call holds the executor and sets the mood idle workers adopt, and destroying an executor drains it, unless a GPU arena it made still holds it, which then does so on its own destruction.
+`us::gpu_devices(devices)` fills a span of `usearch_gpu_device_t` and answers how many GPUs the process can drive, a device's position there being the ordinal `for_vram` names it by, while `us::version_name()` spells the linked library's version.
 
 ## Arenas
 
-Every output whose length only the call knows, like matches, monoliths, tapes and cursor batches, lands in the `arena_t` you pass, and the verb answers a view over it.
-Each call rewinds its arena, so the previous call's views go stale; keep two results alive with two arenas, and give every deferred call its own.
+Every output whose length only the call knows, such as matches, rows, products, monoliths and cursor or stream batches, lands in an `arena_t` you pass, and the verb answers a view over it without copying.
+`arena_t::make({.executor = executor.handle()})` places it where that executor computes, decided once, and `arena_t::make()` makes host pages for the calling thread.
+Each call rewinds its arena, so the previous call's views die and a steady loop allocates once.
+To keep a result past the next call, or to read one while making the next, pass that call another arena.
+An arena serves one call at a time, so each deferred call needs its own.
+Nothing in C++ retires a stale view at compile time, so a view read after its arena's next call reads whatever that call wrote.
+An arena from a VRAM executor holds device memory, which host code must not read; `arena.describe()` answers where an arena's outputs live.
+It grows, fills and frees on that executor's first stream, so it serves only calls on that executor, any other refused with `status_code_t::device_k`.
+Every arena holds the executor that made it until it is destroyed.
 
 ```cpp
-auto [found_arena, found_status, found_message] = us::arena_t::make({.executor = executor.handle()});
-auto [fetched_arena, fetched_status, fetched_message] = us::arena_t::make({.executor = executor.handle()});
-auto hits = index.on(executor).search<float>(query, 10, found_arena);
-auto rows = index.on(executor).get<float>(hits.value.keys[0], fetched_arena); // `hits` stays readable
+auto [arena, arena_status] = us::arena_t::make({.executor = executor.handle()}); // make() is host pages
+for (us::rows_view<float> const& batch : batches) {
+    auto [matches, status] = index.on(executor).search<float>(batch, 10, arena); // rewinds: the last batch's matches are gone
+    if (!status.failed()) total += matches.scores[0];
+}
+
+auto [found_arena, found_arena_status] = us::arena_t::make();     // two live results, two arenas
+auto [fetched_arena, fetched_arena_status] = us::arena_t::make();
+auto [found, status] = index.search<float>({query, 1, 768}, 10, found_arena);
+for (std::size_t rank = 0; rank != found.counts[0]; ++rank) {
+    auto [vectors, get_status] = index.get<float>(found.keys[rank], fetched_arena); // rewinds fetched, never found
+    rerank(found.keys[rank], vectors.row(0));
+}
+
+task_t search_shard(us::dense_index_t const& shard, us::executor_t const& executor, us::arena_t& arena) {
+    us::deferred<usearch_matches_view_t> call = shard.deferred(executor).search<float>(queries, 10, arena);
+    auto [matches, status] = co_await call.wait(loop); // or: call.wait()
+    if (!status.failed()) consume(matches);
+}
+for (std::size_t shard = 0; shard != shards_count; ++shard) // one executor and one arena per submitted call
+    search_shard(shards[shard], executors[shard], arenas[shard]);
+loop.run();
 ```
 
-The arena is the verb's last required argument, before the optional config.
+A `deferred` never moves, so many calls in flight are named locals or one coroutine frame each.
+The library never frees an arena under a call: destroying one waits for the calls writing into it, and a call naming an arena that serves another call finishes with `status_code_t::contended_k` and rewinds nothing, so even an abandoned call leaves it safe.
+Fixed-size reports, such as stats, descriptions and `required`, stay plain values, and so does state you carry between calls, like the attention `carry`.
 
 ## Keys
 
-A key is `usearch_key_t`, 128 bits of opaque identity, and keys need not be unique: `count` reports how many entries share one.
-Spans of keys cross as `std::span<usearch_key_t const>`, so a `std::vector`, a C array or a `std::array` all fit:
+A key is `usearch_key_t`, a 128-bit identity of sixteen bytes.
+Integer identities park in the low eight bytes, big-endian, so a key whose last byte is 42 prints as `00000000-0000-0000-0000-00000000002a`.
 
 ```cpp
-std::vector<usearch_key_t> keys(rows);
-for (std::size_t row = 0; row != rows; ++row) keys[row].bytes[15] = static_cast<std::uint8_t>(row);
-auto [entries, status, message] = index.on(executor).count(keys[0]);
+usearch_key_t key {};
+key.bytes[15] = 42;
+std::span<usearch_key_t const> const keys {stored_keys}; // a std::vector, a C array or a std::array
 ```
+
+Keys need not be unique: an index admits up to `values_per_key` entries under one, `count` reports how many it holds, and `get` returns them all.
+The all-zero key is the nil key.
 
 ## Errors
 
-No verb throws.
-Every answer carries `status` and `message`, a static string the library owns, and converts to `true` only on success, so the usual shape is a structured binding and one check:
+Every fallible call answers a `status_t`, or an `expected<T>` carrying one, and a `status_t` is a `status_code_t` beside a static `note`, so nothing allocates on the failure path and nothing throws.
+Recovery branches on the code, while the note names the broken invariant, step or resource for logs, falling back to the status name.
+A failure the binding catches before the call crosses the boundary reports the status the engine would have used.
 
 ```cpp
-auto [matches, status, message] = index.on(executor).search<float>(queries, 10, arena);
-if (status != usearch_status_success_k) std::fprintf(stderr, "%s: %s\n", usearch_status_name(status), message);
+auto [matches, status] = index.on(executor).search<float>(queries, 10, arena);
+if (status == us::status_code_t::contended_k) retry();
+else if (status.failed()) fmt::println(stderr, "{}", status.note);
 ```
 
-The wrapper refuses only what the C struct cannot express: a key span whose length differs from the rows, tape or observations beside it answers `usearch_status_shape_mismatch_k` before the call crosses.
-Every other status is the library's own, in the order `c/usearch/*.h` lists under each verb.
+`status_code_t` carries the C enumerators' values, so `status_code_t::deferred_k` reaches only `deferred::status`, never a final answer.
+An `expected<T>` is a plain pair of `value` and `status`, unpacked as `auto [value, status]`, and a failure default-constructs the value.
+The C tables spell every enumerator, as `usearch_status_name`, `usearch_scalar_name` or `usearch_dense_metric_name` do, and read them back through the `*_from_name` twins, so nothing is compared as a string.
+Handlers are `noexcept` callables, since a fault cannot unwind through the library, so they report through what they capture.
 
 ## Residency
 
-Where the payload lives is the constructor's name, as in the C lifecycle verbs, and each takes only its own hardware's placement:
+Where the payload lives is the constructor's name, as in the C lifecycle verbs, so a residency an index lacks has no constructor to call.
+Each takes only the placement its own hardware has, as memory domains, devices or paths with one shard per entry, and an empty list derives the placement: every NUMA node, one free device, or wherever the manifest points.
 
 ```cpp
-auto in_ram = us::dense_index_t::init_ram({.metric = metric, .quantization = usearch_scalar_bf16_k, .dimensions = 256});
-auto in_vram = us::dense_index_t::init_vram({.metric = metric, .quantization = usearch_scalar_bf16_k, .dimensions = 256});
-auto on_nvme = us::dense_index_t::view_nvme({.path = path}, rings.value);
+std::int32_t const sockets[2] = {0, 1}, gpus[4] = {0, 1, 2, 3}, key_nodes[1] = {0};
+usearch_bytes_view_t const drives[1] = {us::bytes_view("/mnt/nvme0")};
+usearch_ram_options_t const keys_in_ram {.memory_domains = key_nodes, .memory_domains_count = 1};
+
+auto [in_ram, in_ram_status] = us::dense_index_t::init_ram( // one graph per socket
+    {.metric = metric, .quantization = usearch_scalar_bf16_k, .dimensions = 768,
+     .ram = {.memory_domains = sockets, .memory_domains_count = 2}});
+auto [in_vram, in_vram_status] = us::dense_index_t::init_vram( // sharded, never replicated
+    {.metric = metric, .quantization = usearch_scalar_bf16_k, .dimensions = 768,
+     .vram = {.devices = gpus, .devices_count = 4}});
+auto [on_nvme, on_nvme_status] = us::dense_index_t::view_nvme(
+    {.path = us::bytes_view("index.safegraphs"), .nvme = {.paths = drives, .paths_count = 1}, // striped across the drives
+     .ram = &keys_in_ram},                                                                    // keys resolved through RAM
+    rings);
 ```
 
-A view serves a checkpoint in place and refuses every mutation with `usearch_status_read_only_k`.
-The library describes where a view's memory sits, through `describe`, and the caller checks it.
+An NVMe handle serves a checkpoint in place and is read-only, so every mutating verb fails on it with `status_code_t::read_only_k`.
+Without `ram`, it holds nothing per entry, so `count`, `get`, `sample`, MaxSim and hinted searches fail with `status_code_t::unsupported_k`.
+`load_nvme` takes the same arguments and opens a manifest writable, so `refine` rewrites its parts one at a time, while a lone monolith fails with `status_code_t::unsupported_k`.
+Bigger indexes come from merging, never mutating: shards build in RAM, serialize, and join a manifest.
 
 ## Serialization
 
-Checkpoints ride the SafeGraphs format; a `.safegraphs` path is one monolith and a `.safegraphs.json` path a manifest of many.
+The path extension picks the layout: a `.safegraphs` path is one monolith, and a `.safegraphs.json` path is a manifest cataloging many.
 
 ```cpp
-usearch_bytes_view_t const path {reinterpret_cast<std::uint8_t const*>("index.safegraphs"), 16};
-auto saved = index.on(executor).save(path);
-auto restored = us::dense_index_t::load_ram({.path = path}, executor);
-auto metadata = us::dense_index_t::metadata_read({.path = path});
-auto monolith = index.on(executor).save_buffer(arena);
-auto copied = us::dense_index_t::load_ram_buffer({.buffer = monolith.value}, executor);
+usearch_bytes_view_t const path = us::bytes_view("index.safegraphs");
+us::status_t const saved = index.on(executor).save(path);
+auto [loaded, loaded_status] = us::dense_index_t::load_ram({.path = path});
+auto [gpu, gpu_status] = us::executor_t::for_vram({.vram = {.devices = devices, .devices_count = 1}});
+auto [placed, placed_status] = us::dense_index_t::load_vram({.path = path, .vram = {.devices = devices, .devices_count = 1}}, gpu);
+auto [viewed, viewed_status] = us::dense_index_t::view_ram({.path = path});        // read-only, served from the mapping
+auto [metadata, metadata_status] = us::dense_index_t::metadata_read({.path = path}); // geometry without loading a shard
 ```
 
-Loading blocks, as the handle is its answer, and freezes the geometry from the checkpoint's own headers.
+Checkpoints are residency-portable: one file materializes into RAM, uploads to a device, or opens in place on disk, decided by the constructor that reads it.
+The metadata carries only the four fields a checkpoint froze, so `values_per_key` and the placement stay yours to set in the load arguments.
+`view_ram` answers `status_code_t::unsupported_k` until RAM shards can serve a mapping in place.
+A stopped `save` leaves leftovers every reader rejects, which are yours to remove.
+
+In-memory buffers hold single monoliths only, through `save_buffer`, `load_ram_buffer` or `load_vram_buffer`, and `metadata_read_buffer`.
+
+```cpp
+auto [arena, arena_status] = us::arena_t::make({.executor = executor.handle()});
+auto [monolith, status] = index.on(executor).save_buffer(arena);
+auto [restored, restored_status] = us::dense_index_t::load_ram_buffer({.buffer = monolith});
+```
 
 ## Dense Indexes
 
-A dense index holds fixed-width vectors under one metric, with the dimensions, quantization and connectivity its constructor froze.
-Rows cross as `rows_view<T>`, a base pointer, a count, the values per row and an optional byte stride, where a zero stride repeats the first row.
-`T` names the scalar per call, so one index takes `insert<float>` and `search<us::bf16_t>` alike; the bit containers `bf16_t`, `f16_t`, the four small floats and the packed `i4x2_t`, `u4x2_t` and `u1x8_t` name formats C++ has no arithmetic type for.
-Handlers are `noexcept` callables borrowed for one call, like the predicate of a filtered search:
+A `dense_index_t` holds equidimensional dense vectors, built from `usearch_dense_init_ram_t`: `dimensions`, `metric`, the stored `quantization`, and the `connectivity` and `values_per_key` bounds, where zero derives.
+Every metric derives from a single inner-product kernel with pre-computed magnitudes; arbitrary metrics belong to the C++ baseline tier, forfeiting the SIMD kernel chains and the magnitude cache both.
+
+- `usearch_dense_metric_inner_k` - inner product.
+- `usearch_dense_metric_angular_k` - cosine distance, over pre-computed magnitudes.
+- `usearch_dense_metric_euclidean_k` - L2 distance.
+- `usearch_dense_metric_hamming_k` - bit-level, over `u1x8` vectors alone.
+- `usearch_dense_metric_jaccard_k` - bit-level, over `u1x8` vectors alone.
+
+### Rows & Scalars
+
+`rows_view<T>` borrows a packed slab from a pointer, a row count and the values per row; a dataset whose rows are padded to a wider pitch passes the byte stride as a fourth argument, and a zero stride repeats the first row.
+The scalar type of the input is independent of the stored quantization, so the `float` slab of the Quickstart lands in an `i8` index with nothing converted beforehand.
+Formats C++ has no arithmetic type for are bit containers, so a call can still name them, and NumKong's types convert to them by layout.
+
+| C++ type                               | Scalar                         |
+| :------------------------------------- | :----------------------------- |
+| `double`, `float`                      | `f64`, `f32`                   |
+| `bf16_t`, `f16_t`                      | `bf16`, `f16`                  |
+| `e5m2_t`, `e4m3_t`, `e3m2_t`, `e2m3_t` | `e5m2`, `e4m3`, `e3m2`, `e2m3` |
+| `std::int8_t`, `i4x2_t`                | `i8`, `i4x2`                   |
+| `std::uint8_t`, `u4x2_t`, `u1x8_t`     | `u8`, `u4x2`, `u1x8`           |
+
+Initializing an index with a packed quantization and inserting floating-point vectors quantizes on ingest; the `u1x8_t` type also lets you pass packed bit-vectors directly.
 
 ```cpp
-auto even = [](usearch_key_t const* keys, usearch_admission_t* admissions, std::size_t count) noexcept {
-    for (std::size_t i = 0; i != count; ++i)
-        admissions[i] = keys[i].bytes[15] % 2 == 0 ? usearch_admit_k : usearch_reject_k;
-};
-auto filtered = index.on(executor).search<float>(queries, 10, arena, {.predicate = {even}});
+auto [index, index_status] = us::dense_index_t::init_ram(
+    {.metric = usearch_dense_metric_hamming_k, .quantization = usearch_scalar_u1x8_k, .dimensions = 8});
+us::u1x8_t const slab[2] = {{0b0000'1111}, {0b1111'0000}};
+us::status_t const inserted = index.insert<us::u1x8_t>(keys, {slab, 2, 8});
 ```
 
-A plan keeps a refine or reshard live between calls, and its finish on the receiver consumes it:
+An `insert` batch is all-or-nothing and becomes visible at once, and it overlaps safely with concurrent searches on the same handle.
+
+### Search
+
+Each configurable verb takes a config struct last, whose fields are named and default to what the C interface derives.
+So the required arguments are the whole call, as in `search<float>(queries, 10, arena)`, `insert<float>(keys, vectors)` or `save(path)`, and a designated initializer reaches every knob.
+
+```cpp
+usearch_traversal_stats_t stats {};
+auto [matches, status] = index.on(executor).search<float>(queries, 10, arena, {
+    .expansion_factor = 128,
+    .stats = &stats,
+});
+std::printf("%zu distances computed\n", stats.computed_distances);
+```
+
+The matches are padded: query `q` holds `counts[q]` keys and scores, nearest first, from `keys[q * columns]` and `scores[q * columns]`.
+
+```cpp
+for (std::size_t query = 0; query != queries.count; ++query)
+    for (std::size_t rank = 0; rank != matches.counts[query]; ++rank)
+        visit(matches.keys[query * matches.columns + rank], matches.scores[query * matches.columns + rank]);
+```
+
+The breadth of the candidates rides the call rather than the handle, as `expansion_factor` on every config that walks the graph, so a recall sweep is a loop over `ef` values against one immutable index, with no mutation and no synchronization between points.
+`.traversal = usearch_traversal_scan_k` scores every entry instead of walking, on RAM and NVMe handles, which gives that sweep its exact ground truth; a VRAM handle refuses it with `status_code_t::unsupported_k`.
+`usearch_traversal_stats_t` reports the members visited, the distances computed and the starvation `restarts`, a graph-connectivity signal rather than a cost, overwritten by every call it is passed to.
+
+### Filtered Search
+
+Cross-referencing an external database during traversal beats paging through results and filtering afterwards.
+Non-matching entries still route the traversal, so recall does not collapse at low selectivity.
+
+```cpp
+auto is_odd = [](usearch_key_t key) noexcept { return key.bytes[15] % 2 == 1; };
+auto [matches, status] = index.on(executor).search<float>({query, 1, 768}, 10, arena, {.predicate = {is_odd}});
+
+auto in_stock = [&](std::span<usearch_key_t const> keys, std::span<usearch_admission_t> admissions) noexcept {
+    inventory.lookup(keys, admissions); // one round trip per batch
+};
+auto [stocked, stocked_status] = index.on(executor).search<float>({query, 1, 768}, 10, arena, {.predicate = {in_stock}});
+```
+
+A predicate is a `noexcept` callable, called by the executor's threads together, so it holds no unguarded state.
+One answering a single key as a `bool` is cheap, asked as candidates are scored.
+One writing an admission per key of a batch is expensive by default, asked once per round, unless `us::predicate_t {handler, usearch_predicate_cost_cheap_k}` says otherwise.
+A VRAM handle refuses a host predicate with `status_code_t::device_k`.
+
+Every long verb's config takes a `progress` handler, called with the units finished so far and the units the call finishes if it runs to the end.
+Answering `usearch_cancel_k` stops the call at the next increment boundary.
+
+```cpp
+std::chrono::steady_clock::time_point const deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+auto before_the_deadline = [&](std::size_t, std::size_t) noexcept {
+    return std::chrono::steady_clock::now() < deadline ? usearch_continue_k : usearch_cancel_k;
+};
+us::status_t const refined = index.on(executor).refine(
+    {.refine = {.expansion_factor = 128}, .progress = {before_the_deadline}}).status;
+if (refined.failed()) assert(refined == us::status_code_t::cancelled_k && "only the deadline stops it");
+```
+
+The handler arrives on whichever thread advanced the work and never on two at once, which is what lets it carry a counter or a deadline without a lock of its own.
+Reports are denominated in whatever the verb consumes: entries for an insertion, queries for a search, a phase's entries or islands for a refine or a reshard, draws for a sample, shards for a checkpoint, and bytes for a buffer.
+How often they arrive is the increment's size rather than a guarantee, so read the counts and never the number of calls.
+
+What a stop leaves behind is each verb's own contract.
+An `insert` cannot be stopped: it claims every entry before its first report, ignores a cancel, and publishes the whole batch at once.
+A stopped search reports `status_code_t::cancelled_k` and leaves no matches.
+A stopped `refine` or `reshard` reports `status_code_t::cancelled_k` and leaves a graph that saves; without a plan it closes the round where it stopped, and with one it leaves the plan live for the next call.
+A stopped load creates no index, and a stopped `save_buffer` leaves no monolith.
+
+### Retrieval and Streaming
+
+`get<T>` lands every vector stored under a key in an arena, converted to the scalar type you name, one row per entry in insertion order; an absent key yields no rows.
+
+```cpp
+auto [vectors, status] = index.on(executor).get<float>(key, arena);
+std::printf("%zu rows of %zu\n", vectors.written, vectors.view.columns);
+auto [again, again_status] = index.on(executor).get<float>(key, arena); // rewinds it, so the vectors above are gone
+```
+
+A cursor walks the index contents, reading each shard's publication watermark as it enters that shard, so an entry once passed is never revisited.
+Without start keys it yields every entry as stored; with them, the starts' own entries first, then the entries those link to breadth-first, each once.
+`cursor_next` walks the key column alone, or copies the keys each entry links to beside it when asked for links, both into an arena; the vectors themselves come from `get`.
+
+```cpp
+auto [cursor, cursor_status] = index.cursor_init();
+for (;;) {
+    auto [batch, status] = index.on(executor).cursor_next(cursor, 1024, arena, true);
+    if (status.failed() || batch.written == 0) break;
+    std::printf("%zu keys, the first linking to %zu\n", batch.written, batch.links.offsets[1] - batch.links.offsets[0]);
+}
+```
+
+A search stream is a resumable best-first traversal, so callers that post-filter aggressively pull until satisfied instead of guessing "k" upfront.
+It walks exactly one query row, and each pull lands up to `wanted` more matches in an arena as the one query of `usearch_matches_view_t`, empty once the walk is drained.
+No residency implements the stream yet, so the engine answers `status_code_t::unsupported_k`.
+
+```cpp
+auto [stream, stream_status] = index.search_stream_init<float>({query, 1, 768});
+for (bool pulling = !stream_status.failed(); pulling;) {
+    auto [pulled, status] = index.on(executor).search_stream_next(stream, 64, arena);
+    pulling = !status.failed() && pulled.counts[0] != 0;
+    for (std::size_t rank = 0; pulling && rank != pulled.counts[0]; ++rank) {
+        if (pulled.scores[rank] > 0.3) pulling = false;
+        else visit(pulled.keys[rank], pulled.scores[rank]);
+    }
+}
+```
+
+### Refinement
+
+`refine` re-runs the neighbor selection over entries already in the graph and answers a `usearch_refine_report_t` of the nodes re-selected, those whose neighbors `changed`, the islands found and reconnected, the neighborhoods re-stitched with the links added and dropped, the `verdict`, and the `opening` and `reachability` health checks around the round, so a batch built at a low expansion factor reaches the quality of a slower build afterwards.
+A `verdict` other than `usearch_refine_improved_k` is what settled looks like.
+On a RAM handle searches may run throughout, on a VRAM one they may not, and insertions never may.
+
+```cpp
+us::dense_index_on<usearch_completion_blocking_k> const receiver = index.on(executor);
+for (;;) {
+    auto [report, status] = receiver.refine({.refine = {.expansion_factor = 128}});
+    if (status.failed() || report.verdict != usearch_refine_improved_k) break;
+}
+```
+
+On a loaded NVMe handle `memory_limit` bounds the bytes a round holds for the one part it rewrites: zero rounds the part in RAM, and a smaller budget streams its rounds from the drives.
+
+A `dense_refine_plan_t` carries a round across calls: a stop leaves it live, the next call holding it continues where it stopped, `phase` reports the phase the call stopped in, and `refine_plan_finish` closes it.
 
 ```cpp
 us::dense_refine_plan_t plan;
-auto stopped = index.on(executor).refine({.progress = {cancel_at_first}, .plan = &plan});
-auto resumed = index.on(executor).refine({.plan = &plan});
-auto report = index.on(executor).refine_plan_finish(std::move(plan));
-std::printf("Verdict: %s\n", usearch_refine_verdict_name(report.value.verdict));
+while (receiver.refine({.progress = {before_the_deadline}, .plan = &plan}) == us::status_code_t::cancelled_k)
+    std::printf("stopped in %s at %zu of %zu\n", usearch_phase_name(plan.phase().phase), plan.phase().completed,
+                plan.phase().total);
+auto [report, status] = receiver.refine_plan_finish(std::move(plan));
 ```
 
-`reshard` takes spans of source and target handles: several into one gathers, one into several cuts, and one handle as its own only source and target recuts in place.
-`multiply`, `attend`, `maxsim`, cursors and search streams follow the same shape; `cpp/usearch/dense_index.hpp` documents each.
-
-`sample` draws keys around a focus, or across the whole index, into the arena as a `us::sample_t`, each hanging from a shown or earlier draw and placed in three dimensions, so a view grows one connected sample as it zooms.
-Every modality answers it alike, and `dense_metric_name` with `dense_metric_from_name` spell a metric both ways, as the sequence and shapes ones do:
+A deferred call borrows the plan it carries, which stays where it is until the call is final.
 
 ```cpp
-auto drawn = index.on(executor).sample(64, arena, {.seed = 42});
-auto zoomed = index.on(executor).sample(64, arena, {.shown = shown, .shown_coordinates = placed, .focus = focus});
-auto [metric, metric_status, metric_message] = us::dense_metric_from_name(bytes_of("angular"));
+us::deferred<usearch_refine_report_t> call = index.deferred(executor).refine({.plan = &plan});
+auto [answer, status] = co_await call.wait(loop); // or: call.wait()
 ```
+
+### Resharding
+
+`reshard` moves the entries of its `sources` into its `targets`, keeping their links rather than re-inserting their entries, then runs a round on every target that took entries; the receiver supplies the executor.
+Several sources gather into the one target among them, one source cuts into several empty targets, and one handle alone recuts its own shards in place under `shard_capacity`.
+Every handle stays yours: a source the targets do not name ends empty and live.
+Readers of a RAM target may keep searching throughout, while a VRAM one admits no overlapping search.
+
+```cpp
+usearch_dense_index_t const gathered[3] = {index.handle(), first_shard.handle(), second_shard.handle()};
+us::status_t const gather = index.on(executor).reshard(gathered, {gathered, 1}).status;
+usearch_dense_index_t const source[1] = {index.handle()}, parts[2] = {left.handle(), right.handle()};
+us::status_t const cut = index.on(executor).reshard(source, parts).status; // two empty targets take a part each
+
+```
+
+A stopped `reshard` cuts only its closing rounds, every entry already moved, and reports `status_code_t::cancelled_k`; a `dense_reshard_plan_t` continues it as a refine plan does, and `reshard_plan_finish` closes it.
+
+### Sampling
+
+`sample` draws keys around a focus, each hanging from a shown or earlier draw, and places them in three dimensions beside the keys already shown, so a view grows one connected sample as it zooms.
+
+```cpp
+auto [drawn, status] = index.on(executor).sample(256, arena, {
+    .shown = shown,
+    .shown_coordinates = {&xyz[0][0], shown.size(), 3},
+    .focus = near,
+    .seed = 42,
+});
+for (std::size_t draw = 0; draw != drawn.written; ++draw) place(drawn.keys.data[draw], drawn.coordinate(draw));
+```
+
+### Sparse Multiplication
+
+`multiply`, `maxsim` and `attend` treat the index as a sparse operand rather than as a kNN store, and each folds its arithmetic into the graph walk instead of materializing a match list.
+All three need logits rather than distances, so they run on an inner-product index alone.
+
+`multiply` is a sparse matrix product: every left row is walked against the index, and every pair the walk scored lands in an arena as one ragged run, in traversal order.
+`wanted` keeps the first pairs of each row, where zero keeps every pair, and `required` counts how many there were.
+The run's Apache Arrow offsets land in the arena beside the keys and products.
+
+```cpp
+auto [products, status] = index.on(executor).multiply<float>({left, rows, 768}, arena, {.wanted = 32});
+for (std::size_t row = 0; row != rows; ++row)
+    std::printf("%zu pairs\n", products.view.offsets[row + 1] - products.view.offsets[row]);
+```
+
+### Late Interaction
+
+`maxsim` is late interaction: every query row takes its best match within a key, and those maxima sum to that key's score.
+A document is one key holding its token rows, which is what a `values_per_key` above one exists for, and the wanted count is over documents rather than rows.
+Each query lands its best documents, largest score first, in the same ragged `dense_products_t` run `multiply` answers, and a `wanted` of zero keeps every document the query scored.
+
+```cpp
+auto [documents, status] = index.on(executor).maxsim<float>({tokens, rows, 768}, tokens_per_query, 10, arena);
+for (std::size_t query = 0; query != rows / tokens_per_query; ++query)
+    std::printf("%zu documents\n", documents.view.offsets[query + 1] - documents.view.offsets[query]);
+```
+
+### Attention
+
+`attend` is Flash Attention folded into the walk: every key it scores folds into each head's running maximum, partition and weighted value sum, with no top-k cut, and the outputs land in an arena already divided by the partition, as rows of the scalar type you name.
+The index stores no values, so a `value_lookup_t` handler resolves every scored key to its value row, as wide as the keys, stored in the index's own quantization, and borrowed from storage outliving the call.
+A null row, or rows of another scalar type or width than the library reads, refuses the call with `status_code_t::shape_mismatch_k`.
+It runs on the executor's threads together.
+A VRAM walk resolves values on the device, where no host handler runs, so `value_lookup_t::device` names a device function and its state instead, and a host handler with an arena from a VRAM executor is refused with `status_code_t::device_k`.
+With a `head_count` of 8, row `t * 8 + h` of the queries is head `h` of token `t`, and the heads of one token share its walk.
+A `carry` of one `usearch_dense_softmax_state_t` per query row, lent by you, folds this branch into another over the same queries, such as a recent window kept out of the index.
+`score_scale` is conventionally the inverse square root of the head width, and zero derives it from the frozen geometry.
+
+```cpp
+auto value_lookup = [&](usearch_key_t const* keys, std::size_t count, usearch_scalar_t, std::size_t,
+                        void const** rows) noexcept {
+    for (std::size_t position = 0; position != count; ++position) rows[position] = cache.find(keys[position]);
+};
+std::vector<usearch_dense_softmax_state_t> carry(queries.count);
+auto [context, status] = index.on(executor).attend<float, float>(
+    queries, value_lookup, arena, {.head_count = 8, .carry = carry.data()});
+std::printf("%zu rows of %zu\n", context.written, context.view.columns);
+```
+
+### Introspection
+
+```cpp
+auto [description, status] = index.describe();
+std::printf("%zu entries in %zu bytes\n", description.size, description.memory_usage);
+std::printf("dispatched to %s and %s\n", usearch_cpu_class_name(description.cpu_class),
+            usearch_gpu_class_name(description.gpu_class));
+std::printf("compiled for %s\n", usearch_capabilities_compiled());
+std::printf("available here %s\n", usearch_capabilities_available());
+
+auto [reachability, health_status] = index.health();
+std::printf("%zu of %zu entries reachable\n", reachability.reachable, reachability.audited);
+
+auto [entries, count_status] = index.count(key);
+std::printf("%zu entries under the key\n", entries);
+```
+
+`describe` reads the frozen metadata and the counters once each, so under concurrent insertions they may come from slightly different moments, and `memory_usage` excludes the executor's scratch.
+`health` measures how much of the graph a search reaches from the root; entries it misses stay unfound until a `refine` re-links them.
 
 ## Sequence Indexes
 
-A sequence index searches byte strings, UTF-8 text, DNA, RNA and proteins under edit distances and alignments.
-Sequences cross as a `tape_view<std::uint8_t>`, the bytes end to end around one more 32- or 64-bit offset than entries, as Apache Arrow lays out a binary column:
+A `sequence_index_t` searches byte strings, UTF-8 text, DNA, RNA and proteins under edit distances and alignments.
+Its sequences cross as one `tape_view<std::uint8_t>`, the Apache Arrow `Binary` layout of bytes end to end around one more 32- or 64-bit offset than entries, so the two runs of an Arrow column pass as they are.
 
 ```cpp
-auto [words, status, message] = us::sequence_index_t::init_ram({.metric = usearch_sequence_metric_levenshtein_utf8_k});
-std::uint8_t const bytes[] = {'k', 'i', 't', 't', 'e', 'n', 's', 'i', 't', 't', 'i', 'n', 'g'};
-std::uint64_t const offsets[] = {0, 6, 13};
-usearch_key_t const keys[] = {key_of(1), key_of(2)};
-auto inserted = words.on(executor).insert(keys, {bytes, offsets});
-auto found = words.on(executor).search({bytes + 6, std::span(offsets).first(2)}, 1, arena);
-auto stored = words.on(executor).get(keys[1], arena); // stored.value.entry(0) spans "sitting"
+auto [index, index_status] = us::sequence_index_t::init_ram({.metric = usearch_sequence_metric_levenshtein_utf8_k});
+std::uint8_t const words[] = {'k', 'i', 't', 't', 'e', 'n', 's', 'i', 't', 't',
+                              'i', 'n', 'g', 'm', 'i', 't', 't', 'e', 'n'};
+std::uint64_t const offsets[] = {0, 6, 13, 19};
+us::status_t const inserted = index.insert(keys, {words, offsets});
+
+std::uint8_t const probe[] = {'s', 'i', 't', 't', 'i', 'n'};
+std::uint64_t const probe_offsets[] = {0, 6};
+auto [arena, arena_status] = us::arena_t::make();
+auto [matches, status] = index.search({probe, probe_offsets}, 1, arena);
+assert(matches.scores[0] == 1); // one edit away
 ```
 
-`count` answers a key's entries with their total and largest byte lengths.
-Needleman-Wunsch takes `usearch_sequence_weights_t` and the overlap kind its `window_widths`, both in the init struct.
-`sequence_refine_plan_t`, `sequence_reshard_plan_t` and the cursor work as the dense ones do.
+`usearch_sequence_metric_needleman_wunsch_k` takes `weights`, a 256 × 256 substitution matrix with a gap cost, and `usearch_sequence_metric_overlap_k` takes `window_widths`; every load and view names the weights again, since no checkpoint records them.
+`get` writes a key's sequences into an arena as `sequence_entries_t`, whose `entry(position)` spans one sequence's bytes, and `count` reports a key's entries with their total and largest byte lengths.
+The receivers, reports and plans work as the dense ones do: `refine` and `reshard` take a `sequence_refine_plan_t` or a `sequence_reshard_plan_t` and answer a `usearch_refine_report_t`.
 
 ## Shape Indexes
 
-A shape index searches 3D point clouds of any size, like molecules and protein backbones.
-Shapes cross as a `tape_view<T>` of points, `x`, `y` and `z` interleaved, with offsets counting points, and `T` names their scalar per call:
+A `shapes_index_t` searches 3D point clouds of any size, like molecules, conformers and protein backbones, invariant to rotation, reflection, translation and point order.
+Its tape holds `[x, y, z]` points end to end, with offsets that count points, as an Arrow `List` column lays them out:
 
 ```cpp
-auto [conformers, status, message] = us::shapes_index_t::init_ram(
-    {.metric = usearch_shapes_metric_hausdorff_k, .quantization = usearch_scalar_f32_k});
-float const atoms[5][3] = {{0, 0, 0}, {1.1f, 0, 0}, {0, 0, 0}, {1.5f, 0, 0}, {0, 1.5f, 0}};
-std::uint64_t const offsets[] = {0, 2, 5}; // a 2-atom and a 3-atom entry
-auto inserted = conformers.on(executor).insert<float>(keys, {&atoms[0][0], offsets});
-auto shapes = conformers.on(executor).get<float>(keys[1], arena); // 9 scalars, in the inserted pose
+auto [index, index_status] = us::shapes_index_t::init_ram( // Chamfer over f32 points
+    {.metric = usearch_shapes_metric_chamfer_k, .quantization = usearch_scalar_f32_k});
+float const points[5][3] = {{0, 0, 0}, {1.1f, 0, 0}, {0, 0, 0}, {1.5f, 0, 0}, {0, 1.5f, 0}};
+std::uint64_t const offsets[] = {0, 2, 5}; // a pair and a triple
+us::status_t const inserted = index.insert<float>(keys, {&points[0][0], offsets});
+
+float const probe[2][3] = {{0, 0, 0}, {1, 0, 0}};
+std::uint64_t const probe_offsets[] = {0, 2};
+auto [arena, arena_status] = us::arena_t::make();
+auto [matches, status] = index.search<float>({&probe[0][0], probe_offsets}, 1, arena);
 ```
 
-`count` answers a key's entries with their total and largest point counts, and `search` takes `hints` from an earlier search.
-The engine stores `f16` or `f32` points and refuses other quantizations with `usearch_status_unsupported_k`.
+The metrics are Chamfer, Hausdorff, Gromov-Wasserstein and Wasserstein-Procrustes, over `f16` or `f32` storage, whatever scalar the points arrive in.
+A non-zero `points` in `usearch_shapes_init_ram_t` freezes every shape's point count.
+`get<T>` converts each shape to the scalar it is asked for and answers it in its inserted pose, and `count` reports a key's total and largest point counts.
 
 ## Geospatial Indexes
 
-A geospatial index searches observations on and above the Earth, each one `usearch_geospatial_observation_t` of eleven doubles, where a field no device recorded is NaN:
+A `geospatial_index_t` searches observations on and above the Earth, like photos, video frames, drone footage and sensor fixes.
+`usearch_geospatial_observation_t` is the library's own eleven doubles, so a span of them crosses with no copy; a field no device recorded stays NaN, which only widens the tests that read it:
 
 ```cpp
-auto [places, status, message] = us::geospatial_index_t::init_ram({});
-usearch_geospatial_observation_t const stops[] = {
-    {48.8566, 2.3522, NAN, NAN, NAN, NAN, NAN, NAN, NAN, NAN, NAN},
-    {48.8656, 2.3522, NAN, NAN, NAN, NAN, NAN, NAN, NAN, NAN, NAN},
-    {52.52, 13.405, NAN, NAN, NAN, NAN, NAN, NAN, NAN, NAN, NAN}};
-auto inserted = places.on(executor).insert(keys, stops);
-auto nearest = places.on(executor).search({stops + 2, 1}, usearch_geospatial_relation_near_k, {}, 1, arena);
-auto nearby = places.on(executor).within({stops, 1}, usearch_geospatial_relation_near_k, {.metres = 2000}, arena);
-// nearby.value.view.offsets[1] == 2: both Paris stops, chords in metres
+double const unrecorded = std::numeric_limits<double>::quiet_NaN();
+auto at = [=](double latitude, double longitude) noexcept {
+    return usearch_geospatial_observation_t {latitude,   longitude,  unrecorded, unrecorded, unrecorded, unrecorded,
+                                             unrecorded, unrecorded, unrecorded, unrecorded, unrecorded};
+};
+auto [index, index_status] = us::geospatial_index_t::init_ram({});
+usearch_geospatial_observation_t const stops[3] = {at(51.5308, -0.1238), at(51.5320, -0.1233), at(51.5033, -0.1196)};
+us::status_t const inserted = index.insert(keys, stops);
+
+auto [arena, arena_status] = us::arena_t::make();
+auto [nearby, status] = index.within({stops, 1}, usearch_geospatial_relation_near_k, {.metres = 500}, arena);
+assert(nearby.view.offsets[1] == 2); // both stops within 500 metres, in chord metres
 ```
 
-`search` ranks the `wanted` nearest entries the relation admits, and `within` reports every one inside the tolerance as a ragged run per query.
-A terrain filled on demand is a `noexcept` handler that `us::geospatial_terrain(handler, grid)` turns into the init struct's `terrain`, borrowed for the index's whole life and called from the executor's threads.
+`within` reports every entry the relation admits inside the radius, however many, while `search` ranks the `wanted` nearest, a zero `metres` ranking by distance alone.
+The relation is an argument of each call: `near` widens the radius by both positions' accuracies, `sees` and `seen` test the view cones, and `visible` tests a line of sight over the terrain the handle was built with, which `us::geospatial_terrain(handler, grid)` fills on demand.
+`get` answers a key's observations within the stored rounding.
 
-## What This Binding Does Not Expose
+## Apache Arrow
 
-- __Exceptions.__
-  No verb throws; a caller wanting them wraps `outcome` in one place of its own.
+The converters of `c/usearch/arrow.h` view an Arrow column as a verb's input in place, and export what a call wrote into an arena as a column in place, living until the arena's next call.
+`usearch/arrow.hpp` wraps each of them in a `noexcept` function answering a `status_t`, with the views beside an entry count:
+
+```cpp
+#include <usearch/arrow.hpp>
+
+auto [vectors, get_status] = index.get<float>(key, arena);
+ArrowSchema schema {};
+ArrowDeviceArray array {};
+if (us::rows_view_to_arrow(vectors.view, vectors.written, arena, schema, array).failed()) return 1;
+
+auto [column, view_status] = us::rows_view_from_arrow(schema, array.array); // the same rows, in place
+us::rows_view<float> const queries {static_cast<float const*>(column.view.data), column.count, column.view.columns,
+                                    column.view.stride};
+auto [matches, status] = index.search<float>(queries, 10, other);
+schema.release(&schema); // schema and array release apart
+array.array.release(&array.array);
+```
+
+`keys_view_from_arrow`, `rows_view_from_arrow` and `tape_view_from_arrow` read keys, rows and sequence or shape tapes, and `keys_view_to_arrow`, `rows_view_to_arrow`, `tape_view_to_arrow`, `keys_tape_view_to_arrow` and `matches_tape_view_to_arrow` write keys, rows, tapes, a cursor's links and ragged matches.
+
+## Left Unbound
+
+These C entry points also take a deferred completion, but the SDK calls them blocking, whatever receiver you hold:
+
+- The `load_*` family, `view_nvme`, `load_nvme`, `metadata_read` and `metadata_read_buffer`, with each one's `executor` argument choosing where it fans out.
+- Cursor and search-stream openings, which name no executor, and their pulls, which run on the receiver's.
+
+`init_ram`, `init_vram` and `view_ram` block in C as well.
+No verb throws, so a caller wanting exceptions wraps `status_t` in one place of its own.
 
 ## Design
 
-- __One body per verb.__
-  The blocking and deferred receivers are one class template over the completion, so a verb fills its C struct once and the receiver's type alone picks whether it blocks.
-- __The scalar is a call's type parameter.__
-  Rows and point tapes name their element type per call, as in `search<float>`, never fixed by the handle.
+- __A thin layer over the C ABI.__
+  Every name follows `c/usearch/`: a C verb `usearch_dense_<verb>` is a `<verb>` here, each header mirrors one C header, and a verb's argument struct becomes its `dense_*_config_t` or is taken as is.
+  Enums are the C enums, never strings.
+- __The receiver chooses, the verb stays.__
+  The index runs a verb on the calling thread, `on(executor)` blocks on an executor, and `deferred(executor)` submits it, all with the same arguments.
+- __Deferred calls use the language's own idioms.__
+  `status` polls the status word, `wait()` blocks on it, and `co_await call.wait(loop)` suspends and re-polls through the caller's scheduler, as Rust's `Deferred` re-wakes itself through its `RawWaker`, since the library has no wake-up.
+- __No life of its own.__
+  The SDK starts no threads, keeps no queues and caches nothing; destroying a `deferred` waits for the call first.
+- __Arenas are lent and reused, never shared.__
+  Every output whose length scales with the call lands in an arena the caller passes, and the answer is a view over it.
+- __Nothing costs anything until it is used.__
+  A blocking call allocates nothing, keeping its outcome and outputs on the stack; a deferred submission allocates nothing, keeping them in the immovable `deferred` the caller holds; an awaiter lives in the coroutine frame, and the scheduler stores two words, a function and a state pointer.
+- __Callers lend memory, never an allocator.__
+  No allocation callback crosses into the library: payload belongs to the index, placed by its constructor's residency, and scratch belongs to the executor.
 - __Callbacks cannot throw.__
-  Every handler concept requires `std::is_nothrow_invocable_r_v`, and its trampoline is `noexcept`.
+  Every handler concept requires a `noexcept` call, and its trampoline is `noexcept`.
 - __Shared pieces, no base classes.__
-  Outcomes, receivers' dispatch, plans, cursors, tapes, executors and arenas live in `usearch/types.hpp`, and each index header adds only its own verbs.
+  Statuses, expected values, deferred calls, owners, plans, tapes, executors and arenas live in `usearch/types.hpp`, held as members, and each index header adds only its own verbs.
+
+| Path | C++ | Rust |
+|---|---|---|
+| Blocking call | 0 | 0 |
+| Refusal before the call | 0 | 1 error |
+| Deferred submit and wait | 0: the `deferred` lives with the caller | 0: the `Deferred` is pinned where it is polled |
+| Each callback | 0 | 0 |

@@ -12,11 +12,11 @@
 #include "vram_indexes.cuh"
 
 using namespace unum::usearch;
-using namespace unum::usearch::utilities;
+namespace util = unum::usearch::utilities;
 
 template <typename executor_type_>
 void test::dense::run_vram_indexes_cases(executor_type_& executor) {
-    u64_t const seed = test_run.settings.seed;
+    util::u64_t const seed = test_run.settings.seed;
     char const* const vendor = constant_of(executor_type_::vendor_k);
     run_test_case(fmt::format("test_vram_indexes_configuration<nk_bf16_k, nk_kernel_angular_k>({})", vendor).c_str(),
                   test_vram_indexes_configuration<nk_bf16_k, nk_kernel_angular_k, executor_type_>, seed, executor);
@@ -25,11 +25,11 @@ void test::dense::run_vram_indexes_cases(executor_type_& executor) {
 }
 
 #if USEARCH_ARCH_CUDA_
-template void test::dense::run_vram_indexes_cases<cuda_executor_t>(cuda_executor_t&);
+template void test::dense::run_vram_indexes_cases<util::cuda_executor_t>(util::cuda_executor_t&);
 #endif
 #if USEARCH_ARCH_ROCM_
-template void test::dense::run_vram_indexes_cases<hip_executor_t>(hip_executor_t&);
+template void test::dense::run_vram_indexes_cases<util::hip_executor_t>(util::hip_executor_t&);
 #endif
 #if USEARCH_ARCH_METAL_
-template void test::dense::run_vram_indexes_cases<metal_executor_t>(metal_executor_t&);
+template void test::dense::run_vram_indexes_cases<util::metal_executor_t>(util::metal_executor_t&);
 #endif

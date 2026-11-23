@@ -273,15 +273,6 @@ enum class linux_uring_reaping_t : u8_t {
     polled_k,
 };
 
-/** Keeps the first failure any thread reports into @p first, through the CPU class's reference. */
-template <template <typename> class atomic_ref_template_>
-void keep_first_failure(status_t& first, status_t status) noexcept {
-    if (succeeded(status)) return;
-    status_t unset = status_t::success_k;
-    atomic_ref_template_<status_t>(first).compare_exchange_strong(unset, status, std::memory_order_relaxed,
-                                                                  std::memory_order_relaxed);
-}
-
 #pragma endregion Requests and Completions
 
 #pragma region Media
@@ -358,13 +349,14 @@ struct file_medium_t {
         if (failed(parse_status)) return {file_medium_t {}, parse_status};
         growing_buffer<char> terminated {global_allocator};
         std::size_t const length = parsed.location.size();
-        if (failed(terminated.resize_uninitialized(length + 1))) return {file_medium_t {}, status_t::bad_alloc_k};
+        if (failed(terminated.resize_uninitialized(length + 1)))
+            return {file_medium_t {}, status_code_t::out_of_memory_k};
         terminated[parsed.location.copy(terminated.data(), length)] = '\0';
         auto [medium, open_status] = open_(terminated.data());
         if (failed(open_status)) return {std::move(medium), open_status};
-        if (parsed.byte_base % medium.block_bytes) return {std::move(medium), status_t::invalid_argument_k};
+        if (parsed.byte_base % medium.block_bytes) return {std::move(medium), status_code_t::invalid_argument_k};
         medium.byte_base = parsed.byte_base;
-        return {std::move(medium), status_t::success_k};
+        return {std::move(medium), status_code_t::success_k};
     }
 
     /**
@@ -390,22 +382,23 @@ static_assert(sizeof(io_device_queues_t) == 12 && sizeof(file_medium_t) == 32, "
 inline expected<file_medium_t> file_medium_t::open_(char const* path) noexcept {
     file_medium_t medium;
     medium.descriptor = open_native_file(path, file_access_t::read_only_k, file_buffering_t::unbuffered_k);
-    if (medium.descriptor == invalid_native_file_k) return {std::move(medium), status_t::io_k};
+    if (medium.descriptor == invalid_native_file_k) return {std::move(medium), status_code_t::io_k};
     FILE_STORAGE_INFO storage {};
     medium.block_bytes = ::GetFileInformationByHandleEx(medium.descriptor, FileStorageInfo, &storage,
                                                         sizeof(storage)) &&
                                  storage.LogicalBytesPerSector
                              ? static_cast<u32_t>(storage.LogicalBytesPerSector)
                              : io_block_bytes_default_k;
-    return {std::move(medium), status_t::success_k};
+    return {std::move(medium), status_code_t::success_k};
 }
 
 inline i32_t nvme_namespace_read_(HANDLE, bytes_span_t, u64_t, u32_t) noexcept { return -ENODEV; }
 
-/** Bytes @p medium spans past its base. */
-inline u64_t medium_bytes_of(file_medium_t const& medium) noexcept {
-    u64_t const bytes = native_file_capacity(medium.descriptor).value;
-    return bytes - min_of(bytes, medium.byte_base);
+/** Bytes @p medium spans past its base, or @c io_k when it cannot be measured. */
+inline expected<u64_t> medium_bytes_of(file_medium_t const& medium) noexcept {
+    auto const [bytes, capacity_status] = native_file_capacity(medium.descriptor);
+    if (failed(capacity_status)) return {0, capacity_status};
+    return {bytes - min_of(bytes, medium.byte_base), status_code_t::success_k};
 }
 
 /** Whether reads on @p medium skip the page cache, as every handle opened unbuffered does. */
@@ -752,16 +745,16 @@ inline expected<file_medium_t> file_medium_t::open_(char const* path) noexcept {
     int const refused = medium.descriptor == invalid_native_file_k ? errno : 0;
     if (refused == EINVAL)
         medium.descriptor = open_native_file(path, file_access_t::read_only_k, file_buffering_t::buffered_k);
-    if (medium.descriptor == invalid_native_file_k) return {std::move(medium), status_t::io_k};
+    if (medium.descriptor == invalid_native_file_k) return {std::move(medium), status_code_t::io_k};
     struct stat description;
-    if (::fstat(medium.descriptor, &description) != 0) return {std::move(medium), status_t::io_k};
+    if (::fstat(medium.descriptor, &description) != 0) return {std::move(medium), status_code_t::io_k};
     // The whole disk's queue: a node's own, a partition's or a file's parent, or an ng node's disk.
     io_block_queue_t const queue = io_block_queue_of_(medium.descriptor, description, refused);
     medium.queues = queue.queues;
     medium.block_bytes = direct_offset_alignment_(medium.descriptor);
     if (!medium.block_bytes) medium.block_bytes = queue.logical_block_bytes;
     if (!medium.block_bytes) medium.block_bytes = io_block_bytes_default_k;
-    return {std::move(medium), status_t::success_k};
+    return {std::move(medium), status_code_t::success_k};
 }
 
 /** Reads @p destination at @p offset of the namespace behind the generic char node @p descriptor,
@@ -787,15 +780,16 @@ inline i32_t nvme_namespace_read_(int descriptor, bytes_span_t destination, u64_
 }
 
 /** Bytes @p medium spans past its base: a file's length, a block device's, or the namespace's
- *  behind a generic char node, whose disk counts 512-byte sectors in sysfs whatever its block. */
-inline u64_t medium_bytes_of(file_medium_t const& medium) noexcept {
+ *  behind a generic char node, whose disk counts 512-byte sectors in sysfs whatever its block;
+ *  @c io_k when it cannot be measured. */
+inline expected<u64_t> medium_bytes_of(file_medium_t const& medium) noexcept {
     struct stat description;
-    if (::fstat(medium.descriptor, &description) != 0) return 0;
+    if (::fstat(medium.descriptor, &description) != 0) return {0, status_code_t::io_k};
     u64_t bytes = static_cast<u64_t>(description.st_size);
     if (S_ISBLK(description.st_mode)) bytes = block_device_bytes_(medium.descriptor);
     int const disk = S_ISCHR(description.st_mode) ? sysfs_disk_of_(medium.descriptor, description) : -1;
     if (disk >= 0) bytes = sysfs_number_(disk, "size") * 512, ::close(disk);
-    return bytes - min_of(bytes, medium.byte_base);
+    return {bytes - min_of(bytes, medium.byte_base), status_code_t::success_k};
 }
 
 /** Whether reads on @p medium skip the page cache: @c O_DIRECT held, or a generic char node, which
@@ -824,17 +818,18 @@ inline fu_memory_domain_id_t memory_domain_of(file_medium_t const& medium) noexc
 inline expected<file_medium_t> file_medium_t::open_(char const* path) noexcept {
     file_medium_t medium;
     medium.descriptor = open_native_file(path, file_access_t::read_only_k, file_buffering_t::unbuffered_k);
-    if (medium.descriptor == invalid_native_file_k) return {std::move(medium), status_t::io_k};
+    if (medium.descriptor == invalid_native_file_k) return {std::move(medium), status_code_t::io_k};
     medium.block_bytes = io_block_bytes_default_k;
-    return {std::move(medium), status_t::success_k};
+    return {std::move(medium), status_code_t::success_k};
 }
 
 inline i32_t nvme_namespace_read_(int, bytes_span_t, u64_t, u32_t) noexcept { return -ENODEV; }
 
-/** Bytes @p medium spans past its base. */
-inline u64_t medium_bytes_of(file_medium_t const& medium) noexcept {
-    u64_t const bytes = native_file_capacity(medium.descriptor).value;
-    return bytes - min_of(bytes, medium.byte_base);
+/** Bytes @p medium spans past its base, or @c io_k when it cannot be measured. */
+inline expected<u64_t> medium_bytes_of(file_medium_t const& medium) noexcept {
+    auto const [bytes, capacity_status] = native_file_capacity(medium.descriptor);
+    if (failed(capacity_status)) return {0, capacity_status};
+    return {bytes - min_of(bytes, medium.byte_base), status_code_t::success_k};
 }
 
 /** Whether reads on @p medium skip the page cache; Apple's @c F_NOCACHE is a hint, and FreeBSD
@@ -922,7 +917,7 @@ class linux_spdk_process_t {
     template <typename wait_type_>
     static status_t acquire(config_t const& config) noexcept {
         claim_<wait_type_>();
-        status_t const acquired = running() ? status_t::success_k : start_(config);
+        status_t const acquired = running() ? status_code_t::success_k : start_(config);
         unclaim_();
         return acquired;
     }
@@ -934,17 +929,17 @@ class linux_spdk_process_t {
      *  - @c invalid_argument_k @p transport_id does not parse.
      *  - @c uninitialized_k The environment does not run.
      *  - @c io_k The controller did not connect, or failed and is still held.
-     *  - @c bad_alloc_k The attachment could not be recorded.
+     *  - @c out_of_memory_k The attachment could not be recorded.
      */
     template <typename wait_type_>
     static expected<connected_t*> connect(char const* transport_id) noexcept {
         spdk_nvme_transport_id transport {};
         if (!transport_id || spdk_nvme_transport_id_parse(&transport, transport_id) != 0)
-            return {nullptr, status_t::invalid_argument_k};
+            return {nullptr, status_code_t::invalid_argument_k};
         claim_<wait_type_>();
-        expected<connected_t*> const connected = connect_(transport);
+        auto const [connected, status] = connect_(transport);
         unclaim_();
-        return connected;
+        return {connected, status};
     }
 
     /** Adds a holder to @p connected, as an engine's queue pair on its controller does. */
@@ -986,7 +981,7 @@ class linux_spdk_process_t {
     static void unclaim_() noexcept { fu::standard_atomic_ref<u32_t>(claim_word_).store(0, std::memory_order_release); }
 
     static status_t start_(config_t const& config) noexcept {
-        if (!spdk_env_dpdk_external_init()) return status_t::config_mismatch_k;
+        if (!spdk_env_dpdk_external_init()) return status_code_t::config_mismatch_k;
         spdk_env_opts options {};
         options.opts_size = sizeof(options);
         spdk_env_opts_init(&options);
@@ -1002,18 +997,18 @@ class linux_spdk_process_t {
         int const kept_affinity = ::sched_getaffinity(0, sizeof(inherited), &inherited);
         int const initialized = spdk_env_init(&options);
         if (kept_affinity == 0) ::sched_setaffinity(0, sizeof(inherited), &inherited);
-        if (initialized != 0) return status_t::io_k;
+        if (initialized != 0) return status_code_t::io_k;
         fu::standard_atomic_ref<u32_t>(running_).store(1, std::memory_order_release);
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     static expected<connected_t*> connect_(spdk_nvme_transport_id const& transport) noexcept {
-        if (!running()) return {nullptr, status_t::uninitialized_k};
+        if (!running()) return {nullptr, status_code_t::uninitialized_k};
         for (connected_t* const cached : connections_)
             if (spdk_nvme_transport_id_compare(&cached->transport, &transport) == 0) {
-                if (spdk_nvme_ctrlr_is_failed(cached->controller)) return {nullptr, status_t::io_k};
+                if (spdk_nvme_ctrlr_is_failed(cached->controller)) return {nullptr, status_code_t::io_k};
                 ++cached->holders;
-                return {cached, status_t::success_k};
+                return {cached, status_code_t::success_k};
             }
         spdk_nvme_ctrlr_opts options;
         spdk_nvme_ctrlr_get_default_ctrlr_opts(&options, sizeof(options));
@@ -1021,12 +1016,12 @@ class linux_spdk_process_t {
         // controller.
         options.keep_alive_timeout_ms = 0;
         spdk_nvme_ctrlr* const controller = spdk_nvme_connect(&transport, &options, sizeof(options));
-        if (!controller) return {nullptr, status_t::io_k};
+        if (!controller) return {nullptr, status_code_t::io_k};
         connected_t* const connected = new (std::nothrow) connected_t {transport, controller, 1};
         if (!connected || failed(connections_.push_back(connected)))
             return delete connected, spdk_nvme_detach(controller),
-                   expected<connected_t*> {nullptr, status_t::bad_alloc_k};
-        return {connected, status_t::success_k};
+                   expected<connected_t*> {nullptr, status_code_t::out_of_memory_k};
+        return {connected, status_code_t::success_k};
     }
 
     /** Held while the environment starts or a controller's holders change. */
@@ -1093,11 +1088,11 @@ struct spdk_medium_t {
                                        ? spdk_nvme_ns_get_sector_size(name_space)
                                        : 0;
         if (!sector_bytes || byte_base % sector_bytes)
-            return medium.release<wait_type_>(), expected {std::move(medium), status_t::invalid_argument_k};
+            return medium.release<wait_type_>(), expected {std::move(medium), status_code_t::invalid_argument_k};
         medium.name_space = name_space;
         medium.byte_base = byte_base;
         medium.block_bytes = sector_bytes;
-        return {std::move(medium), status_t::success_k};
+        return {std::move(medium), status_code_t::success_k};
     }
 
     /** Opens the namespace @p path names, an @c spdk:// address or a transport ID in any form
@@ -1112,7 +1107,8 @@ struct spdk_medium_t {
         std::string_view const pcie_keys = names_transport_id(parsed.location) ? "" : "trtype:PCIe traddr:";
         growing_buffer<char> transport_id {global_allocator};
         std::size_t const length = pcie_keys.size() + parsed.location.size();
-        if (failed(transport_id.resize_uninitialized(length + 1))) return {spdk_medium_t {}, status_t::bad_alloc_k};
+        if (failed(transport_id.resize_uninitialized(length + 1)))
+            return {spdk_medium_t {}, status_code_t::out_of_memory_k};
         parsed.location.copy(transport_id.data() + pcie_keys.copy(transport_id.data(), pcie_keys.size()), length);
         transport_id[length] = '\0';
         linux_spdk_process_t::config_t environment;
@@ -1126,22 +1122,22 @@ struct spdk_medium_t {
     /** Fills @p bytes from @p offset bytes past the part's start, one sector-aligned read on a
      *  queue pair of its own waited out by polling, for the headers a view reads once. */
     status_t read_at(u64_t offset, bytes_span_t bytes) const noexcept {
-        if (bytes.empty()) return status_t::success_k;
+        if (bytes.empty()) return status_code_t::success_k;
         spdk_nvme_qpair* const queue_pair = spdk_nvme_ctrlr_alloc_io_qpair(spdk_nvme_ns_get_ctrlr(name_space), nullptr,
                                                                            0);
-        if (!queue_pair) return status_t::io_k;
+        if (!queue_pair) return status_code_t::io_k;
         u64_t const begin = byte_base + offset, first = begin - begin % block_bytes;
         u64_t const bound = round_up_to_multiple<u64_t>(begin + bytes.size(), block_bytes);
         void* const staging = spdk_dma_malloc(bound - first, io_alignment_k, nullptr);
         // The command's callback writes the outcome; until then the read is still arriving.
-        status_t read_status = status_t::uninitialized_k;
-        if (!staging) read_status = status_t::bad_alloc_k;
+        status_t read_status = status_code_t::uninitialized_k;
+        if (!staging) read_status = status_code_t::out_of_memory_k;
         else if (spdk_nvme_ns_cmd_read(name_space, queue_pair, staging, first / block_bytes,
                                        static_cast<u32_t>((bound - first) / block_bytes),
                                        &spdk_medium_t::read_finished_, &read_status, 0) != 0)
-            read_status = status_t::io_k;
-        while (read_status == status_t::uninitialized_k)
-            if (spdk_nvme_qpair_process_completions(queue_pair, 0) < 0) read_status = status_t::io_k;
+            read_status = status_code_t::io_k;
+        while (read_status == status_code_t::uninitialized_k)
+            if (spdk_nvme_qpair_process_completions(queue_pair, 0) < 0) read_status = status_code_t::io_k;
         if (succeeded(read_status))
             std::memcpy(bytes.data(), static_cast<byte_t*>(staging) + (begin - first), bytes.size());
         spdk_nvme_ctrlr_free_io_qpair(queue_pair);
@@ -1151,7 +1147,8 @@ struct spdk_medium_t {
 
   private:
     static void read_finished_(void* context, spdk_nvme_cpl const* completion) noexcept {
-        *static_cast<status_t*>(context) = spdk_nvme_cpl_is_error(completion) ? status_t::io_k : status_t::success_k;
+        *static_cast<status_t*>(context) = spdk_nvme_cpl_is_error(completion) ? status_code_t::io_k
+                                                                              : status_code_t::success_k;
     }
 };
 
@@ -1303,10 +1300,10 @@ struct io_engine_config_t {
  *  @c invalid_argument_k without a queue depth, and @c unsupported_k when the configuration names
  *  another transport. */
 constexpr status_t io_engine_vet_(io_engine_config_t const& config, io_transport_t transport) noexcept {
-    if (!config.queue_depth) return status_t::invalid_argument_k;
+    if (!config.queue_depth) return status_code_t::invalid_argument_k;
     if (config.transport != io_transport_t::automatic_k && config.transport != transport)
-        return status_t::unsupported_k;
-    return status_t::success_k;
+        return status_code_t::unsupported_k;
+    return status_code_t::success_k;
 }
 
 /** What an engine holding @p media_count attached media answers @p request before encoding it:
@@ -1314,8 +1311,8 @@ constexpr status_t io_engine_vet_(io_engine_config_t const& config, io_transport
  *  result counts. */
 inline status_t io_request_vet_(io_request_t const& request, std::size_t media_count) noexcept {
     assert(request.length <= io_max_length_k && "A completion's result must count every byte its read moves");
-    if (request.medium >= media_count || request.length > io_max_length_k) return status_t::invalid_argument_k;
-    return status_t::success_k;
+    if (request.medium >= media_count || request.length > io_max_length_k) return status_code_t::invalid_argument_k;
+    return status_code_t::success_k;
 }
 
 /**
@@ -1386,19 +1383,19 @@ class io_buffers {
      */
     status_t reserve(std::size_t count, std::size_t bytes) noexcept {
         std::size_t const stride = stride_of_(bytes);
-        if (covers(count, bytes)) return count_ = count, stride_ = stride, status_t::success_k;
+        if (covers(count, bytes)) return count_ = count, stride_ = stride, status_code_t::success_k;
         reset();
         std::size_t const page_bytes = fu::ram_page_size();
-        if (count > (~std::size_t {0} - page_bytes) / stride) return status_t::overflow_k;
+        if (count > (~std::size_t {0} - page_bytes) / stride) return status_code_t::overflow_k;
         // Whole pages, which the allocator starts on a page, so the region is taken as placed.
         std::size_t const region_bytes = round_up_to_multiple<std::size_t>(max_of<std::size_t>(count * stride, 1),
                                                                            page_bytes);
         if (status_t const grown = bytes_.resize_uninitialized(region_bytes); failed(grown)) return grown;
         if (reinterpret_cast<std::uintptr_t>(bytes_.data()) % io_alignment_k)
-            return reset(), status_t::config_mismatch_k;
+            return reset(), status_code_t::config_mismatch_k;
         base_ = bytes_.data();
         capacity_ = region_bytes, count_ = count, stride_ = stride;
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Releases every buffer. */
@@ -1436,10 +1433,10 @@ status_t copy_descriptors_(growing_buffer<native_file_t, allocator_type_>& descr
     if (status_t const reserved = descriptors.reserve(media.size()); failed(reserved)) return reserved;
     for (media_type_ const& medium : media) {
         file_medium_t const* const file = medium_as<file_medium_t>(medium);
-        if (!file) return descriptors.clear(), status_t::config_mismatch_k;
+        if (!file) return descriptors.clear(), status_code_t::config_mismatch_k;
         descriptors.push_back_reserved(file->descriptor);
     }
-    return status_t::success_k;
+    return status_code_t::success_k;
 }
 
 /** Moves as many queued completions as @p completions holds off the back of @p queue, answering how
@@ -1459,10 +1456,10 @@ std::size_t poll_queued_completions_(growing_buffer<io_completion_t, allocator_t
 #pragma region Blocking and AIO Engines
 
 inline status_t file_medium_t::read_at(u64_t offset, bytes_span_t bytes) const noexcept {
-    if (bytes.empty()) return status_t::success_k;
+    if (bytes.empty()) return status_code_t::success_k;
     u64_t const begin = byte_base + offset, first = begin - begin % block_bytes;
     u64_t const bound = round_up_to_multiple<u64_t>(begin + bytes.size(), block_bytes);
-    if (bound - first > io_max_length_k) return status_t::overflow_k;
+    if (bound - first > io_max_length_k) return status_code_t::overflow_k;
     io_buffers<forkunion_allocator_t> staging {forkunion_allocator_t {}};
     if (status_t const reserved = staging.reserve(1, bound - first); failed(reserved)) return reserved;
     u32_t const length = static_cast<u32_t>(bound - first);
@@ -1470,9 +1467,9 @@ inline status_t file_medium_t::read_at(u64_t offset, bytes_span_t bytes) const n
     // A generic char node has no read(2); its namespace serves the same blocks to NVMe Reads.
     if (moved == -EINVAL) moved = nvme_namespace_read_(descriptor, {staging.buffer(0), length}, first, block_bytes);
     // The file may end inside its last block, so only the bytes asked for must arrive.
-    if (moved < 0 || static_cast<u64_t>(moved) < begin + bytes.size() - first) return status_t::io_k;
+    if (moved < 0 || static_cast<u64_t>(moved) < begin + bytes.size() - first) return status_code_t::io_k;
     std::memcpy(bytes.data(), staging.buffer(0) + (begin - first), bytes.size());
-    return status_t::success_k;
+    return status_code_t::success_k;
 }
 
 /**
@@ -1514,9 +1511,9 @@ class blocking_files_engine {
         if (status_t const vetted = io_engine_vet_(config, transport()); failed(vetted)) return vetted;
         if (failed(pending_.reserve_exactly(config.queue_depth)) ||
             failed(completions_.reserve_exactly(config.queue_depth)))
-            return status_t::bad_alloc_k;
+            return status_code_t::out_of_memory_k;
         queue_depth_ = config.queue_depth;
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /**
@@ -1550,10 +1547,10 @@ class blocking_files_engine {
      *  - @c invalid_argument_k A medium never attached, or a length past what a completion counts.
      */
     status_t enqueue_read(io_request_t request) noexcept {
-        if (pending_.size() + completions_.size() == queue_depth_) return status_t::overflow_k;
+        if (pending_.size() + completions_.size() == queue_depth_) return status_code_t::overflow_k;
         if (status_t const vetted = io_request_vet_(request, descriptors_.size()); failed(vetted)) return vetted;
         pending_.push_back_reserved(request);
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Reads everything enqueued before returning, so waiting is implicit. */
@@ -1565,7 +1562,7 @@ class blocking_files_engine {
             completions_.push_back_reserved(io_completion_t {request.buffer, result, request.context});
         }
         pending_.clear();
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     std::size_t poll_completions(std::span<io_completion_t> completions) noexcept {
@@ -1618,7 +1615,7 @@ struct linux_aio_context_t {
     status_t setup(std::size_t events) noexcept {
         destroy();
         long const created = syscall(SYS_io_setup, static_cast<unsigned>(events), &context);
-        return created == 0 ? status_t::success_k : status_t::io_k;
+        return created == 0 ? status_code_t::success_k : status_code_t::io_k;
     }
 
     /** Waits out every read in flight and drops the context. */
@@ -1664,15 +1661,15 @@ class linux_aio_files_engine {
         if (failed(control_blocks_.reserve_exactly(config.queue_depth)) ||
             failed(control_pointers_.reserve_exactly(config.queue_depth)) ||
             failed(events_.resize(config.queue_depth)) || failed(completions_.reserve_exactly(config.queue_depth)))
-            return status_t::bad_alloc_k;
+            return status_code_t::out_of_memory_k;
         if (status_t const created = context_.setup(config.queue_depth); failed(created)) return created;
         queue_depth_ = config.queue_depth;
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     status_t reserve(std::size_t buffers, std::size_t buffer_bytes) noexcept {
         if (status_t const grown = buffers_.reserve(buffers, buffer_bytes); failed(grown)) return grown;
-        return request_contexts_.size() >= buffers ? status_t::success_k : request_contexts_.resize(buffers);
+        return request_contexts_.size() >= buffers ? status_code_t::success_k : request_contexts_.resize(buffers);
     }
 
     template <typename media_type_>
@@ -1684,8 +1681,8 @@ class linux_aio_files_engine {
 
     /** Encodes the control block in place, so @c submit only submits. */
     status_t enqueue_read(io_request_t request) noexcept {
-        if (!context_.context) return status_t::io_k;
-        if (control_blocks_.size() + in_flight_ + completions_.size() == queue_depth_) return status_t::overflow_k;
+        if (!context_.context) return status_code_t::io_k;
+        if (control_blocks_.size() + in_flight_ + completions_.size() == queue_depth_) return status_code_t::overflow_k;
         if (status_t const vetted = io_request_vet_(request, descriptors_.size()); failed(vetted)) return vetted;
         struct iocb control {};
         control.aio_data = request.buffer;
@@ -1697,22 +1694,22 @@ class linux_aio_files_engine {
         control_blocks_.push_back_reserved(control);
         control_pointers_.push_back_reserved(&control_blocks_.back());
         request_contexts_[request.buffer] = request.context;
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     status_t submit(io_wait_t wait) noexcept {
         submit_staged_();
-        if (!in_flight_) return status_t::success_k;
+        if (!in_flight_) return status_code_t::success_k;
         long const minimum = wait == io_wait_t::blocking_k && completions_.empty() ? 1 : 0;
         // AIO posts no completion word to watch, so one `io_getevents` both polls and parks.
         long const reaped = syscall(SYS_io_getevents, context_.context, minimum, static_cast<long>(in_flight_),
                                     events_.data(), nullptr);
-        if (reaped < 0 && errno == EINTR) return status_t::success_k;
+        if (reaped < 0 && errno == EINTR) return status_code_t::success_k;
         if (reaped < 0) return abandon_();
         for (long event = 0; event != reaped; ++event)
             complete_(static_cast<io_buffer_id_t>(events_[event].data), static_cast<i32_t>(events_[event].res));
         in_flight_ -= static_cast<std::size_t>(reaped);
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     std::size_t poll_completions(std::span<io_completion_t> completions) noexcept {
@@ -1757,7 +1754,7 @@ class linux_aio_files_engine {
         // A context that cannot come back fails every later read rather than reporting the engine
         // full.
         [[maybe_unused]] status_t const reopened = context_.setup(queue_depth_);
-        return status_t::io_k;
+        return status_code_t::io_k;
     }
 
     /** The staging buffers reads arrive in. */
@@ -1841,9 +1838,9 @@ struct linux_uring_mapping_t {
     status_t map(int ring_descriptor, std::size_t map_bytes, u64_t region) noexcept {
         base = ::mmap(nullptr, map_bytes, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, ring_descriptor,
                       static_cast<off_t>(region));
-        if (base == MAP_FAILED) return base = nullptr, status_t::io_k;
+        if (base == MAP_FAILED) return base = nullptr, status_code_t::io_k;
         bytes = map_bytes;
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
     void reset() noexcept {
         if (base) ::munmap(base, bytes);
@@ -1962,7 +1959,7 @@ class linux_uring_ring_t {
             }
             // Kernels before 5.19 have no 128-byte entries, so they leave passthrough unsupported.
             if (flags == interrupted_flags)
-                return form == linux_uring_form_t::nvme_k ? status_t::unsupported_k : status_t::io_k;
+                return form == linux_uring_form_t::nvme_k ? status_code_t::unsupported_k : status_code_t::io_k;
         }
         reaping_ = params.setup_flags & iopoll ? linux_uring_reaping_t::polled_k : linux_uring_reaping_t::interrupted_k;
         posting_ = params.setup_flags & defer_taskrun ? linux_uring_posting_t::deferred_k
@@ -1999,7 +1996,7 @@ class linux_uring_ring_t {
         pending_tail_ = *submissions_.tail_word;
         queue_depth_ = queue_depth;
         register_ring_descriptor_();
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Pins @p regions into the ring's registered-buffer table, so @c READ_FIXED skips per-read
@@ -2026,7 +2023,7 @@ class linux_uring_ring_t {
     status_t register_files(std::span<int const> descriptors) noexcept {
         u32_t const files = 2; // IORING_REGISTER_FILES
         long const registered = register_(files, descriptors.data(), static_cast<unsigned>(descriptors.size()));
-        return registered < 0 ? status_t::io_k : status_t::success_k;
+        return registered < 0 ? status_code_t::io_k : status_code_t::success_k;
     }
 
     void unregister_files() noexcept {
@@ -2097,7 +2094,7 @@ class linux_uring_ring_t {
         // rings only post them there, so both must ask for events every time.
         bool const getevents = min_complete || posting_ == linux_uring_posting_t::deferred_k ||
                                reaping_ == linux_uring_reaping_t::polled_k;
-        if (!to_submit && !getevents) return status_t::success_k;
+        if (!to_submit && !getevents) return status_code_t::success_k;
         long const enter_syscall = 426 + linux_syscall_offset_k; // __NR_io_uring_enter
 
         u32_t const getevents_flag = 1u << 0;  // IORING_ENTER_GETEVENTS
@@ -2110,8 +2107,8 @@ class linux_uring_ring_t {
         }
         long const entered = syscall(enter_syscall, enter_descriptor, to_submit, min_complete, enter_flags, nullptr,
                                      0ull);
-        if (entered < 0 && errno != EINTR && errno != EBUSY && errno != EAGAIN) return status_t::io_k;
-        return status_t::success_k;
+        if (entered < 0 && errno != EINTR && errno != EBUSY && errno != EAGAIN) return status_code_t::io_k;
+        return status_code_t::success_k;
     }
 
     /** One @c io_uring_register of @p opcode over @p count @p arguments. */
@@ -2123,13 +2120,13 @@ class linux_uring_ring_t {
     /** The body of @ref submit, before a refusal abandons the reads. */
     template <typename wait_type_>
     status_t enter_and_wait_(io_wait_t wait) noexcept {
-        if (!outstanding_) return status_t::success_k;
+        if (!outstanding_) return status_code_t::success_k;
         if (wait == io_wait_t::nonblocking_k || completion_tail_() != *completions_.head_word) return enter_(0);
         if (reaps_asynchronously_()) {
             if (status_t const submitted = enter_(0); failed(submitted)) return submitted;
             u32_t const observed = completion_tail_();
             wait_type_ {}(completions_.tail_word, observed, 0u, fu::wait_capped_t {});
-            if (completion_tail_() != observed) return status_t::success_k;
+            if (completion_tail_() != observed) return status_code_t::success_k;
         }
         return enter_(1);
     }
@@ -2221,14 +2218,14 @@ class linux_uring_registered_buffers {
      *
      *  @par Statuses:
      *  - @c overflow_k The region's byte count overflows.
-     *  - @c bad_alloc_k The piece table could not grow.
+     *  - @c out_of_memory_k The piece table could not grow.
      *  - @c io_k The kernel refused the registration for another reason than its memlock cap.
      */
     status_t reserve(linux_uring_ring_t& ring, std::size_t count, std::size_t bytes) noexcept {
         if (buffers_.covers(count, bytes)) return buffers_.reserve(count, bytes);
         ring.unregister_buffers();
         if (status_t const grown = buffers_.reserve(count, bytes); failed(grown)) return grown;
-        if (registration_ == linux_uring_buffer_registration_t::plain_k) return status_t::success_k;
+        if (registration_ == linux_uring_buffer_registration_t::plain_k) return status_code_t::success_k;
         buffers_per_region_ = max_of<std::size_t>(linux_uring_registered_range_bytes_k / buffers_.stride(), 1);
         std::size_t const held = buffers_.capacity() / buffers_.stride();
         std::size_t const pieces = divide_round_up<std::size_t>(held, buffers_per_region_);
@@ -2241,8 +2238,8 @@ class linux_uring_registered_buffers {
         }
         long const registered = ring.register_buffers(to_span(regions_));
         if (registered == -ENOMEM) registration_ = linux_uring_buffer_registration_t::plain_k;
-        else if (registered < 0) return status_t::io_k;
-        return status_t::success_k;
+        else if (registered < 0) return status_code_t::io_k;
+        return status_code_t::success_k;
     }
 
     /** Whether reads land in registered pieces, or at plain addresses the kernel pins per read. */
@@ -2310,12 +2307,12 @@ class linux_uring_files_engine {
             failed(created))
             return created;
         buffers_.request(config.buffer_registration);
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     status_t reserve(std::size_t buffers, std::size_t buffer_bytes) noexcept {
         if (status_t const grown = buffers_.reserve(ring_, buffers, buffer_bytes); failed(grown)) return grown;
-        return request_contexts_.size() >= buffers ? status_t::success_k : request_contexts_.resize(buffers);
+        return request_contexts_.size() >= buffers ? status_code_t::success_k : request_contexts_.resize(buffers);
     }
 
     /** Whether reads land in buffers registered once, or at addresses the kernel pins per read. */
@@ -2325,10 +2322,10 @@ class linux_uring_files_engine {
     status_t attach(std::span<media_type_ const> media) noexcept {
         detach();
         if (status_t const copied = copy_descriptors_(descriptors_, media); failed(copied)) return copied;
-        if (descriptors_.empty()) return status_t::success_k;
+        if (descriptors_.empty()) return status_code_t::success_k;
         if (status_t const registered = ring_.register_files(descriptors_); failed(registered))
             return descriptors_.clear(), registered;
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     void detach() noexcept {
@@ -2341,7 +2338,7 @@ class linux_uring_files_engine {
         u8_t const read_fixed = 4; // IORING_OP_READ_FIXED
         if (status_t const vetted = io_request_vet_(request, descriptors_.size()); failed(vetted)) return vetted;
         linux_uring_sqe_t* const entry = ring_.next_submission();
-        if (!entry) return status_t::overflow_k;
+        if (!entry) return status_code_t::overflow_k;
         *entry = linux_uring_sqe_t {};
         entry->opcode = read;
         entry->entry_flags = linux_uring_entry_fixed_file_k;
@@ -2354,7 +2351,7 @@ class linux_uring_files_engine {
         if (buffers_.registration() == linux_uring_buffer_registration_t::fixed_k)
             entry->opcode = read_fixed, entry->buf_index = buffers_.piece_of(request.buffer);
         request_contexts_[request.buffer] = request.context;
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     status_t submit(io_wait_t wait) noexcept { return ring_.submit<wait_t>(wait); }
@@ -2427,16 +2424,17 @@ class linux_uring_nvme_engine {
             failed(created))
             return created;
         buffers_.request(config.buffer_registration);
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     status_t reserve(std::size_t buffers, std::size_t buffer_bytes) noexcept {
         if (status_t const grown = buffers_.reserve(ring_, buffers, buffer_bytes); failed(grown)) return grown;
         // The lengths grow second, so a refusal between the two leaves them short and the next call
         // grows both.
-        if (lengths_.size() >= buffers) return status_t::success_k;
-        if (failed(request_contexts_.resize(buffers)) || failed(lengths_.resize(buffers))) return status_t::bad_alloc_k;
-        return status_t::success_k;
+        if (lengths_.size() >= buffers) return status_code_t::success_k;
+        if (failed(request_contexts_.resize(buffers)) || failed(lengths_.resize(buffers)))
+            return status_code_t::out_of_memory_k;
+        return status_code_t::success_k;
     }
 
     /** Whether commands name buffers registered once, or addresses the kernel pins per read. */
@@ -2461,16 +2459,17 @@ class linux_uring_nvme_engine {
             // Block nodes answer NVME_IOCTL_ID too, but only the generic char node takes URING_CMD.
             struct stat description;
             if (::fstat(file.descriptor, &description) != 0 || !S_ISCHR(description.st_mode))
-                return descriptors_.clear(), namespaces_.clear(), status_t::config_mismatch_k;
+                return descriptors_.clear(), namespaces_.clear(), status_code_t::config_mismatch_k;
             int const identifier = ::ioctl(file.descriptor, linux_nvme_ioctl_id_k);
-            if (identifier < 0 || !file.block_bytes) return descriptors_.clear(), namespaces_.clear(), status_t::io_k;
+            if (identifier < 0 || !file.block_bytes)
+                return descriptors_.clear(), namespaces_.clear(), status_code_t::io_k;
             namespaces_.push_back_reserved(nvme_namespace_t {static_cast<u32_t>(identifier),
                                                              static_cast<u32_t>(std::countr_zero(file.block_bytes))});
         }
-        if (descriptors_.empty()) return status_t::success_k;
+        if (descriptors_.empty()) return status_code_t::success_k;
         if (status_t const registered = ring_.register_files(descriptors_); failed(registered))
             return descriptors_.clear(), namespaces_.clear(), registered;
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     void detach() noexcept {
@@ -2486,7 +2485,7 @@ class linux_uring_nvme_engine {
         if (status_t const vetted = io_request_vet_(request, descriptors_.size()); failed(vetted)) return vetted;
         // A passthrough ring's slots are the 128-byte form.
         linux_uring_sqe128_t* const entry = reinterpret_cast<linux_uring_sqe128_t*>(ring_.next_submission());
-        if (!entry) return status_t::overflow_k;
+        if (!entry) return status_code_t::overflow_k;
         *entry = linux_uring_sqe128_t {};
         entry->opcode = uring_cmd;
         entry->entry_flags = linux_uring_entry_fixed_file_k;
@@ -2508,7 +2507,7 @@ class linux_uring_nvme_engine {
         command->cdw12 = block_count - 1;
         request_contexts_[request.buffer] = request.context;
         lengths_[request.buffer] = request.length;
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     status_t submit(io_wait_t wait) noexcept { return ring_.submit<wait_t>(wait); }
@@ -2609,9 +2608,9 @@ class windows_ioring_files_engine {
         // At most the queue depth of reads is outstanding, each leaving one completion.
         HRESULT const created = ::CreateIoRing(IORING_VERSION_3, flags, static_cast<UINT32>(config.queue_depth),
                                                static_cast<UINT32>(config.queue_depth), &ring_);
-        if (!SUCCEEDED(created)) return status_t::io_k;
+        if (!SUCCEEDED(created)) return status_code_t::io_k;
         queue_depth_ = config.queue_depth;
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Cuts the buffers from one region, registered as buffer zero whenever it moves, so reads
@@ -2621,51 +2620,52 @@ class windows_ioring_files_engine {
             if (status_t const grown = request_contexts_.resize(buffers); failed(grown)) return grown;
         if (buffers_.covers(buffers, buffer_bytes)) return buffers_.reserve(buffers, buffer_bytes);
         if (status_t const grown = buffers_.reserve(buffers, buffer_bytes); failed(grown)) return grown;
-        if (buffers_.capacity() > ~UINT32 {0}) return buffers_.reset(), status_t::overflow_k;
+        if (buffers_.capacity() > ~UINT32 {0}) return buffers_.reset(), status_code_t::overflow_k;
         IORING_BUFFER_INFO const region {buffers_.base(), static_cast<UINT32>(buffers_.capacity())};
         HRESULT const built = ::BuildIoRingRegisterBuffers(ring_, 1, &region, 0);
-        if (!SUCCEEDED(built) || failed(settle_())) return buffers_.reset(), status_t::io_k;
-        return status_t::success_k;
+        if (!SUCCEEDED(built) || failed(settle_())) return buffers_.reset(), status_code_t::io_k;
+        return status_code_t::success_k;
     }
 
     template <typename media_type_>
     status_t attach(std::span<media_type_ const> media) noexcept {
         if (status_t const copied = copy_descriptors_(descriptors_, media); failed(copied)) return copied;
-        if (descriptors_.empty()) return status_t::success_k;
+        if (descriptors_.empty()) return status_code_t::success_k;
         HRESULT const built = ::BuildIoRingRegisterFileHandles(ring_, static_cast<UINT32>(descriptors_.size()),
                                                                descriptors_.data(), 0);
-        if (!SUCCEEDED(built) || failed(settle_())) return descriptors_.clear(), status_t::io_k;
-        return status_t::success_k;
+        if (!SUCCEEDED(built) || failed(settle_())) return descriptors_.clear(), status_code_t::io_k;
+        return status_code_t::success_k;
     }
 
     void detach() noexcept { descriptors_.clear(); }
 
     status_t enqueue_read(io_request_t request) noexcept {
-        if (outstanding_ == queue_depth_) return status_t::overflow_k;
+        if (outstanding_ == queue_depth_) return status_code_t::overflow_k;
         if (status_t const vetted = io_request_vet_(request, descriptors_.size()); failed(vetted)) return vetted;
         IORING_HANDLE_REF const file = ::IoRingHandleRefFromIndex(request.medium);
         IORING_BUFFER_REF const destination = ::IoRingBufferRefFromIndexAndOffset(
             0, static_cast<UINT32>(static_cast<std::size_t>(request.buffer) * buffers_.stride()));
         HRESULT const built = ::BuildIoRingReadFile(ring_, file, destination, request.length, request.offset,
                                                     request.buffer, IOSQE_FLAGS_NONE);
-        if (!SUCCEEDED(built)) return status_t::overflow_k;
+        if (!SUCCEEDED(built)) return status_code_t::overflow_k;
         request_contexts_[request.buffer] = request.context;
         ++outstanding_;
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     status_t submit(io_wait_t wait) noexcept {
-        if (!outstanding_) return status_t::success_k;
+        if (!outstanding_) return status_code_t::success_k;
         UINT32 const wanted = wait == io_wait_t::blocking_k ? 1u : 0u;
         UINT32 submitted = 0;
-        if (SUCCEEDED(::SubmitIoRing(ring_, wanted, wanted ? INFINITE : 0u, &submitted))) return status_t::success_k;
+        if (SUCCEEDED(::SubmitIoRing(ring_, wanted, wanted ? INFINITE : 0u, &submitted)))
+            return status_code_t::success_k;
         // Waits out every read the ring holds, then drops their completions.
         [[maybe_unused]] HRESULT const drained = ::SubmitIoRing(ring_, static_cast<UINT32>(outstanding_), INFINITE,
                                                                 &submitted);
         IORING_CQE entry;
         while (::PopIoRingCompletion(ring_, &entry) == S_OK) {}
         outstanding_ = 0;
-        return status_t::io_k;
+        return status_code_t::io_k;
     }
 
     std::size_t poll_completions(std::span<io_completion_t> completions) noexcept {
@@ -2689,8 +2689,8 @@ class windows_ioring_files_engine {
         UINT32 submitted = 0;
         IORING_CQE entry {};
         if (!SUCCEEDED(::SubmitIoRing(ring_, 1, INFINITE, &submitted)) || ::PopIoRingCompletion(ring_, &entry) != S_OK)
-            return status_t::io_k;
-        return SUCCEEDED(entry.ResultCode) ? status_t::success_k : status_t::io_k;
+            return status_code_t::io_k;
+        return SUCCEEDED(entry.ResultCode) ? status_code_t::success_k : status_code_t::io_k;
     }
 
     /** The staging buffers reads arrive in. */
@@ -2779,20 +2779,20 @@ class linux_spdk_engine {
     /** Sizes the completion queue for @p config's depth, once the environment runs. */
     status_t open(config_t const& config) noexcept {
         if (status_t const vetted = io_engine_vet_(config, transport()); failed(vetted)) return vetted;
-        if (!linux_spdk_process_t::running()) return status_t::uninitialized_k;
-        if (failed(completions_.reserve_exactly(config.queue_depth))) return status_t::bad_alloc_k;
+        if (!linux_spdk_process_t::running()) return status_code_t::uninitialized_k;
+        if (failed(completions_.reserve_exactly(config.queue_depth))) return status_code_t::out_of_memory_k;
         queue_depth_ = config.queue_depth;
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     status_t reserve(std::size_t buffers, std::size_t buffer_bytes) noexcept {
         if (status_t const grown = buffers_.reserve(buffers, buffer_bytes); failed(grown)) return grown;
         // The contexts grow second, so a refusal between the two leaves them short and the next
         // call grows both.
-        if (request_contexts_.size() >= buffers) return status_t::success_k;
+        if (request_contexts_.size() >= buffers) return status_code_t::success_k;
         if (failed(commands_.resize(buffers)) || failed(request_contexts_.resize(buffers)))
-            return status_t::bad_alloc_k;
-        return status_t::success_k;
+            return status_code_t::out_of_memory_k;
+        return status_code_t::success_k;
     }
 
     /** Maps each medium to this thread's queue pair on its controller, allocating that queue pair
@@ -2803,13 +2803,13 @@ class linux_spdk_engine {
         if (status_t const reserved = namespaces_.reserve(media.size()); failed(reserved)) return reserved;
         for (media_type_ const& medium : media) {
             spdk_medium_t const* const name_space = medium_as<spdk_medium_t>(medium);
-            if (!name_space) return namespaces_.clear(), status_t::config_mismatch_k;
+            if (!name_space) return namespaces_.clear(), status_code_t::config_mismatch_k;
             auto const [queue_pair, status] = queue_pair_of_(*name_space->connection);
             if (failed(status)) return namespaces_.clear(), status;
             namespaces_.push_back_reserved(
                 attached_namespace_t {name_space->name_space, queue_pair, name_space->block_bytes});
         }
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     void detach() noexcept { namespaces_.clear(); }
@@ -2818,7 +2818,7 @@ class linux_spdk_engine {
     void release() noexcept { release_queue_pairs_(); }
 
     status_t enqueue_read(io_request_t request) noexcept {
-        if (outstanding_ == queue_depth_) return status_t::overflow_k;
+        if (outstanding_ == queue_depth_) return status_code_t::overflow_k;
         if (status_t const vetted = io_request_vet_(request, namespaces_.size()); failed(vetted)) return vetted;
         attached_namespace_t const& name_space = namespaces_[request.medium];
         request_contexts_[request.buffer] = request.context;
@@ -2827,7 +2827,7 @@ class linux_spdk_engine {
         if ((request.offset | request.length) % name_space.block_bytes) {
             complete_(request.buffer, -EINVAL);
             ++outstanding_;
-            return status_t::success_k;
+            return status_code_t::success_k;
         }
         command_t& command = commands_[request.buffer];
         command = command_t {this, request.buffer, request.length};
@@ -2835,18 +2835,19 @@ class linux_spdk_engine {
             name_space.name_space, name_space.queue_pair, buffers_.buffer(request.buffer),
             request.offset / name_space.block_bytes, request.length / name_space.block_bytes,
             &linux_spdk_engine::completed_, &command, 0);
-        if (issued == -ENOMEM) return status_t::overflow_k;
+        if (issued == -ENOMEM) return status_code_t::overflow_k;
         // A command the driver refuses outright fails alone.
         if (issued != 0) complete_(request.buffer, issued);
         ++outstanding_;
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     status_t submit(io_wait_t wait) noexcept {
         while (true) {
             for (queue_pair_t const& queue_pair : queue_pairs_)
                 if (spdk_nvme_qpair_process_completions(queue_pair.queue_pair, 0) < 0) return abandon_();
-            if (wait == io_wait_t::nonblocking_k || !completions_.empty() || !outstanding_) return status_t::success_k;
+            if (wait == io_wait_t::nonblocking_k || !completions_.empty() || !outstanding_)
+                return status_code_t::success_k;
             wait_t {}(&outstanding_, outstanding_, 0u, fu::wait_capped_t {});
         }
     }
@@ -2912,7 +2913,7 @@ class linux_spdk_engine {
     /** This thread's queue pair on @p connected, allocated with delayed doorbells on first use. */
     expected<spdk_nvme_qpair*> queue_pair_of_(linux_spdk_process_t::connected_t& connected) noexcept {
         for (queue_pair_t const& queue_pair : queue_pairs_)
-            if (queue_pair.connection == &connected) return {queue_pair.queue_pair, status_t::success_k};
+            if (queue_pair.connection == &connected) return {queue_pair.queue_pair, status_code_t::success_k};
         spdk_nvme_ctrlr* const controller = connected.controller;
         spdk_nvme_io_qpair_opts options;
         spdk_nvme_ctrlr_get_default_io_qpair_opts(controller, &options, sizeof(options));
@@ -2921,11 +2922,11 @@ class linux_spdk_engine {
         options.io_queue_requests = max_of<u32_t>(options.io_queue_requests, options.io_queue_size);
         options.delay_cmd_submit = true;
         spdk_nvme_qpair* const allocated = spdk_nvme_ctrlr_alloc_io_qpair(controller, &options, sizeof(options));
-        if (!allocated) return {nullptr, status_t::io_k};
+        if (!allocated) return {nullptr, status_code_t::io_k};
         if (status_t const kept = queue_pairs_.push_back(queue_pair_t {&connected, allocated}); failed(kept))
             return spdk_nvme_ctrlr_free_io_qpair(allocated), expected<spdk_nvme_qpair*> {nullptr, kept};
         linux_spdk_process_t::hold<wait_t>(connected);
-        return {allocated, status_t::success_k};
+        return {allocated, status_code_t::success_k};
     }
 
     /** Frees every queue pair; the driver completes what they held through @c completed_. */
@@ -2943,7 +2944,7 @@ class linux_spdk_engine {
         release_queue_pairs_();
         completions_.clear();
         outstanding_ = 0;
-        return status_t::io_k;
+        return status_code_t::io_k;
     }
 
     /** The DMA staging buffers reads arrive in. */
@@ -3109,7 +3110,7 @@ class io_engine_variant {
     template <std::size_t index_>
         requires(index_ == sizeof...(engine_types_))
     status_t open_(config_t const&) noexcept {
-        return status_t::unsupported_k;
+        return status_code_t::unsupported_k;
     }
 
     template <std::size_t index_>
@@ -3119,7 +3120,7 @@ class io_engine_variant {
         if (!opens_(engine_t::transport(), config.transport)) return open_<index_ + 1>(config);
         status_t const opened = engines_.template emplace<index_>(allocator_).open(config);
         // A named transport opens exactly or answers why; only the automatic ladder degrades.
-        if (opened != status_t::io_k || config.transport != io_transport_t::automatic_k) return opened;
+        if (opened != status_code_t::io_k || config.transport != io_transport_t::automatic_k) return opened;
         return open_<index_ + 1>(config);
     }
 
@@ -3260,12 +3261,12 @@ class nvme_executor {
         // A fallback decided per thread could mix transports, so the others follow thread zero's
         // choice or fail.
         status_t opened = executor.on_every_thread_([&](std::size_t thread) noexcept {
-            return thread ? status_t::success_k : executor.open_engine_(thread, executor.opened_);
+            return thread ? status_code_t::success_k : executor.open_engine_(thread, executor.opened_);
         });
         if (failed(opened)) return {std::move(executor), opened};
         executor.opened_.transport = executor.engines_[0].transport();
         opened = executor.on_every_thread_([&](std::size_t thread) noexcept {
-            return thread ? executor.open_engine_(thread, executor.opened_) : status_t::success_k;
+            return thread ? executor.open_engine_(thread, executor.opened_) : status_code_t::success_k;
         });
         return {std::move(executor), opened};
     }
@@ -3289,7 +3290,7 @@ class nvme_executor {
      *  - @c io_k A thread's setup was refused at that shape.
      */
     status_t fit(std::size_t queue_depth, linux_uring_reaping_t reaping) noexcept {
-        if (queue_depth == opened_.queue_depth && reaping == opened_.reaping) return status_t::success_k;
+        if (queue_depth == opened_.queue_depth && reaping == opened_.reaping) return status_code_t::success_k;
         config_t fitted = opened_;
         fitted.queue_depth = queue_depth, fitted.reaping = reaping;
         // Rings share a memlock limit with pinned buffers, so all engines close before any reopens.
@@ -3349,7 +3350,7 @@ class nvme_executor {
         status_t const attached = on_every_thread_(
             [&](std::size_t thread) noexcept { return engines_[thread].attach(media); });
         if (failed(attached)) return detach_(), expected<attachment_t> {attachment_t {}, attached};
-        return {attachment_t {this}, status_t::success_k};
+        return {attachment_t {this}, status_code_t::success_k};
     }
 
     /** Thread @p thread 's engine, driven only from that thread. */
@@ -3428,7 +3429,7 @@ class nvme_executor {
     /** Runs @p callback on every thread, answering the first failure any of them reported. */
     template <typename callback_type_>
     status_t on_every_thread_(callback_type_&& callback) noexcept {
-        status_t failure = status_t::success_k;
+        status_t failure = status_code_t::success_k;
         status_t const dispatched = threads_.for_threads([&](std::size_t thread, std::size_t) noexcept {
             keep_first_failure<fu::standard_atomic_ref>(failure, callback(thread));
         });

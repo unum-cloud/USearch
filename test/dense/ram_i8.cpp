@@ -22,6 +22,9 @@ static void run_ram_i8_cases(gpu_device_t const&) {
         "test_ram_indexes_configuration<nk_i8_k, nk_kernel_dot_k, fu::standard_yield_t, cpu_class_t::intel_icelake_k>",
         test_ram_indexes_configuration<nk_i8_k, nk_kernel_dot_k, fu::standard_yield_t, cpu_class_t::intel_icelake_k>,
         test_run.settings.seed);
+    run_test_case("test_ram_scan_configuration<nk_i8_k, nk_kernel_dot_k, cpu_class_t::apple_m2_k>",
+                  test_ram_scan_configuration<nk_i8_k, nk_kernel_dot_k, cpu_class_t::apple_m2_k>,
+                  test_run.settings.seed);
 }
 
 static bool const ram_i8_registered = (registered_suites({gpu_vendor_t::unknown_k, &run_ram_i8_cases}), true);

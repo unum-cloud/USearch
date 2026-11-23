@@ -349,7 +349,7 @@ struct vram_nvidia_kernels {
          *  allocation leaves every step on its driver copies.
          *
          *  @par Statuses:
-         *  - @c device_error_k The allocation never finished on @p stream.
+         *  - @c device_k The allocation never finished on @p stream.
          */
         status_t open(cuda_executor_t::stream_t const& stream, std::span<part_source_t const> sources,
                       std::size_t step_rows, std::size_t steps,
@@ -357,21 +357,21 @@ struct vram_nvidia_kernels {
             part_source_t const* registered = nullptr;
             for (part_source_t const& source : sources)
                 if (!registered && source.file) registered = &source;
-            if (!registered) return status_t::success_k;
+            if (!registered) return status_code_t::success_k;
             // Each column rounds out to whole blocks, and one more for a read's lead.
             std::size_t const block_bytes = linux_cufile_file_t::block_bytes_k;
             for (std::size_t const row_bytes : column_row_bytes)
                 if (row_bytes) slot_bytes_ += round_up_to_multiple(step_rows * row_bytes + block_bytes, block_bytes);
             std::size_t const bytes = min_of<std::size_t>(steps, 2) * slot_bytes_;
             staging_ = cuda_make_unique(cuda_device_allocator_t {stream}, bytes);
-            if (!staging_) return status_t::success_k;
+            if (!staging_) return status_code_t::success_k;
             // cuFile writes from the host, so the stream's allocation must finish first.
             cuda_event_t allocated {*stream.api};
-            if (failed(allocated.record(stream.handle)) || failed(allocated.wait())) return status_t::device_error_k;
+            if (failed(allocated.record(stream.handle)) || failed(allocated.wait())) return status_code_t::device_k;
             cufile_api_t const& api = registered->file.api();
             if (cufile_register_staging(api, staging_.get(), bytes) == cufile_staging_t::registered_k) cufile_ = &api;
             sources_ = sources;
-            return status_t::success_k;
+            return status_code_t::success_k;
         }
 
         /**
@@ -383,7 +383,7 @@ struct vram_nvidia_kernels {
          */
         status_t read(std::size_t slot, std::span<bytes_view_t* const> extents) noexcept {
             part_source_t const* const holder = staging_ ? cufile_holder(sources_, *extents.front()) : nullptr;
-            if (!holder) return status_t::success_k;
+            if (!holder) return status_code_t::success_k;
             std::size_t into = slot * slot_bytes_;
             for (bytes_view_t* const extent : extents) {
                 auto const [staged, read_status] = holder->file.read(
@@ -392,7 +392,7 @@ struct vram_nvidia_kernels {
                 if (failed(read_status)) return read_status;
                 *extent = staged;
             }
-            return status_t::success_k;
+            return status_code_t::success_k;
         }
 
       private:
@@ -546,15 +546,15 @@ struct vram_nvidia_kernels {
         constexpr bool indexer_k = std::is_same_v<heads_type_, indexer_heads<scalar_t>>;
         constexpr bool attend_k = std::is_same_v<heads_type_, attend_heads_t>;
         std::size_t const queries_count = queries.rows;
-        if (!core.vectors_matrix_.reserved_bytes()) return {{}, status_t::uninitialized_k};
-        if (context.device() != core.device_.ordinal || !context) return {{}, status_t::config_mismatch_k};
+        if (!core.vectors_matrix_.reserved_bytes()) return {{}, status_code_t::uninitialized_k};
+        if (context.device() != core.device_.ordinal || !context) return {{}, status_code_t::config_mismatch_k};
         // Validated with the rest: past here a refusal would already have burned epoch space.
         if (status_t const refusal = core.rows_refusal_(queries); failed(refusal)) return {{}, refusal};
         std::size_t heads_rows = 0;
         if constexpr (indexer_k) {
             heads_rows = heads.heads.extent(0);
             if (heads.weights.extent(0) != queries_count || heads_rows != queries_count * heads.weights.extent(1))
-                return {{}, status_t::config_mismatch_k};
+                return {{}, status_code_t::config_mismatch_k};
             if (status_t const refusal = core.rows_refusal_(heads.heads); failed(refusal)) return {{}, refusal};
         }
         if constexpr (attend_k) {
@@ -583,7 +583,7 @@ struct vram_nvidia_kernels {
         std::size_t const arena_bytes_before = context.arena_bytes_;
         byte_t* const arena = walks ? context.ensure_arena(arena_warps * arena_shape.slice_bytes<node_id_t>())
                                     : nullptr;
-        if (walks && !arena) return {{}, status_t::bad_alloc_k};
+        if (walks && !arena) return {{}, status_code_t::out_of_memory_k};
         // The staging holds the query rows and any head rows first, since they carry the widest
         // alignment, then the window importing them, the heads' weights, then the outputs; stream
         // order serializes its reuse across calls.
@@ -591,7 +591,7 @@ struct vram_nvidia_kernels {
         std::size_t const import_bytes = core.import_bytes_(attend_k ? heads_rows : queries_count, queries.dtype);
         std::size_t const weights_bytes = indexer_k ? heads_rows * sizeof(f32_t) : 0;
         byte_t* const staging = context.ensure_staging(rows_bytes + import_bytes + weights_bytes + outputs_bytes);
-        if (!staging) return {{}, status_t::bad_alloc_k};
+        if (!staging) return {{}, status_code_t::out_of_memory_k};
         byte_t* const window = staging + rows_bytes;
         u32_t epoch_base = 0;
         if (walks) {
@@ -604,12 +604,12 @@ struct vram_nvidia_kernels {
         if (cuda_fill_async(core.api(), context.telemetry_.get(), 0, sizeof(vram_telemetry_block_t), stream) !=
                 cuda_success_k ||
             cuda_fill_async(core.api(), context.assigned_nodes_.get(), 0, 2 * sizeof(u32_t), stream) != cuda_success_k)
-            return {{}, status_t::device_error_k};
+            return {{}, status_code_t::device_k};
         // Pitched uploads: device rows pad to whole fragments, and the pad bytes must be zero for
         // the zero-tail distance identity to hold.
         if ((import_bytes || core.packed_row_bytes() != core.row_bytes()) &&
             cuda_fill_async(core.api(), staging, 0, rows_bytes + import_bytes, stream) != cuda_success_k)
-            return {{}, status_t::device_error_k};
+            return {{}, status_code_t::device_k};
         if (status_t const imported = core.import_rows_(kernels, staging, queries, window, stream); failed(imported))
             return {{}, imported};
 
@@ -635,7 +635,7 @@ struct vram_nvidia_kernels {
                 cuda_copy_2d_async(core.api(), staged_weights, weights_row_bytes, heads.weights.byte_data(),
                                    heads.weights.stride_bytes(0), weights_row_bytes, queries_count,
                                    stream) != cuda_success_k)
-                return {{}, status_t::device_error_k};
+                return {{}, status_code_t::device_k};
             walk.heads = reinterpret_cast<fragment_t const*>(staged_heads);
             walk.weights = reinterpret_cast<f32_t const*>(staged_weights);
             walk.heads_count = static_cast<u32_t>(heads.weights.extent(1));
@@ -648,7 +648,7 @@ struct vram_nvidia_kernels {
             walk.heads = reinterpret_cast<fragment_t const*>(staged_heads);
             walk.heads_count = static_cast<u32_t>(heads.head_count);
         }
-        return {walk, status_t::success_k};
+        return {walk, status_code_t::success_k};
     }
 
     /** The submission half of @c search: stages the queries and @p heads, launches walks over the
@@ -663,17 +663,17 @@ struct vram_nvidia_kernels {
         std::size_t const queries_count = queries.rows;
         bool const scans = config.traversal == traversal_t::scan_k;
         // Indexer heads rescore the batches a walk gathers, and a scan gathers none.
-        if (scans && !std::is_same_v<heads_type_, dummy_heads_t>) return {{}, status_t::unsupported_k};
-        if (!queries_count) return {{}, status_t::success_k};
+        if (scans && !std::is_same_v<heads_type_, dummy_heads_t>) return {{}, status_code_t::unsupported_k};
+        if (!queries_count) return {{}, status_code_t::success_k};
         bool const wants_distances = result_distances.extent(0) != 0;
         if (result_ids.extent(0) != queries_count || result_ids.extent(1) < config.count ||
             (wants_distances &&
              (result_distances.extent(0) != queries_count || result_distances.extent(1) < config.count)))
-            return {{}, status_t::config_mismatch_k};
+            return {{}, status_code_t::config_mismatch_k};
         if (result_ids.stride_bytes(0) < static_cast<std::ptrdiff_t>(config.count * sizeof(node_id_t)) ||
             (wants_distances &&
              result_distances.stride_bytes(0) < static_cast<std::ptrdiff_t>(config.count * sizeof(distance_t))))
-            return {{}, status_t::unsupported_layout_k};
+            return {{}, status_code_t::unsupported_layout_k};
 
         // The expansion covers the count, so the ladder's candidates hold every rank, and past it
         // the arena frontier ranks everything it saw.
@@ -709,13 +709,13 @@ struct vram_nvidia_kernels {
         if (cuda_copy_2d_async(core.api(), result_ids.data(), result_ids.stride_bytes(0), device_ids,
                                config.count * sizeof(node_id_t), config.count * sizeof(node_id_t), queries_count,
                                stream) != cuda_success_k)
-            return {{}, status_t::device_error_k};
+            return {{}, status_code_t::device_k};
         if (wants_distances &&
             cuda_copy_2d_async(core.api(), result_distances.data(), result_distances.stride_bytes(0), device_distances,
                                config.count * sizeof(distance_t), config.count * sizeof(distance_t), queries_count,
                                stream) != cuda_success_k)
-            return {{}, status_t::device_error_k};
-        return {{config.count}, status_t::success_k};
+            return {{}, status_code_t::device_k};
+        return {{config.count}, status_code_t::success_k};
     }
 
     /** The submission half of @c multiply: stages the rows, launches walks over the @p visible
@@ -726,14 +726,14 @@ struct vram_nvidia_kernels {
                                                std::size_t visible) noexcept {
         std::size_t const rows_count = left.rows;
         std::size_t const wanted = node_ids.extent(1);
-        if (config.traversal != traversal_t::walk_k) return {{}, status_t::unsupported_k};
+        if (config.traversal != traversal_t::walk_k) return {{}, status_code_t::unsupported_k};
         if (node_ids.extent(0) != rows_count || products.extent(0) != rows_count || products.extent(1) != wanted ||
             counts.size() != rows_count)
-            return {{}, status_t::config_mismatch_k};
-        if (!rows_count) return {{}, status_t::success_k};
+            return {{}, status_code_t::config_mismatch_k};
+        if (!rows_count) return {{}, status_code_t::success_k};
         if (node_ids.stride_bytes(0) < static_cast<std::ptrdiff_t>(wanted * sizeof(node_id_t)) ||
             products.stride_bytes(0) < static_cast<std::ptrdiff_t>(wanted * sizeof(dot_result_t)))
-            return {{}, status_t::unsupported_layout_k};
+            return {{}, status_code_t::unsupported_layout_k};
         std::size_t const ids_bytes = rows_count * wanted * sizeof(node_id_t);
         std::size_t const products_bytes = rows_count * wanted * sizeof(dot_t);
         auto const [kernels, kernels_status] = kernels_(context);
@@ -756,11 +756,11 @@ struct vram_nvidia_kernels {
                                 stream) != cuda_success_k ||
              cuda_copy_2d_async(core.api(), products.data(), products.stride_bytes(0), device_products,
                                 wanted * sizeof(dot_t), wanted * sizeof(dot_t), rows_count, stream) != cuda_success_k))
-            return {{}, status_t::device_error_k};
+            return {{}, status_code_t::device_k};
         if (cuda_copy_async(core.api(), counts.data(), device_counts, rows_count * sizeof(u32_t), stream) !=
             cuda_success_k)
-            return {{}, status_t::device_error_k};
-        return {{}, status_t::success_k};
+            return {{}, status_code_t::device_k};
+        return {{}, status_code_t::success_k};
     }
 
     /** The submission half of @c attend: stages each token's first head to navigate by, then every
@@ -774,11 +774,11 @@ struct vram_nvidia_kernels {
                                     traversal_context_t& context, search_config_t config, std::size_t blocks,
                                     std::size_t exported_bytes, std::size_t visible) noexcept {
         std::size_t const rows_count = queries.rows;
-        if (config.traversal != traversal_t::walk_k) return {nullptr, status_t::unsupported_k};
-        if (!head_count || rows_count % head_count) return {nullptr, status_t::shape_mismatch_k};
-        if (!rows_count) return {nullptr, status_t::success_k};
+        if (config.traversal != traversal_t::walk_k) return {nullptr, status_code_t::unsupported_k};
+        if (!head_count || rows_count % head_count) return {nullptr, status_code_t::shape_mismatch_k};
+        if (!rows_count) return {nullptr, status_code_t::success_k};
         std::size_t const scratch_bytes = vram_attend_scratch_bytes(head_count, core.dimensions(), wave_lanes());
-        if (!walk_scratch_fits(core, scratch_bytes)) return {nullptr, status_t::config_mismatch_k};
+        if (!walk_scratch_fits(core, scratch_bytes)) return {nullptr, status_code_t::config_mismatch_k};
         std::size_t const outputs_bytes = rows_count * core.dimensions() * sizeof(f32_t);
         rows_view_t const first_heads {queries.data, rows_count / head_count, queries.columns,
                                        queries.stride * head_count, queries.dtype};
@@ -791,7 +791,7 @@ struct vram_nvidia_kernels {
         if (!staged) return {nullptr, staged.status};
         staged.value.scratch_bytes_per_warp += static_cast<u32_t>(scratch_bytes);
         if (cuda_fill_async(core.api(), context.missed_.get(), 0, sizeof(u32_t), context.stream()) != cuda_success_k)
-            return {nullptr, status_t::device_error_k};
+            return {nullptr, status_code_t::device_k};
         f32_t* const device_outputs = reinterpret_cast<f32_t*>(staged.value.outputs);
         if (status_t const launched = launch_attend_(
                 core, *kernels, staged.value, value_lookup, device_outputs,
@@ -799,7 +799,7 @@ struct vram_nvidia_kernels {
                 score_scale * std::numbers::log2e_v<f32_t>, context);
             failed(launched))
             return {nullptr, launched};
-        return {device_outputs, status_t::success_k};
+        return {device_outputs, status_code_t::success_k};
     }
 
 #pragma endregion Search
@@ -918,7 +918,7 @@ struct vram_nvidia_kernels {
             if constexpr (chained_k) arguments.build.touched_count = counters + 2;
             bool const counters_zeroed = chained_k ? slot != 0 || zeroed(build.assigned_nodes, cuda_claim_counters_k)
                                                    : zeroed(build.assigned_nodes, 1) && zeroed(build.touched_count, 1);
-            status_t launched = counters_zeroed ? status_t::success_k : status_t::device_error_k;
+            status_t launched = counters_zeroed ? status_code_t::success_k : status_code_t::device_k;
             if (succeeded(launched))
                 launched = launch_(*kernels, insert, blocks, vram_warps_per_block_k * build.scratch_bytes_per_warp,
                                    stream, arguments, rows_map);
@@ -927,14 +927,14 @@ struct vram_nvidia_kernels {
             arguments.build.scratch_bytes_per_warp = back_link_scratch;
             arguments.build.selection_nodes = back_link_rows;
             if constexpr (chained_k) arguments.build.assigned_nodes = counters + 1;
-            else if (!zeroed(build.assigned_nodes, 1)) return core.fail_(status_t::device_error_k);
+            else if (!zeroed(build.assigned_nodes, 1)) return core.fail_(status_code_t::device_k);
             if (status_t const linked = launch_(*kernels, back_link, blocks, vram_warps_per_block_k * back_link_scratch,
                                                 stream, arguments);
                 failed(linked))
                 return core.fail_(linked);
             wave_first = wave_end;
         }
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Queues one phase of @p fold over the rows of its launching shard on @p context 's stream,
@@ -953,13 +953,13 @@ struct vram_nvidia_kernels {
         fold.scratch_bytes_per_warp = shared ? scratch_bytes : 0u;
         fold.arena = context.ensure_arena(std::size_t {blocks} * vram_warps_per_block_k *
                                           fold.arena_shape.slice_bytes<node_id_t>());
-        if (!fold.arena && fold.arena_shape.scratch_bytes) return status_t::bad_alloc_k;
+        if (!fold.arena && fold.arena_shape.scratch_bytes) return status_code_t::out_of_memory_k;
         fold.telemetry = context.telemetry_.get();
         fold.assigned_nodes = context.assigned_nodes_.get();
         if (cuda_fill_async(core.api(), fold.telemetry, 0, sizeof(vram_telemetry_block_t), context.stream()) !=
                 cuda_success_k ||
             cuda_fill_async(core.api(), fold.assigned_nodes, 0, sizeof(u32_t), context.stream()) != cuda_success_k)
-            return status_t::device_error_k;
+            return status_code_t::device_k;
         vram_arguments_t arguments {};
         arguments.fold = fold;
         return launch_(*kernels, kernel_function_(*kernels, vram_dense_kernel_t::fold_k, 0), blocks,
@@ -1032,7 +1032,7 @@ struct vram_nvidia_kernels {
         // The finished counts start at zero, so the last range of each block to finish merges it.
         if (cuda_fill_async(core.api(), scratch, 0, round_up_to_multiple<std::size_t>(blocks, 4) * sizeof(u32_t),
                             context.stream()) != cuda_success_k)
-            return status_t::device_error_k;
+            return status_code_t::device_k;
         vram_arguments_t arguments {};
         arguments.search = search_view_(core, walk, context);
         arguments.search.arena = scratch;
@@ -1094,7 +1094,7 @@ struct vram_nvidia_kernels {
         arguments.cast.to = static_cast<unsigned char*>(to);
         if (!nk_cast_plan_serial_(from_dtype, to_dtype, count, cuda_address(from) | cuda_address(to),
                                   &arguments.cast.plan))
-            return status_t::unsupported_k;
+            return status_code_t::unsupported_k;
         u32_t const blocks = static_cast<u32_t>(
             min_of<std::size_t>(divide_round_up<std::size_t>(arguments.cast.plan.units, block_threads_k),
                                 core.device_.multiprocessor_count * resident_blocks_(vram_dense_kernel_t::cast_k, 0)));
@@ -1400,10 +1400,10 @@ struct vram_nvidia_index {
     }
 
     /**
-     *  Filtered search, refused since a host predicate cannot run inside the walk.
+     *  @brief Filtered search, refused since a host predicate cannot run inside the walk.
      *
      *  @par Statuses:
-     *  - @c device_error_k Every call.
+     *  - @c device_k Every call.
      */
     template <typename predicate_type_>
     expected<search_result_t> search_if(vector_view_t query_vector, search_config_t config, predicate_type_&& predicate,
@@ -1461,7 +1461,7 @@ struct vram_nvidia_index {
      *  @par Statuses:
      *  - @c uninitialized_k The index never grew.
      *  - @c config_mismatch_k The @p context rides another device or cannot launch.
-     *  - @c bad_alloc_k A column, a mirror, the arena or the counters cannot be placed.
+     *  - @c out_of_memory_k A column, a mirror, the arena or the counters cannot be placed.
      */
     expected<refine_plan_t> plan_refine(refine_config_t config, traversal_context_t& context) noexcept {
         return core_.plan_refine(config, context);
@@ -1473,8 +1473,8 @@ struct vram_nvidia_index {
      *  @par Statuses:
      *  - @c uninitialized_k The index never grew.
      *  - @c config_mismatch_k The @p context rides another device or cannot launch.
-     *  - @c bad_alloc_k A column, a mirror, the arena or the counters cannot be placed.
-     *  - @c device_error_k A launch or a copy failed.
+     *  - @c out_of_memory_k A column, a mirror, the arena or the counters cannot be placed.
+     *  - @c device_k A launch or a copy failed.
      */
     expected<refine_report_t> refine(refine_config_t config, traversal_context_t& context) noexcept {
         return core_.refine(config, context);
@@ -1494,7 +1494,7 @@ struct vram_nvidia_index {
      *    device, metric or geometry, or a @p context of another device or one that cannot launch.
      *  - @c contended_k This index's or a target's claim word is open.
      *  - @c overflow_k Part slots past the 32-bit IDs.
-     *  - @c bad_alloc_k A column, a mirror, the arena or the counters cannot be placed.
+     *  - @c out_of_memory_k A column, a mirror, the arena or the counters cannot be placed.
      */
     expected<reshard_plan_t> plan_reshard(std::span<vram_nvidia_index* const> sources,
                                           std::span<vram_nvidia_index* const> targets, reshard_config_t config,
@@ -1513,7 +1513,7 @@ struct vram_nvidia_index {
      *  @brief One @ref plan_reshard driven to its end on the calling thread.
      *
      *  @par Statuses:
-     *  - Those of @ref plan_reshard, then @c device_error_k when a launch or a copy failed.
+     *  - Those of @ref plan_reshard, then @c device_k when a launch or a copy failed.
      */
     expected<refine_report_t> reshard(std::span<vram_nvidia_index* const> sources,
                                       std::span<vram_nvidia_index* const> targets, reshard_config_t config,
@@ -1526,7 +1526,7 @@ struct vram_nvidia_index {
      *
      *  @par Statuses:
      *  - @c config_mismatch_k The @p context rides another device or cannot launch.
-     *  - @c bad_alloc_k A column or the counters cannot be placed.
+     *  - @c out_of_memory_k A column or the counters cannot be placed.
      */
     expected<health_plan_t> plan_health(traversal_context_t& context) noexcept { return core_.plan_health(context); }
 
@@ -1536,8 +1536,8 @@ struct vram_nvidia_index {
      *
      *  @par Statuses:
      *  - @c config_mismatch_k The @p context rides another device or cannot launch.
-     *  - @c bad_alloc_k A column or the counters cannot be placed.
-     *  - @c device_error_k A launch or a copy failed.
+     *  - @c out_of_memory_k A column or the counters cannot be placed.
+     *  - @c device_k A launch or a copy failed.
      */
     expected<reachability_t> health(traversal_context_t& context) noexcept { return core_.health(context); }
 

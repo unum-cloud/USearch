@@ -768,7 +768,7 @@ void append_itanium_argument(vram_kernel_symbol_t& symbol, itanium_type<kit_type
  *  count, or a table's bytes. */
 inline status_t vram_lay_out_parameters(std::monostate, growing_buffer<u32_t, std::allocator<byte_t>>&,
                                         std::monostate&) noexcept {
-    return status_t::success_k;
+    return status_code_t::success_k;
 }
 inline status_t vram_lay_out_parameters(std::span<u32_t const> widths,
                                         growing_buffer<u32_t, std::allocator<byte_t>>& laid,
@@ -777,7 +777,7 @@ inline status_t vram_lay_out_parameters(std::span<u32_t const> widths,
     laid[0] = static_cast<u32_t>(widths.size());
     for (std::size_t index = 0; index != widths.size(); ++index) laid[index + 1] = widths[index];
     kept = to_span(laid).subspan(1);
-    return status_t::success_k;
+    return status_code_t::success_k;
 }
 template <typename table_type_>
 status_t vram_lay_out_parameters(table_type_ const& table, growing_buffer<u32_t, std::allocator<byte_t>>& laid,
@@ -786,7 +786,7 @@ status_t vram_lay_out_parameters(table_type_ const& table, growing_buffer<u32_t,
         return sized;
     std::memcpy(laid.data(), &table, sizeof(table_type_));
     kept = table;
-    return status_t::success_k;
+    return status_code_t::success_k;
 }
 
 template <typename kit_type_, typename node_id_type_, typename kernels_type_>
@@ -833,13 +833,13 @@ void vram_nvidia_kits<kit_type_, node_id_type_, kernels_type_>::spell_kits_kerne
 template <typename kit_type_, typename node_id_type_, typename kernels_type_>
 status_t vram_nvidia_kits<kit_type_, node_id_type_, kernels_type_>::upload_parameters_(cuda_api_t const& api) noexcept {
     if (host_parameters_.empty())
-        return std::is_empty_v<parameters_t> ? status_t::success_k : status_t::uninitialized_k;
+        return std::is_empty_v<parameters_t> ? status_code_t::success_k : status_code_t::uninitialized_k;
     device_parameters_ = cuda_make_unique(cuda_device_allocator<u32_t> {api}, host_parameters_.size());
-    if (!device_parameters_) return status_t::bad_alloc_k;
+    if (!device_parameters_) return status_code_t::out_of_memory_k;
     if (cuda_copy(api, device_parameters_.get(), host_parameters_.data(), host_parameters_.size() * sizeof(u32_t)) !=
         cuda_success_k)
-        return status_t::device_error_k;
-    return status_t::success_k;
+        return status_code_t::device_k;
+    return status_code_t::success_k;
 }
 
 #pragma endregion Face

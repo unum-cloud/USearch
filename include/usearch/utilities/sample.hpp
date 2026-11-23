@@ -387,15 +387,15 @@ struct sample_plan {
      *
      *  @par Statuses:
      *  - @c shape_mismatch_k An output's or the shown coordinates' length disagrees.
-     *  - @c bad_alloc_k The scratch is shorter than @ref scratch_bytes.
+     *  - @c out_of_memory_k The scratch is shorter than @ref scratch_bytes.
      */
     status_t draw() noexcept {
         if (outputs_.entry_ordinals.size() != wanted_ || outputs_.parents.size() != wanted_ ||
             outputs_.parent_distances.size() != wanted_ || outputs_.coordinates.size() != wanted_ * 3 ||
             inputs_.shown_coordinates.size() != shown_count_ * 3)
-            return status_t::shape_mismatch_k;
+            return status_code_t::shape_mismatch_k;
         carve_all_();
-        if (carved_bytes_ > reserved_scratch_.size()) return status_t::bad_alloc_k;
+        if (carved_bytes_ > reserved_scratch_.size()) return status_code_t::out_of_memory_k;
         std::memset(drawn_slots_.data(), 0, drawn_slots_.size_bytes());
         std::memset(shown_slots_.data(), 0, shown_slots_.size_bytes());
         std::memset(rooted_shown_.data(), 0, rooted_shown_.size_bytes());
@@ -413,7 +413,7 @@ struct sample_plan {
             ++resolved_shown_count_;
         }
         nearest_shown_count_ = min_of(nearest_shown_stride_, resolved_shown_count_);
-        if (!wanted_) return status_t::success_k;
+        if (!wanted_) return status_code_t::success_k;
 
         std::span<node_id_t const> const watermarks = source_->watermarks();
         u64_t total = 0, drawn_so_far = 0, generation = 0;
@@ -444,7 +444,7 @@ struct sample_plan {
             if (written_ == before && next == quota) break;
             quota = next;
         }
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Writes which of its key's entries each draw is, as @c get orders them: in one batch where
@@ -464,7 +464,7 @@ struct sample_plan {
                 });
                 ordinals[draw] = ordinal;
             }
-            return status_t::success_k;
+            return status_code_t::success_k;
         }
     }
 
@@ -488,7 +488,7 @@ struct sample_plan {
                 }
             else scale_classically_();
         }
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** What the steps so far drew and spent. */

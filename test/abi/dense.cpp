@@ -17,15 +17,17 @@
  *  calls its handler cancels carry its round to the end; a second source gathers whole into the
  *  index, a RAM index reshards into one shard in place, and the index reshards into two targets
  *  with every key in one, each through a plan its cancelled calls carry to the end; a cleared index
- *  holds nothing and ends a cursor opened before it; every metric's name reads back.
+ *  holds nothing and ends a cursor opened before it; every metric's name reads back; bytes behind a
+ *  foreign magic are refused with the engine's note.
  */
 #undef NDEBUG // ! A test's oracle must stay live in every build
 
-#include <cstring> // `std::memcmp` - the keys' order
+#include <cstring> // `std::memcmp`, `std::strcmp` - the keys' order, the outcome's note
 
-#include <algorithm> // `std::binary_search`, `std::sort` - the admitted keys
-#include <string>    // `std::string` - the cells' names and checkpoint stems
-#include <vector>    // `std::vector` - the keys
+#include <algorithm>   // `std::binary_search`, `std::sort` - the admitted keys
+#include <string>      // `std::string` - the cells' names and checkpoint stems
+#include <string_view> // `std::string_view` - the foreign magic
+#include <vector>      // `std::vector` - the keys
 
 #include "usearch/dense_index.h"
 
@@ -46,7 +48,7 @@ static usearch_rows_view_t rows_of(nk::matrix<nk::f32_t> const& vectors) noexcep
 }
 
 /** @p count rows from @p seed: sign sketches for bits, small integers for every other scalar. */
-static nk::matrix<nk::f32_t> dense_rows(usearch_scalar_t scalar, std::size_t count, u64_t seed) {
+static nk::matrix<nk::f32_t> dense_rows(usearch_scalar_t scalar, std::size_t count, util::u64_t seed) {
     return scalar == usearch_scalar_u1x8_k ? make_sketched_vectors<nk::f32_t>(count, dense_dimensions_k, seed)
                                            : make_vectors<nk::f32_t>(count, dense_dimensions_k, seed);
 }
@@ -64,8 +66,8 @@ static void expect_self_recall(handle<dense_verbs_t>& index, usearch_rows_view_t
     for (std::size_t query = 0; query != count; ++query) {
         std::size_t const first = offsets[query], last = offsets[query + 1];
         for (std::size_t match = first; match != last; ++match) {
-            std::optional<u64_t> const minted = offset_of_key(index.session->seed,
-                                                              std::bit_cast<usearch_key_t>(found.keys[match]));
+            std::optional<util::u64_t> const minted = offset_of_key(index.session->seed,
+                                                                    std::bit_cast<usearch_key_t>(found.keys[match]));
             unminted += !minted;
             found_first += match == first && minted == query;
             if (match != first) descending += found.scores[match] < found.scores[match - 1];
@@ -128,7 +130,7 @@ static void expect_predicate(handle<dense_verbs_t>& index, usearch_rows_view_t r
     if (!expect_success(outcome)) return;
     copied_matches_t const found = copy_matches(matches, dense_queries_k);
     std::size_t outside = 0;
-    for (uuid128_t const& key : found.keys)
+    for (util::uuid128_t const& key : found.keys)
         outside += !std::binary_search(admitted.begin(), admitted.end(), std::bit_cast<usearch_key_t>(key),
                                        key_precedes);
     expect_true(outside == 0 && !found.keys.empty());
@@ -179,8 +181,20 @@ static void expect_repeatable_walks(handle<dense_verbs_t>& index, usearch_rows_v
     expect_true(std::ranges::equal(pooled.keys, alone.keys));
 }
 
+/** Bytes behind a foreign prefix magic load as @c malformed, with no handle and an engine note in
+ *  place of the status's own name. */
+static void test_dense_foreign_magic() {
+    std::string_view const foreign {"SAFEGRPX\0\0\0\0\0\0\0\0", 16};
+    dense_verbs_t::index_t index = nullptr;
+    usearch_outcome_t outcome {};
+    dense_verbs_t::load_ram_buffer(&index, nullptr, bytes_view(foreign), {}, {}, &outcome);
+    expect_status(outcome, usearch_status_malformed_k);
+    expect_true(outcome.message && std::strcmp(outcome.message, usearch_status_name(outcome.status)) != 0);
+    expect_true(index == nullptr);
+}
+
 /** One cell of the dense diagonal, as the file's docblock describes. */
-static void test_dense_behaviors(sweep_cell_t const& cell, u64_t seed) {
+static void test_dense_behaviors(sweep_cell_t const& cell, util::u64_t seed) {
     // A view holds a key table, so its key verbs and hints probe it rather than scan.
     settings_t cell_settings = settings_of(session_settings(), cell);
     if (cell.residency == usearch_residency_nvme_k)
@@ -223,6 +237,7 @@ static void test_dense_behaviors(sweep_cell_t const& cell, u64_t seed) {
 
 void run_dense_abi_cases() {
     run_test_case("test_metric_names<dense_verbs_t>", test_metric_names<dense_verbs_t>);
+    run_test_case("test_dense_foreign_magic", test_dense_foreign_magic);
     for (sweep_cell_t const& cell : diagonal_sweep(usearch_scalar_bf16_k)) {
         std::string const name = fmt::format("dense {}", name_of(cell));
         // The stream keeps the name the cell had before its label spelled the constants.

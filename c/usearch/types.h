@@ -80,7 +80,7 @@
  *    attention's @c carry.
  *  - Executors make arenas. @c usearch_arena_init places one where its executor computes, host pages
  *    on its memory domains or the memory of its GPU, decided once; a @c NULL executor makes host
- *    pages for calls on the calling thread. A GPU arena keeps the rule @ref usearch_arena_t notes.
+ *    pages for calls on the calling thread. Every arena is freed before its executor.
  *  - A call rewinds the arena it is given, invalidating the previous call's outputs, and writes views
  *    into it. Any verb may reuse any arena of its residency, one call at a time.
  *  - A call holds the arena from its start until just before its final status.
@@ -404,9 +404,10 @@ typedef enum usearch_status_t {
     usearch_status_invalid_argument_k = 17,
 } usearch_status_t;
 
-/** Outcome of one call: a status every binding can branch on, and a static message
- *  carrying the detail the status cannot. Messages are static and @b don't need to be
- *  deallocated, and are @c NULL exactly when the status is @c usearch_status_success_k. */
+/** Outcome of one call: the status word a deferred call completes through and every binding
+ *  branches on, and a static message naming what broke, a library invariant or a rule of this
+ *  call, else the status's own @ref usearch_status_name. Messages are never freed, and are
+ *  @c NULL exactly when the status is @c usearch_status_success_k. */
 typedef struct usearch_outcome_t {
 
     /** What happened, for the caller to branch on. */
@@ -1153,23 +1154,25 @@ typedef enum usearch_admission_t {
 } usearch_admission_t;
 
 /** Admits or rejects @p count candidate keys at once, never zero, writing one admission per key
- *  into @p admissions, a buffer the library owns for the call, so a handler backed by an external
- *  store answers them in one round trip. Called concurrently from the executor's threads. */
+ *  into @p admissions, a buffer the library owns for the call and fills with @c usearch_reject_k
+ *  before every call, so a key the handler leaves unanswered stays rejected. Called concurrently
+ *  from the executor's threads. */
 typedef void (*usearch_predicate_callback_t)(usearch_key_t const* keys, usearch_admission_t* admissions, size_t count,
                                              void* state);
 
-/** How costly one predicate call is, which decides how many keys each call carries. */
+/** What one call costs the predicate's handler, which decides when the library asks it. */
 typedef enum usearch_predicate_cost_t {
 
-    /** Asked as candidates arrive, at most four keys a call, with nothing buffered. */
+    /** Asked as candidates are scored, a few keys a call, with nothing buffered. */
     usearch_predicate_cost_cheap_k = 0,
 
-    /** Asked once per traversal round or scan run about every candidate it gathered, for handlers
+    /** Asked once per round a thread settles, about every candidate it gathered, for handlers
      *  that pay per call, such as a lookup in an external database. */
     usearch_predicate_cost_expensive_k = 1,
 } usearch_predicate_cost_t;
 
-/** Which candidate keys a search may report: a handler and the state it is called with. */
+/** Which candidate keys a search may report: a handler, the state it is called with, and what a
+ *  call costs it. */
 typedef struct usearch_predicate_t {
 
     /** The @b optional handler; @c NULL admits every key. */
@@ -1178,7 +1181,7 @@ typedef struct usearch_predicate_t {
     /** Opaque pointer forwarded into every @c callback call. */
     void* state;
 
-    /** How many keys each @c callback call carries; zero stays cheap. */
+    /** What one @c callback call costs the handler; zero is cheap. */
     usearch_predicate_cost_t cost;
 } usearch_predicate_t;
 
@@ -1542,8 +1545,7 @@ USEARCH_EXPORT void usearch_executor_drain(usearch_executor_drain_t* arguments);
 
 /** Waits until no call holds the executor, releases the scratch and the streams it owns, returns
  *  borrowed pools, and frees the executor; @c NULL is safe, and it cannot fail, so it takes no
- *  outcome. Host arenas it made stay valid until freed, and GPU arenas keep the rule
- *  @ref usearch_arena_t notes. */
+ *  outcome. Every arena it made must be freed first. */
 USEARCH_EXPORT void usearch_executor_free(usearch_executor_t executor);
 
 /**
@@ -1569,7 +1571,7 @@ USEARCH_EXPORT void usearch_executor_free(usearch_executor_t executor);
  *  - A call that fails, is cancelled, or has nothing to report leaves its outputs @c NULL.
  *
  *  @note A GPU arena grows, fills and frees on the first stream of the executor that made it, so it
- *      serves only calls on that executor, and must be freed before that executor is.
+ *      serves only calls on that executor.
  */
 typedef struct usearch_arena_handle_t* usearch_arena_t;
 
@@ -1591,9 +1593,9 @@ typedef struct usearch_arena_init_t {
  *  @brief Creates an empty arena where @c executor computes, so its placement is decided once and
  *      GPU code keeps its outputs on the device without asking.
  *
- *  Nothing is allocated until a call writes into it. An arena of host pages may outlive the
- *  executor that made it, keeping its own memory until it is freed; a GPU arena keeps the rule
- *  @ref usearch_arena_t notes.
+ *  Nothing is allocated until a call writes into it. An arena must not outlive the executor that
+ *  made it: free every arena before its executor. An arena made with a @c NULL executor has none,
+ *  and lives until it is freed.
  */
 USEARCH_EXPORT void usearch_arena_init(usearch_arena_init_t* arguments);
 
@@ -1676,6 +1678,14 @@ USEARCH_EXPORT char const* usearch_mood_name(usearch_mood_t mood);
 
 /** Reads a mood back into @p mood, or fails with @c usearch_status_invalid_argument_k. */
 USEARCH_EXPORT usearch_status_t usearch_mood_from_name(usearch_bytes_view_t name, usearch_mood_t* mood);
+
+/** The canonical spelling of a predicate cost, as @c usearch_predicate_cost_expensive_k spells
+ *  "expensive". */
+USEARCH_EXPORT char const* usearch_predicate_cost_name(usearch_predicate_cost_t cost);
+
+/** Reads a predicate cost back into @p cost, or fails with @c usearch_status_invalid_argument_k. */
+USEARCH_EXPORT usearch_status_t usearch_predicate_cost_from_name(usearch_bytes_view_t name,
+                                                                 usearch_predicate_cost_t* cost);
 
 /** The canonical spelling of a refine verdict, as @c usearch_refine_stalled_k spells "stalled". */
 USEARCH_EXPORT char const* usearch_refine_verdict_name(usearch_refine_verdict_t verdict);

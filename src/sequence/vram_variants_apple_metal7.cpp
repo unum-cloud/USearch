@@ -10,13 +10,13 @@
  */
 #include "sequence_specializations.cuh"
 
-template struct us::sequence::vram_apple_index<us::sequence::apple_levenshtein_bytes_kit_t, u32_t>;
-template struct us::sequence::vram_apple_kits<us::sequence::apple_levenshtein_bytes_kit_t, u32_t>;
-template struct us::sequence::vram_apple_index<us::sequence::apple_levenshtein_utf8_kit_t, u32_t>;
-template struct us::sequence::vram_apple_kits<us::sequence::apple_levenshtein_utf8_kit_t, u32_t>;
-template struct us::sequence::vram_apple_index<us::sequence::apple_overlap_kit_t, u32_t>;
-template struct us::sequence::vram_apple_kits<us::sequence::apple_overlap_kit_t, u32_t>;
-template struct us::sequence::vram_apple_index<us::sequence::apple_needleman_wunsch_kit_t, u32_t>;
-template struct us::sequence::vram_apple_kits<us::sequence::apple_needleman_wunsch_kit_t, u32_t>;
+template struct us::sequence::vram_apple_index<us::sequence::apple_levenshtein_bytes_kit_t, util::u32_t>;
+template struct us::sequence::vram_apple_kits<us::sequence::apple_levenshtein_bytes_kit_t, util::u32_t>;
+template struct us::sequence::vram_apple_index<us::sequence::apple_levenshtein_utf8_kit_t, util::u32_t>;
+template struct us::sequence::vram_apple_kits<us::sequence::apple_levenshtein_utf8_kit_t, util::u32_t>;
+template struct us::sequence::vram_apple_index<us::sequence::apple_overlap_kit_t, util::u32_t>;
+template struct us::sequence::vram_apple_kits<us::sequence::apple_overlap_kit_t, util::u32_t>;
+template struct us::sequence::vram_apple_index<us::sequence::apple_needleman_wunsch_kit_t, util::u32_t>;
+template struct us::sequence::vram_apple_kits<us::sequence::apple_needleman_wunsch_kit_t, util::u32_t>;
 
 template struct basic_class_tables<sequence_traits_t, vendored_residency_t::vram_apple_k, gpu_class_t::apple_metal7_k>;

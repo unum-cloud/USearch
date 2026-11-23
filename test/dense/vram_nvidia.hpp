@@ -18,11 +18,13 @@
 #include "dense.cuh"
 #include "lib.hpp" // `gpu_class_t`, `pick_gpu_class` - the class the library picks a unit by
 
+namespace util = unum::usearch::utilities;
+
 /** The bounds of every dtype's fatbin of one NVIDIA class, in pairs in the library's dtype ladder,
  *  defined in that class's @c src/dense/vram_variants_nvidia_<class>.cpp unit; an unnamed class's
  *  bundles are empty. */
 template <gpu_class_t gpu_class_>
-std::span<us::utilities::byte_t const* const> bundle_bounds() noexcept;
+std::span<util::byte_t const* const> bundle_bounds() noexcept;
 
 namespace unum::usearch::test::dense {
 

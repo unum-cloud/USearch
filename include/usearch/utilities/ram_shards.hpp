@@ -310,14 +310,14 @@ struct shard_set {
      *    flight.
      */
     status_t emplace(std::unique_ptr<index_t>&& shard) noexcept {
-        if (!shard || shard->capacity()) return status_t::config_mismatch_k;
-        if (capacity() || retired_shards() || built_shards_ != size()) return status_t::config_mismatch_k;
+        if (!shard || shard->capacity()) return status_code_t::config_mismatch_k;
+        if (capacity() || retired_shards() || built_shards_ != size()) return status_code_t::config_mismatch_k;
         std::size_t const shards = size();
         if (status_t const placed = construct_(shards, shard_t {std::move(shard)}); failed(placed)) return placed;
         atomic_ref<std::size_t>(built_shards_).store(shards + 1, std::memory_order_release);
         atomic_ref<std::size_t>(shards_count_).store(shards + 1, std::memory_order_release);
         shard_generation_width_ = shards + 1;
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /**
@@ -337,14 +337,14 @@ struct shard_set {
      *  - @c unsupported_k On Apple, a pipeline is narrower than the kernels need.
      */
     expected<std::size_t> reserve(reserve_capacity_t config) noexcept {
-        if (empty()) return {0, status_t::uninitialized_k};
+        if (empty()) return {0, status_code_t::uninitialized_k};
         reserve_capacity_t per_shard = config;
         per_shard.capacity = min_of(divide_round_up(config.capacity, size() - retired_shards()), shard_capacity_);
         per_shard.ceiling = shard_capacity_;
         for (shard_t& shard : *this)
             if (status_t const reserved = shard.index->reserve(per_shard).status; failed(reserved))
                 return {capacity(), reserved};
-        return {capacity(), status_t::success_k};
+        return {capacity(), status_code_t::success_k};
     }
 
     /**
@@ -367,7 +367,7 @@ struct shard_set {
             status_t closed = shard_index.close_();
             // A dense RAM shard closes only its dispenser, so undispensed claims refuse here.
             if (succeeded(closed) && shard_index.claimed_() != shard_index.size())
-                shard_index.reopen_(), closed = status_t::contended_k;
+                shard_index.reopen_(), closed = status_code_t::contended_k;
             if (failed(closed)) {
                 while (shard != live) at_(--shard).index->reopen_();
                 return closed;
@@ -375,7 +375,7 @@ struct shard_set {
         }
         // The unique side orders the seal for every later claimer, which takes the shared side.
         atomic_ref<std::size_t>(shards_count_).set_bits(sealed_k, std::memory_order_relaxed);
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Reopens every closed shard's claim word at its watermark, the last shard first, so a batch
@@ -421,7 +421,7 @@ struct shard_set {
      *
      *  @par Statuses:
      *  - @c contended_k The set is sealed while a fresh shard generation must open.
-     *  - @c bad_alloc_k @p build answers a null index.
+     *  - @c out_of_memory_k @p build answers a null index.
      */
     template <typename build_type_>
     expected<batch_split_t> split_batch_into_shards(std::size_t entries, build_type_&& build) noexcept {
@@ -438,7 +438,7 @@ struct shard_set {
                     {split.open_shard_generation.first + opened * width, width}, build);
                 failed(generated))
                 return {split, generated};
-        return {split, status_t::success_k};
+        return {split, status_code_t::success_k};
     }
 
     /**
@@ -449,9 +449,9 @@ struct shard_set {
      *  One caller opens it while the others wait on the count word, and a caller finding it opened
      *  already answers success untouched; a sealed set answers @c contended_k, since only its
      *  closer may grow it. The new shards stay invisible to every reader until the release store
-     *  that counts them, and a failed build publishes none. @p build is called as <tt>build(like) →
-     *  shard_t</tt>, its index reserved with @ref shard_capacity as the ceiling, a null index
-     *  refusing with @c bad_alloc_k.
+     *  that counts them, and a failed build publishes none. @p build is called as <tt>build(like)</tt> and
+     *  answers a @c shard_t whose index is reserved with @ref shard_capacity as the ceiling, a null
+     *  index refusing with @c out_of_memory_k.
      */
     template <typename build_type_>
     status_t open_shard_generation_(shard_generation_t full, build_type_&& build) noexcept {
@@ -519,8 +519,9 @@ struct shard_set {
      *  retires its shards never forgets them. */
     void forget_entries() noexcept {
         atomic_ref<std::size_t> const count {shards_count_};
-        std::size_t const seen = count.load(std::memory_order_relaxed);
-        count.store((seen & sealed_k) | min_of(seen & ~sealed_k, shard_generation_width_), std::memory_order_release);
+        std::size_t const observed = count.load(std::memory_order_relaxed);
+        count.store((observed & sealed_k) | min_of(observed & ~sealed_k, shard_generation_width_),
+                    std::memory_order_release);
         reset_routing(0);
     }
 
@@ -618,7 +619,7 @@ struct shard_set {
                 std::size_t const candidate_entries = source_shard(candidate).index->size();
                 if (from == unplaced || candidate_entries > entries) from = candidate, entries = candidate_entries;
             }
-            if (entries > bound) return status_t::unsupported_k;
+            if (entries > bound) return status_code_t::unsupported_k;
             auto best = [&]() noexcept {
                 std::size_t into = unplaced, best_rank = unplaced;
                 for (std::size_t bin = retired_shards(), shards = size(); bin != shards; ++bin) {
@@ -640,11 +641,11 @@ struct shard_set {
             else if (into == unplaced) {
                 if (status_t const opened = open(); failed(opened)) return opened;
                 into = best();
-                if (into == unplaced) return status_t::overflow_k;
+                if (into == unplaced) return status_code_t::overflow_k;
             }
             moves[from].into = into;
         }
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Sizes the part runs of @p shards target shards to @p moves: a resident part, and one per
@@ -652,7 +653,7 @@ struct shard_set {
     template <typename offsets_type_, typename bases_type_>
     static status_t size_parts(std::span<shard_move_t const> moves, std::size_t shards, offsets_type_& part_offsets,
                                bases_type_& part_bases) noexcept {
-        if (failed(part_offsets.resize(shards + 1))) return status_t::bad_alloc_k;
+        if (failed(part_offsets.resize(shards + 1))) return status_code_t::out_of_memory_k;
         std::size_t parts = 0;
         for (std::size_t into = 0; into != shards; ++into) {
             part_offsets[into] = parts++;
@@ -660,9 +661,9 @@ struct shard_set {
                 if (move.into == into) ++parts;
         }
         part_offsets[shards] = parts;
-        if (failed(part_bases.resize(parts))) return status_t::bad_alloc_k;
+        if (failed(part_bases.resize(parts))) return status_code_t::out_of_memory_k;
         for (node_id_t& base : part_bases) base = node_id_limits<node_id_t>::unknown_k;
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Writes into @p part_bases, one run per shard as @p part_offsets cuts it, a part for every
@@ -720,14 +721,14 @@ struct shard_set {
         return read_committed([&]() noexcept -> expected<std::size_t> {
             // Read past the sequence, so a commit it saw counts every generation it published into.
             std::size_t const shards = size();
-            if (!watermarks.empty() && watermarks.size() != shards) return {0, status_t::shape_mismatch_k};
+            if (!watermarks.empty() && watermarks.size() != shards) return {0, status_code_t::shape_mismatch_k};
             std::size_t total = 0;
             for (std::size_t shard = 0; shard != shards; ++shard) {
                 std::size_t const visible = at_(shard).index->size();
                 if (!watermarks.empty()) watermarks[shard] = static_cast<node_id_t>(visible);
                 total += visible;
             }
-            return {total, status_t::success_k};
+            return {total, status_code_t::success_k};
         });
     }
 
@@ -751,7 +752,13 @@ struct shard_set {
 
     /** Entries across every shard: the watermarks of one consistent snapshot, summed, so a batch
      *  counts whole or not at all. */
-    std::size_t entries() const noexcept { return snapshot({}).value; }
+    std::size_t entries() const noexcept {
+        return read_committed([&]() noexcept {
+            std::size_t total = 0;
+            for (std::size_t shard = 0, shards = size(); shard != shards; ++shard) total += at_(shard).index->size();
+            return total;
+        });
+    }
 
     /** The epoch a reader starts under: an even one, waiting out a window in progress through the
      *  waiter. The reader takes no read-modify-write, so readers never starve a window. */
@@ -790,8 +797,8 @@ struct shard_set {
             read_result_t result = read();
             if (still_valid(epoch)) return result;
         }
-        if constexpr (std::is_same_v<read_result_t, status_t>) return status_t::contended_k;
-        else return {{}, status_t::contended_k};
+        if constexpr (std::is_same_v<read_result_t, status_t>) return status_code_t::contended_k;
+        else return {{}, status_code_t::contended_k};
     }
 
     /** Runs the reader @p read until neither a destructive window nor a commit spanning
@@ -826,26 +833,26 @@ struct shard_set {
         atomic_ref<std::size_t> const count {shards_count_};
         std::size_t const first = full.first + full.width;
         while (true) {
-            std::size_t seen = first | seal;
-            if (count.compare_exchange_strong(seen, first | seal | opening_k, std::memory_order_acquire,
+            std::size_t observed = first | seal;
+            if (count.compare_exchange_strong(observed, first | seal | opening_k, std::memory_order_acquire,
                                               std::memory_order_acquire))
                 break;
-            if ((seen & sealed_k) != seal) return status_t::contended_k;
-            if ((seen & ~(opening_k | sealed_k)) != first) return status_t::success_k;
-            wait_type_ {}(&shards_count_, seen, 0u);
+            if ((observed & sealed_k) != seal) return status_code_t::contended_k;
+            if ((observed & ~(opening_k | sealed_k)) != first) return status_code_t::success_k;
+            wait_type_ {}(&shards_count_, observed, 0u);
         }
         // Idle shards a forget kept are whole shard generations, closed, and already reserved.
         if (first + full.width <= built_shards_) {
             if (!seal)
                 for (std::size_t shard = first; shard != first + full.width; ++shard) at_(shard).index->reopen_();
             count.store((first + full.width) | seal, std::memory_order_release);
-            return status_t::success_k;
+            return status_code_t::success_k;
         }
-        status_t built = status_t::success_k;
+        status_t built = status_code_t::success_k;
         std::size_t constructed = 0;
         for (; constructed != full.width; ++constructed) {
             shard_t shard = build(at_(full.first + constructed));
-            if (!shard.index) built = status_t::bad_alloc_k;
+            if (!shard.index) built = status_code_t::out_of_memory_k;
             else built = construct_(first + constructed, std::move(shard));
             if (failed(built)) break;
             if (seal) [[maybe_unused]]
@@ -858,7 +865,7 @@ struct shard_set {
         }
         atomic_ref<std::size_t>(built_shards_).store(first + full.width, std::memory_order_release);
         count.store((first + full.width) | seal, std::memory_order_release);
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** The shard at @p shard: chunk @c c holds the 2^c shards from 2^c - 1 on. */
@@ -875,11 +882,11 @@ struct shard_set {
         std::size_t const chunk = static_cast<std::size_t>(std::bit_width(biased)) - 1;
         if (!shard_chunks_[chunk]) {
             shard_t* const chunk_shards = forkunion_allocator<shard_t> {allocator_}.allocate(std::size_t {1} << chunk);
-            if (!chunk_shards) return status_t::bad_alloc_k;
+            if (!chunk_shards) return status_code_t::out_of_memory_k;
             shard_chunks_[chunk] = chunk_shards;
         }
         new (shard_chunks_[chunk] + (biased - (std::size_t {1} << chunk))) shard_t {std::move(shard)};
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** The owned shards, in chunks that double and never move, so a search reading shard @c s while

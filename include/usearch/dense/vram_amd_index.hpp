@@ -277,9 +277,9 @@ struct vram_amd_kernels {
         explicit operator bool() const noexcept { return false; }
         status_t open(hip_executor_t::stream_t const&, std::span<part_source_t const>, std::size_t, std::size_t,
                       std::span<std::size_t const>) noexcept {
-            return status_t::success_k;
+            return status_code_t::success_k;
         }
-        status_t read(std::size_t, std::span<bytes_view_t* const>) noexcept { return status_t::success_k; }
+        status_t read(std::size_t, std::span<bytes_view_t* const>) noexcept { return status_code_t::success_k; }
     };
 
     /** Lanes cooperating on one row: the smallest power of two covering its fragments, at most a
@@ -381,15 +381,15 @@ struct vram_amd_kernels {
         constexpr bool indexer_k = std::is_same_v<heads_type_, indexer_heads<scalar_t>>;
         constexpr bool attend_k = std::is_same_v<heads_type_, attend_heads_t>;
         std::size_t const queries_count = queries.rows;
-        if (!core.vectors_matrix_.reserved_bytes()) return {{}, status_t::uninitialized_k};
-        if (context.device() != core.device_.ordinal || !context) return {{}, status_t::config_mismatch_k};
+        if (!core.vectors_matrix_.reserved_bytes()) return {{}, status_code_t::uninitialized_k};
+        if (context.device() != core.device_.ordinal || !context) return {{}, status_code_t::config_mismatch_k};
         // Validated with the rest: past here a refusal would already have burned epoch space.
         if (status_t const refusal = core.rows_refusal_(queries); failed(refusal)) return {{}, refusal};
         std::size_t heads_rows = 0;
         if constexpr (indexer_k) {
             heads_rows = heads.heads.extent(0);
             if (heads.weights.extent(0) != queries_count || heads_rows != queries_count * heads.weights.extent(1))
-                return {{}, status_t::config_mismatch_k};
+                return {{}, status_code_t::config_mismatch_k};
             if (status_t const refusal = core.rows_refusal_(heads.heads); failed(refusal)) return {{}, refusal};
         }
         if constexpr (attend_k) {
@@ -415,7 +415,7 @@ struct vram_amd_kernels {
                                         vram_warps_per_block_k;
         std::size_t const arena_bytes_before = context.arena_bytes_;
         byte_t* const arena = context.ensure_arena(arena_warps * arena_shape.slice_bytes<node_id_t>());
-        if (!arena) return {{}, status_t::bad_alloc_k};
+        if (!arena) return {{}, status_code_t::out_of_memory_k};
         // The staging holds the query rows and any head rows first, since they carry the widest
         // alignment, then the window importing them, the heads' weights, then the outputs; stream
         // order serializes its reuse across calls.
@@ -423,7 +423,7 @@ struct vram_amd_kernels {
         std::size_t const import_bytes = core.import_bytes_(attend_k ? heads_rows : queries_count, queries.dtype);
         std::size_t const weights_bytes = indexer_k ? heads_rows * sizeof(f32_t) : 0;
         byte_t* const staging = context.ensure_staging(rows_bytes + import_bytes + weights_bytes + outputs_bytes);
-        if (!staging) return {{}, status_t::bad_alloc_k};
+        if (!staging) return {{}, status_code_t::out_of_memory_k};
         byte_t* const window = staging + rows_bytes;
         auto const [epoch_base, epochs_status] = context.take_epochs(queries_count, arena_bytes_before);
         if (failed(epochs_status)) return {{}, epochs_status};
@@ -431,13 +431,13 @@ struct vram_amd_kernels {
         // the zero-tail distance identity to hold.
         if ((import_bytes || core.packed_row_bytes() != core.row_bytes()) &&
             core.api().fill_async(staging, 0, rows_bytes + import_bytes, stream) != hip_success_k)
-            return {{}, status_t::device_error_k};
+            return {{}, status_code_t::device_k};
         if (status_t const imported = core.import_rows_(kernels, staging, queries, window, stream); failed(imported))
             return {{}, imported};
         if (core.api().fill_async(context.telemetry_.get(), 0, sizeof(vram_telemetry_block_t), stream) !=
                 hip_success_k ||
             core.api().fill_async(context.assigned_nodes_.get(), 0, 2 * sizeof(u32_t), stream) != hip_success_k)
-            return {{}, status_t::device_error_k};
+            return {{}, status_code_t::device_k};
 
         vram_rescoring_t rescoring {};
         if constexpr (indexer_k) {
@@ -448,7 +448,7 @@ struct vram_amd_kernels {
                 core.api().copy_2d_async(staged_weights, weights_row_bytes, heads.weights.byte_data(),
                                          heads.weights.stride_bytes(0), weights_row_bytes, queries_count,
                                          hip_copy_default_k, stream) != hip_success_k)
-                return {{}, status_t::device_error_k};
+                return {{}, status_code_t::device_k};
             rescoring = {staged_heads, reinterpret_cast<f32_t const*>(staged_weights),
                          static_cast<u32_t>(heads.weights.extent(1)), core.row_fragments()};
         }
@@ -475,7 +475,7 @@ struct vram_amd_kernels {
                                   concurrent_walks,
                                   filling};
         return {{view, candidate_slots, frontier, staging + rows_bytes + import_bytes + weights_bytes, rescoring},
-                status_t::success_k};
+                status_code_t::success_k};
     }
 
     /** The submission half of @c search: stages the queries and @p heads, launches walks over the
@@ -488,17 +488,17 @@ struct vram_amd_kernels {
                                              search_config_t config, std::size_t visible,
                                              heads_type_ const& heads = {}) noexcept {
         std::size_t const queries_count = queries.rows;
-        if (config.traversal != traversal_t::walk_k) return {{}, status_t::unsupported_k};
-        if (!queries_count) return {{}, status_t::success_k};
+        if (config.traversal != traversal_t::walk_k) return {{}, status_code_t::unsupported_k};
+        if (!queries_count) return {{}, status_code_t::success_k};
         bool const wants_distances = result_distances.extent(0) != 0;
         if (result_ids.extent(0) != queries_count || result_ids.extent(1) < config.count ||
             (wants_distances &&
              (result_distances.extent(0) != queries_count || result_distances.extent(1) < config.count)))
-            return {{}, status_t::config_mismatch_k};
+            return {{}, status_code_t::config_mismatch_k};
         if (result_ids.stride_bytes(0) < static_cast<std::ptrdiff_t>(config.count * sizeof(node_id_t)) ||
             (wants_distances &&
              result_distances.stride_bytes(0) < static_cast<std::ptrdiff_t>(config.count * sizeof(distance_t))))
-            return {{}, status_t::unsupported_layout_k};
+            return {{}, status_code_t::unsupported_layout_k};
 
         // The expansion covers the count, so the ladder's candidates hold every rank, and past it
         // the arena frontier ranks everything it saw.
@@ -528,13 +528,13 @@ struct vram_amd_kernels {
         if (core.api().copy_2d_async(result_ids.data(), result_ids.stride_bytes(0), device_ids,
                                      config.count * sizeof(node_id_t), config.count * sizeof(node_id_t), queries_count,
                                      hip_copy_default_k, stream) != hip_success_k)
-            return {{}, status_t::device_error_k};
+            return {{}, status_code_t::device_k};
         if (wants_distances &&
             core.api().copy_2d_async(result_distances.data(), result_distances.stride_bytes(0), device_distances,
                                      config.count * sizeof(distance_t), config.count * sizeof(distance_t),
                                      queries_count, hip_copy_default_k, stream) != hip_success_k)
-            return {{}, status_t::device_error_k};
-        return {{config.count}, status_t::success_k};
+            return {{}, status_code_t::device_k};
+        return {{config.count}, status_code_t::success_k};
     }
 
     /** The submission half of @c multiply: stages the rows, launches walks over the @p visible
@@ -545,14 +545,14 @@ struct vram_amd_kernels {
                                                std::size_t visible) noexcept {
         std::size_t const rows_count = left.rows;
         std::size_t const wanted = node_ids.extent(1);
-        if (config.traversal != traversal_t::walk_k) return {{}, status_t::unsupported_k};
+        if (config.traversal != traversal_t::walk_k) return {{}, status_code_t::unsupported_k};
         if (node_ids.extent(0) != rows_count || products.extent(0) != rows_count || products.extent(1) != wanted ||
             counts.size() != rows_count)
-            return {{}, status_t::config_mismatch_k};
-        if (!rows_count) return {{}, status_t::success_k};
+            return {{}, status_code_t::config_mismatch_k};
+        if (!rows_count) return {{}, status_code_t::success_k};
         if (node_ids.stride_bytes(0) < static_cast<std::ptrdiff_t>(wanted * sizeof(node_id_t)) ||
             products.stride_bytes(0) < static_cast<std::ptrdiff_t>(wanted * sizeof(dot_result_t)))
-            return {{}, status_t::unsupported_layout_k};
+            return {{}, status_code_t::unsupported_layout_k};
         std::size_t const ids_bytes = rows_count * wanted * sizeof(node_id_t);
         std::size_t const products_bytes = rows_count * wanted * sizeof(dot_t);
         auto const [kernels, kernels_status] = kernels_(context);
@@ -574,11 +574,11 @@ struct vram_amd_kernels {
                        core.api().copy_2d_async(products.data(), products.stride_bytes(0), device_products,
                                                 wanted * sizeof(dot_t), wanted * sizeof(dot_t), rows_count,
                                                 hip_copy_default_k, stream) != hip_success_k))
-            return {{}, status_t::device_error_k};
+            return {{}, status_code_t::device_k};
         if (core.api().copy_async(counts.data(), device_counts, rows_count * sizeof(u32_t), hip_copy_default_k,
                                   stream) != hip_success_k)
-            return {{}, status_t::device_error_k};
-        return {{}, status_t::success_k};
+            return {{}, status_code_t::device_k};
+        return {{}, status_code_t::success_k};
     }
 
     /** The submission half of @c attend: stages each token's first head to navigate by, then every
@@ -592,11 +592,11 @@ struct vram_amd_kernels {
                                     traversal_context_t& context, search_config_t config, std::size_t blocks,
                                     std::size_t exported_bytes, std::size_t visible) noexcept {
         std::size_t const rows_count = queries.rows;
-        if (config.traversal != traversal_t::walk_k) return {nullptr, status_t::unsupported_k};
-        if (!head_count || rows_count % head_count) return {nullptr, status_t::shape_mismatch_k};
-        if (!rows_count) return {nullptr, status_t::success_k};
+        if (config.traversal != traversal_t::walk_k) return {nullptr, status_code_t::unsupported_k};
+        if (!head_count || rows_count % head_count) return {nullptr, status_code_t::shape_mismatch_k};
+        if (!rows_count) return {nullptr, status_code_t::success_k};
         std::size_t const scratch_bytes = vram_attend_scratch_bytes(head_count, core.dimensions(), wave_lanes());
-        if (!walk_scratch_fits(core, scratch_bytes)) return {nullptr, status_t::config_mismatch_k};
+        if (!walk_scratch_fits(core, scratch_bytes)) return {nullptr, status_code_t::config_mismatch_k};
         std::size_t const outputs_bytes = rows_count * core.dimensions() * sizeof(f32_t);
         rows_view_t const first_heads {queries.data, rows_count / head_count, queries.columns,
                                        queries.stride * head_count, queries.dtype};
@@ -609,7 +609,7 @@ struct vram_amd_kernels {
         if (!staged) return {nullptr, staged.status};
         staged.value.view.scratch_bytes_per_warp += static_cast<u32_t>(scratch_bytes);
         if (core.api().fill_async(context.missed_.get(), 0, sizeof(u32_t), context.stream()) != hip_success_k)
-            return {nullptr, status_t::device_error_k};
+            return {nullptr, status_code_t::device_k};
         f32_t* const device_outputs = reinterpret_cast<f32_t*>(staged.value.outputs);
         if (status_t const launched = launch_attend_(
                 core, *kernels, staged.value, value_lookup, device_outputs,
@@ -617,7 +617,7 @@ struct vram_amd_kernels {
                 score_scale * std::numbers::log2e_v<f32_t>, context);
             failed(launched))
             return {nullptr, launched};
-        return {device_outputs, status_t::success_k};
+        return {device_outputs, status_code_t::success_k};
     }
 
 #pragma endregion Search
@@ -678,8 +678,8 @@ struct vram_amd_kernels {
             arguments.build.first_id = wave_first;
             arguments.build.end_id = wave_end;
             arguments.build.epoch_base = build.epoch_base + offset;
-            status_t launched = zeroed(build.assigned_nodes) && zeroed(build.touched_count) ? status_t::success_k
-                                                                                            : status_t::device_error_k;
+            status_t launched = zeroed(build.assigned_nodes) && zeroed(build.touched_count) ? status_code_t::success_k
+                                                                                            : status_code_t::device_k;
             if (succeeded(launched))
                 launched = launch_(*kernels, vram_kernel_t::insert_k, candidate_slots, blocks,
                                    vram_warps_per_block_k * build.scratch_bytes_per_warp, stream, arguments);
@@ -687,14 +687,14 @@ struct vram_amd_kernels {
             // The wave's rows are queued now, so a failure past here can no longer be un-claimed.
             arguments.build.scratch_bytes_per_warp = back_link_scratch;
             arguments.build.selection_nodes = back_link_rows;
-            if (!zeroed(build.assigned_nodes)) return core.fail_(status_t::device_error_k);
+            if (!zeroed(build.assigned_nodes)) return core.fail_(status_code_t::device_k);
             if (status_t const linked = launch_(*kernels, vram_kernel_t::back_link_k, 0, blocks,
                                                 vram_warps_per_block_k * back_link_scratch, stream, arguments);
                 failed(linked))
                 return core.fail_(linked);
             wave_first = wave_end;
         }
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
     /** Queues one phase of @p fold over the rows of its launching shard on @p context 's stream,
      *  each warp's re-selection scratch in shared memory when it fits there and in the context's
@@ -712,13 +712,13 @@ struct vram_amd_kernels {
         fold.scratch_bytes_per_warp = shared ? scratch_bytes : 0u;
         fold.arena = context.ensure_arena(std::size_t {blocks} * vram_warps_per_block_k *
                                           fold.arena_shape.slice_bytes<node_id_t>());
-        if (!fold.arena && fold.arena_shape.scratch_bytes) return status_t::bad_alloc_k;
+        if (!fold.arena && fold.arena_shape.scratch_bytes) return status_code_t::out_of_memory_k;
         fold.telemetry = context.telemetry_.get();
         fold.assigned_nodes = context.assigned_nodes_.get();
         if (core.api().fill_async(fold.telemetry, 0, sizeof(vram_telemetry_block_t), context.stream()) !=
                 hip_success_k ||
             core.api().fill_async(fold.assigned_nodes, 0, sizeof(u32_t), context.stream()) != hip_success_k)
-            return status_t::device_error_k;
+            return status_code_t::device_k;
         vram_arguments_t arguments {};
         arguments.fold = fold;
         return launch_(*kernels, vram_dense_kernel_t::fold_k, 0, blocks,
@@ -735,7 +735,7 @@ struct vram_amd_kernels {
         if (!nk_cast_plan_serial_(from_dtype, to_dtype, count,
                                   reinterpret_cast<std::uintptr_t>(from) | reinterpret_cast<std::uintptr_t>(to),
                                   &arguments.cast.plan))
-            return status_t::unsupported_k;
+            return status_code_t::unsupported_k;
         u32_t const blocks = static_cast<u32_t>(
             min_of<std::size_t>(divide_round_up<std::size_t>(arguments.cast.plan.units, block_threads()),
                                 core.device_.multiprocessor_count * resident_blocks_(vram_dense_kernel_t::cast_k, 0)));
@@ -1094,10 +1094,10 @@ struct vram_amd_index {
     }
 
     /**
-     *  Filtered search, refused since a host predicate cannot run inside the walk.
+     *  @brief Filtered search, refused since a host predicate cannot run inside the walk.
      *
      *  @par Statuses:
-     *  - @c device_error_k Every call.
+     *  - @c device_k Every call.
      */
     template <typename predicate_type_>
     expected<search_result_t> search_if(vector_view_t query_vector, search_config_t config, predicate_type_&& predicate,
@@ -1156,7 +1156,7 @@ struct vram_amd_index {
      *  @par Statuses:
      *  - @c uninitialized_k The index never grew.
      *  - @c config_mismatch_k The @p context rides another device or cannot launch.
-     *  - @c bad_alloc_k A column, a mirror, the arena or the counters cannot be placed.
+     *  - @c out_of_memory_k A column, a mirror, the arena or the counters cannot be placed.
      */
     expected<refine_plan_t> plan_refine(refine_config_t config, traversal_context_t& context) noexcept {
         return core_.plan_refine(config, context);
@@ -1168,8 +1168,8 @@ struct vram_amd_index {
      *  @par Statuses:
      *  - @c uninitialized_k The index never grew.
      *  - @c config_mismatch_k The @p context rides another device or cannot launch.
-     *  - @c bad_alloc_k A column, a mirror, the arena or the counters cannot be placed.
-     *  - @c device_error_k A launch or a copy failed.
+     *  - @c out_of_memory_k A column, a mirror, the arena or the counters cannot be placed.
+     *  - @c device_k A launch or a copy failed.
      */
     expected<refine_report_t> refine(refine_config_t config, traversal_context_t& context) noexcept {
         return core_.refine(config, context);
@@ -1189,7 +1189,7 @@ struct vram_amd_index {
      *    device, metric or geometry, or a @p context of another device or one that cannot launch.
      *  - @c contended_k This index's or a target's claim word is open.
      *  - @c overflow_k Part slots past the 32-bit IDs.
-     *  - @c bad_alloc_k A column, a mirror, the arena or the counters cannot be placed.
+     *  - @c out_of_memory_k A column, a mirror, the arena or the counters cannot be placed.
      */
     expected<reshard_plan_t> plan_reshard(std::span<vram_amd_index* const> sources,
                                           std::span<vram_amd_index* const> targets, reshard_config_t config,
@@ -1208,7 +1208,7 @@ struct vram_amd_index {
      *  @brief One @ref plan_reshard driven to its end on the calling thread.
      *
      *  @par Statuses:
-     *  - Those of @ref plan_reshard, then @c device_error_k when a launch or a copy failed.
+     *  - Those of @ref plan_reshard, then @c device_k when a launch or a copy failed.
      */
     expected<refine_report_t> reshard(std::span<vram_amd_index* const> sources,
                                       std::span<vram_amd_index* const> targets, reshard_config_t config,
@@ -1221,7 +1221,7 @@ struct vram_amd_index {
      *
      *  @par Statuses:
      *  - @c config_mismatch_k The @p context rides another device or cannot launch.
-     *  - @c bad_alloc_k A column or the counters cannot be placed.
+     *  - @c out_of_memory_k A column or the counters cannot be placed.
      */
     expected<health_plan_t> plan_health(traversal_context_t& context) noexcept { return core_.plan_health(context); }
 
@@ -1231,8 +1231,8 @@ struct vram_amd_index {
      *
      *  @par Statuses:
      *  - @c config_mismatch_k The @p context rides another device or cannot launch.
-     *  - @c bad_alloc_k A column or the counters cannot be placed.
-     *  - @c device_error_k A launch or a copy failed.
+     *  - @c out_of_memory_k A column or the counters cannot be placed.
+     *  - @c device_k A launch or a copy failed.
      */
     expected<reachability_t> health(traversal_context_t& context) noexcept { return core_.health(context); }
 

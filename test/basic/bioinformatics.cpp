@@ -23,6 +23,8 @@
 
 #include "basic.hpp"
 
+namespace util = unum::usearch::utilities;
+
 using namespace unum::usearch;
 using namespace unum::usearch::test;
 
@@ -95,7 +97,7 @@ struct packed_dna_codec_t {
         return sizeof(u32_t) + packed_bytes(value.size());
     }
     status_t save(dna_t const& value, bytes_span_t output) const noexcept {
-        if (output.size() < storage_requirements(value)) return status_t::overflow_k;
+        if (output.size() < storage_requirements(value)) return status_code_t::overflow_k;
         auto const count_bytes = std::bit_cast<std::array<std::byte, sizeof(u32_t)>>(static_cast<u32_t>(value.size()));
         for (std::size_t position = 0; position != count_bytes.size(); ++position)
             output[position] = count_bytes[position];
@@ -105,21 +107,21 @@ struct packed_dna_codec_t {
                 packed |= code_of(value[byte * 4 + lane]) << (lane * 2);
             output[sizeof(u32_t) + byte] = static_cast<std::byte>(packed);
         }
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
     status_t load(bytes_view_t input, dna_t& value) const noexcept {
-        if (input.size() < sizeof(u32_t)) return status_t::malformed_k;
+        if (input.size() < sizeof(u32_t)) return status_code_t::malformed_k;
         std::array<std::byte, sizeof(u32_t)> count_bytes;
         for (std::size_t position = 0; position != count_bytes.size(); ++position)
             count_bytes[position] = input[position];
         std::size_t const bases = std::bit_cast<u32_t>(count_bytes);
-        if (input.size() != sizeof(u32_t) + packed_bytes(bases)) return status_t::malformed_k;
+        if (input.size() != sizeof(u32_t) + packed_bytes(bases)) return status_code_t::malformed_k;
         value.clear();
         for (std::size_t base = 0; base != bases; ++base) {
             u32_t const packed = static_cast<u32_t>(input[sizeof(u32_t) + base / 4]);
             value += "ACGT"[(packed >> (base % 4 * 2)) & 3u];
         }
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 };
 
@@ -131,17 +133,16 @@ struct bioinformatics_handmade_t {
 
 template <typename wait_type_ = fu::standard_yield_t>
 struct bioinformatics_fixture {
-    using index_t = ram_index<dna_t, us::utilities::uuid128_t, u64_t, u64_t, wait_type_, fu::standard_atomic_ref,
-                              counting_allocator_t>;
+    using index_t =
+        ram_index<dna_t, util::uuid128_t, u64_t, u64_t, wait_type_, fu::standard_atomic_ref, counting_allocator_t>;
 
     static std::unique_ptr<index_t> make_index(allocation_ledger_t& ledger) {
         return std::unique_ptr<index_t>(new (std::nothrow) index_t(counting_allocator_t {ledger}));
     }
     static alignment_metric_t make_metric() { return {}; }
     static packed_dna_codec_t make_codec() { return {}; }
-    static us::utilities::uuid128_t make_key(std::size_t ordinal) {
-        return std::bit_cast<us::utilities::uuid128_t>(
-            std::array<u64_t, 2> {split_mix_bits(ordinal), 0xB10B10B1ull ^ ordinal});
+    static util::uuid128_t make_key(std::size_t ordinal) {
+        return std::bit_cast<util::uuid128_t>(std::array<u64_t, 2> {split_mix_bits(ordinal), 0xB10B10B1ull ^ ordinal});
     }
     static u64_t oracle(dna_t const& query, dna_t const& stored) noexcept {
         std::vector<u64_t> previous_row, current_row;
@@ -201,13 +202,13 @@ static void test_bioinformatics_codec() {
         dna_t original;
         for (std::size_t base = 0; base != bases; ++base) original += "ACGT"[(base * 7 + bases) % 4];
         std::vector<std::byte> encoded(codec.storage_requirements(original));
-        expect_equal(codec.save(original, {encoded}), status_t::success_k);
+        expect_equal(codec.save(original, {encoded}), status_code_t::success_k);
         dna_t decoded;
-        expect_equal(codec.load({encoded}, decoded), status_t::success_k);
+        expect_equal(codec.load({encoded}, decoded), status_code_t::success_k);
         expect_true(decoded == original);
         if (encoded.size() > sizeof(u32_t)) {
             dna_t rejected;
-            expect_equal(codec.load({encoded.data(), encoded.size() - 1}, rejected), status_t::malformed_k);
+            expect_equal(codec.load({encoded.data(), encoded.size() - 1}, rejected), status_code_t::malformed_k);
         }
     }
 }

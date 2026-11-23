@@ -750,11 +750,12 @@ struct ram_index {
     };
 
     /**
-     *  Covers the node records & the key multimap for @p config.capacity entries ahead of the
-     *  inserts, which cover what they claim on their own, so this is a hint callable any time
-     *  beside every other verb, and bounds every later claim by @p config.ceiling. Neighbor lists
-     *  start empty and grow with wiring. Answers the node capacity covered so far, and a
-     *  @c bad_alloc_k keeps the chunks it did cover, so the same call retries.
+     *  @brief Covers the node records & the key multimap for @p config.capacity entries ahead of
+     *      the inserts, which cover what they claim on their own, so this is a hint callable any
+     *      time beside every other verb, and bounds every later claim by @p config.ceiling.
+     *
+     *  Neighbor lists start empty and grow with wiring. Answers the node capacity covered so far,
+     *  and an @c out_of_memory_k keeps the chunks it did cover, so the same call retries.
      *
      *  @par Statuses:
      *  - @c overflow_k @p config.capacity passes @c max_node_count_k.
@@ -765,7 +766,7 @@ struct ram_index {
         if (status_t const covered = nodes_.cover(config.capacity); failed(covered))
             return {nodes_.capacity(), covered};
         if (status_t const keyed = key_map_.reserve(config.capacity); failed(keyed)) return {nodes_.capacity(), keyed};
-        return {nodes_.capacity(), status_t::success_k};
+        return {nodes_.capacity(), status_code_t::success_k};
     }
 
     /**
@@ -788,11 +789,11 @@ struct ram_index {
      */
     status_t clear() noexcept {
         unique_lock_t unique_lock {shared_mutex_, std::try_to_lock};
-        if (!unique_lock) return status_t::contended_k;
+        if (!unique_lock) return status_code_t::contended_k;
         auto const [visible, status] = watermark_();
         if (failed(status)) return status;
         forget_(visible);
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
 #pragma endregion Lifecycle
@@ -867,9 +868,10 @@ struct ram_index {
             "Certified immutability contradicts insertion - mark_reaches_root exclusive_k or stay concurrent_k");
         std::size_t const incoming_count = incoming_values.size();
         if (!incoming_count) return {};
-        if (!selector.connectivity) return {{}, status_t::config_mismatch_k};
-        if (keys.size() != incoming_count) return {{}, status_t::config_mismatch_k};
-        if (!assigned_ids.empty() && assigned_ids.size() != incoming_count) return {{}, status_t::config_mismatch_k};
+        if (!selector.connectivity) return {{}, status_code_t::config_mismatch_k};
+        if (keys.size() != incoming_count) return {{}, status_code_t::config_mismatch_k};
+        if (!assigned_ids.empty() && assigned_ids.size() != incoming_count)
+            return {{}, status_code_t::config_mismatch_k};
         if (status_t const sized = reserve_traversal(context, selector.connectivity, config); failed(sized))
             return {{}, sized};
         auto [plan, status] = plan_insert(incoming_count);
@@ -884,7 +886,7 @@ struct ram_index {
 
         insert_result_t result;
         result.telemetry = context.telemetry - telemetry_before;
-        return {result, status_t::success_k};
+        return {result, status_code_t::success_k};
     }
 
     /**
@@ -961,9 +963,9 @@ struct ram_index {
          *  - @c config_mismatch_k A position has yet to be placed.
          */
         status_t finish() noexcept {
-            if (!index_) return status_t::uninitialized_k;
+            if (!index_) return status_code_t::uninitialized_k;
             if (atomic_ref<std::size_t>(placed).load(std::memory_order_acquire) != range.size())
-                return status_t::config_mismatch_k;
+                return status_code_t::config_mismatch_k;
             if (!range.empty()) {
                 // Take the turn strictly in dispensed order: every range dispensed ahead of this
                 // one has published, which keeps the visible prefix hole-free. Holds no node lock
@@ -980,7 +982,7 @@ struct ram_index {
             }
             hold_.unlock();
             index_ = nullptr;
-            return status_t::success_k;
+            return status_code_t::success_k;
         }
 
       private:
@@ -1013,7 +1015,7 @@ struct ram_index {
     expected<insert_plan_t> plan_insert(std::size_t count) noexcept {
         auto [claim, status] = claim_(count);
         if (failed(status)) return {{}, status};
-        return {dispense_(std::move(claim)), status_t::success_k};
+        return {dispense_(std::move(claim)), status_code_t::success_k};
     }
 
     /**
@@ -1034,7 +1036,7 @@ struct ram_index {
     template <typename context_allocator_type_>
     static status_t reserve_traversal(traversal_context_over<context_allocator_type_>& context,
                                       std::size_t connectivity, insert_config_t config) noexcept {
-        if (!connectivity) return status_t::config_mismatch_k;
+        if (!connectivity) return status_code_t::config_mismatch_k;
         insert_config_t const walk = resolved_config_(config, connectivity);
         std::size_t const round_capacity = ram_index::round_capacity(connectivity, config);
         // A re-selection's candidates: the walk's breadth plus the node's own neighbor list, which
@@ -1086,7 +1088,7 @@ struct ram_index {
         constexpr bool locked_k = synchronization_ == synchronization_t::concurrent_k;
         std::size_t const visible = size();
         if (static_cast<std::size_t>(from) >= visible || static_cast<std::size_t>(to) >= visible || from == to)
-            return {membership_t::absent_k, status_t::malformed_k};
+            return {membership_t::absent_k, status_code_t::malformed_k};
 
         // Enters the mutator class: manual wiring never moves the watermark, so the shared
         // mutex is what makes it visible to stop-the-world verbs & the marked probes.
@@ -1097,7 +1099,7 @@ struct ram_index {
         for (std::size_t position = 0; position != node.neighbors.size() && membership == membership_t::absent_k;
              ++position)
             if (node.neighbors[position] == to) membership = membership_t::present_k;
-        status_t status = status_t::success_k;
+        status_t status = status_code_t::success_k;
         if (membership == membership_t::absent_k) {
             status = node.neighbors.reserve(node.neighbors.size() + 1);
             if (succeeded(status)) node.neighbors.push_back_reserved(to);
@@ -1124,17 +1126,17 @@ struct ram_index {
         constexpr bool locked_k = synchronization_ == synchronization_t::concurrent_k;
         std::size_t const visible = size();
         if (static_cast<std::size_t>(from) >= visible || static_cast<std::size_t>(to) >= visible)
-            return status_t::malformed_k;
+            return status_code_t::malformed_k;
 
         shared_lock_t shared_lock {shared_mutex_};
         node_t& node = nodes_[from];
         if constexpr (locked_k) node.lock();
-        status_t status = status_t::malformed_k;
+        status_t status = status_code_t::malformed_k;
         for (std::size_t position = 0; position != node.neighbors.size(); ++position)
             if (node.neighbors[position] == to) {
                 node.neighbors[position] = node.neighbors.back();
                 [[maybe_unused]] node_id_t const dropped = node.neighbors.pop_back();
-                status = status_t::success_k;
+                status = status_code_t::success_k;
                 break;
             }
         if constexpr (locked_k) node.unlock();
@@ -1540,11 +1542,11 @@ struct ram_index {
          *
          *  @par Statuses:
          *  - @c uninitialized_k The audit is bound to no index.
-         *  - @c bad_alloc_k The islands' columns could not be placed.
+         *  - @c out_of_memory_k The islands' columns could not be placed.
          */
         expected<reachability_t> finish() const noexcept {
-            if (!index_) return {{}, status_t::uninitialized_k};
-            if (step_ != step_t::done_k) return {{}, status_t::internal_k};
+            if (!index_) return {{}, status_code_t::uninitialized_k};
+            if (step_ != step_t::done_k) return {{}, status_code_t::internal_k};
             if (failed(islands_status_)) return {{}, islands_status_};
             reachability_t result = tallies_;
             result.audited_nodes = visible;
@@ -1554,7 +1556,7 @@ struct ram_index {
                 if (depth_entries_[depth] > depth_entries_[most_populated]) most_populated = depth;
             for (std::size_t depth = most_populated + 1; depth < depth_entries_.size(); ++depth)
                 result.beyond_most_populated_depth += depth_entries_[depth];
-            return {result, status_t::success_k};
+            return {result, status_code_t::success_k};
         }
 
       private:
@@ -1580,9 +1582,9 @@ struct ram_index {
             if (failed(bits_.resize(bitsets_k * words)) || failed(depths_from_root_.resize(visible)) ||
                 failed(depths_to_root_.resize(visible)) || failed(shallower_in_links_.resize(visible)) ||
                 failed(in_links_.resize(visible)))
-                return status_t::bad_alloc_k;
+                return status_code_t::out_of_memory_k;
             rebind(index, visible);
-            return status_t::success_k;
+            return status_code_t::success_k;
         }
 
         /** Words per bitset. */
@@ -1684,7 +1686,7 @@ struct ram_index {
             swept_entries_ = root == missing_k ? 0 : 2;
             tallies_ = {};
             depth_ = 0;
-            islands_status_ = status_t::success_k;
+            islands_status_ = status_code_t::success_k;
             root_ = root;
             step_ = root == missing_k ? step_t::done_k : step_t::expand_k;
             if (root == missing_k) return;
@@ -1813,7 +1815,7 @@ struct ram_index {
                 failed(island_components_.reserve_exactly(islands)) ||
                 failed(island_parents_.reserve_exactly(islands)) || failed(island_entries_.reserve_exactly(islands)) ||
                 failed(island_roles_.reserve_exactly(islands)) || failed(island_walk_.reserve_exactly(5 * islands)))
-                return status_t::bad_alloc_k;
+                return status_code_t::out_of_memory_k;
             std::size_t const words = words_();
             for (std::size_t word = 0; word != divide_round_up<std::size_t>(visible, lanes_k); ++word)
                 for (u1x64_t lanes = ~(bits_[reached_k * words + word] & bits_[reaches_root_k * words + word]) &
@@ -1839,7 +1841,7 @@ struct ram_index {
                 // A reached island never links into the component, or a recheck marked it.
                 mark_reaches_root_(island_nodes_[rank], way_to_root);
             }
-            if (failed(island_links_.reserve_exactly(links))) return status_t::bad_alloc_k;
+            if (failed(island_links_.reserve_exactly(links))) return status_code_t::out_of_memory_k;
             island_offsets_.push_back_reserved(0);
             for (std::size_t rank = 0; rank != islands; ++rank) {
                 for_each_link_(island_nodes_[rank], [&](node_id_t target) noexcept {
@@ -1849,7 +1851,7 @@ struct ram_index {
                 });
                 island_offsets_.push_back_reserved(island_links_.size());
             }
-            return status_t::success_k;
+            return status_code_t::success_k;
         }
 
         /** The rank of island node @p node_id among the islands' nodes. */
@@ -2076,7 +2078,7 @@ struct ram_index {
         step_t step_ = step_t::done_k;
 
         /** Whether the islands' columns could be placed. */
-        status_t islands_status_ = status_t::success_k;
+        status_t islands_status_ = status_code_t::success_k;
     };
 
     /* The audit a refine embeds, its columns on the index's own allocator. */
@@ -2188,7 +2190,7 @@ struct ram_index {
             requires metric<metric_type_, value_t, distance_t> && selector<selector_type_, ram_index, metric_type_>
         status_t run(task_t const& task, metric_type_& metric, traversal_context_over<context_allocator_type_>& context,
                      selector_type_ const& selector = {}) noexcept {
-            if (!index_) return status_t::uninitialized_k;
+            if (!index_) return status_code_t::uninitialized_k;
             switch (phase_) {
             case phase_t::health_k: health.sweep(task); break;
             case phase_t::heal_k: heal_(task); break;
@@ -2196,7 +2198,7 @@ struct ram_index {
             case phase_t::restitch_k: restitch_neighborhoods_(task, metric, context, selector); break;
             default: break;
             }
-            return status_t::success_k;
+            return status_code_t::success_k;
         }
 
         /** The barrier between phases, one caller after every task of the current one ran: draws
@@ -2266,7 +2268,7 @@ struct ram_index {
             if (!index_ || phase_ != phase_t::done_k || failed(status_)) return;
             tally_ = {};
             health.widen(static_cast<node_id_t>(index_->size()));
-            if (failed(reserve_round_(health.visible))) return status_ = status_t::bad_alloc_k, void();
+            if (failed(reserve_round_(health.visible))) return status_ = status_code_t::out_of_memory_k, void();
             open_health_(phase_t::none_k);
         }
 
@@ -2280,19 +2282,19 @@ struct ram_index {
          *  with its mates. An unbound plan needs none of it.
          *
          *  @par Statuses:
-         *  - @c bad_alloc_k @p context cannot grow to a round's scratch.
+         *  - @c out_of_memory_k @p context cannot grow to a round's scratch.
          */
         template <typename context_allocator_type_>
         status_t reserve(traversal_context_over<context_allocator_type_>& context) const noexcept {
-            if (!index_ || !neighborhood_capacity_) return status_t::success_k;
+            if (!index_ || !neighborhood_capacity_) return status_code_t::success_k;
             std::size_t const capacity = neighborhood_capacity_, candidates = widest_list_ + connectivity_;
             if (failed(context.neighborhood_mates.reserve(capacity * (connectivity_ + 1))) ||
                 failed(context.staged_distances.reserve(max_of(quad_lanes_k * capacity, 2 * candidates))) ||
                 failed(context.results.reserve(candidates)) || failed(context.admitted.reserve(widest_list_)) ||
                 failed(context.selected_neighbors.reserve(connectivity_)) ||
                 failed(context.staged_ids.reserve(widest_list_)))
-                return status_t::bad_alloc_k;
-            return status_t::success_k;
+                return status_code_t::out_of_memory_k;
+            return status_code_t::success_k;
         }
 
         /**
@@ -2302,13 +2304,13 @@ struct ram_index {
          *  @par Statuses:
          *  - @c uninitialized_k The plan is bound to no index.
          *  - @c cancelled_k The round stopped before @ref advance answered false, or was stopped.
-         *  - @c bad_alloc_k A health check could not place its islands' adjacency.
+         *  - @c out_of_memory_k A health check could not place its islands' adjacency.
          */
         expected<refine_report_t> finish() const noexcept {
-            if (!index_) return {{}, status_t::uninitialized_k};
+            if (!index_) return {{}, status_code_t::uninitialized_k};
             if (failed(status_)) return {tally_, status_};
             bool const done = phase_ == phase_t::done_k && tally_.verdict != refine_verdict_t::stopped_k;
-            return {tally_, done ? status_t::success_k : status_t::cancelled_k};
+            return {tally_, done ? status_code_t::success_k : status_code_t::cancelled_k};
         }
 
       private:
@@ -2454,9 +2456,9 @@ struct ram_index {
                 failed(hub_nodes_.reserve_exactly(hubs_for_(entries))) ||
                 failed(entry_neighborhoods_.resize(entries)) || failed(neighborhood_entries_.resize(entries)) ||
                 failed(neighborhood_offsets_.reserve_exactly(split_room(entries, hubs_per_draw_))))
-                return status_t::bad_alloc_k;
+                return status_code_t::out_of_memory_k;
             std::memset(changed_.data(), 0, changed_.size() * sizeof(u1x64_t));
-            return status_t::success_k;
+            return status_code_t::success_k;
         }
 
         /** Hubs one gather over @p entries draws, as @ref round_hubs counts them. */
@@ -2931,7 +2933,7 @@ struct ram_index {
 
         /** The first failure the plan met: a health check whose islands' adjacency could not be
          *  placed. */
-        status_t status_ = status_t::success_k;
+        status_t status_ = status_code_t::success_k;
 
         /** Hubs one gather draws at most: as many as half a core's cache holds. */
         std::size_t hubs_per_draw_ = 0;
@@ -3030,14 +3032,14 @@ struct ram_index {
             requires metric<metric_type_, value_t, distance_t> && selector<selector_type_, ram_index, metric_type_>
         status_t run(task_t const& task, metric_type_& metric, traversal_context_over<context_allocator_type_>& context,
                      selector_type_ const& selector = {}) noexcept {
-            if (!rounds_.index_) return status_t::uninitialized_k;
+            if (!rounds_.index_) return status_code_t::uninitialized_k;
             switch (moves_) {
             case phase_t::copy_k: copy_(task); break;
             case phase_t::partition_k: partition_(); break;
             case phase_t::scatter_k: scatter_(task); break;
             default: return rounds_.run(task, metric, context, selector);
             }
-            return status_t::success_k;
+            return status_code_t::success_k;
         }
 
         /** The barrier between phases, one caller after every task of the current one ran:
@@ -3127,11 +3129,11 @@ struct ram_index {
          *  @par Statuses:
          *  - @c uninitialized_k The plan is bound to no index.
          *  - @c cancelled_k The moves or a round stopped before @ref advance answered false.
-         *  - @c bad_alloc_k A health check could not place its islands' adjacency.
+         *  - @c out_of_memory_k A health check could not place its islands' adjacency.
          */
         expected<refine_report_t> finish() const noexcept {
-            if (!rounds_.index_) return {{}, status_t::uninitialized_k};
-            if (moving()) return {{}, status_t::cancelled_k};
+            if (!rounds_.index_) return {{}, status_code_t::uninitialized_k};
+            if (moving()) return {{}, status_code_t::cancelled_k};
             return rounds_.finish();
         }
 
@@ -3365,7 +3367,7 @@ struct ram_index {
      *  @par Statuses:
      *  - @c config_mismatch_k The selector's budget is zero.
      *  - @c contended_k A batch is in flight, or another refine holds the claims closed.
-     *  - @c bad_alloc_k The audit or the round's columns cannot be placed.
+     *  - @c out_of_memory_k The audit or the round's columns cannot be placed.
      */
     template <typename selector_type_, typename codec_type_>
         requires value_codec<codec_type_, value_t>
@@ -3376,7 +3378,7 @@ struct ram_index {
             plan.release_();
             return expected<refine_plan_t> {std::move(plan), status};
         };
-        if (!selector.connectivity) return refuse(status_t::config_mismatch_k);
+        if (!selector.connectivity) return refuse(status_code_t::config_mismatch_k);
         // From here the plan reopens the claims on any refusal, and at its death.
         plan.hold_ = shared_lock_t {shared_mutex_};
         if (status_t const closed = close_(); failed(closed)) return refuse(closed);
@@ -3384,7 +3386,7 @@ struct ram_index {
         if (status_t const planned = plan_rounds_(plan, {}, size(), context, selector.connectivity, config, codec);
             failed(planned))
             return refuse(planned);
-        return {std::move(plan), status_t::success_k};
+        return {std::move(plan), status_code_t::success_k};
     }
 
     /**
@@ -3436,16 +3438,12 @@ struct ram_index {
         };
         // A pack into this index alone may name no source: sharded packs hand it moveless shards.
         bool const lone_pack = sources.empty() && targets.size() == 1 && targets[0] == this;
-        if ((sources.empty() && !lone_pack) || targets.empty()) return refuse(status_t::invalid_argument_k);
+        if ((sources.empty() && !lone_pack) || targets.empty()) return refuse(status_code_t::invalid_argument_k);
         for (std::span<ram_index* const> const listed : {sources, targets})
-            for (std::size_t position = 0; position != listed.size(); ++position) {
-                if (!listed[position]) return refuse(status_t::invalid_argument_k);
-                for (std::size_t earlier = 0; earlier != position; ++earlier)
-                    if (listed[earlier] == listed[position]) return refuse(status_t::invalid_argument_k);
-            }
+            if (status_t const refused = listed_refusal(listed); failed(refused)) return refuse(refused);
         bool const packing = targets.size() == 1 && targets[0] == this;
         bool const splitting = !sources.empty() && sources[0] == this && targets.size() > 1;
-        if (!selector.connectivity || (!packing && !splitting)) return refuse(status_t::config_mismatch_k);
+        if (!selector.connectivity || (!packing && !splitting)) return refuse(status_code_t::config_mismatch_k);
         if (splitting)
             return plan_split_(std::move(plan), sources.subspan(1), targets, context, selector.connectivity, config,
                                codec);
@@ -3457,20 +3455,20 @@ struct ram_index {
         rounds.index_ = this;
         if (failed(plan.sources_.reserve_exactly(sources.size())) ||
             failed(plan.source_holds_.reserve_exactly(sources.size())) || failed(plan.targets_.reserve_exactly(1)))
-            return refuse(status_t::bad_alloc_k);
+            return refuse(status_code_t::out_of_memory_k);
         plan.targets_.push_back_reserved(this);
         std::size_t entries = size();
         std::size_t const ceiling = atomic_ref<std::size_t>(ceiling_nodes_).load(std::memory_order_relaxed);
         for (ram_index* source : sources) {
             if (source == this) continue;
             unique_lock_t source_hold {source->shared_mutex_, std::try_to_lock};
-            if (!source_hold) return refuse(status_t::contended_k);
+            if (!source_hold) return refuse(status_code_t::contended_k);
             auto const [source_entries, watermark_status] = source->watermark_();
             if (failed(watermark_status)) return refuse(watermark_status);
             plan.source_holds_.push_back_reserved(std::move(source_hold));
             plan.sources_.push_back_reserved(source);
             // Both terms stay within the address space's records, so their sum never wraps.
-            if (entries + static_cast<std::size_t>(source_entries) > ceiling) return refuse(status_t::overflow_k);
+            if (entries + static_cast<std::size_t>(source_entries) > ceiling) return refuse(status_code_t::overflow_k);
             entries += source_entries;
         }
         if (status_t const planned = plan_rounds_(rounds, to_span(plan.sources_), entries, context,
@@ -3478,7 +3476,7 @@ struct ram_index {
             failed(planned))
             return refuse(planned);
         plan.moves_ = plan.sources_.empty() ? phase_t::done_k : phase_t::copy_k;
-        return {std::move(plan), status_t::success_k};
+        return {std::move(plan), status_code_t::success_k};
     }
 
     /**
@@ -3494,7 +3492,7 @@ struct ram_index {
      *  @par Statuses:
      *  - @c config_mismatch_k The selector's budget is zero.
      *  - @c contended_k A batch is in flight, or another refine holds the claims closed.
-     *  - @c bad_alloc_k The audit, the round's columns or @p context 's scratch cannot be placed.
+     *  - @c out_of_memory_k No room for the audit, the round's columns or @p context 's scratch.
      */
     template <typename metric_type_, typename selector_type_, typename codec_type_>
         requires metric<metric_type_, value_t, distance_t> && selector<selector_type_, ram_index, metric_type_> &&
@@ -3516,7 +3514,7 @@ struct ram_index {
      *  - @c config_mismatch_k As @ref plan_reshard refuses.
      *  - @c contended_k A batch in flight on this index, a source or a target, or another plan.
      *  - @c overflow_k Nodes past the reserved ceiling, or part slots past the node ID type.
-     *  - @c bad_alloc_k The plan's columns or @p context 's scratch cannot be placed.
+     *  - @c out_of_memory_k The plan's columns or @p context 's scratch cannot be placed.
      */
     template <typename metric_type_, typename selector_type_, typename codec_type_>
         requires metric<metric_type_, value_t, distance_t> && selector<selector_type_, ram_index, metric_type_> &&
@@ -3641,11 +3639,10 @@ struct ram_index {
         context.admitted.clear();
         predicate_fold fold {relation, predicate, context.admitted,
                              resolved_config_({config.expansion_factor}, connectivity()).expansion_factor};
-        expected<search_result_t> found = fold_walk_<synchronization_>(query, metric, fold, context.admitted, context,
-                                                                       config);
+        auto [found, status] = fold_walk_<synchronization_>(query, metric, fold, context.admitted, context, config);
         std::swap(context.results, context.admitted);
-        found.value.count = context.results.size();
-        return found;
+        found.count = context.results.size();
+        return {found, status};
     }
 
     /**
@@ -3742,8 +3739,8 @@ struct ram_index {
      *  - @c malformed_k @p node_id is unpublished.
      */
     expected<key_t> key_of(node_id_t node_id) const noexcept {
-        if (static_cast<std::size_t>(node_id) >= size()) return {key_t {}, status_t::malformed_k};
-        return {nodes_[node_id].key, status_t::success_k};
+        if (static_cast<std::size_t>(node_id) >= size()) return {key_t {}, status_code_t::malformed_k};
+        return {nodes_[node_id].key, status_code_t::success_k};
     }
 
     /**
@@ -3755,8 +3752,8 @@ struct ram_index {
      *  - @c malformed_k @p node_id is unpublished.
      */
     expected<value_t const&> value_of(node_id_t node_id) const noexcept {
-        if (static_cast<std::size_t>(node_id) >= size()) return {nullptr, status_t::malformed_k};
-        return {&nodes_[node_id].value, status_t::success_k};
+        if (static_cast<std::size_t>(node_id) >= size()) return {nullptr, status_code_t::malformed_k};
+        return {&nodes_[node_id].value, status_code_t::success_k};
     }
 
     /** The payload under a @b published or wired @p node_id, unchecked: for traversal-contract
@@ -3774,12 +3771,12 @@ struct ram_index {
      *  - @c malformed_k @p node_id is unpublished.
      */
     expected<std::size_t> degree_of(node_id_t node_id) noexcept {
-        if (static_cast<std::size_t>(node_id) >= size()) return {0, status_t::malformed_k};
+        if (static_cast<std::size_t>(node_id) >= size()) return {0, status_code_t::malformed_k};
         node_t& node = nodes_[node_id];
         node.lock();
         std::size_t const degree = node.neighbors.size();
         node.unlock();
-        return {degree, status_t::success_k};
+        return {degree, status_code_t::success_k};
     }
 
     /**
@@ -3790,9 +3787,10 @@ struct ram_index {
      *  - @c malformed_k No published node is stored under @p key.
      */
     expected<node_id_t> find(key_t const& key) const noexcept {
-        expected<node_id_t> found {node_id_t {}, status_t::malformed_k};
-        find_each(key, [&](node_id_t node_id) noexcept { found = {node_id, status_t::success_k}; });
-        return found;
+        node_id_t found {};
+        status_code_t status = status_code_t::malformed_k;
+        find_each(key, [&](node_id_t node_id) noexcept { found = node_id, status = status_code_t::success_k; });
+        return {found, status};
     }
 
     /** Invokes @p callback with the ID of every published node under @p key, as of one acquire
@@ -3829,7 +3827,7 @@ struct ram_index {
     struct [[nodiscard]] graph_health_t {
 
         /** @c success_k, or why the report could not be taken. */
-        status_t status = status_t::success_k;
+        status_t status = status_code_t::success_k;
 
         /** Forward-reachability components, flooded in ID order - equal to weak
          *  components whenever back-linking has kept the edges reciprocal. */
@@ -3870,7 +3868,7 @@ struct ram_index {
         graph_health_t report;
         unique_lock_t unique_lock {shared_mutex_, std::try_to_lock};
         if (!unique_lock) {
-            report.status = status_t::contended_k;
+            report.status = status_code_t::contended_k;
             return report;
         }
         auto const [visible, status] = watermark_();
@@ -3900,7 +3898,7 @@ struct ram_index {
             total_neighbors += neighbors.size();
             for (std::size_t link = 0; link != neighbors.size(); ++link) {
                 if (static_cast<std::size_t>(neighbors[link]) >= node_count) {
-                    report.status = status_t::internal_k;
+                    report.status = status_code_t::internal_k;
                     continue;
                 }
                 neighbors_buffer_t const& reverse = nodes_[neighbors[link]].neighbors;
@@ -3926,7 +3924,7 @@ struct ram_index {
                 for (std::size_t link = 0; link != neighbors.size(); ++link) {
                     // The same corruption net as the edge sweep above.
                     if (static_cast<std::size_t>(neighbors[link]) >= node_count) {
-                        report.status = status_t::internal_k;
+                        report.status = status_code_t::internal_k;
                         continue;
                     }
                     if (context.visited.insert(neighbors[link]) == membership_t::absent_k)
@@ -3998,10 +3996,10 @@ struct ram_index {
         template <typename value_codec_type_>
             requires value_codec<value_codec_type_, value_t>
         status_t save(iota_view<node_id_t> node_range, value_codec_type_ const& codec) noexcept {
-            if (!index_) return status_t::uninitialized_k;
+            if (!index_) return status_code_t::uninitialized_k;
             std::size_t const node_count = columns.keys.size();
             if (node_range.bound < node_range.first || static_cast<std::size_t>(node_range.bound) > node_count)
-                return status_t::config_mismatch_k;
+                return status_code_t::config_mismatch_k;
 
             for (node_id_t const node : node_range) columns.keys[node] = index_->nodes_[node].key;
 
@@ -4021,7 +4019,7 @@ struct ram_index {
                 if (failed(encoded)) return encoded;
             }
             atomic_ref<std::size_t>(covered).store_add(node_range.size(), std::memory_order_release);
-            return status_t::success_k;
+            return status_code_t::success_k;
         }
 
         /**
@@ -4037,12 +4035,12 @@ struct ram_index {
          *  - @c config_mismatch_k The tasks covered other than every node.
          */
         status_t finish() noexcept {
-            if (!index_) return status_t::uninitialized_k;
+            if (!index_) return status_code_t::uninitialized_k;
             if (atomic_ref<std::size_t>(covered).load(std::memory_order_acquire) != columns.keys.size())
-                return status_t::config_mismatch_k;
+                return status_code_t::config_mismatch_k;
             hold_.unlock();
             index_ = nullptr;
-            return status_t::success_k;
+            return status_code_t::success_k;
         }
 
       private:
@@ -4078,7 +4076,7 @@ struct ram_index {
         requires value_codec<value_codec_type_, value_t>
     expected<save_plan_t> plan_save(columns_t columns, value_codec_type_ const& codec) noexcept {
         unique_lock_t hold {shared_mutex_, std::try_to_lock};
-        if (!hold) return {{}, status_t::contended_k};
+        if (!hold) return {{}, status_code_t::contended_k};
         auto const [visible, status] = watermark_();
         if (failed(status)) return {{}, status};
         std::size_t const node_count = static_cast<std::size_t>(visible);
@@ -4104,7 +4102,7 @@ struct ram_index {
             return {{}, sized};
         if (status_t const sized = sized_at_least_(columns.values.size(), running_values); failed(sized))
             return {{}, sized};
-        return {save_plan_t {this, columns, std::move(hold)}, status_t::success_k};
+        return {save_plan_t {this, columns, std::move(hold)}, status_code_t::success_k};
     }
 
     /**
@@ -4121,7 +4119,7 @@ struct ram_index {
         requires value_codec<value_codec_type_, value_t>
     expected<columns_extents_t> columns_extents(value_codec_type_ const& codec) noexcept {
         unique_lock_t unique_lock {shared_mutex_, std::try_to_lock};
-        if (!unique_lock) return {{}, status_t::contended_k};
+        if (!unique_lock) return {{}, status_code_t::contended_k};
         auto const [visible, status] = watermark_();
         if (failed(status)) return {{}, status};
         columns_extents_t extents {static_cast<std::size_t>(visible), 0, 0};
@@ -4130,7 +4128,7 @@ struct ram_index {
             extents.neighbors += record.neighbors.size();
             extents.value_bytes += codec.storage_requirements(record.value);
         }
-        return {extents, status_t::success_k};
+        return {extents, status_code_t::success_k};
     }
 
     /**
@@ -4192,10 +4190,10 @@ struct ram_index {
         template <typename value_codec_type_>
             requires value_codec<value_codec_type_, value_t>
         status_t load(iota_view<node_id_t> node_range, value_codec_type_ const& codec) noexcept {
-            if (!index_) return status_t::uninitialized_k;
+            if (!index_) return status_code_t::uninitialized_k;
             std::size_t const node_count = columns.keys.size();
             if (node_range.bound < node_range.first || static_cast<std::size_t>(node_range.bound) > node_count)
-                return status_t::config_mismatch_k;
+                return status_code_t::config_mismatch_k;
 
             // The plan vetted both prefix-sum columns and every ID, and reserved every neighbor
             // list, so the slices are trusted and the lists fit.
@@ -4221,7 +4219,7 @@ struct ram_index {
             }
             index_->widen_(widest_list);
             atomic_ref<std::size_t>(covered).store_add(node_range.size(), std::memory_order_release);
-            return status_t::success_k;
+            return status_code_t::success_k;
         }
 
         /**
@@ -4236,10 +4234,10 @@ struct ram_index {
          *  - @c config_mismatch_k The tasks covered other than every node.
          */
         status_t finish() noexcept {
-            if (!index_) return status_t::uninitialized_k;
+            if (!index_) return status_code_t::uninitialized_k;
             std::size_t const node_count = columns.keys.size();
             if (atomic_ref<std::size_t>(covered).load(std::memory_order_acquire) != node_count)
-                return status_t::config_mismatch_k;
+                return status_code_t::config_mismatch_k;
             index_->publish_keys_({0, static_cast<node_id_t>(node_count)});
             atomic_ref<std::size_t>(index_->claimed_count_).store(node_count, std::memory_order_relaxed);
             atomic_ref<node_id_t>(index_->next_dispensed_id_)
@@ -4248,7 +4246,7 @@ struct ram_index {
                 .store(static_cast<node_id_t>(node_count), std::memory_order_release);
             hold_.unlock();
             index_ = nullptr;
-            return status_t::success_k;
+            return status_code_t::success_k;
         }
 
       private:
@@ -4284,9 +4282,9 @@ struct ram_index {
         // The gate excludes mutators & flips marked probes to refusal; the exclusivity
         // contract against readers stays the caller's - key lookups race the map rebuild.
         unique_lock_t hold {shared_mutex_, std::try_to_lock};
-        if (!hold) return {{}, status_t::contended_k};
+        if (!hold) return {{}, status_code_t::contended_k};
         if (atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire) != 0)
-            return {{}, status_t::config_mismatch_k};
+            return {{}, status_code_t::config_mismatch_k};
         if (status_t const vetted = vetted_columns_(columns); failed(vetted)) return {{}, vetted};
         // Vetted first, so hostile columns never allocate.
         std::size_t const node_count = columns.keys.size();
@@ -4297,7 +4295,7 @@ struct ram_index {
                 failed(grown))
                 return {{}, grown};
         if (status_t const keyed = key_map_.reserve(node_count); failed(keyed)) return {{}, keyed};
-        return {load_plan_t {this, columns, std::move(hold)}, status_t::success_k};
+        return {load_plan_t {this, columns, std::move(hold)}, status_code_t::success_k};
     }
 
     /**
@@ -4386,8 +4384,8 @@ struct ram_index {
         return atomic_ref<std::size_t>(claimed_count_)
                        .compare_exchange_strong(visible, closed_claims_k, std::memory_order_acq_rel,
                                                 std::memory_order_relaxed)
-                   ? status_t::success_k
-                   : status_t::contended_k;
+                   ? status_code_t::success_k
+                   : status_code_t::contended_k;
     }
 
     /** Reopens closed claims at the watermark, past every node a copy published meanwhile. */
@@ -4441,9 +4439,9 @@ struct ram_index {
         // The gate opens before the claim, so a batch parked behind a unique holder never
         // sits on committed capacity, spuriously overflowing its peers.
         shared_lock_t hold {shared_mutex_};
-        if (!count) return {capacity_claim_t {this, 0, std::move(hold)}, status_t::success_k};
+        if (!count) return {capacity_claim_t {this, 0, std::move(hold)}, status_code_t::success_k};
         if (atomic_ref<std::size_t>(claimed_count_).load(std::memory_order_relaxed) == closed_claims_k)
-            return {{}, status_t::contended_k};
+            return {{}, status_code_t::contended_k};
 
         // Claims convert one-to-one into dispensed IDs once covered, and commit only within the
         // ceiling, so peers never observe an overshoot. Covering to this claim's end suffices:
@@ -4452,9 +4450,9 @@ struct ram_index {
         std::size_t const ceiling = atomic_ref<std::size_t>(ceiling_nodes_).load(std::memory_order_relaxed);
         std::size_t const claimed =
             atomic_ref<std::size_t>(claimed_count_).fetch_add_if_at_most(count, ceiling, std::memory_order_acq_rel);
-        if (claimed == closed_claims_k) return {{}, status_t::contended_k};
+        if (claimed == closed_claims_k) return {{}, status_code_t::contended_k};
         // A ceiling lowered under the claims refuses every batch rather than wrapping.
-        if (claimed > ceiling || ceiling - claimed < count) return {{}, status_t::overflow_k};
+        if (claimed > ceiling || ceiling - claimed < count) return {{}, status_code_t::overflow_k};
         // The key map first, so a refused one leaves the node chunks, and the capacity, as they
         // were.
         status_t covered = key_map_.reserve(claimed + count);
@@ -4463,7 +4461,7 @@ struct ram_index {
             atomic_ref<std::size_t>(claimed_count_).store_sub(count, std::memory_order_release);
             return {{}, covered};
         }
-        return {capacity_claim_t {this, count, std::move(hold)}, status_t::success_k};
+        return {capacity_claim_t {this, count, std::move(hold)}, status_code_t::success_k};
     }
 
     /** The half of @ref plan_insert that cannot fail: one add dispenses the entries of @p claim as
@@ -4542,11 +4540,11 @@ struct ram_index {
         plan.widest_list_ = this->connectivity();
         plan.size_round_(config.cache_bytes,
                          sizeof(value_t) + divide_round_up<std::size_t>(payload, max_of<std::size_t>(entries, 1)));
-        if (failed(plan.reserve_round_(entries))) return status_t::bad_alloc_k;
+        if (failed(plan.reserve_round_(entries))) return status_code_t::out_of_memory_k;
         // The audit bound above opens the round, or follows the sources' moves.
         plan.swept_after_ = phase_t::none_k;
         plan.phase_ = phase_t::health_k;
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** What a split's @ref plan_reshard does: every check, hold, claim, cover and reservation of a
@@ -4563,18 +4561,19 @@ struct ram_index {
         };
         std::size_t const parts = targets.size();
         std::array<ram_index const*, 1> const own {this};
-        if (lists_share(own, targets) || lists_share(gathered, targets)) return refuse(status_t::config_mismatch_k);
+        if (lists_share(own, targets) || lists_share(gathered, targets))
+            return refuse(status_code_t::config_mismatch_k);
 
         // The split's source is held as a pack's source is, so no batch goes into it while its
         // nodes move out, and so is every source moving into it first.
         unique_lock_t source_hold {shared_mutex_, std::try_to_lock};
-        if (!source_hold) return refuse(status_t::contended_k);
+        if (!source_hold) return refuse(status_code_t::contended_k);
         auto const [own_entries, watermark_status] = watermark_();
         if (failed(watermark_status)) return refuse(watermark_status);
         if (failed(plan.sources_.reserve_exactly(1 + gathered.size())) ||
             failed(plan.source_holds_.reserve_exactly(1 + gathered.size())) ||
             failed(plan.targets_.reserve_exactly(parts)) || failed(plan.target_holds_.reserve_exactly(parts)))
-            return refuse(status_t::bad_alloc_k);
+            return refuse(status_code_t::out_of_memory_k);
         plan.sources_.push_back_reserved(this);
         plan.source_holds_.push_back_reserved(std::move(source_hold));
         plan.moved_sources_ = 1;
@@ -4582,13 +4581,13 @@ struct ram_index {
         std::size_t const ceiling = atomic_ref<std::size_t>(ceiling_nodes_).load(std::memory_order_relaxed);
         for (ram_index* from : gathered) {
             unique_lock_t hold {from->shared_mutex_, std::try_to_lock};
-            if (!hold) return refuse(status_t::contended_k);
+            if (!hold) return refuse(status_code_t::contended_k);
             auto const [from_entries, from_status] = from->watermark_();
             if (failed(from_status)) return refuse(from_status);
             plan.source_holds_.push_back_reserved(std::move(hold));
             plan.sources_.push_back_reserved(from);
             // Both terms stay within the address space's records, so their sum never wraps.
-            if (entries + static_cast<std::size_t>(from_entries) > ceiling) return refuse(status_t::overflow_k);
+            if (entries + static_cast<std::size_t>(from_entries) > ceiling) return refuse(status_code_t::overflow_k);
             entries += from_entries;
         }
         if (!gathered.empty()) {
@@ -4597,10 +4596,10 @@ struct ram_index {
         }
         for (ram_index* into : targets) plan.targets_.push_back_reserved(into);
         std::size_t const capacity = divide_round_up<std::size_t>(entries, parts);
-        if (parts * capacity > static_cast<std::size_t>(missing_k)) return refuse(status_t::overflow_k);
+        if (parts * capacity > static_cast<std::size_t>(missing_k)) return refuse(status_code_t::overflow_k);
         if (failed(plan.part_extents_.resize(parts)) || failed(plan.part_slots_.resize(entries)) ||
             failed(plan.part_members_.resize(parts * capacity)))
-            return refuse(status_t::bad_alloc_k);
+            return refuse(status_code_t::out_of_memory_k);
         std::size_t payload = payload_bytes_(codec);
         for (ram_index const* from : gathered) payload += from->payload_bytes_(codec);
         // One audit and one round's columns over a full part serve every target in turn, rebound as
@@ -4614,7 +4613,7 @@ struct ram_index {
         for (ram_index const* from : gathered) rounds.widest_list_ = max_of(rounds.widest_list_, from->connectivity());
         rounds.size_round_(config.refine.cache_bytes,
                            sizeof(value_t) + divide_round_up<std::size_t>(payload, max_of<std::size_t>(entries, 1)));
-        if (failed(rounds.reserve_round_(capacity))) return refuse(status_t::bad_alloc_k);
+        if (failed(rounds.reserve_round_(capacity))) return refuse(status_code_t::out_of_memory_k);
 
         // From here the plan reopens the claims of every target it closed on any refusal, and at
         // its death; the claims closed at an empty watermark prove no batch is in flight.
@@ -4622,9 +4621,9 @@ struct ram_index {
             shared_lock_t target_hold {into->shared_mutex_};
             if (status_t const closed = into->close_(); failed(closed)) return refuse(closed);
             plan.target_holds_.push_back_reserved(std::move(target_hold));
-            if (into->size()) return refuse(status_t::config_mismatch_k);
+            if (into->size()) return refuse(status_code_t::config_mismatch_k);
             if (capacity > atomic_ref<std::size_t>(into->ceiling_nodes_).load(std::memory_order_relaxed))
-                return refuse(status_t::overflow_k);
+                return refuse(status_code_t::overflow_k);
         }
         for (ram_index* into : targets) {
             if (status_t const covered = into->nodes_.cover(capacity); failed(covered)) return refuse(covered);
@@ -4645,7 +4644,7 @@ struct ram_index {
         rounds.index_ = targets[0];
         plan.seed_ = config.seed;
         plan.moves_ = gathered.empty() ? phase_t::partition_k : phase_t::copy_k;
-        return {std::move(plan), status_t::success_k};
+        return {std::move(plan), status_code_t::success_k};
     }
 
     /** Drains @p plan on the calling thread, its tasks in order, and finishes it: the one-shot
@@ -4653,7 +4652,10 @@ struct ram_index {
     template <typename plan_type_, typename selector_type_, typename metric_type_>
     static expected<refine_report_t> drain_plan_(plan_type_& plan, selector_type_ const& selector, metric_type_& metric,
                                                  traversal_context_t& context) noexcept {
-        if (status_t const sized = plan.reserve(context); failed(sized)) return {plan.finish().value, sized};
+        if (status_t const sized = plan.reserve(context); failed(sized)) {
+            [[maybe_unused]] auto const [report, report_status] = plan.finish();
+            return {report, sized};
+        }
         do
             for (typename plan_type_::task_t const task : plan.tasks()) [[maybe_unused]]
                 status_t const ran = plan.run(task, metric, context, selector);
@@ -4858,12 +4860,12 @@ struct ram_index {
         if (failed(context.staged_ids.reserve(staged_bound)) ||
             failed(context.staged_distances.reserve(staged_bound))) {
             if constexpr (locked_k) node.unlock();
-            return {0, status_t::bad_alloc_k};
+            return {0, status_code_t::out_of_memory_k};
         }
         for (std::size_t position = 0; position != degree; ++position)
             context.staged_ids.push_back_reserved(node.neighbors[position]);
         if constexpr (locked_k) node.unlock();
-        return {degree, status_t::success_k};
+        return {degree, status_code_t::success_k};
     }
 
     /** What a search walks: the IDs below its watermark snapshot, published for every reader. */
@@ -4966,13 +4968,13 @@ struct ram_index {
                    metric.push(published_value_of(context.staged_ids[first + staged_count])) ==
                        metric_staging_t::staged_k)
                 ++staged_count;
-            if (!staged_count) return {walk_step_t::exhausted_k, status_t::success_k};
+            if (!staged_count) return {walk_step_t::exhausted_k, status_code_t::success_k};
             drain_round(metric, staged_count, context, unbounded_radius<distance_t>());
             walk_demand_t const demand = fold.absorb(
                 std::span<node_id_t const>(context.staged_ids).subspan(first, staged_count),
                 std::span<distance_t const>(context.staged_distances));
             settle_fold(fold);
-            if (demand == walk_demand_t::sated_k) return {walk_step_t::sated_k, status_t::success_k};
+            if (demand == walk_demand_t::sated_k) return {walk_step_t::sated_k, status_code_t::success_k};
             for (std::size_t lane = 0; lane != staged_count; ++lane) {
                 scored_node_t const scored {context.staged_ids[first + lane], context.staged_distances[lane]};
                 [[maybe_unused]] bool const ranked = context.results.insert(scored_node_t {scored}, expansion_factor);
@@ -4983,8 +4985,8 @@ struct ram_index {
             }
             first += staged_count;
         }
-        if (!drawn_count) return {walk_step_t::exhausted_k, status_t::success_k};
-        return {walk_step_t::advanced_k, status_t::success_k};
+        if (!drawn_count) return {walk_step_t::exhausted_k, status_code_t::success_k};
+        return {walk_step_t::advanced_k, status_code_t::success_k};
     }
 
     /** One round's expansion half: peels up to @p filling_nodes frontier entries within the
@@ -5075,7 +5077,7 @@ struct ram_index {
         std::size_t const staging = round_capacity(connectivity(), {wanted});
         if (failed(context.staged_ids.reserve(staging)) || failed(context.staged_distances.reserve(staging)) ||
             failed(context.results.reserve(wanted)))
-            return {{}, status_t::bad_alloc_k};
+            return {{}, status_code_t::out_of_memory_k};
         traversal_stats_t const telemetry_before = context.telemetry;
         for (node_id_t first = 0; first != first_invisible_id;) {
             metric.reset(query);
@@ -5085,7 +5087,7 @@ struct ram_index {
                 if (metric.push(published_value_of(next)) == metric_staging_t::refused_k) break;
                 context.staged_ids.push_back_reserved(next);
             }
-            if (next == first) return {{}, status_t::bad_alloc_k};
+            if (next == first) return {{}, status_code_t::out_of_memory_k};
             drain_round(metric, context.staged_ids.size(), context, radius());
             walk_demand_t const demand = fold.absorb(std::span<node_id_t const>(context.staged_ids),
                                                      std::span<distance_t const>(context.staged_distances));
@@ -5093,7 +5095,7 @@ struct ram_index {
             if (demand == walk_demand_t::sated_k) break;
             first = next;
         }
-        return {{context.results.size(), context.telemetry - telemetry_before}, status_t::success_k};
+        return {{context.results.size(), context.telemetry - telemetry_before}, status_code_t::success_k};
     }
 
     /** The one walk behind @c search and @c search_if: @p fold reads every scored round and the
@@ -5112,21 +5114,21 @@ struct ram_index {
                 atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire));
         else {
             auto const entry_probe = shared_mutex_.snapshot();
-            if (!entry_probe.unlocked()) return {{}, status_t::contended_k};
+            if (!entry_probe.unlocked()) return {{}, status_code_t::contended_k};
             auto const [first_invisible_id, watermark_status] = watermark_();
             if (failed(watermark_status)) return {{}, watermark_status};
-            expected<search_result_t> found = fold_walk_below_<synchronization_>(query, metric, fold, stopping, context,
-                                                                                 config, first_invisible_id);
+            auto [found, status] = fold_walk_below_<synchronization_>(query, metric, fold, stopping, context, config,
+                                                                      first_invisible_id);
             // The fence pairs with the release fence in `lock_shared`: a walk read that observed a
             // mutator's write proves its acquisition to the reload, which then reads a moved
             // word. The watermark equality is the belt against generation wrap driven by inserts.
             std::atomic_thread_fence(std::memory_order_acquire);
             auto const exit_probe = shared_mutex_.snapshot();
-            if (succeeded(found.status) &&
+            if (succeeded(status) &&
                 (!exit_probe.unlocked() || exit_probe.generation != entry_probe.generation ||
                  atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire) != first_invisible_id))
-                found.status = status_t::contended_k;
-            return found;
+                status = status_code_t::contended_k;
+            return {found, status};
         }
     }
 
@@ -5158,7 +5160,7 @@ struct ram_index {
         search_result_t result;
         result.count = context.results.size();
         result.telemetry = context.telemetry - telemetry_before;
-        return {result, status_t::success_k};
+        return {result, status_code_t::success_k};
     }
 
     /**
@@ -5190,9 +5192,9 @@ struct ram_index {
             if (context.frontier.empty()) {
                 if (stopping.size() >= expansion_factor) return;
                 bool const restarting = !context.results.empty();
-                expected<walk_step_t> const seeded = sample_landmarks_(query, metric, admission, connectivity,
-                                                                       expansion_factor, context, fold, seeds);
-                if (failed(seeded.status) || seeded.value != walk_step_t::advanced_k) return;
+                auto const [seeded, status] = sample_landmarks_(query, metric, admission, connectivity,
+                                                                expansion_factor, context, fold, seeds);
+                if (failed(status) || seeded != walk_step_t::advanced_k) return;
                 context.telemetry.restarts += restarting;
                 continue;
             }
@@ -5362,35 +5364,35 @@ struct ram_index {
     expected<node_id_t> watermark_() const noexcept {
         node_id_t const visible = atomic_ref<node_id_t const>(last_visible_id_).load(std::memory_order_acquire);
         return {visible, visible == atomic_ref<node_id_t const>(next_dispensed_id_).load(std::memory_order_acquire) //
-                             ? status_t::success_k
-                             : status_t::contended_k};
+                             ? status_code_t::success_k
+                             : status_code_t::contended_k};
     }
 
     /** Refuses a column of @p size that is not exactly @p wanted elements: a short one
      *  overflows, a long one disagrees about the node count. For the three node-sized columns,
      *  whose length is what names the node count. */
     static status_t sized_exactly_(std::size_t size, std::size_t wanted) noexcept {
-        if (size < wanted) return status_t::overflow_k;
-        if (size > wanted) return status_t::config_mismatch_k;
-        return status_t::success_k;
+        if (size < wanted) return status_code_t::overflow_k;
+        if (size > wanted) return status_code_t::config_mismatch_k;
+        return status_code_t::success_k;
     }
 
     /** Refuses a column of @p size shorter than @p wanted elements. For the two bulk
      *  columns, whose content the prefix sums delimit, so spare room is unused rather than
      *  wrong - and a graph that sheds edges between sizing and planning still saves. */
     static status_t sized_at_least_(std::size_t size, std::size_t wanted) noexcept {
-        return size < wanted ? status_t::overflow_k : status_t::success_k;
+        return size < wanted ? status_code_t::overflow_k : status_code_t::success_k;
     }
 
     /** Whether @p sums start at zero, never fall, never pass @p total, and end at it. */
     static status_t monotone_sums_(std::span<u64_t const> sums, std::size_t total) noexcept {
-        if (sums.empty() || sums.front() != 0) return status_t::malformed_k;
+        if (sums.empty() || sums.front() != 0) return status_code_t::malformed_k;
         u64_t previous = 0;
         for (u64_t const next : sums.subspan(1)) {
-            if (next < previous || next > total) return status_t::malformed_k;
+            if (next < previous || next > total) return status_code_t::malformed_k;
             previous = next;
         }
-        return previous == total ? status_t::success_k : status_t::malformed_k;
+        return previous == total ? status_code_t::success_k : status_code_t::malformed_k;
     }
 
     /** Vets untrusted columns in full - both prefix-sum columns sized to the nodes and
@@ -5399,14 +5401,14 @@ struct ram_index {
     static status_t vetted_columns_(columns_view_t columns) noexcept {
         std::size_t const node_count = columns.keys.size();
         if (columns.neighbor_offsets.size() != node_count + 1 || columns.value_offsets.size() != node_count + 1)
-            return status_t::malformed_k;
+            return status_code_t::malformed_k;
         if (status_t const sums = monotone_sums_(columns.neighbor_offsets, columns.neighbor_ids.size()); failed(sums))
             return sums;
         if (status_t const sums = monotone_sums_(columns.value_offsets, columns.values.size()); failed(sums))
             return sums;
         for (node_id_t const neighbor : columns.neighbor_ids)
-            if (static_cast<std::size_t>(neighbor) >= node_count) return status_t::malformed_k;
-        return status_t::success_k;
+            if (static_cast<std::size_t>(neighbor) >= node_count) return status_code_t::malformed_k;
+        return status_code_t::success_k;
     }
 
     /** The node records, covered by each claim and by @c reserve, addresses stable forever. */
@@ -5514,7 +5516,8 @@ struct ram_cursor {
      *  - @c malformed_k @p node is at or past the snapshot.
      */
     status_t seek(node_id_t node) noexcept {
-        if (static_cast<std::size_t>(node) >= static_cast<std::size_t>(visible_count_)) return status_t::malformed_k;
+        if (static_cast<std::size_t>(node) >= static_cast<std::size_t>(visible_count_))
+            return status_code_t::malformed_k;
         typename index_t::node_t& record = index_.nodes_[node];
         if constexpr (synchronization_ == synchronization_t::concurrent_k) record.lock();
         std::size_t const degree = record.neighbors.size();
@@ -5527,7 +5530,7 @@ struct ram_cursor {
         if constexpr (synchronization_ == synchronization_t::concurrent_k) record.unlock();
         if (failed(staged)) return staged;
         current_ = node;
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Advances to the next published ID, staging its neighbor list; past the last one the cursor
@@ -5558,7 +5561,7 @@ struct ram_cursor {
      *  - @c malformed_k The neighbor sits at or past the snapshot.
      */
     status_t follow(std::size_t position) noexcept {
-        if (position >= staged_neighbors_.size()) return status_t::malformed_k;
+        if (position >= staged_neighbors_.size()) return status_code_t::malformed_k;
         return seek(staged_neighbors_[position]);
     }
 

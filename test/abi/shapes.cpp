@@ -51,7 +51,7 @@ static constexpr std::size_t shapes_expansion_k = 128;
 
 /** Points end to end and the offsets around them, as the C interface takes a tape of shapes. */
 struct shapes_tape_t {
-    std::vector<f32_t> coordinates;
+    std::vector<util::f32_t> coordinates;
     std::vector<std::size_t> offsets {0};
 
     usearch_tape_view_t view() const noexcept {
@@ -61,20 +61,23 @@ struct shapes_tape_t {
 
 /** @p count shapes from eight template clouds of @p sizes ' points, each keeping a prefix of
  *  @p sizes ' fewest points or more under a hundredth of jitter. */
-static shapes_tape_t generate_shapes(std::size_t count, shapes_sizes_t const& sizes, u64_t seed) {
+static shapes_tape_t generate_shapes(std::size_t count, shapes_sizes_t const& sizes, util::u64_t seed) {
     constexpr std::size_t templates_k = 8;
     split_mix_generator_t random_generator {seed};
-    uniform_between<f64_t> const unit {-1, 1}, jitter {-0.01, 0.01};
-    uniform_below<u32_t> const template_distribution {templates_k};
-    uniform_below<u32_t> const kept_distribution {static_cast<u32_t>(sizes.points - sizes.fewest_points + 1)};
-    std::vector<f32_t> templates(templates_k * sizes.points * 3);
-    for (f32_t& coordinate : templates) coordinate = static_cast<f32_t>(unit(random_generator));
+    uniform_between<util::f64_t> const unit {-1, 1}, jitter {-0.01, 0.01};
+    util::uniform_below<util::u32_t> const template_distribution {templates_k};
+    util::uniform_below<util::u32_t> const kept_distribution {
+        static_cast<util::u32_t>(sizes.points - sizes.fewest_points + 1)};
+    nk::matrix<util::f32_t> templates = make_matrix<util::f32_t>(templates_k, sizes.points * 3);
+    for (util::f32_t& coordinate : util::to_writable_span(templates))
+        coordinate = static_cast<util::f32_t>(unit(random_generator));
     shapes_tape_t tape;
     for (std::size_t shape = 0; shape != count; ++shape) {
-        f32_t const* const cloud = templates.data() + template_distribution(random_generator) * sizes.points * 3;
+        nk::vector_view<util::f32_t> const cloud =
+            templates.view().row(template_distribution(random_generator)).as_vector();
         std::size_t const kept = sizes.fewest_points + kept_distribution(random_generator);
         for (std::size_t coordinate = 0; coordinate != kept * 3; ++coordinate)
-            tape.coordinates.push_back(cloud[coordinate] + static_cast<f32_t>(jitter(random_generator)));
+            tape.coordinates.push_back(cloud[coordinate] + static_cast<util::f32_t>(jitter(random_generator)));
         tape.offsets.push_back(tape.offsets.back() + kept);
     }
     return tape;
@@ -99,18 +102,18 @@ static double shapes_score_band(shapes_tape_t const& tape, double unit_roundoff)
     for (std::size_t shape = 0; shape + 1 < tape.offsets.size(); ++shape) {
         auto const first = tape.coordinates.begin() + tape.offsets[shape] * 3;
         auto const extremes = std::minmax_element(first, tape.coordinates.begin() + tape.offsets[shape + 1] * 3);
-        widest = max_of(widest, static_cast<double>(*extremes.second - *extremes.first));
+        widest = util::max_of(widest, static_cast<double>(*extremes.second - *extremes.first));
     }
     auto const extremes = std::minmax_element(tape.coordinates.begin(), tape.coordinates.end());
     double const diagonal = std::sqrt(3.0) * (static_cast<double>(*extremes.second) - *extremes.first);
     return std::sqrt(3.0) * pose_rounding_band(widest, unit_roundoff) + 2 * unit_roundoff * diagonal;
 }
 
-/** The coordinates the first @p count keys of @p index read back as in f32, end to end, each key's
- *  cloud starting at its entry of @p offsets, which ends with the total. */
-static std::vector<float> poses_of(handle<shapes_verbs_t>& index, std::size_t count,
-                                   std::vector<std::size_t>& offsets) {
-    std::vector<float> poses;
+/** The coordinates the first @p count keys of @p index read back as in f32 into @p poses, end to
+ *  end, each key's cloud starting at its entry of @p offsets, which ends with the total. */
+static void poses_of(handle<shapes_verbs_t>& index, std::size_t count, std::vector<std::size_t>& offsets,
+                     std::vector<util::f32_t>& poses) {
+    poses.clear();
     offsets.assign(1, 0);
     for (std::size_t offset = 0; offset != count; ++offset) {
         usearch_outcome_t outcome {};
@@ -125,11 +128,10 @@ static std::vector<float> poses_of(handle<shapes_verbs_t>& index, std::size_t co
         expect_success(outcome);
         expect_true(written == 1);
         if (outcome.status != usearch_status_success_k || written != 1) break;
-        float const* const coordinates = static_cast<float const*>(shapes.data);
+        util::f32_t const* const coordinates = static_cast<util::f32_t const*>(shapes.data);
         poses.insert(poses.end(), coordinates + tape_offset(shapes, 0) * 3, coordinates + tape_offset(shapes, 1) * 3);
         offsets.push_back(poses.size());
     }
-    return poses;
 }
 
 /** A RAM index's poses come back within their rounding band after each of three save and load
@@ -138,7 +140,8 @@ static void expect_poses_round_trip(handle<shapes_verbs_t>& index, std::string c
     constexpr std::size_t keys_k = 64, cycles_k = 3;
     double const unit_roundoff = unit_roundoff_of(index.geometry.quantization);
     std::vector<std::size_t> offsets, reloaded_offsets;
-    std::vector<float> const original = poses_of(index, keys_k, offsets);
+    std::vector<util::f32_t> original, reloaded;
+    poses_of(index, keys_k, offsets, original);
     if (!expect_equal(offsets.size(), keys_k + 1)) return;
     handle<shapes_verbs_t> cycled {nullptr, *index.session, usearch_residency_ram_k, index.geometry};
     for (std::size_t cycle = 0; cycle != cycles_k; ++cycle) {
@@ -154,7 +157,7 @@ static void expect_poses_round_trip(handle<shapes_verbs_t>& index, std::string c
         if (!expect_success(outcome)) return;
         cycled = {loaded, *index.session, usearch_residency_ram_k, index.geometry};
         if (cycled) {
-            std::vector<float> const reloaded = poses_of(cycled, keys_k, reloaded_offsets);
+            poses_of(cycled, keys_k, reloaded_offsets, reloaded);
             if (!expect_true(reloaded_offsets == offsets)) return;
             expect_poses_within_rounding(original, reloaded, offsets, unit_roundoff);
         }
@@ -165,7 +168,8 @@ static void expect_poses_round_trip(handle<shapes_verbs_t>& index, std::string c
 
 /** One metric of one cell, as the file's docblock describes; GPUs serve the point-set metrics
  *  alone, the alignments refusing at open. */
-static case_result_t test_shapes_metric(sweep_cell_t const& cell, usearch_shapes_metadata_t geometry, u64_t seed) {
+static case_result_t test_shapes_metric(sweep_cell_t const& cell, usearch_shapes_metadata_t geometry,
+                                        util::u64_t seed) {
     bool const point_set = geometry.metric == usearch_shapes_metric_chamfer_k ||
                            geometry.metric == usearch_shapes_metric_hausdorff_k;
     if (cell.residency == usearch_residency_vram_k && !point_set)

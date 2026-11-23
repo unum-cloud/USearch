@@ -28,7 +28,7 @@ namespace unum::usearch::tools {
 
 /** Reads the lines of the file at @p path into @p lines; false after printing why it cannot. */
 static bool sequence_read_lines(std::string_view path, byte_tape_t& lines) {
-    auto [file, status] = mapped_file_t::read(path);
+    auto [file, status] = util::mapped_file_t::read(path);
     if (failed(status)) {
         fmt::println(stderr, "cannot read {}", path);
         return false;

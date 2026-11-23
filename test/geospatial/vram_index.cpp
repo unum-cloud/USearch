@@ -18,14 +18,16 @@
  */
 #undef NDEBUG // ! A test's oracle must stay live in every build
 
-#include <cmath> // `std::asin`, `std::sqrt`, `std::sin`, `std::cos`, `std::isnan`
+#include <cmath>   // `std::asin`, `std::sqrt`, `std::sin`, `std::cos`, `std::isnan`
+#include <cstring> // `std::memcpy` - the matches copied off the arena
 
 #include <algorithm>   // `std::sort`
 #include <array>       // `std::array` - the grid points and sight lines
 #include <limits>      // `std::numeric_limits` - unrecorded fields
+#include <span>        // `std::span` - a query's exact chords
 #include <string>      // `std::string` - the cases' labels
 #include <string_view> // `std::string_view` - a case label's arguments
-#include <vector>      // `std::vector` - observations, exact matches
+#include <vector>      // `std::vector` - the packed terrain
 
 #include "usearch/geospatial_index.h"
 #include "usearch/geospatial/ram_metric.hpp" // `i32_serial_geospatial_kit_t` - the CPU's sight lines
@@ -56,13 +58,13 @@ static constexpr gpu_vendor_t cell_vendor_k = gpu_vendor_t::amd_k;
 enum class observations_kind_t { global_k, city_k, cameras_k };
 
 /** Draws @p count observations of @p kind. */
-static std::vector<usearch_geospatial_observation_t> generate_observations(observations_kind_t kind, std::size_t count,
-                                                                           u64_t seed) {
+static nk::vector<usearch_geospatial_observation_t> generate_observations(observations_kind_t kind, std::size_t count,
+                                                                          u64_t seed) {
     constexpr f64_t nan_k = std::numeric_limits<f64_t>::quiet_NaN();
     constexpr f64_t degrees_k = 180.0 / 3.14159265358979323846;
     split_mix_generator_t random_generator {seed};
-    std::vector<usearch_geospatial_observation_t> observations(count);
-    for (usearch_geospatial_observation_t& observation : observations) {
+    nk::vector<usearch_geospatial_observation_t> observations = make_vector<usearch_geospatial_observation_t>(count);
+    for (usearch_geospatial_observation_t& observation : to_writable_span(observations)) {
         f64_t const across = 2 * uniform_unit(random_generator) - 1, along = 2 * uniform_unit(random_generator) - 1;
         bool const global = kind == observations_kind_t::global_k;
         // Uniform over the sphere: the sine of the latitude is uniform.
@@ -92,7 +94,7 @@ struct hills_t {
     using kit_t = i32_serial_geospatial_kit_t;
     static constexpr std::size_t rows_k = 101, columns_k = 161;
 
-    std::vector<f32_t> heights = std::vector<f32_t>(rows_k * columns_k);
+    nk::matrix<f32_t> heights = make_matrix<f32_t>(rows_k, columns_k);
     std::vector<byte_t> pack;
     terrain_t grid {rows_k, columns_k, 51.505, -0.108, 0.0001, 0.0001, nullptr, columns_k * sizeof(f32_t)};
 
@@ -100,8 +102,7 @@ struct hills_t {
     hills_t() {
         for (std::size_t row = 0; row != rows_k; ++row)
             for (std::size_t column = 0; column != columns_k; ++column)
-                heights[row * columns_k + column] = static_cast<f32_t>(30 + 25 * std::sin(row * 0.11) *
-                                                                                std::cos(column * 0.07));
+                heights(row, column) = static_cast<f32_t>(30 + 25 * std::sin(row * 0.11) * std::cos(column * 0.07));
         grid.heights = heights.data();
         nk_size_t bytes = 0;
         [[maybe_unused]] nk_status_t const sized = kit_t::terrain_pack_size(rows_k, columns_k, &bytes);
@@ -175,9 +176,9 @@ static bool related(relation_t relation, f64_t radius_metres, earth_observation_
 
 /** The matches of one handle: keys, metres and a count per query, copied off the arena. */
 struct handle_matches_t {
-    std::vector<usearch_key_t> keys;
-    std::vector<usearch_distance_t> metres;
-    std::vector<std::size_t> counts;
+    nk::matrix<usearch_key_t> keys;
+    nk::matrix<usearch_distance_t> metres;
+    nk::vector<std::size_t> counts;
 };
 
 /**
@@ -195,30 +196,33 @@ static void test_geospatial_vram_collection(u64_t seed, std::int32_t ordinal, ob
                                             std::size_t expansion, hills_t const* hills = nullptr) {
     constexpr std::size_t wanted_k = 10, batches_k = 3;
     checks_held_t const held;
-    std::vector<usearch_geospatial_observation_t> observations = generate_observations(kind, count, seed);
-    std::vector<usearch_geospatial_observation_t> queries = generate_observations(kind, queries_count, ~seed);
+    nk::vector<usearch_geospatial_observation_t> observations = generate_observations(kind, count, seed);
+    nk::vector<usearch_geospatial_observation_t> queries = generate_observations(kind, queries_count, ~seed);
     // Over hills, every other camera stands on the ground and the rest hover over every hill.
     for (std::size_t offset = 1; hills && offset < count; offset += 2)
         observations[offset].altitude_metres = 60 + offset % 31;
     for (std::size_t offset = 1; hills && offset < queries_count; offset += 2)
         queries[offset].altitude_metres = 60 + offset % 31;
     usearch_geospatial_terrain_t const terrain = hills ? hills->borrowed() : usearch_geospatial_terrain_t {};
-    std::vector<usearch_key_t> keys(count);
+    nk::vector<usearch_key_t> keys = make_vector<usearch_key_t>(count);
     for (std::size_t offset = 0; offset != count; ++offset) keys[offset] = us::tools::key_of_offset(seed, offset);
     usearch_geospatial_tolerance_t const tolerance {radius_metres, 0};
 
     // The exact admitted chords of every query, ascending.
-    std::vector<earth_observation_t> stored(count);
+    nk::vector<earth_observation_t> stored = make_vector<earth_observation_t>(count);
     for (std::size_t entry = 0; entry != count; ++entry) stored[entry] = encoded(observations[entry], hills);
-    std::vector<std::vector<f64_t>> exact(queries_count);
+    nk::matrix<f64_t> exact = make_matrix<f64_t>(queries_count, count);
+    nk::vector<std::size_t> exact_counts = make_vector<std::size_t>(queries_count);
     for (std::size_t query = 0; query != queries_count; ++query) {
         earth_observation_t const probe = encoded(queries[query], hills);
         for (std::size_t entry = 0; entry != count; ++entry)
             if (related(static_cast<relation_t>(relation), radius_metres, probe, stored[entry], hills))
-                exact[query].push_back(
+                exact(query, exact_counts[query]++) =
                     std::sqrt(static_cast<f64_t>(chord_squared(probe.position, stored[entry].position))) /
-                    centimetres_per_metre_k);
-        std::sort(exact[query].begin(), exact[query].end());
+                    centimetres_per_metre_k;
+        nk::vector_span<f64_t> const chords = exact.span().row(query).as_vector();
+        std::span<f64_t> const admitted = to_writable_span(chords).first(exact_counts[query]);
+        std::sort(admitted.begin(), admitted.end());
     }
 
     usearch_outcome_t outcome {};
@@ -260,9 +264,12 @@ static void test_geospatial_vram_collection(u64_t seed, std::int32_t ordinal, ob
         search.expansion_factor = expansion;
         if (held()) usearch_geospatial_search(&search);
         if (!expect_true(!outcome.message)) return matched;
-        matched.keys.assign(matches.keys, matches.keys + queries_count * matches.columns);
-        matched.metres.assign(matches.scores, matches.scores + queries_count * matches.columns);
-        matched.counts.assign(matches.counts, matches.counts + queries_count);
+        matched.keys = make_matrix<usearch_key_t>(queries_count, matches.columns);
+        matched.metres = make_matrix<usearch_distance_t>(queries_count, matches.columns);
+        matched.counts = make_vector<std::size_t>(queries_count);
+        std::memcpy(matched.keys.data(), matches.keys, matched.keys.size() * sizeof(usearch_key_t));
+        std::memcpy(matched.metres.data(), matches.scores, matched.metres.size() * sizeof(usearch_distance_t));
+        std::memcpy(matched.counts.data(), matches.counts, queries_count * sizeof(std::size_t));
         return matched;
     };
 
@@ -270,12 +277,12 @@ static void test_geospatial_vram_collection(u64_t seed, std::int32_t ordinal, ob
     auto const recall = [&](handle_matches_t const& matched) {
         std::size_t hits = 0, possible = 0;
         for (std::size_t query = 0; query != queries_count && !matched.counts.empty(); ++query) {
-            std::size_t const expected = min_of(wanted_k, exact[query].size());
+            std::size_t const expected = min_of(wanted_k, exact_counts[query]);
             if (!expected) continue;
-            f64_t const threshold = exact[query][expected - 1] * (1 + 1e-9) + 1e-6;
+            f64_t const threshold = exact(query, expected - 1) * (1 + 1e-9) + 1e-6;
             std::size_t found = 0;
             for (std::size_t rank = 0; rank != matched.counts[query]; ++rank)
-                found += matched.metres[query * wanted_k + rank] <= threshold;
+                found += matched.metres(query, rank) <= threshold;
             hits += min_of(found, expected), possible += expected;
         }
         return possible ? static_cast<f64_t>(hits) / possible : 1.0;
@@ -311,20 +318,19 @@ static void test_geospatial_vram_collection(u64_t seed, std::int32_t ordinal, ob
 
     for (std::size_t query = 0; query != queries_count && held(); ++query) {
         earth_observation_t const probe = encoded(queries[query], hills);
-        expect_equal(vram_matches.counts[query], min_of(wanted_k, exact[query].size()));
+        expect_equal(vram_matches.counts[query], min_of(wanted_k, exact_counts[query]));
         for (std::size_t rank = 0; rank != vram_matches.counts[query]; ++rank) {
-            std::optional<u64_t> const minted = us::tools::offset_of_key(seed,
-                                                                         vram_matches.keys[query * wanted_k + rank]);
+            std::optional<u64_t> const minted = us::tools::offset_of_key(seed, vram_matches.keys(query, rank));
             if (!expect_true(minted && *minted < count)) return;
             u64_t const entry = *minted;
-            f64_t const metres = vram_matches.metres[query * wanted_k + rank];
+            f64_t const metres = vram_matches.metres(query, rank);
             f64_t const chord = std::sqrt(static_cast<f64_t>(chord_squared(probe.position, stored[entry].position))) /
                                 centimetres_per_metre_k;
             expect_true(related(static_cast<relation_t>(relation), radius_metres, probe, stored[entry], hills));
             expect_true(std::abs(metres - chord) <= 1e-6 * max_of(chord, 1.0));
-            expect_true(count > expansion || (rank < exact[query].size() &&
-                                              std::abs(metres - exact[query][rank]) <= 1e-6 * max_of(chord, 1.0)));
-            expect_true(!rank || vram_matches.metres[query * wanted_k + rank - 1] <= metres);
+            expect_true(count > expansion || (rank < exact_counts[query] &&
+                                              std::abs(metres - exact(query, rank)) <= 1e-6 * max_of(chord, 1.0)));
+            expect_true(!rank || vram_matches.metres(query, rank - 1) <= metres);
         }
     }
     f64_t const ram_recall = recall(ram_matches), vram_recall = recall(vram_matches);
@@ -357,14 +363,14 @@ static void test_geospatial_vram_within(u64_t seed, std::int32_t ordinal) {
     constexpr std::size_t count_k = 512, queries_k = 16;
     checks_held_t const held;
     constexpr f64_t radius_metres_k = 150;
-    std::vector<usearch_geospatial_observation_t> observations = generate_observations(observations_kind_t::city_k,
-                                                                                       count_k, seed);
-    std::vector<usearch_geospatial_observation_t> queries = generate_observations(observations_kind_t::city_k,
-                                                                                  queries_k, ~seed);
-    std::vector<usearch_key_t> keys(count_k);
+    nk::vector<usearch_geospatial_observation_t> observations = generate_observations(observations_kind_t::city_k,
+                                                                                      count_k, seed);
+    nk::vector<usearch_geospatial_observation_t> queries = generate_observations(observations_kind_t::city_k, queries_k,
+                                                                                 ~seed);
+    nk::vector<usearch_key_t> keys = make_vector<usearch_key_t>(count_k);
     for (std::size_t offset = 0; offset != count_k; ++offset) keys[offset] = us::tools::key_of_offset(seed, offset);
 
-    std::vector<earth_observation_t> stored(count_k);
+    nk::vector<earth_observation_t> stored = make_vector<earth_observation_t>(count_k);
     for (std::size_t entry = 0; entry != count_k; ++entry) stored[entry] = encoded(observations[entry], nullptr);
     std::array<std::size_t, queries_k> expected {};
     for (std::size_t query = 0; query != queries_k; ++query) {

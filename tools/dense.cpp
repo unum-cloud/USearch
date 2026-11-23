@@ -239,7 +239,7 @@ static bool dense_session_for_ram(world_t const& world, count_t const& threads, 
  *  batch into @p phase; a stop keeps the batches handed over, and shortens the slice to them. */
 static bool dense_insert_slice(world_t const& world, dense_settings_t const& settings, dense_source_t& source,
                                handle<dense_verbs_t> const& index, verb_phase_t& phase) {
-    std::size_t const batch_rows = min_of(settings.checkpoint.batch.value, source.slice_rows);
+    std::size_t const batch_rows = util::min_of(settings.checkpoint.batch.value, source.slice_rows);
     std::array<dense_staging_t, 2> stagings;
     for (dense_staging_t& staging : stagings)
         if (st::failed(staging.rows.resize(st::assume_uninitialized, batch_rows * source.row_bytes)) ||
@@ -250,7 +250,7 @@ static bool dense_insert_slice(world_t const& world, dense_settings_t const& set
     std::size_t offset = 0;
     for (std::size_t turn = 0; offset < source.slice_rows; turn ^= 1) {
         dense_staging_t& staging = stagings[turn];
-        std::size_t const count = min_of(batch_rows, source.slice_rows - offset);
+        std::size_t const count = util::min_of(batch_rows, source.slice_rows - offset);
         std::uint64_t const row = source.first_row + offset;
         if (!dense_read_at(source.descriptor, staging.rows.data(), count * source.row_bytes,
                            dense_header_bytes_k + row * source.row_bytes)) {
@@ -273,7 +273,7 @@ static bool dense_insert_slice(world_t const& world, dense_settings_t const& set
         }
         else
             for (std::size_t position = 0; position != count; ++position)
-                staging.keys[position] = std::bit_cast<usearch_key_t>(uuid_of(row + position));
+                staging.keys[position] = std::bit_cast<usearch_key_t>(util::uuid_of(row + position));
         usearch_dense_insert_t insert {
             .index = index.get(),
             .executor = index.executor(),
@@ -313,14 +313,14 @@ static bool dense_insert_batch(world_t const& world, dense_settings_t const& set
     else if (failure.empty()) {
         if (st::failed(arrow.keys.resize(first_position + count))) exit_out_of_memory("the keys");
         for (std::size_t position = 0; position != count; ++position)
-            arrow.keys[first_position + position] = std::bit_cast<usearch_key_t>(uuid_of(first_row + position));
+            arrow.keys[first_position + position] = std::bit_cast<usearch_key_t>(util::uuid_of(first_row + position));
         keys = {arrow.keys.data(), sizeof(usearch_key_t)};
     }
     if (!failure.empty()) {
         fmt::println(stderr, "{}{}", rank_label(world), failure);
         return false;
     }
-    std::size_t const batch_rows = min_of(settings.checkpoint.batch.value, count);
+    std::size_t const batch_rows = util::min_of(settings.checkpoint.batch.value, count);
     for (std::size_t offset = 0; offset < count; offset += batch_rows) {
         std::size_t const position = first_position + offset;
         usearch_outcome_t outcome {};
@@ -328,7 +328,7 @@ static bool dense_insert_batch(world_t const& world, dense_settings_t const& set
             .index = index.get(),
             .executor = index.executor(),
             .outcome = &outcome,
-            .count = min_of(batch_rows, count - offset),
+            .count = util::min_of(batch_rows, count - offset),
             .keys = {keys.data + position, keys.stride},
             .vectors = {static_cast<usearch_byte_t const*>(rows.data) + position * rows.stride, rows.stride,
                         rows.columns, rows.scalar},
@@ -351,7 +351,7 @@ static bool dense_insert_arrow(world_t const& world, dense_settings_t const& set
     std::uint64_t row = 0;
     for (bool more = true; more && row < end && !stop_requested;) {
         std::uint64_t const batch_end = row + arrow.input.rows();
-        std::uint64_t const taken_begin = max_of(row, begin), taken_end = min_of(batch_end, end);
+        std::uint64_t const taken_begin = util::max_of(row, begin), taken_end = util::min_of(batch_end, end);
         if (taken_begin < taken_end &&
             !dense_insert_batch(world, settings, arrow, index, static_cast<std::size_t>(taken_begin - row),
                                 static_cast<std::size_t>(taken_end - taken_begin), taken_begin))
@@ -368,7 +368,7 @@ static bool dense_insert_arrow(world_t const& world, dense_settings_t const& set
                      settings.checkpoint.first_entry.value, settings.checkpoint.entries.value, row, arrow.input.name());
         return false;
     }
-    source.slice_rows = row > begin ? static_cast<std::size_t>(min_of(row, end) - begin) : 0;
+    source.slice_rows = row > begin ? static_cast<std::size_t>(util::min_of(row, end) - begin) : 0;
     return true;
 }
 
@@ -572,8 +572,13 @@ int modality_insert(dense_verbs_t, world_t& world, int argc, char const* const* 
     if (world.barrier(!dense_insert_setup(world, settings, positionals[0], metric, source, arrow, session, index)))
         return EXIT_FAILURE;
 
-    sz::string_t const address = distributed ? checkpoint_part_path(save, world.rank, world.size)
-                                             : formatted("{}", *admitted);
+    sz::string_t address = formatted("{}", *admitted);
+    if (distributed) {
+        auto [part_path, path_status] = checkpoint_part_path(save, world.rank, world.size);
+        if (failed(path_status)) fmt::println(stderr, "{}cannot name its part of {}", rank_label(world), save);
+        if (world.barrier(failed(path_status))) return EXIT_FAILURE;
+        address = std::move(part_path);
+    }
     bool const built = dense_construct(world, settings, source, arrow, index, address, started, steps);
     if (world.barrier(!built)) return EXIT_FAILURE;
     if (!distributed) return EXIT_SUCCESS;
@@ -583,7 +588,7 @@ int modality_insert(dense_verbs_t, world_t& world, int argc, char const* const* 
     if (st::failed(gathered.resize(speaks ? sent.size() * world.size : 0))) exit_out_of_memory("the part sizes");
     world.gather(sent, gathered);
     if (!speaks) return EXIT_SUCCESS;
-    st::vector<safegraphs_part_t> parts;
+    st::vector<util::safegraphs_part_t> parts;
     if (st::failed(parts.resize(world.size))) exit_out_of_memory("the parts");
     std::uint64_t committed = 0;
     for (std::size_t part = 0; part != parts.size(); ++part) {

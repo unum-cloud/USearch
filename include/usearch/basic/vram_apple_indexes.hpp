@@ -117,13 +117,13 @@ struct vram_apple_indexes {
      *  @brief Appends one shard built on Apple device @p device.
      *
      *  @par Statuses:
-     *  - @c bad_alloc_k The shard could not be built.
+     *  - @c out_of_memory_k The shard could not be built.
      *  - @c config_mismatch_k Storage exists already: the set is reserved, retired shards, or has
      *    a shard generation in flight.
      */
     status_t emplace(int device) noexcept {
         std::unique_ptr<index_t> shard = build_(device);
-        if (!shard) return status_t::bad_alloc_k;
+        if (!shard) return status_code_t::out_of_memory_k;
         return shards_.emplace(std::move(shard));
     }
 
@@ -198,7 +198,7 @@ struct vram_apple_indexes {
             shards_.end_window();
         }
         shards_.reopen();
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Invokes @p callback as <tt>callback(device)</tt> for the device of every shard, in placement
@@ -212,7 +212,7 @@ struct vram_apple_indexes {
     status_t status() const noexcept {
         for (shard_t const& one : shards_)
             if (status_t const kept = one.index->status(); failed(kept)) return kept;
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
 #pragma endregion Placement and Measures
@@ -258,13 +258,13 @@ struct vram_apple_indexes {
          *  - @c overflow_k A shard's entries pass its reserved range, or their values its tape.
          */
         expected<insert_result_t> insert(std::span<key_t const> keys, tape_view<byte_t const> tape) noexcept {
-            if (!owner_) return {{}, status_t::uninitialized_k};
-            if (keys.size() != entries_ || tape.size() != entries_) return {{}, status_t::config_mismatch_k};
+            if (!owner_) return {{}, status_code_t::uninitialized_k};
+            if (keys.size() != entries_ || tape.size() != entries_) return {{}, status_code_t::config_mismatch_k};
             vram_apple_indexes& owner = *std::exchange(owner_, nullptr);
             shards_t& shards = owner.shards_;
             insert_result_t result;
-            if (!entries_) return {result, status_t::success_k};
-            status_t status = status_t::success_k;
+            if (!entries_) return {result, status_code_t::success_k};
+            status_t status = status_code_t::success_k;
             std::size_t first_offset = 0, drained = 0, launched = 0;
             for (; drained != shard_plans_.size(); ++drained) {
                 shard_insert_plan_t& shard_plan = shard_plans_[drained];
@@ -272,14 +272,14 @@ struct vram_apple_indexes {
                 if (!entries) continue;
                 traversal_context_t traversal = owner.traversal_(*executor_, placed);
                 if (!traversal) {
-                    status = status_t::bad_alloc_k;
+                    status = status_code_t::out_of_memory_k;
                     break;
                 }
-                expected<insert_result_t> const inserted = shards[placed].index->graph_.launch_(
+                auto const [inserted, inserted_status] = shards[placed].index->graph_.launch_(
                     shard_plan, keys.subspan(first_offset, entries), tape.subview(first_offset, entries), traversal,
                     config_);
-                if (status = inserted.status; failed(status)) break;
-                result += inserted.value;
+                if (status = inserted_status; failed(status)) break;
+                result += inserted;
                 first_offset += entries;
                 ++launched;
             }
@@ -351,7 +351,7 @@ struct vram_apple_indexes {
         plan.executor_ = &executor;
         if (!entries) {
             plan.owner_ = this;
-            return {std::move(plan), status_t::success_k};
+            return {std::move(plan), status_code_t::success_k};
         }
         auto [claim, claim_status] = executor.claim();
         if (failed(claim_status)) return {{}, claim_status};
@@ -362,7 +362,7 @@ struct vram_apple_indexes {
         plan.first_ = batch_split.open_shard_generation.first;
 
         std::size_t const shards = batch_split.shards_spanned();
-        if (failed(plan.shard_plans_.reserve_exactly(shards))) return {{}, status_t::bad_alloc_k};
+        if (failed(plan.shard_plans_.reserve_exactly(shards))) return {{}, status_code_t::out_of_memory_k};
         for (std::size_t shard = 0; shard != shards; ++shard) {
             std::size_t const shard_entries = batch_split.entries_for_shard(shard);
             if (!shard_entries) {
@@ -375,7 +375,7 @@ struct vram_apple_indexes {
             plan.shard_plans_.push_back_reserved(std::move(shard_plan));
         }
         plan.owner_ = this;
-        return {std::move(plan), status_t::success_k};
+        return {std::move(plan), status_code_t::success_k};
     }
 
     /**
@@ -388,7 +388,7 @@ struct vram_apple_indexes {
      */
     expected<insert_result_t> insert(std::span<key_t const> keys, tape_view<byte_t const> tape, executor_t& executor,
                                      insert_config_t config = {}) noexcept {
-        if (keys.size() != tape.size()) return {{}, status_t::config_mismatch_k};
+        if (keys.size() != tape.size()) return {{}, status_code_t::config_mismatch_k};
         auto [plan, status] = plan_insert(tape.size(), executor, config);
         if (failed(status)) return {{}, status};
         return plan.insert(keys, tape);
@@ -410,7 +410,7 @@ struct vram_apple_indexes {
         template <typename codec_type_>
         expected<columns_extents_t> columns_extents(shards_t& shards, std::size_t shard, codec_type_ const&) noexcept {
             traversal_context_t context = owner->traversal_(*executor, shard);
-            if (!context) return {{}, status_t::config_mismatch_k};
+            if (!context) return {{}, status_code_t::config_mismatch_k};
             return shards[shard].index->columns_extents(context);
         }
         template <typename codec_type_>
@@ -418,13 +418,13 @@ struct vram_apple_indexes {
                                                                 columns<key_t, node_id_t, byte_t, u64_t> columns,
                                                                 codec_type_ const&) noexcept {
             traversal_context_t context = owner->traversal_(*executor, shard);
-            if (!context) return {{}, status_t::config_mismatch_k};
+            if (!context) return {{}, status_code_t::config_mismatch_k};
             return shards[shard].index->plan_save(columns, context);
         }
         expected<typename index_t::load_plan_t> open_shard_load(
             shards_t& shards, std::size_t shard, safegraphs_saved_columns<node_id_t> const& saved) noexcept {
             traversal_context_t context = owner->traversal_(*executor, shard);
-            if (!context) return {{}, status_t::config_mismatch_k};
+            if (!context) return {{}, status_code_t::config_mismatch_k};
             owner->loaded_through_ = vram_load_path_t::host_copy_k;
             return shards[shard].index->plan_load(saved, context);
         }
@@ -447,7 +447,7 @@ struct vram_apple_indexes {
          *    from the one a placed shard froze.
          */
         status_t open_shard_for_part(shards_t& shards, std::size_t part) noexcept {
-            if (shards.retired_shards() + part < shards.size()) return status_t::success_k;
+            if (shards.retired_shards() + part < shards.size()) return status_code_t::success_k;
             for (std::size_t shard = shards.retired_shards(); shard != shards.size(); ++shard)
                 if (status_t const reserved = reserve(shards, shard, 0).status; failed(reserved)) return reserved;
             while (shards.size() <= shards.retired_shards() + part)
@@ -456,7 +456,7 @@ struct vram_apple_indexes {
                         [this](shard_t const& like) noexcept { return owner->build_shard_(like); });
                     failed(opened))
                     return opened;
-            return status_t::success_k;
+            return status_code_t::success_k;
         }
     };
 
@@ -581,21 +581,21 @@ struct vram_apple_indexes {
         if (status_t const paired = pairs_with_(executor); failed(paired)) return {{}, paired};
         if (counts.size() != queries_count || keys.extent(0) != queries_count || scores.extent(0) != queries_count ||
             scores.extent(1) != keys.extent(1))
-            return {{}, status_t::config_mismatch_k};
+            return {{}, status_code_t::config_mismatch_k};
         if (keys.stride_bytes(1) != sizeof(key_t) || scores.stride_bytes(1) != sizeof(score_type_))
-            return {{}, status_t::unsupported_layout_k};
+            return {{}, status_code_t::unsupported_layout_k};
         for (std::size_t& count : counts) count = 0;
         std::size_t const wanted = keys.extent(1);
-        if (!queries_count || !wanted) return {{}, status_t::success_k};
+        if (!queries_count || !wanted) return {{}, status_code_t::success_k};
         auto [claim, claim_status] = executor.claim();
         if (failed(claim_status)) return {{}, claim_status};
 
         // One snapshot of every watermark, retaken while a shard generation opens beneath it.
         growing_buffer<node_id_t, forkunion_allocator_t> visible {shards_.allocator()};
         while (true) {
-            if (failed(visible.resize(shards_.size()))) return {{}, status_t::bad_alloc_k};
+            if (failed(visible.resize(shards_.size()))) return {{}, status_code_t::out_of_memory_k};
             status_t const taken = shards_.snapshot(to_writable_span(visible)).status;
-            if (taken == status_t::shape_mismatch_k) continue;
+            if (taken == status_code_t::shape_mismatch_k) continue;
             if (failed(taken)) return {{}, taken};
             break;
         }
@@ -606,12 +606,12 @@ struct vram_apple_indexes {
         growing_buffer<scored_node<node_id_t, shard_score_t>, forkunion_allocator_t> frame {shards_.allocator()};
         if (failed(shard_nodes.resize_uninitialized(entries)) || failed(shard_scores.resize_uninitialized(entries)) ||
             failed(shard_counts.resize_uninitialized(queries_count)) || failed(frame.resize_uninitialized(wanted)))
-            return {{}, status_t::bad_alloc_k};
+            return {{}, status_code_t::out_of_memory_k};
         search_result_t merged;
         for (std::size_t shard = 0; shard != visible.size(); ++shard) {
             if (!visible[shard]) continue;
             traversal_context_t traversal = traversal_(executor, shard);
-            if (!traversal) return {{}, status_t::bad_alloc_k};
+            if (!traversal) return {{}, status_code_t::out_of_memory_k};
             for (std::size_t& count : shard_counts) count = wanted;
             if (status_t const searched = search_shard(
                     *shards_[shard].index, nk::matrix_span<node_id_t> {shard_nodes.data(), queries_count, wanted},
@@ -641,7 +641,7 @@ struct vram_apple_indexes {
             }
         }
         for (std::size_t const count : counts) merged.count += count;
-        return {merged, status_t::success_k};
+        return {merged, status_code_t::success_k};
     }
 
     /** Entries under @p key across every shard, read between destructive windows and between
@@ -672,7 +672,7 @@ struct vram_apple_indexes {
      *  - @c config_mismatch_k The @p executor drives no stream on some shard's device.
      *  - @c contended_k Another call holds the @p executor, or a destructive window overlapped
      *    the read twice.
-     *  - @c bad_alloc_k A shard's round buffer cannot grow.
+     *  - @c out_of_memory_k A shard's round buffer cannot grow.
      */
     expected<reachability_t> health(executor_t& executor) noexcept {
         using health_plan_t = typename graph_t::health_plan_t;
@@ -683,15 +683,15 @@ struct vram_apple_indexes {
             traversals_t traversals {shards_.allocator()};
             growing_buffer<health_plan_t, forkunion_allocator_t> checks {shards_.allocator()};
             if (failed(traversals.reserve_exactly(shards_.size())) || failed(checks.reserve_exactly(shards_.size())))
-                return {{}, status_t::bad_alloc_k};
+                return {{}, status_code_t::out_of_memory_k};
             for (std::size_t shard = 0; shard != shards_.size(); ++shard) {
                 traversals.push_back_reserved(traversal_(executor, shard));
-                if (!traversals.back()) return {{}, status_t::bad_alloc_k};
+                if (!traversals.back()) return {{}, status_code_t::out_of_memory_k};
                 checks.push_back_reserved(health_plan_t {});
                 graph_t& graph = shards_[shard].index->graph_;
                 std::size_t const entries = graph.size();
                 if (!entries) continue;
-                if (!graph.connectivity()) return {{}, status_t::uninitialized_k};
+                if (!graph.connectivity()) return {{}, status_code_t::uninitialized_k};
                 auto const layout = graph.round_layout_(entries, {});
                 if (status_t const carved = graph_t::carve_round_(traversals[shard], layout.bytes); failed(carved))
                     return {{}, carved};
@@ -716,7 +716,7 @@ struct vram_apple_indexes {
                 if (failed(status)) return {{}, status};
                 result += checked;
             }
-            return {result, status_t::success_k};
+            return {result, status_code_t::success_k};
         });
     }
 
@@ -762,7 +762,7 @@ struct vram_apple_indexes {
          */
         template <typename progress_type_ = dummy_progress_t>
         status_t run(executor_t& executor, progress_type_&& on_visited = {}) noexcept {
-            if (!owner_) return status_t::uninitialized_k;
+            if (!owner_) return status_code_t::uninitialized_k;
             if (status_t const paired = owner_->pairs_with_(executor); failed(paired)) return paired;
             auto [claim, claim_status] = executor.claim();
             if (failed(claim_status)) return claim_status;
@@ -777,13 +777,13 @@ struct vram_apple_indexes {
          *  - As @ref run, and the first shard plan's failure.
          */
         expected<refine_report_t> finish(executor_t& executor) noexcept {
-            if (!owner_) return {{}, status_t::uninitialized_k};
+            if (!owner_) return {{}, status_code_t::uninitialized_k};
             if (status_t const paired = owner_->pairs_with_(executor); failed(paired)) return {{}, paired};
             auto [claim, claim_status] = executor.claim();
             if (failed(claim_status)) return {{}, claim_status};
-            expected<refine_report_t> const healed = close_shard_plans_(shard_plans_, traversals_);
+            auto const [healed, healed_status] = close_shard_plans_(shard_plans_, traversals_);
             release_();
-            return healed;
+            return {healed, healed_status};
         }
 
         /** The reports every shard plan holds so far, folded. */
@@ -844,7 +844,7 @@ struct vram_apple_indexes {
         /** Drives the shard plans, as @ref refine_plan_t::run does. */
         template <typename progress_type_ = dummy_progress_t>
         status_t run(executor_t& executor, progress_type_&& on_visited = {}) noexcept {
-            if (!owner_) return status_t::uninitialized_k;
+            if (!owner_) return status_code_t::uninitialized_k;
             if (status_t const paired = owner_->pairs_with_(executor); failed(paired)) return paired;
             auto [claim, claim_status] = executor.claim();
             if (failed(claim_status)) return claim_status;
@@ -859,13 +859,13 @@ struct vram_apple_indexes {
          *  - As @ref refine_plan_t::finish.
          */
         expected<refine_report_t> finish(executor_t& executor) noexcept {
-            if (!owner_) return {{}, status_t::uninitialized_k};
+            if (!owner_) return {{}, status_code_t::uninitialized_k};
             if (status_t const paired = owner_->pairs_with_(executor); failed(paired)) return {{}, paired};
             auto [claim, claim_status] = executor.claim();
             if (failed(claim_status)) return {{}, claim_status};
-            expected<refine_report_t> const healed = close_shard_plans_(shard_plans_, traversals_);
+            auto const [healed, healed_status] = close_shard_plans_(shard_plans_, traversals_);
             release_();
-            return healed;
+            return {healed, healed_status};
         }
 
         /** The reports every shard plan holds so far, folded. */
@@ -974,17 +974,18 @@ struct vram_apple_indexes {
                                           std::span<vram_apple_indexes* const> targets, reshard_config_t config,
                                           executor_t& executor) noexcept {
         reshard_plan_t plan {shards_.allocator()};
-        if (sources.empty() || targets.empty()) return {std::move(plan), status_t::invalid_argument_k};
+        if (sources.empty() || targets.empty()) return {std::move(plan), status_code_t::invalid_argument_k};
         for (std::span<vram_apple_indexes* const> const listed : {sources, targets})
             if (status_t const refused = listed_refusal(listed); failed(refused)) return {std::move(plan), refused};
-        if (targets.size() > 1 && lists_share(sources, targets)) return {std::move(plan), status_t::config_mismatch_k};
-        if (config.shard_capacity) return {std::move(plan), status_t::unsupported_k};
+        if (targets.size() > 1 && lists_share(sources, targets))
+            return {std::move(plan), status_code_t::config_mismatch_k};
+        if (config.shard_capacity) return {std::move(plan), status_code_t::unsupported_k};
         bool const gathering = targets.size() == 1 && targets[0] == this;
         bool const cutting = sources[0] == this && targets.size() > 1;
-        if (!gathering && !cutting) return {std::move(plan), status_t::config_mismatch_k};
+        if (!gathering && !cutting) return {std::move(plan), status_code_t::config_mismatch_k};
         if (failed(plan.sources_.reserve_exactly(sources.size())) ||
             failed(plan.targets_.reserve_exactly(targets.size())))
-            return {std::move(plan), status_t::bad_alloc_k};
+            return {std::move(plan), status_code_t::out_of_memory_k};
         for (vram_apple_indexes* source : sources) plan.sources_.push_back_reserved(source);
         for (vram_apple_indexes* target : targets) plan.targets_.push_back_reserved(target);
         if (gathering) return {std::move(plan), open_gather_(plan, config, executor)};
@@ -1026,10 +1027,10 @@ struct vram_apple_indexes {
     /** Whether @p executor drives a stream on every shard's device - shards sharing a device share
      *  its stream, and queue on it in order. */
     status_t pairs_with_(executor_t const& executor) const noexcept {
-        if (shards_.empty()) return status_t::uninitialized_k;
+        if (shards_.empty()) return status_code_t::uninitialized_k;
         for (std::size_t shard = 0; shard != shards_.size(); ++shard)
-            if (stream_of_(executor, shard) == executor.size()) return status_t::config_mismatch_k;
-        return status_t::success_k;
+            if (stream_of_(executor, shard) == executor.size()) return status_code_t::config_mismatch_k;
+        return status_code_t::success_k;
     }
 
     /** The position of the stream on shard @p shard 's device in @p executor, or its size when it
@@ -1068,7 +1069,7 @@ struct vram_apple_indexes {
     template <typename plans_type_, typename progress_type_>
     static status_t drive_shard_plans_(plans_type_& plans, traversals_t& traversals,
                                        progress_type_& on_visited) noexcept {
-        status_t outcome = status_t::success_k;
+        status_t outcome = status_code_t::success_k;
         for (bool advancing = true; advancing;) {
             for (std::size_t shard = 0; shard != plans.size(); ++shard)
                 if (status_t const queued = plans[shard].queue(traversals[shard]); failed(queued) && succeeded(outcome))
@@ -1086,7 +1087,7 @@ struct vram_apple_indexes {
             }
             advancing = advanced != 0;
             if (advancing && rounding && on_visited(completed, total) == continuation_t::cancel_k)
-                return status_t::cancelled_k;
+                return status_code_t::cancelled_k;
         }
         return outcome;
     }
@@ -1108,9 +1109,12 @@ struct vram_apple_indexes {
     template <typename plans_type_>
     static refine_report_t fold_shard_plans_(plans_type_ const& plans, traversals_t const& traversals) noexcept {
         refine_report_t result;
-        for (std::size_t shard = 0; shard != plans.size(); ++shard)
-            if (shard) result += plans[shard].finish(traversals[shard]).value;
-            else result = plans[shard].finish(traversals[shard]).value;
+        for (std::size_t shard = 0; shard != plans.size(); ++shard) {
+            // A shard mid-round answers cancelled_k, so the fold reads its report alone.
+            [[maybe_unused]] auto const [report, report_status] = plans[shard].finish(traversals[shard]);
+            if (shard) result += report;
+            else result = report;
+        }
         return result;
     }
 
@@ -1158,21 +1162,21 @@ struct vram_apple_indexes {
     template <typename plan_type_, typename open_shard_type_>
     status_t open_plan_(plan_type_& plan, executor_t& executor, open_shard_type_&& open_shard) noexcept {
         std::size_t const live = live_shards_count(), first = shards_.retired_shards();
-        if (!live) return status_t::uninitialized_k;
+        if (!live) return status_code_t::uninitialized_k;
         if (status_t const paired = pairs_with_(executor); failed(paired)) return paired;
         auto [claim, claim_status] = executor.claim();
         if (failed(claim_status)) return claim_status;
         if (failed(plan.traversals_.reserve_exactly(live)) || failed(plan.shard_plans_.reserve_exactly(live)))
-            return status_t::bad_alloc_k;
+            return status_code_t::out_of_memory_k;
         plan.owner_ = this;
         for (std::size_t shard = 0; shard != live; ++shard) {
             plan.traversals_.push_back_reserved(traversal_(executor, first + shard));
-            if (!plan.traversals_.back()) return status_t::bad_alloc_k;
+            if (!plan.traversals_.back()) return status_code_t::out_of_memory_k;
             auto [shard_plan, status] = open_shard(*shards_[first + shard].index, plan.traversals_[shard], shard);
             if (failed(status)) return status;
             plan.shard_plans_.push_back_reserved(std::move(shard_plan));
         }
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Opens a gather of the plan's other sources into this index: each source shard enters the
@@ -1184,9 +1188,11 @@ struct vram_apple_indexes {
             if (source == this) continue;
             source_shards += source->live_shards_count();
             for (index_t const& shard : source->live_shards())
-                if (first_live_on_(shard.device_specs().ordinal) == shards_.size()) return status_t::config_mismatch_k;
+                if (first_live_on_(shard.device_specs().ordinal) == shards_.size())
+                    return status_code_t::config_mismatch_k;
         }
-        if (failed(plan.slots_.reserve_exactly(source_shards + live_shards_count()))) return status_t::bad_alloc_k;
+        if (failed(plan.slots_.reserve_exactly(source_shards + live_shards_count())))
+            return status_code_t::out_of_memory_k;
         std::size_t const first = shards_.retired_shards();
         typename index_t::reshard_config_t const shard_config {config.refine, 0, config.seed};
         status_t const opened = open_plan_(
@@ -1206,7 +1212,7 @@ struct vram_apple_indexes {
             source->shards_.forget_entries();
             source->shards_.end_window();
         }
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Lists every live shard of the plan's other sources on @p device in its slots, after the
@@ -1223,10 +1229,10 @@ struct vram_apple_indexes {
      *  appends them, its rounds dropped unrun; nothing to do with this index the only source. */
     status_t gather_before_cut_(std::span<vram_apple_indexes* const> sources, reshard_config_t const& config,
                                 executor_t& executor) noexcept {
-        if (sources.size() == 1) return status_t::success_k;
+        if (sources.size() == 1) return status_code_t::success_k;
         reshard_plan_t gathering {shards_.allocator()};
         if (failed(gathering.sources_.reserve_exactly(sources.size())) || failed(gathering.targets_.reserve_exactly(1)))
-            return status_t::bad_alloc_k;
+            return status_code_t::out_of_memory_k;
         for (vram_apple_indexes* source : sources) gathering.sources_.push_back_reserved(source);
         gathering.targets_.push_back_reserved(this);
         return open_gather_(gathering, config, executor);
@@ -1238,19 +1244,19 @@ struct vram_apple_indexes {
     status_t refuses_cut_targets_(std::span<vram_apple_indexes* const> targets) const noexcept {
         std::size_t const live = live_shards_count();
         for (vram_apple_indexes const* const target : targets) {
-            if (target->size() || target->live_shards_count() != live) return status_t::config_mismatch_k;
+            if (target->size() || target->live_shards_count() != live) return status_code_t::config_mismatch_k;
             for (std::size_t shard = 0; shard != live; ++shard)
                 if (target->live_shard_(shard).device_specs().ordinal != live_shard_(shard).device_specs().ordinal)
-                    return status_t::config_mismatch_k;
+                    return status_code_t::config_mismatch_k;
         }
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Opens a cut of this index into the plan's targets, which @ref refuses_cut_targets_ admitted:
      *  shard @c s parts its nodes among shard @c s of every target. */
     status_t open_cut_(reshard_plan_t& plan, reshard_config_t const& config, executor_t& executor) noexcept {
         std::size_t const live = live_shards_count(), targets = plan.targets_.size();
-        if (failed(plan.slots_.reserve_exactly(live * (targets + 1)))) return status_t::bad_alloc_k;
+        if (failed(plan.slots_.reserve_exactly(live * (targets + 1)))) return status_code_t::out_of_memory_k;
         typename index_t::reshard_config_t const shard_config {config.refine, 0, config.seed};
         return open_plan_(plan, executor, [&](index_t& shard, traversal_context_t& context, std::size_t at) noexcept {
             std::size_t const from = plan.slots_.size();
@@ -1320,7 +1326,7 @@ struct vram_apple_indexes_cursor {
          *  @brief Takes the watermark of @p shard and sizes the staging for one block of its rows.
          *
          *  @par Statuses:
-         *  - @c bad_alloc_k The staging found no memory.
+         *  - @c out_of_memory_k The staging found no memory.
          */
         status_t open(index_t const& shard) noexcept {
             refresh(shard);
@@ -1345,7 +1351,7 @@ struct vram_apple_indexes_cursor {
          *  - @c config_mismatch_k The shard holds fewer rows than the snapshot, as a clear left it.
          */
         status_t seek(index_t const& shard, node_id_t node) noexcept {
-            if (node >= visible_count_) return status_t::malformed_k;
+            if (node >= visible_count_) return status_code_t::malformed_k;
             std::size_t const row_ids = shard.connectivity();
             if (node < staged_first_ || node >= staged_first_ + staged_count_) {
                 node_id_t const first = static_cast<node_id_t>(node - node % walk_t::lanes_k);
@@ -1357,7 +1363,7 @@ struct vram_apple_indexes_cursor {
                 staged_count_ = count;
             }
             sought_row_ = to_span(staged_rows_).subspan((node - staged_first_) * row_ids, row_ids);
-            return status_t::success_k;
+            return status_code_t::success_k;
         }
 
       private:
@@ -1387,22 +1393,22 @@ struct vram_apple_indexes_cursor {
      *      shard holding it, and a key held nowhere starting nothing.
      *
      *  @par Statuses:
-     *  - @c bad_alloc_k A cursor, its staging, the visited bits or the frontier found no memory.
+     *  - @c out_of_memory_k A cursor, its staging, the visited bits or the frontier got no memory.
      */
     status_t open(indexes_t const& indexes, std::span<key_t const> starts) noexcept {
         epoch_ = indexes.read_epoch();
         first_shard_ = indexes.shards_.retired_shards();
         std::size_t const count = indexes.shards_count() - first_shard_;
-        if (failed(shard_cursors_.reserve_exactly(count))) return status_t::bad_alloc_k;
+        if (failed(shard_cursors_.reserve_exactly(count))) return status_code_t::out_of_memory_k;
         for (std::size_t shard = 0; shard != count; ++shard) {
             shard_cursors_.push_back_reserved(shard_cursor_t {allocator_});
             if (status_t const opened = shard_cursors_.back().open(shard_(indexes, shard)); failed(opened))
                 return opened;
         }
-        if (starts.empty()) return status_t::success_k;
+        if (starts.empty()) return status_code_t::success_k;
         order_ = cursor_order_t::breadth_first_k;
         growing_buffer<std::size_t, forkunion_allocator_t> visible {allocator_};
-        if (failed(visible.resize_uninitialized(count))) return status_t::bad_alloc_k;
+        if (failed(visible.resize_uninitialized(count))) return status_code_t::out_of_memory_k;
         for (std::size_t shard = 0; shard != count; ++shard) visible[shard] = shard_cursors_[shard].visible_count();
         if (status_t const opened = walk_.open(to_span(visible)); failed(opened)) return opened;
         for (key_t const& key : starts)
@@ -1415,7 +1421,7 @@ struct vram_apple_indexes_cursor {
                     return visited;
                 break;
             }
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /**
@@ -1424,7 +1430,7 @@ struct vram_apple_indexes_cursor {
      *      number of keys written.
      *
      *  @par Statuses:
-     *  - @c bad_alloc_k A link or a newly visited entry found no memory; the entries written stand.
+     *  - @c out_of_memory_k No memory for a link or a newly visited entry; written entries stand.
      *  - @c contended_k A destructive window of @p indexes opened since the walk did; none stand.
      */
     expected<std::size_t> pull(indexes_t const& indexes, std::span<key_t> keys, links_keys_t* links_keys,
@@ -1436,25 +1442,27 @@ struct vram_apple_indexes_cursor {
             index_t const& shard = shard_(indexes, entry.shard);
             if (status_t const sought = cursor.seek(shard, entry.node); failed(sought))
                 return indexes.still_valid(epoch_) ? expected<std::size_t> {written, sought}
-                                                   : expected<std::size_t> {0, status_t::contended_k};
+                                                   : expected<std::size_t> {0, status_code_t::contended_k};
             std::span<node_id_t const> const neighbors = cursor.neighbors();
             if (links_keys && (failed(links_keys->reserve(links_keys->size() + neighbors.size())) ||
                                failed(links_offsets->reserve(links_offsets->size() + 1))))
-                return {written, status_t::bad_alloc_k};
+                return {written, status_code_t::out_of_memory_k};
             if (status_t const visited = visit_links_(entry, neighbors, cursor.visible_count()); failed(visited))
                 return {written, visited};
             for (node_id_t const neighbor : neighbors) {
                 // Rows come raw: a self-loop links nowhere, and sentinels fail the key lookup.
                 if (neighbor == entry.node || !links_keys) continue;
-                expected<key_t> const linked = shard.key_of(neighbor);
-                if (succeeded(linked.status)) links_keys->push_back_reserved(linked.value);
+                auto const [linked, linked_status] = shard.key_of(neighbor);
+                if (succeeded(linked_status)) links_keys->push_back_reserved(linked);
             }
             if (links_keys) links_offsets->push_back_reserved(links_keys->size());
-            keys[written++] = shard.key_of(entry.node).value;
+            auto const [key, key_status] = shard.key_of(entry.node);
+            if (failed(key_status)) return {written, key_status};
+            keys[written++] = key;
         }
         // Retired shards keep their storage, so a pull that ran past a window read nothing freed.
-        if (!indexes.still_valid(epoch_)) return {0, status_t::contended_k};
-        return {written, status_t::success_k};
+        if (!indexes.still_valid(epoch_)) return {0, status_code_t::contended_k};
+        return {written, status_code_t::success_k};
     }
 
   private:
@@ -1462,11 +1470,11 @@ struct vram_apple_indexes_cursor {
     /** Visits every link of @p entry among @p neighbors on a breadth-first walk, none on a stored
      *  one: below @p visible, the snapshot the bits span, since breadth-first never refreshes. */
     status_t visit_links_(shard_node_t entry, std::span<node_id_t const> neighbors, node_id_t visible) noexcept {
-        if (order_ != cursor_order_t::breadth_first_k) return status_t::success_k;
+        if (order_ != cursor_order_t::breadth_first_k) return status_code_t::success_k;
         for (node_id_t const neighbor : neighbors)
             if (neighbor != entry.node && neighbor < visible)
                 if (status_t const visited = walk_.visit(entry.shard, neighbor); failed(visited)) return visited;
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** The live shard at @p live as the walk opened, counted past the shards retired then. */

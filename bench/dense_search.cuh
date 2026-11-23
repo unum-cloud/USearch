@@ -88,10 +88,12 @@ struct bench_results_t {
 
 /** Sizes the per-query hit matrices for @p queries_count queries of @p top_k matches each. */
 inline bool reserve_results(bench_results_t& results, std::size_t queries_count, std::size_t top_k) {
-    results.hit_rows = nk::matrix<u64_t>::zeros({queries_count, top_k}).value;
-    results.hit_distances = nk::matrix<distance_t>::zeros({queries_count, top_k}).value;
-    if (results.hit_rows.empty() || results.hit_distances.empty())
+    auto [hit_rows, hit_rows_status] = nk::matrix<u64_t>::zeros({queries_count, top_k});
+    auto [hit_distances, hit_distances_status] = nk::matrix<distance_t>::zeros({queries_count, top_k});
+    if (nk::failed(hit_rows_status) || nk::failed(hit_distances_status))
         return fmt::println("Failed to allocate the per-query hit matrices"), false;
+    results.hit_rows = std::move(hit_rows);
+    results.hit_distances = std::move(hit_distances);
     results.hit_counts.resize(queries_count);
     return true;
 }
@@ -289,8 +291,9 @@ inline bool read_widened_rows(std::string_view path, nk::matrix<f32_t>& widened)
     return open_dataset(path, {}, {}, [&]<typename file_scalar_type_>(mapped_dataset<file_scalar_type_> const& file) {
                nk::matrix_view<file_scalar_type_> const rows = file.vectors(0, file.rows());
                if (rows.extent(0) != file.rows()) return fmt::println("{} spans several parts", path), 1;
-               widened = nk::matrix<f32_t>::zeros({rows.extent(0), rows.extent(1)}).value;
-               if (widened.empty()) return fmt::println("Failed to widen {} into f32", path), 1;
+               auto [made, status] = nk::matrix<f32_t>::zeros({rows.extent(0), rows.extent(1)});
+               if (nk::failed(status)) return fmt::println("Failed to widen {} into f32", path), 1;
+               widened = std::move(made);
                for (std::size_t row = 0; row != rows.extent(0); ++row)
                    widen_row(rows.row(row).as_vector(), std::span<f32_t> {widened.row(row).data(), rows.extent(1)});
                return 0;

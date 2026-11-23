@@ -114,7 +114,7 @@ struct shard_columns {
             shards_type_& shards = view->shards;
             if (status_t const finished = plan.finish(); failed(finished)) return finished;
             shards.reset_routing(shards.entries());
-            return status_t::success_k;
+            return status_code_t::success_k;
         }
     };
 
@@ -155,7 +155,7 @@ struct shard_columns {
     expected<save_plan_t> plan_save(columns_t columns, codec_type_ const& codec) noexcept {
         auto [plan, status] = residency.open_shard_save(shards, shard, columns, codec);
         if (failed(status)) return {{}, status};
-        return {save_plan_t {std::move(plan)}, status_t::success_k};
+        return {save_plan_t {std::move(plan)}, status_code_t::success_k};
     }
 
     /**
@@ -180,7 +180,7 @@ struct shard_columns {
     expected<load_plan_t> plan_load(columns_type_ const& columns) noexcept {
         auto [plan, status] = residency.open_shard_load(shards, shard, columns);
         if (failed(status)) return {{}, status};
-        return {load_plan_t {std::move(plan), this}, status_t::success_k};
+        return {load_plan_t {std::move(plan), this}, status_code_t::success_k};
     }
 };
 
@@ -212,7 +212,7 @@ status_t save_shards(shards_type_& shards, residency_type_ residency, std::strin
                      progress_type_&& progress = {}) noexcept {
     using view_t = shard_columns<shards_type_, residency_type_>;
     std::size_t const retired = shards.retired_shards(), count = shards.size() - retired;
-    if (!count) return status_t::uninitialized_k;
+    if (!count) return status_code_t::uninitialized_k;
     if (count == 1) {
         view_t view {shards, residency, retired};
         return safegraphs_write_index(path, view, codec, executor, config, metric, progress);
@@ -222,7 +222,7 @@ status_t save_shards(shards_type_& shards, residency_type_ residency, std::strin
     // no manifest names.
     growing_buffer<safegraphs_part_t, forkunion_allocator_t> parts {shards.allocator()};
     growing_buffer<char, forkunion_allocator_t> part_path {shards.allocator()}, names {shards.allocator()};
-    if (failed(parts.reserve_exactly(count))) return status_t::bad_alloc_k;
+    if (failed(parts.reserve_exactly(count))) return status_code_t::out_of_memory_k;
     std::string_view const stem = safegraphs_stem(path);
     for (std::size_t part = 0; part != count; ++part) {
         view_t view {shards, residency, retired + part};
@@ -267,7 +267,7 @@ expected<std::size_t> lay_out_shard_parts_(shards_type_& shards, residency_type_
                                            growing_buffer<std::size_t, forkunion_allocator_t>& offsets) noexcept {
     using view_t = shard_columns<shards_type_, residency_type_>;
     std::size_t const retired = shards.retired_shards(), count = shards.size() - retired;
-    if (failed(parts.resize(count)) || failed(offsets.resize(count))) return {0, status_t::bad_alloc_k};
+    if (failed(parts.resize(count)) || failed(offsets.resize(count))) return {0, status_code_t::out_of_memory_k};
     for (std::size_t part = 0; part != count; ++part) {
         view_t view {shards, residency, retired + part};
         auto const [extents, extents_status] = view.columns_extents(codec);
@@ -295,7 +295,7 @@ template <typename shards_type_, typename residency_type_, typename codec_type_>
 expected<std::size_t> shard_storage_requirements(shards_type_& shards, residency_type_ residency,
                                                  codec_type_ const& codec, save_config_t const& config,
                                                  std::string_view metric) noexcept {
-    if (shards.size() == shards.retired_shards()) return {0, status_t::uninitialized_k};
+    if (shards.size() == shards.retired_shards()) return {0, status_code_t::uninitialized_k};
     growing_buffer<safegraphs_part_t, forkunion_allocator_t> parts {shards.allocator()};
     growing_buffer<std::size_t, forkunion_allocator_t> offsets {shards.allocator()};
     return lay_out_shard_parts_(shards, residency, codec, config, metric, parts, offsets);
@@ -325,12 +325,12 @@ status_t save_shards(shards_type_& shards, residency_type_ residency, bytes_span
                      progress_type_&& progress = {}) noexcept {
     using view_t = shard_columns<shards_type_, residency_type_>;
     std::size_t const retired = shards.retired_shards(), count = shards.size() - retired;
-    if (!count) return status_t::uninitialized_k;
+    if (!count) return status_code_t::uninitialized_k;
     growing_buffer<safegraphs_part_t, forkunion_allocator_t> parts {shards.allocator()};
     growing_buffer<std::size_t, forkunion_allocator_t> offsets {shards.allocator()};
     auto const [bytes, layout_status] = lay_out_shard_parts_(shards, residency, codec, config, metric, parts, offsets);
     if (failed(layout_status)) return layout_status;
-    if (buffer.size() < bytes) return status_t::overflow_k;
+    if (buffer.size() < bytes) return status_code_t::overflow_k;
     std::memset(buffer.data(), 0, offsets[0]);
     for (std::size_t part = 0; part != count; ++part) {
         view_t view {shards, residency, retired + part};
@@ -360,7 +360,7 @@ status_t load_parts_(shards_type_& shards, residency_type_& residency, std::span
             failed(loaded))
             return loaded;
     }
-    return status_t::success_k;
+    return status_code_t::success_k;
 }
 
 /**
@@ -386,8 +386,8 @@ template <typename shards_type_, typename residency_type_, typename codec_type_,
           typename progress_type_ = dummy_progress_t>
 status_t load_shards(shards_type_& shards, residency_type_ residency, std::string_view path, codec_type_ const& codec,
                      executor_type_& executor, load_config_t const& config, progress_type_&& progress = {}) noexcept {
-    if (shards.empty()) return status_t::uninitialized_k;
-    if (shards.entries()) return status_t::config_mismatch_k;
+    if (shards.empty()) return status_code_t::uninitialized_k;
+    if (shards.entries()) return status_code_t::config_mismatch_k;
     growing_buffer<mapped_file_t, forkunion_allocator_t> mappings {shards.allocator()};
     growing_buffer<safegraphs_catalog_part_t, forkunion_allocator_t> parts {shards.allocator()};
     growing_buffer<safegraphs_named_column_t, forkunion_allocator_t> extra_columns {shards.allocator()};
@@ -416,8 +416,8 @@ template <typename shards_type_, typename residency_type_, typename codec_type_,
           typename progress_type_ = dummy_progress_t>
 status_t load_shards(shards_type_& shards, residency_type_ residency, bytes_view_t buffer, codec_type_ const& codec,
                      executor_type_& executor, load_config_t const& config, progress_type_&& progress = {}) noexcept {
-    if (shards.empty()) return status_t::uninitialized_k;
-    if (shards.entries()) return status_t::config_mismatch_k;
+    if (shards.empty()) return status_code_t::uninitialized_k;
+    if (shards.entries()) return status_code_t::config_mismatch_k;
     growing_buffer<safegraphs_catalog_part_t, forkunion_allocator_t> parts {shards.allocator()};
     growing_buffer<safegraphs_named_column_t, forkunion_allocator_t> extra_columns {shards.allocator()};
     if (status_t const listed = checkpoint_source_t {buffer}.read_header(parts, extra_columns, no_device_copy_t {},

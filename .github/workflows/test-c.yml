@@ -35,7 +35,7 @@ jobs:
           cmake --preset relwithdebinfo -D CMAKE_C_COMPILER=gcc-16 -D CMAKE_CXX_COMPILER=g++-16 -D USEARCH_BUILD_SHARED=1 -D USEARCH_WITH_JEMALLOC=1
           cmake --build --preset relwithdebinfo
       - name: Test C and C++
-        run: ctest --preset relwithdebinfo
+        run: ctest --preset relwithdebinfo --exclude-regex '^usearch_test_cpp(_stub)?$'
 
   test_ubuntu_asan:
     name: Test Debug Build under ASan on Ubuntu
@@ -57,7 +57,7 @@ jobs:
           cmake --preset asan -D CMAKE_C_COMPILER=gcc -D CMAKE_CXX_COMPILER=g++
           cmake --build --preset asan
       - name: Test C/C++
-        run: ctest --preset asan
+        run: ctest --preset asan --exclude-regex '^usearch_test_cpp(_stub)?$'
 
   # The mutex annotations in `sanitizers.hpp` only take effect under ThreadSanitizer.
   test_ubuntu_tsan:
@@ -75,7 +75,7 @@ jobs:
           cmake --preset tsan -D CMAKE_C_COMPILER=clang-23 -D CMAKE_CXX_COMPILER=clang++-23
           cmake --build --preset tsan
       - name: Test C/C++
-        run: ctest --preset tsan
+        run: ctest --preset tsan --exclude-regex '^usearch_test_cpp(_stub)?$'
 
   verify_models:
     name: Check Promela Models and GenMC Clients
@@ -112,7 +112,7 @@ jobs:
           cmake --preset relwithdebinfo -D CMAKE_C_COMPILER=clang-23 -D CMAKE_CXX_COMPILER=clang++-23 -D USEARCH_BUILD_SHARED=1 -D USEARCH_WITH_JEMALLOC=1
           cmake --build --preset relwithdebinfo
       - name: Test C and C++
-        run: ctest --preset relwithdebinfo
+        run: ctest --preset relwithdebinfo --exclude-regex '^usearch_test_cpp(_stub)?$'
 
   # Linux 4.18 headers prove the kernel mirrors suffice, and the runner's newer kernel that they match.
   test_old_kernel_headers:
@@ -149,7 +149,7 @@ jobs:
           cmake --preset relwithdebinfo -D USEARCH_BUILD_SHARED=1 -D CMAKE_EXE_LINKER_FLAGS= -D CMAKE_SHARED_LINKER_FLAGS=
           cmake --build --preset relwithdebinfo
       - name: Test C and C++
-        run: ctest --preset relwithdebinfo
+        run: ctest --preset relwithdebinfo --exclude-regex '^usearch_test_cpp(_stub)?$'
 
   test_windows_x86:
     name: Test on Windows x86 with Visual Studio 2026
@@ -165,7 +165,7 @@ jobs:
           cmake --preset msvc2026_x64
           cmake --build --preset msvc2026_x64
       - name: Test C and C++
-        run: ctest --preset msvc2026_x64
+        run: ctest --preset msvc2026_x64 --exclude-regex '^usearch_test_cpp(_stub)?$'
 
   test_windows_arm:
     name: Test on Windows Arm64 with Visual Studio 2026
@@ -181,7 +181,7 @@ jobs:
           cmake --preset msvc2026_arm64
           cmake --build --preset msvc2026_arm64
       - name: Test C and C++
-        run: ctest --preset msvc2026_arm64
+        run: ctest --preset msvc2026_arm64 --exclude-regex '^usearch_test_cpp(_stub)?$'
 
   build_cross_linux:
     name: Build for Linux ${{ matrix.arch }}

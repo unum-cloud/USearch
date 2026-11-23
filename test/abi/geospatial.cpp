@@ -20,7 +20,9 @@
 #undef NDEBUG // ! A test's oracle must stay live in every build
 
 #include <algorithm> // `std::find`, `std::nth_element` - the contained keys, the radius
+#include <array>     // `std::array` - every query's tenth-nearest distance
 #include <limits>    // `std::numeric_limits` - unrecorded fields
+#include <span>      // `std::span` - the queries' tenths that the oracle filled
 #include <string>    // `std::string` - the cells' names
 #include <vector>    // `std::vector` - the observations
 
@@ -38,10 +40,10 @@ static constexpr std::size_t geospatial_entries_k = 2048, geospatial_queries_k =
 static constexpr std::size_t geospatial_expansion_k = 64;
 
 /** @p count points over a city's square kilometre, every other field unrecorded. */
-static std::vector<usearch_geospatial_observation_t> generate_points(std::size_t count, u64_t seed) {
-    constexpr f64_t nan_k = std::numeric_limits<f64_t>::quiet_NaN();
+static std::vector<usearch_geospatial_observation_t> generate_points(std::size_t count, util::u64_t seed) {
+    constexpr util::f64_t nan_k = std::numeric_limits<util::f64_t>::quiet_NaN();
     split_mix_generator_t random_generator {seed};
-    uniform_between<f64_t> const across {-1, 1};
+    uniform_between<util::f64_t> const across {-1, 1};
     std::vector<usearch_geospatial_observation_t> points(count);
     for (usearch_geospatial_observation_t& point : points)
         point = {51.5 + across(random_generator) * 0.0045,
@@ -85,12 +87,14 @@ static void expect_within(handle<geospatial_verbs_t>& index, geospatial_queries_
     if (scanned.status == usearch_status_unsupported_k) return;
     if (!expect_success(scanned)) return;
     st::vector<std::size_t> const offsets = match_offsets(oracle);
-    std::vector<f64_t> tenth;
+    std::array<util::f64_t, geospatial_queries_k> tenths;
+    std::size_t tenths_count = 0;
     for (std::size_t query = 0; query != geospatial_queries_k; ++query)
-        if (oracle.counts[query]) tenth.push_back(oracle.scores[offsets[query + 1] - 1]);
+        if (oracle.counts[query]) tenths[tenths_count++] = oracle.scores[offsets[query + 1] - 1];
+    std::span<util::f64_t> const tenth = std::span {tenths}.first(tenths_count);
     if (tenth.empty()) return void(expect_true(false));
     std::nth_element(tenth.begin(), tenth.begin() + tenth.size() / 2, tenth.end());
-    f64_t const radius_metres = tenth[tenth.size() / 2];
+    util::f64_t const radius_metres = tenth[tenth.size() / 2];
 
     usearch_outcome_t outcome {};
     usearch_matches_tape_view_t matches {};
@@ -105,9 +109,9 @@ static void expect_within(handle<geospatial_verbs_t>& index, geospatial_queries_
     std::vector<usearch_key_t> contained(contained_offsets.back());
     expect_true(download(contained.data(), matches.keys, contained.size() * sizeof(usearch_key_t)));
     std::size_t unminted = 0;
-    std::vector<u64_t> contained_entries(contained.size());
+    std::vector<util::u64_t> contained_entries(contained.size());
     for (std::size_t match = 0; match != contained.size(); ++match) {
-        std::optional<u64_t> const entry = offset_of_key(index.session->seed, contained[match]);
+        std::optional<util::u64_t> const entry = offset_of_key(index.session->seed, contained[match]);
         unminted += !entry, contained_entries[match] = entry.value_or(key_offsets_k);
     }
     std::size_t missed = 0;
@@ -115,8 +119,8 @@ static void expect_within(handle<geospatial_verbs_t>& index, geospatial_queries_
         for (std::size_t match = offsets[query]; match != offsets[query + 1]; ++match) {
             // Scan scores round to f32, so an entry at the radius may land on either side of it.
             if (oracle.scores[match] >= radius_metres * (1 - 1e-4)) continue;
-            std::optional<u64_t> const entry = offset_of_key(index.session->seed,
-                                                             std::bit_cast<usearch_key_t>(oracle.keys[match]));
+            std::optional<util::u64_t> const entry = offset_of_key(index.session->seed,
+                                                                   std::bit_cast<usearch_key_t>(oracle.keys[match]));
             unminted += !entry;
             missed += std::find(contained_entries.begin() + contained_offsets[query],
                                 contained_entries.begin() + contained_offsets[query + 1],
@@ -129,7 +133,7 @@ static void expect_within(handle<geospatial_verbs_t>& index, geospatial_queries_
 }
 
 /** One cell, as the file's docblock describes. */
-static void test_geospatial_behaviors(sweep_cell_t const& cell, u64_t seed) {
+static void test_geospatial_behaviors(sweep_cell_t const& cell, util::u64_t seed) {
     session_t session = open_session(settings_of(session_settings(), cell), cell.cpu_class);
     if (!expect_true(bool(session))) return;
     handle<geospatial_verbs_t> index = open_index<geospatial_verbs_t>(session, geospatial_geometry_t {}, cell.shards);

@@ -300,21 +300,21 @@ struct candidate_pool {
  *  Each row is populated with a different cyclic rotation so the branch predictor can't
  *  shortcut on identical content; correctness isn't tested here. */
 template <typename scalar_>
-static candidate_pool<scalar_> make_candidate_pool(std::size_t dim) {
+static nk::expected<candidate_pool<scalar_>> make_candidate_pool(std::size_t dim) {
     constexpr std::size_t dims_per_value = nk::dimensions_per_value<scalar_>();
     std::size_t const row_bytes = (dim / dims_per_value) * sizeof(scalar_);
     std::size_t const target_rows = max_of<std::size_t>(8, candidate_pool_target_bytes_k / row_bytes);
     std::size_t const row_count = round_up_pow2(target_rows);
 
-    candidate_pool<scalar_> pool {
-        nk::tensor<scalar_, nk::aligned_allocator<scalar_, 64>, 2>::zeros({row_count, dim}).value,
-        {}};
+    auto [matrix, status] = nk::tensor<scalar_, nk::aligned_allocator<scalar_, 64>, 2>::zeros({row_count, dim});
+    if (nk::failed(status)) return {{}, status};
+    candidate_pool<scalar_> pool {std::move(matrix), {}};
     for (std::size_t row = 0; row < row_count; ++row) fill_cyclic(pool.matrix.span().row(row).as_vector(), row);
     pool.norms.reserve(row_count);
     for (std::size_t row = 0; row < row_count; ++row)
         pool.norms.push_back(
             norms<typename quads_ladder<scalar_, nk_cap_serial_k>::kit_t>(pool.matrix.view().row(row).as_vector()));
-    return pool;
+    return {std::move(pool), nk::status_t::success_k};
 }
 
 /** Reports distances, candidate bytes - the query is reused - and scalar operations per call, one distance
@@ -337,9 +337,11 @@ template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
 static void measure_distance(loop_t& loop, environment_t const& env, std::size_t dim) {
     if (!runs_on<caps_>(env.machine)) return loop.skip("capabilities missing at runtime");
     using quads_kit_t = typename quads_ladder<scalar_, caps_>::kit_t;
-    auto query = nk::vector<scalar_>::zeros(dim).value;
+    auto [query, query_status] = nk::vector<scalar_>::zeros(dim);
+    if (nk::failed(query_status)) return loop.skip("query allocation failed");
     fill_cyclic(query.span(), 0);
-    auto pool = make_candidate_pool<scalar_>(dim);
+    auto [pool, pool_status] = make_candidate_pool<scalar_>(dim);
+    if (nk::failed(pool_status)) return loop.skip("candidate pool allocation failed");
     auto query_view = query.view();
     auto query_norms = norms<quads_kit_t>(query_view);
 
@@ -361,9 +363,11 @@ template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
 static void measure_distances_quad(loop_t& loop, environment_t const& env, std::size_t dim) {
     if (!runs_on<caps_>(env.machine)) return loop.skip("capabilities missing at runtime");
     using quads_kit_t = typename quads_ladder<scalar_, caps_>::kit_t;
-    auto query = nk::vector<scalar_>::zeros(dim).value;
+    auto [query, query_status] = nk::vector<scalar_>::zeros(dim);
+    if (nk::failed(query_status)) return loop.skip("query allocation failed");
     fill_cyclic(query.span(), 0);
-    auto pool = make_candidate_pool<scalar_>(dim);
+    auto [pool, pool_status] = make_candidate_pool<scalar_>(dim);
+    if (nk::failed(pool_status)) return loop.skip("candidate pool allocation failed");
     auto query_view = query.view();
     auto query_norms = norms<quads_kit_t>(query_view);
 
@@ -392,9 +396,11 @@ static void measure_distances_quad(loop_t& loop, environment_t const& env, std::
  *  candidate per call, randomly picked from the same overflowed pool as the USearch rows. */
 template <nk_kernel_kind_t kernel_, typename scalar_>
 static void measure_baseline(loop_t& loop, environment_t const& env, std::size_t dim) {
-    auto query = nk::vector<scalar_>::zeros(dim).value;
+    auto [query, query_status] = nk::vector<scalar_>::zeros(dim);
+    if (nk::failed(query_status)) return loop.skip("query allocation failed");
     fill_cyclic(query.span(), 0);
-    auto pool = make_candidate_pool<scalar_>(dim);
+    auto [pool, pool_status] = make_candidate_pool<scalar_>(dim);
+    if (nk::failed(pool_status)) return loop.skip("candidate pool allocation failed");
     auto query_view = query.view();
 
     std::size_t const row_index_mask = pool.matrix.extent(0) - 1;
@@ -449,14 +455,16 @@ static void measure_distances_tile(loop_t& loop, environment_t const& env, std::
     constexpr std::size_t queries_k = tiles_kit_t::tile_columns_k, rows_k = 256;
 
     using lanes_t = std::array<typename quads_kit_t::finalized_vec_t, queries_k / 4>;
-    auto storage = nk::matrix<scalar_>::zeros({queries_k + rows_k, dim}).value;
+    auto [storage, storage_status] = nk::matrix<scalar_>::zeros({queries_k + rows_k, dim});
+    if (nk::failed(storage_status)) return loop.skip("storage allocation failed");
     for (std::size_t row = 0; row != queries_k + rows_k; ++row) fill_cyclic(storage.row(row).as_vector(), row);
     nk::matrix_view<scalar_> const queries = storage(nk::range(std::size_t {0}, queries_k), nk::slice);
     nk::matrix_view<scalar_> const rows = storage(nk::range(queries_k, queries_k + rows_k), nk::slice);
     std::size_t const stride = static_cast<std::size_t>(queries.stride_bytes(0));
     nk_size_t packed_bytes = 0;
     if (tiles_kit_t::pack_size(queries_k, dim, &packed_bytes) != nk_success_k) return loop.skip("pack size failed");
-    auto packed = nk::vector<nk::u8_t>::zeros(packed_bytes).value;
+    auto [packed, packed_status] = nk::vector<nk::u8_t>::zeros(packed_bytes);
+    if (nk::failed(packed_status)) return loop.skip("packed allocation failed");
     if (tiles_kit_t::pack(queries.raw_values_data(), queries_k, dim, stride, packed.data(), 0, queries_k, nullptr) !=
         nk_success_k)
         return loop.skip("pack failed");
@@ -471,7 +479,8 @@ static void measure_distances_tile(loop_t& loop, environment_t const& env, std::
     std::array<typename scalar_::dot_result_t, rows_k> row_sumsqs;
     for (std::size_t row = 0; row != rows_k; ++row)
         row_sumsqs[row] = norms<quads_kit_t>(rows.row(row).as_vector()).sumsq;
-    auto dots = nk::matrix<raw_dot_t>::zeros({rows_k, queries_k}).value;
+    auto [dots, dots_status] = nk::matrix<raw_dot_t>::zeros({rows_k, queries_k});
+    if (nk::failed(dots_status)) return loop.skip("dots allocation failed");
     std::array<std::array<std::array<f32_t, 4>, queries_k / 4>, rows_k> distances;
 
     for ([[maybe_unused]] std::size_t call : loop) {

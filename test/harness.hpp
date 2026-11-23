@@ -67,13 +67,22 @@
 #include <execinfo.h> // `backtrace`, `backtrace_symbols_fd`
 #endif
 
+namespace util = unum::usearch::utilities;
+
 /** Prints a status by name, as a failed comparison of the most compared enum shows it. */
 namespace us = unum::usearch;
 
 template <>
-struct fmt::formatter<us::utilities::status_t> : fmt::formatter<char const*> {
-    auto format(us::utilities::status_t status, format_context& context) const {
-        return fmt::formatter<char const*>::format(us::utilities::status_to_string(status), context);
+struct fmt::formatter<util::status_t> : fmt::formatter<char const*> {
+    auto format(util::status_t status, format_context& context) const {
+        return fmt::formatter<char const*>::format(util::status_to_string(status), context);
+    }
+};
+
+template <>
+struct fmt::formatter<util::status_code_t> : fmt::formatter<char const*> {
+    auto format(util::status_code_t code, format_context& context) const {
+        return fmt::formatter<char const*>::format(util::status_to_string(code), context);
     }
 };
 
@@ -82,7 +91,6 @@ struct fmt::formatter<us::utilities::status_t> : fmt::formatter<char const*> {
 namespace us = unum::usearch;
 
 namespace unum::usearch::test {
-using namespace unum::usearch::utilities;
 
 /** Stops in an attached debugger, or dumps core without one; no crash handler catches SIGTRAP. */
 inline void trap_into_debugger() noexcept {
@@ -802,11 +810,11 @@ struct scratch_directory_t {
 };
 
 /** The relative error a @c -ffast-math build leaves, which @c expect_errors allows. */
-inline constexpr f64_t approximate_tolerance_k = 1e-3;
+inline constexpr util::f64_t approximate_tolerance_k = 1e-3;
 
 /** Recall a graph that moved or re-linked may lose against its reference, as a share of the
  *  results, one bound for every modality and residency. */
-inline constexpr f64_t rewrite_recall_margin_k = 0.05;
+inline constexpr util::f64_t rewrite_recall_margin_k = 0.05;
 
 /** How a cell's results relate to their exact reference, the families NumKong's harness judges its
  *  kernels by: equal, within rounding, within rounding of the largest reference for weighted
@@ -822,41 +830,42 @@ enum class comparison_verdict_t { assert_k, warn_k };
  *  @c f32 units in the last place. */
 struct error_stats_t {
     std::size_t count = 0;
-    f64_t max_absolute_error = 0;
-    f64_t max_relative_error = 0;
-    f64_t max_reference = 0;
-    f64_t mean = 0;
-    f64_t sum_of_squares = 0;
-    u64_t max_ulp = 0;
+    util::f64_t max_absolute_error = 0;
+    util::f64_t max_relative_error = 0;
+    util::f64_t max_reference = 0;
+    util::f64_t mean = 0;
+    util::f64_t sum_of_squares = 0;
+    util::u64_t max_ulp = 0;
     std::size_t exact_matches = 0;
 
-    void add(f64_t actual, f64_t reference) noexcept {
-        f64_t const difference = actual == reference ? 0.0 : std::fabs(actual - reference);
+    void add(util::f64_t actual, util::f64_t reference) noexcept {
+        util::f64_t const difference = actual == reference ? 0.0 : std::fabs(actual - reference);
         // NaN counts as the largest error, which every family's bound refuses.
-        f64_t const error = std::isnan(difference) ? std::numeric_limits<f64_t>::infinity() : difference;
+        util::f64_t const error = std::isnan(difference) ? std::numeric_limits<util::f64_t>::infinity() : difference;
         ++count;
         exact_matches += error == 0;
         max_absolute_error = std::fmax(max_absolute_error, error);
         max_relative_error = std::fmax(max_relative_error,
                                        error / std::fmax(std::fmax(std::fabs(actual), std::fabs(reference)), 1.0));
         max_reference = std::fmax(max_reference, std::fabs(reference));
-        f64_t const delta = error - mean;
-        mean += delta / static_cast<f64_t>(count);
+        util::f64_t const delta = error - mean;
+        mean += delta / static_cast<util::f64_t>(count);
         sum_of_squares += delta * (error - mean);
-        max_ulp = max_of(max_ulp, ulp_distance(static_cast<f32_t>(actual), static_cast<f32_t>(reference)));
+        max_ulp = util::max_of(max_ulp,
+                               ulp_distance(static_cast<util::f32_t>(actual), static_cast<util::f32_t>(reference)));
     }
 
-    f64_t deviation() const noexcept {
-        return count > 1 ? std::sqrt(sum_of_squares / static_cast<f64_t>(count - 1)) : 0.0;
+    util::f64_t deviation() const noexcept {
+        return count > 1 ? std::sqrt(sum_of_squares / static_cast<util::f64_t>(count - 1)) : 0.0;
     }
 
-    static u64_t ulp_distance(f32_t first, f32_t second) noexcept {
-        auto const ordered = [](f32_t value) noexcept {
-            u32_t const bits = std::bit_cast<u32_t>(value);
-            return bits >> 31 ? -static_cast<i64_t>(bits & 0x7FFFFFFFu) : static_cast<i64_t>(bits);
+    static util::u64_t ulp_distance(util::f32_t first, util::f32_t second) noexcept {
+        auto const ordered = [](util::f32_t value) noexcept {
+            util::u32_t const bits = std::bit_cast<util::u32_t>(value);
+            return bits >> 31 ? -static_cast<util::i64_t>(bits & 0x7FFFFFFFu) : static_cast<util::i64_t>(bits);
         };
-        i64_t const gap = ordered(first) - ordered(second);
-        return static_cast<u64_t>(gap < 0 ? -gap : gap);
+        util::i64_t const gap = ordered(first) - ordered(second);
+        return static_cast<util::u64_t>(gap < 0 ? -gap : gap);
     }
 };
 
@@ -896,8 +905,8 @@ inline bool expect_errors(char const* cell, comparison_family_t family, comparis
 /** A per-item test filter in the quad shape the engines ask, each item answered on its own. */
 template <typename per_item_type_>
 auto quad_predicate(per_item_type_ per_item) noexcept {
-    return [per_item]<typename item_type_, std::size_t extent_>(std::span<item_type_ const, extent_> items,
-                                                                std::span<admission_t, extent_> admissions) noexcept {
+    return [per_item]<typename item_type_, std::size_t extent_>(
+               std::span<item_type_ const, extent_> items, std::span<util::admission_t, extent_> admissions) noexcept {
         for (std::size_t lane = 0; lane != items.size(); ++lane) admissions[lane] = per_item(items[lane]);
     };
 }
@@ -910,10 +919,10 @@ struct gathering_predicate {
     std::vector<item_type_> items;
     std::vector<payload_type_> payloads;
 
-    status_t reserve(std::size_t capacity) noexcept {
+    util::status_t reserve(std::size_t capacity) noexcept {
         items.reserve(capacity);
         payloads.reserve(capacity);
-        return status_t::success_k;
+        return util::status_code_t::success_k;
     }
 
     template <std::size_t extent_>
@@ -925,7 +934,7 @@ struct gathering_predicate {
     template <typename on_admitted_type_>
     void drain(on_admitted_type_&& on_admitted) noexcept {
         for (std::size_t position = 0; position != items.size(); ++position)
-            if (per_item(items[position]) == admission_t::admit_k) on_admitted(payloads[position]);
+            if (per_item(items[position]) == util::admission_t::admit_k) on_admitted(payloads[position]);
         items.clear();
         payloads.clear();
     }
@@ -953,16 +962,16 @@ gathering_predicates<per_item_type_, item_type_, payload_type_> gathering_per_th
  *  device of that vendor, or a host unit's under @c gpu_vendor_t::unknown_k , run once with no
  *  device, so the runner names neither the vendors nor the dtypes a build compiled. */
 struct registered_suite_t {
-    gpu_vendor_t vendor = gpu_vendor_t::unknown_k;
-    void (*run_cases)(gpu_device_t const& device) = nullptr;
+    util::gpu_vendor_t vendor = util::gpu_vendor_t::unknown_k;
+    void (*run_cases)(util::gpu_device_t const& device) = nullptr;
 };
 
 /** The exact spelling of @p vendor 's constant, for the labels of the cases that run on it. */
-constexpr char const* constant_of(gpu_vendor_t vendor) noexcept {
+constexpr char const* constant_of(util::gpu_vendor_t vendor) noexcept {
     switch (vendor) {
-    case gpu_vendor_t::nvidia_k: return "gpu_vendor_t::nvidia_k";
-    case gpu_vendor_t::amd_k: return "gpu_vendor_t::amd_k";
-    case gpu_vendor_t::apple_k: return "gpu_vendor_t::apple_k";
+    case util::gpu_vendor_t::nvidia_k: return "gpu_vendor_t::nvidia_k";
+    case util::gpu_vendor_t::amd_k: return "gpu_vendor_t::amd_k";
+    case util::gpu_vendor_t::apple_k: return "gpu_vendor_t::apple_k";
     default: return "gpu_vendor_t::unknown_k";
     }
 }
@@ -971,7 +980,7 @@ constexpr char const* constant_of(gpu_vendor_t vendor) noexcept {
 using us::tools::gpu_drivers;
 
 /** Every device the C interface numbers, in its order, which @c USEARCH_DEVICES indexes. */
-std::span<gpu_device_t const> gpu_devices() noexcept;
+std::span<util::gpu_device_t const> gpu_devices() noexcept;
 
 /** Registers @p added when it names cases, and answers every suite registered so far. */
 inline std::span<registered_suite_t const> registered_suites(registered_suite_t added = {}) noexcept {
@@ -1075,7 +1084,7 @@ struct counting_allocator {
 };
 
 /** The byte specialization every fixture places its index through. */
-using counting_allocator_t = counting_allocator<byte_t>;
+using counting_allocator_t = counting_allocator<util::byte_t>;
 
 /**
  *  @brief Distinct levels one component of @p scalar_ draws from: a packed bit has two, since
@@ -1084,7 +1093,7 @@ using counting_allocator_t = counting_allocator<byte_t>;
  *  @sa @c nk::fill_uniform, which ranges every dtype by its own @c finite_min & @c finite_max.
  */
 template <typename scalar_>
-constexpr u32_t random_component_levels() noexcept {
+constexpr util::u32_t random_component_levels() noexcept {
     if constexpr (std::is_same_v<scalar_, nk::u1x8_t>) return 2;
     else return 8;
 }
@@ -1093,7 +1102,7 @@ constexpr u32_t random_component_levels() noexcept {
  *  float wrappers via @c from_f32, byte-or-larger integers via the integral constructor. */
 template <typename scalar_>
 auto make_scalar(unsigned value) noexcept {
-    if constexpr (nk::dimensions_per_value<scalar_>() > 1) return static_cast<i8_t>(value);
+    if constexpr (nk::dimensions_per_value<scalar_>() > 1) return static_cast<util::i8_t>(value);
     else if constexpr (requires { scalar_::from_f32(0.0f); }) return scalar_::from_f32(static_cast<float>(value));
     else return scalar_(value);
 }
@@ -1103,12 +1112,12 @@ auto make_scalar(unsigned value) noexcept {
  *  produces - a poor man's schedule fuzzer. The draw hashes the watched word, its value and the
  *  thread, so a stalled wait stays stalled on every retry until another thread moves the word. */
 struct flaky_waiter_t {
-    template <typename value_type_, typename thread_index_type_, typename bound_type_ = wait_capped_t>
+    template <typename value_type_, typename thread_index_type_, typename bound_type_ = util::wait_capped_t>
     void operator()(value_type_ const* watched, value_type_ observed, thread_index_type_ thread,
                     bound_type_ = {}) const noexcept {
-        split_mix_generator_t draw {reinterpret_cast<u64_t>(watched) ^ static_cast<u64_t>(observed) ^
-                                    (static_cast<u64_t>(thread) << 48)};
-        std::size_t const yields = uniform_below<u32_t> {64}(draw) == 0 ? 4096 : 1;
+        split_mix_generator_t draw {reinterpret_cast<util::u64_t>(watched) ^ static_cast<util::u64_t>(observed) ^
+                                    (static_cast<util::u64_t>(thread) << 48)};
+        std::size_t const yields = util::uniform_below<util::u32_t> {64}(draw) == 0 ? 4096 : 1;
         for (std::size_t yielded = 0; yielded != yields; ++yielded) std::this_thread::yield();
     }
 };
@@ -1120,15 +1129,31 @@ template <typename real_type_>
 struct uniform_between;
 
 template <>
-struct uniform_between<f64_t> {
-    f64_t lower = 0, upper = 1;
+struct uniform_between<util::f64_t> {
+    util::f64_t lower = 0, upper = 1;
 
     /** One draw from the top 53 random bits, the double's whole mantissa. */
     template <typename generator_type_>
-    constexpr f64_t operator()(generator_type_& generator) const noexcept {
-        return lower + static_cast<f64_t>(generator() >> 11) * 0x1p-53 * (upper - lower);
+    constexpr util::f64_t operator()(generator_type_& generator) const noexcept {
+        return lower + static_cast<util::f64_t>(generator() >> 11) * 0x1p-53 * (upper - lower);
     }
 };
+
+/** Factory function to allocate zeroed vectors, aborting on exhaustion. */
+template <typename type_>
+[[nodiscard]] nk::vector<type_> make_vector(std::size_t count) {
+    auto [made, status] = nk::vector<type_>::zeros(count);
+    if (nk::failed(status)) std::abort();
+    return std::move(made);
+}
+
+/** Factory function to allocate zeroed row-major matrices, aborting on exhaustion. */
+template <typename type_>
+[[nodiscard]] nk::matrix<type_> make_matrix(std::size_t rows, std::size_t columns) {
+    auto [made, status] = nk::matrix<type_>::zeros({rows, columns});
+    if (nk::failed(status)) std::abort();
+    return std::move(made);
+}
 
 /** Builds binary vectors as sign sketches of points in a small latent space: bit @c b of a row
  *  is the side of the @c b-th random hyperplane its point falls on, the way binary embeddings
@@ -1136,52 +1161,49 @@ struct uniform_between<f64_t> {
  *  where independent bits - or clusters of independently flipped ones - leave every pair
  *  near-equidistant and no walk can navigate. Eight latent dimensions keep neighboring rows
  *  distinct at the scenarios' row counts. */
-template <typename scalar_, typename allocator_type_ = nk::aligned_allocator<scalar_>>
-nk::matrix<scalar_, allocator_type_> make_sketched_vectors(std::size_t count, std::size_t dimensions, u64_t seed,
-                                                           allocator_type_ allocator = {}) {
+template <typename scalar_>
+nk::matrix<scalar_> make_sketched_vectors(std::size_t count, std::size_t dimensions, util::u64_t seed) {
     constexpr std::size_t latent_dimensions_k = 8;
-    // One set of hyperplanes for every call, as one embedding model serves every batch: slices drawn under
-    // different seeds, like the concurrent builds', still fall in one sketch space.
-    split_mix_generator_t hyperplanes_generator {0x5E7C4ull}, points_generator {seed};
-    uniform_between<f64_t> const centered {-1, 1};
-    auto hyperplanes = nk::matrix<f64_t>::zeros({dimensions, latent_dimensions_k}).value;
-    for (std::size_t dimension = 0; dimension != dimensions; ++dimension)
-        for (std::size_t latent = 0; latent != latent_dimensions_k; ++latent)
-            hyperplanes(dimension, latent) = centered(hyperplanes_generator);
-    auto made = nk::matrix<scalar_, allocator_type_>::zeros({count, dimensions}, allocator);
-    std::array<f64_t, latent_dimensions_k> point;
+    split_mix_generator_t points_generator {seed};
+    uniform_between<util::f64_t> const centered {-1, 1};
+    auto [made, status] = nk::matrix<scalar_>::zeros({count, dimensions});
+    if (nk::failed(status)) std::abort();
+    std::array<util::f64_t, latent_dimensions_k> point;
     // Filled before the move, as in `make_vectors`, past the same MSVC 14.51 `/O2` miscompile.
-    for (auto row : made.value.rows()) {
-        for (f64_t& coordinate : point) coordinate = centered(points_generator);
+    for (auto row : made.rows()) {
+        for (util::f64_t& coordinate : point) coordinate = centered(points_generator);
+        // One set of hyperplanes for every call, as one embedding model serves every batch: slices
+        // drawn under different seeds, like the concurrent builds', still fall in one sketch space.
+        // Redrawn per row in the same order, so nothing holds them.
+        split_mix_generator_t hyperplanes_generator {0x5E7C4ull};
         auto bits = row.as_vector();
         for (std::size_t dimension = 0; dimension != dimensions; ++dimension) {
-            f64_t side = 0;
+            util::f64_t side = 0;
             for (std::size_t latent = 0; latent != latent_dimensions_k; ++latent)
-                side += hyperplanes(dimension, latent) * point[latent];
+                side += centered(hyperplanes_generator) * point[latent];
             bits[dimension] = make_scalar<scalar_>(side > 0);
         }
     }
-    return std::move(made.value);
+    return std::move(made);
 }
 
 /** Fills a row-major matrix with pseudo-random small values from {0..7}, exactly
  *  representable in every supported scalar type down to i4 nibbles. Binary vectors
  *  route through the sign-sketch generator: their flat draw has no navigable structure. */
-template <typename scalar_, typename allocator_type_ = nk::aligned_allocator<scalar_>>
-nk::matrix<scalar_, allocator_type_> make_vectors(std::size_t count, std::size_t dimensions, u64_t seed,
-                                                  allocator_type_ allocator = {}) {
-    if constexpr (std::is_same_v<scalar_, nk::u1x8_t>)
-        return make_sketched_vectors<scalar_>(count, dimensions, seed, allocator);
-    auto made = nk::matrix<scalar_, allocator_type_>::zeros({count, dimensions}, allocator);
+template <typename scalar_>
+nk::matrix<scalar_> make_vectors(std::size_t count, std::size_t dimensions, util::u64_t seed) {
+    if constexpr (std::is_same_v<scalar_, nk::u1x8_t>) return make_sketched_vectors<scalar_>(count, dimensions, seed);
+    auto [made, status] = nk::matrix<scalar_>::zeros({count, dimensions});
+    if (nk::failed(status)) std::abort();
     split_mix_generator_t random_generator {seed};
-    uniform_below<u32_t> component_distribution {random_component_levels<scalar_>()};
+    util::uniform_below<util::u32_t> component_distribution {random_component_levels<scalar_>()};
     // Filled before the move: MSVC 14.51 `/O2` reads the moved rank from `rcx`, not `xmm1`.
-    for (auto row : made.value.rows()) {
+    for (auto row : made.rows()) {
         auto values = row.as_vector();
         for (std::size_t dimension = 0; dimension != dimensions; ++dimension)
             values[dimension] = make_scalar<scalar_>(component_distribution(random_generator));
     }
-    return std::move(made.value);
+    return std::move(made);
 }
 
 /** A cursor over the sharded @p indexes, pulled @p chunk keys at a time, yields each of its
@@ -1193,18 +1215,19 @@ void expect_sharded_cursor(indexes_type_& indexes, typename indexes_type_::key_t
     using key_t = typename indexes_type_::key_t;
     using cursor_t = typename indexes_type_::cursor_t;
     for (std::span<key_t const> const starts : {std::span<key_t const> {}, std::span<key_t const> {&start, 1}}) {
-        growing_arena<forkunion_allocator_t> arena {forkunion_allocator_t {no_memory_domain_k}};
+        util::growing_arena<util::forkunion_allocator_t> arena {util::forkunion_allocator_t {util::no_memory_domain_k}};
         typename cursor_t::links_allocator_t const links_allocator {arena};
         typename cursor_t::links_keys_t links {links_allocator};
         typename cursor_t::links_offsets_t offsets {links_allocator};
-        cursor_t cursor {forkunion_allocator_t {no_memory_domain_k}};
-        expect_equal(cursor.open(indexes, starts), status_t::success_k);
-        std::vector<key_t> pulled_keys(chunk), pulled;
+        cursor_t cursor {util::forkunion_allocator_t {util::no_memory_domain_k}};
+        expect_equal(cursor.open(indexes, starts), util::status_code_t::success_k);
+        nk::vector<key_t> pulled_keys = make_vector<key_t>(chunk);
+        std::vector<key_t> pulled;
         while (true) {
-            auto const [read, status] = cursor.pull(indexes, std::span {pulled_keys}, &links, &offsets);
-            expect_equal(status, status_t::success_k);
+            auto const [read, status] = cursor.pull(indexes, util::to_writable_span(pulled_keys), &links, &offsets);
+            expect_equal(status, util::status_code_t::success_k);
             if (!read || failed(status)) break;
-            pulled.insert(pulled.end(), pulled_keys.begin(), pulled_keys.begin() + read);
+            pulled.insert(pulled.end(), pulled_keys.data(), pulled_keys.data() + read);
         }
         std::size_t repeated = 0, foreign = 0;
         for (auto yielded = pulled.begin(); yielded != pulled.end(); ++yielded)
@@ -1246,7 +1269,7 @@ void run_sequence_cases();
 /** The sequence VRAM cases on @p device , of the vendor of @p executor_type_ , which each
  *  vendor's units specialize. */
 template <typename executor_type_>
-void run_sequence_vram_cases(gpu_device_t const& device);
+void run_sequence_vram_cases(util::gpu_device_t const& device);
 } // namespace sequence
 
 namespace shapes {
@@ -1255,7 +1278,7 @@ void run_shapes_cases();
 /** The shapes VRAM cases on @p device , of the vendor of @p executor_type_ , which each vendor's
  *  units specialize. */
 template <typename executor_type_>
-void run_shapes_vram_cases(gpu_device_t const& device);
+void run_shapes_vram_cases(util::gpu_device_t const& device);
 } // namespace shapes
 
 namespace geospatial {
@@ -1264,7 +1287,7 @@ void run_geospatial_cases();
 /** The geospatial VRAM cases on @p device , of the vendor of @p executor_type_ , which each
  *  vendor's units specialize. */
 template <typename executor_type_>
-void run_geospatial_vram_cases(gpu_device_t const& device);
+void run_geospatial_vram_cases(util::gpu_device_t const& device);
 } // namespace geospatial
 
 /** The suites over the C interface, each sweeping its modality's diagonal, and the checks every
@@ -1304,9 +1327,9 @@ inline bool equivalent_matches(copied_matches_t const& first, copied_matches_t c
 
 /** Whether the files at @p first and @p second both open and hold the same bytes. */
 inline bool same_file_bytes(std::string_view first, std::string_view second) {
-    auto [first_file, first_status] = mapped_file_t::read(first);
-    auto [second_file, second_status] = mapped_file_t::read(second);
-    return succeeded(first_status) && succeeded(second_status) &&
+    auto [first_file, first_status] = util::mapped_file_t::read(first);
+    auto [second_file, second_status] = util::mapped_file_t::read(second);
+    return util::succeeded(first_status) && util::succeeded(second_status) &&
            std::ranges::equal(first_file.view(), second_file.view());
 }
 
@@ -1359,7 +1382,7 @@ void expect_checkpoint_round_trip(handle<verbs_type_>& index, std::string_view s
             if (!equivalent && reloaded.scores.size() == original_matches.scores.size()) {
                 double widest = 0;
                 for (std::size_t match = 0; match != reloaded.scores.size(); ++match)
-                    widest = max_of(widest, std::fabs(reloaded.scores[match] - original_matches.scores[match]));
+                    widest = util::max_of(widest, std::fabs(reloaded.scores[match] - original_matches.scores[match]));
                 fmt::println(stderr, "  a reloaded score moved {:.3g} against a band of {:.3g}", widest, score_band);
             }
             expect_true(equivalent);
@@ -1497,19 +1520,20 @@ void expect_hints(handle<verbs_type_>& index, typename verbs_type_::queries_t qu
                                        usearch_traversal_walk_k, stats, found)))
         return;
     st::vector<std::size_t> const offsets = match_offsets(found);
-    std::vector<usearch_key_t> keys(2 * count);
-    std::vector<std::size_t> const counts(count, 2);
+    nk::matrix<usearch_key_t> keys = make_matrix<usearch_key_t>(count, 2);
+    nk::vector<std::size_t> counts = make_vector<std::size_t>(count);
+    std::fill_n(counts.data(), count, 2);
     for (std::size_t query = 0; query != count; ++query) {
-        keys[2 * query] = std::bit_cast<usearch_key_t>(found.keys[offsets[query]]);
-        keys[2 * query + 1] = key_of_offset(index.session->seed, (std::numeric_limits<u64_t>::max)() - query);
+        keys(query, 0) = std::bit_cast<usearch_key_t>(found.keys[offsets[query]]);
+        keys(query, 1) = key_of_offset(index.session->seed, (std::numeric_limits<util::u64_t>::max)() - query);
     }
     usearch_matches_view_t const hints {keys.data(), nullptr, counts.data(), 2};
     copied_matches_t hinted;
     usearch_traversal_stats_t hinted_stats {};
     // Several batches, so each takes its own rows of the hints.
-    usearch_outcome_t const outcome = search_queries(index, queries, count, divide_round_up<std::size_t>(count, 4),
-                                                     cell_wanted_k, expansion, usearch_traversal_walk_k, hinted_stats,
-                                                     hinted, &hints);
+    usearch_outcome_t const outcome = search_queries(index, queries, count,
+                                                     util::divide_round_up<std::size_t>(count, 4), cell_wanted_k,
+                                                     expansion, usearch_traversal_walk_k, hinted_stats, hinted, &hints);
     if (accepted != usearch_status_success_k) return void(expect_status(outcome, accepted));
     if (!expect_success(outcome)) return;
     st::vector<std::size_t> const hinted_offsets = match_offsets(hinted);
@@ -1519,7 +1543,7 @@ void expect_hints(handle<verbs_type_>& index, typename verbs_type_::queries_t qu
     // A warm second call, its scratch already sized, ranks alike.
     copied_matches_t warm;
     usearch_traversal_stats_t warm_stats {};
-    expect_success(search_queries(index, queries, count, divide_round_up<std::size_t>(count, 4), cell_wanted_k,
+    expect_success(search_queries(index, queries, count, util::divide_round_up<std::size_t>(count, 4), cell_wanted_k,
                                   expansion, usearch_traversal_walk_k, warm_stats, warm, &hints));
     expect_true(std::ranges::equal(warm.counts, hinted.counts) && warm_stats.missing_hints == count);
     expect_true(hinted_stats.missing_hints == count);
@@ -1558,15 +1582,15 @@ void expect_cursor(handle<verbs_type_>& index, std::size_t count) {
                                      &written, &outcome);
             expect_success(outcome);
             if (outcome.status != usearch_status_success_k || !written) break;
-            std::vector<usearch_key_t> batch(written);
-            std::vector<std::size_t> offsets(written + 1);
+            nk::vector<usearch_key_t> batch = make_vector<usearch_key_t>(written);
+            nk::vector<std::size_t> offsets = make_vector<std::size_t>(written + 1);
             expect_true(download(batch.data(), keys.data, written * sizeof(usearch_key_t)));
             expect_true(download(offsets.data(), links.offsets, offsets.size() * sizeof(std::size_t)));
-            std::vector<usearch_key_t> linked(offsets.back());
+            nk::vector<usearch_key_t> linked = make_vector<usearch_key_t>(offsets[written]);
             expect_true(download(linked.data(), links.keys, linked.size() * sizeof(usearch_key_t)));
             if (!pulled && !starts.empty()) started = same_key(batch[0], start);
             for (std::size_t entry = 0; entry != written; ++entry) {
-                std::optional<u64_t> const offset = offset_of_key(index.session->seed, batch[entry]);
+                std::optional<util::u64_t> const offset = offset_of_key(index.session->seed, batch[entry]);
                 unminted += !offset || *offset >= count;
                 if (offset && *offset < count) repeated += yielded[*offset], yielded[*offset] = true;
                 unordered += offsets[entry] > offsets[entry + 1];
@@ -1589,7 +1613,7 @@ void expect_cursor(handle<verbs_type_>& index, std::size_t count) {
  *  and an equal seed draws the same keys again; a GPU index refuses it and says why. */
 template <typename verbs_type_>
 void expect_sample(handle<verbs_type_>& index, std::size_t count) {
-    std::size_t const wanted = min_of(cell_wanted_k, count);
+    std::size_t const wanted = util::min_of(cell_wanted_k, count);
     std::array<std::vector<usearch_key_t>, 2> drawn;
     for (std::vector<usearch_key_t>& keys : drawn) {
         usearch_outcome_t outcome {};
@@ -1601,25 +1625,27 @@ void expect_sample(handle<verbs_type_>& index, std::size_t count) {
         if (!expect_success(outcome)) return;
         expect_true(outputs.written == wanted);
         keys.resize(outputs.written);
-        std::vector<std::size_t> ordinals(outputs.written), parented(outputs.written);
-        std::vector<usearch_key_t> parents(outputs.written * outputs.parents.columns);
-        std::vector<f32_t> coordinates(outputs.written * outputs.coordinates.stride / sizeof(f32_t));
+        nk::vector<std::size_t> ordinals = make_vector<std::size_t>(outputs.written);
+        nk::vector<std::size_t> parented = make_vector<std::size_t>(outputs.written);
+        nk::matrix<usearch_key_t> parents = make_matrix<usearch_key_t>(outputs.written, outputs.parents.columns);
+        nk::matrix<util::f32_t> coordinates = make_matrix<util::f32_t>(
+            outputs.written, outputs.coordinates.stride / sizeof(util::f32_t));
         expect_true(download(keys.data(), outputs.keys.data, keys.size() * sizeof(usearch_key_t)));
         expect_true(download(ordinals.data(), outputs.entry_ordinals, ordinals.size() * sizeof(std::size_t)));
         expect_true(download(parented.data(), outputs.parents.counts, parented.size() * sizeof(std::size_t)));
         expect_true(download(parents.data(), outputs.parents.keys, parents.size() * sizeof(usearch_key_t)));
-        expect_true(download(coordinates.data(), outputs.coordinates.data, coordinates.size() * sizeof(f32_t)));
+        expect_true(download(coordinates.data(), outputs.coordinates.data, coordinates.size() * sizeof(util::f32_t)));
         auto const drawn_before = [&](usearch_key_t const& key, std::size_t draw) {
             return std::any_of(keys.begin(), keys.begin() + draw,
                                [&](usearch_key_t const& earlier) { return same_key(earlier, key); });
         };
         std::size_t misdrawn = 0;
         for (std::size_t draw = 0; draw != keys.size(); ++draw) {
-            std::optional<u64_t> const offset = offset_of_key(index.session->seed, keys[draw]);
+            std::optional<util::u64_t> const offset = offset_of_key(index.session->seed, keys[draw]);
             misdrawn += !offset || *offset >= count || ordinals[draw] != 0 || drawn_before(keys[draw], draw);
-            misdrawn += parented[draw] && !drawn_before(parents[draw * outputs.parents.columns], draw);
-            f32_t const* const point = coordinates.data() + draw * outputs.coordinates.stride / sizeof(f32_t);
-            misdrawn += !std::isfinite(point[0]) || !std::isfinite(point[1]) || !std::isfinite(point[2]);
+            misdrawn += parented[draw] && !drawn_before(parents(draw, 0), draw);
+            misdrawn += !std::isfinite(coordinates(draw, 0)) || !std::isfinite(coordinates(draw, 1)) ||
+                        !std::isfinite(coordinates(draw, 2));
         }
         expect_true(misdrawn == 0);
     }
@@ -1765,7 +1791,7 @@ template <typename verbs_type_>
 void test_metric_names() {
     using metric_t = typename verbs_type_::metric_t;
     std::size_t spelled = 0, misread = 0;
-    for (u32_t kind = 1; std::string_view {verbs_type_::metric_name(static_cast<metric_t>(kind))} != "unknown";
+    for (util::u32_t kind = 1; std::string_view {verbs_type_::metric_name(static_cast<metric_t>(kind))} != "unknown";
          ++kind) {
         metric_t const metric = static_cast<metric_t>(kind);
         metric_t parsed {};
@@ -1869,7 +1895,7 @@ void expect_refined(handle<verbs_type_>& index, typename verbs_type_::queries_t 
     expect_success(walk_recall(index, queries, count, breadth, oracle, recall_after, &spent_after));
     while (recall_after < recall_before && spent_after.computed_distances < spent_before.computed_distances &&
            breadth < 2 * expansion) {
-        breadth += max_of<std::size_t>(expansion / 8, 1);
+        breadth += util::max_of<std::size_t>(expansion / 8, 1);
         expect_success(walk_recall(index, queries, count, breadth, oracle, recall_after, &spent_after));
     }
     if (recall_after < recall_before)

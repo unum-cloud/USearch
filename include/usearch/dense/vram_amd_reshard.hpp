@@ -168,8 +168,8 @@ struct [[nodiscard]] vram_amd_reshard_plan {
     status_t run(device_executor_t& device_executor, host_executor_t& host_executor,
                  std::span<traversal_context_t> traversals, progress_type_&& on_visited = {}) noexcept {
         ram_indexes_t* const target = refining_.owner_;
-        if (!target) return status_t::uninitialized_k;
-        if (host_executor.size() != traversals.size()) return status_t::config_mismatch_k;
+        if (!target) return status_code_t::uninitialized_k;
+        if (host_executor.size() != traversals.size()) return status_code_t::config_mismatch_k;
         auto [device_claim, device_status] = device_executor.claim();
         if (failed(device_status)) return device_status;
         auto [host_claim, host_status] = host_executor.claim();
@@ -179,7 +179,7 @@ struct [[nodiscard]] vram_amd_reshard_plan {
             return copied;
         // The fold linked every bin, so each target shard's round runs in `finish`.
         if (refining_.shard_plans_.empty()) return refining_.open_shards_();
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /**
@@ -196,7 +196,7 @@ struct [[nodiscard]] vram_amd_reshard_plan {
     expected<result_t> finish(host_executor_t& host_executor, std::span<traversal_context_t> traversals) noexcept {
         result_t result;
         ram_indexes_t* const target = refining_.owner_;
-        if (!target) return {result, status_t::uninitialized_k};
+        if (!target) return {result, status_code_t::uninitialized_k};
         result.source_shards = moves_.size();
         result.moved_entries = moved_entries_;
         release_sources_();
@@ -316,19 +316,19 @@ struct [[nodiscard]] vram_amd_reshard_plan {
                                                  device_executor_t& device_executor,
                                                  host_executor_t const& host_executor,
                                                  reshard_config_t const& config) noexcept {
-        if (sources.empty()) return {{}, status_t::invalid_argument_k};
+        if (sources.empty()) return {{}, status_code_t::invalid_argument_k};
         for (std::size_t position = 0; position != sources.size(); ++position) {
-            if (!sources[position]) return {{}, status_t::invalid_argument_k};
+            if (!sources[position]) return {{}, status_code_t::invalid_argument_k};
             for (std::size_t earlier = 0; earlier != position; ++earlier)
-                if (sources[earlier] == sources[position]) return {{}, status_t::invalid_argument_k};
+                if (sources[earlier] == sources[position]) return {{}, status_code_t::invalid_argument_k};
         }
-        if (!target.shards_count() || !host_executor.size()) return {{}, status_t::uninitialized_k};
+        if (!target.shards_count() || !host_executor.size()) return {{}, status_code_t::uninitialized_k};
         vram_indexes_t const* shaped = sources.front();
         for (std::size_t position = 0; position != sources.size(); ++position) {
             vram_indexes_t const* source = sources[position];
             if (source->kernel() != target.kernel() || source->dimensions() != target.dimensions() ||
                 source->connectivity() != target.connectivity())
-                return {{}, status_t::config_mismatch_k};
+                return {{}, status_code_t::config_mismatch_k};
             if (status_t const kept = source->status(); failed(kept)) return {{}, kept};
             if (status_t const paired = fanout_t::pairs_with(source->shards_, device_executor); failed(paired))
                 return {{}, paired};
@@ -346,7 +346,7 @@ struct [[nodiscard]] vram_amd_reshard_plan {
         refining.config_.expansion_factor = config.refine.expansion_factor;
         refining.config_.cache_bytes = config.refine.cache_bytes ? config.refine.cache_bytes
                                                                  : host_executor.cache_bytes_per_core();
-        if (failed(plan.sources_.reserve_exactly(sources.size()))) return {{}, status_t::bad_alloc_k};
+        if (failed(plan.sources_.reserve_exactly(sources.size()))) return {{}, status_code_t::out_of_memory_k};
         for (std::size_t closing = 0; closing != sources.size(); ++closing)
             if (status_t const closed = sources[closing]->close_gated_(); failed(closed)) {
                 while (closing) sources[--closing]->shards_.reopen();
@@ -360,7 +360,7 @@ struct [[nodiscard]] vram_amd_reshard_plan {
             count += source->shards_.size();
             plan.moved_entries_ += source->size();
         }
-        if (failed(plan.moves_.resize(count))) return {{}, status_t::bad_alloc_k};
+        if (failed(plan.moves_.resize(count))) return {{}, status_code_t::out_of_memory_k};
         auto source_shard = [&](std::size_t from) noexcept -> vram_shard_t const& { return plan.shard_at_(from); };
         auto open = [&]() noexcept {
             // The target is sealed, so the shard generation opens closed like the rest, past the
@@ -375,10 +375,10 @@ struct [[nodiscard]] vram_amd_reshard_plan {
             return {{}, packed};
         std::size_t const shards = target.shards_.size();
         if (failed(refining.shard_plans_.reserve_exactly(shards)) || failed(refining.cursors_.resize(shards)))
-            return {{}, status_t::bad_alloc_k};
+            return {{}, status_code_t::out_of_memory_k};
         if (status_t const binned = plan.cut_bins_(shards); failed(binned)) return {{}, binned};
         if (status_t const opened = plan.open_folds_(device_executor, *shaped); failed(opened)) return {{}, opened};
-        return {std::move(plan), status_t::success_k};
+        return {std::move(plan), status_code_t::success_k};
     }
 
     /** Cuts the moves into bins: every source's non-empty shards going into one of the @p shards
@@ -388,7 +388,7 @@ struct [[nodiscard]] vram_amd_reshard_plan {
     status_t cut_bins_(std::size_t shards) noexcept {
         std::size_t const count = moves_.size();
         if (failed(members_.reserve_exactly(count)) || failed(bins_.reserve_exactly(count)))
-            return status_t::bad_alloc_k;
+            return status_code_t::out_of_memory_k;
         std::size_t first = 0;
         for (vram_indexes_t const* source : sources_) {
             std::size_t const source_shards = source->shards_.size(), connectivity = source->connectivity();
@@ -413,7 +413,8 @@ struct [[nodiscard]] vram_amd_reshard_plan {
         for (bin_t const& bin : bins_)
             staged_bytes = max_of(staged_bytes,
                                   bin_rows_(bin) * staged_row_bytes_(*shard_at_(members_[bin.first]).index));
-        return failed(columns_.resize_uninitialized(staged_bytes)) ? status_t::bad_alloc_k : status_t::success_k;
+        return failed(columns_.resize_uninitialized(staged_bytes)) ? status_code_t::out_of_memory_k
+                                                                   : status_code_t::success_k;
     }
 
     /**
@@ -435,7 +436,7 @@ struct [[nodiscard]] vram_amd_reshard_plan {
         if (failed(folds_.reserve_exactly(states)) || failed(bin_tables_.resize(states)) ||
             failed(fold_tables_.resize(states)) || failed(arenas_.reserve_exactly(states)) ||
             failed(walks_.reserve_exactly(states)))
-            return status_t::bad_alloc_k;
+            return status_code_t::out_of_memory_k;
         std::size_t const connectivity = shaped.connectivity();
         for (bin_t const& bin : bins_) {
             if (bin.count == 1) continue;
@@ -443,7 +444,7 @@ struct [[nodiscard]] vram_amd_reshard_plan {
             for (std::size_t member = bin.first; member != bin.first + bin.count; ++member) {
                 std::size_t const device = static_cast<std::size_t>(
                     shard_at_(members_[member]).index->device_specs().ordinal);
-                if (device >= devices.size()) return status_t::config_mismatch_k;
+                if (device >= devices.size()) return status_code_t::config_mismatch_k;
                 devices[device] = true;
             }
             std::size_t const rows = bin_rows_(bin);
@@ -458,7 +459,7 @@ struct [[nodiscard]] vram_amd_reshard_plan {
                 int const device = index.device_specs().ordinal;
                 // Every device of the bin scores this member's vectors and norms.
                 if (status_t const granted = index.grant_(devices); failed(granted)) return granted;
-                if (failed(hip_vendor_t::select(index.api(), device))) return status_t::device_error_k;
+                if (failed(hip_vendor_t::select(index.api(), device))) return status_code_t::device_k;
                 // The member's searches by the bin's other rows, then the fold's slices, if shared
                 // memory cannot hold them.
                 std::size_t const walk_bytes =
@@ -471,17 +472,18 @@ struct [[nodiscard]] vram_amd_reshard_plan {
                     default_alignment_k;
                 typename device_executor_t::stream_t& stream = stream_at_(device_executor, members_[member]);
                 arenas_.push_back_reserved(typename device_executor_t::arena_t {stream.arena.upstream()});
-                if (failed(arenas_.back().reserve_exactly(walk_bytes))) return status_t::bad_alloc_k;
+                if (failed(arenas_.back().reserve_exactly(walk_bytes))) return status_code_t::out_of_memory_k;
                 walks_.push_back_reserved(
                     walk_context_t {typename walk_context_t::allocator_t {arenas_.back(), stream}});
-                if (!walks_.back()) return status_t::bad_alloc_k;
+                if (!walks_.back()) return status_code_t::out_of_memory_k;
 
                 std::size_t const row_words = own_rows * connectivity;
                 std::size_t const bytes = table_bytes + (3 * row_words + rows - own_rows) * sizeof(u32_t);
                 folds_.push_back_reserved(hip_virtual_memory_allocator<byte_t> {index.api(), device});
                 hip_virtual_memory_allocator<byte_t>& buffer = folds_.back();
                 if (status_t const granted = buffer.grant(devices); failed(granted)) return granted;
-                if (failed(buffer.reserve_range(bytes)) || failed(buffer.commit(bytes))) return status_t::bad_alloc_k;
+                if (failed(buffer.reserve_range(bytes)) || failed(buffer.commit(bytes)))
+                    return status_code_t::out_of_memory_k;
                 vram_flat_storage_t const storage = index.core().storage();
                 u32_t* const neighbors = reinterpret_cast<u32_t*>(buffer.base() + table_bytes);
                 bin_tables_[state] = {storage.vectors, storage.norms, neighbors, static_cast<u32_t>(first),
@@ -491,7 +493,7 @@ struct [[nodiscard]] vram_amd_reshard_plan {
                 first += own_rows;
             }
         }
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** The fold launch of the shard at @p place in @p bin for @p phase, over its copies of the
@@ -513,6 +515,47 @@ struct [[nodiscard]] vram_amd_reshard_plan {
         return fold;
     }
 
+    /** Queues the cross step of member @p place of @p bin: its tables, its empty heads, and its
+     *  searches of every other member on its device, writing the matches into its picks. */
+    status_t queue_cross_(bin_t const& bin, std::size_t place, search_config_t const& search) noexcept {
+        vram_index_t& index = *shard_at_(members_[bin.first + place]).index;
+        std::size_t const connectivity = index.connectivity();
+        walk_context_t& walk = walks_[bin.state + place];
+        vram_bin_shard_t* const bin_shards = reinterpret_cast<vram_bin_shard_t*>(folds_[bin.state + place].base());
+        vram_fold_shard_t* const fold_shards = reinterpret_cast<vram_fold_shard_t*>(bin_shards + bin.count);
+        vram_fold_shard_t const& own = fold_tables_[bin.state + place];
+        std::size_t const heads = bin_rows_(bin) - index.size();
+        if (failed(hip_vendor_t::copy(walk.api(), bin_shards, &bin_tables_[bin.state],
+                                      bin.count * sizeof(vram_bin_shard_t), walk.stream())) ||
+            failed(hip_vendor_t::copy(walk.api(), fold_shards, &fold_tables_[bin.state],
+                                      bin.count * sizeof(vram_fold_shard_t), walk.stream())) ||
+            failed(hip_vendor_t::fill(walk.api(), own.heads, 0xFF, heads * sizeof(u32_t), walk.stream())))
+            return status_code_t::device_k;
+
+        vram_flat_storage_t const storage = index.core().storage();
+        std::size_t const rows = index.size(), row_bytes = index.row_bytes();
+        for (std::size_t other = 0; other != bin.count; ++other) {
+            if (other == place) continue;
+            vram_index_t& searched = *shard_at_(members_[bin.first + other]).index;
+            walk_context_t& searching = walks_[bin.state + other];
+            std::size_t const block = other - (other > place);
+            if (failed(hip_vendor_t::select(searching.api(), searching.device()))) return status_code_t::device_k;
+            for (std::size_t first = 0; first < rows; first += vram_indexes_t::window_rows_k) {
+                std::size_t const window = min_of(vram_indexes_t::window_rows_k, rows - first);
+                rows_view_t const queries {storage.vectors + first * row_bytes, window, index.dimensions(), row_bytes,
+                                           vram_indexes_t::vector_dtype_k};
+                nk::matrix_span<node_id_t> const found {
+                    reinterpret_cast<char*>(own.picks + first * connectivity + block * search.count),
+                    rows_shape_of<node_id_t>(window, connectivity * sizeof(node_id_t), search.count)};
+                if (status_t const searched_status =
+                        searched.search(queries, found, {}, search, searching, completion_t::deferred_k).status;
+                    failed(searched_status))
+                    return searched_status;
+            }
+        }
+        return status_code_t::success_k;
+    }
+
     /** Queues the current step on every folding bin's members: the tables, the empty heads and
      *  every member's searches of the others for the cross step, one fold launch per member for
      *  the others. Stops at the first refusal. */
@@ -524,9 +567,8 @@ struct [[nodiscard]] vram_amd_reshard_plan {
             search.count = cross_count_(bin.count, shard_at_(members_[bin.first]).index->connectivity());
             for (std::size_t place = 0; place != bin.count; ++place) {
                 vram_index_t& index = *shard_at_(members_[bin.first + place]).index;
-                std::size_t const connectivity = index.connectivity();
                 walk_context_t& walk = walks_[bin.state + place];
-                if (failed(hip_vendor_t::select(walk.api(), walk.device()))) return status_t::device_error_k;
+                if (failed(hip_vendor_t::select(walk.api(), walk.device()))) return status_code_t::device_k;
                 if (fold_step_ != fold_step_t::cross_k) {
                     vram_fold_step_t const step = fold_step_ == fold_step_t::reselect_k ? vram_fold_step_t::reselect_k
                                                                                         : vram_fold_step_t::merge_k;
@@ -536,45 +578,10 @@ struct [[nodiscard]] vram_amd_reshard_plan {
                         return launched;
                     continue;
                 }
-                vram_bin_shard_t* const bin_shards = reinterpret_cast<vram_bin_shard_t*>(
-                    folds_[bin.state + place].base());
-                vram_fold_shard_t* const fold_shards = reinterpret_cast<vram_fold_shard_t*>(bin_shards + bin.count);
-                vram_fold_shard_t const& own = fold_tables_[bin.state + place];
-                std::size_t const heads = bin_rows_(bin) - index.size();
-                if (failed(hip_vendor_t::copy(walk.api(), bin_shards, &bin_tables_[bin.state],
-                                              bin.count * sizeof(vram_bin_shard_t), walk.stream())) ||
-                    failed(hip_vendor_t::copy(walk.api(), fold_shards, &fold_tables_[bin.state],
-                                              bin.count * sizeof(vram_fold_shard_t), walk.stream())) ||
-                    failed(hip_vendor_t::fill(walk.api(), own.heads, 0xFF, heads * sizeof(u32_t), walk.stream())))
-                    return status_t::device_error_k;
-
-                // This member's rows search every other member on its device, writing its matches
-                // into its picks.
-                vram_flat_storage_t const storage = index.core().storage();
-                std::size_t const rows = index.size(), row_bytes = index.row_bytes();
-                for (std::size_t other = 0; other != bin.count; ++other) {
-                    if (other == place) continue;
-                    vram_index_t& searched = *shard_at_(members_[bin.first + other]).index;
-                    walk_context_t& searching = walks_[bin.state + other];
-                    std::size_t const block = other - (other > place);
-                    if (failed(hip_vendor_t::select(searching.api(), searching.device())))
-                        return status_t::device_error_k;
-                    for (std::size_t first = 0; first < rows; first += vram_indexes_t::window_rows_k) {
-                        std::size_t const window = min_of(vram_indexes_t::window_rows_k, rows - first);
-                        rows_view_t const queries {storage.vectors + first * row_bytes, window, index.dimensions(),
-                                                   row_bytes, vram_indexes_t::vector_dtype_k};
-                        nk::matrix_span<node_id_t> const found {
-                            reinterpret_cast<char*>(own.picks + first * connectivity + block * search.count),
-                            rows_shape_of<node_id_t>(window, connectivity * sizeof(node_id_t), search.count)};
-                        if (status_t const searched_status =
-                                searched.search(queries, found, {}, search, searching, completion_t::deferred_k).status;
-                            failed(searched_status))
-                            return searched_status;
-                    }
-                }
+                if (status_t const queued = queue_cross_(bin, place, search); failed(queued)) return queued;
             }
         }
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Drives the fold's pending steps, each queued on every folding bin and awaited on every
@@ -588,7 +595,7 @@ struct [[nodiscard]] vram_amd_reshard_plan {
             status_t const queued = queue_step_();
             // Every launch queued so far finishes before anything returns, as the buffers die with
             // the plan.
-            status_t waited = status_t::success_k;
+            status_t waited = status_code_t::success_k;
             for (walk_context_t& walk : walks_)
                 if (status_t const drained = walk.wait(); failed(drained) && succeeded(waited)) waited = drained;
             if (failed(queued) || failed(waited)) {
@@ -609,9 +616,9 @@ struct [[nodiscard]] vram_amd_reshard_plan {
             fold_step_ = static_cast<fold_step_t>(static_cast<u8_t>(fold_step_) + 1);
             if (fold_step_ != fold_step_t::reselect_k &&
                 on_visited(folded_.reselected_nodes, moved_entries_) == continuation_t::cancel_k)
-                return status_t::cancelled_k;
+                return status_code_t::cancelled_k;
         }
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Copies every pending source into @p target, each source's moves the run of them its
@@ -627,7 +634,7 @@ struct [[nodiscard]] vram_amd_reshard_plan {
                 return copied;
             first += count;
         }
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /**
@@ -647,17 +654,18 @@ struct [[nodiscard]] vram_amd_reshard_plan {
     status_t copy_(ram_indexes_t& target, vram_indexes_t& source, std::size_t first, device_executor_t& device_executor,
                    host_executor_t& host_executor) noexcept {
         std::size_t const shards = refining_.cursors_.size();
-        if (!source.size()) return status_t::success_k;
+        if (!source.size()) return status_code_t::success_k;
         std::span<shard_move_t const> const moves = to_span(moves_).subspan(first, source.shards_.size());
         // The source empties once its rows are copied, so its gate comes before anything that a
         // refusal might undo.
         typename vram_indexes_t::unique_lock_t const emptying {source.gate_, std::try_to_lock};
-        if (!emptying) return status_t::contended_k;
+        if (!emptying) return status_code_t::contended_k;
 
         std::size_t const sources = moves.size();
         growing_buffer<ram_load_plan_t, forkunion_allocator_t> plans {target.shards_.allocator()};
         growing_buffer<std::size_t, forkunion_allocator_t> cursors {target.shards_.allocator()};
-        if (failed(plans.reserve_exactly(shards)) || failed(cursors.resize(shards))) return status_t::bad_alloc_k;
+        if (failed(plans.reserve_exactly(shards)) || failed(cursors.resize(shards)))
+            return status_code_t::out_of_memory_k;
         for (std::size_t into = 0; into != shards; ++into) {
             std::size_t rows = 0;
             for (std::size_t from = 0; from != sources; ++from)
@@ -705,7 +713,7 @@ struct [[nodiscard]] vram_amd_reshard_plan {
                                                                 bin_tables_[state].neighbors, staged.neighbors.size(),
                                                                 walks_[state].stream())) ||
                                       failed(walks_[state].wait())))
-                    return status_t::device_error_k;
+                    return status_code_t::device_k;
                 offset += part_rows;
             }
 
@@ -716,11 +724,11 @@ struct [[nodiscard]] vram_amd_reshard_plan {
                 {}};
             auto copy_task = [&](std::size_t shard, typename ram_load_plan_t::task_t const& chunk,
                                  std::size_t) noexcept -> status_t {
-                if (shard != into) return status_t::success_k;
+                if (shard != into) return status_code_t::success_k;
                 typename ram_load_plan_t::task_t task = chunk;
                 task.index_nodes = {max_of(chunk.index_nodes.first, target_nodes.first),
                                     min_of(chunk.index_nodes.bound, target_nodes.bound)};
-                if (task.index_nodes.first >= task.index_nodes.bound) return status_t::success_k;
+                if (task.index_nodes.first >= task.index_nodes.bound) return status_code_t::success_k;
                 task.source_nodes = {static_cast<node_id_t>(task.index_nodes.first - target_nodes.first),
                                      static_cast<node_id_t>(task.index_nodes.bound - target_nodes.first)};
                 auto part_of = [&](std::size_t member) noexcept -> vram_shard_t const& {
@@ -744,10 +752,10 @@ struct [[nodiscard]] vram_amd_reshard_plan {
 
         // Every bin was copied, so no plan refuses, and every run filed its keys as it settled; the
         // bracket shows a search every shard's rows with their keys or none.
-        auto publish = [&]() noexcept {
+        auto publish = [&]() noexcept -> status_t {
             for (ram_load_plan_t& plan : plans)
                 if (status_t const finished = plan.finish(); failed(finished)) return finished;
-            return status_t::success_k;
+            return status_code_t::success_k;
         };
         target.shards_.begin_commit();
         status_t const published = publish();
@@ -756,7 +764,7 @@ struct [[nodiscard]] vram_amd_reshard_plan {
         source.shards_.begin_window();
         source.clear_();
         source.shards_.end_window();
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Reopens every source still pending, each closed at planning; the plan holds none after. */

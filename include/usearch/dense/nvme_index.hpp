@@ -260,7 +260,7 @@ struct nvme_index {
      */
     status_t view(std::string_view path) noexcept {
         release();
-        if (!kernel_supported<quads_kit_t>(kernel_)) return status_t::unknown_kind_k;
+        if (!kernel_supported<quads_kit_t>(kernel_)) return status_code_t::unknown_kind_k;
         return open_part_(path, dtype_t::unknown_k, kernel_, forkunion_allocator_t {}, medium_, part_);
     }
 
@@ -341,7 +341,7 @@ struct nvme_index {
                                      executor_t& executor) noexcept
         requires floating_scalar<scalar_t>
     {
-        if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
+        if (kernel_ != nk_kernel_dot_k) return {{}, status_code_t::config_mismatch_k};
         return search_(queries, heads, executor, config, node_ids, distances, counts);
     }
 
@@ -411,17 +411,17 @@ struct nvme_index {
                 if (status_t const read = read_part_(name_space, key_dtype, kernel, allocator, part); failed(read))
                     return name_space.template release<wait_t>(), read;
                 medium = medium_t {std::move(name_space)};
-                return status_t::success_k;
+                return status_code_t::success_k;
             }
 #endif
-        if (names_transport_id(path)) return status_t::unsupported_k;
-        if constexpr (!std::is_constructible_v<medium_t, file_medium_t&&>) return status_t::config_mismatch_k;
+        if (names_transport_id(path)) return status_code_t::unsupported_k;
+        if constexpr (!std::is_constructible_v<medium_t, file_medium_t&&>) return status_code_t::config_mismatch_k;
         else {
             auto [file, open_status] = file_medium_t::open(path);
             if (failed(open_status)) return open_status;
             if (status_t const read = read_part_(file, key_dtype, kernel, allocator, part); failed(read)) return read;
             medium = medium_t {std::move(file)};
-            return status_t::success_k;
+            return status_code_t::success_k;
         }
     }
 
@@ -437,11 +437,11 @@ struct nvme_index {
         safegraphs_name_t const& metric = persisted.metric;
         nk_kernel_kind_t const named = metric.empty() ? kernel
                                                       : nk_kernel_named(metric.characters, metric.view().size());
-        if (kernel != nk_kernel_unknown_k && named != kernel) return status_t::config_mismatch_k;
+        if (kernel != nk_kernel_unknown_k && named != kernel) return status_code_t::config_mismatch_k;
         if (status_t const derived = part_of_columns_(persisted.columns, key_dtype, part); failed(derived))
             return derived;
         kernel = named;
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Derives @p part from the persisted @p columns of a dense part: values of this index's scalar
@@ -454,11 +454,11 @@ struct nvme_index {
         persisted_column_t const& neighbors = columns.neighbors;
         if (keys.offsets || values.offsets || neighbors.offsets || keys.row_width != 1 || !keys.row_bytes ||
             values.dtype != dtype_of(scalar_t::dtype()) || neighbors.dtype != dtype_t::u32_k)
-            return status_t::config_mismatch_k;
+            return status_code_t::config_mismatch_k;
         if (key_dtype != dtype_t::unknown_k && !safegraphs_key_widens(keys.dtype, key_dtype))
-            return status_t::config_mismatch_k;
+            return status_code_t::config_mismatch_k;
         if (!values.row_width || !neighbors.row_width || columns.nodes >= node_id_unknown_k)
-            return status_t::malformed_k;
+            return status_code_t::malformed_k;
         part.nodes = static_cast<u32_t>(columns.nodes);
         part.dimensions = static_cast<u32_t>(values.row_width);
         part.connectivity = static_cast<u32_t>(neighbors.row_width);
@@ -468,7 +468,7 @@ struct nvme_index {
         part.keys_begin = keys.data.first;
         part.values_begin = values.data.first;
         part.neighbors_begin = neighbors.data.first;
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
 #pragma endregion Opening
@@ -708,8 +708,8 @@ struct nvme_index {
                                                    typename query_type_::inputs_t const& inputs,
                                                    std::size_t staged_bytes, std::span<std::size_t const> counts,
                                                    std::span<u64_t> latencies) noexcept {
-        if (parts.empty()) return {{}, status_t::uninitialized_k};
-        if (!queries_count) return {{}, status_t::success_k};
+        if (parts.empty()) return {{}, status_code_t::uninitialized_k};
+        if (!queries_count) return {{}, status_code_t::success_k};
         std::size_t const queue_depth = nvme_call_depth(executor, media, parts);
         walk_shape_t const shape = walk_shape_<query_type_>(media, parts, kernel, queue_depth, executor.size(),
                                                             queries_count, expansion_factor, staged_bytes);
@@ -750,7 +750,7 @@ struct nvme_index {
         vector_norms_t query_norms {};
 
         node_search_query(inputs_t const& inputs, scratch_allocator_t) noexcept : inputs(inputs) {}
-        status_t reserve(std::size_t, std::size_t) noexcept { return status_t::success_k; }
+        status_t reserve(std::size_t, std::size_t) noexcept { return status_code_t::success_k; }
 
         void prime_query(std::size_t new_query_index) noexcept {
             row = new_query_index;
@@ -776,7 +776,7 @@ struct nvme_index {
         std::size_t output_count() const noexcept { return 0; }
         shard_node_t output_locator(std::size_t) const noexcept { return {}; }
         void resolve_output_key(std::size_t, key_t const&) noexcept {}
-        status_t finish_query() noexcept { return status_t::success_k; }
+        status_t finish_query() noexcept { return status_code_t::success_k; }
     };
 
     /** The batched @ref search under @p heads, or as the kit scores under @c dummy_heads_t. */
@@ -785,12 +785,12 @@ struct nvme_index {
                                       search_config_t config, nk::matrix_span<node_id_t> node_ids,
                                       nk::matrix_span<distance_t> distances, std::span<std::size_t> counts) noexcept {
         std::size_t const queries_count = queries.extent(0);
-        if (!part_.dimensions) return {{}, status_t::uninitialized_k};
-        if (config.traversal != traversal_t::walk_k) return {{}, status_t::unsupported_k};
-        if (counts.size() != queries_count) return {{}, status_t::config_mismatch_k};
+        if (!part_.dimensions) return {{}, status_code_t::uninitialized_k};
+        if (config.traversal != traversal_t::walk_k) return {{}, status_code_t::unsupported_k};
+        if (counts.size() != queries_count) return {{}, status_code_t::config_mismatch_k};
         if (status_t const refusal = rankings_refusal(queries_count, node_ids, distances); failed(refusal))
             return {{}, refusal};
-        if (queries_count && queries.extent(1) != dimensions()) return {{}, status_t::config_mismatch_k};
+        if (queries_count && queries.extent(1) != dimensions()) return {{}, status_code_t::config_mismatch_k};
         using query_t = node_search_query<heads_type_>;
         typename query_t::inputs_t const inputs {queries, &heads, node_ids, distances, counts};
         return walk_queries_<query_t>(std::span<medium_t const>(&medium_, 1), std::span<nvme_part_t const>(&part_, 1),

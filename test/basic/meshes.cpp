@@ -26,6 +26,8 @@
 
 #include "basic.hpp"
 
+namespace util = unum::usearch::utilities;
+
 using namespace unum::usearch;
 using namespace unum::usearch::test;
 
@@ -113,16 +115,16 @@ struct mesh_codec_t {
         return value.points.size() * sizeof(point3_t);
     }
     status_t save(mesh_t const& value, bytes_span_t output) const noexcept {
-        if (output.size() < storage_requirements(value)) return status_t::overflow_k;
+        if (output.size() < storage_requirements(value)) return status_code_t::overflow_k;
         for (std::size_t point = 0; point != value.points.size(); ++point) {
             auto const point_bytes = std::bit_cast<std::array<std::byte, sizeof(point3_t)>>(value.points[point]);
             for (std::size_t position = 0; position != point_bytes.size(); ++position)
                 output[point * sizeof(point3_t) + position] = point_bytes[position];
         }
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
     status_t load(bytes_view_t input, mesh_t& value) const noexcept {
-        if (input.size() % sizeof(point3_t)) return status_t::malformed_k;
+        if (input.size() % sizeof(point3_t)) return status_code_t::malformed_k;
         std::size_t const points_count = input.size() / sizeof(point3_t);
         value.points.clear();
         for (std::size_t point = 0; point != points_count; ++point) {
@@ -132,7 +134,7 @@ struct mesh_codec_t {
             value.points.push_back(std::bit_cast<point3_t>(point_bytes));
         }
         refresh_spectrum(value);
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 };
 
@@ -166,17 +168,16 @@ struct meshes_handmade_t {
 
 template <typename wait_type_ = fu::standard_yield_t>
 struct meshes_fixture {
-    using index_t = ram_index<mesh_t, us::utilities::uuid128_t, u64_t, f64_t, wait_type_, fu::standard_atomic_ref,
-                              counting_allocator_t>;
+    using index_t =
+        ram_index<mesh_t, util::uuid128_t, u64_t, f64_t, wait_type_, fu::standard_atomic_ref, counting_allocator_t>;
 
     static std::unique_ptr<index_t> make_index(allocation_ledger_t& ledger) {
         return std::unique_ptr<index_t>(new (std::nothrow) index_t(counting_allocator_t {ledger}));
     }
     static spectra_metric_t make_metric() { return {}; }
     static mesh_codec_t make_codec() { return {}; }
-    static us::utilities::uuid128_t make_key(std::size_t ordinal) {
-        return std::bit_cast<us::utilities::uuid128_t>(
-            std::array<u64_t, 2> {split_mix_bits(ordinal ^ 0x3D3D3Dull), ordinal});
+    static util::uuid128_t make_key(std::size_t ordinal) {
+        return std::bit_cast<util::uuid128_t>(std::array<u64_t, 2> {split_mix_bits(ordinal ^ 0x3D3D3Dull), ordinal});
     }
     static f64_t oracle(mesh_t const& query, mesh_t const& stored) noexcept {
         return scalar_spectra_distance(query.spectrum, stored.spectrum);

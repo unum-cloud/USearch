@@ -129,7 +129,7 @@ template <typename engine_type_>
 status_t nvme_read_round(engine_type_& engine, std::span<typename engine_type_::medium_t const> media,
                          std::span<nvme_extent_t const> extents, std::span<byte_t const*> bytes) noexcept {
     assert(bytes.size() >= extents.size() && "Every extent lands in a pointer of its own");
-    status_t status = status_t::success_k;
+    status_t status = status_code_t::success_k;
     std::size_t issued = 0;
     for (; issued != extents.size(); ++issued) {
         nvme_extent_t const& extent = extents[issued];
@@ -149,12 +149,16 @@ status_t nvme_read_round(engine_type_& engine, std::span<typename engine_type_::
             typename engine_type_::medium_t const& medium = media[extent.medium];
             u64_t const skipped = (byte_base_of(medium) + extent.begin) % block_bytes_of(medium);
             if (completion[0].result < 0 || static_cast<u64_t>(completion[0].result) < skipped + extent.length)
-                status = status_t::io_k;
+                status = status_code_t::io_k;
             bytes[position] = engine.buffer(completion[0].buffer) + skipped;
         }
     }
     return status;
 }
+
+/** A reader whose medium reports its length, which bounds a header before it sizes a buffer. */
+template <typename source_type_>
+concept measurable_medium = requires(source_type_ const& source) { medium_bytes_of(source); };
 
 /**
  *  @brief Reads the prefix and the header of the part @p source holds, any reader with
@@ -163,22 +167,27 @@ status_t nvme_read_round(engine_type_& engine, std::span<typename engine_type_::
  *  @par Statuses:
  *  - @c malformed_k The prefix cannot be read or carries no monolith's magic.
  *  - @c malformed_k The header cannot be read, or claims more bytes than the medium holds.
+ *  - @c io_k The medium cannot be measured.
  */
 template <typename source_type_, typename allocator_type_>
     requires requires(source_type_ const& source, bytes_span_t bytes) { source.read_at(0, bytes); }
 status_t nvme_read_header(source_type_ const& source, growing_buffer<byte_t, allocator_type_>& header_bytes) noexcept {
     std::array<byte_t, sizeof(safegraphs_prefix_t)> prefix_bytes {};
-    if (status_t const read = source.read_at(0, prefix_bytes); failed(read)) return status_t::malformed_k;
+    if (status_t const read = source.read_at(0, prefix_bytes); failed(read)) return status_code_t::malformed_k;
     safegraphs_prefix_t const prefix = std::bit_cast<safegraphs_prefix_t>(prefix_bytes);
-    if (prefix.magic != safegraphs_prefix_t::magic_k) return status_t::malformed_k;
+    if (prefix.magic != safegraphs_prefix_t::magic_k) return status_code_t::malformed_k;
     std::size_t const header_length = static_cast<std::size_t>(little_endian(prefix.header_length));
     // A damaged length is checked against the medium before it sizes an allocation.
-    if constexpr (requires { medium_bytes_of(source); })
-        if (header_length > medium_bytes_of(source) - sizeof(prefix)) return status_t::malformed_k;
-    if (failed(header_bytes.resize_uninitialized(sizeof(prefix) + header_length))) return status_t::bad_alloc_k;
+    if constexpr (measurable_medium<source_type_>) {
+        auto const [medium_bytes, measure_status] = medium_bytes_of(source);
+        if (failed(measure_status)) return measure_status;
+        if (header_length > medium_bytes - sizeof(prefix)) return status_code_t::malformed_k;
+    }
+    if (failed(header_bytes.resize_uninitialized(sizeof(prefix) + header_length)))
+        return status_code_t::out_of_memory_k;
     if (status_t const read = source.read_at(0, to_writable_span(header_bytes)); failed(read))
-        return status_t::malformed_k;
-    return status_t::success_k;
+        return status_code_t::malformed_k;
+    return status_code_t::success_k;
 }
 
 /**
@@ -204,7 +213,7 @@ status_t nvme_read_header(std::string_view path, growing_buffer<byte_t, allocato
         return read;
     }
 #endif
-    if (names_transport_id(path)) return status_t::unsupported_k;
+    if (names_transport_id(path)) return status_code_t::unsupported_k;
     auto [file, open_status] = file_medium_t::open(path);
     if (failed(open_status)) return open_status;
     return nvme_read_header(file, header_bytes);
@@ -225,7 +234,7 @@ template <typename wait_type_>
 expected<safegraphs_metadata_t> nvme_read_metadata(std::string_view path) noexcept {
     growing_buffer<byte_t, forkunion_allocator_t> header_bytes {global_allocator};
     status_t const read = nvme_read_header<wait_type_>(path, header_bytes);
-    if (read == status_t::malformed_k && !names_transport_id(path)) return safegraphs_read_manifest(path);
+    if (read == status_code_t::malformed_k && !names_transport_id(path)) return safegraphs_read_manifest(path);
     if (failed(read)) return {safegraphs_metadata_t {}, read};
     return safegraphs_read_metadata(to_span(header_bytes));
 }
@@ -254,13 +263,13 @@ inline status_t nvme_join_path_(growing_buffer<char, forkunion_allocator_t>& buf
                                 std::string_view name) noexcept {
     std::size_t const separators = directory.empty() || directory.ends_with('/') || directory.ends_with('\\') ? 0 : 1;
     std::size_t const length = directory.size() + separators + name.size();
-    if (failed(buffer.resize_uninitialized(length + 1))) return status_t::bad_alloc_k;
+    if (failed(buffer.resize_uninitialized(length + 1))) return status_code_t::out_of_memory_k;
     for (std::size_t position = 0; position != directory.size(); ++position) buffer[position] = directory[position];
     if (separators) buffer[directory.size()] = '/';
     for (std::size_t position = 0; position != name.size(); ++position)
         buffer[directory.size() + separators + position] = name[position];
     buffer[length] = '\0';
-    return status_t::success_k;
+    return status_code_t::success_k;
 }
 
 /** Which keys a walk reads besides the value and neighbors rows. */
@@ -309,17 +318,17 @@ class nvme_resident_keys {
      *  @brief Reserves an empty table for every part of @p parts, dropping any held before.
      *
      *  @par Statuses:
-     *  - @c bad_alloc_k A table could not be allocated.
+     *  - @c out_of_memory_k A table could not be allocated.
      */
     template <typename part_type_>
     status_t reserve(std::span<part_type_ const> parts) noexcept {
         parts_.clear();
-        if (failed(parts_.reserve_exactly(parts.size()))) return status_t::bad_alloc_k;
+        if (failed(parts_.reserve_exactly(parts.size()))) return status_code_t::out_of_memory_k;
         for (part_type_ const& part : parts) {
             parts_.push_back_reserved(map_t {allocator_});
-            if (failed(parts_.back().reserve(part.nodes))) return parts_.clear(), status_t::bad_alloc_k;
+            if (failed(parts_.back().reserve(part.nodes))) return parts_.clear(), status_code_t::out_of_memory_k;
         }
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Files @p node of part @p part under the fingerprint of @p key, while other threads file. */
@@ -648,7 +657,7 @@ class query_walker {
         io_completion_t* const completions = carve_<io_completion_t>(shape_.buffers);
         if (!walk_slots || !query_slots || !slot_states || !flight_states || !free_flights || !hop_flights ||
             !backlog || !completions)
-            return status_t::bad_alloc_k;
+            return status_code_t::out_of_memory_k;
 
         scratch_allocator_t const allocator {arena_};
         nvme_queue_sizes_t const queue_sizes = shape_.queue_sizes;
@@ -660,10 +669,10 @@ class query_walker {
                 failed(constructed.frontier.reserve(queue_sizes.frontier)) ||
                 failed(constructed.visited.reserve(queue_sizes.visited)) ||
                 (query_t::admitting_k && failed(constructed.admitted.reserve(queue_sizes.results))))
-                return status_t::bad_alloc_k;
+                return status_code_t::out_of_memory_k;
             if constexpr (requires { constructed.seed_slots; }) {
                 nvme_seed<node_id_t>* const seed_slots = carve_<nvme_seed<node_id_t>>(landmarks);
-                if (!seed_slots) return status_t::bad_alloc_k;
+                if (!seed_slots) return status_code_t::out_of_memory_k;
                 constructed.seed_slots = {seed_slots, landmarks};
             }
         }
@@ -685,7 +694,7 @@ class query_walker {
         completions_ = {completions, shape_.buffers};
         if constexpr (query_t::admitting_k)
             return reserve_predicate(thread_predicate(*inputs_.predicate, thread_), flights);
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Primes queries until the batch runs out, keeping every slot's walks in flight, and drains
@@ -758,13 +767,14 @@ class query_walker {
                                                std::span<std::size_t const> counts, std::span<u64_t> latencies,
                                                std::size_t line_bytes = default_alignment_k) noexcept {
         search_result_t merged;
-        if (!latencies.empty() && latencies.size() != shape.queries_count) return {merged, status_t::config_mismatch_k};
+        if (!latencies.empty() && latencies.size() != shape.queries_count)
+            return {merged, status_code_t::config_mismatch_k};
         alignas(default_alignment_k) std::size_t cursor = 0;
-        status_t failure = status_t::success_k;
+        status_t failure = status_code_t::success_k;
         shape.cursor = &cursor;
         shape.failure = &failure;
         shape.latencies = latencies;
-        status_t refusal = status_t::success_k;
+        status_t refusal = status_code_t::success_k;
         auto add = [](std::size_t& into, std::size_t value) noexcept {
             atomic_ref<std::size_t>(into).store_add(value, std::memory_order_relaxed);
         };
@@ -801,7 +811,8 @@ class query_walker {
     }
 
     status_t shared_failure_() const noexcept {
-        return atomic_ref<status_t>(*shape_.failure).load(std::memory_order_relaxed);
+        status_code_t const code = atomic_ref<status_code_t>(shape_.failure->code).load(std::memory_order_relaxed);
+        return {code, atomic_ref<char const*>(shape_.failure->note).load(std::memory_order_acquire)};
     }
 
     bool exhausted_() const noexcept {
@@ -888,10 +899,10 @@ class query_walker {
     void enqueue_backlog_() noexcept {
         while (backlog_size_) {
             status_t const enqueued = engine_.enqueue_read(backlog_[backlog_size_ - 1]);
-            if (enqueued == status_t::overflow_k && outstanding_) return;
+            if (enqueued == status_code_t::overflow_k && outstanding_) return;
             // A full engine holding none of this thread's reads would never drain, so the
             // thread fails instead.
-            if (failed(enqueued)) return fail(enqueued == status_t::overflow_k ? status_t::io_k : enqueued);
+            if (failed(enqueued)) return fail(enqueued == status_code_t::overflow_k ? status_code_t::io_k : enqueued);
             --backlog_size_;
             ++outstanding_;
         }
@@ -1024,7 +1035,8 @@ class query_walker {
         nvme_purpose_t const purpose = completion.buffer == flight_index ? flight.purpose : nvme_purpose_t::key_k;
         u64_t const row_begin = row_begin_(flight, purpose);
         u64_t const needed = row_begin % block_bytes_of(media_[shard_of_(flight)]) + row_bytes_(flight, purpose);
-        if (completion.result < 0 || static_cast<u64_t>(completion.result) < needed) return fail(status_t::io_k), false;
+        if (completion.result < 0 || static_cast<u64_t>(completion.result) < needed)
+            return fail(status_code_t::io_k), false;
         if (--flight.reads_left) return false;
         switch (flight.purpose) {
         case nvme_purpose_t::score_k: {
@@ -1310,10 +1322,10 @@ class query_walker {
     search_result_t telemetry_;
 
     /** The read failure that stops this thread. */
-    status_t failure_ = status_t::success_k;
+    status_t failure_ = status_code_t::success_k;
 
     /** The first query that refused, which leaves the other queries standing. */
-    status_t refusal_ = status_t::success_k;
+    status_t refusal_ = status_code_t::success_k;
 };
 
 #pragma endregion Walks
@@ -1392,7 +1404,7 @@ struct nvme_scan_lane {
     u32_t* free_slots = nullptr;
     io_completion_t* completions = nullptr;
 
-    status_t local = status_t::success_k;
+    status_t local = status_code_t::success_k;
     std::size_t free_count = 0, outstanding = 0;
     std::size_t task = unclaimed_k;
     u64_t progress = 0;
@@ -1422,7 +1434,8 @@ struct nvme_scan_lane {
     /** Enqueues reads until the engine is full, every slot is busy, the tasks ran out, or a thread
      *  failed. */
     void issue() noexcept {
-        while (succeeded(local) && succeeded(atomic_ref<status_t const>(failure).load(std::memory_order_relaxed))) {
+        while (succeeded(local) &&
+               succeeded(atomic_ref<status_code_t const>(failure.code).load(std::memory_order_relaxed))) {
             if (issuing == depth) {
                 if (!free_count || !claim()) return;
                 if (!describe_slot()) continue;
@@ -1463,9 +1476,10 @@ struct nvme_scan_lane {
                                                         static_cast<io_buffer_id_t>(issuing + next_read * depth), 0);
         slot.offsets[next_read] = begin - request.offset;
         status_t const enqueued = engine.enqueue_read(request);
-        if (enqueued == status_t::overflow_k && outstanding) return false;
+        if (enqueued == status_code_t::overflow_k && outstanding) return false;
         // A full engine holding none of this thread's reads would never drain, so it fails instead.
-        if (failed(enqueued)) return local = enqueued == status_t::overflow_k ? status_t::io_k : enqueued, false;
+        if (failed(enqueued))
+            return local = enqueued == status_code_t::overflow_k ? status_code_t::io_k : enqueued, false;
         reads += nvme_reads_t {1, request.length};
         ++outstanding;
         if (++next_read == reads_per_task_) issuing = depth;
@@ -1480,7 +1494,7 @@ struct nvme_scan_lane {
         slot_t& slot = slots[slot_index];
         u64_t const needed = slot.offsets[read] + slot.extents[read].length;
         if (succeeded(local) && (completion.result < 0 || static_cast<u64_t>(completion.result) < needed))
-            local = status_t::io_k;
+            local = status_code_t::io_k;
         if (--slot.reads_left) return;
         if (succeeded(local)) {
             std::array<byte_t const*, reads_per_task_> bytes;
@@ -1520,7 +1534,7 @@ expected<nvme_reads_t> nvme_scan_reads(executor_type_& executor,
     std::size_t const depth = max_of<std::size_t>(
         min_of(executor.queue_depth(), executor.buffers_cut().buffers / reads_per_task_), 1);
     alignas(default_alignment_k) std::size_t cursor = 0;
-    status_t failure = status_t::success_k;
+    status_t failure = status_code_t::success_k;
     nvme_reads_t issued;
     auto scan_thread = [&](std::size_t thread, std::size_t) noexcept {
         auto& arena = executor.arena(thread);
@@ -1530,7 +1544,7 @@ expected<nvme_reads_t> nvme_scan_reads(executor_type_& executor,
         lane.completions = reinterpret_cast<io_completion_t*>(
             arena.allocate(depth * reads_per_task_ * sizeof(io_completion_t), default_alignment_k));
         if (lane.slots && lane.free_slots && lane.completions) lane.run();
-        else lane.local = status_t::bad_alloc_k;
+        else lane.local = status_code_t::out_of_memory_k;
         atomic_ref_template_<std::size_t>(issued.count).store_add(lane.reads.count, std::memory_order_relaxed);
         atomic_ref_template_<std::size_t>(issued.bytes).store_add(lane.reads.bytes, std::memory_order_relaxed);
         keep_first_failure<atomic_ref_template_>(failure, lane.local);
@@ -1567,7 +1581,7 @@ bool nvme_extends_read(medium_type_ const& medium, nvme_extent_t const& read, nv
  *  @c nvme_scan_reads, inside a call @c nvme_begin_scans began.
  *
  *  @par Statuses:
- *  - @c bad_alloc_k Thread zero's arena could not hold the order.
+ *  - @c out_of_memory_k Thread zero's arena could not hold the order.
  *  - @c overflow_k A read finds its engine's queue full.
  *  - @c io_k A read came back short.
  */
@@ -1580,7 +1594,7 @@ status_t nvme_read_located(executor_type_& executor, std::span<typename executor
     scratch_allocator_t const scratch {executor.arena(0)};
     growing_buffer<std::size_t, scratch_allocator_t> sorted {scratch}, run_starts {scratch};
     if (failed(sorted.resize_uninitialized(nodes.size())) || failed(run_starts.reserve_exactly(nodes.size() + 1)))
-        return status_t::bad_alloc_k;
+        return status_code_t::out_of_memory_k;
     for (std::size_t position = 0; position != nodes.size(); ++position) sorted[position] = position;
     partial_sort(to_writable_span(sorted), sorted.size(),
                  [&](std::size_t first, std::size_t second) noexcept { return nodes[first] < nodes[second]; });
@@ -1627,7 +1641,7 @@ status_t nvme_find_first(std::span<key_type_ const> keys, std::span<shard_node<n
     scratch_allocator_t const scratch {executor.arena(0)};
     growing_buffer<u64_t, scratch_allocator_t> earliest {scratch}, bases {scratch};
     if (failed(earliest.resize_uninitialized(keys.size())) || failed(bases.resize(parts.size() + 1)))
-        return status_t::bad_alloc_k;
+        return status_code_t::out_of_memory_k;
     // An entry's ordinal orders as its part, then its node, so the lowest ordinal wins.
     for (std::size_t part = 0; part != parts.size(); ++part) bases[part + 1] = bases[part] + parts[part].nodes;
     for (u64_t& ordinal : earliest) ordinal = bases.back();
@@ -1642,7 +1656,7 @@ status_t nvme_find_first(std::span<key_type_ const> keys, std::span<shard_node<n
         while (part != parts.size() && earliest[position] >= bases[part + 1]) ++part;
         locators[position] = {part, static_cast<node_id_type_>(earliest[position] - bases[part])};
     }
-    return status_t::success_k;
+    return status_code_t::success_k;
 }
 
 /**
@@ -1660,17 +1674,17 @@ status_t nvme_list_entries(std::span<key_type_ const> keys, std::span<std::size_
                            executor_type_& executor, scan_keys_type_&& scan_keys) noexcept {
     using shard_node_t = shard_node<node_id_type_>;
     using scratch_allocator_t = arena_allocator<byte_t, forkunion_allocator_t>;
-    if (keys.empty()) return status_t::success_k;
+    if (keys.empty()) return status_code_t::success_k;
 
     struct listing_share_t {
         growing_buffer<u32_t, scratch_allocator_t> positions;
         growing_buffer<shard_node_t, scratch_allocator_t> nodes;
-        status_t failure = status_t::success_k;
+        status_t failure = status_code_t::success_k;
     };
     std::size_t const threads = executor.size();
     listing_share_t* const shares =
         arena_allocator<listing_share_t, forkunion_allocator_t> {executor.arena(0)}.allocate(threads);
-    if (!shares) return status_t::bad_alloc_k;
+    if (!shares) return status_code_t::out_of_memory_k;
     for (std::size_t thread = 0; thread != threads; ++thread)
         new (shares + thread) listing_share_t {
             growing_buffer<u32_t, scratch_allocator_t> {scratch_allocator_t {executor.arena(thread)}},
@@ -1678,7 +1692,7 @@ status_t nvme_list_entries(std::span<key_type_ const> keys, std::span<std::size_
     status_t listed = scan_keys(keys, [&](std::size_t thread, std::size_t position, shard_node_t locator) noexcept {
         listing_share_t& share = shares[thread];
         if (failed(share.positions.push_back(static_cast<u32_t>(position))) || failed(share.nodes.push_back(locator)))
-            share.failure = status_t::bad_alloc_k;
+            share.failure = status_code_t::out_of_memory_k;
     });
     for (std::size_t thread = 0; thread != threads && succeeded(listed); ++thread) listed = shares[thread].failure;
     // Counts land one past their key, so their prefix sums are the starts; scattering moves
@@ -1686,7 +1700,8 @@ status_t nvme_list_entries(std::span<key_type_ const> keys, std::span<std::size_
     for (std::size_t thread = 0; thread != threads && succeeded(listed); ++thread)
         for (u32_t const position : shares[thread].positions) ++starts[position + 1];
     for (std::size_t position = 0; position != keys.size(); ++position) starts[position + 1] += starts[position];
-    if (succeeded(listed) && failed(nodes.resize_uninitialized(starts[keys.size()]))) listed = status_t::bad_alloc_k;
+    if (succeeded(listed) && failed(nodes.resize_uninitialized(starts[keys.size()])))
+        listed = status_code_t::out_of_memory_k;
     for (std::size_t thread = 0; thread != threads && succeeded(listed); ++thread)
         for (std::size_t hit = 0; hit != shares[thread].positions.size(); ++hit)
             nodes[starts[shares[thread].positions[hit]]++] = shares[thread].nodes[hit];
@@ -1698,7 +1713,7 @@ status_t nvme_list_entries(std::span<key_type_ const> keys, std::span<std::size_
         std::size_t const count = starts[position + 1] - starts[position];
         partial_sort(std::span<shard_node_t>(nodes.data() + starts[position], count), count, std::less<> {});
     }
-    return status_t::success_k;
+    return status_code_t::success_k;
 }
 
 #pragma endregion Scans
@@ -1834,7 +1849,7 @@ struct audit_islands {
  *  a call @c nvme_begin_scans began.
  *
  *  @par Statuses:
- *  - @c bad_alloc_k Thread zero's arena could not hold the islands.
+ *  - @c out_of_memory_k Thread zero's arena could not hold the islands.
  *  - @c overflow_k A read finds its engine's queue full.
  *  - @c io_k A neighbors read came back short.
  */
@@ -1882,7 +1897,7 @@ expected<reachability_t> nvme_audit_reachability(executor_type_& executor,
 
     reachability_t audited;
     audited.audited_nodes = nodes;
-    if (!nodes) return {audited, status_t::success_k};
+    if (!nodes) return {audited, status_code_t::success_k};
     std::size_t const words = audit_columns_t::words_for(nodes), tasks = divide_round_up(nodes, run_nodes);
 
     auto word_of = [&](bitset_t bitset, std::size_t word) noexcept {
@@ -2075,7 +2090,7 @@ expected<reachability_t> nvme_audit_reachability(executor_type_& executor,
             failed(island_components.resize_uninitialized(islands)) || failed(island_walk.resize(5 * islands)) ||
             failed(island_parents.resize_uninitialized(islands)) || failed(islands_found.entries.resize(islands)) ||
             failed(island_roles.resize(islands)))
-            return {{}, status_t::bad_alloc_k};
+            return {{}, status_code_t::out_of_memory_k};
         if (islands) std::memset(island_roles.data(), 0, islands);
         for (node_id_type_& parent : island_parents) parent = sentinel_k;
         for (std::size_t word = 0; word != words; ++word)
@@ -2252,7 +2267,7 @@ expected<reachability_t> nvme_audit_reachability(executor_type_& executor,
         audited.reachable_nodes = component;
         audited.unlinked = gathered.unlinked;
         audited.underlinked = gathered.underlinked;
-        return {audited, status_t::success_k};
+        return {audited, status_code_t::success_k};
     }
 }
 
@@ -2312,12 +2327,12 @@ struct nvme_parts_cursor {
      *  through one scan of the key columns.
      *
      *  @par Statuses:
-     *  - @c bad_alloc_k The kept starts or the visited bits found no memory.
+     *  - @c out_of_memory_k The kept starts or the visited bits found no memory.
      */
     template <typename reader_type_>
     status_t open(reader_type_ const& reader, std::span<key_t const> starts) noexcept {
-        if (starts.empty()) return status_t::success_k;
-        if (failed(starts_.reserve_exactly(starts.size()))) return status_t::bad_alloc_k;
+        if (starts.empty()) return status_code_t::success_k;
+        if (failed(starts_.reserve_exactly(starts.size()))) return status_code_t::out_of_memory_k;
         for (key_t const& key : starts) starts_.push_back_reserved(key);
         return walk_.open_breadth_first(reader.shards_count(),
                                         [&](std::size_t part) noexcept { return reader.part_size(part); });
@@ -2329,8 +2344,7 @@ struct nvme_parts_cursor {
      *      number of keys written.
      *
      *  @par Statuses:
-     *  - @c bad_alloc_k A link or a newly visited entry found no memory; the batches written before
-     *    stand.
+     *  - @c out_of_memory_k A link or a newly visited entry found no memory; earlier batches stand.
      *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
      *  - @c uninitialized_k @p executor holds no threads or pool workers.
      *  - @c config_mismatch_k A medium the engines cannot read.
@@ -2348,14 +2362,14 @@ struct nvme_parts_cursor {
         while (written != keys.size()) {
             std::size_t const wanted = keys.size() - written;
             entries_.clear();
-            if (failed(entries_.reserve(wanted))) return {written, status_t::bad_alloc_k};
+            if (failed(entries_.reserve(wanted))) return {written, status_code_t::out_of_memory_k};
             shard_node_t entry;
             while (entries_.size() != wanted && walk_.next(entry, reader.shards_count(), enter))
                 entries_.push_back_reserved(entry);
             if (entries_.empty()) break;
             status_t const linked = walk_.breadth_first() || links_keys
                                         ? follow_links_(reader, links_keys, links_offsets, executor)
-                                        : status_t::success_k;
+                                        : status_code_t::success_k;
             if (failed(linked)) return {written, linked};
             if (status_t const read = reader.read_keys(to_span(entries_), keys.subspan(written, entries_.size()),
                                                        executor);
@@ -2363,14 +2377,14 @@ struct nvme_parts_cursor {
                 return {written, read};
             written += entries_.size();
         }
-        return {written, status_t::success_k};
+        return {written, status_code_t::success_k};
     }
 
   private:
     /** Visits the earliest entry of every kept start, in start order, then forgets the starts. */
     template <typename reader_type_, typename executor_type_>
     status_t visit_starts_(reader_type_ const& reader, executor_type_& executor) noexcept {
-        if (failed(entries_.resize_uninitialized(starts_.size()))) return status_t::bad_alloc_k;
+        if (failed(entries_.resize_uninitialized(starts_.size()))) return status_code_t::out_of_memory_k;
         if (status_t const found = reader.find_first(to_span(starts_), to_writable_span(entries_), executor);
             failed(found))
             return found;
@@ -2378,7 +2392,7 @@ struct nvme_parts_cursor {
             if (start.shard != reader.shards_count())
                 if (status_t const visited = walk_.visit(start.shard, start.node); failed(visited)) return visited;
         starts_.clear();
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Reads the batch's neighbors rows, visits their links in a breadth-first walk, and gathers
@@ -2387,7 +2401,7 @@ struct nvme_parts_cursor {
     template <typename reader_type_, typename executor_type_>
     status_t follow_links_(reader_type_ const& reader, links_keys_t* links_keys, links_offsets_t* links_offsets,
                            executor_type_& executor) noexcept {
-        if (failed(offsets_.resize_uninitialized(entries_.size() + 1))) return status_t::bad_alloc_k;
+        if (failed(offsets_.resize_uninitialized(entries_.size() + 1))) return status_code_t::out_of_memory_k;
         if (status_t const read = reader.read_neighbors(to_span(entries_), to_writable_span(offsets_), neighbors_,
                                                         executor);
             failed(read))
@@ -2396,7 +2410,7 @@ struct nvme_parts_cursor {
         linked_.clear();
         if (links_keys && (failed(linked_.reserve(neighbors_.size())) ||
                            failed(links_offsets->reserve(links_offsets->size() + entries_.size()))))
-            return status_t::bad_alloc_k;
+            return status_code_t::out_of_memory_k;
         for (std::size_t position = 0; position != entries_.size(); ++position) {
             shard_node_t const from = entries_[position];
             node_id_t const part_size = reader.part_size(from.shard);
@@ -2404,15 +2418,15 @@ struct nvme_parts_cursor {
                 node_id_t const neighbor = neighbors_[slot];
                 if (neighbor >= part_size || neighbor == from.node) continue;
                 status_t const visited = walk_.breadth_first() ? walk_.visit(from.shard, neighbor)
-                                                               : status_t::success_k;
+                                                               : status_code_t::success_k;
                 if (failed(visited)) return visited;
                 if (links_keys) linked_.push_back_reserved({from.shard, neighbor});
             }
             if (links_keys) links_offsets->push_back_reserved(links_before + linked_.size());
         }
-        if (!links_keys) return status_t::success_k;
+        if (!links_keys) return status_code_t::success_k;
         // Extending keeps earlier batches' links; a resize drops them on growth.
-        if (failed(links_keys->reserve(links_before + linked_.size()))) return status_t::bad_alloc_k;
+        if (failed(links_keys->reserve(links_before + linked_.size()))) return status_code_t::out_of_memory_k;
         links_keys->extend_uninitialized(links_before + linked_.size());
         return reader.read_keys(to_span(linked_), std::span<key_t>(links_keys->data() + links_before, linked_.size()),
                                 executor);
@@ -2578,7 +2592,7 @@ struct nvme_sample_rows {
  *
  *  @par Statuses:
  *  - @c uninitialized_k No part is viewed, or @p executor holds no threads or pool workers.
- *  - @c bad_alloc_k The arenas cannot hold the scratch.
+ *  - @c out_of_memory_k The arenas cannot hold the scratch.
  *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
  *  - @c config_mismatch_k A medium the engines cannot read.
  */
@@ -2592,7 +2606,7 @@ expected<sample_result_t> nvme_sample(executor_type_& executor,
     using rows_t = nvme_sample_rows<part_type_, key_type_, node_id_type_, typename executor_type_::engine_t>;
     using shard_node_t = shard_node<node_id_type_>;
     using scratch_allocator_t = arena_allocator<byte_t, forkunion_allocator_t>;
-    if (parts.empty()) return {{}, status_t::uninitialized_k};
+    if (parts.empty()) return {{}, status_code_t::uninitialized_k};
     std::size_t const round_reads = 2 * width + 1;
     std::size_t const queue_depth = max_of(nvme_call_depth(executor, media, parts), round_reads);
     auto [call, call_status] = nvme_begin_call(executor, media, queue_depth, 0, round_reads, buffer_bytes);
@@ -2615,7 +2629,7 @@ expected<sample_result_t> nvme_sample(executor_type_& executor,
         failed(cached_nodes.resize_uninitialized(cached_count)) ||
         failed(watermarks.resize_uninitialized(parts.size())) || failed(staged_neighbors.resize_uninitialized(width)) ||
         failed(round_extents.resize(round_reads)) || failed(round_bytes.resize(round_reads)))
-        return {{}, status_t::bad_alloc_k};
+        return {{}, status_code_t::out_of_memory_k};
     for (std::size_t part = 0; part != parts.size(); ++part) watermarks[part] = parts[part].nodes;
     for (shard_node_t& cached : cached_nodes) cached = {static_cast<u32_t>(parts.size()), 0};
     for (key_type_ const& key : inputs.shown) listed_keys.push_back_reserved(key);
@@ -2631,7 +2645,7 @@ expected<sample_result_t> nvme_sample(executor_type_& executor,
         failed(listed))
         return {{}, listed};
 
-    status_t failure = status_t::success_k;
+    status_t failure = status_code_t::success_k;
     return draw(rows_t {executor.engine(0), media, parts, to_span(watermarks), listed_positions, distinct_starts,
                         to_span(listed_nodes), to_writable_span(cached_nodes), to_writable_span(cached_keys),
                         to_writable_span(staged_neighbors), to_writable_span(round_extents),
@@ -2644,7 +2658,7 @@ expected<sample_result_t> nvme_sample(executor_type_& executor,
  *      @p failure the source's reads kept answers last.
  *
  *  @par Statuses:
- *  - @c bad_alloc_k Thread zero's arena cannot hold the plan's scratch.
+ *  - @c out_of_memory_k Thread zero's arena cannot hold the plan's scratch.
  *  - @c shape_mismatch_k An output's or the shown coordinates' length disagrees.
  *  - @c io_k A read came back short; the draws written stand, their later reads unscored.
  */
@@ -2655,10 +2669,10 @@ expected<sample_result_t> nvme_draw_sample(source_type_ const& source, sample_in
     using plan_t = sample_plan<source_type_>;
     std::size_t const plan_bytes = plan_t::scratch_bytes(outputs.keys.size(), inputs.shown.size(), config);
     byte_t* const plan_scratch = executor.arena(0).allocate(plan_bytes, default_alignment_k);
-    if (!plan_scratch) return {{}, status_t::bad_alloc_k};
+    if (!plan_scratch) return {{}, status_code_t::out_of_memory_k};
     plan_t plan {source, inputs, outputs, config, {plan_scratch, plan_bytes}};
     // Thread zero's engine reads for the plan and serves only the pool thread that opened it.
-    status_t status = status_t::success_k;
+    status_t status = status_code_t::success_k;
     status_t const dispatched = executor.for_threads([&](std::size_t thread, std::size_t) noexcept {
         if (thread) return;
         status = plan.draw();

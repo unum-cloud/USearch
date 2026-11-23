@@ -59,7 +59,7 @@ constexpr std::string_view overlap_alphabet_k = "ACGT";
 constexpr std::size_t overlap_symbols_k = 12;
 
 using sequence_index_t =
-    sequence::ram_index<us::utilities::uuid128_t, u32_t, flaky_waiter_t, fu::standard_atomic_ref, counting_allocator_t>;
+    sequence::ram_index<util::uuid128_t, u32_t, flaky_waiter_t, fu::standard_atomic_ref, counting_allocator_t>;
 using sequence_value_t = sequence_index_t::value_t;
 
 /** The symbols of @p text as views of their bytes: every byte under @c sz_levenshtein_bytes_k, and
@@ -245,7 +245,7 @@ struct levenshtein_fixture {
         return metric;
     }
     static codec_t make_codec() noexcept { return {}; }
-    static us::utilities::uuid128_t make_key(std::size_t ordinal) noexcept { return uuid_of(0x5E0E0CE0ull + ordinal); }
+    static util::uuid128_t make_key(std::size_t ordinal) noexcept { return uuid_of(0x5E0E0CE0ull + ordinal); }
     static sz_size_t oracle(std::string_view query, std::string_view stored) noexcept {
         return levenshtein_oracle(query, stored, symbol_);
     }
@@ -281,7 +281,7 @@ struct overlap_fixture_t {
         return metric;
     }
     static codec_t make_codec() noexcept { return {}; }
-    static us::utilities::uuid128_t make_key(std::size_t ordinal) noexcept { return uuid_of(0x0E7E1A90ull + ordinal); }
+    static util::uuid128_t make_key(std::size_t ordinal) noexcept { return uuid_of(0x0E7E1A90ull + ordinal); }
     static sz_size_t oracle(std::string_view query, std::string_view stored) noexcept {
         return overlap_oracle(query, stored);
     }
@@ -314,7 +314,7 @@ struct needleman_wunsch_fixture_t {
         return metric;
     }
     static codec_t make_codec() noexcept { return {}; }
-    static us::utilities::uuid128_t make_key(std::size_t ordinal) noexcept { return uuid_of(0x0A11C0DEull + ordinal); }
+    static util::uuid128_t make_key(std::size_t ordinal) noexcept { return uuid_of(0x0A11C0DEull + ordinal); }
     static sz_size_t oracle(std::string_view query, std::string_view stored) {
         return needleman_wunsch_oracle(query, stored, nucleotide_costs_k);
     }
@@ -365,7 +365,7 @@ void test_levenshtein_kit(u64_t seed) {
         }
 
         levenshtein_metric<typename levenshtein_ladder<symbol_, capability_>::kit_t> metric;
-        expect_equal(metric.init(candidates_k), status_t::success_k);
+        expect_equal(metric.init(candidates_k), status_code_t::success_k);
         for (sz_size_t const radius : {unbounded_radius<sz_size_t>(), tight_radius_k}) {
             for (std::size_t const query : {std::size_t {0}, generated_k}) {
                 metric.reset(candidates[query]);
@@ -373,7 +373,7 @@ void test_levenshtein_kit(u64_t seed) {
                     expect_true(metric.push(candidate) == metric_staging_t::staged_k);
                 std::array<sz_size_t, candidates_k> distances;
                 metric.drain(distances, radius);
-                expect_equal(metric.status(), status_t::success_k);
+                expect_equal(metric.status(), status_code_t::success_k);
                 for (std::size_t candidate = 0; candidate != candidates_k; ++candidate) {
                     sz_size_t const truth = levenshtein_oracle(candidates[query], candidates[candidate], symbol_);
                     truth <= radius ? expect_equal(distances[candidate], truth)
@@ -401,7 +401,7 @@ void test_overlap_kit(u64_t seed) {
         candidates.push_back(make_value("", allocator));
 
         overlap_metric<typename overlap_ladder<capability_>::kit_t> metric;
-        expect_equal(metric.init(candidates_k, sequence_window_widths_k), status_t::success_k);
+        expect_equal(metric.init(candidates_k, sequence_window_widths_k), status_code_t::success_k);
         for (sz_size_t const radius : {unbounded_radius<sz_size_t>(), overlap_resolution_k / 2}) {
             // A batch scores every query as that query alone would, and the empty query
             // reopened right after it is prepared anew rather than taken for the batch.
@@ -411,7 +411,7 @@ void test_overlap_kit(u64_t seed) {
                 expect_true(metric.push(candidate) == metric_staging_t::staged_k);
             std::array<sz_size_t, candidates_k * 2> batched;
             metric.drain(batched, radius);
-            expect_equal(metric.status(), status_t::success_k);
+            expect_equal(metric.status(), status_code_t::success_k);
             for (std::size_t slot = 0; slot != batched.size(); ++slot) {
                 sz_size_t const truth = overlap_oracle(batch[slot / candidates_k], candidates[slot % candidates_k]);
                 truth <= radius ? expect_equal(batched[slot], truth) : expect_true(batched[slot] > radius);
@@ -422,7 +422,7 @@ void test_overlap_kit(u64_t seed) {
                     expect_true(metric.push(candidate) == metric_staging_t::staged_k);
                 std::array<sz_size_t, candidates_k> distances;
                 metric.drain(distances, radius);
-                expect_equal(metric.status(), status_t::success_k);
+                expect_equal(metric.status(), status_code_t::success_k);
                 for (std::size_t candidate = 0; candidate != candidates_k; ++candidate) {
                     sz_size_t const truth = overlap_oracle(candidates[query], candidates[candidate]);
                     truth <= radius ? expect_equal(distances[candidate], truth)
@@ -450,7 +450,7 @@ void test_needleman_wunsch_kit(u64_t seed) {
         for (std::size_t second = 0; second != 4; ++second)
             nucleotides[first * side_k + second] = first == second ? 2 : (first & 1) == (second & 1) ? 1 : 0;
     auto const [nucleotide_folded, nucleotide_status] = needleman_wunsch_costs_t::fold(nucleotides, 2);
-    expect_equal(nucleotide_status, status_t::success_k);
+    expect_equal(nucleotide_status, status_code_t::success_k);
     expect_true(std::memcmp(&nucleotide_folded, &nucleotide_costs_k, sizeof(nucleotide_costs_k)) == 0);
 
     // Self-scores of 8 to 11 and cross-scores of -3 to 3 keep every cost at 14 or below, so the gap
@@ -461,7 +461,7 @@ void test_needleman_wunsch_kit(u64_t seed) {
             similarities[first * side_k + second] = static_cast<i8_t>(
                 first == second ? 8 + first % 4 : static_cast<int>(first * second % 7) - 3);
     auto const [costs, fold_status] = needleman_wunsch_costs_t::fold(similarities, 20);
-    expect_equal(fold_status, status_t::success_k);
+    expect_equal(fold_status, status_code_t::success_k);
     expect_equal(costs.code_bits, 5u);
     expect_equal(costs.classes, classes_k);
     expect_equal(costs.gap, 15u);
@@ -469,7 +469,7 @@ void test_needleman_wunsch_kit(u64_t seed) {
     expect_equal(costs.substitutions[0][1], 9u);
     expect_equal(costs.substitutions[5][5], 0u);
     similarities[1] = 100;
-    expect_equal(needleman_wunsch_costs_t::fold(similarities, 20).status, status_t::config_mismatch_k);
+    expect_equal(needleman_wunsch_costs_t::fold(similarities, 20).status, status_code_t::config_mismatch_k);
 
     split_mix_generator_t random_generator {stream_key(seed, "needleman_wunsch")};
     uniform_below<u32_t> const code_distribution {classes_k}, length_distribution {60};
@@ -485,7 +485,7 @@ void test_needleman_wunsch_kit(u64_t seed) {
     }
 
     needleman_wunsch_metric<typename needleman_wunsch_ladder<capability_>::kit_t> metric;
-    expect_equal(metric.init(generated_k, costs), status_t::success_k);
+    expect_equal(metric.init(generated_k, costs), status_code_t::success_k);
     for (sz_size_t const radius : {unbounded_radius<sz_size_t>(), tight_radius_k}) {
         for (std::size_t const query : {std::size_t {2}, std::size_t {0}, generated_k - 1}) {
             metric.reset(std::string_view {candidates[query]});
@@ -493,7 +493,7 @@ void test_needleman_wunsch_kit(u64_t seed) {
                 expect_true(metric.push(std::string_view {candidate}) == metric_staging_t::staged_k);
             std::array<sz_size_t, generated_k> distances;
             metric.drain(distances, radius);
-            expect_equal(metric.status(), status_t::success_k);
+            expect_equal(metric.status(), status_code_t::success_k);
             for (std::size_t candidate = 0; candidate != generated_k; ++candidate) {
                 sz_size_t const truth = needleman_wunsch_oracle(candidates[query], candidates[candidate], costs);
                 truth <= radius ? expect_equal(distances[candidate], truth)
@@ -505,8 +505,8 @@ void test_needleman_wunsch_kit(u64_t seed) {
 
 /** The byte Levenshtein fixture over 64-bit node IDs, which a saved neighbors column records. */
 struct levenshtein_wide_fixture_t : levenshtein_bytes_fixture_t {
-    using index_t = sequence::ram_index<us::utilities::uuid128_t, u64_t, flaky_waiter_t, fu::standard_atomic_ref,
-                                        counting_allocator_t>;
+    using index_t =
+        sequence::ram_index<util::uuid128_t, u64_t, flaky_waiter_t, fu::standard_atomic_ref, counting_allocator_t>;
 
     static std::unique_ptr<index_t> make_index(allocation_ledger_t& ledger) {
         return std::unique_ptr<index_t>(new (std::nothrow) index_t(counting_allocator_t {ledger}));
@@ -518,10 +518,10 @@ struct levenshtein_wide_fixture_t : levenshtein_bytes_fixture_t {
 struct levenshtein_nvme_fixture_t {
     using ram_fixture_t = levenshtein_bytes_fixture_t;
     using wide_fixture_t = levenshtein_wide_fixture_t;
-    using shard_index_t = sequence::ram_index<us::utilities::uuid128_t, u32_t, flaky_waiter_t, fu::standard_atomic_ref,
-                                              forkunion_allocator_t>;
+    using shard_index_t =
+        sequence::ram_index<util::uuid128_t, u32_t, flaky_waiter_t, fu::standard_atomic_ref, forkunion_allocator_t>;
     template <typename engine_type_, typename node_id_type_ = u32_t>
-    using nvme_t = us::basic::nvme_indexes<codec_t, us::utilities::uuid128_t, node_id_type_, sz_size_t, engine_type_>;
+    using nvme_t = us::basic::nvme_indexes<codec_t, util::uuid128_t, node_id_type_, sz_size_t, engine_type_>;
     using scratch_metric_t =
         levenshtein_metric<levenshtein_ladder<sz_levenshtein_bytes_k, sz_cap_any_k>::kit_t, basic_nvme_scratch_t>;
     using query_t = std::string_view;
@@ -554,10 +554,10 @@ struct levenshtein_nvme_fixture_t {
         return {std::move(metric), ready};
     }
     expected<query_t> query_of(std::size_t entry, basic_nvme_scratch_t const&) const noexcept {
-        return {texts[entry], status_t::success_k};
+        return {texts[entry], status_code_t::success_k};
     }
     static expected<query_t> stored_query(std::string_view stored, basic_nvme_scratch_t const&) noexcept {
-        return {stored, status_t::success_k};
+        return {stored, status_code_t::success_k};
     }
     bool matches(std::size_t entry, std::string_view view) const noexcept { return view == texts[entry]; }
 };
@@ -565,8 +565,8 @@ struct levenshtein_nvme_fixture_t {
 /** 5000 strings over sharded indexes, as @c test_basic_sharded checks, against the Wagner-Fischer
  *  oracle over every string. */
 void test_sequence_sharded(u64_t seed) {
-    using index_t = sequence::ram_index<us::utilities::uuid128_t, u32_t, flaky_waiter_t, fu::standard_atomic_ref,
-                                        forkunion_allocator_t>;
+    using index_t =
+        sequence::ram_index<util::uuid128_t, u32_t, flaky_waiter_t, fu::standard_atomic_ref, forkunion_allocator_t>;
     using value_t = index_t::value_t;
     constexpr std::size_t entries_k = 5000;
     std::vector<std::string> texts;
@@ -585,7 +585,7 @@ void test_sequence_sharded(u64_t seed) {
             sz::status_t const assigned = values.emplace_back(allocator).assign(texts[entry]);
         return values;
     };
-    std::vector<us::utilities::uuid128_t> keys(entries_k);
+    std::vector<util::uuid128_t> keys(entries_k);
     for (std::size_t entry = 0; entry != entries_k; ++entry) keys[entry] = uuid_of(0x91A7A100ull + entry);
     auto query_of = [&](std::size_t sample) noexcept { return std::string_view {texts[entries_k + sample]}; };
     auto best_of = [&](std::size_t sample) {
@@ -596,14 +596,14 @@ void test_sequence_sharded(u64_t seed) {
     };
     levenshtein_bytes_fixture_t::metric_t metric = levenshtein_bytes_fixture_t::make_metric();
     return test_basic_sharded<us::basic::ram_indexes<index_t>>(seed, metric, levenshtein_bytes_fixture_t::make_codec(),
-                                                               std::span<us::utilities::uuid128_t const>(keys),
-                                                               make_values, query_of, best_of);
+                                                               std::span<util::uuid128_t const>(keys), make_values,
+                                                               query_of, best_of);
 }
 
 /** Generated strings sampled from two shards, as @c test_basic_sharded_sample checks. */
 void test_sequence_sample(u64_t seed) {
-    using index_t = sequence::ram_index<us::utilities::uuid128_t, u32_t, flaky_waiter_t, fu::standard_atomic_ref,
-                                        forkunion_allocator_t>;
+    using index_t =
+        sequence::ram_index<util::uuid128_t, u32_t, flaky_waiter_t, fu::standard_atomic_ref, forkunion_allocator_t>;
     using value_t = index_t::value_t;
     constexpr std::size_t entries_k = basic_recall_samples_k * basic_connectivity_k;
     std::vector<std::string> texts;
@@ -621,18 +621,18 @@ void test_sequence_sample(u64_t seed) {
             sz::status_t const assigned = values.emplace_back(allocator).assign(text);
         return values;
     };
-    std::vector<us::utilities::uuid128_t> keys(entries_k);
+    std::vector<util::uuid128_t> keys(entries_k);
     for (std::size_t entry = 0; entry != entries_k; ++entry) keys[entry] = uuid_of(0x5A3B1E00ull + entry);
     levenshtein_bytes_fixture_t::metric_t metric = levenshtein_bytes_fixture_t::make_metric();
     return test_basic_sharded_sample<us::basic::ram_indexes<index_t>>(
-        seed, metric, std::span<us::utilities::uuid128_t const>(keys), make_values, no_fixed_coordinates_t {});
+        seed, metric, std::span<util::uuid128_t const>(keys), make_values, no_fixed_coordinates_t {});
 }
 
 /** 600 strings in a sharded index of two shards cut into two sharded indexes of two, as
  *  @c test_basic_sharded_cut checks. */
 void test_sequence_sharded_cut(u64_t seed) {
-    using index_t = sequence::ram_index<us::utilities::uuid128_t, u32_t, flaky_waiter_t, fu::standard_atomic_ref,
-                                        forkunion_allocator_t>;
+    using index_t =
+        sequence::ram_index<util::uuid128_t, u32_t, flaky_waiter_t, fu::standard_atomic_ref, forkunion_allocator_t>;
     using value_t = index_t::value_t;
     constexpr std::size_t entries_k = 600;
     std::vector<std::string> texts;
@@ -644,7 +644,7 @@ void test_sequence_sharded_cut(u64_t seed) {
             texts.emplace_back(std::string_view {value});
     }
     forkunion_allocator_t const allocator {no_memory_domain_k};
-    std::vector<us::utilities::uuid128_t> keys(entries_k);
+    std::vector<util::uuid128_t> keys(entries_k);
     for (std::size_t entry = 0; entry != entries_k; ++entry) keys[entry] = uuid_of(0x5917A100ull + entry);
     auto make_values = [&] {
         std::vector<value_t> values;
@@ -655,8 +655,7 @@ void test_sequence_sharded_cut(u64_t seed) {
     };
     levenshtein_bytes_fixture_t::metric_t metric = levenshtein_bytes_fixture_t::make_metric();
     return test_basic_sharded_cut<us::basic::ram_indexes<index_t>>(
-        seed, metric, levenshtein_bytes_fixture_t::make_codec(), std::span<us::utilities::uuid128_t const>(keys),
-        make_values);
+        seed, metric, levenshtein_bytes_fixture_t::make_codec(), std::span<util::uuid128_t const>(keys), make_values);
 }
 
 /** Searches racing a clear of one shard read only retired entries nothing frees: each answers
@@ -665,8 +664,8 @@ void test_sequence_sharded_cut(u64_t seed) {
  *  clear answers @c contended_k after it. Under a sanitizer, a value freed under a search would
  *  trap. */
 void test_sequence_sharded_clear_race(u64_t seed) {
-    using index_t = sequence::ram_index<us::utilities::uuid128_t, u32_t, flaky_waiter_t, fu::standard_atomic_ref,
-                                        forkunion_allocator_t>;
+    using index_t =
+        sequence::ram_index<util::uuid128_t, u32_t, flaky_waiter_t, fu::standard_atomic_ref, forkunion_allocator_t>;
     using indexes_t = us::basic::ram_indexes<index_t>;
     using value_t = index_t::value_t;
     using distance_t = index_t::distance_t;
@@ -681,7 +680,7 @@ void test_sequence_sharded_clear_race(u64_t seed) {
             texts.emplace_back(std::string_view {value});
     }
     forkunion_allocator_t const allocator {no_memory_domain_k};
-    std::vector<us::utilities::uuid128_t> keys(entries_k);
+    std::vector<util::uuid128_t> keys(entries_k);
     for (std::size_t entry = 0; entry != entries_k; ++entry) keys[entry] = uuid_of(0xC1EA0000ull + entry);
     keep_diverse_t const selector {basic_connectivity_k};
     std::vector<index_t::traversal_context_t> contexts;
@@ -690,23 +689,23 @@ void test_sequence_sharded_clear_race(u64_t seed) {
     metrics.reserve(searchers_k + 1);
     for (std::size_t thread = 0; thread != searchers_k + 1; ++thread) {
         contexts.emplace_back(stream_key(seed, "plural_clear_race") + thread, allocator);
-        expect_equal(index_t::reserve_traversal(contexts.back(), basic_connectivity_k, {}), status_t::success_k);
+        expect_equal(index_t::reserve_traversal(contexts.back(), basic_connectivity_k, {}), status_code_t::success_k);
         metrics.push_back(levenshtein_bytes_fixture_t::make_metric());
     }
 
     indexes_t indexes {allocator};
-    expect_equal(indexes.emplace(no_memory_domain_k), status_t::success_k);
+    expect_equal(indexes.emplace(no_memory_domain_k), status_code_t::success_k);
     auto insert_batch = [&] {
         std::vector<value_t> values;
         values.reserve(entries_k);
         for (std::size_t entry = 0; entry != entries_k; ++entry) [[maybe_unused]]
             sz::status_t const assigned = values.emplace_back(allocator).assign(texts[entry]);
         auto [plan, plan_status] = indexes.plan_insert(entries_k);
-        expect_equal(plan_status, status_t::success_k);
+        expect_equal(plan_status, status_code_t::success_k);
         if (failed(plan_status)) return;
-        plan.insert(0, std::span<value_t>(values), std::span<us::utilities::uuid128_t const>(keys), metrics[0],
-                    contexts[0], selector);
-        expect_equal(plan.finish(), status_t::success_k);
+        plan.insert(0, std::span<value_t>(values), std::span<util::uuid128_t const>(keys), metrics[0], contexts[0],
+                    selector);
+        expect_equal(plan.finish(), status_code_t::success_k);
     };
 
     fu::flat_pool_t pool;
@@ -725,24 +724,24 @@ void test_sequence_sharded_clear_race(u64_t seed) {
                 // Every searcher walks the entries once first, so the clear runs under live walks.
                 while (fu::standard_atomic_ref<std::size_t>(searched).load(std::memory_order_acquire) < searchers_k)
                     std::this_thread::yield();
-                while (indexes.clear() == status_t::contended_k) std::this_thread::yield();
+                while (indexes.clear() == status_code_t::contended_k) std::this_thread::yield();
                 fu::standard_atomic_ref<bool>(cleared).store(true, std::memory_order_release);
                 return;
             }
             std::vector<u32_t> watermarks;
-            std::array<us::utilities::uuid128_t, wanted_k> found_keys;
+            std::array<util::uuid128_t, wanted_k> found_keys;
             std::array<distance_t, wanted_k> found_distances;
             dummy_predicate_t unfiltered;
             for (std::size_t entry = thread; !fu::standard_atomic_ref<bool>(cleared).load(std::memory_order_acquire);
                  entry = (entry + searchers_k) % entries_k) {
                 watermarks.resize(indexes.shards_count());
-                if (indexes.snapshot(watermarks).status == status_t::shape_mismatch_k) continue;
+                if (indexes.snapshot(watermarks).status == status_code_t::shape_mismatch_k) continue;
                 auto const [found, status] = indexes.search_if(std::string_view {texts[entry]}, watermarks, found_keys,
                                                                found_distances, {}, unfiltered, metrics[thread],
                                                                contexts[thread]);
                 if (entry == thread)
                     fu::standard_atomic_ref<std::size_t>(searched).store_add(1, std::memory_order_release);
-                if (status == status_t::contended_k) continue;
+                if (status == status_code_t::contended_k) continue;
                 if (failed(status)) foreign.store_add(1);
                 else
                     for (std::size_t match = 0; match != found; ++match)
@@ -754,9 +753,9 @@ void test_sequence_sharded_clear_race(u64_t seed) {
         expect_equal(indexes.shards_count(), round + 2);
         auto const live = indexes.live_shards();
         expect_equal(live.bound - live.first, std::size_t {1});
-        std::array<us::utilities::uuid128_t, 4> read_keys;
-        expect_equal(cursor.pull(indexes, std::span<us::utilities::uuid128_t> {read_keys}, nullptr, nullptr).status,
-                     status_t::contended_k);
+        std::array<util::uuid128_t, 4> read_keys;
+        expect_equal(cursor.pull(indexes, std::span<util::uuid128_t> {read_keys}, nullptr, nullptr).status,
+                     status_code_t::contended_k);
     }
     expect_equal(foreign_count, std::size_t {0});
 
@@ -764,8 +763,8 @@ void test_sequence_sharded_clear_race(u64_t seed) {
     insert_batch();
     expect_equal(indexes.size(), entries_k);
     expect_equal(indexes.count(keys[entries_k - 1]), std::size_t {1});
-    expect_equal(indexes.clear(), status_t::success_k);
-    expect_equal(indexes.clear(), status_t::success_k);
+    expect_equal(indexes.clear(), status_code_t::success_k);
+    expect_equal(indexes.clear(), status_code_t::success_k);
     expect_equal(indexes.shards_count(), rounds_k + 2);
 }
 

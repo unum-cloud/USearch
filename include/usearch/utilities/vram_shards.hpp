@@ -65,10 +65,10 @@ struct vram_shard_fanout {
      *  - @c config_mismatch_k The @p executor drives no stream on some shard's device.
      */
     static status_t pairs_with(shards_t const& shards, executor_t const& executor) noexcept {
-        if (shards.empty()) return status_t::uninitialized_k;
+        if (shards.empty()) return status_code_t::uninitialized_k;
         for (std::size_t shard = 0; shard != shards.size(); ++shard)
-            if (stream_of(shards, executor, shard) == executor.size()) return status_t::config_mismatch_k;
-        return status_t::success_k;
+            if (stream_of(shards, executor, shard) == executor.size()) return status_code_t::config_mismatch_k;
+        return status_code_t::success_k;
     }
 
     /** The position of the stream on shard @p shard 's device in @p executor, or its size when it
@@ -82,7 +82,10 @@ struct vram_shard_fanout {
 
     /** Makes shard @p shard 's device current, since a launch fails on a stream of any other. */
     static status_t enter(shards_t const& shards, std::size_t shard) noexcept {
-        return vendor_t::select(shards[shard].index->api(), shards[shard].index->device_specs().ordinal);
+        status_t const selected = vendor_t::select(shards[shard].index->api(),
+                                                   shards[shard].index->device_specs().ordinal);
+        if (failed(selected)) return {selected.code, "Shard device could not be made current"};
+        return selected;
     }
 
     /**
@@ -105,14 +108,14 @@ struct vram_shard_fanout {
                                                     shards_per_stream_(shards, executor));
             failed(sized))
             return sized;
-        if (failed(traversals.reserve_exactly(count))) return status_t::bad_alloc_k;
+        if (failed(traversals.reserve_exactly(count))) return status_code_t::out_of_memory_k;
         for (std::size_t shard = 0; shard != count; ++shard) {
             typename executor_t::stream_t& stream = executor.stream(stream_of(shards, executor, shard));
             traversals.push_back_reserved(
                 traversal_context_t {typename traversal_context_t::allocator_t {stream.arena, stream}});
-            if (!traversals.back()) return status_t::bad_alloc_k;
+            if (!traversals.back()) return status_code_t::out_of_memory_k;
         }
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /**
@@ -132,10 +135,10 @@ struct vram_shard_fanout {
         if (status_t const paired = pairs_with(shards, executor); failed(paired)) return paired;
         if (counts.size() != queries || keys.extent(0) != queries || scores.extent(0) != queries ||
             scores.extent(1) != keys.extent(1))
-            return status_t::config_mismatch_k;
+            return status_code_t::config_mismatch_k;
         if (keys.stride_bytes(1) != sizeof(key_t) || scores.stride_bytes(1) != sizeof(score_type_))
-            return status_t::unsupported_layout_k;
-        return status_t::success_k;
+            return status_code_t::unsupported_layout_k;
+        return status_code_t::success_k;
     }
 
 #pragma endregion Pairing
@@ -177,9 +180,9 @@ struct vram_shard_fanout {
                 failed(shard_scores_.resize_uninitialized(entries)) ||
                 failed(shard_counts_.resize_uninitialized(shards * widest)) ||
                 failed(frame_.resize_uninitialized(wanted)))
-                return status_t::bad_alloc_k;
+                return status_code_t::out_of_memory_k;
             status_t const taken = shards_.snapshot(to_writable_span(visible_)).status;
-            if (taken != status_t::shape_mismatch_k) return taken;
+            if (taken != status_code_t::shape_mismatch_k) return taken;
         }
     }
 
@@ -225,7 +228,7 @@ struct vram_shard_fanout {
             followed = first.follow(*traversals_[shard]);
         if (succeeded(followed) && succeeded(queued_status)) queued_status = merge(first);
 
-        status_t awaited = status_t::success_k;
+        status_t awaited = status_code_t::success_k;
         if (succeeded(followed)) awaited = first.wait();
         else
             for (std::size_t shard = 0; shard != queued; ++shard)
@@ -243,7 +246,7 @@ struct vram_shard_fanout {
     traversal_context_t const& traversal(std::size_t shard) const noexcept { return *traversals_[shard]; }
 
     /** The merge of a call that merges on the host after the one wait, queuing nothing more. */
-    static status_t merge_nothing(traversal_context_t&) noexcept { return status_t::success_k; }
+    static status_t merge_nothing(traversal_context_t&) noexcept { return status_code_t::success_k; }
 
     /** One match of a shard's query, scored in the type its search copies back. */
     struct shard_match_t {
@@ -274,12 +277,13 @@ struct vram_shard_fanout {
                                                  nk::matrix_span<key_t> keys, nk::matrix_span<score_type_> scores,
                                                  std::span<std::size_t> counts) noexcept {
         std::size_t const shards = this->shards(), wanted = frame_.size(), shard_entries = queries_count * wanted;
-        if (shards * queries_count > shard_counts_.size()) return {{}, status_t::config_mismatch_k};
+        if (shards * queries_count > shard_counts_.size()) return {{}, status_code_t::config_mismatch_k};
         auto shard_counts = [&](std::size_t shard) noexcept {
             return std::span<std::size_t>(shard_counts_.data() + shard * queries_count, queries_count);
         };
-        auto submit_shard = [&](std::size_t shard, traversal_context_t& traversal, std::size_t visible) noexcept {
-            if (!visible) return status_t::success_k;
+        auto submit_shard = [&](std::size_t shard, traversal_context_t& traversal,
+                                std::size_t visible) noexcept -> status_t {
+            if (!visible) return status_code_t::success_k;
             for (std::size_t& count : shard_counts(shard)) count = wanted;
             return search_shard(
                 shard, nk::matrix_span<node_id_t> {shard_ids_.data() + shard * shard_entries, queries_count, wanted},
@@ -302,11 +306,11 @@ struct vram_shard_fanout {
             }
         };
         for (std::size_t& count : counts) count = 0;
-        expected<search_result_t> found = await_every_shard(0, submit_shard, merge_nothing);
-        if (!found) return found;
+        auto [found, status] = await_every_shard(0, submit_shard, merge_nothing);
+        if (failed(status)) return {found, status};
         for (std::size_t shard = 0; shard != shards; ++shard) merge_shard(shard);
-        for (std::size_t const count : counts) found.value.count += count;
-        return found;
+        for (std::size_t const count : counts) found.count += count;
+        return {found, status};
     }
 
 #pragma endregion Batches
@@ -327,12 +331,12 @@ struct vram_shard_fanout {
         std::size_t const shards = this->shards();
         for (std::size_t shard = 0; shard != shards; ++shard) {
             // A launch fails on a stream of any device but the current one.
-            status_t submitted = succeeded(enter(shards_, shard)) ? submit(shard, *traversals_[shard], visible_[shard])
-                                                                  : status_t::device_error_k;
+            status_t const entered = enter(shards_, shard);
+            status_t submitted = succeeded(entered) ? submit(shard, *traversals_[shard], visible_[shard]) : entered;
             if (status_t const recorded = traversals_[shard]->record(); succeeded(submitted)) submitted = recorded;
             if (failed(submitted)) return {shard + 1, submitted};
         }
-        return {shards, status_t::success_k};
+        return {shards, status_code_t::success_k};
     }
 
     /** The widest shard's traversal bytes for @p usage, which every shard's context is sized for;
@@ -377,7 +381,7 @@ struct vram_shard_fanout {
         if (status_t const sized = executor_.reserve(walk_bytes_per_shard_ * served, served); failed(sized))
             return sized;
         traversals_.clear();
-        if (failed(traversals_.reserve_exactly(count))) return status_t::bad_alloc_k;
+        if (failed(traversals_.reserve_exactly(count))) return status_code_t::out_of_memory_k;
         for (std::size_t shard = 0; shard != count; ++shard) {
             std::size_t const stream = stream_of(shards_, executor_, shard);
             std::size_t paired_before = 0;
@@ -386,7 +390,7 @@ struct vram_shard_fanout {
             std::span<traversal_context_t> const stream_traversals = executor_.traversals(stream);
             traversals_.push_back_reserved(&stream_traversals[paired_before]);
         }
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Adds the counters @p traversal copied home behind its last submission to @p merged; read

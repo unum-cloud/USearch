@@ -468,7 +468,7 @@ class levenshtein_metric {
     /** The bytes @c engine_ was prepared from, so a round reopening the same query keeps the
      *  engine; grows to the longest query seen. */
     growing_buffer<char, allocator_t> prepared_;
-    status_t last_status_ = status_t::uninitialized_k;
+    status_t last_status_ = status_code_t::uninitialized_k;
 
   public:
     levenshtein_metric(allocator_t const& allocator = {}) noexcept
@@ -488,7 +488,8 @@ class levenshtein_metric {
      *  - @c config_mismatch_k @p staging_limit is zero or past @c u32_t slots.
      */
     status_t init(std::size_t staging_limit) noexcept {
-        if (!staging_limit || staging_limit > (std::numeric_limits<u32_t>::max)()) return status_t::config_mismatch_k;
+        if (!staging_limit || staging_limit > (std::numeric_limits<u32_t>::max)())
+            return status_code_t::config_mismatch_k;
         last_status_ = staged_.reserve_exactly(staging_limit);
         return last_status_;
     }
@@ -528,7 +529,7 @@ class levenshtein_metric {
         engine_ = sz_levenshtein_engine_t {};
         arena_.clear();
         prepared_.clear();
-        last_status_ = status_t::success_k;
+        last_status_ = status_code_t::success_k;
         prepare_(as_strings_view(queries));
     }
 
@@ -561,7 +562,7 @@ class levenshtein_metric {
         bool const scored = succeeded(last_status_) && distances.size() == engine_.count * count &&
                             kit_t::distances(&engine_, &candidates, nullptr, nullptr, radius, distances.data(), count,
                                              nullptr) == sz_success_k;
-        if (!scored && succeeded(last_status_)) last_status_ = status_t::bad_alloc_k;
+        if (!scored && succeeded(last_status_)) last_status_ = status_code_t::out_of_memory_k;
         if (!scored)
             for (sz_size_t& distance : distances) distance = (std::numeric_limits<sz_size_t>::max)();
         staged_.clear();
@@ -577,7 +578,7 @@ class levenshtein_metric {
         if (prepared == sz_success_k) return;
         engine_ = sz_levenshtein_engine_t {};
         prepared_.clear();
-        last_status_ = prepared == sz_bad_alloc_k ? status_t::bad_alloc_k : status_t::shape_mismatch_k;
+        last_status_ = prepared == sz_bad_alloc_k ? status_code_t::out_of_memory_k : status_code_t::shape_mismatch_k;
     }
 
     /** Starts the misses on every line of @p value, which the drain reads. */
@@ -664,7 +665,7 @@ class overlap_metric {
     growing_buffer<sz_u32_t, allocator_t> matches_;
 
     /** How the last @ref init, @ref reset or @ref drain fared. */
-    status_t last_status_ = status_t::uninitialized_k;
+    status_t last_status_ = status_code_t::uninitialized_k;
 
   public:
     overlap_metric(allocator_t const& allocator = {}) noexcept
@@ -688,15 +689,15 @@ class overlap_metric {
      *    zero or past @c u32_t bytes.
      */
     status_t init(std::size_t staging_limit, std::span<std::size_t const> window_widths) noexcept {
-        if (!staging_limit || window_widths.empty()) return status_t::config_mismatch_k;
+        if (!staging_limit || window_widths.empty()) return status_code_t::config_mismatch_k;
         for (std::size_t const width : window_widths)
-            if (!width || width > (std::numeric_limits<u32_t>::max)()) return status_t::config_mismatch_k;
+            if (!width || width > (std::numeric_limits<u32_t>::max)()) return status_code_t::config_mismatch_k;
         if (status_t const staged = staged_.reserve_exactly(staging_limit); failed(staged)) return staged;
         if (status_t const sized = matches_.resize_uninitialized(staged_.capacity() * window_widths.size());
             failed(sized))
             return sized;
         window_widths_ = window_widths;
-        last_status_ = status_t::success_k;
+        last_status_ = status_code_t::success_k;
         return last_status_;
     }
 
@@ -772,7 +773,7 @@ class overlap_metric {
         bool const scored = succeeded(last_status_) && distances.size() == engine_.count * count &&
                             kit_t::scores(&engine_, &candidates, share, matches_.data(), count * widths, widths,
                                           nullptr) == sz_success_k;
-        if (!scored && succeeded(last_status_)) last_status_ = status_t::bad_alloc_k;
+        if (!scored && succeeded(last_status_)) last_status_ = status_code_t::out_of_memory_k;
         for (std::size_t slot = 0; slot != distances.size(); ++slot)
             distances[slot] = scored ? distance_(engine_.lengths[slot / count], staged_[slot % count].length,
                                                  matches_.data() + slot * widths)
@@ -790,7 +791,7 @@ class overlap_metric {
         if (prepared == sz_success_k) return;
         engine_ = sz_overlap_engine_t {};
         prepared_.clear();
-        last_status_ = prepared == sz_bad_alloc_k ? status_t::bad_alloc_k : status_t::shape_mismatch_k;
+        last_status_ = prepared == sz_bad_alloc_k ? status_code_t::out_of_memory_k : status_code_t::shape_mismatch_k;
     }
 
     /** Starts the misses on every line of @p value, which the drain reads. */
@@ -874,13 +875,12 @@ struct needleman_wunsch_costs_t {
      *  - @c config_mismatch_k A pair scores above its mean self-score.
      */
     static expected<needleman_wunsch_costs_t> fold(std::span<i8_t const> similarities, i8_t gap) noexcept {
-        expected<needleman_wunsch_costs_t> folded {{}, status_t::config_mismatch_k};
         constexpr std::size_t side_k = needleman_wunsch_byte_alphabet_k;
-        if (similarities.size() != side_k * side_k || gap < 0) return folded;
+        if (similarities.size() != side_k * side_k || gap < 0) return {{}, status_code_t::config_mismatch_k};
         std::size_t classes = 0;
         for (std::size_t cell = 0; cell != similarities.size(); ++cell)
             if (similarities[cell]) classes = max_of(classes, max_of(cell / side_k, cell % side_k) + 1);
-        if (!classes || classes > needleman_wunsch_classes_k) return folded;
+        if (!classes || classes > needleman_wunsch_classes_k) return {{}, status_code_t::config_mismatch_k};
         // Every cost in halves, so a half-integer mean self-score stays exact.
         auto const doubled = [&](std::size_t row, std::size_t column) noexcept {
             return i32_t {similarities[row * side_k + row]} + similarities[column * side_k + column] -
@@ -890,7 +890,7 @@ struct needleman_wunsch_costs_t {
         largest = max_of(largest, 2 * i32_t {gap});
         for (std::size_t row = 0; row != classes; ++row)
             for (std::size_t column = 0; column != classes; ++column) {
-                if (doubled(row, column) < 0) return folded;
+                if (doubled(row, column) < 0) return {{}, status_code_t::config_mismatch_k};
                 largest = max_of(largest, doubled(row, column));
             }
         // `halves / 2` scaled by `30 / largest`, rounded half up, unscaled while `largest` is 30.
@@ -898,15 +898,14 @@ struct needleman_wunsch_costs_t {
             i32_t const ceiling = static_cast<i32_t>(needleman_wunsch_cost_ceiling_k);
             return static_cast<u8_t>((2 * ceiling * halves + largest) / (2 * largest));
         };
-        needleman_wunsch_costs_t& costs = folded.value;
+        needleman_wunsch_costs_t costs {};
         costs.code_bits = packed_code_bits(classes);
         costs.classes = static_cast<u8_t>(classes);
         costs.gap = rounded(2 * i32_t {gap});
         for (std::size_t row = 0; row != classes; ++row)
             for (std::size_t column = 0; column != classes; ++column)
                 costs.substitutions[row][column] = rounded(doubled(row, column));
-        folded.status = status_t::success_k;
-        return folded;
+        return {costs, status_code_t::success_k};
     }
 };
 
@@ -1632,7 +1631,7 @@ class needleman_wunsch_metric {
     growing_buffer<byte_t, allocator_t> scratch_;
 
     /** How the last @ref init, @ref reset or @ref drain fared. */
-    status_t last_status_ = status_t::uninitialized_k;
+    status_t last_status_ = status_code_t::uninitialized_k;
 
   public:
     needleman_wunsch_metric(allocator_t const& allocator = {}) noexcept
@@ -1655,11 +1654,11 @@ class needleman_wunsch_metric {
      */
     status_t init(std::size_t staging_limit, needleman_wunsch_costs_t const& costs) noexcept {
         if (!staging_limit || staging_limit > (std::numeric_limits<u32_t>::max)() || !costs.code_bits)
-            return status_t::config_mismatch_k;
+            return status_code_t::config_mismatch_k;
         if (status_t const staged = staged_.reserve_exactly(staging_limit); failed(staged)) return staged;
         if (status_t const ordered = order_.reserve_exactly(staging_limit); failed(ordered)) return ordered;
         costs_ = &costs;
-        last_status_ = status_t::success_k;
+        last_status_ = status_code_t::success_k;
         return last_status_;
     }
 

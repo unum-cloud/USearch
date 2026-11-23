@@ -313,10 +313,10 @@ struct hip_device_specs_t {
     }
 
     /**
-     *  Queries the runtime for @p ordinal's specification; meaningful only on @c success_k.
+     *  @brief Queries the runtime for @p ordinal's specification; meaningful only on @c success_k.
      *
      *  @par Statuses:
-     *  - @c device_error_k The @p ordinal is past the device listing.
+     *  - @c device_k The @p ordinal is past the device listing.
      */
     static expected<hip_device_specs_t> query(hip_api_t const& api, int ordinal) noexcept {
         hip_device_specs_t specs {ordinal};
@@ -335,12 +335,12 @@ struct hip_device_specs_t {
             api.get_device_attribute(&shared_memory_per_multiprocessor,
                                      hip_attribute_shared_memory_per_multiprocessor_k, ordinal) != hip_success_k ||
             api.get_device_memory(&specs.vram_bytes, device) != hip_success_k)
-            return {{ordinal}, status_t::device_error_k};
+            return {{ordinal}, status_code_t::device_k};
         specs.multiprocessor_count = static_cast<u32_t>(multiprocessors);
         specs.shared_memory_per_block_bytes = static_cast<std::size_t>(shared_memory_per_block);
         specs.shared_memory_per_multiprocessor_bytes = static_cast<std::size_t>(shared_memory_per_multiprocessor);
         specs.warp_lanes = static_cast<u32_t>(warp_lanes);
-        return {specs, status_t::success_k};
+        return {specs, status_code_t::success_k};
     }
 };
 
@@ -470,14 +470,14 @@ struct hip_virtual_memory_allocator {
         hip_allocation_properties_t const properties = allocation_properties_(device_);
         if (!api_ || !*api_ ||
             api_->memory_granularity(&granularity_, &properties, hip_granularity_minimum_k) != hip_success_k)
-            return status_t::device_error_k;
+            return status_code_t::device_k;
         slab_bytes_ = max_of(granularity_, preferred_slab_bytes_k / granularity_ * granularity_);
         virtual_address_bytes_ = fu::round_up_to_multiple(virtual_address_bytes, slab_bytes_);
         void* base = nullptr;
         if (api_->memory_address_reserve(&base, virtual_address_bytes_, 0, nullptr, 0) != hip_success_k)
-            return status_t::bad_alloc_k;
+            return status_code_t::out_of_memory_k;
         base_ = static_cast<byte_t*>(base);
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Maps every slab for those of @p devices that can reach the owner too, so their kernels and
@@ -497,20 +497,20 @@ struct hip_virtual_memory_allocator {
      *  - @c config_mismatch_k One of @p devices cannot reach the owner; nothing is granted.
      */
     status_t grant(std::bitset<gpu_devices_capacity_k> devices) noexcept {
-        if (!api_ || !*api_) return status_t::device_error_k;
+        if (!api_ || !*api_) return status_code_t::device_k;
         devices[static_cast<std::size_t>(device_)] = false;
-        if (reachable_(devices) != devices) return status_t::config_mismatch_k;
+        if (reachable_(devices) != devices) return status_code_t::config_mismatch_k;
         std::bitset<gpu_devices_capacity_k> const granted = peers_ | devices;
-        if (granted == peers_) return status_t::success_k;
+        if (granted == peers_) return status_code_t::success_k;
         hip_access_descriptor_t access[gpu_devices_capacity_k];
         std::size_t const readers = access_of_(granted, access);
         for (std::size_t offset = 0, slab = 0; offset != mapped_bytes_; offset += slab) {
             slab = min_of(slab_bytes_, max_of(granularity_, offset));
             if (api_->memory_set_access(base_ + offset, slab, access, readers) != hip_success_k)
-                return status_t::device_error_k;
+                return status_code_t::device_k;
         }
         peers_ = granted;
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /**
@@ -523,7 +523,7 @@ struct hip_virtual_memory_allocator {
      *  - @c overflow_k The @p bytes pass the reserved range.
      */
     status_t commit(std::size_t bytes) noexcept {
-        if (bytes > virtual_address_bytes_) return status_t::overflow_k;
+        if (bytes > virtual_address_bytes_) return status_code_t::overflow_k;
         // A reservation exists only once `reserve_range` found the runtime, so the table is
         // complete.
         hip_api_t const& runtime = *api_;
@@ -534,17 +534,17 @@ struct hip_virtual_memory_allocator {
             hip_allocation_handle_t handle = nullptr;
             std::size_t const slab_bytes = min_of(slab_bytes_, max_of(granularity_, mapped_bytes_));
             if (runtime.memory_create(&handle, slab_bytes, &properties, 0) != hip_success_k)
-                return status_t::bad_alloc_k;
+                return status_code_t::out_of_memory_k;
             byte_t* const slab = base_ + mapped_bytes_;
             bool const mapped = runtime.memory_map(slab, slab_bytes, 0, handle, 0) == hip_success_k &&
                                 runtime.memory_set_access(slab, slab_bytes, access, readers) == hip_success_k;
             runtime.memory_release(handle);
-            if (!mapped) return status_t::device_error_k;
-            if (runtime.fill(slab, 0, slab_bytes) != hip_success_k) return status_t::device_error_k;
+            if (!mapped) return status_code_t::device_k;
+            if (runtime.fill(slab, 0, slab_bytes) != hip_success_k) return status_code_t::device_k;
             fu::standard_atomic_ref<std::size_t>(mapped_bytes_)
                 .store(mapped_bytes_ + slab_bytes, std::memory_order_release);
         }
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     value_type* base() const noexcept { return reinterpret_cast<value_type*>(base_); }
@@ -638,11 +638,11 @@ struct hip_managed_allocator {
         virtual_address_bytes_ = virtual_address_bytes;
         void* base = nullptr;
         if (!api_ || !*api_ || api_->malloc_managed(&base, virtual_address_bytes, hip_attach_global_k) != hip_success_k)
-            return status_t::bad_alloc_k;
+            return status_code_t::out_of_memory_k;
         base_ = static_cast<value_type*>(base);
         api_->memory_advise(base, virtual_address_bytes, hip_advise_preferred_location_k, device_);
         api_->memory_advise(base, virtual_address_bytes, hip_advise_accessed_by_k, hip_host_device_k);
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /**
@@ -652,14 +652,14 @@ struct hip_managed_allocator {
      *  - @c overflow_k The @p bytes pass the reserved range.
      */
     status_t commit(std::size_t bytes) noexcept {
-        if (bytes > virtual_address_bytes_) return status_t::overflow_k;
-        if (bytes <= committed_bytes_) return status_t::success_k;
+        if (bytes > virtual_address_bytes_) return status_code_t::overflow_k;
+        if (bytes <= committed_bytes_) return status_code_t::success_k;
         // Managed pages arrive unzeroed; zeroing the fresh range also commits its residency.
         if (api_->fill(reinterpret_cast<byte_t*>(base_) + committed_bytes_, 0, bytes - committed_bytes_) !=
             hip_success_k)
-            return status_t::device_error_k;
+            return status_code_t::device_k;
         fu::standard_atomic_ref<std::size_t>(committed_bytes_).store(bytes, std::memory_order_release);
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     value_type* base() const noexcept { return base_; }
@@ -695,6 +695,11 @@ struct hip_device_allocator {
     struct rebind {
         using other = hip_device_allocator<other_>;
     };
+
+    /** A block returns to the pool on the stream that ordered it, so the allocator follows it. */
+    using propagate_on_container_move_assignment = std::true_type;
+    using propagate_on_container_swap = std::true_type;
+    using is_always_equal = std::false_type;
 
     hip_device_allocator() noexcept = default;
 
@@ -738,6 +743,12 @@ struct hip_device_allocator {
     /** The code objects loaded on the stream it rides, which a context launches through. */
     hip_kernel_tables_t* kernel_tables() const noexcept { return kernel_tables_; }
 
+    /** Whether both free onto one stream of one device. */
+    template <typename other_>
+    bool operator==(hip_device_allocator<other_> const& other) const noexcept {
+        return api_ == other.api_ && stream_ == other.stream_ && device_ == other.device_;
+    }
+
   private:
     template <typename>
     friend struct hip_device_allocator;
@@ -770,6 +781,11 @@ struct hip_arena_allocator {
     struct rebind {
         using other = hip_arena_allocator<other_>;
     };
+
+    /** Bound to its run by reference, so a container never trades it for another run's. */
+    using propagate_on_container_move_assignment = std::false_type;
+    using propagate_on_container_swap = std::false_type;
+    using is_always_equal = std::false_type;
 
     /** Carves from @p arena on the executor's @p stream, which names the device. */
     template <typename stream_type_>
@@ -804,7 +820,10 @@ struct hip_arena_allocator {
 
     /** The run every rebound copy shares. */
     arena_t& arena() const noexcept { return arena_; }
-    bool operator==(hip_arena_allocator const& other) const noexcept { return &arena_ == &other.arena_; }
+    template <typename other_>
+    bool operator==(hip_arena_allocator<other_> const& other) const noexcept {
+        return &arena_ == &other.arena();
+    }
 
   private:
     template <typename>
@@ -833,6 +852,11 @@ struct hip_pinned_allocator {
     struct rebind {
         using other = hip_pinned_allocator<other_>;
     };
+
+    /** Pages unpin where they were pinned and return to their domain, so the allocator follows. */
+    using propagate_on_container_move_assignment = std::true_type;
+    using propagate_on_container_swap = std::true_type;
+    using is_always_equal = std::false_type;
 
     hip_pinned_allocator() noexcept = default;
 
@@ -875,6 +899,12 @@ struct hip_pinned_allocator {
     hip_api_t const& api() const noexcept { return *api_; }
     hip_stream_handle_t stream() const noexcept { return stream_; }
     int device() const noexcept { return device_; }
+
+    /** Whether both unpin beside one device and release to one memory domain. */
+    template <typename other_>
+    bool operator==(hip_pinned_allocator<other_> const& other) const noexcept {
+        return api_ == other.api_ && device_ == other.device_ && memory_domain_ == other.memory_domain_;
+    }
 
   private:
     template <typename>
@@ -983,36 +1013,36 @@ struct hip_event_t {
      *      then await in order.
      *
      *  @par Statuses:
-     *  - @c device_error_k The event was never created.
+     *  - @c device_k The event was never created.
      */
     status_t record(hip_stream_handle_t stream) noexcept {
-        return handle_ && api_->event_record(handle_, stream) == hip_success_k ? status_t::success_k
-                                                                               : status_t::device_error_k;
+        return handle_ && api_->event_record(handle_, stream) == hip_success_k ? status_code_t::success_k
+                                                                               : status_code_t::device_k;
     }
 
     /**
-     *  Polls the recorded work without blocking; nothing recorded has nothing to run.
+     *  @brief Polls the recorded work without blocking; nothing recorded has nothing to run.
      *
      *  @par Statuses:
-     *  - @c device_error_k The event was never created.
+     *  - @c device_k The event was never created.
      */
     status_t finished() const noexcept {
-        if (!handle_) return status_t::device_error_k;
+        if (!handle_) return status_code_t::device_k;
         hip_result_t const queried = api_->event_query(handle_);
-        return queried == hip_success_k           ? status_t::success_k
-               : queried == hip_error_not_ready_k ? status_t::deferred_k
-                                                  : status_t::device_error_k;
+        return queried == hip_success_k           ? status_code_t::success_k
+               : queried == hip_error_not_ready_k ? status_code_t::deferred_k
+                                                  : status_code_t::device_k;
     }
 
     /**
-     *  Sleeps until the recorded work finishes and answers whether the device finished it.
+     *  @brief Sleeps until the recorded work finishes and answers whether the device finished it.
      *
      *  @par Statuses:
-     *  - @c device_error_k The event was never created.
+     *  - @c device_k The event was never created.
      */
     status_t wait() noexcept {
-        return handle_ && api_->event_synchronize(handle_) == hip_success_k ? status_t::success_k
-                                                                            : status_t::device_error_k;
+        return handle_ && api_->event_synchronize(handle_) == hip_success_k ? status_code_t::success_k
+                                                                            : status_code_t::device_k;
     }
 
   private:
@@ -1051,14 +1081,14 @@ struct hip_device_arena_t {
     status_t upload(void* destination, void const* source, std::size_t bytes) noexcept {
         return hip_set_device(*api_, device_) == hip_success_k &&
                        api_->copy_async(destination, source, bytes, hip_copy_host_to_device_k, stream_) == hip_success_k
-                   ? status_t::success_k
-                   : status_t::device_error_k;
+                   ? status_code_t::success_k
+                   : status_code_t::device_k;
     }
 
     /** Waits once for every upload queued so far - the end of the call holding the arena -
      *  sleeping on the stream's event. */
     status_t wait() noexcept {
-        if (hip_set_device(*api_, device_) != hip_success_k) return status_t::device_error_k;
+        if (hip_set_device(*api_, device_) != hip_success_k) return status_code_t::device_k;
         if (status_t const recorded = event_->record(stream_); failed(recorded)) return recorded;
         return event_->wait();
     }
@@ -1108,19 +1138,21 @@ struct hip_module_t {
     }
 
     /**
-     *  Loads @p code_object onto HIP ordinal @p device, binding it first, since a module loads into
-     *  the current device; an offload bundle loads the entry matching the device's architecture.
+     *  @brief Loads @p code_object onto HIP ordinal @p device, binding it first, since a module
+     *      loads into the current device.
+     *
+     *  An offload bundle loads the entry matching the device's architecture.
      *
      *  @par Statuses:
-     *  - @c device_error_k The @p code_object is empty.
+     *  - @c device_k The @p code_object is empty.
      */
     static expected<hip_module_t> load(hip_api_t const& api, int device, bytes_view_t code_object) noexcept {
         hip_module_t module;
         module.api_ = &api;
         if (code_object.empty() || hip_set_device(api, device) != hip_success_k ||
             api.module_load_data(&module.handle_, code_object.data()) != hip_success_k)
-            return {{}, status_t::device_error_k};
-        return {std::move(module), status_t::success_k};
+            return {{}, status_code_t::device_k};
+        return {std::move(module), status_code_t::success_k};
     }
 
     /** The kernel exported as @p name, or null when the code object has none. */
@@ -1153,14 +1185,14 @@ struct hip_kernel_table_t {
      *      does not require.
      *
      *  @par Statuses:
-     *  - @c device_error_k The code object is empty or lacks a required kernel, or the runtime
+     *  - @c device_k The code object is empty or lacks a required kernel, or the runtime
      *    would not load it.
      */
     template <typename speller_type_>
     status_t load(hip_api_t const& api, int on_device, bytes_view_t bytes, speller_type_ const& speller) noexcept {
         auto [loaded, status] = hip_module_t::load(api, on_device, bytes);
         if (failed(status)) return status;
-        if (failed(functions.resize(speller.count()))) return status_t::bad_alloc_k;
+        if (failed(functions.resize(speller.count()))) return status_code_t::out_of_memory_k;
         fatbin = bytes;
         device = on_device;
         module = std::move(loaded);
@@ -1168,9 +1200,9 @@ struct hip_kernel_table_t {
         for (std::size_t position = 0; position != functions.size(); ++position) {
             speller.spell(symbol, position);
             functions[position] = module.function(symbol.text);
-            if (!functions[position] && speller.required(position)) return status_t::device_error_k;
+            if (!functions[position] && speller.required(position)) return status_code_t::device_k;
         }
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 };
 
@@ -1182,19 +1214,19 @@ struct hip_kernel_tables_t {
      *  @brief The table of @p fatbin on @p device, loaded through @p speller at the first ask.
      *
      *  @par Statuses:
-     *  - @c bad_alloc_k The table could not be allocated.
-     *  - @c device_error_k The code object would not load, or lacks a required kernel.
+     *  - @c out_of_memory_k The table could not be allocated.
+     *  - @c device_k The code object would not load, or lacks a required kernel.
      */
     template <typename speller_type_>
     expected<hip_kernel_table_t const*> table_of(hip_api_t const& api, int device, bytes_view_t fatbin,
                                                  speller_type_ const& speller) noexcept {
         for (std::unique_ptr<hip_kernel_table_t> const& table : tables_)
-            if (table->fatbin.data() == fatbin.data()) return {table.get(), status_t::success_k};
+            if (table->fatbin.data() == fatbin.data()) return {table.get(), status_code_t::success_k};
         std::unique_ptr<hip_kernel_table_t> table {new (std::nothrow) hip_kernel_table_t};
-        if (!table) return {nullptr, status_t::bad_alloc_k};
+        if (!table) return {nullptr, status_code_t::out_of_memory_k};
         if (status_t const loaded = table->load(api, device, fatbin, speller); failed(loaded)) return {nullptr, loaded};
-        if (failed(tables_.push_back(std::move(table)))) return {nullptr, status_t::bad_alloc_k};
-        return {tables_.back().get(), status_t::success_k};
+        if (failed(tables_.push_back(std::move(table)))) return {nullptr, status_code_t::out_of_memory_k};
+        return {tables_.back().get(), status_code_t::success_k};
     }
 
   private:
@@ -1202,12 +1234,12 @@ struct hip_kernel_tables_t {
 };
 
 /**
- *  Launches @p function over @p blocks of @p threads on @p stream - the only launch path - passing
- *  each argument by address, as the module API takes them, so each must already be the kernel's own
- *  type.
+ *  @brief Launches @p function over @p blocks of @p threads on @p stream - the only launch path -
+ *      passing each argument by address, as the module API takes them, so each must already be the
+ *      kernel's own type.
  *
  *  @par Statuses:
- *  - @c device_error_k The launch refuses a bad configuration or too much shared memory.
+ *  - @c device_k The launch refuses a bad configuration or too much shared memory.
  */
 template <typename... argument_types_>
 status_t hip_launch(hip_api_t const& api, hip_function_handle_t function, u32_t blocks, u32_t threads,
@@ -1216,8 +1248,8 @@ status_t hip_launch(hip_api_t const& api, hip_function_handle_t function, u32_t 
     void* addresses[] = {static_cast<void*>(&arguments)...};
     return api.module_launch_kernel(function, blocks, 1, 1, threads, 1, 1, shared_bytes, stream, addresses, nullptr) ==
                    hip_success_k
-               ? status_t::success_k
-               : status_t::device_error_k;
+               ? status_code_t::success_k
+               : status_code_t::device_k;
 }
 
 static_assert(hip_reservable_allocator<hip_virtual_memory_allocator<byte_t>>);
@@ -1225,6 +1257,15 @@ static_assert(hip_reservable_allocator<hip_managed_allocator<byte_t>>);
 static_assert(hip_allocator<hip_device_allocator_t>);
 static_assert(hip_allocator<hip_arena_allocator_t>);
 static_assert(hip_allocator<hip_pinned_allocator_t>);
+static_assert(std::allocator_traits<hip_device_allocator_t>::propagate_on_container_move_assignment::value &&
+              std::allocator_traits<hip_device_allocator_t>::propagate_on_container_swap::value &&
+              !std::allocator_traits<hip_device_allocator_t>::is_always_equal::value);
+static_assert(std::allocator_traits<hip_pinned_allocator_t>::propagate_on_container_move_assignment::value &&
+              std::allocator_traits<hip_pinned_allocator_t>::propagate_on_container_swap::value &&
+              !std::allocator_traits<hip_pinned_allocator_t>::is_always_equal::value);
+static_assert(!std::allocator_traits<hip_arena_allocator_t>::propagate_on_container_move_assignment::value &&
+              !std::allocator_traits<hip_arena_allocator_t>::propagate_on_container_swap::value &&
+              !std::is_move_assignable_v<hip_arena_allocator_t>);
 
 /** One stream's device-side scratch for driving an AMD index: the traversal arena, the batch
  *  staging, the output staging, the telemetry counters and the attend miss word, riding the stream
@@ -1294,13 +1335,13 @@ struct hip_traversal_context {
      *
      *  @par Statuses:
      *  - @c uninitialized_k The context rides no executor stream.
-     *  - @c bad_alloc_k The table could not be allocated.
-     *  - @c device_error_k The code object would not load, or lacks a required kernel.
+     *  - @c out_of_memory_k The table could not be allocated.
+     *  - @c device_k The code object would not load, or lacks a required kernel.
      */
     template <typename speller_type_>
     expected<kernel_table_t const*> table_of(bytes_view_t fatbin, speller_type_ const& speller) const noexcept {
         hip_kernel_tables_t* const tables = allocator_.kernel_tables();
-        if (!tables) return {nullptr, status_t::uninitialized_k};
+        if (!tables) return {nullptr, status_code_t::uninitialized_k};
         return tables->table_of(api(), device(), fatbin, speller);
     }
 
@@ -1315,7 +1356,7 @@ struct hip_traversal_context {
      *  instead of spinning a core. Selects the context's device first, since an event records only
      *  on its own device. */
     status_t wait() noexcept {
-        if (hip_set_device(api(), device()) != hip_success_k) return status_t::device_error_k;
+        if (hip_set_device(api(), device()) != hip_success_k) return status_code_t::device_k;
         if (status_t const recorded = record(); failed(recorded)) return recorded;
         return event_.wait();
     }
@@ -1326,7 +1367,7 @@ struct hip_traversal_context {
      *      read; the context's device must be current.
      *
      *  @par Statuses:
-     *  - @c device_error_k The context has no counters.
+     *  - @c device_k The context has no counters.
      */
     status_t record() noexcept {
         hip_api_t const& runtime = api();
@@ -1335,7 +1376,7 @@ struct hip_traversal_context {
                                hip_copy_device_to_host_k, stream()) != hip_success_k ||
             runtime.copy_async(&host_counters_->missed, missed_.get(), sizeof(u32_t), hip_copy_device_to_host_k,
                                stream()) != hip_success_k)
-            return status_t::device_error_k;
+            return status_code_t::device_k;
         return event_.record(stream());
     }
 
@@ -1344,15 +1385,15 @@ struct hip_traversal_context {
      *      host thread awaits whichever of several streams finishes first.
      *
      *  @par Statuses:
-     *  - @c device_error_k The event was never created.
+     *  - @c device_k The event was never created.
      */
     status_t finished() const noexcept { return event_.finished(); }
 
     /** Queues on this context's stream a wait for everything @p other recorded last, so work here
      *  follows work there without the host waiting; the two may sit on different devices. */
     status_t follow(hip_traversal_context const& other) noexcept {
-        return api().stream_wait_event(stream(), other.event_, 0) == hip_success_k ? status_t::success_k
-                                                                                   : status_t::device_error_k;
+        return api().stream_wait_event(stream(), other.event_, 0) == hip_success_k ? status_code_t::success_k
+                                                                                   : status_code_t::device_k;
     }
 
     /** The telemetry of the last submission, zeroed when it was queued; read once it finished. */
@@ -1369,13 +1410,13 @@ struct hip_traversal_context {
      *      twin @ref matched reads, behind everything queued here so far.
      *
      *  @par Statuses:
-     *  - @c device_error_k The context has no counters, or the copy refused.
+     *  - @c device_k The context has no counters, or the copy refused.
      */
     status_t copy_matched(std::size_t const* total) noexcept {
         return host_counters_ && api().copy_async(&host_counters_->matched, total, sizeof(std::size_t),
                                                   hip_copy_device_to_host_k, stream()) == hip_success_k
-                   ? status_t::success_k
-                   : status_t::device_error_k;
+                   ? status_code_t::success_k
+                   : status_code_t::device_k;
     }
 
     /** The word @ref copy_matched last copied, such as the matches a batch found; read once it
@@ -1458,13 +1499,13 @@ struct hip_traversal_context {
         if (arena_bytes_ != before || epoch_floor_ + count > 0xFFFFFFFEull) {
             if (api().fill_async(arena_.get(), 0, arena_bytes_, stream()) != hip_success_k) {
                 arena_bytes_ = 0;
-                return {0, status_t::device_error_k};
+                return {0, status_code_t::device_k};
             }
             epoch_floor_ = 0;
         }
         u32_t const first = static_cast<u32_t>(epoch_floor_);
         epoch_floor_ += count;
-        return {first, status_t::success_k};
+        return {first, status_code_t::success_k};
     }
 
     /** Grow-only staging for one batch's device transport: an insert's padded vectors, or a
@@ -1545,8 +1586,8 @@ struct hip_executor_t {
          *  @brief The table of @p fatbin on this device, loaded by @p speller at the first ask.
          *
          *  @par Statuses:
-         *  - @c bad_alloc_k The table could not be allocated.
-         *  - @c device_error_k The code object would not load, or lacks a required kernel.
+         *  - @c out_of_memory_k The table could not be allocated.
+         *  - @c device_k The code object would not load, or lacks a required kernel.
          */
         template <typename speller_type_>
         expected<hip_kernel_table_t const*> table_of(bytes_view_t fatbin, speller_type_ const& speller) const noexcept {
@@ -1575,8 +1616,8 @@ struct hip_executor_t {
      *  - @c contended_k Another call holds the executor.
      */
     expected<claim_t> claim() noexcept {
-        if (!held_.lock_if_free()) return {{}, status_t::contended_k};
-        return {claim_t {held_, std::adopt_lock}, status_t::success_k};
+        if (!held_.lock_if_free()) return {{}, status_code_t::contended_k};
+        return {claim_t {held_, std::adopt_lock}, status_code_t::success_k};
     }
 
     /**
@@ -1586,7 +1627,7 @@ struct hip_executor_t {
      *  - @c config_mismatch_k The @p streams are empty.
      */
     static expected<hip_executor_t> acquire(growing_buffer<stream_t>&& streams) noexcept {
-        if (streams.empty()) return {{}, status_t::config_mismatch_k};
+        if (streams.empty()) return {{}, status_code_t::config_mismatch_k};
         hip_executor_t executor;
         executor.api_ = streams[0].api;
         // Queried once here; every round reads it from the executor afterwards.
@@ -1599,7 +1640,7 @@ struct hip_executor_t {
                                                  : bytes;
         }
         executor.streams_ = std::move(streams);
-        return {std::move(executor), status_t::success_k};
+        return {std::move(executor), status_code_t::success_k};
     }
 
     /** Bytes of local data share a block keeps to itself on the smallest of this executor's
@@ -1616,12 +1657,12 @@ struct hip_executor_t {
     static expected<hip_executor_t> spawn(hip_api_t const& api, std::span<int const> devices,
                                           std::size_t scratch_limit = 0) noexcept {
         growing_buffer<stream_t> streams {global_allocator};
-        if (failed(streams.reserve_exactly(devices.size()))) return {{}, status_t::bad_alloc_k};
+        if (failed(streams.reserve_exactly(devices.size()))) return {{}, status_code_t::out_of_memory_k};
         for (int device : devices) {
-            if (hip_set_device(api, device) != hip_success_k) return {{}, status_t::device_error_k};
+            if (hip_set_device(api, device) != hip_success_k) return {{}, status_code_t::device_k};
             stream_t opened {api, device, hip_stream_t {api}};
-            if (!opened.pinned_slots || !opened.kernel_tables) return {{}, status_t::bad_alloc_k};
-            if (!opened.handle || !opened.event) return {{}, status_t::device_error_k};
+            if (!opened.pinned_slots || !opened.kernel_tables) return {{}, status_code_t::out_of_memory_k};
+            if (!opened.handle || !opened.event) return {{}, status_code_t::device_k};
             streams.push_back_reserved(std::move(opened));
         }
         auto [executor, status] = acquire(std::move(streams));
@@ -1637,28 +1678,28 @@ struct hip_executor_t {
      *
      *  @par Statuses:
      *  - @c uninitialized_k The executor has no streams.
-     *  - @c bad_alloc_k The @p bytes_per_stream pass the scratch ceiling, or a run or a context
+     *  - @c out_of_memory_k The @p bytes_per_stream pass the scratch ceiling, or a run or a context
      *    could not grow.
      */
     status_t reserve(std::size_t bytes_per_stream, std::size_t contexts_per_stream = 0) noexcept {
-        if (streams_.empty()) return status_t::uninitialized_k;
-        if (scratch_limit_ && bytes_per_stream > scratch_limit_) return status_t::bad_alloc_k;
+        if (streams_.empty()) return status_code_t::uninitialized_k;
+        if (scratch_limit_ && bytes_per_stream > scratch_limit_) return status_code_t::out_of_memory_k;
         for (stream_t& opened : streams_) {
             opened.arena.clear();
             // A rewound run holds one chunk, its widest, which a wider call replaces whole.
             if (opened.arena.capacity() < bytes_per_stream) {
                 opened.arena.reset();
-                if (failed(opened.arena.reserve_exactly(bytes_per_stream))) return status_t::bad_alloc_k;
+                if (failed(opened.arena.reserve_exactly(bytes_per_stream))) return status_code_t::out_of_memory_k;
             }
             if (opened.contexts.size() >= contexts_per_stream) continue;
-            if (hip_set_device(*api_, opened.device) != hip_success_k) return status_t::device_error_k;
-            if (failed(opened.contexts.reserve_exactly(contexts_per_stream))) return status_t::bad_alloc_k;
+            if (hip_set_device(*api_, opened.device) != hip_success_k) return status_code_t::device_k;
+            if (failed(opened.contexts.reserve_exactly(contexts_per_stream))) return status_code_t::out_of_memory_k;
             while (opened.contexts.size() != contexts_per_stream) {
                 opened.contexts.push_back_reserved(traversal_context_t {hip_arena_allocator_t {opened.arena, opened}});
-                if (!opened.contexts.back()) return status_t::bad_alloc_k;
+                if (!opened.contexts.back()) return status_code_t::out_of_memory_k;
             }
         }
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** The contexts @ref reserve keeps on stream @p index, the ones its shards borrow in the order
@@ -1672,10 +1713,10 @@ struct hip_executor_t {
     status_t wait() noexcept {
         for (stream_t& opened : streams_)
             if (hip_set_device(*api_, opened.device) != hip_success_k || failed(opened.event.record(opened.handle)))
-                return status_t::device_error_k;
+                return status_code_t::device_k;
         for (stream_t& opened : streams_)
             if (status_t const drained = opened.event.wait(); failed(drained)) return drained;
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** The stream at @p index, in the order the devices were named. */
@@ -1733,10 +1774,10 @@ struct hip_vendor_t {
     using traversal_context = hip_traversal_context<allocator_type_>;
 
     /**
-     *  Makes HIP ordinal @p ordinal current on the calling thread.
+     *  @brief Makes HIP ordinal @p ordinal current on the calling thread.
      *
      *  @par Statuses:
-     *  - @c device_error_k The @p ordinal is past the device listing.
+     *  - @c device_k The @p ordinal is past the device listing.
      */
     static status_t select(api_t const& api, int ordinal) noexcept { return verdict_(hip_set_device(api, ordinal)); }
 
@@ -1770,7 +1811,7 @@ struct hip_vendor_t {
 
   private:
     static status_t verdict_(hip_result_t result) noexcept {
-        return result == hip_success_k ? status_t::success_k : status_t::device_error_k;
+        return result == hip_success_k ? status_code_t::success_k : status_code_t::device_k;
     }
 };
 

@@ -42,6 +42,8 @@
 
 #include "lib.hpp"
 
+namespace util = unum::usearch::utilities;
+
 using namespace unum::usearch;
 using namespace unum::usearch::stub;
 
@@ -68,10 +70,10 @@ struct sequence_index_options_t {
     std::size_t values_per_key = 0;
 
     /** Row-major @c alphabet_k × @c alphabet_k scores; empty under a uniform metric. */
-    std::vector<us::utilities::i8_t> substitution;
+    std::vector<util::i8_t> substitution;
 
     /** Cost of one unaligned symbol. */
-    us::utilities::i8_t gap = 0;
+    util::i8_t gap = 0;
 
     /** Window widths in bytes the overlap kind compares at; empty under every other kind. */
     std::vector<std::size_t> window_widths;
@@ -116,18 +118,18 @@ static bool known_metric(usearch_sequence_metric_t metric) {
 #pragma region Scoring
 
 /** Decodes UTF-8 into code points, treating a malformed byte as its own code point. */
-static void decode_utf8(bytes_view_t bytes, std::vector<us::utilities::u32_t>& points) {
+static void decode_utf8(util::bytes_view_t bytes, std::vector<util::u32_t>& points) {
     points.clear();
     for (std::size_t position = 0; position != bytes.size();) {
-        us::utilities::u8_t const leading = std::to_integer<us::utilities::u8_t>(bytes[position]);
+        util::u8_t const leading = std::to_integer<util::u8_t>(bytes[position]);
         std::size_t width = 1;
-        us::utilities::u32_t point = leading;
+        util::u32_t point = leading;
         if ((leading & 0xE0) == 0xC0) width = 2, point = leading & 0x1F;
         else if ((leading & 0xF0) == 0xE0) width = 3, point = leading & 0x0F;
         else if ((leading & 0xF8) == 0xF0) width = 4, point = leading & 0x07;
         if (position + width > bytes.size()) width = 1, point = leading;
         for (std::size_t continuation = 1; continuation != width; ++continuation) {
-            us::utilities::u8_t const following = std::to_integer<us::utilities::u8_t>(bytes[position + continuation]);
+            util::u8_t const following = std::to_integer<util::u8_t>(bytes[position + continuation]);
             if ((following & 0xC0) != 0x80) {
                 width = 1, point = leading;
                 break;
@@ -150,7 +152,7 @@ static double levenshtein(std::span<unit_ const> first, std::span<unit_ const> s
         for (std::size_t column = 0; column != second.size(); ++column) {
             std::size_t const substitution = diagonal + (first[above] == second[column] ? 0 : 1);
             diagonal = row[column + 1];
-            row[column + 1] = min_of(substitution, min_of(row[column], row[column + 1]) + 1);
+            row[column + 1] = util::min_of(substitution, util::min_of(row[column], row[column + 1]) + 1);
         }
     }
     return static_cast<double>(row[second.size()]);
@@ -159,8 +161,8 @@ static double levenshtein(std::span<unit_ const> first, std::span<unit_ const> s
 /** Needleman-Wunsch with a linear gap: the least cost turning @p first into @p second, a
  *  substitution costing the mean of the two symbols' self-scores less their shared score and every
  *  unaligned symbol @c gap, as the header defines the kind. */
-static double global_alignment(bytes_view_t first, bytes_view_t second, sequence_index_options_t const& parameters,
-                               std::vector<double>& row) {
+static double global_alignment(util::bytes_view_t first, util::bytes_view_t second,
+                               sequence_index_options_t const& parameters, std::vector<double>& row) {
     auto const score = [&](std::byte a, std::byte b) {
         return static_cast<double>(
             parameters.substitution[std::to_integer<std::size_t>(a) * alphabet_k + std::to_integer<std::size_t>(b)]);
@@ -176,7 +178,7 @@ static double global_alignment(bytes_view_t first, bytes_view_t second, sequence
             double const cost = (score(a, a) + score(b, b)) / 2 - score(a, b);
             double const aligned = diagonal + cost;
             diagonal = row[column + 1];
-            row[column + 1] = min_of(aligned, min_of(row[column], row[column + 1]) + gap);
+            row[column + 1] = util::min_of(aligned, util::min_of(row[column], row[column + 1]) + gap);
         }
     }
     return row[second.size()];
@@ -184,8 +186,8 @@ static double global_alignment(bytes_view_t first, bytes_view_t second, sequence
 
 /** Reusable buffers, so scoring a whole corpus allocates once rather than per pair. */
 struct sequence_search_scratch_t {
-    std::vector<us::utilities::u32_t> query_points;
-    std::vector<us::utilities::u32_t> entry_points;
+    std::vector<util::u32_t> query_points;
+    std::vector<util::u32_t> entry_points;
     std::vector<std::size_t> unsigned_row;
     std::vector<double> cost_row;
     std::vector<std::string_view> query_windows;
@@ -195,9 +197,9 @@ struct sequence_search_scratch_t {
 static std::size_t windows_in(std::size_t length, std::size_t width) { return length < width ? 0 : length - width + 1; }
 
 /** The overlap kind: the stored windows the query lacks, over whichever side has more windows. */
-static double window_overlap(bytes_view_t query, bytes_view_t stored, std::span<std::size_t const> widths,
+static double window_overlap(util::bytes_view_t query, util::bytes_view_t stored, std::span<std::size_t const> widths,
                              std::vector<std::string_view>& query_windows) {
-    std::string_view const query_text = chars_of(query), stored_text = chars_of(stored);
+    std::string_view const query_text = util::chars_of(query), stored_text = util::chars_of(stored);
     std::size_t query_count = 0, stored_count = 0, hits = 0;
     for (std::size_t const width : widths) {
         query_windows.clear();
@@ -209,20 +211,20 @@ static double window_overlap(bytes_view_t query, bytes_view_t stored, std::span<
         query_count += query_windows.size();
         stored_count += windows_in(stored_text.size(), width);
     }
-    std::size_t const longer = max_of(query_count, stored_count);
+    std::size_t const longer = util::max_of(query_count, stored_count);
     return longer ? static_cast<double>(longer - hits) / static_cast<double>(longer) : 1.0;
 }
 
 /** Scores one pair under the frozen kind. The constructor and @c adopt refuse a kind
  *  this build does not know, so every enumerator reaching here is one of the four. */
-static double distance(sequence_index_t const& index, bytes_view_t query, bytes_view_t stored,
+static double distance(sequence_index_t const& index, util::bytes_view_t query, util::bytes_view_t stored,
                        sequence_search_scratch_t& scratch) {
     sequence_index_options_t const& parameters = index.options;
     switch (parameters.metric) {
     case usearch_sequence_metric_levenshtein_utf8_k:
         decode_utf8(query, scratch.query_points);
         decode_utf8(stored, scratch.entry_points);
-        return levenshtein<us::utilities::u32_t>(scratch.query_points, scratch.entry_points, scratch.unsigned_row);
+        return levenshtein<util::u32_t>(scratch.query_points, scratch.entry_points, scratch.unsigned_row);
     case usearch_sequence_metric_needleman_wunsch_k:
         return global_alignment(query, stored, parameters, scratch.cost_row);
     case usearch_sequence_metric_overlap_k:
@@ -238,9 +240,9 @@ static bool reject_bytes(usearch_tape_view_t tape, usearch_outcome_t* outcome) {
 }
 
 /** Entry @p entry of a tape, as the bytes its offsets bound. */
-static bytes_view_t viewed(usearch_tape_view_t tape, std::size_t entry) {
+static util::bytes_view_t viewed(usearch_tape_view_t tape, std::size_t entry) {
     std::size_t const begin = offset_at(tape, entry), end = offset_at(tape, entry + 1);
-    return bytes_of(static_cast<std::uint8_t const*>(tape.data) + begin, end - begin);
+    return util::bytes_of(static_cast<std::uint8_t const*>(tape.data) + begin, end - begin);
 }
 
 /** The output twin of @c viewed: writes the entries at @p entries into @p arena as one tape,
@@ -276,7 +278,7 @@ static std::size_t search_tape(sequence_index_t& index, usearch_tape_view_t quer
     sequence_search_scratch_t scratch;
     std::vector<match_t> ranked;
     for (std::size_t query = 0; query != count; ++query) {
-        bytes_view_t const query_view = viewed(queries, query);
+        util::bytes_view_t const query_view = viewed(queries, query);
         rank<sequence_payload_t>(
             std::span<sequence_entry_t const>(index.entries).first(entries), predicate,
             [&](sequence_payload_t const& payload) { return distance(index, query_view, payload, scratch); }, ranked);
@@ -317,7 +319,7 @@ struct sequence_checkpoint_prefix_t {
     usearch_sequence_metric_t metric;
 
     /** Cost of one unaligned symbol. */
-    us::utilities::i8_t gap;
+    util::i8_t gap;
 
     /** How many window widths follow the matrix, each a @c std::size_t. */
     std::size_t window_widths_count;
@@ -341,7 +343,7 @@ static std::optional<std::size_t> serialized_bytes(sequence_index_t const& index
     return blob_bytes(sizeof(sequence_checkpoint_prefix_t) + parameter_bytes(index), payload_extent(index, entries), 1);
 }
 
-static void write_into(sequence_index_t const& index, std::size_t entries, bytes_span_t target) {
+static void write_into(sequence_index_t const& index, std::size_t entries, util::bytes_span_t target) {
     sequence_checkpoint_prefix_t prefix {};
     prefix.connectivity = index.options.connectivity;
     prefix.entries = entries;
@@ -350,12 +352,12 @@ static void write_into(sequence_index_t const& index, std::size_t entries, bytes
     prefix.gap = index.options.gap;
     prefix.window_widths_count = index.options.window_widths.size();
     write_pod(target, prefix);
-    bytes_span_t cursor = target.subspan(sizeof(prefix));
+    util::bytes_span_t cursor = target.subspan(sizeof(prefix));
 
     if (!index.options.substitution.empty()) {
-        [[maybe_unused]] status_t const copied = copy_bytes(
+        [[maybe_unused]] util::status_t const copied = util::copy_bytes(
             cursor.first(index.options.substitution.size()),
-            bytes_of(index.options.substitution.data(), index.options.substitution.size()));
+            util::bytes_of(index.options.substitution.data(), index.options.substitution.size()));
         cursor = cursor.subspan(index.options.substitution.size());
     }
     for (std::size_t const width : index.options.window_widths) {
@@ -369,13 +371,14 @@ static void write_into(sequence_index_t const& index, std::size_t entries, bytes
         cursor = cursor.subspan(sizeof(usearch_key_t));
         write_pod(cursor, length);
         cursor = cursor.subspan(sizeof(length));
-        [[maybe_unused]] status_t const copied = copy_bytes(cursor.first(entry.payload.size()), entry.payload);
+        [[maybe_unused]] util::status_t const copied = util::copy_bytes(cursor.first(entry.payload.size()),
+                                                                        entry.payload);
         cursor = cursor.subspan(entry.payload.size());
     }
 }
 
 /** Reads the prefix and checks the blob is long enough for what it claims. */
-static bool parse_prefix(sequence_checkpoint_prefix_t& prefix, bytes_view_t blob, usearch_outcome_t* outcome) {
+static bool parse_prefix(sequence_checkpoint_prefix_t& prefix, util::bytes_view_t blob, usearch_outcome_t* outcome) {
     if (reject_if(blob.size() < sizeof(sequence_checkpoint_prefix_t), usearch_status_malformed_k,
                   "The checkpoint ends early", outcome))
         return false;
@@ -405,7 +408,7 @@ static bool adopt(sequence_index_options_t& options, sequence_checkpoint_prefix_
 }
 
 /** Fills a fresh @p index from a checkpoint, which no other thread can see yet. */
-static bool read_from(sequence_index_t& index, bytes_view_t blob, usearch_outcome_t* outcome) {
+static bool read_from(sequence_index_t& index, util::bytes_view_t blob, usearch_outcome_t* outcome) {
     sequence_checkpoint_prefix_t prefix {};
     if (!parse_prefix(prefix, blob, outcome)) return false;
     std::size_t const entries = prefix.entries;
@@ -420,12 +423,12 @@ static bool read_from(sequence_index_t& index, bytes_view_t blob, usearch_outcom
     }
     index.options.gap = prefix.gap;
 
-    bytes_view_t cursor = blob.subspan(sizeof(sequence_checkpoint_prefix_t));
+    util::bytes_view_t cursor = blob.subspan(sizeof(sequence_checkpoint_prefix_t));
     index.options.substitution.clear();
     if (alignment_metric(prefix.metric)) {
         index.options.substitution.resize(alphabet_k * alphabet_k);
-        [[maybe_unused]] status_t const copied = copy_bytes(
-            bytes_of(index.options.substitution.data(), index.options.substitution.size()),
+        [[maybe_unused]] util::status_t const copied = util::copy_bytes(
+            util::bytes_of(index.options.substitution.data(), index.options.substitution.size()),
             cursor.first(index.options.substitution.size()));
         cursor = cursor.subspan(index.options.substitution.size());
     }
@@ -484,7 +487,7 @@ static bool serialize_shard(sequence_index_t const& shard, std::vector<std::byte
 
 /** A new handle holding the checkpoint in @p blob, or null once the outcome records why not. */
 template <typename index_type_>
-static index_type_* open_checkpoint(bytes_view_t blob, usearch_sequence_weights_t const* weights,
+static index_type_* open_checkpoint(util::bytes_view_t blob, usearch_sequence_weights_t const* weights,
                                     usearch_outcome_t* outcome) {
     index_type_* const index = new (std::nothrow) index_type_();
     if (reject_if(!index, usearch_status_out_of_memory_k, "The handle could not be allocated", outcome)) return nullptr;
@@ -545,7 +548,7 @@ void usearch_sequence_init_ram(usearch_sequence_init_ram_t* arguments) {
     if (reject_if(!index, usearch_status_out_of_memory_k, "The handle could not be allocated", outcome)) return;
     index->options.metric = metric;
     index->options.window_widths.assign(widths.begin(), widths.end());
-    index->options.connectivity = arguments->connectivity ? arguments->connectivity : us::utilities::connectivity_16_k;
+    index->options.connectivity = arguments->connectivity ? arguments->connectivity : util::connectivity_16_k;
     index->options.values_per_key = arguments->values_per_key;
     if (weights) {
         // Copied rather than borrowed, so a binding whose matrix dies after this call still scores.
@@ -583,7 +586,7 @@ void usearch_sequence_load_ram(usearch_sequence_load_ram_t* arguments) {
     if (!read_file(arguments->path, blob, outcome)) return;
     usearch_sequence_index_handle_t* const index = open_parts<usearch_sequence_index_handle_t>(
         blob, arguments->path,
-        [&](bytes_view_t part) {
+        [&](util::bytes_view_t part) {
             return open_checkpoint<usearch_sequence_index_handle_t>(part, arguments->weights, outcome);
         },
         outcome);
@@ -594,9 +597,10 @@ void usearch_sequence_load_ram(usearch_sequence_load_ram_t* arguments) {
 }
 
 void usearch_sequence_load_ram_buffer(usearch_sequence_load_ram_buffer_t* arguments) {
-    load_ram_buffer<usearch_sequence_load_ram_buffer>(arguments, [&](bytes_view_t blob, usearch_outcome_t* outcome) {
-        return open_checkpoint<usearch_sequence_index_handle_t>(blob, arguments->weights, outcome);
-    });
+    load_ram_buffer<usearch_sequence_load_ram_buffer>(
+        arguments, [&](util::bytes_view_t blob, usearch_outcome_t* outcome) {
+            return open_checkpoint<usearch_sequence_index_handle_t>(blob, arguments->weights, outcome);
+        });
 }
 
 void usearch_sequence_load_vram_buffer(usearch_sequence_load_vram_buffer_t* arguments) {
@@ -611,13 +615,13 @@ void usearch_sequence_view_ram(usearch_sequence_view_ram_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
     if (reject_ceiling(arguments->ram.cpu_class_ceiling, outcome)) return;
-    mapped_file_t served = map_file(arguments->path, outcome);
+    util::mapped_file_t served = map_file(arguments->path, outcome);
     if (!served) return;
     // Entries are still copied out of the mapping, so only the view's refusals are mirrored, not
     // its zero cost.
     usearch_sequence_index_handle_t* const index = open_parts<usearch_sequence_index_handle_t>(
         served.view(), arguments->path,
-        [&](bytes_view_t part) {
+        [&](util::bytes_view_t part) {
             return open_checkpoint<usearch_sequence_index_handle_t>(part, arguments->weights, outcome);
         },
         outcome);
@@ -631,12 +635,12 @@ void usearch_sequence_view_nvme(usearch_sequence_view_nvme_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
     if (reject_ceiling(arguments->nvme.cpu_class_ceiling, outcome)) return;
-    mapped_file_t served = map_file(arguments->path, outcome);
+    util::mapped_file_t served = map_file(arguments->path, outcome);
     if (!served) return;
     // Serves the drives' checkpoint as the RAM view does, mirroring only the residency's refusals.
     usearch_sequence_index_handle_t* const index = open_parts<usearch_sequence_index_handle_t>(
         served.view(), arguments->path,
-        [&](bytes_view_t part) {
+        [&](util::bytes_view_t part) {
             return open_checkpoint<usearch_sequence_index_handle_t>(part, arguments->weights, outcome);
         },
         outcome);
@@ -713,7 +717,7 @@ void usearch_sequence_insert(usearch_sequence_insert_t* arguments) {
     sequence_payload_t payload;
     std::size_t published = 0;
     for (std::size_t offset = 0; offset != count; ++offset) {
-        bytes_view_t const sequence = viewed(arguments->sequences, offset);
+        util::bytes_view_t const sequence = viewed(arguments->sequences, offset);
         payload.assign(sequence.begin(), sequence.end());
         index.append(key_at(arguments->keys, offset), payload);
         ++published;
@@ -792,7 +796,7 @@ void usearch_sequence_count(usearch_sequence_count_t* arguments) {
     for (auto position = range.first; position != range.second; ++position, ++entries) {
         std::size_t const bytes = index.entries[position->second].payload.size();
         total_bytes += bytes;
-        largest_bytes = max_of(largest_bytes, bytes);
+        largest_bytes = util::max_of(largest_bytes, bytes);
     }
     *arguments->key_stats = {entries, total_bytes, largest_bytes};
 }
@@ -818,7 +822,7 @@ static void reshard_body(usearch_sequence_reshard_t* arguments) {
     reset(arguments->stats);
     if (arguments->report) *arguments->report = {};
     sequence_search_scratch_t scratch;
-    auto const score = [&](bytes_view_t first, bytes_view_t second) {
+    auto const score = [&](util::bytes_view_t first, util::bytes_view_t second) {
         return distance(*arguments->sources[0], first, second, scratch);
     };
     auto const recut = [](usearch_sequence_index_handle_t&, usearch_outcome_t* refusal) {
@@ -863,14 +867,16 @@ void usearch_sequence_cursor_next(usearch_sequence_cursor_next_t* arguments) {
     usearch_sequence_index_handle_t& index = *arguments->index;
     usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, {}, outcome);
     if (!arena) return;
-    if (reject_if(serial_atomic_ref<u32_t>(cursor.pulling).fetch_test_and_set_bit(0, std::memory_order_acquire),
+    if (reject_if(serial_atomic_ref<util::u32_t>(cursor.pulling).fetch_test_and_set_bit(0, std::memory_order_acquire),
                   usearch_status_contended_k, "Another pull is still running on the cursor", outcome))
         return;
     std::shared_lock readers(index.mutex);
     sequence_search_scratch_t scratch;
-    auto const score = [&](bytes_view_t first, bytes_view_t second) { return distance(index, first, second, scratch); };
+    auto const score = [&](util::bytes_view_t first, util::bytes_view_t second) {
+        return distance(index, first, second, scratch);
+    };
     pull_walk(*arguments, cursor, score, *arena, outcome);
-    serial_atomic_ref<u32_t>(cursor.pulling).clear_bits(1, std::memory_order_release);
+    serial_atomic_ref<util::u32_t>(cursor.pulling).clear_bits(1, std::memory_order_release);
 }
 
 void usearch_sequence_cursor_free(usearch_sequence_cursor_t handle) {
@@ -883,7 +889,9 @@ void usearch_sequence_sample(usearch_sequence_sample_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome, arguments->arena);
     usearch_sequence_index_handle_t& index = *arguments->index;
     sequence_search_scratch_t scratch;
-    auto const score = [&](bytes_view_t first, bytes_view_t second) { return distance(index, first, second, scratch); };
+    auto const score = [&](util::bytes_view_t first, util::bytes_view_t second) {
+        return distance(index, first, second, scratch);
+    };
     draw_sample(*arguments, index, score, no_fixed_coordinates_t {}, outcome);
 }
 

@@ -181,8 +181,8 @@ template <typename kit_type_, nk_kernel_kind_t kernel_>
 struct shapes_fixture {
     using kit_t = kit_type_;
     using scalar_t = typename kit_t::scalar_t;
-    using index_t = shapes::ram_index<kit_t, us::utilities::uuid128_t, flaky_waiter_t, fu::standard_atomic_ref,
-                                      counting_allocator_t>;
+    using index_t =
+        shapes::ram_index<kit_t, util::uuid128_t, flaky_waiter_t, fu::standard_atomic_ref, counting_allocator_t>;
     using value_t = typename index_t::value_t;
     using allocator_t = typename index_t::allocator_t;
     using distance_t = typename index_t::distance_t;
@@ -197,9 +197,8 @@ struct shapes_fixture {
         return metric;
     }
     static codec<kit_t> make_codec() noexcept { return {}; }
-    static us::utilities::uuid128_t make_key(std::size_t ordinal) {
-        return std::bit_cast<us::utilities::uuid128_t>(
-            std::array<u64_t, 2> {split_mix_bits(ordinal ^ 0x5A5A5Aull), ordinal});
+    static util::uuid128_t make_key(std::size_t ordinal) {
+        return std::bit_cast<util::uuid128_t>(std::array<u64_t, 2> {split_mix_bits(ordinal ^ 0x5A5A5Aull), ordinal});
     }
     static distance_t oracle(value_t const& query, value_t const& stored) noexcept {
         return serial_distance<scalar_t>(kernel_, query[0], stored[0]);
@@ -219,7 +218,9 @@ struct shapes_fixture {
     /** Packs @p cloud alone through @p allocator, as the codec's load does. */
     static value_t pack(std::span<scalar_t const> cloud, allocator_t const& allocator) noexcept {
         std::array<std::span<scalar_t const>, 1> const clouds {cloud};
-        return value_t::make(clouds, allocator, 0).value;
+        auto [packed, pack_status] = value_t::make(clouds, allocator, 0);
+        if (failed(pack_status)) std::abort();
+        return std::move(packed);
     }
 
     static shapes_handmade<value_t, distance_t> make_handmade(allocator_t const& allocator) {
@@ -264,7 +265,7 @@ void score_round(typename fixture_type_::metric_t& metric, std::vector<typename 
             ++staged;
         expect_true(staged != 0);
         metric.drain(distances.subspan(first, staged), radius);
-        expect_equal(metric.status(), status_t::success_k);
+        expect_equal(metric.status(), status_code_t::success_k);
         first += staged;
     }
 }
@@ -332,14 +333,15 @@ void test_shapes_codec(u64_t seed) {
             expect_equal(shapes_codec.storage_requirements(packs.back()), cloud.size() * sizeof(scalar_t));
             std::vector<scalar_t> saved(cloud.size());
             expect_equal(shapes_codec.save(packs.back(), std::as_writable_bytes(std::span {saved})),
-                         status_t::success_k);
+                         status_code_t::success_k);
             f64_t const tolerance = storage_precision<scalar_t>(cloud_extent(cloud));
             std::size_t drifted = 0;
             for (std::size_t coordinate = 0; coordinate != cloud.size(); ++coordinate)
                 drifted += std::fabs(f64_t(float(saved[coordinate])) - f64_t(float(cloud[coordinate]))) > tolerance;
             expect_equal(drifted, 0u);
             reloaded.emplace_back(allocator);
-            expect_equal(shapes_codec.load(std::as_bytes(std::span {saved}), reloaded.back()), status_t::success_k);
+            expect_equal(shapes_codec.load(std::as_bytes(std::span {saved}), reloaded.back()),
+                         status_code_t::success_k);
             extent = std::fmax(extent, cloud_extent(cloud));
         }
         for (std::size_t candidate = 1; candidate != clouds_k; ++candidate) {
@@ -371,22 +373,23 @@ void test_shapes_packing(u64_t seed) {
         error_stats_t transport_errors;
         for (std::vector<scalar_t> const& cloud : make_clouds<scalar_t>(4, stream_key(seed, "packing"))) {
             value_t first(allocator), second(allocator);
-            expect_equal(shapes_codec.load(std::as_bytes(std::span {cloud}), first), status_t::success_k);
-            expect_equal(shapes_codec.load(std::as_bytes(std::span {cloud}), second), status_t::success_k);
-            std::size_t const bytes = nk::shapes_pack_size<scalar_t>(cloud.size() / 3, 0).value;
-            expect_true(std::memcmp(first[0], second[0], bytes) == 0);
+            expect_equal(shapes_codec.load(std::as_bytes(std::span {cloud}), first), status_code_t::success_k);
+            expect_equal(shapes_codec.load(std::as_bytes(std::span {cloud}), second), status_code_t::success_k);
+            auto const [bytes, pack_size_status] = nk::shapes_pack_size<scalar_t>(cloud.size() / 3, 0);
+            expect_true(succeeded(pack_size_status) && std::memcmp(first[0], second[0], bytes) == 0);
 
             // The query comes from another allocator, as a call builds one in its arena.
             std::array<std::span<scalar_t const>, 1> const clouds {cloud};
-            query_t const query =
-                query_t::make(clouds, {}, fixture_type_::kit_t::pack_size, fixture_type_::kit_t::pack).value;
+            auto const [query, query_status] = query_t::make(clouds, {}, fixture_type_::kit_t::pack_size,
+                                                             fixture_type_::kit_t::pack);
+            if (!expect_true(succeeded(query_status))) continue;
             for (nk_kernel_kind_t const kernel : shapes_kernels_k) {
                 metric_t metric(kernel, forkunion_allocator_t {});
                 metric.reset(query);
                 expect_true(metric.push(second) == metric_staging_t::staged_k);
                 std::array<distance_t, 1> distances {1};
                 metric.drain(distances, unbounded_radius<distance_t>());
-                expect_equal(metric.status(), status_t::success_k);
+                expect_equal(metric.status(), status_code_t::success_k);
                 if (kernel == nk_kernel_gromovwassersteins_packed_k) transport_errors.add(distances[0], 0.0);
                 else expect_equal(distances[0], distance_t {});
             }
@@ -398,7 +401,7 @@ void test_shapes_packing(u64_t seed) {
 }
 
 /** The sharded index of Chamfer shards over the heap, and the clouds its cells hold. */
-using chamfer_shard_index_t = shapes::ram_index<chamfer_fixture_t::kit_t, us::utilities::uuid128_t, flaky_waiter_t,
+using chamfer_shard_index_t = shapes::ram_index<chamfer_fixture_t::kit_t, util::uuid128_t, flaky_waiter_t,
                                                 fu::standard_atomic_ref, forkunion_allocator_t>;
 using chamfer_indexes_t = us::basic::ram_indexes<chamfer_shard_index_t>;
 
@@ -409,14 +412,16 @@ struct chamfer_entries_t {
     using value_t = chamfer_shard_index_t::value_t;
 
     std::vector<std::vector<scalar_t>> clouds;
-    std::vector<us::utilities::uuid128_t> keys;
+    std::vector<util::uuid128_t> keys;
 
     chamfer_entries_t(std::size_t count, u64_t seed) : clouds(make_clouds<scalar_t>(count, seed)), keys(count) {
         for (std::size_t entry = 0; entry != count; ++entry) keys[entry] = chamfer_fixture_t::make_key(seed + entry);
     }
     value_t pack(std::size_t entry) const {
         std::array<std::span<scalar_t const>, 1> const cloud {clouds[entry]};
-        return value_t::make(cloud, forkunion_allocator_t {no_memory_domain_k}, 0).value;
+        auto [packed, pack_status] = value_t::make(cloud, forkunion_allocator_t {no_memory_domain_k}, 0);
+        if (failed(pack_status)) std::abort();
+        return std::move(packed);
     }
     std::vector<value_t> values(std::size_t count) const {
         std::vector<value_t> packed;
@@ -449,8 +454,7 @@ void test_shapes_sharded(u64_t seed) {
         return best;
     };
     return test_basic_sharded<chamfer_indexes_t>(
-        seed, metric, chamfer_fixture_t::make_codec(),
-        std::span<us::utilities::uuid128_t const> {entries.keys}.first(entries_k),
+        seed, metric, chamfer_fixture_t::make_codec(), std::span<util::uuid128_t const> {entries.keys}.first(entries_k),
         [&] { return entries.values(entries_k); }, query_of, best_of);
 }
 
@@ -461,7 +465,7 @@ void test_shapes_sharded_cut(u64_t seed) {
     chamfer_entries_t const entries {entries_k, stream_key(seed, "plural_cut")};
     chamfer_fixture_t::metric_t metric = chamfer_fixture_t::make_metric();
     return test_basic_sharded_cut<chamfer_indexes_t>(seed, metric, chamfer_fixture_t::make_codec(),
-                                                     std::span<us::utilities::uuid128_t const> {entries.keys},
+                                                     std::span<util::uuid128_t const> {entries.keys},
                                                      [&] { return entries.values(entries_k); });
 }
 
@@ -471,8 +475,8 @@ void test_shapes_sample(u64_t seed) {
     chamfer_entries_t const entries {entries_k, stream_key(seed, "plural_sample")};
     chamfer_fixture_t::metric_t metric = chamfer_fixture_t::make_metric();
     return test_basic_sharded_sample<chamfer_indexes_t>(
-        seed, metric, std::span<us::utilities::uuid128_t const> {entries.keys},
-        [&] { return entries.values(entries_k); }, no_fixed_coordinates_t {});
+        seed, metric, std::span<util::uuid128_t const> {entries.keys}, [&] { return entries.values(entries_k); },
+        no_fixed_coordinates_t {});
 }
 
 /** Clouds walked by a cursor over two shards, as @c test_basic_sharded_cursor checks. */
@@ -480,8 +484,7 @@ void test_shapes_cursor(u64_t seed) {
     constexpr std::size_t entries_k = basic_recall_samples_k * basic_connectivity_k;
     chamfer_entries_t const entries {entries_k, stream_key(seed, "plural_cursor")};
     chamfer_fixture_t::metric_t metric = chamfer_fixture_t::make_metric();
-    return test_basic_sharded_cursor<chamfer_indexes_t>(seed, metric,
-                                                        std::span<us::utilities::uuid128_t const> {entries.keys},
+    return test_basic_sharded_cursor<chamfer_indexes_t>(seed, metric, std::span<util::uuid128_t const> {entries.keys},
                                                         [&] { return entries.values(entries_k); });
 }
 
@@ -491,11 +494,11 @@ struct chamfer_nvme_fixture_t {
     using ram_fixture_t = chamfer_fixture_t;
     using kit_t = ram_fixture_t::kit_t;
     using scalar_t = ram_fixture_t::scalar_t;
-    using shard_index_t = shapes::ram_index<kit_t, us::utilities::uuid128_t, flaky_waiter_t, fu::standard_atomic_ref,
-                                            forkunion_allocator_t>;
+    using shard_index_t =
+        shapes::ram_index<kit_t, util::uuid128_t, flaky_waiter_t, fu::standard_atomic_ref, forkunion_allocator_t>;
     template <typename engine_type_, typename node_id_type_ = u32_t>
-    using nvme_t = us::basic::nvme_indexes<codec<kit_t>, us::utilities::uuid128_t, node_id_type_,
-                                           ram_fixture_t::distance_t, engine_type_>;
+    using nvme_t =
+        us::basic::nvme_indexes<codec<kit_t>, util::uuid128_t, node_id_type_, ram_fixture_t::distance_t, engine_type_>;
     using scratch_metric_t = shapes_metric<kit_t, basic_nvme_scratch_t>;
     using query_t = nk::shapes_packed<scalar_t, std::allocator_traits<basic_nvme_scratch_t>::rebind_alloc<char>>;
     using coordinates_t = no_fixed_coordinates_t;
@@ -509,10 +512,12 @@ struct chamfer_nvme_fixture_t {
     typename index_type_::value_t make_value(std::size_t entry,
                                              typename index_type_::allocator_t const& allocator) const {
         std::array<std::span<scalar_t const>, 1> const cloud {clouds[entry]};
-        return index_type_::value_t::make(cloud, allocator, 0).value;
+        auto [packed, pack_status] = index_type_::value_t::make(cloud, allocator, 0);
+        if (failed(pack_status)) std::abort();
+        return std::move(packed);
     }
     static expected<scratch_metric_t> make_scratch_metric(basic_nvme_scratch_t const& allocator, std::size_t) noexcept {
-        return {scratch_metric_t {ram_fixture_t::kernel_k, allocator}, status_t::success_k};
+        return {scratch_metric_t {ram_fixture_t::kernel_k, allocator}, status_code_t::success_k};
     }
     static expected<query_t> pack(std::span<scalar_t const> points, basic_nvme_scratch_t const& allocator) noexcept {
         std::array<std::span<scalar_t const>, 1> const cloud {points};

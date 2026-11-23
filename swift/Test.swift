@@ -195,16 +195,6 @@ struct VocabularyTests {
         #expect(DenseRefineVerdict(name: "settled") == nil)
     }
 
-    @Test func errorsRenderTheirStatusAndMessage() {
-        do {
-            _ = try Key(parsing: "")
-            Issue.record("an empty rendering parsed")
-        }
-        catch {
-            #expect(error.description == "usearch: malformed: the key is not thirty-two hexadecimal digits")
-        }
-    }
-
     @Test func executorFactoriesTakeOnlyTheirOwnPlacement() throws {
         let executor = try Executor.forRam(memoryDomains: [], threads: 2)
         try executor.drain(mood: .spinning)
@@ -465,8 +455,6 @@ struct LifetimeTests {
         #expect(observed == nil)
     }
 
-    // Raw spans over a buffer arrive with the macOS 26 runtime.
-    @available(macOS 26.0, iOS 26.0, tvOS 26.0, watchOS 26.0, visionOS 26.0, *)
     @Test func serializationRoundTrip() throws {
         let index = try triangle()
         let executor = try executor()

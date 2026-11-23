@@ -27,6 +27,8 @@
 
 #pragma region Scaffolding
 
+namespace util = unum::usearch::utilities;
+
 /** A kernel kind lifted back onto the C metric vocabulary. */
 inline usearch_dense_metric_t usearch_metric_of(nk_kernel_kind_t kernel) noexcept {
     switch (kernel) {
@@ -41,14 +43,14 @@ inline usearch_dense_metric_t usearch_metric_of(nk_kernel_kind_t kernel) noexcep
 
 /** Where a ranking writes: @c wanted keys and scores per query, distances or products, and how
  *  many each kept. */
-using ranked_matches_span_t = dense::ranked_matches_span<us::utilities::uuid128_t, f64_t>;
+using ranked_matches_span_t = dense::ranked_matches_span<util::uuid128_t, util::f64_t>;
 
 /** The keys each query's walk starts from, as a ranking's keys and counts lay them out. */
-using ranked_hints_view_t = dense::ranked_hints_view<us::utilities::uuid128_t>;
+using ranked_hints_view_t = dense::ranked_hints_view<util::uuid128_t>;
 
 /** Where a product or MaxSim writes, in the arena's memory for its residency: each query's keys
  *  and the ABI's scores from its offset, as the C tape reads them. */
-using products_tape_t = dense::products_tape<us::utilities::uuid128_t, usearch_distance_t>;
+using products_tape_t = dense::products_tape<util::uuid128_t, usearch_distance_t>;
 
 /** Queries of many rows each: the rows, the offsets cutting them, one more than the queries, and
  *  the keys every row's walks of a query start from, empty for none. */
@@ -64,7 +66,7 @@ struct maxsim_queries_view_t {
 struct attention_arguments_t {
     std::size_t heads = 1;
     value_lookup_t value_lookup;
-    f32_t score_scale = 1;
+    util::f32_t score_scale = 1;
     dense::rows_span_t outputs;
     std::span<dense::softmax_state_t> carry;
 };
@@ -87,7 +89,7 @@ struct attention_arguments_t {
 template <vendored_residency_t residency_>
 struct dense_verbs {
     using executor_t = typename vendored_residency_executor<residency_>::type;
-    using key_t = us::utilities::uuid128_t;
+    using key_t = util::uuid128_t;
     using keys_view_t = nk::vector_view<key_t>;
     using rows_view_t = dense::rows_view_t;
     using rows_span_t = dense::rows_span_t;
@@ -102,21 +104,21 @@ struct dense_verbs {
     gpu_class_t gpu_class;
 
     // Lifetime
-    void* (*create)(nk_kernel_kind_t kernel, dense::geometry_t geometry, forkunion_allocator_t tables) noexcept;
+    void* (*create)(nk_kernel_kind_t kernel, dense::geometry_t geometry, util::forkunion_allocator_t tables) noexcept;
     void (*destroy)(void* index) noexcept;
     void (*bound_shards)(void* index, std::size_t nodes) noexcept;
 
     /** Appends one shard on a device, or on RAM on @p memory_domain. */
-    status_t (*emplace)(void* index, arena_residency_t residency, fu_memory_domain_id_t memory_domain) noexcept;
+    util::status_t (*emplace)(void* index, arena_residency_t residency, fu_memory_domain_id_t memory_domain) noexcept;
 
     /** Opens a checkpoint in place, with @p ram a key table in its limit filled on @p executor. */
-    status_t (*view)(void* index, std::string_view path, std::span<std::string_view const> paths,
-                     usearch_ram_options_t const* ram, usearch_executor_t executor) noexcept;
+    util::status_t (*view)(void* index, std::string_view path, std::span<std::string_view const> paths,
+                           usearch_ram_options_t const* ram, usearch_executor_t executor) noexcept;
 
     /** Opens a checkpoint's manifest as a writable index, with @p ram a key table as @c view holds
      *  one; only the NVMe table opens one. */
-    status_t (*load_nvme)(void* index, std::string_view path, usearch_ram_options_t const* ram,
-                          usearch_executor_t executor) noexcept;
+    util::status_t (*load_nvme)(void* index, std::string_view path, usearch_ram_options_t const* ram,
+                                usearch_executor_t executor) noexcept;
 
     // Shape
     nk_kernel_kind_t (*kernel)(void const* index) noexcept;
@@ -131,86 +133,91 @@ struct dense_verbs {
     std::size_t (*size)(void const* index) noexcept;
     std::size_t (*capacity)(void const* index) noexcept;
     std::size_t (*memory_usage)(void const* index) noexcept;
-    expected<std::size_t> (*storage_requirements)(void const* index) noexcept;
+    util::expected<std::size_t> (*storage_requirements)(void const* index) noexcept;
 
     // Writes
 
     /** Whether the index takes writes, which a view refuses with @c read_only_k. */
-    status_t (*serves_writes)(void const* index) noexcept;
-    status_t (*reserve)(void* index, std::size_t capacity) noexcept;
-    status_t (*clear)(void* index) noexcept;
-    expected<traversal_stats_t> (*insert)(void* index, keys_view_t keys, rows_view_t rows, insert_config_t config,
-                                          executor_t& executor, progress_ticks_t& ticks) noexcept;
+    util::status_t (*serves_writes)(void const* index) noexcept;
+    util::status_t (*reserve)(void* index, std::size_t capacity) noexcept;
+    util::status_t (*clear)(void* index) noexcept;
+    util::expected<util::traversal_stats_t> (*insert)(void* index, keys_view_t keys, rows_view_t rows,
+                                                      insert_config_t config, executor_t& executor,
+                                                      progress_ticks_t& ticks) noexcept;
 
     // Refining
-    expected<reachability_t> (*health)(void* index, executor_t& executor) noexcept;
+    util::expected<util::reachability_t> (*health)(void* index, executor_t& executor) noexcept;
 
     // Plans
 
     /** Opens a refine plan of rounds over the index's shards. */
-    expected<void*> (*refine_plan_open)(void* index, refine_config_t config, executor_t& executor) noexcept;
+    util::expected<void*> (*refine_plan_open)(void* index, refine_config_t config, executor_t& executor) noexcept;
 
     /** Opens a reshard plan moving the entries of @p sources into @p targets, then running the
      *  rounds of every target that took entries; the plan keeps its own lists. */
-    expected<void*> (*reshard_plan_open)(variants_view_t sources, variants_view_t targets, reshard_options_t options,
-                                         executor_t& executor) noexcept;
+    util::expected<void*> (*reshard_plan_open)(variants_view_t sources, variants_view_t targets,
+                                               reshard_options_t options, executor_t& executor) noexcept;
     plan_verbs<executor_t> refine_plan;
     plan_verbs<executor_t> reshard_plan;
 
     // Lookups
-    status_t (*count)(void* index, std::span<key_t const> keys, std::span<std::size_t> entries,
-                      executor_t& executor) noexcept;
+    util::status_t (*count)(void* index, std::span<key_t const> keys, std::span<std::size_t> entries,
+                            executor_t& executor) noexcept;
 
     /** Reads up to @p wanted entries of @p keys into @p outputs, cast into their scalar where the
      *  index lives, on the device for a GPU one. */
-    status_t (*get)(void* index, std::span<key_t const> keys, rows_span_t outputs, std::span<std::size_t> entries,
-                    std::size_t wanted, executor_t& executor) noexcept;
+    util::status_t (*get)(void* index, std::span<key_t const> keys, rows_span_t outputs, std::span<std::size_t> entries,
+                          std::size_t wanted, executor_t& executor) noexcept;
 
     // Walks
 
     /** Ranks the entries nearest each query, narrowed by @p predicate and seeded by @p hints on the
      *  host. */
-    expected<traversal_stats_t> (*search)(void* index, rows_view_t queries, ranked_hints_view_t hints,
-                                          ranked_matches_span_t matches, search_config_t config, predicate_t predicate,
-                                          executor_t& executor) noexcept;
+    util::expected<util::traversal_stats_t> (*search)(void* index, rows_view_t queries, ranked_hints_view_t hints,
+                                                      ranked_matches_span_t matches, search_config_t config,
+                                                      predicate_t predicate, executor_t& executor) noexcept;
 
     /** Keeps the largest dot products of each left row, up to the tape's stride, packed into @p
      *  products from its first offset, and on the host the pairs each row scored into @p scored. */
-    expected<traversal_stats_t> (*multiply)(void* index, rows_view_t left, products_tape_t products,
-                                            std::span<std::size_t> scored, search_config_t config,
-                                            predicate_t predicate, executor_t& executor) noexcept;
+    util::expected<util::traversal_stats_t> (*multiply)(void* index, rows_view_t left, products_tape_t products,
+                                                        std::span<std::size_t> scored, search_config_t config,
+                                                        predicate_t predicate, executor_t& executor) noexcept;
 
     /** Late interaction of each query the offsets cut: up to @p wanted keys each, every scored one
      *  for zero, packed into @p matches from its first offset, and the keys each query scored into
      *  @p scored on the host; a GPU index walks uniform queries alone. */
-    expected<traversal_stats_t> (*maxsim)(void* index, maxsim_queries_view_t queries, products_tape_t matches,
-                                          std::span<std::size_t> scored, std::size_t wanted, search_config_t config,
-                                          predicate_t predicate, executor_t& executor) noexcept;
-    expected<traversal_stats_t> (*attend)(void* index, rows_view_t queries, attention_arguments_t attention,
-                                          search_config_t config, predicate_t predicate, executor_t& executor) noexcept;
+    util::expected<util::traversal_stats_t> (*maxsim)(void* index, maxsim_queries_view_t queries,
+                                                      products_tape_t matches, std::span<std::size_t> scored,
+                                                      std::size_t wanted, search_config_t config, predicate_t predicate,
+                                                      executor_t& executor) noexcept;
+    util::expected<util::traversal_stats_t> (*attend)(void* index, rows_view_t queries, attention_arguments_t attention,
+                                                      search_config_t config, predicate_t predicate,
+                                                      executor_t& executor) noexcept;
 
     // Exploration
 
     /** Opens a walk over every entry as stored, or breadth-first from @p starts. */
-    expected<void*> (*cursor_init)(void* index, std::span<key_t const> starts) noexcept;
+    util::expected<void*> (*cursor_init)(void* index, std::span<key_t const> starts) noexcept;
 
     /** Pulls the next entries' keys into @p keys, gathering their links into @p links where
      *  named. */
-    expected<std::size_t> (*cursor_next)(void* index, void* cursor, std::span<key_t> keys, links_outputs_t* links,
-                                         executor_t& executor) noexcept;
+    util::expected<std::size_t> (*cursor_next)(void* index, void* cursor, std::span<key_t> keys, links_outputs_t* links,
+                                               executor_t& executor) noexcept;
     void (*cursor_free)(void* cursor) noexcept;
 
     /** Draws up to the outputs' length around the focus keys, beside and placed among the shown
      *  ones, never scanning; only a RAM index samples yet. */
-    expected<sample_result_t> (*sample)(void* index, sample_inputs<key_t> inputs, sample_outputs<key_t> outputs,
-                                        sample_config_t config, executor_t& executor) noexcept;
+    util::expected<util::sample_result_t> (*sample)(void* index, util::sample_inputs<key_t> inputs,
+                                                    util::sample_outputs<key_t> outputs, util::sample_config_t config,
+                                                    executor_t& executor) noexcept;
 
     // Persistence
-    status_t (*save)(void* index, std::string_view path, executor_t& executor, progress_ticks_t& ticks) noexcept;
-    status_t (*save_buffer)(void* index, bytes_span_t buffer, executor_t& executor, progress_ticks_t& ticks) noexcept;
-    status_t (*load)(void* index, std::string_view path, executor_t& executor, progress_ticks_t& ticks) noexcept;
-    status_t (*load_buffer)(void* index, checkpoint_source_t source, executor_t& executor,
-                            progress_ticks_t& ticks) noexcept;
+    util::status_t (*save)(void* index, std::string_view path, executor_t& executor, progress_ticks_t& ticks) noexcept;
+    util::status_t (*save_buffer)(void* index, util::bytes_span_t buffer, executor_t& executor,
+                                  progress_ticks_t& ticks) noexcept;
+    util::status_t (*load)(void* index, std::string_view path, executor_t& executor, progress_ticks_t& ticks) noexcept;
+    util::status_t (*load_buffer)(void* index, util::checkpoint_source_t source, executor_t& executor,
+                                  progress_ticks_t& ticks) noexcept;
 };
 
 /** The variants one class unit compiles for one residency: @c find answers the verb table of a
@@ -239,7 +246,7 @@ template <vendored_residency_t residency_>
 usearch_executor_t call_executor_for(punned_dense_index<residency_> const& punned,
                                      usearch_executor_handle_t& call_executor, usearch_outcome_t* outcome) noexcept {
     std::size_t const shards = punned.verbs.shards_count(punned.index);
-    growing_buffer<int> devices {global_allocator};
+    util::growing_buffer<int> devices {util::global_allocator};
     if (failed(devices.reserve_exactly(shards)))
         return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to list the devices"), nullptr;
     for (std::size_t shard = 0; shard != shards; ++shard) {
@@ -251,7 +258,7 @@ usearch_executor_t call_executor_for(punned_dense_index<residency_> const& punne
     using executor_t = typename punned_dense_index<residency_>::executor_t;
     auto [built, status] = executor_t::spawn(driver_of(gpu_drivers(), std::type_identity<executor_t> {}), devices);
     if (failed(status)) return propagate_error(status, outcome), nullptr;
-    call_executor.executor.emplace<gpu_executor_t>(std::in_place_type<executor_t>, std::move(built));
+    call_executor.executor.emplace<util::gpu_executor_t>(std::in_place_type<executor_t>, std::move(built));
     return &call_executor;
 }
 

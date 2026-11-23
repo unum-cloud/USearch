@@ -88,6 +88,9 @@ namespace nk = ashvardanian::numkong;
 namespace fu = ashvardanian::forkunion;
 namespace sz = ashvardanian::stringzilla;
 namespace st = ashvardanian::smashtable;
+} // namespace unum::usearch
+
+namespace unum::usearch::utilities {
 
 /** The base Linux adds to syscall numbers on MIPS and Alpha, so mirrored numbers add it too. */
 #if defined(_MIPS_SIM) && _MIPS_SIM == _ABIO32
@@ -101,9 +104,6 @@ inline constexpr long linux_syscall_offset_k = 110;
 #else
 inline constexpr long linux_syscall_offset_k = 0;
 #endif
-} // namespace unum::usearch
-
-namespace unum::usearch::utilities {
 
 using f64_t = double;
 using f32_t = float;
@@ -274,7 +274,7 @@ struct dummy_fold_t {
 };
 
 /**
- *  @brief Why a call failed, in the vocabulary the engine and every binding share.
+ *  @brief The code a call fails with, in the vocabulary the engine and every binding share.
  *
  *  Every enumerator takes its value from @c usearch_status_t in @c types.h, so the C++ mirror
  *  and the ABI cannot drift - there is nothing to keep in step and nothing to assert, and the
@@ -283,79 +283,117 @@ struct dummy_fold_t {
  *  The set describes the project's failures, not this tier's exits: several enumerators name
  *  conditions only a binding or a higher layer can see, and are never returned from here.
  *
- *  The failures fall into five categories. Resources: @c bad_alloc_k, @c device_error_k and
- *  @c io_k. Input: @c shape_mismatch_k, @c unsupported_layout_k, @c unknown_kind_k,
- *  @c malformed_k and @c invalid_argument_k. State: @c uninitialized_k, @c config_mismatch_k,
- *  @c read_only_k, @c overflow_k, @c contended_k and @c unsupported_k. Interruptions:
- *  @c cancelled_k and @c deferred_k. Defects: @c internal_k. Any verb that allocates, binds a
- *  device or touches a file may also return a Resources status; any verb taking a progress
- *  callback may return @c cancelled_k. A verb's own block lists only what its contract adds.
+ *  Each failure's own line opens with its category: Resources, Input, State, Interruptions or
+ *  Defects. Any verb that allocates, binds a device or touches a file may also return a Resources
+ *  status; any verb taking a progress callback may return @c cancelled_k. A verb's own block lists
+ *  only what its contract adds.
  */
-enum class [[nodiscard]] status_t : int {
+enum class [[nodiscard]] status_code_t : int {
 
     /** The call completed and any paired value is meaningful. */
     success_k = usearch_status_success_k,
 
-    /** The underlying allocator failed to provide memory; retrying a smaller batch may succeed. */
-    bad_alloc_k = usearch_status_out_of_memory_k,
+    /** Resources: the allocator failed to provide memory; retrying a smaller batch may succeed. */
+    out_of_memory_k = usearch_status_out_of_memory_k,
 
-    /** Shapes, entry counts, or output capacity disagree. */
+    /** Input: shapes, entry counts, or output capacity disagree. */
     shape_mismatch_k = usearch_status_shape_mismatch_k,
 
-    /** A stride or packing no traversal can walk. */
+    /** Input: a stride or packing no traversal can walk. */
     unsupported_layout_k = usearch_status_unsupported_layout_k,
 
-    /** A scalar, metric, or residency tag this build does not know. */
+    /** Input: a scalar, metric, or residency tag this build does not know. */
     unknown_kind_k = usearch_status_unknown_kind_k,
 
-    /** A mutating verb on a structure that opens its checkpoint in place. */
+    /** State: a mutating verb on a structure that opens its checkpoint in place. */
     read_only_k = usearch_status_read_only_k,
 
-    /** A file could not be opened, read, written, or parsed. */
+    /** Resources: a file could not be opened, read, written, or parsed. */
     io_k = usearch_status_io_k,
 
-    /** An accelerator runtime call failed - the device state should be treated as
+    /** Resources: an accelerator runtime call failed - the device state should be treated as
      *  poisoned and the structure rebuilt. */
-    device_error_k = usearch_status_device_k,
+    device_k = usearch_status_device_k,
 
-    /** The serialized payload is truncated or does not describe this structure. */
+    /** Input: the serialized payload is truncated or does not describe this structure. */
     malformed_k = usearch_status_malformed_k,
 
-    /** Neither success nor a named failure was reported - a defect, not a state. */
+    /** Defects: neither success nor a named failure was reported - a defect, not a state. */
     internal_k = usearch_status_internal_k,
 
-    /** The structure reached a hard design ceiling, like the 2^32 ID space; retrying can't help. */
+    /** State: the structure hit a hard design ceiling, like the 2^32 ID space; no retry helps. */
     overflow_k = usearch_status_overflow_k,
 
-    /** The operation requires a prior successful @c reserve() -like initialization call. */
+    /** State: the operation requires a prior successful @c reserve() -like initialization call. */
     uninitialized_k = usearch_status_uninitialized_k,
 
-    /** The requested configuration contradicts an already-frozen one, like re-reserving
+    /** State: the requested configuration contradicts an already-frozen one, like re-reserving
      *  with a different geometry; pass matching parameters or start a fresh structure. */
     config_mismatch_k = usearch_status_config_mismatch_k,
 
-    /** A certified synchronization contract was violated by a concurrent operation;
+    /** State: a certified synchronization contract was violated by a concurrent operation;
      *  discard any produced output and retry in a quieter phase. */
     contended_k = usearch_status_contended_k,
 
-    /** A progress callback asked the operation to stop; it unwound without publishing,
-     *  so the structure carries whatever it did before the call. */
+    /** Interruptions: a progress callback asked the operation to stop; it unwound without
+     *  publishing, so the structure carries whatever it did before the call. */
     cancelled_k = usearch_status_cancelled_k,
-    /** @brief The verb is declared for every residency but this one does not implement it. */
+
+    /** State: the verb is declared for every residency but this one does not implement it. */
     unsupported_k = usearch_status_unsupported_k,
 
-    /** The call was submitted deferred and is not final yet; never a final status. */
+    /** Interruptions: the call was submitted deferred and is not final yet. */
     deferred_k = usearch_status_deferred_k,
 
-    /** An argument breaks the verb's contract, like a required pointer left null. */
+    /** Input: an argument breaks the verb's contract, like a required pointer left null. */
     invalid_argument_k = usearch_status_invalid_argument_k,
 };
 
+/** Why a call failed: a code recovery branches on, and an optional static note naming the broken
+ *  invariant, step or resource, for logs and regression analysis. */
+struct [[nodiscard]] status_t {
+    status_code_t code = status_code_t::success_k;
+    char const* note = nullptr;
+
+    constexpr status_t() noexcept = default;
+    constexpr status_t(status_code_t reason, char const* detail = nullptr) noexcept : code(reason), note(detail) {}
+    constexpr bool succeeded() const noexcept { return code == status_code_t::success_k; }
+    constexpr bool failed() const noexcept { return code != status_code_t::success_k; }
+    friend constexpr bool operator==(status_t const& status, status_code_t code) noexcept {
+        return status.code == code;
+    }
+};
+
+static_assert(sizeof(status_t) == 2 * sizeof(void*) && std::is_trivially_copyable_v<status_t>,
+              "a status is a code and a note pointer, returned in two registers");
+
 /** Whether @p status reports success. */
-constexpr bool succeeded(status_t status) noexcept { return status == status_t::success_k; }
+constexpr bool succeeded(status_t status) noexcept { return status.succeeded(); }
 
 /** Whether @p status reports failure. */
-constexpr bool failed(status_t status) noexcept { return status != status_t::success_k; }
+constexpr bool failed(status_t status) noexcept { return status.failed(); }
+
+/** Keeps the first failure any thread reports into @p first, through the CPU class's reference. */
+template <template <typename> class atomic_ref_template_>
+void keep_first_failure(status_t& first, status_t status) noexcept {
+    if (status.succeeded()) return;
+    status_code_t unset = status_code_t::success_k;
+    if (atomic_ref_template_<status_code_t>(first.code)
+            .compare_exchange_strong(unset, status.code, std::memory_order_acq_rel, std::memory_order_relaxed))
+        atomic_ref_template_<char const*>(first.note).store(status.note, std::memory_order_release);
+}
+
+/** Why @p listed cannot name the indexes of a reshard: @c invalid_argument_k at a null entry or one
+ *  named twice. */
+template <typename pointer_type_>
+status_t listed_refusal(std::span<pointer_type_* const> listed) noexcept {
+    for (std::size_t position = 0; position != listed.size(); ++position) {
+        if (!listed[position]) return status_code_t::invalid_argument_k;
+        for (std::size_t earlier = 0; earlier != position; ++earlier)
+            if (listed[earlier] == listed[position]) return status_code_t::invalid_argument_k;
+    }
+    return status_code_t::success_k;
+}
 
 /**
  *  Copies @p source over @p destination; the sizes must agree.
@@ -364,9 +402,9 @@ constexpr bool failed(status_t status) noexcept { return status != status_t::suc
  *  - @c config_mismatch_k The sizes differ.
  */
 inline status_t copy_bytes(bytes_span_t destination, bytes_view_t source) noexcept {
-    if (destination.size() != source.size()) return status_t::config_mismatch_k;
+    if (destination.size() != source.size()) return status_code_t::config_mismatch_k;
     if (!source.empty()) std::memcpy(destination.data(), source.data(), source.size());
-    return status_t::success_k;
+    return status_code_t::success_k;
 }
 
 /** Rows @p first to @p first + @p count of a flat row-major @p matrix whose rows are @p row_bytes
@@ -418,51 +456,52 @@ enum class completion_t : int {
  *      an enumerator without a text here is a @c -Wswitch warning instead of silent prose.
  */
 constexpr char const* status_to_string(status_t status) noexcept {
-    switch (status) {
-    case status_t::success_k: return "success";
-    case status_t::bad_alloc_k: return "an allocation failed";
-    case status_t::shape_mismatch_k: return "shapes, entry counts, or output capacity disagree";
-    case status_t::unsupported_layout_k: return "a stride or packing no traversal can walk";
-    case status_t::unknown_kind_k: return "a scalar, metric, or residency tag this build does not know";
-    case status_t::read_only_k: return "a mutating verb on a structure opened in place";
-    case status_t::io_k: return "a file could not be opened, read, written, or parsed";
-    case status_t::device_error_k: return "an accelerator runtime call failed";
-    case status_t::malformed_k: return "the payload is truncated or describes something else";
-    case status_t::internal_k: return "the library reported neither success nor a failure";
-    case status_t::overflow_k: return "a hard design ceiling was reached";
-    case status_t::uninitialized_k: return "the structure needs a successful reservation first";
-    case status_t::config_mismatch_k: return "the request contradicts the frozen configuration";
-    case status_t::contended_k: return "a synchronization contract was violated concurrently";
-    case status_t::cancelled_k: return "a progress callback asked the operation to stop";
-    case status_t::unsupported_k: return "this residency does not implement the verb or its traversal";
-    case status_t::deferred_k: return "the call was submitted deferred and is not final yet";
-    case status_t::invalid_argument_k: return "an argument breaks the verb's contract";
+    switch (status.code) {
+    case status_code_t::success_k: return "success";
+    case status_code_t::out_of_memory_k: return "an allocation failed";
+    case status_code_t::shape_mismatch_k: return "shapes, entry counts, or output capacity disagree";
+    case status_code_t::unsupported_layout_k: return "a stride or packing no traversal can walk";
+    case status_code_t::unknown_kind_k: return "a scalar, metric, or residency tag this build does not know";
+    case status_code_t::read_only_k: return "a mutating verb on a structure opened in place";
+    case status_code_t::io_k: return "a file could not be opened, read, written, or parsed";
+    case status_code_t::device_k: return "an accelerator runtime call failed";
+    case status_code_t::malformed_k: return "the payload is truncated or describes something else";
+    case status_code_t::internal_k: return "the library reported neither success nor a failure";
+    case status_code_t::overflow_k: return "a hard design ceiling was reached";
+    case status_code_t::uninitialized_k: return "the structure needs a successful reservation first";
+    case status_code_t::config_mismatch_k: return "the request contradicts the frozen configuration";
+    case status_code_t::contended_k: return "a synchronization contract was violated concurrently";
+    case status_code_t::cancelled_k: return "a progress callback asked the operation to stop";
+    case status_code_t::unsupported_k: return "this residency does not implement the verb or its traversal";
+    case status_code_t::deferred_k: return "the call was submitted deferred and is not final yet";
+    case status_code_t::invalid_argument_k: return "an argument breaks the verb's contract";
     }
     return "an unrecognized status";
 }
 
-/** A result paired with the @c status_t explaining it; the value is only meaningful
- *  on @c success_k. */
-template <typename value_type_>
+/** A result paired with the @c status_t explaining it; the value is only meaningful on
+ *  @c success_k. A per-neighbor call that is not inlined pairs its value with a bare
+ *  @c status_code_t instead, keeping the result at the value's size plus one code. */
+template <typename value_type_, typename status_type_ = status_t>
 struct [[nodiscard]] expected {
     using value_t = value_type_;
 
     value_type_ value;
-    status_t status;
+    status_type_ status;
 
-    explicit operator bool() const noexcept { return succeeded(status); }
+    explicit operator bool() const noexcept { return status == status_code_t::success_k; }
 };
 
 /** The borrowing face of @ref expected for reference results: there is no null
  *  reference, so the borrow is stored as an address and @c value() binds it only on
  *  @c success_k. */
-template <typename value_type_>
-struct [[nodiscard]] expected<value_type_&> {
+template <typename value_type_, typename status_type_>
+struct [[nodiscard]] expected<value_type_&, status_type_> {
     value_type_* borrowed;
-    status_t status;
+    status_type_ status;
 
     value_type_& value() const noexcept { return *borrowed; }
-    explicit operator bool() const noexcept { return succeeded(status); }
+    explicit operator bool() const noexcept { return status == status_code_t::success_k; }
 };
 
 /** A half-open interval of integer identifiers, iterable like the standard views -
@@ -1712,7 +1751,7 @@ inline void settle_predicate(predicate_type_& predicate, on_admitted_type_&& on_
 /** Reserves nothing for an immediate @p predicate, which gathers nothing. */
 template <typename predicate_type_>
 inline status_t reserve_predicate(predicate_type_&, std::size_t) noexcept {
-    return status_t::success_k;
+    return status_code_t::success_k;
 }
 
 /** Reserves an aggregating @p predicate for @p candidates between two settles, on whatever arena
@@ -1728,7 +1767,7 @@ inline status_t reserve_predicate(predicate_type_& predicate, std::size_t candid
 /** Opens nothing for a predicate every thread shares. */
 template <typename predicate_type_, typename executor_type_>
 inline status_t open_predicate(predicate_type_&, executor_type_&) noexcept {
-    return status_t::success_k;
+    return status_code_t::success_k;
 }
 
 /** Opens a per-thread family on @p executor 's scratch, right after the call's rewind. */
@@ -1819,7 +1858,7 @@ struct serial_executor_t {
     template <typename callback_type_>
     status_t for_tasks(std::size_t tasks, callback_type_&& callback) noexcept {
         for (std::size_t task = 0; task != tasks; ++task) callback(task, 0, 0);
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 };
 
@@ -2169,11 +2208,11 @@ struct claim_word_t {
      */
     expected<std::size_t> claim(std::size_t visible, std::size_t entries, std::size_t max_entries) noexcept {
         std::size_t first = visible;
-        if (entries > max_entries - first) return {{}, status_t::overflow_k};
+        if (entries > max_entries - first) return {{}, status_code_t::overflow_k};
         if (!standard_atomic_ref<std::size_t>(claimed_entries)
                  .compare_exchange_strong(first, first + entries, std::memory_order_acq_rel, std::memory_order_relaxed))
-            return {{}, status_t::contended_k};
-        return {first, status_t::success_k};
+            return {{}, status_code_t::contended_k};
+        return {first, status_code_t::success_k};
     }
 
     /** Gives back the claim over @p entries from @p first, which launched nothing; a word that
@@ -2193,8 +2232,8 @@ struct claim_word_t {
     status_t close(std::size_t visible) noexcept {
         return standard_atomic_ref<std::size_t>(claimed_entries)
                        .compare_exchange_strong(visible, closed_k, std::memory_order_acq_rel, std::memory_order_relaxed)
-                   ? status_t::success_k
-                   : status_t::contended_k;
+                   ? status_code_t::success_k
+                   : status_code_t::contended_k;
     }
 
     /** Reopens a closed word at @p visible, past every entry a load published meanwhile; an open
@@ -2315,6 +2354,10 @@ template <typename index_type_, template <typename> class atomic_ref_template_, 
 struct shard_set;
 
 } // namespace unum::usearch::utilities
+
+namespace unum::usearch {
+namespace util = utilities;
+} // namespace unum::usearch
 
 /** Makes @c uuid128_t a first-class key of standard-hash-keyed containers: fold one mixed
  *  half into the other, then mix again - @ref unum::usearch::utilities::mix_bits twice. */

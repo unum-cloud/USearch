@@ -625,7 +625,9 @@ struct vram_shard_core {
     /** The first failure that left claimed rows unpublished, kept for the index's lifetime; it
      *  refuses every later mutation while searches keep running. */
     status_t status() const noexcept {
-        return fu::standard_atomic_ref<status_t const>(status_).load(std::memory_order_acquire);
+        status_code_t const code =
+            fu::standard_atomic_ref<status_code_t const>(status_.code).load(std::memory_order_acquire);
+        return {code, fu::standard_atomic_ref<char const* const>(status_.note).load(std::memory_order_acquire)};
     }
 
     /** Rows mapped across the flat storage, the smallest of their counts, since slabs are a fixed
@@ -767,8 +769,8 @@ struct vram_shard_core {
      *  - @c config_mismatch_k The @p node is not visible.
      */
     expected<key_t> key_of(node_id_t node) const noexcept {
-        if (node >= size()) return {{}, status_t::config_mismatch_k};
-        return {keyed_[node], status_t::success_k};
+        if (node >= size()) return {{}, status_code_t::config_mismatch_k};
+        return {keyed_[node], status_code_t::success_k};
     }
 
     /** Invokes @p callback for every published node stored under @p key, as of one acquire of the
@@ -795,13 +797,14 @@ struct vram_shard_core {
      *  - @c unsupported_layout_k The @p destination is not contiguous.
      */
     status_t vector(node_id_t node, nk::vector_span<scalar_t> destination, stream_handle_t stream) const noexcept {
-        if (node >= size()) return status_t::config_mismatch_k;
-        if (destination.size() != dimensions()) return status_t::config_mismatch_k;
-        if (!destination.is_contiguous()) return status_t::unsupported_layout_k;
+        if (node >= size()) return {status_code_t::config_mismatch_k, "Node past the index size"};
+        if (destination.size() != dimensions())
+            return {status_code_t::config_mismatch_k, "Destination width differs from the index"};
+        if (!destination.is_contiguous()) return status_code_t::unsupported_layout_k;
         return succeeded(vendor_t::copy(api(), destination.byte_data(), vectors_rows_() + node * row_bytes(),
                                         packed_row_bytes(), stream))
-                   ? status_t::success_k
-                   : status_t::device_error_k;
+                   ? status_code_t::success_k
+                   : status_code_t::device_k;
     }
 
 #pragma endregion Measures
@@ -850,7 +853,7 @@ struct vram_shard_core {
      *  - @c overflow_k The capacity passes the ID space or the reserved range.
      */
     expected<std::size_t> reserve(reserve_capacity_t config) noexcept {
-        if (config.capacity > max_node_count_k) return {capacity(), status_t::overflow_k};
+        if (config.capacity > max_node_count_k) return {capacity(), status_code_t::overflow_k};
         // A closed word is the caller's, who grows around its window; an open one is closed here,
         // so the growth has one writer.
         bool const closing = !claims_.closed();
@@ -989,33 +992,34 @@ struct vram_shard_core {
         if (context && context.device() == device_.ordinal &&
             failed(
                 vendor_t::fill(api(), context.telemetry_.get(), 0, sizeof(vram_telemetry_block_t), context.stream())))
-            return {{}, status_t::device_error_k};
+            return {{}, {status_code_t::device_k, "Telemetry block could not be zeroed"}};
         std::size_t const rows = new_rows.rows;
-        if (keys.size() != rows) return {{}, status_t::config_mismatch_k};
-        if (!rows) return {{claimed_(), static_cast<node_id_t>(claimed_())}, status_t::success_k};
+        if (keys.size() != rows) return {{}, {status_code_t::config_mismatch_k, "Keys differ from the rows"}};
+        if (!rows) return {{claimed_(), static_cast<node_id_t>(claimed_())}, status_code_t::success_k};
         if (status_t const kept = status(); failed(kept)) return {{}, kept};
-        if (!context || context.device() != device_.ordinal) return {{}, status_t::config_mismatch_k};
+        if (!context || context.device() != device_.ordinal)
+            return {{}, {status_code_t::config_mismatch_k, "Context not bound to this GPU"}};
         auto const [first_id, claim_status] = claim_(rows);
         if (failed(claim_status)) return {{}, claim_status};
-        expected<insert_result_t> inserted = submit_insert_(keys, new_rows, first_id, assigned_ids, context, config);
-        if (!inserted) {
+        auto [inserted, insert_status] = submit_insert_(keys, new_rows, first_id, assigned_ids, context, config);
+        if (failed(insert_status)) {
             unclaim_(first_id, rows);
-            return inserted;
+            return {inserted, insert_status};
         }
         if (status_t const drained = context.wait(); failed(drained))
-            return {{inserted.value.new_size, inserted.value.first_id}, fail_(drained)};
+            return {{inserted.new_size, inserted.first_id}, fail_(drained)};
         publish_keys_({first_id, static_cast<node_id_t>(first_id + rows)});
-        if (status_t const published = publish_(inserted.value.first_id, rows); failed(published))
-            return {{inserted.value.new_size, inserted.value.first_id}, published};
+        if (status_t const published = publish_(inserted.first_id, rows); failed(published))
+            return {{inserted.new_size, inserted.first_id}, published};
         vram_telemetry_block_t const spent = context.spent();
-        inserted.value.visited_members = spent.hops;
-        inserted.value.computed_distances = spent.scored;
-        inserted.value.restarts = spent.restarts;
-        inserted.value.unlinked_neighbors = spent.lock_skips;
-        inserted.value.tail_compactions = spent.tail_compactions;
-        inserted.value.tail_dropped = spent.tail_dropped;
-        inserted.value.visited_saturations = spent.visited_saturations;
-        return inserted;
+        inserted.visited_members = spent.hops;
+        inserted.computed_distances = spent.scored;
+        inserted.restarts = spent.restarts;
+        inserted.unlinked_neighbors = spent.lock_skips;
+        inserted.tail_compactions = spent.tail_compactions;
+        inserted.tail_dropped = spent.tail_dropped;
+        inserted.visited_saturations = spent.visited_saturations;
+        return {inserted, insert_status};
     }
 
 #pragma endregion Insertion
@@ -1106,7 +1110,7 @@ struct vram_shard_core {
                                      completion_t completion = completion_t::blocking_k) noexcept
         requires floating_scalar<scalar_t>
     {
-        if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
+        if (kernel_ != nk_kernel_dot_k) return {{}, {status_code_t::config_mismatch_k, "Dot kernel required"}};
         return settle_(
             kernels_.submit_search_(*this, queries, result_ids, result_distances, context, config, size(), heads),
             queries.rows, context, completion);
@@ -1128,16 +1132,16 @@ struct vram_shard_core {
     }
 
     /**
-     *  Filtered search is refused: a host predicate cannot run inside the walk, and a
-     *  device-resident admission bitmap is a design of its own.
+     *  @brief Filtered search is refused: a host predicate cannot run inside the walk, and a
+     *      device-resident admission bitmap is a design of its own.
      *
      *  @par Statuses:
-     *  - @c device_error_k Every call.
+     *  - @c device_k Every call.
      */
     template <typename predicate_type_>
     expected<search_result_t> search_if(vector_view_t, search_config_t, predicate_type_&&,
                                         traversal_context_t&) noexcept {
-        return {{}, status_t::device_error_k};
+        return {{}, status_code_t::device_k};
     }
 
     /**
@@ -1172,13 +1176,13 @@ struct vram_shard_core {
                                        nk::matrix_span<dot_result_t> products, std::span<u32_t> counts,
                                        search_config_t config, traversal_context_t& context,
                                        completion_t completion = completion_t::blocking_k) noexcept {
-        if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
-        expected<search_result_t> settled = settle_(
+        if (kernel_ != nk_kernel_dot_k) return {{}, {status_code_t::config_mismatch_k, "Dot kernel required"}};
+        auto [settled, settle_status] = settle_(
             kernels_.submit_multiply_(*this, left, node_ids, products, counts, context, config, size()), left.rows,
             context, completion);
-        if (settled && completion == completion_t::blocking_k)
-            for (u32_t const scored : counts) settled.value.count += scored;
-        return settled;
+        if (succeeded(settle_status) && completion == completion_t::blocking_k)
+            for (u32_t const scored : counts) settled.count += scored;
+        return {settled, settle_status};
     }
 
     /**
@@ -1226,22 +1230,22 @@ struct vram_shard_core {
                                      search_config_t config, traversal_context_t& context,
                                      completion_t completion = completion_t::blocking_k) noexcept {
         std::size_t const rows_count = queries.rows;
-        if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
+        if (kernel_ != nk_kernel_dot_k) return {{}, {status_code_t::config_mismatch_k, "Dot kernel required"}};
         if (status_t const refusal = attend_refusal_(rows_count, outputs, carry); failed(refusal)) return {{}, refusal};
-        expected<f32_t*> const submitted = kernels_.submit_attend_(*this, queries, head_count, value_lookup,
-                                                                   score_scale, context, config, 1,
-                                                                   exported_bytes_(outputs), size());
-        if (!submitted || !rows_count) return {{}, submitted.status};
+        auto const [submitted, submitted_status] = kernels_.submit_attend_(*this, queries, head_count, value_lookup,
+                                                                           score_scale, context, config, 1,
+                                                                           exported_bytes_(outputs), size());
+        if (failed(submitted_status) || !rows_count) return {{}, submitted_status};
         auto const [kernels, kernels_status] = kernels_.kernels_(context);
         if (failed(kernels_status)) return {{}, kernels_status};
-        if (status_t const copied = copy_attended_(*kernels, submitted.value, 1, outputs, carry, context.stream());
+        if (status_t const copied = copy_attended_(*kernels, submitted, 1, outputs, carry, context.stream());
             failed(copied))
             return {{}, copied};
-        expected<search_result_t> const attended = settle_({{rows_count}, status_t::success_k}, rows_count, context,
-                                                           completion);
-        if (attended && completion == completion_t::blocking_k && context.missed())
-            return {{}, status_t::shape_mismatch_k};
-        return attended;
+        auto const [attended, attended_status] = settle_({{rows_count}, status_code_t::success_k}, rows_count, context,
+                                                         completion);
+        if (succeeded(attended_status) && completion == completion_t::blocking_k && context.missed())
+            return {{}, status_code_t::shape_mismatch_k};
+        return {attended, attended_status};
     }
 
 #pragma endregion Search
@@ -1425,12 +1429,12 @@ struct vram_shard_core {
          *      the in-link counts and the islands' components; @c internal_k while passes remain.
          *
          *  @par Statuses:
-         *  - @c config_mismatch_k, @c device_error_k A batch failed, as it kept.
+         *  - @c config_mismatch_k, @c device_k A batch failed, as it kept.
          */
         expected<reachability_t> finish() const noexcept {
             if (failed(status_)) return {{}, status_};
-            if (!index_ || !visible) return {reachability_t {}, status_t::success_k};
-            if (step_ != step_t::done_k) return {{}, status_t::internal_k};
+            if (!index_ || !visible) return {reachability_t {}, status_code_t::success_k};
+            if (step_ != step_t::done_k) return {{}, status_code_t::internal_k};
             round_counters_t const& counters = *counters_;
             reachability_t result;
             result.audited_nodes = visible;
@@ -1443,7 +1447,7 @@ struct vram_shard_core {
             result.unreached_islands = counters.islands ? counters.unreached_islands : 0;
             result.stranded_islands = counters.islands ? counters.stranded_islands : 0;
             result.components = counters.islands ? counters.components : 1;
-            return {result, status_t::success_k};
+            return {result, status_code_t::success_k};
         }
 
         /** Turns the check onto @p index 's IDs below @p visible, which its columns must span, and
@@ -1530,7 +1534,7 @@ struct vram_shard_core {
         u32_t next_pass_ = 0, last_pass_ = 0;
         vram_island_pass_t island_pass_ = vram_island_pass_t::forward_k;
         step_t step_ = step_t::done_k;
-        status_t status_ = status_t::success_k;
+        status_t status_ = status_code_t::success_k;
     };
 
     /**
@@ -1571,12 +1575,12 @@ struct vram_shard_core {
          *  - @c uninitialized_k The plan is unbound, as a refused one answers, or @ref status
          *    keeps it.
          *  - @c config_mismatch_k The @p context rides another device, or the plan keeps it.
-         *  - @c device_error_k A launch or a copy failed, or the plan keeps it.
+         *  - @c device_k A launch or a copy failed, or the plan keeps it.
          */
         status_t queue(traversal_context_t& context, refine_config_t) noexcept {
-            if (!index_) return status_t::uninitialized_k;
+            if (!index_) return status_code_t::uninitialized_k;
             if (failed(status_)) return status_;
-            if (context.device() != index_->device_.ordinal) return status_t::config_mismatch_k;
+            if (context.device() != index_->device_.ordinal) return status_code_t::config_mismatch_k;
             auto const [kernels, kernels_status] = index_->kernels_.kernels_(context);
             if (failed(kernels_status)) return kernels_status;
             switch (phase_) {
@@ -1585,7 +1589,7 @@ struct vram_shard_core {
             case phase_t::gather_k: status_ = index_->queue_gather_(context, *this); break;
             case phase_t::restitch_k: status_ = index_->queue_restitch_(context, *this); break;
             // The barrier closing the draw draws the hubs, which the gather uploads with its runs.
-            default: return status_t::success_k;
+            default: return status_code_t::success_k;
             }
             if (succeeded(status_)) status_ = context.record();
             return status_;
@@ -1698,11 +1702,11 @@ struct vram_shard_core {
          *
          *  @par Statuses:
          *  - @c uninitialized_k The plan is unbound.
-         *  - @c config_mismatch_k, @c device_error_k or @c internal_k A phase kept it.
+         *  - @c config_mismatch_k, @c device_k or @c internal_k A phase kept it.
          *  - @c cancelled_k A phase still follows, or the round was stopped.
          */
         expected<refine_report_t> finish(traversal_context_t const& context) const noexcept {
-            if (!index_) return {{}, status_t::uninitialized_k};
+            if (!index_) return {{}, status_code_t::uninitialized_k};
             refine_report_t result = tally_;
             vram_telemetry_block_t const spent = context.spent();
             result.traversal_stats.visited_members = spent.hops;
@@ -1711,7 +1715,7 @@ struct vram_shard_core {
             result.traversal_stats.saturated_walks = spent.visited_saturations;
             if (failed(status_)) return {result, status_};
             bool const done = phase_ == phase_t::done_k && result.verdict != refine_verdict_t::stopped_k;
-            return {result, done ? status_t::success_k : status_t::cancelled_k};
+            return {result, done ? status_code_t::success_k : status_code_t::cancelled_k};
         }
 
       private:
@@ -1851,7 +1855,7 @@ struct vram_shard_core {
         /** The phase the current health check follows, which decides the one after it. */
         phase_t swept_after_ = phase_t::none_k;
         phase_t phase_ = phase_t::done_k;
-        status_t status_ = status_t::success_k;
+        status_t status_ = status_code_t::success_k;
         refine_report_t tally_;
     };
 
@@ -1866,7 +1870,7 @@ struct vram_shard_core {
      *  @par Statuses:
      *  - @c uninitialized_k The index never grew.
      *  - @c config_mismatch_k The @p context rides another device or cannot launch.
-     *  - @c bad_alloc_k A column, a mirror, the arena or the counters cannot be placed.
+     *  - @c out_of_memory_k A column, a mirror, the arena or the counters cannot be placed.
      */
     expected<refine_plan_t> plan_refine(refine_config_t config, traversal_context_t& context) noexcept {
         refine_plan_t plan {health_plan_t {empty_round_scratch_(context)}};
@@ -1877,7 +1881,7 @@ struct vram_shard_core {
         plan.health.rebind(*this, static_cast<node_id_t>(rows));
         plan.swept_after_ = phase_t::none_k;
         plan.phase_ = rows ? phase_t::health_k : phase_t::done_k;
-        return {std::move(plan), status_t::success_k};
+        return {std::move(plan), status_code_t::success_k};
     }
 
     /**
@@ -1886,8 +1890,8 @@ struct vram_shard_core {
      *  @par Statuses:
      *  - @c uninitialized_k The index never grew.
      *  - @c config_mismatch_k The @p context rides another device or cannot launch.
-     *  - @c bad_alloc_k A column, a mirror, the arena or the counters cannot be placed.
-     *  - @c device_error_k A launch or a copy failed.
+     *  - @c out_of_memory_k A column, a mirror, the arena or the counters cannot be placed.
+     *  - @c device_k A launch or a copy failed.
      */
     expected<refine_report_t> refine(refine_config_t config, traversal_context_t& context) noexcept {
         auto [plan, status] = plan_refine(config, context);
@@ -1929,15 +1933,15 @@ struct vram_shard_core {
          *  @par Statuses:
          *  - @c uninitialized_k The plan is unbound, as a refused one answers.
          *  - @c config_mismatch_k The @p context rides another device, or the plan keeps it.
-         *  - @c device_error_k A launch or a copy failed, or the plan keeps it.
+         *  - @c device_k A launch or a copy failed, or the plan keeps it.
          */
         status_t queue(traversal_context_t& context, refine_config_t config) noexcept {
-            if (!rounds_.index_) return status_t::uninitialized_k;
+            if (!rounds_.index_) return status_code_t::uninitialized_k;
             if (!moving()) return rounds_.queue(context, config);
             status_t& status = rounds_.status_;
             if (failed(status)) return status;
             vram_shard_core& source = *split_.source;
-            if (context.device() != source.device_.ordinal) return status_t::config_mismatch_k;
+            if (context.device() != source.device_.ordinal) return status_code_t::config_mismatch_k;
             stream_handle_t const stream = context.stream();
             auto const [kernels, kernels_status] = source.kernels_.kernels_(context);
             if (failed(kernels_status)) return kernels_status;
@@ -2015,13 +2019,13 @@ struct vram_shard_core {
          *
          *  @par Statuses:
          *  - @c uninitialized_k The plan is unbound.
-         *  - @c config_mismatch_k, @c device_error_k or @c internal_k A phase kept it.
+         *  - @c config_mismatch_k, @c device_k or @c internal_k A phase kept it.
          *  - @c cancelled_k The moves or a round still follow, or a round was stopped.
          */
         expected<refine_report_t> finish(traversal_context_t const& context) const noexcept {
-            if (!rounds_.index_) return {{}, status_t::uninitialized_k};
+            if (!rounds_.index_) return {{}, status_code_t::uninitialized_k};
             if (failed(rounds_.status_)) return {{}, rounds_.status_};
-            if (moving()) return {{}, status_t::cancelled_k};
+            if (moving()) return {{}, status_code_t::cancelled_k};
             return rounds_.finish(context);
         }
 
@@ -2128,7 +2132,7 @@ struct vram_shard_core {
      *    device, metric or geometry, or a @p context of another device or one that cannot launch.
      *  - @c contended_k This index's or a target's claim word is open.
      *  - @c overflow_k Part slots past the 32-bit IDs.
-     *  - @c bad_alloc_k A column, a mirror, the arena or the counters cannot be placed.
+     *  - @c out_of_memory_k A column, a mirror, the arena or the counters cannot be placed.
      */
     template <typename owner_type_>
     expected<reshard_plan_t> plan_reshard(std::span<owner_type_* const> sources, std::span<owner_type_* const> targets,
@@ -2136,35 +2140,31 @@ struct vram_shard_core {
                                           traversal_context_t& context, std::size_t rows) noexcept {
         reshard_plan_t plan {refine_plan_t {health_plan_t {empty_round_scratch_(context)}}};
         for (std::span<owner_type_* const> const listed : {sources, targets}) {
-            if (listed.empty()) return {std::move(plan), status_t::invalid_argument_k};
-            for (std::size_t position = 0; position != listed.size(); ++position) {
-                if (!listed[position]) return {std::move(plan), status_t::invalid_argument_k};
-                for (std::size_t earlier = 0; earlier != position; ++earlier)
-                    if (listed[earlier] == listed[position]) return {std::move(plan), status_t::invalid_argument_k};
-            }
+            if (listed.empty()) return {std::move(plan), status_code_t::invalid_argument_k};
+            if (status_t const refused = listed_refusal(listed); failed(refused)) return {std::move(plan), refused};
         }
         std::size_t const parts = targets.size();
         if (config.shard_capacity || sources.size() != 1 || &(sources[0]->*core) != this || parts < 2)
-            return {std::move(plan), status_t::unsupported_k};
+            return {std::move(plan), status_code_t::unsupported_k};
         for (owner_type_* const into : targets)
-            if (&(into->*core) == this) return {std::move(plan), status_t::config_mismatch_k};
-        if (!claims_.closed()) return {std::move(plan), status_t::contended_k};
+            if (&(into->*core) == this) return {std::move(plan), status_code_t::config_mismatch_k};
+        if (!claims_.closed()) return {std::move(plan), status_code_t::contended_k};
         split_t& split = plan.split_;
         if (failed(split.targets.reserve_exactly(parts)) || failed(split.parts.resize(parts)))
-            return {std::move(plan), status_t::bad_alloc_k};
+            return {std::move(plan), status_code_t::out_of_memory_k};
         for (owner_type_* const into : targets) {
             vram_shard_core& part = into->*core;
             if (part.device_.ordinal != device_.ordinal || part.kernel_ != kernel_ || !(part.geometry_ == geometry_) ||
                 part.size())
-                return {std::move(plan), status_t::config_mismatch_k};
-            if (!part.claims_.closed()) return {std::move(plan), status_t::contended_k};
+                return {std::move(plan), status_code_t::config_mismatch_k};
+            if (!part.claims_.closed()) return {std::move(plan), status_code_t::contended_k};
             split.targets.push_back_reserved(&part);
         }
         split.source = this;
         split.entries = rows;
         split.part_capacity = divide_round_up<std::size_t>(split.entries, parts);
         if (parts * split.part_capacity >= (std::numeric_limits<u32_t>::max)())
-            return {std::move(plan), status_t::overflow_k};
+            return {std::move(plan), status_code_t::overflow_k};
         // Every target holds a full part's nodes, sentinel-filled, before the partition queues.
         stream_handle_t const stream = context.stream();
         for (vram_shard_core* const part : split.targets)
@@ -2181,14 +2181,14 @@ struct vram_shard_core {
         plan.rounds_.index_ = this;
         plan.moves_ = split.entries ? phase_t::partition_k : phase_t::done_k;
         if (!split.entries) plan.bind_target_();
-        return {std::move(plan), status_t::success_k};
+        return {std::move(plan), status_code_t::success_k};
     }
 
     /**
      *  @brief One @ref plan_reshard driven to its end on the calling thread, one wait a phase.
      *
      *  @par Statuses:
-     *  - Those of @ref plan_reshard, then @c device_error_k when a launch or a copy failed.
+     *  - Those of @ref plan_reshard, then @c device_k when a launch or a copy failed.
      */
     template <typename owner_type_>
     expected<refine_report_t> reshard(std::span<owner_type_* const> sources, std::span<owner_type_* const> targets,
@@ -2208,16 +2208,16 @@ struct vram_shard_core {
      *
      *  @par Statuses:
      *  - @c config_mismatch_k The @p context rides another device or cannot launch.
-     *  - @c bad_alloc_k A column or the counters cannot be placed.
+     *  - @c out_of_memory_k A column or the counters cannot be placed.
      */
     expected<health_plan_t> plan_health(traversal_context_t& context) noexcept {
         std::size_t const rows = size();
         health_plan_t plan {empty_round_scratch_(context)};
-        if (!rows) return {std::move(plan), status_t::success_k};
+        if (!rows) return {std::move(plan), status_code_t::success_k};
         if (status_t const carved = carve_health_(plan, context, rows_shape_(rows)); failed(carved))
             return {std::move(plan), carved};
         plan.rebind(*this, static_cast<node_id_t>(rows));
-        return {std::move(plan), status_t::success_k};
+        return {std::move(plan), status_code_t::success_k};
     }
 
     /**
@@ -2229,8 +2229,8 @@ struct vram_shard_core {
      *
      *  @par Statuses:
      *  - @c config_mismatch_k The @p context rides another device or cannot launch.
-     *  - @c bad_alloc_k A column or the counters cannot be placed.
-     *  - @c device_error_k A launch or a copy failed.
+     *  - @c out_of_memory_k A column or the counters cannot be placed.
+     *  - @c device_k A launch or a copy failed.
      */
     expected<reachability_t> health(traversal_context_t& context) noexcept {
         auto [plan, status] = plan_health(context);
@@ -2368,19 +2368,19 @@ struct vram_shard_core {
          *  - @c config_mismatch_k The task is empty, or the columns cannot hold its rows.
          */
         status_t save(task_t const& task) noexcept {
-            if (!index_) return status_t::uninitialized_k;
+            if (!index_) return status_code_t::uninitialized_k;
             // Shards' tasks interleave on one thread, so another shard's device may be current.
             if (failed(vendor_t::select(index_->api(), index_->device_specs().ordinal)))
-                return status_t::device_error_k;
+                return {status_code_t::device_k, "Device could not be made current"};
             iota_view<node_id_t> const rows = task.index_nodes;
-            if (rows.empty()) return status_t::config_mismatch_k;
+            if (rows.empty()) return {status_code_t::config_mismatch_k, "Task covers no rows"};
             std::size_t const scalar_row_bytes = index_->packed_row_bytes();
             std::size_t const neighbors_row_bytes = index_->connectivity() * sizeof(node_id_t);
             std::size_t const first = task.source_nodes.first;
             if (flat_rows(columns.vectors, first, rows.size(), scalar_row_bytes).empty() ||
                 flat_rows(columns.neighbors, first, rows.size(), neighbors_row_bytes).empty() ||
                 flat_rows(columns.norms, first, rows.size(), sizeof(norms_t)).empty() != columns.norms.empty())
-                return status_t::config_mismatch_k;
+                return {status_code_t::config_mismatch_k, "Task rows do not fit the columns"};
             for (std::size_t chunk = rows.first; chunk < rows.bound; chunk += half_rows()) {
                 std::size_t const bound = min_of<std::size_t>(chunk + half_rows(), rows.bound);
                 // Every half but the pending one has finished, so the other one is free.
@@ -2401,7 +2401,7 @@ struct vram_shard_core {
                                           index_->neighbors_matrix_.base() + chunk * neighbors_row_bytes,
                                           count * neighbors_row_bytes, stream)) ||
                     failed(crossed_[half].record(stream)))
-                    return status_t::device_error_k;
+                    return {status_code_t::device_k, "Copy off the device could not be queued"};
                 // The previous half reaches the host while this one copies off the device.
                 if (status_t const copied = copy_pending_(); failed(copied)) return copied;
                 pending_.index_nodes = {static_cast<node_id_t>(chunk), static_cast<node_id_t>(bound)};
@@ -2409,7 +2409,7 @@ struct vram_shard_core {
                                          static_cast<node_id_t>(first + bound - rows.first)};
                 pending_half_ = half;
             }
-            return status_t::success_k;
+            return status_code_t::success_k;
         }
 
         /**
@@ -2422,15 +2422,15 @@ struct vram_shard_core {
          *  - @c config_mismatch_k Some task's rows never arrived.
          */
         status_t finish() noexcept {
-            if (!index_) return status_t::uninitialized_k;
+            if (!index_) return status_code_t::uninitialized_k;
             if (failed(vendor_t::select(index_->api(), index_->device_specs().ordinal)))
-                return status_t::device_error_k;
+                return {status_code_t::device_k, "Device could not be made current"};
             if (status_t const copied = copy_pending_(); failed(copied)) return copied;
             std::size_t const nodes = static_cast<std::size_t>(visible);
             if (fu::standard_atomic_ref<std::size_t> {covered}.load(std::memory_order_acquire) != nodes)
-                return status_t::config_mismatch_k;
+                return {status_code_t::config_mismatch_k, "Saved rows do not cover the plan"};
             index_ = nullptr;
-            return status_t::success_k;
+            return status_code_t::success_k;
         }
 
       private:
@@ -2439,7 +2439,7 @@ struct vram_shard_core {
          *  neighbor under the watermark and folding every other onto the sentinel. */
         status_t copy_pending_() noexcept {
             iota_view<node_id_t> const rows = pending_.source_nodes;
-            if (pending_.index_nodes.empty()) return status_t::success_k;
+            if (pending_.index_nodes.empty()) return status_code_t::success_k;
             if (status_t const drained = crossed_[pending_half_].wait(); failed(drained)) return drained;
             pending_ = {};
             std::size_t const scalar_row_bytes = index_->packed_row_bytes();
@@ -2465,7 +2465,7 @@ struct vram_shard_core {
             [[maybe_unused]] status_t const copied_neighbors = copy_bytes(neighbors_rows,
                                                                           std::as_bytes(neighbors_view));
             fu::standard_atomic_ref<std::size_t> {covered}.store_add(rows.size(), std::memory_order_acq_rel);
-            return status_t::success_k;
+            return status_code_t::success_k;
         }
 
         /** Marks the last copies into each half of the bounce, born with the plan. */
@@ -2501,19 +2501,24 @@ struct vram_shard_core {
      */
     expected<save_plan_t> plan_save(columns_t columns, synchronization_t synchronization,
                                     typename executor_t::stream_t const& stream) const noexcept {
-        if (synchronization == synchronization_t::concurrent_k) return {{}, status_t::config_mismatch_k};
-        if (!vectors_matrix_.reserved_bytes()) return {{}, status_t::uninitialized_k};
+        if (synchronization == synchronization_t::concurrent_k)
+            return {{}, {status_code_t::config_mismatch_k, "Concurrent synchronization unsupported"}};
+        if (!vectors_matrix_.reserved_bytes()) return {{}, status_code_t::uninitialized_k};
         std::size_t const rows = size();
+        if (!columns.norms.empty() && !stores_norms())
+            return {{}, {status_code_t::config_mismatch_k, "Index stores no norms"}};
         if (columns.vectors.size() < rows * packed_row_bytes() ||
             columns.neighbors.size() < rows * connectivity() * sizeof(node_id_t) ||
-            (!columns.norms.empty() && (!stores_norms() || columns.norms.size() < rows * sizeof(norms_t))))
-            return {{}, status_t::config_mismatch_k};
-        if (failed(vendor_t::select(api(), device_.ordinal))) return {{}, status_t::device_error_k};
+            (!columns.norms.empty() && columns.norms.size() < rows * sizeof(norms_t)))
+            return {{}, {status_code_t::config_mismatch_k, "Columns too small for the rows"}};
+        if (failed(vendor_t::select(api(), device_.ordinal)))
+            return {{}, {status_code_t::device_k, "Device could not be made current"}};
         save_plan_t plan {*this, columns, stream, static_cast<node_id_t>(rows)};
         std::size_t const bounce_bytes = 2 * plan.half_rows() *
                                          (packed_row_bytes() + connectivity() * sizeof(node_id_t) + sizeof(norms_t));
-        if (bounce_bytes && failed(plan.bounce.resize_uninitialized(bounce_bytes))) return {{}, status_t::bad_alloc_k};
-        return {std::move(plan), status_t::success_k};
+        if (bounce_bytes && failed(plan.bounce.resize_uninitialized(bounce_bytes)))
+            return {{}, {status_code_t::out_of_memory_k, "No room for the bounce buffer"}};
+        return {std::move(plan), status_code_t::success_k};
     }
 
     /**
@@ -2659,11 +2664,11 @@ struct vram_shard_core {
         template <typename key_of_type_>
         status_t load(task_t const& task, columns_view_t columns, iota_view<node_id_t> source_range,
                       key_of_type_&& key_of) noexcept {
-            if (!index_) return status_t::uninitialized_k;
+            if (!index_) return status_code_t::uninitialized_k;
             if (failed(vendor_t::select(index_->api(), index_->device_specs().ordinal)))
-                return status_t::device_error_k;
+                return {status_code_t::device_k, "Device could not be made current"};
             iota_view<node_id_t> const range = task.index_nodes;
-            if (range.empty()) return status_t::config_mismatch_k;
+            if (range.empty()) return {status_code_t::config_mismatch_k, "Task covers no rows"};
             std::size_t const scalar_row_bytes = index_->packed_row_bytes();
             std::size_t const neighbors_row_bytes = index_->connectivity() * sizeof(node_id_t);
             std::size_t const first = task.source_nodes.first;
@@ -2671,19 +2676,19 @@ struct vram_shard_core {
             bytes_view_t neighbors_rows = flat_rows(columns.neighbors, first, range.size(), neighbors_row_bytes);
             bytes_view_t norms_rows = flat_rows(columns.norms, first, range.size(), sizeof(norms_t));
             if (vectors_rows.empty() || neighbors_rows.empty() || norms_rows.empty() != columns.norms.empty())
-                return status_t::config_mismatch_k;
+                return {status_code_t::config_mismatch_k, "Task rows do not fit the columns"};
             // The part's rows go to this task's own index rows, so an ID's shift follows from
             // the task rather than from the plan's base - the two agree for a one-part plan.
             node_id_t const shift = static_cast<node_id_t>(range.first - task.source_nodes.first + source_range.first);
             // The device indexes its chain heads by neighbor ID unchecked, so every rebased ID must
             // arrive in this plan.
             if (static_cast<std::size_t>(shift) + source_range.size() > static_cast<std::size_t>(base) + rows)
-                return status_t::config_mismatch_k;
+                return {status_code_t::config_mismatch_k, "Rebased IDs fall outside the plan"};
             // Dot reserves no norms column, so a part's column has nowhere to go.
             bool const normed = index_->stores_norms() && !norms_rows.empty();
             std::size_t const slot = chunks_++ % 2;
             // A slot refills only once the copies out of it finished, while the other's run.
-            if (reader_ && chunks_ > 2 && failed(drained_[slot].wait())) return index_->fail_(status_t::device_error_k);
+            if (reader_ && chunks_ > 2 && failed(drained_[slot].wait())) return index_->fail_(status_code_t::device_k);
             bytes_view_t* const extents[] = {&vectors_rows, &neighbors_rows, &norms_rows};
             if (status_t const read = reader_.read(slot, std::span(extents).first(normed ? 3 : 2)); failed(read))
                 return index_->fail_(read);
@@ -2698,13 +2703,13 @@ struct vram_shard_core {
                                       neighbors_rows.data(), neighbors_rows.size(), stream)) ||
                 failed(index_->launch_rebase_links_(*kernels_, range, source_range, shift, stream)) ||
                 failed(drained_[slot].record(stream)))
-                return index_->fail_(status_t::device_error_k);
+                return index_->fail_(status_code_t::device_k);
             for (node_id_t node = range.first; node != range.bound; ++node)
                 index_->keyed_.assign(node, key_of(static_cast<node_id_t>(first + node - range.first)));
             if (normed)
                 fu::standard_atomic_ref<std::size_t> {covered_norms}.store_add(range.size(), std::memory_order_acq_rel);
             fu::standard_atomic_ref<std::size_t> {covered}.store_add(range.size(), std::memory_order_acq_rel);
-            return status_t::success_k;
+            return status_code_t::success_k;
         }
 
         /** Files every appended row under the key its task copied, which @ref finish then uploads
@@ -2739,19 +2744,23 @@ struct vram_shard_core {
         template <typename shard_type_>
         status_t load(task_t const& task, shard_type_ const& source_shard, iota_view<node_id_t> source_range) noexcept {
             vram_shard_core const& source = source_shard.core();
-            if (!index_) return status_t::uninitialized_k;
+            if (!index_) return status_code_t::uninitialized_k;
             int const device = index_->device_specs().ordinal;
-            if (failed(vendor_t::select(index_->api(), device))) return status_t::device_error_k;
+            if (failed(vendor_t::select(index_->api(), device)))
+                return {status_code_t::device_k, "Device could not be made current"};
             iota_view<node_id_t> const range = task.index_nodes;
             bool const normed = index_->stores_norms() && source.stores_norms();
             if (range.empty() || range.size() != task.source_nodes.size() || range.first < base ||
-                range.bound > base + rows || task.source_nodes.bound > source.size() ||
-                source.dimensions() != index_->dimensions() || source.connectivity() != index_->connectivity() ||
-                !source.vectors_matrix_.shared_with(device) || !source.neighbors_matrix_.shared_with(device) ||
+                range.bound > base + rows || task.source_nodes.bound > source.size())
+                return {status_code_t::config_mismatch_k, "Task rows do not fit the plan"};
+            if (source.dimensions() != index_->dimensions() || source.connectivity() != index_->connectivity())
+                return {status_code_t::config_mismatch_k, "Source geometry differs from the index"};
+            if (!source.vectors_matrix_.shared_with(device) || !source.neighbors_matrix_.shared_with(device) ||
                 (normed && !source.norms_column_.shared_with(device)))
-                return status_t::config_mismatch_k;
+                return {status_code_t::config_mismatch_k, "Source storage unreachable from this device"};
             node_id_t const shift = range.first - task.source_nodes.first + source_range.first;
-            if (shift + source_range.size() > base + rows) return status_t::config_mismatch_k;
+            if (shift + source_range.size() > base + rows)
+                return {status_code_t::config_mismatch_k, "Rebased IDs fall outside the plan"};
             std::size_t const row_bytes = index_->row_bytes();
             std::size_t const neighbors_row_bytes = index_->connectivity() * sizeof(node_id_t);
             std::size_t const count = range.size(), into = range.first, from = task.source_nodes.first;
@@ -2763,16 +2772,16 @@ struct vram_shard_core {
                 (normed && failed(vendor_t::copy(index_->api(), index_->norms_column_.base() + into * sizeof(norms_t),
                                                  source.norms_column_.base() + from * sizeof(norms_t),
                                                  count * sizeof(norms_t), stream))))
-                return index_->fail_(status_t::device_error_k);
+                return index_->fail_(status_code_t::device_k);
             if (failed(index_->launch_rebase_links_(*kernels_, range, source_range, shift, stream)))
-                return index_->fail_(status_t::device_error_k);
+                return index_->fail_(status_code_t::device_k);
             for (std::size_t row = 0; row != count; ++row)
                 index_->keyed_.assign(static_cast<node_id_t>(into + row),
                                       source.keyed_[static_cast<node_id_t>(from + row)]);
             if (normed)
                 fu::standard_atomic_ref<std::size_t> {covered_norms}.store_add(count, std::memory_order_acq_rel);
             fu::standard_atomic_ref<std::size_t> {covered}.store_add(count, std::memory_order_acq_rel);
-            return status_t::success_k;
+            return status_code_t::success_k;
         }
 
         /**
@@ -2792,29 +2801,29 @@ struct vram_shard_core {
          *    keeps it, as @ref status says.
          */
         status_t finish() noexcept {
-            if (!index_) return status_t::uninitialized_k;
+            if (!index_) return status_code_t::uninitialized_k;
             if (failed(vendor_t::select(index_->api(), index_->device_specs().ordinal)))
-                return status_t::device_error_k;
+                return {status_code_t::device_k, "Device could not be made current"};
             if (fu::standard_atomic_ref<std::size_t> {covered}.load(std::memory_order_acquire) != rows)
-                return status_t::config_mismatch_k;
+                return {status_code_t::config_mismatch_k, "Loaded rows do not cover the plan"};
             if (rows) {
                 if (failed(index_->upload_keys_({base, base + rows}, stream)))
-                    return index_->fail_(status_t::device_error_k);
+                    return index_->fail_(status_code_t::device_k);
                 // One launch derives every row, so a load mixing carried and missing norms
                 // re-derives the carried.
                 if (index_->stores_norms() &&
                     fu::standard_atomic_ref<std::size_t> {covered_norms}.load(std::memory_order_acquire) != rows &&
                     failed(index_->launch_derive_norms_(*kernels_, base, rows, stream)))
-                    return index_->fail_(status_t::device_error_k);
+                    return index_->fail_(status_code_t::device_k);
                 // A fill carries the count by value, so no host word must outlive a copy; the one
                 // wait finishes every task, the norms and the count before the watermark turns.
                 if (failed(vendor_t::fill_words(index_->api(), index_->published_rows_(),
                                                 static_cast<u32_t>(base + rows), 1, stream)) ||
                     failed(drained_[0].record(stream)) || failed(drained_[0].wait()))
-                    return index_->fail_(status_t::device_error_k);
+                    return index_->fail_(status_code_t::device_k);
             }
             vram_shard_core* const index = std::exchange(index_, nullptr);
-            return rows ? index->publish_(base, rows) : status_t::success_k;
+            return rows ? index->publish_(base, rows) : status_code_t::success_k;
         }
 
       private:
@@ -2864,11 +2873,12 @@ struct vram_shard_core {
     expected<load_plan_t> plan_load(std::size_t rows, typename executor_t::stream_t const& stream,
                                     std::span<typename kernels_type_::part_source_t const> sources = {}) noexcept {
         if (status_t const kept = status(); failed(kept)) return {{}, kept};
-        if (failed(vendor_t::select(api(), device_.ordinal))) return {{}, status_t::device_error_k};
+        if (failed(vendor_t::select(api(), device_.ordinal))) return {{}, status_code_t::device_k};
         auto const [kernels, kernels_status] = kernels_.kernels_(stream);
         if (failed(kernels_status)) return {{}, kernels_status};
         if (!rows)
-            return {load_plan_t {*this, stream, *kernels, static_cast<node_id_t>(claimed_()), 0}, status_t::success_k};
+            return {load_plan_t {*this, stream, *kernels, static_cast<node_id_t>(claimed_()), 0},
+                    status_code_t::success_k};
         // A closed word is the caller's, who refines or reshards around the load; an open one is
         // claimed like a batch's, so no batch goes beside it.
         bool const claiming = !claims_.closed();
@@ -2878,7 +2888,7 @@ struct vram_shard_core {
             if (failed(claim_status)) return {{}, claim_status};
             base = first_id;
         }
-        else if (rows > ceiling_nodes_ - base) return {{}, status_t::overflow_k};
+        else if (rows > ceiling_nodes_ - base) return {{}, status_code_t::overflow_k};
         load_plan_t plan {*this, stream, *kernels, base, rows};
         if (status_t const grown = grow_nodes_(base + rows, stream.handle); failed(grown)) return {{}, grown};
         std::size_t const column_row_bytes[] = {packed_row_bytes(), connectivity() * sizeof(node_id_t),
@@ -2887,7 +2897,7 @@ struct vram_shard_core {
                                                       column_row_bytes);
             failed(opened))
             return {{}, opened};
-        return {std::move(plan), status_t::success_k};
+        return {std::move(plan), status_code_t::success_k};
     }
 
     /**
@@ -2908,7 +2918,7 @@ struct vram_shard_core {
         if (keys.size() < rows || columns.vectors.size() < rows * packed_row_bytes() ||
             columns.neighbors.size() < rows * connectivity() * sizeof(node_id_t) ||
             (!columns.norms.empty() && (!stores_norms() || columns.norms.size() < rows * sizeof(norms_t))))
-            return status_t::config_mismatch_k;
+            return status_code_t::config_mismatch_k;
         auto [plan, status] = plan_load(rows, stream);
         if (failed(status)) return status;
         for (typename load_plan_t::task_t const task : plan.tasks())
@@ -2935,8 +2945,10 @@ struct vram_shard_core {
                                              insert_config_t config) noexcept {
         std::size_t const rows = new_rows.rows;
         if (status_t const refusal = rows_refusal_(new_rows); failed(refusal)) return {{}, refusal};
-        if (assigned_ids.size() && assigned_ids.size() != rows) return {{}, status_t::config_mismatch_k};
-        if (context.device() != device_.ordinal || !context) return {{}, status_t::config_mismatch_k};
+        if (assigned_ids.size() && assigned_ids.size() != rows)
+            return {{}, {status_code_t::config_mismatch_k, "Assigned IDs differ from the rows"}};
+        if (context.device() != device_.ordinal || !context)
+            return {{}, {status_code_t::config_mismatch_k, "Context not bound to this GPU"}};
         if (status_t const kept = status(); failed(kept)) return {{}, kept};
         stream_handle_t const stream = context.stream();
         // The first growth binds the device every size below reads. The claim admits no other
@@ -2953,13 +2965,13 @@ struct vram_shard_core {
         std::size_t const links_offset = round_up_to_multiple<std::size_t>(rows * row_bytes() + import_bytes, 16);
         std::size_t const links_bytes = (total_nodes + 2 * picks + 1) * sizeof(u32_t);
         byte_t* const staging = context.ensure_staging(links_offset + links_bytes);
-        if (!staging) return {{}, status_t::bad_alloc_k};
+        if (!staging) return {{}, {status_code_t::out_of_memory_k, "No room for the staging buffer"}};
         u32_t* const link_heads = reinterpret_cast<u32_t*>(staging + links_offset);
         if (failed(vendor_t::fill(api(), link_heads, 0xFF, total_nodes * sizeof(u32_t), stream)))
-            return {{}, status_t::device_error_k};
+            return {{}, {status_code_t::device_k, "Link heads fill failed"}};
         if ((import_bytes || packed_row_bytes() != row_bytes()) &&
             failed(vendor_t::fill(api(), staging, 0, rows * row_bytes() + import_bytes, stream)))
-            return {{}, status_t::device_error_k};
+            return {{}, {status_code_t::device_k, "Staging fill failed"}};
         auto const [kernels, kernels_status] = kernels_.kernels_(context);
         if (failed(kernels_status)) return {{}, kernels_status};
         if (status_t const imported = import_rows_(*kernels, staging, new_rows, staging + rows * row_bytes(), stream);
@@ -2976,7 +2988,7 @@ struct vram_shard_core {
                                         vram_warps_per_block_k;
         std::size_t const arena_bytes_before = context.arena_bytes_;
         byte_t* const arena = context.ensure_arena(arena_warps * arena_shape.slice_bytes<node_id_t>());
-        if (!arena) return {{}, status_t::bad_alloc_k};
+        if (!arena) return {{}, {status_code_t::out_of_memory_k, "No room for the insert arena"}};
 
         // Monotone, so an un-claim below only forfeits epoch space.
         auto const [epoch_base, epochs_status] = context.take_epochs(rows, arena_bytes_before);
@@ -3001,14 +3013,14 @@ struct vram_shard_core {
         // The launch is the last fallible step; reading its verdict here keeps the claim
         // reversible.
         if (failed(kernels_.launch_insert_(*this, build, candidate_slots, context)))
-            return {{}, status_t::device_error_k};
+            return {{}, {status_code_t::device_k, "Insert launch failed"}};
 
         insert_result_t result;
         result.first_id = first_id;
         for (std::size_t row = 0; row != assigned_ids.size(); ++row)
             assigned_ids[row] = static_cast<node_id_t>(first_id + row);
         result.new_size = total_nodes;
-        return {result, status_t::success_k};
+        return {result, status_code_t::success_k};
     }
 
 #pragma endregion Insertion
@@ -3028,10 +3040,11 @@ struct vram_shard_core {
      *  device casts cannot carry into the stored one, or rows closer than one packed row apart, a
      *  zero stride repeating the first. */
     status_t rows_refusal_(rows_view_t rows) const noexcept {
-        if (rows.columns != dimensions()) return status_t::config_mismatch_k;
-        if (rows.dtype != vector_dtype_ && !casts_(rows.dtype, vector_dtype_)) return status_t::unsupported_k;
-        if (rows.stride && rows.stride < packed_bytes(rows.dtype, rows.columns)) return status_t::unsupported_layout_k;
-        return status_t::success_k;
+        if (rows.columns != dimensions()) return status_code_t::config_mismatch_k;
+        if (rows.dtype != vector_dtype_ && !casts_(rows.dtype, vector_dtype_)) return status_code_t::unsupported_k;
+        if (rows.stride && rows.stride < packed_bytes(rows.dtype, rows.columns))
+            return status_code_t::unsupported_layout_k;
+        return status_code_t::success_k;
     }
 
     /** Values one staged row holds at the vectors matrix pitch, its pad included. */
@@ -3067,7 +3080,7 @@ struct vram_shard_core {
         if (rows.dtype == vector_dtype_) {
             if (failed(vendor_t::copy_2d(api(), staging, row_bytes(), rows.data, source_pitch, source_row_bytes,
                                          distinct, stream)))
-                return status_t::device_error_k;
+                return status_code_t::device_k;
         }
         else {
             std::size_t const pitch_values = pitch_values_();
@@ -3079,8 +3092,8 @@ struct vram_shard_core {
                 byte_t* const window_staging = staging + first * row_bytes();
                 if (failed(vendor_t::copy_2d(api(), window, window_row_bytes, rows.row(first), source_pitch,
                                              source_row_bytes, count, stream)))
-                    return status_t::device_error_k;
-                status_t cast = status_t::success_k;
+                    return status_code_t::device_k;
+                status_t cast = status_code_t::success_k;
                 if (!narrows_at_unit_rms_(rows.dtype))
                     cast = kernels_.launch_cast_(kernels, *this, window, rows.dtype, window_staging, vector_dtype_,
                                                  count * pitch_values, stream);
@@ -3100,8 +3113,8 @@ struct vram_shard_core {
         for (std::size_t copied = distinct; copied < rows.rows; copied *= 2)
             if (failed(vendor_t::copy(api(), staging + copied * row_bytes(), staging,
                                       min_of(copied, rows.rows - copied) * row_bytes(), stream)))
-                return status_t::device_error_k;
-        return status_t::success_k;
+                return status_code_t::device_k;
+        return status_code_t::success_k;
     }
 
     /** Why an attend over @p rows rows cannot be written to @p outputs and @p carry: shapes other
@@ -3110,10 +3123,10 @@ struct vram_shard_core {
     status_t attend_refusal_(std::size_t rows, rows_span_t outputs,
                              std::span<softmax_state_t const> carry) const noexcept {
         if (outputs.rows != rows || outputs.columns != dimensions() || (!carry.empty() && carry.size() != rows))
-            return status_t::config_mismatch_k;
-        if (outputs.dtype != nk_f32_k && !casts_(nk_f32_k, outputs.dtype)) return status_t::unsupported_k;
-        if (outputs.stride < packed_bytes(outputs.dtype, dimensions())) return status_t::unsupported_layout_k;
-        return status_t::success_k;
+            return status_code_t::config_mismatch_k;
+        if (outputs.dtype != nk_f32_k && !casts_(nk_f32_k, outputs.dtype)) return status_code_t::unsupported_k;
+        if (outputs.stride < packed_bytes(outputs.dtype, dimensions())) return status_code_t::unsupported_layout_k;
+        return status_code_t::success_k;
     }
 
     /** Bytes the attended rows take past the f32 blocks once cast into the scalar of @p outputs;
@@ -3141,8 +3154,8 @@ struct vram_shard_core {
                                      exported_row_bytes, outputs.rows, stream)) ||
             (!carry.empty() &&
              failed(vendor_t::copy(api(), carry.data(), attended + values, carry.size_bytes(), stream))))
-            return status_t::device_error_k;
-        return status_t::success_k;
+            return status_code_t::device_k;
+        return status_code_t::success_k;
     }
 
     /** Blocking drains the context's stream and adds the telemetry the walks spent; deferred
@@ -3170,29 +3183,30 @@ struct vram_shard_core {
     expected<search_result_t> search_(vector_view_t query_vector, traversal_context_t& context, search_config_t config,
                                       std::size_t visible) noexcept {
         context.results.count_ = 0;
-        if (!visible) return {{}, status_t::success_k}; // An empty index matches nothing, touches nothing.
+        if (!visible) return {{}, status_code_t::success_k};
         // Up to the expansion factor, defaulting to twice the connectivity, clipped to the graph.
         u32_t const expansion = non_zero_expansion_factor(config);
         u32_t const count = min_of<u32_t>(expansion, visible);
-        if (failed(context.results.entries_.reserve(std::size_t {count} * 2))) return {{}, status_t::bad_alloc_k};
+        if (failed(context.results.entries_.reserve(std::size_t {count} * 2)))
+            return {{}, status_code_t::out_of_memory_k};
         context.results.entries_.extend_uninitialized(std::size_t {count} * 2);
         node_id_t* const staged_ids = reinterpret_cast<node_id_t*>(context.results.entries_.data() + count);
         distance_t* const staged_distances = reinterpret_cast<distance_t*>(staged_ids + count);
         vectors_view_t const one_query {query_vector.data(), {1, query_vector.size()}};
         config.expansion_factor = expansion;
         config.count = count;
-        expected<search_result_t> result = settle_(
+        auto [found, settle_status] = settle_(
             kernels_.submit_search_(*this, one_query, nk::matrix_span<node_id_t> {staged_ids, {1, count}},
                                     nk::matrix_span<distance_t> {staged_distances, {1, count}}, context, config,
                                     visible),
             1, context, completion_t::blocking_k);
-        if (!result) return result;
+        if (failed(settle_status)) return {found, settle_status};
         std::size_t live = 0;
         for (; live != count && staged_ids[live] != node_id_unknown_k; ++live)
             context.results.entries_[live] = scored_node_t {staged_ids[live], staged_distances[live]};
         context.results.count_ = live;
-        result.value.count = live;
-        return result;
+        found.count = live;
+        return {found, settle_status};
     }
 
 #pragma endregion Search
@@ -3360,16 +3374,18 @@ struct vram_shard_core {
     /** Carves @p plan 's columns for a check of @p shape from @p context 's allocator and takes its
      *  page-locked counters. */
     status_t carve_health_(health_plan_t& plan, traversal_context_t& context, round_shape_t const& shape) noexcept {
-        if (!vectors_matrix_.reserved_bytes()) return status_t::uninitialized_k;
-        if (context.device() != device_.ordinal || !context) return status_t::config_mismatch_k;
+        if (!vectors_matrix_.reserved_bytes()) return status_code_t::uninitialized_k;
+        if (context.device() != device_.ordinal || !context)
+            return {status_code_t::config_mismatch_k, "Context not bound to this GPU"};
         std::size_t const bytes = lay_out_round_(shape).device_bytes;
         round_scratch_t& scratch = plan.columns_;
         scratch.bytes.reset(context.allocator_.allocate(bytes));
         scratch.bytes.get_deleter().count = bytes;
-        if (!scratch.bytes) return status_t::bad_alloc_k;
+        if (!scratch.bytes) return {status_code_t::out_of_memory_k, "No room for the round scratch"};
         lay_out_round_(shape, scratch.bytes.get(), &scratch);
         plan.counters_ = take_round_counters_(context);
-        return plan.counters_ ? status_t::success_k : status_t::bad_alloc_k;
+        return plan.counters_ ? status_t {}
+                              : status_t {status_code_t::out_of_memory_k, "No room for the round counters"};
     }
 
     /** Carves everything @p plan 's rounds over @p entries entries keep under @p cache_bytes: the
@@ -3385,7 +3401,7 @@ struct vram_shard_core {
         growing_buffer<scored_node_t, typename vendor_t::pinned_allocator_t>& pinned = context.results.entries_;
         std::size_t const host_bytes = max_of(lay_out_round_(shape).host_bytes, pinned_floor);
         if (failed(pinned.resize_uninitialized(divide_round_up(host_bytes, sizeof(scored_node_t)))))
-            return status_t::bad_alloc_k;
+            return status_code_t::out_of_memory_k;
         lay_out_round_(shape, nullptr, nullptr, bytes_of(pinned.data(), pinned.size()).data(), &plan.mirrors_);
         // A restitch warp keeps its selection scratch in the block's shared memory when it fits,
         // aliasing the neighborhood's staged rows, which the scoring is done with by then.
@@ -3403,11 +3419,11 @@ struct vram_shard_core {
         plan.gather_staged_bytes_ = kernels_.round_scratch_fits(*this, gather_staged)
                                         ? static_cast<u32_t>(gather_staged)
                                         : 0u;
-        if (!scratch_shared && !context.ensure_arena(restitch_arena_bytes_())) return status_t::bad_alloc_k;
+        if (!scratch_shared && !context.ensure_arena(restitch_arena_bytes_())) return status_code_t::out_of_memory_k;
         return failed(
                    vendor_t::fill(api(), context.telemetry_.get(), 0, sizeof(vram_telemetry_block_t), context.stream()))
-                   ? status_t::device_error_k
-                   : status_t::success_k;
+                   ? status_code_t::device_k
+                   : status_code_t::success_k;
     }
 
     /** The record every launch of @p plan 's check reads, over this index's neighbors. */
@@ -3440,7 +3456,7 @@ struct vram_shard_core {
             succeeded(vendor_t::fill(api(), health.depths_to_root + root, 0, 1, stream)) &&
             succeeded(vendor_t::fill_words(api(), health.depth_entries, 1, 1, stream)) &&
             succeeded(vendor_t::fill_words(api(), &health.counters->swept, 2, 1, stream));
-        return filled ? status_t::success_k : status_t::device_error_k;
+        return filled ? status_code_t::success_k : status_code_t::device_k;
     }
 
     /**
@@ -3463,10 +3479,10 @@ struct vram_shard_core {
         u32_t const striding = device_.multiprocessor_count *
                                kernels_type_::resident_blocks_(vram_kernel_t::health_expand_k, 0);
         u32_t const first = plan.next_pass_, bound = first ? 2 * first : 1;
-        status_t queued = status_t::success_k;
+        status_t queued = status_code_t::success_k;
         auto zeroed = [&](u32_t& word) noexcept {
             if (succeeded(queued) && failed(vendor_t::fill(api(), &word, 0, sizeof(u32_t), stream)))
-                queued = status_t::device_error_k;
+                queued = status_code_t::device_k;
         };
         auto launch = [&](vram_kernel_t kernel, u32_t blocks) noexcept {
             if (succeeded(queued)) queued = kernels_.launch_(*kernels, kernel, 0, blocks, 0, stream, arguments);
@@ -3523,7 +3539,7 @@ struct vram_shard_core {
         plan.next_pass_ = bound;
         if (succeeded(queued) &&
             failed(vendor_t::copy(api(), plan.counters_.get(), counters, sizeof(round_counters_t), stream)))
-            queued = status_t::device_error_k;
+            queued = status_code_t::device_k;
         return queued;
     }
 
@@ -3540,8 +3556,8 @@ struct vram_shard_core {
                                   sizeof(round_counters_t) - round_offset, stream)) ||
             failed(
                 vendor_t::fill(api(), arguments.health.changed.words, 0, plan.columns_.words * sizeof(u32_t), stream)))
-            return status_t::device_error_k;
-        if (!plan.counters_->islands) return status_t::success_k;
+            return status_code_t::device_k;
+        if (!plan.counters_->islands) return status_code_t::success_k;
         return kernels_.launch_(*kernels, vram_kernel_t::heal_islands_k, 0, 1, 0, stream, arguments);
     }
 
@@ -3564,7 +3580,7 @@ struct vram_shard_core {
             (nested && failed(vendor_t::copy(api(), scratch.neighborhood_entries, mirrors.neighborhood_entries,
                                              visible * sizeof(u32_t), stream))) ||
             failed(vendor_t::fill(api(), &scratch.health.counters->claimed, 0, sizeof(u32_t), stream)))
-            return status_t::device_error_k;
+            return status_code_t::device_k;
         vram_arguments_t arguments {};
         vram_gather_neighborhoods_t& gather = arguments.gather_neighborhoods;
         gather.storage = storage();
@@ -3585,8 +3601,8 @@ struct vram_shard_core {
             return launched;
         return failed(vendor_t::copy(api(), mirrors.entry_neighborhoods, scratch.entry_neighborhoods,
                                      visible * sizeof(u16_t), stream))
-                   ? status_t::device_error_k
-                   : status_t::success_k;
+                   ? status_code_t::device_k
+                   : status_code_t::success_k;
     }
 
     /** Queues @p plan 's restitch on @p context 's stream: the entries in neighborhood order and
@@ -3603,10 +3619,10 @@ struct vram_shard_core {
             failed(vendor_t::copy(api(), scratch.neighborhood_offsets, mirrors.neighborhood_offsets,
                                   (plan.neighborhoods_ + 1) * sizeof(u32_t), stream)) ||
             failed(vendor_t::fill(api(), &scratch.health.counters->claimed, 0, sizeof(u32_t), stream)))
-            return status_t::device_error_k;
+            return status_code_t::device_k;
         gpu_arena_shape_t const arena_shape = plan.restitch_arena_shape_;
         byte_t* const arena = arena_shape.scratch_bytes ? context.ensure_arena(restitch_arena_bytes_()) : nullptr;
-        if (arena_shape.scratch_bytes && !arena) return status_t::bad_alloc_k;
+        if (arena_shape.scratch_bytes && !arena) return status_code_t::out_of_memory_k;
         u32_t const selection_nodes = reselection_nodes_();
         vram_arguments_t arguments {};
         vram_restitch_t& restitch = arguments.restitch;
@@ -3692,9 +3708,10 @@ struct vram_shard_core {
         split_layout_t const bytes = split_layout_(entries, parts);
         split.device_bytes.reset(context.allocator_.allocate(bytes.device_bytes));
         split.device_bytes.get_deleter().count = bytes.device_bytes;
-        if (!split.device_bytes) return status_t::bad_alloc_k;
+        if (!split.device_bytes) return {status_code_t::out_of_memory_k, "No room for the split device buffer"};
         growing_buffer<scored_node_t, typename vendor_t::pinned_allocator_t>& pinned = context.results.entries_;
-        if (pinned.size() * sizeof(scored_node_t) < bytes.host_bytes) return status_t::bad_alloc_k;
+        if (pinned.size() * sizeof(scored_node_t) < bytes.host_bytes)
+            return {status_code_t::out_of_memory_k, "Pinned results too small for the split"};
         split.host_bytes = bytes_of(pinned.data(), pinned.size()).data();
         u32_t** const columns = reinterpret_cast<u32_t**>(split.host_bytes + bytes.host_columns);
         u32_t* const roots = reinterpret_cast<u32_t*>(split.host_bytes + bytes.host_roots);
@@ -3710,8 +3727,8 @@ struct vram_shard_core {
         stream_handle_t const stream = context.stream();
         return succeeded(vendor_t::copy(api(), carved.part_columns, columns, 4 * parts * sizeof(u32_t*), stream)) &&
                        succeeded(vendor_t::copy(api(), carved.roots, roots, parts * sizeof(u32_t), stream))
-                   ? status_t::success_k
-                   : status_t::device_error_k;
+                   ? status_code_t::success_k
+                   : status_code_t::device_k;
     }
 
     /** The record every launch of @p split reads: this index's columns and the split's scratch. */
@@ -3757,7 +3774,7 @@ struct vram_shard_core {
         if (failed(vendor_t::fill(api(), carved.node_parts, 0xFF, 2 * entries * sizeof(u32_t), stream)) ||
             failed(
                 vendor_t::fill(api(), carved.frontier.words, 0, (2 * words + 2 * parts + 2) * sizeof(u32_t), stream)))
-            return status_t::device_error_k;
+            return status_code_t::device_k;
         split.next_round = 1;
         vram_arguments_t const arguments = split_arguments_(split);
         u32_t const block_threads = vram_warps_per_block_k * kernels_type_::wave_lanes();
@@ -3789,7 +3806,7 @@ struct vram_shard_core {
             graph.previous_counter = round == 1 ? nullptr : carved.placed + (odd ^ 1u);
             if (failed(vendor_t::fill(api(), graph.next_frontier.words, 0, words * sizeof(u32_t), stream)) ||
                 failed(vendor_t::fill(api(), graph.counter, 0, sizeof(u32_t), stream)))
-                return status_t::device_error_k;
+                return status_code_t::device_k;
             for (vram_kernel_t const pass : {vram_kernel_t::partition_propose_k, vram_kernel_t::partition_count_k,
                                              vram_kernel_t::partition_accept_k})
                 if (status_t const launched = kernels_.launch_(kernels, pass, 0, split_blocks_(pass), 0, stream,
@@ -3806,8 +3823,8 @@ struct vram_shard_core {
             split.host_bytes + split_layout_(split.entries, split.targets.size()).host_assigned);
         return failed(vendor_t::copy(api(), assigned_count, carved.placed + ((2 * first_round - 1) & 1u), sizeof(u32_t),
                                      stream))
-                   ? status_t::device_error_k
-                   : status_t::success_k;
+                   ? status_code_t::device_k
+                   : status_code_t::success_k;
     }
 
     /** Whether the last growth round of @p split placed anything, so more rounds follow. */
@@ -3826,8 +3843,8 @@ struct vram_shard_core {
             return launched;
         return failed(vendor_t::copy(api(), split.host_bytes, split_scratch_(split).node_parts,
                                      split.entries * sizeof(u32_t), stream))
-                   ? status_t::device_error_k
-                   : status_t::success_k;
+                   ? status_code_t::device_k
+                   : status_code_t::success_k;
     }
 
     /** Queues @p split 's scatter: the assigned slots and the targets' published counts up, then
@@ -3835,17 +3852,17 @@ struct vram_shard_core {
     status_t queue_scatter_(kernel_table_t const& kernels, split_t const& split, stream_handle_t stream) noexcept {
         if (failed(vendor_t::copy(api(), split_scratch_(split).node_parts, split.host_bytes,
                                   split.entries * sizeof(u32_t), stream)))
-            return status_t::device_error_k;
+            return status_code_t::device_k;
         for (std::size_t index = 0; index != split.targets.size(); ++index)
             if (failed(vendor_t::fill_words(api(), split.targets[index]->published_rows_(),
                                             static_cast<u32_t>(split.parts[index].entries), 1, stream)))
-                return status_t::device_error_k;
+                return status_code_t::device_k;
         vram_arguments_t const arguments = split_arguments_(split);
         for (vram_kernel_t const pass : {vram_kernel_t::split_links_k, vram_kernel_t::split_nodes_k})
             if (status_t const launched = kernels_.launch_(kernels, pass, 0, split_blocks_(pass), 0, stream, arguments);
                 failed(launched))
                 return launched;
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
 #pragma endregion Refinement
@@ -3863,9 +3880,7 @@ struct vram_shard_core {
     /** Keeps @p failure as the status unless one is kept already; returns it for the caller's own
      *  report. */
     status_t fail_(status_t failure) noexcept {
-        status_t expected = status_t::success_k;
-        fu::standard_atomic_ref<status_t>(status_).compare_exchange_strong(expected, failure, std::memory_order_acq_rel,
-                                                                           std::memory_order_acquire);
+        keep_first_failure<fu::standard_atomic_ref>(status_, failure);
         return failure;
     }
 
@@ -3899,7 +3914,8 @@ struct vram_shard_core {
      *  epoch discards it. */
     void forget_() noexcept {
         fu::standard_atomic_ref<std::size_t>(last_visible_id_).store(0, std::memory_order_release);
-        fu::standard_atomic_ref<status_t>(status_).store(status_t::success_k, std::memory_order_release);
+        fu::standard_atomic_ref<char const*>(status_.note).store(nullptr, std::memory_order_relaxed);
+        fu::standard_atomic_ref<status_code_t>(status_.code).store(status_code_t::success_k, std::memory_order_release);
         keyed_.forget();
         filled_rows_ = 0;
     }
@@ -3918,13 +3934,13 @@ struct vram_shard_core {
      *  closed claim word. */
     status_t upload_keys_(iota_view<std::size_t> rows, stream_handle_t stream) noexcept {
         std::size_t const half_keys = keys_staging_.size() / 2;
-        if (rows.empty()) return status_t::success_k;
-        if (!half_keys) return status_t::uninitialized_k;
+        if (rows.empty()) return status_code_t::success_k;
+        if (!half_keys) return status_code_t::uninitialized_k;
         for (std::size_t first = rows.first; first < rows.bound; first += half_keys) {
             std::size_t const bound = min_of(first + half_keys, rows.bound);
             std::size_t const half = staged_halves_++ % 2;
             key_t* const staged = keys_staging_.data() + half * half_keys;
-            if (staged_halves_ > 2 && failed(keys_crossed_[half].wait())) return status_t::device_error_k;
+            if (staged_halves_ > 2 && failed(keys_crossed_[half].wait())) return status_code_t::device_k;
             std::size_t written = 0;
             keyed_.column().for_each_span({first, bound}, [&](std::span<key_t const> run) noexcept {
                 for (key_t const& key : run) staged[written++] = key;
@@ -3932,9 +3948,9 @@ struct vram_shard_core {
             if (failed(
                     vendor_t::copy(api(), device_keys_() + first, staged, (bound - first) * sizeof(key_t), stream)) ||
                 failed(keys_crossed_[half].record(stream)))
-                return status_t::device_error_k;
+                return status_code_t::device_k;
         }
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Turns the watermark from @p first over @p rows drained rows once every batch claimed before
@@ -3948,7 +3964,7 @@ struct vram_shard_core {
             wait_t {}(&last_visible_id_, watermark, 0u, fu::wait_capped_t {});
         }
         fu::standard_atomic_ref<std::size_t>(last_visible_id_).store(first + rows, std::memory_order_release);
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Row zero of the vectors matrix, one row past its base. */
@@ -3969,17 +3985,20 @@ struct vram_shard_core {
      *
      *  @par Statuses:
      *  - @c config_mismatch_k The @p rows hold no whole number of rows, or the rows pass @c size.
-     *  - @c device_error_k The device could not be selected, or the copy failed.
+     *  - @c device_k The device could not be selected, or the copy failed.
      */
     status_t neighbors(node_id_t first, std::span<node_id_t> rows) const noexcept {
         std::size_t const row_ids = connectivity();
-        if (!row_ids || rows.size() % row_ids || std::size_t {first} + rows.size() / row_ids > size())
-            return status_t::config_mismatch_k;
-        if (failed(vendor_t::select(api(), device_.ordinal)) ||
-            failed(vendor_t::copy(api(), rows.data(), neighbor_rows_() + std::size_t {first} * row_ids,
+        if (!row_ids || rows.size() % row_ids)
+            return {status_code_t::config_mismatch_k, "Buffer holds a partial neighbor row"};
+        if (std::size_t {first} + rows.size() / row_ids > size())
+            return {status_code_t::config_mismatch_k, "Rows span past the index"};
+        if (failed(vendor_t::select(api(), device_.ordinal)))
+            return {status_code_t::device_k, "Device could not be made current"};
+        if (failed(vendor_t::copy(api(), rows.data(), neighbor_rows_() + std::size_t {first} * row_ids,
                                   rows.size_bytes(), stream_handle_t {})))
-            return status_t::device_error_k;
-        return status_t::success_k;
+            return {status_code_t::device_k, "Neighbor rows copy failed"};
+        return status_code_t::success_k;
     }
 
     /**
@@ -3994,7 +4013,7 @@ struct vram_shard_core {
      *    connectivity is not a power of two, or no walk fits the geometry.
      */
     status_t bind_(std::size_t rows, std::size_t ceiling) noexcept {
-        if (vectors_matrix_.reserved_bytes()) return status_t::success_k;
+        if (vectors_matrix_.reserved_bytes()) return status_code_t::success_k;
         // The kits' epilogues fall through to the last metric of each family, so no other kind may
         // reach them.
         bool const scored = vector_dtype_ == nk_u1_k
@@ -4002,18 +4021,21 @@ struct vram_shard_core {
                                       kernel_ == nk_kernel_jaccard_k
                                 : kernel_ == nk_kernel_dot_k || kernel_ == nk_kernel_angular_k ||
                                       kernel_ == nk_kernel_sqeuclidean_k || kernel_ == nk_kernel_euclidean_k;
-        if (!scored) return status_t::unknown_kind_k;
-        if (neighbors_matrix_.device() != device_.ordinal) return status_t::config_mismatch_k;
-        if (!dimensions() || !std::has_single_bit(static_cast<u32_t>(connectivity())))
-            return status_t::config_mismatch_k;
+        if (!scored) return status_code_t::unknown_kind_k;
+        if (neighbors_matrix_.device() != device_.ordinal)
+            return {status_code_t::config_mismatch_k, "Neighbors live on another device"};
+        if (!dimensions()) return {status_code_t::config_mismatch_k, "Index has zero dimensions"};
+        if (!std::has_single_bit(static_cast<u32_t>(connectivity())))
+            return {status_code_t::config_mismatch_k, "Connectivity is not a power of two"};
         // The device must be current before any mapping, since the storage lives on it.
-        if (failed(vendor_t::select(api(), device_.ordinal))) return status_t::device_error_k;
+        if (failed(vendor_t::select(api(), device_.ordinal)))
+            return {status_code_t::device_k, "Device could not be made current"};
         auto const [specs, status] = device_specs_t::query(api(), device_.ordinal);
         if (failed(status)) return status;
         device_ = specs;
         // Geometry no walk can fit is refused here; a builder whose scratch shared memory cannot
         // fit keeps it in its arena slice.
-        if (!kernels_.walk_scratch_fits(*this)) return status_t::config_mismatch_k;
+        if (!kernels_.walk_scratch_fits(*this)) return {status_code_t::config_mismatch_k, "Walk scratch does not fit"};
         // Device storage maps at most the device's memory, which bounds the ceiling independent of
         // the first growth; the reservation itself is the ceiling, no cached row count shadows it.
         bool const normed = kernel_ != nk_kernel_dot_k;
@@ -4029,13 +4051,14 @@ struct vram_shard_core {
                                                 max_of<std::size_t>(rows, budget_bytes / bytes_per_row));
         // The vectors matrix reserves last, as its range is what marks the index bound; one more
         // vectors row ahead of row zero holds the published-row count.
-        if ((normed && norms_column_.reserve_range(ceiling_rows * sizeof(norms_t)) != status_t::success_k) ||
-            keys_column_.reserve_range(ceiling_rows * sizeof(key_t)) != status_t::success_k ||
-            neighbors_matrix_.reserve_range(ceiling_rows * connectivity() * sizeof(u32_t)) != status_t::success_k ||
-            vectors_matrix_.reserve_range((ceiling_rows + 1) * row_bytes()) != status_t::success_k)
-            return status_t::bad_alloc_k;
+        if ((normed && norms_column_.reserve_range(ceiling_rows * sizeof(norms_t)) != status_code_t::success_k) ||
+            keys_column_.reserve_range(ceiling_rows * sizeof(key_t)) != status_code_t::success_k ||
+            neighbors_matrix_.reserve_range(ceiling_rows * connectivity() * sizeof(u32_t)) !=
+                status_code_t::success_k ||
+            vectors_matrix_.reserve_range((ceiling_rows + 1) * row_bytes()) != status_code_t::success_k)
+            return status_code_t::out_of_memory_k;
         ceiling_nodes_ = ceiling_rows;
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Binds the index at its first growth under @p ceiling, then maps every matrix and column up
@@ -4044,26 +4067,29 @@ struct vram_shard_core {
      *  rows for @ref grow_nodes_ to fill. Callers hold the claim or the closed claim word. */
     status_t map_nodes_(std::size_t rows, std::size_t ceiling = max_node_count_k) noexcept {
         if (status_t const bound = bind_(rows, ceiling); failed(bound)) return bound;
-        if (rows > ceiling_nodes_) return status_t::overflow_k;
+        if (rows > ceiling_nodes_) return status_code_t::overflow_k;
         if (status_t const covered = keyed_.cover(rows); failed(covered)) return covered;
         std::size_t const half_keys = min_of(power_of_two<std::size_t>(batch_rows_log2_k),
                                              std::bit_ceil(max_of<std::size_t>(rows, 1)));
         if (keys_staging_.size() < 2 * half_keys) {
             // Pinning needs a current device, and the copies out of the old halves must finish.
-            if (failed(vendor_t::select(api(), device_.ordinal)) || failed(keys_crossed_[0].wait()) ||
-                failed(keys_crossed_[1].wait()))
-                return status_t::device_error_k;
+            if (failed(vendor_t::select(api(), device_.ordinal)))
+                return {status_code_t::device_k, "Device could not be made current"};
+            if (failed(keys_crossed_[0].wait()) || failed(keys_crossed_[1].wait()))
+                return {status_code_t::device_k, "Key staging copies did not finish"};
             keys_staging_.reset();
-            if (failed(keys_staging_.resize_uninitialized(2 * half_keys))) return status_t::bad_alloc_k;
+            if (failed(keys_staging_.resize_uninitialized(2 * half_keys)))
+                return {status_code_t::out_of_memory_k, "No room for key staging"};
         }
-        if (rows <= capacity()) return status_t::success_k;
-        if (status_t status = vectors_matrix_.commit((rows + 1) * row_bytes()); status != status_t::success_k)
+        if (rows <= capacity()) return status_code_t::success_k;
+        if (status_t status = vectors_matrix_.commit((rows + 1) * row_bytes()); status != status_code_t::success_k)
             return status;
-        if (status_t status = kernel_ == nk_kernel_dot_k ? status_t::success_k
+        if (status_t status = kernel_ == nk_kernel_dot_k ? status_code_t::success_k
                                                          : norms_column_.commit(rows * sizeof(norms_t));
-            status != status_t::success_k)
+            status != status_code_t::success_k)
             return status;
-        if (status_t status = keys_column_.commit(rows * sizeof(key_t)); status != status_t::success_k) return status;
+        if (status_t status = keys_column_.commit(rows * sizeof(key_t)); status != status_code_t::success_k)
+            return status;
         return neighbors_matrix_.commit(rows * connectivity() * sizeof(u32_t));
     }
 
@@ -4075,17 +4101,17 @@ struct vram_shard_core {
      *  claim word. */
     status_t grow_nodes_(std::size_t rows, stream_handle_t stream) noexcept {
         if (status_t const mapped = map_nodes_(rows); failed(mapped)) return mapped;
-        if (failed(vendor_t::follow(api(), stream, grown_))) return status_t::device_error_k;
-        if (rows <= filled_rows_) return status_t::success_k;
+        if (failed(vendor_t::follow(api(), stream, grown_))) return status_code_t::device_k;
+        if (rows <= filled_rows_) return status_code_t::success_k;
         std::size_t const mapped_rows = capacity(), row_words = connectivity();
         if (!filled_rows_ && failed(vendor_t::fill_words(api(), published_rows_(), 0, 1, stream)))
-            return status_t::device_error_k;
+            return status_code_t::device_k;
         if (failed(vendor_t::fill_words(api(), neighbors_matrix_.base() + filled_rows_ * row_words * sizeof(u32_t),
                                         node_id_unknown_k, (mapped_rows - filled_rows_) * row_words, stream)) ||
             failed(grown_.record(stream)))
-            return status_t::device_error_k;
+            return status_code_t::device_k;
         filled_rows_ = mapped_rows;
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Rounds the requested expansion to the register ladder of 2 to 16 slots of the vendor's warp
@@ -4216,10 +4242,10 @@ struct vram_shard_core {
      */
     status_t launch_gather_vectors_(kernel_table_t const& kernels, std::span<vram_gathered_row_t const> rows,
                                     rows_span_t outputs, stream_handle_t stream) const noexcept {
-        if (outputs.columns != dimensions()) return status_t::config_mismatch_k;
+        if (outputs.columns != dimensions()) return status_code_t::config_mismatch_k;
         if (outputs.stride < divide_round_up<std::size_t>(dimensions() * nk_dtype_bits(outputs.dtype), 8u))
-            return status_t::unsupported_layout_k;
-        if (rows.empty()) return status_t::success_k;
+            return status_code_t::unsupported_layout_k;
+        if (rows.empty()) return status_code_t::success_k;
         vram_arguments_t arguments {};
         vram_gather_t& gather = arguments.gather;
         gather.source = vectors_rows_();
@@ -4232,7 +4258,7 @@ struct vram_shard_core {
         std::size_t const addresses = reinterpret_cast<std::uintptr_t>(gather.source) | gather.source_stride |
                                       reinterpret_cast<std::uintptr_t>(gather.outputs) | gather.output_stride;
         if (!nk_cast_plan_serial_(vector_dtype_, outputs.dtype, dimensions(), addresses, &gather.cast))
-            return status_t::unsupported_k;
+            return status_code_t::unsupported_k;
         return kernels_.launch_(kernels, vram_kernel_t::gather_vectors_k, 0,
                                 divide_round_up<u32_t>(gather.count, vram_warps_per_block_k), 0, stream, arguments);
     }
@@ -4267,10 +4293,10 @@ struct vram_shard_core {
             scored.size() != ids.extent(0) ||
             (ranking.score_bytes != sizeof(dot_result_t) && ranking.score_bytes != sizeof(f64_t)) ||
             ranking.key_bytes != sizeof(key_t))
-            return status_t::config_mismatch_k;
+            return status_code_t::config_mismatch_k;
         if (ids.stride_bytes(1) != sizeof(node_id_t) || products.stride_bytes(1) != sizeof(dot_result_t))
-            return status_t::unsupported_layout_k;
-        if (scored.empty()) return status_t::success_k;
+            return status_code_t::unsupported_layout_k;
+        if (scored.empty()) return status_code_t::success_k;
         vram_arguments_t arguments {};
         vram_multiply_t& resolving = arguments.products;
         resolving.ids = ids.data();
@@ -4300,7 +4326,7 @@ struct vram_shard_core {
                                       std::size_t block_bytes, u32_t shards, u32_t queries_count,
                                       vram_products_tape_t const& tape, std::span<std::size_t> scored,
                                       stream_handle_t stream) const noexcept {
-        if (!scored.empty() && scored.size() != queries_count) return status_t::config_mismatch_k;
+        if (!scored.empty() && scored.size() != queries_count) return status_code_t::config_mismatch_k;
         vram_arguments_t arguments {};
         vram_multiply_t& compacting = arguments.products;
         compacting.ranking = gathered;
@@ -4319,8 +4345,8 @@ struct vram_shard_core {
     status_t launch_nominate_keys_(kernel_table_t const& kernels, vram_ranking_t const& gathered,
                                    std::size_t block_bytes, u32_t shards, std::span<u32_t const> query_offsets,
                                    vram_ranking_t const& nominees, stream_handle_t stream) const noexcept {
-        if (query_offsets.size() < 2) return status_t::success_k;
-        if (nominees.key_bytes != gathered.key_bytes || !nominees.counts) return status_t::config_mismatch_k;
+        if (query_offsets.size() < 2) return status_code_t::success_k;
+        if (nominees.key_bytes != gathered.key_bytes || !nominees.counts) return status_code_t::config_mismatch_k;
         vram_arguments_t arguments {};
         vram_maxsim_t& maxsim = arguments.maxsim;
         maxsim.gathered = gathered;
@@ -4351,11 +4377,13 @@ struct vram_shard_core {
                                     std::span<u32_t const> query_offsets, std::span<std::size_t const> nominee_offsets,
                                     std::span<vram_gathered_row_t const> entries,
                                     nk::matrix_span<dot_result_t> partials, stream_handle_t stream) const noexcept {
-        if (queries.dtype != vector_dtype_ || queries.stride != row_bytes() || query_offsets.size() < 2 ||
-            nominee_offsets.size() != query_offsets.size())
-            return status_t::config_mismatch_k;
-        if (partials.stride_bytes(1) != sizeof(dot_result_t)) return status_t::unsupported_layout_k;
-        if (!partials.extent(0)) return status_t::success_k;
+        if (queries.dtype != vector_dtype_ || queries.stride != row_bytes())
+            return {status_code_t::config_mismatch_k, "Queries are not staged index rows"};
+        if (query_offsets.size() < 2) return {status_code_t::config_mismatch_k, "Query offsets name no queries"};
+        if (nominee_offsets.size() != query_offsets.size())
+            return {status_code_t::config_mismatch_k, "Nominee offsets differ from the queries"};
+        if (partials.stride_bytes(1) != sizeof(dot_result_t)) return status_code_t::unsupported_layout_k;
+        if (!partials.extent(0)) return status_code_t::success_k;
         vram_arguments_t arguments {};
         vram_maxsim_t& maxsim = arguments.maxsim;
         maxsim.storage = storage();
@@ -4368,7 +4396,8 @@ struct vram_shard_core {
         maxsim.entries_count = static_cast<u32_t>(entries.size());
         maxsim.partials = reinterpret_cast<byte_t*>(partials.data());
         maxsim.rows_stride = static_cast<u32_t>(partials.stride_bytes(0) / sizeof(dot_result_t));
-        if (partials.extent(1) > maxsim.rows_stride) return status_t::config_mismatch_k;
+        if (partials.extent(1) > maxsim.rows_stride)
+            return {status_code_t::config_mismatch_k, "Partials wider than the stride"};
         return kernels_.launch_(kernels, vram_kernel_t::maxsim_rescore_k, 0,
                                 divide_round_up<u32_t>(maxsim.nominees_count, vram_warps_per_block_k), 0, stream,
                                 arguments);
@@ -4384,9 +4413,9 @@ struct vram_shard_core {
                                  stream_handle_t stream) const noexcept {
         if (query_offsets.size() < 2 || nominee_offsets.size() != query_offsets.size() ||
             sums.size() != partials.extent(0))
-            return status_t::config_mismatch_k;
-        if (partials.stride_bytes(1) != sizeof(dot_result_t)) return status_t::unsupported_layout_k;
-        if (sums.empty()) return status_t::success_k;
+            return status_code_t::config_mismatch_k;
+        if (partials.stride_bytes(1) != sizeof(dot_result_t)) return status_code_t::unsupported_layout_k;
+        if (sums.empty()) return status_code_t::success_k;
         vram_arguments_t arguments {};
         vram_maxsim_t& maxsim = arguments.maxsim;
         maxsim.partials = reinterpret_cast<byte_t*>(partials.data());
@@ -4409,7 +4438,7 @@ struct vram_shard_core {
     status_t launch_top_k_(kernel_table_t const& kernels, std::span<f64_t> sums, vram_products_tape_t const& nominated,
                            std::size_t wanted, vram_products_tape_t const& tape, std::span<std::size_t> scored,
                            stream_handle_t stream) const noexcept {
-        if (scored.empty()) return status_t::success_k;
+        if (scored.empty()) return status_code_t::success_k;
         vram_arguments_t arguments {};
         vram_maxsim_t& maxsim = arguments.maxsim;
         maxsim.totals = sums.data();
@@ -4509,7 +4538,7 @@ struct vram_shard_core {
     std::size_t last_visible_id_ = 0;
 
     /** The first post-claim device failure: IDs past it may be unpublished or unfilled. */
-    status_t status_ = status_t::success_k;
+    status_t status_ = status_code_t::success_k;
 
     /** The vendor's kernels: the hooks every launch goes through, each resolving its table on the
      *  stream it launches on. */

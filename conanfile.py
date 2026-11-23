@@ -82,17 +82,15 @@ class USearchConan(ConanFile):
     def package_info(self):
         self.cpp_info.set_property("cmake_file_name", "usearch")
 
-        # Three components, because the tree exports three targets and a consumer picks between
-        # them: the headers alone, the headers plus the siblings they reach for, or the compiled
-        # C interface that spares a consumer the instantiation grid.
-        self.cpp_info.components["core"].set_property("cmake_target_name", "usearch::core")
-        self.cpp_info.components["core"].bindirs = []
-        self.cpp_info.components["core"].libdirs = []
+        # The targets the tree exports: the header-only templates, the C headers alone, a library,
+        # and the C++ wrappers over that library.
+        self.cpp_info.components["templates"].set_property("cmake_target_name", "usearch::templates")
+        self.cpp_info.components["templates"].bindirs = []
+        self.cpp_info.components["templates"].libdirs = []
 
-        self.cpp_info.components["header"].set_property("cmake_target_name", "usearch::header")
-        self.cpp_info.components["header"].requires = ["core"]
-        self.cpp_info.components["header"].bindirs = []
-        self.cpp_info.components["header"].libdirs = []
+        self.cpp_info.components["abi"].set_property("cmake_target_name", "usearch::abi")
+        self.cpp_info.components["abi"].bindirs = []
+        self.cpp_info.components["abi"].libdirs = []
 
         # Named for what the tree builds rather than for the package, so a consumer picks the archive
         # or the shared object explicitly instead of inheriting whichever this recipe defaulted to.
@@ -100,6 +98,11 @@ class USearchConan(ConanFile):
         self.cpp_info.components[linkage].set_property("cmake_target_name", f"usearch::{linkage}")
         self.cpp_info.components[linkage].set_property("pkg_config_name", "usearch")
         self.cpp_info.components[linkage].libs = [f"usearch_{linkage}"]
-        self.cpp_info.components[linkage].requires = ["header"]
+        self.cpp_info.components[linkage].requires = ["abi"]
         if self.settings.os in ("Linux", "FreeBSD"):
             self.cpp_info.components[linkage].system_libs = ["m", "pthread", "dl"]
+
+        self.cpp_info.components["cpp"].set_property("cmake_target_name", "usearch::cpp")
+        self.cpp_info.components["cpp"].requires = ["abi", linkage]
+        self.cpp_info.components["cpp"].bindirs = []
+        self.cpp_info.components["cpp"].libdirs = []

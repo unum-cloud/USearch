@@ -128,11 +128,11 @@ static void check_quads(std::size_t dim) noexcept {
                   "Capability cascade selected a tier that was never requested");
     using quads_kit_t = typename quads_ladder<scalar_, caps_>::kit_t;
 
-    auto query = nk::vector<scalar_>::zeros(dim).value;
-    auto first_candidate = nk::vector<scalar_>::zeros(dim).value;
-    auto second_candidate = nk::vector<scalar_>::zeros(dim).value;
-    auto third_candidate = nk::vector<scalar_>::zeros(dim).value;
-    auto fourth_candidate = nk::vector<scalar_>::zeros(dim).value;
+    nk::vector<scalar_> query = make_vector<scalar_>(dim);
+    nk::vector<scalar_> first_candidate = make_vector<scalar_>(dim);
+    nk::vector<scalar_> second_candidate = make_vector<scalar_>(dim);
+    nk::vector<scalar_> third_candidate = make_vector<scalar_>(dim);
+    nk::vector<scalar_> fourth_candidate = make_vector<scalar_>(dim);
     fill_cyclic(query.span(), 0);
     fill_cyclic(first_candidate.span(), 1);
     fill_cyclic(second_candidate.span(), 2);
@@ -209,21 +209,21 @@ static void check_tiles() noexcept {
     using raw_dot_t = typename scalar_::dot_result_t::raw_t;
     constexpr std::size_t queries_k = tiles_kit_t::tile_columns_k + 3, rows_k = 37, dimensions_k = 128;
 
-    auto storage = nk::matrix<scalar_>::zeros({queries_k + rows_k, dimensions_k}).value;
+    nk::matrix<scalar_> storage = make_matrix<scalar_>(queries_k + rows_k, dimensions_k);
     for (std::size_t row = 0; row != queries_k + rows_k; ++row) fill_cyclic(storage.row(row).as_vector(), row);
     nk::matrix_view<scalar_> const queries = storage(nk::range(std::size_t {0}, queries_k), nk::slice);
     nk::matrix_view<scalar_> const rows = storage(nk::range(queries_k, queries_k + rows_k), nk::slice);
     std::size_t const stride = static_cast<std::size_t>(queries.stride_bytes(0));
-    std::array<typename scalar_::dot_result_t, queries_k> query_sumsqs;
+    nk::vector<typename scalar_::dot_result_t> query_sumsqs = make_vector<typename scalar_::dot_result_t>(queries_k);
     for (std::size_t query = 0; query != queries_k; ++query)
         query_sumsqs[query] = norms<quads_kit_t>(queries.row(query).as_vector()).sumsq;
 
     nk_size_t packed_bytes = 0;
     expect_true(tiles_kit_t::pack_size(queries_k, dimensions_k, &packed_bytes) == nk_success_k);
-    auto packed = nk::vector<nk::u8_t>::zeros(packed_bytes).value;
+    nk::vector<nk::u8_t> packed = make_vector<nk::u8_t>(packed_bytes);
     expect_true(tiles_kit_t::pack(queries.raw_values_data(), queries_k, dimensions_k, stride, packed.data(), 0,
                                   queries_k, nullptr) == nk_success_k);
-    auto dots = nk::matrix<raw_dot_t>::zeros({rows_k, queries_k}).value;
+    nk::matrix<raw_dot_t> dots = make_matrix<raw_dot_t>(rows_k, queries_k);
     expect_true(tiles_kit_t::dots_packed(rows.raw_values_data(), packed.data(), dots.data(), rows_k, queries_k,
                                          dimensions_k, stride, queries_k * sizeof(raw_dot_t), nullptr, 0,
                                          nullptr) == nk_success_k);
@@ -237,7 +237,7 @@ static void check_tiles() noexcept {
             std::size_t const lanes = min_of<std::size_t>(4, queries_k - first);
             typename quads_kit_t::finalized_vec_t lane_dots {}, lane_sumsqs {};
             std::memcpy(&lane_dots, row_dots.subspan(first, lanes).data(), lanes * sizeof(raw_dot_t));
-            std::memcpy(&lane_sumsqs, std::span {query_sumsqs}.subspan(first, lanes).data(), lanes * sizeof(raw_dot_t));
+            std::memcpy(&lane_sumsqs, to_span(query_sumsqs).subspan(first, lanes).data(), lanes * sizeof(raw_dot_t));
             std::array<f32_t, 4> const tiled = convert_to_distances<quads_kit_t>(kernel_, lane_dots, row_norms.sumsq,
                                                                                  lane_sumsqs);
             for (std::size_t lane = 0; lane != lanes; ++lane) {

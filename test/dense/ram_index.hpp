@@ -46,9 +46,9 @@ static void test_ram_index_keys(make_index_type_ const& make_index, u64_t seed) 
     using key_t = typename index_type_::key_t;
     using keys_view_t = typename index_type_::keys_view_t;
     std::size_t const rows = dense_thread_nodes_k, dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
-    auto vectors = make_vectors<scalar_t>(rows, dimensions, stream_key(seed, "index_keys"));
+    nk::matrix<scalar_t> vectors = make_vectors<scalar_t>(rows, dimensions, stream_key(seed, "index_keys"));
     // Rows 2k and 2k + 1 share key k + 1, so every lookup must find a pair.
-    std::vector<key_t> keys(rows);
+    nk::vector<key_t> keys = make_vector<key_t>(rows);
     for (std::size_t row = 0; row != rows; ++row) keys[row] = dense_key<key_t>(1 + row / 2);
     auto rows_of_key = [&](key_t const& key) { return 2 * (dense_key_number(key) - 1); };
     allocation_ledger_t ledger;
@@ -56,7 +56,7 @@ static void test_ram_index_keys(make_index_type_ const& make_index, u64_t seed) 
         std::unique_ptr<index_type_> const index_ptr = make_index(ledger);
         index_type_& index = *index_ptr;
         typename index_type_::traversal_context_t context = dense_make_context<index_type_>(make_index);
-        auto assigned = nk::vector<node_id_t>::zeros(rows).value;
+        nk::vector<node_id_t> assigned = make_vector<node_id_t>(rows);
         expect_equal(index.capacity(), 0u);
         expect_true(
             succeeded(index.insert(keys_view_t {keys.data(), rows}, vectors.view(), assigned.span(), context).status));
@@ -64,17 +64,18 @@ static void test_ram_index_keys(make_index_type_ const& make_index, u64_t seed) 
 
         std::size_t wrong = 0;
         for (std::size_t row = 0; row != rows; ++row) {
-            wrong += index.key_of(assigned[row]).value != keys[row];
+            auto const [stored_key, key_status] = index.key_of(assigned[row]);
+            wrong += failed(key_status) || stored_key != keys[row];
             std::size_t own = 0;
             index.find_each(keys[row], [&](node_id_t node) noexcept { own += node == assigned[row]; });
             wrong += own != 1 || index.count(keys[row]) != 2 || !index.contains(keys[row]);
         }
         expect_equal(wrong, 0u);
-        expect_equal(index.key_of(static_cast<node_id_t>(rows)).status, status_t::config_mismatch_k);
+        expect_equal(index.key_of(static_cast<node_id_t>(rows)).status, status_code_t::config_mismatch_k);
         expect_true(!index.contains(dense_key<key_t>(rows)));
 
         // A pair exports whole, and a narrower export still reports the true total.
-        auto exported = nk::matrix<scalar_t>::zeros({2, dimensions}).value;
+        nk::matrix<scalar_t> exported = make_matrix<scalar_t>(2, dimensions);
         expect_equal(index.get(keys[0], rows_span_t {exported.span()}, 2), 2u);
         expect_equal(index.get(keys[0], rows_span_t {exported.span()}, 1), 2u);
         expect_equal(index.get(dense_key<key_t>(rows), rows_span_t {exported.span()}, 2), 0u);
@@ -103,10 +104,10 @@ static void test_ram_index_keys(make_index_type_ const& make_index, u64_t seed) 
         wrong = 0;
         for (index_type_ const* part : targets)
             for (node_id_t node = 0; node != part->size(); ++node) {
-                key_t const key = part->key_of(node).value;
+                auto const [key, key_status] = part->key_of(node);
                 std::size_t const row = rows_of_key(key);
-                wrong += !ram_index_row_matches(*part, node, vectors, row) &&
-                         !ram_index_row_matches(*part, node, vectors, row + 1);
+                wrong += failed(key_status) || (!ram_index_row_matches(*part, node, vectors, row) &&
+                                                !ram_index_row_matches(*part, node, vectors, row + 1));
             }
         for (std::size_t row = 0; row != rows; row += 2)
             wrong += targets[0]->count(keys[row]) + targets[1]->count(keys[row]) != 2;
@@ -115,23 +116,27 @@ static void test_ram_index_keys(make_index_type_ const& make_index, u64_t seed) 
         // A save and a load through the plans keep every key beside its row.
         index_type_& saved = *targets[0];
         auto const shape = saved.saved_shape();
-        auto saved_vectors = nk::matrix<scalar_t>::zeros({shape.nodes, shape.dimensions}).value;
-        auto saved_neighbors = nk::matrix<node_id_t>::zeros({shape.nodes, shape.connectivity}).value;
+        nk::matrix<scalar_t> saved_vectors = make_matrix<scalar_t>(shape.nodes, shape.dimensions);
+        nk::matrix<node_id_t> saved_neighbors = make_matrix<node_id_t>(shape.nodes, shape.connectivity);
         expect_equal(saved.save({dense_matrix_bytes(saved_vectors), dense_matrix_bytes(saved_neighbors)},
                                 synchronization_t::exclusive_k),
-                     status_t::success_k);
-        std::vector<key_t> saved_keys(shape.nodes);
-        for (node_id_t node = 0; node != shape.nodes; ++node) saved_keys[node] = saved.key_of(node).value;
+                     status_code_t::success_k);
+        nk::vector<key_t> saved_keys = make_vector<key_t>(shape.nodes);
+        for (node_id_t node = 0; node != shape.nodes; ++node) {
+            auto const [saved_key, key_status] = saved.key_of(node);
+            if (expect_true(succeeded(key_status))) saved_keys[node] = saved_key;
+        }
         std::unique_ptr<index_type_> const restored_ptr = make_index(ledger);
         index_type_& restored = *restored_ptr;
         expect_equal(
             restored.load({dense_matrix_bytes(saved_vectors.view()), dense_matrix_bytes(saved_neighbors.view())},
                           to_span(saved_keys), shape.nodes, {0, static_cast<node_id_t>(shape.nodes)}),
-            status_t::success_k);
+            status_code_t::success_k);
         expect_equal(restored.size(), shape.nodes);
         wrong = 0;
         for (node_id_t node = 0; node != shape.nodes; ++node) {
-            wrong += restored.key_of(node).value != saved_keys[node];
+            auto const [restored_key, key_status] = restored.key_of(node);
+            wrong += failed(key_status) || restored_key != saved_keys[node];
             wrong += restored.count(saved_keys[node]) != saved.count(saved_keys[node]);
             wrong += !ram_index_row_matches(restored, node, vectors, rows_of_key(saved_keys[node])) &&
                      !ram_index_row_matches(restored, node, vectors, rows_of_key(saved_keys[node]) + 1);
@@ -148,15 +153,16 @@ static void test_ram_index_keys(make_index_type_ const& make_index, u64_t seed) 
             .neighbors = dense_matrix_bytes(saved_neighbors.view()),
             .connectivity = shape.connectivity,
         };
-        expect_equal(widened.load(narrow_columns, to_span(saved_keys), shape.nodes, saved_nodes), status_t::success_k);
+        expect_equal(widened.load(narrow_columns, to_span(saved_keys), shape.nodes, saved_nodes),
+                     status_code_t::success_k);
         expect_true(succeeded(widened.refine({}, context).status));
         auto const wide_shape = widened.saved_shape();
         expect_equal(wide_shape.connectivity, 2 * shape.connectivity);
-        auto wide_vectors = nk::matrix<scalar_t>::zeros({wide_shape.nodes, wide_shape.dimensions}).value;
-        auto wide_neighbors = nk::matrix<node_id_t>::zeros({wide_shape.nodes, wide_shape.connectivity}).value;
+        nk::matrix<scalar_t> wide_vectors = make_matrix<scalar_t>(wide_shape.nodes, wide_shape.dimensions);
+        nk::matrix<node_id_t> wide_neighbors = make_matrix<node_id_t>(wide_shape.nodes, wide_shape.connectivity);
         expect_equal(widened.save({dense_matrix_bytes(wide_vectors), dense_matrix_bytes(wide_neighbors)},
                                   synchronization_t::exclusive_k),
-                     status_t::success_k);
+                     status_code_t::success_k);
         auto const [reachability, health_status] = dense_audit_health(widened, context);
         expect_true(succeeded(health_status));
         expect_equal(reachability.reachable_nodes, reachability.audited_nodes);
@@ -168,7 +174,7 @@ static void test_ram_index_keys(make_index_type_ const& make_index, u64_t seed) 
             .connectivity = wide_shape.connectivity,
         };
         expect_equal(narrowed_ptr->load(wide_columns, to_span(saved_keys), shape.nodes, saved_nodes),
-                     status_t::config_mismatch_k);
+                     status_code_t::config_mismatch_k);
     }
     expect_equal(ledger.live_bytes, 0);
 }
@@ -182,8 +188,8 @@ static std::unique_ptr<index_type_> ram_index_of_links(make_index_type_ const& m
     std::size_t const entries = links.size();
     std::unique_ptr<index_type_> index = make_index(ledger);
     std::size_t const dimensions = index->dimensions(), connectivity = index->connectivity();
-    auto vectors = make_vectors<scalar_t>(entries, dimensions, stream_key(seed, "audit_links"));
-    auto neighbors = nk::matrix<node_id_t>::zeros({entries, connectivity}).value;
+    nk::matrix<scalar_t> vectors = make_vectors<scalar_t>(entries, dimensions, stream_key(seed, "audit_links"));
+    nk::matrix<node_id_t> neighbors = make_matrix<node_id_t>(entries, connectivity);
     for (std::size_t entry = 0; entry != entries; ++entry) {
         auto row = neighbors.span().row(entry).as_vector();
         for (std::size_t slot = 0; slot != connectivity; ++slot)
@@ -205,6 +211,7 @@ enum class ram_tasks_order_t { first_to_last_k, last_to_first_k };
 template <typename index_type_>
 static typename index_type_::health_plan_t ram_index_audit(index_type_& index, ram_tasks_order_t order) {
     auto [plan, status] = index.plan_health();
+    expect_equal(status, status_code_t::success_k);
     do {
         auto const tasks = plan.tasks();
         for (std::size_t task = 0; task != tasks.size(); ++task)
@@ -302,8 +309,10 @@ static void test_ram_index_audit_components(make_index_type_ const& make_index, 
         std::size_t const jump = (entry * entry + 3) % entries;
         if (jump != entry && jump != (entry + 1) % entries) chained[at(entry)].push_back(at(jump));
     }
-    std::vector<u8_t> depths(entries, 255);
-    std::vector<std::size_t> in_links(entries, 0), frontier {root};
+    nk::vector<u8_t> depths = make_vector<u8_t>(entries);
+    std::fill_n(depths.data(), entries, u8_t {255});
+    nk::vector<std::size_t> in_links = make_vector<std::size_t>(entries);
+    std::vector<std::size_t> frontier {root};
     depths[root] = 0;
     std::size_t deepest = 0;
     for (std::size_t head = 0; head != frontier.size(); ++head)
@@ -325,7 +334,8 @@ static void test_ram_index_audit_components(make_index_type_ const& make_index, 
             for (node_id_t entry = 0; entry != entries; ++entry)
                 wrong += plan.depth_from_root(entry) != depths[entry] || plan.in_links(entry) != in_links[entry];
             expect_equal(wrong, 0u);
-            expect_equal(plan.finish().value.depth_from_root, deepest);
+            auto const [reachability, finish_status] = plan.finish();
+            expect_true(succeeded(finish_status) && reachability.depth_from_root == deepest);
         }
     }
     expect_equal(ledger.live_bytes, 0);
@@ -357,8 +367,8 @@ template <typename index_type_, typename make_index_type_>
 static nk::matrix<node_id_t> ram_index_rows(index_type_& index, make_index_type_ const& make_index) {
     using scalar_t = typename index_type_::scalar_t;
     auto const shape = index.saved_shape();
-    auto vectors = nk::matrix<scalar_t>::zeros({shape.nodes, shape.dimensions}).value;
-    auto neighbors = nk::matrix<node_id_t>::zeros({shape.nodes, shape.connectivity}).value;
+    nk::matrix<scalar_t> vectors = make_matrix<scalar_t>(shape.nodes, shape.dimensions);
+    nk::matrix<node_id_t> neighbors = make_matrix<node_id_t>(shape.nodes, shape.connectivity);
     static_cast<void>(dense_save(index, make_index, {dense_matrix_bytes(vectors), dense_matrix_bytes(neighbors)},
                                  synchronization_t::exclusive_k));
     return neighbors;
@@ -420,10 +430,10 @@ static void test_ram_index_rounds(make_index_type_ const& make_index, u64_t seed
     }
 
     std::size_t const built = 600;
-    auto vectors = make_vectors<scalar_t>(built, dimensions, stream_key(seed, "rounds"));
+    nk::matrix<scalar_t> vectors = make_vectors<scalar_t>(built, dimensions, stream_key(seed, "rounds"));
     std::vector<key_t> const keys = dense_keys<index_type_>(built);
-    auto saved_vectors = nk::matrix<scalar_t>::zeros({built, dimensions}).value;
-    auto saved_neighbors = nk::matrix<node_id_t>::zeros({built, static_cast<std::size_t>(connectivity_16_k)}).value;
+    nk::matrix<scalar_t> saved_vectors = make_matrix<scalar_t>(built, dimensions);
+    nk::matrix<node_id_t> saved_neighbors = make_matrix<node_id_t>(built, static_cast<std::size_t>(connectivity_16_k));
     {
         std::unique_ptr<index_type_> const index = make_index(ledger);
         expect_true(succeeded(index->reserve({built}).status));
@@ -433,14 +443,14 @@ static void test_ram_index_rounds(make_index_type_ const& make_index, u64_t seed
         expect_equal(
             dense_save(*index, make_index, {dense_matrix_bytes(saved_vectors), dense_matrix_bytes(saved_neighbors)},
                        synchronization_t::exclusive_k),
-            status_t::success_k);
+            status_code_t::success_k);
     }
     auto load = [&](nk::matrix_view<scalar_t> rows, nk::matrix_view<node_id_t> links, std::span<key_t const> named) {
         std::unique_ptr<index_type_> index = make_index(ledger);
         expect_true(succeeded(index->reserve({built}).status));
         expect_equal(dense_load(*index, make_index, {dense_matrix_bytes(rows), dense_matrix_bytes(links)}, named, built,
                                 {0, static_cast<node_id_t>(built)}),
-                     status_t::success_k);
+                     status_code_t::success_k);
         return index;
     };
     nk::matrix_view<scalar_t> const rows = vectors.view();
@@ -460,7 +470,7 @@ static void test_ram_index_rounds(make_index_type_ const& make_index, u64_t seed
                 stopped = true;
             });
             expect_true(stopped);
-            expect_equal(status, status_t::cancelled_k);
+            expect_equal(status, status_code_t::cancelled_k);
             expect_true(report.verdict == refine_verdict_t::stopped_k);
             expect_true(dense_recall_at_ten(*index, make_index, queries) >= before);
         }
@@ -484,7 +494,7 @@ static void test_ram_index_rounds(make_index_type_ const& make_index, u64_t seed
     // pieces by ID instead, and the round ends.
     {
         constexpr std::size_t entries = 10 * narrow_capacity;
-        auto copies = nk::matrix<scalar_t>::zeros({entries, dimensions}).value;
+        nk::matrix<scalar_t> copies = make_matrix<scalar_t>(entries, dimensions);
         for (std::size_t entry = 0; entry != entries; ++entry) {
             auto const source = vectors.view().row(0).as_vector();
             auto target = copies.row(entry).as_vector();
@@ -502,10 +512,10 @@ static void test_ram_index_rounds(make_index_type_ const& make_index, u64_t seed
 
     // The same graph under shuffled IDs draws other entries but reaches recall within noise.
     if constexpr (kernel_ != nk_kernel_dot_k) {
-        auto shuffled_vectors = nk::matrix<scalar_t>::zeros({built, dimensions}).value;
-        auto shuffled_neighbors =
-            nk::matrix<node_id_t>::zeros({built, static_cast<std::size_t>(connectivity_16_k)}).value;
-        std::vector<key_t> shuffled_keys(built);
+        nk::matrix<scalar_t> shuffled_vectors = make_matrix<scalar_t>(built, dimensions);
+        nk::matrix<node_id_t> shuffled_neighbors = make_matrix<node_id_t>(built,
+                                                                          static_cast<std::size_t>(connectivity_16_k));
+        nk::vector<key_t> shuffled_keys = make_vector<key_t>(built);
         nk::matrix_view<node_id_t> const saved_links = saved_neighbors.view();
         nk::matrix_span<node_id_t> const shuffled_links = shuffled_neighbors.span();
         auto moved = [&](node_id_t entry) {
@@ -542,9 +552,10 @@ static void test_ram_index_rounds(make_index_type_ const& make_index, u64_t seed
         expect_true(succeeded(
             index->insert(std::span(keys).first(entries), rows(nk::range(0, entries), nk::slice), {}, context).status));
         bool converged = false;
-        for (std::size_t round = 0; round != rounds && !converged; ++round)
-            converged = ram_index_round(*index, {}, context, ignore_barriers).value.verdict ==
-                        refine_verdict_t::converged_k;
+        for (std::size_t round = 0; round != rounds && !converged; ++round) {
+            auto const [round_report, round_status] = ram_index_round(*index, {}, context, ignore_barriers);
+            converged = succeeded(round_status) && round_report.verdict == refine_verdict_t::converged_k;
+        }
         expect_true(converged);
         nk::matrix<node_id_t> const before = ram_index_rows(*index, make_index);
         auto const [report, status] = ram_index_round(*index, {}, context, ignore_barriers);

@@ -288,11 +288,11 @@ std::span<key_type_ const> hints_of(ranked_hints_view<key_type_> const& hints, s
  */
 template <typename key_type_>
 status_t hints_refusal(ranked_hints_view<key_type_> const& hints, std::size_t queries) noexcept {
-    if (hints.counts.empty()) return status_t::success_k;
-    if (hints.counts.size() != queries || hints.keys.extent(0) != queries) return status_t::config_mismatch_k;
+    if (hints.counts.empty()) return status_code_t::success_k;
+    if (hints.counts.size() != queries || hints.keys.extent(0) != queries) return status_code_t::config_mismatch_k;
     for (std::size_t const count : hints.counts)
-        if (count > hints.keys.extent(1)) return status_t::shape_mismatch_k;
-    return status_t::success_k;
+        if (count > hints.keys.extent(1)) return status_code_t::shape_mismatch_k;
+    return status_code_t::success_k;
 }
 
 /**
@@ -331,8 +331,8 @@ struct products_tape {
      */
     status_t refusal(std::size_t queries, std::span<std::size_t const> scored) const noexcept {
         if (count() != queries || scored.size() != queries || scores.size() < keys.size())
-            return status_t::config_mismatch_k;
-        return status_t::success_k;
+            return status_code_t::config_mismatch_k;
+        return status_code_t::success_k;
     }
 
     /** Publishes every offset after the first from the one before it, each query keeping the
@@ -442,17 +442,17 @@ expected<search_result_type_> for_each_window(std::size_t rows, std::size_t wind
                                               window_type_&& window) noexcept {
     search_result_type_ total;
     for (std::size_t first = 0; first < rows; first += window_rows) {
-        expected<search_result_type_> const searched = window(first, min_of(window_rows, rows - first));
-        total.count += searched.value.count;
-        total.visited_members += searched.value.visited_members;
-        total.computed_distances += searched.value.computed_distances;
-        total.restarts += searched.value.restarts;
-        total.tail_compactions += searched.value.tail_compactions;
-        total.tail_dropped += searched.value.tail_dropped;
-        total.visited_saturations += searched.value.visited_saturations;
-        if (!searched) return {total, searched.status};
+        auto const [searched, status] = window(first, min_of(window_rows, rows - first));
+        total.count += searched.count;
+        total.visited_members += searched.visited_members;
+        total.computed_distances += searched.computed_distances;
+        total.restarts += searched.restarts;
+        total.tail_compactions += searched.tail_compactions;
+        total.tail_dropped += searched.tail_dropped;
+        total.visited_saturations += searched.visited_saturations;
+        if (failed(status)) return {total, status};
     }
-    return {total, status_t::success_k};
+    return {total, status_code_t::success_k};
 }
 
 /**
@@ -465,9 +465,9 @@ expected<search_result_type_> for_each_window(std::size_t rows, std::size_t wind
  */
 template <typename value_type_>
 status_t rows_refusal(std::size_t rows, nk::matrix_span<value_type_> span, std::size_t columns) noexcept {
-    if (span.extent(0) != rows || (rows && span.extent(1) < columns)) return status_t::config_mismatch_k;
-    if (rows && span.stride_bytes(1) != sizeof(value_type_)) return status_t::unsupported_layout_k;
-    return status_t::success_k;
+    if (span.extent(0) != rows || (rows && span.extent(1) < columns)) return status_code_t::config_mismatch_k;
+    if (rows && span.stride_bytes(1) != sizeof(value_type_)) return status_code_t::unsupported_layout_k;
+    return status_code_t::success_k;
 }
 
 /** Whether @p first and @p second walk by one kernel over one geometry, as two shards of a sharded
@@ -642,12 +642,12 @@ class maxsim_reducer {
      */
     status_t reserve(std::size_t rows_per_query, std::size_t width) noexcept {
         std::size_t const hits = rows_per_query * width;
-        if (hits > (std::numeric_limits<u32_t>::max)()) return status_t::config_mismatch_k;
+        if (hits > (std::numeric_limits<u32_t>::max)()) return status_code_t::config_mismatch_k;
         rows_per_query_ = rows_per_query;
         if (status_t const sized = staged_.resize_uninitialized(hits); failed(sized)) return sized;
         if (status_t const sized = row_best_.resize_uninitialized(rows_per_query); failed(sized)) return sized;
         for (std::size_t row = 0; row != rows_per_query; ++row) row_best_[row] = unscored_k;
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /**
@@ -734,10 +734,10 @@ template <typename key_type_, typename score_type_>
 status_t rankings_refusal(std::size_t queries, nk::matrix_span<key_type_> keys,
                           nk::matrix_span<score_type_> scores) noexcept {
     if (keys.extent(0) != queries || scores.extent(0) != queries || scores.extent(1) != keys.extent(1))
-        return status_t::config_mismatch_k;
+        return status_code_t::config_mismatch_k;
     if (keys.stride_bytes(1) != sizeof(key_type_) || scores.stride_bytes(1) != sizeof(score_type_))
-        return status_t::unsupported_layout_k;
-    return status_t::success_k;
+        return status_code_t::unsupported_layout_k;
+    return status_code_t::success_k;
 }
 
 } // namespace unum::usearch::dense

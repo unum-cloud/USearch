@@ -45,6 +45,8 @@
 
 #include "lib.hpp"
 
+namespace util = unum::usearch::utilities;
+
 using namespace unum::usearch;
 using namespace unum::usearch::stub;
 
@@ -125,10 +127,10 @@ static void nearest_partners(std::span<double const> from, std::span<double cons
     for (std::size_t point = 0; point != from_points; ++point) {
         double nearest = std::numeric_limits<double>::infinity();
         for (std::size_t partner = 0; partner != onto_points; ++partner)
-            nearest = min_of(nearest, point_distance(from.subspan(point * coordinates_k, coordinates_k),
-                                                     onto.subspan(partner * coordinates_k, coordinates_k)));
+            nearest = util::min_of(nearest, point_distance(from.subspan(point * coordinates_k, coordinates_k),
+                                                           onto.subspan(partner * coordinates_k, coordinates_k)));
         summed += nearest;
-        worst = max_of(worst, nearest);
+        worst = util::max_of(worst, nearest);
     }
     if (from_points) summed /= static_cast<double>(from_points);
 }
@@ -140,7 +142,7 @@ static double distance(shapes_index_t const& index, std::span<double const> quer
     nearest_partners(query, stored, forward_mean, forward_worst);
     nearest_partners(stored, query, reverse_mean, reverse_worst);
     if (index.options.metric == usearch_shapes_metric_chamfer_k) return (forward_mean + reverse_mean) / 2;
-    return max_of(forward_worst, reverse_worst);
+    return util::max_of(forward_worst, reverse_worst);
 }
 
 /** Whether the kind is one this build implements. The transport kinds need a solver and
@@ -241,7 +243,7 @@ struct shapes_checkpoint_prefix_t {
 };
 
 /** The per-entry overhead of the blob: the key, then the point count that follows it. */
-constexpr std::size_t record_overhead_k = sizeof(usearch_key_t) + sizeof(us::utilities::u64_t);
+constexpr std::size_t record_overhead_k = sizeof(usearch_key_t) + sizeof(util::u64_t);
 
 static std::size_t payload_extent(shapes_index_t const& index, std::size_t entries) {
     std::size_t extent = 0;
@@ -254,7 +256,7 @@ static std::optional<std::size_t> serialized_bytes(shapes_index_t const& index, 
     return blob_bytes(sizeof(shapes_checkpoint_prefix_t), payload_extent(index, entries), 1);
 }
 
-static void write_into(shapes_index_t const& index, std::size_t entries, bytes_span_t target) {
+static void write_into(shapes_index_t const& index, std::size_t entries, util::bytes_span_t target) {
     shapes_checkpoint_prefix_t prefix {};
     prefix.points = index.options.points;
     prefix.connectivity = index.options.connectivity;
@@ -264,7 +266,7 @@ static void write_into(shapes_index_t const& index, std::size_t entries, bytes_s
     prefix.quantization = index.options.quantization;
     write_pod(target, prefix);
 
-    bytes_span_t cursor = target.subspan(sizeof(prefix));
+    util::bytes_span_t cursor = target.subspan(sizeof(prefix));
     for (std::size_t position = 0; position != entries; ++position) {
         shapes_entry_t const& entry = index.entries[position];
         std::size_t const point_count = points_of(entry);
@@ -273,14 +275,14 @@ static void write_into(shapes_index_t const& index, std::size_t entries, bytes_s
         cursor = cursor.subspan(sizeof(usearch_key_t));
         write_pod(cursor, point_count);
         cursor = cursor.subspan(sizeof(point_count));
-        [[maybe_unused]] status_t const copied = copy_bytes(cursor.first(payload_bytes),
-                                                            bytes_of(entry.payload.data(), entry.payload.size()));
+        [[maybe_unused]] util::status_t const copied = util::copy_bytes(
+            cursor.first(payload_bytes), util::bytes_of(entry.payload.data(), entry.payload.size()));
         cursor = cursor.subspan(payload_bytes);
     }
 }
 
 /** Reads the prefix and checks the blob is long enough for what it claims. */
-static bool parse_prefix(shapes_checkpoint_prefix_t& prefix, bytes_view_t blob, usearch_outcome_t* outcome) {
+static bool parse_prefix(shapes_checkpoint_prefix_t& prefix, util::bytes_view_t blob, usearch_outcome_t* outcome) {
     if (reject_if(blob.size() < sizeof(shapes_checkpoint_prefix_t), usearch_status_malformed_k,
                   "The checkpoint ends early", outcome))
         return false;
@@ -307,7 +309,7 @@ static bool adopt(shapes_index_options_t& options, shapes_checkpoint_prefix_t co
 }
 
 /** Fills a fresh @p index from a checkpoint, which no other thread can see yet. */
-static bool read_from(shapes_index_t& index, bytes_view_t blob, usearch_outcome_t* outcome) {
+static bool read_from(shapes_index_t& index, util::bytes_view_t blob, usearch_outcome_t* outcome) {
     shapes_checkpoint_prefix_t prefix {};
     if (!parse_prefix(prefix, blob, outcome)) return false;
     std::size_t const entries = prefix.entries;
@@ -321,7 +323,7 @@ static bool read_from(shapes_index_t& index, bytes_view_t blob, usearch_outcome_
         return false;
     }
 
-    bytes_view_t cursor = blob.subspan(sizeof(shapes_checkpoint_prefix_t));
+    util::bytes_view_t cursor = blob.subspan(sizeof(shapes_checkpoint_prefix_t));
     shapes_payload_t payload;
     for (std::size_t entry_index = 0; entry_index != entries; ++entry_index) {
         if (cursor.size() < record_overhead_k) {
@@ -342,8 +344,8 @@ static bool read_from(shapes_index_t& index, bytes_view_t blob, usearch_outcome_
             return false;
         }
         payload.resize(scalars);
-        [[maybe_unused]] status_t const copied = copy_bytes(bytes_of(payload.data(), payload.size()),
-                                                            cursor.first(scalars * sizeof(double)));
+        [[maybe_unused]] util::status_t const copied = util::copy_bytes(util::bytes_of(payload.data(), payload.size()),
+                                                                        cursor.first(scalars * sizeof(double)));
         cursor = cursor.subspan(scalars * sizeof(double));
         index.append(key, payload);
     }
@@ -363,7 +365,7 @@ static bool serialize_shard(shapes_index_t const& shard, std::vector<std::byte>&
 
 /** A new handle holding the checkpoint in @p blob, or null once the outcome records why not. */
 template <typename index_type_>
-static index_type_* open_checkpoint(bytes_view_t blob, usearch_outcome_t* outcome) {
+static index_type_* open_checkpoint(util::bytes_view_t blob, usearch_outcome_t* outcome) {
     index_type_* const index = new (std::nothrow) index_type_();
     if (reject_if(!index, usearch_status_out_of_memory_k, "The handle could not be allocated", outcome)) return nullptr;
     if (read_from(*index, blob, outcome)) return index;
@@ -414,7 +416,7 @@ void usearch_shapes_init_ram(usearch_shapes_init_ram_t* arguments) {
     usearch_shapes_index_handle_t* const index = new (std::nothrow) usearch_shapes_index_handle_t();
     if (reject_if(!index, usearch_status_out_of_memory_k, "The handle could not be allocated", outcome)) return;
     index->options = {arguments->metric, arguments->quantization, arguments->points,
-                      arguments->connectivity ? arguments->connectivity : us::utilities::connectivity_16_k,
+                      arguments->connectivity ? arguments->connectivity : util::connectivity_16_k,
                       arguments->values_per_key};
     index->shard_capacity = arguments->ram.shard_capacity;
     *arguments->index = index;
@@ -438,7 +440,8 @@ void usearch_shapes_load_ram(usearch_shapes_load_ram_t* arguments) {
     if (!read_file(arguments->path, blob, outcome)) return;
     usearch_shapes_index_handle_t* const index = open_parts<usearch_shapes_index_handle_t>(
         blob, arguments->path,
-        [&](bytes_view_t part) { return open_checkpoint<usearch_shapes_index_handle_t>(part, outcome); }, outcome);
+        [&](util::bytes_view_t part) { return open_checkpoint<usearch_shapes_index_handle_t>(part, outcome); },
+        outcome);
     if (!index) return;
     index->options.values_per_key = arguments->values_per_key;
     keep_going(arguments->progress, 1, 1);
@@ -469,13 +472,14 @@ void usearch_shapes_view_ram(usearch_shapes_view_ram_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
     if (reject_ceiling(arguments->ram.cpu_class_ceiling, outcome)) return;
-    mapped_file_t served = map_file(arguments->path, outcome);
+    util::mapped_file_t served = map_file(arguments->path, outcome);
     if (!served) return;
     // Entries are still copied out of the mapping, so only the view's refusals are mirrored, not
     // its zero cost.
     usearch_shapes_index_handle_t* const index = open_parts<usearch_shapes_index_handle_t>(
         served.view(), arguments->path,
-        [&](bytes_view_t part) { return open_checkpoint<usearch_shapes_index_handle_t>(part, outcome); }, outcome);
+        [&](util::bytes_view_t part) { return open_checkpoint<usearch_shapes_index_handle_t>(part, outcome); },
+        outcome);
     if (!index) return;
     index->served = std::move(served);
     *arguments->index = index;
@@ -486,12 +490,13 @@ void usearch_shapes_view_nvme(usearch_shapes_view_nvme_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
     if (reject_ceiling(arguments->nvme.cpu_class_ceiling, outcome)) return;
-    mapped_file_t served = map_file(arguments->path, outcome);
+    util::mapped_file_t served = map_file(arguments->path, outcome);
     if (!served) return;
     // Serves the drives' checkpoint as the RAM view does, mirroring only the residency's refusals.
     usearch_shapes_index_handle_t* const index = open_parts<usearch_shapes_index_handle_t>(
         served.view(), arguments->path,
-        [&](bytes_view_t part) { return open_checkpoint<usearch_shapes_index_handle_t>(part, outcome); }, outcome);
+        [&](util::bytes_view_t part) { return open_checkpoint<usearch_shapes_index_handle_t>(part, outcome); },
+        outcome);
     if (!index) return;
     index->served = std::move(served);
     index->residency = usearch_residency_nvme_k;
@@ -655,7 +660,7 @@ void usearch_shapes_count(usearch_shapes_count_t* arguments) {
     for (auto position = range.first; position != range.second; ++position, ++entries) {
         std::size_t const points = points_of(index.entries[position->second]);
         total_points += points;
-        largest_points = max_of(largest_points, points);
+        largest_points = util::max_of(largest_points, points);
     }
     *arguments->key_stats = {entries, total_points, largest_points};
 }
@@ -731,7 +736,7 @@ void usearch_shapes_cursor_next(usearch_shapes_cursor_next_t* arguments) {
     if (arguments->links && reject_metric(index, outcome)) return;
     usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, {}, outcome);
     if (!arena) return;
-    if (reject_if(serial_atomic_ref<u32_t>(cursor.pulling).fetch_test_and_set_bit(0, std::memory_order_acquire),
+    if (reject_if(serial_atomic_ref<util::u32_t>(cursor.pulling).fetch_test_and_set_bit(0, std::memory_order_acquire),
                   usearch_status_contended_k, "Another pull is still running on the cursor", outcome))
         return;
     std::shared_lock readers(index.mutex);
@@ -739,7 +744,7 @@ void usearch_shapes_cursor_next(usearch_shapes_cursor_next_t* arguments) {
         return distance(index, first, second);
     };
     pull_walk(*arguments, cursor, score, *arena, outcome);
-    serial_atomic_ref<u32_t>(cursor.pulling).clear_bits(1, std::memory_order_release);
+    serial_atomic_ref<util::u32_t>(cursor.pulling).clear_bits(1, std::memory_order_release);
 }
 
 void usearch_shapes_cursor_free(usearch_shapes_cursor_t handle) {

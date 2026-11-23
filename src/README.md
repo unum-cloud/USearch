@@ -150,7 +150,7 @@ Their ladders are shorter than dense's, over the classes where StringZilla's Lev
 Sequence, shapes and geospatial compile the same classes, each into a RAM and an NVMe unit, and a modality whose kits do not advance at a class falls back through its kit chain to the next lower generation.
 
 - `insert` builds the batch's values on every thread from the index's allocator, sizes every thread's context and metric, and only then plans the batch, so nothing fails after the dispense.
-- `search` writes each query's nearest from the walk's candidates, narrowed by the predicate a quad of keys at a time.
+- `search` writes each query's nearest from the walk's candidates, narrowed by the predicate a quad of keys at a time when it is cheap, or once per settled round when it is expensive.
 - Overlap distances are reported as the share of missed windows, from zero to one, rather than the kernels' fixed point.
 - Checkpoints are one SafeGraphs monolith for a lone live shard, or one part per live shard beside a `.json` manifest, whose metric token is `levenshtein`, `levenshtein-utf8`, `needleman-wunsch`, `overlap`, `chamfer`, `hausdorff`, `gromov-wasserstein` or `wasserstein-procrustes`, with `connectivity`, `window_widths` and `points` in the provenance.
 

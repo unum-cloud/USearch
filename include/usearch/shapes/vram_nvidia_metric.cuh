@@ -268,7 +268,7 @@ expected<std::size_t> vram_nvidia_kits<kit_type_, node_id_type_, kernels_type_>:
             pack_kit_t::packed_shape(stored.data(), &points, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr));
         failed(read))
         return {0, read};
-    return {points * 3 * sizeof(typename kit_type_::scalar_t::raw_t), status_t::success_k};
+    return {points * 3 * sizeof(typename kit_type_::scalar_t::raw_t), status_code_t::success_k};
 }
 
 template <typename kit_type_, typename node_id_type_, typename kernels_type_>
@@ -283,11 +283,11 @@ expected<std::size_t> vram_nvidia_kits<kit_type_, node_id_type_, kernels_type_>:
     std::size_t saved) noexcept {
     using pack_kit_t = typename shapes_ladder<typename kit_type_::scalar_t, nk_cap_serial_k>::kit_t;
     constexpr std::size_t point_bytes_k = 3 * sizeof(typename kit_type_::scalar_t::raw_t);
-    if (saved % point_bytes_k) return {0, status_t::malformed_k};
+    if (saved % point_bytes_k) return {0, status_code_t::malformed_k};
     nk_size_t bytes = 0;
     if (status_t const sized = status_of(pack_kit_t::pack_size(saved / point_bytes_k, &bytes)); failed(sized))
         return {0, sized};
-    return {bytes, status_t::success_k};
+    return {bytes, status_code_t::success_k};
 }
 
 template <typename kit_type_, typename node_id_type_, typename kernels_type_>

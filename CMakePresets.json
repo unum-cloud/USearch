@@ -506,7 +506,7 @@
         "USEARCH_DENSE_DTYPES": "11",
         "USEARCH_SWIFT_SDK": "macosx",
         "CMAKE_OSX_ARCHITECTURES": "arm64",
-        "CMAKE_OSX_DEPLOYMENT_TARGET": "15.0"
+        "CMAKE_OSX_DEPLOYMENT_TARGET": "26.0"
       }
     },
     {

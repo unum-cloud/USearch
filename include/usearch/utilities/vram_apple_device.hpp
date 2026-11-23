@@ -231,9 +231,9 @@ struct metal_context_t {
         for (metal_pipeline_t const& entry : pipelines) {
             if (entry.source != source) continue;
             library = entry.library;
-            if (std::strcmp(entry.name, name) == 0) return {entry.state, status_t::success_k};
+            if (std::strcmp(entry.name, name) == 0) return {entry.state, status_code_t::success_k};
         }
-        if (failed(pipelines.reserve(pipelines.size() + 1))) return {{}, status_t::bad_alloc_k};
+        if (failed(pipelines.reserve(pipelines.size() + 1))) return {{}, status_code_t::out_of_memory_k};
         metal_api_t const& api = *this->api;
         void* const pool = api.autorelease_pool_push();
         if (!library) {
@@ -255,11 +255,11 @@ struct metal_context_t {
             }
         }
         api.autorelease_pool_pop(pool);
-        if (!pipeline) return {{}, status_t::device_error_k};
+        if (!pipeline) return {{}, status_code_t::device_k};
         u32_t const width = static_cast<u32_t>(metal_send<std::size_t>(api, pipeline, "threadExecutionWidth"));
         if (width != metal_simdgroup_width_k) {
             metal_send<void>(api, pipeline, "release");
-            return {{}, status_t::unsupported_k};
+            return {{}, status_code_t::unsupported_k};
         }
         wave_lanes = width;
         u32_t const max_threads = static_cast<u32_t>(
@@ -267,7 +267,7 @@ struct metal_context_t {
         metal_pipeline_t entry {source, {}, library, {pipeline, max_threads}};
         std::strncpy(entry.name, name, metal_pipeline_name_capacity_k - 1);
         pipelines.push_back_reserved(entry);
-        return {entry.state, status_t::success_k};
+        return {entry.state, status_code_t::success_k};
     }
 };
 
@@ -361,17 +361,17 @@ struct metal_device_specs_t {
     std::size_t cache_bytes_per_core() const noexcept { return shared_memory_per_block_bytes; }
 
     /**
-     *  Queries Metal and the I/O Registry for the specification of @p context, the device at
-     *  @p ordinal, once a pipeline built for it reported its simdgroup width; meaningful only on
-     *  @c success_k.
+     *  @brief Queries Metal and the I/O Registry for the specification of @p context, the device at
+     *      @p ordinal, once a pipeline built for it reported its simdgroup width; meaningful only
+     *      on @c success_k.
      *
      *  @par Statuses:
-     *  - @c device_error_k No pipeline reported the device's simdgroup width yet.
+     *  - @c device_k No pipeline reported the device's simdgroup width yet.
      *  - @c unsupported_k The device's registry lists no core count.
      */
     static expected<metal_device_specs_t> query(metal_context_t const& context, int ordinal) noexcept {
-        if (!context.wave_lanes) return {{ordinal}, status_t::device_error_k};
-        if (!context.multiprocessor_count) return {{ordinal}, status_t::unsupported_k};
+        if (!context.wave_lanes) return {{ordinal}, status_code_t::device_k};
+        if (!context.multiprocessor_count) return {{ordinal}, status_code_t::unsupported_k};
         metal_api_t const& api = *context.api;
         void* const device = context.device;
         metal_device_specs_t specs {ordinal, context.multiprocessor_count, context.family, context.wave_lanes};
@@ -381,7 +381,7 @@ struct metal_device_specs_t {
         specs.max_buffer_bytes = metal_send<std::size_t>(api, device, "maxBufferLength");
         specs.working_set_bytes = static_cast<std::size_t>(
             metal_send<u64_t>(api, device, "recommendedMaxWorkingSetSize"));
-        return {specs, status_t::success_k};
+        return {specs, status_code_t::success_k};
     }
 };
 
@@ -549,31 +549,31 @@ struct metal_launch_t {
     }
 
     /**
-     *  Dispatches @p groups threadgroups of @p threads each and commits, without waiting.
+     *  @brief Dispatches @p groups threadgroups of @p threads each and commits, without waiting.
      *
      *  @par Statuses:
-     *  - @c device_error_k The encoder is not open.
+     *  - @c device_k The encoder is not open.
      */
     status_t submit(std::size_t groups, std::size_t threads) noexcept {
-        if (!encoder) return status_t::device_error_k;
+        if (!encoder) return status_code_t::device_k;
         metal_send<void, metal_size_t, metal_size_t>(*api, encoder, "dispatchThreadgroups:threadsPerThreadgroup:",
                                                      metal_size_t {groups}, metal_size_t {threads});
         metal_send<void>(*api, encoder, "endEncoding");
         metal_send<void>(*api, encoder, "release");
         encoder = nullptr;
         metal_send<void>(*api, commands, "commit");
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Polls the committed command buffer without blocking; nothing committed has nothing to
      *  run. */
     status_t finished() const noexcept {
-        if (!commands || encoder) return status_t::success_k;
+        if (!commands || encoder) return status_code_t::success_k;
         constexpr std::size_t completed_k = 4, error_k = 5; // `MTLCommandBufferStatusCompleted`, `...Error`
         std::size_t const state = metal_send<std::size_t>(*api, commands, "status");
-        return state == completed_k ? status_t::success_k
-               : state == error_k   ? status_t::device_error_k
-                                    : status_t::deferred_k;
+        return state == completed_k ? status_code_t::success_k
+               : state == error_k   ? status_code_t::device_k
+                                    : status_code_t::deferred_k;
     }
 
     /** Waits for the committed command buffer and answers whether the device finished it. */
@@ -609,11 +609,11 @@ struct metal_device_arena_t {
      *  stream, so the copy is done when it returns. */
     status_t upload(void* destination, void const* source, std::size_t bytes) noexcept {
         std::memcpy(destination, source, bytes);
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Every upload already arrived, so there is nothing to wait for. */
-    status_t wait() noexcept { return status_t::success_k; }
+    status_t wait() noexcept { return status_code_t::success_k; }
 
     int device() const noexcept { return device_; }
 
@@ -669,8 +669,8 @@ struct metal_executor_t {
      *  - @c contended_k Another call holds the executor.
      */
     expected<claim_t> claim() noexcept {
-        if (!held_.lock_if_free()) return {{}, status_t::contended_k};
-        return {claim_t {held_, std::adopt_lock}, status_t::success_k};
+        if (!held_.lock_if_free()) return {{}, status_code_t::contended_k};
+        return {claim_t {held_, std::adopt_lock}, status_code_t::success_k};
     }
 
     /**
@@ -680,12 +680,12 @@ struct metal_executor_t {
      *  - @c config_mismatch_k The @p streams are empty.
      */
     static expected<metal_executor_t> acquire(growing_buffer<stream_t>&& streams) noexcept {
-        if (streams.empty()) return {{}, status_t::config_mismatch_k};
+        if (streams.empty()) return {{}, status_code_t::config_mismatch_k};
         metal_executor_t executor;
         // Queried once here, from each device itself, as its specs wait for a pipeline's lanes.
         for (stream_t const& opened : streams) {
             metal_context_t const* const context = opened.handle.context();
-            if (!context) return {{}, status_t::device_error_k};
+            if (!context) return {{}, status_code_t::device_k};
             std::size_t const bytes = metal_send<std::size_t>(*context->api, context->device,
                                                               "maxThreadgroupMemoryLength");
             executor.cache_bytes_per_core_ = executor.cache_bytes_per_core_
@@ -693,7 +693,7 @@ struct metal_executor_t {
                                                  : bytes;
         }
         executor.streams_ = std::move(streams);
-        return {std::move(executor), status_t::success_k};
+        return {std::move(executor), status_code_t::success_k};
     }
 
     /** Bytes of threadgroup memory one GPU core keeps to itself on the smallest of this executor's
@@ -701,22 +701,22 @@ struct metal_executor_t {
     std::size_t cache_bytes_per_core() const noexcept { return cache_bytes_per_core_; }
 
     /**
-     *  Opens one stream per entry of @p devices among @p contexts, whose scratch never grows past
-     *  @p scratch_limit bytes, zero for no ceiling.
+     *  @brief Opens one stream per entry of @p devices among @p contexts, whose scratch never grows
+     *      past @p scratch_limit bytes, zero for no ceiling.
      *
      *  @par Statuses:
-     *  - @c device_error_k A device is not listed.
+     *  - @c device_k A device is not listed.
      *  - @c config_mismatch_k The @p devices are empty.
      */
     static expected<metal_executor_t> spawn(metal_contexts_t& contexts, std::span<int const> devices,
                                             std::size_t scratch_limit = 0) noexcept {
         growing_buffer<stream_t> streams {global_allocator};
-        if (failed(streams.reserve_exactly(devices.size()))) return {{}, status_t::bad_alloc_k};
+        if (failed(streams.reserve_exactly(devices.size()))) return {{}, status_code_t::out_of_memory_k};
         for (int const device : devices) {
             metal_context_t* const context = contexts.context(device);
-            if (!context) return {{}, status_t::device_error_k};
+            if (!context) return {{}, status_code_t::device_k};
             void* const queue = metal_send(*context->api, context->device, "newCommandQueue");
-            if (!queue) return {{}, status_t::device_error_k};
+            if (!queue) return {{}, status_code_t::device_k};
             streams.push_back_reserved(stream_t {metal_stream_t {*context, device, queue}});
         }
         auto [executor, status] = acquire(std::move(streams));
@@ -725,39 +725,40 @@ struct metal_executor_t {
     }
 
     /**
-     *  Claims @p bytes_per_stream of scratch on every stream, ahead of the fan-out that maps state
-     *  onto it; the old run lives on in whichever command buffer still binds it.
+     *  @brief Claims @p bytes_per_stream of scratch on every stream, ahead of the fan-out that maps
+     *      state onto it; the old run lives on in whichever command buffer still binds it.
      *
      *  @par Statuses:
      *  - @c uninitialized_k The executor has no streams.
-     *  - @c bad_alloc_k The @p bytes_per_stream pass the scratch ceiling.
-     *  - @c device_error_k A stream's device is not listed.
+     *  - @c out_of_memory_k The @p bytes_per_stream pass the scratch ceiling.
+     *  - @c device_k A stream's device is not listed.
      */
     status_t reserve(std::size_t bytes_per_stream) noexcept {
-        if (streams_.empty()) return status_t::uninitialized_k;
-        if (scratch_limit_ && bytes_per_stream > scratch_limit_) return status_t::bad_alloc_k;
+        if (streams_.empty()) return status_code_t::uninitialized_k;
+        if (scratch_limit_ && bytes_per_stream > scratch_limit_) return status_code_t::out_of_memory_k;
         for (stream_t& opened : streams_) {
             metal_context_t* const context = opened.handle.context();
-            if (!context) return status_t::device_error_k;
+            if (!context) return status_code_t::device_k;
             opened.arena = metal_allocate(*context, bytes_per_stream);
-            if (bytes_per_stream && !opened.arena) return status_t::bad_alloc_k;
+            if (bytes_per_stream && !opened.arena) return status_code_t::out_of_memory_k;
         }
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /**
-     *  Waits for every command buffer committed to every stream - the fleet's completion: one empty
-     *  command buffer per stream, which completes only after every one committed before it.
+     *  @brief Waits for every command buffer committed to every stream, the fleet's completion.
+     *
+     *  One empty command buffer per stream completes only after every one committed before it.
      *
      *  @par Statuses:
-     *  - @c device_error_k A stream's device is not listed.
+     *  - @c device_k A stream's device is not listed.
      */
     status_t wait() noexcept {
         constexpr std::size_t completed_k = 4; // `MTLCommandBufferStatusCompleted`
         for (stream_t const& opened : streams_) {
             metal_stream_t const& stream = opened.handle;
             metal_context_t* const context = stream.context();
-            if (!context) return status_t::device_error_k;
+            if (!context) return status_code_t::device_k;
             metal_api_t const& api = *context->api;
             void* const pool = api.autorelease_pool_push();
             void* const commands = metal_send(api, stream.handle() ? stream.handle() : context->queue, "commandBuffer");
@@ -768,9 +769,9 @@ struct metal_executor_t {
                 state = metal_send<std::size_t>(api, commands, "status");
             }
             api.autorelease_pool_pop(pool);
-            if (state != completed_k) return status_t::device_error_k;
+            if (state != completed_k) return status_code_t::device_k;
         }
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** The stream at @p index, in the order the devices were named. */
@@ -922,17 +923,17 @@ struct metal_traversal_context {
     status_t submit_(metal_launch_t& launch, std::size_t groups, std::size_t threads) noexcept {
         if (status_t const submitted = launch.submit(groups, threads); failed(submitted)) return submitted;
         committed_ = std::move(launch);
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Grows @p buffer to at least @p bytes; answers whether it was reallocated, zeroed by
      *  Metal. */
     status_t ensure_(metal_buffer_t& buffer, std::size_t bytes, bool& fresh) noexcept {
         fresh = false;
-        if (bytes <= buffer.bytes) return status_t::success_k;
+        if (bytes <= buffer.bytes) return status_code_t::success_k;
         buffer = buffers_allocator_.allocate(bytes);
         fresh = true;
-        return buffer ? status_t::success_k : status_t::bad_alloc_k;
+        return buffer ? status_code_t::success_k : status_code_t::out_of_memory_k;
     }
 };
 

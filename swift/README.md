@@ -1,7 +1,7 @@
 # USearch for Swift
 
 The Swift package binds the C ABI in `c/usearch/` through `USearchC`, a Clang module map over its headers, and links the `libusearch_static` engine CMake builds.
-It requires Swift 6.4 or newer, on macOS 15, iOS 18, tvOS 18, watchOS 11, visionOS 2, or Linux, and takes its matrix views and low-precision scalars from NumKong.
+It requires Swift 6.4 or newer, on macOS 26, iOS 26, tvOS 26, watchOS 26, visionOS 26, or Linux, and takes its matrix views and low-precision scalars from NumKong.
 It exposes dense indexes over vectors, sequence indexes over strings, shape indexes over 3D point clouds and geospatial indexes over observations of the Earth, each with the same receivers, plans and reports.
 
 ## Installation
@@ -493,12 +493,13 @@ print(nearby[0].map(\.key)) // the two stops within 500 metres
 `.near` widens the radius by both positions' accuracies, `.visible` needs a clear line of sight over the handle's `GeospatialTerrain`, and `.sees` and `.seen` test the entry's or the query's view cone.
 The terrain is a grid of `f32` heights in a `RowsView`, which the index borrows for its lifetime and keeps alive when built over a `Tensor`; a checkpoint never carries it, so every load and view names it again.
 
-## What This Binding Does Not Expose
+## Left Unbound
 
 - `cursor` and `searchStream` pull blocking, so a `DenseIndexDeferredOn` lacks them; `contains` is a test over `count`, so the deferred receiver offers `count` alone.
 - The constructors address no index yet, so no receiver offers them.
 - A geospatial terrain filled on demand by a callback: the library calls it from the executor's threads for every sight line, so the binding lends only a grid of heights or a dataset path.
 - `searchStream`, `maxsim`, `multiply` and `attend` exist for dense indexes alone, as in the C library.
+- The Arrow converters of `c/usearch/arrow.h`, which view an Arrow column as an input and export an arena's output as one.
 
 ## Design
 

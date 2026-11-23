@@ -27,7 +27,7 @@
 namespace unum::usearch::tools {
 
 /** Columns of one observation in an <tt>.f64bin</tt>. */
-static constexpr std::size_t geospatial_columns_k = sizeof(usearch_geospatial_observation_t) / sizeof(f64_t);
+static constexpr std::size_t geospatial_columns_k = sizeof(usearch_geospatial_observation_t) / sizeof(util::f64_t);
 
 /** Maps the observations of @p path into @p file; none after printing why it cannot. */
 static usearch_geospatial_observation_t const* geospatial_open_observations(std::string_view path,
@@ -89,7 +89,7 @@ int modality_search(geospatial_verbs_t, world_t& world, int argc, char const* co
             if (!observations) return std::nullopt;
             geospatial_queries_t const queries {observations,
                                                 relation,
-                                                {radius_metres, std::numeric_limits<f64_t>::infinity()}};
+                                                {radius_metres, std::numeric_limits<util::f64_t>::infinity()}};
             return checkpoint_queries<geospatial_verbs_t> {queries, file.rows()};
         });
 }

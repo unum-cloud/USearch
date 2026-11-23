@@ -4560,7 +4560,7 @@ check_qualified_namespace() {
     spelled=$(printf '%s\n' "$staged_added_text" |
         grep -vE '^\+[[:space:]]*(\*|//|/\*)' |
         grep -vE 'namespace [a-z_]+ = unum::usearch(::[a-z_]+)*;|(using )?namespace unum::usearch(::[a-z_]+)*( \{|;)$|^\+\} // namespace unum::usearch' |
-        grep -vE 'struct (std|fmt)::[A-Za-z_]+<unum::usearch::|operator\(\)\(unum::usearch::' |
+        grep -vE 'struct (std|fmt)::[A-Za-z_]+<([^<>]*, *)?unum::usearch::|using type = typename unum::usearch::|operator\(\)\(unum::usearch::' |
         grep -E 'unum::usearch::' || true)
     [ -z "$spelled" ] || reject_with_reason "$spelled" \
         "$staged_path spells unum::usearch:: in full; the name is already in scope through an alias like \`us\`," \
@@ -4938,6 +4938,28 @@ check_call_chained_call() {
     chained=$(printf '%s\n' "$staged_added_text" | grep -E '[A-Za-z0-9_>]\(\)\(' | grep -v 'operator()(' || true)
     [ -z "$chained" ] || reject_with_reason "$chained" \
         "$staged_path calls a call result; slice an owning tensor directly, or name the first result:"
+}
+
+# Rejects `.value` read straight off a call's result, as `parse(text).value`, because an unchecked unwrap hides the
+# failure that the status code reports: bind the result with `auto [value, status] = parse(text);` and check `status`.
+# A trait's `::value` and a call to `.value(...)` are not member reads and pass.
+check_call_value_unwrap() {
+    local unwrapped
+    unwrapped=$(grep -E '\)\.value\b([^(]|$)' "$staged_added_code_path" || true)
+    [ -z "$unwrapped" ] || reject_with_reason "$unwrapped" \
+        "$staged_path unwraps a call result with .value; bind it as auto [value, status] = call(...)," \
+        "            and check the status:"
+}
+
+# Rejects a local declared as `expected<...>` from a call, because it spells the return type twice: bind the result
+# with `auto [value, status] = call(...);`. Return types, parameters and members have no `=` or `{` after the name,
+# and a function's parameter list keeps its defaults out of the template argument.
+check_expected_local_binding() {
+    local declared
+    declared=$(grep -E '^\+[[:space:]]*([A-Za-z_]+::)?expected<[^()]*>([[:space:]]+const)?[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*(=|\{)' "$staged_added_code_path" |
+        grep -vE '^\+[[:space:]]*(return|using|typedef|template)\b' || true)
+    [ -z "$declared" ] || reject_with_reason "$declared" \
+        "$staged_path declares an expected<…> local; bind it as auto [value, status] = call(...):"
 }
 
 # The `&*iterator` antipattern: laundering an iterator through a reference into a pointer. Take the
@@ -5598,6 +5620,8 @@ run_project_checks() {
         check_data_null_probe
         check_call_chained_subscript
         check_call_chained_call
+        check_call_value_unwrap
+        check_expected_local_binding
         check_gcc_atomics
         check_annotate_release_before_unlock
         check_mutable_and_const_cast

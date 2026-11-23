@@ -43,7 +43,7 @@
 #include "usearch/utilities/vram_device.hpp"       // `gpu_executor_t`, `gpu_arena_t`
 
 using namespace unum::usearch;
-using namespace unum::usearch::utilities;
+namespace util = unum::usearch::utilities;
 namespace us = unum::usearch;
 namespace nk = ashvardanian::numkong;
 namespace fu = ashvardanian::forkunion;
@@ -71,10 +71,10 @@ inline nk_dtype_t nk_dtype_of(usearch_scalar_t scalar) noexcept {
 }
 
 /** The C spelling of how an index's last load from a path read its parts. */
-inline usearch_load_path_t usearch_load_path_of(vram_load_path_t load_path) noexcept {
+inline usearch_load_path_t usearch_load_path_of(util::vram_load_path_t load_path) noexcept {
     switch (load_path) {
-    case vram_load_path_t::host_copy_k: return usearch_load_path_host_copy_k;
-    case vram_load_path_t::cufile_k: return usearch_load_path_cufile_k;
+    case util::vram_load_path_t::host_copy_k: return usearch_load_path_host_copy_k;
+    case util::vram_load_path_t::cufile_k: return usearch_load_path_cufile_k;
     default: return usearch_load_path_none_k;
     }
 }
@@ -90,7 +90,7 @@ inline usearch_scalar_t usearch_scalar_of(nk_dtype_t dtype) noexcept {
 inline constexpr std::size_t default_progress_steps_k = 10;
 
 /** Whether a call holds an executor: taken by exchange, given back by a store. */
-enum class call_claim_t : u32_t {
+enum class call_claim_t : util::u32_t {
     free_k = 0,
     held_k = 1,
 };
@@ -116,13 +116,13 @@ struct outcome_verbs_t {
     void (*wait_claim)(call_claim_t const*) noexcept;
 
     /** Counts one more call naming a handle; the claim's acquire orders it. */
-    void (*raise_named)(u32_t*) noexcept;
+    void (*raise_named)(util::u32_t*) noexcept;
 
     /** Counts one call naming a handle off, with a release. */
-    void (*lower_named)(u32_t*) noexcept;
+    void (*lower_named)(util::u32_t*) noexcept;
 
     /** Loops on the class waiter until the count reads zero. */
-    void (*wait_named)(u32_t const*) noexcept;
+    void (*wait_named)(util::u32_t const*) noexcept;
 };
 
 /** The row of the newest class this machine admits, picked once by the CPU ladder walk. */
@@ -134,20 +134,18 @@ inline void propagate_pending(usearch_outcome_t* outcome) noexcept {
     host_outcome_verbs().publish(outcome, usearch_status_deferred_k, std::memory_order_relaxed);
 }
 
-/** The one final write to @p outcome: the message, then the status every waiter acquires. The call
- *  touches nothing it was passed after this, and the message is null exactly on success. */
-inline bool propagate_error(usearch_status_t status, usearch_outcome_t* outcome, char const* message) noexcept {
+/** The one final write to @p outcome: the message, then the status every waiter acquires. A @p rule
+ *  names the rule of the C contract the call broke; without one, the status names itself. */
+inline bool propagate_error(usearch_status_t status, usearch_outcome_t* outcome, char const* rule = nullptr) noexcept {
     bool const succeeded = status == usearch_status_success_k;
-    outcome->message = succeeded ? nullptr : message;
+    outcome->message = succeeded ? nullptr : rule ? rule : usearch_status_name(status);
     host_outcome_verbs().publish(outcome, status, std::memory_order_release);
     return succeeded;
 }
 
-/** The engine-side overload: the C++ mirror shares the ABI's values, so crossing is a cast, and an
- *  unnamed @p message falls back to the status's own static text. */
-inline bool propagate_error(status_t status, usearch_outcome_t* outcome, char const* message = nullptr) noexcept {
-    return propagate_error(static_cast<usearch_status_t>(status), outcome,
-                           message ? message : status_to_string(status));
+/** An engine failure crosses with its own note, or names itself. */
+inline bool propagate_error(util::status_t status, usearch_outcome_t* outcome) noexcept {
+    return propagate_error(static_cast<usearch_status_t>(status.code), outcome, status.note);
 }
 
 /** Adds one fan-out's telemetry into the caller's stats - accumulating, so chunked verbs report the
@@ -167,12 +165,12 @@ inline void accumulate_stats(usearch_traversal_stats_t* stats, result_type_ cons
 
 /** The traversal stats @p result carries: itself, the telemetry it holds, or its own counters. */
 template <typename result_type_>
-inline traversal_stats_t traversal_stats_of(result_type_ const& result) noexcept {
-    if constexpr (std::is_same_v<result_type_, traversal_stats_t>) return result;
+inline util::traversal_stats_t traversal_stats_of(result_type_ const& result) noexcept {
+    if constexpr (std::is_same_v<result_type_, util::traversal_stats_t>) return result;
     else if constexpr (requires { result.telemetry.visited_members; }) return traversal_stats_of(result.telemetry);
     else if constexpr (requires { result.traversal_stats.visited_members; }) return result.traversal_stats;
     else {
-        traversal_stats_t stats;
+        util::traversal_stats_t stats;
         stats.computed_distances = result.computed_distances;
         stats.visited_members = result.visited_members;
         stats.restarts = result.restarts;
@@ -185,23 +183,23 @@ inline traversal_stats_t traversal_stats_of(result_type_ const& result) noexcept
  *  <tt>emplace(domain) → status_t</tt>, over a transient topology; @c uninitialized_k where it
  *  names none. */
 template <typename emplace_type_>
-status_t emplace_on_every_domain(emplace_type_&& emplace) noexcept {
+util::status_t emplace_on_every_domain(emplace_type_&& emplace) noexcept {
     fu_topology_t topology = nullptr;
-    if (fu_topology_new(&topology) != fu_success_k) return status_t::uninitialized_k;
+    if (fu_topology_new(&topology) != fu_success_k) return util::status_code_t::uninitialized_k;
     // The topology dies on every path, so the domains are walked before it is deleted.
-    auto place_on_every_domain = [&]() noexcept {
+    auto place_on_every_domain = [&]() noexcept -> util::status_t {
         std::size_t domains_count = 0;
         if (fu_memory_domains_count(topology, &domains_count) != fu_success_k || !domains_count)
-            return status_t::uninitialized_k;
+            return util::status_code_t::uninitialized_k;
         for (std::size_t position = 0; position != domains_count; ++position) {
             fu_memory_domain_id_t domain = -1;
             if (fu_memory_domain_id_at_index(topology, position, &domain) != fu_success_k)
-                return status_t::uninitialized_k;
-            if (status_t const placed = emplace(domain); failed(placed)) return placed;
+                return util::status_code_t::uninitialized_k;
+            if (util::status_t const placed = emplace(domain); util::failed(placed)) return placed;
         }
-        return status_t::success_k;
+        return util::status_code_t::success_k;
     };
-    status_t const placed = place_on_every_domain();
+    util::status_t const placed = place_on_every_domain();
     fu_topology_delete(topology);
     return placed;
 }
@@ -209,16 +207,16 @@ status_t emplace_on_every_domain(emplace_type_&& emplace) noexcept {
 /** The domain host tables sit on: the first @p ram names, else the heap's. */
 inline fu_memory_domain_id_t tables_domain(usearch_ram_options_t const& ram) noexcept {
     return ram.memory_domains && ram.memory_domains_count ? static_cast<fu_memory_domain_id_t>(ram.memory_domains[0])
-                                                          : no_memory_domain_k;
+                                                          : util::no_memory_domain_k;
 }
 
 /** The host allocator a variant keeps its tables on: @ref tables_domain on RAM, the heap's
  *  otherwise. */
 template <typename residency_options_type_>
-inline forkunion_allocator_t host_allocator_of(residency_options_type_ const& options) noexcept {
+inline util::forkunion_allocator_t host_allocator_of(residency_options_type_ const& options) noexcept {
     if constexpr (std::is_same_v<residency_options_type_, usearch_ram_options_t>)
-        return forkunion_allocator_t {tables_domain(options)};
-    else return forkunion_allocator_t {no_memory_domain_k};
+        return util::forkunion_allocator_t {tables_domain(options)};
+    else return util::forkunion_allocator_t {util::no_memory_domain_k};
 }
 
 /** Whether a result carries traversal telemetry - one probe both crossings read. */
@@ -230,16 +228,14 @@ concept carries_telemetry = requires(value_type_ const& value) { value.visited_m
 /** The one crossing for a fallible step: folds telemetry into @p stats when the payload carries
  *  any, finishes @p outcome only on failure, and answers whether @c .value is readable. */
 template <typename value_type_>
-inline bool crossed(expected<value_type_> const& result, usearch_traversal_stats_t* stats, usearch_outcome_t* outcome,
-                    char const* message = nullptr) noexcept {
+inline bool crossed(util::expected<value_type_> const& result, usearch_traversal_stats_t* stats,
+                    usearch_outcome_t* outcome) noexcept {
     if constexpr (carries_telemetry<value_type_>) accumulate_stats(stats, result.value);
-    return result || propagate_error(result.status, outcome, message);
+    return result || propagate_error(result.status, outcome);
 }
 
 /** The C key struct and the engine's @c utilities::uuid128_t share sixteen bytes: one bit cast. */
-inline us::utilities::uuid128_t uuid_of(usearch_key_t key) noexcept {
-    return std::bit_cast<us::utilities::uuid128_t>(key);
-}
+inline util::uuid128_t uuid_of(usearch_key_t key) noexcept { return std::bit_cast<util::uuid128_t>(key); }
 
 /** Admits every candidate, for a call that names no predicate. */
 struct no_predicate_t {};
@@ -250,14 +246,15 @@ struct cheap_predicate_t {
     usearch_predicate_t predicate;
 
     template <std::size_t extent_>
-    void operator()(std::span<us::utilities::uuid128_t const, extent_> keys,
-                    std::span<admission_t, extent_> admissions) const noexcept {
+    void operator()(std::span<util::uuid128_t const, extent_> keys,
+                    std::span<util::admission_t, extent_> admissions) const noexcept {
         std::array<usearch_key_t, extent_> c_keys;
         std::array<usearch_admission_t, extent_> c_admissions;
+        c_admissions.fill(usearch_reject_k);
         for (std::size_t lane = 0; lane != extent_; ++lane) c_keys[lane] = std::bit_cast<usearch_key_t>(keys[lane]);
         predicate.callback(c_keys.data(), c_admissions.data(), extent_, predicate.state);
         for (std::size_t lane = 0; lane != extent_; ++lane)
-            admissions[lane] = static_cast<admission_t>(c_admissions[lane]);
+            admissions[lane] = static_cast<util::admission_t>(c_admissions[lane]);
     }
 };
 
@@ -286,7 +283,7 @@ struct value_lookup_t {
     std::size_t dimensions;
 
     template <typename scalar_type_, std::size_t extent_>
-    void operator()(std::span<us::utilities::uuid128_t const, extent_> keys,
+    void operator()(std::span<util::uuid128_t const, extent_> keys,
                     std::span<nk::vector_view<scalar_type_>, extent_> rows) const noexcept {
         std::array<usearch_key_t, extent_> batch;
         std::array<void const*, extent_> found;
@@ -300,13 +297,13 @@ struct value_lookup_t {
 };
 
 /** Spells @c value_lookup_t into the name of an attend kernel instantiated over it. */
-inline void append_itanium_argument(vram_kernel_symbol_t& symbol, itanium_type<value_lookup_t>) noexcept {
+inline void append_itanium_argument(util::vram_kernel_symbol_t& symbol, util::itanium_type<value_lookup_t>) noexcept {
     symbol.append_name("value_lookup_t");
 }
 
 /** The allocator every per-call buffer of one executor thread comes from: its arena, rewound per
  *  verb. */
-using thread_allocator_t = arena_allocator<byte_t, forkunion_allocator_t>;
+using thread_allocator_t = util::arena_allocator<util::byte_t, util::forkunion_allocator_t>;
 
 /**
  *  @brief An expensive predicate: keys gather beside the engine's @p payload_type_ until the engine
@@ -318,34 +315,35 @@ using thread_allocator_t = arena_allocator<byte_t, forkunion_allocator_t>;
 template <typename payload_type_>
 struct expensive_predicate {
     usearch_predicate_t predicate;
-    growing_buffer<usearch_key_t, thread_allocator_t> keys;
-    growing_buffer<payload_type_, thread_allocator_t> payloads;
-    growing_buffer<usearch_admission_t, thread_allocator_t> admissions;
+    util::growing_buffer<usearch_key_t, thread_allocator_t> keys;
+    util::growing_buffer<payload_type_, thread_allocator_t> payloads;
+    util::growing_buffer<usearch_admission_t, thread_allocator_t> admissions;
 
     expensive_predicate(usearch_predicate_t handler, thread_allocator_t const& allocator) noexcept
         : predicate(handler), keys(allocator), payloads(allocator), admissions(allocator) {}
 
     /** Reserves for rounds of @p round_capacity candidates. */
-    status_t reserve(std::size_t round_capacity) noexcept {
-        if (failed(keys.reserve_exactly(round_capacity)) || failed(payloads.reserve_exactly(round_capacity)) ||
-            failed(admissions.reserve_exactly(round_capacity)))
-            return status_t::bad_alloc_k;
-        return status_t::success_k;
+    util::status_t reserve(std::size_t round_capacity) noexcept {
+        if (util::failed(keys.reserve_exactly(round_capacity)) ||
+            util::failed(payloads.reserve_exactly(round_capacity)) ||
+            util::failed(admissions.reserve_exactly(round_capacity)))
+            return util::status_code_t::out_of_memory_k;
+        return util::status_code_t::success_k;
     }
 
     template <std::size_t extent_>
-    void push(std::span<us::utilities::uuid128_t const, extent_> asked,
+    void push(std::span<util::uuid128_t const, extent_> asked,
               std::span<payload_type_ const, extent_> carried) noexcept {
         for (std::size_t lane = 0; lane != extent_; ++lane) {
             keys.push_back_reserved(std::bit_cast<usearch_key_t>(asked[lane]));
             payloads.push_back_reserved(carried[lane]);
+            admissions.push_back_reserved(usearch_reject_k);
         }
     }
 
     template <typename on_admitted_type_>
     void drain(on_admitted_type_&& on_admitted) noexcept {
         if (keys.empty()) return;
-        admissions.resize_reserved(keys.size());
         predicate.callback(keys.data(), admissions.data(), keys.size(), predicate.state);
         for (std::size_t position = 0; position != keys.size(); ++position)
             if (admissions[position] == usearch_admit_k) on_admitted(payloads[position]);
@@ -364,17 +362,17 @@ struct expensive_predicates {
     using thread_predicate_t = expensive_predicate<payload_type_>;
 
     usearch_predicate_t predicate;
-    growing_buffer<thread_predicate_t, thread_allocator_t> threads {thread_allocator_t {}};
+    util::growing_buffer<thread_predicate_t, thread_allocator_t> threads {thread_allocator_t {}};
 
     /** Builds one predicate per thread of @p executor over that thread's arena, the array in the
      *  first; the engine reserves each for its rounds. */
     template <typename executor_type_>
-    status_t open(executor_type_& executor) noexcept {
-        threads = growing_buffer<thread_predicate_t, thread_allocator_t> {thread_allocator_t {executor.arena(0)}};
-        if (failed(threads.reserve_exactly(executor.size()))) return status_t::bad_alloc_k;
+    util::status_t open(executor_type_& executor) noexcept {
+        threads = util::growing_buffer<thread_predicate_t, thread_allocator_t> {thread_allocator_t {executor.arena(0)}};
+        if (util::failed(threads.reserve_exactly(executor.size()))) return util::status_code_t::out_of_memory_k;
         for (std::size_t thread = 0; thread != executor.size(); ++thread)
             threads.push_back_reserved(thread_predicate_t {predicate, thread_allocator_t {executor.arena(thread)}});
-        return status_t::success_k;
+        return util::status_code_t::success_k;
     }
 
     thread_predicate_t& of_thread(std::size_t thread) noexcept {
@@ -405,17 +403,17 @@ struct progress_ticks_t {
     /** Units each slice of a batch spans: a step's share with a handler, the whole batch
      *  without. */
     std::size_t slice() const noexcept {
-        return progress.callback ? divide_round_up<std::size_t>(total, steps_()) : total;
+        return progress.callback ? util::divide_round_up<std::size_t>(total, steps_()) : total;
     }
 
     /** One unit finished; a tick per entry or query reaches the handler only when it closes a new
      *  step, or the last one. */
-    continuation_t operator()(std::size_t) noexcept {
-        if (!progress.callback) return continuation_t::continue_k;
+    util::continuation_t operator()(std::size_t) noexcept {
+        if (!progress.callback) return util::continuation_t::continue_k;
         std::lock_guard guard {mutex};
         std::size_t const finished = ++done;
-        std::size_t const step = finished >= total ? steps_() : finished / divide_round_up(total, steps_());
-        if (step <= closed) return continuation_t::continue_k;
+        std::size_t const step = finished >= total ? steps_() : finished / util::divide_round_up(total, steps_());
+        if (step <= closed) return util::continuation_t::continue_k;
         closed = step;
         return forward_(finished, total);
     }
@@ -423,10 +421,11 @@ struct progress_ticks_t {
     /** The sibling for verbs that count their own units and know their own population - a
      *  refinement ticks each barrier with its phase's units, which no counter here could derive,
      *  and the handler hears every barrier that finished more or some of another population. */
-    continuation_t operator()(std::size_t finished, std::size_t population) noexcept {
-        if (!progress.callback) return continuation_t::continue_k;
+    util::continuation_t operator()(std::size_t finished, std::size_t population) noexcept {
+        if (!progress.callback) return util::continuation_t::continue_k;
         std::lock_guard guard {mutex};
-        if (finished == done && (population == reported_population || !finished)) return continuation_t::continue_k;
+        if (finished == done && (population == reported_population || !finished))
+            return util::continuation_t::continue_k;
         done = finished;
         reported_population = population;
         return forward_(finished, population);
@@ -436,9 +435,10 @@ struct progress_ticks_t {
     std::size_t steps_() const noexcept { return progress.steps ? progress.steps : default_progress_steps_k; }
 
     /** Hands the C handler a tick; the caller holds the mutex. */
-    continuation_t forward_(std::size_t finished, std::size_t population) noexcept {
-        return progress.callback(finished, population, progress.state) == usearch_cancel_k ? continuation_t::cancel_k
-                                                                                           : continuation_t::continue_k;
+    util::continuation_t forward_(std::size_t finished, std::size_t population) noexcept {
+        return progress.callback(finished, population, progress.state) == usearch_cancel_k
+                   ? util::continuation_t::cancel_k
+                   : util::continuation_t::continue_k;
     }
 };
 
@@ -459,7 +459,7 @@ struct reshard_options_t {
     usearch_vram_options_t const* vram = nullptr;
     usearch_nvme_options_t const* nvme = nullptr;
     refine_config_t refine {};
-    u64_t seed = 0;
+    util::u64_t seed = 0;
 };
 
 /** The engine config a C call's refine options name. */
@@ -483,7 +483,7 @@ struct variants_view_t {
 inline search_config_t search_config_of(std::size_t expansion_factor, usearch_traversal_t traversal) noexcept {
     search_config_t config;
     config.expansion_factor = static_cast<candidates_count_t>(expansion_factor);
-    config.traversal = traversal == usearch_traversal_scan_k ? traversal_t::scan_k : traversal_t::walk_k;
+    config.traversal = traversal == usearch_traversal_scan_k ? util::traversal_t::scan_k : util::traversal_t::walk_k;
     return config;
 }
 
@@ -493,7 +493,7 @@ struct arena_residency_t {
     usearch_residency_t residency = usearch_residency_ram_k;
 
     /** The vendor ordinal, on VRAM. */
-    u32_t device = 0;
+    util::u32_t device = 0;
 
     bool operator==(arena_residency_t const&) const noexcept = default;
 };
@@ -502,7 +502,7 @@ struct arena_residency_t {
 inline constexpr arena_residency_t ram_residency_k {};
 
 inline constexpr arena_residency_t vram_residency(std::size_t device) noexcept {
-    return {usearch_residency_vram_k, static_cast<u32_t>(device)};
+    return {usearch_residency_vram_k, static_cast<util::u32_t>(device)};
 }
 
 /** The C spelling of an engine's reachability @p audit. */
@@ -525,11 +525,13 @@ inline usearch_reachability_t reachability_of(audit_type_ const& audit) noexcept
 template <typename refined_type_>
 inline void write_refine_report(usearch_refine_report_t* report, refined_type_ const& refined) noexcept {
     // Every engine verdict is valued as its C spelling, as the phases are.
-    static_assert(static_cast<usearch_refine_verdict_t>(refine_verdict_t::none_k) == usearch_refine_none_k);
-    static_assert(static_cast<usearch_refine_verdict_t>(refine_verdict_t::improved_k) == usearch_refine_improved_k);
-    static_assert(static_cast<usearch_refine_verdict_t>(refine_verdict_t::converged_k) == usearch_refine_converged_k);
-    static_assert(static_cast<usearch_refine_verdict_t>(refine_verdict_t::stalled_k) == usearch_refine_stalled_k);
-    static_assert(static_cast<usearch_refine_verdict_t>(refine_verdict_t::stopped_k) == usearch_refine_stopped_k);
+    static_assert(static_cast<usearch_refine_verdict_t>(util::refine_verdict_t::none_k) == usearch_refine_none_k);
+    static_assert(static_cast<usearch_refine_verdict_t>(util::refine_verdict_t::improved_k) ==
+                  usearch_refine_improved_k);
+    static_assert(static_cast<usearch_refine_verdict_t>(util::refine_verdict_t::converged_k) ==
+                  usearch_refine_converged_k);
+    static_assert(static_cast<usearch_refine_verdict_t>(util::refine_verdict_t::stalled_k) == usearch_refine_stalled_k);
+    static_assert(static_cast<usearch_refine_verdict_t>(util::refine_verdict_t::stopped_k) == usearch_refine_stopped_k);
     if (!report) return;
     report->reselected = refined.reselected_nodes;
     report->changed = refined.changed_nodes;
@@ -615,7 +617,7 @@ using dense_dtypes_t = typename first_dtypes<USEARCH_DENSE_DTYPES, dense_ladder_
  *  wait instruction, and atomics its silicon generation guarantees; explicit helpers
  *  lower a class onto NumKong, ForkUnion & StringZilla capability masks where those
  *  libraries are linked. */
-enum class cpu_class_t : u32_t {
+enum class cpu_class_t : util::u32_t {
 
     /** No class detected yet, or none of the classes below. */
     unknown_k = 0,
@@ -706,7 +708,7 @@ enum class cpu_class_t : u32_t {
  *  class per generation of kernel kits, each compiled for its own architecture alone. A class
  *  implies its vendor, and an unknown newer device takes the newest class it satisfies within
  *  that vendor's classes. */
-enum class gpu_class_t : u32_t {
+enum class gpu_class_t : util::u32_t {
 
     /** No class detected yet, or none of the classes below. */
     unknown_k = 0,
@@ -1143,7 +1145,7 @@ struct cache_hints_for_cpu_class<cpu_class_t::monoversioned_k> {
  *  @c default_alignment_k where no platform source names one. */
 inline std::size_t machine_cache_line_bytes() noexcept {
     std::size_t const machine_line_bytes = fu::cache_line_bytes();
-    return machine_line_bytes ? machine_line_bytes : default_alignment_k;
+    return machine_line_bytes ? machine_line_bytes : util::default_alignment_k;
 }
 
 /** The spin hints every core of an architecture carries - PAUSE, YIELD, Zihintpause and Power's
@@ -1157,7 +1159,8 @@ inline constexpr fu::capabilities_t baseline_hints_k = fu::capability_x86_pause_
 template <cpu_class_t cpu_class_>
 constexpr fu::capabilities_t forkunion_capabilities_of() noexcept {
     constexpr fu::capabilities_t waits_k = waiter_of<cpu_class_>::capability_k;
-    constexpr fu::capabilities_t atomics_k = atomic_ref_for_cpu_class<cpu_class_>::template type<u32_t>::capabilities_k;
+    constexpr fu::capabilities_t atomics_k =
+        atomic_ref_for_cpu_class<cpu_class_>::template type<util::u32_t>::capabilities_k;
     return static_cast<fu::capabilities_t>((waits_k | atomics_k) & ~baseline_hints_k);
 }
 
@@ -1316,9 +1319,9 @@ inline constexpr cpu_class_t cpu_ladder_floor_k = cpu_class_t::serial_k;
  *  machine lacks narrows the ceiling to the masks both share rather than refusing. Answers
  *  @c invalid_argument_k for a value no class takes, and @c unsupported_k when no compiled class
  *  fits the ceiling, as on a monoversioned build under an older CPU or a lower ceiling. */
-inline expected<cpu_ceiling_t> pick_cpu_ceiling(usearch_cpu_class_t ceiling_class) noexcept {
+inline util::expected<cpu_ceiling_t> pick_cpu_ceiling(usearch_cpu_class_t ceiling_class) noexcept {
     if (ceiling_class != usearch_cpu_class_unknown_k && !listed(cpu_classes_k, ceiling_class))
-        return {{}, status_t::invalid_argument_k};
+        return {{}, {util::status_code_t::invalid_argument_k, "No CPU class has that value"}};
     cpu_ceiling_t ceiling;
     if (nk_capabilities_detected_cpu(&ceiling.compute) != nk_success_k) ceiling.compute = nk_cap_serial_k;
     if (sz_capabilities_detected_cpu(&ceiling.strings) != sz_success_k) ceiling.strings = sz_cap_serial_k;
@@ -1334,7 +1337,8 @@ inline expected<cpu_ceiling_t> pick_cpu_ceiling(usearch_cpu_class_t ceiling_clas
     bool const compiled = []<cpu_class_t... classes_>(cpu_ladder<classes_...>, cpu_ceiling_t under) noexcept {
         return ((cpu_class_compiled(classes_) && cpu_rung_fits(classes_, under)) || ...);
     }(cpu_ladder_t {}, ceiling);
-    return {ceiling, compiled ? status_t::success_k : status_t::unsupported_k};
+    if (!compiled) return {ceiling, {util::status_code_t::unsupported_k, "No compiled class fits the CPU ceiling"}};
+    return {ceiling, util::status_code_t::success_k};
 }
 
 /** One class's outcome row: its reference over the status, the claim and the named-call counts,
@@ -1345,8 +1349,8 @@ outcome_verbs_t outcome_verbs_of() noexcept {
     using status_reader_t = typename atomic_ref_for_cpu_class<cpu_class_>::template type<usearch_status_t const>;
     using claim_ref_t = typename atomic_ref_for_cpu_class<cpu_class_>::template type<call_claim_t>;
     using claim_reader_t = typename atomic_ref_for_cpu_class<cpu_class_>::template type<call_claim_t const>;
-    using count_ref_t = typename atomic_ref_for_cpu_class<cpu_class_>::template type<u32_t>;
-    using count_reader_t = typename atomic_ref_for_cpu_class<cpu_class_>::template type<u32_t const>;
+    using count_ref_t = typename atomic_ref_for_cpu_class<cpu_class_>::template type<util::u32_t>;
+    using count_reader_t = typename atomic_ref_for_cpu_class<cpu_class_>::template type<util::u32_t const>;
     using wait_t = waiter_of<cpu_class_>;
     return {
         [](usearch_outcome_t* outcome, usearch_status_t status, std::memory_order order) noexcept {
@@ -1373,11 +1377,11 @@ outcome_verbs_t outcome_verbs_of() noexcept {
             for (call_claim_t observed; (observed = held.load(std::memory_order_acquire)) == call_claim_t::held_k;)
                 wait_t {}(claim, observed, 0u, fu::wait_capped_t {});
         },
-        [](u32_t* count) noexcept { count_ref_t(*count).store_add(1, std::memory_order_relaxed); },
-        [](u32_t* count) noexcept { count_ref_t(*count).store_sub(1, std::memory_order_release); },
-        [](u32_t const* count) noexcept {
+        [](util::u32_t* count) noexcept { count_ref_t(*count).store_add(1, std::memory_order_relaxed); },
+        [](util::u32_t* count) noexcept { count_ref_t(*count).store_sub(1, std::memory_order_release); },
+        [](util::u32_t const* count) noexcept {
             count_reader_t const named {*count};
-            for (u32_t observed; (observed = named.load(std::memory_order_acquire)) != 0;)
+            for (util::u32_t observed; (observed = named.load(std::memory_order_acquire)) != 0;)
                 wait_t {}(count, observed, 0u, fu::wait_capped_t {});
         },
     };
@@ -1497,16 +1501,16 @@ constexpr bool basic_class_compiled(cpu_class_t cpu_class) noexcept {
 
 /** Every I/O engine this build admits, yielding between polls, since one NVMe executor serves every
  *  CPU class. */
-using default_io_engine_t = default_io_engine<fu::standard_yield_t>;
+using default_io_engine_t = util::default_io_engine<fu::standard_yield_t>;
 
 /** The executor over every engine this build admits, each thread's transport picked at spawn. */
-using nvme_executor_t = nvme_executor<default_io_engine_t>;
+using nvme_executor_t = util::nvme_executor<default_io_engine_t>;
 
 /** Residency discrimination off the alternative's own executor type - no second tag exists to
  *  disagree with the variant. */
 template <typename multi_type_>
 inline constexpr bool is_ram_index = requires {
-    requires std::is_same_v<typename multi_type_::executor_t, forkunion_executor_t>;
+    requires std::is_same_v<typename multi_type_::executor_t, util::forkunion_executor_t>;
 };
 
 /** Whether an executor drives GPUs: every vendor's names the vendor it drives. */
@@ -1522,7 +1526,7 @@ inline constexpr bool is_nvme_index = requires {
 };
 
 /** Where a variant runs and which executor it takes, the dense and basic modalities alike. */
-enum class vendored_residency_t : u32_t {
+enum class vendored_residency_t : util::u32_t {
     ram_k,
     nvme_k,
     vram_nvidia_k,
@@ -1535,7 +1539,7 @@ template <vendored_residency_t residency_>
 struct vendored_residency_executor;
 template <>
 struct vendored_residency_executor<vendored_residency_t::ram_k> {
-    using type = forkunion_executor_t;
+    using type = util::forkunion_executor_t;
 };
 template <>
 struct vendored_residency_executor<vendored_residency_t::nvme_k> {
@@ -1543,31 +1547,31 @@ struct vendored_residency_executor<vendored_residency_t::nvme_k> {
 };
 template <>
 struct vendored_residency_executor<vendored_residency_t::vram_nvidia_k> {
-    using type = cuda_executor_t;
+    using type = util::cuda_executor_t;
 };
 template <>
 struct vendored_residency_executor<vendored_residency_t::vram_amd_k> {
-    using type = hip_executor_t;
+    using type = util::hip_executor_t;
 };
 template <>
 struct vendored_residency_executor<vendored_residency_t::vram_apple_k> {
-    using type = metal_executor_t;
+    using type = util::metal_executor_t;
 };
 
 /** The residency whose verbs take @p executor_type_. */
 template <typename executor_type_>
 inline constexpr vendored_residency_t vendored_residency_of =
-    std::is_same_v<executor_type_, forkunion_executor_t> ? vendored_residency_t::ram_k
-    : std::is_same_v<executor_type_, nvme_executor_t>    ? vendored_residency_t::nvme_k
-    : std::is_same_v<executor_type_, cuda_executor_t>    ? vendored_residency_t::vram_nvidia_k
-    : std::is_same_v<executor_type_, hip_executor_t>     ? vendored_residency_t::vram_amd_k
-                                                         : vendored_residency_t::vram_apple_k;
+    std::is_same_v<executor_type_, util::forkunion_executor_t> ? vendored_residency_t::ram_k
+    : std::is_same_v<executor_type_, nvme_executor_t>          ? vendored_residency_t::nvme_k
+    : std::is_same_v<executor_type_, util::cuda_executor_t>    ? vendored_residency_t::vram_nvidia_k
+    : std::is_same_v<executor_type_, util::hip_executor_t>     ? vendored_residency_t::vram_amd_k
+                                                               : vendored_residency_t::vram_apple_k;
 
 /** A set of GPU classes, one bit per C enum value. */
-using gpu_class_mask_t = u32_t;
+using gpu_class_mask_t = util::u32_t;
 
 constexpr gpu_class_mask_t gpu_class_bit(gpu_class_t gpu_class) noexcept {
-    return gpu_class_mask_t {1} << static_cast<u32_t>(gpu_class);
+    return gpu_class_mask_t {1} << static_cast<util::u32_t>(gpu_class);
 }
 
 /** The GPU side of the process, built at its first VRAM call: every vendor's driver, and every
@@ -1575,9 +1579,9 @@ constexpr gpu_class_mask_t gpu_class_bit(gpu_class_t gpu_class) noexcept {
  *  USearch ordinal, beside the classes whose units its loader took; a device no class runs on is
  *  listed too, and refuses work. */
 struct gpu_runtime_t {
-    gpu_drivers_t drivers;
-    gpu_device_t devices[3 * gpu_devices_capacity_k];
-    gpu_class_mask_t loaded[3 * gpu_devices_capacity_k] = {};
+    util::gpu_drivers_t drivers;
+    util::gpu_device_t devices[3 * util::gpu_devices_capacity_k];
+    gpu_class_mask_t loaded[3 * util::gpu_devices_capacity_k] = {};
     std::size_t devices_count = 0;
 
     gpu_runtime_t() noexcept;
@@ -1590,10 +1594,10 @@ inline gpu_runtime_t& gpu_runtime() noexcept {
 }
 
 /** Every vendor's driver, loaded at the first VRAM call. */
-inline gpu_drivers_t& gpu_drivers() noexcept { return gpu_runtime().drivers; }
+inline util::gpu_drivers_t& gpu_drivers() noexcept { return gpu_runtime().drivers; }
 
 /** Every GPU the drivers report, as the ABI numbers them. */
-inline std::span<gpu_device_t const> gpu_devices() noexcept {
+inline std::span<util::gpu_device_t const> gpu_devices() noexcept {
     gpu_runtime_t const& runtime = gpu_runtime();
     return {runtime.devices, runtime.devices_count};
 }
@@ -1647,19 +1651,19 @@ constexpr bool gpu_class_compiled(gpu_class_t gpu_class) noexcept {
 
 /** The bundle tables of the GPU class units, two addresses per dtype, which CMake writes beside
  *  each class's dense unit. */
-extern "C" byte_t const* const dense_nvidia_ampere_bundles[];
-extern "C" byte_t const* const dense_nvidia_ada_bundles[];
-extern "C" byte_t const* const dense_nvidia_hopper_bundles[];
-extern "C" byte_t const* const dense_nvidia_blackwell_bundles[];
-extern "C" byte_t const* const dense_nvidia_blackwellrtx_bundles[];
-extern "C" byte_t const* const dense_amd_cdna3_bundles[];
-extern "C" byte_t const* const dense_amd_cdna4_bundles[];
-extern "C" byte_t const* const dense_amd_cdna5_bundles[];
+extern "C" util::byte_t const* const dense_nvidia_ampere_bundles[];
+extern "C" util::byte_t const* const dense_nvidia_ada_bundles[];
+extern "C" util::byte_t const* const dense_nvidia_hopper_bundles[];
+extern "C" util::byte_t const* const dense_nvidia_blackwell_bundles[];
+extern "C" util::byte_t const* const dense_nvidia_blackwellrtx_bundles[];
+extern "C" util::byte_t const* const dense_amd_cdna3_bundles[];
+extern "C" util::byte_t const* const dense_amd_cdna4_bundles[];
+extern "C" util::byte_t const* const dense_amd_cdna5_bundles[];
 
 /** The device code the loader is asked about for @p gpu_class: its dense unit's first bundle, empty
  *  where the build has none. */
-inline bytes_view_t gpu_class_probe_of(gpu_class_t gpu_class) noexcept {
-    byte_t const* const* bounds = nullptr;
+inline util::bytes_view_t gpu_class_probe_of(gpu_class_t gpu_class) noexcept {
+    util::byte_t const* const* bounds = nullptr;
     switch (gpu_class) {
 #if USEARCH_TARGET_NVIDIA_AMPERE
     case gpu_class_t::nvidia_ampere_k: bounds = dense_nvidia_ampere_bundles; break;
@@ -1691,38 +1695,39 @@ inline bytes_view_t gpu_class_probe_of(gpu_class_t gpu_class) noexcept {
 }
 
 /** The vendor whose devices @p gpu_class serves, read off the C enum's per-vendor value ranges. */
-constexpr gpu_vendor_t gpu_vendor_of(gpu_class_t gpu_class) noexcept {
-    u32_t const value = static_cast<u32_t>(gpu_class);
-    return value == usearch_gpu_class_unknown_k         ? gpu_vendor_t::unknown_k
-           : value <= usearch_gpu_class_nvidia_rubin_k  ? gpu_vendor_t::nvidia_k
-           : value <= usearch_gpu_class_amd_cdna5_k     ? gpu_vendor_t::amd_k
-           : value <= usearch_gpu_class_apple_metal10_k ? gpu_vendor_t::apple_k
-                                                        : gpu_vendor_t::unknown_k;
+constexpr util::gpu_vendor_t gpu_vendor_of(gpu_class_t gpu_class) noexcept {
+    util::u32_t const value = static_cast<util::u32_t>(gpu_class);
+    return value == usearch_gpu_class_unknown_k         ? util::gpu_vendor_t::unknown_k
+           : value <= usearch_gpu_class_nvidia_rubin_k  ? util::gpu_vendor_t::nvidia_k
+           : value <= usearch_gpu_class_amd_cdna5_k     ? util::gpu_vendor_t::amd_k
+           : value <= usearch_gpu_class_apple_metal10_k ? util::gpu_vendor_t::apple_k
+                                                        : util::gpu_vendor_t::unknown_k;
 }
 
 /** The newest Apple GPU family an Apple class needs, Apple7 and Apple8 sharing the floor. */
-constexpr u32_t apple_family_of(gpu_class_t gpu_class) noexcept {
+constexpr util::u32_t apple_family_of(gpu_class_t gpu_class) noexcept {
     return gpu_class == gpu_class_t::apple_metal10_k ? 10 : gpu_class == gpu_class_t::apple_metal9_k ? 9 : 7;
 }
 
 /** Whether @p device runs @p gpu_class, as the loader of @p drivers answers: the driver loads a
  *  class's device code only where some code it holds runs there, and an Apple class runs from the
  *  Apple family it needs on. */
-inline bool gpu_class_serves(gpu_class_t gpu_class, gpu_device_t const& device, gpu_drivers_t const& drivers) noexcept {
+inline bool gpu_class_serves(gpu_class_t gpu_class, util::gpu_device_t const& device,
+                             util::gpu_drivers_t const& drivers) noexcept {
     if (gpu_vendor_of(gpu_class) != device.vendor || !gpu_class_compiled(gpu_class)) return false;
     int const ordinal = static_cast<int>(device.vendor_ordinal);
     switch (device.vendor) {
-    case gpu_vendor_t::nvidia_k:
-        return succeeded(cuda_module_t::load(drivers.cuda, ordinal, gpu_class_probe_of(gpu_class)).status);
-    case gpu_vendor_t::amd_k:
-        return succeeded(hip_module_t::load(drivers.hip, ordinal, gpu_class_probe_of(gpu_class)).status);
-    case gpu_vendor_t::apple_k: return device.architecture_major >= apple_family_of(gpu_class);
+    case util::gpu_vendor_t::nvidia_k:
+        return succeeded(util::cuda_module_t::load(drivers.cuda, ordinal, gpu_class_probe_of(gpu_class)).status);
+    case util::gpu_vendor_t::amd_k:
+        return succeeded(util::hip_module_t::load(drivers.hip, ordinal, gpu_class_probe_of(gpu_class)).status);
+    case util::gpu_vendor_t::apple_k: return device.architecture_major >= apple_family_of(gpu_class);
     default: return false;
     }
 }
 
 inline gpu_runtime_t::gpu_runtime_t() noexcept {
-    devices_count = list_gpu_devices(drivers, devices);
+    devices_count = util::list_gpu_devices(drivers, devices);
     for (std::size_t position = 0; position != devices_count; ++position)
         for (usearch_gpu_class_t const gpu_class : gpu_classes_k)
             if (gpu_class_serves(static_cast<gpu_class_t>(gpu_class), devices[position], drivers))
@@ -1794,19 +1799,20 @@ gpu_class_t pick_gpu_class(gpu_ladder<classes_...>, gpu_class_mask_t loaded, use
 /** The class a device of @p vendor whose loader took @p loaded takes under @p ceiling, walking
  *  its own vendor's ladder; @c unknown_k when no unit this build carries runs on it, or none at
  *  or under the ceiling does. */
-inline gpu_class_t pick_gpu_class(gpu_vendor_t vendor, gpu_class_mask_t loaded, usearch_gpu_class_t ceiling) noexcept {
+inline gpu_class_t pick_gpu_class(util::gpu_vendor_t vendor, gpu_class_mask_t loaded,
+                                  usearch_gpu_class_t ceiling) noexcept {
     switch (vendor) {
-    case gpu_vendor_t::nvidia_k: return pick_gpu_class(nvidia_ladder_t {}, loaded, ceiling);
-    case gpu_vendor_t::amd_k: return pick_gpu_class(amd_ladder_t {}, loaded, ceiling);
-    case gpu_vendor_t::apple_k: return pick_gpu_class(apple_ladder_t {}, loaded, ceiling);
+    case util::gpu_vendor_t::nvidia_k: return pick_gpu_class(nvidia_ladder_t {}, loaded, ceiling);
+    case util::gpu_vendor_t::amd_k: return pick_gpu_class(amd_ladder_t {}, loaded, ceiling);
+    case util::gpu_vendor_t::apple_k: return pick_gpu_class(apple_ladder_t {}, loaded, ceiling);
     default: return gpu_class_t::unknown_k;
     }
 }
 
 /** The class @p device takes under @p ceiling, from what the listing entry of its vendor and
  *  ordinal loaded. */
-inline gpu_class_t pick_gpu_class(gpu_device_t const& device, usearch_gpu_class_t ceiling) noexcept {
-    std::span<gpu_device_t const> const devices = gpu_devices();
+inline gpu_class_t pick_gpu_class(util::gpu_device_t const& device, usearch_gpu_class_t ceiling) noexcept {
+    std::span<util::gpu_device_t const> const devices = gpu_devices();
     std::span<gpu_class_mask_t const> const loaded = gpu_classes_loaded();
     for (std::size_t position = 0; position != devices.size(); ++position)
         if (devices[position].vendor == device.vendor && devices[position].vendor_ordinal == device.vendor_ordinal)
@@ -1817,13 +1823,13 @@ inline gpu_class_t pick_gpu_class(gpu_device_t const& device, usearch_gpu_class_
 /** The devices one index places its shards on: their one vendor, the best class all of them load
  *  under the ceiling, every class they all load, and their positions in the listing @c table. */
 struct gpu_placement_t {
-    gpu_vendor_t vendor = gpu_vendor_t::unknown_k;
+    util::gpu_vendor_t vendor = util::gpu_vendor_t::unknown_k;
     gpu_class_t gpu_class = gpu_class_t::unknown_k;
     gpu_class_mask_t loaded = 0;
-    std::span<gpu_device_t const> table;
+    std::span<util::gpu_device_t const> table;
     std::span<std::int32_t const> positions;
 
-    gpu_device_t const& first() const noexcept { return table[static_cast<std::size_t>(positions[0])]; }
+    util::gpu_device_t const& first() const noexcept { return table[static_cast<std::size_t>(positions[0])]; }
 };
 
 /**
@@ -1835,16 +1841,16 @@ struct gpu_placement_t {
  *
  *  @par Statuses:
  *  - @c invalid_argument_k The ceiling is a value no class takes.
- *  - @c device_error_k An ordinal is past the listing.
+ *  - @c device_k An ordinal is past the listing.
  *  - @c config_mismatch_k The devices span vendors.
  *  - @c unsupported_k The devices share no class this build carries at or under the ceiling.
  */
-inline expected<gpu_placement_t> resolve_placement(std::span<gpu_device_t const> table,
-                                                   std::span<gpu_class_mask_t const> loaded,
-                                                   usearch_vram_options_t const& vram) noexcept {
+inline util::expected<gpu_placement_t> resolve_placement(std::span<util::gpu_device_t const> table,
+                                                         std::span<gpu_class_mask_t const> loaded,
+                                                         usearch_vram_options_t const& vram) noexcept {
     static constexpr std::int32_t device_zero_k[] {0};
     if (vram.gpu_class_ceiling != usearch_gpu_class_unknown_k && !listed(gpu_classes_k, vram.gpu_class_ceiling))
-        return {{}, status_t::invalid_argument_k};
+        return {{}, {util::status_code_t::invalid_argument_k, "No GPU class has that value"}};
     gpu_placement_t placement;
     placement.table = table, placement.loaded = ~gpu_class_mask_t {0};
     placement.positions = vram.devices && vram.devices_count
@@ -1852,47 +1858,50 @@ inline expected<gpu_placement_t> resolve_placement(std::span<gpu_device_t const>
                               : std::span<std::int32_t const> {device_zero_k};
     for (std::int32_t const ordinal : placement.positions) {
         std::size_t const position = static_cast<std::size_t>(ordinal);
-        if (ordinal < 0 || position >= table.size()) return {{}, status_t::device_error_k};
-        gpu_vendor_t const vendor = table[position].vendor;
-        if (placement.vendor != gpu_vendor_t::unknown_k && vendor != placement.vendor)
-            return {{}, status_t::config_mismatch_k};
+        if (ordinal < 0 || position >= table.size())
+            return {{}, {util::status_code_t::device_k, "A device ordinal is past the listing"}};
+        util::gpu_vendor_t const vendor = table[position].vendor;
+        if (placement.vendor != util::gpu_vendor_t::unknown_k && vendor != placement.vendor)
+            return {{}, {util::status_code_t::config_mismatch_k, "The devices must share one vendor"}};
         placement.vendor = vendor, placement.loaded &= loaded[position];
     }
     placement.gpu_class = pick_gpu_class(placement.vendor, placement.loaded, vram.gpu_class_ceiling);
-    if (placement.gpu_class == gpu_class_t::unknown_k) return {{}, status_t::unsupported_k};
-    return {placement, status_t::success_k};
+    if (placement.gpu_class == gpu_class_t::unknown_k)
+        return {{}, {util::status_code_t::unsupported_k, "No carried GPU class fits the devices"}};
+    return {placement, util::status_code_t::success_k};
 }
 
 /** Resolves the devices @p vram names against this process's listing. */
-inline expected<gpu_placement_t> resolve_placement(usearch_vram_options_t const& vram) noexcept {
+inline util::expected<gpu_placement_t> resolve_placement(usearch_vram_options_t const& vram) noexcept {
     return resolve_placement(gpu_devices(), gpu_classes_loaded(), vram);
 }
 
 /** The checkpoint in @p bytes and where it sits: on the NVIDIA or AMD device whose memory holds it,
  *  which no host read reaches, or on the host, as host pages and Apple's unified memory are. */
-inline checkpoint_source_t checkpoint_source_of(bytes_view_t bytes) noexcept {
-    gpu_drivers_t const& drivers = gpu_drivers();
-    int const nvidia = cuda_device_of(drivers.cuda, bytes.data());
-    return {bytes, nvidia >= 0 ? nvidia : hip_device_of(drivers.hip, bytes.data())};
+inline util::checkpoint_source_t checkpoint_source_of(util::bytes_view_t bytes) noexcept {
+    util::gpu_drivers_t const& drivers = gpu_drivers();
+    int const nvidia = util::cuda_device_of(drivers.cuda, bytes.data());
+    return {bytes, nvidia >= 0 ? nvidia : util::hip_device_of(drivers.hip, bytes.data())};
 }
 
 /** Copies the NVIDIA or AMD device bytes @p source into the host's @p destination through the
  *  driver whose device holds them, returning once they arrived, as a checkpoint's headers cross. */
-inline status_t copy_off_device(bytes_span_t destination, bytes_view_t source) noexcept {
-    if (destination.size() != source.size()) return status_t::config_mismatch_k;
-    gpu_drivers_t const& drivers = gpu_drivers();
-    if (int const nvidia = cuda_device_of(drivers.cuda, source.data()); nvidia >= 0)
-        return cuda_set_device(drivers.cuda, nvidia) == cuda_success_k &&
-                       cuda_copy(drivers.cuda, destination.data(), source.data(), source.size()) == cuda_success_k
-                   ? status_t::success_k
-                   : status_t::device_error_k;
-    if (int const amd = hip_device_of(drivers.hip, source.data()); amd >= 0)
-        return hip_set_device(drivers.hip, amd) == hip_success_k &&
-                       drivers.hip.copy(destination.data(), source.data(), source.size(), hip_copy_device_to_host_k) ==
-                           hip_success_k
-                   ? status_t::success_k
-                   : status_t::device_error_k;
-    return status_t::device_error_k;
+inline util::status_t copy_off_device(util::bytes_span_t destination, util::bytes_view_t source) noexcept {
+    if (destination.size() != source.size()) return util::status_code_t::config_mismatch_k;
+    util::gpu_drivers_t const& drivers = gpu_drivers();
+    if (int const nvidia = util::cuda_device_of(drivers.cuda, source.data()); nvidia >= 0)
+        return util::cuda_set_device(drivers.cuda, nvidia) == util::cuda_success_k &&
+                       util::cuda_copy(drivers.cuda, destination.data(), source.data(), source.size()) ==
+                           util::cuda_success_k
+                   ? util::status_code_t::success_k
+                   : util::status_code_t::device_k;
+    if (int const amd = util::hip_device_of(drivers.hip, source.data()); amd >= 0)
+        return util::hip_set_device(drivers.hip, amd) == util::hip_success_k &&
+                       drivers.hip.copy(destination.data(), source.data(), source.size(),
+                                        util::hip_copy_device_to_host_k) == util::hip_success_k
+                   ? util::status_code_t::success_k
+                   : util::status_code_t::device_k;
+    return util::status_code_t::device_k;
 }
 
 /** Lowers one GPU class onto NumKong's GPU capabilities. On NVIDIA, the Ampere & Ada bits
@@ -1994,8 +2003,8 @@ static_assert(compiled_rungs(nvidia_ladder_t {}) <= 1 && compiled_rungs(amd_ladd
 #endif
 
 // The device listing crosses the ABI by casts, so the C vendors and classes mirror the engine's.
-static_assert(static_cast<u32_t>(gpu_vendor_t::apple_k) == usearch_gpu_vendor_apple_k);
-static_assert(static_cast<u32_t>(gpu_class_t::apple_metal10_k) == usearch_gpu_class_apple_metal10_k);
+static_assert(static_cast<util::u32_t>(util::gpu_vendor_t::apple_k) == usearch_gpu_vendor_apple_k);
+static_assert(static_cast<util::u32_t>(gpu_class_t::apple_metal10_k) == usearch_gpu_class_apple_metal10_k);
 
 #pragma endregion Residencies
 
@@ -2062,14 +2071,14 @@ using deferred_arguments_t = std::variant< //
 
 /** The counts of the handles a call names - its index or target, cursor, plan, and arena - each
  *  raised at its entry and lowered at its end; null where it names none. */
-using named_calls_t = std::array<u32_t*, 5>;
+using named_calls_t = std::array<util::u32_t*, 5>;
 
 /** Raises the count of every handle @p arguments name and answers where they are, so @c end_call
  *  lowers the same ones; an output slot for a handle the call creates names nothing yet. */
 template <typename arguments_type_>
 inline named_calls_t raise_named_calls(arguments_type_ const& arguments) noexcept {
     named_calls_t named {};
-    u32_t** next = named.data();
+    util::u32_t** next = named.data();
     auto const name = [&](auto* handle) noexcept {
         if (!handle) return;
         host_outcome_verbs().raise_named(&handle->named_calls);
@@ -2087,7 +2096,7 @@ inline named_calls_t raise_named_calls(arguments_type_ const& arguments) noexcep
 
 /** Lowers the counts @ref raise_named_calls raised. */
 inline void lower_named_calls(named_calls_t const& named_calls) noexcept {
-    for (u32_t* const named : named_calls)
+    for (util::u32_t* const named : named_calls)
         if (named) host_outcome_verbs().lower_named(named);
 }
 
@@ -2127,7 +2136,7 @@ struct usearch_executor_handle_t {
     /** The one call that holds the executor, from its claim to its end. */
     holding_call_t holding_call;
 
-    std::variant<forkunion_executor_t, nvme_executor_t, gpu_executor_t> executor;
+    std::variant<util::forkunion_executor_t, nvme_executor_t, util::gpu_executor_t> executor;
 };
 
 /** Discovers the topology and spawns @p threads over it into @p handle under @p ceiling, near the
@@ -2144,12 +2153,13 @@ inline usearch_executor_t spawn_ram_executor(usearch_executor_handle_t& handle, 
     std::size_t domains_count = 0;
     bool const near_one = ram.memory_domains && ram.memory_domains_count == 1 &&
                           fu_memory_domains_count(topology, &domains_count) == fu_success_k && domains_count > 1;
-    auto [spawned, status] = near_one ? forkunion_executor_t::spawn_near(
-                                            topology, static_cast<fu_memory_domain_id_t>(ram.memory_domains[0]),
-                                            threads, forkunion_allowed_of(ceiling))
-                                      : forkunion_executor_t::spawn(topology, threads, forkunion_allowed_of(ceiling));
-    if (failed(status)) return propagate_error(status, outcome), nullptr;
-    handle.executor.emplace<forkunion_executor_t>(std::move(spawned));
+    auto [spawned, status] = near_one
+                                 ? util::forkunion_executor_t::spawn_near(
+                                       topology, static_cast<fu_memory_domain_id_t>(ram.memory_domains[0]), threads,
+                                       forkunion_allowed_of(ceiling))
+                                 : util::forkunion_executor_t::spawn(topology, threads, forkunion_allowed_of(ceiling));
+    if (util::failed(status)) return propagate_error(status, outcome), nullptr;
+    handle.executor.emplace<util::forkunion_executor_t>(std::move(spawned));
     return &handle;
 }
 
@@ -2158,7 +2168,7 @@ inline usearch_executor_t spawn_ram_executor(usearch_executor_handle_t& handle, 
  *  @c no_memory_domain_k when they differ or none is known. */
 struct nvme_media_shape_t {
     std::size_t fewest_queues = 0;
-    fu_memory_domain_id_t memory_domain = no_memory_domain_k;
+    fu_memory_domain_id_t memory_domain = util::no_memory_domain_k;
 };
 
 /** The shape of the media under @p paths, opened as views open them. */
@@ -2166,22 +2176,24 @@ inline nvme_media_shape_t nvme_media_shape(std::span<usearch_bytes_view_t const>
     nvme_media_shape_t shape;
     for (std::size_t position = 0; position != paths.size(); ++position) {
         std::string_view const named {reinterpret_cast<char const*>(paths[position].data), paths[position].length};
-        io_device_queues_t queues;
-        fu_memory_domain_id_t domain = no_memory_domain_k;
+        util::io_device_queues_t queues;
+        fu_memory_domain_id_t domain = util::no_memory_domain_k;
 #if USEARCH_WITH_LINUX_SPDK
-        if (names_transport_id(named)) {
-            auto [name_space, open_status] = spdk_medium_t::open<fu::standard_yield_t>(named);
-            if (succeeded(open_status)) queues = device_queues_of(name_space), domain = memory_domain_of(name_space);
+        if (util::names_transport_id(named)) {
+            auto [name_space, open_status] = util::spdk_medium_t::open<fu::standard_yield_t>(named);
+            if (succeeded(open_status))
+                queues = util::device_queues_of(name_space), domain = util::memory_domain_of(name_space);
             name_space.release<fu::standard_yield_t>();
         }
 #endif
-        if (!names_transport_id(named)) {
-            file_medium_t const medium = file_medium_t::open(named).value;
-            queues = device_queues_of(medium), domain = memory_domain_of(medium);
+        if (!util::names_transport_id(named)) {
+            auto const [medium, open_status] = util::file_medium_t::open(named);
+            if (succeeded(open_status))
+                queues = util::device_queues_of(medium), domain = util::memory_domain_of(medium);
         }
         if (queues.hardware_queues && (!shape.fewest_queues || queues.hardware_queues < shape.fewest_queues))
             shape.fewest_queues = queues.hardware_queues;
-        shape.memory_domain = !position || shape.memory_domain == domain ? domain : no_memory_domain_k;
+        shape.memory_domain = !position || shape.memory_domain == domain ? domain : util::no_memory_domain_k;
     }
     return shape;
 }
@@ -2190,9 +2202,9 @@ inline nvme_media_shape_t nvme_media_shape(std::span<usearch_bytes_view_t const>
  *  @p queues, the fewest hardware queues of its media, so no two threads share a queue; zero,
  *  ForkUnion's own default, when the cores are unknown. */
 inline std::size_t nvme_default_threads(fu_topology_t topology, std::size_t queues) noexcept {
-    auto const [cores, cores_status] = forkunion_executor_t::default_threads(topology);
-    if (failed(cores_status)) return 0;
-    return queues ? min_of(cores, queues) : cores;
+    auto const [cores, cores_status] = util::forkunion_executor_t::default_threads(topology);
+    if (util::failed(cores_status)) return 0;
+    return queues ? util::min_of(cores, queues) : cores;
 }
 
 /** Discovers the topology and spawns @p threads into @p handle under @p ceiling, each opening the
@@ -2200,7 +2212,7 @@ inline std::size_t nvme_default_threads(fu_topology_t topology, std::size_t queu
  *  threads takes @ref nvme_default_threads over the media under @p paths. */
 inline usearch_executor_t spawn_nvme_executor(usearch_executor_handle_t& handle, std::size_t threads,
                                               std::span<usearch_bytes_view_t const> paths,
-                                              io_engine_config_t const& config, cpu_ceiling_t ceiling,
+                                              util::io_engine_config_t const& config, cpu_ceiling_t ceiling,
                                               usearch_outcome_t* outcome) noexcept {
     fu_topology_t topology = nullptr;
     if (fu_topology_new(&topology) != fu_success_k)
@@ -2209,7 +2221,7 @@ inline usearch_executor_t spawn_nvme_executor(usearch_executor_handle_t& handle,
     nvme_media_shape_t const shape = nvme_media_shape(paths);
     std::size_t const queues = shape.fewest_queues;
     // Each SPDK thread holds a queue pair of its own, and a controller grants only so many.
-    if (config.transport == io_transport_t::linux_spdk_k && queues && threads > queues)
+    if (config.transport == util::io_transport_t::linux_spdk_k && queues && threads > queues)
         return propagate_error(usearch_status_config_mismatch_k, outcome,
                                "More threads than the SPDK controller granted I/O queue pairs"),
                nullptr;
@@ -2219,11 +2231,10 @@ inline usearch_executor_t spawn_nvme_executor(usearch_executor_handle_t& handle,
     fu_memory_domain_id_t const near_domain = fu_memory_domains_count(topology, &domains_count) == fu_success_k &&
                                                       domains_count > 1
                                                   ? shape.memory_domain
-                                                  : no_memory_domain_k;
+                                                  : util::no_memory_domain_k;
     auto [spawned, status] = nvme_executor_t::spawn(topology, threads, config, forkunion_allowed_of(ceiling),
                                                     near_domain);
-    if (failed(status))
-        return propagate_error(status, outcome, "No I/O engine opened on the executor's threads"), nullptr;
+    if (util::failed(status)) return propagate_error(status, outcome), nullptr;
     handle.executor.emplace<nvme_executor_t>(std::move(spawned));
     return &handle;
 }
@@ -2244,26 +2255,24 @@ template <typename multi_type_>
 inline usearch_executor_t call_executor_for(multi_type_&, usearch_executor_handle_t& call_executor,
                                             usearch_outcome_t* outcome) noexcept {
     // Zero leaves each call's depth to the block queues of the media it reads.
-    io_engine_config_t config;
-    config.transport = io_transport_t::blocking_k;
+    util::io_engine_config_t config;
+    config.transport = util::io_transport_t::blocking_k;
     return spawn_nvme_executor(call_executor, 1, {}, config, pick_cpu_ceiling(usearch_cpu_class_unknown_k).value,
                                outcome);
 }
 
 /** Applies @p visitor to whichever executor @p executor holds, a GPU one included; an empty GPU
- *  alternative answers @c device_error_k. */
+ *  alternative answers @c device_k. */
 template <typename visitor_type_>
-inline status_t visit_executor(usearch_executor_handle_t& executor, visitor_type_&& visitor) noexcept {
+inline util::status_t visit_executor(usearch_executor_handle_t& executor, visitor_type_&& visitor) noexcept {
+    auto const visit_gpu = [&]<typename gpu_type_>(gpu_type_& gpu) noexcept {
+        if constexpr (std::is_same_v<gpu_type_, std::monostate>) return util::status_t {util::status_code_t::device_k};
+        else return util::status_t {visitor(gpu)};
+    };
     return std::visit(
         [&]<typename executor_type_>(executor_type_& typed) noexcept {
-            if constexpr (!std::is_same_v<executor_type_, gpu_executor_t>) return visitor(typed);
-            else
-                return std::visit(
-                    [&]<typename gpu_type_>(gpu_type_& gpu) noexcept {
-                        if constexpr (std::is_same_v<gpu_type_, std::monostate>) return status_t::device_error_k;
-                        else return visitor(gpu);
-                    },
-                    typed);
+            if constexpr (std::is_same_v<executor_type_, util::gpu_executor_t>) return std::visit(visit_gpu, typed);
+            else return util::status_t {visitor(typed)};
         },
         executor.executor);
 }
@@ -2271,11 +2280,11 @@ inline status_t visit_executor(usearch_executor_handle_t& executor, visitor_type
 /** The residency's executor inside @p executor 's variant: GPU executors nest one level deeper. */
 template <typename executor_type_>
 inline executor_type_* residency_executor(usearch_executor_handle_t& executor) noexcept {
-    if constexpr (std::is_same_v<executor_type_, forkunion_executor_t> ||
+    if constexpr (std::is_same_v<executor_type_, util::forkunion_executor_t> ||
                   std::is_same_v<executor_type_, nvme_executor_t>)
         return std::get_if<executor_type_>(&executor.executor);
     else {
-        gpu_executor_t* const gpu = std::get_if<gpu_executor_t>(&executor.executor);
+        util::gpu_executor_t* const gpu = std::get_if<util::gpu_executor_t>(&executor.executor);
         return gpu ? std::get_if<executor_type_>(gpu) : nullptr;
     }
 }
@@ -2312,10 +2321,10 @@ inline bool accepts_traversal(arena_residency_t residency, usearch_traversal_t t
 /** What @c usearch_arena_t owns: memory that one call at a time rewinds and refills, as host pages
  *  or on one device, and the call holding it. */
 struct usearch_arena_handle_t {
-    growing_arena<forkunion_allocator_t> memory {forkunion_allocator_t {no_memory_domain_k}};
+    util::growing_arena<util::forkunion_allocator_t> memory {util::forkunion_allocator_t {util::no_memory_domain_k}};
 
     /** Device memory on the first stream of the executor the arena was made for, or none. */
-    gpu_arena_t device_memory;
+    util::gpu_arena_t device_memory;
 
     /** The executor whose first stream the device memory rides, the only one whose calls it serves;
      *  null for host pages, which serve any. */
@@ -2329,7 +2338,7 @@ struct usearch_arena_handle_t {
     usearch_outcome_t const* holder = nullptr;
 
     /** Executor calls naming the arena that have not ended, which its free waits out. */
-    u32_t named_calls = 0;
+    util::u32_t named_calls = 0;
 };
 
 /** Holds @p arena for the call whose outcome is @p call, answering whether it was free or already
@@ -2352,16 +2361,17 @@ inline void release_arena(usearch_arena_t arena, usearch_outcome_t const* call) 
 /** Where @c usearch_gpu_devices lists the device @p arena lives on, or 0 for host pages; the arena
  *  keeps its vendor's own ordinal, which the listing maps back. */
 inline std::size_t arena_device_ordinal(usearch_arena_handle_t const& arena) noexcept {
-    gpu_executor_t const* const devices = arena.executor ? std::get_if<gpu_executor_t>(&arena.executor->executor)
-                                                         : nullptr;
+    util::gpu_executor_t const* const devices = arena.executor
+                                                    ? std::get_if<util::gpu_executor_t>(&arena.executor->executor)
+                                                    : nullptr;
     if (!devices) return 0;
-    gpu_vendor_t const vendor = std::visit(
+    util::gpu_vendor_t const vendor = std::visit(
         []<typename executor_type_>(executor_type_ const&) noexcept {
             if constexpr (is_gpu_executor<executor_type_>) return executor_type_::vendor_k;
-            else return gpu_vendor_t::unknown_k;
+            else return util::gpu_vendor_t::unknown_k;
         },
         *devices);
-    std::span<gpu_device_t const> const listed = gpu_devices();
+    std::span<util::gpu_device_t const> const listed = gpu_devices();
     for (std::size_t ordinal = 0; ordinal != listed.size(); ++ordinal)
         if (listed[ordinal].vendor == vendor && listed[ordinal].vendor_ordinal == arena.residency.device)
             return ordinal;
@@ -2371,6 +2381,25 @@ inline std::size_t arena_device_ordinal(usearch_arena_handle_t const& arena) noe
 /** Whether @p address lies in memory @p arena handed out, which its next rewind reuses or frees. */
 inline bool arena_contains(usearch_arena_handle_t const& arena, void const* address) noexcept {
     return arena.device_memory ? arena.device_memory.contains(address) : arena.memory.contains(address);
+}
+
+/** The Arrow device an arena's outputs sit on, and the vendor's ordinal of it. */
+struct arrow_device_t {
+    ArrowDeviceType type = ARROW_DEVICE_CPU;
+    std::int64_t ordinal = -1;
+};
+
+inline arrow_device_t arrow_device_of(usearch_arena_handle_t const& arena) noexcept {
+    return std::visit(
+        []<typename arena_type_>(arena_type_ const& device) noexcept -> arrow_device_t {
+            if constexpr (std::is_same_v<arena_type_, std::monostate>) return {};
+            else if constexpr (std::is_same_v<arena_type_, util::cuda_device_arena_t>)
+                return {ARROW_DEVICE_CUDA, device.device()};
+            else if constexpr (std::is_same_v<arena_type_, util::hip_device_arena_t>)
+                return {ARROW_DEVICE_ROCM, device.device()};
+            else return {ARROW_DEVICE_METAL, device.device()};
+        },
+        arena.device_memory.arena);
 }
 
 /** Where @ref claim_arena wants @p arena for a verb filling host pages over an index at
@@ -2413,15 +2442,15 @@ inline usearch_arena_handle_t* claim_arena(usearch_arena_t arena, usearch_outcom
  *  every verb computes, even one whose outputs @ref publish moves to a device; null when they
  *  cannot grow. */
 template <typename value_type_>
-inline value_type_* carve(growing_arena<forkunion_allocator_t>& staging, std::size_t count) noexcept {
-    if (wraps_on_multiply(count, sizeof(value_type_))) return nullptr;
-    return reinterpret_cast<value_type_*>(staging.allocate(count * sizeof(value_type_), default_alignment_k));
+inline value_type_* carve(util::growing_arena<util::forkunion_allocator_t>& staging, std::size_t count) noexcept {
+    if (util::wraps_on_multiply(count, sizeof(value_type_))) return nullptr;
+    return reinterpret_cast<value_type_*>(staging.allocate(count * sizeof(value_type_), util::default_alignment_k));
 }
 
 /** Carves @p count values of @p value_type_ out of a claimed arena's @p device_memory, for outputs
  *  the device writes in place. */
 template <typename value_type_>
-inline value_type_* carve(gpu_arena_t& device_memory, std::size_t count) noexcept {
+inline value_type_* carve(util::gpu_arena_t& device_memory, std::size_t count) noexcept {
     return device_memory.template allocate<value_type_>(count);
 }
 
@@ -2429,25 +2458,26 @@ inline value_type_* carve(gpu_arena_t& device_memory, std::size_t count) noexcep
  *  or one upload to the arena's device queued on its executor's first stream, which the call
  *  awaits once through @ref drained, the host pages it reads living until then. */
 template <typename value_type_>
-inline expected<value_type_*> publish(usearch_arena_handle_t& arena, value_type_* output, std::size_t count) noexcept {
-    if (!arena.device_memory || !output || !count) return {output, status_t::success_k};
+inline util::expected<value_type_*> publish(usearch_arena_handle_t& arena, value_type_* output,
+                                            std::size_t count) noexcept {
+    if (!arena.device_memory || !output || !count) return {output, util::status_code_t::success_k};
     using uploaded_t = std::remove_const_t<value_type_>;
     uploaded_t* const uploaded = carve<uploaded_t>(arena.device_memory, count);
-    if (!uploaded) return {nullptr, status_t::bad_alloc_k};
+    if (!uploaded) return {nullptr, util::status_code_t::out_of_memory_k};
     return {uploaded, arena.device_memory.upload(uploaded, output, count * sizeof(value_type_))};
 }
 
 /** The first failure of the steps of one call, or success. */
-inline status_t first_failure(std::initializer_list<status_t> statuses) noexcept {
-    for (status_t const status : statuses)
-        if (failed(status)) return status;
-    return status_t::success_k;
+inline util::status_t first_failure(std::initializer_list<util::status_t> statuses) noexcept {
+    for (util::status_t const status : statuses)
+        if (util::failed(status)) return status;
+    return util::status_code_t::success_k;
 }
 
 /** Keeps the first failure of @p status, awaiting @p arena 's uploads either way. */
-inline status_t drained(usearch_arena_handle_t& arena, status_t status) noexcept {
-    status_t const waited = arena.device_memory.wait();
-    return failed(status) ? status : waited;
+inline util::status_t drained(usearch_arena_handle_t& arena, util::status_t status) noexcept {
+    util::status_t const waited = arena.device_memory.wait();
+    return util::failed(status) ? status : waited;
 }
 
 /** The arena @p arguments name for their outputs, or null for a verb that names none. */
@@ -2540,7 +2570,8 @@ struct matches_outputs_t {
 /** The outputs of @p count queries of @p wanted matches, carved out of a claimed arena's host pages
  *  or device memory, @p memory; a zero @p wanted carves only the counts. */
 template <typename memory_type_>
-inline expected<matches_outputs_t> carve_matches(memory_type_& memory, std::size_t count, std::size_t wanted) noexcept {
+inline util::expected<matches_outputs_t> carve_matches(memory_type_& memory, std::size_t count,
+                                                       std::size_t wanted) noexcept {
     matches_outputs_t outputs;
     outputs.wanted = wanted;
     outputs.counts = carve<std::size_t>(memory, count);
@@ -2549,18 +2580,19 @@ inline expected<matches_outputs_t> carve_matches(memory_type_& memory, std::size
         outputs.scores = carve<usearch_distance_t>(memory, count * wanted);
     }
     bool const carved = outputs.counts && (!wanted || (outputs.keys && outputs.scores));
-    return {outputs, carved ? status_t::success_k : status_t::bad_alloc_k};
+    return {outputs, carved ? util::status_code_t::success_k : util::status_code_t::out_of_memory_k};
 }
 
 /** The @p count queries @ref carve_matches put in @p outputs as the caller reads them, where
  *  @p arena hands outputs out, once its uploads drained. */
-inline expected<usearch_matches_view_t> publish_matches(usearch_arena_handle_t& arena, matches_outputs_t const& outputs,
-                                                        std::size_t count) noexcept {
+inline util::expected<usearch_matches_view_t> publish_matches(usearch_arena_handle_t& arena,
+                                                              matches_outputs_t const& outputs,
+                                                              std::size_t count) noexcept {
     std::size_t const entries = count * outputs.wanted;
     auto const [counts, counts_status] = publish(arena, outputs.counts, count);
     auto const [keys, keys_status] = publish(arena, outputs.keys, entries);
     auto const [scores, scores_status] = publish(arena, outputs.scores, entries);
-    status_t const published = drained(arena, first_failure({counts_status, keys_status, scores_status}));
+    util::status_t const published = drained(arena, first_failure({counts_status, keys_status, scores_status}));
     return {{keys, scores, counts, outputs.wanted}, published};
 }
 
@@ -2568,25 +2600,25 @@ inline expected<usearch_matches_view_t> publish_matches(usearch_arena_handle_t& 
  *  end, and the offset where each entry's run starts, one more than the entries, as the C tape
  *  reads them out. */
 struct links_outputs_t {
-    growing_buffer<us::utilities::uuid128_t, thread_allocator_t> keys;
-    growing_buffer<std::size_t, thread_allocator_t> offsets;
+    util::growing_buffer<util::uuid128_t, thread_allocator_t> keys;
+    util::growing_buffer<std::size_t, thread_allocator_t> offsets;
 
-    explicit links_outputs_t(growing_arena<forkunion_allocator_t>& memory) noexcept
+    explicit links_outputs_t(util::growing_arena<util::forkunion_allocator_t>& memory) noexcept
         : keys(thread_allocator_t {memory}), offsets(thread_allocator_t {memory}) {}
 
-    /** Opens the first run; @c bad_alloc_k when the arena cannot grow. */
-    status_t open() noexcept { return offsets.push_back(0); }
+    /** Opens the first run; @c out_of_memory_k when the arena cannot grow. */
+    util::status_t open() noexcept { return offsets.push_back(0); }
 
     /** The C tape over the gathered links. */
     usearch_keys_tape_view_t tape() const noexcept {
-        static_assert(sizeof(us::utilities::uuid128_t) == sizeof(usearch_key_t), "Links land as the walk reads them");
+        static_assert(sizeof(util::uuid128_t) == sizeof(usearch_key_t), "Links land as the walk reads them");
         return {reinterpret_cast<usearch_key_t const*>(keys.data()), offsets.data()};
     }
 };
 
 /** Where the host @p links a pull gathered reach the caller, as @ref publish moves them. */
-inline expected<usearch_keys_tape_view_t> publish_links(usearch_arena_handle_t& arena,
-                                                        links_outputs_t const& links) noexcept {
+inline util::expected<usearch_keys_tape_view_t> publish_links(usearch_arena_handle_t& arena,
+                                                              links_outputs_t const& links) noexcept {
     usearch_keys_tape_view_t const gathered = links.tape();
     auto const [keys, keys_status] = publish(arena, gathered.keys, links.keys.size());
     auto const [offsets, offsets_status] = publish(arena, gathered.offsets, links.offsets.size());
@@ -2600,15 +2632,15 @@ struct sample_staging_t {
     usearch_key_t* keys = nullptr;
     std::size_t* ordinals = nullptr;
     usearch_key_t* parents = nullptr;
-    f32_t* parent_distances = nullptr;
+    util::f32_t* parent_distances = nullptr;
     usearch_distance_t* scores = nullptr;
     std::size_t* counts = nullptr;
-    f32_t* coordinates = nullptr;
+    util::f32_t* coordinates = nullptr;
     std::size_t wanted = 0;
 
     /** The plan's outputs over these rows, in the key type @p key_type_ the index stores. */
     template <typename key_type_>
-    sample_outputs<key_type_> outputs() const noexcept {
+    util::sample_outputs<key_type_> outputs() const noexcept {
         static_assert(sizeof(key_type_) == sizeof(usearch_key_t), "Keys land in the arena as the plan writes them");
         return {{reinterpret_cast<key_type_*>(keys), wanted},
                 {ordinals, wanted},
@@ -2619,63 +2651,64 @@ struct sample_staging_t {
 };
 
 /** Carves the staging of @p wanted draws out of the host pages @p memory. */
-inline expected<sample_staging_t> carve_sample(growing_arena<forkunion_allocator_t>& memory,
-                                               std::size_t wanted) noexcept {
+inline util::expected<sample_staging_t> carve_sample(util::growing_arena<util::forkunion_allocator_t>& memory,
+                                                     std::size_t wanted) noexcept {
     sample_staging_t staging;
     staging.wanted = wanted;
     staging.keys = carve<usearch_key_t>(memory, wanted);
     staging.ordinals = carve<std::size_t>(memory, wanted);
     staging.parents = carve<usearch_key_t>(memory, wanted);
-    staging.parent_distances = carve<f32_t>(memory, wanted);
+    staging.parent_distances = carve<util::f32_t>(memory, wanted);
     staging.scores = carve<usearch_distance_t>(memory, wanted);
     staging.counts = carve<std::size_t>(memory, wanted);
-    staging.coordinates = carve<f32_t>(memory, wanted * 3);
+    staging.coordinates = carve<util::f32_t>(memory, wanted * 3);
     bool const carved = staging.keys && staging.ordinals && staging.parents && staging.parent_distances &&
                         staging.scores && staging.counts && staging.coordinates;
-    return {staging, carved || !wanted ? status_t::success_k : status_t::bad_alloc_k};
+    return {staging, carved || !wanted ? util::status_code_t::success_k : util::status_code_t::out_of_memory_k};
 }
 
 /** The @p count keys of @p keys as the plan reads them: the caller's own when packed, otherwise
  *  copied onto the host pages @p memory. */
 template <typename key_type_>
-inline expected<std::span<key_type_ const>> view_keys(usearch_keys_view_t keys, std::size_t count,
-                                                      growing_arena<forkunion_allocator_t>& memory) noexcept {
+inline util::expected<std::span<key_type_ const>> view_keys(
+    usearch_keys_view_t keys, std::size_t count, util::growing_arena<util::forkunion_allocator_t>& memory) noexcept {
     static_assert(sizeof(key_type_) == sizeof(usearch_key_t), "The plan reads the caller's keys as they are");
     if (count <= 1 || keys.stride == sizeof(usearch_key_t))
-        return {{reinterpret_cast<key_type_ const*>(keys.data), count}, status_t::success_k};
+        return {{reinterpret_cast<key_type_ const*>(keys.data), count}, util::status_code_t::success_k};
     key_type_* const packed = carve<key_type_>(memory, count);
-    if (!packed) return {{}, status_t::bad_alloc_k};
+    if (!packed) return {{}, util::status_code_t::out_of_memory_k};
     for (std::size_t offset = 0; offset != count; ++offset)
-        std::memcpy(packed + offset, reinterpret_cast<byte_t const*>(keys.data) + offset * keys.stride,
+        std::memcpy(packed + offset, reinterpret_cast<util::byte_t const*>(keys.data) + offset * keys.stride,
                     sizeof(usearch_key_t));
-    return {{packed, count}, status_t::success_k};
+    return {{packed, count}, util::status_code_t::success_k};
 }
 
 /** The @p count rows of three f32 values of @p rows as the plan reads them: the caller's own when
  *  packed, otherwise copied onto the host pages @p memory. */
-inline expected<std::span<f32_t const>> view_coordinates(usearch_rows_view_t rows, std::size_t count,
-                                                         growing_arena<forkunion_allocator_t>& memory) noexcept {
-    std::size_t const row_bytes = 3 * sizeof(f32_t);
+inline util::expected<std::span<util::f32_t const>> view_coordinates(
+    usearch_rows_view_t rows, std::size_t count, util::growing_arena<util::forkunion_allocator_t>& memory) noexcept {
+    std::size_t const row_bytes = 3 * sizeof(util::f32_t);
     if (count <= 1 || rows.stride == row_bytes)
-        return {{static_cast<f32_t const*>(rows.data), count * 3}, status_t::success_k};
-    f32_t* const packed = carve<f32_t>(memory, count * 3);
-    if (!packed) return {{}, status_t::bad_alloc_k};
+        return {{static_cast<util::f32_t const*>(rows.data), count * 3}, util::status_code_t::success_k};
+    util::f32_t* const packed = carve<util::f32_t>(memory, count * 3);
+    if (!packed) return {{}, util::status_code_t::out_of_memory_k};
     for (std::size_t row = 0; row != count; ++row)
-        std::memcpy(packed + row * 3, static_cast<byte_t const*>(rows.data) + row * rows.stride, row_bytes);
-    return {{packed, count * 3}, status_t::success_k};
+        std::memcpy(packed + row * 3, static_cast<util::byte_t const*>(rows.data) + row * rows.stride, row_bytes);
+    return {{packed, count * 3}, util::status_code_t::success_k};
 }
 
 /** A sample's shown keys, their coordinates and its focus, viewed in place where packed and copied
  *  onto the host pages @p memory otherwise. */
 template <typename key_type_, typename arguments_type_>
-inline expected<sample_inputs<key_type_>> view_sample(arguments_type_ const& arguments,
-                                                      growing_arena<forkunion_allocator_t>& memory) noexcept {
+inline util::expected<util::sample_inputs<key_type_>> view_sample(
+    arguments_type_ const& arguments, util::growing_arena<util::forkunion_allocator_t>& memory) noexcept {
     auto const [shown, shown_status] = view_keys<key_type_>(arguments.shown, arguments.shown_count, memory);
     auto const [coordinates, coordinates_status] = view_coordinates(arguments.shown_coordinates, arguments.shown_count,
                                                                     memory);
     auto const [focus, focus_status] = view_keys<key_type_>(arguments.focus, arguments.focus_count, memory);
-    if (failed(first_failure({shown_status, coordinates_status, focus_status}))) return {{}, status_t::bad_alloc_k};
-    return {{shown, coordinates, focus}, status_t::success_k};
+    if (util::failed(first_failure({shown_status, coordinates_status, focus_status})))
+        return {{}, util::status_code_t::out_of_memory_k};
+    return {{shown, coordinates, focus}, util::status_code_t::success_k};
 }
 
 /** Resets every output of a sample's @p arguments, so a refused call leaves nothing behind. */
@@ -2701,7 +2734,7 @@ inline bool accepts_sample(arguments_type_ const& arguments, usearch_outcome_t* 
         return propagate_error(usearch_status_unsupported_layout_k, outcome, "The key stride is shorter than a key");
     if (arguments.shown_count &&
         (!coordinates.data || coordinates.columns != 3 || coordinates.scalar != usearch_scalar_f32_k ||
-         (coordinates.stride && coordinates.stride < 3 * sizeof(f32_t))))
+         (coordinates.stride && coordinates.stride < 3 * sizeof(util::f32_t))))
         return propagate_error(usearch_status_invalid_argument_k, outcome,
                                "The shown coordinates must be three f32 values per key");
     return true;
@@ -2712,7 +2745,7 @@ inline bool accepts_sample(arguments_type_ const& arguments, usearch_outcome_t* 
  *  as no parent. */
 template <typename arguments_type_>
 inline void publish_sample(arguments_type_ const& arguments, sample_staging_t const& staging,
-                           sample_result_t const& sampled) noexcept {
+                           util::sample_result_t const& sampled) noexcept {
     std::size_t const written = sampled.written;
     if (arguments.stats)
         arguments.stats->visited_members += sampled.visited_members,
@@ -2727,25 +2760,25 @@ inline void publish_sample(arguments_type_ const& arguments, sample_staging_t co
     *arguments.keys = {staging.keys, sizeof(usearch_key_t)};
     *arguments.entry_ordinals = staging.ordinals;
     *arguments.parents = {staging.parents, staging.scores, staging.counts, 1};
-    *arguments.coordinates = {staging.coordinates, 3 * sizeof(f32_t), 3, usearch_scalar_f32_k};
+    *arguments.coordinates = {staging.coordinates, 3 * sizeof(util::f32_t), 3, usearch_scalar_f32_k};
     *arguments.written = written;
 }
 
 /** Writes the @p required bytes of a checkpoint into @p arena through @p save, as
  *  <tt>save(bytes_span_t) → status_t</tt>, and points @p monolith at its published copy. */
 template <typename save_type_>
-inline void save_into_arena(usearch_arena_handle_t& arena, expected<std::size_t> required, save_type_&& save,
+inline void save_into_arena(usearch_arena_handle_t& arena, util::expected<std::size_t> required, save_type_&& save,
                             usearch_bytes_view_t& monolith, usearch_outcome_t* outcome) noexcept {
-    if (failed(required.status)) return propagate_error(required.status, outcome), void();
+    if (util::failed(required.status)) return propagate_error(required.status, outcome), void();
     std::byte* const checkpoint = carve<std::byte>(arena.memory, required.value);
     if (!checkpoint)
         return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
-    if (status_t const saved = save(bytes_span_t {checkpoint, required.value}); failed(saved))
+    if (util::status_t const saved = save(util::bytes_span_t {checkpoint, required.value}); util::failed(saved))
         return propagate_error(saved, outcome), void();
     // A device checkpoint is written on the host, then uploaded to the arena's device.
     auto const [published, publish_status] = publish(arena, checkpoint, required.value);
-    if (status_t const uploaded = drained(arena, publish_status); failed(uploaded))
-        return propagate_error(uploaded, outcome, "Failed to copy the checkpoint to the device"), void();
+    if (util::status_t const uploaded = drained(arena, publish_status); util::failed(uploaded))
+        return propagate_error(uploaded, outcome), void();
     monolith = {reinterpret_cast<uint8_t const*>(published), required.value};
     propagate_error(usearch_status_success_k, outcome, nullptr);
 }
@@ -2757,15 +2790,18 @@ inline std::string_view as_text(usearch_bytes_view_t bytes) noexcept {
 }
 
 /** The run read as the engine's bytes - a buffer the ABI spells in @c uint8_t. */
-inline bytes_view_t as_bytes(usearch_bytes_view_t bytes) noexcept { return bytes_of(bytes.data, bytes.length); }
+inline util::bytes_view_t as_bytes(usearch_bytes_view_t bytes) noexcept {
+    return util::bytes_of(bytes.data, bytes.length);
+}
 
 #pragma endregion Calls
 
 #pragma region Holding Calls
 
 /** The host threads behind @p executor, or null for a VRAM one, which has none. */
-inline forkunion_executor_t* threads_of(usearch_executor_handle_t& executor) noexcept {
-    if (forkunion_executor_t* const threads = std::get_if<forkunion_executor_t>(&executor.executor)) return threads;
+inline util::forkunion_executor_t* threads_of(usearch_executor_handle_t& executor) noexcept {
+    if (util::forkunion_executor_t* const threads = std::get_if<util::forkunion_executor_t>(&executor.executor))
+        return threads;
     if (nvme_executor_t* const nvme = std::get_if<nvme_executor_t>(&executor.executor)) return &nvme->threads();
     return nullptr;
 }
@@ -2773,7 +2809,7 @@ inline forkunion_executor_t* threads_of(usearch_executor_handle_t& executor) noe
 /** Whether @p executor hands deferred calls to its thread 0: a caller-exclusive pool does, while an
  *  inclusive one, a single thread, WebAssembly and a VRAM executor run them at submission. */
 inline bool delegates(usearch_executor_handle_t& executor) noexcept {
-    forkunion_executor_t const* const threads = threads_of(executor);
+    util::forkunion_executor_t const* const threads = threads_of(executor);
     return threads && threads->exclusivity() == fu_caller_exclusive_k;
 }
 
@@ -2787,12 +2823,12 @@ inline bool runs_holding_call(usearch_executor_handle_t& executor) noexcept {
 
 /** Waits out the tail of the last delegated call's slice on thread 0, after its status went out. */
 inline void await_delegated_call(usearch_executor_handle_t& executor) noexcept {
-    if (forkunion_executor_t* const threads = threads_of(executor)) threads->unsafe_await();
+    if (util::forkunion_executor_t* const threads = threads_of(executor)) threads->unsafe_await();
 }
 
 /** Returns once no call naming the handle that owns @p named_calls is left: what every free and
  *  every reshard accepting the handle waits for. */
-inline void wait_named_calls(u32_t const& named_calls) noexcept { host_outcome_verbs().wait_named(&named_calls); }
+inline void wait_named_calls(util::u32_t const& named_calls) noexcept { host_outcome_verbs().wait_named(&named_calls); }
 
 /** Ends the call holding @p executor: its handle counts, the executor claim, then its status. A
  *  delegated call ends inside thread 0's slice, so the next call awaits that dispatch first. */
@@ -2851,7 +2887,7 @@ inline bool submitted(arguments_type_* arguments) noexcept {
         verb_(delegated);
         end_call(held);
     };
-    if (failed(threads_of(*executor)->unsafe_for_threads(delegated_body, executor)))
+    if (util::failed(threads_of(*executor)->unsafe_for_threads(delegated_body, executor)))
         return call.recorded = {usearch_status_contended_k, "The pool runs another dispatch"}, end_call(*executor),
                true;
     return true;
@@ -2870,18 +2906,18 @@ inline void wait_while_claimed(usearch_executor_handle_t& executor) noexcept {
 template <typename plan_type_>
 usearch_phase_progress_t phase_of(plan_type_ const& plan) noexcept {
     // Every engine phase is valued as its C spelling, so a reorder on either side fails to compile.
-    static_assert(static_cast<usearch_phase_t>(phase_t::none_k) == usearch_phase_none_k);
-    static_assert(static_cast<usearch_phase_t>(phase_t::copy_k) == usearch_phase_copy_k);
-    static_assert(static_cast<usearch_phase_t>(phase_t::build_k) == usearch_phase_build_k);
-    static_assert(static_cast<usearch_phase_t>(phase_t::partition_k) == usearch_phase_partition_k);
-    static_assert(static_cast<usearch_phase_t>(phase_t::scatter_k) == usearch_phase_scatter_k);
-    static_assert(static_cast<usearch_phase_t>(phase_t::health_k) == usearch_phase_health_k);
-    static_assert(static_cast<usearch_phase_t>(phase_t::heal_k) == usearch_phase_heal_k);
-    static_assert(static_cast<usearch_phase_t>(phase_t::hubs_k) == usearch_phase_hubs_k);
-    static_assert(static_cast<usearch_phase_t>(phase_t::gather_k) == usearch_phase_gather_k);
-    static_assert(static_cast<usearch_phase_t>(phase_t::restitch_k) == usearch_phase_restitch_k);
-    static_assert(static_cast<usearch_phase_t>(phase_t::write_k) == usearch_phase_write_k);
-    static_assert(static_cast<usearch_phase_t>(phase_t::done_k) == usearch_phase_done_k);
+    static_assert(static_cast<usearch_phase_t>(util::phase_t::none_k) == usearch_phase_none_k);
+    static_assert(static_cast<usearch_phase_t>(util::phase_t::copy_k) == usearch_phase_copy_k);
+    static_assert(static_cast<usearch_phase_t>(util::phase_t::build_k) == usearch_phase_build_k);
+    static_assert(static_cast<usearch_phase_t>(util::phase_t::partition_k) == usearch_phase_partition_k);
+    static_assert(static_cast<usearch_phase_t>(util::phase_t::scatter_k) == usearch_phase_scatter_k);
+    static_assert(static_cast<usearch_phase_t>(util::phase_t::health_k) == usearch_phase_health_k);
+    static_assert(static_cast<usearch_phase_t>(util::phase_t::heal_k) == usearch_phase_heal_k);
+    static_assert(static_cast<usearch_phase_t>(util::phase_t::hubs_k) == usearch_phase_hubs_k);
+    static_assert(static_cast<usearch_phase_t>(util::phase_t::gather_k) == usearch_phase_gather_k);
+    static_assert(static_cast<usearch_phase_t>(util::phase_t::restitch_k) == usearch_phase_restitch_k);
+    static_assert(static_cast<usearch_phase_t>(util::phase_t::write_k) == usearch_phase_write_k);
+    static_assert(static_cast<usearch_phase_t>(util::phase_t::done_k) == usearch_phase_done_k);
     return {static_cast<usearch_phase_t>(plan.phase()), plan.ordinal(), plan.completed(), plan.total()};
 }
 
@@ -2891,18 +2927,18 @@ template <typename executor_type_>
 struct plan_verbs {
 
     /** Runs the plan's phases until its round ends or @p ticks cancels. */
-    status_t (*run)(void* plan, executor_type_& executor, progress_ticks_t& ticks) noexcept;
+    util::status_t (*run)(void* plan, executor_type_& executor, progress_ticks_t& ticks) noexcept;
 
     /** Opens the next round, from the same root, once the last one ended. */
     void (*next_round)(void* plan) noexcept;
     usearch_phase_progress_t (*phase)(void const* plan) noexcept;
 
     /** What the plan did to the graph so far. */
-    refine_report_t (*running)(void const* plan) noexcept;
+    util::refine_report_t (*running)(void const* plan) noexcept;
 
     /** Closes the round a cancel stopped as a stop at that barrier would, and reports the whole
      *  plan; a plan still moving entries runs no round and reports zeros. */
-    expected<refine_report_t> (*finish)(void* plan, executor_type_& executor) noexcept;
+    util::expected<util::refine_report_t> (*finish)(void* plan, executor_type_& executor) noexcept;
     void (*free)(void* plan) noexcept;
 };
 
@@ -2923,12 +2959,13 @@ struct punned_plan {
  *  round answers success, since the round had ended.
  */
 template <typename executor_type_>
-expected<refine_report_t> drive_plan(punned_plan<executor_type_> plan, executor_type_& executor,
-                                     progress_ticks_t& ticks, usearch_phase_progress_t* phase) noexcept {
+util::expected<util::refine_report_t> drive_plan(punned_plan<executor_type_> plan, executor_type_& executor,
+                                                 progress_ticks_t& ticks, usearch_phase_progress_t* phase) noexcept {
     if (plan.verbs.phase(plan.plan).phase == usearch_phase_done_k) plan.verbs.next_round(plan.plan);
-    status_t ran = plan.verbs.run(plan.plan, executor, ticks);
+    util::status_t ran = plan.verbs.run(plan.plan, executor, ticks);
     usearch_phase_progress_t const reached = plan.verbs.phase(plan.plan);
-    if (ran == status_t::cancelled_k && reached.phase == usearch_phase_done_k) ran = status_t::success_k;
+    if (ran == util::status_code_t::cancelled_k && reached.phase == usearch_phase_done_k)
+        ran = util::status_code_t::success_k;
     if (phase) *phase = reached;
     return {plan.verbs.running(plan.plan), ran};
 }
@@ -2936,18 +2973,21 @@ expected<refine_report_t> drive_plan(punned_plan<executor_type_> plan, executor_
 /** Drives @p plan once through @ref drive_plan, then closes and frees it, so a cancel still closes
  *  its round and reports beside @c cancelled_k; the path every call naming no plan takes. */
 template <typename executor_type_>
-expected<refine_report_t> drive_plan_once(punned_plan<executor_type_> plan, executor_type_& executor,
-                                          progress_ticks_t& ticks, usearch_phase_progress_t* phase) noexcept {
-    expected<refine_report_t> const driven = drive_plan(plan, executor, ticks, phase);
-    expected<refine_report_t> const finished = succeeded(driven.status) || driven.status == status_t::cancelled_k
-                                                   ? plan.verbs.finish(plan.plan, executor)
-                                                   : driven;
+util::expected<util::refine_report_t> drive_plan_once(punned_plan<executor_type_> plan, executor_type_& executor,
+                                                      progress_ticks_t& ticks,
+                                                      usearch_phase_progress_t* phase) noexcept {
+    auto [report, status] = drive_plan(plan, executor, ticks, phase);
+    if (succeeded(status) || status == util::status_code_t::cancelled_k) {
+        auto const [finished, finish_status] = plan.verbs.finish(plan.plan, executor);
+        if (util::failed(finish_status)) status = finish_status;
+        report = finished;
+    }
     plan.verbs.free(plan.plan);
-    return {finished.value, failed(finished.status) ? finished.status : driven.status};
+    return {report, status};
 }
 
 /** The two operations a plan handle serves, each through its own table entries. */
-enum class plan_operation_t : u8_t { refine_k, reshard_k };
+enum class plan_operation_t : util::u8_t { refine_k, reshard_k };
 
 /** The entries of @p verbs serving plans of @p operation_. */
 template <plan_operation_t operation_, typename verbs_type_>
@@ -2976,7 +3016,7 @@ struct held_plan {
     usearch_executor_t opened_with = nullptr;
 
     /** Executor calls naming the plan that have not ended. */
-    u32_t named_calls = 0;
+    util::u32_t named_calls = 0;
 
     held_plan() noexcept = default;
     held_plan(held_plan const&) = delete;
@@ -3007,43 +3047,46 @@ bool accepts_plan(arguments_type_ const& arguments, usearch_outcome_t* outcome) 
 }
 
 /**
- *  @brief Runs one call of a long verb through the plan slot @p planned on @p opened, and answers
- *      the report beside how the call ended.
+ *  @brief Runs one call of a long verb through the plan slot @p planned, and answers the report
+ *      beside how the call ended.
  *
- *  @p opened is the slot's live engine plan or the one this call opened: a live one continues, a
- *  fresh one is adopted into a null slot, and a call naming no slot drives a one-shot plan. A
- *  failed @p opened answers its status, leaving the slot null. A plan in a slot stays live
- *  whatever the call answers, until its operation's finish frees it.
+ *  A live plan in the slot continues; otherwise @p open_plan opens one, which a null slot adopts
+ *  and a call naming no slot drives as a one-shot plan. A failed @p open_plan answers its status,
+ *  leaving the slot null. A plan in a slot stays live whatever the call answers, until its
+ *  operation's finish frees it.
  */
-template <typename handle_type_, typename executor_type_, typename tables_type_, typename index_handle_type_>
-expected<refine_report_t> drive_planned(handle_type_** planned, plan_verbs<executor_type_> const& verbs,
-                                        tables_type_ tables, index_handle_type_ const* index,
-                                        usearch_executor_t executor_handle, executor_type_& executor,
-                                        progress_ticks_t& ticks, usearch_phase_progress_t* phase,
-                                        expected<void*> opened) noexcept {
-    if (failed(opened.status)) return {{}, opened.status};
-    if (planned && *planned) return drive_plan({verbs, opened.value}, executor, ticks, phase);
-    if (!planned) return drive_plan_once({verbs, opened.value}, executor, ticks, phase);
+template <typename handle_type_, typename executor_type_, typename tables_type_, typename index_handle_type_,
+          typename open_plan_type_>
+util::expected<util::refine_report_t> drive_planned(handle_type_** planned, plan_verbs<executor_type_> const& verbs,
+                                                    tables_type_ tables, index_handle_type_ const* index,
+                                                    usearch_executor_t executor_handle, executor_type_& executor,
+                                                    progress_ticks_t& ticks, usearch_phase_progress_t* phase,
+                                                    open_plan_type_ const& open_plan) noexcept {
+    if (planned && *planned) return drive_plan({verbs, (*planned)->held.engine_plan}, executor, ticks, phase);
+    auto const [opened, open_status] = open_plan();
+    if (util::failed(open_status)) return {{}, open_status};
+    if (!planned) return drive_plan_once({verbs, opened}, executor, ticks, phase);
     handle_type_* const held = new (std::nothrow) handle_type_ {};
-    if (!held) return verbs.free(opened.value), expected<refine_report_t> {{}, status_t::bad_alloc_k};
+    if (!held)
+        return verbs.free(opened), util::expected<util::refine_report_t> {{}, util::status_code_t::out_of_memory_k};
     held->held.tables = tables;
-    held->held.engine_plan = opened.value;
+    held->held.engine_plan = opened;
     held->held.opened_on = index;
     held->held.opened_with = executor_handle;
     *planned = held;
-    return drive_plan({verbs, opened.value}, executor, ticks, phase);
+    return drive_plan({verbs, opened}, executor, ticks, phase);
 }
 
 /** Writes what a long verb's @p refined result counts into the outputs @p arguments name, and
  *  answers how the call ended: a stopped round's report stands beside the cancel. */
 template <typename arguments_type_>
-inline void publish_refined(arguments_type_ const& arguments, expected<refine_report_t> const& refined,
+inline void publish_refined(arguments_type_ const& arguments, util::expected<util::refine_report_t> const& refined,
                             usearch_outcome_t* outcome) noexcept {
     accumulate_stats(arguments.stats, refined.value);
-    if (failed(refined.status) && refined.status != status_t::cancelled_k)
+    if (util::failed(refined.status) && refined.status != util::status_code_t::cancelled_k)
         return propagate_error(refined.status, outcome), void();
     write_refine_report(arguments.report, refined.value);
-    if (failed(refined.status)) return propagate_error(refined.status, outcome), void();
+    if (util::failed(refined.status)) return propagate_error(refined.status, outcome), void();
     propagate_error(usearch_status_success_k, outcome, nullptr);
 }
 
@@ -3113,7 +3156,7 @@ void finish_planned(arguments_type_* arguments) noexcept {
                                        "The executor's kind must match the handle's residency"),
                        void();
             auto const [refined, status] = plan_verbs_of<operation_>(*verbs).finish(plan->held.engine_plan, *executor);
-            if (failed(status)) return propagate_error(status, outcome), void();
+            if (util::failed(status)) return propagate_error(status, outcome), void();
             write_refine_report(arguments->report, refined);
             propagate_error(usearch_status_success_k, outcome, nullptr);
         },

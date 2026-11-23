@@ -77,8 +77,8 @@ struct codec {
                 kit_type_::packed_shape(pack.data(), &points, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr));
             failed(read))
             return read;
-        if (pose.size() != points * 3 * sizeof(raw_t)) return status_t::config_mismatch_k;
-        if (pose.empty()) return status_t::success_k;
+        if (pose.size() != points * 3 * sizeof(raw_t)) return status_code_t::config_mismatch_k;
+        if (pose.empty()) return status_code_t::success_k;
         return status_of(kit_type_::unpack(pack.data(), reinterpret_cast<raw_t*>(pose.data()), nullptr));
     }
 
@@ -90,7 +90,7 @@ struct codec {
      */
     static status_t load_pack(bytes_view_t pose, bytes_span_t pack) noexcept {
         constexpr std::size_t point_bytes_k = 3 * sizeof(raw_t);
-        if (pose.size() % point_bytes_k) return status_t::malformed_k;
+        if (pose.size() % point_bytes_k) return status_code_t::malformed_k;
         return status_of(kit_type_::pack(reinterpret_cast<raw_t const*>(pose.data()), pose.size() / point_bytes_k,
                                          pack.data(), nullptr));
     }
@@ -105,8 +105,8 @@ struct codec {
     template <typename value_type_>
     status_t save(value_type_ const& value, bytes_span_t output) const noexcept {
         std::size_t const pose_bytes = storage_requirements(value);
-        if (output.size() < pose_bytes) return status_t::overflow_k;
-        if (value.empty()) return status_t::success_k;
+        if (output.size() < pose_bytes) return status_code_t::overflow_k;
+        if (value.empty()) return status_code_t::success_k;
         nk_size_t pack_bytes = 0;
         if (status_t const sized = status_of(kit_type_::pack_size(value.max_points(), &pack_bytes)); failed(sized))
             return sized;
@@ -125,7 +125,7 @@ struct codec {
         auto [packed, status] = value_type_::make(clouds, value.get_allocator(), kit_type_::pack_size, kit_type_::pack);
         if (nk::failed(status)) return status_of(status);
         value = std::move(packed);
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** What @ref view hands out for a stored shape. */

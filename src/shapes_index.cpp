@@ -15,14 +15,14 @@ struct usearch_shapes_index_handle_t {
     basic_handle<traits_t> basic;
 
     /** Executor calls naming the handle that have not ended, which its free waits out. */
-    u32_t named_calls = 0;
+    util::u32_t named_calls = 0;
 };
 
 struct usearch_shapes_cursor_handle_t {
     basic_cursor<usearch_shapes_index_handle_t> basic;
 
     /** Executor calls naming the cursor that have not ended, which its free waits out. */
-    u32_t named_calls = 0;
+    util::u32_t named_calls = 0;
 };
 
 struct usearch_shapes_refine_plan_handle_t {
