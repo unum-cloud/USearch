@@ -31,13 +31,14 @@ def main() raises:
 The receiver chooses where a verb runs and how it completes, and the verb stays the same: a verb
 on the index runs on the calling thread, `index.on(executor)` blocks on that executor, and
 `index.deferred(executor)` submits the call there and answers a `Deferred` at once, whose `wait`
-blocks until it is final. `Executor(library)` owns nothing and runs each call on the caller's own
+blocks until it is final and whose `await` yields to the runtime until then. `Executor(library)` owns nothing and runs each call on the caller's own
 thread; the spawning constructors fix a kind that must match the residency of every handle they
 drive.
 
 Every output whose length scales with the call lands in an `Arena` the verb takes as its last
 required argument, and is read in place. `Arena(library)` holds host pages for calls on the calling
-thread, and `Arena(executor)` places its memory where that executor computes. Every receiver takes
+thread, and `Arena(executor)` places its memory where that executor computes, borrowing the executor
+until it is freed. Every receiver takes
 it the same way, deferred ones too, and the result borrows it in turn; each call rewinds and refills
 it, so a steady loop allocates once. A result reads its arena in place until the arena's next call,
 and `Arena.describe` says whether that memory is a device's, which the host cannot read.
@@ -48,7 +49,8 @@ refusal is never folded into an `Optional` a caller has to interpret.
 
 A closure capturing anything cannot be handed to C, so every callback is a capture-free function
 with its state crossing beside it as an address: the `ValueLookup` of `attend`, and the handlers
-`PredicateArguments.of` and `ProgressArguments.of` compile from a comptime Mojo function. A kernel
+`PredicateArguments.each`, `PredicateArguments.batch` and `ProgressArguments.of` compile from a
+comptime Mojo function, each reading its state through a `Pointer`. A kernel
 compiled in C installs unchanged through the same slots.
 
 This package root re-exports every public symbol from the modules that mirror the C headers, so

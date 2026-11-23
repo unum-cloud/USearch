@@ -20,6 +20,7 @@ from _typeshed import structseq
 
 __all__: list[str] = [
     "Arena",
+    "Batch",
     "CPUClass",
     "CancelledError",
     "CapacityOverflowError",
@@ -61,6 +62,7 @@ __all__: list[str] = [
     "On",
     "OutOfMemoryError",
     "Phase",
+    "PredicateCost",
     "ReadOnlyError",
     "RefineReport",
     "RefineVerdict",
@@ -146,6 +148,7 @@ type _Tensor = Buffer | _ArrowArrayExporter | _ArrowStreamExporter
 type _KeyLike = Key | int | str | uuid.UUID | Buffer
 type _PathLike = str | bytes | os.PathLike[str] | os.PathLike[bytes]
 type _Progress = Callable[[int, int], bool | None]
+type _Predicate = Callable[[Key], bool] | Batch
 
 class Status(IntEnum):
     """What a call finished with: `Error.status` and `Deferred.status`."""
@@ -286,6 +289,15 @@ class Phase(IntEnum):
     """A round on NVMe rewriting each tile of links from what its restitch changed."""
     DONE = 11
     """The plan ended its round, and nothing more is pending."""
+
+class PredicateCost(IntEnum):
+    """How costly one predicate call is, which decides how many keys each call carries, valued as
+    `usearch_predicate_cost_t`."""
+
+    CHEAP = 0
+    """Asked as candidates arrive, a few keys a call, with nothing buffered."""
+    EXPENSIVE = 1
+    """Asked once per traversal round or scan run about every candidate it gathered."""
 
 class CPUClass(IntEnum):
     """The CPU families dispatch picks from; a placement may cap dispatch at one."""
@@ -446,6 +458,32 @@ class Key:
     def __gt__(self, other: Key | int | uuid.UUID, /) -> bool: ...
     def __ge__(self, other: Key | int | uuid.UUID, /) -> bool: ...
     def __reduce__(self) -> tuple[type[Key], tuple[builtins.bytes]]: ...
+
+@final
+class Batch:
+    """A `predicate=` answering many keys per call, for handlers that pay per call.
+
+    `handler(keys, admissions)` reads a `(count, 16)` memoryview of key bytes and writes 1 into a
+    `(count,)` memoryview of admissions for every key it admits; both are valid only for the call.
+
+    Example:
+      >>> def even(keys, admissions):
+      ...     for row in range(len(admissions)):
+      ...         admissions[row] = keys[row, 15] % 2 == 0
+      >>> index.search(queries, 10, arena, predicate=usearch.Batch(even))
+    """
+
+    def __init__(
+        self,
+        handler: Callable[[memoryview, memoryview], object],
+        /,
+        *,
+        cost: PredicateCost = PredicateCost.EXPENSIVE,
+    ) -> None: ...
+    @property
+    def handler(self) -> Callable[[memoryview, memoryview], object]: ...
+    @property
+    def cost(self) -> PredicateCost: ...
 
 @final
 class Executor:
@@ -675,7 +713,8 @@ class Deferred[AnswerT]:
         ...
 
     def __await__(self) -> Generator[Any, None, AnswerT]:
-        """Polls `status` between sleeps that double from 1 µs to 1 ms, suspending the task meanwhile."""
+        """Polls `status`, re-polling once per turn of the running loop through `loop.call_soon`
+        while it is deferred, so the task suspends and no thread blocks."""
         ...
 
     def __repr__(self) -> str: ...
@@ -928,7 +967,7 @@ class On[IndexT]:
         expansion_factor: int = 0,
         traversal: Traversal = ...,
         dtype: Scalar | None = None,
-        predicate: Callable[[Key], bool] | None = None,
+        predicate: _Predicate | None = None,
         progress: _Progress | None = None,
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
@@ -947,6 +986,7 @@ class On[IndexT]:
           predicate (callable, optional): Admits a Key when it returns truthy. Non-matching
             entries still route the traversal, so recall survives low selectivity. The
             callback re-enters Python, so it runs under the GIL and serializes the walk.
+            A `Batch` answers many keys per call instead.
           progress (callable, optional): Called with (completed, total) queries; returning
             False stops the batch and raises `CancelledError`, None carries on.
           progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
@@ -978,7 +1018,7 @@ class On[IndexT]:
         *,
         expansion_factor: int = 0,
         traversal: Traversal = ...,
-        predicate: Callable[[Key], bool] | None = None,
+        predicate: _Predicate | None = None,
         progress: _Progress | None = None,
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
@@ -994,7 +1034,7 @@ class On[IndexT]:
         expansion_factor: int = 0,
         traversal: Traversal = ...,
         dtype: Scalar | None = None,
-        predicate: Callable[[Key], bool] | None = None,
+        predicate: _Predicate | None = None,
         progress: _Progress | None = None,
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
@@ -1012,7 +1052,7 @@ class On[IndexT]:
         seconds: float = 0.0,
         expansion_factor: int = 0,
         traversal: Traversal = ...,
-        predicate: Callable[[Key], bool] | None = None,
+        predicate: _Predicate | None = None,
         progress: _Progress | None = None,
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
@@ -1181,7 +1221,7 @@ class On[IndexT]:
         expansion_factor: int = 0,
         traversal: Traversal = ...,
         dtype: Scalar | None = None,
-        predicate: Callable[[Key], bool] | None = None,
+        predicate: _Predicate | None = None,
         progress: _Progress | None = None,
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
@@ -1209,6 +1249,7 @@ class On[IndexT]:
           dtype (Scalar, optional): Names the query scalar type when the buffer cannot.
           predicate (callable, optional): Admits a Key when it returns truthy, asked before any
             of its vectors are scored, so a rejected document never scores.
+            A `Batch` answers many keys per call instead.
           progress (callable, optional): Called with (completed, total) queries; returning
             False stops the batch and raises `CancelledError`, None carries on.
           progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
@@ -1508,7 +1549,7 @@ class On[IndexT]:
         relation: GeospatialRelation = ...,
         seconds: float = 0.0,
         traversal: Traversal = ...,
-        predicate: Callable[[Key], bool] | None = None,
+        predicate: _Predicate | None = None,
         progress: _Progress | None = None,
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
@@ -1762,7 +1803,7 @@ class DeferredOn[IndexT]:
         expansion_factor: int = 0,
         traversal: Traversal = ...,
         dtype: Scalar | None = None,
-        predicate: Callable[[Key], bool] | None = None,
+        predicate: _Predicate | None = None,
         progress: _Progress | None = None,
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
@@ -1781,6 +1822,7 @@ class DeferredOn[IndexT]:
           predicate (callable, optional): Admits a Key when it returns truthy. Non-matching
             entries still route the traversal, so recall survives low selectivity. The
             callback re-enters Python, so it runs under the GIL and serializes the walk.
+            A `Batch` answers many keys per call instead.
           progress (callable, optional): Called with (completed, total) queries; returning
             False stops the batch and raises `CancelledError`, None carries on.
           progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
@@ -1812,7 +1854,7 @@ class DeferredOn[IndexT]:
         *,
         expansion_factor: int = 0,
         traversal: Traversal = ...,
-        predicate: Callable[[Key], bool] | None = None,
+        predicate: _Predicate | None = None,
         progress: _Progress | None = None,
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
@@ -1828,7 +1870,7 @@ class DeferredOn[IndexT]:
         expansion_factor: int = 0,
         traversal: Traversal = ...,
         dtype: Scalar | None = None,
-        predicate: Callable[[Key], bool] | None = None,
+        predicate: _Predicate | None = None,
         progress: _Progress | None = None,
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
@@ -1846,7 +1888,7 @@ class DeferredOn[IndexT]:
         seconds: float = 0.0,
         expansion_factor: int = 0,
         traversal: Traversal = ...,
-        predicate: Callable[[Key], bool] | None = None,
+        predicate: _Predicate | None = None,
         progress: _Progress | None = None,
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
@@ -2019,7 +2061,7 @@ class DeferredOn[IndexT]:
         expansion_factor: int = 0,
         traversal: Traversal = ...,
         dtype: Scalar | None = None,
-        predicate: Callable[[Key], bool] | None = None,
+        predicate: _Predicate | None = None,
         progress: _Progress | None = None,
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
@@ -2047,6 +2089,7 @@ class DeferredOn[IndexT]:
           dtype (Scalar, optional): Names the query scalar type when the buffer cannot.
           predicate (callable, optional): Admits a Key when it returns truthy, asked before any
             of its vectors are scored, so a rejected document never scores.
+            A `Batch` answers many keys per call instead.
           progress (callable, optional): Called with (completed, total) queries; returning
             False stops the batch and raises `CancelledError`, None carries on.
           progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
@@ -2336,7 +2379,7 @@ class DeferredOn[IndexT]:
         relation: GeospatialRelation = ...,
         seconds: float = 0.0,
         traversal: Traversal = ...,
-        predicate: Callable[[Key], bool] | None = None,
+        predicate: _Predicate | None = None,
         progress: _Progress | None = None,
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
@@ -2889,7 +2932,7 @@ class DenseIndex:
         expansion_factor: int = 0,
         traversal: Traversal = ...,
         dtype: Scalar | None = None,
-        predicate: Callable[[Key], bool] | None = None,
+        predicate: _Predicate | None = None,
         progress: _Progress | None = None,
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
@@ -2954,7 +2997,7 @@ class DenseIndex:
         expansion_factor: int = 0,
         traversal: Traversal = ...,
         dtype: Scalar | None = None,
-        predicate: Callable[[Key], bool] | None = None,
+        predicate: _Predicate | None = None,
         progress: _Progress | None = None,
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
@@ -3346,7 +3389,7 @@ class SequenceIndex:
         *,
         expansion_factor: int = 0,
         traversal: Traversal = ...,
-        predicate: Callable[[Key], bool] | None = None,
+        predicate: _Predicate | None = None,
         progress: _Progress | None = None,
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
@@ -3660,7 +3703,7 @@ class ShapesIndex:
         expansion_factor: int = 0,
         traversal: Traversal = ...,
         dtype: Scalar | None = None,
-        predicate: Callable[[Key], bool] | None = None,
+        predicate: _Predicate | None = None,
         progress: _Progress | None = None,
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
@@ -3961,7 +4004,7 @@ class GeospatialIndex:
         seconds: float = 0.0,
         expansion_factor: int = 0,
         traversal: Traversal = ...,
-        predicate: Callable[[Key], bool] | None = None,
+        predicate: _Predicate | None = None,
         progress: _Progress | None = None,
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
@@ -3979,7 +4022,7 @@ class GeospatialIndex:
         relation: GeospatialRelation = ...,
         seconds: float = 0.0,
         traversal: Traversal = ...,
-        predicate: Callable[[Key], bool] | None = None,
+        predicate: _Predicate | None = None,
         progress: _Progress | None = None,
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,

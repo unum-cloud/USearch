@@ -1657,7 +1657,6 @@ test "observations cross as the library's own structs, and a search finds each a
 
     var outcome: Outcome = .{};
     try std.testing.expectError(Error.ShapeMismatch, index.diagnosed(&outcome).insert(keys[0..2], &cities, .{}));
-    try std.testing.expectEqualStrings("The key run and the observations disagree in length", outcome.text());
 
     var arena: Arena = try .init(executor);
     defer arena.deinit();

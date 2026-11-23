@@ -30,6 +30,7 @@
 
 mod dense_index;
 mod geospatial_index;
+mod sealed;
 mod sequence_index;
 mod shapes_index;
 #[cfg(test)]
@@ -38,36 +39,47 @@ mod types;
 
 // The C mirror items are public within their modules, so only these names leave the crate.
 pub use dense_index::{
-    DenseAttendConfig, DenseBatch, DenseCursor, DenseIndex, DenseIndexDescription, DenseInsertConfig,
-    DenseLoadRamBufferConfig, DenseLoadRamConfig, DenseLoadVramBufferConfig, DenseLoadVramConfig, DenseMaxsimConfig,
-    DenseMetadata, DenseMetric, DenseMultiplyConfig, DenseOptions, DenseProducts, DenseReachability, DenseRefineConfig,
-    DenseRefinePlan, DenseReshardConfig, DenseReshardPlan, DenseSampleConfig, DenseSaveBufferConfig, DenseSaveConfig,
-    DenseSearchConfig, DenseSearchStream, DenseSearchStreamInitConfig, DenseSoftmaxState, DenseTraversalStats,
-    DenseVectors, DenseVerbs, DenseViewNvmeConfig, Monolith, RefineReport, RefineVerdict, Sample, ValueLookup,
+    DenseAttend, DenseAttendConfig, DenseBatch, DenseCount, DenseCursor, DenseDescribe, DenseGet, DenseHealth,
+    DenseIndex, DenseIndexDescription, DenseInsert, DenseInsertConfig, DenseLoadRamBufferConfig, DenseLoadRamConfig,
+    DenseLoadVramBufferConfig, DenseLoadVramConfig, DenseMaxsim, DenseMaxsimConfig, DenseMetadata, DenseMetric,
+    DenseMultiply, DenseMultiplyConfig, DenseOptions, DenseProducts, DenseReachability, DenseRefine, DenseRefineConfig,
+    DenseRefinePlan, DenseRefinePlanFinish, DenseReserve, DenseReshard, DenseReshardConfig, DenseReshardPlan,
+    DenseReshardPlanFinish, DenseSample, DenseSampleConfig, DenseSave, DenseSaveBuffer, DenseSaveBufferConfig,
+    DenseSaveConfig, DenseSearch, DenseSearchConfig, DenseSearchStream, DenseSearchStreamInitConfig, DenseSoftmaxState,
+    DenseTraversalStats, DenseVectors, DenseVerbs, DenseViewNvmeConfig, Monolith, RefineReport, RefineVerdict, Sample,
+    ValueLookup,
 };
 pub use geospatial_index::{
-    GeospatialCursor, GeospatialIndex, GeospatialIndexDescription, GeospatialInsertConfig, GeospatialKeyStats,
+    GeospatialCount, GeospatialCursor, GeospatialDescribe, GeospatialGet, GeospatialHealth, GeospatialIndex,
+    GeospatialIndexDescription, GeospatialInsert, GeospatialInsertConfig, GeospatialKeyStats,
     GeospatialLoadRamBufferConfig, GeospatialLoadRamConfig, GeospatialLoadVramBufferConfig, GeospatialLoadVramConfig,
     GeospatialMatches, GeospatialMetadata, GeospatialObservation, GeospatialObservations, GeospatialOptions,
-    GeospatialRefineConfig, GeospatialRefinePlan, GeospatialRelation, GeospatialReshardConfig, GeospatialReshardPlan,
-    GeospatialSearchConfig, GeospatialTerrain, GeospatialTerrainFill, GeospatialVerbs, GeospatialViewNvmeConfig,
+    GeospatialRefine, GeospatialRefineConfig, GeospatialRefinePlan, GeospatialRefinePlanFinish, GeospatialRelation,
+    GeospatialReserve, GeospatialReshard, GeospatialReshardConfig, GeospatialReshardPlan, GeospatialReshardPlanFinish,
+    GeospatialSample, GeospatialSave, GeospatialSaveBuffer, GeospatialSearch, GeospatialSearchConfig,
+    GeospatialTerrain, GeospatialTerrainFill, GeospatialVerbs, GeospatialViewNvmeConfig, GeospatialWithin,
     GeospatialWithinConfig,
 };
 pub use sequence_index::{
-    SequenceCursor, SequenceIndex, SequenceIndexDescription, SequenceInsertConfig, SequenceKeyStats,
-    SequenceLoadRamBufferConfig, SequenceLoadRamConfig, SequenceLoadVramBufferConfig, SequenceLoadVramConfig,
-    SequenceMetadata, SequenceMetric, SequenceOptions, SequenceRefineConfig, SequenceRefinePlan, SequenceReshardConfig,
-    SequenceReshardPlan, SequenceSearchConfig, SequenceVerbs, SequenceViewNvmeConfig, SequenceWeights,
+    SequenceCount, SequenceCursor, SequenceDescribe, SequenceGet, SequenceHealth, SequenceIndex,
+    SequenceIndexDescription, SequenceInsert, SequenceInsertConfig, SequenceKeyStats, SequenceLoadRamBufferConfig,
+    SequenceLoadRamConfig, SequenceLoadVramBufferConfig, SequenceLoadVramConfig, SequenceMetadata, SequenceMetric,
+    SequenceOptions, SequenceRefine, SequenceRefineConfig, SequenceRefinePlan, SequenceRefinePlanFinish,
+    SequenceReserve, SequenceReshard, SequenceReshardConfig, SequenceReshardPlan, SequenceReshardPlanFinish,
+    SequenceSample, SequenceSave, SequenceSaveBuffer, SequenceSearch, SequenceSearchConfig, SequenceVerbs,
+    SequenceViewNvmeConfig, SequenceWeights,
 };
 pub use shapes_index::{
-    ShapesCursor, ShapesIndex, ShapesIndexDescription, ShapesInsertConfig, ShapesKeyStats, ShapesLoadRamBufferConfig,
-    ShapesLoadRamConfig, ShapesLoadVramBufferConfig, ShapesLoadVramConfig, ShapesMetadata, ShapesMetric, ShapesOptions,
-    ShapesRefineConfig, ShapesRefinePlan, ShapesReshardConfig, ShapesReshardPlan, ShapesSearchConfig, ShapesVerbs,
-    ShapesViewNvmeConfig,
+    ShapesCount, ShapesCursor, ShapesDescribe, ShapesGet, ShapesHealth, ShapesIndex, ShapesIndexDescription,
+    ShapesInsert, ShapesInsertConfig, ShapesKeyStats, ShapesLoadRamBufferConfig, ShapesLoadRamConfig,
+    ShapesLoadVramBufferConfig, ShapesLoadVramConfig, ShapesMetadata, ShapesMetric, ShapesOptions, ShapesRefine,
+    ShapesRefineConfig, ShapesRefinePlan, ShapesRefinePlanFinish, ShapesReserve, ShapesReshard, ShapesReshardConfig,
+    ShapesReshardPlan, ShapesReshardPlanFinish, ShapesSample, ShapesSave, ShapesSaveBuffer, ShapesSearch,
+    ShapesSearchConfig, ShapesVerbs, ShapesViewNvmeConfig,
 };
 pub use types::{
-    Arena, ArenaDescription, ArrowArray, ArrowColumn, ArrowDeviceArray, ArrowExport, ArrowRows, ArrowSchema, Blocking,
-    CPUClass, Deferred, Deferring, Distance, Element, Error, Executor, GPUClass, Key, Matches, Mood, On, Phase,
-    PhaseProgress, Predicate, ProgressCallback, QueryMatches, Residency, Result, Scalar, Status, Tape, TapeEntries,
-    TapeOffset, Traversal, Wait, capabilities_available, capabilities_compiled, keys_from_arrow, rows, version,
+    Admission, Arena, ArenaDescription, ArrowArray, ArrowColumn, ArrowDeviceArray, ArrowExport, ArrowRows, ArrowSchema,
+    Blocking, CPUClass, Deferred, Deferring, Distance, Element, Error, Executor, GPUClass, Key, Matches, Mood, On,
+    Phase, PhaseProgress, Predicate, PredicateCost, Progress, QueryMatches, Residency, Result, Scalar, Status, Tape,
+    TapeEntries, TapeOffset, Traversal, capabilities_available, capabilities_compiled, keys_from_arrow, rows, version,
 };

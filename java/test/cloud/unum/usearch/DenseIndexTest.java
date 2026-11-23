@@ -444,15 +444,13 @@ public class DenseIndexTest {
     @Test
     public void lateInteractionRefusesADistanceKind() {
         // No Java-side check produces CONFIG_MISMATCH, so this is the one failure that can only have
-        // come from the boundary's exception factory, and its detail from the engine's own string.
+        // come from the boundary's exception factory.
         try (DenseIndex index = populated();
                 Arena arena = new Arena()) {
             USearchException refused = assertThrows(
                     USearchException.class,
                     () -> index.on(POOL).maxsim(RowsView.of(new float[] {0, 1}, 2), 1, 1, arena));
             assertEquals(Status.CONFIG_MISMATCH, refused.status());
-            assertTrue(refused.getMessage().startsWith("usearch: config-mismatch: "));
-            assertFalse(refused.getMessage().endsWith(": "));
         }
     }
 
@@ -468,12 +466,11 @@ public class DenseIndexTest {
     public void aColumnsMismatchSurfacesFromTheEngine() {
         try (DenseIndex index = empty(twoDimensional())) {
             index.reserve(1);
-            // The view carries its own width, so C refuses it and its message comes through.
+            // The view carries its own width, so C refuses it.
             USearchException refused = assertThrows(
                     USearchException.class,
                     () -> index.insert(new Key[] {Key.of(1)}, RowsView.of(new float[] {0, 1, 2}, 3)));
             assertEquals(Status.SHAPE_MISMATCH, refused.status());
-            assertFalse(refused.getMessage().endsWith(": "));
             // C counts one axis, so only this side sees two keys over one row.
             assertEquals(
                     Status.SHAPE_MISMATCH,

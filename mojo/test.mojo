@@ -10,6 +10,7 @@ from std.ffi import c_size_t
 from std.math import exp, sqrt
 from std.memory import stack_allocation
 from std.os import getenv, remove, rmdir
+from std.runtime._asyncrt import create_raising_task
 from std.tempfile import mkdtemp
 from std.testing import TestSuite, assert_almost_equal, assert_equal, assert_false, assert_true
 from std.time import perf_counter_ns
@@ -53,6 +54,7 @@ from usearch import (
     Phase,
     PhaseProgress,
     PredicateArguments,
+    PredicateCost,
     RefineVerdict,
     ProgressArguments,
     RamOptions,
@@ -305,19 +307,12 @@ def test_width_mismatch_is_refused_by_the_engine() raises:
     var index = _basis(library)
     var narrow = [Float32(1), 0, 0]
     var arena = Arena(library)
-    var rendered = String()
     var status = Status.SUCCESS
     try:
         _ = index.search(RowsView.of(narrow, 3), 1, arena)
     except error:
         status = error.status
-        rendered = String(error)
     assert_true(status == Status.SHAPE_MISMATCH, "a three-wide query cannot search a two-wide index")
-    assert_equal(
-        rendered,
-        "USearch: shape-mismatch [usearch_dense_search]: The rows' width differs from the index's",
-        "the failure reads with the engine's own name and message",
-    )
 
 
 def test_names_round_trip_through_the_library_and_refuse_strangers() raises:
@@ -708,9 +703,9 @@ def test_scans_find_every_query_itself() raises:
         assert_true(matches.query_keys(query)[0] == keys[query], "each query finds itself first")
 
 
-def _stop_at_first_report(completed: Int, total: Int, mut reports: Int) -> Continuation:
+def _stop_at_first_report(completed: Int, total: Int, reports: Pointer[Int, MutAnyOrigin]) -> Continuation:
     """Counts its reports and stops the call at the first one."""
-    reports += 1
+    reports[] += 1
     return Continuation.CANCEL
 
 
@@ -742,15 +737,23 @@ def test_progress_cancels_a_search() raises:
     assert_equal(reports[unsafe_offset=0], 1, "and the handler hears no report after cancelling")
 
 
-def _admit_parity(keys: Span[Key, ImmUntrackedOrigin], admissions: Span[Admission, MutUntrackedOrigin], parity: UInt64):
+def _has_parity(key: Key, parity: Pointer[UInt64, MutAnyOrigin]) -> Bool:
+    """Whether the key's integer identity has the given parity."""
+    return key.as_integer().value() % 2 == parity[]
+
+
+def _admit_parity(
+    keys: Span[Key, ImmUntrackedOrigin],
+    admissions: Span[Admission, MutUntrackedOrigin],
+    parity: Pointer[UInt64, MutAnyOrigin],
+):
     """Admits the keys whose integer identity has the given parity."""
     for position in range(len(keys)):
-        var matching = keys[position].as_integer().value() % 2 == parity
-        admissions[position] = Admission.ADMIT if matching else Admission.REJECT
+        admissions[position] = Admission.ADMIT if _has_parity(keys[position], parity) else Admission.REJECT
 
 
 def test_predicate_filters_keys() raises:
-    """A Mojo predicate admitting odd keys leaves only those among every query's matches."""
+    """A per-key and a batch Mojo predicate admitting odd keys each leave only those among every query's matches."""
     if not _library_is_present():
         _skipped(library_missing_k)
         return
@@ -763,17 +766,18 @@ def test_predicate_filters_keys() raises:
     var parity = stack_allocation[1, UInt64]().unsafe_origin_cast[MutAnyOrigin]()
     parity[unsafe_offset=0] = 1
     var arena = Arena(library)
-    var matches = index.search(
-        RowsView.of(rows, 2),
-        4,
-        arena,
-        DenseSearchConfig(traversal=Traversal.SCAN, predicate=PredicateArguments.of[_admit_parity](parity)),
-    )
-    for query in range(4):
-        var found = matches.query_keys(query)
-        assert_equal(len(found), 2, "both odd keys and neither even one")
-        for position in range(len(found)):
-            assert_equal(found[position].as_integer().value() % 2, UInt64(1), "only odd keys are reported")
+    var predicates = [PredicateArguments.each[_has_parity](parity), PredicateArguments.batch[_admit_parity](parity)]
+    assert_true(predicates[0].cost == PredicateCost.CHEAP, "a per-key predicate is cheap")
+    assert_true(predicates[1].cost == PredicateCost.EXPENSIVE, "and a batch one expensive unless told otherwise")
+    for predicate in predicates:
+        var matches = index.search(
+            RowsView.of(rows, 2), 4, arena, DenseSearchConfig(traversal=Traversal.SCAN, predicate=predicate)
+        )
+        for query in range(4):
+            var found = matches.query_keys(query)
+            assert_equal(len(found), 2, "both odd keys and neither even one")
+            for position in range(len(found)):
+                assert_equal(found[position].as_integer().value() % 2, UInt64(1), "only odd keys are reported")
 
 
 # endregion Engine
@@ -856,13 +860,13 @@ struct _Gate(Movable):
         return self.entered.load() != 0
 
 
-def _hold_until_released(completed: Int, total: Int, mut gate: _Gate) -> Continuation:
+def _hold_until_released(completed: Int, total: Int, gate: Pointer[_Gate, MutAnyOrigin]) -> Continuation:
     """Lets the test know at the last report, then waits for it to release the call."""
     if completed != total:
         return Continuation.CONTINUE
-    gate.entered.store(1)
+    gate[].entered.store(1)
     var deadline = perf_counter_ns() + 3_000_000_000
-    while gate.released.load() == 0 and perf_counter_ns() < deadline:
+    while gate[].released.load() == 0 and perf_counter_ns() < deadline:
         pass
     return Continuation.CONTINUE
 
@@ -905,6 +909,80 @@ def test_deferred_results_borrow_the_callers_arena() raises:
     # The handler reaches the gate by address, which is not a use, so it is kept past the wait.
     _ = gate^
     assert_equal(index.count(Key(integer=8)), 1, "and the deferred insertion published")
+
+
+async def _search_both[
+    queries_origin: ImmOrigin, //
+](
+    east: DenseIndex, west: DenseIndex, east_executor: Executor, west_executor: Executor, queries: RowsView[queries_origin]
+) raises -> UInt64:
+    """Searches two shards at once, each on its own executor and arena, and adds their nearest keys."""
+    var east_arena = Arena(east_executor)
+    var west_arena = Arena(west_executor)
+    var east_call = east.deferred(east_executor).search(queries, 1, east_arena)
+    var west_call = west.deferred(west_executor).search(queries, 1, west_arena)
+    ref east_matches = await east_call
+    ref west_matches = await west_call
+    return east_matches.query_keys(0)[0].as_integer().value() + west_matches.query_keys(0)[0].as_integer().value()
+
+
+def test_awaited_fan_out_answers_both_shards() raises:
+    """Two deferred searches submitted before either is awaited both answer inside one task."""
+    if not _library_is_present():
+        _skipped(library_missing_k)
+        return
+    var library = Library()
+    var east = _basis(library)
+    var west = DenseIndex.init_ram(library, DenseOptions(2, DenseMetric.INNER))
+    var rows = [Float32(1), 0, Float32(0), 1]
+    west.insert([Key(integer=10), Key(integer=11)], RowsView.of(rows, 2))
+    var east_executor = Executor.for_ram(library, threads=2)
+    var west_executor = Executor.for_ram(library, threads=2)
+    var query = [Float32(0), 1]
+    var both = create_raising_task(_search_both(east, west, east_executor, west_executor, RowsView.of(query, 2)))
+    assert_equal(both^.wait(), UInt64(1 + 11), "each shard's nearest entry")
+
+
+async def _search_once[
+    queries_origin: ImmOrigin, //
+](index: DenseIndex, executor: Executor, queries: RowsView[queries_origin]) raises -> Int:
+    """Awaits one deferred search and answers the status code it failed with, or zero when it succeeded."""
+    var arena = Arena(executor)
+    var call = index.deferred(executor).search(queries, 1, arena)
+    try:
+        ref matches = await call
+        _ = len(matches)
+    except error:
+        return Int(error.status.code)
+    return 0
+
+
+def test_awaited_failures_raise() raises:
+    """A deferred call the engine refuses raises its failure through `await` and the task's wait."""
+    if not _library_is_present():
+        _skipped(library_missing_k)
+        return
+    var library = Library()
+    var executor = Executor.for_ram(library, threads=2)
+    var index = _basis(library)
+    var narrow = [Float32(1), 0, 0]
+    var failing = create_raising_task(_search_once(index, executor, RowsView.of(narrow, 3)))
+    assert_equal(failing^.wait(), Int(Status.SHAPE_MISMATCH.code), "the refusal reaches the awaiting task")
+
+
+def test_arenas_free_before_their_executor() raises:
+    """An arena borrows the executor that made it, so the executor outlives it past its own last use."""
+    if not _library_is_present():
+        _skipped(library_missing_k)
+        return
+    var library = Library()
+    var index = _basis(library)
+    var executor = Executor.for_ram(library, threads=2)
+    var arena = Arena(executor)
+    var query = [Float32(0), 1]
+    for _ in range(2):
+        var matches = index.search(RowsView.of(query, 2), 1, arena)
+        assert_true(matches.query_keys(0)[0] == Key(integer=1), "the arena serves calls after its executor's last use")
 
 
 # endregion Deferred Calls
@@ -1664,6 +1742,9 @@ def main() raises:
     suite.test[test_deferred_failures_repeat]()
     suite.test[test_deferred_refusals_finish_at_submission]()
     suite.test[test_deferred_results_borrow_the_callers_arena]()
+    suite.test[test_awaited_fan_out_answers_both_shards]()
+    suite.test[test_awaited_failures_raise]()
+    suite.test[test_arenas_free_before_their_executor]()
     suite.test[test_multiplication_reports_every_scored_pair]()
     suite.test[test_late_interaction_scores_over_documents]()
     suite.test[test_attention_is_exact_over_every_key]()

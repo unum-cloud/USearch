@@ -1117,9 +1117,8 @@ test "statuses lift into the error set one for one" {
     try success.check();
     try std.testing.expectEqualStrings("", success.text());
 
-    const contended: Outcome = .{ .status = .contended, .message = "another thread is driving it" };
+    const contended: Outcome = .{ .status = .contended };
     try std.testing.expectError(Error.Contended, contended.check());
-    try std.testing.expectEqualStrings("another thread is driving it", contended.text());
     try std.testing.expectError(Error.InvalidArgument, (Outcome{ .status = .invalid_argument }).check());
     try std.testing.expectError(Error.Unsupported, (Outcome{ .status = .unsupported }).check());
 

@@ -558,10 +558,11 @@ The relation is a field of each call's config: `.near` widens the radius by both
 A terrain borrows its heights for the handle's lifetime or fills windows of them on demand through `GeospatialTerrainFill.of`, a trampoline generated per call site that runs on the executor's threads; no checkpoint carries it, so every load and view names it again.
 `get` returns a key's observations within the stored rounding.
 
-## What This Binding Does Not Expose
+## Left Unbound
 
 - The `hints` of a dense or shape search, which the C argument structures carry and this module leaves null.
 - An NVMe `load`, search streams, and the sparse verbs, for the sequence, shape and geospatial indexes, since the C library declares none for them.
+- The Arrow converters of `c/usearch/arrow.h`, which view an Arrow column as an input and export an arena's output as one.
 - The numeric `usearch_version` triple; `usearch.version()` answers the library's version string instead.
 
 ## Design

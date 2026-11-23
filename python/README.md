@@ -64,7 +64,16 @@ async def nearest(pool, arena):
     return await call  # or, outside a coroutine: call.wait()
 ```
 
-`await` polls the status between sleeps that double from 1 µs to 1 ms, so the coroutine suspends and no thread blocks.
+`await` polls the status and, while the call is deferred, re-polls on the next turn of the running loop through `loop.call_soon`, so the coroutine suspends, nothing sleeps and no thread blocks.
+Two calls on two executors run together, and `asyncio.gather` awaits both:
+
+```python
+async def fan_out(left, left_pool, right, right_pool):
+    near_left = left.deferred(left_pool).search(queries, 10, usearch.Arena(left_pool))
+    near_right = right.deferred(right_pool).search(queries, 10, usearch.Arena(right_pool))
+    return await asyncio.gather(near_left, near_right)  # both submitted before either is awaited
+```
+
 A `Deferred` holds its outcome, its arena and every input buffer the library reads until it is waited on or dropped, and dropping an unfinished one waits for its call.
 The full rules live in the [C README](../c/README.md#receivers--deferred-calls).
 
@@ -215,12 +224,23 @@ The breadth of the candidates is a per-call setting, so a recall sweep runs agai
 
 ### Filtered Search
 
-A predicate admits keys one at a time, while non-matching entries still route the traversal, so recall does not collapse at low selectivity.
+A predicate admits keys while non-matching entries still route the traversal, so recall does not collapse at low selectivity.
 It re-enters Python from the library's threads, so it runs under the GIL and serializes the walk.
+A plain callable is asked about one `Key` at a time and is cheap, while `usearch.Batch(handler)` is asked once per traversal round about every candidate the round gathered, for handlers that pay per call:
 
 ```python
 index.on(pool).search(queries, 10, arena, predicate=lambda key: int(key) % 2 == 0)
+
+
+def even(keys, admissions):  # a (count, 16) view of key bytes, and a (count,) view to write 1 into
+    np.asarray(admissions)[:] = keys_to_integers(keys) % 2 == 0
+
+
+index.on(pool).search(queries, 10, arena, predicate=usearch.Batch(even))
+index.on(pool).search(queries, 10, arena, predicate=usearch.Batch(even, cost=usearch.PredicateCost.CHEAP))
 ```
+
+Both views are valid only for the call, and the admissions start as rejections.
 
 A `progress` handler is called with `(completed, total)` units, and `False` stops the call, except in `insert`, which claims every entry before its first report.
 
@@ -388,6 +408,22 @@ assert sorted(keys_to_integers(np.asarray(keys)).tolist()) == [1, 2]  # The two 
 `search` ranks the `wanted` nearest entries a `GeospatialRelation` admits, in chord metres, and `within` reports every entry inside the radius as one ragged run per query; `seconds=` widens each query's time interval.
 No handle here carries a terrain, so `GeospatialRelation.VISIBLE` raises `UnsupportedError`, and `get` returns a key's observations within the stored rounding.
 
+## Apache Arrow
+
+Every arena output speaks the Arrow PyCapsule protocol, exporting its rows or pairs in place, and every verb that takes rows or keys reads any object that speaks it back in place:
+
+```python
+import pyarrow as pa
+
+vectors = index.get(42, arena)  # a `DenseVectors`
+column = pa.array(vectors)  # a fixed-size list over the arena's pages, which the capsule keeps alive
+matches = index.search(column, 10, other)  # the same rows, read in place as queries
+```
+
+`usearch.DenseVectors`, `usearch.Matches` and `usearch.DenseProducts` answer `__arrow_c_array__`, `__arrow_c_device_array__` and `__arrow_c_stream__`, the device form carrying VRAM arenas as they are, and every matrix or key argument accepts an object answering `__arrow_c_array__` or `__arrow_c_stream__`, such as a `pyarrow` array, a chunked array or a `polars` series.
+Keys travel as an `arrow.uuid` or `fixed_size_binary(16)` column, or as integers, which gather into 128-bit keys.
+Sequences and shapes cross as Python values, so the tape converters stay unbound.
+
 ## Tooling
 
 `usearch.io` reads and writes the `fbin` / `ibin` / `i8bin` matrix formats, and `usearch.eval` carries the recall harness, which takes the index or any blocking receiver:
@@ -399,7 +435,7 @@ stats = self_recall(index.on(pool), usearch.Arena(pool))
 print(stats.mean_recall, stats.mean_efficiency)
 ```
 
-## What This Binding Does Not Expose
+## Left Unbound
 
 - `cursor` and `search_stream` on a `DeferredOn`: they open walks whose every pull blocks, so there is nothing to submit.
 - `usearch_dense_metric_from_name`: `DenseMetric` is an `enum.IntEnum`, so `DenseMetric["ANGULAR"]` parses a name and no string ever reaches a verb.
@@ -409,7 +445,7 @@ print(stats.mean_recall, stats.mean_efficiency)
 - __Pure CPython over the C ABI.__
   A C verb `usearch_dense_<verb>` is a `<verb>` here, a type drops `usearch_` and `_t`, and enums are `enum.IntEnum` classes, never strings.
 - __Deferred calls are awaitables.__
-  `await` polls `usearch_outcome_status` between doubling sleeps on the running loop, and `wait` blocks in `usearch_outcome_wait`.
+  `await` polls `usearch_outcome_status` and re-polls through `loop.call_soon` on the running loop, and `wait` blocks in `usearch_outcome_wait`.
 - __Reference counting is the lifetime.__
   Releasing a `Deferred` waits for its call, and a view over an arena lasts until the next call rewinds it.
 - __Language idioms over parallel APIs.__

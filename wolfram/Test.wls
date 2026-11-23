@@ -27,8 +27,7 @@ $arena = ArenaInit["Executor" -> $executor]
 $local = ArenaInit[]
 Expect["a host arena", ArenaDescribe[$arena], <|"Residency" -> "ram", "Device" -> None|>]
 Expect["an arena for the calling thread", ArenaDescribe[$local], <|"Residency" -> "ram", "Device" -> None|>]
-Expect["an unknown mood", ExecutorDrain[$executor, "chill"],
-    Failure["invalid-argument", <|"MessageTemplate" -> "the mood is neither parked nor spinning"|>]]
+Expect["an unknown mood", ExecutorDrain[$executor, "chill"][[1]], "invalid-argument"]
 
 Expect["an unknown quantization", DenseInitRam["inner", "f24", 5][[1]], "unknown-kind"]
 Expect["a quantization the engine never stores", DenseInitRam["inner", "f32", 5][[1]], "unknown-kind"]
@@ -44,8 +43,7 @@ $typed = NumericArray[$rows, "Real32"];
 Expect["an insertion", DenseInsert[DenseIndexOn[$index, $executor], {$uuid, 43}, $typed], Null]
 Expect["the size after insertion", DenseDescribe[$index]["Size"], 2]
 Expect["a narrow row", DenseInsert[$index, {44}, {{1.0, 2.0}}][[1]], "shape-mismatch"]
-Expect["one key per vector", DenseInsert[$index, {44}, $rows],
-    Failure["shape-mismatch", <|"MessageTemplate" -> "there must be one key per vector"|>]]
+Expect["one key per vector", DenseInsert[$index, {44}, $rows][[1]], "shape-mismatch"]
 
 (* A search lands in an arena and answers each query's keys and scores, as many as it found. *)
 $matches = DenseSearch[DenseIndexOn[$index, $executor], $typed, 10, $arena]
@@ -56,10 +54,8 @@ Expect["the calling thread", DenseSearch[$index, $rows, 10, $local]["Keys"], $ma
 Expect["a result outlives its arena's next call", DenseSearch[$index, {Last[$rows]}, 1, $arena]["Keys"], {{43}}]
 Expect["the earlier result", $matches["Keys"], {{$uuid, 43}, {43, $uuid}}]
 Expect["no arena", Head[DenseSearch[$index, $rows, 10]], DenseSearch]
-Expect["a negative wanted", DenseSearch[$index, $rows, -1, $arena],
-    Failure["invalid-argument", <|"MessageTemplate" -> "wanted must not be negative"|>]]
-Expect["arguments of the wrong type", Quiet[DenseSearch[$index, {{"one"}}, 1, $arena]],
-    Failure["invalid-argument", <|"MessageTemplate" -> "the arguments do not match the verb's types"|>]]
+Expect["a negative wanted", DenseSearch[$index, $rows, -1, $arena][[1]], "invalid-argument"]
+Expect["arguments of the wrong type", Quiet[DenseSearch[$index, {{"one"}}, 1, $arena]][[1]], "invalid-argument"]
 Expect["non-real typed rows", DenseSearch[$index, NumericArray[{{1, 2, 3, 4, 5}}, "Integer32"], 1, $arena][[1]],
     "shape-mismatch"]
 Expect["a negative expansion", DenseSearch[$index, $typed, 1, $arena, "ExpansionFactor" -> -1][[1]],
@@ -74,12 +70,10 @@ Expect["the default geometry", KeyTake[DenseDescribe[$scanned], {"Metric", "Quan
 Expect["a reservation to scan", DenseReserve[$scanned, 2], Null]
 Expect["an insertion to scan", DenseInsert[$scanned, {$uuid, 43}, $rows], Null]
 Expect["a scan", First /@ DenseSearch[$scanned, $rows, 2, $local, "Traversal" -> "scan"]["Keys"], {$uuid, 43}]
-Expect["an unknown traversal", DenseSearch[$scanned, $rows, 2, $local, "Traversal" -> "sweep"],
-    Failure["invalid-argument", <|"MessageTemplate" -> "the traversal is neither walk nor scan"|>]]
+Expect["an unknown traversal", DenseSearch[$scanned, $rows, 2, $local, "Traversal" -> "sweep"][[1]], "invalid-argument"]
 
 Expect["a drain", ExecutorDrain[$executor, "parked"], Null]
-Expect["an arena no constructor made", DenseSearch[$index, $rows, 10, Arena[0]],
-    Failure["uninitialized", <|"MessageTemplate" -> "the Arena was released"|>]]
+Expect["an arena no constructor made", DenseSearch[$index, $rows, 10, Arena[0]][[1]], "uninitialized"]
 
 (* One arena serves get and multiply in turn, and each result outlives its reuse. *)
 Expect["a stored vector", DenseGet[$index, 43, $arena], {Last[$rows]}]

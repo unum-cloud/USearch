@@ -39,6 +39,7 @@ static struct {
     {"Deferred", &DeferredType, NULL},
     {"On", &OnType, NULL},
     {"DeferredOn", &DeferredOnType, NULL},
+    {"Batch", &BatchType, NULL},
 
     {"DenseIndex", &DenseIndexType, NULL},
     {"DenseMetadata", &DenseMetadataType, &usearch_py_dense_metadata_desc},

@@ -165,7 +165,8 @@ heights and their row stride in bytes, and the state."""
 
 
 def _terrain_trampoline[
-    State: AnyType, fill: def(Int, Int, Int, Int, Span[Float32, MutUntrackedOrigin], Int, State) thin -> None
+    State: AnyType,
+    fill: def(Int, Int, Int, Int, Span[Float32, MutUntrackedOrigin], Int, Pointer[State, MutAnyOrigin]) thin -> None,
 ](
     first_row: c_size_t,
     first_column: c_size_t,
@@ -187,7 +188,7 @@ def _terrain_trampoline[
             unsafe_ptr=UnsafePointer[Float32, MutUntrackedOrigin](unsafe_from_address=heights), length=length
         ),
         stride,
-        Pointer[State, MutAnyOrigin](unsafe_from_address=state)[],
+        Pointer[State, MutAnyOrigin](unsafe_from_address=state),
     )
 
 
@@ -285,7 +286,9 @@ struct GeospatialTerrain[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopya
     def filled[
         State: AnyType,
         //,
-        fill: def(Int, Int, Int, Int, Span[Float32, MutUntrackedOrigin], Int, State) thin -> None,
+        fill: def(
+            Int, Int, Int, Int, Span[Float32, MutUntrackedOrigin], Int, Pointer[State, MutAnyOrigin]
+        ) thin -> None,
     ](
         rows: Int,
         columns: Int,

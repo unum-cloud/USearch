@@ -779,6 +779,7 @@ static char const doc_GeospatialIndex_search[] =                                
     "  predicate (callable, optional): Admits a Key when it returns truthy; it re-enters\n"       //
     "    Python, so it runs under the GIL; what it raises goes to `sys.unraisablehook`, and\n"    //
     "    the key is rejected.\n"                                                                  //
+    "    A `Batch` answers many keys per call instead.\n"                                         //
     "  progress (callable, optional): Called with (completed, total) queries; returning False\n"  //
     "    stops the batch and raises `CancelledError`, None carries on.\n"                         //
     "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"       //
@@ -830,8 +831,7 @@ static PyObject* GeospatialIndex_search(PyObject* self, PyObject* const* args, P
     Matches* matches = NULL;
     usearch_geospatial_observation_t const* const queries = observations_from_object(queries_object, &count,
                                                                                      &call->buffers[0]);
-    if (!queries ||
-        usearch_py_callable_from_object(predicate_object, "predicate", &call->holds[callback_slot_k]) != 0 ||
+    if (!queries || usearch_py_predicate_from_object(predicate_object, &call->holds[callback_slot_k]) != 0 ||
         walk_parse(call, progress_object, stats_object) != 0 ||
         !(matches = usearch_py_call_arena(call, arena_object, &MatchesType)))
         return usearch_py_call_discard(&receiver, call);
@@ -881,6 +881,7 @@ static char const doc_GeospatialIndex_within[] =                                
     "  traversal (Traversal, optional): `Traversal.WALK`, the default, walks the graph;\n"      //
     "    `Traversal.SCAN` scores every entry exactly.\n"                                        //
     "  predicate (callable, optional): Admits a Key when it returns truthy.\n"                  //
+    "    A `Batch` answers many keys per call instead.\n"                                       //
     "  progress (callable, optional): Called with (completed, total) queries.\n"                //
     "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"     //
     "  stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.\n"        //
@@ -928,8 +929,7 @@ static PyObject* GeospatialIndex_within(PyObject* self, PyObject* const* args, P
     DenseProducts* products = NULL;
     usearch_geospatial_observation_t const* const queries = observations_from_object(queries_object, &count,
                                                                                      &call->buffers[0]);
-    if (!queries ||
-        usearch_py_callable_from_object(predicate_object, "predicate", &call->holds[callback_slot_k]) != 0 ||
+    if (!queries || usearch_py_predicate_from_object(predicate_object, &call->holds[callback_slot_k]) != 0 ||
         walk_parse(call, progress_object, stats_object) != 0 ||
         !(products = usearch_py_call_arena(call, arena_object, &DenseProductsType)))
         return usearch_py_call_discard(&receiver, call);

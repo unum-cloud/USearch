@@ -29,15 +29,15 @@ use crate::dense_index::{
     usearch_refine_report_t, usearch_traversal_stats_t,
 };
 use crate::types::{
-    Accepts, Arena, Blocking, CPUClass, Completion, Deferring, Error, Executor, GPUClass, Key, Matches, On,
-    PhaseProgress, Predicate, ProgressCallback, ReshardHandles, Result, Scalar, Status, Tape, TapeEntries, TapeOffset,
-    Traversal, check, lower_predicate, lower_progress, nvme_options, output_slot, path_view, path_views, ram_options,
-    read_named, spelling, usearch_arena_t, usearch_bytes_view_t, usearch_completion_blocking_k, usearch_completion_t,
-    usearch_cpu_class_name, usearch_cpu_class_t, usearch_executor_t, usearch_gpu_class_name, usearch_gpu_class_t,
-    usearch_key_t, usearch_keys_tape_view_t, usearch_keys_view_t, usearch_load_path_name, usearch_load_path_t,
-    usearch_matches_view_t, usearch_nvme_options_t, usearch_outcome_t, usearch_predicate_t, usearch_progress_t,
-    usearch_ram_options_t, usearch_rows_view_t, usearch_status_t, usearch_tape_view_t, usearch_traversal_t,
-    usearch_vram_options_t, vram_options,
+    Accepts, Arena, Blocking, CPUClass, Calling, Completion, Deferring, Error, Executor, GPUClass, Handles, Key,
+    Lending, Matches, On, PhaseProgress, Predicate, Progress, ReshardHandles, Result, Scalar, Status, Tape,
+    TapeEntries, TapeOffset, Traversal, check, fail, lower_predicate, lower_progress, nvme_options, output_slot,
+    path_view, path_views, ram_options, read_named, spelling, usearch_arena_t, usearch_bytes_view_t,
+    usearch_completion_blocking_k, usearch_completion_t, usearch_cpu_class_name, usearch_cpu_class_t,
+    usearch_executor_t, usearch_gpu_class_name, usearch_gpu_class_t, usearch_key_t, usearch_keys_tape_view_t,
+    usearch_keys_view_t, usearch_load_path_name, usearch_load_path_t, usearch_matches_view_t, usearch_nvme_options_t,
+    usearch_outcome_t, usearch_predicate_t, usearch_progress_t, usearch_ram_options_t, usearch_rows_view_t,
+    usearch_status_t, usearch_tape_view_t, usearch_traversal_t, usearch_vram_options_t, vram_options,
 };
 
 // region: Raw Declarations
@@ -614,7 +614,7 @@ pub struct SequenceLoadRamConfig<'config> {
     /// The weights an alignment kind needs, which no checkpoint records.
     pub weights: Option<SequenceWeights<'config>>,
     /// Reports the shards placed and stops wherever it says to; a stopped load creates no index.
-    pub progress: Option<&'config mut ProgressCallback<'config>>,
+    pub progress: Option<Progress<'config>>,
     /// Reports the call makes at most, the last at completion; zero derives to ten.
     pub progress_steps: usize,
 }
@@ -650,7 +650,7 @@ pub struct SequenceLoadVramConfig<'config> {
     /// The weights an alignment kind needs, which no checkpoint records.
     pub weights: Option<SequenceWeights<'config>>,
     /// Reports the shards placed and stops wherever it says to; a stopped load creates no index.
-    pub progress: Option<&'config mut ProgressCallback<'config>>,
+    pub progress: Option<Progress<'config>>,
     /// Reports the call makes at most, the last at completion; zero derives to ten.
     pub progress_steps: usize,
 }
@@ -687,7 +687,7 @@ pub struct SequenceLoadRamBufferConfig<'config> {
     /// The weights an alignment kind needs, which no checkpoint records.
     pub weights: Option<SequenceWeights<'config>>,
     /// Reports the bytes placed and stops wherever it says to; a stopped load creates no index.
-    pub progress: Option<&'config mut ProgressCallback<'config>>,
+    pub progress: Option<Progress<'config>>,
     /// Reports the call makes at most, the last at completion; zero derives to ten.
     pub progress_steps: usize,
 }
@@ -729,7 +729,7 @@ pub struct SequenceLoadVramBufferConfig<'config> {
     /// The weights an alignment kind needs, which no checkpoint records.
     pub weights: Option<SequenceWeights<'config>>,
     /// Reports the bytes placed and stops wherever it says to; a stopped load creates no index.
-    pub progress: Option<&'config mut ProgressCallback<'config>>,
+    pub progress: Option<Progress<'config>>,
     /// Reports the call makes at most, the last at completion; zero derives to ten.
     pub progress_steps: usize,
 }
@@ -790,7 +790,7 @@ pub struct SequenceInsertConfig<'config, Offset: Clone = u64> {
     pub expansion_factor: usize,
     /// Reports the entries inserted; every entry is claimed before the first report, so a `Break`
     /// is ignored.
-    pub progress: Option<&'config mut ProgressCallback<'config>>,
+    pub progress: Option<Progress<'config>>,
     /// Reports the call makes at most, the last at completion; zero derives to ten.
     pub progress_steps: usize,
     /// Where the traversal telemetry lands, overwritten by the call.
@@ -812,9 +812,9 @@ pub struct SequenceSearchConfig<'config> {
     /// Walks the graph by default; [`Traversal::Scan`] scores every entry exactly.
     pub traversal: Traversal,
     /// Admits only the keys it approves; the rest still route the walk.
-    pub predicate: Option<&'config Predicate<'config>>,
+    pub predicate: Option<Predicate<'config>>,
     /// Reports the queries resolved and stops wherever it says to.
-    pub progress: Option<&'config mut ProgressCallback<'config>>,
+    pub progress: Option<Progress<'config>>,
     /// Reports the call makes at most, the last at completion; zero derives to ten.
     pub progress_steps: usize,
     /// Where the traversal telemetry lands, overwritten by the call.
@@ -842,7 +842,7 @@ pub struct SequenceRefineConfig<'config, Plan = &'config mut SequenceRefinePlan>
     /// Bytes a loaded NVMe handle holds for the one part it rewrites; zero derives it.
     pub memory_limit: usize,
     /// Reports every phase's units at its barriers and stops wherever it says to.
-    pub progress: Option<&'config mut ProgressCallback<'config>>,
+    pub progress: Option<Progress<'config>>,
     /// Reports the call makes at most, the last at completion; zero derives to ten.
     pub progress_steps: usize,
     /// Where the traversal telemetry lands, overwritten by the call.
@@ -894,7 +894,7 @@ pub struct SequenceReshardConfig<'config, Plan = &'config mut SequenceReshardPla
     /// Picks the part roots of a source cut among several targets.
     pub seed: u64,
     /// Reports the closing rounds' phases and stops them wherever it says to, never a move.
-    pub progress: Option<&'config mut ProgressCallback<'config>>,
+    pub progress: Option<Progress<'config>>,
     /// Reports the call makes at most, the last at completion; zero derives to ten.
     pub progress_steps: usize,
     /// Where the traversal telemetry lands, overwritten by the call.
@@ -1086,11 +1086,11 @@ impl SequenceIndex {
 
     /// Copies a checkpoint into a new, mutable index in host memory, shard by shard.
     pub fn load_ram<'config>(config: impl Into<SequenceLoadRamConfig<'config>>) -> Result<Self> {
-        let mut config = config.into();
+        let config = config.into();
         let mut index = SequenceIndex::null();
         let mut outcome = usearch_outcome_t::default();
         let mut weights = usearch_sequence_weights_t { substitution_matrix: ptr::null(), gap: 0 };
-        let progress = lower_progress(&mut config.progress, config.progress_steps);
+        let progress = lower_progress(&config.progress, config.progress_steps);
         unsafe {
             usearch_sequence_load_ram(&mut usearch_sequence_load_ram_t {
                 index: &mut index.handle,
@@ -1109,11 +1109,11 @@ impl SequenceIndex {
 
     /// Uploads a checkpoint into a new index on devices, part by part.
     pub fn load_vram<'config>(config: impl Into<SequenceLoadVramConfig<'config>>) -> Result<Self> {
-        let mut config = config.into();
+        let config = config.into();
         let mut index = SequenceIndex::null();
         let mut outcome = usearch_outcome_t::default();
         let mut weights = usearch_sequence_weights_t { substitution_matrix: ptr::null(), gap: 0 };
-        let progress = lower_progress(&mut config.progress, config.progress_steps);
+        let progress = lower_progress(&config.progress, config.progress_steps);
         unsafe {
             usearch_sequence_load_vram(&mut usearch_sequence_load_vram_t {
                 index: &mut index.handle,
@@ -1132,11 +1132,11 @@ impl SequenceIndex {
 
     /// Copies a serialized monolith into a new, mutable index in host memory.
     pub fn load_ram_buffer<'config>(config: impl Into<SequenceLoadRamBufferConfig<'config>>) -> Result<Self> {
-        let mut config = config.into();
+        let config = config.into();
         let mut index = SequenceIndex::null();
         let mut outcome = usearch_outcome_t::default();
         let mut weights = usearch_sequence_weights_t { substitution_matrix: ptr::null(), gap: 0 };
-        let progress = lower_progress(&mut config.progress, config.progress_steps);
+        let progress = lower_progress(&config.progress, config.progress_steps);
         unsafe {
             usearch_sequence_load_ram_buffer(&mut usearch_sequence_load_ram_buffer_t {
                 index: &mut index.handle,
@@ -1155,11 +1155,11 @@ impl SequenceIndex {
 
     /// Uploads a serialized monolith into a new index on devices.
     pub fn load_vram_buffer<'config>(config: impl Into<SequenceLoadVramBufferConfig<'config>>) -> Result<Self> {
-        let mut config = config.into();
+        let config = config.into();
         let mut index = SequenceIndex::null();
         let mut outcome = usearch_outcome_t::default();
         let mut weights = usearch_sequence_weights_t { substitution_matrix: ptr::null(), gap: 0 };
-        let progress = lower_progress(&mut config.progress, config.progress_steps);
+        let progress = lower_progress(&config.progress, config.progress_steps);
         unsafe {
             usearch_sequence_load_vram_buffer(&mut usearch_sequence_load_vram_buffer_t {
                 index: &mut index.handle,
@@ -1250,11 +1250,8 @@ impl SequenceIndex {
 }
 
 /// What a verb answers through `Receiver`: its output, or a [`Deferred`](crate::Deferred).
-type Answer<'index, Receiver, Inputs, Output> =
-    <<Receiver as SequenceVerbs<'index>>::Completion as Completion>::Answer<'index, Inputs, Output>;
-
-/// What a search keeps alive until it answers: the query tape and its config.
-type SearchInputs<'config, Offset> = (Tape<'config, u8, Offset>, SequenceSearchConfig<'config>);
+type Deferrable<'index, Receiver, Verb> =
+    <<Receiver as SequenceVerbs<'index>>::Completion as Completion>::Deferrable<'index, Verb>;
 
 /// Every sequence verb, written once for every receiver: `&SequenceIndex` blocks on the calling
 /// thread, and the [`On`] that [`SequenceIndex::on`] or [`SequenceIndex::deferred`] makes runs on
@@ -1271,55 +1268,27 @@ pub trait SequenceVerbs<'index>: Copy {
 
     /// Reserves room for `entries` entries and `payload_bytes` bytes across them, a hint, since
     /// insertions grow the index on demand.
-    fn reserve(self, entries: usize, payload_bytes: usize) -> Result<Answer<'index, Self, (), ()>> {
+    fn reserve(self, entries: usize, payload_bytes: usize) -> Result<Deferrable<'index, Self, SequenceReserve>> {
         let (index, executor) = self.handles();
-        Self::Completion::answer((), (), |call, completion| {
-            unsafe {
-                usearch_sequence_reserve(&mut usearch_sequence_reserve_t {
-                    index,
-                    executor,
-                    outcome: &mut call.outcome,
-                    completion,
-                    entries,
-                    payload_bytes,
-                })
-            };
-            Ok(())
-        })
+        Self::Completion::answer(SequenceReserve { handles: Handles::of(index, executor), entries, payload_bytes })
     }
 
     /// Reports the frozen metadata and the current counters in one call.
-    fn describe(self) -> Result<Answer<'index, Self, (), SequenceIndexDescription>> {
+    fn describe(self) -> Result<Deferrable<'index, Self, SequenceDescribe>> {
         let (index, executor) = self.handles();
-        Self::Completion::answer((), SequenceIndexDescription::default(), |call, completion| {
-            unsafe {
-                usearch_sequence_describe(&mut usearch_sequence_describe_t {
-                    index,
-                    executor,
-                    outcome: &mut call.outcome,
-                    completion,
-                    description: &mut call.output,
-                })
-            };
-            Ok(())
+        Self::Completion::answer(SequenceDescribe {
+            handles: Handles::of(index, executor),
+            description: SequenceIndexDescription::default(),
         })
     }
 
     /// The entries stored under `key`, with their total and largest byte lengths.
-    fn count(self, key: Key) -> Result<Answer<'index, Self, (), SequenceKeyStats>> {
+    fn count(self, key: Key) -> Result<Deferrable<'index, Self, SequenceCount>> {
         let (index, executor) = self.handles();
-        Self::Completion::answer((), SequenceKeyStats::default(), |call, completion| {
-            unsafe {
-                usearch_sequence_count(&mut usearch_sequence_count_t {
-                    index,
-                    executor,
-                    outcome: &mut call.outcome,
-                    completion,
-                    key,
-                    key_stats: &mut call.output,
-                })
-            };
-            Ok(())
+        Self::Completion::answer(SequenceCount {
+            handles: Handles::of(index, executor),
+            key,
+            key_stats: SequenceKeyStats::default(),
         })
     }
 
@@ -1338,25 +1307,14 @@ pub trait SequenceVerbs<'index>: Copy {
     fn get<'arena>(
         self,
         key: Key,
-        arena: &'arena mut Arena,
-    ) -> Result<Answer<'index, Self, (), TapeEntries<'arena, u8>>> {
+        arena: &'arena mut Arena<'_>,
+    ) -> Result<Deferrable<'index, Self, SequenceGet<'arena>>> {
         let (index, executor) = self.handles();
-        let arena_handle = arena.handle;
-        Self::Completion::answer((), TapeEntries::new(), |call, completion| {
-            let sequences = &mut call.output;
-            unsafe {
-                usearch_sequence_get(&mut usearch_sequence_get_t {
-                    index,
-                    executor,
-                    outcome: &mut call.outcome,
-                    completion,
-                    key,
-                    sequences: &mut sequences.view,
-                    written: &mut sequences.written,
-                    arena: arena_handle,
-                })
-            };
-            Ok(())
+        Self::Completion::answer(SequenceGet {
+            handles: Handles::of(index, executor),
+            key,
+            arena,
+            sequences: TapeEntries::new(),
         })
     }
 
@@ -1365,103 +1323,54 @@ pub trait SequenceVerbs<'index>: Copy {
         self,
         keys: Keys,
         config: impl Into<SequenceInsertConfig<'config, Offset>>,
-    ) -> Result<Answer<'index, Self, (Keys, SequenceInsertConfig<'config, Offset>), ()>>
+    ) -> Result<Deferrable<'index, Self, SequenceInsert<'config, Keys, Offset>>>
     where
         Self::Completion: Accepts<Keys> + Accepts<SequenceInsertConfig<'config, Offset>>,
     {
         let (index, executor) = self.handles();
-        Self::Completion::answer((keys, config.into()), (), |call, completion| {
-            let (keys, config) = &mut call.inputs;
-            let keys = keys.as_ref();
-            // The keys view carries no count, so only this side can see the two disagree.
-            if config.sequences.count() != keys.len() {
-                return Err(crate::types::fail(
-                    Status::ShapeMismatch,
-                    "the key count does not match the tape's entries",
-                ));
-            }
-            unsafe {
-                usearch_sequence_insert(&mut usearch_sequence_insert_t {
-                    index,
-                    executor,
-                    outcome: &mut call.outcome,
-                    completion,
-                    count: keys.len(),
-                    keys: usearch_keys_view_t::of(keys),
-                    sequences: config.sequences.view(Scalar::U8),
-                    expansion_factor: config.expansion_factor,
-                    progress: lower_progress(&mut config.progress, config.progress_steps),
-                    stats: output_slot(&mut config.stats),
-                })
-            };
-            Ok(())
-        })
+        let config = config.into();
+        // The keys view carries no count, so only this side can see the two disagree.
+        if config.sequences.count() != keys.as_ref().len() {
+            return Err(fail(Status::ShapeMismatch, "the key count does not match the tape's entries"));
+        }
+        Self::Completion::answer(SequenceInsert { handles: Handles::of(index, executor), keys, config })
     }
 
     /// Runs one refine round over the whole graph, answering a [`RefineReport`].
     fn refine<'config, Plan: BorrowMut<SequenceRefinePlan>>(
         self,
         config: SequenceRefineConfig<'config, Plan>,
-    ) -> Result<Answer<'index, Self, SequenceRefineConfig<'config, Plan>, RefineReport>>
+    ) -> Result<Deferrable<'index, Self, SequenceRefine<'config, Plan>>>
     where
         Self::Completion: Accepts<SequenceRefineConfig<'config, Plan>>,
     {
         let (index, executor) = self.handles();
-        Self::Completion::answer(config, RefineReport::default(), |call, completion| {
-            let config = &mut call.inputs;
-            unsafe {
-                usearch_sequence_refine(&mut usearch_sequence_refine_t {
-                    index,
-                    executor,
-                    outcome: &mut call.outcome,
-                    completion,
-                    report: &mut call.output,
-                    refine: usearch_refine_options_t {
-                        expansion_factor: config.expansion_factor,
-                        memory_limit: config.memory_limit,
-                    },
-                    progress: lower_progress(&mut config.progress, config.progress_steps),
-                    stats: output_slot(&mut config.stats),
-                    plan: config.plan.as_mut().map_or(ptr::null_mut(), |plan| &mut plan.borrow_mut().handle),
-                    phase: output_slot(&mut config.phase),
-                })
-            };
-            Ok(())
+        Self::Completion::answer(SequenceRefine {
+            handles: Handles::of(index, executor),
+            config,
+            report: RefineReport::default(),
         })
     }
 
     /// Closes a refine plan, whatever the call answers, and answers what the whole plan did.
-    fn refine_plan_finish(self, plan: SequenceRefinePlan) -> Result<Answer<'index, Self, (), RefineReport>> {
+    fn refine_plan_finish(
+        self,
+        plan: SequenceRefinePlan,
+    ) -> Result<Deferrable<'index, Self, SequenceRefinePlanFinish>> {
         let (index, executor) = self.handles();
-        Self::Completion::answer((), RefineReport::default(), |call, completion| {
-            unsafe {
-                usearch_sequence_refine_plan_finish(&mut usearch_sequence_refine_plan_finish_t {
-                    index,
-                    executor,
-                    outcome: &mut call.outcome,
-                    completion,
-                    plan: plan.handle,
-                    report: &mut call.output,
-                })
-            };
-            Ok(())
+        Self::Completion::answer(SequenceRefinePlanFinish {
+            handles: Handles::of(index, executor),
+            plan,
+            report: RefineReport::default(),
         })
     }
 
     /// Measures how much of the graph a search reaches from the root.
-    fn health(self) -> Result<Answer<'index, Self, (), DenseReachability>> {
+    fn health(self) -> Result<Deferrable<'index, Self, SequenceHealth>> {
         let (index, executor) = self.handles();
-        Self::Completion::answer((), DenseReachability::default(), |call, completion| {
-            unsafe {
-                usearch_sequence_health(&mut usearch_sequence_health_t {
-                    index,
-                    executor,
-                    outcome: &mut call.outcome,
-                    completion,
-                    reachability: &mut call.output,
-                })
-            };
-            Ok(())
+        Self::Completion::answer(SequenceHealth {
+            handles: Handles::of(index, executor),
+            reachability: DenseReachability::default(),
         })
     }
 
@@ -1471,34 +1380,19 @@ pub trait SequenceVerbs<'index>: Copy {
         self,
         queries: Tape<'config, u8, Offset>,
         config: impl Into<SequenceSearchConfig<'config>>,
-        arena: &'arena mut Arena,
-    ) -> Result<Answer<'index, Self, SearchInputs<'config, Offset>, Matches<'arena>>>
+        arena: &'arena mut Arena<'_>,
+    ) -> Result<Deferrable<'index, Self, SequenceSearch<'config, 'arena, Offset>>>
     where
         Self::Completion: Accepts<Tape<'config, u8, Offset>> + Accepts<SequenceSearchConfig<'config>>,
     {
         let (index, executor) = self.handles();
-        Self::Completion::answer((queries, config.into()), Matches::new(arena), |call, completion| {
-            let (queries, config) = &mut call.inputs;
-            call.output.queries = queries.count();
-            unsafe {
-                usearch_sequence_search(&mut usearch_sequence_search_t {
-                    index,
-                    executor,
-                    outcome: &mut call.outcome,
-                    completion,
-                    count: queries.count(),
-                    queries: queries.view(Scalar::U8),
-                    matches: &mut call.output.view,
-                    arena: call.output.arena.handle,
-                    wanted: config.wanted,
-                    expansion_factor: config.expansion_factor,
-                    traversal: config.traversal as usearch_traversal_t,
-                    predicate: lower_predicate(&config.predicate),
-                    progress: lower_progress(&mut config.progress, config.progress_steps),
-                    stats: output_slot(&mut config.stats),
-                })
-            };
-            Ok(())
+        let mut matches = Matches::new(arena);
+        matches.queries = queries.count();
+        Self::Completion::answer(SequenceSearch {
+            handles: Handles::of(index, executor),
+            queries,
+            config: config.into(),
+            matches,
         })
     }
 
@@ -1508,54 +1402,31 @@ pub trait SequenceVerbs<'index>: Copy {
     fn reshard<'config, Plan: BorrowMut<SequenceReshardPlan>>(
         self,
         config: SequenceReshardConfig<'config, Plan>,
-    ) -> Result<Answer<'index, Self, (SequenceReshardConfig<'config, Plan>, ReshardHandles), RefineReport>>
+    ) -> Result<Deferrable<'index, Self, SequenceReshard<'config, Plan>>>
     where
         Self::Completion: Accepts<SequenceReshardConfig<'config, Plan>>,
     {
         let (_, executor) = self.handles();
         let handles = |named: &[&SequenceIndex]| named.iter().map(|named| named.handle).collect();
         let lists = ReshardHandles { sources: handles(config.sources), targets: handles(config.targets) };
-        Self::Completion::answer((config, lists), RefineReport::default(), |call, completion| {
-            let (config, lists) = &mut call.inputs;
-            unsafe {
-                usearch_sequence_reshard(&mut usearch_sequence_reshard_t {
-                    sources_count: lists.sources.len(),
-                    sources: lists.sources.as_ptr(),
-                    targets_count: lists.targets.len(),
-                    targets: lists.targets.as_ptr(),
-                    executor,
-                    outcome: &mut call.outcome,
-                    completion,
-                    report: &mut call.output,
-                    refine: usearch_refine_options_t {
-                        expansion_factor: config.expansion_factor,
-                        memory_limit: config.memory_limit,
-                    },
-                    seed: config.seed,
-                    progress: lower_progress(&mut config.progress, config.progress_steps),
-                    stats: output_slot(&mut config.stats),
-                    plan: config.plan.as_mut().map_or(ptr::null_mut(), |plan| &mut plan.borrow_mut().handle),
-                    phase: output_slot(&mut config.phase),
-                })
-            };
-            Ok(())
+        Self::Completion::answer(SequenceReshard {
+            handles: Handles::of(ptr::null_mut(), executor),
+            config,
+            lists,
+            report: RefineReport::default(),
         })
     }
 
     /// Closes a reshard plan, whatever the call answers, and answers what the whole plan did.
-    fn reshard_plan_finish(self, plan: SequenceReshardPlan) -> Result<Answer<'index, Self, (), RefineReport>> {
+    fn reshard_plan_finish(
+        self,
+        plan: SequenceReshardPlan,
+    ) -> Result<Deferrable<'index, Self, SequenceReshardPlanFinish>> {
         let (_, executor) = self.handles();
-        Self::Completion::answer((), RefineReport::default(), |call, completion| {
-            unsafe {
-                usearch_sequence_reshard_plan_finish(&mut usearch_sequence_reshard_plan_finish_t {
-                    executor,
-                    outcome: &mut call.outcome,
-                    completion,
-                    plan: plan.handle,
-                    report: &mut call.output,
-                })
-            };
-            Ok(())
+        Self::Completion::answer(SequenceReshardPlanFinish {
+            handles: Handles::of(ptr::null_mut(), executor),
+            plan,
+            report: RefineReport::default(),
         })
     }
 
@@ -1564,57 +1435,22 @@ pub trait SequenceVerbs<'index>: Copy {
     fn sample<'config, 'arena>(
         self,
         wanted: usize,
-        arena: &'arena mut Arena,
+        arena: &'arena mut Arena<'_>,
         config: DenseSampleConfig<'config>,
-    ) -> Result<Answer<'index, Self, DenseSampleConfig<'config>, Sample<'arena>>>
+    ) -> Result<Deferrable<'index, Self, SequenceSample<'config, 'arena>>>
     where
         Self::Completion: Accepts<DenseSampleConfig<'config>>,
     {
         // Two slices name the shown keys and their places, so only this side sees them disagree.
         if config.shown.len() != config.shown_coordinates.len() {
-            return Err(crate::types::fail(Status::InvalidArgument, "every shown key needs its coordinates"));
+            return Err(fail(Status::InvalidArgument, "every shown key needs its coordinates"));
         }
         let (index, executor) = self.handles();
-        let sample = Sample {
-            arena,
-            keys: usearch_keys_view_t::default(),
-            entry_ordinals: ptr::null(),
-            parents: usearch_matches_view_t::default(),
-            coordinates: usearch_rows_view_t::default(),
-            written: 0,
-        };
-        Self::Completion::answer(config, sample, |call, completion| {
-            let (config, sample) = (&mut call.inputs, &mut call.output);
-            unsafe {
-                usearch_sequence_sample(&mut usearch_sequence_sample_t {
-                    index,
-                    executor,
-                    outcome: &mut call.outcome,
-                    completion,
-                    shown_count: config.shown.len(),
-                    shown: usearch_keys_view_t::of(config.shown),
-                    shown_coordinates: usearch_rows_view_t {
-                        data: config.shown_coordinates.as_ptr().cast(),
-                        stride: core::mem::size_of::<[f32; 3]>(),
-                        columns: 3,
-                        scalar: Scalar::F32 as crate::types::usearch_scalar_t,
-                    },
-                    focus_count: config.focus.len(),
-                    focus: usearch_keys_view_t::of(config.focus),
-                    keys: &mut sample.keys,
-                    entry_ordinals: &mut sample.entry_ordinals,
-                    parents: &mut sample.parents,
-                    coordinates: &mut sample.coordinates,
-                    written: &mut sample.written,
-                    arena: sample.arena.handle,
-                    wanted,
-                    seed: config.seed,
-                    expansion_factor: config.expansion_factor,
-                    progress: lower_progress(&mut config.progress, config.progress_steps),
-                    stats: output_slot(&mut config.stats),
-                })
-            };
-            Ok(())
+        Self::Completion::answer(SequenceSample {
+            handles: Handles::of(index, executor),
+            wanted,
+            config,
+            sample: Sample::new(arena),
         })
     }
 
@@ -1623,78 +1459,33 @@ pub trait SequenceVerbs<'index>: Copy {
     fn save<'config, Location: AsRef<Path>>(
         self,
         config: impl Into<DenseSaveConfig<'config, Location>>,
-    ) -> Result<Answer<'index, Self, DenseSaveConfig<'config, Location>, ()>>
+    ) -> Result<Deferrable<'index, Self, SequenceSave<'config, Location>>>
     where
         Self::Completion: Accepts<DenseSaveConfig<'config, Location>>,
     {
         let (index, executor) = self.handles();
-        Self::Completion::answer(config.into(), (), |call, completion| {
-            let config = &mut call.inputs;
-            let path = path_view(config.path.as_ref())?;
-            unsafe {
-                usearch_sequence_save(&mut usearch_sequence_save_t {
-                    index,
-                    executor,
-                    outcome: &mut call.outcome,
-                    completion,
-                    path,
-                    progress: lower_progress(&mut config.progress, config.progress_steps),
-                })
-            };
-            Ok(())
-        })
+        let config = config.into();
+        let path = path_view(config.path.as_ref())?;
+        Self::Completion::answer(SequenceSave { handles: Handles::of(index, executor), path, config })
     }
 
     /// Saves the index as one monolith into the arena its config carries.
-    #[allow(clippy::type_complexity)]
-    fn save_buffer<'config, 'arena>(
+    fn save_buffer<'config, 'arena, 'executor>(
         self,
-        config: impl Into<DenseSaveBufferConfig<'config, 'arena>>,
-    ) -> Result<Answer<'index, Self, (Option<&'config mut ProgressCallback<'config>>, usize), Monolith<'arena>>>
+        config: impl Into<DenseSaveBufferConfig<'config, 'arena, 'executor>>,
+    ) -> Result<Deferrable<'index, Self, SequenceSaveBuffer<'config, 'arena>>>
     where
-        Self::Completion: Accepts<DenseSaveBufferConfig<'config, 'arena>>,
+        'executor: 'arena,
+        Self::Completion: Accepts<DenseSaveBufferConfig<'config, 'arena, 'executor>>,
     {
         let (index, executor) = self.handles();
         let DenseSaveBufferConfig { arena, progress, progress_steps } = config.into();
-        let arena_handle = arena.handle;
-        let monolith = Monolith { arena: PhantomData, monolith: usearch_bytes_view_t::default() };
-        Self::Completion::answer((progress, progress_steps), monolith, |call, completion| {
-            let (progress, progress_steps) = &mut call.inputs;
-            unsafe {
-                usearch_sequence_save_buffer(&mut usearch_sequence_save_buffer_t {
-                    index,
-                    executor,
-                    outcome: &mut call.outcome,
-                    completion,
-                    monolith: &mut call.output.monolith,
-                    arena: arena_handle,
-                    progress: lower_progress(progress, *progress_steps),
-                })
-            };
-            Ok(())
+        Self::Completion::answer(SequenceSaveBuffer {
+            handles: Handles::of(index, executor),
+            progress,
+            progress_steps,
+            monolith: Monolith::new(arena),
         })
-    }
-
-    /// Opens a walk over the current contents, pulled blocking on this receiver's executor:
-    /// without `starts` every entry as stored, with them the start keys' entries first, then the
-    /// entries those link to breadth-first.
-    fn cursor(self, starts: &[Key]) -> Result<SequenceCursor<'index>>
-    where
-        Self: SequenceVerbs<'index, Completion = Blocking>,
-    {
-        let (index, executor) = self.handles();
-        let mut cursor = SequenceCursor { handle: ptr::null_mut(), index, executor, receiver: PhantomData };
-        let mut outcome = usearch_outcome_t::default();
-        unsafe {
-            usearch_sequence_cursor_init(&mut usearch_sequence_cursor_init_t {
-                index,
-                outcome: &mut outcome,
-                starts_count: starts.len(),
-                starts: starts.as_ptr(),
-                cursor: &mut cursor.handle,
-            })
-        };
-        check(outcome).map(|()| cursor)
     }
 }
 
@@ -1714,29 +1505,66 @@ impl<'index, Completion: crate::types::Completion> SequenceVerbs<'index> for On<
     }
 }
 
-/// A walk over the index contents; see [`SequenceVerbs::cursor`].
+impl SequenceIndex {
+    /// Opens a walk over the current contents: without `starts` every entry as stored, with them
+    /// the start keys' entries first, then the entries those link to breadth-first.
+    pub fn cursor(&self, starts: &[Key]) -> Result<SequenceCursor<'_>> {
+        let mut cursor = SequenceCursor { handle: ptr::null_mut(), index: self.handle, marker: PhantomData };
+        let mut outcome = usearch_outcome_t::default();
+        unsafe {
+            usearch_sequence_cursor_init(&mut usearch_sequence_cursor_init_t {
+                index: self.handle,
+                outcome: &mut outcome,
+                starts_count: starts.len(),
+                starts: starts.as_ptr(),
+                cursor: &mut cursor.handle,
+            })
+        };
+        check(outcome).map(|()| cursor)
+    }
+}
+
+/// A walk over the index contents; see [`SequenceIndex::cursor`].
+///
+/// Its pulls run on the calling thread, or blocking on the executor [`SequenceCursor::on`] names
+/// for them; the cursor keeps none.
 ///
 /// Dropping it waits for every deferred call naming the cursor, then releases it.
 #[derive(Debug)]
 pub struct SequenceCursor<'index> {
     handle: usearch_sequence_cursor_t,
     index: usearch_sequence_index_t,
-    executor: usearch_executor_t,
-    receiver: PhantomData<On<'index, SequenceIndex>>,
+    marker: PhantomData<&'index SequenceIndex>,
 }
 
-impl SequenceCursor<'_> {
-    /// Copies up to `wanted` next keys into `arena`; an empty batch means the walk is exhausted.
-    pub fn next_keys<'arena>(&mut self, wanted: usize, arena: &'arena mut Arena) -> Result<DenseBatch<'arena>> {
-        self.next(false, wanted, arena)
+impl<'index> SequenceCursor<'index> {
+    /// The receiver whose pulls block on `executor`, contended while another call holds it.
+    ///
+    /// Rust-only.
+    pub fn on<'cursor>(&'cursor mut self, executor: &'cursor Executor) -> On<'cursor, SequenceCursor<'index>> {
+        On { index: self, executor, completion: PhantomData }
     }
 
-    /// Copies up to `wanted` next keys into `arena`, each with the keys it links to.
-    pub fn next_links<'arena>(&mut self, wanted: usize, arena: &'arena mut Arena) -> Result<DenseBatch<'arena>> {
-        self.next(true, wanted, arena)
+    /// Copies up to `wanted` next keys into `arena` on the calling thread; an empty batch means the
+    /// walk is exhausted.
+    pub fn next_keys<'arena>(&mut self, wanted: usize, arena: &'arena mut Arena<'_>) -> Result<DenseBatch<'arena>> {
+        self.pull(ptr::null_mut(), false, wanted, arena)
     }
 
-    fn next<'arena>(&mut self, linked: bool, wanted: usize, arena: &'arena mut Arena) -> Result<DenseBatch<'arena>> {
+    /// Copies up to `wanted` next keys into `arena` on the calling thread, each with the keys it
+    /// links to.
+    pub fn next_links<'arena>(&mut self, wanted: usize, arena: &'arena mut Arena<'_>) -> Result<DenseBatch<'arena>> {
+        self.pull(ptr::null_mut(), true, wanted, arena)
+    }
+
+    /// Pulls a batch on `executor`, exporting each entry's links only when `linked` asks.
+    fn pull<'arena>(
+        &self,
+        executor: usearch_executor_t,
+        linked: bool,
+        wanted: usize,
+        arena: &'arena mut Arena<'_>,
+    ) -> Result<DenseBatch<'arena>> {
         let mut batch = DenseBatch {
             arena: PhantomData,
             keys: usearch_keys_view_t::default(),
@@ -1747,7 +1575,7 @@ impl SequenceCursor<'_> {
         unsafe {
             usearch_sequence_cursor_next(&mut usearch_sequence_cursor_next_t {
                 index: self.index,
-                executor: self.executor,
+                executor,
                 outcome: &mut outcome,
                 completion: usearch_completion_blocking_k,
                 cursor: self.handle,
@@ -1762,6 +1590,19 @@ impl SequenceCursor<'_> {
     }
 }
 
+impl On<'_, SequenceCursor<'_>> {
+    /// Copies up to `wanted` next keys into `arena` on this receiver's executor.
+    pub fn next_keys<'arena>(self, wanted: usize, arena: &'arena mut Arena<'_>) -> Result<DenseBatch<'arena>> {
+        self.index.pull(self.executor.handle, false, wanted, arena)
+    }
+
+    /// Copies up to `wanted` next keys into `arena` on this receiver's executor, each with the keys
+    /// it links to.
+    pub fn next_links<'arena>(self, wanted: usize, arena: &'arena mut Arena<'_>) -> Result<DenseBatch<'arena>> {
+        self.index.pull(self.executor.handle, true, wanted, arena)
+    }
+}
+
 impl Drop for SequenceCursor<'_> {
     fn drop(&mut self) {
         unsafe { usearch_sequence_cursor_free(self.handle) }
@@ -1769,6 +1610,511 @@ impl Drop for SequenceCursor<'_> {
 }
 
 // endregion: Sequence Index
+
+// region: Calls
+
+/// What [`SequenceVerbs::reserve`] runs.
+pub struct SequenceReserve {
+    handles: Handles,
+    entries: usize,
+    payload_bytes: usize,
+}
+
+impl Calling for SequenceReserve {
+    type Arguments = usearch_sequence_reserve_t;
+    type Output = ();
+
+    fn arguments(&mut self, outcome: *mut usearch_outcome_t, completion: usearch_completion_t) -> Self::Arguments {
+        let Handles { handle: index, executor } = self.handles;
+        usearch_sequence_reserve_t {
+            index,
+            executor,
+            outcome,
+            completion,
+            entries: self.entries,
+            payload_bytes: self.payload_bytes,
+        }
+    }
+
+    unsafe fn call(arguments: *mut Self::Arguments) {
+        unsafe { usearch_sequence_reserve(arguments) }
+    }
+
+    fn finish(self, status: Result<()>) -> Result<()> {
+        status
+    }
+}
+
+/// What [`SequenceVerbs::describe`] runs, and the description it fills.
+pub struct SequenceDescribe {
+    handles: Handles,
+    description: SequenceIndexDescription,
+}
+
+impl Calling for SequenceDescribe {
+    type Arguments = usearch_sequence_describe_t;
+    type Output = SequenceIndexDescription;
+
+    fn arguments(&mut self, outcome: *mut usearch_outcome_t, completion: usearch_completion_t) -> Self::Arguments {
+        let Handles { handle: index, executor } = self.handles;
+        usearch_sequence_describe_t { index, executor, outcome, completion, description: &mut self.description }
+    }
+
+    unsafe fn call(arguments: *mut Self::Arguments) {
+        unsafe { usearch_sequence_describe(arguments) }
+    }
+
+    fn finish(self, status: Result<()>) -> Result<SequenceIndexDescription> {
+        status.map(|()| self.description)
+    }
+}
+
+/// What [`SequenceVerbs::count`] runs, and the key's stats it fills.
+pub struct SequenceCount {
+    handles: Handles,
+    key: Key,
+    key_stats: SequenceKeyStats,
+}
+
+impl Calling for SequenceCount {
+    type Arguments = usearch_sequence_count_t;
+    type Output = SequenceKeyStats;
+
+    fn arguments(&mut self, outcome: *mut usearch_outcome_t, completion: usearch_completion_t) -> Self::Arguments {
+        let Handles { handle: index, executor } = self.handles;
+        usearch_sequence_count_t { index, executor, outcome, completion, key: self.key, key_stats: &mut self.key_stats }
+    }
+
+    unsafe fn call(arguments: *mut Self::Arguments) {
+        unsafe { usearch_sequence_count(arguments) }
+    }
+
+    fn finish(self, status: Result<()>) -> Result<SequenceKeyStats> {
+        status.map(|()| self.key_stats)
+    }
+}
+
+/// What [`SequenceVerbs::get`] runs, and the tape it exports.
+pub struct SequenceGet<'arena> {
+    handles: Handles,
+    key: Key,
+    arena: &'arena Arena<'arena>,
+    sequences: TapeEntries<'arena, u8>,
+}
+
+impl<'arena> Calling for SequenceGet<'arena> {
+    type Arguments = usearch_sequence_get_t;
+    type Output = TapeEntries<'arena, u8>;
+
+    fn arguments(&mut self, outcome: *mut usearch_outcome_t, completion: usearch_completion_t) -> Self::Arguments {
+        let Handles { handle: index, executor } = self.handles;
+        usearch_sequence_get_t {
+            index,
+            executor,
+            outcome,
+            completion,
+            key: self.key,
+            sequences: &mut self.sequences.view,
+            written: &mut self.sequences.written,
+            arena: self.arena.handle,
+        }
+    }
+
+    unsafe fn call(arguments: *mut Self::Arguments) {
+        unsafe { usearch_sequence_get(arguments) }
+    }
+
+    fn finish(self, status: Result<()>) -> Result<TapeEntries<'arena, u8>> {
+        status.map(|()| self.sequences)
+    }
+}
+
+/// What [`SequenceVerbs::insert`] runs: the keys and the config holding their tape.
+pub struct SequenceInsert<'config, Keys, Offset: Clone> {
+    handles: Handles,
+    keys: Keys,
+    config: SequenceInsertConfig<'config, Offset>,
+}
+
+impl<Keys: AsRef<[Key]>, Offset: TapeOffset> Calling for SequenceInsert<'_, Keys, Offset> {
+    type Arguments = usearch_sequence_insert_t;
+    type Output = ();
+
+    fn arguments(&mut self, outcome: *mut usearch_outcome_t, completion: usearch_completion_t) -> Self::Arguments {
+        let Handles { handle: index, executor } = self.handles;
+        let (keys, config) = (self.keys.as_ref(), &mut self.config);
+        usearch_sequence_insert_t {
+            index,
+            executor,
+            outcome,
+            completion,
+            count: keys.len(),
+            keys: usearch_keys_view_t::of(keys),
+            sequences: config.sequences.view(Scalar::U8),
+            expansion_factor: config.expansion_factor,
+            progress: lower_progress(&config.progress, config.progress_steps),
+            stats: output_slot(&mut config.stats),
+        }
+    }
+
+    unsafe fn call(arguments: *mut Self::Arguments) {
+        unsafe { usearch_sequence_insert(arguments) }
+    }
+
+    fn finish(self, status: Result<()>) -> Result<()> {
+        status
+    }
+}
+
+/// What [`SequenceVerbs::refine`] runs: its config, plan included, and the report it fills.
+pub struct SequenceRefine<'config, Plan> {
+    handles: Handles,
+    config: SequenceRefineConfig<'config, Plan>,
+    report: RefineReport,
+}
+
+impl<'config, Plan: BorrowMut<SequenceRefinePlan>> Calling for SequenceRefine<'config, Plan> {
+    type Arguments = usearch_sequence_refine_t;
+    type Output = RefineReport;
+
+    fn arguments(&mut self, outcome: *mut usearch_outcome_t, completion: usearch_completion_t) -> Self::Arguments {
+        let Handles { handle: index, executor } = self.handles;
+        let config = &mut self.config;
+        usearch_sequence_refine_t {
+            index,
+            executor,
+            outcome,
+            completion,
+            report: &mut self.report,
+            refine: usearch_refine_options_t {
+                expansion_factor: config.expansion_factor,
+                memory_limit: config.memory_limit,
+            },
+            progress: lower_progress(&config.progress, config.progress_steps),
+            stats: output_slot(&mut config.stats),
+            plan: config.plan.as_mut().map_or(ptr::null_mut(), |plan| &mut plan.borrow_mut().handle),
+            phase: output_slot(&mut config.phase),
+        }
+    }
+
+    unsafe fn call(arguments: *mut Self::Arguments) {
+        unsafe { usearch_sequence_refine(arguments) }
+    }
+
+    fn finish(self, status: Result<()>) -> Result<RefineReport> {
+        status.map(|()| self.report)
+    }
+}
+
+impl<'config, Plan: BorrowMut<SequenceRefinePlan>> Lending for SequenceRefine<'config, Plan> {
+    type Inputs = SequenceRefineConfig<'config, Plan>;
+
+    fn finish_with_inputs(self, status: Result<()>) -> (Result<RefineReport>, Self::Inputs) {
+        (status.map(|()| self.report), self.config)
+    }
+}
+
+/// What [`SequenceVerbs::refine_plan_finish`] runs: the plan it closes and the report it fills.
+pub struct SequenceRefinePlanFinish {
+    handles: Handles,
+    plan: SequenceRefinePlan,
+    report: RefineReport,
+}
+
+impl Calling for SequenceRefinePlanFinish {
+    type Arguments = usearch_sequence_refine_plan_finish_t;
+    type Output = RefineReport;
+
+    fn arguments(&mut self, outcome: *mut usearch_outcome_t, completion: usearch_completion_t) -> Self::Arguments {
+        let Handles { handle: index, executor } = self.handles;
+        usearch_sequence_refine_plan_finish_t {
+            index,
+            executor,
+            outcome,
+            completion,
+            plan: self.plan.handle,
+            report: &mut self.report,
+        }
+    }
+
+    unsafe fn call(arguments: *mut Self::Arguments) {
+        unsafe { usearch_sequence_refine_plan_finish(arguments) }
+    }
+
+    fn finish(self, status: Result<()>) -> Result<RefineReport> {
+        status.map(|()| self.report)
+    }
+}
+
+/// What [`SequenceVerbs::health`] runs, and the reachability it fills.
+pub struct SequenceHealth {
+    handles: Handles,
+    reachability: DenseReachability,
+}
+
+impl Calling for SequenceHealth {
+    type Arguments = usearch_sequence_health_t;
+    type Output = DenseReachability;
+
+    fn arguments(&mut self, outcome: *mut usearch_outcome_t, completion: usearch_completion_t) -> Self::Arguments {
+        let Handles { handle: index, executor } = self.handles;
+        usearch_sequence_health_t { index, executor, outcome, completion, reachability: &mut self.reachability }
+    }
+
+    unsafe fn call(arguments: *mut Self::Arguments) {
+        unsafe { usearch_sequence_health(arguments) }
+    }
+
+    fn finish(self, status: Result<()>) -> Result<DenseReachability> {
+        status.map(|()| self.reachability)
+    }
+}
+
+/// What [`SequenceVerbs::search`] runs: its query tape and config, and the matches it writes.
+pub struct SequenceSearch<'config, 'arena, Offset: Clone> {
+    handles: Handles,
+    queries: Tape<'config, u8, Offset>,
+    config: SequenceSearchConfig<'config>,
+    matches: Matches<'arena>,
+}
+
+impl<'arena, Offset: TapeOffset> Calling for SequenceSearch<'_, 'arena, Offset> {
+    type Arguments = usearch_sequence_search_t;
+    type Output = Matches<'arena>;
+
+    fn arguments(&mut self, outcome: *mut usearch_outcome_t, completion: usearch_completion_t) -> Self::Arguments {
+        let Handles { handle: index, executor } = self.handles;
+        let config = &mut self.config;
+        usearch_sequence_search_t {
+            index,
+            executor,
+            outcome,
+            completion,
+            count: self.queries.count(),
+            queries: self.queries.view(Scalar::U8),
+            matches: &mut self.matches.view,
+            arena: self.matches.arena.handle,
+            wanted: config.wanted,
+            expansion_factor: config.expansion_factor,
+            traversal: config.traversal as usearch_traversal_t,
+            predicate: lower_predicate(&config.predicate),
+            progress: lower_progress(&config.progress, config.progress_steps),
+            stats: output_slot(&mut config.stats),
+        }
+    }
+
+    unsafe fn call(arguments: *mut Self::Arguments) {
+        unsafe { usearch_sequence_search(arguments) }
+    }
+
+    fn finish(self, status: Result<()>) -> Result<Matches<'arena>> {
+        status.map(|()| self.matches)
+    }
+}
+
+/// What [`SequenceVerbs::reshard`] runs: its config, plan included, the handles it lends and the
+/// report it fills.
+pub struct SequenceReshard<'config, Plan> {
+    handles: Handles,
+    config: SequenceReshardConfig<'config, Plan>,
+    lists: ReshardHandles,
+    report: RefineReport,
+}
+
+impl<'config, Plan: BorrowMut<SequenceReshardPlan>> Calling for SequenceReshard<'config, Plan> {
+    type Arguments = usearch_sequence_reshard_t;
+    type Output = RefineReport;
+
+    fn arguments(&mut self, outcome: *mut usearch_outcome_t, completion: usearch_completion_t) -> Self::Arguments {
+        let (config, lists) = (&mut self.config, &self.lists);
+        usearch_sequence_reshard_t {
+            sources_count: lists.sources.len(),
+            sources: lists.sources.as_ptr(),
+            targets_count: lists.targets.len(),
+            targets: lists.targets.as_ptr(),
+            executor: self.handles.executor,
+            outcome,
+            completion,
+            report: &mut self.report,
+            refine: usearch_refine_options_t {
+                expansion_factor: config.expansion_factor,
+                memory_limit: config.memory_limit,
+            },
+            seed: config.seed,
+            progress: lower_progress(&config.progress, config.progress_steps),
+            stats: output_slot(&mut config.stats),
+            plan: config.plan.as_mut().map_or(ptr::null_mut(), |plan| &mut plan.borrow_mut().handle),
+            phase: output_slot(&mut config.phase),
+        }
+    }
+
+    unsafe fn call(arguments: *mut Self::Arguments) {
+        unsafe { usearch_sequence_reshard(arguments) }
+    }
+
+    fn finish(self, status: Result<()>) -> Result<RefineReport> {
+        status.map(|()| self.report)
+    }
+}
+
+impl<'config, Plan: BorrowMut<SequenceReshardPlan>> Lending for SequenceReshard<'config, Plan> {
+    type Inputs = SequenceReshardConfig<'config, Plan>;
+
+    fn finish_with_inputs(self, status: Result<()>) -> (Result<RefineReport>, Self::Inputs) {
+        (status.map(|()| self.report), self.config)
+    }
+}
+
+/// What [`SequenceVerbs::reshard_plan_finish`] runs: the plan it closes and the report it fills.
+pub struct SequenceReshardPlanFinish {
+    handles: Handles,
+    plan: SequenceReshardPlan,
+    report: RefineReport,
+}
+
+impl Calling for SequenceReshardPlanFinish {
+    type Arguments = usearch_sequence_reshard_plan_finish_t;
+    type Output = RefineReport;
+
+    fn arguments(&mut self, outcome: *mut usearch_outcome_t, completion: usearch_completion_t) -> Self::Arguments {
+        usearch_sequence_reshard_plan_finish_t {
+            executor: self.handles.executor,
+            outcome,
+            completion,
+            plan: self.plan.handle,
+            report: &mut self.report,
+        }
+    }
+
+    unsafe fn call(arguments: *mut Self::Arguments) {
+        unsafe { usearch_sequence_reshard_plan_finish(arguments) }
+    }
+
+    fn finish(self, status: Result<()>) -> Result<RefineReport> {
+        status.map(|()| self.report)
+    }
+}
+
+/// What [`SequenceVerbs::sample`] runs: its config and the draws it writes.
+pub struct SequenceSample<'config, 'arena> {
+    handles: Handles,
+    wanted: usize,
+    config: DenseSampleConfig<'config>,
+    sample: Sample<'arena>,
+}
+
+impl<'arena> Calling for SequenceSample<'_, 'arena> {
+    type Arguments = usearch_sequence_sample_t;
+    type Output = Sample<'arena>;
+
+    fn arguments(&mut self, outcome: *mut usearch_outcome_t, completion: usearch_completion_t) -> Self::Arguments {
+        let Handles { handle: index, executor } = self.handles;
+        let (config, sample) = (&mut self.config, &mut self.sample);
+        usearch_sequence_sample_t {
+            index,
+            executor,
+            outcome,
+            completion,
+            shown_count: config.shown.len(),
+            shown: usearch_keys_view_t::of(config.shown),
+            shown_coordinates: usearch_rows_view_t {
+                data: config.shown_coordinates.as_ptr().cast(),
+                stride: core::mem::size_of::<[f32; 3]>(),
+                columns: 3,
+                scalar: Scalar::F32 as crate::types::usearch_scalar_t,
+            },
+            focus_count: config.focus.len(),
+            focus: usearch_keys_view_t::of(config.focus),
+            keys: &mut sample.keys,
+            entry_ordinals: &mut sample.entry_ordinals,
+            parents: &mut sample.parents,
+            coordinates: &mut sample.coordinates,
+            written: &mut sample.written,
+            arena: sample.arena.handle,
+            wanted: self.wanted,
+            seed: config.seed,
+            expansion_factor: config.expansion_factor,
+            progress: lower_progress(&config.progress, config.progress_steps),
+            stats: output_slot(&mut config.stats),
+        }
+    }
+
+    unsafe fn call(arguments: *mut Self::Arguments) {
+        unsafe { usearch_sequence_sample(arguments) }
+    }
+
+    fn finish(self, status: Result<()>) -> Result<Sample<'arena>> {
+        status.map(|()| self.sample)
+    }
+}
+
+/// What [`SequenceVerbs::save`] runs: its config and the path view into it.
+pub struct SequenceSave<'config, Location> {
+    handles: Handles,
+    path: usearch_bytes_view_t,
+    config: DenseSaveConfig<'config, Location>,
+}
+
+impl<Location> Calling for SequenceSave<'_, Location> {
+    type Arguments = usearch_sequence_save_t;
+    type Output = ();
+
+    fn arguments(&mut self, outcome: *mut usearch_outcome_t, completion: usearch_completion_t) -> Self::Arguments {
+        let Handles { handle: index, executor } = self.handles;
+        usearch_sequence_save_t {
+            index,
+            executor,
+            outcome,
+            completion,
+            path: self.path,
+            progress: lower_progress(&self.config.progress, self.config.progress_steps),
+        }
+    }
+
+    unsafe fn call(arguments: *mut Self::Arguments) {
+        unsafe { usearch_sequence_save(arguments) }
+    }
+
+    fn finish(self, status: Result<()>) -> Result<()> {
+        status
+    }
+}
+
+/// What [`SequenceVerbs::save_buffer`] runs: its progress and the monolith it writes.
+pub struct SequenceSaveBuffer<'config, 'arena> {
+    handles: Handles,
+    progress: Option<Progress<'config>>,
+    progress_steps: usize,
+    monolith: Monolith<'arena>,
+}
+
+impl<'arena> Calling for SequenceSaveBuffer<'_, 'arena> {
+    type Arguments = usearch_sequence_save_buffer_t;
+    type Output = Monolith<'arena>;
+
+    fn arguments(&mut self, outcome: *mut usearch_outcome_t, completion: usearch_completion_t) -> Self::Arguments {
+        let Handles { handle: index, executor } = self.handles;
+        usearch_sequence_save_buffer_t {
+            index,
+            executor,
+            outcome,
+            completion,
+            monolith: &mut self.monolith.monolith,
+            arena: self.monolith.arena.handle,
+            progress: lower_progress(&self.progress, self.progress_steps),
+        }
+    }
+
+    unsafe fn call(arguments: *mut Self::Arguments) {
+        unsafe { usearch_sequence_save_buffer(arguments) }
+    }
+
+    fn finish(self, status: Result<()>) -> Result<Monolith<'arena>> {
+        status.map(|()| self.monolith)
+    }
+}
+
+// endregion: Calls
 
 // region: Tests
 
@@ -1963,7 +2309,7 @@ mod tests {
         let executor = executor();
         let (mut plan, mut phase) = (SequenceRefinePlan::default(), PhaseProgress::default());
         let stopped = index.on(&executor).refine(SequenceRefineConfig {
-            progress: Some(&mut |_, _| ControlFlow::Break(())),
+            progress: Some(Progress::new(&mut |_, _| ControlFlow::Break(()))),
             plan: Some(&mut plan),
             phase: Some(&mut phase),
             ..SequenceRefineConfig::default()
@@ -2030,7 +2376,7 @@ mod tests {
         let stopped = first.on(&executor).reshard(SequenceReshardConfig {
             sources: &[&first, &second],
             targets: &[&first],
-            progress: Some(&mut |_, _| ControlFlow::Break(())),
+            progress: Some(Progress::new(&mut |_, _| ControlFlow::Break(()))),
             plan: Some(&mut plan),
             phase: Some(&mut phase),
             ..SequenceReshardConfig::default()
@@ -2043,7 +2389,7 @@ mod tests {
 
         // A deferred call owns the plan it continues and hands it back once final.
         let continued = first.deferred(&executor).reshard(SequenceReshardConfig::from(plan)).unwrap();
-        let (finished, (config, _)) = continued.wait_with_inputs();
+        let (finished, config) = continued.wait_with_inputs();
         finished.unwrap();
         let plan = config.plan.expect("the call hands its plan back");
         let report = first.deferred(&executor).reshard_plan_finish(plan).unwrap().wait().unwrap();
@@ -2083,7 +2429,7 @@ mod tests {
         let stopped = source.on(&executor).reshard(SequenceReshardConfig {
             sources: &[&source],
             targets: &[&targets[0], &targets[1]],
-            progress: Some(&mut |_, _| ControlFlow::Break(())),
+            progress: Some(Progress::new(&mut |_, _| ControlFlow::Break(()))),
             plan: Some(&mut plan),
             phase: Some(&mut phase),
             ..SequenceReshardConfig::default()

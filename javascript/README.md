@@ -333,7 +333,7 @@ for (let pulled = stream.next(16, arena); pulled.counts[0] && admitted.length < 
 }
 ```
 
-The engine-side predicate and the progress handlers are not exposed, for the reason under [What This Binding Does Not Expose](#what-this-binding-does-not-expose).
+The engine-side predicate and the progress handlers are not exposed, for the reason under [Left Unbound](#left-unbound).
 
 ### Retrieval and Streaming
 
@@ -553,13 +553,14 @@ console.log(nearby.get(0).count); // 2: the two Paris stops, a kilometre apart
 `GeospatialRelation` holds the C enumerator values, since the library names no spelling for them.
 No handle here carries a terrain, so `Visible` is refused, and `get` returns observations within the stored rounding.
 
-## What This Binding Does Not Expose
+## Left Unbound
 
 A JavaScript callback runs only on the thread owning the JavaScript context, and an executor's threads never are.
 A thread-safe function would queue onto a loop that sits blocked inside the verb, so the callback could never run.
 That is why `attend` runs on the calling thread alone, where its `rowOf` can, and no executor receiver offers it.
 It is also why a search `predicate`, a per-candidate callback the engine calls from the threads it fanned out over, is not exposed at all; pull through `searchStream` instead and filter in JavaScript.
 The same reasoning excludes the progress handlers every long verb takes, and the terrain callback a geospatial index fills its heights through.
+The Arrow converters of `c/usearch/arrow.h` are not bound either; `Tape` borrows the offsets and elements of an Arrow column, but no column converts to or from a call's input or output.
 
 ## Design
 

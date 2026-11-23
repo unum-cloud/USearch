@@ -4,7 +4,7 @@ Nothing dense-specific lives here - the metric kinds, the result shapes only a d
 and the index itself belong to @c dense.mojo, so a second modality adds a module rather than
 widening this one.
 
-`Error` is the only error type the binding raises: Mojo 1.1 allows at most one per function, so a
+`Error` is the only error type the binding raises: Mojo allows at most one per function, so a
 second would force every caller raising `Error` to catch and convert. A refusal is a failure, not an absence - a key the index does not hold answers zero, but a
 call the engine declines raises.
 
@@ -28,12 +28,14 @@ allocation; naming the origin in the descriptor's type moved the destruction aft
 pointer fields carry that origin too, so the compiler tracks the pointer itself, and `arguments`
 erases it inside the verb, while the descriptor is still alive, to reach the one instantiation the
 ABI signatures name. A `Deferred` carries the union of every origin its call
-borrows the same way, which keeps the index, the executor, and the inputs alive until it is gone.
+borrows the same way, which keeps the index, the executor, the arena and the inputs alive until it
+is gone, and an `Arena` carries its executor's origin, so the executor outlives it.
 
 A struct whose address crosses to C is materialized into a `stack_allocation` slot rather than held
 in a local whose address is taken. An `alloca` is not a value Mojo owns, so nothing destroys it and
 nothing folds its store away, where a local's last tracked use is the address-taking itself. A
-deferred call's slots outlive the verb that submitted them, so they live on the heap instead.
+deferred call's slots outlive the verb that submitted them, so they live inside its `Deferred`,
+which is built in the caller's place and never moves.
 
 File: mojo/usearch/types.mojo
 Author: Ash Vardanian
@@ -42,7 +44,9 @@ Date: September 7, 2026
 
 from std.bit import byte_swap
 from std.ffi import c_int, c_size_t
-from std.memory import ArcPointer, OwnedPointer, stack_allocation
+from std.builtin._coroutine import AnyCoroutine, _suspend_async
+from std.memory import stack_allocation
+from std.runtime._asyncrt import _async_execute
 from std.sys.info import size_of
 
 from usearch.library import Library
@@ -551,7 +555,7 @@ struct ProgressArguments(Defaultable, ImplicitlyCopyable):
 
     @staticmethod
     def of[
-        State: AnyType, //, handler: def(Int, Int, mut State) thin -> Continuation
+        State: AnyType, //, handler: def(Int, Int, Pointer[State, MutAnyOrigin]) thin -> Continuation
     ](state: Pointer[State, MutAnyOrigin], steps: Int = 0) -> Self:
         """Installs a Mojo handler, never called concurrently, that may stop the call. Binding-only.
 
@@ -591,10 +595,10 @@ comptime ProgressCallback = def(c_size_t, c_size_t, Address) thin abi("C") -> c_
 
 
 def _progress_trampoline[
-    State: AnyType, handler: def(Int, Int, mut State) thin -> Continuation
+    State: AnyType, handler: def(Int, Int, Pointer[State, MutAnyOrigin]) thin -> Continuation
 ](completed: c_size_t, total: c_size_t, state: Address) abi("C") -> c_int:
     """The C handler one Mojo handler compiles into, its state typed again."""
-    return handler(Int(completed), Int(total), Pointer[State, MutAnyOrigin](unsafe_from_address=state)[]).code
+    return handler(Int(completed), Int(total), Pointer[State, MutAnyOrigin](unsafe_from_address=state)).code
 
 
 @fieldwise_init
@@ -615,7 +619,7 @@ struct PredicateArguments(ImplicitlyCopyable):
     state it is called with."""
 
     var callback: Address
-    """The handler, compiled in Mojo by `of` or in C; `NULL_ADDRESS` admits every key."""
+    """The handler, compiled in Mojo by `each` or `batch`, or in C; `NULL_ADDRESS` admits every key."""
     var state: Address
     """Forwarded into every `callback` call."""
     var cost: PredicateCost
@@ -628,12 +632,35 @@ struct PredicateArguments(ImplicitlyCopyable):
         self.cost = PredicateCost.CHEAP
 
     @staticmethod
-    def of[
+    def each[
+        State: AnyType, //, judge: def(Key, Pointer[State, MutAnyOrigin]) thin -> Bool
+    ](state: Pointer[State, MutAnyOrigin]) -> Self:
+        """Installs a cheap Mojo handler answering one key at a time, asked as candidates are scored and
+        called concurrently from the executor's threads. Binding-only.
+
+        Parameters:
+            State: The handler's state, inferred from the argument.
+            judge: Whether one candidate key may be reported, reading the state but never writing it.
+
+        Args:
+            state: What the handler reads; it must outlive the call.
+
+        Returns:
+            The predicate a filtered search takes.
+        """
+        var callback: PredicateCallback = _each_trampoline[State, judge]
+        return Self(Pointer(to=callback).unsafe_bitcast[Address]()[], Int(state), PredicateCost.CHEAP)
+
+    @staticmethod
+    def batch[
         State: AnyType,
         //,
-        judge: def(Span[Key, ImmUntrackedOrigin], Span[Admission, MutUntrackedOrigin], State) thin -> None,
-    ](state: Pointer[State, MutAnyOrigin], cost: PredicateCost = PredicateCost.CHEAP) -> Self:
-        """Installs a Mojo handler, called concurrently from the executor's threads. Binding-only.
+        judge: def(
+            Span[Key, ImmUntrackedOrigin], Span[Admission, MutUntrackedOrigin], Pointer[State, MutAnyOrigin]
+        ) thin -> None,
+    ](state: Pointer[State, MutAnyOrigin], cost: PredicateCost = PredicateCost.EXPENSIVE) -> Self:
+        """Installs a Mojo handler answering a batch at a time, asked once per round unless told it is
+        cheap, and called concurrently from the executor's threads. Binding-only.
 
         Parameters:
             State: The handler's state, inferred from the argument.
@@ -646,7 +673,7 @@ struct PredicateArguments(ImplicitlyCopyable):
         Returns:
             The predicate a filtered search takes.
         """
-        var callback: PredicateCallback = _predicate_trampoline[State, judge]
+        var callback: PredicateCallback = _batch_trampoline[State, judge]
         return Self(Pointer(to=callback).unsafe_bitcast[Address]()[], Int(state), cost)
 
 
@@ -656,19 +683,38 @@ comptime PredicateCallback = def(
 """`usearch_predicate_callback_t`: the candidate keys, one admission slot apiece, their count, and the state."""
 
 
-def _predicate_trampoline[
-    State: AnyType, judge: def(Span[Key, ImmUntrackedOrigin], Span[Admission, MutUntrackedOrigin], State) thin -> None
+def _each_trampoline[
+    State: AnyType, judge: def(Key, Pointer[State, MutAnyOrigin]) thin -> Bool
 ](
     keys: Pointer[Key, ImmUntrackedOrigin],
     admissions: Pointer[Admission, MutUntrackedOrigin],
     count: c_size_t,
     state: Address,
 ) abi("C"):
-    """The C handler one Mojo predicate compiles into, its keys and admissions spanned again."""
+    """The C handler one per-key Mojo predicate compiles into, asking it about every key in turn."""
+    var typed = Pointer[State, MutAnyOrigin](unsafe_from_address=state)
+    var written = admissions.unsafe_origin_cast[MutAnyOrigin]()
+    for position in range(Int(count)):
+        var admitted = judge(keys[unsafe_offset=position], typed)
+        written[unsafe_offset=position] = Admission.ADMIT if admitted else Admission.REJECT
+
+
+def _batch_trampoline[
+    State: AnyType,
+    judge: def(
+        Span[Key, ImmUntrackedOrigin], Span[Admission, MutUntrackedOrigin], Pointer[State, MutAnyOrigin]
+    ) thin -> None,
+](
+    keys: Pointer[Key, ImmUntrackedOrigin],
+    admissions: Pointer[Admission, MutUntrackedOrigin],
+    count: c_size_t,
+    state: Address,
+) abi("C"):
+    """The C handler one batch Mojo predicate compiles into, its keys and admissions spanned again."""
     judge(
         Span[Key, ImmUntrackedOrigin](unsafe_ptr=keys, length=Int(count)),
         Span[Admission, MutUntrackedOrigin](unsafe_ptr=admissions, length=Int(count)),
-        Pointer[State, MutAnyOrigin](unsafe_from_address=state)[],
+        Pointer[State, MutAnyOrigin](unsafe_from_address=state),
     )
 
 
@@ -1282,32 +1328,8 @@ struct ExecutorDrainArguments(ImplicitlyCopyable):
     var mood: Mood
 
 
-struct _ExecutorHandle:
-    """The `usearch_executor_t` an `Executor` owns, shared with every VRAM arena it made and freed with
-    the last of them, since such an arena grows, fills and frees on the executor's first stream."""
-
-    var library: Library
-    var address: Address
-
-    def __init__(out self, library: Library, address: Address):
-        """Takes over a spawned handle, or the null one the caller-thread executor names."""
-        self.library = library
-        self.address = address
-
-    def __deinit__(deinit self):
-        """Drains every thread or stream, releases the scratch, and frees the executor.
-        Calls `usearch_executor_free`.
-
-        The loader reference is surrendered only after the call: reading the entry point is the
-        last use of `library`, so without the trailing move Mojo drops the last reference - and
-        `dlclose`s the engine - between the load and the branch to it.
-        """
-        self.library.symbols().executor_free(self.address)
-        _ = self.library^
-
-
 struct Executor:
-    """The threads or streams a verb runs on, freed once it and every VRAM arena it made go out of scope.
+    """The threads or streams a verb runs on, freed when it goes out of scope, after every arena it made.
 
     `Executor(library)` owns nothing: every verb handed it runs on the calling thread -
     single-threaded on RAM, on the handle's device and default stream on VRAM. The spawning
@@ -1322,8 +1344,6 @@ struct Executor:
     """The loaded engine, held so its symbol table outlives every call made through the handle."""
     var address: Address
     """The opaque `usearch_executor_t` every verb hands back to the engine; `NULL_ADDRESS` runs inline."""
-    var _handle: ArcPointer[_ExecutorHandle]
-    """The handle's owner, which a VRAM arena shares so the executor outlives it."""
 
     def __init__(out self, library: Library):
         """The caller-thread executor, which every verb accepts whatever the handle's residency.
@@ -1342,7 +1362,17 @@ struct Executor:
         """
         self.library = library
         self.address = address
-        self._handle = ArcPointer(_ExecutorHandle(library, address))
+
+    def __deinit__(deinit self):
+        """Drains every thread or stream, releases the scratch, and frees the executor.
+        Calls `usearch_executor_free`.
+
+        The loader reference is surrendered only after the call: reading the entry point is the
+        last use of `library`, so without the trailing move Mojo drops the last reference - and
+        `dlclose`s the engine - between the load and the branch to it.
+        """
+        self.library.symbols().executor_free(self.address)
+        _ = self.library^
 
     @staticmethod
     def for_ram[
@@ -1572,7 +1602,24 @@ struct ArenaDescribeArguments(ImplicitlyCopyable):
     var description: Pointer[ArenaDescription, MutUntrackedOrigin]
 
 
-struct Arena:
+def _arena_init(library: Library, executor: Address) raises Error -> Address:
+    """Makes an arena where `executor` computes, or host pages for a null one. Calls `usearch_arena_init`."""
+    var created = stack_allocation[1, Address]()
+    created[unsafe_offset=0] = NULL_ADDRESS
+    var outcome = stack_allocation[1, Outcome]()
+    outcome[unsafe_offset=0] = Outcome()
+    var arguments = stack_allocation[1, ArenaInitArguments]()
+    arguments[unsafe_offset=0] = ArenaInitArguments(
+        created.unsafe_origin_cast[MutUntrackedOrigin](),
+        executor,
+        outcome.unsafe_origin_cast[MutUntrackedOrigin](),
+    )
+    library.symbols().arena_init(arguments.unsafe_origin_cast[MutAnyOrigin]())
+    library._check(outcome.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0], "usearch_arena_init")
+    return created.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0]
+
+
+struct Arena[origin: ImmOrigin]:
     """The memory every output whose length scales with a call lands in - `usearch_arena_t`, freed
     when it goes out of scope.
 
@@ -1587,18 +1634,19 @@ struct Arena:
 
     A result reads the arena in place until its next call rewinds it, and `describe` says where that
     memory lives, which a caller checks before reading a VRAM arena's results on the host. A VRAM
-    arena serves only calls on the executor that made it, and keeps that executor alive until it is
-    freed.
+    arena serves only calls on the executor that made it. An arena never outlives that executor: its
+    origin borrows it, so Mojo frees the arena first.
+
+    Parameters:
+        origin: The executor that made it, untracked for `Arena(library)`, which no executor made.
     """
 
     var _library: Library
     """The loaded engine, held so the release can still reach `usearch_arena_free`."""
     var _address: Address
     """The `usearch_arena_t`, never null."""
-    var _executor: Optional[ArcPointer[_ExecutorHandle]]
-    """The VRAM executor that made it, held so the arena is freed first, on that executor's first stream."""
 
-    def __init__(out self, library: Library) raises Error:
+    def __init__(out self: Arena[ImmUntrackedOrigin], library: Library) raises Error:
         """Host pages for calls on the calling thread. Calls `usearch_arena_init`.
 
         Args:
@@ -1607,46 +1655,30 @@ struct Arena:
         Raises:
             `Error` if the engine cannot allocate the handle.
         """
-        self = Self(Executor(library))
+        var address = _arena_init(library, NULL_ADDRESS)
+        self._library = library
+        self._address = address
 
-    def __init__(out self, executor: Executor) raises Error:
+    def __init__(out self, ref[Self.origin] executor: Executor) raises Error:
         """Memory where `executor` computes - host pages, or the memory of its GPU - serving the calls
         of its residency. Calls `usearch_arena_init`.
 
         Args:
-            executor: The executor whose calls it serves; host pages may outlive it, and a VRAM arena
-                keeps it alive.
+            executor: The executor whose calls it serves, borrowed until the arena is freed.
 
         Raises:
             `Error` if the engine cannot allocate the handle.
         """
-        var created = stack_allocation[1, Address]()
-        created[unsafe_offset=0] = NULL_ADDRESS
-        var outcome = stack_allocation[1, Outcome]()
-        outcome[unsafe_offset=0] = Outcome()
-        var arguments = stack_allocation[1, ArenaInitArguments]()
-        arguments[unsafe_offset=0] = ArenaInitArguments(
-            created.unsafe_origin_cast[MutUntrackedOrigin](),
-            executor.address,
-            outcome.unsafe_origin_cast[MutUntrackedOrigin](),
-        )
-        executor.library.symbols().arena_init(arguments.unsafe_origin_cast[MutAnyOrigin]())
-        executor.library._check(outcome.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0], "usearch_arena_init")
+        var address = _arena_init(executor.library, executor.address)
         self._library = executor.library
-        self._address = created.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0]
-        self._executor = None
-        if self.describe().residency == Residency.VRAM:
-            self._executor = Optional(executor._handle)
+        self._address = address
 
     def __deinit__(deinit self):
-        """Frees the arena and every output in it, then lets a VRAM arena's executor go.
-        Calls `usearch_arena_free`.
+        """Frees the arena and every output in it. Calls `usearch_arena_free`.
 
-        The executor and the loader reference are surrendered only after the call, for the reason
-        `_ExecutorHandle` records.
+        The loader reference is surrendered only after the call, for the reason `Executor` records.
         """
         self._library.symbols().arena_free(self._address)
-        _ = self._executor^
         _ = self._library^
 
     def describe(self) raises Error -> ArenaDescription:
@@ -1811,13 +1843,15 @@ def _block[C: Call](library: Library, var call: C, index: Address, executor: Add
     return result^
 
 
-struct Deferred[C: Call, origin: ImmOrigin](Movable):
-    """A call submitted to an executor, which owns its outcome and outputs until it is final. Binding-only.
+struct Deferred[C: Call, origin: ImmOrigin]:
+    """A call submitted to an executor, which holds its outcome and outputs inline until it is final. Binding-only.
 
-    `status` reads `DEFERRED` until then, without blocking, and `wait` blocks until the call is
-    final and answers its result or raises its failure, as many times as it is asked. The result is
-    the view a blocking call answers, borrowing the same arena. Dropping an unfinished one waits the
-    same way, so nothing the engine still writes is ever freed under it. The origins keep the index,
+    It never moves: a receiver builds it in the caller's place and submits it there, so the engine
+    writes into it directly. `status` reads `DEFERRED` until then, without blocking, and `wait`
+    blocks until the call is final and answers its result or raises its failure, as many times as
+    it is asked. `await` answers the same, yielding to the runtime while the call is pending. The
+    result is the view a blocking call answers, borrowing the same arena. Dropping an unfinished one
+    waits, so nothing the engine still writes is ever freed under it. The origins keep the index,
     the executor, the arena and every borrowed input alive for as long as this is.
 
     A caller-exclusive pool runs a deferred call on its own thread 0, so polling alone finishes it,
@@ -1831,8 +1865,8 @@ struct Deferred[C: Call, origin: ImmOrigin](Movable):
 
     var library: Library
     """The loaded engine, held so the wait can still reach `usearch_outcome_wait`."""
-    var slots: OwnedPointer[CallSlots[Self.C.Outputs]]
-    """The outcome and scalar outputs the engine writes, on the heap since they outlive the verb."""
+    var slots: CallSlots[Self.C.Outputs]
+    """The outcome and outputs the engine writes."""
     var call: Optional[Self.C]
     """What the call lends the engine, until a wait concludes it."""
     var answer: Optional[Self.C.Result]
@@ -1841,16 +1875,9 @@ struct Deferred[C: Call, origin: ImmOrigin](Movable):
     """The failure, once a wait found the call failed."""
 
     def __init__(out self, library: Library, var call: Self.C, index: Address, executor: Address):
-        """Submits `call` deferred, on `executor`, against `index`.
-
-        Args:
-            library: The loaded engine the call crosses into.
-            call: The verb's crossing, owned until the call is final.
-            index: The handle the call names, or `NULL_ADDRESS` for one that names none.
-            executor: The executor the call is submitted to.
-        """
+        """Submits `call` deferred, on the receiver's executor."""
         self.library = library
-        self.slots = OwnedPointer(CallSlots[Self.C.Outputs]())
+        self.slots = CallSlots[Self.C.Outputs]()
         self.call = call^
         self.answer = None
         self.failure = None
@@ -1871,27 +1898,23 @@ struct Deferred[C: Call, origin: ImmOrigin](Movable):
         """Waits until the call is final, then frees what it lent. Calls `usearch_outcome_wait`."""
         if self.call:
             var slots = Pointer[CallSlots[Self.C.Outputs], MutAnyOrigin](
-                unsafe_from_address=Int(Pointer(to=self.slots[]))
+                unsafe_from_address=Int(Pointer(to=self.slots))
             )
             _ = self.library.symbols().outcome_wait(Pointer(to=slots[].outcome))
             _ = self.call.take().conclude(slots[].outputs)
         _ = self.library^
 
     def _slots(self) -> Pointer[CallSlots[Self.C.Outputs], MutAnyOrigin]:
-        """The heap slots, through the origin the engine's writes need."""
-        return Pointer[CallSlots[Self.C.Outputs], MutAnyOrigin](unsafe_from_address=Int(Pointer(to=self.slots[])))
+        """The slots, through the origin the engine's writes need."""
+        return Pointer[CallSlots[Self.C.Outputs], MutAnyOrigin](unsafe_from_address=Int(Pointer(to=self.slots)))
 
     def status(self) -> Status:
-        """`DEFERRED` until the call is final, then its final status; never blocks. Calls `usearch_outcome_status`.
-
-        Returns:
-            The status the outcome holds.
-        """
+        """`DEFERRED` until the call is final, then its final status; never blocks. Calls `usearch_outcome_status`."""
         return Status(self.library.symbols().outcome_status(Pointer(to=self._slots()[].outcome)))
 
     def wait(mut self) raises Error -> ref[self] Self.C.Result:
-        """Blocks until the call is final, then answers its result or raises its failure, every time it is asked.
-        Calls `usearch_outcome_wait`.
+        """Blocks until the call is final, then answers its result or raises its failure, every time it
+        is asked. Calls `usearch_outcome_wait`.
 
         Returns:
             The result, owned by this `Deferred` and borrowed for as long as it is.
@@ -1911,6 +1934,26 @@ struct Deferred[C: Call, origin: ImmOrigin](Movable):
         if case .Some(failure) = self.failure:
             raise failure
         return Pointer(to=self.answer.value()).unsafe_origin_cast[origin_of(self)]()[]
+
+    @always_inline
+    def __await__(mut self) raises Error -> ref[self] Self.C.Result:
+        """Yields to the runtime until the call is final, then answers as `wait` does.
+        Calls `usearch_outcome_status`.
+
+        Returns:
+            The result, owned by this `Deferred` and borrowed for as long as it is.
+
+        Raises:
+            `Error` carrying the call's failure, whether the engine or the binding refused it.
+        """
+        while self.status() == Status.DEFERRED:
+
+            @always_inline
+            def requeue(handle: AnyCoroutine):
+                _async_execute[NoneType](handle, -1)
+
+            _suspend_async(requeue)
+        return self.wait()
 
 
 # endregion Deferred Calls

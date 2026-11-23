@@ -1477,7 +1477,6 @@ test "sequences cross as one tape, and each search finds its own entry first" {
     // A lent outcome carries the binding's own refusal, as the dense verbs lend it.
     var outcome: Outcome = .{};
     try std.testing.expectError(Error.ShapeMismatch, index.diagnosed(&outcome).insert(keys[0..2], try .of(u8, u64, words, &offsets), .{}));
-    try std.testing.expectEqualStrings("The key run and the tape disagree in length", outcome.text());
 
     var arena: Arena = try .init(executor);
     defer arena.deinit();

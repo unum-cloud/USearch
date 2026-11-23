@@ -27,6 +27,12 @@ version = "3.0.0-rc.1"
 name = "usearch"
 path = "rust/lib.rs"
 
+# Installs a counting global allocator, so it runs as a program of its own rather than under libtest.
+[[test]]
+name = "allocations"
+path = "rust/allocations.rs"
+harness = false
+
 [dependencies]
 # Each `rev` is the one `cmake/usearch_siblings.cmake` pins, so the crates and the C library carry one
 # copy of every sibling; CMake builds each crate's tree in place of downloading it again.

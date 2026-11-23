@@ -378,11 +378,12 @@ Length[nearby["Keys"]]    (* 2: both stops within 500 metres, in chord metres *)
 `GeospatialGet[receiver, key, arena]` answers a key's observations within the stored rounding, each unrecorded field reading as `Missing["NotRecorded"]`, and `GeospatialCount[receiver, key]` the entries under it.
 Refinement, resharding and plans work as in a sequence index.
 
-## What This Binding Does Not Expose
+## Left Unbound
 
 - Search predicates and progress callbacks, since the kernel evaluates on one thread and the executor's workers would have nowhere to call back into; so nothing stops a round early, and a plan resumes only rounds that ended.
 - Traversal telemetry and search streams, which the C interface has and this package does not bind yet.
 - Cursors and sampling, on any index.
+- The Arrow converters of `c/usearch/arrow.h`, which view an Arrow column as an input and export an arena's output as one.
 - Geospatial terrain: `GeospatialInitRam` and `GeospatialInitVram` build a handle without one, which refuses the `visible` relation.
 
 ## Design

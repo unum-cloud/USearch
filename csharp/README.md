@@ -464,7 +464,7 @@ The relation is an argument of each call: `Near` widens the radius by both posit
 Every entry point is declared with `[LibraryImport]`, so the marshalling stubs are source-generated and compiled in rather than reflected at runtime, and the assembly stays trimmable and ahead-of-time compilable.
 Every verb takes one argument struct, as the C interface does, and holds a reference on each `SafeHandle` the struct names for the length of the C call, so a finalizer can never free a handle out from under a running verb, and the free of one a deferred call still names waits for that call.
 
-## What This Binding Does Not Expose
+## Left Unbound
 
 - __Progress steps.__
   A `progress` delegate hears a batch verb after each of the ten slices the C interface derives, since the binding leaves `steps` at zero.
@@ -472,6 +472,8 @@ Every verb takes one argument struct, as the C interface does, and holds a refer
   `Cursor` and `SearchStream` pull blocking, so a `DenseIndexDeferredOn` lacks them.
 - __Constructors on receivers.__
   The constructors address no index yet, so no receiver offers them; the ones the C interface lets fan out take an `executor` argument and run on the caller's thread without one.
+- __Arrow converters.__
+  The Arrow converters of `c/usearch/arrow.h`, which view an Arrow column as an input and export an arena's output as one.
 - __Version numbers and class names.__
   `usearch_version` and the CPU and GPU class spellings stay unbound; `USearchCapabilities.Version()` answers the version as text.
 

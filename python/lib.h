@@ -208,6 +208,7 @@ extern PyTypeObject MonolithType;
 extern PyTypeObject DeferredType;
 extern PyTypeObject OnType;
 extern PyTypeObject DeferredOnType;
+extern PyTypeObject BatchType;
 
 extern PyTypeObject DenseIndexType;
 extern PyTypeObject DenseMetadataType;
@@ -294,7 +295,7 @@ typedef struct usearch_py_enum_t {
 extern usearch_py_enum_t usearch_py_status, usearch_py_mood, usearch_py_dense_metric, usearch_py_scalar,
     usearch_py_residency, usearch_py_traversal, usearch_py_cpu_class, usearch_py_gpu_class, usearch_py_nvme_class;
 extern usearch_py_enum_t usearch_py_sequence_metric, usearch_py_shapes_metric, usearch_py_geospatial_relation,
-    usearch_py_refine_verdict, usearch_py_phase;
+    usearch_py_refine_verdict, usearch_py_phase, usearch_py_predicate_cost;
 
 /**
  *  @brief Builds every mirrored enum's class from `enum.IntEnum` and adds it to @p module, one
@@ -441,8 +442,16 @@ int usearch_py_callable_from_object(PyObject* object, char const* field, PyObjec
 /** The progress to register for @p callable and @p steps, the callable its state; NULL for none. */
 usearch_progress_t usearch_py_progress_registered(PyObject* callable, size_t steps);
 
-/** The predicate to register for @p callable, the callable its state; no trampoline for NULL. */
-usearch_predicate_t usearch_py_predicate_registered(PyObject* callable);
+/**
+ *  @brief Reads the predicate option @p object, a callable asked per key, a @c Batch or None,
+ *      holding it in @p predicate and leaving NULL or None alone.
+ *  @return 0 on success, -1 with a @c TypeError set otherwise.
+ */
+int usearch_py_predicate_from_object(PyObject* object, PyObject** predicate);
+
+/** The predicate to register for @p predicate, which is its state: cheap per key for a callable,
+ *  the cost a @c Batch carries for one; no trampoline for NULL. */
+usearch_predicate_t usearch_py_predicate_registered(PyObject* predicate);
 
 #pragma endregion Calls
 

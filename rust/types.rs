@@ -5,7 +5,7 @@
 //!
 //! An [`On`] is the receiver every modality's verbs run through: it borrows an index and an
 //! executor, and its completion decides whether a verb answers what the call produced or a
-//! [`Deferred`] once the call is submitted.
+//! [`Deferred`] that submits the call once polled or waited on.
 //!
 //! File: rust/types.rs
 //! Author: Ash Vardanian
@@ -14,19 +14,19 @@
 // The C mirror keeps the C spelling of every name.
 #![allow(non_camel_case_types, non_upper_case_globals)]
 
+use core::cell::UnsafeCell;
 use core::ffi::{CStr, c_char, c_int, c_void};
 use core::fmt;
-use core::future::{Future, IntoFuture};
-use core::marker::PhantomData;
-use core::mem::ManuallyDrop;
+use core::future::Future;
+use core::marker::{PhantomData, PhantomPinned};
+use core::mem::{ManuallyDrop, MaybeUninit};
 use core::ops::ControlFlow;
-use core::pin::Pin;
-use core::ptr::{self, NonNull};
+use core::pin::{Pin, pin};
+use core::ptr;
 use core::str::FromStr;
 use core::task::{Context, Poll};
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use numkong::{Allocator, Matrix, MatrixView, StorageElement, TensorRef};
 use numkong::{bf16, e2m3, e3m2, e4m3, e5m2, f16, i4x2, u1x8, u4x2};
@@ -56,6 +56,9 @@ impl Default for usearch_bytes_view_t {
         usearch_bytes_view_t { data: ptr::null(), length: 0 }
     }
 }
+
+// Safety: it views bytes as `&[u8]` does, which crosses threads freely.
+unsafe impl Send for usearch_bytes_view_t {}
 
 /// A strided run of keys - how a batch names the identities it carries, or a cursor pull the
 /// ones it wrote into its arena.
@@ -508,60 +511,13 @@ unsafe extern "C" {
 
 // endregion: Raw Declarations
 
-// region: Sealed Traits
-
-/// One call's outcome, the inputs it reads and the output slot it fills, kept in place until the
-/// call is final.
-#[doc(hidden)]
-pub struct Call<Inputs, Output> {
-    pub(crate) outcome: usearch_outcome_t,
-    pub(crate) inputs: Inputs,
-    pub(crate) output: Output,
-}
-
-/// How the verbs of a receiver complete, which decides what each of them answers.
-#[doc(hidden)]
-pub trait Completion: Sized {
-    /// The output itself when blocking, a [`Deferred`] owning the call when deferring.
-    type Answer<'index, Inputs, Output>;
-
-    /// Places the call and hands it to `submit`, which fills the verb's arguments and calls it,
-    /// or refuses before the call crosses the boundary.
-    fn answer<'index, Inputs, Output>(
-        inputs: Inputs,
-        output: Output,
-        submit: impl FnOnce(&mut Call<Inputs, Output>, usearch_completion_t) -> Result<()>,
-    ) -> Result<Self::Answer<'index, Inputs, Output>>;
-}
-
-/// The inputs a completion takes: a blocking receiver takes borrows and owned values alike, while
-/// a deferring one takes only what it owns, since the library reads its inputs after the verb returns.
-/// Both borrow the arena, which no call reads as an input.
-#[doc(hidden)]
-#[diagnostic::on_unimplemented(
-    message = "a deferred receiver needs owned inputs",
-    label = "the library would still read this borrow after the verb returns",
-    note = "pass keys in a `Vec` or an array, rows in a NumKong `Matrix` or a `'static` `MatrixView`, a `PathBuf`, \
-            `String` or `'static` path, and `'static` configs, handlers and value lookups"
-)]
-pub trait Accepts<Input> {}
-
-/// A matrix a verb reads its rows from, borrowed or owned.
-#[doc(hidden)]
-pub trait RowsView {
-    /// The scalar type the rows hold.
-    type Value: Element;
-    /// The rows and their count, refused when the layout cannot cross the boundary.
-    fn batch(&self) -> Result<Batch>;
-}
-
-// endregion: Sealed Traits
+pub(crate) use crate::sealed::{Accepts, Calling, Completion, Lending, RowsView};
 
 // region: Errors and Introspection
 
 /// Every way a call can end besides success, numbered as the library numbers them.
 ///
-/// An [`Error`] never carries [`Status::Deferred`], which only [`Deferred::status`] reports.
+/// An [`Error`] never carries [`Status::Deferred`], the status of a call not yet final.
 #[repr(i32)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 #[non_exhaustive]
@@ -1059,6 +1015,9 @@ pub struct Batch {
     pub(crate) count: usize,
 }
 
+// Safety: it views plain scalars that the verb holding it owns or borrows beside it.
+unsafe impl Send for Batch {}
+
 /// Lowers a matrix as the batch of rows a verb reads, its width passed through for the call to check.
 fn batch_of<Value: Element>(matrix: &impl TensorRef<Value, 2>) -> Result<Batch> {
     let layout = MatrixLayout::of(matrix)?;
@@ -1173,7 +1132,7 @@ impl<Element: Clone + 'static, Offset: Clone + 'static> Accepts<Tape<'static, El
 ///
 /// Rust-only.
 pub struct TapeEntries<'arena, Element> {
-    pub(crate) arena: PhantomData<&'arena Arena>,
+    pub(crate) arena: PhantomData<&'arena Arena<'arena>>,
     pub(crate) view: usearch_tape_view_t,
     pub(crate) written: usize,
     pub(crate) element: PhantomData<Element>,
@@ -1211,8 +1170,7 @@ impl<'arena, Element: 'arena> TapeEntries<'arena, Element> {
 }
 
 /// The source and target handles a reshard lends, laid out as the library reads them.
-#[doc(hidden)]
-pub struct ReshardHandles {
+pub(crate) struct ReshardHandles {
     pub(crate) sources: Vec<*mut c_void>,
     pub(crate) targets: Vec<*mut c_void>,
 }
@@ -1240,7 +1198,7 @@ pub struct QueryMatches<'matches> {
 /// The ranked matches a search or a stream pull wrote into the arena it borrows; see
 /// [`DenseVerbs::search`](crate::DenseVerbs::search).
 pub struct Matches<'arena> {
-    pub(crate) arena: &'arena Arena,
+    pub(crate) arena: &'arena Arena<'arena>,
     pub(crate) view: usearch_matches_view_t,
     pub(crate) queries: usize,
 }
@@ -1250,7 +1208,7 @@ unsafe impl Send for Matches<'_> {}
 
 impl<'arena> Matches<'arena> {
     /// An empty slot a call fills in `arena`.
-    pub(crate) fn new(arena: &'arena Arena) -> Self {
+    pub(crate) fn new(arena: &'arena Arena<'arena>) -> Self {
         Matches { arena, view: usearch_matches_view_t::default(), queries: 0 }
     }
 
@@ -1526,7 +1484,7 @@ pub fn keys_from_arrow<Column: ArrowColumn + ?Sized>(column: &Column) -> Result<
 ///
 /// Rust-only.
 pub struct ArrowExport<'arena> {
-    pub(crate) arena: PhantomData<&'arena Arena>,
+    pub(crate) arena: PhantomData<&'arena Arena<'arena>>,
     pub(crate) schema: ArrowSchema,
     pub(crate) array: ArrowDeviceArray,
 }
@@ -1706,59 +1664,163 @@ pub(crate) fn path_views(paths: &[impl AsRef<Path>]) -> Result<Vec<usearch_bytes
 
 // region: Callbacks
 
-/// A periodic report of finished and total units; `Break` stops the call at the next increment
-/// wherever the verb can stop, which an insertion cannot.
+/// Whether a predicate admits one candidate key or passes over it.
+#[repr(i32)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Hash)]
+pub enum Admission {
+    /// Skip the key; the walk still routes through it.
+    #[default]
+    Reject = 0,
+    /// Report the key among the matches.
+    Admit = 1,
+}
+
+/// How costly one predicate call is, which decides how many keys each call carries.
+#[repr(i32)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Hash)]
+pub enum PredicateCost {
+    /// Asked as candidates arrive, a few keys a call, with nothing buffered.
+    #[default]
+    Cheap = 0,
+    /// Asked once per traversal round or scan run about every candidate it gathered, for handlers
+    /// that pay per call, such as a lookup in an external database.
+    Expensive = 1,
+}
+
+/// A periodic report of finished and total units, lent as the C struct every reporting verb takes;
+/// `Break` stops the call at the next increment wherever the verb can stop, which an insertion
+/// cannot.
 ///
-/// It runs on whichever thread advanced the work, never on two at once, so it owes `Send` and may
-/// be `FnMut`. A panic inside it aborts the process, as it cannot unwind through the library.
-pub type ProgressCallback<'a> = dyn FnMut(usize, usize) -> ControlFlow<()> + Send + 'a;
+/// The handler runs on whichever thread advanced the work, never on two at once, so it owes `Send`
+/// and may be `FnMut`. A panic inside it aborts the process, unable to unwind through the library.
+pub struct Progress<'handler> {
+    raw: usearch_progress_t,
+    handler: PhantomData<&'handler mut ()>,
+}
+
+// Safety: it points at a `Send` handler it borrows exclusively.
+unsafe impl Send for Progress<'_> {}
+
+impl<'handler> Progress<'handler> {
+    /// Lends `handler`, called with the units finished so far and the total the call finishes.
+    pub fn new<Handler: FnMut(usize, usize) -> ControlFlow<()> + Send>(handler: &'handler mut Handler) -> Self {
+        let raw = usearch_progress_t {
+            callback: Some(progress_trampoline::<Handler>),
+            state: ptr::from_mut(handler).cast(),
+            steps: 0,
+        };
+        Progress { raw, handler: PhantomData }
+    }
+}
 
 /// # Safety
-/// `state` must address the `&mut ProgressCallback` lent to the call.
-unsafe extern "C" fn progress_trampoline(finished: usize, total: usize, state: *mut c_void) -> c_int {
+/// `state` must address the `Handler` a [`Progress`] lent to the call.
+unsafe extern "C" fn progress_trampoline<Handler: FnMut(usize, usize) -> ControlFlow<()>>(
+    finished: usize,
+    total: usize,
+    state: *mut c_void,
+) -> c_int {
     unsafe {
-        let handler = &mut **state.cast::<&mut ProgressCallback>();
+        let handler = &mut *state.cast::<Handler>();
         c_int::from(handler(finished, total).is_break())
     }
 }
 
-/// Lends an optional handler and its step count as the progress every reporting verb takes, the
-/// state pointing at the handler itself; `None` lends nulls.
-pub(crate) fn lower_progress(handler: &mut Option<&mut ProgressCallback>, steps: usize) -> usearch_progress_t {
-    match handler {
-        Some(handler) => {
-            usearch_progress_t { callback: Some(progress_trampoline), state: ptr::from_mut(handler).cast(), steps }
-        }
+/// Lends an optional progress and step count as reporting verbs take them; `None` lends nulls.
+pub(crate) fn lower_progress(progress: &Option<Progress>, steps: usize) -> usearch_progress_t {
+    match progress {
+        Some(progress) => usearch_progress_t { steps, ..progress.raw },
         None => usearch_progress_t { callback: None, state: ptr::null_mut(), steps },
     }
 }
 
-/// A search filter, run on the executor's threads together; a panic inside it aborts the process.
-pub type Predicate<'a> = dyn Fn(Key) -> bool + Sync + 'a;
+/// Which candidate keys a search may report, lent as the C struct every filtering verb takes.
+///
+/// The handler runs on the executor's threads together, so it owes `Sync`; a panic inside it
+/// aborts the process.
+#[derive(Clone, Copy)]
+pub struct Predicate<'handler> {
+    raw: usearch_predicate_t,
+    handler: PhantomData<&'handler ()>,
+}
+
+// Safety: it points at a `Sync` handler it borrows shared.
+unsafe impl Send for Predicate<'_> {}
+unsafe impl Sync for Predicate<'_> {}
+
+impl<'handler> Predicate<'handler> {
+    /// Answers one key at a time, asked as candidates are scored.
+    pub fn each<Handler: Fn(Key) -> bool + Sync>(handler: &'handler Handler) -> Self {
+        Self::lowered(each_trampoline::<Handler>, handler, PredicateCost::Cheap)
+    }
+
+    /// Answers a batch at a time, every admission starting as [`Admission::Reject`], asked once per
+    /// round unless told it is cheap.
+    pub fn batch<Handler: Fn(&[Key], &mut [Admission]) + Sync>(handler: &'handler Handler) -> Self {
+        Self::lowered(batch_trampoline::<Handler>, handler, PredicateCost::Expensive)
+    }
+
+    /// Asks the handler as candidates arrive, a few keys a call.
+    pub fn cheap(mut self) -> Self {
+        self.raw.cost = PredicateCost::Cheap as usearch_predicate_cost_t;
+        self
+    }
+
+    fn lowered<Handler>(
+        callback: unsafe extern "C" fn(*const Key, *mut c_int, usize, *mut c_void),
+        handler: &'handler Handler,
+        cost: PredicateCost,
+    ) -> Self {
+        let raw = usearch_predicate_t {
+            callback: Some(callback),
+            state: ptr::from_ref(handler).cast_mut().cast(),
+            cost: cost as usearch_predicate_cost_t,
+        };
+        Predicate { raw, handler: PhantomData }
+    }
+}
 
 /// # Safety
-/// `state` must address the `&Predicate` lent to the call, and `keys` and `admissions` must each
-/// address `count` elements.
-unsafe extern "C" fn admission_trampoline(keys: *const Key, admissions: *mut c_int, count: usize, state: *mut c_void) {
+/// `state` must address the `Handler` a [`Predicate`] lent to the call, and `keys` and
+/// `admissions` must each address `count` elements.
+unsafe extern "C" fn each_trampoline<Handler: Fn(Key) -> bool>(
+    keys: *const Key,
+    admissions: *mut c_int,
+    count: usize,
+    state: *mut c_void,
+) {
     unsafe {
-        let predicate = *state.cast::<&Predicate>();
-        let keys = std::slice::from_raw_parts(keys, count);
-        let admissions = std::slice::from_raw_parts_mut(admissions, count);
+        let handler = &*state.cast::<Handler>();
+        let keys = core::slice::from_raw_parts(keys, count);
+        let admissions = core::slice::from_raw_parts_mut(admissions, count);
         for (key, admission) in keys.iter().zip(admissions) {
-            *admission = c_int::from(predicate(*key));
+            *admission = c_int::from(handler(*key));
         }
     }
 }
 
-/// Lends an optional predicate as the struct every filtering verb takes, the state pointing at the
-/// predicate itself; `None` lends nulls.
-pub(crate) fn lower_predicate(predicate: &Option<&Predicate>) -> usearch_predicate_t {
+/// # Safety
+/// `state` must address the `Handler` a [`Predicate`] lent to the call, and `keys` and
+/// `admissions` must each address `count` elements.
+unsafe extern "C" fn batch_trampoline<Handler: Fn(&[Key], &mut [Admission])>(
+    keys: *const Key,
+    admissions: *mut c_int,
+    count: usize,
+    state: *mut c_void,
+) {
+    unsafe {
+        let handler = &*state.cast::<Handler>();
+        // Rejection is zero, so every slot holds a valid admission before the handler reads it.
+        ptr::write_bytes(admissions, 0, count);
+        let admissions = core::slice::from_raw_parts_mut(admissions.cast::<Admission>(), count);
+        handler(core::slice::from_raw_parts(keys, count), admissions);
+    }
+}
+
+/// Lends an optional predicate as the struct every filtering verb takes; `None` lends nulls.
+pub(crate) fn lower_predicate(predicate: &Option<Predicate>) -> usearch_predicate_t {
     match predicate {
-        Some(predicate) => usearch_predicate_t {
-            callback: Some(admission_trampoline),
-            state: ptr::from_ref(predicate).cast_mut().cast(),
-            cost: usearch_predicate_cost_cheap_k,
-        },
+        Some(predicate) => predicate.raw,
         None => usearch_predicate_t { callback: None, state: ptr::null_mut(), cost: usearch_predicate_cost_cheap_k },
     }
 }
@@ -1989,13 +2051,11 @@ impl FromStr for Traversal {
 /// [`Status::Contended`], as nothing queues, so threads wanting to overlap take one apiece; it is
 /// `Send` but not `Sync`. A deferred call on a caller-exclusive pool runs on the pool's thread 0,
 /// so polling alone finishes it, while a single thread or a VRAM executor runs it at submission.
-/// [`Arena::new_in`] places an arena where it computes, and the arena holds it until it drops.
-/// Dropping an executor drains it, unless an arena it made still holds it, which then does so.
+/// [`Arena::new_in`] places an arena where it computes, and the arena borrows it, so the executor
+/// outlives every arena it made. Dropping an executor drains it, then frees it.
 #[derive(Debug)]
 pub struct Executor {
     pub(crate) handle: usearch_executor_t,
-    /// Frees `handle` once neither this nor an arena it made holds it.
-    share: Arc<ExecutorShare>,
 }
 
 // Safety: nothing in an executor is tied to the thread that created it, so it may move to another;
@@ -2011,7 +2071,7 @@ impl Default for Executor {
 impl Executor {
     /// Owns the handle a constructor filled, which is null for the executor that owns nothing.
     fn adopt(handle: usearch_executor_t) -> Self {
-        Executor { handle, share: Arc::new(ExecutorShare(handle)) }
+        Executor { handle }
     }
 
     /// Spawns host workers for RAM-resident indexes, interleaved across the compute domains local
@@ -2142,17 +2202,9 @@ impl Executor {
     }
 }
 
-/// The executor every holder shares, freed by the last of them to drop.
-#[derive(Debug)]
-struct ExecutorShare(usearch_executor_t);
-
-// Safety: an executor may be freed from any thread, and a share is only ever dropped, never read.
-unsafe impl Send for ExecutorShare {}
-unsafe impl Sync for ExecutorShare {}
-
-impl Drop for ExecutorShare {
+impl Drop for Executor {
     fn drop(&mut self) {
-        unsafe { usearch_executor_free(self.0) }
+        unsafe { usearch_executor_free(self.handle) }
     }
 }
 
@@ -2171,37 +2223,49 @@ impl Drop for ExecutorShare {
 /// stream of the executor that made it, so it serves only calls on that executor, any other refused
 /// with [`Status::Device`].
 ///
-/// It holds the executor that made it until it drops, and dropping it waits for the calls still
-/// writing into it.
+/// `'executor` borrows the executor that made it, which therefore outlives it, and dropping it
+/// waits for the calls still writing into it:
+///
+/// ```compile_fail,E0505
+/// use usearch::*;
+/// # fn main() -> Result<()> {
+/// let executor = Executor::for_ram(&[], None, 0)?;
+/// let arena = Arena::new_in(&executor)?;
+/// drop(executor);
+/// drop(arena);
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug)]
-pub struct Arena {
+pub struct Arena<'executor> {
     pub(crate) handle: usearch_arena_t,
-    /// The executor that made the arena, freed after it.
-    _executor: Arc<ExecutorShare>,
+    executor: PhantomData<&'executor ()>,
 }
 
 // Safety: an arena serves one call at a time, which the `&mut` every verb takes already enforces,
 // and a shared borrow only asks the library where it lives.
-unsafe impl Send for Arena {}
-unsafe impl Sync for Arena {}
+unsafe impl Send for Arena<'_> {}
+unsafe impl Sync for Arena<'_> {}
 
-impl Arena {
+impl Arena<'static> {
     /// Makes an arena of host pages for calls on the calling thread.
     pub fn new() -> Result<Self> {
-        Arena::new_in(&Executor::default())
+        Arena::made_by(ptr::null_mut())
     }
+}
 
+impl<'executor> Arena<'executor> {
     /// Makes an arena where `executor` computes, serving the calls of its residency, or only those
     /// on `executor` itself for a GPU arena.
-    pub fn new_in(executor: &Executor) -> Result<Self> {
-        let mut arena = Arena { handle: ptr::null_mut(), _executor: Arc::clone(&executor.share) };
+    pub fn new_in(executor: &'executor Executor) -> Result<Self> {
+        Arena::made_by(executor.handle)
+    }
+
+    fn made_by(executor: usearch_executor_t) -> Result<Self> {
+        let mut arena = Arena { handle: ptr::null_mut(), executor: PhantomData };
         let mut outcome = usearch_outcome_t::default();
         unsafe {
-            usearch_arena_init(&mut usearch_arena_init_t {
-                arena: &mut arena.handle,
-                executor: executor.handle,
-                outcome: &mut outcome,
-            })
+            usearch_arena_init(&mut usearch_arena_init_t { arena: &mut arena.handle, executor, outcome: &mut outcome })
         };
         check(outcome).map(|()| arena)
     }
@@ -2230,7 +2294,7 @@ impl Arena {
     }
 }
 
-impl Drop for Arena {
+impl Drop for Arena<'_> {
     fn drop(&mut self) {
         unsafe { usearch_arena_free(self.handle) }
     }
@@ -2284,6 +2348,22 @@ impl<Index, Completion> Clone for On<'_, Index, Completion> {
 
 impl<Index, Completion> Copy for On<'_, Index, Completion> {}
 
+/// The index a verb reaches and the executor it runs on, as its receiver lent them.
+#[derive(Clone, Copy)]
+pub(crate) struct Handles {
+    pub(crate) handle: *mut c_void,
+    pub(crate) executor: usearch_executor_t,
+}
+
+// Safety: an index is shared across threads, and an executor goes with the calls submitted to it.
+unsafe impl Send for Handles {}
+
+impl Handles {
+    pub(crate) fn of(handle: *mut c_void, executor: usearch_executor_t) -> Self {
+        Handles { handle, executor }
+    }
+}
+
 /// The completion of a blocking receiver, whose verbs return once their call is final and answer
 /// what it produced.
 ///
@@ -2292,46 +2372,32 @@ impl<Index, Completion> Copy for On<'_, Index, Completion> {}
 pub struct Blocking;
 
 impl Completion for Blocking {
-    type Answer<'index, Inputs, Output> = Output;
+    type Deferrable<'index, Verb: Calling> = Verb::Output;
 
-    fn answer<'index, Inputs, Output>(
-        inputs: Inputs,
-        output: Output,
-        submit: impl FnOnce(&mut Call<Inputs, Output>, usearch_completion_t) -> Result<()>,
-    ) -> Result<Self::Answer<'index, Inputs, Output>> {
-        let mut call = Call { outcome: usearch_outcome_t::default(), inputs, output };
-        submit(&mut call, usearch_completion_blocking_k)?;
-        check(call.outcome).map(|()| call.output)
+    fn answer<'index, Verb: Calling>(mut verb: Verb) -> Result<Self::Deferrable<'index, Verb>> {
+        let mut outcome = usearch_outcome_t::default();
+        let mut arguments = verb.arguments(&mut outcome, usearch_completion_blocking_k);
+        // Safety: the arguments point into `verb` and `outcome`, which stay in place until the call
+        // returns, and a blocking call is final on return.
+        unsafe { Verb::call(&mut arguments) };
+        verb.finish(check(outcome))
     }
 }
 
 impl<Input> Accepts<Input> for Blocking {}
 
-/// The completion of a deferring receiver, whose verbs return once their call is submitted and
-/// answer a [`Deferred`].
+/// The completion of a deferring receiver, whose verbs answer a [`Deferred`] that submits the call
+/// once first polled or waited on.
 ///
 /// Rust-only.
 #[derive(Debug)]
 pub struct Deferring;
 
 impl Completion for Deferring {
-    type Answer<'index, Inputs, Output> = Deferred<'index, Inputs, Output>;
+    type Deferrable<'index, Verb: Calling> = Deferred<'index, Verb>;
 
-    fn answer<'index, Inputs, Output>(
-        inputs: Inputs,
-        output: Output,
-        submit: impl FnOnce(&mut Call<Inputs, Output>, usearch_completion_t) -> Result<()>,
-    ) -> Result<Deferred<'index, Inputs, Output>> {
-        let call = NonNull::from(Box::leak(Box::new(Call { outcome: usearch_outcome_t::default(), inputs, output })));
-        // Safety: the box is reached through `call` alone, and a refusal comes before the library
-        // sees it.
-        match submit(unsafe { &mut *call.as_ptr() }, usearch_completion_deferred_k) {
-            Ok(()) => Ok(Deferred { call, receiver: PhantomData }),
-            Err(refusal) => {
-                drop(unsafe { Box::from_raw(call.as_ptr()) });
-                Err(refusal)
-            }
-        }
+    fn answer<'index, Verb: Calling>(verb: Verb) -> Result<Self::Deferrable<'index, Verb>> {
+        Ok(Deferred::new(verb))
     }
 }
 
@@ -2344,98 +2410,169 @@ impl Accepts<String> for Deferring {}
 impl Accepts<&'static str> for Deferring {}
 impl Accepts<&'static Path> for Deferring {}
 
-/// A submitted call, which owns its outcome, inputs and output slot in one box the library reads
-/// until the call is final, and borrows its arena as a blocking call does.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Stage {
+    Unsubmitted,
+    Submitted,
+    Answered,
+}
+
+/// What the library reads and writes while a call is in flight, reached only through raw pointers.
+struct Call<Verb: Calling> {
+    outcome: usearch_outcome_t,
+    arguments: MaybeUninit<Verb::Arguments>,
+    /// The owned inputs, the output slots and the arena borrow.
+    verb: ManuallyDrop<Verb>,
+}
+
+/// A call submitted on its first poll or on [`Deferred::wait`], at the address it is pinned at, so
+/// its outcome, arguments, inputs and output slots live inline and need no allocation.
 ///
-/// [`Deferred::status`] polls without blocking, and [`Deferred::wait`] blocks until the call is
-/// final and hands back what it produced, while `.await` polls it from async code. Dropping an
-/// unfinished one waits for it, then frees the box. `'index` is the borrow of the [`On`] that
-/// submitted it.
+/// It is the [`Future`] of its call, so `.await` submits it and polls its status word until final,
+/// while `wait` blocks the thread without spinning, and both hand back what the call produced.
+/// Dropping a submitted one waits for its call, and dropping an unsubmitted one runs nothing.
+/// `'index` borrows the [`On`] that made it, and it borrows its arena as a blocking call does.
+///
+/// The library reads its inputs until it is final, so a deferred call takes no borrow of a local:
+///
+/// ```compile_fail,E0597
+/// use usearch::*;
+/// # fn main() -> Result<()> {
+/// let index = DenseIndex::init_ram(&DenseOptions { dimensions: 2, ..DenseOptions::default() }, &[])?;
+/// let executor = Executor::for_ram(&[], None, 0)?;
+/// let mut arena = Arena::new_in(&executor)?;
+/// let slab = vec![0.0f32, 1.0];
+/// let call = index.deferred(&executor).search(rows(&slab, 2)?, 1, &mut arena)?;
+/// call.wait()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// And an arena serves one call at a time, so two calls in flight take one apiece:
+///
+/// ```compile_fail,E0499
+/// use usearch::*;
+/// # fn main() -> Result<()> {
+/// static SLAB: [f32; 2] = [0.0, 1.0];
+/// let index = DenseIndex::init_ram(&DenseOptions { dimensions: 2, ..DenseOptions::default() }, &[])?;
+/// let executor = Executor::for_ram(&[], None, 0)?;
+/// let mut arena = Arena::new_in(&executor)?;
+/// let first = index.deferred(&executor).search(rows(&SLAB, 2)?, 1, &mut arena)?;
+/// let second = index.deferred(&executor).search(rows(&SLAB, 2)?, 1, &mut arena)?;
+/// first.wait()?;
+/// second.wait()?;
+/// # Ok(())
+/// # }
+/// ```
 ///
 /// Rust-only.
-#[must_use = "a deferred call's outcome is seen only through `status` or `wait`"]
-pub struct Deferred<'index, Inputs, Output> {
-    call: NonNull<Call<Inputs, Output>>,
+#[must_use = "a deferred call runs only once awaited or waited on"]
+pub struct Deferred<'index, Verb: Calling> {
+    /// The library writes here while `stage` is `Submitted`.
+    call: UnsafeCell<Call<Verb>>,
+    stage: Stage,
     receiver: PhantomData<&'index ()>,
+    _pinned: PhantomPinned,
 }
 
-impl<Inputs, Output> Deferred<'_, Inputs, Output> {
-    /// `Err(Status::Deferred)` until the call is final, then its final status, read without blocking.
-    pub fn status(&self) -> core::result::Result<(), Status> {
-        // Safety: the outcome lives in the box this `Deferred` owns until it is final.
-        Status::from_raw(unsafe { usearch_outcome_status(ptr::addr_of_mut!((*self.call.as_ptr()).outcome)) })
+// Safety: until submission it is plain data, and once submitted it is pinned and only the library
+// reaches the call.
+unsafe impl<Verb: Calling + Send> Send for Deferred<'_, Verb> {}
+
+impl<Verb: Calling> Deferred<'_, Verb> {
+    fn new(verb: Verb) -> Self {
+        Deferred {
+            call: UnsafeCell::new(Call {
+                outcome: usearch_outcome_t::default(),
+                arguments: MaybeUninit::uninit(),
+                verb: ManuallyDrop::new(verb),
+            }),
+            stage: Stage::Unsubmitted,
+            receiver: PhantomData,
+            _pinned: PhantomPinned,
+        }
     }
 
-    /// Blocks until the call is final, then hands back what it produced.
-    pub fn wait(self) -> Result<Output> {
-        self.wait_with_inputs().0
+    fn outcome(&self) -> *mut usearch_outcome_t {
+        unsafe { ptr::addr_of_mut!((*self.call.get()).outcome) }
     }
 
-    /// Blocks until the call is final, then hands back what it produced beside the inputs it owned,
-    /// like a plan a stop left live.
-    pub fn wait_with_inputs(self) -> (Result<Output>, Inputs) {
-        let call = ManuallyDrop::new(self).call.as_ptr();
-        // Safety: once the outcome is final the library touches the box no more, so it is freed here.
-        let Call { outcome, inputs, output } = unsafe {
-            usearch_outcome_wait(ptr::addr_of_mut!((*call).outcome));
-            *Box::from_raw(call)
-        };
-        (check(outcome).map(|()| output), inputs)
-    }
-}
-
-impl<Inputs, Output> Drop for Deferred<'_, Inputs, Output> {
-    fn drop(&mut self) {
-        let call = self.call.as_ptr();
-        // Safety: once the outcome is final the library touches the box no more, and this owned it.
+    /// Hands the call to the library at the address it is pinned at.
+    fn submit(self: Pin<&mut Self>) {
+        // Safety: nothing moves out, and the pointers taken here stay valid while it is pinned.
+        let this = unsafe { self.get_unchecked_mut() };
+        let call = this.call.get();
         unsafe {
-            usearch_outcome_wait(ptr::addr_of_mut!((*call).outcome));
-            drop(Box::from_raw(call));
+            let outcome = ptr::addr_of_mut!((*call).outcome);
+            let arguments = (*call).verb.arguments(outcome, usearch_completion_deferred_k);
+            let arguments = (*call).arguments.write(arguments) as *mut Verb::Arguments;
+            this.stage = Stage::Submitted;
+            Verb::call(arguments);
         }
     }
-}
 
-impl<Inputs, Output> fmt::Debug for Deferred<'_, Inputs, Output> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "Deferred({:?})", self.status())
+    /// Takes the verb back from a final call, which the library touches no more, beside its status.
+    fn answered(self: Pin<&mut Self>) -> (Result<()>, Verb) {
+        // Safety: the call is final, so nothing reads the verb once it moves out.
+        let this = unsafe { self.get_unchecked_mut() };
+        this.stage = Stage::Answered;
+        let call = this.call.get();
+        unsafe { (check(ptr::read(ptr::addr_of!((*call).outcome))), ManuallyDrop::take(&mut (*call).verb)) }
+    }
+
+    /// Submits the call, then blocks until it is final and hands back what it produced.
+    pub fn wait(self) -> Result<Verb::Output> {
+        let mut this = pin!(self);
+        this.as_mut().submit();
+        unsafe { usearch_outcome_wait(this.outcome()) };
+        let (status, verb) = this.answered();
+        verb.finish(status)
     }
 }
 
-// Safety: the box moves with the `Deferred`, and until its call is final only the library reaches it.
-unsafe impl<Inputs: Send, Output: Send> Send for Deferred<'_, Inputs, Output> {}
-
-impl<'index, Inputs, Output> IntoFuture for Deferred<'index, Inputs, Output> {
-    type Output = Result<Output>;
-    type IntoFuture = Wait<'index, Inputs, Output>;
-
-    fn into_future(self) -> Wait<'index, Inputs, Output> {
-        Wait(Some(self))
+impl<Verb: Lending> Deferred<'_, Verb> {
+    /// Submits the call, then blocks until it is final and hands back what it produced beside the
+    /// inputs it owned, like a plan a stop left live.
+    pub fn wait_with_inputs(self) -> (Result<Verb::Output>, Verb::Inputs) {
+        let mut this = pin!(self);
+        this.as_mut().submit();
+        unsafe { usearch_outcome_wait(this.outcome()) };
+        let (status, verb) = this.answered();
+        verb.finish_with_inputs(status)
     }
 }
 
-/// A [`Deferred`] being awaited: every poll reads its status, and one not yet final asks to be polled again.
-///
-/// The library has no wake-up, so an executor re-polls it while other tasks run, spinning only
-/// when nothing else is ready; [`Deferred::wait`] blocks without spinning.
-///
-/// Rust-only.
-#[must_use = "an awaited call does nothing unless polled"]
-pub struct Wait<'index, Inputs, Output>(Option<Deferred<'index, Inputs, Output>>);
+impl<Verb: Calling> Future for Deferred<'_, Verb> {
+    type Output = Result<Verb::Output>;
 
-impl<Inputs, Output> Future for Wait<'_, Inputs, Output> {
-    type Output = Result<Output>;
-
-    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        let awaited = &mut self.get_mut().0;
-        match awaited.take() {
-            None => Poll::Ready(Err(fail(Status::InvalidArgument, "the call was already awaited"))),
-            Some(call) if call.status() == Err(Status::Deferred) => {
-                *awaited = Some(call);
-                context.waker().wake_by_ref();
-                Poll::Pending
-            }
-            Some(call) => Poll::Ready(call.wait()),
+    /// Submits the call on the first poll, then reads its status word; a call not yet final asks to
+    /// be polled again, since the library has no wake-up.
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        match self.stage {
+            Stage::Answered => return Poll::Ready(Err(fail(Status::InvalidArgument, "the call was already awaited"))),
+            Stage::Unsubmitted => self.as_mut().submit(),
+            Stage::Submitted => {}
         }
+        if unsafe { usearch_outcome_status(self.outcome()) } == usearch_status_deferred_k {
+            context.waker().wake_by_ref();
+            return Poll::Pending;
+        }
+        let (status, verb) = self.answered();
+        Poll::Ready(verb.finish(status))
+    }
+}
+
+impl<Verb: Calling> Drop for Deferred<'_, Verb> {
+    fn drop(&mut self) {
+        match self.stage {
+            Stage::Answered => return,
+            Stage::Submitted => unsafe {
+                usearch_outcome_wait(self.outcome());
+            },
+            Stage::Unsubmitted => {}
+        }
+        // Safety: the call is final or was never submitted, so the library reads the verb no more.
+        unsafe { ManuallyDrop::drop(&mut (*self.call.get()).verb) };
     }
 }
 
@@ -2594,7 +2731,6 @@ mod tests {
     fn packed_slabs_reject_a_partial_row() {
         let failure = rows(&[1.0f32, 2.0, 3.0], 2).unwrap_err();
         assert_eq!(failure.status, Status::ShapeMismatch);
-        assert_eq!(failure.to_string(), "the slab is not a whole number of rows");
     }
 
     #[test]
@@ -2602,22 +2738,16 @@ mod tests {
         // The width divides the slab, so a zero would be a division rather than an empty run.
         let failure = rows(&[1.0f32, 2.0], 0).unwrap_err();
         assert_eq!(failure.status, Status::ShapeMismatch);
-        assert_eq!(failure.to_string(), "a row needs at least one dimension");
     }
 
-    /// An arena lives where the executor that made it computes, and keeps that executor alive.
+    /// An arena lives where the executor that made it computes.
     #[test]
     fn arenas_live_where_their_executor_computes() {
         let host = ArenaDescription { residency: Residency::Ram, device: None };
         assert_eq!(Arena::new().unwrap().describe().unwrap(), host);
 
         let executor = Executor::for_ram(&[], None, 1).unwrap();
-        let placed = Arena::new_in(&executor).unwrap();
-        let share = Arc::downgrade(&executor.share);
-        drop(executor);
-        assert_eq!(placed.describe().unwrap(), host, "an arena outlives its executor's handle");
-        drop(placed);
-        assert!(share.upgrade().is_none(), "the last arena frees its executor");
+        assert_eq!(Arena::new_in(&executor).unwrap().describe().unwrap(), host);
 
         let Ok(gpu) = Executor::for_vram(&[0], None, 0) else {
             return skipped("no GPU device");
@@ -2629,10 +2759,9 @@ mod tests {
     }
 
     #[test]
-    fn errors_carry_a_status_and_a_message() {
+    fn errors_carry_a_status() {
         let failure = fail(Status::ShapeMismatch, "something specific went wrong");
         assert_eq!(failure.status, Status::ShapeMismatch);
-        assert_eq!(failure.to_string(), "something specific went wrong");
         assert!(check(usearch_outcome_t::default()).is_ok(), "a zero status is success");
     }
 

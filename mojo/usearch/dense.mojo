@@ -25,7 +25,8 @@ A closure capturing anything cannot be handed to C at all, so a callback's state
 as an `Address`, and a Mojo handler is a comptime parameter of a capture-free `abi("C")`
 trampoline that types the state again. The value lookup of `attend` is such a function, a
 `ValueLookup`; the predicate of `search` and every `progress` slot are installed the same way by
-`PredicateArguments.of` and `ProgressArguments.of`, or take a handler compiled in C.
+`PredicateArguments.each`, `PredicateArguments.batch` and `ProgressArguments.of`, or take a handler
+compiled in C.
 
 Telemetry is a lent output. Every config of a verb that reports traversal statistics takes an
 optional `stats` pointer, which the engine overwrites whole on every call it is passed to.
@@ -414,8 +415,8 @@ struct DenseMetadata(Defaultable, ImplicitlyCopyable):
     a reader must keep it, and `values_per_key` is absent because it bounds a live handle's mutable
     state rather than anything the serialized form carries.
 
-    Never marked register-passable: its address crosses to C, and Mojo 1.1 mislays a struct once it
-    is, so the probes would read back nothing.
+    Never marked register-passable: its address crosses to C, and Mojo mislays a struct once it is,
+    so the probes would read back nothing.
     """
 
     var metric: DenseMetric
@@ -872,9 +873,10 @@ struct DenseSearchConfig[stats_origin: MutOrigin = MutUntrackedOrigin](Implicitl
     """The knobs of `usearch_dense_search_t`; zeroed or absent ones derive what the C interface derives.
 
     A `predicate` narrows the matches to the entries it admits: a Mojo handler installed by
-    `PredicateArguments.of`, or a `usearch_predicate_callback_t` compiled in C. Non-matching entries
-    still route the traversal, so the predicate judges every scored candidate, a quad of them per
-    call, concurrently from the executor's threads.
+    `PredicateArguments.each` or `PredicateArguments.batch`, or a `usearch_predicate_callback_t`
+    compiled in C. Non-matching entries still route the traversal, so the predicate judges every
+    scored candidate, concurrently from the executor's threads: a cheap one as candidates are
+    scored, an expensive one once per round.
 
     Parameters:
         stats_origin: The lent telemetry slot's origin, inferred where one is lent.

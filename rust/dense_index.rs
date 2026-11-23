@@ -31,13 +31,13 @@ use std::path::Path;
 use numkong::MatrixView;
 
 use crate::types::{
-    Accepts, Arena, ArrowDeviceArray, ArrowExport, ArrowSchema, Blocking, CPUClass, Completion, Deferring, Element,
-    Error, Executor, GPUClass, Key, Matches, On, PhaseProgress, Predicate, ProgressCallback, QueryMatches, Residency,
-    Result, RowsView, Scalar, Status, Traversal, arena_slice, arrow_checked, check, fail, lower_predicate,
-    lower_progress, nvme_options, output_slot, path_view, path_views, ram_options, read_named, spelling,
-    usearch_arena_t, usearch_bytes_view_t, usearch_completion_blocking_k, usearch_completion_t, usearch_cpu_class_name,
-    usearch_cpu_class_t, usearch_executor_t, usearch_gpu_class_name, usearch_gpu_class_t, usearch_key_t,
-    usearch_keys_tape_view_t, usearch_keys_view_t, usearch_load_path_name, usearch_load_path_t,
+    Accepts, Arena, ArrowDeviceArray, ArrowExport, ArrowSchema, Batch, Blocking, CPUClass, Calling, Completion,
+    Deferring, Element, Error, Executor, GPUClass, Handles, Key, Lending, Matches, On, PhaseProgress, Predicate,
+    Progress, QueryMatches, Residency, Result, RowsView, Scalar, Status, Traversal, arena_slice, arrow_checked, check,
+    fail, lower_predicate, lower_progress, nvme_options, output_slot, path_view, path_views, ram_options, read_named,
+    spelling, usearch_arena_t, usearch_bytes_view_t, usearch_completion_blocking_k, usearch_completion_t,
+    usearch_cpu_class_name, usearch_cpu_class_t, usearch_executor_t, usearch_gpu_class_name, usearch_gpu_class_t,
+    usearch_key_t, usearch_keys_tape_view_t, usearch_keys_view_t, usearch_load_path_name, usearch_load_path_t,
     usearch_matches_tape_view_t, usearch_matches_tape_view_to_arrow, usearch_matches_view_t, usearch_nvme_options_t,
     usearch_outcome_t, usearch_predicate_t, usearch_progress_t, usearch_ram_options_t,
     usearch_refine_verdict_from_name, usearch_refine_verdict_name, usearch_rows_view_t, usearch_rows_view_to_arrow,
@@ -847,10 +847,40 @@ pub struct DenseSoftmaxState {
     pub partition: f32,
 }
 
-/// An attention's value lookup, run on the executor's threads together: it resolves one key to
-/// its value row, stored in the index's own quantization and borrowed from storage outliving the
-/// call, and `None` refuses the call; a panic inside it aborts the process.
-pub type ValueLookup<'lookup, Value> = dyn Fn(Key) -> Option<&'lookup [Value]> + Sync + 'lookup;
+/// An attention's value lookup, lent as the callback and state the attention takes: one key at a
+/// time, it resolves the value row, stored in the index's own quantization and borrowed from
+/// storage outliving the call, and `None` refuses the call.
+///
+/// The handler runs on the executor's threads together, so it owes `Sync`; a panic inside it
+/// aborts the process.
+pub struct ValueLookup<'handler, Value> {
+    callback:
+        unsafe extern "C" fn(*mut c_void, *const usearch_key_t, usize, usearch_scalar_t, usize, *mut *const c_void),
+    state: *mut c_void,
+    handler: PhantomData<&'handler [Value]>,
+}
+
+// Safety: it points at a `Sync` handler it borrows shared.
+unsafe impl<Value> Send for ValueLookup<'_, Value> {}
+
+impl<Value> Clone for ValueLookup<'_, Value> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<Value> Copy for ValueLookup<'_, Value> {}
+
+impl<'handler, Value: Element> ValueLookup<'handler, Value> {
+    /// Lends `handler`, asked one key at a time.
+    pub fn each<Handler: Fn(Key) -> Option<&'handler [Value]> + Sync>(handler: &'handler Handler) -> Self {
+        ValueLookup {
+            callback: value_lookup_trampoline::<Value, Handler>,
+            state: ptr::from_ref(handler).cast_mut().cast(),
+            handler: PhantomData,
+        }
+    }
+}
 
 /// A checkpoint path and how it is copied into a new index in host memory; see
 /// [`DenseIndex::load_ram`].
@@ -868,7 +898,7 @@ pub struct DenseLoadRamConfig<'config> {
     /// Upper bound on entries sharing one key, which no checkpoint records; zero is unbounded.
     pub values_per_key: usize,
     /// Reports the shards placed and stops wherever it says to; a stopped load creates no index.
-    pub progress: Option<&'config mut ProgressCallback<'config>>,
+    pub progress: Option<Progress<'config>>,
     /// Reports the call makes at most, the last at completion; zero derives to ten.
     pub progress_steps: usize,
 }
@@ -903,7 +933,7 @@ pub struct DenseLoadVramConfig<'config> {
     /// Upper bound on entries sharing one key, which no checkpoint records; zero is unbounded.
     pub values_per_key: usize,
     /// Reports the shards placed and stops wherever it says to; a stopped load creates no index.
-    pub progress: Option<&'config mut ProgressCallback<'config>>,
+    pub progress: Option<Progress<'config>>,
     /// Reports the call makes at most, the last at completion; zero derives to ten.
     pub progress_steps: usize,
 }
@@ -938,7 +968,7 @@ pub struct DenseLoadRamBufferConfig<'config> {
     /// Upper bound on entries sharing one key, which no checkpoint records; zero is unbounded.
     pub values_per_key: usize,
     /// Reports the bytes placed and stops wherever it says to; a stopped load creates no index.
-    pub progress: Option<&'config mut ProgressCallback<'config>>,
+    pub progress: Option<Progress<'config>>,
     /// Reports the call makes at most, the last at completion; zero derives to ten.
     pub progress_steps: usize,
 }
@@ -979,7 +1009,7 @@ pub struct DenseLoadVramBufferConfig<'config> {
     /// Upper bound on entries sharing one key, which no checkpoint records; zero is unbounded.
     pub values_per_key: usize,
     /// Reports the bytes placed and stops wherever it says to; a stopped load creates no index.
-    pub progress: Option<&'config mut ProgressCallback<'config>>,
+    pub progress: Option<Progress<'config>>,
     /// Reports the call makes at most, the last at completion; zero derives to ten.
     pub progress_steps: usize,
 }
@@ -1043,7 +1073,7 @@ pub struct DenseInsertConfig<'config, Rows> {
     pub expansion_factor: usize,
     /// Reports the entries inserted; every entry is claimed before the first report, so a `Break` is
     /// ignored.
-    pub progress: Option<&'config mut ProgressCallback<'config>>,
+    pub progress: Option<Progress<'config>>,
     /// Reports the call makes at most, the last at completion; zero derives to ten.
     pub progress_steps: usize,
     /// Where the traversal telemetry lands, overwritten by the call.
@@ -1067,7 +1097,7 @@ pub struct DenseRefineConfig<'config, Plan = &'config mut DenseRefinePlan> {
     /// part in RAM, and RAM and VRAM handles never read it.
     pub memory_limit: usize,
     /// Reports every phase's units at its barriers and stops wherever it says to.
-    pub progress: Option<&'config mut ProgressCallback<'config>>,
+    pub progress: Option<Progress<'config>>,
     /// Reports the call makes at most, the last at completion; zero derives to ten.
     pub progress_steps: usize,
     /// Where the traversal telemetry lands, overwritten by the call.
@@ -1153,10 +1183,10 @@ pub struct DenseSearchConfig<'config> {
     pub traversal: Traversal,
     /// Admits only the keys it approves; the rest still route the walk, so recall does not
     /// collapse at low selectivity. A VRAM handle refuses one with [`Status::Unsupported`].
-    pub predicate: Option<&'config Predicate<'config>>,
+    pub predicate: Option<Predicate<'config>>,
     /// Reports the queries resolved and stops wherever it says to; a stopped search reports
     /// [`Status::Cancelled`] and leaves no matches.
-    pub progress: Option<&'config mut ProgressCallback<'config>>,
+    pub progress: Option<Progress<'config>>,
     /// Reports the call makes at most, the last at completion; zero derives to ten.
     pub progress_steps: usize,
     /// Where the traversal telemetry lands, overwritten by the call.
@@ -1186,7 +1216,7 @@ pub struct DenseMaxsimConfig<'config> {
     /// The breadth of the candidates the walk explores; zero derives it from the geometry.
     pub expansion_factor: usize,
     /// Reports the queries resolved and stops wherever it says to.
-    pub progress: Option<&'config mut ProgressCallback<'config>>,
+    pub progress: Option<Progress<'config>>,
     /// Reports the call makes at most, the last at completion; zero derives to ten.
     pub progress_steps: usize,
     /// Where the traversal telemetry lands, overwritten by the call.
@@ -1206,7 +1236,7 @@ pub struct DenseMultiplyConfig<'config> {
     /// The breadth of the candidates, which widens the emitted pattern; zero derives it.
     pub expansion_factor: usize,
     /// Reports the rows resolved and stops wherever it says to.
-    pub progress: Option<&'config mut ProgressCallback<'config>>,
+    pub progress: Option<Progress<'config>>,
     /// Reports the call makes at most, the last at completion; zero derives to ten.
     pub progress_steps: usize,
     /// Where the traversal telemetry lands, overwritten by the call.
@@ -1234,7 +1264,7 @@ pub struct DenseAttendConfig<'config> {
     /// derives it from the index's frozen geometry.
     pub score_scale: f32,
     /// Reports the queries resolved and stops wherever it says to.
-    pub progress: Option<&'config mut ProgressCallback<'config>>,
+    pub progress: Option<Progress<'config>>,
     /// Reports the call makes at most, the last at completion; zero derives to ten.
     pub progress_steps: usize,
     /// Where the traversal telemetry lands, overwritten by the call.
@@ -1282,7 +1312,7 @@ pub struct DenseReshardConfig<'config, Plan = &'config mut DenseReshardPlan> {
     /// source cut equally.
     pub seed: u64,
     /// Reports the closing rounds' phases and stops them wherever it says to, never a move.
-    pub progress: Option<&'config mut ProgressCallback<'config>>,
+    pub progress: Option<Progress<'config>>,
     /// Reports the call makes at most, the last at completion; zero derives to ten.
     pub progress_steps: usize,
     /// Where the traversal telemetry lands, overwritten by the call.
@@ -1342,7 +1372,7 @@ pub struct DenseSampleConfig<'config> {
     /// The breadth of the walks behind the draws; zero derives it from the geometry.
     pub expansion_factor: usize,
     /// Reports the draws written against `wanted` and stops wherever it says to.
-    pub progress: Option<&'config mut ProgressCallback<'config>>,
+    pub progress: Option<Progress<'config>>,
     /// Reports the call makes at most, the last at completion; zero derives to ten.
     pub progress_steps: usize,
     /// Where the traversal telemetry lands, overwritten by the call.
@@ -1354,7 +1384,7 @@ pub struct DenseSaveConfig<'config, Location> {
     /// A `.safegraphs` path for one monolith, a `.safegraphs.json` path for a manifest.
     pub path: Location,
     /// Reports the shards written and stops wherever it says to.
-    pub progress: Option<&'config mut ProgressCallback<'config>>,
+    pub progress: Option<Progress<'config>>,
     /// Reports the call makes at most, the last at completion; zero derives to ten.
     pub progress_steps: usize,
 }
@@ -1367,22 +1397,22 @@ impl<Location: AsRef<Path>> From<Location> for DenseSaveConfig<'_, Location> {
 
 /// The arena a monolith is written into and the handler counting its bytes; see
 /// [`DenseVerbs::save_buffer`].
-pub struct DenseSaveBufferConfig<'config, 'arena> {
+pub struct DenseSaveBufferConfig<'config, 'arena, 'executor> {
     /// The arena the monolith lands in, which the result borrows.
-    pub arena: &'arena mut Arena,
+    pub arena: &'arena mut Arena<'executor>,
     /// Reports the bytes written and stops wherever it says to; a stopped save leaves no monolith.
-    pub progress: Option<&'config mut ProgressCallback<'config>>,
+    pub progress: Option<Progress<'config>>,
     /// Reports the call makes at most, the last at completion; zero derives to ten.
     pub progress_steps: usize,
 }
 
-impl<'arena> From<&'arena mut Arena> for DenseSaveBufferConfig<'_, 'arena> {
-    fn from(arena: &'arena mut Arena) -> Self {
+impl<'arena, 'executor> From<&'arena mut Arena<'executor>> for DenseSaveBufferConfig<'_, 'arena, 'executor> {
+    fn from(arena: &'arena mut Arena<'executor>) -> Self {
         DenseSaveBufferConfig { arena, progress: None, progress_steps: 0 }
     }
 }
 
-/// The query a stream walks and the breadth of its walk; see [`DenseVerbs::search_stream`].
+/// The query a stream walks and the breadth of its walk; see [`DenseIndex::search_stream`].
 pub struct DenseSearchStreamInitConfig<Query> {
     /// Exactly one query row.
     pub query: Query,
@@ -1402,11 +1432,11 @@ impl Accepts<DenseSearchConfig<'static>> for Deferring {}
 impl Accepts<DenseMaxsimConfig<'static>> for Deferring {}
 impl Accepts<DenseMultiplyConfig<'static>> for Deferring {}
 impl Accepts<DenseAttendConfig<'static>> for Deferring {}
-impl<Value> Accepts<&'static ValueLookup<'static, Value>> for Deferring {}
+impl<Value> Accepts<ValueLookup<'static, Value>> for Deferring {}
 impl<Plan: 'static> Accepts<DenseReshardConfig<'static, Plan>> for Deferring {}
 impl Accepts<DenseSampleConfig<'static>> for Deferring {}
 impl<Location> Accepts<DenseSaveConfig<'static, Location>> for Deferring where Deferring: Accepts<Location> {}
-impl Accepts<DenseSaveBufferConfig<'static, '_>> for Deferring {}
+impl Accepts<DenseSaveBufferConfig<'static, '_, '_>> for Deferring {}
 
 // endregion: Configs
 
@@ -1416,14 +1446,14 @@ impl Accepts<DenseSaveBufferConfig<'static, '_>> for Deferring {}
 ///
 /// Rust-only.
 pub struct DenseVectors<'arena, Value> {
-    arena: &'arena Arena,
+    arena: &'arena Arena<'arena>,
     vectors: usearch_rows_view_t,
     count: usize,
     value: PhantomData<Value>,
 }
 
 impl<'arena, Value: Element> DenseVectors<'arena, Value> {
-    fn new(arena: &'arena Arena) -> Self {
+    fn new(arena: &'arena Arena<'arena>) -> Self {
         DenseVectors { arena, vectors: usearch_rows_view_t::default(), count: 0, value: PhantomData }
     }
 
@@ -1468,14 +1498,14 @@ impl<'arena, Value: Element> DenseVectors<'arena, Value> {
 /// borrows: per left row, every pair its walk scored, in traversal order, or per query, its kept
 /// keys, largest score first.
 pub struct DenseProducts<'arena> {
-    arena: &'arena Arena,
+    arena: &'arena Arena<'arena>,
     products: usearch_matches_tape_view_t,
     count: usize,
     required: usize,
 }
 
 impl<'arena> DenseProducts<'arena> {
-    fn new(arena: &'arena Arena) -> Self {
+    fn new(arena: &'arena Arena<'arena>) -> Self {
         DenseProducts { arena, products: usearch_matches_tape_view_t::default(), count: 0, required: 0 }
     }
 
@@ -1542,11 +1572,16 @@ impl<'arena> DenseProducts<'arena> {
 ///
 /// Rust-only.
 pub struct Monolith<'arena> {
-    pub(crate) arena: PhantomData<&'arena Arena>,
+    pub(crate) arena: &'arena Arena<'arena>,
     pub(crate) monolith: usearch_bytes_view_t,
 }
 
 impl<'arena> Monolith<'arena> {
+    /// An empty slot a call fills in `arena`.
+    pub(crate) fn new(arena: &'arena Arena<'arena>) -> Self {
+        Monolith { arena, monolith: usearch_bytes_view_t::default() }
+    }
+
     /// The monolith's bytes.
     pub fn view(&self) -> &'arena [u8] {
         // Safety: the arena holds a finished call's output.
@@ -1558,7 +1593,7 @@ impl<'arena> Monolith<'arena> {
 ///
 /// Rust-only.
 pub struct Sample<'arena> {
-    pub(crate) arena: &'arena Arena,
+    pub(crate) arena: &'arena Arena<'arena>,
     pub(crate) keys: usearch_keys_view_t,
     pub(crate) entry_ordinals: *const usize,
     pub(crate) parents: usearch_matches_view_t,
@@ -1567,6 +1602,18 @@ pub struct Sample<'arena> {
 }
 
 impl<'arena> Sample<'arena> {
+    /// An empty slot a call fills in `arena`.
+    pub(crate) fn new(arena: &'arena Arena<'arena>) -> Self {
+        Sample {
+            arena,
+            keys: usearch_keys_view_t::default(),
+            entry_ordinals: ptr::null(),
+            parents: usearch_matches_view_t::default(),
+            coordinates: usearch_rows_view_t::default(),
+            written: 0,
+        }
+    }
+
     /// Draws the call wrote; fewer than wanted only once the region is exhausted.
     pub fn written(&self) -> usize {
         self.written
@@ -1602,7 +1649,7 @@ impl<'arena> Sample<'arena> {
 ///
 /// Rust-only.
 pub struct DenseBatch<'arena> {
-    pub(crate) arena: PhantomData<&'arena Arena>,
+    pub(crate) arena: PhantomData<&'arena Arena<'arena>>,
     pub(crate) keys: usearch_keys_view_t,
     pub(crate) links: Option<usearch_keys_tape_view_t>,
     pub(crate) written: usize,
@@ -1794,8 +1841,8 @@ impl DenseIndex {
     /// Copies a checkpoint into a new, mutable index in host memory; a bare path reads on the
     /// calling thread.
     pub fn load_ram<'config>(config: impl Into<DenseLoadRamConfig<'config>>) -> Result<Self> {
-        let mut config = config.into();
-        let progress = lower_progress(&mut config.progress, config.progress_steps);
+        let config = config.into();
+        let progress = lower_progress(&config.progress, config.progress_steps);
         let mut index = DenseIndex::null();
         let mut outcome = usearch_outcome_t::default();
         unsafe {
@@ -1817,8 +1864,8 @@ impl DenseIndex {
     /// Uploads a checkpoint into a new, mutable index in device memory, placing its parts as
     /// [`DenseIndex::load_ram`] does.
     pub fn load_vram<'config>(config: impl Into<DenseLoadVramConfig<'config>>) -> Result<Self> {
-        let mut config = config.into();
-        let progress = lower_progress(&mut config.progress, config.progress_steps);
+        let config = config.into();
+        let progress = lower_progress(&config.progress, config.progress_steps);
         let mut index = DenseIndex::null();
         let mut outcome = usearch_outcome_t::default();
         unsafe {
@@ -1838,8 +1885,8 @@ impl DenseIndex {
 
     /// Copies a monolith from a buffer into a new, mutable index in host memory.
     pub fn load_ram_buffer<'config>(config: impl Into<DenseLoadRamBufferConfig<'config>>) -> Result<Self> {
-        let mut config = config.into();
-        let progress = lower_progress(&mut config.progress, config.progress_steps);
+        let config = config.into();
+        let progress = lower_progress(&config.progress, config.progress_steps);
         let mut index = DenseIndex::null();
         let mut outcome = usearch_outcome_t::default();
         unsafe {
@@ -1860,8 +1907,8 @@ impl DenseIndex {
 
     /// Uploads a monolith from a buffer into a new, mutable index in device memory.
     pub fn load_vram_buffer<'config>(config: impl Into<DenseLoadVramBufferConfig<'config>>) -> Result<Self> {
-        let mut config = config.into();
-        let progress = lower_progress(&mut config.progress, config.progress_steps);
+        let config = config.into();
+        let progress = lower_progress(&config.progress, config.progress_steps);
         let mut index = DenseIndex::null();
         let mut outcome = usearch_outcome_t::default();
         unsafe {
@@ -1975,20 +2022,20 @@ impl DenseIndex {
     }
 }
 
-/// What a verb answers through `Receiver`: what the call produced, or a [`Deferred`](crate::Deferred).
-type Answer<'index, Receiver, Inputs, Output> =
-    <<Receiver as DenseVerbs<'index>>::Completion as Completion>::Answer<'index, Inputs, Output>;
+/// What a verb answers through `Receiver`: its output, or a [`Deferred`](crate::Deferred).
+type Deferrable<'index, Receiver, Verb> =
+    <<Receiver as DenseVerbs<'index>>::Completion as Completion>::Deferrable<'index, Verb>;
 
 /// Every dense verb, written once for every receiver: `&DenseIndex` blocks on the calling thread,
 /// and the [`On`] that [`DenseIndex::on`] or [`DenseIndex::deferred`] makes runs on an executor.
 ///
 /// A blocking receiver answers what the call produced; a deferring one answers a
-/// [`Deferred`](crate::Deferred) that borrows the index and owns the inputs. Every configurable
-/// verb's config converts into its `Dense*Config`, so the bare value is the whole call and
-/// `..DenseSearchConfig::from(10)` reaches every knob.
-/// Every verb whose output scales with the call borrows an [`Arena`] last as `&mut Arena`, blocking
-/// or deferring alike, except `save_buffer`, whose config holds it, and its result borrows the arena
-/// in turn.
+/// [`Deferred`](crate::Deferred) that borrows the index and owns the inputs, and submits the call
+/// once first polled or waited on. Every configurable verb's config converts into its
+/// `Dense*Config`, so the bare value is the whole call and `..DenseSearchConfig::from(10)` reaches
+/// every knob. Every verb whose output scales with the call borrows an [`Arena`] last as
+/// `&mut Arena`, blocking or deferring alike, except `save_buffer`, whose config holds it, and its
+/// result borrows the arena in turn.
 ///
 /// Rust-only.
 pub trait DenseVerbs<'index>: Copy {
@@ -2001,55 +2048,24 @@ pub trait DenseVerbs<'index>: Copy {
 
     /// Reserves capacity for a number of incoming vectors ahead of insertion, a hint, since
     /// insertions grow the index on demand.
-    fn reserve(self, capacity: usize) -> Result<Answer<'index, Self, (), ()>> {
+    fn reserve(self, capacity: usize) -> Result<Deferrable<'index, Self, DenseReserve>> {
         let (index, executor) = self.handles();
-        Self::Completion::answer((), (), |call, completion| {
-            unsafe {
-                usearch_dense_reserve(&mut usearch_dense_reserve_t {
-                    index,
-                    executor,
-                    outcome: &mut call.outcome,
-                    completion,
-                    capacity,
-                })
-            };
-            Ok(())
-        })
+        Self::Completion::answer(DenseReserve { handles: Handles::of(index, executor), capacity })
     }
 
     /// Reports the frozen metadata and the current counters in one call.
-    fn describe(self) -> Result<Answer<'index, Self, (), DenseIndexDescription>> {
+    fn describe(self) -> Result<Deferrable<'index, Self, DenseDescribe>> {
         let (index, executor) = self.handles();
-        Self::Completion::answer((), DenseIndexDescription::default(), |call, completion| {
-            unsafe {
-                usearch_dense_describe(&mut usearch_dense_describe_t {
-                    index,
-                    executor,
-                    outcome: &mut call.outcome,
-                    completion,
-                    description: &mut call.output,
-                })
-            };
-            Ok(())
+        Self::Completion::answer(DenseDescribe {
+            handles: Handles::of(index, executor),
+            description: DenseIndexDescription::default(),
         })
     }
 
     /// The number of entries stored under `key`.
-    fn count(self, key: Key) -> Result<Answer<'index, Self, (), usize>> {
+    fn count(self, key: Key) -> Result<Deferrable<'index, Self, DenseCount>> {
         let (index, executor) = self.handles();
-        Self::Completion::answer((), 0, |call, completion| {
-            unsafe {
-                usearch_dense_count(&mut usearch_dense_count_t {
-                    index,
-                    executor,
-                    outcome: &mut call.outcome,
-                    completion,
-                    key,
-                    entries: &mut call.output,
-                })
-            };
-            Ok(())
-        })
+        Self::Completion::answer(DenseCount { handles: Handles::of(index, executor), key, entries: 0 })
     }
 
     /// Whether the index holds at least one entry under `key`.
@@ -2067,25 +2083,13 @@ pub trait DenseVerbs<'index>: Copy {
     fn get<'arena, Value: Element>(
         self,
         key: Key,
-        arena: &'arena mut Arena,
-    ) -> Result<Answer<'index, Self, (), DenseVectors<'arena, Value>>> {
+        arena: &'arena mut Arena<'_>,
+    ) -> Result<Deferrable<'index, Self, DenseGet<'arena, Value>>> {
         let (index, executor) = self.handles();
-        Self::Completion::answer((), DenseVectors::new(arena), |call, completion| {
-            let vectors = &mut call.output;
-            unsafe {
-                usearch_dense_get(&mut usearch_dense_get_t {
-                    index,
-                    executor,
-                    outcome: &mut call.outcome,
-                    completion,
-                    key,
-                    vectors: &mut vectors.vectors,
-                    written: &mut vectors.count,
-                    arena: vectors.arena.handle,
-                    outputs_scalar: Value::SCALAR as usearch_scalar_t,
-                })
-            };
-            Ok(())
+        Self::Completion::answer(DenseGet {
+            handles: Handles::of(index, executor),
+            key,
+            vectors: DenseVectors::new(arena),
         })
     }
 
@@ -2099,34 +2103,18 @@ pub trait DenseVerbs<'index>: Copy {
         self,
         keys: Keys,
         config: impl Into<DenseInsertConfig<'config, Rows>>,
-    ) -> Result<Answer<'index, Self, (Keys, DenseInsertConfig<'config, Rows>), ()>>
+    ) -> Result<Deferrable<'index, Self, DenseInsert<'config, Keys, Rows>>>
     where
         Self::Completion: Accepts<Keys> + Accepts<DenseInsertConfig<'config, Rows>>,
     {
         let (index, executor) = self.handles();
-        Self::Completion::answer((keys, config.into()), (), |call, completion| {
-            let (keys, config) = &mut call.inputs;
-            let (keys, batch) = (keys.as_ref(), config.vectors.batch()?);
-            // The keys view carries no count, so only this side can see the two disagree.
-            if batch.count != keys.len() {
-                return Err(fail(Status::ShapeMismatch, "the key count does not match the vector row count"));
-            }
-            unsafe {
-                usearch_dense_insert(&mut usearch_dense_insert_t {
-                    index,
-                    executor,
-                    outcome: &mut call.outcome,
-                    completion,
-                    count: batch.count,
-                    keys: usearch_keys_view_t::of(keys),
-                    vectors: batch.rows,
-                    expansion_factor: config.expansion_factor,
-                    progress: lower_progress(&mut config.progress, config.progress_steps),
-                    stats: output_slot(&mut config.stats),
-                })
-            };
-            Ok(())
-        })
+        let config = config.into();
+        let batch = config.vectors.batch()?;
+        // The keys view carries no count, so only this side can see the two disagree.
+        if batch.count != keys.as_ref().len() {
+            return Err(fail(Status::ShapeMismatch, "the key count does not match the vector row count"));
+        }
+        Self::Completion::answer(DenseInsert { handles: Handles::of(index, executor), keys, batch, config })
     }
 
     /// Runs one refine round over the whole graph, answering a [`RefineReport`] of the entries
@@ -2139,69 +2127,37 @@ pub trait DenseVerbs<'index>: Copy {
     fn refine<'config, Plan: BorrowMut<DenseRefinePlan>>(
         self,
         config: DenseRefineConfig<'config, Plan>,
-    ) -> Result<Answer<'index, Self, DenseRefineConfig<'config, Plan>, RefineReport>>
+    ) -> Result<Deferrable<'index, Self, DenseRefine<'config, Plan>>>
     where
         Self::Completion: Accepts<DenseRefineConfig<'config, Plan>>,
     {
         let (index, executor) = self.handles();
-        Self::Completion::answer(config, RefineReport::default(), |call, completion| {
-            let config = &mut call.inputs;
-            unsafe {
-                usearch_dense_refine(&mut usearch_dense_refine_t {
-                    index,
-                    executor,
-                    outcome: &mut call.outcome,
-                    completion,
-                    report: &mut call.output,
-                    refine: usearch_refine_options_t {
-                        expansion_factor: config.expansion_factor,
-                        memory_limit: config.memory_limit,
-                    },
-                    progress: lower_progress(&mut config.progress, config.progress_steps),
-                    stats: output_slot(&mut config.stats),
-                    plan: config.plan.as_mut().map_or(ptr::null_mut(), |plan| &mut plan.borrow_mut().handle),
-                    phase: output_slot(&mut config.phase),
-                })
-            };
-            Ok(())
+        Self::Completion::answer(DenseRefine {
+            handles: Handles::of(index, executor),
+            config,
+            report: RefineReport::default(),
         })
     }
 
     /// Closes a refine plan, whatever the call answers, and answers what the whole plan did to the
     /// graph; a round a stop left closes as a stop at that barrier would.
-    fn refine_plan_finish(self, plan: DenseRefinePlan) -> Result<Answer<'index, Self, (), RefineReport>> {
+    fn refine_plan_finish(self, plan: DenseRefinePlan) -> Result<Deferrable<'index, Self, DenseRefinePlanFinish>> {
         let (index, executor) = self.handles();
-        Self::Completion::answer((), RefineReport::default(), |call, completion| {
-            unsafe {
-                usearch_dense_refine_plan_finish(&mut usearch_dense_refine_plan_finish_t {
-                    index,
-                    executor,
-                    outcome: &mut call.outcome,
-                    completion,
-                    plan: plan.handle,
-                    report: &mut call.output,
-                })
-            };
-            Ok(())
+        Self::Completion::answer(DenseRefinePlanFinish {
+            handles: Handles::of(index, executor),
+            plan,
+            report: RefineReport::default(),
         })
     }
 
     /// Measures how much of the graph a search reaches from the root, swept level by level.
     ///
     /// Read-only, so concurrent insertions merely leave fresh entries uncounted.
-    fn health(self) -> Result<Answer<'index, Self, (), DenseReachability>> {
+    fn health(self) -> Result<Deferrable<'index, Self, DenseHealth>> {
         let (index, executor) = self.handles();
-        Self::Completion::answer((), DenseReachability::default(), |call, completion| {
-            unsafe {
-                usearch_dense_health(&mut usearch_dense_health_t {
-                    index,
-                    executor,
-                    outcome: &mut call.outcome,
-                    completion,
-                    reachability: &mut call.output,
-                })
-            };
-            Ok(())
+        Self::Completion::answer(DenseHealth {
+            handles: Handles::of(index, executor),
+            reachability: DenseReachability::default(),
         })
     }
 
@@ -2213,36 +2169,21 @@ pub trait DenseVerbs<'index>: Copy {
         self,
         queries: Queries,
         config: impl Into<DenseSearchConfig<'config>>,
-        arena: &'arena mut Arena,
-    ) -> Result<Answer<'index, Self, (Queries, DenseSearchConfig<'config>), Matches<'arena>>>
+        arena: &'arena mut Arena<'_>,
+    ) -> Result<Deferrable<'index, Self, DenseSearch<'config, 'arena, Queries>>>
     where
         Self::Completion: Accepts<Queries> + Accepts<DenseSearchConfig<'config>>,
     {
         let (index, executor) = self.handles();
-        Self::Completion::answer((queries, config.into()), Matches::new(arena), |call, completion| {
-            let (queries, config) = &mut call.inputs;
-            let batch = queries.batch()?;
-            call.output.queries = batch.count;
-            unsafe {
-                usearch_dense_search(&mut usearch_dense_search_t {
-                    index,
-                    executor,
-                    outcome: &mut call.outcome,
-                    completion,
-                    count: batch.count,
-                    queries: batch.rows,
-                    matches: &mut call.output.view,
-                    arena: call.output.arena.handle,
-                    wanted: config.wanted,
-                    expansion_factor: config.expansion_factor,
-                    traversal: config.traversal as usearch_traversal_t,
-                    predicate: lower_predicate(&config.predicate),
-                    hints: ptr::null(),
-                    progress: lower_progress(&mut config.progress, config.progress_steps),
-                    stats: output_slot(&mut config.stats),
-                })
-            };
-            Ok(())
+        let batch = queries.batch()?;
+        let mut matches = Matches::new(arena);
+        matches.queries = batch.count;
+        Self::Completion::answer(DenseSearch {
+            handles: Handles::of(index, executor),
+            _queries: queries,
+            batch,
+            config: config.into(),
+            matches,
         })
     }
 
@@ -2261,45 +2202,26 @@ pub trait DenseVerbs<'index>: Copy {
         queries: Queries,
         rows_per_query: usize,
         config: impl Into<DenseMaxsimConfig<'config>>,
-        arena: &'arena mut Arena,
-    ) -> Result<Answer<'index, Self, (Queries, DenseMaxsimConfig<'config>), DenseProducts<'arena>>>
+        arena: &'arena mut Arena<'_>,
+    ) -> Result<Deferrable<'index, Self, DenseMaxsim<'config, 'arena, Queries>>>
     where
         Self::Completion: Accepts<Queries> + Accepts<DenseMaxsimConfig<'config>>,
     {
         let (index, executor) = self.handles();
-        Self::Completion::answer((queries, config.into()), DenseProducts::new(arena), |call, completion| {
-            let (queries, config) = &mut call.inputs;
-            let batch = queries.batch()?;
-            // The call counts queries, so only this side sees the matrix's rows fail to divide.
-            if rows_per_query == 0 || !batch.count.is_multiple_of(rows_per_query) {
-                return Err(fail(Status::ShapeMismatch, "the query rows do not divide into whole queries"));
-            }
-            let products = &mut call.output;
-            products.count = batch.count / rows_per_query;
-            unsafe {
-                usearch_dense_maxsim(&mut usearch_dense_maxsim_t {
-                    index,
-                    executor,
-                    outcome: &mut call.outcome,
-                    completion,
-                    count: products.count,
-                    queries: batch.rows,
-                    query_offsets: ptr::null(),
-                    rows_per_query,
-                    matches: &mut products.products,
-                    written: ptr::null_mut(),
-                    required: &mut products.required,
-                    arena: products.arena.handle,
-                    wanted: config.wanted,
-                    expansion_factor: config.expansion_factor,
-                    traversal: Traversal::Walk as usearch_traversal_t,
-                    predicate: lower_predicate(&None),
-                    hints: ptr::null(),
-                    progress: lower_progress(&mut config.progress, config.progress_steps),
-                    stats: output_slot(&mut config.stats),
-                })
-            };
-            Ok(())
+        let batch = queries.batch()?;
+        // The call counts queries, so only this side sees the matrix's rows fail to divide.
+        if rows_per_query == 0 || !batch.count.is_multiple_of(rows_per_query) {
+            return Err(fail(Status::ShapeMismatch, "the query rows do not divide into whole queries"));
+        }
+        let mut products = DenseProducts::new(arena);
+        products.count = batch.count / rows_per_query;
+        Self::Completion::answer(DenseMaxsim {
+            handles: Handles::of(index, executor),
+            _queries: queries,
+            batch,
+            rows_per_query,
+            config: config.into(),
+            products,
         })
     }
 
@@ -2313,38 +2235,21 @@ pub trait DenseVerbs<'index>: Copy {
         self,
         left: Left,
         config: impl Into<DenseMultiplyConfig<'config>>,
-        arena: &'arena mut Arena,
-    ) -> Result<Answer<'index, Self, (Left, DenseMultiplyConfig<'config>), DenseProducts<'arena>>>
+        arena: &'arena mut Arena<'_>,
+    ) -> Result<Deferrable<'index, Self, DenseMultiply<'config, 'arena, Left>>>
     where
         Self::Completion: Accepts<Left> + Accepts<DenseMultiplyConfig<'config>>,
     {
         let (index, executor) = self.handles();
-        Self::Completion::answer((left, config.into()), DenseProducts::new(arena), |call, completion| {
-            let (left, config) = &mut call.inputs;
-            let batch = left.batch()?;
-            let products = &mut call.output;
-            products.count = batch.count;
-            unsafe {
-                usearch_dense_multiply(&mut usearch_dense_multiply_t {
-                    index,
-                    executor,
-                    outcome: &mut call.outcome,
-                    completion,
-                    count: batch.count,
-                    left: batch.rows,
-                    products: &mut products.products,
-                    written: ptr::null_mut(),
-                    required: &mut products.required,
-                    arena: products.arena.handle,
-                    wanted: config.wanted,
-                    expansion_factor: config.expansion_factor,
-                    traversal: Traversal::Walk as usearch_traversal_t,
-                    predicate: lower_predicate(&None),
-                    progress: lower_progress(&mut config.progress, config.progress_steps),
-                    stats: output_slot(&mut config.stats),
-                })
-            };
-            Ok(())
+        let batch = left.batch()?;
+        let mut products = DenseProducts::new(arena);
+        products.count = batch.count;
+        Self::Completion::answer(DenseMultiply {
+            handles: Handles::of(index, executor),
+            _left: left,
+            batch,
+            config: config.into(),
+            products,
         })
     }
 
@@ -2362,71 +2267,36 @@ pub trait DenseVerbs<'index>: Copy {
     /// needs logits.
     ///
     /// See <https://arxiv.org/abs/2205.14135> - Flash Attention, whose recurrence this reuses.
-    #[allow(clippy::type_complexity)]
     fn attend<'config, 'lookup, 'arena, Queries: RowsView, Value: Element>(
         self,
         queries: Queries,
-        value_lookup: &'lookup ValueLookup<'lookup, Value>,
+        value_lookup: ValueLookup<'lookup, Value>,
         config: impl Into<DenseAttendConfig<'config>>,
-        arena: &'arena mut Arena,
-    ) -> Result<
-        Answer<
-            'index,
-            Self,
-            (Queries, &'lookup ValueLookup<'lookup, Value>, DenseAttendConfig<'config>),
-            DenseVectors<'arena, Queries::Value>,
-        >,
-    >
+        arena: &'arena mut Arena<'_>,
+    ) -> Result<Deferrable<'index, Self, DenseAttend<'config, 'lookup, 'arena, Queries, Value>>>
     where
-        Self::Completion:
-            Accepts<Queries> + Accepts<&'lookup ValueLookup<'lookup, Value>> + Accepts<DenseAttendConfig<'config>>,
+        Self::Completion: Accepts<Queries> + Accepts<ValueLookup<'lookup, Value>> + Accepts<DenseAttendConfig<'config>>,
     {
+        // A VRAM walk calls its value lookup on the device, where no host trampoline runs.
+        if arena.describe()?.residency == Residency::Vram {
+            return Err(fail(Status::Device, "a VRAM walk needs a device-callable value lookup"));
+        }
         let (index, executor) = self.handles();
-        let inputs = (queries, value_lookup, config.into());
-        Self::Completion::answer(inputs, DenseVectors::new(arena), |call, completion| {
-            let (queries, value_lookup, config) = &mut call.inputs;
-            let outputs = &mut call.output;
-            // A VRAM walk calls its value lookup on the device, where no host trampoline runs.
-            if outputs.arena.describe()?.residency == Residency::Vram {
-                return Err(fail(Status::Device, "a VRAM walk needs a device-callable value lookup"));
-            }
-            let batch = queries.batch()?;
-            let carry = match config.carry.as_deref_mut() {
-                None => ptr::null_mut(),
-                // The carry pointer has no length, so only this side can see it fall short.
-                Some(carry) if carry.len() < batch.count => {
-                    return Err(fail(
-                        Status::ShapeMismatch,
-                        "the softmax carry holds fewer entries than there are queries",
-                    ));
-                }
-                Some(carry) => carry.as_mut_ptr(),
-            };
-            outputs.count = batch.count;
-            unsafe {
-                usearch_dense_attend(&mut usearch_dense_attend_t {
-                    index,
-                    executor,
-                    outcome: &mut call.outcome,
-                    completion,
-                    count: batch.count,
-                    queries: batch.rows,
-                    head_count: config.head_count,
-                    value_lookup: Some(value_lookup_trampoline::<Value>),
-                    value_lookup_state: ptr::from_mut(value_lookup).cast(),
-                    carry,
-                    outputs: &mut outputs.vectors,
-                    arena: outputs.arena.handle,
-                    outputs_scalar: Queries::Value::SCALAR as usearch_scalar_t,
-                    expansion_factor: config.expansion_factor,
-                    score_scale: config.score_scale,
-                    traversal: Traversal::Walk as usearch_traversal_t,
-                    predicate: lower_predicate(&None),
-                    progress: lower_progress(&mut config.progress, config.progress_steps),
-                    stats: output_slot(&mut config.stats),
-                })
-            };
-            Ok(())
+        let config = config.into();
+        let batch = queries.batch()?;
+        // The carry pointer has no length, so only this side can see it fall short.
+        if config.carry.as_ref().is_some_and(|carry| carry.len() < batch.count) {
+            return Err(fail(Status::ShapeMismatch, "the softmax carry holds fewer entries than there are queries"));
+        }
+        let mut outputs = DenseVectors::new(arena);
+        outputs.count = batch.count;
+        Self::Completion::answer(DenseAttend {
+            handles: Handles::of(index, executor),
+            _queries: queries,
+            batch,
+            value_lookup,
+            config,
+            outputs,
         })
     }
 
@@ -2442,7 +2312,7 @@ pub trait DenseVerbs<'index>: Copy {
     fn reshard<'config, Plan: BorrowMut<DenseReshardPlan>>(
         self,
         config: DenseReshardConfig<'config, Plan>,
-    ) -> Result<Answer<'index, Self, (DenseReshardConfig<'config, Plan>, ReshardLists), RefineReport>>
+    ) -> Result<Deferrable<'index, Self, DenseReshard<'config, Plan>>>
     where
         Self::Completion: Accepts<DenseReshardConfig<'config, Plan>>,
     {
@@ -2463,51 +2333,22 @@ pub trait DenseVerbs<'index>: Copy {
             nvme: config.paths.map(|_| nvme_options(&paths, None)),
             _paths: paths,
         };
-        Self::Completion::answer((config, lists), RefineReport::default(), |call, completion| {
-            let (config, lists) = &mut call.inputs;
-            unsafe {
-                usearch_dense_reshard(&mut usearch_dense_reshard_t {
-                    sources_count: lists.sources.len(),
-                    sources: lists.sources.as_ptr(),
-                    targets_count: lists.targets.len(),
-                    targets: lists.targets.as_ptr(),
-                    executor,
-                    outcome: &mut call.outcome,
-                    completion,
-                    ram: lists.ram.as_ref().map_or(ptr::null(), ptr::from_ref),
-                    vram: lists.vram.as_ref().map_or(ptr::null(), ptr::from_ref),
-                    nvme: lists.nvme.as_ref().map_or(ptr::null(), ptr::from_ref),
-                    report: &mut call.output,
-                    refine: usearch_refine_options_t {
-                        expansion_factor: config.expansion_factor,
-                        memory_limit: config.memory_limit,
-                    },
-                    seed: config.seed,
-                    progress: lower_progress(&mut config.progress, config.progress_steps),
-                    stats: output_slot(&mut config.stats),
-                    plan: config.plan.as_mut().map_or(ptr::null_mut(), |plan| &mut plan.borrow_mut().handle),
-                    phase: output_slot(&mut config.phase),
-                })
-            };
-            Ok(())
+        Self::Completion::answer(DenseReshard {
+            handles: Handles::of(ptr::null_mut(), executor),
+            config,
+            lists,
+            report: RefineReport::default(),
         })
     }
 
     /// Closes a reshard plan, whatever the call answers, and answers what the whole plan did to
     /// the graph; a plan whose entries have not all moved runs no round and reports zeros.
-    fn reshard_plan_finish(self, plan: DenseReshardPlan) -> Result<Answer<'index, Self, (), RefineReport>> {
+    fn reshard_plan_finish(self, plan: DenseReshardPlan) -> Result<Deferrable<'index, Self, DenseReshardPlanFinish>> {
         let (_, executor) = self.handles();
-        Self::Completion::answer((), RefineReport::default(), |call, completion| {
-            unsafe {
-                usearch_dense_reshard_plan_finish(&mut usearch_dense_reshard_plan_finish_t {
-                    executor,
-                    outcome: &mut call.outcome,
-                    completion,
-                    plan: plan.handle,
-                    report: &mut call.output,
-                })
-            };
-            Ok(())
+        Self::Completion::answer(DenseReshardPlanFinish {
+            handles: Handles::of(ptr::null_mut(), executor),
+            plan,
+            report: RefineReport::default(),
         })
     }
 
@@ -2518,9 +2359,9 @@ pub trait DenseVerbs<'index>: Copy {
     fn sample<'config, 'arena>(
         self,
         wanted: usize,
-        arena: &'arena mut Arena,
+        arena: &'arena mut Arena<'_>,
         config: DenseSampleConfig<'config>,
-    ) -> Result<Answer<'index, Self, DenseSampleConfig<'config>, Sample<'arena>>>
+    ) -> Result<Deferrable<'index, Self, DenseSample<'config, 'arena>>>
     where
         Self::Completion: Accepts<DenseSampleConfig<'config>>,
     {
@@ -2529,46 +2370,11 @@ pub trait DenseVerbs<'index>: Copy {
             return Err(fail(Status::InvalidArgument, "every shown key needs its coordinates"));
         }
         let (index, executor) = self.handles();
-        let sample = Sample {
-            arena,
-            keys: usearch_keys_view_t::default(),
-            entry_ordinals: ptr::null(),
-            parents: usearch_matches_view_t::default(),
-            coordinates: usearch_rows_view_t::default(),
-            written: 0,
-        };
-        Self::Completion::answer(config, sample, |call, completion| {
-            let (config, sample) = (&mut call.inputs, &mut call.output);
-            unsafe {
-                usearch_dense_sample(&mut usearch_dense_sample_t {
-                    index,
-                    executor,
-                    outcome: &mut call.outcome,
-                    completion,
-                    shown_count: config.shown.len(),
-                    shown: usearch_keys_view_t::of(config.shown),
-                    shown_coordinates: usearch_rows_view_t {
-                        data: config.shown_coordinates.as_ptr().cast(),
-                        stride: core::mem::size_of::<[f32; 3]>(),
-                        columns: 3,
-                        scalar: Scalar::F32 as usearch_scalar_t,
-                    },
-                    focus_count: config.focus.len(),
-                    focus: usearch_keys_view_t::of(config.focus),
-                    keys: &mut sample.keys,
-                    entry_ordinals: &mut sample.entry_ordinals,
-                    parents: &mut sample.parents,
-                    coordinates: &mut sample.coordinates,
-                    written: &mut sample.written,
-                    arena: sample.arena.handle,
-                    wanted,
-                    seed: config.seed,
-                    expansion_factor: config.expansion_factor,
-                    progress: lower_progress(&mut config.progress, config.progress_steps),
-                    stats: output_slot(&mut config.stats),
-                })
-            };
-            Ok(())
+        Self::Completion::answer(DenseSample {
+            handles: Handles::of(index, executor),
+            wanted,
+            config,
+            sample: Sample::new(arena),
         })
     }
 
@@ -2580,117 +2386,33 @@ pub trait DenseVerbs<'index>: Copy {
     fn save<'config, Location: AsRef<Path>>(
         self,
         config: impl Into<DenseSaveConfig<'config, Location>>,
-    ) -> Result<Answer<'index, Self, DenseSaveConfig<'config, Location>, ()>>
+    ) -> Result<Deferrable<'index, Self, DenseSave<'config, Location>>>
     where
         Self::Completion: Accepts<DenseSaveConfig<'config, Location>>,
     {
         let (index, executor) = self.handles();
-        Self::Completion::answer(config.into(), (), |call, completion| {
-            let config = &mut call.inputs;
-            let path = path_view(config.path.as_ref())?;
-            unsafe {
-                usearch_dense_save(&mut usearch_dense_save_t {
-                    index,
-                    executor,
-                    outcome: &mut call.outcome,
-                    completion,
-                    path,
-                    progress: lower_progress(&mut config.progress, config.progress_steps),
-                })
-            };
-            Ok(())
-        })
+        let config = config.into();
+        let path = path_view(config.path.as_ref())?;
+        Self::Completion::answer(DenseSave { handles: Handles::of(index, executor), path, config })
     }
 
     /// Saves the index as one monolith into the arena its config carries.
-    #[allow(clippy::type_complexity)]
-    fn save_buffer<'config, 'arena>(
+    fn save_buffer<'config, 'arena, 'executor>(
         self,
-        config: impl Into<DenseSaveBufferConfig<'config, 'arena>>,
-    ) -> Result<Answer<'index, Self, (Option<&'config mut ProgressCallback<'config>>, usize), Monolith<'arena>>>
+        config: impl Into<DenseSaveBufferConfig<'config, 'arena, 'executor>>,
+    ) -> Result<Deferrable<'index, Self, DenseSaveBuffer<'config, 'arena>>>
     where
-        Self::Completion: Accepts<DenseSaveBufferConfig<'config, 'arena>>,
+        'executor: 'arena,
+        Self::Completion: Accepts<DenseSaveBufferConfig<'config, 'arena, 'executor>>,
     {
         let (index, executor) = self.handles();
         let DenseSaveBufferConfig { arena, progress, progress_steps } = config.into();
-        let arena_handle = arena.handle;
-        let monolith = Monolith { arena: PhantomData, monolith: usearch_bytes_view_t::default() };
-        Self::Completion::answer((progress, progress_steps), monolith, |call, completion| {
-            let (progress, progress_steps) = &mut call.inputs;
-            unsafe {
-                usearch_dense_save_buffer(&mut usearch_dense_save_buffer_t {
-                    index,
-                    executor,
-                    outcome: &mut call.outcome,
-                    completion,
-                    monolith: &mut call.output.monolith,
-                    arena: arena_handle,
-                    progress: lower_progress(progress, *progress_steps),
-                })
-            };
-            Ok(())
+        Self::Completion::answer(DenseSaveBuffer {
+            handles: Handles::of(index, executor),
+            progress,
+            progress_steps,
+            monolith: Monolith::new(arena),
         })
-    }
-
-    /// Opens a walk over the current contents, pulled blocking on this receiver's executor; each
-    /// shard's publication watermark is read as the walk enters it, so an entry once passed is never
-    /// revisited.
-    ///
-    /// Without `starts` the walk yields every entry as stored. With them it yields the start keys'
-    /// own entries first, in order, then the entries those link to breadth-first, each entry once.
-    fn cursor(self, starts: &[Key]) -> Result<DenseCursor<'index>>
-    where
-        Self: DenseVerbs<'index, Completion = Blocking>,
-    {
-        let (index, executor) = self.handles();
-        let mut cursor = DenseCursor { handle: ptr::null_mut(), index, executor, receiver: PhantomData };
-        let mut outcome = usearch_outcome_t::default();
-        unsafe {
-            usearch_dense_cursor_init(&mut usearch_dense_cursor_init_t {
-                cursor: &mut cursor.handle,
-                index,
-                outcome: &mut outcome,
-                starts_count: starts.len(),
-                starts: starts.as_ptr(),
-            })
-        };
-        check(outcome).map(|()| cursor)
-    }
-
-    /// Opens a resumable nearest-neighbor stream for a one-row query, pulled blocking on this
-    /// receiver's executor.
-    ///
-    /// Best-first traversal is naturally pausable, so callers that post-filter aggressively pull
-    /// until satisfied instead of guessing "k" upfront. The stream keeps walk state rather than a
-    /// thread.
-    ///
-    /// No residency implements the stream yet, so the engine answers [`Status::Unsupported`].
-    fn search_stream<Query: RowsView>(
-        self,
-        config: impl Into<DenseSearchStreamInitConfig<Query>>,
-    ) -> Result<DenseSearchStream<'index>>
-    where
-        Self: DenseVerbs<'index, Completion = Blocking>,
-    {
-        let config = config.into();
-        // The stream takes no count, so only this side sees a matrix of several rows.
-        let query = match config.query.batch()? {
-            batch if batch.count == 1 => batch.rows,
-            _ => return Err(fail(Status::ShapeMismatch, "a stream walks exactly one query row")),
-        };
-        let (index, executor) = self.handles();
-        let mut stream = DenseSearchStream { handle: ptr::null_mut(), index, executor, receiver: PhantomData };
-        let mut outcome = usearch_outcome_t::default();
-        unsafe {
-            usearch_dense_search_stream_init(&mut usearch_dense_search_stream_init_t {
-                stream: &mut stream.handle,
-                index,
-                outcome: &mut outcome,
-                query,
-                expansion_factor: config.expansion_factor,
-            })
-        };
-        check(outcome).map(|()| stream)
     }
 }
 
@@ -2711,8 +2433,7 @@ impl<'index, Completion: crate::types::Completion> DenseVerbs<'index> for On<'in
 }
 
 /// The handle lists and placements a reshard lends, laid out as the library reads them.
-#[doc(hidden)]
-pub struct ReshardLists {
+struct ReshardLists {
     sources: Vec<usearch_dense_index_t>,
     targets: Vec<usearch_dense_index_t>,
     ram: Option<usearch_ram_options_t>,
@@ -2727,9 +2448,13 @@ pub struct ReshardLists {
 unsafe impl Send for ReshardLists {}
 
 /// # Safety
-/// `state` must address the `&ValueLookup` lent to the call, and `keys` and `rows` must hold
-/// `count` entries each.
-unsafe extern "C" fn value_lookup_trampoline<Value: Element>(
+/// `state` must address the `Handler` a [`ValueLookup`] lent to the call, and `keys` and `rows`
+/// must hold `count` entries each.
+unsafe extern "C" fn value_lookup_trampoline<
+    'handler,
+    Value: Element,
+    Handler: Fn(Key) -> Option<&'handler [Value]>,
+>(
     state: *mut c_void,
     keys: *const Key,
     count: usize,
@@ -2738,7 +2463,7 @@ unsafe extern "C" fn value_lookup_trampoline<Value: Element>(
     rows: *mut *const c_void,
 ) {
     unsafe {
-        let lookup = *state.cast::<&ValueLookup<'_, Value>>();
+        let handler = &*state.cast::<Handler>();
         // The library reads rows of its own shape, so a lookup typed otherwise answers no row.
         let row_length = match scalar == Value::SCALAR as usearch_scalar_t {
             true => values_of::<Value>(columns),
@@ -2746,7 +2471,7 @@ unsafe extern "C" fn value_lookup_trampoline<Value: Element>(
         };
         let keys = slice::from_raw_parts(keys, count);
         for (key, row) in keys.iter().zip(slice::from_raw_parts_mut(rows, count)) {
-            *row = match lookup(*key) {
+            *row = match handler(*key) {
                 Some(value) if value.len() == row_length => value.as_ptr().cast(),
                 _ => ptr::null(),
             };
@@ -2756,36 +2481,752 @@ unsafe extern "C" fn value_lookup_trampoline<Value: Element>(
 
 // endregion: Dense Index
 
+// region: Calls
+
+/// What [`DenseVerbs::reserve`] runs.
+pub struct DenseReserve {
+    handles: Handles,
+    capacity: usize,
+}
+
+impl Calling for DenseReserve {
+    type Arguments = usearch_dense_reserve_t;
+    type Output = ();
+
+    fn arguments(&mut self, outcome: *mut usearch_outcome_t, completion: usearch_completion_t) -> Self::Arguments {
+        let Handles { handle: index, executor } = self.handles;
+        usearch_dense_reserve_t { index, executor, outcome, completion, capacity: self.capacity }
+    }
+
+    unsafe fn call(arguments: *mut Self::Arguments) {
+        unsafe { usearch_dense_reserve(arguments) }
+    }
+
+    fn finish(self, status: Result<()>) -> Result<()> {
+        status
+    }
+}
+
+/// What [`DenseVerbs::describe`] runs, and the description it fills.
+pub struct DenseDescribe {
+    handles: Handles,
+    description: DenseIndexDescription,
+}
+
+impl Calling for DenseDescribe {
+    type Arguments = usearch_dense_describe_t;
+    type Output = DenseIndexDescription;
+
+    fn arguments(&mut self, outcome: *mut usearch_outcome_t, completion: usearch_completion_t) -> Self::Arguments {
+        let Handles { handle: index, executor } = self.handles;
+        usearch_dense_describe_t { index, executor, outcome, completion, description: &mut self.description }
+    }
+
+    unsafe fn call(arguments: *mut Self::Arguments) {
+        unsafe { usearch_dense_describe(arguments) }
+    }
+
+    fn finish(self, status: Result<()>) -> Result<DenseIndexDescription> {
+        status.map(|()| self.description)
+    }
+}
+
+/// What [`DenseVerbs::count`] runs, and the count it fills.
+pub struct DenseCount {
+    handles: Handles,
+    key: Key,
+    entries: usize,
+}
+
+impl Calling for DenseCount {
+    type Arguments = usearch_dense_count_t;
+    type Output = usize;
+
+    fn arguments(&mut self, outcome: *mut usearch_outcome_t, completion: usearch_completion_t) -> Self::Arguments {
+        let Handles { handle: index, executor } = self.handles;
+        usearch_dense_count_t { index, executor, outcome, completion, key: self.key, entries: &mut self.entries }
+    }
+
+    unsafe fn call(arguments: *mut Self::Arguments) {
+        unsafe { usearch_dense_count(arguments) }
+    }
+
+    fn finish(self, status: Result<()>) -> Result<usize> {
+        status.map(|()| self.entries)
+    }
+}
+
+/// What [`DenseVerbs::get`] runs, and the rows it exports.
+pub struct DenseGet<'arena, Value> {
+    handles: Handles,
+    key: Key,
+    vectors: DenseVectors<'arena, Value>,
+}
+
+impl<'arena, Value: Element> Calling for DenseGet<'arena, Value> {
+    type Arguments = usearch_dense_get_t;
+    type Output = DenseVectors<'arena, Value>;
+
+    fn arguments(&mut self, outcome: *mut usearch_outcome_t, completion: usearch_completion_t) -> Self::Arguments {
+        let Handles { handle: index, executor } = self.handles;
+        usearch_dense_get_t {
+            index,
+            executor,
+            outcome,
+            completion,
+            key: self.key,
+            vectors: &mut self.vectors.vectors,
+            written: &mut self.vectors.count,
+            arena: self.vectors.arena.handle,
+            outputs_scalar: Value::SCALAR as usearch_scalar_t,
+        }
+    }
+
+    unsafe fn call(arguments: *mut Self::Arguments) {
+        unsafe { usearch_dense_get(arguments) }
+    }
+
+    fn finish(self, status: Result<()>) -> Result<DenseVectors<'arena, Value>> {
+        status.map(|()| self.vectors)
+    }
+}
+
+/// What [`DenseVerbs::insert`] runs: the keys and the config holding their rows.
+pub struct DenseInsert<'config, Keys, Rows> {
+    handles: Handles,
+    keys: Keys,
+    batch: Batch,
+    config: DenseInsertConfig<'config, Rows>,
+}
+
+impl<Keys: AsRef<[Key]>, Rows> Calling for DenseInsert<'_, Keys, Rows> {
+    type Arguments = usearch_dense_insert_t;
+    type Output = ();
+
+    fn arguments(&mut self, outcome: *mut usearch_outcome_t, completion: usearch_completion_t) -> Self::Arguments {
+        let Handles { handle: index, executor } = self.handles;
+        usearch_dense_insert_t {
+            index,
+            executor,
+            outcome,
+            completion,
+            count: self.batch.count,
+            keys: usearch_keys_view_t::of(self.keys.as_ref()),
+            vectors: self.batch.rows,
+            expansion_factor: self.config.expansion_factor,
+            progress: lower_progress(&self.config.progress, self.config.progress_steps),
+            stats: output_slot(&mut self.config.stats),
+        }
+    }
+
+    unsafe fn call(arguments: *mut Self::Arguments) {
+        unsafe { usearch_dense_insert(arguments) }
+    }
+
+    fn finish(self, status: Result<()>) -> Result<()> {
+        status
+    }
+}
+
+/// What [`DenseVerbs::refine`] runs: its config, plan included, and the report it fills.
+pub struct DenseRefine<'config, Plan> {
+    handles: Handles,
+    config: DenseRefineConfig<'config, Plan>,
+    report: RefineReport,
+}
+
+impl<'config, Plan: BorrowMut<DenseRefinePlan>> Calling for DenseRefine<'config, Plan> {
+    type Arguments = usearch_dense_refine_t;
+    type Output = RefineReport;
+
+    fn arguments(&mut self, outcome: *mut usearch_outcome_t, completion: usearch_completion_t) -> Self::Arguments {
+        let Handles { handle: index, executor } = self.handles;
+        let config = &mut self.config;
+        usearch_dense_refine_t {
+            index,
+            executor,
+            outcome,
+            completion,
+            report: &mut self.report,
+            refine: usearch_refine_options_t {
+                expansion_factor: config.expansion_factor,
+                memory_limit: config.memory_limit,
+            },
+            progress: lower_progress(&config.progress, config.progress_steps),
+            stats: output_slot(&mut config.stats),
+            plan: config.plan.as_mut().map_or(ptr::null_mut(), |plan| &mut plan.borrow_mut().handle),
+            phase: output_slot(&mut config.phase),
+        }
+    }
+
+    unsafe fn call(arguments: *mut Self::Arguments) {
+        unsafe { usearch_dense_refine(arguments) }
+    }
+
+    fn finish(self, status: Result<()>) -> Result<RefineReport> {
+        status.map(|()| self.report)
+    }
+}
+
+impl<'config, Plan: BorrowMut<DenseRefinePlan>> Lending for DenseRefine<'config, Plan> {
+    type Inputs = DenseRefineConfig<'config, Plan>;
+
+    fn finish_with_inputs(self, status: Result<()>) -> (Result<RefineReport>, Self::Inputs) {
+        (status.map(|()| self.report), self.config)
+    }
+}
+
+/// What [`DenseVerbs::refine_plan_finish`] runs: the plan it closes and the report it fills.
+pub struct DenseRefinePlanFinish {
+    handles: Handles,
+    plan: DenseRefinePlan,
+    report: RefineReport,
+}
+
+impl Calling for DenseRefinePlanFinish {
+    type Arguments = usearch_dense_refine_plan_finish_t;
+    type Output = RefineReport;
+
+    fn arguments(&mut self, outcome: *mut usearch_outcome_t, completion: usearch_completion_t) -> Self::Arguments {
+        let Handles { handle: index, executor } = self.handles;
+        usearch_dense_refine_plan_finish_t {
+            index,
+            executor,
+            outcome,
+            completion,
+            plan: self.plan.handle,
+            report: &mut self.report,
+        }
+    }
+
+    unsafe fn call(arguments: *mut Self::Arguments) {
+        unsafe { usearch_dense_refine_plan_finish(arguments) }
+    }
+
+    fn finish(self, status: Result<()>) -> Result<RefineReport> {
+        status.map(|()| self.report)
+    }
+}
+
+/// What [`DenseVerbs::health`] runs, and the reachability it fills.
+pub struct DenseHealth {
+    handles: Handles,
+    reachability: DenseReachability,
+}
+
+impl Calling for DenseHealth {
+    type Arguments = usearch_dense_health_t;
+    type Output = DenseReachability;
+
+    fn arguments(&mut self, outcome: *mut usearch_outcome_t, completion: usearch_completion_t) -> Self::Arguments {
+        let Handles { handle: index, executor } = self.handles;
+        usearch_dense_health_t { index, executor, outcome, completion, reachability: &mut self.reachability }
+    }
+
+    unsafe fn call(arguments: *mut Self::Arguments) {
+        unsafe { usearch_dense_health(arguments) }
+    }
+
+    fn finish(self, status: Result<()>) -> Result<DenseReachability> {
+        status.map(|()| self.reachability)
+    }
+}
+
+/// What [`DenseVerbs::search`] runs: its queries and config, and the matches it writes.
+pub struct DenseSearch<'config, 'arena, Queries> {
+    handles: Handles,
+    /// Held so the rows `batch` views live until the call is final.
+    _queries: Queries,
+    batch: Batch,
+    config: DenseSearchConfig<'config>,
+    matches: Matches<'arena>,
+}
+
+impl<'arena, Queries> Calling for DenseSearch<'_, 'arena, Queries> {
+    type Arguments = usearch_dense_search_t;
+    type Output = Matches<'arena>;
+
+    fn arguments(&mut self, outcome: *mut usearch_outcome_t, completion: usearch_completion_t) -> Self::Arguments {
+        let Handles { handle: index, executor } = self.handles;
+        let config = &mut self.config;
+        usearch_dense_search_t {
+            index,
+            executor,
+            outcome,
+            completion,
+            count: self.batch.count,
+            queries: self.batch.rows,
+            matches: &mut self.matches.view,
+            arena: self.matches.arena.handle,
+            wanted: config.wanted,
+            expansion_factor: config.expansion_factor,
+            traversal: config.traversal as usearch_traversal_t,
+            predicate: lower_predicate(&config.predicate),
+            hints: ptr::null(),
+            progress: lower_progress(&config.progress, config.progress_steps),
+            stats: output_slot(&mut config.stats),
+        }
+    }
+
+    unsafe fn call(arguments: *mut Self::Arguments) {
+        unsafe { usearch_dense_search(arguments) }
+    }
+
+    fn finish(self, status: Result<()>) -> Result<Matches<'arena>> {
+        status.map(|()| self.matches)
+    }
+}
+
+/// What [`DenseVerbs::maxsim`] runs: its queries and config, and the products it writes.
+pub struct DenseMaxsim<'config, 'arena, Queries> {
+    handles: Handles,
+    /// Held so the rows `batch` views live until the call is final.
+    _queries: Queries,
+    batch: Batch,
+    rows_per_query: usize,
+    config: DenseMaxsimConfig<'config>,
+    products: DenseProducts<'arena>,
+}
+
+impl<'arena, Queries> Calling for DenseMaxsim<'_, 'arena, Queries> {
+    type Arguments = usearch_dense_maxsim_t;
+    type Output = DenseProducts<'arena>;
+
+    fn arguments(&mut self, outcome: *mut usearch_outcome_t, completion: usearch_completion_t) -> Self::Arguments {
+        let Handles { handle: index, executor } = self.handles;
+        let (config, products) = (&mut self.config, &mut self.products);
+        usearch_dense_maxsim_t {
+            index,
+            executor,
+            outcome,
+            completion,
+            count: products.count,
+            queries: self.batch.rows,
+            query_offsets: ptr::null(),
+            rows_per_query: self.rows_per_query,
+            matches: &mut products.products,
+            written: ptr::null_mut(),
+            required: &mut products.required,
+            arena: products.arena.handle,
+            wanted: config.wanted,
+            expansion_factor: config.expansion_factor,
+            traversal: Traversal::Walk as usearch_traversal_t,
+            predicate: lower_predicate(&None),
+            hints: ptr::null(),
+            progress: lower_progress(&config.progress, config.progress_steps),
+            stats: output_slot(&mut config.stats),
+        }
+    }
+
+    unsafe fn call(arguments: *mut Self::Arguments) {
+        unsafe { usearch_dense_maxsim(arguments) }
+    }
+
+    fn finish(self, status: Result<()>) -> Result<DenseProducts<'arena>> {
+        status.map(|()| self.products)
+    }
+}
+
+/// What [`DenseVerbs::multiply`] runs: its left rows and config, and the products it writes.
+pub struct DenseMultiply<'config, 'arena, Left> {
+    handles: Handles,
+    /// Held so the rows `batch` views live until the call is final.
+    _left: Left,
+    batch: Batch,
+    config: DenseMultiplyConfig<'config>,
+    products: DenseProducts<'arena>,
+}
+
+impl<'arena, Left> Calling for DenseMultiply<'_, 'arena, Left> {
+    type Arguments = usearch_dense_multiply_t;
+    type Output = DenseProducts<'arena>;
+
+    fn arguments(&mut self, outcome: *mut usearch_outcome_t, completion: usearch_completion_t) -> Self::Arguments {
+        let Handles { handle: index, executor } = self.handles;
+        let (config, products) = (&mut self.config, &mut self.products);
+        usearch_dense_multiply_t {
+            index,
+            executor,
+            outcome,
+            completion,
+            count: self.batch.count,
+            left: self.batch.rows,
+            products: &mut products.products,
+            written: ptr::null_mut(),
+            required: &mut products.required,
+            arena: products.arena.handle,
+            wanted: config.wanted,
+            expansion_factor: config.expansion_factor,
+            traversal: Traversal::Walk as usearch_traversal_t,
+            predicate: lower_predicate(&None),
+            progress: lower_progress(&config.progress, config.progress_steps),
+            stats: output_slot(&mut config.stats),
+        }
+    }
+
+    unsafe fn call(arguments: *mut Self::Arguments) {
+        unsafe { usearch_dense_multiply(arguments) }
+    }
+
+    fn finish(self, status: Result<()>) -> Result<DenseProducts<'arena>> {
+        status.map(|()| self.products)
+    }
+}
+
+/// What [`DenseVerbs::attend`] runs: its queries, value lookup and config, and the rows it writes.
+pub struct DenseAttend<'config, 'lookup, 'arena, Queries: RowsView, Value> {
+    handles: Handles,
+    /// Held so the rows `batch` views live until the call is final.
+    _queries: Queries,
+    batch: Batch,
+    value_lookup: ValueLookup<'lookup, Value>,
+    config: DenseAttendConfig<'config>,
+    outputs: DenseVectors<'arena, Queries::Value>,
+}
+
+impl<'arena, Queries: RowsView, Value> Calling for DenseAttend<'_, '_, 'arena, Queries, Value> {
+    type Arguments = usearch_dense_attend_t;
+    type Output = DenseVectors<'arena, Queries::Value>;
+
+    fn arguments(&mut self, outcome: *mut usearch_outcome_t, completion: usearch_completion_t) -> Self::Arguments {
+        let Handles { handle: index, executor } = self.handles;
+        let (config, outputs) = (&mut self.config, &mut self.outputs);
+        usearch_dense_attend_t {
+            index,
+            executor,
+            outcome,
+            completion,
+            count: self.batch.count,
+            queries: self.batch.rows,
+            head_count: config.head_count,
+            value_lookup: Some(self.value_lookup.callback),
+            value_lookup_state: self.value_lookup.state,
+            carry: config.carry.as_deref_mut().map_or(ptr::null_mut(), <[DenseSoftmaxState]>::as_mut_ptr),
+            outputs: &mut outputs.vectors,
+            arena: outputs.arena.handle,
+            outputs_scalar: Queries::Value::SCALAR as usearch_scalar_t,
+            expansion_factor: config.expansion_factor,
+            score_scale: config.score_scale,
+            traversal: Traversal::Walk as usearch_traversal_t,
+            predicate: lower_predicate(&None),
+            progress: lower_progress(&config.progress, config.progress_steps),
+            stats: output_slot(&mut config.stats),
+        }
+    }
+
+    unsafe fn call(arguments: *mut Self::Arguments) {
+        unsafe { usearch_dense_attend(arguments) }
+    }
+
+    fn finish(self, status: Result<()>) -> Result<DenseVectors<'arena, Queries::Value>> {
+        status.map(|()| self.outputs)
+    }
+}
+
+/// What [`DenseVerbs::reshard`] runs: its config, plan included, the lists it lends and the report
+/// it fills.
+pub struct DenseReshard<'config, Plan> {
+    handles: Handles,
+    config: DenseReshardConfig<'config, Plan>,
+    lists: ReshardLists,
+    report: RefineReport,
+}
+
+impl<'config, Plan: BorrowMut<DenseReshardPlan>> Calling for DenseReshard<'config, Plan> {
+    type Arguments = usearch_dense_reshard_t;
+    type Output = RefineReport;
+
+    fn arguments(&mut self, outcome: *mut usearch_outcome_t, completion: usearch_completion_t) -> Self::Arguments {
+        let (config, lists) = (&mut self.config, &self.lists);
+        usearch_dense_reshard_t {
+            sources_count: lists.sources.len(),
+            sources: lists.sources.as_ptr(),
+            targets_count: lists.targets.len(),
+            targets: lists.targets.as_ptr(),
+            executor: self.handles.executor,
+            outcome,
+            completion,
+            ram: lists.ram.as_ref().map_or(ptr::null(), ptr::from_ref),
+            vram: lists.vram.as_ref().map_or(ptr::null(), ptr::from_ref),
+            nvme: lists.nvme.as_ref().map_or(ptr::null(), ptr::from_ref),
+            report: &mut self.report,
+            refine: usearch_refine_options_t {
+                expansion_factor: config.expansion_factor,
+                memory_limit: config.memory_limit,
+            },
+            seed: config.seed,
+            progress: lower_progress(&config.progress, config.progress_steps),
+            stats: output_slot(&mut config.stats),
+            plan: config.plan.as_mut().map_or(ptr::null_mut(), |plan| &mut plan.borrow_mut().handle),
+            phase: output_slot(&mut config.phase),
+        }
+    }
+
+    unsafe fn call(arguments: *mut Self::Arguments) {
+        unsafe { usearch_dense_reshard(arguments) }
+    }
+
+    fn finish(self, status: Result<()>) -> Result<RefineReport> {
+        status.map(|()| self.report)
+    }
+}
+
+impl<'config, Plan: BorrowMut<DenseReshardPlan>> Lending for DenseReshard<'config, Plan> {
+    type Inputs = DenseReshardConfig<'config, Plan>;
+
+    fn finish_with_inputs(self, status: Result<()>) -> (Result<RefineReport>, Self::Inputs) {
+        (status.map(|()| self.report), self.config)
+    }
+}
+
+/// What [`DenseVerbs::reshard_plan_finish`] runs: the plan it closes and the report it fills.
+pub struct DenseReshardPlanFinish {
+    handles: Handles,
+    plan: DenseReshardPlan,
+    report: RefineReport,
+}
+
+impl Calling for DenseReshardPlanFinish {
+    type Arguments = usearch_dense_reshard_plan_finish_t;
+    type Output = RefineReport;
+
+    fn arguments(&mut self, outcome: *mut usearch_outcome_t, completion: usearch_completion_t) -> Self::Arguments {
+        usearch_dense_reshard_plan_finish_t {
+            executor: self.handles.executor,
+            outcome,
+            completion,
+            plan: self.plan.handle,
+            report: &mut self.report,
+        }
+    }
+
+    unsafe fn call(arguments: *mut Self::Arguments) {
+        unsafe { usearch_dense_reshard_plan_finish(arguments) }
+    }
+
+    fn finish(self, status: Result<()>) -> Result<RefineReport> {
+        status.map(|()| self.report)
+    }
+}
+
+/// What [`DenseVerbs::sample`] runs: its config and the draws it writes.
+pub struct DenseSample<'config, 'arena> {
+    handles: Handles,
+    wanted: usize,
+    config: DenseSampleConfig<'config>,
+    sample: Sample<'arena>,
+}
+
+impl<'arena> Calling for DenseSample<'_, 'arena> {
+    type Arguments = usearch_dense_sample_t;
+    type Output = Sample<'arena>;
+
+    fn arguments(&mut self, outcome: *mut usearch_outcome_t, completion: usearch_completion_t) -> Self::Arguments {
+        let Handles { handle: index, executor } = self.handles;
+        let (config, sample) = (&mut self.config, &mut self.sample);
+        usearch_dense_sample_t {
+            index,
+            executor,
+            outcome,
+            completion,
+            shown_count: config.shown.len(),
+            shown: usearch_keys_view_t::of(config.shown),
+            shown_coordinates: usearch_rows_view_t {
+                data: config.shown_coordinates.as_ptr().cast(),
+                stride: core::mem::size_of::<[f32; 3]>(),
+                columns: 3,
+                scalar: Scalar::F32 as usearch_scalar_t,
+            },
+            focus_count: config.focus.len(),
+            focus: usearch_keys_view_t::of(config.focus),
+            keys: &mut sample.keys,
+            entry_ordinals: &mut sample.entry_ordinals,
+            parents: &mut sample.parents,
+            coordinates: &mut sample.coordinates,
+            written: &mut sample.written,
+            arena: sample.arena.handle,
+            wanted: self.wanted,
+            seed: config.seed,
+            expansion_factor: config.expansion_factor,
+            progress: lower_progress(&config.progress, config.progress_steps),
+            stats: output_slot(&mut config.stats),
+        }
+    }
+
+    unsafe fn call(arguments: *mut Self::Arguments) {
+        unsafe { usearch_dense_sample(arguments) }
+    }
+
+    fn finish(self, status: Result<()>) -> Result<Sample<'arena>> {
+        status.map(|()| self.sample)
+    }
+}
+
+/// What [`DenseVerbs::save`] runs: its config and the path view into it.
+pub struct DenseSave<'config, Location> {
+    handles: Handles,
+    path: usearch_bytes_view_t,
+    config: DenseSaveConfig<'config, Location>,
+}
+
+impl<Location> Calling for DenseSave<'_, Location> {
+    type Arguments = usearch_dense_save_t;
+    type Output = ();
+
+    fn arguments(&mut self, outcome: *mut usearch_outcome_t, completion: usearch_completion_t) -> Self::Arguments {
+        let Handles { handle: index, executor } = self.handles;
+        usearch_dense_save_t {
+            index,
+            executor,
+            outcome,
+            completion,
+            path: self.path,
+            progress: lower_progress(&self.config.progress, self.config.progress_steps),
+        }
+    }
+
+    unsafe fn call(arguments: *mut Self::Arguments) {
+        unsafe { usearch_dense_save(arguments) }
+    }
+
+    fn finish(self, status: Result<()>) -> Result<()> {
+        status
+    }
+}
+
+/// What [`DenseVerbs::save_buffer`] runs: its progress and the monolith it writes.
+pub struct DenseSaveBuffer<'config, 'arena> {
+    handles: Handles,
+    progress: Option<Progress<'config>>,
+    progress_steps: usize,
+    monolith: Monolith<'arena>,
+}
+
+impl<'arena> Calling for DenseSaveBuffer<'_, 'arena> {
+    type Arguments = usearch_dense_save_buffer_t;
+    type Output = Monolith<'arena>;
+
+    fn arguments(&mut self, outcome: *mut usearch_outcome_t, completion: usearch_completion_t) -> Self::Arguments {
+        let Handles { handle: index, executor } = self.handles;
+        usearch_dense_save_buffer_t {
+            index,
+            executor,
+            outcome,
+            completion,
+            monolith: &mut self.monolith.monolith,
+            arena: self.monolith.arena.handle,
+            progress: lower_progress(&self.progress, self.progress_steps),
+        }
+    }
+
+    unsafe fn call(arguments: *mut Self::Arguments) {
+        unsafe { usearch_dense_save_buffer(arguments) }
+    }
+
+    fn finish(self, status: Result<()>) -> Result<Monolith<'arena>> {
+        status.map(|()| self.monolith)
+    }
+}
+
+// endregion: Calls
+
 // region: Cursors and Streams
 
-/// A walk over the index contents; see [`DenseVerbs::cursor`].
+impl DenseIndex {
+    /// Opens a walk over the current contents; each shard's publication watermark is read as the
+    /// walk enters it, so an entry once passed is never revisited.
+    ///
+    /// Without `starts` the walk yields every entry as stored. With them it yields the start keys'
+    /// own entries first, in order, then the entries those link to breadth-first, each entry once.
+    pub fn cursor(&self, starts: &[Key]) -> Result<DenseCursor<'_>> {
+        let mut cursor = DenseCursor { handle: ptr::null_mut(), index: self.handle, marker: PhantomData };
+        let mut outcome = usearch_outcome_t::default();
+        unsafe {
+            usearch_dense_cursor_init(&mut usearch_dense_cursor_init_t {
+                cursor: &mut cursor.handle,
+                index: self.handle,
+                outcome: &mut outcome,
+                starts_count: starts.len(),
+                starts: starts.as_ptr(),
+            })
+        };
+        check(outcome).map(|()| cursor)
+    }
+
+    /// Opens a resumable nearest-neighbor stream for a one-row query.
+    ///
+    /// Best-first traversal is naturally pausable, so callers that post-filter aggressively pull
+    /// until satisfied instead of guessing "k" upfront. The stream keeps walk state rather than a
+    /// thread.
+    ///
+    /// No residency implements the stream yet, so the engine answers [`Status::Unsupported`].
+    pub fn search_stream<Query: RowsView>(
+        &self,
+        config: impl Into<DenseSearchStreamInitConfig<Query>>,
+    ) -> Result<DenseSearchStream<'_>> {
+        let config = config.into();
+        // The stream takes no count, so only this side sees a matrix of several rows.
+        let query = match config.query.batch()? {
+            batch if batch.count == 1 => batch.rows,
+            _ => return Err(fail(Status::ShapeMismatch, "a stream walks exactly one query row")),
+        };
+        let mut stream = DenseSearchStream { handle: ptr::null_mut(), index: self.handle, marker: PhantomData };
+        let mut outcome = usearch_outcome_t::default();
+        unsafe {
+            usearch_dense_search_stream_init(&mut usearch_dense_search_stream_init_t {
+                stream: &mut stream.handle,
+                index: self.handle,
+                outcome: &mut outcome,
+                query,
+                expansion_factor: config.expansion_factor,
+            })
+        };
+        check(outcome).map(|()| stream)
+    }
+}
+
+/// A walk over the index contents; see [`DenseIndex::cursor`].
 ///
 /// The walk is a sequential scan, so it stays a batch operation: export, migration, and
-/// visualization all move whole slabs.
+/// visualization all move whole slabs. Its pulls run on the calling thread, or blocking on the
+/// executor [`DenseCursor::on`] names for them; the cursor keeps none.
 ///
 /// Dropping it waits for every deferred call naming the cursor, then releases it.
 #[derive(Debug)]
 pub struct DenseCursor<'index> {
     handle: usearch_dense_cursor_t,
     index: usearch_dense_index_t,
-    executor: usearch_executor_t,
-    receiver: PhantomData<On<'index, DenseIndex>>,
+    marker: PhantomData<&'index DenseIndex>,
 }
 
-impl DenseCursor<'_> {
-    /// Copies up to `wanted` next keys into `arena`; an empty batch means the walk is exhausted.
-    pub fn next_keys<'arena>(&mut self, wanted: usize, arena: &'arena mut Arena) -> Result<DenseBatch<'arena>> {
-        self.next(false, wanted, arena)
+impl<'index> DenseCursor<'index> {
+    /// The receiver whose pulls block on `executor`, contended while another call holds it.
+    ///
+    /// Rust-only.
+    pub fn on<'cursor>(&'cursor mut self, executor: &'cursor Executor) -> On<'cursor, DenseCursor<'index>> {
+        On { index: self, executor, completion: PhantomData }
     }
 
-    /// Copies up to `wanted` next keys into `arena`, each with the keys it links to; an empty
-    /// batch means the walk is exhausted.
-    pub fn next_links<'arena>(&mut self, wanted: usize, arena: &'arena mut Arena) -> Result<DenseBatch<'arena>> {
-        self.next(true, wanted, arena)
+    /// Copies up to `wanted` next keys into `arena` on the calling thread; an empty batch means the
+    /// walk is exhausted.
+    pub fn next_keys<'arena>(&mut self, wanted: usize, arena: &'arena mut Arena<'_>) -> Result<DenseBatch<'arena>> {
+        self.pull(ptr::null_mut(), false, wanted, arena)
     }
 
-    /// Pulls a batch, exporting each entry's links only when `linked` asks.
-    fn next<'arena>(&mut self, linked: bool, wanted: usize, arena: &'arena mut Arena) -> Result<DenseBatch<'arena>> {
+    /// Copies up to `wanted` next keys into `arena` on the calling thread, each with the keys it
+    /// links to; an empty batch means the walk is exhausted.
+    pub fn next_links<'arena>(&mut self, wanted: usize, arena: &'arena mut Arena<'_>) -> Result<DenseBatch<'arena>> {
+        self.pull(ptr::null_mut(), true, wanted, arena)
+    }
+
+    /// Pulls a batch on `executor`, exporting each entry's links only when `linked` asks.
+    fn pull<'arena>(
+        &self,
+        executor: usearch_executor_t,
+        linked: bool,
+        wanted: usize,
+        arena: &'arena mut Arena<'_>,
+    ) -> Result<DenseBatch<'arena>> {
         let mut batch = DenseBatch {
             arena: PhantomData,
             keys: usearch_keys_view_t::default(),
@@ -2796,7 +3237,7 @@ impl DenseCursor<'_> {
         unsafe {
             usearch_dense_cursor_next(&mut usearch_dense_cursor_next_t {
                 index: self.index,
-                executor: self.executor,
+                executor,
                 outcome: &mut outcome,
                 completion: usearch_completion_blocking_k,
                 cursor: self.handle,
@@ -2811,17 +3252,31 @@ impl DenseCursor<'_> {
     }
 }
 
+impl On<'_, DenseCursor<'_>> {
+    /// Copies up to `wanted` next keys into `arena` on this receiver's executor.
+    pub fn next_keys<'arena>(self, wanted: usize, arena: &'arena mut Arena<'_>) -> Result<DenseBatch<'arena>> {
+        self.index.pull(self.executor.handle, false, wanted, arena)
+    }
+
+    /// Copies up to `wanted` next keys into `arena` on this receiver's executor, each with the keys
+    /// it links to.
+    pub fn next_links<'arena>(self, wanted: usize, arena: &'arena mut Arena<'_>) -> Result<DenseBatch<'arena>> {
+        self.index.pull(self.executor.handle, true, wanted, arena)
+    }
+}
+
 impl Drop for DenseCursor<'_> {
     fn drop(&mut self) {
         unsafe { usearch_dense_cursor_free(self.handle) }
     }
 }
 
-/// A resumable nearest-neighbor stream; see [`DenseVerbs::search_stream`].
+/// A resumable nearest-neighbor stream; see [`DenseIndex::search_stream`].
 ///
 /// Ordering beyond the expansion horizon is best-effort nearest, not globally exact. Each pull
 /// lands its matches in the arena it is given as one query of a search, so nothing allocates per
-/// match. An empty pull means the walk is drained.
+/// match. An empty pull means the walk is drained. Its pulls run on the calling thread, or blocking
+/// on the executor [`DenseSearchStream::on`] names for them; the stream keeps none.
 ///
 /// Dropping it waits for every deferred call naming the stream, then releases the walk state it
 /// keeps.
@@ -2829,19 +3284,36 @@ impl Drop for DenseCursor<'_> {
 pub struct DenseSearchStream<'index> {
     handle: usearch_dense_search_stream_t,
     index: usearch_dense_index_t,
-    executor: usearch_executor_t,
-    receiver: PhantomData<On<'index, DenseIndex>>,
+    marker: PhantomData<&'index DenseIndex>,
 }
 
-impl DenseSearchStream<'_> {
-    /// Pulls up to `wanted` more matches into `arena`, as the one query of [`Matches`].
-    pub fn next<'arena>(&mut self, wanted: usize, arena: &'arena mut Arena) -> Result<Matches<'arena>> {
+impl<'index> DenseSearchStream<'index> {
+    /// The receiver whose pulls block on `executor`, contended while another call holds it.
+    ///
+    /// Rust-only.
+    pub fn on<'stream>(&'stream mut self, executor: &'stream Executor) -> On<'stream, DenseSearchStream<'index>> {
+        On { index: self, executor, completion: PhantomData }
+    }
+
+    /// Pulls up to `wanted` more matches into `arena` on the calling thread, as the one query of
+    /// [`Matches`].
+    pub fn next<'arena>(&mut self, wanted: usize, arena: &'arena mut Arena<'_>) -> Result<Matches<'arena>> {
+        self.pull(ptr::null_mut(), wanted, arena)
+    }
+
+    /// Pulls up to `wanted` more matches into `arena` on `executor`.
+    fn pull<'arena>(
+        &self,
+        executor: usearch_executor_t,
+        wanted: usize,
+        arena: &'arena mut Arena<'_>,
+    ) -> Result<Matches<'arena>> {
         let mut matches = Matches::new(arena);
         let mut outcome = usearch_outcome_t::default();
         unsafe {
             usearch_dense_search_stream_next(&mut usearch_dense_search_stream_next_t {
                 index: self.index,
-                executor: self.executor,
+                executor,
                 outcome: &mut outcome,
                 completion: usearch_completion_blocking_k,
                 stream: self.handle,
@@ -2852,6 +3324,14 @@ impl DenseSearchStream<'_> {
         };
         matches.queries = 1;
         check(outcome).map(|()| matches)
+    }
+}
+
+impl On<'_, DenseSearchStream<'_>> {
+    /// Pulls up to `wanted` more matches into `arena` on this receiver's executor, as the one query
+    /// of [`Matches`].
+    pub fn next<'arena>(self, wanted: usize, arena: &'arena mut Arena<'_>) -> Result<Matches<'arena>> {
+        self.index.pull(self.executor.handle, wanted, arena)
     }
 }
 
@@ -3443,7 +3923,7 @@ mod tests {
                 &rows(&slab[..DIMENSIONS], DIMENSIONS).unwrap(),
                 DenseSearchConfig {
                     expansion_factor: 64,
-                    predicate: Some(&is_even),
+                    predicate: Some(Predicate::each(&is_even)),
                     ..DenseSearchConfig::from(WANTED)
                 },
                 &mut arena,
@@ -3474,7 +3954,7 @@ mod tests {
                 &rows(&slab[..DIMENSIONS], DIMENSIONS).unwrap(),
                 DenseSearchConfig {
                     expansion_factor: 64,
-                    predicate: Some(&|key: Key| allowed.contains(&key)),
+                    predicate: Some(Predicate::each(&|key: Key| allowed.contains(&key))),
                     ..DenseSearchConfig::from(WANTED)
                 },
                 &mut arena,
@@ -3494,7 +3974,11 @@ mod tests {
         let matches = index
             .search(
                 &rows(&slab[..DIMENSIONS], DIMENSIONS).unwrap(),
-                DenseSearchConfig { expansion_factor: 64, predicate: Some(&|_| false), ..DenseSearchConfig::from(4) },
+                DenseSearchConfig {
+                    expansion_factor: 64,
+                    predicate: Some(Predicate::each(&|_| false)),
+                    ..DenseSearchConfig::from(4)
+                },
                 &mut arena,
             )
             .unwrap();
@@ -3686,8 +4170,8 @@ mod tests {
         fn row_of<Value>(table: &[Value], entry: usize) -> &[Value] {
             &table[entry * DIMENSIONS..][..DIMENSIONS]
         }
-        let value_lookup: &ValueLookup<bf16> =
-            &|key| u64::try_from(key).ok().map(|entry| row_of(&stored_values, entry as usize));
+        let lookup = |key: Key| u64::try_from(key).ok().map(|entry| row_of(&stored_values, entry as usize));
+        let value_lookup = ValueLookup::each(&lookup);
 
         let executor = executor();
         let mut arena = Arena::new_in(&executor).unwrap();
@@ -3732,13 +4216,21 @@ mod tests {
             }
         }
 
-        let refused =
-            index.attend(&rows(&slab[..DIMENSIONS], DIMENSIONS).unwrap(), &|_| None::<&[bf16]>, 1, &mut arena);
+        let refused = index.attend(
+            &rows(&slab[..DIMENSIONS], DIMENSIONS).unwrap(),
+            ValueLookup::each(&|_| None::<&[bf16]>),
+            1,
+            &mut arena,
+        );
         assert!(matches!(refused, Err(Error { status: Status::ShapeMismatch, .. })));
 
         let wide = vec![0.0f64; DIMENSIONS];
-        let mistyped =
-            index.attend(&rows(&slab[..DIMENSIONS], DIMENSIONS).unwrap(), &|_| Some(wide.as_slice()), 1, &mut arena);
+        let mistyped = index.attend(
+            &rows(&slab[..DIMENSIONS], DIMENSIONS).unwrap(),
+            ValueLookup::each(&|_| Some(wide.as_slice())),
+            1,
+            &mut arena,
+        );
         assert!(
             matches!(mistyped, Err(Error { status: Status::ShapeMismatch, .. })),
             "value rows are read in the index's own quantization"
@@ -3838,7 +4330,7 @@ mod tests {
         let mut arena = Arena::new().unwrap();
         let buffer = index
             .save_buffer(DenseSaveBufferConfig {
-                progress: Some(&mut |_, _| ControlFlow::Continue(())),
+                progress: Some(Progress::new(&mut |_, _| ControlFlow::Continue(()))),
                 ..DenseSaveBufferConfig::from(&mut arena)
             })
             .unwrap();
@@ -3922,13 +4414,12 @@ mod tests {
         let (index, keys, _) = populated_index(COUNT, DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
 
         let executor = executor();
-        let receiver = index.on(&executor);
-        let mut cursor = receiver.cursor(&[]).unwrap();
+        let mut cursor = index.cursor(&[]).unwrap();
         let mut arena = Arena::new_in(&executor).unwrap();
         let mut seen = HashSet::new();
         let mut batches = Vec::new();
         loop {
-            let batch = cursor.next_keys(BUFFERED, &mut arena).unwrap();
+            let batch = cursor.on(&executor).next_keys(BUFFERED, &mut arena).unwrap();
             if batch.written() == 0 {
                 break;
             }
@@ -4023,7 +4514,7 @@ mod tests {
             .insert(
                 &keys,
                 DenseInsertConfig {
-                    progress: Some(&mut |finished, total| watch.saw(finished, total)),
+                    progress: Some(Progress::new(&mut |finished, total| watch.saw(finished, total))),
                     ..DenseInsertConfig::from(&rows(&slab, DIMENSIONS).unwrap())
                 },
             )
@@ -4050,7 +4541,7 @@ mod tests {
             .insert(
                 &keys,
                 DenseInsertConfig {
-                    progress: Some(&mut |finished, total| watch.saw(finished, total)),
+                    progress: Some(Progress::new(&mut |finished, total| watch.saw(finished, total))),
                     ..DenseInsertConfig::from(&rows(&slab, DIMENSIONS).unwrap())
                 },
             )
@@ -4071,7 +4562,7 @@ mod tests {
             .search(
                 &rows(&slab[..QUERIES * DIMENSIONS], DIMENSIONS).unwrap(),
                 DenseSearchConfig {
-                    progress: Some(&mut |finished, total| watch.saw(finished, total)),
+                    progress: Some(Progress::new(&mut |finished, total| watch.saw(finished, total))),
                     ..DenseSearchConfig::from(WANTED)
                 },
                 &mut Arena::new().unwrap(),
@@ -4092,7 +4583,7 @@ mod tests {
 
         let mut watch = Watch::new(Patience::StopAtFirstReport);
         let refined = index.on(&executor()).refine(DenseRefineConfig {
-            progress: Some(&mut |finished, total| watch.saw(finished, total)),
+            progress: Some(Progress::new(&mut |finished, total| watch.saw(finished, total))),
             ..DenseRefineConfig::default()
         });
 
@@ -4117,7 +4608,7 @@ mod tests {
         index
             .on(&executor())
             .save(DenseSaveConfig {
-                progress: Some(&mut |finished, total| writing.saw(finished, total)),
+                progress: Some(Progress::new(&mut |finished, total| writing.saw(finished, total))),
                 ..DenseSaveConfig::from(&path)
             })
             .unwrap();
@@ -4128,7 +4619,7 @@ mod tests {
         let mut placing = Watch::new(Patience::Complete);
         let restored = DenseIndex::load_ram(DenseLoadRamConfig {
             executor: Some(&executor()),
-            progress: Some(&mut |finished, total| placing.saw(finished, total)),
+            progress: Some(Progress::new(&mut |finished, total| placing.saw(finished, total))),
             ..DenseLoadRamConfig::from(&path)
         })
         .unwrap();
@@ -4152,7 +4643,7 @@ mod tests {
             .reshard(DenseReshardConfig {
                 sources: &[&index, &first, &second],
                 targets: &[&index],
-                progress: Some(&mut |finished, total| watch.saw(finished, total)),
+                progress: Some(Progress::new(&mut |finished, total| watch.saw(finished, total))),
                 ..DenseReshardConfig::default()
             })
             .unwrap();
@@ -4177,7 +4668,7 @@ mod tests {
         let stopped = index.on(&executor).reshard(DenseReshardConfig {
             sources: &[&index, &first, &second],
             targets: &[&index],
-            progress: Some(&mut |finished, total| watch.saw(finished, total)),
+            progress: Some(Progress::new(&mut |finished, total| watch.saw(finished, total))),
             plan: Some(&mut plan),
             phase: Some(&mut phase),
             ..DenseReshardConfig::default()
@@ -4190,7 +4681,7 @@ mod tests {
 
         // A deferred call owns the plan it continues and hands it back once final.
         let continued = index.deferred(&executor).reshard(DenseReshardConfig::from(plan)).unwrap();
-        let (finished, (config, _)) = continued.wait_with_inputs();
+        let (finished, config) = continued.wait_with_inputs();
         finished.unwrap();
         let plan = config.plan.expect("the call hands its plan back");
         let report = index.deferred(&executor).reshard_plan_finish(plan).unwrap().wait().unwrap();
@@ -4207,7 +4698,7 @@ mod tests {
         let (mut plan, mut phase) = (DenseRefinePlan::default(), PhaseProgress::default());
         let mut watch = Watch::new(Patience::StopAtFirstReport);
         let stopped = index.on(&executor).refine(DenseRefineConfig {
-            progress: Some(&mut |finished, total| watch.saw(finished, total)),
+            progress: Some(Progress::new(&mut |finished, total| watch.saw(finished, total))),
             plan: Some(&mut plan),
             phase: Some(&mut phase),
             ..DenseRefineConfig::default()
@@ -4325,6 +4816,12 @@ mod tests {
 
     // region: Deferred Calls
 
+    /// Submits `call` with one poll, then leaves it pinned and running.
+    fn submitted<Call: core::future::Future>(call: core::pin::Pin<&mut Call>) -> bool {
+        let mut context = core::task::Context::from_waker(core::task::Waker::noop());
+        call.poll(&mut context).is_pending()
+    }
+
     /// A deferred search owns its queries, borrows its arena as the blocking one does, and answers
     /// what the blocking one does once waited on.
     #[test]
@@ -4338,9 +4835,8 @@ mod tests {
         let executor = executor();
         let mut arena = Arena::new_in(&executor).unwrap();
         let call = index.deferred(&executor).search(queries, WANTED, &mut arena).unwrap();
-        requires_send::<Deferred<'static, (Matrix<f32>, DenseSearchConfig<'static>), Matches<'static>>>();
+        requires_send::<Deferred<'static, DenseSearch<'static, 'static, Matrix<f32>>>>();
         requires_send::<Matches<'static>>();
-        assert!(matches!(call.status(), Err(Status::Deferred) | Ok(())));
         let deferred = call.wait().unwrap();
 
         let mut blocking_arena = Arena::new().unwrap();
@@ -4357,6 +4853,18 @@ mod tests {
         assert_eq!(again.wait().unwrap().query(0), blocking.query(0));
     }
 
+    /// A binding-side refusal arrives through the `?` on creation, before anything is submitted.
+    #[test]
+    fn a_deferred_refusal_arrives_on_creation() {
+        const DIMENSIONS: usize = 4;
+        let index = empty_index(DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
+        let vectors = Matrix::<f32>::from_slice(&[0.0; DIMENSIONS * 2], &[2, DIMENSIONS]).unwrap();
+        let executor = executor();
+        let refused = index.deferred(&executor).insert(sequential_keys(3), vectors);
+        assert!(matches!(refused, Err(Error { status: Status::ShapeMismatch, .. })));
+        assert_eq!(index.describe().unwrap().size, 0);
+    }
+
     /// A leaked deferred call leaves its arena busy rather than unsafe: a call naming it finishes
     /// contended, and dropping it waits for the leaked call.
     #[test]
@@ -4369,7 +4877,7 @@ mod tests {
         let (index, keys, slab) = populated_index(16, DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
         let queries = Matrix::<f32>::from_slice(&slab[..DIMENSIONS], &[1, DIMENSIONS]).unwrap();
         // The handler holds the call until released, so it is still running when the arena is named again.
-        let gate: &'static mut ProgressCallback<'static> = Box::leak(Box::new(|_, _| {
+        let gate = Box::leak(Box::new(|_, _| {
             ENTERED.store(true, Ordering::Release);
             while !RELEASED.load(Ordering::Acquire) {
                 std::thread::yield_now();
@@ -4379,8 +4887,10 @@ mod tests {
 
         let executor = executor();
         let mut arena = Arena::new_in(&executor).unwrap();
-        let config = DenseSearchConfig { progress: Some(gate), ..DenseSearchConfig::from(3) };
-        core::mem::forget(index.deferred(&executor).search(queries, config, &mut arena).unwrap());
+        let config = DenseSearchConfig { progress: Some(Progress::new(gate)), ..DenseSearchConfig::from(3) };
+        let mut leaked = Box::pin(index.deferred(&executor).search(queries, config, &mut arena).unwrap());
+        assert!(submitted(leaked.as_mut()));
+        core::mem::forget(leaked);
         while !ENTERED.load(Ordering::Acquire) {
             std::thread::yield_now();
         }
@@ -4401,7 +4911,7 @@ mod tests {
         let (index, keys, slab) = populated_index(16, DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
         let queries = Matrix::<f32>::from_slice(&slab[..DIMENSIONS], &[1, DIMENSIONS]).unwrap();
         // A deferred call borrows its handler for as long as it may run, so the gate is leaked.
-        let gate: &'static mut ProgressCallback<'static> = Box::leak(Box::new(|_, _| {
+        let gate = Box::leak(Box::new(|_, _| {
             ENTERED.store(true, Ordering::Release);
             while !RELEASED.load(Ordering::Acquire) {
                 std::thread::yield_now();
@@ -4411,14 +4921,15 @@ mod tests {
 
         let executor = executor();
         let mut arena = Arena::new_in(&executor).unwrap();
-        let config = DenseSearchConfig { progress: Some(gate), ..DenseSearchConfig::from(3) };
-        let held = index.deferred(&executor).search(queries, config, &mut arena).unwrap();
+        let config = DenseSearchConfig { progress: Some(Progress::new(gate)), ..DenseSearchConfig::from(3) };
+        let mut held = core::pin::pin!(index.deferred(&executor).search(queries, config, &mut arena).unwrap());
+        assert!(submitted(held.as_mut()));
         while !ENTERED.load(Ordering::Acquire) {
             std::thread::yield_now();
         }
         assert!(matches!(index.on(&executor).count(keys[0]), Err(Error { status: Status::Contended, .. })));
         RELEASED.store(true, Ordering::Release);
-        assert_eq!(held.wait().unwrap().query(0).unwrap().keys.len(), 3);
+        assert_eq!(block_on(held).unwrap().query(0).unwrap().keys.len(), 3);
         assert_eq!(index.on(&executor).count(keys[0]).unwrap(), 1);
     }
 
@@ -4434,10 +4945,10 @@ mod tests {
     }
 
     /// Polling an awaited deferred call alone finishes it, since pool thread 0 runs it in the
-    /// caller's place, and the answer is what `wait` would give.
+    /// caller's place, the answer is what `wait` would give, and a poll after the answer refuses.
     #[test]
     fn an_awaited_call_finishes_by_polling() {
-        use core::future::{Future, IntoFuture};
+        use core::future::Future;
         use core::pin::pin;
         use core::task::{Context, Poll, Waker};
 
@@ -4446,7 +4957,7 @@ mod tests {
         let queries = Matrix::<f32>::from_slice(&slab[..DIMENSIONS], &[1, DIMENSIONS]).unwrap();
         let executor = executor();
         let mut arena = Arena::new_in(&executor).unwrap();
-        let mut awaited = pin!(index.deferred(&executor).search(queries, 3, &mut arena).unwrap().into_future());
+        let mut awaited = pin!(index.deferred(&executor).search(queries, 3, &mut arena).unwrap());
         let matches = block_on(awaited.as_mut());
         assert_eq!(
             matches.unwrap().query(0),
@@ -4480,18 +4991,25 @@ mod tests {
         assert_eq!(counted.wait().unwrap(), 1);
     }
 
-    /// Dropping a call that is not yet final waits for it, then frees what it owned.
+    /// Dropping a submitted call that is not yet final waits for it, then frees what it owned,
+    /// while dropping an unsubmitted one runs nothing.
     #[test]
     fn an_unfinished_deferred_call_drops_by_waiting() {
         const DIMENSIONS: usize = 8;
         const COUNT: usize = 64;
         let index = empty_index(DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
         let slab = seeded_rows(COUNT, DIMENSIONS, case_stream_key(0));
-        let vectors = Matrix::<f32>::from_slice(&slab, &[COUNT, DIMENSIONS]).unwrap();
-
         let executor = executor();
-        let call = index.deferred(&executor).insert(sequential_keys(COUNT), vectors).unwrap();
-        drop(call);
+
+        let vectors = Matrix::<f32>::from_slice(&slab, &[COUNT, DIMENSIONS]).unwrap();
+        drop(index.deferred(&executor).insert(sequential_keys(COUNT), vectors).unwrap());
+        assert_eq!(index.describe().unwrap().size, 0);
+
+        let vectors = Matrix::<f32>::from_slice(&slab, &[COUNT, DIMENSIONS]).unwrap();
+        {
+            let mut call = core::pin::pin!(index.deferred(&executor).insert(sequential_keys(COUNT), vectors).unwrap());
+            submitted(call.as_mut());
+        }
         assert_eq!(index.describe().unwrap().size, COUNT);
     }
 

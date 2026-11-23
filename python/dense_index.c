@@ -1042,6 +1042,7 @@ static char const doc_DenseIndex_search[] =                                     
     "    entries still route the traversal, so recall survives low selectivity. The\n"         //
     "    callback re-enters Python, so it runs under the GIL and serializes the walk; what\n"  //
     "    it raises goes to `sys.unraisablehook`, and the key is rejected.\n"                   //
+    "    A `Batch` answers many keys per call instead.\n"                                      //
     "  progress (callable, optional): Called with (completed, total) queries; returning\n"     //
     "    False stops the batch and raises `CancelledError`, None carries on.\n"                //
     "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"    //
@@ -1099,7 +1100,7 @@ static PyObject* DenseIndex_search(PyObject* self, PyObject* const* args, Py_ssi
     usearch_matrix_view_t queries;
     Matches* matches = NULL;
     if (usearch_py_matrix_from_object(queries_object, dtype, &queries, &call->buffers[0]) != 0 ||
-        usearch_py_callable_from_object(predicate_object, "predicate", &call->holds[callback_slot_k]) != 0 ||
+        usearch_py_predicate_from_object(predicate_object, &call->holds[callback_slot_k]) != 0 ||
         walk_parse(call, progress_object, stats_object) != 0 ||
         !(matches = usearch_py_call_arena(call, arena_object, &MatchesType)))
         return usearch_py_call_discard(&receiver, call);
@@ -1559,6 +1560,7 @@ static char const doc_DenseIndex_maxsim[] =                                     
     "  dtype (Scalar, optional): Names the query scalar type when the buffer cannot.\n"          //
     "  predicate (callable, optional): Admits a Key when it returns truthy, asked before any\n"  //
     "    of its vectors are scored, so a rejected document never scores.\n"                      //
+    "    A `Batch` answers many keys per call instead.\n"                                        //
     "  progress (callable, optional): Called with (completed, total) queries; returning\n"       //
     "    False stops the batch and raises `CancelledError`, None carries on.\n"                  //
     "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"      //
@@ -1617,7 +1619,7 @@ static PyObject* DenseIndex_maxsim(PyObject* self, PyObject* const* args, Py_ssi
         return usearch_py_call_discard(&receiver, call);
     }
     DenseProducts* matches = NULL;
-    if (usearch_py_callable_from_object(predicate_object, "predicate", &call->holds[callback_slot_k]) != 0 ||
+    if (usearch_py_predicate_from_object(predicate_object, &call->holds[callback_slot_k]) != 0 ||
         walk_parse(call, progress_object, stats_object) != 0 ||
         !(matches = usearch_py_call_arena(call, arena_object, &DenseProductsType)))
         return usearch_py_call_discard(&receiver, call);

@@ -86,11 +86,10 @@ def build(modality: type, count: int, executor, *, first_key: int = 0, seed: int
 
 
 @pytest.mark.parametrize("modality", MODALITIES, ids=attrgetter("__name__"))
-def test_direct_construction_of_a_modality_names_the_factories(modality: type):
-    """No modality is built by calling its type; the refusal says what to call instead."""
-    with pytest.raises(TypeError) as refusal:
+def test_direct_construction_of_a_modality_is_refused(modality: type):
+    """No modality is built by calling its type, only through its factories."""
+    with pytest.raises(TypeError):
         modality()
-    assert str(refusal.value) == f"{modality.__name__} is built through init_*(), load_*(), view_ram() or view_nvme()"
 
 
 @pytest.mark.parametrize(

@@ -190,6 +190,9 @@ static char const* spell_refine_verdict(int value) {
 }
 
 static char const* spell_phase(int value) { return usearch_phase_name((usearch_phase_t)value); }
+static char const* spell_predicate_cost(int value) {
+    return usearch_predicate_cost_name((usearch_predicate_cost_t)value);
+}
 
 usearch_py_enum_t usearch_py_status = {"Status", usearch_status_success_k, usearch_status_invalid_argument_k,
                                        spell_status, NULL};
@@ -219,6 +222,8 @@ usearch_py_enum_t usearch_py_geospatial_relation = {"GeospatialRelation", usearc
 usearch_py_enum_t usearch_py_refine_verdict = {"RefineVerdict", usearch_refine_none_k, usearch_refine_stopped_k,
                                                spell_refine_verdict, NULL};
 usearch_py_enum_t usearch_py_phase = {"Phase", usearch_phase_none_k, usearch_phase_done_k, spell_phase, NULL};
+usearch_py_enum_t usearch_py_predicate_cost = {"PredicateCost", usearch_predicate_cost_cheap_k,
+                                               usearch_predicate_cost_expensive_k, spell_predicate_cost, NULL};
 
 /** The C spelling of @p value, or NULL when C names no member by it. */
 static char const* enum_spelling(usearch_py_enum_t const* mirrored, long value) {
@@ -260,7 +265,7 @@ int usearch_py_register_enums(PyObject* module) {
         &usearch_py_scalar,          &usearch_py_residency,     &usearch_py_traversal,
         &usearch_py_cpu_class,       &usearch_py_gpu_class,     &usearch_py_nvme_class,
         &usearch_py_sequence_metric, &usearch_py_shapes_metric, &usearch_py_geospatial_relation,
-        &usearch_py_refine_verdict,  &usearch_py_phase};
+        &usearch_py_refine_verdict,  &usearch_py_phase,         &usearch_py_predicate_cost};
     PyObject* const enum_module = PyImport_ImportModule("enum");
     PyObject* const int_enum = enum_module ? PyObject_GetAttrString(enum_module, "IntEnum") : NULL;
     PyObject* keywords = int_enum ? PyDict_New() : NULL;
@@ -1997,14 +2002,14 @@ usearch_progress_t usearch_py_progress_registered(PyObject* callable, size_t ste
 }
 
 /**
- *  @brief Re-enters Python for one batch of admission decisions, from whichever library thread
- *      traverses, taking the GIL once per batch.
+ *  @brief Re-enters Python for one batch of admission decisions, asking the callable @p state about
+ *      each key in turn, from whichever library thread traverses, taking the GIL once per batch.
  *
  *  A predicate that raises reports through the unraisable hook, and its key and the rest of the
  *  batch are rejected.
  */
-static void predicate_trampoline(usearch_key_t const* keys, usearch_admission_t* admissions, size_t count,
-                                 void* state) {
+static void predicate_each_trampoline(usearch_key_t const* keys, usearch_admission_t* admissions, size_t count,
+                                      void* state) {
     PyObject* const callable = (PyObject*)state;
     PyGILState_STATE const gil_state = PyGILState_Ensure();
     size_t index = 0;
@@ -2022,9 +2027,168 @@ static void predicate_trampoline(usearch_key_t const* keys, usearch_admission_t*
     PyGILState_Release(gil_state);
 }
 
-usearch_predicate_t usearch_py_predicate_registered(PyObject* callable) {
-    return (usearch_predicate_t) {.callback = callable ? predicate_trampoline : NULL, .state = callable};
+/** A batch predicate: a handler answering many keys in one call, and the cost deciding how many. */
+typedef struct Batch {
+    PyObject ob_base;
+
+    /** The callable taking the keys and the admissions to write, held. */
+    PyObject* handler;
+
+    /** How costly one call of @c handler is, fixed at construction. */
+    usearch_predicate_cost_t cost;
+} Batch;
+
+_Static_assert(sizeof(usearch_admission_t) == sizeof(unsigned int), "admissions cross as an 'I' memoryview");
+
+/** Closes @p view, stolen, so a handler keeping it past its call reads nothing; one still exporting
+ *  it reports through the unraisable hook. @return 0 on success, -1 otherwise. */
+static int predicate_view_close(PyObject* view, PyObject* handler) {
+    if (!view) return 0;
+    PyObject* const closed = PyObject_CallMethod(view, "release", NULL);
+    Py_DECREF(view);
+    if (closed) {
+        Py_DECREF(closed);
+        return 0;
+    }
+    PyErr_WriteUnraisable(handler);
+    return -1;
 }
+
+/**
+ *  @brief Re-enters Python for one batch of admission decisions, handing the @c Batch @p state's
+ *      handler the keys and the admissions as memoryviews over the library's buffers.
+ *
+ *  The keys are a read-only "B" view of @p count rows of 16 bytes, and the admissions a writable
+ *  "I" view of @p count entries the library pre-filled with rejections. Both close when the handler
+ *  returns. A handler that raises, or keeps a view exported past its call, reports through the
+ *  unraisable hook, and the whole batch is rejected.
+ */
+static void predicate_batch_trampoline(usearch_key_t const* keys, usearch_admission_t* admissions, size_t count,
+                                       void* state) {
+    PyObject* const handler = ((Batch const*)state)->handler;
+    PyGILState_STATE const gil_state = PyGILState_Ensure();
+    Py_ssize_t keys_shape[2] = {(Py_ssize_t)count, (Py_ssize_t)sizeof(usearch_key_t)};
+    Py_ssize_t admissions_shape[1] = {(Py_ssize_t)count};
+    Py_buffer keys_buffer = {.buf = (void*)keys,
+                             .len = (Py_ssize_t)(count * sizeof(usearch_key_t)),
+                             .itemsize = 1,
+                             .readonly = 1,
+                             .ndim = 2,
+                             .format = "B",
+                             .shape = keys_shape};
+    Py_buffer admissions_buffer = {.buf = admissions,
+                                   .len = (Py_ssize_t)(count * sizeof(usearch_admission_t)),
+                                   .itemsize = sizeof(usearch_admission_t),
+                                   .ndim = 1,
+                                   .format = "I",
+                                   .shape = admissions_shape};
+    PyObject* const keys_view = PyMemoryView_FromBuffer(&keys_buffer);
+    PyObject* const admissions_view = keys_view ? PyMemoryView_FromBuffer(&admissions_buffer) : NULL;
+    PyObject* const arguments[2] = {keys_view, admissions_view};
+    PyObject* const answered = admissions_view ? PyObject_Vectorcall(handler, arguments, 2, NULL) : NULL;
+    if (!answered) PyErr_WriteUnraisable(handler);
+    Py_XDECREF(answered);
+    int const kept = predicate_view_close(keys_view, handler) | predicate_view_close(admissions_view, handler);
+    if (!answered || kept)
+        for (size_t index = 0; index != count; ++index) admissions[index] = usearch_reject_k;
+    PyGILState_Release(gil_state);
+}
+
+int usearch_py_predicate_from_object(PyObject* object, PyObject** predicate) {
+    if (!object || object == Py_None) return 0;
+    if (!PyCallable_Check(object) && !Py_IS_TYPE(object, &BatchType)) {
+        PyErr_Format(PyExc_TypeError, "the 'predicate' option takes a callable or a usearch.Batch, got %S",
+                     Py_TYPE(object));
+        return -1;
+    }
+    *predicate = Py_NewRef(object);
+    return 0;
+}
+
+usearch_predicate_t usearch_py_predicate_registered(PyObject* predicate) {
+    if (!predicate) return (usearch_predicate_t) {0};
+    if (Py_IS_TYPE(predicate, &BatchType))
+        return (usearch_predicate_t) {predicate_batch_trampoline, predicate, ((Batch const*)predicate)->cost};
+    return (usearch_predicate_t) {predicate_each_trampoline, predicate, usearch_predicate_cost_cheap_k};
+}
+
+static char const doc_Batch[] =                                                                     //
+    "Batch(handler, /, *, cost=PredicateCost.EXPENSIVE)\n"                                          //
+    "\n"                                                                                            //
+    "A `predicate=` that answers many keys in one call, for handlers that pay per call, such as\n"  //
+    "a lookup in an external store. `handler(keys, admissions)` reads a `(count, 16)` memoryview\n" //
+    "of key bytes and writes 1 into a `(count,)` memoryview of admissions for every key it\n"       //
+    "admits, the rest staying rejected. Both views are valid only for the call. An expensive\n"     //
+    "batch is asked once per traversal round about every candidate the round gathered, and a\n"     //
+    "cheap one as candidates arrive. Wraps `usearch_predicate_t`.\n"                                //
+    "\n"                                                                                            //
+    "Example:\n"                                                                                    //
+    "  >>> def even(keys, admissions):\n"                                                           //
+    "  ...     for row in range(len(admissions)):\n"                                                //
+    "  ...         admissions[row] = keys[row, 15] % 2 == 0\n"                                      //
+    "  >>> index.search(queries, 10, arena, predicate=usearch.Batch(even))";
+
+static PyObject* Batch_tp_new(PyTypeObject* type, PyObject* args, PyObject* keywords) {
+    PyObject* const cost_object = keywords ? PyDict_GetItemString(keywords, "cost") : NULL;
+    if (PyTuple_GET_SIZE(args) != 1 || (keywords && PyDict_GET_SIZE(keywords) != (cost_object != NULL))) {
+        PyErr_SetString(PyExc_TypeError, "Batch() takes one positional handler and an optional cost=");
+        return NULL;
+    }
+    PyObject* const handler = PyTuple_GET_ITEM(args, 0);
+    if (!PyCallable_Check(handler)) {
+        PyErr_Format(PyExc_TypeError, "Batch() takes a callable handler, got %S", Py_TYPE(handler));
+        return NULL;
+    }
+    int cost = usearch_predicate_cost_expensive_k;
+    if (cost_object && usearch_py_enum_from_object(cost_object, "cost", &usearch_py_predicate_cost, &cost) != 0)
+        return NULL;
+    Batch* const batch = (Batch*)type->tp_alloc(type, 0);
+    if (!batch) return NULL;
+    batch->handler = Py_NewRef(handler);
+    batch->cost = (usearch_predicate_cost_t)cost;
+    return (PyObject*)batch;
+}
+
+static int Batch_traverse(Batch* self, visitproc visit, void* arg) {
+    Py_VISIT(self->handler);
+    return 0;
+}
+
+static int Batch_clear(Batch* self) {
+    Py_CLEAR(self->handler);
+    return 0;
+}
+
+static void Batch_dealloc(Batch* self) {
+    PyObject_GC_UnTrack(self);
+    Batch_clear(self);
+    Py_TYPE(self)->tp_free((PyObject*)self);
+}
+
+static PyObject* Batch_get_handler(Batch* self, void* closure) { return Py_NewRef(self->handler); }
+
+static PyObject* Batch_get_cost(Batch* self, void* closure) {
+    return usearch_py_enum_to_object(&usearch_py_predicate_cost, (int)self->cost);
+}
+
+static PyGetSetDef Batch_getset[] = {
+    {"handler", (getter)Batch_get_handler, NULL, "The callable taking the keys and the admissions.", NULL},
+    {"cost", (getter)Batch_get_cost, NULL, "The `PredicateCost` deciding how many keys one call carries.", NULL},
+    {NULL, NULL, NULL, NULL, NULL},
+};
+
+PyTypeObject BatchType = {
+    PyVarObject_HEAD_INIT(NULL, 0) //
+        .tp_name = "usearch.Batch",
+    .tp_doc = doc_Batch,
+    .tp_basicsize = sizeof(Batch),
+    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
+    .tp_new = Batch_tp_new,
+    .tp_dealloc = (destructor)Batch_dealloc,
+    .tp_traverse = (traverseproc)Batch_traverse,
+    .tp_clear = (inquiry)Batch_clear,
+    .tp_getset = Batch_getset,
+};
 
 #pragma endregion Calls
 
@@ -2244,8 +2408,8 @@ static PyObject* Deferred_wait(Deferred* self, PyObject* unused) {
     return deferred_answer(self);
 }
 
-/** Answers the iterator of <tt>usearch._settled(self)</tt>, which polls the status between doubling
- *  sleeps on the running loop, so no thread is parked on the call. */
+/** Answers the iterator of <tt>usearch._settled(self)</tt>, which re-polls the status once per turn
+ *  of the running loop, so no thread is parked on the call. */
 static PyObject* Deferred_await(PyObject* self) {
     PyObject* const package = PyImport_ImportModule("usearch");
     PyObject* const settled = package ? PyObject_GetAttrString(package, "_settled") : NULL;

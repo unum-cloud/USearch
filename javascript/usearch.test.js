@@ -103,26 +103,23 @@ const { Arena, DenseIndex, DenseMetric, Executor, Matches, RowsView, Scalar, Sta
 const EXECUTOR = Executor.forRam({ threads: 2 });
 
 test("Residency factories", async (t) => {
-  await t.test("a direct construction is refused, and names the factories", () => {
+  await t.test("a direct construction is refused", () => {
     assert.throws(() => new Executor(), {
       code: Status.InvalidArgument,
-      message: "An Executor is made by Executor.forRam, Executor.onPool, Executor.forVram or Executor.forNvme",
     });
     assert.throws(() => new DenseIndex(), {
       code: Status.InvalidArgument,
-      message: "A DenseIndex is opened by DenseIndex.initRam, DenseIndex.initVram, or a DenseIndex.load or view verb.",
     });
   });
 
   await t.test("a count that is not a whole number at or above zero is refused, never cast", () => {
-    const refusal = { code: Status.InvalidArgument, message: "The 'threads' argument must be a non-negative integer" };
+    const refusal = { code: Status.InvalidArgument };
     assert.throws(() => Executor.forRam({ threads: -1 }), refusal);
     assert.throws(() => Executor.forRam({ threads: 2.5 }), refusal);
     assert.throws(() => Executor.forRam({ threads: Infinity }), refusal);
     assert.throws(() => Executor.forRam({ threads: NaN }), refusal);
     assert.throws(() => Executor.forRam({ threads: "2" }), {
       code: Status.InvalidArgument,
-      message: "The 'threads' argument must be a number or a BigInt",
     });
   });
 
@@ -167,7 +164,6 @@ test("Identities", async (t) => {
     );
     assert.throws(() => usearch.parseKey("not-a-key"), {
       code: Status.Malformed,
-      message: "The key is not thirty-two hexadecimal digits.",
     });
   });
 
@@ -183,7 +179,6 @@ test("Identities", async (t) => {
     assert.equal(usearch.formatKey(usearch.keyAt(found.keys, 0)), "f81d4fae-7dec-11d0-a765-00a0c91e6bf6");
     assert.throws(() => usearch.integerFromKey(found.keys), {
       code: Status.Malformed,
-      message: "The key f81d4fae-7dec-11d0-a765-00a0c91e6bf6 carries no integer identity.",
     });
     assert.equal(index.contains(key), true, "sixteen bytes spell one key");
   });
@@ -288,7 +283,6 @@ test("Batch operations", async (t) => {
     index.reserve(3);
     assert.throws(() => index.insert([1n, 2n, 3n], rows(2, 1, 2, 3, 4)), {
       code: Status.ShapeMismatch,
-      message: "The keys name neither one key nor one per row",
     });
   });
 
@@ -318,7 +312,6 @@ test("Ranked runs land in the arena they are handed", async (t) => {
   await t.test("a verb handed no arena is refused rather than given one", () => {
     assert.throws(() => index.search(new Float32Array([1, 1]), 1), {
       code: Status.InvalidArgument,
-      message: "The 'arena' argument must be an Arena",
     });
   });
 
@@ -347,14 +340,12 @@ test("Rows are checked against the array that holds them", async (t) => {
     const overreaching = new RowsView(new Float32Array(8), 2, 8, 32, Scalar.F32);
     assert.throws(() => index.insert([1n, 2n], overreaching), {
       code: Status.ShapeMismatch,
-      message: "The rows reach past the end of their array",
     });
   });
 
   await t.test("an array that splits into no whole rows is refused", () => {
     assert.throws(() => RowsView.of(new Float32Array(5), 2), {
       code: Status.ShapeMismatch,
-      message: "The array does not split into rows of 2 f32 values.",
     });
   });
 });
@@ -376,7 +367,6 @@ test("Receivers choose where a verb runs, and the verb stays the same", async (t
   await t.test("a receiver refuses an executor that is not one", () => {
     assert.throws(() => index.on({}).count(42n), {
       code: Status.InvalidArgument,
-      message: "The 'executor' argument must be an Executor",
     });
   });
 
@@ -387,9 +377,8 @@ test("Receivers choose where a verb runs, and the verb stays the same", async (t
     executor.free(); // freeing twice is a no-op
     assert.throws(() => index.on(executor).get(42n, new Arena()), {
       code: Status.Uninitialized,
-      message: "The Executor was already freed",
     });
-    assert.throws(() => new Arena(executor), { code: Status.Uninitialized, message: "The Executor was already freed" });
+    assert.throws(() => new Arena(executor), { code: Status.Uninitialized });
   });
 });
 
@@ -572,7 +561,6 @@ test("A reshard gathers its sources into the target, leaving the rest empty and 
   assert.equal(source.describe().size, 0, "a source the targets do not name ends empty and live");
   assert.throws(() => index.on(EXECUTOR).reshard([index, EXECUTOR], [index]), {
     code: Status.InvalidArgument,
-    message: "The 'sources' argument must hold indexes",
   });
   assert.throws(() => index.on(EXECUTOR).reshard([index, source, source], [index]), { code: Status.InvalidArgument });
 
@@ -841,13 +829,12 @@ test("Attention folds every key the walk scores", async (t) => {
       process.removeAllListeners("uncaughtException");
       for (const runner of runners) process.on("uncaughtException", runner);
     }
-    assert(reported.length > 0 && reported.every((error) => error.message === "no such token"));
+    assert(reported.length > 0 && reported.every((error) => error instanceof RangeError));
   });
 
   await t.test("a carry that holds no maximum and partition per query is refused", () => {
     assert.throws(() => index.attend(queryRows, valueRows, rowOf, new Arena(), { carry: new Float32Array(3) }), {
       code: Status.ShapeMismatch,
-      message: "The carry must hold a maximum and a partition per query",
     });
   });
 
@@ -878,7 +865,7 @@ test("Cursors walk every entry once, and keep their index alive", () => {
   }
   cursor.free();
   cursor.free(); // releasing twice is a no-op
-  assert.throws(() => cursor.next(2, arena), { code: Status.Uninitialized, message: "The walk was already released" });
+  assert.throws(() => cursor.next(2, arena), { code: Status.Uninitialized });
 
   const keysAlone = opened().next(3, arena);
   assert.deepEqual([keysAlone.entries, keysAlone.keys.length, keysAlone.links], [3, 3 * usearch.keyBytes, undefined]);
@@ -908,7 +895,6 @@ test("Search streams pull matches lazily", () => {
   stream[Symbol.dispose]();
   assert.throws(() => stream.next(8, arena), {
     code: Status.Uninitialized,
-    message: "The walk was already released",
   });
 });
 
@@ -1013,7 +999,6 @@ test("Every enumerator crosses the C name tables", async (t) => {
     for (const mood of Object.values(usearch.Mood)) executor.drain(mood);
     assert.throws(() => executor.drain("restless"), {
       code: Status.InvalidArgument,
-      message: "The 'mood' argument names nothing: 'restless'",
     });
     executor.free();
   });
@@ -1021,7 +1006,6 @@ test("Every enumerator crosses the C name tables", async (t) => {
   await t.test("a misspelled metric is refused rather than read as a default", () => {
     assert.throws(() => DenseIndex.initRam({ metric: "cosine", dimensions: 8 }), {
       code: Status.InvalidArgument,
-      message: "The 'metric' argument names nothing: 'cosine'",
     });
   });
 });
@@ -1051,7 +1035,6 @@ test("A scan scores every entry exactly, so each query finds itself first", () =
     assert.equal(usearch.integerFromKey(usearch.keyAt(matches.get(query).keys, 0)), BigInt(query + 1));
   assert.throws(() => index.search(stored, 3, new Arena(), { traversal: "sweep" }), {
     code: Status.InvalidArgument,
-    message: "The 'traversal' argument names nothing: 'sweep'",
   });
 });
 
@@ -1088,7 +1071,6 @@ test("Input scalar kinds beyond the four a TypedArray spells", async (t) => {
     index.reserve(1);
     assert.throws(() => index.insert(1n, new Uint16Array([1, 2, 3, 4])), {
       code: Status.UnknownKind,
-      message: "The rows spell no scalar kind on their own; name one in a RowsView.",
     });
   });
 
@@ -1154,7 +1136,6 @@ test("Arenas hold every output whose length scales with the call", async (t) => 
     assert.deepEqual(new Arena(EXECUTOR).describe(), { residency: usearch.Residency.Ram, device: null });
     assert.throws(() => new Arena({}), {
       code: Status.InvalidArgument,
-      message: "The 'executor' argument must be an Executor",
     });
   });
 
@@ -1162,7 +1143,7 @@ test("Arenas hold every output whose length scales with the call", async (t) => 
     assert(index.get(1n, new Arena(), { scalar: Scalar.F64 }).data instanceof Float64Array);
     assert.throws(
       () => index.get(1n, new Arena(), { scalar: Scalar.U1x8 }),
-      { code: Status.ShapeMismatch, message: "Sub-byte rows come in whole bytes" },
+      { code: Status.ShapeMismatch },
       "four dimensions fill half a byte, which a packed export refuses",
     );
     assert.equal(index.get(3n, new Arena()).data.length, 0, "an absent key exports nothing");

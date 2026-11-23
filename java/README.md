@@ -579,9 +579,10 @@ DenseSearchConfig watched = new DenseSearchConfig(10).progress((completed, total
 index.save("index.safegraphs", (completed, total) -> { bar.set(completed, total); return true; });
 ```
 
-## What This Binding Does Not Expose
+## Left Unbound
 
 `cursor` and `searchStream` pull one batch at a time, blocking, so a `DeferredOn` lacks them, and constructors address no index yet, so no receiver offers them.
+The Arrow converters of `c/usearch/arrow.h` are not bound, since a `Tape` borrows an Arrow column's buffers and nothing converts a column to or from an input or an output.
 
 ## Design
 

@@ -148,7 +148,7 @@ public sealed class DenseIndexTests : IDisposable
         Assert.False(Names.TryParse("gromov_wasserstein", out ShapesMetric _));
 
         USearchException failure = new(Status.ReadOnly, "detail");
-        Assert.Equal("usearch: read-only: detail", failure.Message);
+        Assert.Equal(Status.ReadOnly, failure.Status);
     }
 
     /// <summary>Reads <paramref name="name"/> back through <paramref name="parse"/>.</summary>

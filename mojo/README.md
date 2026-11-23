@@ -1,7 +1,7 @@
 # USearch for Mojo
 
 The Mojo package binds the C ABI in `c/usearch/`, opening the engine's shared library with `dlopen` rather than linking it, so a consumer builds with no linker flags of its own.
-It needs Mojo 1.2 through pixi, on Linux x86-64, Linux AArch64 or macOS on Apple silicon.
+It needs the Mojo nightly the workspace pins, through pixi, on Linux x86-64, Linux AArch64 or macOS on Apple silicon.
 On Linux it needs glibc 2.39 or newer, the first conda-forge sysroot whose kernel headers carry the `io_uring` flags the NVMe engine sets.
 It exposes dense, sequence, shape and geospatial indexes.
 
@@ -60,17 +60,38 @@ var call = index.deferred(executor).search(queries, 10, arena)  # Deferred[...],
 The blocking verbs are written once, in the `DenseVerbs` trait both the index and `DenseIndexOn` conform to.
 Constructors address no index yet, so no receiver offers them; the ones whose C structure names an executor take one.
 
-A `Deferred` owns its outcome and outputs until the call is final, and borrows the index, the executor, the arena and every input it was handed, which Mojo keeps alive for as long as the `Deferred` is.
+A `Deferred` keeps its outcome and outputs inline and never moves: the receiver builds it in your variable and submits it there, so it allocates nothing.
+It borrows the index, the executor, the arena and every input it was handed, which Mojo keeps alive for as long as the `Deferred` is.
 
 ```mojo
-var call = index.deferred(executor).search(queries, 10, arena)
-if call.status() == Status.DEFERRED:
-    pass  # other work
-print(call.wait().query_keys(0)[0])  # the matches, read in place from your arena
+var call = index.deferred(executor).search(queries, 10, arena)  # running now
+other_work()
+ref matches = call.wait()  # blocks until final
+print(matches.query_keys(0)[0])  # the matches, read in place from your arena
 ```
 
-Mojo has no runtime of its own to await on, so `wait` is the whole interface: it blocks in `usearch_outcome_wait` until the call is final, then answers the result or raises the failure, as many times as it is asked.
+`wait` blocks in `usearch_outcome_wait` until the call is final, then answers the result or raises the failure, as many times as it is asked.
 The result is the very `Matches` a blocking search answers, borrowing the same arena, and `status` reads the outcome without blocking.
+Inside an `async def`, `await call` answers the same, re-polling the status and yielding to Mojo's runtime while the call is pending; a task re-raises a failure as Mojo's own `Error`, which keeps the message but not the `status`:
+
+```mojo
+from std.runtime._asyncrt import create_raising_task  # Mojo's runtime entry point today
+
+async def search_both(east: DenseIndex, west: DenseIndex, east_executor: Executor, west_executor: Executor,
+                      queries: RowsView) raises -> Int:
+    var east_arena = Arena(east_executor)  # borrows east_executor until it is freed
+    var west_arena = Arena(west_executor)
+    var east_call = east.deferred(east_executor).search(queries, 10, east_arena)  # running now
+    var west_call = west.deferred(west_executor).search(queries, 10, west_arena)
+    ref east_matches = await east_call  # raises the call's failure
+    ref west_matches = await west_call
+    return merge(east_matches, west_matches)
+
+var both = create_raising_task(search_both(east, west, east_executor, west_executor, queries))
+print(both^.wait())  # drives the coroutine on the runtime
+```
+
+Mojo still calls async experimental and reaches its runtime through underscored modules, so `await` and this entry point move to a public runtime once Mojo stabilizes one.
 A failure this binding catches before the call crosses is final at once, and arrives through the same `status` and `wait`.
 Mojo destroys a value at its last use, and destroying an unfinished `Deferred` waits for it.
 Calls depending on each other are ordered by waiting on the first before submitting the second.
@@ -101,7 +122,8 @@ Each call rewinds its arena, so the previous call's views die and a steady loop 
 To keep a result past the next call, or to read one while making the next, pass that call another arena.
 An arena serves one call at a time, so each deferred call needs its own.
 A view's origin keeps its arena alive, and the view reads it in place until the arena's next call.
-An arena from a VRAM executor holds device memory, which `arena.describe()` reports and the host cannot read, and serves only that executor's calls, keeping the executor alive until the arena goes.
+An arena from a VRAM executor holds device memory, which `arena.describe()` reports and the host cannot read, and serves only that executor's calls.
+Every arena borrows the executor that made it, so Mojo frees the arena before that executor.
 
 ```mojo
 var arena = Arena(executor)  # Arena(library) makes host pages for the calling thread
@@ -252,22 +274,23 @@ The breadth of the candidates rides each call as `expansion_factor` rather than 
 ### Filtered Search
 
 A `predicate` in the `DenseSearchConfig` admits only the keys it approves, while non-matching entries still route the traversal, so recall does not collapse at low selectivity.
-`PredicateArguments.of` compiles a Mojo function into the handler, judging a batch of keys per call against a state it reads through a pointer; a `usearch_predicate_callback_t` compiled in C installs unchanged through the same struct.
+`PredicateArguments.each` compiles a Mojo function judging one key into a cheap handler, asked as candidates are scored, against a state it reads through a pointer:
 
 ```mojo
-def admits_tenant(keys: Span[Key, ImmUntrackedOrigin], admissions: Span[Admission, MutUntrackedOrigin], tenant: UInt64):
-    for position in range(len(keys)):
-        var owned = keys[position].as_integer().value() >> 32 == tenant
-        admissions[position] = Admission.ADMIT if owned else Admission.REJECT
+def owned_by(key: Key, tenant: Pointer[UInt64, MutAnyOrigin]) -> Bool:
+    return key.as_integer().value() >> 32 == tenant[]
 
-var predicate = PredicateArguments.of[admits_tenant](tenant_slot)
+var predicate = PredicateArguments.each[owned_by](tenant_slot)
 var admitted = index.search(queries, 10, arena, DenseSearchConfig(predicate=predicate))
 ```
+
+`PredicateArguments.batch` compiles a function writing one `Admission` per key of a batch, asked once per round about every candidate it gathered unless passed `PredicateCost.CHEAP`.
+A `usearch_predicate_callback_t` compiled in C installs unchanged through the same struct.
 
 The predicate runs on the executor's threads together, so it must be safe for concurrent use.
 A `progress` knob on the configs of the long verbs hears how far a call has come, and a handler installed by `ProgressArguments.of` stops it by answering `Continuation.CANCEL`.
 An insertion's handler reports but never cancels, so an `insert` batch stays all-or-nothing: every fallible step runs before the first entry is claimed, and a rejected batch publishes no entry.
-Mojo handlers work on linux-64 in Mojo 1.2; AArch64 and macOS are confirmed by CI.
+Handlers that return a value run in the CI matrix on Linux x86-64, Linux AArch64 and macOS.
 
 ### Retrieval and Streaming
 
@@ -484,12 +507,14 @@ print(len(nearby.query_keys(0)))  # 2: both Paris stops within two kilometres, i
 The relation is a field of each call's config: `NEAR` widens the radius by both positions' accuracies, `SEES` and `SEEN` test the view cones, and `VISIBLE` tests a line of sight over the `GeospatialTerrain` the handle was built with, borrowed whole by `GeospatialTerrain.of` or filled on demand by `GeospatialTerrain.filled`.
 `get` returns a key's observations within the stored rounding.
 
-## What This Binding Does Not Expose
+## Left Unbound
 
 - __Progress on loads and saves.__
   Their entry points take no config, so those calls run without a handler.
 - __Deferred cursors and streams.__
   `DenseIndexDeferredOn` and the deferred receivers of the other modalities offer neither, since their pulls block.
+- __Arrow converters.__
+  The Arrow converters of `c/usearch/arrow.h`, which view an Arrow column as an input and export an arena's output as one.
 - __Terrain datasets on disk.__
   `GeospatialTerrain` borrows heights or fills them, and never names a dataset path, which every residency refuses.
 
@@ -502,14 +527,12 @@ The relation is a field of each call's config: `NEAR` widens the radius by both 
 - __The receiver chooses, the verb stays.__
   The index runs a verb on the calling thread, `on(executor)` blocks on an executor, and `deferred(executor)` submits it, all with the same arguments.
 - __Deferred calls use the language's own idioms.__
-  `status` polls through `usearch_outcome_status`, `wait` blocks through `usearch_outcome_wait`, and the origins a `Deferred` carries keep everything it borrows alive until it is gone.
+  `status` polls through `usearch_outcome_status`, `wait` blocks through `usearch_outcome_wait`, `await` re-polls through Mojo's runtime, and the origins a `Deferred` carries keep everything it borrows alive until it is gone.
 - __No life of its own.__
   The binding starts no threads and keeps no queues; releasing a `Deferred` rides Mojo's destruction at last use, which waits for the call first.
 - __Arenas are lent and reused, never shared.__
-  Every output whose length scales with the call lands in an arena the caller passes; the binding stamps each arena with a counter that every view checks before reading, and keeps no call counts.
+  Every output whose length scales with the call lands in an arena the caller passes, and a view's origin keeps that arena alive.
 - __Nothing costs anything until it is used.__
-  Submitting a call allocates nothing, and an arena allocates only when a call writes into it.
-- __Blocking calls live on the stack.__
-  A blocking call keeps its outcome and outputs in stack slots and allocates nothing of its own; a deferred one moves those slots to one heap allocation it frees once final.
+  A blocking call keeps its outcome and outputs in stack slots and a deferred one inside its `Deferred`, so submitting allocates nothing, and an arena allocates only when a call writes into it.
 - __`ScalarKind`, not `Scalar`.__
   Types drop `usearch_` and `_t` from their C names, except `ScalarKind`, which keeps clear of Mojo's built-in `Scalar`.

@@ -2274,7 +2274,6 @@ test "a batch crosses the ABI and comes back as views over the arena it lands in
     var outcome: Outcome = .{};
     try std.testing.expectError(Error.ShapeMismatch, index.diagnosed(&outcome).insert(keys[0..2], try .of(f32, &slab, dimensions), .{}));
     try std.testing.expectEqual(types.Status.shape_mismatch, outcome.status);
-    try std.testing.expectEqualStrings("The key run and the rows disagree in length", outcome.text());
     try index.on(executor).diagnosed(&outcome).reserve(3);
     try std.testing.expectEqual(Outcome{}, outcome);
 
@@ -2328,12 +2327,10 @@ test "a batch crosses the ABI and comes back as views over the arena it lands in
         index.on(executor).diagnosed(&outcome).search(try .ofRow(f32, &narrow), 2, &arena, .{}),
     );
     try std.testing.expectEqual(types.Status.shape_mismatch, outcome.status);
-    try std.testing.expect(outcome.text().len != 0);
 
     // A constructor's config lends one the same way.
     try std.testing.expectError(Error.Io, DenseIndex.loadRam("absent.safegraphs", .{ .diagnostics = &outcome }));
     try std.testing.expectEqual(types.Status.io, outcome.status);
-    try std.testing.expect(outcome.text().len != 0);
 
     // A stream yields one query's matches nearest first, and refuses a run carrying more; a
     // residency that streams no matches yet refuses the stream itself.

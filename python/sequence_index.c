@@ -952,6 +952,7 @@ static char const doc_SequenceIndex_search[] =                                  
     "  predicate (callable, optional): Admits a Key when it returns truthy; it re-enters\n"      //
     "    Python, so it runs under the GIL; what it raises goes to `sys.unraisablehook`, and\n"   //
     "    the key is rejected.\n"                                                                 //
+    "    A `Batch` answers many keys per call instead.\n"                                        //
     "  progress (callable, optional): Called with (completed, total) queries; returning False\n" //
     "    stops the batch and raises `CancelledError`, None carries on.\n"                        //
     "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"      //
@@ -992,7 +993,7 @@ static PyObject* SequenceIndex_search(PyObject* self, PyObject* const* args, Py_
     usearch_tape_view_t queries;
     Matches* matches = NULL;
     if (sequences_from_object(queries_object, &call->blocks[0], &count, &queries) != 0 ||
-        usearch_py_callable_from_object(predicate_object, "predicate", &call->holds[callback_slot_k]) != 0 ||
+        usearch_py_predicate_from_object(predicate_object, &call->holds[callback_slot_k]) != 0 ||
         walk_parse(call, progress_object, stats_object) != 0 ||
         !(matches = usearch_py_call_arena(call, arena_object, &MatchesType)))
         return usearch_py_call_discard(&receiver, call);

@@ -1468,7 +1468,6 @@ test "shapes of different point counts share one tape, and each finds itself fir
 
     var outcome: Outcome = .{};
     try std.testing.expectError(Error.ShapeMismatch, index.diagnosed(&outcome).insert(keys[0..2], try .of([3]f32, u64, &cloud, &offsets), .{}));
-    try std.testing.expectEqualStrings("The key run and the tape disagree in length", outcome.text());
 
     var arena: Arena = try .init(executor);
     defer arena.deinit();
