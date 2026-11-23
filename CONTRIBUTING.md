@@ -1083,32 +1083,28 @@ A toolchain built for an older Ubuntu than the host may want that release's `lib
 
 ## Go
 
-USearch provides Go bindings, that depend on the C library that must be installed beforehand.
-So one should first compile the C library, link it with Go, and only then run tests.
+The Go module sits at the repository root, so cgo reads the headers straight from `c/` and links the static archive the C build produces.
+Compile the C library first, point cgo at it, and run everything from the root.
 
 ```sh
 cmake -B build_release -D USEARCH_BUILD_SHARED=1 -D USEARCH_DENSE_DTYPES=11
-cmake --build build_release --config Release -j
+cmake --build build_release --config Release --target usearch_static -j
 
-cp build_release/libusearch_static.a golang/  # the archive `golang/types.go` links, NumKong and ForkUnion included
-cp -r c/usearch golang/                              # to make the headers available to Go
-
-cd golang && go test -race -v ./... ; cd ..
+export CGO_LDFLAGS="-L$PWD/build_release" # the archive `golang/types.go` links, NumKong and ForkUnion included
+go test -race -v ./golang/...
 ```
 
 The race detector matters here: the tests drive one shared handle from many goroutines, and it is the only thing that catches a missing `runtime.KeepAlive` around a matrix crossing into C.
+Name `./golang/...` rather than `./...`, which would also walk `node_modules`.
 
 Compilation and the static checks need only the headers, not the library, so they run before it links:
 
 ```sh
-cp -r c/usearch golang/
-
-cd golang
-go build ./...      # compiles the cgo preamble and shim.c against the real headers
-go vet ./...        # catches the cgo pointer-rule violations the headers cannot
-gofmt -l .          # must print nothing
-staticcheck ./...   # if installed
-golangci-lint run   # if installed
+go build ./golang/...      # compiles the cgo preamble and shim.c against the real headers
+go vet ./golang/...        # catches the cgo pointer-rule violations the headers cannot
+gofmt -l golang            # must print nothing
+staticcheck ./golang/...   # if installed
+golangci-lint run ./golang/... # if installed
 ```
 
 ## Java, Kotlin & Scala

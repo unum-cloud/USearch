@@ -17,13 +17,19 @@ import (
 )
 
 /*
-#cgo CFLAGS: -I${SRCDIR}
-#cgo LDFLAGS: -L${SRCDIR} -lusearch_static
+#cgo CFLAGS: -I${SRCDIR}/../c
+#cgo LDFLAGS: -lusearch_static
 #cgo linux LDFLAGS: -lstdc++ -lm
 #cgo darwin LDFLAGS: -lc++
 #cgo windows LDFLAGS: -lstdc++
 
-// Every verb here retains nothing and takes no callback, so each claims both promises.
+// A function is noescape when C keeps none of its Go pointers past the call, and nocallback when
+// its argument structure carries no callback field: an executor runs only the callbacks of the call
+// that names them.
+#cgo noescape usearch_outcome_status
+#cgo nocallback usearch_outcome_status
+#cgo noescape usearch_outcome_wait
+#cgo nocallback usearch_outcome_wait
 #cgo noescape usearch_executor_for_ram
 #cgo nocallback usearch_executor_for_ram
 #cgo noescape usearch_executor_on_pool
@@ -38,6 +44,26 @@ import (
 #cgo nocallback usearch_arena_init
 #cgo noescape usearch_arena_describe
 #cgo nocallback usearch_arena_describe
+#cgo noescape usearch_status_from_name
+#cgo nocallback usearch_status_from_name
+#cgo noescape usearch_scalar_from_name
+#cgo nocallback usearch_scalar_from_name
+#cgo noescape usearch_residency_from_name
+#cgo nocallback usearch_residency_from_name
+#cgo noescape usearch_traversal_from_name
+#cgo nocallback usearch_traversal_from_name
+#cgo noescape usearch_mood_from_name
+#cgo nocallback usearch_mood_from_name
+#cgo noescape usearch_refine_verdict_from_name
+#cgo nocallback usearch_refine_verdict_from_name
+#cgo noescape usearch_phase_from_name
+#cgo nocallback usearch_phase_from_name
+#cgo noescape usearch_cpu_class_from_name
+#cgo nocallback usearch_cpu_class_from_name
+#cgo noescape usearch_gpu_class_from_name
+#cgo nocallback usearch_gpu_class_from_name
+#cgo noescape usearch_nvme_class_from_name
+#cgo nocallback usearch_nvme_class_from_name
 
 #include "shim.h"
 */
@@ -100,6 +126,16 @@ const (
 // String renders the status as the library spells it.
 func (status Status) String() string {
 	return C.GoString(C.usearch_status_name(C.usearch_status_t(status)))
+}
+
+// StatusFromName reads a status back from the spelling String gives it,
+// failing with StatusInvalidArgument on a name the library does not spell.
+func StatusFromName(name string) (Status, error) {
+	var named C.usearch_status_t
+	if status := C.usearch_status_from_name(view(name), &named); status != C.usearch_status_success_k {
+		return 0, fail(Status(status), "no status is spelled \""+name+"\"")
+	}
+	return Status(named), nil
 }
 
 // Error implements the error interface, so a bare Status is an errors.Is target.
@@ -265,6 +301,16 @@ const (
 // String renders the scalar kind as the library spells it.
 func (scalar Scalar) String() string {
 	return C.GoString(C.usearch_scalar_name(C.usearch_scalar_t(scalar)))
+}
+
+// ScalarFromName reads a scalar kind back from the spelling String gives it,
+// failing with StatusInvalidArgument on a name the library does not spell.
+func ScalarFromName(name string) (Scalar, error) {
+	var scalar C.usearch_scalar_t
+	if status := C.usearch_scalar_from_name(view(name), &scalar); status != C.usearch_status_success_k {
+		return 0, fail(Status(status), "no scalar kind is spelled \""+name+"\"")
+	}
+	return Scalar(scalar), nil
 }
 
 // dimensionsPerValue is how many logical dimensions one stored value carries: one for the
@@ -475,13 +521,69 @@ func (matches MatchesView) Query(query uint) ([]Key, []Distance) {
 	return keys[from : from+count], scores[from : from+count]
 }
 
+// MatchesTape is a ragged run of matches a call wrote into its arena, one run per query: every pair
+// Multiply's walk scored per left row in traversal order, every key Maxsim scored per query largest
+// score first, or every entry Within found per query.
+type MatchesTape struct {
+	raw      C.usearch_matches_tape_view_t
+	queries  uint
+	required uint
+	written  uint
+}
+
+// Queries reports how many left rows the call multiplied, or how many queries it scored.
+func (matches MatchesTape) Queries() uint { return matches.queries }
+
+// Required reports the pairs the walks scored across every left row, or for Maxsim the keys scored
+// across every query, before the wanted bound cut any; zero for Within.
+func (matches MatchesTape) Required() uint { return matches.required }
+
+// Written reports the matches Within wrote across every query; zero for Multiply and Maxsim.
+func (matches MatchesTape) Written() uint { return matches.written }
+
+// Query borrows one query's keys and scores from the arena, a left row's pairs for Multiply; query
+// must be below Queries.
+func (matches MatchesTape) Query(query uint) ([]Key, []Distance) {
+	offsets := unsafe.Slice((*uint)(unsafe.Pointer(matches.raw.offsets)), matches.queries+1)
+	keys := unsafe.Slice((*Key)(unsafe.Pointer(matches.raw.keys)), offsets[matches.queries])
+	scores := unsafe.Slice((*Distance)(unsafe.Pointer(matches.raw.scores)), offsets[matches.queries])
+	return keys[offsets[query]:offsets[query+1]], scores[offsets[query]:offsets[query+1]]
+}
+
 // endregion: Matches
 
 // region: Callbacks
 
-// Predicate admits a candidate key into a filtered search, or passes over it. It runs on the
-// executor's threads together, so it must be safe for concurrent use, and it must not panic.
+// Admitter is the predicate a filtered verb asks about its candidate keys: a [Predicate], a
+// [BatchPredicate] or a [CheapBatchPredicate], whose type tells the library what one call costs.
+type Admitter interface {
+	// admitter lends the handler through handle, which stays in place until the verb is final.
+	admitter(handle *cgo.Handle) C.usearch_predicate_t
+}
+
+// Predicate admits one candidate key into a filtered search, or passes over it, asked as candidates
+// are scored. It runs on the executor's threads together, so it must be safe for concurrent use,
+// and it must not panic.
 type Predicate func(key Key) bool
+
+// BatchPredicate writes an Admission for every key into admissions, which start as Reject, for
+// handlers that pay per call: it is asked once per round a thread settles, about every candidate
+// it gathered. Both slices live only until it returns. It runs on the executor's threads together,
+// so it must be safe for concurrent use, and it must not panic.
+type BatchPredicate func(keys []Key, admissions []Admission)
+
+// CheapBatchPredicate is a [BatchPredicate] asked as candidates are scored, a few keys a call.
+type CheapBatchPredicate func(keys []Key, admissions []Admission)
+
+// Admission is whether a predicate admits one candidate key or passes over it.
+type Admission int32
+
+const (
+	// Reject skips the key; the walk still routes through it.
+	Reject Admission = C.usearch_reject_k
+	// Admit reports the key among the matches.
+	Admit Admission = C.usearch_admit_k
+)
 
 // ProgressCallback is called with the units a long call finished so far and the units it
 // finishes unless stopped; false stops it wherever the verb can stop. It never runs on two
@@ -490,13 +592,19 @@ type ProgressCallback func(completed, total uint) bool
 
 //export usearchAdmits
 func usearchAdmits(keys *C.usearch_key_t, admissions *C.usearch_admission_t, count C.size_t, state unsafe.Pointer) {
-	predicate := (*cgo.Handle)(state).Value().(Predicate)
-	verdicts := unsafe.Slice(admissions, count)
-	for index, key := range unsafe.Slice(keys, count) {
-		verdicts[index] = C.usearch_reject_k
-		if predicate(keyFromRaw(key)) {
-			verdicts[index] = C.usearch_admit_k
+	asked := unsafe.Slice((*Key)(unsafe.Pointer(keys)), count)
+	verdicts := unsafe.Slice((*Admission)(unsafe.Pointer(admissions)), count)
+	switch predicate := (*cgo.Handle)(state).Value().(type) {
+	case Predicate:
+		for index, key := range asked {
+			if predicate(key) {
+				verdicts[index] = Admit
+			}
 		}
+	case BatchPredicate:
+		predicate(asked, verdicts)
+	case CheapBatchPredicate:
+		predicate(asked, verdicts)
 	}
 }
 
@@ -508,12 +616,40 @@ func usearchContinues(completed, total C.size_t, state unsafe.Pointer) C.usearch
 	return C.usearch_cancel_k
 }
 
-// predicate lends an optional predicate as the struct a filtering verb takes.
-func (call *call) predicate(predicate Predicate) C.usearch_predicate_t {
+func (predicate Predicate) admitter(handle *cgo.Handle) C.usearch_predicate_t {
 	if predicate == nil {
 		return C.usearch_predicate_t{}
 	}
-	return C.usearch_predicate_t{callback: C.usearch_go_admits(), state: call.callback(predicate)}
+	return admits(handle, predicate, C.usearch_predicate_cost_cheap_k)
+}
+
+func (predicate BatchPredicate) admitter(handle *cgo.Handle) C.usearch_predicate_t {
+	if predicate == nil {
+		return C.usearch_predicate_t{}
+	}
+	return admits(handle, predicate, C.usearch_predicate_cost_expensive_k)
+}
+
+func (predicate CheapBatchPredicate) admitter(handle *cgo.Handle) C.usearch_predicate_t {
+	if predicate == nil {
+		return C.usearch_predicate_t{}
+	}
+	return admits(handle, predicate, C.usearch_predicate_cost_cheap_k)
+}
+
+// admits lends handler to the C trampoline through handle, at the cost its type names.
+func admits(handle *cgo.Handle, handler any, cost C.usearch_predicate_cost_t) C.usearch_predicate_t {
+	*handle = cgo.NewHandle(handler)
+	return C.usearch_predicate_t{callback: C.usearch_go_admits(), state: unsafe.Pointer(handle), cost: cost}
+}
+
+// predicate lends an optional predicate as the struct a filtering verb takes. It hands the handle
+// slot rather than the call through the interface, so the call stays off the heap.
+func (call *call) predicate(admitter Admitter) C.usearch_predicate_t {
+	if admitter == nil {
+		return C.usearch_predicate_t{}
+	}
+	return admitter.admitter(&call.slots.handles[0])
 }
 
 // progress lends an optional handler and its report count as the struct a reporting verb takes.
@@ -521,16 +657,18 @@ func (call *call) progress(progress ProgressCallback, steps uint) C.usearch_prog
 	if progress == nil {
 		return C.usearch_progress_t{}
 	}
-	return C.usearch_progress_t{callback: C.usearch_go_continues(), state: call.callback(progress), steps: C.size_t(steps)}
+	return C.usearch_progress_t{
+		callback: C.usearch_go_continues(),
+		state:    call.callback(1, progress),
+		steps:    C.size_t(steps),
+	}
 }
 
-// callback lends a handler to its C trampoline as an opaque handle rather than a Go pointer, since
-// the closure holds Go pointers the cgo rules forbid handing to C.
-func (call *call) callback(handler any) unsafe.Pointer {
-	handle := pin(call, new(cgo.Handle))
-	*handle = cgo.NewHandle(handler)
-	call.handles = append(call.handles, *handle)
-	return unsafe.Pointer(handle)
+// callback lends a handler to its C trampoline as an opaque handle in the call's slot rather than a
+// Go pointer, since the closure holds Go pointers the cgo rules forbid handing to C.
+func (call *call) callback(slot int, handler any) unsafe.Pointer {
+	call.slots.handles[slot] = cgo.NewHandle(handler)
+	return unsafe.Pointer(&call.slots.handles[slot])
 }
 
 // endregion: Callbacks
@@ -573,6 +711,16 @@ func (residency Residency) String() string {
 	return C.GoString(C.usearch_residency_name(C.usearch_residency_t(residency)))
 }
 
+// ResidencyFromName reads a residency back from the spelling String gives it,
+// failing with StatusInvalidArgument on a name the library does not spell.
+func ResidencyFromName(name string) (Residency, error) {
+	var residency C.usearch_residency_t
+	if status := C.usearch_residency_from_name(view(name), &residency); status != C.usearch_status_success_k {
+		return 0, fail(Status(status), "no residency is spelled \""+name+"\"")
+	}
+	return Residency(residency), nil
+}
+
 // Traversal is how a search reaches the entries it scores.
 type Traversal int32
 
@@ -588,6 +736,16 @@ func (traversal Traversal) String() string {
 	return C.GoString(C.usearch_traversal_name(C.usearch_traversal_t(traversal)))
 }
 
+// TraversalFromName reads a traversal back from the spelling String gives it,
+// failing with StatusInvalidArgument on a name the library does not spell.
+func TraversalFromName(name string) (Traversal, error) {
+	var traversal C.usearch_traversal_t
+	if status := C.usearch_traversal_from_name(view(name), &traversal); status != C.usearch_status_success_k {
+		return 0, fail(Status(status), "no traversal is spelled \""+name+"\"")
+	}
+	return Traversal(traversal), nil
+}
+
 // Mood is what an executor does with its threads or streams once it goes idle.
 type Mood int32
 
@@ -601,6 +759,16 @@ const (
 // String renders the mood as the library spells it.
 func (mood Mood) String() string {
 	return C.GoString(C.usearch_mood_name(C.usearch_mood_t(mood)))
+}
+
+// MoodFromName reads a mood back from the spelling String gives it,
+// failing with StatusInvalidArgument on a name the library does not spell.
+func MoodFromName(name string) (Mood, error) {
+	var mood C.usearch_mood_t
+	if status := C.usearch_mood_from_name(view(name), &mood); status != C.usearch_status_success_k {
+		return 0, fail(Status(status), "no mood is spelled \""+name+"\"")
+	}
+	return Mood(mood), nil
 }
 
 // LoadPath is how a load from a path read the parts onto the devices.
@@ -655,6 +823,16 @@ const (
 // String renders the phase as the library spells it.
 func (phase Phase) String() string {
 	return C.GoString(C.usearch_phase_name(C.usearch_phase_t(phase)))
+}
+
+// PhaseFromName reads a phase back from the spelling String gives it,
+// failing with StatusInvalidArgument on a name the library does not spell.
+func PhaseFromName(name string) (Phase, error) {
+	var phase C.usearch_phase_t
+	if status := C.usearch_phase_from_name(view(name), &phase); status != C.usearch_status_success_k {
+		return 0, fail(Status(status), "no phase is spelled \""+name+"\"")
+	}
+	return Phase(phase), nil
 }
 
 // PhaseProgress is where a plan stands: its phase, that phase's position in the plan, and its own
@@ -722,6 +900,16 @@ func (class CPUClass) String() string {
 	return C.GoString(C.usearch_cpu_class_name(C.usearch_cpu_class_t(class)))
 }
 
+// CPUClassFromName reads a CPU class back from the spelling String gives it,
+// failing with StatusInvalidArgument on a name the library does not spell.
+func CPUClassFromName(name string) (CPUClass, error) {
+	var class C.usearch_cpu_class_t
+	if status := C.usearch_cpu_class_from_name(view(name), &class); status != C.usearch_status_success_k {
+		return 0, fail(Status(status), "no CPU class is spelled \""+name+"\"")
+	}
+	return CPUClass(class), nil
+}
+
 // GPUClass is a GPU family USearch ships tuned variants for; a VRAM placement or executor may cap
 // dispatch at one, and the zero value sets no ceiling.
 type GPUClass int32
@@ -760,6 +948,52 @@ func (class GPUClass) String() string {
 	return C.GoString(C.usearch_gpu_class_name(C.usearch_gpu_class_t(class)))
 }
 
+// GPUClassFromName reads a GPU class back from the spelling String gives it,
+// failing with StatusInvalidArgument on a name the library does not spell.
+func GPUClassFromName(name string) (GPUClass, error) {
+	var class C.usearch_gpu_class_t
+	if status := C.usearch_gpu_class_from_name(view(name), &class); status != C.usearch_status_success_k {
+		return 0, fail(Status(status), "no GPU class is spelled \""+name+"\"")
+	}
+	return GPUClass(class), nil
+}
+
+// NvmeClass is an I/O engine USearch drives external memory through, newest first; an NVMe executor
+// pinned to one tries it and degrades down the ladder the media admit.
+type NvmeClass int32
+
+const (
+	// NvmeClassUnknown derives the newest engine the host and the media admit.
+	NvmeClassUnknown NvmeClass = C.usearch_nvme_class_unknown_k
+	// NvmeClassPosix is pread or ReadFile on the calling thread.
+	NvmeClassPosix NvmeClass = C.usearch_nvme_class_posix_k
+	// NvmeClassLinuxAIO is Linux AIO over io_submit and io_getevents, with O_DIRECT.
+	NvmeClassLinuxAIO NvmeClass = C.usearch_nvme_class_linux_aio_k
+	// NvmeClassLinuxUring is io_uring reads on files and block devices.
+	NvmeClassLinuxUring NvmeClass = C.usearch_nvme_class_linux_uring_k
+	// NvmeClassLinuxUringPassthrough is io_uring NVMe passthrough on namespace character devices.
+	NvmeClassLinuxUringPassthrough NvmeClass = C.usearch_nvme_class_linux_uring_passthrough_k
+	// NvmeClassLinuxSPDK is the SPDK user-space driver, on namespaces named by transport identifiers.
+	NvmeClassLinuxSPDK NvmeClass = C.usearch_nvme_class_linux_spdk_k
+	// NvmeClassWindowsIORing is I/O Rings, on Windows 11 22H2 and newer.
+	NvmeClassWindowsIORing NvmeClass = C.usearch_nvme_class_windows_ioring_k
+)
+
+// String renders the class as the library spells it.
+func (class NvmeClass) String() string {
+	return C.GoString(C.usearch_nvme_class_name(C.usearch_nvme_class_t(class)))
+}
+
+// NvmeClassFromName reads an NVMe class back from the spelling String gives it,
+// failing with StatusInvalidArgument on a name the library does not spell.
+func NvmeClassFromName(name string) (NvmeClass, error) {
+	var class C.usearch_nvme_class_t
+	if status := C.usearch_nvme_class_from_name(view(name), &class); status != C.usearch_status_success_k {
+		return 0, fail(Status(status), "no NVMe class is spelled \""+name+"\"")
+	}
+	return NvmeClass(class), nil
+}
+
 // ExecutorForRam spawns host workers for RAM-resident indexes, interleaved across the compute
 // domains local to memoryDomains - the same list the indexes were initialized with, which is what
 // keeps compute and memory domains in agreement. An empty list derives them from the machine.
@@ -768,44 +1002,53 @@ func (class GPUClass) String() string {
 // the ordered publication path. A cpuClassCeiling intersects with what the machine runs, so a class
 // the machine lacks narrows rather than refuses.
 func ExecutorForRam(memoryDomains []int32, cpuClassCeiling CPUClass, threads uint) (*Executor, error) {
-	lent := open[C.usearch_executor_t]()
-	C.usearch_executor_for_ram(&C.usearch_executor_for_ram_t{
+	var lent lent[C.usearch_executor_t]
+	arguments := open[C.usearch_executor_for_ram_t](&lent)
+	*arguments = C.usearch_executor_for_ram_t{
 		executor: lent.result,
-		outcome:  lent.outcome,
+		outcome:  lent.outcome(),
 		ram:      lent.ram(memoryDomains, cpuClassCeiling),
 		threads:  C.size_t(threads),
-	})
-	return executorOf(block(lent))
+	}
+	C.usearch_executor_for_ram(arguments)
+	return executorOf(block(&lent, nil))
 }
 
 // ExecutorOnPool creates a RAM executor over a borrowed ForkUnion fu_pool_t, so several
 // libraries in one process share one set of threads while each keeps its own scratch. The pool
 // must outlive the executor, and keeps its lender's mood.
 func ExecutorOnPool(memoryDomains []int32, cpuClassCeiling CPUClass, pool unsafe.Pointer) (*Executor, error) {
-	lent := open[C.usearch_executor_t]()
-	C.usearch_executor_on_pool(&C.usearch_executor_on_pool_t{
+	var lent lent[C.usearch_executor_t]
+	arguments := open[C.usearch_executor_on_pool_t](&lent)
+	*arguments = C.usearch_executor_on_pool_t{
 		executor: lent.result,
-		outcome:  lent.outcome,
+		outcome:  lent.outcome(),
 		ram:      lent.ram(memoryDomains, cpuClassCeiling),
 		pool:     pool,
-	})
-	return executorOf(block(lent))
+	}
+	C.usearch_executor_on_pool(arguments)
+	return executorOf(block(&lent, nil))
 }
 
 // ExecutorForNvme spawns host workers for NVMe-resident indexes, one submission ring apiece,
 // across the compute domains local to the devices paths names. One ring per thread is what keeps
 // submission lock-free: a thread owns its queue outright.
 //
-// Zero threads derives from those devices' queue capabilities.
-func ExecutorForNvme(paths []string, cpuClassCeiling CPUClass, threads uint) (*Executor, error) {
-	lent := open[C.usearch_executor_t]()
-	C.usearch_executor_for_nvme(&C.usearch_executor_for_nvme_t{
-		executor: lent.result,
-		outcome:  lent.outcome,
-		nvme:     lent.nvme(paths, cpuClassCeiling),
-		threads:  C.size_t(threads),
-	})
-	return executorOf(block(lent))
+// Zero threads derives from those devices' queue capabilities. Every ring submits through
+// nvmeClass, opened exactly or refused, and NvmeClassUnknown tries io_uring, then AIO, then
+// blocking reads.
+func ExecutorForNvme(paths []string, cpuClassCeiling CPUClass, threads uint, nvmeClass NvmeClass) (*Executor, error) {
+	var lent lent[C.usearch_executor_t]
+	arguments := open[C.usearch_executor_for_nvme_t](&lent)
+	*arguments = C.usearch_executor_for_nvme_t{
+		executor:   lent.result,
+		outcome:    lent.outcome(),
+		nvme:       lent.nvme(paths, cpuClassCeiling),
+		threads:    C.size_t(threads),
+		nvme_class: C.usearch_nvme_class_t(nvmeClass),
+	}
+	C.usearch_executor_for_nvme(arguments)
+	return executorOf(block(&lent, nil))
 }
 
 // ExecutorForVram opens one submission stream on every named device, or borrows the caller's,
@@ -822,15 +1065,17 @@ func ExecutorForVram(
 	if len(streams) != 0 && len(streams) != len(devices) {
 		return nil, fail(StatusShapeMismatch, "pass no streams or one per device")
 	}
-	lent := open[C.usearch_executor_t]()
-	C.usearch_executor_for_vram(&C.usearch_executor_for_vram_t{
+	var lent lent[C.usearch_executor_t]
+	arguments := open[C.usearch_executor_for_vram_t](&lent)
+	*arguments = C.usearch_executor_for_vram_t{
 		executor:      lent.result,
-		outcome:       lent.outcome,
+		outcome:       lent.outcome(),
 		vram:          lent.vram(devices, gpuClassCeiling),
-		streams:       lend(&lent.call, streams),
+		streams:       (*unsafe.Pointer)(lent.lend(unsafe.Pointer(unsafe.SliceData(streams)), len(streams))),
 		scratch_limit: C.size_t(scratchLimit),
-	})
-	return executorOf(block(lent))
+	}
+	C.usearch_executor_for_vram(arguments)
+	return executorOf(block(&lent, nil))
 }
 
 // executorOf wraps the handle an executor factory wrote.
@@ -845,38 +1090,16 @@ func executorOf(handle C.usearch_executor_t, err error) (*Executor, error) {
 // waits and never runs a call itself. A failure is the executor's own, such as a lost device,
 // never one of a drained call.
 func (executor *Executor) Drain(mood Mood) error {
-	handle, refusal := executor.lower()
-	if refusal != nil {
-		return refusal
+	handle, err := executor.lower()
+	if err != nil {
+		return err
 	}
-	lent := open[struct{}]()
-	C.usearch_executor_drain(&C.usearch_executor_drain_t{executor: handle, outcome: lent.outcome, mood: C.usearch_mood_t(mood)})
-	_, err := block(lent)
+	var lent lent[struct{}]
+	arguments := open[C.usearch_executor_drain_t](&lent)
+	*arguments = C.usearch_executor_drain_t{executor: handle, outcome: lent.outcome(), mood: C.usearch_mood_t(mood)}
+	C.usearch_executor_drain(arguments)
+	_, err = block(&lent, nil)
 	return err
-}
-
-// Close waits out the call holding the executor, then releases its threads or streams. It is
-// idempotent, and a closed executor must not be used again. The host arenas it made stay valid,
-// while its GPU arenas must be closed first.
-func (executor *Executor) Close() error {
-	if executor == nil || executor.handle == nil {
-		return nil
-	}
-	C.usearch_executor_free(executor.handle)
-	executor.handle = nil
-	return nil
-}
-
-// lower reports the handle a verb hands across: nil for the null executor, and a refusal for a
-// closed one rather than a silent fall back to the calling goroutine.
-func (executor *Executor) lower() (C.usearch_executor_t, *Error) {
-	if executor == nil {
-		return nil, nil
-	}
-	if executor.handle == nil {
-		return nil, fail(StatusInvalidArgument, "the executor is closed or was never spawned")
-	}
-	return executor.handle, nil
 }
 
 // endregion: Executors
@@ -898,17 +1121,20 @@ type Arena struct {
 
 // NewArena makes an empty arena where executor computes, host pages or the memory of its GPU,
 // decided once; a nil executor makes host pages for calls on the calling goroutine. Nothing is
-// allocated until a call writes into it, and host pages may outlive their executor. A GPU arena
-// grows and frees on its executor's stream, so it serves only calls on that executor, any other or
-// nil finishing StatusDevice, and must be closed before it.
+// allocated until a call writes into it. An arena must not outlive the executor that made it, so
+// defer [Executor.Close] before [Arena.Close]; one made with a nil executor lives until it is
+// closed. A GPU arena grows and frees on its executor's stream, so it serves only calls on that
+// executor, any other or nil finishing StatusDevice.
 func NewArena(executor *Executor) (*Arena, error) {
-	handle, refusal := executor.lower()
-	if refusal != nil {
-		return nil, refusal
+	handle, err := executor.lower()
+	if err != nil {
+		return nil, err
 	}
-	lent := open[C.usearch_arena_t]()
-	C.usearch_arena_init(&C.usearch_arena_init_t{arena: lent.result, executor: handle, outcome: lent.outcome})
-	arena, err := block(lent)
+	var lent lent[C.usearch_arena_t]
+	arguments := open[C.usearch_arena_init_t](&lent)
+	*arguments = C.usearch_arena_init_t{arena: lent.result, executor: handle, outcome: lent.outcome()}
+	C.usearch_arena_init(arguments)
+	arena, err := block(&lent, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -926,52 +1152,50 @@ type ArenaDescription struct {
 
 // Describe reports where the arena's outputs live, as the executor that made it decided.
 func (arena *Arena) Describe() (ArenaDescription, error) {
-	lent := open[ArenaDescription]()
-	C.usearch_arena_describe(&C.usearch_arena_describe_t{
-		arena:       arena.lower(),
-		outcome:     lent.outcome,
+	handle, err := arena.lower()
+	if err != nil {
+		return ArenaDescription{}, err
+	}
+	var lent lent[ArenaDescription]
+	arguments := open[C.usearch_arena_describe_t](&lent)
+	*arguments = C.usearch_arena_describe_t{
+		arena:       handle,
+		outcome:     lent.outcome(),
 		description: (*C.usearch_arena_description_t)(unsafe.Pointer(lent.result)),
-	})
-	return block(lent)
-}
-
-// Close releases the memory, waiting for every deferred call naming the arena, and ends every view
-// over it. It is idempotent, and a closed arena must not be used again.
-func (arena *Arena) Close() error {
-	if arena == nil || arena.handle == nil {
-		return nil
 	}
-	C.usearch_arena_free(arena.handle)
-	arena.handle = nil
-	return nil
-}
-
-// lower reports the handle a verb hands across, nil for a nil or closed arena, which the call
-// refuses.
-func (arena *Arena) lower() C.usearch_arena_t {
-	if arena == nil {
-		return nil
-	}
-	return arena.handle
+	C.usearch_arena_describe(arguments)
+	return block(&lent, nil)
 }
 
 // endregion: Arenas
 
-// region: Deferred Calls
+// region: Calls
 
-// call is one verb crossing into the library: the outcome it reports through, and the pins and
-// handles that keep every Go pointer and callback its argument structure carries in place until
-// the call is final. cgo lets C keep a Go pointer only while it is pinned, and pinning is also
-// what keeps every pointee on the heap, which the noescape promises rely on.
-//
-// The outcome is its own allocation, since the pinner holds Go pointers of its own and anything
-// sharing its object would carry them across.
+// slots is what the library reads and writes for every verb: the outcome, and the handles its
+// callbacks reach Go through.
+type slots struct {
+	outcome C.usearch_outcome_t
+	handles [2]cgo.Handle
+}
+
+// frame is one call's slots, argument structure and result in a single pinned allocation, whose
+// only Go pointers are those the arguments hold, every one of them pinned until the call settles.
+type frame[Arguments, Result any] struct {
+	slots
+	arguments Arguments
+	result    Result
+}
+
+// call is one verb crossing into the library: the pins that keep every Go pointer its argument
+// structure carries in place until the call is final, and the slots it reports through. cgo lets C
+// keep a Go pointer only while it is pinned, and pinning is also what keeps every pointee on the
+// heap, which the noescape promises rely on.
 type call struct {
-	outcome *C.usearch_outcome_t
-	pinner  runtime.Pinner
-	handles []cgo.Handle
-	// refusal is a fault this binding caught before the call crossed.
-	refusal *Error
+	pinner runtime.Pinner
+	slots  *slots
+	// arguments is the frame's argument structure, cleared once the call is final, so a settled
+	// frame holds no Go pointer and its outcome may still cross to C unpinned.
+	arguments []byte
 }
 
 // lent is a call and the slot its result lands in, which the library writes in place.
@@ -980,49 +1204,86 @@ type lent[Result any] struct {
 	result *Result
 }
 
-// open starts a call; a verb fills its argument structure, pointing it at the result slot, and
-// crosses.
-func open[Result any]() *lent[Result] {
-	opened := new(lent[Result])
-	opened.outcome = pin(&opened.call, new(C.usearch_outcome_t))
-	opened.result = pin(&opened.call, new(Result))
-	return opened
+// open pins a fresh frame and hands back its argument structure, which a verb fills and passes to
+// C; verbs refuse before opening, so a refusal pins and allocates nothing. The arguments live in
+// the frame because cgo moves to the heap whatever a C function that may call back into Go reaches.
+func open[Arguments, Result any](lent *lent[Result]) *Arguments {
+	frame := new(frame[Arguments, Result])
+	lent.pinner.Pin(frame)
+	lent.slots, lent.result = &frame.slots, &frame.result
+	lent.arguments = unsafe.Slice((*byte)(unsafe.Pointer(&frame.arguments)), unsafe.Sizeof(frame.arguments))
+	return &frame.arguments
 }
 
-// refuse records a failure the binding caught, so the call never crosses.
-func (lent *lent[Result]) refuse(refusal *Error) *lent[Result] {
-	lent.refusal = refusal
-	return lent
-}
+// outcome is where the library reports the call's status.
+func (call *call) outcome() *C.usearch_outcome_t { return &call.slots.outcome }
 
 // status reads the outcome word without waiting.
 func (call *call) status() Status {
-	return Status(C.usearch_outcome_status(call.outcome))
+	return Status(C.usearch_outcome_status(call.outcome()))
 }
 
-// settle waits until the call is final, releases everything it lent, and reports its failure.
+// settle waits until the call is final, releases everything it lent, and reports its failure, the
+// same every time it is asked.
 func (call *call) settle() error {
 	if call.status() == StatusDeferred {
-		C.usearch_outcome_wait(call.outcome)
+		C.usearch_outcome_wait(call.outcome())
 	}
+	for slot, handle := range call.slots.handles {
+		if handle != 0 {
+			handle.Delete()
+			call.slots.handles[slot] = 0
+		}
+	}
+	clear(call.arguments)
 	call.pinner.Unpin()
-	for _, handle := range call.handles {
-		handle.Delete()
-	}
-	call.handles = nil
-	if call.refusal != nil {
-		return call.refusal
-	}
-	return check(*call.outcome)
+	return check(call.slots.outcome)
 }
 
-// block settles a call and hands back its result.
-func block[Result any](lent *lent[Result]) (Result, error) {
+// block settles the call a verb opened and hands back its result, or the verb's refusal.
+func block[Result any](lent *lent[Result], refusal error) (Result, error) {
+	var none Result
+	if refusal != nil {
+		return none, refusal
+	}
 	if err := lent.settle(); err != nil {
-		var empty Result
-		return empty, err
+		return none, err
 	}
 	return *lent.result, nil
+}
+
+// configOf reads a nil config as the zero one, by value, so generic verbs allocate nothing for it.
+func configOf[Config any](config *Config) Config {
+	var options Config
+	if config != nil {
+		options = *config
+	}
+	return options
+}
+
+// pin keeps a Go object in place until the call is final and hands back its address. It takes no
+// type parameter, since a generic call inlined into a generic verb reaches its callee through a
+// dictionary, and escape analysis then moves the verb's lent to the heap.
+func (call *call) pin(pointer unsafe.Pointer) unsafe.Pointer {
+	call.pinner.Pin(pointer)
+	return pointer
+}
+
+// lend pins the backing array of a slice of length elements at data until the call is final, and
+// lends an empty slice as nil.
+func (call *call) lend(data unsafe.Pointer, length int) unsafe.Pointer {
+	if length == 0 {
+		return nil
+	}
+	return call.pin(data)
+}
+
+// view lends a string to a call that only reads it before returning.
+func view(text string) C.usearch_bytes_view_t {
+	view := C.usearch_bytes_view_t{data: (*C.uint8_t)(unsafe.Pointer(unsafe.StringData(text)))}
+	// cgo names the length's typedef apart from size_t, though the two are as wide.
+	*(*C.size_t)(unsafe.Pointer(&view.length)) = C.size_t(len(text))
+	return view
 }
 
 // Deferred is a submitted call, which holds its outcome and inputs until it is final, owned by the
@@ -1030,43 +1291,39 @@ func block[Result any](lent *lent[Result]) (Result, error) {
 // call is final and hands back its result, and Close waits the same way and drops it. A Deferred
 // dropped without Wait or Close is released by the collector once the call is final, never
 // blocking on it: until then every later collection checks it again.
-//
-// A failure the binding catches before the call crosses is reported here too, like any other.
 type Deferred[Result any] struct {
-	lent    *lent[Result]
+	lent    lent[Result]
 	cleanup runtime.Cleanup
 }
 
-// submitted hands a call to its caller, who waits on it or closes it, or drops it to the collector.
-func submitted[Result any](lent *lent[Result]) *Deferred[Result] {
-	deferred := &Deferred[Result]{lent: lent}
-	deferred.cleanup = runtime.AddCleanup(deferred, release[Result], lent)
-	return deferred
+// submitted hands the call a verb opened to its caller, who waits on it or closes it, or drops it
+// to the collector; a verb's refusal comes back instead, with nothing submitted.
+func submitted[Result any](deferred *Deferred[Result], refusal error) (*Deferred[Result], error) {
+	if refusal != nil {
+		return nil, refusal
+	}
+	deferred.cleanup = runtime.AddCleanup(deferred, release, deferred.lent.call)
+	return deferred, nil
 }
 
-// release settles a dropped call once it is final, and otherwise hands it to another dropped
-// Deferred for the next collection, since the collector's goroutine must not block.
-func release[Result any](lent *lent[Result]) {
-	if lent.status() == StatusDeferred {
-		submitted(lent)
+// release settles a dropped call once it is final, and otherwise arms itself again for the next
+// collection, since the collector's goroutine must not block.
+func release(call call) {
+	if call.status() == StatusDeferred {
+		runtime.AddCleanup(&call, release, call)
 		return
 	}
-	_ = lent.settle()
+	_ = call.settle()
 }
 
 // Status reports StatusDeferred until the call is final, then its final status, without blocking.
-func (deferred *Deferred[Result]) Status() Status {
-	if deferred.lent.refusal != nil {
-		return deferred.lent.refusal.Status
-	}
-	return deferred.lent.status()
-}
+func (deferred *Deferred[Result]) Status() Status { return deferred.lent.status() }
 
 // Wait blocks until the call is final, releases its pins, then hands back its result, the same
 // every time it is asked.
 func (deferred *Deferred[Result]) Wait() (Result, error) {
 	deferred.cleanup.Stop()
-	return block(deferred.lent)
+	return block(&deferred.lent, nil)
 }
 
 // Close blocks until the call is final, releases its pins, and reports the call's failure. It is
@@ -1076,7 +1333,84 @@ func (deferred *Deferred[Result]) Close() error {
 	return deferred.lent.settle()
 }
 
-// endregion: Deferred Calls
+// endregion: Calls
+
+// region: Receivers
+
+// receiver is a handle's field, so a Close is seen, and the executor its verbs run on.
+type receiver[Handle comparable] struct {
+	handle   *Handle
+	executor *Executor
+}
+
+// lower reports the handles a verb hands across, refusing a closed handle before C dereferences it.
+func (receiver receiver[Handle]) lower() (Handle, C.usearch_executor_t, error) {
+	var none Handle
+	if receiver.handle == nil || *receiver.handle == none {
+		return none, nil, fail(StatusUninitialized, "the handle is closed or was never initialized")
+	}
+	executor, err := receiver.executor.lower()
+	return *receiver.handle, executor, err
+}
+
+// lowerInto is lower for a verb writing into arena, refusing a closed one too.
+func (receiver receiver[Handle]) lowerInto(arena *Arena) (Handle, C.usearch_executor_t, C.usearch_arena_t, error) {
+	handle, executor, err := receiver.lower()
+	if err != nil {
+		return handle, executor, nil, err
+	}
+	outputs, err := arena.lower()
+	return handle, executor, outputs, err
+}
+
+// lower reports the handle a verb hands across: nil for the null executor, and a refusal for a
+// closed one rather than a silent fall back to the calling goroutine.
+func (executor *Executor) lower() (C.usearch_executor_t, error) {
+	if executor == nil {
+		return nil, nil
+	}
+	if executor.handle == nil {
+		return nil, fail(StatusUninitialized, "the executor is closed or was never spawned")
+	}
+	return executor.handle, nil
+}
+
+// Close waits out the call holding the executor, then releases its threads, rings or streams; every
+// arena it made must be closed first. It is idempotent; a closed executor must not be used again.
+func (executor *Executor) Close() error {
+	if executor == nil || executor.handle == nil {
+		return nil
+	}
+	C.usearch_executor_free(executor.handle)
+	executor.handle = nil
+	return nil
+}
+
+// lower reports the handle a verb hands across: nil for a nil arena, which the call refuses, and a
+// refusal for a closed one.
+func (arena *Arena) lower() (C.usearch_arena_t, error) {
+	if arena == nil {
+		return nil, nil
+	}
+	if arena.handle == nil {
+		return nil, fail(StatusUninitialized, "the arena is closed or was never made")
+	}
+	return arena.handle, nil
+}
+
+// Close releases the memory, waiting for every deferred call naming the arena, and ends every view
+// over it; it comes before the Close of the executor that made the arena. It is idempotent, and a
+// closed arena must not be used again.
+func (arena *Arena) Close() error {
+	if arena == nil || arena.handle == nil {
+		return nil
+	}
+	C.usearch_arena_free(arena.handle)
+	arena.handle = nil
+	return nil
+}
+
+// endregion: Receivers
 
 // region: Introspection
 
@@ -1095,23 +1429,9 @@ func CapabilitiesAvailable() string { return C.GoString(C.usearch_capabilities_a
 
 // region: Helpers
 
-// pin keeps a Go object in place until the call is final and hands back its address.
-func pin[Value any](call *call, value *Value) *Value {
-	call.pinner.Pin(value)
-	return value
-}
-
-// lend pins a slice's backing array until the call is final, and lends an empty slice as nil.
-func lend[Value any](call *call, slice []Value) *Value {
-	if len(slice) == 0 {
-		return nil
-	}
-	return pin(call, &slice[0])
-}
-
 // ints lends a slice of IDs until the call is final.
 func (call *call) ints(values []int32) (*C.int32_t, C.size_t) {
-	return (*C.int32_t)(unsafe.Pointer(lend(call, values))), C.size_t(len(values))
+	return (*C.int32_t)(call.lend(unsafe.Pointer(unsafe.SliceData(values)), len(values))), C.size_t(len(values))
 }
 
 // ram lends the memory domains of a RAM placement or executor, beside the class ceiling.
@@ -1134,6 +1454,37 @@ func (call *call) vram(devices []int32, gpuClassCeiling GPUClass) C.usearch_vram
 	}
 }
 
+// ramPlacement lends an optional RAM placement, nil for none, which keeps the handle's own.
+func (call *call) ramPlacement(
+	memoryDomains []int32, cpuClassCeiling CPUClass, shardCapacity uint,
+) *C.usearch_ram_options_t {
+	if memoryDomains == nil {
+		return nil
+	}
+	placement := call.ram(memoryDomains, cpuClassCeiling)
+	placement.shard_capacity = C.size_t(shardCapacity)
+	return (*C.usearch_ram_options_t)(call.pin(unsafe.Pointer(&placement)))
+}
+
+// vramPlacement lends an optional VRAM placement, nil for none.
+func (call *call) vramPlacement(devices []int32, shardCapacity uint) *C.usearch_vram_options_t {
+	if devices == nil {
+		return nil
+	}
+	placement := call.vram(devices, GPUClassUnknown)
+	placement.shard_capacity = C.size_t(shardCapacity)
+	return (*C.usearch_vram_options_t)(call.pin(unsafe.Pointer(&placement)))
+}
+
+// nvmePlacement lends an optional NVMe placement, nil for none.
+func (call *call) nvmePlacement(paths []string) *C.usearch_nvme_options_t {
+	if paths == nil {
+		return nil
+	}
+	placement := call.nvme(paths, CPUClassUnknown)
+	return (*C.usearch_nvme_options_t)(call.pin(unsafe.Pointer(&placement)))
+}
+
 // nvme lends a run of device paths, each borrowed rather than copied. Go strings are not
 // null-terminated and the interface never assumes one, so the bytes cross as they are.
 func (call *call) nvme(paths []string, cpuClassCeiling CPUClass) C.usearch_nvme_options_t {
@@ -1142,7 +1493,7 @@ func (call *call) nvme(paths []string, cpuClassCeiling CPUClass) C.usearch_nvme_
 		views[position] = call.text(path)
 	}
 	return C.usearch_nvme_options_t{
-		paths:             lend(call, views),
+		paths:             (*C.usearch_bytes_view_t)(call.lend(unsafe.Pointer(unsafe.SliceData(views)), len(views))),
 		paths_count:       C.size_t(len(views)),
 		cpu_class_ceiling: C.usearch_cpu_class_t(cpuClassCeiling),
 	}
@@ -1151,7 +1502,7 @@ func (call *call) nvme(paths []string, cpuClassCeiling CPUClass) C.usearch_nvme_
 // bytes lends a byte slab as the view the C interface reads, with no terminator and no copy.
 func (call *call) bytes(bytes []byte) C.usearch_bytes_view_t {
 	return C.usearch_bytes_view_t{
-		data:   (*C.uint8_t)(unsafe.Pointer(lend(call, bytes))),
+		data:   (*C.uint8_t)(call.lend(unsafe.Pointer(unsafe.SliceData(bytes)), len(bytes))),
 		length: C.size_t(len(bytes)),
 	}
 }
@@ -1163,7 +1514,7 @@ func (call *call) text(text string) C.usearch_bytes_view_t {
 		return C.usearch_bytes_view_t{}
 	}
 	return C.usearch_bytes_view_t{
-		data:   (*C.uint8_t)(unsafe.Pointer(pin(call, unsafe.StringData(text)))),
+		data:   (*C.uint8_t)(call.pin(unsafe.Pointer(unsafe.StringData(text)))),
 		length: C.size_t(len(text)),
 	}
 }
@@ -1172,7 +1523,7 @@ func (call *call) text(text string) C.usearch_bytes_view_t {
 // it accompanies.
 func (call *call) keys(keys []Key) C.usearch_keys_view_t {
 	return C.usearch_keys_view_t{
-		data:   (*C.usearch_key_t)(unsafe.Pointer(lend(call, keys))),
+		data:   (*C.usearch_key_t)(call.lend(unsafe.Pointer(unsafe.SliceData(keys)), len(keys))),
 		stride: C.size_t(unsafe.Sizeof(Key{})),
 	}
 }
@@ -1180,7 +1531,7 @@ func (call *call) keys(keys []Key) C.usearch_keys_view_t {
 // points lends places in three dimensions as the f32 rows a sampling verb reads.
 func (call *call) points(points [][3]float32) C.usearch_rows_view_t {
 	return C.usearch_rows_view_t{
-		data:    unsafe.Pointer(lend(call, points)),
+		data:    call.lend(unsafe.Pointer(unsafe.SliceData(points)), len(points)),
 		stride:  C.size_t(unsafe.Sizeof([3]float32{})),
 		columns: 3,
 		scalar:  C.usearch_scalar_t(ScalarF32),
@@ -1199,7 +1550,9 @@ func (call *call) points(points [][3]float32) C.usearch_rows_view_t {
 // it crosses is final.
 type Tape struct {
 	pointer unsafe.Pointer
-	offsets []uint64
+	offsets unsafe.Pointer
+	entries uint
+	layout  C.usearch_tape_layout_t
 	scalar  Scalar
 }
 
@@ -1259,22 +1612,25 @@ func tapeOf[Value Element](data []Value, offsets []uint64, width uint64) Tape {
 	if last := offsets[len(offsets)-1]; last*width > uint64(len(data)) {
 		panic(fmt.Sprintf("usearch: offsets ending at %d overrun %d scalars", last, len(data)))
 	}
-	return Tape{pointer: unsafe.Pointer(unsafe.SliceData(data)), offsets: offsets, scalar: scalarOf[Value]()}
+	return Tape{
+		pointer: unsafe.Pointer(unsafe.SliceData(data)),
+		offsets: unsafe.Pointer(unsafe.SliceData(offsets)),
+		entries: uint(len(offsets)) - 1,
+		layout:  C.usearch_tape_u64_k,
+		scalar:  scalarOf[Value](),
+	}
 }
 
 // Entries reports how many entries the tape spans.
-func (tape Tape) Entries() uint { return uint(len(tape.offsets)) - 1 }
+func (tape Tape) Entries() uint { return tape.entries }
 
 // Scalar reports the scalar type the elements hold.
 func (tape Tape) Scalar() Scalar { return tape.scalar }
 
-// lower lends the tape as the batch view a verb reads, with 64-bit offsets.
+// lower lends the tape as the batch view a verb reads, with the offsets as wide as it holds them.
 func (tape Tape) lower(call *call) C.usearch_tape_view_t {
-	if tape.pointer != nil {
-		call.pinner.Pin(tape.pointer)
-	}
-	view := C.usearch_tape_view_t{data: tape.pointer, layout: C.usearch_tape_u64_k, scalar: C.usearch_scalar_t(tape.scalar)}
-	*(**C.uint64_t)(unsafe.Pointer(&view.offsets)) = (*C.uint64_t)(unsafe.Pointer(lend(call, tape.offsets)))
+	view := C.usearch_tape_view_t{data: call.pin(tape.pointer), layout: tape.layout, scalar: C.usearch_scalar_t(tape.scalar)}
+	*(*unsafe.Pointer)(unsafe.Pointer(&view.offsets)) = call.pin(tape.offsets)
 	return view
 }
 
@@ -1320,6 +1676,130 @@ func TapeEntry[Value Element](tape TapeView, entry uint) ([]Value, error) {
 
 // endregion: Tapes
 
+// region: Reports
+
+// TraversalStats is the traversal telemetry one call reports. Every call overwrites it
+// rather than accumulating, so a sweep over many batches sums them itself with Accumulate.
+type TraversalStats struct {
+	// VisitedMembers counts the graph members the call visited.
+	VisitedMembers uint
+	// ComputedDistances counts the distances the call computed, diversity re-selections
+	// included.
+	ComputedDistances uint
+	// Restarts counts starvation re-seedings - a graph-connectivity health signal rather than
+	// a cost counter.
+	Restarts uint
+	// MissingHints counts hint keys no shard held an entry under; zero unless a search was
+	// handed hints.
+	MissingHints uint
+}
+
+// Accumulate folds another call's telemetry into this one. Binding-only.
+func (stats *TraversalStats) Accumulate(other TraversalStats) {
+	stats.VisitedMembers += other.VisitedMembers
+	stats.ComputedDistances += other.ComputedDistances
+	stats.Restarts += other.Restarts
+	stats.MissingHints += other.MissingHints
+}
+
+// Reachability is one reachability audit: the population it judged, and how much of it a
+// search reaches.
+type Reachability struct {
+	// Audited counts the entries published when the audit started; compare Reachable against
+	// this, never a later size.
+	Audited uint
+	// Reachable counts those a search reaches; the rest no search finds until a refinement
+	// re-links them.
+	Reachable uint
+	// DepthFromRoot counts the depths the walk from the root took to converge.
+	DepthFromRoot uint
+	// DepthToRoot counts the depths the walk back toward the root took, where a health check
+	// walks both ways.
+	DepthToRoot uint
+	// Unlinked counts the entries no reached entry links to.
+	Unlinked uint
+	// Underlinked counts the entries linked to by fewer entries than they link to.
+	Underlinked uint
+	// BeyondMostPopulatedDepth counts the entries deeper than the depth holding the most entries.
+	BeyondMostPopulatedDepth uint
+	// UnreachedIslands counts the islands no entry outside them links into.
+	UnreachedIslands uint
+	// StrandedIslands counts the islands with no link out.
+	StrandedIslands uint
+	// Components counts the components when direction is ignored.
+	Components uint
+}
+
+// RefineVerdict is what a round concluded, so no caller picks a change rate.
+type RefineVerdict int32
+
+const (
+	// RefineNone means no round concluded: a report no round filled yet.
+	RefineNone RefineVerdict = C.usearch_refine_none_k
+	// RefineImproved means the round changed some entry's link set, so another round can help.
+	RefineImproved RefineVerdict = C.usearch_refine_improved_k
+	// RefineConverged means the round changed no entry's link set.
+	RefineConverged RefineVerdict = C.usearch_refine_converged_k
+	// RefineStalled means the round lowered nothing while something stands, as full
+	// entries leave no slot.
+	RefineStalled RefineVerdict = C.usearch_refine_stalled_k
+	// RefineStopped means the caller stopped the round.
+	RefineStopped RefineVerdict = C.usearch_refine_stopped_k
+)
+
+// String renders the verdict as the library spells it.
+func (verdict RefineVerdict) String() string {
+	return C.GoString(C.usearch_refine_verdict_name(C.usearch_refine_verdict_t(verdict)))
+}
+
+// RefineVerdictFromName reads a refine verdict back from the spelling String gives it,
+// failing with StatusInvalidArgument on a name the library does not spell.
+func RefineVerdictFromName(name string) (RefineVerdict, error) {
+	var verdict C.usearch_refine_verdict_t
+	if status := C.usearch_refine_verdict_from_name(view(name), &verdict); status != C.usearch_status_success_k {
+		return 0, fail(Status(status), "no refine verdict is spelled \""+name+"\"")
+	}
+	return RefineVerdict(verdict), nil
+}
+
+// RefineReport is what one Refine or Reshard did to the graph, so far when its plan stays
+// live, and what the whole plan did once its finish lands it.
+type RefineReport struct {
+	// Reselected counts the entries whose neighbors were selected again, the islands of every
+	// heal round included.
+	Reselected uint
+	// Changed counts those whose neighbor set gained a member it lacked; zero means settled.
+	Changed uint
+	// IslandsFound counts the entries the first audit found not reached both ways.
+	IslandsFound uint
+	// IslandsReconnected counts the links written between an island and a reached entry.
+	IslandsReconnected uint
+	// Neighborhoods counts the neighborhoods the round re-stitched.
+	Neighborhoods uint
+	// WidestNeighborhood counts the entries of the widest neighborhood.
+	WidestNeighborhood uint
+	// AddedLinks counts the links the round added.
+	AddedLinks uint
+	// DroppedLinks counts the links the round dropped.
+	DroppedLinks uint
+	// Verdict is what the round concluded.
+	Verdict RefineVerdict
+	// Opening is the health check opening the round.
+	Opening Reachability
+	// Reachability is the health check closing the heal, as a fresh Health right after would take it.
+	Reachability Reachability
+}
+
+// stats lends optional telemetry as the pointer the C interface fills.
+func (call *call) stats(stats *TraversalStats) *C.usearch_traversal_stats_t {
+	if stats == nil {
+		return nil
+	}
+	return (*C.usearch_traversal_stats_t)(call.pin(unsafe.Pointer(stats)))
+}
+
+// endregion: Reports
+
 // region: Plans
 
 // livePlan is one long operation kept live across calls: the handle the library opens on the first
@@ -1336,7 +1816,7 @@ func (plan *livePlan[Handle]) lower(call *call) (*Handle, *C.usearch_phase_progr
 	if plan == nil {
 		return nil, nil
 	}
-	pin(call, plan)
+	call.pin(unsafe.Pointer(plan))
 	return &plan.handle, (*C.usearch_phase_progress_t)(unsafe.Pointer(&plan.Phase))
 }
 
@@ -1353,3 +1833,29 @@ func (plan *livePlan[Handle]) take() Handle {
 }
 
 // endregion: Plans
+
+// region: Children
+
+// childReceiver is a cursor's or a stream's handle field and the parent handle it was opened on,
+// which every pull names, so a Close of either is seen, and the executor a pull runs on, nil for
+// the calling goroutine; the child keeps none.
+type childReceiver[Child, Parent comparable] struct {
+	receiver[Child]
+	parent *Parent
+}
+
+// lowerInto reports the handles a pull hands across, refusing a closed child, parent, executor or
+// arena before C dereferences them.
+func (on childReceiver[Child, Parent]) lowerInto(arena *Arena) (Child, Parent, C.usearch_executor_t, C.usearch_arena_t, error) {
+	var none Parent
+	child, executor, outputs, err := on.receiver.lowerInto(arena)
+	if err != nil {
+		return child, none, executor, outputs, err
+	}
+	if *on.parent == none {
+		return child, none, executor, outputs, fail(StatusUninitialized, "the handle it was opened on is closed")
+	}
+	return child, *on.parent, executor, outputs, nil
+}
+
+// endregion: Children

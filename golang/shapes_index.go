@@ -5,17 +5,18 @@
 // Date: November 16, 2026
 
 // Every verb is a batch over a tape, the Apache Arrow layout of ragged entries, so molecules or
-// scans of any point counts share one batch, and a single shape is a one-entry tape. Reports,
-// traversal stats, cursor batches and draws are the dense modality's own types, since the library
-// fills them through the same C structures.
+// scans of any point counts share one batch, and a single shape is a one-entry tape. Cursor
+// batches and draws are the dense modality's own types, since the library fills them through the
+// same C structures.
 
 package usearch
 
 import "unsafe"
 
 /*
-// `nocallback` only where the argument structure carries no callback and no executor; `noescape`
-// everywhere, since submission copies the structure and everything it names is pinned.
+// noescape and nocallback follow the rule in types.go.
+#cgo noescape usearch_shapes_metric_from_name
+#cgo nocallback usearch_shapes_metric_from_name
 #cgo noescape usearch_shapes_init_ram
 #cgo nocallback usearch_shapes_init_ram
 #cgo noescape usearch_shapes_init_vram
@@ -25,14 +26,23 @@ import "unsafe"
 #cgo noescape usearch_shapes_cursor_init
 #cgo nocallback usearch_shapes_cursor_init
 #cgo noescape usearch_shapes_view_nvme
+#cgo nocallback usearch_shapes_view_nvme
 #cgo noescape usearch_shapes_reserve
+#cgo nocallback usearch_shapes_reserve
 #cgo noescape usearch_shapes_clear
+#cgo nocallback usearch_shapes_clear
 #cgo noescape usearch_shapes_describe
+#cgo nocallback usearch_shapes_describe
 #cgo noescape usearch_shapes_count
+#cgo nocallback usearch_shapes_count
 #cgo noescape usearch_shapes_get
+#cgo nocallback usearch_shapes_get
 #cgo noescape usearch_shapes_health
+#cgo nocallback usearch_shapes_health
 #cgo noescape usearch_shapes_metadata_read
+#cgo nocallback usearch_shapes_metadata_read
 #cgo noescape usearch_shapes_metadata_read_buffer
+#cgo nocallback usearch_shapes_metadata_read_buffer
 #cgo noescape usearch_shapes_load_ram
 #cgo noescape usearch_shapes_load_vram
 #cgo noescape usearch_shapes_load_ram_buffer
@@ -40,13 +50,16 @@ import "unsafe"
 #cgo noescape usearch_shapes_insert
 #cgo noescape usearch_shapes_refine
 #cgo noescape usearch_shapes_refine_plan_finish
+#cgo nocallback usearch_shapes_refine_plan_finish
 #cgo noescape usearch_shapes_search
 #cgo noescape usearch_shapes_reshard
 #cgo noescape usearch_shapes_reshard_plan_finish
+#cgo nocallback usearch_shapes_reshard_plan_finish
 #cgo noescape usearch_shapes_sample
 #cgo noescape usearch_shapes_save
 #cgo noescape usearch_shapes_save_buffer
 #cgo noescape usearch_shapes_cursor_next
+#cgo nocallback usearch_shapes_cursor_next
 
 #include "shim.h"
 #include "usearch/shapes_index.h"
@@ -83,8 +96,7 @@ func (metric ShapesMetric) String() string {
 // StatusInvalidArgument.
 func ShapesMetricFromName(name string) (ShapesMetric, error) {
 	metric := C.usearch_shapes_metric_t(ShapesMetricUnknown)
-	view := C.usearch_bytes_view_t{data: (*C.uint8_t)(unsafe.Pointer(unsafe.StringData(name))), length: C.size_t(len(name))}
-	if status := C.usearch_shapes_metric_from_name(view, &metric); status != C.usearch_status_success_k {
+	if status := C.usearch_shapes_metric_from_name(view(name), &metric); status != C.usearch_status_success_k {
 		return ShapesMetricUnknown, fail(Status(status), "no shapes metric is spelled \""+name+"\"")
 	}
 	return ShapesMetric(metric), nil
@@ -169,6 +181,147 @@ type ShapesKeyStats struct {
 
 // region: Configs
 
+// ShapesLoadRamConfig carries the optional settings of ShapesLoadRam.
+type ShapesLoadRamConfig struct {
+	// Executor is the one the read fans out over; nil reads on the calling goroutine.
+	Executor *Executor
+	// MemoryDomains are the NUMA node IDs to place the parts on, part p loading whole into shard p
+	// modulo their count; empty derives every node the process may use.
+	MemoryDomains []int32
+	// CPUClassCeiling is the newest class dispatch may pick, intersected with what the machine runs,
+	// so a class the machine lacks narrows rather than refuses; the zero value means no ceiling.
+	CPUClassCeiling CPUClass
+	// ValuesPerKey bounds how many entries may share one key, which no checkpoint records; zero
+	// is unbounded.
+	ValuesPerKey uint
+	// Progress reports the shards placed and stops wherever it says to; a stopped load creates no
+	// index.
+	Progress ProgressCallback
+	// ProgressSteps bounds the reports Progress hears, the last at completion; zero derives to ten.
+	ProgressSteps uint
+}
+
+// ShapesLoadVramConfig carries the optional settings of ShapesLoadVram.
+type ShapesLoadVramConfig struct {
+	// Executor is the one the upload runs on; nil uploads on the default stream of each device.
+	Executor *Executor
+	// Devices are the CUDA ordinals to place the parts on, part p loading whole onto device p modulo
+	// their count; empty derives one free device.
+	Devices []int32
+	// GPUClassCeiling is the newest class dispatch may pick, capped below the best class every named
+	// device loads; a ceiling no named device loads is refused as unsupported; the zero value means no
+	// ceiling.
+	GPUClassCeiling GPUClass
+	// ValuesPerKey bounds how many entries may share one key; zero is unbounded.
+	ValuesPerKey uint
+	// Progress reports the shards placed and stops wherever it says to.
+	Progress ProgressCallback
+	// ProgressSteps bounds the reports Progress hears, the last at completion; zero derives to ten.
+	ProgressSteps uint
+}
+
+// ShapesLoadRamBufferConfig carries the optional settings of ShapesLoadRamBuffer.
+type ShapesLoadRamBufferConfig struct {
+	// Executor is the one the copy fans out over; nil copies on the calling goroutine.
+	Executor *Executor
+	// MemoryDomains are the NUMA node IDs to place shards on, the monolith loading whole into the
+	// first; empty derives every node the process may use.
+	MemoryDomains []int32
+	// CPUClassCeiling is the newest class dispatch may pick, intersected with what the machine runs,
+	// so a class the machine lacks narrows rather than refuses; the zero value means no ceiling.
+	CPUClassCeiling CPUClass
+	// ValuesPerKey bounds how many entries may share one key; zero is unbounded.
+	ValuesPerKey uint
+	// Progress reports the bytes placed and stops wherever it says to.
+	Progress ProgressCallback
+	// ProgressSteps bounds the reports Progress hears, the last at completion; zero derives to ten.
+	ProgressSteps uint
+}
+
+// ShapesLoadVramBufferConfig carries the optional settings of ShapesLoadVramBuffer.
+type ShapesLoadVramBufferConfig struct {
+	// Executor is the one the upload runs on; nil uploads on the default stream of each device.
+	Executor *Executor
+	// Devices are the CUDA ordinals to place shards on, the monolith loading whole onto the first;
+	// empty derives one free device.
+	Devices []int32
+	// GPUClassCeiling is the newest class dispatch may pick, capped below the best class every named
+	// device loads; a ceiling no named device loads is refused as unsupported; the zero value means no
+	// ceiling.
+	GPUClassCeiling GPUClass
+	// ValuesPerKey bounds how many entries may share one key; zero is unbounded.
+	ValuesPerKey uint
+	// Progress reports the bytes placed and stops wherever it says to.
+	Progress ProgressCallback
+	// ProgressSteps bounds the reports Progress hears, the last at completion; zero derives to ten.
+	ProgressSteps uint
+}
+
+// ShapesMetadataReadConfig carries the optional settings of ShapesMetadataRead.
+type ShapesMetadataReadConfig struct {
+	// Executor is the one the read runs on; nil reads on the calling goroutine.
+	Executor *Executor
+}
+
+// ShapesMetadataReadBufferConfig carries the optional settings of ShapesMetadataReadBuffer.
+type ShapesMetadataReadBufferConfig struct {
+	// Executor is the one the read runs on; nil reads on the calling goroutine.
+	Executor *Executor
+}
+
+// ShapesInsertConfig carries the optional settings of Insert. A zero value derives every setting.
+type ShapesInsertConfig struct {
+	// ExpansionFactor is the breadth of the candidates the build walk explores; zero derives it
+	// from the geometry.
+	ExpansionFactor uint
+	// Progress reports the entries inserted; every entry is claimed before the first report, so a
+	// stop is ignored.
+	Progress ProgressCallback
+	// ProgressSteps bounds the reports Progress hears, the last at completion; zero derives to ten.
+	ProgressSteps uint
+	// Stats is where the traversal telemetry lands, overwritten by the call.
+	Stats *TraversalStats
+}
+
+// ShapesSampleConfig carries the optional settings of Sample. A zero value draws across the whole
+// index with nothing shown.
+type ShapesSampleConfig struct {
+	// Shown holds the keys already shown: never drawn again, and the paths reach toward them.
+	Shown []Key
+	// ShownCoordinates places each Shown key, one point apiece.
+	ShownCoordinates [][3]float32
+	// Focus holds the keys to look around; empty looks around the whole index.
+	Focus []Key
+	// Seed makes the draw repeatable: equal seeds, shown keys and focus over an unchanged index
+	// draw equally.
+	Seed uint64
+	// ExpansionFactor is the breadth of the candidates of the walks behind the draws; zero derives.
+	ExpansionFactor uint
+	// Progress reports the draws and stops wherever it says to.
+	Progress ProgressCallback
+	// ProgressSteps bounds the reports Progress hears, the last at completion; zero derives to ten.
+	ProgressSteps uint
+	// Stats is where the traversal telemetry lands, overwritten by the call.
+	Stats *TraversalStats
+}
+
+// ShapesSaveConfig carries the optional settings of Save.
+type ShapesSaveConfig struct {
+	// Progress reports the shards written and stops wherever it says to.
+	Progress ProgressCallback
+	// ProgressSteps bounds the reports Progress hears, the last at completion; zero derives to ten.
+	ProgressSteps uint
+}
+
+// ShapesSaveBufferConfig carries the optional settings of SaveBuffer.
+type ShapesSaveBufferConfig struct {
+	// Progress reports the bytes written and stops wherever it says to; a stopped save leaves no
+	// monolith.
+	Progress ProgressCallback
+	// ProgressSteps bounds the reports Progress hears, the last at completion; zero derives to ten.
+	ProgressSteps uint
+}
+
 // ShapesViewNvmeConfig carries the optional settings of ShapesViewNvme.
 type ShapesViewNvmeConfig struct {
 	// Executor is the NVMe executor whose rings read the checkpoint's headers; nil reads on the
@@ -182,6 +335,25 @@ type ShapesViewNvmeConfig struct {
 	CPUClassCeiling CPUClass
 }
 
+// ShapesSearchConfig carries the optional settings of Search. A zero value derives every setting.
+type ShapesSearchConfig struct {
+	// ExpansionFactor is the breadth of the candidates the walk explores; zero derives it, and a scan
+	// ignores it.
+	ExpansionFactor uint
+	// Traversal walks the graph by default; TraversalScan scores every entry exactly, on RAM and
+	// NVMe handles.
+	Traversal Traversal
+	// Predicate admits only the keys it approves, one or a batch at a time; nil admits everything.
+	// Non-matching entries still route the traversal.
+	Predicate Admitter
+	// Progress reports the queries resolved and stops wherever it says to.
+	Progress ProgressCallback
+	// ProgressSteps bounds the reports Progress hears, the last at completion; zero derives to ten.
+	ProgressSteps uint
+	// Stats is where the traversal telemetry lands, overwritten by the call.
+	Stats *TraversalStats
+}
+
 // ShapesRefineConfig carries the optional settings of Refine. A zero value derives every setting.
 type ShapesRefineConfig struct {
 	// ExpansionFactor is the breadth of the candidates the re-selection walk explores; zero derives.
@@ -193,7 +365,7 @@ type ShapesRefineConfig struct {
 	// ProgressSteps bounds the reports Progress hears, the last at completion; zero derives to ten.
 	ProgressSteps uint
 	// Stats is where the traversal telemetry lands, overwritten by the call.
-	Stats *DenseTraversalStats
+	Stats *TraversalStats
 	// Plan keeps the round live across calls: nil runs one round to its end, a fresh plan opens one
 	// that a stop leaves live, and a live one continues where it stopped, or starts the next round.
 	Plan *ShapesRefinePlan
@@ -213,7 +385,7 @@ type ShapesReshardConfig struct {
 	// ProgressSteps bounds the reports Progress hears, the last at completion; zero derives to ten.
 	ProgressSteps uint
 	// Stats is where the traversal telemetry lands, overwritten by the call.
-	Stats *DenseTraversalStats
+	Stats *TraversalStats
 	// Plan keeps the reshard live across calls: nil moves and runs to the end, a fresh plan opens one
 	// that a stop leaves live, and a live one continues where it stopped.
 	Plan *ShapesReshardPlan
@@ -254,19 +426,8 @@ func shapesIndexOf(handle C.usearch_shapes_index_t, err error) (*ShapesIndex, er
 		return nil, err
 	}
 	index := &ShapesIndex{handle: handle}
-	index.ShapesIndexOn = ShapesIndexOn{shapesReceiver{index: index}}
+	index.ShapesIndexOn = ShapesIndexOn{shapesReceiver{receiver[C.usearch_shapes_index_t]{handle: &index.handle}}}
 	return index, nil
-}
-
-// On is the receiver whose verbs block on executor. Binding-only.
-func (index *ShapesIndex) On(executor *Executor) ShapesIndexOn {
-	return ShapesIndexOn{shapesReceiver{index: index, executor: executor}}
-}
-
-// Deferred is the receiver whose verbs submit their calls to executor, each answering a Deferred
-// from the same arguments. Binding-only.
-func (index *ShapesIndex) Deferred(executor *Executor) ShapesIndexDeferredOn {
-	return ShapesIndexDeferredOn{shapesReceiver{index: index, executor: executor}}
 }
 
 // Close releases the index, waiting for every deferred call naming it. It is idempotent, and a
@@ -283,197 +444,203 @@ func (index *ShapesIndex) Close() error {
 // ShapesInitRam creates an empty, mutable index in host memory, one shard per NUMA node
 // memoryDomains names; empty derives every node the process may use.
 func ShapesInitRam(options ShapesOptions, memoryDomains []int32) (*ShapesIndex, error) {
-	lent := open[C.usearch_shapes_index_t]()
-	C.usearch_shapes_init_ram(&C.usearch_shapes_init_ram_t{
+	var lent lent[C.usearch_shapes_index_t]
+	arguments := open[C.usearch_shapes_init_ram_t](&lent)
+	*arguments = C.usearch_shapes_init_ram_t{
 		index:          lent.result,
-		outcome:        lent.outcome,
+		outcome:        lent.outcome(),
 		metric:         C.usearch_shapes_metric_t(options.Metric),
 		quantization:   C.usearch_scalar_t(options.Quantization),
 		points:         C.size_t(options.Points),
 		connectivity:   C.size_t(options.Connectivity),
 		values_per_key: C.size_t(options.ValuesPerKey),
 		ram:            lent.ram(memoryDomains, options.CPUClassCeiling),
-	})
-	return shapesIndexOf(block(lent))
+	}
+	C.usearch_shapes_init_ram(arguments)
+	return shapesIndexOf(block(&lent, nil))
 }
 
 // ShapesInitVram creates an empty, mutable index in device memory, sharded across the CUDA
 // ordinals devices names and never replicated; empty derives one free device.
 func ShapesInitVram(options ShapesOptions, devices []int32) (*ShapesIndex, error) {
-	lent := open[C.usearch_shapes_index_t]()
-	C.usearch_shapes_init_vram(&C.usearch_shapes_init_vram_t{
+	var lent lent[C.usearch_shapes_index_t]
+	arguments := open[C.usearch_shapes_init_vram_t](&lent)
+	*arguments = C.usearch_shapes_init_vram_t{
 		index:          lent.result,
-		outcome:        lent.outcome,
+		outcome:        lent.outcome(),
 		metric:         C.usearch_shapes_metric_t(options.Metric),
 		quantization:   C.usearch_scalar_t(options.Quantization),
 		points:         C.size_t(options.Points),
 		connectivity:   C.size_t(options.Connectivity),
 		values_per_key: C.size_t(options.ValuesPerKey),
 		vram:           lent.vram(devices, options.GPUClassCeiling),
-	})
-	return shapesIndexOf(block(lent))
+	}
+	C.usearch_shapes_init_vram(arguments)
+	return shapesIndexOf(block(&lent, nil))
 }
 
 // ShapesLoadRam copies a checkpoint into a new, mutable index in host memory. The path names a
 // manifest of a sharded checkpoint or a single .safegraphs monolith.
-func ShapesLoadRam(path string, config *DenseLoadRamConfig) (*ShapesIndex, error) {
-	if config == nil {
-		config = new(DenseLoadRamConfig)
+func ShapesLoadRam(path string, config *ShapesLoadRamConfig) (*ShapesIndex, error) {
+	options := configOf(config)
+	executor, err := options.Executor.lower()
+	if err != nil {
+		return nil, err
 	}
-	executor, refusal := config.Executor.lower()
-	if refusal != nil {
-		return nil, refusal
-	}
-	lent := open[C.usearch_shapes_index_t]()
-	C.usearch_shapes_load_ram(&C.usearch_shapes_load_ram_t{
+	var lent lent[C.usearch_shapes_index_t]
+	arguments := open[C.usearch_shapes_load_ram_t](&lent)
+	*arguments = C.usearch_shapes_load_ram_t{
 		index:          lent.result,
 		executor:       executor,
-		outcome:        lent.outcome,
+		outcome:        lent.outcome(),
 		path:           lent.text(path),
-		ram:            lent.ram(config.MemoryDomains, config.CPUClassCeiling),
-		values_per_key: C.size_t(config.ValuesPerKey),
-		progress:       lent.progress(config.Progress, config.ProgressSteps),
-	})
-	return shapesIndexOf(block(lent))
+		ram:            lent.ram(options.MemoryDomains, options.CPUClassCeiling),
+		values_per_key: C.size_t(options.ValuesPerKey),
+		progress:       lent.progress(options.Progress, options.ProgressSteps),
+	}
+	C.usearch_shapes_load_ram(arguments)
+	return shapesIndexOf(block(&lent, nil))
 }
 
 // ShapesLoadVram copies a checkpoint into a new, mutable index in device memory, with the
 // placement rules of ShapesLoadRam.
-func ShapesLoadVram(path string, config *DenseLoadVramConfig) (*ShapesIndex, error) {
-	if config == nil {
-		config = new(DenseLoadVramConfig)
+func ShapesLoadVram(path string, config *ShapesLoadVramConfig) (*ShapesIndex, error) {
+	options := configOf(config)
+	executor, err := options.Executor.lower()
+	if err != nil {
+		return nil, err
 	}
-	executor, refusal := config.Executor.lower()
-	if refusal != nil {
-		return nil, refusal
-	}
-	lent := open[C.usearch_shapes_index_t]()
-	C.usearch_shapes_load_vram(&C.usearch_shapes_load_vram_t{
+	var lent lent[C.usearch_shapes_index_t]
+	arguments := open[C.usearch_shapes_load_vram_t](&lent)
+	*arguments = C.usearch_shapes_load_vram_t{
 		index:          lent.result,
 		executor:       executor,
-		outcome:        lent.outcome,
+		outcome:        lent.outcome(),
 		path:           lent.text(path),
-		vram:           lent.vram(config.Devices, config.GPUClassCeiling),
-		values_per_key: C.size_t(config.ValuesPerKey),
-		progress:       lent.progress(config.Progress, config.ProgressSteps),
-	})
-	return shapesIndexOf(block(lent))
+		vram:           lent.vram(options.Devices, options.GPUClassCeiling),
+		values_per_key: C.size_t(options.ValuesPerKey),
+		progress:       lent.progress(options.Progress, options.ProgressSteps),
+	}
+	C.usearch_shapes_load_vram(arguments)
+	return shapesIndexOf(block(&lent, nil))
 }
 
 // ShapesLoadRamBuffer copies a monolith from a buffer into a new, mutable index in host memory, as
 // ShapesLoadRam does a path.
-func ShapesLoadRamBuffer(buffer []byte, config *DenseLoadRamBufferConfig) (*ShapesIndex, error) {
-	if config == nil {
-		config = new(DenseLoadRamBufferConfig)
+func ShapesLoadRamBuffer(buffer []byte, config *ShapesLoadRamBufferConfig) (*ShapesIndex, error) {
+	options := configOf(config)
+	executor, err := options.Executor.lower()
+	if err != nil {
+		return nil, err
 	}
-	executor, refusal := config.Executor.lower()
-	if refusal != nil {
-		return nil, refusal
-	}
-	lent := open[C.usearch_shapes_index_t]()
-	C.usearch_shapes_load_ram_buffer(&C.usearch_shapes_load_ram_buffer_t{
+	var lent lent[C.usearch_shapes_index_t]
+	arguments := open[C.usearch_shapes_load_ram_buffer_t](&lent)
+	*arguments = C.usearch_shapes_load_ram_buffer_t{
 		index:          lent.result,
 		executor:       executor,
-		outcome:        lent.outcome,
+		outcome:        lent.outcome(),
 		buffer:         lent.bytes(buffer),
-		ram:            lent.ram(config.MemoryDomains, config.CPUClassCeiling),
-		values_per_key: C.size_t(config.ValuesPerKey),
-		progress:       lent.progress(config.Progress, config.ProgressSteps),
-	})
-	return shapesIndexOf(block(lent))
+		ram:            lent.ram(options.MemoryDomains, options.CPUClassCeiling),
+		values_per_key: C.size_t(options.ValuesPerKey),
+		progress:       lent.progress(options.Progress, options.ProgressSteps),
+	}
+	C.usearch_shapes_load_ram_buffer(arguments)
+	return shapesIndexOf(block(&lent, nil))
 }
 
 // ShapesLoadVramBuffer copies a monolith from a buffer into a new, mutable index in device memory.
-func ShapesLoadVramBuffer(buffer []byte, config *DenseLoadVramBufferConfig) (*ShapesIndex, error) {
-	if config == nil {
-		config = new(DenseLoadVramBufferConfig)
+func ShapesLoadVramBuffer(buffer []byte, config *ShapesLoadVramBufferConfig) (*ShapesIndex, error) {
+	options := configOf(config)
+	executor, err := options.Executor.lower()
+	if err != nil {
+		return nil, err
 	}
-	executor, refusal := config.Executor.lower()
-	if refusal != nil {
-		return nil, refusal
-	}
-	lent := open[C.usearch_shapes_index_t]()
-	C.usearch_shapes_load_vram_buffer(&C.usearch_shapes_load_vram_buffer_t{
+	var lent lent[C.usearch_shapes_index_t]
+	arguments := open[C.usearch_shapes_load_vram_buffer_t](&lent)
+	*arguments = C.usearch_shapes_load_vram_buffer_t{
 		index:          lent.result,
 		executor:       executor,
-		outcome:        lent.outcome,
+		outcome:        lent.outcome(),
 		buffer:         lent.bytes(buffer),
-		vram:           lent.vram(config.Devices, config.GPUClassCeiling),
-		values_per_key: C.size_t(config.ValuesPerKey),
-		progress:       lent.progress(config.Progress, config.ProgressSteps),
-	})
-	return shapesIndexOf(block(lent))
+		vram:           lent.vram(options.Devices, options.GPUClassCeiling),
+		values_per_key: C.size_t(options.ValuesPerKey),
+		progress:       lent.progress(options.Progress, options.ProgressSteps),
+	}
+	C.usearch_shapes_load_vram_buffer(arguments)
+	return shapesIndexOf(block(&lent, nil))
 }
 
 // ShapesViewRam serves a checkpoint in place through a memory mapping, as a read-only index whose
 // mutating verbs report StatusReadOnly; the files must stay unmodified while it lives.
 func ShapesViewRam(path string) (*ShapesIndex, error) {
-	lent := open[C.usearch_shapes_index_t]()
-	C.usearch_shapes_view_ram(&C.usearch_shapes_view_ram_t{
+	var lent lent[C.usearch_shapes_index_t]
+	arguments := open[C.usearch_shapes_view_ram_t](&lent)
+	*arguments = C.usearch_shapes_view_ram_t{
 		index:   lent.result,
-		outcome: lent.outcome,
+		outcome: lent.outcome(),
 		path:    lent.text(path),
-	})
-	return shapesIndexOf(block(lent))
+	}
+	C.usearch_shapes_view_ram(arguments)
+	return shapesIndexOf(block(&lent, nil))
 }
 
 // ShapesViewNvme serves a checkpoint in place from NVMe drives, read through the executor's
 // submission rings, as a read-only index.
 func ShapesViewNvme(path string, config *ShapesViewNvmeConfig) (*ShapesIndex, error) {
-	if config == nil {
-		config = new(ShapesViewNvmeConfig)
+	options := configOf(config)
+	executor, err := options.Executor.lower()
+	if err != nil {
+		return nil, err
 	}
-	executor, refusal := config.Executor.lower()
-	if refusal != nil {
-		return nil, refusal
-	}
-	lent := open[C.usearch_shapes_index_t]()
-	C.usearch_shapes_view_nvme(&C.usearch_shapes_view_nvme_t{
+	var lent lent[C.usearch_shapes_index_t]
+	arguments := open[C.usearch_shapes_view_nvme_t](&lent)
+	*arguments = C.usearch_shapes_view_nvme_t{
 		index:    lent.result,
 		executor: executor,
-		outcome:  lent.outcome,
+		outcome:  lent.outcome(),
 		path:     lent.text(path),
-		nvme:     lent.nvme(config.Paths, config.CPUClassCeiling),
-	})
-	return shapesIndexOf(block(lent))
+		nvme:     lent.nvme(options.Paths, options.CPUClassCeiling),
+	}
+	C.usearch_shapes_view_nvme(arguments)
+	return shapesIndexOf(block(&lent, nil))
 }
 
 // ShapesMetadataRead reads a checkpoint's metric and geometry without loading it.
-func ShapesMetadataRead(path string, config *DenseMetadataReadConfig) (ShapesMetadata, error) {
-	if config == nil {
-		config = new(DenseMetadataReadConfig)
+func ShapesMetadataRead(path string, config *ShapesMetadataReadConfig) (ShapesMetadata, error) {
+	options := configOf(config)
+	executor, err := options.Executor.lower()
+	if err != nil {
+		return ShapesMetadata{}, err
 	}
-	executor, refusal := config.Executor.lower()
-	if refusal != nil {
-		return ShapesMetadata{}, refusal
-	}
-	lent := open[ShapesMetadata]()
-	C.usearch_shapes_metadata_read(&C.usearch_shapes_metadata_read_t{
+	var lent lent[ShapesMetadata]
+	arguments := open[C.usearch_shapes_metadata_read_t](&lent)
+	*arguments = C.usearch_shapes_metadata_read_t{
 		executor: executor,
-		outcome:  lent.outcome,
+		outcome:  lent.outcome(),
 		path:     lent.text(path),
 		metadata: (*C.usearch_shapes_metadata_t)(unsafe.Pointer(lent.result)),
-	})
-	return block(lent)
+	}
+	C.usearch_shapes_metadata_read(arguments)
+	return block(&lent, nil)
 }
 
 // ShapesMetadataReadBuffer reads the metric and geometry out of a serialized monolith buffer.
-func ShapesMetadataReadBuffer(buffer []byte, config *DenseMetadataReadBufferConfig) (ShapesMetadata, error) {
-	if config == nil {
-		config = new(DenseMetadataReadBufferConfig)
+func ShapesMetadataReadBuffer(buffer []byte, config *ShapesMetadataReadBufferConfig) (ShapesMetadata, error) {
+	options := configOf(config)
+	executor, err := options.Executor.lower()
+	if err != nil {
+		return ShapesMetadata{}, err
 	}
-	executor, refusal := config.Executor.lower()
-	if refusal != nil {
-		return ShapesMetadata{}, refusal
-	}
-	lent := open[ShapesMetadata]()
-	C.usearch_shapes_metadata_read_buffer(&C.usearch_shapes_metadata_read_buffer_t{
+	var lent lent[ShapesMetadata]
+	arguments := open[C.usearch_shapes_metadata_read_buffer_t](&lent)
+	*arguments = C.usearch_shapes_metadata_read_buffer_t{
 		executor: executor,
-		outcome:  lent.outcome,
+		outcome:  lent.outcome(),
 		buffer:   lent.bytes(buffer),
 		metadata: (*C.usearch_shapes_metadata_t)(unsafe.Pointer(lent.result)),
-	})
-	return block(lent)
+	}
+	C.usearch_shapes_metadata_read_buffer(arguments)
+	return block(&lent, nil)
 }
 
 // endregion: Index
@@ -482,21 +649,11 @@ func ShapesMetadataReadBuffer(buffer []byte, config *DenseMetadataReadBufferConf
 
 // shapesReceiver is an index and the executor its verbs run on, nil for the calling goroutine.
 type shapesReceiver struct {
-	index    *ShapesIndex
-	executor *Executor
-}
-
-// lower reports the handles a verb hands across, refusing a closed index before C dereferences it.
-func (receiver shapesReceiver) lower() (C.usearch_shapes_index_t, C.usearch_executor_t, *Error) {
-	if receiver.index == nil || receiver.index.handle == nil {
-		return nil, nil, fail(StatusUninitialized, "the index is closed or was never initialized")
-	}
-	executor, refusal := receiver.executor.lower()
-	return receiver.index.handle, executor, refusal
+	receiver[C.usearch_shapes_index_t]
 }
 
 // ShapesIndexOn is the receiver whose verbs block until their call is final: on the calling
-// goroutine when embedded in a ShapesIndex, and on an executor when ShapesIndex.On makes it.
+// goroutine when embedded in a ShapesIndex, and on an executor when ShapesIndexOn.On makes it.
 // Binding-only.
 type ShapesIndexOn struct {
 	shapesReceiver
@@ -504,7 +661,7 @@ type ShapesIndexOn struct {
 
 // ShapesIndexDeferredOn is the receiver whose verbs submit their calls to an executor and answer
 // a Deferred, offering every verb of ShapesIndexOn with the same arguments but the blocking-only
-// sugar and cursors. Binding-only.
+// sugar. Binding-only.
 //
 // The library reads a deferred call's inputs until the call is final, so the slices a verb is
 // handed must not change until then; its arena is borrowed, as a blocking verb borrows it.
@@ -512,48 +669,69 @@ type ShapesIndexDeferredOn struct {
 	shapesReceiver
 }
 
+// On is the receiver whose verbs block on executor. Binding-only.
+func (on ShapesIndexOn) On(executor *Executor) ShapesIndexOn {
+	on.executor = executor
+	return on
+}
+
+// Deferred is the receiver whose verbs submit their calls to executor, each answering a Deferred
+// from the same arguments, or the refusal it caught before submitting anything. Binding-only.
+func (on ShapesIndexOn) Deferred(executor *Executor) ShapesIndexDeferredOn {
+	on.executor = executor
+	return ShapesIndexDeferredOn{on.shapesReceiver}
+}
+
 // Reserve claims capacity for a number of incoming entries and the points they hold, ahead of
 // insertion. Both are desired totals, including what the index holds.
 func (on ShapesIndexOn) Reserve(entries, points uint) error {
-	_, err := block(on.reserve(C.usearch_completion_blocking_k, entries, points))
+	var lent lent[struct{}]
+	_, err := block(&lent, on.reserve(&lent, C.usearch_completion_blocking_k, entries, points))
 	return err
 }
 
 // Reserve submits ShapesIndexOn.Reserve.
-func (on ShapesIndexDeferredOn) Reserve(entries, points uint) *Deferred[struct{}] {
-	return submitted(on.reserve(C.usearch_completion_deferred_k, entries, points))
+func (on ShapesIndexDeferredOn) Reserve(entries, points uint) (*Deferred[struct{}], error) {
+	deferred := new(Deferred[struct{}])
+	return submitted(deferred, on.reserve(&deferred.lent, C.usearch_completion_deferred_k, entries, points))
 }
 
 // Clear erases all entries, keeping the reserved capacity. No other verb may overlap it on the
 // same handle.
 func (on ShapesIndexOn) Clear() error {
-	_, err := block(on.clear(C.usearch_completion_blocking_k))
+	var lent lent[struct{}]
+	_, err := block(&lent, on.clear(&lent, C.usearch_completion_blocking_k))
 	return err
 }
 
 // Clear submits ShapesIndexOn.Clear.
-func (on ShapesIndexDeferredOn) Clear() *Deferred[struct{}] {
-	return submitted(on.clear(C.usearch_completion_deferred_k))
+func (on ShapesIndexDeferredOn) Clear() (*Deferred[struct{}], error) {
+	deferred := new(Deferred[struct{}])
+	return submitted(deferred, on.clear(&deferred.lent, C.usearch_completion_deferred_k))
 }
 
 // Describe reports the frozen metadata and the current counters in one call.
 func (on ShapesIndexOn) Describe() (ShapesIndexDescription, error) {
-	return block(on.describe(C.usearch_completion_blocking_k))
+	var lent lent[ShapesIndexDescription]
+	return block(&lent, on.describe(&lent, C.usearch_completion_blocking_k))
 }
 
 // Describe submits ShapesIndexOn.Describe.
-func (on ShapesIndexDeferredOn) Describe() *Deferred[ShapesIndexDescription] {
-	return submitted(on.describe(C.usearch_completion_deferred_k))
+func (on ShapesIndexDeferredOn) Describe() (*Deferred[ShapesIndexDescription], error) {
+	deferred := new(Deferred[ShapesIndexDescription])
+	return submitted(deferred, on.describe(&deferred.lent, C.usearch_completion_deferred_k))
 }
 
 // Count reports how many entries are stored under a key, with the extent of their points.
 func (on ShapesIndexOn) Count(key Key) (ShapesKeyStats, error) {
-	return block(on.count(C.usearch_completion_blocking_k, key))
+	var lent lent[ShapesKeyStats]
+	return block(&lent, on.count(&lent, C.usearch_completion_blocking_k, key))
 }
 
 // Count submits ShapesIndexOn.Count.
-func (on ShapesIndexDeferredOn) Count(key Key) *Deferred[ShapesKeyStats] {
-	return submitted(on.count(C.usearch_completion_deferred_k, key))
+func (on ShapesIndexDeferredOn) Count(key Key) (*Deferred[ShapesKeyStats], error) {
+	deferred := new(Deferred[ShapesKeyStats])
+	return submitted(deferred, on.count(&deferred.lent, C.usearch_completion_deferred_k, key))
 }
 
 // Contains reports whether the index holds at least one entry under a key, as a nonzero Count.
@@ -568,375 +746,405 @@ func (on ShapesIndexOn) Contains(key Key) (bool, error) {
 //
 // The call rewinds arena, and the tape stays readable until it serves another call.
 func (on ShapesIndexOn) Get(key Key, outputsScalar Scalar, arena *Arena) (TapeView, error) {
-	return block(on.get(C.usearch_completion_blocking_k, key, outputsScalar, arena))
+	var lent lent[TapeView]
+	return block(&lent, on.get(&lent, C.usearch_completion_blocking_k, key, outputsScalar, arena))
 }
 
 // Get submits ShapesIndexOn.Get.
-func (on ShapesIndexDeferredOn) Get(key Key, outputsScalar Scalar, arena *Arena) *Deferred[TapeView] {
-	return submitted(on.get(C.usearch_completion_deferred_k, key, outputsScalar, arena))
+func (on ShapesIndexDeferredOn) Get(key Key, outputsScalar Scalar, arena *Arena) (*Deferred[TapeView], error) {
+	deferred := new(Deferred[TapeView])
+	return submitted(deferred, on.get(&deferred.lent, C.usearch_completion_deferred_k, key, outputsScalar, arena))
 }
 
 // Insert adds a tape of shapes under their keys - the native batch operation, where a single
 // shape is a one-entry tape. The points' scalar type is independent of the stored quantization,
 // and a batch is all-or-nothing and becomes visible at once.
-func (on ShapesIndexOn) Insert(keys []Key, shapes Tape, config *DenseInsertConfig) error {
-	_, err := block(on.insert(C.usearch_completion_blocking_k, keys, shapes, config))
+func (on ShapesIndexOn) Insert(keys []Key, shapes Tape, config *ShapesInsertConfig) error {
+	var lent lent[struct{}]
+	_, err := block(&lent, on.insert(&lent, C.usearch_completion_blocking_k, keys, shapes, config))
 	return err
 }
 
 // Insert submits ShapesIndexOn.Insert.
-func (on ShapesIndexDeferredOn) Insert(keys []Key, shapes Tape, config *DenseInsertConfig) *Deferred[struct{}] {
-	return submitted(on.insert(C.usearch_completion_deferred_k, keys, shapes, config))
+func (on ShapesIndexDeferredOn) Insert(keys []Key, shapes Tape, config *ShapesInsertConfig) (*Deferred[struct{}],
+	error) {
+	deferred := new(Deferred[struct{}])
+	return submitted(deferred, on.insert(&deferred.lent, C.usearch_completion_deferred_k, keys, shapes, config))
 }
 
 // Refine re-selects the neighbors of every stored entry against the finished graph, as the dense
-// Refine does; a caller repeats rounds until the report's Verdict reads DenseRefineConverged.
-func (on ShapesIndexOn) Refine(config *ShapesRefineConfig) (DenseRefineReport, error) {
-	return block(on.refine(C.usearch_completion_blocking_k, config))
+// Refine does; a caller repeats rounds until the report's Verdict reads RefineConverged.
+func (on ShapesIndexOn) Refine(config *ShapesRefineConfig) (RefineReport, error) {
+	var lent lent[RefineReport]
+	return block(&lent, on.refine(&lent, C.usearch_completion_blocking_k, config))
 }
 
 // Refine submits ShapesIndexOn.Refine.
-func (on ShapesIndexDeferredOn) Refine(config *ShapesRefineConfig) *Deferred[DenseRefineReport] {
-	return submitted(on.refine(C.usearch_completion_deferred_k, config))
+func (on ShapesIndexDeferredOn) Refine(config *ShapesRefineConfig) (*Deferred[RefineReport], error) {
+	deferred := new(Deferred[RefineReport])
+	return submitted(deferred, on.refine(&deferred.lent, C.usearch_completion_deferred_k, config))
 }
 
 // Health measures how much of the graph a search reaches from the root. Read-only.
-func (on ShapesIndexOn) Health() (DenseReachability, error) {
-	return block(on.health(C.usearch_completion_blocking_k))
+func (on ShapesIndexOn) Health() (Reachability, error) {
+	var lent lent[Reachability]
+	return block(&lent, on.health(&lent, C.usearch_completion_blocking_k))
 }
 
 // Health submits ShapesIndexOn.Health.
-func (on ShapesIndexDeferredOn) Health() *Deferred[DenseReachability] {
-	return submitted(on.health(C.usearch_completion_deferred_k))
+func (on ShapesIndexDeferredOn) Health() (*Deferred[Reachability], error) {
+	deferred := new(Deferred[Reachability])
+	return submitted(deferred, on.health(&deferred.lent, C.usearch_completion_deferred_k))
 }
 
 // Search resolves a tape of queries into up to wanted nearest matches apiece, written into arena,
 // and filtered when the config carries a predicate. Never writes to the graph.
-func (on ShapesIndexOn) Search(queries Tape, wanted uint, arena *Arena, config *DenseSearchConfig) (MatchesView, error) {
-	return block(on.search(C.usearch_completion_blocking_k, queries, wanted, arena, config))
+func (on ShapesIndexOn) Search(queries Tape, wanted uint, arena *Arena, config *ShapesSearchConfig) (MatchesView,
+	error) {
+	var lent lent[MatchesView]
+	return block(&lent, on.search(&lent, C.usearch_completion_blocking_k, queries, wanted, arena, config))
 }
 
 // Search submits ShapesIndexOn.Search.
 func (on ShapesIndexDeferredOn) Search(queries Tape, wanted uint, arena *Arena,
-	config *DenseSearchConfig) *Deferred[MatchesView] {
-	return submitted(on.search(C.usearch_completion_deferred_k, queries, wanted, arena, config))
+	config *ShapesSearchConfig) (*Deferred[MatchesView], error) {
+	deferred := new(Deferred[MatchesView])
+	return submitted(deferred, on.search(&deferred.lent, C.usearch_completion_deferred_k, queries, wanted, arena,
+		config))
 }
 
 // Reshard moves the entries of sources into targets, keeping their links rather than re-inserting
 // them, then runs a round on every target that took entries: several sources gather into one
 // target, and one source cuts into one graph-local part per target. The receiver contributes only
 // its executor, and a refusal moves nothing.
-func (on ShapesIndexOn) Reshard(sources, targets []*ShapesIndex, config *ShapesReshardConfig) (DenseRefineReport, error) {
-	return block(on.reshard(C.usearch_completion_blocking_k, sources, targets, config))
+func (on ShapesIndexOn) Reshard(sources, targets []*ShapesIndex, config *ShapesReshardConfig) (RefineReport, error) {
+	var lent lent[RefineReport]
+	return block(&lent, on.reshard(&lent, C.usearch_completion_blocking_k, sources, targets, config))
 }
 
 // Reshard submits ShapesIndexOn.Reshard.
 func (on ShapesIndexDeferredOn) Reshard(sources, targets []*ShapesIndex,
-	config *ShapesReshardConfig) *Deferred[DenseRefineReport] {
-	return submitted(on.reshard(C.usearch_completion_deferred_k, sources, targets, config))
+	config *ShapesReshardConfig) (*Deferred[RefineReport], error) {
+	deferred := new(Deferred[RefineReport])
+	return submitted(deferred, on.reshard(&deferred.lent, C.usearch_completion_deferred_k, sources, targets, config))
 }
 
 // RefinePlanFinish closes a live refine plan and frees it whatever the call answers, reporting
 // what the whole plan did to the graph.
-func (on ShapesIndexOn) RefinePlanFinish(plan *ShapesRefinePlan) (DenseRefineReport, error) {
-	return block(on.refinePlanFinish(C.usearch_completion_blocking_k, plan))
+func (on ShapesIndexOn) RefinePlanFinish(plan *ShapesRefinePlan) (RefineReport, error) {
+	var lent lent[RefineReport]
+	return block(&lent, on.refinePlanFinish(&lent, C.usearch_completion_blocking_k, plan))
 }
 
 // RefinePlanFinish submits ShapesIndexOn.RefinePlanFinish.
-func (on ShapesIndexDeferredOn) RefinePlanFinish(plan *ShapesRefinePlan) *Deferred[DenseRefineReport] {
-	return submitted(on.refinePlanFinish(C.usearch_completion_deferred_k, plan))
+func (on ShapesIndexDeferredOn) RefinePlanFinish(plan *ShapesRefinePlan) (*Deferred[RefineReport], error) {
+	deferred := new(Deferred[RefineReport])
+	return submitted(deferred, on.refinePlanFinish(&deferred.lent, C.usearch_completion_deferred_k, plan))
 }
 
 // ReshardPlanFinish closes a live reshard plan on this receiver's executor and frees it whatever
 // the call answers, reporting what the whole plan did.
-func (on ShapesIndexOn) ReshardPlanFinish(plan *ShapesReshardPlan) (DenseRefineReport, error) {
-	return block(on.reshardPlanFinish(C.usearch_completion_blocking_k, plan))
+func (on ShapesIndexOn) ReshardPlanFinish(plan *ShapesReshardPlan) (RefineReport, error) {
+	var lent lent[RefineReport]
+	return block(&lent, on.reshardPlanFinish(&lent, C.usearch_completion_blocking_k, plan))
 }
 
 // ReshardPlanFinish submits ShapesIndexOn.ReshardPlanFinish.
-func (on ShapesIndexDeferredOn) ReshardPlanFinish(plan *ShapesReshardPlan) *Deferred[DenseRefineReport] {
-	return submitted(on.reshardPlanFinish(C.usearch_completion_deferred_k, plan))
+func (on ShapesIndexDeferredOn) ReshardPlanFinish(plan *ShapesReshardPlan) (*Deferred[RefineReport], error) {
+	deferred := new(Deferred[RefineReport])
+	return submitted(deferred, on.reshardPlanFinish(&deferred.lent, C.usearch_completion_deferred_k, plan))
 }
 
 // Sample draws up to wanted keys around the config's Focus, or across the whole index, each
 // hanging from a shown or earlier draw and placed in three dimensions beside the shown ones.
-func (on ShapesIndexOn) Sample(wanted uint, arena *Arena, config *DenseSampleConfig) (DenseDraws, error) {
-	return block(on.sample(C.usearch_completion_blocking_k, wanted, arena, config))
+func (on ShapesIndexOn) Sample(wanted uint, arena *Arena, config *ShapesSampleConfig) (DenseDraws, error) {
+	var lent lent[DenseDraws]
+	return block(&lent, on.sample(&lent, C.usearch_completion_blocking_k, wanted, arena, config))
 }
 
 // Sample submits ShapesIndexOn.Sample.
-func (on ShapesIndexDeferredOn) Sample(wanted uint, arena *Arena, config *DenseSampleConfig) *Deferred[DenseDraws] {
-	return submitted(on.sample(C.usearch_completion_deferred_k, wanted, arena, config))
+func (on ShapesIndexDeferredOn) Sample(wanted uint, arena *Arena, config *ShapesSampleConfig) (*Deferred[DenseDraws],
+	error) {
+	deferred := new(Deferred[DenseDraws])
+	return submitted(deferred, on.sample(&deferred.lent, C.usearch_completion_deferred_k, wanted, arena, config))
 }
 
 // Save writes the index under a path, in the layout its extension picks - one .safegraphs
 // monolith, or a .safegraphs.json manifest beside its shards.
-func (on ShapesIndexOn) Save(path string, config *DenseSaveConfig) error {
-	_, err := block(on.save(C.usearch_completion_blocking_k, path, config))
+func (on ShapesIndexOn) Save(path string, config *ShapesSaveConfig) error {
+	var lent lent[struct{}]
+	_, err := block(&lent, on.save(&lent, C.usearch_completion_blocking_k, path, config))
 	return err
 }
 
 // Save submits ShapesIndexOn.Save.
-func (on ShapesIndexDeferredOn) Save(path string, config *DenseSaveConfig) *Deferred[struct{}] {
-	return submitted(on.save(C.usearch_completion_deferred_k, path, config))
+func (on ShapesIndexDeferredOn) Save(path string, config *ShapesSaveConfig) (*Deferred[struct{}], error) {
+	deferred := new(Deferred[struct{}])
+	return submitted(deferred, on.save(&deferred.lent, C.usearch_completion_deferred_k, path, config))
 }
 
 // SaveBuffer serializes the index as one monolith into arena.
-func (on ShapesIndexOn) SaveBuffer(arena *Arena, config *DenseSaveBufferConfig) (Monolith, error) {
-	return block(on.saveBuffer(C.usearch_completion_blocking_k, arena, config))
+func (on ShapesIndexOn) SaveBuffer(arena *Arena, config *ShapesSaveBufferConfig) (Monolith, error) {
+	var lent lent[Monolith]
+	return block(&lent, on.saveBuffer(&lent, C.usearch_completion_blocking_k, arena, config))
 }
 
 // SaveBuffer submits ShapesIndexOn.SaveBuffer.
-func (on ShapesIndexDeferredOn) SaveBuffer(arena *Arena, config *DenseSaveBufferConfig) *Deferred[Monolith] {
-	return submitted(on.saveBuffer(C.usearch_completion_deferred_k, arena, config))
+func (on ShapesIndexDeferredOn) SaveBuffer(arena *Arena, config *ShapesSaveBufferConfig) (*Deferred[Monolith], error) {
+	deferred := new(Deferred[Monolith])
+	return submitted(deferred, on.saveBuffer(&deferred.lent, C.usearch_completion_deferred_k, arena, config))
 }
 
 // endregion: Receivers
 
 // region: Calls
 
-func (receiver shapesReceiver) reserve(completion C.usearch_completion_t, entries, points uint) *lent[struct{}] {
-	lent := open[struct{}]()
-	index, executor, refusal := receiver.lower()
-	if refusal != nil {
-		return lent.refuse(refusal)
+func (receiver shapesReceiver) reserve(lent *lent[struct{}], completion C.usearch_completion_t, entries,
+	points uint) error {
+	index, executor, err := receiver.lower()
+	if err != nil {
+		return err
 	}
-	C.usearch_shapes_reserve(&C.usearch_shapes_reserve_t{
+	arguments := open[C.usearch_shapes_reserve_t](lent)
+	*arguments = C.usearch_shapes_reserve_t{
 		index:      index,
 		executor:   executor,
-		outcome:    lent.outcome,
+		outcome:    lent.outcome(),
 		completion: completion,
 		entries:    C.size_t(entries),
 		points:     C.size_t(points),
-	})
-	return lent
+	}
+	C.usearch_shapes_reserve(arguments)
+	return nil
 }
 
-func (receiver shapesReceiver) clear(completion C.usearch_completion_t) *lent[struct{}] {
-	lent := open[struct{}]()
-	index, executor, refusal := receiver.lower()
-	if refusal != nil {
-		return lent.refuse(refusal)
+func (receiver shapesReceiver) clear(lent *lent[struct{}], completion C.usearch_completion_t) error {
+	index, executor, err := receiver.lower()
+	if err != nil {
+		return err
 	}
-	C.usearch_shapes_clear(&C.usearch_shapes_clear_t{
+	arguments := open[C.usearch_shapes_clear_t](lent)
+	*arguments = C.usearch_shapes_clear_t{
 		index:      index,
 		executor:   executor,
-		outcome:    lent.outcome,
+		outcome:    lent.outcome(),
 		completion: completion,
-	})
-	return lent
+	}
+	C.usearch_shapes_clear(arguments)
+	return nil
 }
 
-func (receiver shapesReceiver) describe(completion C.usearch_completion_t) *lent[ShapesIndexDescription] {
-	lent := open[ShapesIndexDescription]()
-	index, executor, refusal := receiver.lower()
-	if refusal != nil {
-		return lent.refuse(refusal)
+func (receiver shapesReceiver) describe(lent *lent[ShapesIndexDescription], completion C.usearch_completion_t) error {
+	index, executor, err := receiver.lower()
+	if err != nil {
+		return err
 	}
-	C.usearch_shapes_describe(&C.usearch_shapes_describe_t{
+	arguments := open[C.usearch_shapes_describe_t](lent)
+	*arguments = C.usearch_shapes_describe_t{
 		index:       index,
 		executor:    executor,
-		outcome:     lent.outcome,
+		outcome:     lent.outcome(),
 		completion:  completion,
 		description: (*C.usearch_shapes_index_description_t)(unsafe.Pointer(lent.result)),
-	})
-	return lent
+	}
+	C.usearch_shapes_describe(arguments)
+	return nil
 }
 
-func (receiver shapesReceiver) count(completion C.usearch_completion_t, key Key) *lent[ShapesKeyStats] {
-	lent := open[ShapesKeyStats]()
-	index, executor, refusal := receiver.lower()
-	if refusal != nil {
-		return lent.refuse(refusal)
+func (receiver shapesReceiver) count(lent *lent[ShapesKeyStats], completion C.usearch_completion_t, key Key) error {
+	index, executor, err := receiver.lower()
+	if err != nil {
+		return err
 	}
-	C.usearch_shapes_count(&C.usearch_shapes_count_t{
+	arguments := open[C.usearch_shapes_count_t](lent)
+	*arguments = C.usearch_shapes_count_t{
 		index:      index,
 		executor:   executor,
-		outcome:    lent.outcome,
+		outcome:    lent.outcome(),
 		completion: completion,
 		key:        key.toRaw(),
 		key_stats:  (*C.usearch_shapes_key_stats_t)(unsafe.Pointer(lent.result)),
-	})
-	return lent
+	}
+	C.usearch_shapes_count(arguments)
+	return nil
 }
 
-func (receiver shapesReceiver) get(completion C.usearch_completion_t, key Key, outputsScalar Scalar,
-	arena *Arena) *lent[TapeView] {
-	lent := open[TapeView]()
-	index, executor, refusal := receiver.lower()
-	if refusal != nil {
-		return lent.refuse(refusal)
+func (receiver shapesReceiver) get(lent *lent[TapeView], completion C.usearch_completion_t, key Key,
+	outputsScalar Scalar, arena *Arena) error {
+	index, executor, outputs, err := receiver.lowerInto(arena)
+	if err != nil {
+		return err
 	}
+	arguments := open[C.usearch_shapes_get_t](lent)
 	lent.result.width = 3
-	C.usearch_shapes_get(&C.usearch_shapes_get_t{
+	*arguments = C.usearch_shapes_get_t{
 		index:          index,
 		executor:       executor,
-		outcome:        lent.outcome,
+		outcome:        lent.outcome(),
 		completion:     completion,
 		key:            key.toRaw(),
 		shapes:         &lent.result.raw,
 		written:        (*C.size_t)(unsafe.Pointer(&lent.result.written)),
-		arena:          arena.lower(),
+		arena:          outputs,
 		outputs_scalar: C.usearch_scalar_t(outputsScalar),
-	})
-	return lent
+	}
+	C.usearch_shapes_get(arguments)
+	return nil
 }
 
-func (receiver shapesReceiver) insert(completion C.usearch_completion_t, keys []Key, shapes Tape,
-	config *DenseInsertConfig) *lent[struct{}] {
-	if config == nil {
-		config = new(DenseInsertConfig)
-	}
-	lent := open[struct{}]()
-	index, executor, refusal := receiver.lower()
-	if refusal != nil {
-		return lent.refuse(refusal)
+func (receiver shapesReceiver) insert(lent *lent[struct{}], completion C.usearch_completion_t, keys []Key, shapes Tape,
+	config *ShapesInsertConfig) error {
+	options := configOf(config)
+	index, executor, err := receiver.lower()
+	if err != nil {
+		return err
 	}
 	// The call has one count, so only this side sees the keys and the entries disagree.
 	if uint(len(keys)) != shapes.Entries() {
-		return lent.refuse(fail(StatusShapeMismatch, "the key count does not match the tape's entries"))
+		return fail(StatusShapeMismatch, "the key count does not match the tape's entries")
 	}
-	C.usearch_shapes_insert(&C.usearch_shapes_insert_t{
+	arguments := open[C.usearch_shapes_insert_t](lent)
+	*arguments = C.usearch_shapes_insert_t{
 		index:            index,
 		executor:         executor,
-		outcome:          lent.outcome,
+		outcome:          lent.outcome(),
 		completion:       completion,
 		count:            C.size_t(len(keys)),
 		keys:             lent.keys(keys),
 		shapes:           shapes.lower(&lent.call),
-		expansion_factor: C.size_t(config.ExpansionFactor),
-		progress:         lent.progress(config.Progress, config.ProgressSteps),
-		stats:            lent.stats(config.Stats),
-	})
-	return lent
+		expansion_factor: C.size_t(options.ExpansionFactor),
+		progress:         lent.progress(options.Progress, options.ProgressSteps),
+		stats:            lent.stats(options.Stats),
+	}
+	C.usearch_shapes_insert(arguments)
+	return nil
 }
 
-func (receiver shapesReceiver) refine(completion C.usearch_completion_t,
-	config *ShapesRefineConfig) *lent[DenseRefineReport] {
-	if config == nil {
-		config = new(ShapesRefineConfig)
+func (receiver shapesReceiver) refine(lent *lent[RefineReport], completion C.usearch_completion_t,
+	config *ShapesRefineConfig) error {
+	options := configOf(config)
+	index, executor, err := receiver.lower()
+	if err != nil {
+		return err
 	}
-	lent := open[DenseRefineReport]()
-	index, executor, refusal := receiver.lower()
-	if refusal != nil {
-		return lent.refuse(refusal)
-	}
-	plan, phase := config.Plan.lower(&lent.call)
-	C.usearch_shapes_refine(&C.usearch_shapes_refine_t{
+	arguments := open[C.usearch_shapes_refine_t](lent)
+	plan, phase := options.Plan.lower(&lent.call)
+	*arguments = C.usearch_shapes_refine_t{
 		index:      index,
 		executor:   executor,
-		outcome:    lent.outcome,
+		outcome:    lent.outcome(),
 		completion: completion,
 		report:     (*C.usearch_refine_report_t)(unsafe.Pointer(lent.result)),
 		refine: C.usearch_refine_options_t{
-			expansion_factor: C.size_t(config.ExpansionFactor),
-			memory_limit:     C.size_t(config.MemoryLimit),
+			expansion_factor: C.size_t(options.ExpansionFactor),
+			memory_limit:     C.size_t(options.MemoryLimit),
 		},
-		progress: lent.progress(config.Progress, config.ProgressSteps),
-		stats:    lent.stats(config.Stats),
+		progress: lent.progress(options.Progress, options.ProgressSteps),
+		stats:    lent.stats(options.Stats),
 		plan:     plan,
 		phase:    phase,
-	})
-	return lent
+	}
+	C.usearch_shapes_refine(arguments)
+	return nil
 }
 
-func (receiver shapesReceiver) refinePlanFinish(completion C.usearch_completion_t,
-	plan *ShapesRefinePlan) *lent[DenseRefineReport] {
-	lent := open[DenseRefineReport]()
-	index, executor, refusal := receiver.lower()
-	if refusal != nil {
-		return lent.refuse(refusal)
+func (receiver shapesReceiver) refinePlanFinish(lent *lent[RefineReport], completion C.usearch_completion_t,
+	plan *ShapesRefinePlan) error {
+	index, executor, err := receiver.lower()
+	if err != nil {
+		return err
 	}
-	C.usearch_shapes_refine_plan_finish(&C.usearch_shapes_refine_plan_finish_t{
+	arguments := open[C.usearch_shapes_refine_plan_finish_t](lent)
+	*arguments = C.usearch_shapes_refine_plan_finish_t{
 		index:      index,
 		executor:   executor,
-		outcome:    lent.outcome,
+		outcome:    lent.outcome(),
 		completion: completion,
 		plan:       plan.take(),
 		report:     (*C.usearch_refine_report_t)(unsafe.Pointer(lent.result)),
-	})
-	return lent
+	}
+	C.usearch_shapes_refine_plan_finish(arguments)
+	return nil
 }
 
-func (receiver shapesReceiver) health(completion C.usearch_completion_t) *lent[DenseReachability] {
-	lent := open[DenseReachability]()
-	index, executor, refusal := receiver.lower()
-	if refusal != nil {
-		return lent.refuse(refusal)
+func (receiver shapesReceiver) health(lent *lent[Reachability], completion C.usearch_completion_t) error {
+	index, executor, err := receiver.lower()
+	if err != nil {
+		return err
 	}
-	C.usearch_shapes_health(&C.usearch_shapes_health_t{
+	arguments := open[C.usearch_shapes_health_t](lent)
+	*arguments = C.usearch_shapes_health_t{
 		index:        index,
 		executor:     executor,
-		outcome:      lent.outcome,
+		outcome:      lent.outcome(),
 		completion:   completion,
 		reachability: (*C.usearch_reachability_t)(unsafe.Pointer(lent.result)),
-	})
-	return lent
+	}
+	C.usearch_shapes_health(arguments)
+	return nil
 }
 
-func (receiver shapesReceiver) search(completion C.usearch_completion_t, queries Tape, wanted uint,
-	arena *Arena, config *DenseSearchConfig) *lent[MatchesView] {
-	if config == nil {
-		config = new(DenseSearchConfig)
+func (receiver shapesReceiver) search(lent *lent[MatchesView], completion C.usearch_completion_t, queries Tape,
+	wanted uint, arena *Arena, config *ShapesSearchConfig) error {
+	options := configOf(config)
+	index, executor, outputs, err := receiver.lowerInto(arena)
+	if err != nil {
+		return err
 	}
-	lent := open[MatchesView]()
-	index, executor, refusal := receiver.lower()
-	if refusal != nil {
-		return lent.refuse(refusal)
-	}
+	arguments := open[C.usearch_shapes_search_t](lent)
 	lent.result.queries = queries.Entries()
-	C.usearch_shapes_search(&C.usearch_shapes_search_t{
+	*arguments = C.usearch_shapes_search_t{
 		index:            index,
 		executor:         executor,
-		outcome:          lent.outcome,
+		outcome:          lent.outcome(),
 		completion:       completion,
 		count:            C.size_t(queries.Entries()),
 		queries:          queries.lower(&lent.call),
 		matches:          &lent.result.raw,
-		arena:            arena.lower(),
+		arena:            outputs,
 		wanted:           C.size_t(wanted),
-		expansion_factor: C.size_t(config.ExpansionFactor),
-		traversal:        C.usearch_traversal_t(config.Traversal),
-		predicate:        lent.predicate(config.Predicate),
-		progress:         lent.progress(config.Progress, config.ProgressSteps),
-		stats:            lent.stats(config.Stats),
-	})
-	return lent
+		expansion_factor: C.size_t(options.ExpansionFactor),
+		traversal:        C.usearch_traversal_t(options.Traversal),
+		predicate:        lent.predicate(options.Predicate),
+		progress:         lent.progress(options.Progress, options.ProgressSteps),
+		stats:            lent.stats(options.Stats),
+	}
+	C.usearch_shapes_search(arguments)
+	return nil
 }
 
-func (receiver shapesReceiver) reshard(completion C.usearch_completion_t, sources, targets []*ShapesIndex,
-	config *ShapesReshardConfig) *lent[DenseRefineReport] {
-	if config == nil {
-		config = new(ShapesReshardConfig)
-	}
-	lent := open[DenseRefineReport]()
+func (receiver shapesReceiver) reshard(lent *lent[RefineReport], completion C.usearch_completion_t, sources,
+	targets []*ShapesIndex, config *ShapesReshardConfig) error {
+	options := configOf(config)
 	// A reshard names its handles in its lists, so the receiver lends only its executor.
-	executor, refusal := receiver.executor.lower()
-	if refusal != nil {
-		return lent.refuse(refusal)
+	executor, err := receiver.executor.lower()
+	if err != nil {
+		return err
 	}
 	sourceHandles, targetHandles := shapesHandles(sources), shapesHandles(targets)
-	plan, phase := config.Plan.lower(&lent.call)
-	C.usearch_shapes_reshard(&C.usearch_shapes_reshard_t{
+	arguments := open[C.usearch_shapes_reshard_t](lent)
+	plan, phase := options.Plan.lower(&lent.call)
+	*arguments = C.usearch_shapes_reshard_t{
 		sources_count: C.size_t(len(sourceHandles)),
-		sources:       lend(&lent.call, sourceHandles),
+		sources:       (*C.usearch_shapes_index_t)(lent.lend(unsafe.Pointer(unsafe.SliceData(sourceHandles)), len(sourceHandles))),
 		targets_count: C.size_t(len(targetHandles)),
-		targets:       lend(&lent.call, targetHandles),
+		targets:       (*C.usearch_shapes_index_t)(lent.lend(unsafe.Pointer(unsafe.SliceData(targetHandles)), len(targetHandles))),
 		executor:      executor,
-		outcome:       lent.outcome,
+		outcome:       lent.outcome(),
 		completion:    completion,
 		report:        (*C.usearch_refine_report_t)(unsafe.Pointer(lent.result)),
 		refine: C.usearch_refine_options_t{
-			expansion_factor: C.size_t(config.ExpansionFactor),
-			memory_limit:     C.size_t(config.MemoryLimit),
+			expansion_factor: C.size_t(options.ExpansionFactor),
+			memory_limit:     C.size_t(options.MemoryLimit),
 		},
-		seed:     C.uint64_t(config.Seed),
-		progress: lent.progress(config.Progress, config.ProgressSteps),
-		stats:    lent.stats(config.Stats),
+		seed:     C.uint64_t(options.Seed),
+		progress: lent.progress(options.Progress, options.ProgressSteps),
+		stats:    lent.stats(options.Stats),
 		plan:     plan,
 		phase:    phase,
-	})
-	return lent
+	}
+	C.usearch_shapes_reshard(arguments)
+	return nil
 }
 
 // shapesHandles lists the handles of indexes.
@@ -948,175 +1156,191 @@ func shapesHandles(indexes []*ShapesIndex) []C.usearch_shapes_index_t {
 	return handles
 }
 
-func (receiver shapesReceiver) reshardPlanFinish(completion C.usearch_completion_t,
-	plan *ShapesReshardPlan) *lent[DenseRefineReport] {
-	lent := open[DenseRefineReport]()
+func (receiver shapesReceiver) reshardPlanFinish(lent *lent[RefineReport], completion C.usearch_completion_t,
+	plan *ShapesReshardPlan) error {
 	// A reshard names its handles in its lists, so the receiver lends only its executor.
-	executor, refusal := receiver.executor.lower()
-	if refusal != nil {
-		return lent.refuse(refusal)
+	executor, err := receiver.executor.lower()
+	if err != nil {
+		return err
 	}
-	C.usearch_shapes_reshard_plan_finish(&C.usearch_shapes_reshard_plan_finish_t{
+	arguments := open[C.usearch_shapes_reshard_plan_finish_t](lent)
+	*arguments = C.usearch_shapes_reshard_plan_finish_t{
 		executor:   executor,
-		outcome:    lent.outcome,
+		outcome:    lent.outcome(),
 		completion: completion,
 		plan:       plan.take(),
 		report:     (*C.usearch_refine_report_t)(unsafe.Pointer(lent.result)),
-	})
-	return lent
+	}
+	C.usearch_shapes_reshard_plan_finish(arguments)
+	return nil
 }
 
-func (receiver shapesReceiver) sample(completion C.usearch_completion_t, wanted uint, arena *Arena,
-	config *DenseSampleConfig) *lent[DenseDraws] {
-	if config == nil {
-		config = new(DenseSampleConfig)
-	}
-	lent := open[DenseDraws]()
-	index, executor, refusal := receiver.lower()
-	if refusal != nil {
-		return lent.refuse(refusal)
+func (receiver shapesReceiver) sample(lent *lent[DenseDraws], completion C.usearch_completion_t, wanted uint,
+	arena *Arena, config *ShapesSampleConfig) error {
+	options := configOf(config)
+	index, executor, outputs, err := receiver.lowerInto(arena)
+	if err != nil {
+		return err
 	}
 	// The call has one count for both, so only this side sees the keys and their places disagree.
-	if len(config.Shown) != len(config.ShownCoordinates) {
-		return lent.refuse(fail(StatusShapeMismatch, "the shown keys and coordinates disagree in length"))
+	if len(options.Shown) != len(options.ShownCoordinates) {
+		return fail(StatusShapeMismatch, "the shown keys and coordinates disagree in length")
 	}
-	C.usearch_shapes_sample(&C.usearch_shapes_sample_t{
+	arguments := open[C.usearch_shapes_sample_t](lent)
+	*arguments = C.usearch_shapes_sample_t{
 		index:             index,
 		executor:          executor,
-		outcome:           lent.outcome,
+		outcome:           lent.outcome(),
 		completion:        completion,
-		shown_count:       C.size_t(len(config.Shown)),
-		shown:             lent.keys(config.Shown),
-		shown_coordinates: lent.points(config.ShownCoordinates),
-		focus_count:       C.size_t(len(config.Focus)),
-		focus:             lent.keys(config.Focus),
+		shown_count:       C.size_t(len(options.Shown)),
+		shown:             lent.keys(options.Shown),
+		shown_coordinates: lent.points(options.ShownCoordinates),
+		focus_count:       C.size_t(len(options.Focus)),
+		focus:             lent.keys(options.Focus),
 		keys:              &lent.result.keys,
 		entry_ordinals:    &lent.result.entryOrdinals,
 		parents:           &lent.result.parents,
 		coordinates:       &lent.result.coordinates,
 		written:           (*C.size_t)(unsafe.Pointer(&lent.result.written)),
-		arena:             arena.lower(),
+		arena:             outputs,
 		wanted:            C.size_t(wanted),
-		seed:              C.uint64_t(config.Seed),
-		expansion_factor:  C.size_t(config.ExpansionFactor),
-		progress:          lent.progress(config.Progress, config.ProgressSteps),
-		stats:             lent.stats(config.Stats),
-	})
-	return lent
+		seed:              C.uint64_t(options.Seed),
+		expansion_factor:  C.size_t(options.ExpansionFactor),
+		progress:          lent.progress(options.Progress, options.ProgressSteps),
+		stats:             lent.stats(options.Stats),
+	}
+	C.usearch_shapes_sample(arguments)
+	return nil
 }
 
-func (receiver shapesReceiver) save(completion C.usearch_completion_t, path string,
-	config *DenseSaveConfig) *lent[struct{}] {
-	if config == nil {
-		config = new(DenseSaveConfig)
+func (receiver shapesReceiver) save(lent *lent[struct{}], completion C.usearch_completion_t, path string,
+	config *ShapesSaveConfig) error {
+	options := configOf(config)
+	index, executor, err := receiver.lower()
+	if err != nil {
+		return err
 	}
-	lent := open[struct{}]()
-	index, executor, refusal := receiver.lower()
-	if refusal != nil {
-		return lent.refuse(refusal)
-	}
-	C.usearch_shapes_save(&C.usearch_shapes_save_t{
+	arguments := open[C.usearch_shapes_save_t](lent)
+	*arguments = C.usearch_shapes_save_t{
 		index:      index,
 		executor:   executor,
-		outcome:    lent.outcome,
+		outcome:    lent.outcome(),
 		completion: completion,
 		path:       lent.text(path),
-		progress:   lent.progress(config.Progress, config.ProgressSteps),
-	})
-	return lent
+		progress:   lent.progress(options.Progress, options.ProgressSteps),
+	}
+	C.usearch_shapes_save(arguments)
+	return nil
 }
 
-func (receiver shapesReceiver) saveBuffer(completion C.usearch_completion_t, arena *Arena,
-	config *DenseSaveBufferConfig) *lent[Monolith] {
-	if config == nil {
-		config = new(DenseSaveBufferConfig)
+func (receiver shapesReceiver) saveBuffer(lent *lent[Monolith], completion C.usearch_completion_t, arena *Arena,
+	config *ShapesSaveBufferConfig) error {
+	options := configOf(config)
+	index, executor, outputs, err := receiver.lowerInto(arena)
+	if err != nil {
+		return err
 	}
-	lent := open[Monolith]()
-	index, executor, refusal := receiver.lower()
-	if refusal != nil {
-		return lent.refuse(refusal)
-	}
-	C.usearch_shapes_save_buffer(&C.usearch_shapes_save_buffer_t{
+	arguments := open[C.usearch_shapes_save_buffer_t](lent)
+	*arguments = C.usearch_shapes_save_buffer_t{
 		index:      index,
 		executor:   executor,
-		outcome:    lent.outcome,
+		outcome:    lent.outcome(),
 		completion: completion,
 		monolith:   &lent.result.raw,
-		arena:      arena.lower(),
-		progress:   lent.progress(config.Progress, config.ProgressSteps),
-	})
-	return lent
+		arena:      outputs,
+		progress:   lent.progress(options.Progress, options.ProgressSteps),
+	}
+	C.usearch_shapes_save_buffer(arguments)
+	return nil
 }
 
 // endregion: Calls
 
 // region: Cursors
 
-// ShapesCursor is a walk over the index contents, pulled blocking on the executor of the
-// receiver that opened it; an entry once passed is never revisited.
+// ShapesCursor is a walk over the index contents; an entry once passed is never revisited.
+//
+// Its pulls come from the embedded ShapesCursorOn and run on the calling goroutine; On runs them
+// blocking on an executor, named again for every pull.
 type ShapesCursor struct {
-	handle   C.usearch_shapes_cursor_t
-	receiver shapesReceiver
+	ShapesCursorOn
+	handle C.usearch_shapes_cursor_t
+}
+
+// ShapesCursorOn is the receiver whose pulls block until their call is final: on the calling
+// goroutine when embedded in a ShapesCursor, and on an executor when ShapesCursorOn.On makes it.
+// Binding-only.
+type ShapesCursorOn struct {
+	childReceiver[C.usearch_shapes_cursor_t, C.usearch_shapes_index_t]
+}
+
+// On is the receiver whose pulls block on executor. Binding-only.
+func (on ShapesCursorOn) On(executor *Executor) ShapesCursorOn {
+	on.executor = executor
+	return on
 }
 
 // Cursor opens a walk over the current contents. Without starts it yields every entry as stored;
 // with them, the start keys' own entries first in order, then the entries those link to
 // breadth-first, each once.
-func (on ShapesIndexOn) Cursor(starts ...Key) (*ShapesCursor, error) {
-	index, _, refusal := on.lower()
-	if refusal != nil {
-		return nil, refusal
-	}
-	lent := open[C.usearch_shapes_cursor_t]()
-	C.usearch_shapes_cursor_init(&C.usearch_shapes_cursor_init_t{
-		index:        index,
-		outcome:      lent.outcome,
-		starts_count: C.size_t(len(starts)),
-		starts:       (*C.usearch_key_t)(unsafe.Pointer(lend(&lent.call, starts))),
-		cursor:       lent.result,
-	})
-	handle, err := block(lent)
+func (index *ShapesIndex) Cursor(starts ...Key) (*ShapesCursor, error) {
+	handle, _, err := index.lower()
 	if err != nil {
 		return nil, err
 	}
-	return &ShapesCursor{handle: handle, receiver: on.shapesReceiver}, nil
+	var lent lent[C.usearch_shapes_cursor_t]
+	arguments := open[C.usearch_shapes_cursor_init_t](&lent)
+	*arguments = C.usearch_shapes_cursor_init_t{
+		index:        handle,
+		outcome:      lent.outcome(),
+		starts_count: C.size_t(len(starts)),
+		starts:       (*C.usearch_key_t)(lent.lend(unsafe.Pointer(unsafe.SliceData(starts)), len(starts))),
+		cursor:       lent.result,
+	}
+	C.usearch_shapes_cursor_init(arguments)
+	cursor := new(ShapesCursor)
+	if cursor.handle, err = block(&lent, nil); err != nil {
+		return nil, err
+	}
+	cursor.childReceiver = childReceiver[C.usearch_shapes_cursor_t, C.usearch_shapes_index_t]{
+		receiver: receiver[C.usearch_shapes_cursor_t]{handle: &cursor.handle}, parent: &index.handle}
+	return cursor, nil
 }
 
 // NextKeys copies up to wanted next keys into arena; a batch of none means the walk is exhausted.
-func (cursor *ShapesCursor) NextKeys(wanted uint, arena *Arena) (DenseBatch, error) {
-	return cursor.next(wanted, false, arena)
+func (on ShapesCursorOn) NextKeys(wanted uint, arena *Arena) (DenseBatch, error) {
+	var lent lent[DenseBatch]
+	return block(&lent, on.next(&lent, wanted, arena, noLinks))
 }
 
 // NextLinks copies up to wanted next keys into arena, each with the keys it links to; a batch of
 // none means the walk is exhausted.
-func (cursor *ShapesCursor) NextLinks(wanted uint, arena *Arena) (DenseBatch, error) {
-	return cursor.next(wanted, true, arena)
+func (on ShapesCursorOn) NextLinks(wanted uint, arena *Arena) (DenseBatch, error) {
+	var lent lent[DenseBatch]
+	return block(&lent, on.next(&lent, wanted, arena, linksOf))
 }
 
-// next pulls a batch, exporting each entry's links only when linked asks for them.
-func (cursor *ShapesCursor) next(wanted uint, linked bool, arena *Arena) (DenseBatch, error) {
-	index, executor, refusal := cursor.receiver.lower()
-	if refusal != nil {
-		return DenseBatch{}, refusal
+// next pulls a batch, exporting each entry's links into the slot links picks, if any.
+func (on ShapesCursorOn) next(lent *lent[DenseBatch], wanted uint, arena *Arena, links batchLinks) error {
+	cursor, index, executor, outputs, err := on.lowerInto(arena)
+	if err != nil {
+		return err
 	}
-	lent := open[DenseBatch]()
-	var links *C.usearch_keys_tape_view_t
-	if linked {
-		links = &lent.result.links
-	}
-	C.usearch_shapes_cursor_next(&C.usearch_shapes_cursor_next_t{
+	arguments := open[C.usearch_shapes_cursor_next_t](lent)
+	*arguments = C.usearch_shapes_cursor_next_t{
 		index:      index,
 		executor:   executor,
-		outcome:    lent.outcome,
+		outcome:    lent.outcome(),
 		completion: C.usearch_completion_blocking_k,
-		cursor:     cursor.handle,
+		cursor:     cursor,
 		keys:       &lent.result.keys,
-		links:      links,
+		links:      links(lent.result),
 		written:    (*C.size_t)(unsafe.Pointer(&lent.result.written)),
-		arena:      arena.lower(),
+		arena:      outputs,
 		wanted:     C.size_t(wanted),
-	})
-	return block(lent)
+	}
+	C.usearch_shapes_cursor_next(arguments)
+	return nil
 }
 
 // Close releases the cursor. It is idempotent.

@@ -10,28 +10,22 @@ jobs:
   test_go_ubuntu_gcc:
     name: Test Go on Ubuntu with GCC 16
     runs-on: ubuntu-26.04
-    timeout-minutes: 30
-    env:
-      CC: gcc-16
-      CXX: g++-16
+    env: { CC: gcc-16, CXX: g++-16 }
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v7
-      - name: Pull Git Submodules
-        run: git submodule update --init --recursive
-      - name: Install Toolchain
+        with: { submodules: recursive }
+      - name: Install Go
+        uses: actions/setup-go@v7
+        with: { go-version: stable }
+      - name: Build the Static Library
         run: |
-          sudo apt update
-          sudo apt install -y build-essential g++-16 lld libjemalloc-dev libomp-dev
-      - name: Build the Shared C Library
+          sudo apt-get update && sudo apt-get install -y g++-16
+          cmake --preset relwithdebinfo -D USEARCH_BUILD_SHARED=1
+          cmake --build --preset relwithdebinfo --target usearch_static
+      - name: Test Go
+        env: { CGO_LDFLAGS: "-L${{ github.workspace }}/build_relwithdebinfo" }
         run: |
-          cmake --preset relwithdebinfo -D CMAKE_C_COMPILER=gcc-16 -D CMAKE_CXX_COMPILER=g++-16 -D USEARCH_BUILD_SHARED=1 -D USEARCH_WITH_JEMALLOC=1
-          cmake --build --preset relwithdebinfo --target usearch_shared
-      - name: Test GoLang
-        run: |
-          sudo cp ${{ github.workspace }}/build_relwithdebinfo/libusearch_shared.so /usr/lib/libusearch_shared.so
-          for root in c include cpp; do sudo cp -r ${{ github.workspace }}/$root/usearch /usr/include/; done
-          test -z "$(gofmt -l .)"
-          go vet ./...
-          go test -race -v ./...
-        working-directory: ${{ github.workspace }}/golang/
+          test -z "$(gofmt -l golang)"
+          go vet ./golang/...
+          go test -race ./golang/...

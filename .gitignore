@@ -60,9 +60,6 @@ wasi-sdk-*
 .swiftpm
 Package.resolved
 
-# Go
-golang/usearch/
-
 # Java
 .gradle
 *.class

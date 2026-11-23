@@ -1,8 +1,8 @@
 // Package usearch provides Go bindings for USearch.
 //
 // The package links the precompiled engine, so building it compiles no index. Status, Key,
-// Scalar, RowsView, Executor and Arena serve every modality; the dense modality carries a
-// Dense prefix, leaving room for the modalities that follow.
+// Scalar, RowsView, Tape, Executor, Arena and the reports serve every modality, while each
+// modality's own types carry its prefix: Dense, Sequence, Shapes or Geospatial.
 //
 //	options := usearch.DefaultDenseOptions()
 //	options.Dimensions = 768

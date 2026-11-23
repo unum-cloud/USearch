@@ -2,7 +2,8 @@
  *  @file golang/shim.c
  *  @author Ash Vardanian
  *  @date August 16, 2026
- *  @brief The addresses of the Go-side trampolines, taken where C can take them.
+ *  @brief The addresses of the Go-side trampolines, taken where C can take them, and the Arrow
+ *      releases Go cannot call.
  */
 #include "shim.h"
 
@@ -20,3 +21,11 @@ static void usearch_go_value_lookup(void* state, usearch_key_t const* keys, size
 }
 
 usearch_value_lookup_t usearch_go_looks_up_values(void) { return &usearch_go_value_lookup; }
+
+void usearch_go_release_schema(struct ArrowSchema* schema) {
+    if (schema->release) schema->release(schema);
+}
+
+void usearch_go_release_array(struct ArrowDeviceArray* array) {
+    if (array->array.release) array->array.release(&array->array);
+}

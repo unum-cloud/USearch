@@ -4,7 +4,7 @@
  *  @date August 16, 2026
  *  @brief Declarations the Go binding needs and the C header cannot give it: the Go-side
  *      trampolines a filtered search, a progress handler, and an attention's value lookup
- *      install as C callbacks.
+ *      install as C callbacks, and the release of Arrow structures.
  *
  *  The definitions live in @c shim.c because a Go file carrying an @c //export directive may hold
  *  only declarations in its preamble.
@@ -12,6 +12,7 @@
 #ifndef UNUM_USEARCH_GO_SHIM_H
 #define UNUM_USEARCH_GO_SHIM_H
 
+#include "usearch/arrow.h"
 #include "usearch/dense_index.h"
 
 #ifdef __cplusplus
@@ -37,6 +38,11 @@ void usearchLooksUpValues(void* state, usearch_key_t* keys, size_t count, usearc
 usearch_predicate_callback_t usearch_go_admits(void);
 usearch_progress_callback_t usearch_go_continues(void);
 usearch_value_lookup_t usearch_go_looks_up_values(void);
+
+/** Hands an Arrow schema or array back to its producer through its release callback, which Go
+ *  cannot call, and leaves a released one as it is. */
+void usearch_go_release_schema(struct ArrowSchema* schema);
+void usearch_go_release_array(struct ArrowDeviceArray* array);
 
 #ifdef __cplusplus
 }

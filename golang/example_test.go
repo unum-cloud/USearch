@@ -1,97 +1,71 @@
-// Tests from outside the package, as its users import it.
+// Examples from outside the package, as its users write them, each checked against its output.
 //
-// File: golang/usearch_test.go
+// File: golang/example_test.go
 // Author: Ash Vardanian
-// Date: May 3, 2023
-
-// The consumer's view: everything here reaches the package through its import path alone, so
-// an accidental reliance on an unexported helper breaks this file rather than passing quietly.
+// Date: November 18, 2026
 
 package usearch_test
 
 import (
-	"errors"
 	"fmt"
 	"log"
-	"testing"
 
-	usearch "github.com/unum-cloud/USearch/golang"
+	usearch "github.com/unum-cloud/usearch/golang"
 )
 
-// region: Introspection
-
-func TestPublicSurfaceNamesTheLinkedBuild(t *testing.T) {
-	t.Parallel()
-	if usearch.CapabilitiesCompiled() == "" {
-		t.Error("the build must name the kernels it compiled")
-	}
-	if usearch.CapabilitiesAvailable() == "" {
-		t.Error("the machine must name the kernels it offers")
-	}
-}
-
-// endregion: Introspection
-
-// region: Fuzzing
-
-// Parsing is the one place this package reads text a caller did not write, so the corpus is
-// where malformed renderings are cheapest to find.
-func FuzzParseKey(f *testing.F) {
-	for _, seed := range []string{
-		"00000000-0000-0000-0000-00000000002a",
-		"0000000000000000000000000000002a",
-		"00112233-4455-6677-8899-AABBCCDDEEFF",
-		"-------",
-		"",
-	} {
-		f.Add(seed)
-	}
-
-	f.Fuzz(func(t *testing.T, text string) {
-		key, err := usearch.ParseKey(text)
-		if err != nil {
-			if !errors.Is(err, usearch.StatusMalformed) {
-				t.Fatalf("%q was refused as %v", text, err)
-			}
-			if key != usearch.NilKey {
-				t.Fatalf("%q was refused yet yielded %v", text, key)
-			}
-			return
-		}
-		// Whatever parsed renders canonically, and the canonical rendering parses back to it.
-		rendered := key.String()
-		again, err := usearch.ParseKey(rendered)
-		if err != nil || again != key {
-			t.Fatalf("%q rendered as %q and parsed back as %v: %v", text, rendered, again, err)
-		}
-	})
-}
-
-// endregion: Fuzzing
-
-// region: Benchmarks
-
-func BenchmarkParseKey(b *testing.B) {
-	const rendered = "00112233-4455-6677-8899-aabbccddeeff"
-	b.ReportAllocs()
-	for b.Loop() {
-		if _, err := usearch.ParseKey(rendered); err != nil {
-			b.Fatal(err)
-		}
-	}
-}
-
-func BenchmarkKeyString(b *testing.B) {
-	key := usearch.KeyFromUint64(42)
-	b.ReportAllocs()
-	for b.Loop() {
-		_ = key.String()
-	}
-}
-
-// endregion: Benchmarks
-
 // region: Examples
+
+// The Quickstart of golang/README.md, whose main function runs these same lines.
+func Example() {
+	options := usearch.DefaultDenseOptions()
+	options.Dimensions = 4
+	options.Metric = usearch.DenseMetricAngular
+	options.Quantization = usearch.ScalarI8
+	index, err := usearch.DenseInitRam(options, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer index.Close()
+	if err := index.Reserve(1_000); err != nil { // optional capacity hint; inserts grow on demand
+		log.Fatal(err)
+	}
+
+	keys := []usearch.Key{usearch.KeyFromUint64(42), usearch.KeyFromUint64(43)}
+	slab := []float32{0.2, 0.1, 0.2, 0.1, 0.1, 0.2, 0.1, 0.2}
+	if err := index.Insert(keys, usearch.RowsOf(slab, 4), nil); err != nil {
+		log.Fatal(err)
+	}
+
+	executor, err := usearch.ExecutorForRam(nil, usearch.CPUClassUnknown, 0)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer executor.Close()
+	arena, err := usearch.NewArena(executor)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer arena.Close()
+	query := []float32{0.2, 0.1, 0.2, 0.1}
+	matches, err := index.On(executor).Search(usearch.RowsOf(query, 4), 10, arena, nil) // on an executor, into its arena
+	if err != nil {
+		log.Fatal(err)
+	}
+	localArena, err := usearch.NewArena(nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer localArena.Close()
+	local, err := index.Search(usearch.RowsOf(query, 4), 10, localArena, nil) // the calling goroutine, into host pages
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	found, _ := matches.Query(0)
+	foundLocally, _ := local.Query(0)
+	fmt.Println(found[0], foundLocally[0])
+	// Output: 00000000-0000-0000-0000-00000000002a 00000000-0000-0000-0000-00000000002a
+}
 
 func ExampleKey_String() {
 	fmt.Println(usearch.KeyFromUint64(42))
@@ -142,7 +116,7 @@ func ExampleDenseIndex() {
 	// Output: 00000000-0000-0000-0000-000000000002
 }
 
-func ExampleDenseIndex_Deferred() {
+func ExampleDenseIndexOn_Deferred() {
 	options := usearch.DefaultDenseOptions()
 	options.Dimensions = 3
 	options.Metric = usearch.DenseMetricEuclidean
@@ -172,7 +146,10 @@ func ExampleDenseIndex_Deferred() {
 		log.Fatal(err)
 	}
 	defer arena.Close()
-	call := index.Deferred(executor).Search(usearch.RowsOf([]float32{0, 0, 1}, 3), 1, arena, nil)
+	call, err := index.Deferred(executor).Search(usearch.RowsOf([]float32{0, 0, 1}, 3), 1, arena, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
 	matches, err := call.Wait() // a view borrowing arena, as a blocking call's does
 	if err != nil {
 		log.Fatal(err)

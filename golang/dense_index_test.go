@@ -16,6 +16,7 @@ package usearch
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"math/rand"
 	"path/filepath"
@@ -63,6 +64,15 @@ func sequentialKeys(count uint) []Key {
 	keys := make([]Key, count)
 	for row := uint(0); row < count; row++ {
 		keys[row] = KeyFromUint64(uint64(row) + 1)
+	}
+	return keys
+}
+
+// keysFrom names count entries from first on.
+func keysFrom(first, count uint) []Key {
+	keys := make([]Key, count)
+	for position := range keys {
+		keys[position] = KeyFromUint64(uint64(first) + uint64(position))
 	}
 	return keys
 }
@@ -285,7 +295,7 @@ func TestEnumeratorsSpellTheLibrarysNames(t *testing.T) {
 		{ResidencyVram, "vram"},
 		{TraversalScan, "scan"},
 		{PhaseRestitch, "restitch"},
-		{DenseRefineStalled, "stalled"},
+		{RefineStalled, "stalled"},
 		{LoadPathCuFile, "cufile"},
 		{ShapesMetricGromovWasserstein, "gromov-wasserstein"},
 		{ScalarBF16, "bf16"},
@@ -293,6 +303,7 @@ func TestEnumeratorsSpellTheLibrarysNames(t *testing.T) {
 		{ScalarI32, "i32"},
 		{DenseMetricInner, "inner"},
 		{DenseMetricJaccard, "jaccard"},
+		{NvmeClassLinuxUringPassthrough, "linux-uring-passthrough"},
 	} {
 		if spelled := single.value.String(); spelled != single.spelling {
 			t.Errorf("spelled %q, wanted %q", spelled, single.spelling)
@@ -317,6 +328,30 @@ func TestDenseMetricsReadBackFromTheirNames(t *testing.T) {
 	}
 	if _, err := DenseMetricFromName("cosine-ish"); !errors.Is(err, StatusInvalidArgument) {
 		t.Errorf("a misspelled dense metric reads back with %v", err)
+	}
+}
+
+// Every shared enumeration reads back from its own spelling, and one none carries is refused.
+func TestEnumeratorsReadBackFromTheirNames(t *testing.T) {
+	t.Parallel()
+	for spelling, read := range map[string]func(string) (fmt.Stringer, error){
+		StatusReadOnly.String():         func(name string) (fmt.Stringer, error) { return StatusFromName(name) },
+		ScalarE4M3.String():             func(name string) (fmt.Stringer, error) { return ScalarFromName(name) },
+		ResidencyNvme.String():          func(name string) (fmt.Stringer, error) { return ResidencyFromName(name) },
+		TraversalScan.String():          func(name string) (fmt.Stringer, error) { return TraversalFromName(name) },
+		MoodSpinning.String():           func(name string) (fmt.Stringer, error) { return MoodFromName(name) },
+		RefineConverged.String():        func(name string) (fmt.Stringer, error) { return RefineVerdictFromName(name) },
+		PhaseGather.String():            func(name string) (fmt.Stringer, error) { return PhaseFromName(name) },
+		CPUClassAppleM4.String():        func(name string) (fmt.Stringer, error) { return CPUClassFromName(name) },
+		GPUClassNVIDIAHopper.String():   func(name string) (fmt.Stringer, error) { return GPUClassFromName(name) },
+		NvmeClassWindowsIORing.String(): func(name string) (fmt.Stringer, error) { return NvmeClassFromName(name) },
+	} {
+		if value, err := read(spelling); err != nil || value.String() != spelling {
+			t.Errorf("%q reads back as %v: %v", spelling, value, err)
+		}
+		if _, err := read(spelling + "-ish"); !errors.Is(err, StatusInvalidArgument) {
+			t.Errorf("%q-ish reads back with %v", spelling, err)
+		}
 	}
 }
 
@@ -395,8 +430,8 @@ func TestMatrixViewsRejectBadShapes(t *testing.T) {
 // region: Results
 
 // An arena serves one call at a time: the next call given it lands its rows where the last ones
-// were, a call contending with a deferred one holding it is refused, and a closed or nil arena is
-// refused by the library.
+// were, a call contending with a deferred one holding it is refused, a closed arena is refused as
+// uninitialized, and a nil one by the library.
 func TestArenasServeOneCallAtATime(t *testing.T) {
 	t.Parallel()
 	const dimensions = 4
@@ -421,32 +456,46 @@ func TestArenasServeOneCallAtATime(t *testing.T) {
 		t.Error("a rewound arena must land the next rows where the last ones were")
 	}
 
-	// A deferred call borrows its arena until final, so a call contending for it is refused.
-	executor := pool(t)
-	entered, release := make(chan struct{}), make(chan struct{})
+	// A call holds its arena until final, so any other call contending for it is refused.
+	entered, release, held := make(chan struct{}), make(chan struct{}), make(chan error, 1)
 	var enter sync.Once
-	held := index.Deferred(executor).Search(RowsOf(slab[:dimensions], dimensions), 2, arena,
-		&DenseSearchConfig{Predicate: func(Key) bool { enter.Do(func() { close(entered) }); <-release; return true }})
+	go func() {
+		matches, err := index.Search(RowsOf(slab[:dimensions], dimensions), 2, arena,
+			&DenseSearchConfig{Predicate: Predicate(func(Key) bool { enter.Do(func() { close(entered) }); <-release; return true })})
+		if err == nil {
+			if found, _ := matches.Query(0); len(found) != 2 {
+				err = fmt.Errorf("the holding call's view read %d matches", len(found))
+			}
+		}
+		held <- err
+	}()
 	<-entered // the predicate runs only once the body has claimed the arena
 	if _, err := index.Get(keys[0], ScalarF32, arena); !errors.Is(err, StatusContended) {
 		t.Errorf("a call on a held arena reported %v", err)
 	}
-	close(release)
-	matches, err := held.Wait()
-	if err != nil {
-		t.Fatalf("the holding call must succeed: %v", err)
+	refused, err := index.Deferred(pool(t)).Get(keys[0], ScalarF32, arena)
+	if err == nil {
+		_, err = refused.Wait()
 	}
-	if found, _ := matches.Query(0); len(found) != 2 {
-		t.Fatalf("the holding call's view read %d matches", len(found))
+	if !errors.Is(err, StatusContended) {
+		t.Errorf("a deferred call on a held arena reported %v", err)
+	}
+	close(release)
+	if err := <-held; err != nil {
+		t.Fatalf("the holding call must succeed: %v", err)
 	}
 
 	if err := arena.Close(); err != nil {
 		t.Fatalf("the arena must close: %v", err)
 	}
-	for name, refused := range map[string]*Arena{"closed": arena, "nil": nil} {
-		if _, err := index.Get(keys[0], ScalarF32, refused); !errors.Is(err, StatusInvalidArgument) {
-			t.Errorf("a %s arena served with %v", name, err)
-		}
+	if _, err := index.Get(keys[0], ScalarF32, arena); !errors.Is(err, StatusUninitialized) {
+		t.Errorf("a closed arena served with %v", err)
+	}
+	if _, err := arena.Describe(); !errors.Is(err, StatusUninitialized) {
+		t.Errorf("a closed arena described itself with %v", err)
+	}
+	if _, err := index.Get(keys[0], ScalarF32, nil); !errors.Is(err, StatusInvalidArgument) {
+		t.Errorf("a nil arena served with %v", err)
 	}
 	if description, err := other.Describe(); err != nil || description != (ArenaDescription{ResidencyRam, 0}) {
 		t.Errorf("a host arena described itself as %+v: %v", description, err)
@@ -473,20 +522,13 @@ func TestClosingTwiceIsHarmless(t *testing.T) {
 	if _, err := index.Describe(); !errors.Is(err, StatusUninitialized) {
 		t.Errorf("a released handle reported %v", err)
 	}
-	call := index.Deferred(nil).Describe()
-	if call.Status() != StatusUninitialized {
-		t.Errorf("a released handle submitted with %v", call.Status())
-	}
-	if err := call.Close(); !errors.Is(err, StatusUninitialized) {
-		t.Errorf("a released handle's call closed with %v", err)
+	if call, err := index.Deferred(nil).Describe(); call != nil || !errors.Is(err, StatusUninitialized) {
+		t.Errorf("a released handle submitted %v with %v", call, err)
 	}
 
 	var absent *DenseIndex
 	if err := absent.Close(); err != nil {
 		t.Errorf("a nil handle closed with %v", err)
-	}
-	if _, err := absent.On(nil).Describe(); !errors.Is(err, StatusUninitialized) {
-		t.Errorf("a nil handle reported %v", err)
 	}
 }
 
@@ -510,7 +552,7 @@ func TestExecutorConstructorsTakeOnlyWhatTheirResidencyHas(t *testing.T) {
 	}
 	devices.Close()
 
-	drives, err := ExecutorForNvme(nil, CPUClassUnknown, 2)
+	drives, err := ExecutorForNvme(nil, CPUClassUnknown, 2, NvmeClassUnknown)
 	if (drives == nil) == (err == nil) {
 		t.Errorf("the NVMe constructor answered with %v and %v", drives, err)
 	}
@@ -545,21 +587,21 @@ func TestExecutorRefusesUseAfterClose(t *testing.T) {
 	if err := executor.Close(); err != nil {
 		t.Fatalf("the second release must be a no-op: %v", err)
 	}
-	if err := executor.Drain(MoodParked); !errors.Is(err, StatusInvalidArgument) {
+	if err := executor.Drain(MoodParked); !errors.Is(err, StatusUninitialized) {
 		t.Errorf("a released executor drained with %v", err)
 	}
 
 	slab := seededRows(1, 4)
-	if err := index.On(executor).Insert(sequentialKeys(1), RowsOf(slab, 4), nil); !errors.Is(err, StatusInvalidArgument) {
+	if err := index.On(executor).Insert(sequentialKeys(1), RowsOf(slab, 4), nil); !errors.Is(err, StatusUninitialized) {
 		t.Errorf("a released executor inserted with %v", err)
 	}
-	if _, err := index.On(executor).Get(KeyFromUint64(1), ScalarF64, newArena(t, nil)); !errors.Is(err, StatusInvalidArgument) {
+	if _, err := index.On(executor).Get(KeyFromUint64(1), ScalarF64, newArena(t, nil)); !errors.Is(err, StatusUninitialized) {
 		t.Errorf("a released executor exported with %v", err)
 	}
-	if _, err := DenseLoadRam("index.safegraphs", &DenseLoadRamConfig{Executor: executor}); !errors.Is(err, StatusInvalidArgument) {
+	if _, err := DenseLoadRam("index.safegraphs", &DenseLoadRamConfig{Executor: executor}); !errors.Is(err, StatusUninitialized) {
 		t.Errorf("a released executor loaded with %v", err)
 	}
-	if _, err := NewArena(executor); !errors.Is(err, StatusInvalidArgument) {
+	if _, err := NewArena(executor); !errors.Is(err, StatusUninitialized) {
 		t.Errorf("a released executor made an arena with %v", err)
 	}
 	if err := index.Insert(sequentialKeys(1), RowsOf(slab, 4), nil); err != nil {
@@ -640,7 +682,7 @@ func TestMultiplyLandsEveryRowsPairs(t *testing.T) {
 	index, _, slab := populated(t, options, 16)
 	arena := newArena(t, nil)
 
-	var stats DenseTraversalStats
+	var stats TraversalStats
 	products, err := index.On(pool(t)).Multiply(RowsOf(slab[:3*dimensions], dimensions), arena,
 		&DenseMultiplyConfig{Wanted: 4, Stats: &stats})
 	if err != nil {
@@ -674,14 +716,15 @@ func TestCursorsWalkEveryEntryOnce(t *testing.T) {
 	index, keys, _ := populated(t, angularBF16(dimensions), count)
 	arena := newArena(t, nil)
 
-	cursor, err := index.On(pool(t)).Cursor()
+	executor := pool(t)
+	cursor, err := index.Cursor()
 	if err != nil {
 		t.Fatalf("the cursor must open: %v", err)
 	}
 	defer cursor.Close()
 	walked, linked := make([]Key, 0, count), 0
 	for {
-		batch, err := cursor.NextLinks(2, arena)
+		batch, err := cursor.On(executor).NextLinks(2, arena)
 		if err != nil {
 			t.Fatalf("the cursor must pull: %v", err)
 		}
@@ -713,7 +756,7 @@ func TestCursorsWalkEveryEntryOnce(t *testing.T) {
 	if err := keysOnly.Close(); err != nil {
 		t.Fatalf("the cursor must close: %v", err)
 	}
-	if _, err := keysOnly.NextKeys(2, arena); !errors.Is(err, StatusInvalidArgument) {
+	if _, err := keysOnly.NextKeys(2, arena); !errors.Is(err, StatusUninitialized) {
 		t.Errorf("a closed cursor pulled with %v", err)
 	}
 }
@@ -828,7 +871,7 @@ func TestBatchSearchFillsEveryQuery(t *testing.T) {
 	)
 	index, _, slab := populated(t, angularBF16(dimensions), count)
 
-	var stats DenseTraversalStats
+	var stats TraversalStats
 	outputs, err := index.On(pool(t)).Search(RowsOf(slab[:queries*dimensions], dimensions), wanted, newArena(t, nil),
 		&DenseSearchConfig{Stats: &stats})
 	if err != nil {
@@ -882,32 +925,51 @@ func TestSearchAdmitsOnlyApprovedKeys(t *testing.T) {
 		value, integral := key.Uint64()
 		return integral && value%2 == 0
 	}
-	admitted, err := on.Search(queries, 10, arena, &DenseSearchConfig{ExpansionFactor: 64, Predicate: even})
-	if err != nil {
-		t.Fatalf("the filtered batch must resolve: %v", err)
-	}
-	seen := 0
-	for query := uint(0); query < 3; query++ {
-		found, _ := admitted.Query(query)
-		for _, key := range found {
-			if !even(key) {
-				t.Fatalf("query %d admitted %v", query, key)
+	evenBatch := func(keys []Key, admissions []Admission) {
+		for index, key := range keys {
+			if even(key) {
+				admissions[index] = Admit
 			}
-			seen++
 		}
 	}
-	if seen == 0 {
-		t.Fatal("the filter admitted nothing at all")
+	for name, admitter := range map[string]Admitter{
+		"per key":     Predicate(even),
+		"batch":       BatchPredicate(evenBatch),
+		"cheap batch": CheapBatchPredicate(evenBatch),
+	} {
+		admitted, err := on.Search(queries, 10, arena, &DenseSearchConfig{ExpansionFactor: 64, Predicate: admitter})
+		if err != nil {
+			t.Fatalf("the %s filtered batch must resolve: %v", name, err)
+		}
+		seen := 0
+		for query := uint(0); query < 3; query++ {
+			found, _ := admitted.Query(query)
+			for _, key := range found {
+				if !even(key) {
+					t.Fatalf("the %s filter's query %d admitted %v", name, query, key)
+				}
+				seen++
+			}
+		}
+		if seen == 0 {
+			t.Fatalf("the %s filter admitted nothing at all", name)
+		}
 	}
 
-	// Admitting nothing is a result, not a failure.
-	rejected, err := on.Search(queries, 10, arena, &DenseSearchConfig{Predicate: func(Key) bool { return false }})
-	if err != nil {
-		t.Fatalf("a rejecting filter must still resolve: %v", err)
-	}
-	for query := uint(0); query < 3; query++ {
-		if found, _ := rejected.Query(query); len(found) != 0 {
-			t.Fatalf("a rejecting filter admitted %d matches", len(found))
+	// Admitting nothing is a result, not a failure, and admissions start rejected, so a handler that
+	// answers nothing admits nothing.
+	for name, admitter := range map[string]Admitter{
+		"rejecting": Predicate(func(Key) bool { return false }),
+		"silent":    BatchPredicate(func([]Key, []Admission) {}),
+	} {
+		rejected, err := on.Search(queries, 10, arena, &DenseSearchConfig{Predicate: admitter})
+		if err != nil {
+			t.Fatalf("a %s filter must still resolve: %v", name, err)
+		}
+		for query := uint(0); query < 3; query++ {
+			if found, _ := rejected.Query(query); len(found) != 0 {
+				t.Fatalf("a %s filter admitted %d matches", name, len(found))
+			}
 		}
 	}
 
@@ -1042,7 +1104,7 @@ func TestMaxsimSizesItsOutputsOverDocuments(t *testing.T) {
 		t.Fatalf("the token rows must insert: %v", err)
 	}
 
-	var stats DenseTraversalStats
+	var stats TraversalStats
 	outputs, err := index.On(pool(t)).Maxsim(RowsOf(slab[:queries*tokens*dimensions], dimensions), tokens, documents,
 		newArena(t, nil), &DenseMaxsimConfig{Stats: &stats})
 	if err != nil {
@@ -1129,7 +1191,7 @@ func TestRefineAndHealthReportTheirSweeps(t *testing.T) {
 	index, _, _ := populated(t, angularBF16(dimensions), count)
 	on := index.On(pool(t))
 
-	var stats DenseTraversalStats
+	var stats TraversalStats
 	report, err := on.Refine(&DenseRefineConfig{ExpansionFactor: 64, Stats: &stats})
 	if err != nil {
 		t.Fatalf("the sweep must run: %v", err)
@@ -1203,11 +1265,18 @@ func TestReshardPlansContinueUntilFinished(t *testing.T) {
 	if description, err := source.Describe(); err != nil || description.Size != 0 {
 		t.Errorf("a stop left the source holding %+v: %v", description, err)
 	}
-	continued := index.Deferred(executor).Reshard(nil, nil, &DenseReshardConfig{Plan: &plan})
+	continued, err := index.Deferred(executor).Reshard(nil, nil, &DenseReshardConfig{Plan: &plan})
+	if err != nil {
+		t.Fatalf("the continued reshard must submit: %v", err)
+	}
 	if _, err := continued.Wait(); err != nil || plan.Phase.Phase != PhaseDone {
 		t.Fatalf("the continued reshard ended in %+v: %v", plan.Phase, err)
 	}
-	report, err := index.Deferred(executor).ReshardPlanFinish(&plan).Wait()
+	finished, err := index.Deferred(executor).ReshardPlanFinish(&plan)
+	if err != nil {
+		t.Fatalf("the finish must submit: %v", err)
+	}
+	report, err := finished.Wait()
 	if err != nil || report.Reachability.Audited != 2*count {
 		t.Fatalf("the finished plan reported %+v: %v", report, err)
 	}
@@ -1290,12 +1359,12 @@ func TestLoadNvmeWantsAManifest(t *testing.T) {
 	if err := index.Save(path, nil); err != nil {
 		t.Fatalf("the checkpoint must write: %v", err)
 	}
-	drives, err := ExecutorForNvme(nil, CPUClassUnknown, 1)
+	drives, err := ExecutorForNvme(nil, CPUClassUnknown, 1, NvmeClassUnknown)
 	if err != nil {
 		t.Fatalf("the NVMe executor must open: %v", err)
 	}
 	defer drives.Close()
-	if _, err := DenseLoadNvme(path, &DenseViewNvmeConfig{Executor: drives}); !errors.Is(err, StatusUnsupported) {
+	if _, err := DenseLoadNvme(path, &DenseLoadNvmeConfig{Executor: drives}); !errors.Is(err, StatusUnsupported) {
 		t.Errorf("a lone monolith loaded with %v", err)
 	}
 }
@@ -1411,7 +1480,7 @@ func TestSerializationPreservesEveryOption(t *testing.T) {
 	}
 
 	// An NVMe view resolves keys only through the key table it was opened with.
-	drives, err := ExecutorForNvme(nil, CPUClassUnknown, 1)
+	drives, err := ExecutorForNvme(nil, CPUClassUnknown, 1, NvmeClassUnknown)
 	if err != nil {
 		t.Fatalf("the NVMe executor must open: %v", err)
 	}
@@ -1460,7 +1529,11 @@ func TestDeferredSearchMatchesTheBlockingOne(t *testing.T) {
 	index, _, slab := populated(t, angularBF16(dimensions), 64)
 	executor := pool(t)
 
-	call := index.Deferred(executor).Search(RowsOf(slab[:queries*dimensions], dimensions), wanted, newArena(t, executor), nil)
+	queried := RowsOf(slab[:queries*dimensions], dimensions)
+	call, err := index.Deferred(executor).Search(queried, wanted, newArena(t, executor), nil)
+	if err != nil {
+		t.Fatalf("the call must submit: %v", err)
+	}
 	if status := call.Status(); status != StatusDeferred && status != StatusSuccess {
 		t.Fatalf("a submitted call reported %v", status)
 	}
@@ -1499,10 +1572,13 @@ func TestDeferredViewsBorrowTheCallersArenas(t *testing.T) {
 	getting, saving, counting, describing := pool(t), pool(t), pool(t), pool(t)
 	rows, bytes := newArena(t, getting), newArena(t, saving)
 
-	found := index.Deferred(getting).Get(keys[2], ScalarF32, rows)
-	buffer := index.Deferred(saving).SaveBuffer(bytes, nil)
-	counted := index.Deferred(counting).Count(keys[3])
-	described := index.Deferred(describing).Describe()
+	found, foundErr := index.Deferred(getting).Get(keys[2], ScalarF32, rows)
+	buffer, bufferErr := index.Deferred(saving).SaveBuffer(bytes, nil)
+	counted, countedErr := index.Deferred(counting).Count(keys[3])
+	described, describedErr := index.Deferred(describing).Describe()
+	if err := errors.Join(foundErr, bufferErr, countedErr, describedErr); err != nil {
+		t.Fatalf("every call must submit: %v", err)
+	}
 
 	vectors, err := found.Wait()
 	if err != nil {
@@ -1542,8 +1618,11 @@ func TestDeferredPredicatesAdmitOnlyApprovedKeys(t *testing.T) {
 		value, _ := key.Uint64()
 		return value%2 == 1
 	}
-	call := index.Deferred(executor).Search(RowsOf(slab[:dimensions], dimensions), 4, newArena(t, executor),
-		&DenseSearchConfig{Predicate: odd})
+	call, err := index.Deferred(executor).Search(RowsOf(slab[:dimensions], dimensions), 4, newArena(t, executor),
+		&DenseSearchConfig{Predicate: Predicate(odd)})
+	if err != nil {
+		t.Fatalf("the filtered call must submit: %v", err)
+	}
 	matches, err := call.Wait()
 	if err != nil {
 		t.Fatalf("the filtered call must succeed: %v", err)
@@ -1568,12 +1647,18 @@ func TestClosedDeferredCallsStillLand(t *testing.T) {
 	inserting, discarding, keeping := pool(t), pool(t), pool(t)
 	slab := seededRows(count, dimensions)
 
-	inserted := index.Deferred(inserting).Insert(sequentialKeys(count), RowsOf(slab, dimensions), nil)
+	inserted, err := index.Deferred(inserting).Insert(sequentialKeys(count), RowsOf(slab, dimensions), nil)
+	if err != nil {
+		t.Fatalf("the insertion must submit: %v", err)
+	}
 	if err := inserted.Close(); err != nil {
 		t.Fatalf("a closed call reported %v", err)
 	}
-	discarded := index.Deferred(discarding).Get(KeyFromUint64(1), ScalarF32, newArena(t, discarding))
-	kept := index.Deferred(keeping).Get(KeyFromUint64(1), ScalarF32, newArena(t, keeping))
+	discarded, discardedErr := index.Deferred(discarding).Get(KeyFromUint64(1), ScalarF32, newArena(t, discarding))
+	kept, keptErr := index.Deferred(keeping).Get(KeyFromUint64(1), ScalarF32, newArena(t, keeping))
+	if err := errors.Join(discardedErr, keptErr); err != nil {
+		t.Fatalf("every call must submit: %v", err)
+	}
 	for _, call := range []interface{ Close() error }{discarded, discarded} {
 		if err := call.Close(); err != nil {
 			t.Fatalf("a closed call reported %v", err)
@@ -1594,8 +1679,9 @@ func TestClosedDeferredCallsStillLand(t *testing.T) {
 	}
 }
 
-// A refusal the binding catches is reported through the same Status and Wait as the engine's.
-func TestDeferredRefusalsReachStatusAndWait(t *testing.T) {
+// A refusal the binding catches comes back at submission with nothing submitted, while the
+// engine's own arrives through Status and Wait.
+func TestDeferredRefusalsComeBackAtSubmission(t *testing.T) {
 	t.Parallel()
 	const dimensions = 8
 	const count = 16
@@ -1608,16 +1694,22 @@ func TestDeferredRefusalsReachStatusAndWait(t *testing.T) {
 	}
 	defer executor.Close()
 	on := index.Deferred(executor)
-	if _, err := on.Insert(sequentialKeys(count), RowsOf(slab, dimensions), nil).Wait(); err != nil {
+	inserted, err := on.Insert(sequentialKeys(count), RowsOf(slab, dimensions), nil)
+	if err != nil {
 		t.Fatalf("the first submission must succeed: %v", err)
 	}
-
-	refused := on.Insert(sequentialKeys(1), RowsOf(slab, dimensions), nil)
-	if status := refused.Status(); status != StatusShapeMismatch {
-		t.Errorf("a refused submission reported %v", status)
+	if _, err := inserted.Wait(); err != nil {
+		t.Fatalf("the first insertion must succeed: %v", err)
 	}
-	if _, err := refused.Wait(); !errors.Is(err, StatusShapeMismatch) {
-		t.Errorf("a refused submission finished with %v", err)
+
+	if refused, err := on.Insert(sequentialKeys(1), RowsOf(slab, dimensions), nil); refused != nil ||
+		!errors.Is(err, StatusShapeMismatch) {
+		t.Errorf("a refused submission answered %v with %v", refused, err)
+	}
+	if reserved, err := on.Reserve(2 * count); err != nil {
+		t.Errorf("a submission after a refusal reported %v", err)
+	} else if _, err := reserved.Wait(); err != nil {
+		t.Errorf("a submission after a refusal finished with %v", err)
 	}
 	if description, err := index.Describe(); err != nil || description.Size != count {
 		t.Fatalf("the index holds %d of %d entries: %v", description.Size, count, err)
@@ -1625,7 +1717,7 @@ func TestDeferredRefusalsReachStatusAndWait(t *testing.T) {
 }
 
 // A Deferred dropped unfinished keeps everything its call reads until the call is final, and the
-// collector releases it then; a refused one is released at once.
+// collector releases it then; a refused one never existed.
 func TestDroppedDeferredCallsAreReleased(t *testing.T) {
 	t.Parallel()
 	const dimensions = 8
@@ -1637,9 +1729,13 @@ func TestDroppedDeferredCallsAreReleased(t *testing.T) {
 	func() {
 		witness := new([4]int64)
 		runtime.AddCleanup(witness, func(released chan struct{}) { close(released) }, released)
-		index.Deferred(searching).Search(RowsOf(slab[:dimensions], dimensions), 4, arena,
-			&DenseSearchConfig{Predicate: func(Key) bool { return witness[0] == 0 }})
-		index.Deferred(inserting).Insert(sequentialKeys(1), RowsOf(slab, dimensions), nil)
+		if _, err := index.Deferred(searching).Search(RowsOf(slab[:dimensions], dimensions), 4, arena,
+			&DenseSearchConfig{Predicate: Predicate(func(Key) bool { return witness[0] == 0 })}); err != nil {
+			t.Errorf("the dropped call must submit: %v", err)
+		}
+		if _, err := index.Deferred(inserting).Insert(sequentialKeys(1), RowsOf(slab, dimensions), nil); err == nil {
+			t.Error("a mismatched insertion must be refused")
+		}
 	}()
 	runtime.GC()
 	if err := searching.Drain(MoodParked); err != nil {
