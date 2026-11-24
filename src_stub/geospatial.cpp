@@ -57,7 +57,7 @@ static_assert(std::is_nothrow_move_constructible_v<geospatial_entry_t>,
               "reallocation must move entries, never copy them");
 
 /** The north-up grid of heights lines of sight are tested over, copied from what the caller gave
- *  at creation; no rows means none, and a checkpoint never carries it. */
+ *  at creation; no rows means none, and a checkpoint never holds it. */
 struct terrain_grid_t {
     std::size_t rows = 0, columns = 0;
     double north_latitude = 0, west_longitude = 0, row_step = 0, column_step = 0;
@@ -106,13 +106,13 @@ static bool same_kind(geospatial_index_options_t const& index, geospatial_index_
 
 /** Copies the terrain @p given into @p terrain, or fills it once through the caller's handler;
  *  false once @p outcome records a dataset path, which no residency reads yet, a terrain both
- *  borrowed and filled, or a grid without rows, columns or positive steps. */
+ *  viewed and filled, or a grid without rows, columns or positive steps. */
 static bool adopt_terrain(terrain_grid_t& terrain, usearch_geospatial_terrain_t const& given,
                           usearch_outcome_t* outcome) {
     if (reject_if(given.path.data != nullptr, usearch_status_unsupported_k, "No residency reads a terrain path yet",
                   outcome) ||
         reject_if(given.heights && given.callback, usearch_status_invalid_argument_k,
-                  "A terrain is either borrowed or filled, never both", outcome))
+                  "A terrain is viewed or filled, never both", outcome))
         return false;
     if (!given.heights && !given.callback) return true;
     if (reject_if(!given.rows || !given.columns || !(given.row_step_degrees > 0) || !(given.column_step_degrees > 0),
@@ -253,7 +253,7 @@ static std::array<double, 3> geodetic(std::array<double, 3> const& position) {
 
 /** Whether the straight line from @p from to @p to clears @p terrain: at every sample between
  *  them the line, lifted by the refraction of light, stands above the ground beneath it. The
- *  Earth-fixed chord carries the curvature on its own. */
+ *  Earth-fixed chord holds the curvature on its own. */
 static bool clear_sight(terrain_grid_t const& terrain, placed_t const& from, placed_t const& to) {
     if (!terrain.present()) return true;
     std::array<double, 3> const offset {to.position[0] - from.position[0], to.position[1] - from.position[1],
@@ -465,7 +465,7 @@ void usearch_geospatial_init_vram(usearch_geospatial_init_vram_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
     if (reject_ceiling(arguments->vram.gpu_class_ceiling, outcome)) return;
-    propagate_error(usearch_status_device_k, outcome, "This build carries no GPU backends");
+    propagate_error(usearch_status_device_k, outcome, "This build has no GPU backends");
 }
 
 void usearch_geospatial_load_ram(usearch_geospatial_load_ram_t* arguments) {
@@ -507,7 +507,7 @@ void usearch_geospatial_load_vram(usearch_geospatial_load_vram_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
     if (reject_ceiling(arguments->vram.gpu_class_ceiling, outcome)) return;
-    propagate_error(usearch_status_device_k, outcome, "This build carries no GPU backends");
+    propagate_error(usearch_status_device_k, outcome, "This build has no GPU backends");
 }
 
 void usearch_geospatial_load_vram_buffer(usearch_geospatial_load_vram_buffer_t* arguments) {
@@ -515,7 +515,7 @@ void usearch_geospatial_load_vram_buffer(usearch_geospatial_load_vram_buffer_t* 
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
     if (reject_ceiling(arguments->vram.gpu_class_ceiling, outcome)) return;
-    propagate_error(usearch_status_device_k, outcome, "This build carries no GPU backends");
+    propagate_error(usearch_status_device_k, outcome, "This build has no GPU backends");
 }
 
 void usearch_geospatial_view_ram(usearch_geospatial_view_ram_t* arguments) {

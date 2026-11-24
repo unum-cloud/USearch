@@ -96,7 +96,7 @@ Each class unit compiles its variants with the class's own flags into a table of
 - `usearch_<modality>_vram_variants_nvidia` embeds a basic modality's NVIDIA fatbins, one per sequence metric or shapes dtype and one for geospatial, every kit compiled past the Ampere floor.
 - `usearch_punned` - `types.cpp`, `arrow.cpp` & the dispatch units, `dense_index.cpp`, `sequence_index.cpp`, `shapes_index.cpp` and `geospatial_index.cpp`.
 
-`USEARCH_PUNNED_LIBRARIES` and `USEARCH_PUNNED_OBJECTS` hand all of them to `usearch_shared`, `usearch_static` and `usearch_test_c`, and the static archive carries the yyjson, NumKong and ForkUnion objects too, so a binding links one library.
+`USEARCH_PUNNED_LIBRARIES` and `USEARCH_PUNNED_OBJECTS` hand all of them to `usearch_shared`, `usearch_static` and `usearch_test_c`, and the static archive holds the yyjson, NumKong and ForkUnion objects too, so a binding links one library.
 `USEARCH_DENSE_DTYPES` trims every unit's variants from the front of `bf16`, `u1`, `i8`, `e4m3`, `f16`, `u8`, `e5m2`, `i4`, `u4`, `e3m2` and `e2m3`, keeping four by default.
 
 ## Executors & Arenas
@@ -107,9 +107,9 @@ The engine running there sizes and reuses it, and the executor rewinds it once p
 A call's arena holds the outputs alone, the results that outlive the call, so neither the C layer nor an argument structure ever stages or allocates on a verb's behalf.
 
 `usearch_executor_handle_t` holds the topology a RAM or NVMe executor was spawned over, the call holding it, and one residency's executor.
-The executor is a `std::variant` of `forkunion_executor_t`, `nvme_executor_t` and, per GPU vendor built, `cuda_executor_t`, `hip_executor_t` or `metal_executor_t`, whose alternative is the kind tag.
+The executor is a `std::variant` of `ram_executor_t`, `nvme_executor_t` and, per GPU vendor built, `cuda_executor_t`, `hip_executor_t` or `metal_executor_t`, whose alternative is the kind tag.
 A verb whose executor kind does not match the handle's residency answers `usearch_status_device_k`.
-A null executor builds one for that call alone: the calling thread on RAM, one thread of blocking reads on NVMe, and the default streams of the index's devices on VRAM.
+A null executor builds one for that call alone, with no pool, thread, ring or stream: the calling thread on RAM, blocking reads on that thread on NVMe, and each device's null legacy stream on VRAM.
 
 `usearch_arena_handle_t` owns a growing arena of host pages and, under CUDA, one of device memory on the first device of the VRAM executor it was created with.
 `claim_arena` holds it for one call and rewinds it, freeing the previous call's outputs, after refusing:

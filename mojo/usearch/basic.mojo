@@ -5,7 +5,7 @@ every entry's elements end to end, with one more offset than entries around them
 `count` is the entry count. An element is a byte of a sequence or a point of a shape, whose
 `width` scalars travel together while the offsets count whole points.
 
-`TapeView` borrows a caller's run as a call's input, `Tape` owns one a caller builds entry by
+`TapeView` views a caller's run as a call's input, `Tape` owns one a caller builds entry by
 entry, and `TapeEntries` reads what `get` wrote into its arena, in place.
 
 File: mojo/usearch/basic.mojo
@@ -49,19 +49,19 @@ def _no_tape() -> TapeViewArguments:
 
 @fieldwise_init
 struct TapeView[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
-    """A borrowed ragged batch - `usearch_tape_view_t`, the input of every sequence and shapes verb.
+    """A viewed ragged batch - `usearch_tape_view_t`, the input of every sequence and shapes verb.
 
     Entry `i` spans elements `offsets[i]` up to `offsets[i + 1]`, counted from the first element, so
     a single entry is a tape of two offsets. The entry count becomes the verb's `count`.
 
     Parameters:
-        origin: The borrowed elements and offsets, named so they outlive every call this view crosses.
+        origin: The viewed elements and offsets, named so they outlive every call this view crosses.
     """
 
     var view: TapeViewArguments
     """The first element, the offsets, their width and the scalar kind, as the engine reads them."""
     var entries: Int
-    """Entries the tape carries, one fewer than its offsets, which the verb takes as its `count`."""
+    """Entries the tape holds, one fewer than its offsets, which the verb takes as its `count`."""
 
     @staticmethod
     def of[
@@ -157,7 +157,7 @@ struct Tape[dtype: DType, width: Int = 1](Movable, Sized):
         self.offsets.append(UInt64(len(self.elements)))
 
     def view(ref self) -> TapeView[ImmOrigin(origin_of(self))]:
-        """The tape as a call's input, borrowing this one.
+        """The tape as a call's input, viewing this one.
 
         Returns:
             A view of every entry appended.
@@ -179,7 +179,7 @@ struct TapeEntries[dtype: DType, origin: MutOrigin, width: Int = 1](Movable, Siz
 
     Parameters:
         dtype: The element type each entry is read as.
-        origin: The arena the entries live in, which this result borrows.
+        origin: The arena the entries live in, which this result views.
         width: Scalars per element: one for a sequence's bytes, three for a shape's points.
     """
 
@@ -197,7 +197,7 @@ struct TapeEntries[dtype: DType, origin: MutOrigin, width: Int = 1](Movable, Siz
         return self.written
 
     def __getitem__(ref self, entry: Int) -> Span[Scalar[Self.dtype], origin_of(self)]:
-        """One entry's scalars, `width` per element, borrowed from the arena this result reads.
+        """One entry's scalars, `width` per element, viewed from the arena this result reads.
 
         Args:
             entry: Which entry, below `len(self)`.

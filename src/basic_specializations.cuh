@@ -16,7 +16,7 @@
 #pragma once
 
 #include <cstddef> // `std::size_t`
-#include <cstring> // `std::memcpy` - an entry an NVMe read borrowed, kept past it
+#include <cstring> // `std::memcpy` - an entry in an NVMe read's buffer, kept past the read
 
 #include <array>       // `std::array` - the one key a view scans for
 #include <bit>         // `std::bit_cast` - the C key struct & `us::utilities::uuid128_t` share sixteen bytes
@@ -154,8 +154,7 @@ using row_kit_of = typename row_kit_for_cpu_class<cpu_class_>::type;
 /** Runs @p per_task over @p tasks taken in ascending order by the executor's threads, answering the
  *  fan-out's refusal rather than running them on one thread, which would hide a held executor. */
 template <template <typename> class atomic_ref_template_, typename per_task_type_>
-util::status_t drain_in_order(util::forkunion_executor_t& executor, std::size_t tasks,
-                              per_task_type_&& per_task) noexcept {
+util::status_t drain_in_order(util::ram_executor_t& executor, std::size_t tasks, per_task_type_&& per_task) noexcept {
     if (!tasks) return util::status_code_t::success_k;
     // Every task bumps it, so it takes its own line, away from the locals every thread reads.
     alignas(util::default_alignment_k) std::size_t cursor = 0;
@@ -185,14 +184,14 @@ struct thread_scratch {
 
     /** Places the per-thread objects in the first arena of @p executor, which @ref prepare
      *  rewinds before it builds them. */
-    explicit thread_scratch(util::forkunion_executor_t& executor) noexcept
+    explicit thread_scratch(util::ram_executor_t& executor) noexcept
         : traversals(thread_allocator_t {executor.arena(0)}), metrics(thread_allocator_t {executor.arena(0)}) {}
 
     /** Rewinds every arena, keeping the high-water mark of earlier calls, and builds one context
      *  sized for @p connectivity and @p expansion plus one metric from @p make_metric for each
      *  of the first @p threads threads. */
     template <typename make_metric_type_>
-    util::status_t prepare(util::forkunion_executor_t& executor, std::size_t threads, std::size_t connectivity,
+    util::status_t prepare(util::ram_executor_t& executor, std::size_t threads, std::size_t connectivity,
                            std::size_t expansion, util::u64_t seed, make_metric_type_&& make_metric) noexcept {
         if (util::status_t const rewound = executor.reserve(0); failed(rewound)) return rewound;
         if (failed(traversals.reserve_exactly(threads)) || failed(metrics.reserve_exactly(threads)))
@@ -235,8 +234,7 @@ template <typename indexes_type_, typename make_metric_type_, typename build_typ
 util::expected<traversal_stats_t> insert_entries(indexes_type_& index, usearch_keys_view_t keys, caller_tape_t tape,
                                                  std::size_t connectivity, std::size_t expansion,
                                                  make_metric_type_&& make_metric, build_type_&& build,
-                                                 progress_ticks_t& ticks,
-                                                 util::forkunion_executor_t& executor) noexcept {
+                                                 progress_ticks_t& ticks, util::ram_executor_t& executor) noexcept {
     using shard_t = typename indexes_type_::index_t;
     using value_t = typename indexes_type_::value_t;
     using key_t = typename indexes_type_::key_t;
@@ -293,7 +291,7 @@ util::expected<traversal_stats_t> insert_entries(indexes_type_& index, usearch_k
 template <typename shard_type_, typename plan_type_, typename make_metric_type_>
 util::expected<thread_scratch<shard_type_, made_metric<make_metric_type_>>> prepare_refinement(
     plan_type_ const& plan, std::size_t widest_list, make_metric_type_&& make_metric,
-    util::forkunion_executor_t& executor) noexcept {
+    util::ram_executor_t& executor) noexcept {
     thread_scratch<shard_type_, made_metric<make_metric_type_>> scratch {executor};
     std::size_t const connectivity = util::max_of(widest_list, plan.connectivity());
     util::status_t prepared = scratch.prepare(executor, executor.size(), connectivity, connectivity,
@@ -317,7 +315,7 @@ util::expected<thread_scratch<shard_type_, made_metric<make_metric_type_>>> prep
 template <typename plan_type_, typename shard_type_, typename metric_type_, typename selector_type_>
 util::status_t drive_refinement(plan_type_& plan, thread_scratch<shard_type_, metric_type_>& scratch,
                                 selector_type_ const& selector, progress_ticks_t& ticks,
-                                util::forkunion_executor_t& executor) noexcept {
+                                util::ram_executor_t& executor) noexcept {
     using count_ref_t = typename shard_type_::template atomic_ref<std::size_t>;
     // Every task bumps it, so it takes its own line, away from the locals every thread reads.
     alignas(util::default_alignment_k) std::size_t taken = plan.taken;
@@ -356,7 +354,7 @@ inline constexpr usearch_distance_t distance_unit = 1;
  *  @p round_capacity candidates gathered beside @p payload_type_. */
 template <typename payload_type_, typename body_type_>
 util::status_t with_key_predicates(predicate_t const& predicate, std::size_t round_capacity,
-                                   util::forkunion_executor_t& executor, body_type_&& body) noexcept {
+                                   util::ram_executor_t& executor, body_type_&& body) noexcept {
     if (std::holds_alternative<no_predicate_t>(predicate)) {
         body([](std::size_t) noexcept { return util::dummy_predicate_t {}; });
         return util::status_code_t::success_k;
@@ -405,7 +403,7 @@ template <typename indexes_type_, typename make_metric_type_, typename query_of_
 util::expected<traversal_stats_t> search_entries(indexes_type_& indexes, std::size_t count, std::size_t connectivity,
                                                  make_metric_type_&& make_metric, query_of_type_&& query_of,
                                                  matches_outputs_t& outputs, search_config_t search,
-                                                 predicate_t const& predicate, util::forkunion_executor_t& executor,
+                                                 predicate_t const& predicate, util::ram_executor_t& executor,
                                                  progress_ticks_t& ticks,
                                                  usearch_matches_view_t const* hints = nullptr) noexcept {
     using shard_t = typename indexes_type_::index_t;
@@ -613,7 +611,7 @@ util::status_t values_under(index_type_ const& index, usearch_key_t key, nvme_ex
     return index.get(identities, entries, held, executor, on_value);
 }
 
-/** Copies @p entry, borrowed for one read, into thread @p thread 's arena as @p kept, which
+/** Copies @p entry, valid only during one read, into thread @p thread 's arena as @p kept, which
  *  outlives the read until the executor's next reservation. */
 inline util::status_t keep_entry(nvme_executor_t& executor, std::size_t thread, util::bytes_view_t entry,
                                  util::bytes_view_t& kept) noexcept {
@@ -647,7 +645,7 @@ template <typename indexes_type_, typename make_metric_type_, typename coordinat
 util::expected<util::sample_result_t> sample_entries(indexes_type_& indexes, std::size_t connectivity,
                                                      make_metric_type_&& make_metric, basic_sample_inputs_t inputs,
                                                      basic_sample_outputs_t outputs, util::sample_config_t config,
-                                                     util::forkunion_executor_t& executor,
+                                                     util::ram_executor_t& executor,
                                                      coordinates_type_ const& coordinates_of = {}) noexcept {
     using shard_t = typename indexes_type_::index_t;
     using node_id_t = typename indexes_type_::node_id_t;
@@ -710,7 +708,7 @@ void tally_entry(stats_type_& stats, value_type_ const& value) noexcept {
 template <typename traits_type_, typename variant_type_, typename stats_type_>
     requires is_ram_index<variant_type_>
 util::status_t count_entries(variant_type_& variant, usearch_key_t key, stats_type_& stats,
-                             util::forkunion_executor_t&) noexcept {
+                             util::ram_executor_t&) noexcept {
     using shard_t = typename variant_type_::shard_t;
     variant.index.find_each(uuid_of(key), [&](shard_t const& shard, typename shard_t::node_id_t node) noexcept {
         ++stats.entries;
@@ -751,7 +749,7 @@ template <typename traits_type_, typename variant_type_>
 util::expected<std::size_t> get_entries(variant_type_& variant, usearch_key_t key,
                                         typename traits_type_::get_outputs_t outputs,
                                         util::growing_arena<util::forkunion_allocator_t>& memory,
-                                        util::forkunion_executor_t& executor) noexcept {
+                                        util::ram_executor_t& executor) noexcept {
     if (util::status_t const rewound = executor.reserve(0); failed(rewound)) return {0, rewound};
     using shard_t = typename variant_type_::shard_t;
     thread_allocator_t const allocator {executor.arena(0)};
@@ -923,7 +921,7 @@ status_t count_entries(variant_type_& variant, usearch_key_t key, stats_type_& s
  *      where the modality reads each stored value back as it writes it.
  *
  *  A modality whose bodies spell no @c keep_stored cannot read its stored bytes back, and a face
- *  that keeps its gather to its sharded index lends none, so both answer @c unsupported_k; shards
+ *  that keeps its gather to its sharded index passes none, so both answer @c unsupported_k; shards
  *  on a device @p executor drives no stream on refuse with @c config_mismatch_k.
  */
 template <typename traits_type_, typename variant_type_>
@@ -1836,12 +1834,13 @@ struct specialized_variant {
         else return of(variant).index.health(executor);
     }
 
-    /** Opens a walk over the variant's shards, breadth-first from @p starts when it names any; an
-     *  NVMe view resolves them on its first pull. */
-    static util::expected<void*> cursor_init(void* variant, std::span<usearch_key_t const> starts) noexcept {
+    /** Opens a walk over the variant's shards, breadth-first from @p starts when it names any, its
+     *  state placed through @p allocator; an NVMe view resolves them on its first pull. */
+    static util::expected<void*> cursor_init(void* variant, std::span<usearch_key_t const> starts,
+                                             util::forkunion_allocator_t allocator) noexcept {
         using cursor_t = typename variant_t::index_t::cursor_t;
         using key_t = typename variant_t::index_t::key_t;
-        cursor_t* const opened = new (std::nothrow) cursor_t(util::forkunion_allocator_t {util::no_memory_domain_k});
+        cursor_t* const opened = new (std::nothrow) cursor_t(allocator);
         if (!opened) return {nullptr, util::status_code_t::out_of_memory_k};
         std::span<key_t const> const keys {reinterpret_cast<key_t const*>(starts.data()), starts.size()};
         if (util::status_t const walking = opened->open(of(variant).index, keys); failed(walking))

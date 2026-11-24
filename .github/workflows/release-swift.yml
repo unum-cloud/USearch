@@ -7,7 +7,7 @@ on:
 permissions:
   contents: read
 
-# The release commit names the Swift artifacts the release carries by checksum, and `mint-release.sh` attaches them
+# The release commit names the Swift artifacts the release holds by checksum, and `mint-release.sh` attaches them
 # as it publishes. This resolves the package as a consumer does, downloading and checking them, while NumKong links
 # the artifact its own preset builds from the submodule.
 jobs:

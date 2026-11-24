@@ -38,7 +38,7 @@
 //!
 //! This root re-exports every public symbol from the modules that mirror the C headers - `types`
 //! and `dense` - so `@import("usearch").X` resolves whichever header X came from. Each module
-//! carries its own FFI declarations at the top and its tests at the bottom.
+//! holds its own FFI declarations at the top and its tests at the bottom.
 //!
 //! File: zig/usearch.zig
 //! Author: Ash Vardanian
@@ -75,7 +75,6 @@ pub const Mood = types.Mood;
 pub const Phase = types.Phase;
 pub const PhaseProgress = types.PhaseProgress;
 pub const ExecutorForRamConfig = types.ExecutorForRamConfig;
-pub const ExecutorOnPoolConfig = types.ExecutorOnPoolConfig;
 pub const ExecutorForVramConfig = types.ExecutorForVramConfig;
 pub const ExecutorForNvmeConfig = types.ExecutorForNvmeConfig;
 pub const Executor = types.Executor;

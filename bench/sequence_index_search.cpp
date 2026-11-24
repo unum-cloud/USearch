@@ -90,7 +90,7 @@ struct alphabet_t {
     std::size_t classes = 0;
     std::int8_t gap = 0;
 
-    /** The weights the C interface reads, borrowing the similarities. */
+    /** The weights the C interface reads, viewing the similarities. */
     usearch_sequence_weights_t weights() const noexcept { return {similarities.data(), gap}; }
 };
 

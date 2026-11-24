@@ -202,7 +202,7 @@ using cell_vendor_t = apple_cells_t;
  *      @p scalar_type_, built on the GPU in the face @p vram_index_type_, and in RAM under the kits
  *      of @p kernel alike.
  *
- *  Every match the GPU reports must carry the pair's serial distance, ascending, and the GPU's
+ *  Every match the GPU reports must hold the pair's serial distance, ascending, and the GPU's
  *  recall at ten must reach the RAM index's at the same breadth, give or take a twentieth.
  */
 template <typename scalar_type_, typename vram_index_type_>

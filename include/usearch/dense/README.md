@@ -27,7 +27,7 @@ A `*_index` is a mono-index and a `*_indexes` the sharded index over shards of i
 - `vram_apple_indexes.hpp` - the Apple twin over its one device, so one shard.
 - `nvme_indexes.hpp` - read-only views of the parts a RAM or VRAM sharded index saved, every query's walks over all parts on one executor thread, and key lookups as bulk scans of the key columns.
 - `ram_reshard.hpp`, `vram_nvidia_reshard.hpp` and `vram_amd_reshard.hpp` - the freestanding reshard plans moving a sharded index's sources into its targets, several sources gathered into one target, one source cut into several, or one index recut in place under a shard capacity.
-- `nvme_reshard.hpp` - the freestanding reshard, refine and build plans that write new parts from old ones in phases of tasks, within a workspace the caller lends, each target part holding at most a shard capacity of entries, and that round each part in RAM when it fits the workspace and streamed from the drives when it does not.
+- `nvme_reshard.hpp` - the freestanding reshard, refine and build plans that write new parts from old ones in phases of tasks, within a workspace the caller passes, each target part holding at most a shard capacity of entries, and that round each part in RAM when it fits the workspace and streamed from the drives when it does not.
 
 ## Construction
 

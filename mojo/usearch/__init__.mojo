@@ -37,9 +37,9 @@ drive.
 
 Every output whose length scales with the call lands in an `Arena` the verb takes as its last
 required argument, and is read in place. `Arena(library)` holds host pages for calls on the calling
-thread, and `Arena(executor)` places its memory where that executor computes, borrowing the executor
-until it is freed. Every receiver takes
-it the same way, deferred ones too, and the result borrows it in turn; each call rewinds and refills
+thread, and `Arena(executor)` places its memory where that executor computes, holding the
+executor's origin until it is freed. Every receiver takes it the same way, deferred ones too, and
+the result views it in turn; each call rewinds and refills
 it, so a steady loop allocates once. A result reads its arena in place until the arena's next call,
 and `Arena.describe` says whether that memory is a device's, which the host cannot read.
 

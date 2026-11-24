@@ -440,7 +440,7 @@ public sealed class DenseTraversalStats
 /// </para>
 /// <para>
 /// A handle may be shared across threads, and no method here takes a lock: every output whose length
-/// scales with the call lands in an <see cref="Arena"/> the caller lends. On a RAM handle,
+/// scales with the call lands in an <see cref="Arena"/> the caller passes. On a RAM handle,
 /// insertions and searches overlap freely: searches read only entries published behind the
 /// visibility watermark and never write to the graph, while insertions synchronize through
 /// per-node locks and publish in order. Serialization is the one exception, demanding a
@@ -453,7 +453,7 @@ public sealed unsafe class DenseIndex : IDisposable
 
     private DenseIndex(NativeDenseIndexHandle handle) => this._handle = handle;
 
-    /// <summary>The engine handle the verbs lease.</summary>
+    /// <summary>The engine handle the verbs reference.</summary>
     internal NativeDenseIndexHandle Handle => this._handle;
 
     /// <summary>Creates an empty, mutable index in host memory, one shard per named NUMA node. Calls
@@ -549,7 +549,7 @@ public sealed unsafe class DenseIndex : IDisposable
         CPUClass? cpuClassCeiling = null)
     {
         byte[] encoded = Encoding.UTF8.GetBytes(path);
-        using Lease pool = Lease.Of(executor?.Handle, "executor");
+        using HandleReference pool = HandleReference.Of(executor?.Handle, "executor");
         IntPtr created = IntPtr.Zero;
         NativeOutcome outcome = default;
         fixed (byte* data = encoded)
@@ -560,7 +560,7 @@ public sealed unsafe class DenseIndex : IDisposable
                 Index = &created,
                 Executor = pool.Pointer,
                 Outcome = &outcome,
-                Path = Borrow(data, encoded.Length),
+                Path = View(data, encoded.Length),
                 Ram = new NativeRamOptions
                 {
                     MemoryDomains = (IntPtr)domains, MemoryDomainsCount = (nuint)memoryDomains.Length,
@@ -590,7 +590,7 @@ public sealed unsafe class DenseIndex : IDisposable
         GPUClass? gpuClassCeiling = null)
     {
         byte[] encoded = Encoding.UTF8.GetBytes(path);
-        using Lease pool = Lease.Of(executor?.Handle, "executor");
+        using HandleReference pool = HandleReference.Of(executor?.Handle, "executor");
         IntPtr created = IntPtr.Zero;
         NativeOutcome outcome = default;
         fixed (byte* data = encoded)
@@ -601,7 +601,7 @@ public sealed unsafe class DenseIndex : IDisposable
                 Index = &created,
                 Executor = pool.Pointer,
                 Outcome = &outcome,
-                Path = Borrow(data, encoded.Length),
+                Path = View(data, encoded.Length),
                 Vram = new NativeVramOptions
                 {
                     Devices = (IntPtr)ordinals, DevicesCount = (nuint)devices.Length, GpuClassCeiling = (int)(gpuClassCeiling ?? 0),
@@ -628,7 +628,7 @@ public sealed unsafe class DenseIndex : IDisposable
         ReadOnlySpan<byte> buffer, ReadOnlySpan<int> memoryDomains = default, ulong valuesPerKey = 0,
         Executor? executor = null, CPUClass? cpuClassCeiling = null)
     {
-        using Lease pool = Lease.Of(executor?.Handle, "executor");
+        using HandleReference pool = HandleReference.Of(executor?.Handle, "executor");
         IntPtr created = IntPtr.Zero;
         NativeOutcome outcome = default;
         fixed (byte* source = buffer)
@@ -639,7 +639,7 @@ public sealed unsafe class DenseIndex : IDisposable
                 Index = &created,
                 Executor = pool.Pointer,
                 Outcome = &outcome,
-                Buffer = Borrow(source, buffer.Length),
+                Buffer = View(source, buffer.Length),
                 Ram = new NativeRamOptions
                 {
                     MemoryDomains = (IntPtr)domains, MemoryDomainsCount = (nuint)memoryDomains.Length,
@@ -667,7 +667,7 @@ public sealed unsafe class DenseIndex : IDisposable
         ReadOnlySpan<byte> buffer, ReadOnlySpan<int> devices = default, ulong valuesPerKey = 0,
         Executor? executor = null, GPUClass? gpuClassCeiling = null)
     {
-        using Lease pool = Lease.Of(executor?.Handle, "executor");
+        using HandleReference pool = HandleReference.Of(executor?.Handle, "executor");
         IntPtr created = IntPtr.Zero;
         NativeOutcome outcome = default;
         fixed (byte* source = buffer)
@@ -678,7 +678,7 @@ public sealed unsafe class DenseIndex : IDisposable
                 Index = &created,
                 Executor = pool.Pointer,
                 Outcome = &outcome,
-                Buffer = Borrow(source, buffer.Length),
+                Buffer = View(source, buffer.Length),
                 Vram = new NativeVramOptions
                 {
                     Devices = (IntPtr)ordinals, DevicesCount = (nuint)devices.Length, GpuClassCeiling = (int)(gpuClassCeiling ?? 0),
@@ -707,7 +707,7 @@ public sealed unsafe class DenseIndex : IDisposable
         {
             NativeDenseViewRam arguments = new()
             {
-                Index = &created, Outcome = &outcome, Path = Borrow(data, encoded.Length),
+                Index = &created, Outcome = &outcome, Path = View(data, encoded.Length),
             };
             usearch_dense_view_ram(&arguments);
         }
@@ -736,7 +736,7 @@ public sealed unsafe class DenseIndex : IDisposable
         int[]? keyTableDomains = null)
     {
         byte[] encoded = Encoding.UTF8.GetBytes(path);
-        using Lease pool = Lease.Of(executor?.Handle, "executor");
+        using HandleReference pool = HandleReference.Of(executor?.Handle, "executor");
         IntPtr created = IntPtr.Zero;
         NativeOutcome outcome = default;
         NativeBytesView* views = Paths.Encode(paths);
@@ -755,7 +755,7 @@ public sealed unsafe class DenseIndex : IDisposable
                     Index = &created,
                     Executor = pool.Pointer,
                     Outcome = &outcome,
-                    Path = Borrow(data, encoded.Length),
+                    Path = View(data, encoded.Length),
                     Nvme = new NativeNvmeOptions
                     {
                         Paths = (IntPtr)views, PathsCount = (nuint)paths.Length, CpuClassCeiling = (int)(cpuClassCeiling ?? 0),
@@ -797,7 +797,7 @@ public sealed unsafe class DenseIndex : IDisposable
         int[]? keyTableDomains = null)
     {
         byte[] encoded = Encoding.UTF8.GetBytes(path);
-        using Lease pool = Lease.Of(executor?.Handle, "executor");
+        using HandleReference pool = HandleReference.Of(executor?.Handle, "executor");
         IntPtr created = IntPtr.Zero;
         NativeOutcome outcome = default;
         NativeBytesView* views = Paths.Encode(paths);
@@ -816,7 +816,7 @@ public sealed unsafe class DenseIndex : IDisposable
                     Index = &created,
                     Executor = pool.Pointer,
                     Outcome = &outcome,
-                    Path = Borrow(data, encoded.Length),
+                    Path = View(data, encoded.Length),
                     Nvme = new NativeNvmeOptions
                     {
                         Paths = (IntPtr)views, PathsCount = (nuint)paths.Length, CpuClassCeiling = (int)(cpuClassCeiling ?? 0),
@@ -844,7 +844,7 @@ public sealed unsafe class DenseIndex : IDisposable
     public static DenseMetadata MetadataRead(string path, Executor? executor = null)
     {
         byte[] encoded = Encoding.UTF8.GetBytes(path);
-        using Lease pool = Lease.Of(executor?.Handle, "executor");
+        using HandleReference pool = HandleReference.Of(executor?.Handle, "executor");
         NativeDenseMetadata lowered = default;
         NativeOutcome outcome = default;
         fixed (byte* data = encoded)
@@ -852,7 +852,7 @@ public sealed unsafe class DenseIndex : IDisposable
             NativeDenseMetadataRead arguments = new()
             {
                 Executor = pool.Pointer,
-                Outcome = &outcome, Path = Borrow(data, encoded.Length), Metadata = &lowered,
+                Outcome = &outcome, Path = View(data, encoded.Length), Metadata = &lowered,
             };
             usearch_dense_metadata_read(&arguments);
         }
@@ -868,7 +868,7 @@ public sealed unsafe class DenseIndex : IDisposable
     /// <returns>The geometry and metric the monolith's header describes.</returns>
     public static DenseMetadata MetadataReadBuffer(ReadOnlySpan<byte> buffer, Executor? executor = null)
     {
-        using Lease pool = Lease.Of(executor?.Handle, "executor");
+        using HandleReference pool = HandleReference.Of(executor?.Handle, "executor");
         NativeDenseMetadata lowered = default;
         NativeOutcome outcome = default;
         fixed (byte* source = buffer)
@@ -876,7 +876,7 @@ public sealed unsafe class DenseIndex : IDisposable
             NativeDenseMetadataReadBuffer arguments = new()
             {
                 Executor = pool.Pointer,
-                Outcome = &outcome, Buffer = Borrow(source, buffer.Length), Metadata = &lowered,
+                Outcome = &outcome, Buffer = View(source, buffer.Length), Metadata = &lowered,
             };
             usearch_dense_metadata_read_buffer(&arguments);
         }
@@ -996,9 +996,14 @@ public sealed unsafe class DenseIndex : IDisposable
     public Monolith SaveBuffer(Arena arena, Progress? progress = null) =>
         new DenseIndexOn(this, null).SaveBuffer(arena, progress);
 
-    /// <inheritdoc cref="DenseIndexOn.Cursor"/>
-    public DenseCursor Cursor(ReadOnlySpan<Key> starts = default) =>
-        new DenseIndexOn(this, null).Cursor(starts);
+    /// <summary>Opens a walk over the current contents, pulled on the caller's thread or through
+    /// <see cref="DenseCursor.On"/>; each shard's publication watermark is read as the walk enters it,
+    /// so an entry once passed is never revisited. Without starts it yields every entry as stored; with
+    /// them, the start keys' own entries first in order, then the entries those link to breadth-first,
+    /// each once. Calls <c>usearch_dense_cursor_init</c>.</summary>
+    /// <param name="starts">The keys to walk from; empty walks every row.</param>
+    /// <returns>The cursor, which keeps the index alive until disposed.</returns>
+    public DenseCursor Cursor(ReadOnlySpan<Key> starts = default) => DenseCursor.Open(this.Handle, starts);
 
     /// <inheritdoc cref="DenseIndexOn.SearchStream"/>
     public DenseSearchStream SearchStream(RowsView query, ulong expansionFactor = 0) =>
@@ -1008,7 +1013,7 @@ public sealed unsafe class DenseIndex : IDisposable
     /// and a freed handle must not be used. Calls <c>usearch_dense_free</c>.</summary>
     public void Dispose() => this._handle.Dispose();
 
-    private static NativeBytesView Borrow(byte* data, int length) =>
+    private static NativeBytesView View(byte* data, int length) =>
         new() { Data = (IntPtr)data, Length = (nuint)length };
 }
 
@@ -1347,14 +1352,6 @@ public readonly unsafe struct DenseIndexOn
     public Monolith SaveBuffer(Arena arena, Progress? progress = null) =>
         Calls.Block(new DenseSaveBufferCall(this.Handles, arena, progress)).Result;
 
-    /// <summary>Opens a walk over the current contents, pulled on the receiver's thread or executor; each
-    /// shard's publication watermark is read as the walk enters it, so an entry once passed is never
-    /// revisited. Without starts it yields every entry as stored; with them, the start keys' own entries
-    /// first in order, then the entries those link to breadth-first, each once. Calls
-    /// <c>usearch_dense_cursor_init</c>.</summary>
-    /// <param name="starts">The keys to walk from; empty walks every row.</param>
-    /// <returns>The cursor, which keeps the index alive until disposed.</returns>
-    public DenseCursor Cursor(ReadOnlySpan<Key> starts = default) => DenseCursor.Open(this.Handles, starts);
 
     /// <summary>
     /// Opens a resumable nearest-neighbor stream for one query, pulled on the receiver's thread or
@@ -1527,8 +1524,8 @@ internal unsafe struct DenseReserveCall(CallHandles handles, ulong capacity) : I
 {
     public readonly void Submit(CallOutputs* outputs, Completion completion)
     {
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
         NativeDenseReserve arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome,
@@ -1547,8 +1544,8 @@ internal unsafe struct DenseClearCall(CallHandles handles) : ICall
 {
     public readonly void Submit(CallOutputs* outputs, Completion completion)
     {
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
         NativeDenseClear arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome,
@@ -1569,8 +1566,8 @@ internal unsafe struct DenseDescribeCall(CallHandles handles) : ICall<DenseIndex
 
     public readonly void Submit(CallOutputs* outputs, Completion completion)
     {
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
         NativeDenseDescribe arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome,
@@ -1605,8 +1602,8 @@ internal unsafe struct DenseCountCall(CallHandles handles, Key key) : ICall<ulon
 
     public readonly void Submit(CallOutputs* outputs, Completion completion)
     {
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
         NativeDenseCount arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome,
@@ -1632,13 +1629,13 @@ internal unsafe struct DenseGetCall(CallHandles handles, Key key, Arena arena, S
 
     public readonly void Submit(CallOutputs* outputs, Completion completion)
     {
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
-        using Lease lent = Arena.Lend(arena);
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
+        using HandleReference passed = Arena.Reference(arena);
         NativeDenseGet arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
-            Key = key, Vectors = (NativeRowsView*)outputs->View, Written = &outputs->Written, Arena = lent.Pointer,
+            Key = key, Vectors = (NativeRowsView*)outputs->View, Written = &outputs->Written, Arena = passed.Pointer,
             OutputsScalar = outputsScalar,
         };
         usearch_dense_get(&arguments);
@@ -1673,8 +1670,8 @@ internal unsafe struct DenseInsertCall(
 
         this._keys = keys.Pin();
         this._vectors = vectors.Pin();
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
         NativeDenseInsert arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome,
@@ -1711,8 +1708,8 @@ internal unsafe struct DenseRefineCall(
 
     public void Submit(CallOutputs* outputs, Completion completion)
     {
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
         NativeDenseRefine arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome,
@@ -1741,8 +1738,8 @@ internal unsafe struct DenseHealthCall(CallHandles handles) : ICall<DenseReachab
 
     public readonly void Submit(CallOutputs* outputs, Completion completion)
     {
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
         NativeDenseHealth arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome,
@@ -1775,14 +1772,14 @@ internal unsafe struct DenseSearchCall(
     {
         nuint bound = Calls.Bound(wanted);
         this._queries = queries.Pin();
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
-        using Lease lent = Arena.Lend(arena);
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
+        using HandleReference passed = Arena.Reference(arena);
         NativeDenseSearch arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
             Count = (nuint)queries.Rows, Queries = queries.AsView((byte*)this._queries.Pointer),
-            Matches = (NativeMatchesView*)outputs->View, Arena = lent.Pointer, Wanted = bound,
+            Matches = (NativeMatchesView*)outputs->View, Arena = passed.Pointer, Wanted = bound,
             ExpansionFactor = (nuint)expansionFactor, Traversal = traversal,
             Predicate = this._predicate.Predicate(predicate), Progress = this._progress.Progress(progress),
             Stats = (NativeDenseTraversalStats*)outputs->Report,
@@ -1827,15 +1824,15 @@ internal unsafe struct DenseMaxsimCall(
 
         nuint bound = Calls.Bound(wanted);
         this._queries = queries.Pin();
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
-        using Lease lent = Arena.Lend(arena);
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
+        using HandleReference passed = Arena.Reference(arena);
         NativeDenseMaxsim arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
             Count = (nuint)(queries.Rows / rowsPerQuery), Queries = queries.AsView((byte*)this._queries.Pointer),
             RowsPerQuery = (nuint)rowsPerQuery, Matches = (NativeMatchesTapeView*)outputs->View,
-            Written = &outputs->Written, Required = &outputs->Required, Arena = lent.Pointer, Wanted = bound,
+            Written = &outputs->Written, Required = &outputs->Required, Arena = passed.Pointer, Wanted = bound,
             ExpansionFactor = (nuint)expansionFactor, Predicate = this._predicate.Predicate(predicate),
             Progress = this._progress.Progress(progress), Stats = (NativeDenseTraversalStats*)outputs->Report,
         };
@@ -1872,15 +1869,15 @@ internal unsafe struct DenseMultiplyCall(
     public void Submit(CallOutputs* outputs, Completion completion)
     {
         this._left = left.Pin();
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
-        using Lease lent = Arena.Lend(arena);
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
+        using HandleReference passed = Arena.Reference(arena);
         NativeDenseMultiply arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
             Count = (nuint)left.Rows, Left = left.AsView((byte*)this._left.Pointer),
             Products = (NativeMatchesTapeView*)outputs->View, Written = &outputs->Written,
-            Required = &outputs->Required, Arena = lent.Pointer, Wanted = (nuint)wanted,
+            Required = &outputs->Required, Arena = passed.Pointer, Wanted = (nuint)wanted,
             ExpansionFactor = (nuint)expansionFactor, Predicate = this._predicate.Predicate(predicate),
             Progress = this._progress.Progress(progress), Stats = (NativeDenseTraversalStats*)outputs->Report,
         };
@@ -1929,17 +1926,17 @@ internal unsafe struct DenseAttendCall(
         this._queries = queries.Pin();
         this._values = values.Pin();
         this._carry = carry.Pin();
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
-        using Lease lent = Arena.Lend(arena);
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
+        using HandleReference passed = Arena.Reference(arena);
         NativeDenseAttend arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
             Count = (nuint)queries.Rows, Queries = queries.AsView((byte*)this._queries.Pointer),
             HeadCount = (nuint)headCount, ValueLookup = &ValueRows.Resolve,
-            ValueLookupState = this._lookup.Lend(new ValueRows(rowOf, values, (byte*)this._values.Pointer)),
+            ValueLookupState = this._lookup.Reference(new ValueRows(rowOf, values, (byte*)this._values.Pointer)),
             Carry = (DenseSoftmaxState*)this._carry.Pointer, Outputs = (NativeRowsView*)outputs->View,
-            Arena = lent.Pointer, OutputsScalar = outputsScalar, ExpansionFactor = (nuint)expansionFactor,
+            Arena = passed.Pointer, OutputsScalar = outputsScalar, ExpansionFactor = (nuint)expansionFactor,
             ScoreScale = scoreScale, Predicate = this._predicate.Predicate(predicate),
             Progress = this._progress.Progress(progress), Stats = (NativeDenseTraversalStats*)outputs->Report,
         };
@@ -1971,8 +1968,8 @@ internal unsafe struct DenseRefinePlanFinishCall(CallHandles handles, DenseRefin
 
     public readonly void Submit(CallOutputs* outputs, Completion completion)
     {
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
         NativeDenseRefinePlanFinish arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome,
@@ -1997,7 +1994,7 @@ internal unsafe struct DenseReshardCall(
     string[]? paths, ulong shardCapacity, ulong seed, ulong expansionFactor, ulong memoryLimit,
     DenseTraversalStats? stats, Progress? progress, DenseReshardPlan? plan) : ICall<RefineReport>
 {
-    private readonly Lease[] _leases = new Lease[sources.Length + targets.Length];
+    private readonly HandleReference[] _references = new HandleReference[sources.Length + targets.Length];
     private readonly IntPtr[] _slots = new IntPtr[sources.Length + targets.Length];
     private MemoryHandle _pinnedSlots;
     private MemoryHandle _pinnedMemoryDomains;
@@ -2014,8 +2011,8 @@ internal unsafe struct DenseReshardCall(
         for (int position = 0; position < this._slots.Length; position++)
         {
             DenseIndex named = position < sources.Length ? sources[position] : targets[position - sources.Length];
-            this._leases[position] = Lease.Of(named?.Handle, "index");
-            this._slots[position] = this._leases[position].Pointer;
+            this._references[position] = HandleReference.Of(named?.Handle, "index");
+            this._slots[position] = this._references[position].Pointer;
         }
 
         this._pinnedSlots = this._slots.AsMemory().Pin();
@@ -2048,7 +2045,7 @@ internal unsafe struct DenseReshardCall(
         }
 
         IntPtr* slots = (IntPtr*)this._pinnedSlots.Pointer;
-        using Lease executor = handles.LendExecutor();
+        using HandleReference executor = handles.ReferenceExecutor();
         NativeDenseReshard arguments = new()
         {
             SourcesCount = (nuint)sources.Length, Sources = slots, TargetsCount = (nuint)targets.Length,
@@ -2065,9 +2062,9 @@ internal unsafe struct DenseReshardCall(
 
     public void Release(CallOutputs* outputs)
     {
-        for (int position = 0; position < this._leases.Length; position++)
+        for (int position = 0; position < this._references.Length; position++)
         {
-            this._leases[position].Dispose();
+            this._references[position].Dispose();
         }
 
         if (this._nvme is not null)
@@ -2102,7 +2099,7 @@ internal unsafe struct DenseReshardPlanFinishCall(CallHandles handles, DenseResh
 
     public readonly void Submit(CallOutputs* outputs, Completion completion)
     {
-        using Lease executor = handles.LendExecutor();
+        using HandleReference executor = handles.ReferenceExecutor();
         NativeDenseReshardPlanFinish arguments = new()
         {
             Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
@@ -2147,9 +2144,9 @@ internal unsafe struct DenseSampleCall(CallHandles handles, int wanted, Arena ar
         this._shown = shown.Pin();
         this._shownCoordinates = shownCoordinates.Pin();
         this._focus = focus.Pin();
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
-        using Lease lent = Arena.Lend(arena);
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
+        using HandleReference passed = Arena.Reference(arena);
         NativeDenseSample arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
@@ -2164,7 +2161,7 @@ internal unsafe struct DenseSampleCall(CallHandles handles, int wanted, Arena ar
             Focus = new NativeKeysView { Data = (IntPtr)this._focus.Pointer, Stride = (nuint)sizeof(Key) },
             Keys = &reports->Keys, EntryOrdinals = &reports->EntryOrdinals,
             Parents = (NativeMatchesView*)outputs->View, Coordinates = &reports->Coordinates,
-            Written = &outputs->Written, Arena = lent.Pointer, Wanted = bound, Seed = config.Seed,
+            Written = &outputs->Written, Arena = passed.Pointer, Wanted = bound, Seed = config.Seed,
             ExpansionFactor = (nuint)config.ExpansionFactor, Progress = this._progress.Progress(config.Progress),
             Stats = &reports->Stats,
         };
@@ -2211,8 +2208,8 @@ internal unsafe struct DenseSaveCall(CallHandles handles, string path, Progress?
     public void Submit(CallOutputs* outputs, Completion completion)
     {
         this._pinnedPath = this._path.AsMemory().Pin();
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
         NativeDenseSave arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome,
@@ -2241,13 +2238,13 @@ internal unsafe struct DenseSaveBufferCall(CallHandles handles, Arena arena, Pro
 
     public void Submit(CallOutputs* outputs, Completion completion)
     {
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
-        using Lease lent = Arena.Lend(arena);
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
+        using HandleReference passed = Arena.Reference(arena);
         NativeDenseSaveBuffer arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
-            Monolith = (NativeBytesView*)outputs->View, Arena = lent.Pointer,
+            Monolith = (NativeBytesView*)outputs->View, Arena = passed.Pointer,
             Progress = this._progress.Progress(progress),
         };
         usearch_dense_save_buffer(&arguments);
@@ -2527,8 +2524,9 @@ public readonly unsafe struct DenseBatch
 /// <summary>
 /// A sequential walk over the index contents - export, migration, and visualization feed off
 /// it. Each shard's publication watermark is read as the walk enters that shard, so an entry once
-/// passed is never revisited, while a later shard may still carry entries published after the walk
-/// began. It keeps the index and the executor it pulls on alive until disposed.
+/// passed is never revisited, while a later shard may still hold entries published after the walk
+/// began. It keeps the index alive until disposed and no executor: its pulls run on the caller's
+/// thread, or block on the executor <see cref="On"/> names for each.
 /// </summary>
 public sealed unsafe class DenseCursor : IDisposable
 {
@@ -2536,19 +2534,9 @@ public sealed unsafe class DenseCursor : IDisposable
 
     private DenseCursor(NativeCursorHandle handle) => this._handle = handle;
 
-    internal static DenseCursor Open(CallHandles handles, ReadOnlySpan<Key> starts)
+    internal static DenseCursor Open(EngineHandle index, ReadOnlySpan<Key> starts)
     {
-        Lease held = handles.LendIndex();
-        Lease pool;
-        try
-        {
-            pool = handles.LendExecutor();
-        }
-        catch
-        {
-            held.Dispose();
-            throw;
-        }
+        HandleReference held = HandleReference.Of(index, "index");
 
         IntPtr created = IntPtr.Zero;
         NativeOutcome outcome = default;
@@ -2568,11 +2556,10 @@ public sealed unsafe class DenseCursor : IDisposable
         if (outcome.Status != Status.Success)
         {
             held.Dispose();
-            pool.Dispose();
             outcome.ThrowIfFailed();
         }
 
-        return new DenseCursor(new NativeCursorHandle(created, held, pool));
+        return new DenseCursor(new NativeCursorHandle(created, held));
     }
 
     /// <summary>Copies the next batch of entries out of the walk into an arena, the keys always and
@@ -2581,11 +2568,20 @@ public sealed unsafe class DenseCursor : IDisposable
     /// <param name="arena">Where the batch lands, rewound by the pull.</param>
     /// <param name="links">Whether to export the keys each entry links to; false exports the keys alone.</param>
     /// <returns>The batch, empty once the walk is exhausted.</returns>
-    public DenseBatch Next(int wanted, Arena arena, bool links = false)
+    public DenseBatch Next(int wanted, Arena arena, bool links = false) => this.Pull(null, wanted, arena, links);
+
+    /// <summary>The receiver whose pulls block on <paramref name="executor"/>, named again for every pull.</summary>
+    /// <param name="executor">The executor every pull through the receiver runs on.</param>
+    /// <returns>The receiver, which offers the same pulls.</returns>
+    public DenseCursorOn On(Executor executor) => new(this, executor);
+
+    /// <summary>One pull on <paramref name="executor"/>, or the caller's thread when null.</summary>
+    internal DenseBatch Pull(Executor? executor, int wanted, Arena arena, bool links)
     {
         nuint bound = Calls.Bound(wanted);
-        using Lease cursor = Lease.Of(this._handle, "cursor");
-        using Lease lent = Arena.Lend(arena);
+        using HandleReference cursor = HandleReference.Of(this._handle, "cursor");
+        using HandleReference passed = Arena.Reference(arena);
+        using HandleReference pool = HandleReference.Of(executor?.Handle, "executor");
         nuint written = 0;
         NativeOutcome outcome = default;
         NativeKeysView keys = default;
@@ -2593,13 +2589,13 @@ public sealed unsafe class DenseCursor : IDisposable
         NativeDenseCursorNext arguments = new()
         {
             Index = this._handle.Index,
-            Executor = this._handle.Executor,
+            Executor = pool.Pointer,
             Outcome = &outcome,
             Cursor = cursor.Pointer,
             Keys = &keys,
             Links = links ? &linked : null,
             Written = &written,
-            Arena = lent.Pointer,
+            Arena = passed.Pointer,
             Wanted = bound,
         };
         usearch_dense_cursor_next(&arguments);
@@ -2607,9 +2603,26 @@ public sealed unsafe class DenseCursor : IDisposable
         return new DenseBatch(keys, linked, links, (int)written);
     }
 
-    /// <summary>Releases the cursor, then the index and executor it kept alive. Calls
+    /// <summary>Releases the cursor, then the index it kept alive. Calls
     /// <c>usearch_dense_cursor_free</c>.</summary>
     public void Dispose() => this._handle.Dispose();
+}
+
+/// <summary>A cursor's pulls blocking on one executor, as <see cref="DenseCursor.On"/> makes them.</summary>
+public readonly struct DenseCursorOn
+{
+    private readonly DenseCursor _cursor;
+    private readonly Executor _executor;
+
+    internal DenseCursorOn(DenseCursor cursor, Executor executor)
+    {
+        this._cursor = cursor;
+        this._executor = executor;
+    }
+
+    /// <inheritdoc cref="DenseCursor.Next"/>
+    public DenseBatch Next(int wanted, Arena arena, bool links = false) =>
+        this._cursor.Pull(this._executor, wanted, arena, links);
 }
 
 /// <summary>
@@ -2626,11 +2639,11 @@ public sealed unsafe class DenseSearchStream : IDisposable
 
     internal static DenseSearchStream Open(CallHandles handles, RowsView query, ulong expansionFactor)
     {
-        Lease held = handles.LendIndex();
-        Lease pool;
+        HandleReference held = handles.ReferenceIndex();
+        HandleReference pool;
         try
         {
-            pool = handles.LendExecutor();
+            pool = handles.ReferenceExecutor();
         }
         catch
         {
@@ -2673,8 +2686,8 @@ public sealed unsafe class DenseSearchStream : IDisposable
     public QueryMatches Next(int wanted, Arena arena)
     {
         nuint bound = Calls.Bound(wanted);
-        using Lease stream = Lease.Of(this._handle, "search stream");
-        using Lease lent = Arena.Lend(arena);
+        using HandleReference stream = HandleReference.Of(this._handle, "search stream");
+        using HandleReference passed = Arena.Reference(arena);
         NativeOutcome outcome = default;
         NativeMatchesView matches = default;
         NativeDenseSearchStreamNext arguments = new()
@@ -2684,7 +2697,7 @@ public sealed unsafe class DenseSearchStream : IDisposable
             Outcome = &outcome,
             Stream = stream.Pointer,
             Matches = &matches,
-            Arena = lent.Pointer,
+            Arena = passed.Pointer,
             Wanted = bound,
         };
         usearch_dense_search_stream_next(&arguments);
@@ -3115,6 +3128,7 @@ internal unsafe struct NativeDenseSample
 internal unsafe struct NativeDenseCursorInit
 {
     public IntPtr Index;
+    public IntPtr Executor;
     public NativeOutcome* Outcome;
     public nuint StartsCount;
     public Key* Starts;
@@ -3486,44 +3500,38 @@ internal sealed class NativeDenseIndexHandle : EngineHandle
     }
 }
 
-/// <summary>A <c>usearch_dense_cursor_t</c> and the leases on the index and executor every pull
-/// names, all released when the wrapper is disposed or collected.</summary>
+/// <summary>A <c>usearch_dense_cursor_t</c> and the reference on the index every pull names, both
+/// released when the wrapper is disposed or collected.</summary>
 internal sealed class NativeCursorHandle : EngineHandle
 {
-    private Lease _index;
-    private Lease _executor;
+    private HandleReference _index;
 
-    internal NativeCursorHandle(IntPtr cursor, Lease index, Lease executor)
+    internal NativeCursorHandle(IntPtr cursor, HandleReference index)
     {
         this.SetHandle(cursor);
         this._index = index;
-        this._executor = executor;
     }
 
     /// <summary>The index the cursor was opened on.</summary>
     internal IntPtr Index => this._index.Pointer;
-
-    /// <summary>The executor every pull runs on, null for the caller's thread.</summary>
-    internal IntPtr Executor => this._executor.Pointer;
 
     /// <inheritdoc/>
     protected override bool ReleaseHandle()
     {
         NativeMethods.usearch_dense_cursor_free(this.handle);
         this._index.Dispose();
-        this._executor.Dispose();
         return true;
     }
 }
 
-/// <summary>A <c>usearch_dense_search_stream_t</c> and the leases on the index and executor every
+/// <summary>A <c>usearch_dense_search_stream_t</c> and the references on the index and executor every
 /// pull names, all released when the wrapper is disposed or collected.</summary>
 internal sealed class NativeSearchStreamHandle : EngineHandle
 {
-    private Lease _index;
-    private Lease _executor;
+    private HandleReference _index;
+    private HandleReference _executor;
 
-    internal NativeSearchStreamHandle(IntPtr stream, Lease index, Lease executor)
+    internal NativeSearchStreamHandle(IntPtr stream, HandleReference index, HandleReference executor)
     {
         this.SetHandle(stream);
         this._index = index;

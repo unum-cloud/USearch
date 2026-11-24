@@ -275,7 +275,7 @@ util::status_t place_shards(punned_basic_index<traits_type_, residency_> const& 
  *
  *  The variant is the first on the modality's ladder of the devices' vendor at or under the best
  *  class every named device loads under the ceiling, whose unit they all load and which serves the
- *  geometry. Devices this build carries a class for but no variant of the geometry are refused with
+ *  geometry. Devices this build holds a class for but no variant of the geometry are refused with
  *  @c unsupported_k, as Apple GPUs are for geospatial and f32 shapes, short of their contract. The
  *  shards are placed once the variant holds its geometry, since each is built as it names; then the
  *  variant goes to <tt>fill(punned_basic_index) → bool</tt>.
@@ -317,7 +317,7 @@ handle_type_* make_basic_vram_handle(typename handle_type_::traits_t::geometry_t
     on_vendor.template operator()<vendored_residency_t::vram_apple_k>(typename traits_t::apple_gpu_ladder_t {});
     if (picked) return index;
     return propagate_error(usearch_status_unsupported_k, outcome,
-                           "No kernel this build carries serves the geometry on the devices"),
+                           "No kernel this build holds serves the geometry on the devices"),
            nullptr;
 }
 
@@ -798,8 +798,9 @@ void basic_cursor_init(arguments_type_* arguments) noexcept {
     cursor->basic.tables = arguments->index->basic.tables;
     util::status_t opened = util::status_code_t::success_k;
     visit_basic(*arguments->index, [&](auto punned) noexcept {
-        auto const [walk, status] = punned.verbs.cursor_init(punned.variant,
-                                                             {arguments->starts, arguments->starts_count});
+        auto const [walk, status] = punned.verbs.cursor_init(
+            punned.variant, {arguments->starts, arguments->starts_count},
+            util::forkunion_allocator_t {memory_domain_of(arguments->executor)});
         cursor->basic.cursor = walk;
         opened = status;
     });

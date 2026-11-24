@@ -1301,7 +1301,7 @@ struct ram_indexes {
      *  searches run throughout.
      *
      *  @param[in] config The cache a core keeps, which sizes every shard's round.
-     *  @param[in] selector Carries the budget every neighbor list is reserved for.
+     *  @param[in] selector Holds the budget every neighbor list is reserved for.
      *  @param[in] codec Measures the stored values.
      *  @param[in,out] context The planning thread's scratch, whose allocator places the shard
      *      plans.
@@ -1363,7 +1363,7 @@ struct ram_indexes {
      *      each with as many live shards as this one.
      *  @param[in] config The cache a core keeps, which sizes every round, the most entries a shard
      *      holds once packed, and the seed picking every shard's part roots.
-     *  @param[in] selector Carries the budget every neighbor list is reserved for.
+     *  @param[in] selector Holds the budget every neighbor list is reserved for.
      *  @param[in] codec Measures the stored values.
      *  @param[in,out] context The planning thread's scratch; its allocator places the shard plans.
      *
@@ -1427,7 +1427,7 @@ struct ram_indexes {
      *
      *  Read-only, so concurrent insertions leave fresh nodes uncounted; the audit runs again once
      *  if a destructive window overlapped it, and each shard's bitsets come from the allocator
-     *  @p context carries.
+     *  @p context holds.
      *
      *  @par Statuses:
      *  - @c uninitialized_k No shard is placed.

@@ -10,11 +10,11 @@
  *  many bytes the next step needs, so a pipe reads exactly that much, and writers answer
  *  @c ipc_status_t::too_small_k with the bytes they need, so an empty output measures. Bodies are
  *  never copied: a writer answers them as gathers for @c writev, and a reader answers spans into
- *  the body it was lent. Every scalar crosses the wire little-endian, through @c ipc_load_little
+ *  the body it was passed. Every scalar crosses the wire little-endian, through @c ipc_load_little
  *  and @c ipc_store_little, whatever the host.
  *
  *  The slots follow <tt>Schema.fbs</tt>, <tt>Message.fbs</tt> and <tt>File.fbs</tt> of Apache Arrow's <tt>format/</tt>
- *  directory. The names carry no type of the project they ship in, so another project copies the
+ *  directory. The names hold no type of the project they ship in, so another project copies the
  *  file with only its namespace changed.
  */
 #pragma once
@@ -92,11 +92,11 @@ inline constexpr std::uint32_t ipc_alignment_default_k = 64;
  *  largest alignment. */
 inline constexpr std::uint32_t ipc_alignment_direct_k = 4096;
 
-/** The most fields a schema carries, nested ones counted, which sizes @c ipc_arrow_storage_t; each
+/** The most fields a schema holds, nested ones counted, which sizes @c ipc_arrow_storage_t; each
  *  level of nesting costs a field, which also bounds how deep the codec recurses. */
 inline constexpr std::size_t ipc_fields_max_k = 16;
 
-/** The most buffers a batch carries: validity, offsets and data of every field. */
+/** The most buffers a batch holds: validity, offsets and data of every field. */
 inline constexpr std::size_t ipc_buffers_max_k = 3 * ipc_fields_max_k;
 
 /** The bytes a file starts with, of which the first 6 also end it. */
@@ -124,7 +124,7 @@ enum class ipc_status_t : std::uint8_t {
      *  maps or nulls. */
     unsupported_k,
 
-    /** An output the caller lent is too short; the call names the bytes or entries it needs where
+    /** An output the caller passed is too short; the call names the bytes or entries it needs where
      *  it can. */
     too_small_k,
 };
@@ -181,7 +181,7 @@ enum class ipc_nullability_t : std::uint8_t {
     nullable_k,
 };
 
-/** What a message carries. */
+/** What a message holds. */
 enum class ipc_message_kind_t : std::uint8_t {
     schema_k,
     record_batch_k,
@@ -825,7 +825,7 @@ inline ipc_status_t ipc_read_field(ipc_flatbuffer_table_t const& table, ipc_sche
     return status;
 }
 
-/** Reads a @c Schema table, from a message or a footer, into the entries the caller lent. */
+/** Reads a @c Schema table, from a message or a footer, into the entries the caller passed. */
 inline ipc_status_t ipc_read_schema_table(ipc_flatbuffer_table_t const& table, std::span<ipc_field_t> fields,
                                           std::span<ipc_key_value_t> metadata, ipc_schema_t& schema) noexcept {
     ipc_status_t status = ipc_status_t::success_k;
@@ -902,7 +902,7 @@ inline ipc_status_t ipc_read_message(bytes_view_t metadata, ipc_message_t& messa
     return message.header.present() ? ipc_status_t::success_k : ipc_status_t::malformed_k;
 }
 
-/** Reads the schema a message carries: its fields into @p fields, the columns first and every
+/** Reads the schema a message holds: its fields into @p fields, the columns first and every
  *  nested field after, each field's children side by side, and its pairs into @p metadata. */
 inline ipc_status_t ipc_read_schema(ipc_message_t const& message, std::span<ipc_field_t> fields,
                                     std::span<ipc_key_value_t> metadata, ipc_schema_t& schema) noexcept {
@@ -911,7 +911,7 @@ inline ipc_status_t ipc_read_schema(ipc_message_t const& message, std::span<ipc_
 }
 
 /**
- *  @brief Reads the record batch a message carries, its nodes into @p nodes and views of its
+ *  @brief Reads the record batch a message holds, its nodes into @p nodes and views of its
  *      buffers into @p buffers, each checked to lie inside @p body.
  *
  *  Compression is refused before the body is needed. The values themselves are left to
@@ -1037,8 +1037,8 @@ constexpr ipc_status_t ipc_validate_batch(ipc_schema_t const& schema, ipc_batch_
 }
 
 /**
- *  @brief Reads the footer at the end of a whole @p file: its schema into the entries lent, and the
- *      Blocks of its record batches into @p blocks, so a mapped file imports them in parallel.
+ *  @brief Reads the footer at the end of a whole @p file: its schema into the entries passed, and
+ *      the Blocks of its record batches into @p blocks, so a mapped file imports them in parallel.
  *
  *  @p blocks_count names how many Blocks the footer holds, also when @p blocks is too short for
  *  them. A file that starts with the magic but does not end with it reads as truncated.
@@ -1365,11 +1365,11 @@ inline ipc_status_t ipc_write_footer(ipc_schema_t const& schema, std::span<ipc_b
 
 /**
  *  @brief The memory an exported @c ArrowSchema or @c ArrowArray tree lives in, which the caller
- *      lends and keeps alive until the tree is released, so exporting allocates nothing.
+ *      passes and keeps alive until the tree is released, so exporting allocates nothing.
  *
  *  Every field takes one entry of each array, nested ones included, as @c ipc_fields_max_k counts
  *  them: the columns first, then each field's children side by side, depth-first. Schemas also need
- *  @c text for their names, formats and metadata, which the caller lends; batches need none.
+ *  @c text for their names, formats and metadata, which the caller passes; batches need none.
  *  Release marks the tree released and frees nothing.
  */
 struct ipc_arrow_storage_t {
@@ -1388,14 +1388,14 @@ struct ipc_arrow_storage_t {
  *  then. */
 inline constexpr std::int64_t ipc_zero_offsets_k[1] {};
 
-/** Releases an exported schema tree in caller-lent storage: its children, then itself. */
+/** Releases an exported schema tree in caller-passed storage: its children, then itself. */
 inline void ipc_release_schema(ArrowSchema* schema) noexcept {
     for (std::int64_t index = 0; index != schema->n_children; ++index)
         if (schema->children[index]->release) schema->children[index]->release(schema->children[index]);
     schema->release = nullptr;
 }
 
-/** Releases an exported array tree in caller-lent storage: its children, then itself. */
+/** Releases an exported array tree in caller-passed storage: its children, then itself. */
 inline void ipc_release_array(ArrowArray* array) noexcept {
     for (std::int64_t index = 0; index != array->n_children; ++index)
         if (array->children[index]->release) array->children[index]->release(array->children[index]);

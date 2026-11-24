@@ -269,7 +269,7 @@ struct vram_apple_index {
      *  fragments. */
     inline static constexpr std::size_t fragment_bytes_k = metal_fragment_bytes_k;
 
-    /** Rows one checkpoint batch carries between a matrix and the caller: one slab, the row
+    /** Rows one checkpoint batch moves between a matrix and the caller: one slab, the row
      *  granularity the RAM residency grows by. */
     inline static constexpr std::size_t batch_rows_log2_k = 20;
 
@@ -452,6 +452,22 @@ struct vram_apple_index {
         shared_lock_t storage {storage_};
         std::memcpy(destination.byte_data(), vectors_matrix_.host + node * row_bytes(), packed_row_bytes());
         return status_code_t::success_k;
+    }
+
+    /** Writes up to @p wanted rows stored under @p key into @p vectors in their scalar, any NumKong
+     *  casts the stored one into, read in place from unified memory, and answers the key's true
+     *  total; the storage lock keeps a growth from freeing the rows mid-copy. */
+    std::size_t get(key_t const& key, rows_span_t vectors, std::size_t wanted) noexcept {
+        rows_span_t const target {vectors.data, vectors.rows, dimensions(), vectors.stride, vectors.dtype};
+        shared_lock_t storage {storage_};
+        std::size_t total = 0;
+        find_each(key, [&](node_id_t node) noexcept {
+            if (total < wanted && total < target.rows)
+                export_row<typename elementwise_ladder<import_capability_k>::kit_t>(
+                    vectors_matrix_.host + node * row_bytes(), vector_dtype_k, target, total);
+            ++total;
+        });
+        return total;
     }
 
     /**
@@ -1104,7 +1120,7 @@ struct vram_apple_index {
         /** The depth the next expansion reaches from, and the depths each direction took. */
         std::size_t depth_ = 0, depth_from_root_ = 0, depth_to_root_ = 0;
 
-        /** The population counts the report carries, as @c reachability_t names them. */
+        /** The population counts the report holds, as @c reachability_t names them. */
         std::size_t unlinked_ = 0, underlinked_ = 0, unreached_islands_ = 0, stranded_islands_ = 0, components_ = 0;
 
         /** The pass within the components or labels the next batch queues. */
@@ -1577,7 +1593,6 @@ struct vram_apple_index {
             assign_slots_();
             source.scatter_(split_);
             publish_parts_();
-            source_batch_ = batch_lock_t {};
             moves_ = phase_t::done_k;
             split_.bound_target = 0;
             bind_target_(context);
@@ -1649,9 +1664,6 @@ struct vram_apple_index {
 
         /** The split's state: its targets, their parts and the folded reports. */
         split_t split_;
-
-        /** The source's batch hold, let go once its parts published. */
-        batch_lock_t source_batch_;
 
         /** The index the entries move out of; null in a refused plan. */
         vram_apple_index* source_ = nullptr;
@@ -1766,10 +1778,11 @@ struct vram_apple_index {
             if (into == this || into->device_.ordinal != device_.ordinal || into->kernel_ != kernel_ ||
                 !(into->geometry_ == geometry_) || into->size())
                 return {std::move(plan), status_code_t::config_mismatch_k};
-        plan.source_batch_ = batch_lock_t {batch_};
-        if (!claims_.closed()) return {std::move(plan), status_code_t::contended_k};
+        if (!claims_.closed())
+            return {std::move(plan), {status_code_t::contended_k, "The source's claim word is open"}};
         for (vram_apple_index const* into : targets)
-            if (!into->claims_.closed()) return {std::move(plan), status_code_t::contended_k};
+            if (!into->claims_.closed())
+                return {std::move(plan), {status_code_t::contended_k, "A target's claim word is open"}};
         split_t& split = plan.split_;
         if (failed(split.targets.reserve_exactly(parts)) || failed(split.parts.resize(parts)))
             return {std::move(plan), status_code_t::out_of_memory_k};
@@ -1996,7 +2009,7 @@ struct vram_apple_index {
 
     /** One load in flight: the rows it appends at the watermark, under its own claim or a claim
      *  word its caller closed, holding the growth hold for its whole life, since growth would
-     *  relocate the storage its tasks write; @ref finish derives the norms no task carried and
+     *  relocate the storage its tasks write; @ref finish derives the norms no task supplied and
      *  publishes. */
     struct [[nodiscard]] load_plan_t {
         node_id_t base = 0;
@@ -2047,7 +2060,7 @@ struct vram_apple_index {
 
         /**
          *  @brief Copies the task's rows out of @p columns into the storage: vectors padded, norms
-         *      where carried, neighbors rebased from @p source_range onto the appended range and
+         *      where supplied, neighbors rebased from @p source_range onto the appended range and
          *      compacted, and row @c r of the task's source nodes keyed <tt>key_of(r)</tt>.
          *
          *  @par Statuses:
@@ -2147,7 +2160,7 @@ struct vram_apple_index {
         }
 
         /**
-         *  @brief Derives the norms no task carried on the device, lifts the hold, and publishes
+         *  @brief Derives the norms no task supplied on the device, lifts the hold, and publishes
          *      the appended nodes with the keys @ref publish_keys filed.
          *
          *  @par Statuses:
@@ -2194,7 +2207,7 @@ struct vram_apple_index {
         if (status_t const kept = status(); failed(kept)) return {{}, kept};
         if (!rows) return {load_plan_t {*this, {}, static_cast<node_id_t>(claimed_()), 0}, status_code_t::success_k};
         batch_lock_t batch {batch_, std::try_to_lock};
-        if (!batch.owns_lock()) return {{}, status_code_t::contended_k};
+        if (!batch.owns_lock()) return {{}, {status_code_t::contended_k, "Another batch or load is in flight"}};
         if (status_t const bound = bind_(); failed(bound)) return {{}, bound};
         // A closed word is the caller's, who refines or reshards around the load; an open one is
         // claimed like a batch's, so no batch goes beside it.
@@ -2214,12 +2227,12 @@ struct vram_apple_index {
     }
 
     /**
-     *  Appends the whole source on the calling thread; columns shorter than @p rows are refused
-     *  before a row is claimed.
+     *  @brief Appends the whole source on the calling thread; columns shorter than @p rows are
+     *      refused before a row is claimed.
      *
      *  @par Statuses:
      *  - @c uninitialized_k The index never grew.
-     *  - @c config_mismatch_k The @p columns are shorter than @p rows or carry norms the index
+     *  - @c config_mismatch_k The @p columns are shorter than @p rows or hold norms the index
      *    does not store, or @c status keeps it.
      *  - @c contended_k Another batch or load is in flight.
      *  - @c overflow_k The rows pass the ceiling.
@@ -3381,7 +3394,7 @@ struct vram_apple_index {
         if (neighbors_allocator_.device() != device_.ordinal) return status_code_t::config_mismatch_k;
         metal_context_t* const context = vectors_allocator_.context();
         if (!context) return status_code_t::device_k;
-        // The pipelines report the simdgroup width the specification carries, so they build first.
+        // The pipelines report the simdgroup width the specification names, so they build first.
         if (status_t const loaded = load_pipelines_(); failed(loaded)) return loaded;
         auto const [specs, status] = metal_device_specs_t::query(*context, device_.ordinal);
         if (failed(status)) return status;

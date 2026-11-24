@@ -21,12 +21,12 @@ import USearchC
 /// engine status. Validation performed here before a call crosses reports the status the engine
 /// would have reported for the same fault.
 ///
-/// A `USearchError` never carries `success` or `deferred`; a `Deferred` call reports both.
+/// A `USearchError` never holds `success` or `deferred`; a `Deferred` call reports both.
 public struct Status: Hashable, Sendable, CustomStringConvertible {
     /// The engine's own value.
     let raw: usearch_status_t
 
-    /// The call succeeded and carries no message.
+    /// The call succeeded and holds no message.
     public static let success = Status(raw: usearch_status_success_k)
     /// The call was submitted deferred and is not final yet.
     public static let deferred = Status(raw: usearch_status_deferred_k)
@@ -68,7 +68,7 @@ public struct Status: Hashable, Sendable, CustomStringConvertible {
     /// The status rendered as the library spells it, like `invalid-argument`.
     public var description: String { String(cString: usearch_status_name(raw)) }
 
-    /// Reads a spelling back, and nil for one no status carries.
+    /// Reads a spelling back, and nil for one no status holds.
     public init?(name: String) {
         guard let raw = parsed(name, usearch_status_from_name, usearch_status_success_k) else { return nil }
         self.raw = raw
@@ -171,7 +171,7 @@ public struct Key: Hashable, Comparable, CustomStringConvertible, ExpressibleByI
     /// The sixteen identity bytes, most significant first.
     public var byteArray: [UInt8] { (0 ..< 16).map { raw[$0] } }
 
-    /// The integer identity in the low eight bytes, and nil when the high eight carry anything.
+    /// The integer identity in the low eight bytes, and nil when the high eight hold anything.
     public var integerIdentity: UInt64? {
         for position in 0 ..< 8 where raw[position] != 0 { return nil }
         var value: UInt64 = 0
@@ -292,7 +292,7 @@ public struct Scalar: Hashable, Sendable, CustomStringConvertible {
     /// The kind rendered as the library spells it.
     public var description: String { String(cString: usearch_scalar_name(raw)) }
 
-    /// Reads a spelling back, and nil for one no kind carries.
+    /// Reads a spelling back, and nil for one no kind holds.
     public init?(name: String) {
         guard let raw = parsed(name, usearch_scalar_from_name, usearch_scalar_unknown_k) else { return nil }
         self.raw = raw
@@ -300,7 +300,7 @@ public struct Scalar: Hashable, Sendable, CustomStringConvertible {
 
     init(raw: usearch_scalar_t) { self.raw = raw }
 
-    /// How many logical dimensions one stored value carries: one for the byte-and-wider kinds,
+    /// How many logical dimensions one stored value holds: one for the byte-and-wider kinds,
     /// more for the packed ones.
     var dimensionsPerValue: Int {
         switch self {
@@ -361,16 +361,16 @@ extension U1x8: ScalarValue {
 
 // MARK: - Rows
 
-/// A borrowed run of rows along a call's batch axis - the input of every verb whose rows share one
+/// A viewed run of rows along a call's batch axis - the input of every verb whose rows share one
 /// width - with the row count that sets the call's batch size.
 ///
-/// Built over a NumKong `MatrixView`, it borrows and stays valid only as long as the storage the
+/// Built over a NumKong `MatrixView`, it views and stays valid only as long as the storage the
 /// view points into, so a memory-mapped dataset reaches the index with no reshape and no copy.
 /// Built over a `Tensor`, it keeps the tensor alive, which is what a deferred call needs.
 public struct RowsView: @unchecked Sendable {
     /// The first row.
     public let data: UnsafeRawPointer
-    /// The rows the run carries, which the call takes as its batch axis.
+    /// The rows the run holds, which the call takes as its batch axis.
     public let rows: Int
     /// Bytes between the starts of consecutive rows; zero repeats the first row.
     public let stride: Int
@@ -381,7 +381,7 @@ public struct RowsView: @unchecked Sendable {
     /// The storage the rows live in, held when the view keeps it alive.
     let owner: AnyObject?
 
-    /// Borrows the rows of a NumKong view, which must outlive every call reading them.
+    /// Views the rows of a NumKong view, which must outlive every call reading them.
     public init<Element: ScalarValue>(_ matrix: MatrixView<Element>) { self.init(matrix, owner: nil) }
 
     /// Views the rows of a NumKong tensor, keeping it alive as long as the view is.
@@ -468,7 +468,7 @@ public struct QueryMatches: RandomAccessCollection {
 
 // MARK: - Progress
 
-/// Whether the operation a progress handler is watching carries on or unwinds.
+/// Whether the operation a progress handler is watching continues or unwinds.
 public enum Continuation: Sendable {
     /// Carry on to the next unit of work.
     case `continue`
@@ -530,7 +530,7 @@ public struct Phase: Hashable, Sendable, CustomStringConvertible {
     /// The phase rendered as the library spells it.
     public var description: String { String(cString: usearch_phase_name(raw)) }
 
-    /// Reads a spelling back, and nil for one no phase carries.
+    /// Reads a spelling back, and nil for one no phase holds.
     public init?(name: String) {
         guard let raw = parsed(name, usearch_phase_from_name, usearch_phase_none_k) else { return nil }
         self.raw = raw
@@ -559,9 +559,9 @@ public struct PhaseProgress: Sendable {
 /// Everything one call points the library at, held where it cannot move until the call is final.
 ///
 /// Submission copies the argument structure, so only its pointees live here: the outcome, the slots
-/// the call writes, the handlers it calls back, and for a deferred call the copies of what it
-/// borrows and the objects whose memory it reads. A blocking call releases it on return, and a
-/// deferred one is kept by its `Deferred` until final.
+/// the call writes, the handlers it calls back, and for a deferred call the copies of what it views
+/// and the objects whose memory it reads. A blocking call releases it on return, and a deferred one
+/// is kept by its `Deferred` until final.
 final class CallState {
     /// Whether the call blocks or returns once submitted.
     let completion: usearch_completion_t
@@ -606,9 +606,9 @@ final class CallState {
         if isDeferred, let object { anchors.append(object) }
     }
 
-    /// Lends trivial `values` to the call: in place while a blocking call runs, or as a copy the
+    /// Passes trivial `values` to the call: in place while a blocking call runs, or as a copy the
     /// call state owns, since a deferred call reads them after the verb returns.
-    func lend<Element, Value>(
+    func pass<Element, Value>(
         _ values: [Element],
         _ body: (UnsafePointer<Element>?) throws(USearchError) -> Value
     ) throws(USearchError) -> Value {
@@ -628,20 +628,20 @@ final class CallState {
         return copy
     }
 
-    /// Lends the UTF-8 bytes of a path, never terminated, by contract.
-    func lend<Value>(
+    /// Passes the UTF-8 bytes of a path, never terminated, by contract.
+    func pass<Value>(
         _ text: String,
         _ body: (usearch_bytes_view_t) throws(USearchError) -> Value
     ) throws(USearchError) -> Value {
         let bytes = Array(text.utf8)
-        return try lend(bytes) { (data) throws(USearchError) -> Value in
+        return try pass(bytes) { (data) throws(USearchError) -> Value in
             try body(usearch_bytes_view_t(data: data, length: bytes.count))
         }
     }
 
-    /// Lends an optional handler and its report count as the progress every reporting verb takes, so
-    /// the trampoline can never be paired with the wrong state; nil lends a null callback.
-    func lend(_ progress: Progress?, steps: Int) -> usearch_progress_t {
+    /// Passes an optional handler and its report count as the progress every reporting verb takes,
+    /// so the trampoline can never be paired with the wrong state; nil passes a null callback.
+    func pass(_ progress: Progress?, steps: Int) -> usearch_progress_t {
         guard let progress else { return usearch_progress_t(callback: nil, state: nil, steps: steps) }
         return usearch_progress_t(callback: progressTrampoline, state: place(Handler(progress)), steps: steps)
     }
@@ -712,9 +712,9 @@ func boundsCheck(_ position: Int, below count: Int) {
 /// A call submitted to an executor, which finishes there while its one owner polls, waits, or does
 /// other work.
 ///
-/// It owns the call's outcome and outputs, and keeps alive every object whose memory the call reads,
-/// until the call is final. The handles it names, the arena among them, it borrows as a blocking
-/// call does. Releasing an unfinished one waits for it first.
+/// It owns the call's outcome and outputs, and keeps alive every object whose memory the call
+/// reads, until the call is final. The handles it names, the arena among them, it views as a
+/// blocking call does. Releasing an unfinished one waits for it first.
 public final class Deferred<Value> {
     /// The call state and the result slot.
     private let submission: Submission<Value>
@@ -808,7 +808,7 @@ public struct CPUClass: Hashable, Sendable, CustomStringConvertible {
     /// The class as the library spells it.
     public var description: String { String(cString: usearch_cpu_class_name(raw)) }
 
-    /// Reads a spelling back, and nil for one no class carries.
+    /// Reads a spelling back, and nil for one no class holds.
     public init?(name: String) {
         guard let raw = parsed(name, usearch_cpu_class_from_name, usearch_cpu_class_unknown_k),
             raw != usearch_cpu_class_unknown_k
@@ -853,7 +853,7 @@ public struct GPUClass: Hashable, Sendable, CustomStringConvertible {
     /// The class as the library spells it.
     public var description: String { String(cString: usearch_gpu_class_name(raw)) }
 
-    /// Reads a spelling back, and nil for one no class carries.
+    /// Reads a spelling back, and nil for one no class holds.
     public init?(name: String) {
         guard let raw = parsed(name, usearch_gpu_class_from_name, usearch_gpu_class_unknown_k) else { return nil }
         self.raw = raw
@@ -879,7 +879,7 @@ public struct Residency: Hashable, Sendable, CustomStringConvertible {
     /// The residency rendered as the library spells it.
     public var description: String { String(cString: usearch_residency_name(raw)) }
 
-    /// Reads a spelling back, and nil for one no residency carries.
+    /// Reads a spelling back, and nil for one no residency holds.
     public init?(name: String) {
         guard let raw = parsed(name, usearch_residency_from_name, usearch_residency_unknown_k) else { return nil }
         self.raw = raw
@@ -901,7 +901,7 @@ public struct Traversal: Hashable, Sendable, CustomStringConvertible {
     /// The traversal rendered as the library spells it.
     public var description: String { String(cString: usearch_traversal_name(raw)) }
 
-    /// Reads a spelling back, and nil for one no traversal carries.
+    /// Reads a spelling back, and nil for one no traversal holds.
     public init?(name: String) {
         guard let raw = parsed(name, usearch_traversal_from_name, usearch_traversal_unknown_k) else { return nil }
         self.raw = raw
@@ -923,7 +923,7 @@ public struct Mood: Hashable, Sendable, CustomStringConvertible {
     /// The mood rendered as the library spells it.
     public var description: String { String(cString: usearch_mood_name(raw)) }
 
-    /// Reads a spelling back, and nil for one no mood carries.
+    /// Reads a spelling back, and nil for one no mood holds.
     public init?(name: String) {
         guard let raw = parsed(name, usearch_mood_from_name, usearch_mood_parked_k) else { return nil }
         self.raw = raw
@@ -956,7 +956,7 @@ public final class Executor: @unchecked Sendable {
     /// Creates an executor of host threads for RAM-resident indexes, interleaved across the compute
     /// domains local to `memoryDomains` - the very list the indexes were initialized with.
     ///
-    /// Zero `threads` takes 7/8 of the cores those domains carry, since full occupancy starves the
+    /// Zero `threads` takes 7/8 of the cores those domains hold, since full occupancy starves the
     /// ordered publication path. A `cpuClassCeiling` intersects with what the machine runs, so a
     /// class the machine lacks narrows rather than refuses; nil means no ceiling.
     public static func forRam(
@@ -966,7 +966,7 @@ public final class Executor: @unchecked Sendable {
     ) throws(USearchError) -> Executor {
         let callState = CallState()
         let executor = callState.slots(usearch_executor_t?.none)
-        try callState.lend(memoryDomains) { (domains) throws(USearchError) in
+        try callState.pass(memoryDomains) { (domains) throws(USearchError) in
             var arguments = usearch_executor_for_ram_t(
                 executor: executor,
                 outcome: callState.outcome,
@@ -977,38 +977,10 @@ public final class Executor: @unchecked Sendable {
                     cpu_class_ceiling: cpuClassCeiling?.raw ?? usearch_cpu_class_unknown_k,
                     memory_limit: 0
                 ),
-                threads: threads
+                threads: threads,
+                scratch_limit: 0
             )
             usearch_executor_for_ram(&arguments)
-        }
-        try callState.wait()
-        return Executor(raw: try created(executor))
-    }
-
-    /// Creates a RAM executor over a borrowed ForkUnion `fu_pool_t`, so several libraries in one
-    /// process share one set of threads while each keeps its own scratch. The pool must outlive
-    /// the executor, and keeps its lender's mood.
-    public static func onPool(
-        memoryDomains: [Int32] = [],
-        cpuClassCeiling: CPUClass? = nil,
-        pool: UnsafeMutableRawPointer
-    ) throws(USearchError) -> Executor {
-        let callState = CallState()
-        let executor = callState.slots(usearch_executor_t?.none)
-        try callState.lend(memoryDomains) { (domains) throws(USearchError) in
-            var arguments = usearch_executor_on_pool_t(
-                executor: executor,
-                outcome: callState.outcome,
-                ram: usearch_ram_options_t(
-                    memory_domains: domains,
-                    memory_domains_count: memoryDomains.count,
-                    shard_capacity: 0,
-                    cpu_class_ceiling: cpuClassCeiling?.raw ?? usearch_cpu_class_unknown_k,
-                    memory_limit: 0
-                ),
-                pool: pool
-            )
-            usearch_executor_on_pool(&arguments)
         }
         try callState.wait()
         return Executor(raw: try created(executor))
@@ -1030,8 +1002,10 @@ public final class Executor: @unchecked Sendable {
                 executor: executor,
                 outcome: callState.outcome,
                 nvme: nvme,
+                ram: usearch_ram_options_t(),
                 threads: threads,
-                nvme_class: usearch_nvme_class_unknown_k
+                nvme_class: usearch_nvme_class_unknown_k,
+                scratch_limit: 0
             )
             usearch_executor_for_nvme(&arguments)
         }
@@ -1039,37 +1013,38 @@ public final class Executor: @unchecked Sendable {
         return Executor(raw: try created(executor))
     }
 
-    /// Opens one submission stream on every named device, all of them driven by the one host thread
-    /// that calls the verbs - which is why this factory takes no thread count.
+    /// Opens one non-blocking stream on every named device, created and destroyed with the
+    /// executor, all of them driven by the one host thread that calls the verbs - which is why this
+    /// factory takes no thread count.
     ///
-    /// `streams` borrows the caller's CUDA streams, one per device in `devices` order, and nil
-    /// creates the executor's own. A zero `scratchLimit` lets per-device scratch grow as geometry
-    /// asks. A `gpuClassCeiling` no named device loads is refused with `unsupported`; nil means no
-    /// ceiling.
+    /// `streams` is declared for the caller's CUDA streams, one per device in `devices` order,
+    /// which answer `unsupported`, since the executor drives only its own; nil uses the executor's
+    /// own. A zero `scratchLimit` lets per-device scratch grow as geometry asks. A
+    /// `gpuClassCeiling` no named device loads is refused with `unsupported`; nil means no ceiling.
     public static func forVram(
         devices: [Int32] = [],
         gpuClassCeiling: GPUClass? = nil,
         streams: [UnsafeMutableRawPointer?]? = nil,
         scratchLimit: Int = 0
     ) throws(USearchError) -> Executor {
-        // The C side reads one stream per device behind a pointer that carries no count.
+        // The C side reads one stream per device behind a pointer that holds no count.
         if let streams, streams.count != devices.count {
             throw USearchError(status: .shapeMismatch, message: "the streams must name one per device")
         }
         let callState = CallState()
         let executor = callState.slots(usearch_executor_t?.none)
-        try callState.lend(devices) { (lentDevices) throws(USearchError) in
-            try callState.lend(streams ?? []) { (lentStreams) throws(USearchError) in
+        try callState.pass(devices) { (passedDevices) throws(USearchError) in
+            try callState.pass(streams ?? []) { (passedStreams) throws(USearchError) in
                 var arguments = usearch_executor_for_vram_t(
                     executor: executor,
                     outcome: callState.outcome,
                     vram: usearch_vram_options_t(
-                        devices: lentDevices,
+                        devices: passedDevices,
                         devices_count: devices.count,
                         shard_capacity: 0,
                         gpu_class_ceiling: gpuClassCeiling?.raw ?? usearch_gpu_class_unknown_k
                     ),
-                    streams: streams == nil ? nil : lentStreams,
+                    streams: streams == nil ? nil : passedStreams,
                     scratch_limit: scratchLimit
                 )
                 usearch_executor_for_vram(&arguments)
@@ -1091,7 +1066,7 @@ public final class Executor: @unchecked Sendable {
     }
 }
 
-/// Lends NVMe paths as the byte views the engine's NVMe options point at, beside the class
+/// Passes NVMe paths as the byte views the engine's NVMe options point at, beside the class
 /// ceiling, for one blocking call.
 func withPaths<Value>(
     _ paths: [String],
@@ -1126,7 +1101,7 @@ func withPaths<Value>(
 /// Every such verb requires one and answers a view reading it in place. Each call given the
 /// arena rewinds it, so the views an earlier call answered end there, and reading one after
 /// reads what the next call wrote. To keep a result past the next call, give that call another
-/// arena. Every call borrows the arena, deferred ones included, and one naming it while another
+/// arena. Every call uses the arena, deferred ones included, and one naming it while another
 /// call writes it is refused with `contended`. An arena serves one call at a time and is not
 /// `Sendable`. One in GPU memory, as `describe` reports, serves only calls on the executor that
 /// made it, keeps that executor alive, and answers views no host read may reach.

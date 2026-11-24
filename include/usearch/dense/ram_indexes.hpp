@@ -33,7 +33,7 @@
 
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/ram_buffers.hpp"       // `growing_buffer` - the plans' per-thread state
-#include "usearch/utilities/ram_device.hpp"        // `forkunion_allocator`, `forkunion_executor_t`, `shared_mutex`
+#include "usearch/utilities/ram_device.hpp"        // `forkunion_allocator`, `ram_executor_t`, `shared_mutex`
 #include "usearch/utilities/safegraphs_format.hpp" // `save_config_t`, `load_config_t`, `safegraphs_read_metadata`
 #include "usearch/utilities/ram_shards.hpp"        // `shard_set` - the shards & their routing
 #include "usearch/utilities/ram_walks.hpp"         // `cursor_walk` - the cursor's walk
@@ -133,7 +133,7 @@ struct ram_indexes {
 
     /** The threads and their scratch every bulk verb runs on; it names no index, so one executor
      *  serves every instantiation. */
-    using executor_t = forkunion_executor_t;
+    using executor_t = ram_executor_t;
     using traversal_context_t = typename index_t::traversal_context_t;
 
     /* Scalars and views */
@@ -1579,7 +1579,7 @@ struct ram_indexes {
          *  none. */
         ram_indexes* owner = nullptr;
 
-        /** Bytes one request to the drives under a load's parts carries, the least across them;
+        /** Bytes one request to the drives under a load's parts holds, the least across them;
          *  zero for a buffer. */
         std::size_t request_bytes = 0;
 
@@ -2189,7 +2189,7 @@ struct ram_indexes {
      *
      *  The block folds against every pack of the query rows once full, and the @c rank_key each
      *  call passes takes each key with its maxima row, one maximum per query row, once all of its
-     *  rows folded; a key with more rows than the block carries its maxima row into the next fold.
+     *  rows folded; a key with more rows than the block holds its maxima row into the next fold.
      *  Carved from @c staged as @c maxsim_staged_bytes_ counts it.
      */
     struct tiled_fold_t {

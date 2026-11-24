@@ -38,7 +38,8 @@
 #define refined(id) (40 + (id))
 #define id_of(word) ((word) % 10)
 
-// The map's control bytes: the chain's end, and the probe tag the one key every row carries publishes.
+/** The map's control bytes: the chain's end, and the probe tag the one key every row holds
+ *  publishes. */
 #define empty 0
 #define key_tag 50
 
@@ -174,7 +175,7 @@ inline find_keys(t, watermark, chain, seen, found) {
         :: else
         fi;
         load(t, slot(chain), order_relaxed, seen);
-        assert(seen == named(id_of(seen))); // the slot the tag published carries its key and node
+        assert(seen == named(id_of(seen))); // the slot the tag published holds its key and node
         if
         :: id_of(seen) < watermark -> found++
         :: else

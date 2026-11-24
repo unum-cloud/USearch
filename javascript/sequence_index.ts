@@ -71,7 +71,7 @@ export enum SequenceMetric {
 export interface SequenceOptions {
   /** How sequences are scored; defaults to `levenshtein`. */
   metric?: SequenceMetric;
-  /** Row-major 256 × 256 signed scores over bytes, which Needleman-Wunsch alone takes; borrowed
+  /** Row-major 256 × 256 signed scores over bytes, which Needleman-Wunsch alone takes; viewed
    *  for the call. */
   substitutionMatrix?: Int8Array;
   /** Cost of one unaligned symbol, beside the substitution matrix. */
@@ -80,7 +80,7 @@ export interface SequenceOptions {
   windowWidths?: number[];
   /** Neighbors per node; absent derives it. */
   connectivity?: number;
-  /** Entries one key may carry; absent is unbounded. */
+  /** Entries one key may hold; absent is unbounded. */
   valuesPerKey?: number;
   /** The newest CPU class dispatch may pick, by canonical name; absent means no ceiling. */
   cpuClassCeiling?: string;
@@ -102,7 +102,7 @@ export interface SequenceLoadConfig extends SequenceWeights {
   executor?: Executor;
   /** NUMA node IDs for a RAM load, or CUDA ordinals for a VRAM one; absent derives them. */
   placement?: number[];
-  /** Entries one key may carry; absent is unbounded. */
+  /** Entries one key may hold; absent is unbounded. */
   valuesPerKey?: number;
   /** The newest CPU or GPU class dispatch may pick, by canonical name; absent means no ceiling. */
   classCeiling?: string;
@@ -475,11 +475,6 @@ export class SequenceIndexOn {
   saveBuffer(arena: Arena): Monolith {
     return block(sequenceSaveBuffer(this.#index, this.executor, arena));
   }
-
-  /** {@inheritDoc SequenceIndex.cursor} */
-  cursor(starts?: KeysLike): DenseCursor {
-    return new DenseCursor(this.#index.cursor(this.executor, starts === undefined ? undefined : normalizeKeys(starts)));
-  }
 }
 
 /** The verbs of one sequence index, submitted to one executor and answered as {@link Deferred}
@@ -717,7 +712,7 @@ export class SequenceIndex implements Disposable {
 
   /** Opens a walk over the current contents; absent `starts` walks every entry as stored. */
   cursor(starts?: KeysLike): DenseCursor {
-    return new DenseCursor(this.compiled.cursor(undefined, starts === undefined ? undefined : normalizeKeys(starts)));
+    return new DenseCursor(this.compiled.cursor(starts === undefined ? undefined : normalizeKeys(starts)));
   }
 
   /** Releases the handle now; a freed index refuses later calls, and a second `free` is a no-op. */

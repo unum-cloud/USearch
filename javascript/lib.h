@@ -9,19 +9,19 @@
  *
  *  @section javascript_batching Batching and Threading
  *
- *  Every verb is a batch and the engine fans it out itself, so this layer spawns nothing: it
- *  borrows the caller's @c TypedArray storage, hands the engine one strided matrix, and views
- *  the outputs the engine lands in the caller's @c Arena without copying them. The workers live
- *  in an @c Executor the caller constructs and passes in, which is what lets several indexes
- *  share one pool. A verb handed no executor runs on the calling thread, as the C interface's
- *  @c NULL executor does.
+ *  Every verb is a batch and the engine fans it out itself, so this layer spawns nothing: it views
+ *  the caller's @c TypedArray storage, hands the engine one strided matrix, and views the outputs
+ *  the engine lands in the caller's @c Arena without copying them. The workers live in an
+ *  @c Executor the caller constructs and passes in, which is what lets several indexes share one
+ *  pool. A verb handed no executor runs on the calling thread, exactly as the C interface does for
+ *  a @c NULL executor.
  *
  *  Every verb takes the C @c completion beside its executor. A blocking call answers its result; a
  *  deferred one answers a @c CompiledDeferred holding the outcome and strong references to every
- *  JavaScript value the library borrows until the call is final, and borrows its arena as a
- *  blocking call does. Its @c wait blocks the calling thread in @c usearch_outcome_wait, and its
- *  @c settled hands that wait to the libuv pool through @c napi_async_work, the one thread this
- *  layer ever borrows, and only while a caller awaits.
+ *  JavaScript value the library views until the call is final, and uses its arena as a blocking
+ *  call does. Its @c wait blocks the calling thread in @c usearch_outcome_wait, and its @c settled
+ *  hands that wait to the libuv pool through @c napi_async_work, the one thread this layer ever
+ *  views, and only while a caller awaits.
  *
  *  A JavaScript callback runs only on the thread owning the context, which an executor's threads
  *  never are, and a thread-safe function would queue onto a loop blocked inside the verb. So only
@@ -134,7 +134,7 @@ typedef struct usearch_js_index_t {
 } usearch_js_index_t;
 
 /**
- *  @brief The paths a residency arm borrows for the length of one factory call.
+ *  @brief The paths a residency arm views for the length of one factory call.
  *
  *  The ABI reads the views contiguously, so the bytes they point at cannot ride inside them
  *  and trail them in the same block instead - one allocation, released as one.
@@ -198,7 +198,7 @@ typedef struct usearch_js_call_t {
     /** Builds the answer of a call that succeeded; @c NULL once the answer was built. */
     usearch_js_finish_t finish;
 
-    /** Strong references to the slots a deferred call borrows; @c NULL for an empty slot. */
+    /** Strong references to the slots a deferred call views; @c NULL for an empty slot. */
     napi_ref held[usearch_js_slots_k];
 
     /** Heap blocks the call reads or writes, freed once it is final. */
@@ -282,7 +282,7 @@ typedef struct usearch_js_index_call_t {
     /** The kind the rows were asked in, which picks their element type even with none written. */
     usearch_scalar_t scalar;
 
-    /** The placements a reshard lends, over the ordinals and paths in the call's owned blocks. */
+    /** The placements a reshard passes, over the ordinals and paths in the call's owned blocks. */
     usearch_ram_options_t ram;
     usearch_vram_options_t vram;
     usearch_nvme_options_t nvme;
@@ -323,10 +323,11 @@ typedef struct usearch_js_walk_t {
     /** The engine cursor or stream, @c NULL once released. */
     void* handle;
 
-    /** A strong reference to the compiled index, so the index outlives the walk it borrows. */
+    /** A strong reference to the compiled index, so the index outlives the walk it views. */
     napi_ref index;
 
-    /** A strong reference to the @c Executor every pull runs on; @c NULL for the calling thread. */
+    /** A strong reference to the @c Executor every stream pull runs on; @c NULL for the calling
+     *  thread and for a cursor, whose every pull names its own. */
     napi_ref executor;
 } usearch_js_walk_t;
 
@@ -342,7 +343,7 @@ bool usearch_js_throw(napi_env env, usearch_status_t status, char const* message
 bool usearch_js_throw_field(napi_env env, char const* field, char const* expectation);
 
 /**
- *  @brief Throws the mapped JavaScript error when @p outcome carries a failure.
+ *  @brief Throws the mapped JavaScript error when @p outcome holds a failure.
  *  @return @c true when the call succeeded, @c false with an exception pending otherwise.
  */
 bool usearch_js_succeeded(napi_env env, usearch_outcome_t const* outcome);
@@ -360,8 +361,8 @@ bool usearch_js_size_from_value(napi_env env, napi_value value, char const* fiel
 bool usearch_js_double_from_value(napi_env env, napi_value value, char const* field, double* result);
 
 /**
- *  @brief Copies a UTF-8 string into a @c malloc-ed block, so a deferred call can borrow it.
- *  @param[out] view The bytes, without the terminator the block also carries.
+ *  @brief Copies a UTF-8 string into a @c malloc-ed block, so a deferred call can view it.
+ *  @param[out] view The bytes, without the terminator the block also holds.
  *  @return The block the caller frees, or @c NULL with an exception pending.
  */
 char* usearch_js_string_from_value(napi_env env, napi_value value, char const* field, usearch_bytes_view_t* view);
@@ -407,7 +408,7 @@ size_t usearch_js_row_bytes(usearch_scalar_t scalar, size_t columns);
 /**
  *  @brief Reads NUMA node IDs or CUDA ordinals from an array of numbers.
  *
- *  A residency arm borrows its array only for the length of one factory call, so the
+ *  A residency arm views its array only for the length of one factory call, so the
  *  allocation lives no longer than the constructor that made it.
  *
  *  @param[out] ordinals Receives a @c free -able array; NULL when the value is absent or empty.
@@ -431,13 +432,13 @@ bool usearch_js_paths_from_value(napi_env env, napi_value value, char const* fie
 void usearch_js_paths_release(usearch_js_paths_arena_t* arena);
 
 /**
- *  @brief Borrows the bytes of a numeric @c TypedArray, whatever its element type.
+ *  @brief Views the bytes of a numeric @c TypedArray, whatever its element type.
  *  @return @c true on success, @c false with an exception pending otherwise.
  */
 bool usearch_js_bytes_from_value(napi_env env, napi_value value, char const* field, void** data, size_t* bytes);
 
 /**
- *  @brief Borrows a run of rows as five values: the @c TypedArray, its rows, its columns, the bytes
+ *  @brief Views a run of rows as five values: the @c TypedArray, its rows, its columns, the bytes
  *      between rows, and the scalar kind - the shape every row argument crosses in.
  *  @param[out] count The rows the run holds, which every batch verb takes as its @c count.
  *  @return @c true on success, @c false with an exception pending otherwise.
@@ -449,7 +450,7 @@ bool usearch_js_rows_from_value(napi_env env, napi_value const* arguments, char 
                                 usearch_rows_view_t* view);
 
 /**
- *  @brief Borrows a ragged batch as three values: the elements' @c TypedArray, its Apache Arrow
+ *  @brief Views a ragged batch as three values: the elements' @c TypedArray, its Apache Arrow
  *      offsets as a @c Uint32Array or a @c BigUint64Array, and the elements' scalar kind.
  *  @param[in] scalars_per_element Scalars one element holds: one byte of a sequence, three
  *      coordinates of a point.
@@ -466,7 +467,7 @@ bool usearch_js_tape_from_value(napi_env env, napi_value const* arguments, char 
 usearch_scalar_t usearch_js_scalar_from_typedarray(napi_typedarray_type type);
 
 /**
- *  @brief Reads a run of identities: a @c Uint8Array of sixteen bytes per key, borrowed in place,
+ *  @brief Reads a run of identities: a @c Uint8Array of sixteen bytes per key, viewed in place,
  *      or a @c BigUint64Array of integer ones, gathered into @p gathered.
  *  @param[out] keys The run the engine reads.
  *  @param[out] gathered A @c malloc-ed block when the keys had to be gathered, else @c NULL.
@@ -570,7 +571,7 @@ bool usearch_js_disposable(napi_env env, napi_value holder, char const* method);
 /** Answers with the library's semantic version. */
 napi_value usearch_js_version(napi_env env, napi_callback_info info);
 
-/** Answers with the kernel families this build carries, whatever the machine offers. */
+/** Answers with the kernel families this build holds, whatever the machine offers. */
 napi_value usearch_js_capabilities_compiled(napi_env env, napi_callback_info info);
 
 /** Answers with the kernel families this machine can run, and dispatch picks from. */
@@ -679,7 +680,7 @@ usearch_js_walk_t* usearch_js_walk_self(napi_env env, napi_callback_info info, s
 
 /**
  *  @brief Wraps an engine walk into an object exposing @p next, @c free and @c [Symbol.dispose],
- *      holding the index the walk borrows and the executor every pull runs on.
+ *      holding the index the walk views and the executor every pull runs on.
  *  @return The object, or @c NULL with an exception pending and the walk released.
  */
 napi_value usearch_js_walk_object(napi_env env, void* handle, napi_value index, napi_value executor, napi_callback next,

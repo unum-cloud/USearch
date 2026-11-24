@@ -47,7 +47,7 @@
 #define tag 133
 #define key_a 1
 #define key_b 2
-#define key_carried(t) ((t) == 2 -> key_b : key_a)
+#define key_held(t) ((t) == 2 -> key_b : key_a)
 #define key_seated(entry) ((entry) == 0 -> key_a : key_b)
 #define entries 2
 #define value_for(k) (10 + (k))
@@ -114,11 +114,11 @@ look:
     goto look;
 claimed_slot:
     // the payload relaxed, then the publication with the release: `insert`'s tail
-    store(t, key(chain), order_relaxed, key_carried(t));
-    store(t, value(chain), order_relaxed, value_for(key_carried(t)));
+    store(t, key(chain), order_relaxed, key_held(t));
+    store(t, value(chain), order_relaxed, value_for(key_held(t)));
     atomic {
         store(t, state(chain), publish_order, tag);
-        if :: key_carried(t) == key_a && !probing -> published_before_probe = true :: else fi
+        if :: key_held(t) == key_a && !probing -> published_before_probe = true :: else fi
     };
     goto refused;
 seated:

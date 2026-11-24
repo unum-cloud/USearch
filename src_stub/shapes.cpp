@@ -146,7 +146,7 @@ static double distance(shapes_index_t const& index, std::span<double const> quer
 }
 
 /** Whether the kind is one this build implements. The transport kinds need a solver and
- *  an SVD, which a brute-force stand-in deliberately does not carry. */
+ *  an SVD, which a brute-force stand-in deliberately leaves out. */
 static bool known_metric(usearch_shapes_metric_t metric) {
     return metric == usearch_shapes_metric_chamfer_k || metric == usearch_shapes_metric_hausdorff_k;
 }
@@ -426,7 +426,7 @@ void usearch_shapes_init_vram(usearch_shapes_init_vram_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
     if (reject_ceiling(arguments->vram.gpu_class_ceiling, outcome)) return;
-    propagate_error(usearch_status_device_k, outcome, "This build carries no GPU backends");
+    propagate_error(usearch_status_device_k, outcome, "This build has no GPU backends");
 }
 
 void usearch_shapes_load_ram(usearch_shapes_load_ram_t* arguments) {
@@ -457,7 +457,7 @@ void usearch_shapes_load_vram(usearch_shapes_load_vram_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
     if (reject_ceiling(arguments->vram.gpu_class_ceiling, outcome)) return;
-    propagate_error(usearch_status_device_k, outcome, "This build carries no GPU backends");
+    propagate_error(usearch_status_device_k, outcome, "This build has no GPU backends");
 }
 
 void usearch_shapes_load_vram_buffer(usearch_shapes_load_vram_buffer_t* arguments) {
@@ -465,7 +465,7 @@ void usearch_shapes_load_vram_buffer(usearch_shapes_load_vram_buffer_t* argument
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
     if (reject_ceiling(arguments->vram.gpu_class_ceiling, outcome)) return;
-    propagate_error(usearch_status_device_k, outcome, "This build carries no GPU backends");
+    propagate_error(usearch_status_device_k, outcome, "This build has no GPU backends");
 }
 
 void usearch_shapes_view_ram(usearch_shapes_view_ram_t* arguments) {

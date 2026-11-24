@@ -98,12 +98,12 @@
  *  or published under it, and concurrent readers keep searching throughout every save.
  *
  *  Every verb is safe beside every other on the same handle, with no rule to keep any of them from
- *  starting. Each RAM or VRAM handle carries one gate: insertions hold its shared side for their
- *  own call, and the verbs that empty or move entries in place - a clear, a reshard emptying its
+ *  starting. Each RAM or VRAM handle holds one gate: insertions hold its shared side for their own
+ *  call, and the verbs that empty or move entries in place - a clear, a reshard emptying its
  *  sources, and the closing step of every refinement, reshard, load and VRAM save - take it alone
- *  or report @c usearch_status_contended_k, never waiting. Readers take no lock at all: a search,
- *  a product, an attention call, a lookup of vectors or a cursor pull reads one epoch word before
- *  and after its work, repeats once when a destructive step ran in between, and reports
+ *  or report @c usearch_status_contended_k, never waiting. Readers take no lock at all: a search, a
+ *  product, an attention call, a lookup of vectors or a cursor pull reads one epoch word before and
+ *  after its work, repeats once when a destructive step ran in between, and reports
  *  @c usearch_status_contended_k when another one did. Nothing a reader can reach is freed while
  *  the handle lives: an emptied shard keeps its memory until the handle is freed, and a count of a
  *  key stays exact throughout, as a reshard moves each key's entry with one atomic store.
@@ -196,7 +196,7 @@ typedef struct usearch_dense_index_handle_t* usearch_dense_index_t;
  *      stored or breadth-first from start keys, which export, migration, and visualization read.
  *
  *  Each shard's publication watermark is read as the walk enters that shard, so an entry once
- *  passed is never revisited, while a later shard may still carry entries published after the walk
+ *  passed is never revisited, while a later shard may still hold entries published after the walk
  *  began. Each pull names the index again; an overlapping pull reports
  *  @c usearch_status_contended_k.
  */
@@ -483,7 +483,7 @@ typedef struct usearch_dense_load_vram_t {
  *  - @c usearch_status_config_mismatch_k Devices of more than one vendor or generation, the
  *    executor driving no stream on some shard's device, or the checkpoint's geometry, dtypes or
  *    metric differing from the shards'.
- *  - @c usearch_status_device_k An ordinal past the listing, devices this build carries no kernels
+ *  - @c usearch_status_device_k An ordinal past the listing, devices this build holds no kernels
  *    for, or an executor that is not a VRAM executor.
  *  - @c usearch_status_contended_k Another call holds the executor.
  *  - @c usearch_status_overflow_k A part passes a shard's bound.
@@ -596,7 +596,7 @@ typedef struct usearch_dense_load_vram_buffer_t {
  *  - @c usearch_status_config_mismatch_k Devices of more than one vendor or generation, the
  *    executor driving no stream on some shard's device, or the checkpoint's geometry, dtypes or
  *    metric differing from the shards'.
- *  - @c usearch_status_device_k An ordinal past the listing, devices this build carries no kernels
+ *  - @c usearch_status_device_k An ordinal past the listing, devices this build holds no kernels
  *    for, or an executor that is not a VRAM executor.
  *  - @c usearch_status_contended_k Another call holds the executor.
  *  - @c usearch_status_overflow_k A part passes a shard's bound.
@@ -650,7 +650,7 @@ typedef struct usearch_dense_view_nvme_t {
     /** The devices the parts are served from; naming none serves each where its manifest points. */
     usearch_nvme_options_t nvme;
 
-    /** The @b optional RAM the view may hold beyond its headers, borrowed for the call: a key
+    /** The @b optional RAM the view may hold beyond its headers, read only during the call: a key
      *  table on the first of @c ram->memory_domains within @c ram->memory_limit; @c NULL holds
      *  nothing per entry, so key lookups and hints refuse. */
     usearch_ram_options_t const* ram;
@@ -1497,6 +1497,10 @@ typedef struct usearch_dense_cursor_init_t {
     /** The handle to be scanned. */
     usearch_dense_index_t index;
 
+    /** The @b optional executor whose first thread's memory domain holds the cursor's state;
+     *  @c NULL keeps it on no domain. */
+    usearch_executor_t executor;
+
     /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
@@ -1566,8 +1570,8 @@ typedef struct usearch_dense_cursor_next_t {
  *      from @c usearch_dense_get.
  *
  *  Links name only entries published when the pull ran, as the graph stored them then. The keys are
- *  copied rather than borrowed from the index, so the batch stays valid until the next call given
- *  the same arena, however the cursor moves meanwhile.
+ *  copied rather than read in place from the index, so the batch stays valid until the next call
+ *  given the same arena, however the cursor moves meanwhile.
  *
  *  @par Statuses:
  *  - @c usearch_status_io_k A read from an NVMe view's drives failed.
@@ -1848,7 +1852,7 @@ USEARCH_EXPORT void usearch_dense_save_buffer(usearch_dense_save_buffer_t* argum
  *
  *  Placement is absent because a checkpoint records where it was written, never where a reader
  *  must keep it. So is @c values_per_key, which bounds a live handle's mutable state rather than
- *  anything the serialized form carries. Both remain the caller's to choose when loading, and no
+ *  anything the serialized form holds. Both remain the caller's to choose when loading, and no
  *  caller has to know which fields this call filled.
  */
 typedef struct usearch_dense_metadata_t {
@@ -2049,7 +2053,7 @@ typedef struct usearch_dense_multiply_t {
  *
  *  A walk scores many times the pairs a search reports, and each of them is an exact product the
  *  caller would otherwise recompute - this verb hands them all back. Pairs arrive in traversal
- *  order rather than sorted, and carry no duplicates: the traversal's visited set admits each
+ *  order rather than sorted, and hold no duplicates: the traversal's visited set admits each
  *  indexed vector at most once per left-hand row. A wider @c expansion_factor widens the emitted
  *  pattern, that breadth being what decides how much the walk touches.
  *
@@ -2074,7 +2078,7 @@ typedef struct usearch_dense_multiply_t {
  *              1.0f, a, lda, b, ldb, 0.0f, c, ldc);
  *
  *  // Here: B was built once and is the index, C is ragged and holds only the pairs the walk
- *  // scored, and the executor carries what a cuBLAS handle plus its stream would.
+ *  // scored, and the executor holds what a cuBLAS handle plus its stream would.
  *  usearch_arena_t arena = NULL;
  *  usearch_matches_tape_view_t c;
  *  usearch_outcome_t outcome = {0};
@@ -2156,7 +2160,8 @@ typedef struct usearch_dense_attend_t {
     /** Opaque pointer forwarded into every @c value_lookup call. */
     void* value_lookup_state;
 
-    /** The @b optional online-softmax state, one per query row, lent by the caller; @c NULL skips it. */
+    /** The @b optional online-softmax state, one per query row, passed by the caller; @c NULL skips
+     *  it. */
     usearch_dense_softmax_state_t* carry;
 
     /* Outputs */
@@ -2217,11 +2222,11 @@ typedef struct usearch_dense_attend_t {
  *  @c usearch_status_shape_mismatch_k rather than skipping the key: a missing row is a wrong softmax,
  *  not a smaller one.
  *
- *  Keep the recent window out of the index, inserting a token once it leaves the window, so the dense
- *  window and the graph never share a key. @c carry holds the softmax's @c m and @c l, which is
- *  what merges this branch with another over the same queries - the recent window, attention sinks,
- *  or a second index of one context. The two travel in one element because a maximum without its
- *  partition is a number nothing can rescale. Two branches over the same queries merge as:
+ *  Keep the recent window out of the index, inserting a token once it leaves the window, so the
+ *  dense window and the graph never share a key. @c carry holds the softmax's @c m and @c l, which
+ *  is what merges this branch with another over the same queries - the recent window, attention
+ *  sinks, or a second index of one context. The two travel in one element because a maximum without
+ *  its partition is a number nothing can rescale. Two branches over the same queries merge as:
  *
  *  m = max(m₁, m₂),  aᵢ = lᵢ · e^(mᵢ − m),  l = a₁ + a₂,  o = (a₁ · o₁ + a₂ · o₂) / l
  *
@@ -2292,7 +2297,7 @@ typedef struct usearch_dense_maxsim_t {
     /* Outputs */
     /** Output for each query's best-scoring keys, largest first, as many as it found up to
      *  @c wanted, or every key it scored when @c wanted is zero, packed into @c arena: query @c i
-     *  spans @c matches->offsets[i] up to @c matches->offsets[i+1], @c scores carrying each key's
+     *  spans @c matches->offsets[i] up to @c matches->offsets[i+1], @c scores holding each key's
      *  summed maxima. */
     usearch_matches_tape_view_t* matches;
 

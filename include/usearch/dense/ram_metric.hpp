@@ -12,7 +12,7 @@
  *
  *  @section File Organization
  *
- *  @b Norms - @c vector_norms carries per-vector @c sum (DPBUSD compensation) and @c sumsq
+ *  @b Norms - @c vector_norms holds per-vector @c sum (DPBUSD compensation) and @c sumsq
  *  (L2 norm, used by angular/euclidean). @c norms<kit> dispatches to NumKong's
  *  @c nk_reduce_moments_* family at construction-time of the index.
  *
@@ -23,10 +23,10 @@
  *  that reaches only @c convert_to_distances, so one kit serves every metric of its scalar.
  *  The shape is uniform - the @c quads_kit concept enforces it.
  *
- *  @b Ladders - one @c quads_ladder<scalar,caps> per supported scalar. A linear list of kits fed
- *  to @c highest_kit picks the first one this build compiled whose @c capability_k the caps
- *  admit, else falls back to serial. A kit the build cannot carry is a stub in the @c \#else of
- *  its @c NUMKONG_TARGET_* guard, stating only its @c capability_k and @c compiled_k as false.
+ *  @b Ladders - one @c quads_ladder<scalar,caps> per supported scalar. A linear list of kits fed to
+ *  @c highest_kit picks the first one this build compiled whose @c capability_k the caps admit,
+ *  else falls back to serial. A kit the build leaves out is a stub in the @c \#else of its
+ *  @c NUMKONG_TARGET_* guard, stating only its @c capability_k and @c compiled_k as false.
  *  Unsupported scalars simply have no specialization. Adding an ISA tier is one row and one stub.
  *  @c src/ climbs every ladder once per dtype and CPU class and hands each dense engine the kits
  *  they pick, so no engine derives a pick from a capability mask.
@@ -241,7 +241,7 @@ struct bf16_haswell_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct bf16_haswell_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
@@ -270,7 +270,7 @@ struct bf16_skylake_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct bf16_skylake_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
@@ -299,7 +299,7 @@ struct bf16_genoa_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct bf16_genoa_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_genoa_k;
@@ -328,7 +328,7 @@ struct bf16_neon_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct bf16_neon_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neon_k;
@@ -357,7 +357,7 @@ struct bf16_neonbfdot_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct bf16_neonbfdot_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonbfdot_k;
@@ -386,7 +386,7 @@ struct bf16_v128_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct bf16_v128_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128_k;
@@ -415,7 +415,7 @@ struct bf16_v128relaxed_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct bf16_v128relaxed_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
@@ -445,7 +445,7 @@ struct bf16_powervsx_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct bf16_powervsx_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_powervsx_k;
@@ -499,7 +499,7 @@ struct f16_haswell_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct f16_haswell_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
@@ -528,7 +528,7 @@ struct f16_skylake_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct f16_skylake_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
@@ -557,7 +557,7 @@ struct f16_neon_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct f16_neon_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neon_k;
@@ -586,7 +586,7 @@ struct f16_neonfhm_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct f16_neonfhm_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonfhm_k;
@@ -616,7 +616,7 @@ struct f16_v128relaxed_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct f16_v128relaxed_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
@@ -646,7 +646,7 @@ struct f16_powervsx_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct f16_powervsx_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_powervsx_k;
@@ -698,7 +698,7 @@ struct e5m2_haswell_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct e5m2_haswell_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
@@ -727,7 +727,7 @@ struct e5m2_skylake_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct e5m2_skylake_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
@@ -759,7 +759,7 @@ struct e5m2_diamond_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct e5m2_diamond_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_diamond_k;
@@ -789,7 +789,7 @@ struct e5m2_genoa_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct e5m2_genoa_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_genoa_k;
@@ -818,7 +818,7 @@ struct e5m2_neonfhm_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct e5m2_neonfhm_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonfhm_k;
@@ -847,7 +847,7 @@ struct e5m2_neonfp8_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct e5m2_neonfp8_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonfp8_k;
@@ -877,7 +877,7 @@ struct e5m2_v128relaxed_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct e5m2_v128relaxed_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
@@ -924,7 +924,7 @@ struct e4m3_haswell_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct e4m3_haswell_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
@@ -953,7 +953,7 @@ struct e4m3_skylake_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct e4m3_skylake_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
@@ -985,7 +985,7 @@ struct e4m3_diamond_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct e4m3_diamond_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_diamond_k;
@@ -1015,7 +1015,7 @@ struct e4m3_genoa_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct e4m3_genoa_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_genoa_k;
@@ -1044,7 +1044,7 @@ struct e4m3_neonfhm_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct e4m3_neonfhm_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonfhm_k;
@@ -1073,7 +1073,7 @@ struct e4m3_neonfp8_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct e4m3_neonfp8_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonfp8_k;
@@ -1103,7 +1103,7 @@ struct e4m3_v128relaxed_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct e4m3_v128relaxed_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
@@ -1156,7 +1156,7 @@ struct e3m2_haswell_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct e3m2_haswell_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
@@ -1185,7 +1185,7 @@ struct e3m2_skylake_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct e3m2_skylake_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
@@ -1214,7 +1214,7 @@ struct e3m2_neonsdot_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct e3m2_neonsdot_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonsdot_k;
@@ -1243,7 +1243,7 @@ struct e3m2_neonfp8_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct e3m2_neonfp8_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonfp8_k;
@@ -1272,7 +1272,7 @@ struct e3m2_v128relaxed_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct e3m2_v128relaxed_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
@@ -1319,7 +1319,7 @@ struct e2m3_haswell_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct e2m3_haswell_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
@@ -1348,7 +1348,7 @@ struct e2m3_skylake_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct e2m3_skylake_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
@@ -1377,7 +1377,7 @@ struct e2m3_alder_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct e2m3_alder_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_alder_k;
@@ -1406,7 +1406,7 @@ struct e2m3_sierra_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct e2m3_sierra_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sierra_k;
@@ -1435,7 +1435,7 @@ struct e2m3_neonsdot_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct e2m3_neonsdot_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonsdot_k;
@@ -1464,7 +1464,7 @@ struct e2m3_neonfp8_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct e2m3_neonfp8_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonfp8_k;
@@ -1493,7 +1493,7 @@ struct e2m3_v128relaxed_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct e2m3_v128relaxed_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
@@ -1540,7 +1540,7 @@ struct u8_haswell_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct u8_haswell_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
@@ -1569,7 +1569,7 @@ struct u8_icelake_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct u8_icelake_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_icelake_k;
@@ -1598,7 +1598,7 @@ struct u8_alder_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct u8_alder_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_alder_k;
@@ -1627,7 +1627,7 @@ struct u8_sierra_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct u8_sierra_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sierra_k;
@@ -1656,7 +1656,7 @@ struct u8_neonsdot_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct u8_neonsdot_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonsdot_k;
@@ -1685,7 +1685,7 @@ struct u8_v128_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct u8_v128_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128_k;
@@ -1714,7 +1714,7 @@ struct u8_v128relaxed_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct u8_v128relaxed_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
@@ -1743,7 +1743,7 @@ struct u8_powervsx_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct u8_powervsx_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_powervsx_k;
@@ -1790,7 +1790,7 @@ struct i8_haswell_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct i8_haswell_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
@@ -1819,7 +1819,7 @@ struct i8_icelake_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct i8_icelake_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_icelake_k;
@@ -1850,7 +1850,7 @@ struct i8_alder_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct i8_alder_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_alder_k;
@@ -1879,7 +1879,7 @@ struct i8_sierra_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct i8_sierra_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sierra_k;
@@ -1908,7 +1908,7 @@ struct i8_neonsdot_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct i8_neonsdot_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonsdot_k;
@@ -1937,7 +1937,7 @@ struct i8_v128_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct i8_v128_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128_k;
@@ -1966,7 +1966,7 @@ struct i8_v128relaxed_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct i8_v128relaxed_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
@@ -1995,7 +1995,7 @@ struct i8_powervsx_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct i8_powervsx_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_powervsx_k;
@@ -2044,7 +2044,7 @@ struct u4x2_haswell_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct u4x2_haswell_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
@@ -2073,7 +2073,7 @@ struct u4x2_icelake_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct u4x2_icelake_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_icelake_k;
@@ -2102,7 +2102,7 @@ struct u4x2_neonsdot_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct u4x2_neonsdot_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonsdot_k;
@@ -2131,7 +2131,7 @@ struct u4x2_v128relaxed_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct u4x2_v128relaxed_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
@@ -2178,7 +2178,7 @@ struct i4x2_haswell_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct i4x2_haswell_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
@@ -2207,7 +2207,7 @@ struct i4x2_icelake_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct i4x2_icelake_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_icelake_k;
@@ -2236,7 +2236,7 @@ struct i4x2_neonsdot_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct i4x2_neonsdot_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonsdot_k;
@@ -2266,7 +2266,7 @@ struct i4x2_v128relaxed_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct i4x2_v128relaxed_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
@@ -2313,7 +2313,7 @@ struct u1x8_haswell_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct u1x8_haswell_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
@@ -2342,7 +2342,7 @@ struct u1x8_icelake_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct u1x8_icelake_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_icelake_k;
@@ -2371,7 +2371,7 @@ struct u1x8_neon_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct u1x8_neon_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neon_k;
@@ -2401,7 +2401,7 @@ struct u1x8_v128_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct u1x8_v128_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128_k;
@@ -2431,7 +2431,7 @@ struct u1x8_powervsx_quads_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c quads_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct u1x8_powervsx_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_powervsx_k;
@@ -2455,7 +2455,7 @@ struct u1x8_powervsx_quads_kit_t {
  *  Placement is group-ordered: an element may sit @b before its exact hashed slot inside its
  *  starting group, and every reader replicates that order, so a group holding any empty lane ends
  *  the walk. Groups are 16-aligned and the capacity is a power of two, so once it reaches 16 no
- *  load straddles the table's end; smaller tables take the serial walk. The scan carries its own
+ *  load straddles the table's end; smaller tables take the serial walk. The scan holds its own
  *  ISA, so any unit compiles it whatever flags that unit was given.
  */
 struct u32_skylake_visits_hash_set_kit_t {
@@ -2486,7 +2486,7 @@ struct u32_skylake_visits_hash_set_kit_t {
 #endif
 #else
 
-/** The kit this build cannot carry, kept so @c visits_hash_set_ladder stays one list rather than a
+/** The kit this build leaves out, kept so @c visits_hash_set_ladder stays one list rather than a
  *  run of preprocessor branches. */
 struct u32_skylake_visits_hash_set_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
@@ -2495,7 +2495,7 @@ struct u32_skylake_visits_hash_set_kit_t {
 #endif // NUMKONG_TARGET_SKYLAKE
 
 /** The visited set's kit for one capability ceiling: the Skylake group scan where the class
- *  carries AVX-512, else the dependency-free core's serial walk, which as the floor states no
+ *  holds AVX-512, else the dependency-free core's serial walk, which as the floor states no
  *  capability. */
 template <nk_capability_t caps_>
 struct visits_hash_set_ladder {
@@ -2720,7 +2720,7 @@ struct haswell_elementwise_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c elementwise_ladder stays one list rather than a
+/** The kit this build leaves out, kept so @c elementwise_ladder stays one list rather than a
  *  run of preprocessor branches. */
 struct haswell_elementwise_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
@@ -2740,7 +2740,7 @@ struct skylake_elementwise_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c elementwise_ladder stays one list rather than a
+/** The kit this build leaves out, kept so @c elementwise_ladder stays one list rather than a
  *  run of preprocessor branches. */
 struct skylake_elementwise_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
@@ -2760,7 +2760,7 @@ struct icelake_elementwise_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c elementwise_ladder stays one list rather than a
+/** The kit this build leaves out, kept so @c elementwise_ladder stays one list rather than a
  *  run of preprocessor branches. */
 struct icelake_elementwise_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_icelake_k;
@@ -2780,7 +2780,7 @@ struct sapphire_elementwise_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c elementwise_ladder stays one list rather than a
+/** The kit this build leaves out, kept so @c elementwise_ladder stays one list rather than a
  *  run of preprocessor branches. */
 struct sapphire_elementwise_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sapphire_k;
@@ -2800,7 +2800,7 @@ struct neon_elementwise_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c elementwise_ladder stays one list rather than a
+/** The kit this build leaves out, kept so @c elementwise_ladder stays one list rather than a
  *  run of preprocessor branches. */
 struct neon_elementwise_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neon_k;
@@ -2822,7 +2822,7 @@ struct rvv_elementwise_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c elementwise_ladder stays one list rather than a
+/** The kit this build leaves out, kept so @c elementwise_ladder stays one list rather than a
  *  run of preprocessor branches. */
 struct rvv_elementwise_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_rvv_k;
@@ -2842,7 +2842,7 @@ struct v128relaxed_elementwise_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c elementwise_ladder stays one list rather than a
+/** The kit this build leaves out, kept so @c elementwise_ladder stays one list rather than a
  *  run of preprocessor branches. */
 struct v128relaxed_elementwise_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
@@ -2863,7 +2863,7 @@ struct powervsx_elementwise_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c elementwise_ladder stays one list rather than a
+/** The kit this build leaves out, kept so @c elementwise_ladder stays one list rather than a
  *  run of preprocessor branches. */
 struct powervsx_elementwise_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_powervsx_k;
@@ -2929,7 +2929,7 @@ struct e4m3_haswell_rmscast_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c rmscast_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c rmscast_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct e4m3_haswell_rmscast_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
@@ -2944,7 +2944,7 @@ struct e4m3_skylake_rmscast_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c rmscast_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c rmscast_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct e4m3_skylake_rmscast_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
@@ -2963,7 +2963,7 @@ struct e4m3_neon_rmscast_kit_t {
 };
 #else
 
-/** The kits this build cannot carry, kept so @c rmscast_ladder stays one list rather than a run of
+/** The kits this build leaves out, kept so @c rmscast_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct f16_neon_rmscast_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neon_k;
@@ -3042,7 +3042,7 @@ void import_row(rows_view_t source, std::size_t row, nk_kernel_kind_t kernel, nk
     assert(status == nk_success_k && "Every kit casts every dtype pair");
 }
 
-/** Rows @b [first,first+count) of @p source in @p scalar_type_: borrowed when they already are,
+/** Rows @b [first,first+count) of @p source in @p scalar_type_: viewed when they already are,
  *  else imported through @ref import_row into the leading rows of @p staging. */
 template <typename elementwise_kit_type_, typename rmscast_kit_type_, nk::numeric_dtype scalar_type_>
 nk::matrix_view<scalar_type_> import_rows(rows_view_t source, std::size_t first, std::size_t count,
@@ -3941,7 +3941,7 @@ struct e2m3_sapphireamx_tiles_kit_t {
 
 #else
 
-/** The kits this build cannot carry, kept so @c tiles_ladder stays one list rather than a run of
+/** The kits this build leaves out, kept so @c tiles_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct bf16_sapphireamx_tiles_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sapphireamx_k;
@@ -4001,7 +4001,7 @@ struct e5m2_graniteamx_tiles_kit_t {
 
 #else
 
-/** The kits this build cannot carry, kept so @c tiles_ladder stays one list rather than a run of
+/** The kits this build leaves out, kept so @c tiles_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct f16_graniteamx_tiles_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_graniteamx_k;
@@ -4137,7 +4137,7 @@ struct u4x2_sme_tiles_kit_t {
 
 #else
 
-/** The kits this build cannot carry, kept so @c tiles_ladder stays one list rather than a run of
+/** The kits this build leaves out, kept so @c tiles_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct bf16_sme_tiles_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sme_k;
@@ -4197,7 +4197,7 @@ struct u1x8_smebi32_tiles_kit_t {
 
 #else
 
-/** The kit this build cannot carry, kept so @c tiles_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c tiles_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct u1x8_smebi32_tiles_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_smebi32_k;
@@ -4257,7 +4257,7 @@ struct u8_powermma_tiles_kit_t {
 
 #else
 
-/** The kits this build cannot carry, kept so @c tiles_ladder stays one list rather than a run of
+/** The kits this build leaves out, kept so @c tiles_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct bf16_powermma_tiles_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_powermma_k;

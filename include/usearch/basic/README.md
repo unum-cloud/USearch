@@ -94,7 +94,7 @@ for (std::size_t i = 0; i != found.count; ++i) {
 - `insert` moves a batch of payloads in under their keys and is all-or-nothing: capacity and scratch for the whole batch are secured before the first value moves.
 - `plan_insert` spreads one batch over threads: it claims, covers and dispenses the whole ID range, each thread places a disjoint slice through the plan's own `insert` with a context `reserve_traversal` sized, and `finish` publishes the batch at once.
   Nothing can fail past the dispense, so every position of a plan must be placed, and a refused fan-out places on the calling thread.
-- The selector decides which candidates become neighbors, and carries the neighbors-per-node budget: `basic::keep_diverse_t` prunes by diversity, `basic::keep_closest_t` keeps the nearest.
+- The selector decides which candidates become neighbors, and holds the neighbors-per-node budget: `basic::keep_diverse_t` prunes by diversity, `basic::keep_closest_t` keeps the nearest.
   Both are per-call values, so heuristics and budgets can change between batches.
 - `search` leaves its matches in `context.results`, nearest first, and `key_of`, `value_of`, `find` and `count` translate between node IDs and keys.
 - A search may score with a different metric than the one the graph was built with, and a `fold` passed to `search` reads every scored round, for walks that reduce to something other than the nearest matches.
@@ -176,5 +176,5 @@ It reaches ForkUnion through `utilities/nvme_device.hpp` and SmashTable for the 
 
 - `nvme_index::open(path, columns)` opens one part as its `persisted_columns_t` locates its rows.
 - `nvme_indexes::view(path, paths, metric, executor)` opens a monolith or a manifest, building the directories on the executor's threads.
-- `search(count, make_metric, query_of, keys, distances, counts, config, executor)` keeps one metric per query slot, built by the caller's factory on the slot's arena, and hands it every fetched value as the codec's borrowed `view`.
+- `search(count, make_metric, query_of, keys, distances, counts, config, executor)` keeps one metric per query slot, built by the caller's factory on the slot's arena, and hands it every fetched value as the codec's `view`, valid until the next fetch.
 - `count`, `contains` and `get` scan the key columns, and `get` reads the value rows of the keys it found.

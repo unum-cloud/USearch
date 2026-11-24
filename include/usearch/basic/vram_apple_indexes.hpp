@@ -399,7 +399,7 @@ struct vram_apple_indexes {
 #pragma region Checkpoints
 
     /** What a checkpoint does on these shards' devices, for @ref save_shards and @c load_shards:
-     *  every shard's plans on a context over its own stream of @c executor, which carry its keys
+     *  every shard's plans on a context over its own stream of @c executor, which hold its keys
      *  too, and a load's reservation at the connectivity the checkpoint froze. Unified memory reads
      *  every part in place, so no part opens a source. */
     struct checkpoint_residency_t {
@@ -922,7 +922,7 @@ struct vram_apple_indexes {
         growing_buffer<vram_apple_indexes*, forkunion_allocator_t> targets_;
 
         /** A gather's source shards grouped by the live shard taking them in, or a cut's target
-         *  shards grouped by the live shard parting into them, which the shard plans borrow. */
+         *  shards grouped by the live shard parting into them, which the shard plans point at. */
         growing_buffer<index_t*, forkunion_allocator_t> slots_;
         vram_apple_indexes* owner_ = nullptr;
     };
@@ -1441,8 +1441,10 @@ struct vram_apple_indexes_cursor {
             shard_cursor_t& cursor = shard_cursors_[entry.shard];
             index_t const& shard = shard_(indexes, entry.shard);
             if (status_t const sought = cursor.seek(shard, entry.node); failed(sought))
-                return indexes.still_valid(epoch_) ? expected<std::size_t> {written, sought}
-                                                   : expected<std::size_t> {0, status_code_t::contended_k};
+                return indexes.still_valid(epoch_)
+                           ? expected<std::size_t> {written, sought}
+                           : expected<std::size_t> {0,
+                                                    {status_code_t::contended_k, "A window moved the cursor's shard"}};
             std::span<node_id_t const> const neighbors = cursor.neighbors();
             if (links_keys && (failed(links_keys->reserve(links_keys->size() + neighbors.size())) ||
                                failed(links_offsets->reserve(links_offsets->size() + 1))))
@@ -1461,7 +1463,7 @@ struct vram_apple_indexes_cursor {
             keys[written++] = key;
         }
         // Retired shards keep their storage, so a pull that ran past a window read nothing freed.
-        if (!indexes.still_valid(epoch_)) return {0, status_code_t::contended_k};
+        if (!indexes.still_valid(epoch_)) return {0, {status_code_t::contended_k, "A window passed the cursor's pull"}};
         return {written, status_code_t::success_k};
     }
 

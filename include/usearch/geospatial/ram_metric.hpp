@@ -59,7 +59,7 @@ struct i32_neon_geospatial_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c geospatial_ladder stays one list rather than a run
+/** The kit this build leaves out, kept so @c geospatial_ladder stays one list rather than a run
  *  of preprocessor branches. */
 struct i32_neon_geospatial_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neon_k;
@@ -80,7 +80,7 @@ struct i32_haswell_geospatial_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c geospatial_ladder stays one list rather than a run
+/** The kit this build leaves out, kept so @c geospatial_ladder stays one list rather than a run
  *  of preprocessor branches. */
 struct i32_haswell_geospatial_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
@@ -101,7 +101,7 @@ struct i32_skylake_geospatial_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c geospatial_ladder stays one list rather than a run
+/** The kit this build leaves out, kept so @c geospatial_ladder stays one list rather than a run
  *  of preprocessor branches. */
 struct i32_skylake_geospatial_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
@@ -122,7 +122,7 @@ struct i32_rvv_geospatial_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c geospatial_ladder stays one list rather than a run
+/** The kit this build leaves out, kept so @c geospatial_ladder stays one list rather than a run
  *  of preprocessor branches. */
 struct i32_rvv_geospatial_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_rvv_k;
@@ -143,7 +143,7 @@ struct i32_powervsx_geospatial_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c geospatial_ladder stays one list rather than a run
+/** The kit this build leaves out, kept so @c geospatial_ladder stays one list rather than a run
  *  of preprocessor branches. */
 struct i32_powervsx_geospatial_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_powervsx_k;
@@ -164,7 +164,7 @@ struct i32_v128relaxed_geospatial_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c geospatial_ladder stays one list rather than a run
+/** The kit this build leaves out, kept so @c geospatial_ladder stays one list rather than a run
  *  of preprocessor branches. */
 struct i32_v128relaxed_geospatial_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;

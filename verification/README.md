@@ -37,8 +37,8 @@ ForkUnion's [verification README](https://github.com/ashvardanian/ForkUnion/blob
 - `basic::shared_mutex::lock_shared` ends in a release fence, or a certified search certifies a torn pair of rows: [`basic_shared_mutex.pml`](basic_shared_mutex.pml), [`basic_shared_mutex.cpp`](basic_shared_mutex.cpp).
 - The gate's back-off wait and the deficit wait in `claim_capacity` are capped: [`basic_shared_mutex.pml`](basic_shared_mutex.pml).
 - The gate's generation wrap is priced at days of churn: [`basic_shared_mutex.pml`](basic_shared_mutex.pml).
-- `unlock_shared`'s release and `try_lock`'s acquire carry the shared side's edits to the unique side: [`basic_shared_mutex.pml`](basic_shared_mutex.pml).
-- The basic index's rows carry their edits on the row lock's acquire and the unlock's release: [`basic_ram_index_rows.pml`](basic_ram_index_rows.pml).
+- `unlock_shared`'s release and `try_lock`'s acquire publish the shared side's edits to the unique side: [`basic_shared_mutex.pml`](basic_shared_mutex.pml).
+- The basic index's rows publish their edits through the row lock's acquire and the unlock's release: [`basic_ram_index_rows.pml`](basic_ram_index_rows.pml).
 - A walk admits another batch's row only once it acquires that row's `wired_k` bit: [`basic_ram_index_batches/serial.pml`](basic_ram_index_batches/serial.pml).
 - `finish` refuses until every position is placed, and a refused fan-out places on the caller: [`basic_ram_index_batches/planned.pml`](basic_ram_index_batches/planned.pml).
 - A basic batch across two shards publishes whole, even when two batches cross between them: [`basic_ram_index_batches/sharded.pml`](basic_ram_index_batches/sharded.pml).

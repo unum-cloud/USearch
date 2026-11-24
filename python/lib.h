@@ -22,7 +22,7 @@
  *  index runs it on the calling thread, an @c On blocks on its executor, and a @c DeferredOn
  *  submits it there and answers a @c Deferred. A verb fills one call record, kept on the stack
  *  while it blocks and inside its @c Deferred once submitted, so one body serves every receiver and
- *  nothing the library borrows ever moves. Its result object is the output slot the library writes
+ *  nothing the library views ever moves. Its result object is the output slot the library writes
  *  into, so a deferred call answers it as a blocking one does. The binding starts no threads, takes
  *  no locks and re-checks nothing the library refuses; it counts only the GPU arenas an executor
  *  made, since each frees on the executor's stream, so a close leaves its handle to the last of
@@ -35,7 +35,7 @@
  *  Batch inputs arrive through PEP 3118 first and @c __array_interface__ second, so a PyTorch or
  *  TensorFlow tensor reaches the index without a NumPy round-trip and NumPy itself is never a
  *  build-time dependency. Every output whose length scales with the call lands in the @c Arena the
- *  caller passes and leaves as zero-copy results over it. A result views its arena until the next
+ *  caller passes and leaves as zero-copy results over it. A result uses its arena until the next
  *  call on that arena rewinds it, as a C view does, and @c Arena.describe says where it lives.
  *
  *  @section python_arrow Arrow PyCapsule Interface
@@ -90,16 +90,16 @@ enum {
     /** Objects one call holds until it is final: callables, telemetry, plans, lists of indexes. */
     usearch_py_holds_k = 5,
 
-    /** Buffers one call borrows until it is final. */
+    /** Buffers one call views until it is final. */
     usearch_py_buffers_k = 3,
 
-    /** Runs of keys one call borrows until it is final. */
+    /** Runs of keys one call views until it is final. */
     usearch_py_keys_k = 2,
 
-    /** Heap blocks one call lends until it is final: ordinals and arrays of handles. */
+    /** Heap blocks one call passes until it is final: ordinals and arrays of handles. */
     usearch_py_blocks_k = 4,
 
-    /** Words of the C arguments one call carries, room for the widest verb and its own outputs. */
+    /** Words of the C arguments one call holds, room for the widest verb and its own outputs. */
     usearch_py_arguments_words_k = 48,
 };
 
@@ -117,7 +117,7 @@ typedef struct usearch_py_argument_t {
     /** The keyword spelling, which also names the argument in every refusal. */
     char const* name;
 
-    /** Where the borrowed value lands. */
+    /** Where the viewed value lands. */
     PyObject** value;
 } usearch_py_argument_t;
 
@@ -151,7 +151,7 @@ typedef struct usearch_py_buffer_backing_t {
     /** Per-axis byte strides the synthesized buffer points at; likewise unused. */
     Py_ssize_t strides[usearch_py_max_rank_k];
 
-    /** The exporter a synthesized buffer borrows from, or the Arrow column one was read from, kept
+    /** The exporter a synthesized buffer views from, or the Arrow column one was read from, kept
      *  alive; NULL otherwise. */
     PyObject* synthesized_owner;
 } usearch_py_buffer_backing_t;
@@ -176,7 +176,7 @@ typedef struct usearch_py_keys_t {
 } usearch_py_keys_t;
 
 /**
- *  @brief The paths a residency arm borrows for the length of one factory call.
+ *  @brief The paths a residency arm views for the length of one factory call.
  *
  *  A path arrives as text and the ABI reads bytes, so the encoded objects have to outlive the
  *  call. The ABI reads the views contiguously, so the objects cannot ride inside them and
@@ -305,7 +305,8 @@ extern usearch_py_enum_t usearch_py_sequence_metric, usearch_py_shapes_metric, u
 int usearch_py_register_enums(PyObject* module);
 
 /**
- *  @brief Reads a member of @p mirrored from an `int`, refusing a `bool`, text and values no member carries.
+ *  @brief Reads a member of @p mirrored from an @c int, refusing a @c bool, text and values that
+ *      no member holds.
  *  @return 0 on success, -1 with an exception set otherwise.
  */
 int usearch_py_enum_from_object(PyObject* object, char const* field, usearch_py_enum_t const* mirrored, int* value);
@@ -323,7 +324,7 @@ typedef struct usearch_py_receiver_t {
     /** The receiver object, which a deferred call holds so its index and executor outlive the call. */
     PyObject* origin;
 
-    /** The index the verb addresses, borrowed from @c origin. */
+    /** The index the verb addresses, viewed from @c origin. */
     PyObject* index;
 
     /** The workers the call runs on; NULL runs it on the calling thread. */
@@ -337,7 +338,7 @@ typedef struct usearch_py_receiver_t {
  *  type of the index they hold, so one receiver type serves every modality. */
 typedef struct usearch_py_receiver_verbs_t {
 
-    /** The index type the receivers address. */
+    /** The index or cursor type the receivers address. */
     PyTypeObject* index;
 
     /** The verbs an @c On offers, each blocking on its executor. */
@@ -348,8 +349,8 @@ typedef struct usearch_py_receiver_verbs_t {
     PyMethodDef* deferred_on;
 } usearch_py_receiver_verbs_t;
 
-extern usearch_py_receiver_verbs_t const usearch_py_dense_receiver_verbs, usearch_py_sequence_receiver_verbs,
-    usearch_py_shapes_receiver_verbs, usearch_py_geospatial_receiver_verbs;
+extern usearch_py_receiver_verbs_t const usearch_py_dense_receiver_verbs, usearch_py_dense_cursor_receiver_verbs,
+    usearch_py_sequence_receiver_verbs, usearch_py_shapes_receiver_verbs, usearch_py_geospatial_receiver_verbs;
 
 /**
  *  @brief Reads what @p self names: an index runs on the calling thread, an @c On or a @c DeferredOn on its executor.
@@ -401,7 +402,7 @@ typedef struct usearch_py_call_t {
     uint64_t arguments[usearch_py_arguments_words_k];
 } usearch_py_call_t;
 
-/** A call a @c DeferredOn submitted, the object its allocation, so nothing it lends ever moves. */
+/** A call a @c DeferredOn submitted, the object its allocation, so nothing it passes ever moves. */
 typedef struct Deferred {
     PyObject ob_base;
 
@@ -458,7 +459,7 @@ usearch_predicate_t usearch_py_predicate_registered(PyObject* predicate);
 #pragma region Shared Helpers
 
 /**
- *  @brief Raises the class @p outcome 's status maps to when it carries a failure.
+ *  @brief Raises the class @p outcome 's status maps to when it holds a failure.
  *  @return -1 with an exception set when @p outcome failed, 0 otherwise.
  */
 int usearch_py_raise_on_outcome(usearch_outcome_t const* outcome);
@@ -509,7 +510,7 @@ size_t usearch_py_scalar_row_bytes(usearch_scalar_t kind, size_t columns);
 /**
  *  @brief The @c memoryview format character for @p kind, or NULL when packing forbids one.
  *
- *  Sub-byte kinds carry a format in the naming table but pack several dimensions per byte, so
+ *  Sub-byte kinds hold a format in the naming table but pack several dimensions per byte, so
  *  a view cast to it would report the wrong extent; those leave as raw bytes instead.
  */
 char const* usearch_py_scalar_buffer_format(usearch_scalar_t kind);
@@ -532,7 +533,7 @@ int usearch_py_matrix_bytes(size_t rows, size_t columns, size_t unit, Py_ssize_t
 int usearch_py_scalar_from_object(PyObject* object, char const* field, usearch_scalar_t* kind);
 
 /**
- *  @brief Borrows a contiguous-rowed matrix, PEP 3118 first, @c __array_interface__ second, and
+ *  @brief Views a contiguous-rowed matrix, PEP 3118 first, @c __array_interface__ second, and
  *      an Arrow column third.
  *
  *  A one-dimensional input is read as a single row, matching the C surface's rule that one
@@ -543,7 +544,7 @@ int usearch_py_scalar_from_object(PyObject* object, char const* field, usearch_s
  *  @param[in] object The tensor-like input.
  *  @param[in] scalar_hint Names the scalar kind; unknown infers it from the buffer, and a named one
  *      must be as wide as the buffer's own items.
- *  @param[out] view The borrowed matrix, whose @c columns counts logical dimensions rather than
+ *  @param[out] view The viewed matrix, whose @c columns counts logical dimensions rather than
  *      the storage units a sub-byte kind packs them into.
  *  @param[out] backing Storage the view points into; release it with @c usearch_py_buffer_release.
  *  @return 0 on success, -1 with an exception set otherwise.
@@ -552,7 +553,7 @@ int usearch_py_matrix_from_object(PyObject* object, usearch_scalar_t scalar_hint
                                   usearch_py_buffer_backing_t* backing);
 
 /**
- *  @brief Borrows a writable contiguous byte run of exactly @p bytes for state the caller lends a
+ *  @brief Views a writable contiguous byte run of exactly @p bytes for state the caller passes a
  *      verb, such as attention's carry.
  *
  *  The state is a byte run rather than a matrix, so this validates the total extent instead of the
@@ -577,7 +578,7 @@ int usearch_py_keys_from_object(PyObject* object, size_t expected, usearch_py_ke
 void usearch_py_keys_release(usearch_py_keys_t* batch);
 
 /**
- *  @brief Borrows a filesystem path from a @c str, @c bytes, or @c os.PathLike.
+ *  @brief Views a filesystem path from a @c str, @c bytes, or @c os.PathLike.
  *  @param[out] decoded A new reference the caller must release once @p path is spent.
  *  @return 0 on success, -1 with an exception set otherwise.
  */
@@ -589,7 +590,7 @@ int usearch_py_register_error_types(PyObject* module);
 /**
  *  @brief Reads a sequence of NUMA node IDs or device ordinals into a caller-freed array.
  *
- *  Residency variants borrow their arrays only for the duration of the factory call, so the
+ *  Residency variants view their arrays only for the duration of the factory call, so the
  *  allocation lives no longer than the constructor that made it.
  *
  *  @param[out] ordinals Receives a @c PyMem_Free -able array; @c NULL when @p object is NULL or @c None.
@@ -598,7 +599,7 @@ int usearch_py_register_error_types(PyObject* module);
 int usearch_py_ordinals_from_object(PyObject* object, char const* field, int32_t** ordinals, size_t* count);
 
 /**
- *  @brief Reads a sequence of filesystem or transport identifiers a residency arm borrows.
+ *  @brief Reads a sequence of filesystem or transport identifiers a residency arm views.
  *
  *  A path arrives as text and the ABI reads bytes, so the encoded objects have to outlive the
  *  call; they trail the views in the same block, since the ABI reads the views contiguously.
@@ -652,7 +653,7 @@ PyObject* usearch_py_reachability_to_object(usearch_reachability_t const* reacha
 /** A new @c RefineReport of @p report, or NULL with an exception set. */
 PyObject* usearch_py_refine_report_to_object(usearch_refine_report_t const* report);
 
-/** Borrows a whole checkpoint blob, whatever its length; returns 0 or -1 with an exception set. */
+/** Views a whole checkpoint blob, whatever its length; returns 0 or -1 with an exception set. */
 int usearch_py_checkpoint_from_object(PyObject* object, usearch_py_buffer_backing_t* backing);
 
 /**
@@ -695,7 +696,7 @@ typedef struct ArenaBuffer {
     /** The arena the output lives in, kept alive so the memory outlives every other name for it. */
     PyObject* arena;
 
-    /** The rows a call writes into a @c DenseVectors, which carry its scalar and columns; zeroed
+    /** The rows a call writes into a @c DenseVectors, which hold its scalar and columns; zeroed
      *  for every other output. */
     usearch_rows_view_t rows;
 

@@ -32,8 +32,6 @@ import (
 #cgo nocallback usearch_outcome_wait
 #cgo noescape usearch_executor_for_ram
 #cgo nocallback usearch_executor_for_ram
-#cgo noescape usearch_executor_on_pool
-#cgo nocallback usearch_executor_on_pool
 #cgo noescape usearch_executor_for_vram
 #cgo nocallback usearch_executor_for_vram
 #cgo noescape usearch_executor_for_nvme
@@ -75,13 +73,13 @@ import "C"
 // Validation performed here before a call crosses reports the status the engine would have
 // reported for the same fault.
 //
-// A Status is an error, so errors.Is(err, usearch.StatusReadOnly) matches any failure carrying it.
+// A Status is an error, so errors.Is(err, usearch.StatusReadOnly) matches any failure holding it.
 type Status int32
 
 // The statuses a call ends in. Only Deferred.Status reports StatusDeferred, the one status
 // that is not final.
 const (
-	// StatusSuccess means the call completed and carries no message.
+	// StatusSuccess means the call completed and holds no message.
 	StatusSuccess Status = C.usearch_status_success_k
 	// StatusDeferred means the call was submitted deferred and is not final yet.
 	StatusDeferred Status = C.usearch_status_deferred_k
@@ -113,7 +111,7 @@ const (
 	// executor another call holds, or an arena still serving another call.
 	StatusContended Status = C.usearch_status_contended_k
 	// StatusCancelled means a progress handler asked the operation to stop; it unwound and published
-	// nothing, so the handle carries whatever it did before the call.
+	// nothing, so the handle holds whatever it did before the call.
 	StatusCancelled Status = C.usearch_status_cancelled_k
 	// StatusUnsupported means the verb is declared for every residency but this one does not
 	// implement it; a caller picks another residency.
@@ -142,7 +140,7 @@ func StatusFromName(name string) (Status, error) {
 func (status Status) Error() string { return status.String() }
 
 // Error is one failed call: a status every caller can branch on, and the detail the status
-// cannot carry. Reach the status with errors.Is or errors.As.
+// cannot hold. Reach the status with errors.Is or errors.As.
 type Error struct {
 	Status  Status
 	Message string
@@ -196,7 +194,7 @@ func KeyFromUint64(value uint64) Key {
 }
 
 // Uint64 reports the integer identity in the low eight bytes, and false when the high eight
-// carry anything.
+// hold anything.
 func (key Key) Uint64() (uint64, bool) {
 	if binary.BigEndian.Uint64(key[:8]) != 0 {
 		return 0, false
@@ -313,7 +311,7 @@ func ScalarFromName(name string) (Scalar, error) {
 	return Scalar(scalar), nil
 }
 
-// dimensionsPerValue is how many logical dimensions one stored value carries: one for the
+// dimensionsPerValue is how many logical dimensions one stored value holds: one for the
 // byte-and-wider kinds, more for the packed ones.
 func (scalar Scalar) dimensionsPerValue() uint {
 	switch scalar {
@@ -395,11 +393,11 @@ func scalarOf[Value Element]() Scalar {
 
 // region: Row Views
 
-// RowsView borrows a caller-owned slab as rows of equal width: a base pointer, a row count, and
+// RowsView views a caller-owned slab as rows of equal width: a base pointer, a row count, and
 // a byte pitch between consecutive rows. It is the shape every batch argument takes.
 //
-// A RowsView borrows and never owns. It stays valid only as long as the slice it was built
-// from, which the binding pins until each call it crosses is final: the collector traces the
+// A RowsView only points at memory it never owns. It stays valid only as long as the slice it was
+// built from, which the binding pins until each call it crosses is final: the collector traces the
 // base pointer, so keeping the view alive keeps the backing array alive.
 type RowsView struct {
 	pointer    unsafe.Pointer
@@ -480,7 +478,7 @@ func (matrix RowsView) Stride() uint { return matrix.stride }
 // Scalar reports the scalar type the rows hold.
 func (matrix RowsView) Scalar() Scalar { return matrix.scalar }
 
-// lower lends the rows as the batch view a verb reads; the library checks their width against
+// lower passes the rows as the batch view a verb reads; the library checks their width against
 // the frozen geometry.
 func (matrix RowsView) lower(call *call) C.usearch_rows_view_t {
 	call.pinner.Pin(matrix.pointer)
@@ -510,7 +508,7 @@ func (matches MatchesView) Queries() uint { return matches.queries }
 // Columns reports the matches the call made room for per query, at most its wanted - the "k" in "kANN".
 func (matches MatchesView) Columns() uint { return uint(matches.raw.columns) }
 
-// Query borrows one query's keys and scores from the arena, trimmed to the count that query
+// Query views one query's keys and scores from the arena, trimmed to the count that query
 // reported; query must be below Queries.
 func (matches MatchesView) Query(query uint) ([]Key, []Distance) {
 	columns := matches.Columns()
@@ -541,7 +539,7 @@ func (matches MatchesTape) Required() uint { return matches.required }
 // Written reports the matches Within wrote across every query; zero for Multiply and Maxsim.
 func (matches MatchesTape) Written() uint { return matches.written }
 
-// Query borrows one query's keys and scores from the arena, a left row's pairs for Multiply; query
+// Query views one query's keys and scores from the arena, a left row's pairs for Multiply; query
 // must be below Queries.
 func (matches MatchesTape) Query(query uint) ([]Key, []Distance) {
 	offsets := unsafe.Slice((*uint)(unsafe.Pointer(matches.raw.offsets)), matches.queries+1)
@@ -557,7 +555,7 @@ func (matches MatchesTape) Query(query uint) ([]Key, []Distance) {
 // Admitter is the predicate a filtered verb asks about its candidate keys: a [Predicate], a
 // [BatchPredicate] or a [CheapBatchPredicate], whose type tells the library what one call costs.
 type Admitter interface {
-	// admitter lends the handler through handle, which stays in place until the verb is final.
+	// admitter passes the handler through handle, which stays in place until the verb is final.
 	admitter(handle *cgo.Handle) C.usearch_predicate_t
 }
 
@@ -637,13 +635,13 @@ func (predicate CheapBatchPredicate) admitter(handle *cgo.Handle) C.usearch_pred
 	return admits(handle, predicate, C.usearch_predicate_cost_cheap_k)
 }
 
-// admits lends handler to the C trampoline through handle, at the cost its type names.
+// admits passes handler to the C trampoline through handle, at the cost its type names.
 func admits(handle *cgo.Handle, handler any, cost C.usearch_predicate_cost_t) C.usearch_predicate_t {
 	*handle = cgo.NewHandle(handler)
 	return C.usearch_predicate_t{callback: C.usearch_go_admits(), state: unsafe.Pointer(handle), cost: cost}
 }
 
-// predicate lends an optional predicate as the struct a filtering verb takes. It hands the handle
+// predicate passes an optional predicate as the struct a filtering verb takes. It hands the handle
 // slot rather than the call through the interface, so the call stays off the heap.
 func (call *call) predicate(admitter Admitter) C.usearch_predicate_t {
 	if admitter == nil {
@@ -652,7 +650,7 @@ func (call *call) predicate(admitter Admitter) C.usearch_predicate_t {
 	return admitter.admitter(&call.slots.handles[0])
 }
 
-// progress lends an optional handler and its report count as the struct a reporting verb takes.
+// progress passes an optional handler and its report count as the struct a reporting verb takes.
 func (call *call) progress(progress ProgressCallback, steps uint) C.usearch_progress_t {
 	if progress == nil {
 		return C.usearch_progress_t{}
@@ -664,8 +662,8 @@ func (call *call) progress(progress ProgressCallback, steps uint) C.usearch_prog
 	}
 }
 
-// callback lends a handler to its C trampoline as an opaque handle in the call's slot rather than a
-// Go pointer, since the closure holds Go pointers the cgo rules forbid handing to C.
+// callback passes a handler to its C trampoline as an opaque handle in the call's slot rather than
+// a Go pointer, since the closure holds Go pointers the cgo rules forbid handing to C.
 func (call *call) callback(slot int, handler any) unsafe.Pointer {
 	call.slots.handles[slot] = cgo.NewHandle(handler)
 	return unsafe.Pointer(&call.slots.handles[slot])
@@ -998,36 +996,22 @@ func NvmeClassFromName(name string) (NvmeClass, error) {
 // domains local to memoryDomains - the same list the indexes were initialized with, which is what
 // keeps compute and memory domains in agreement. An empty list derives them from the machine.
 //
-// Zero threads takes seven eighths of the cores those domains carry, since full occupancy starves
+// Zero threads takes seven eighths of the cores those domains hold, since full occupancy starves
 // the ordered publication path. A cpuClassCeiling intersects with what the machine runs, so a class
-// the machine lacks narrows rather than refuses.
-func ExecutorForRam(memoryDomains []int32, cpuClassCeiling CPUClass, threads uint) (*Executor, error) {
-	var lent lent[C.usearch_executor_t]
-	arguments := open[C.usearch_executor_for_ram_t](&lent)
+// the machine lacks narrows rather than refuses. ScratchLimit caps each thread's scratch, past
+// which a call fails with StatusOutOfMemory; zero takes 1 GiB.
+func ExecutorForRam(memoryDomains []int32, cpuClassCeiling CPUClass, threads uint, scratchLimit uint) (*Executor, error) {
+	var call callWithResult[C.usearch_executor_t]
+	arguments := open[C.usearch_executor_for_ram_t](&call)
 	*arguments = C.usearch_executor_for_ram_t{
-		executor: lent.result,
-		outcome:  lent.outcome(),
-		ram:      lent.ram(memoryDomains, cpuClassCeiling),
-		threads:  C.size_t(threads),
+		executor:      call.result,
+		outcome:       call.outcome(),
+		ram:           call.ram(memoryDomains, cpuClassCeiling),
+		threads:       C.size_t(threads),
+		scratch_limit: C.size_t(scratchLimit),
 	}
 	C.usearch_executor_for_ram(arguments)
-	return executorOf(block(&lent, nil))
-}
-
-// ExecutorOnPool creates a RAM executor over a borrowed ForkUnion fu_pool_t, so several
-// libraries in one process share one set of threads while each keeps its own scratch. The pool
-// must outlive the executor, and keeps its lender's mood.
-func ExecutorOnPool(memoryDomains []int32, cpuClassCeiling CPUClass, pool unsafe.Pointer) (*Executor, error) {
-	var lent lent[C.usearch_executor_t]
-	arguments := open[C.usearch_executor_on_pool_t](&lent)
-	*arguments = C.usearch_executor_on_pool_t{
-		executor: lent.result,
-		outcome:  lent.outcome(),
-		ram:      lent.ram(memoryDomains, cpuClassCeiling),
-		pool:     pool,
-	}
-	C.usearch_executor_on_pool(arguments)
-	return executorOf(block(&lent, nil))
+	return executorOf(block(&call, nil))
 }
 
 // ExecutorForNvme spawns host workers for NVMe-resident indexes, one submission ring apiece,
@@ -1036,28 +1020,36 @@ func ExecutorOnPool(memoryDomains []int32, cpuClassCeiling CPUClass, pool unsafe
 //
 // Zero threads derives from those devices' queue capabilities. Every ring submits through
 // nvmeClass, opened exactly or refused, and NvmeClassUnknown tries io_uring, then AIO, then
-// blocking reads.
-func ExecutorForNvme(paths []string, cpuClassCeiling CPUClass, threads uint, nvmeClass NvmeClass) (*Executor, error) {
-	var lent lent[C.usearch_executor_t]
-	arguments := open[C.usearch_executor_for_nvme_t](&lent)
+// blocking reads. The first of memoryDomains places the threads and their scratch over the domain
+// the devices sit on; an empty list takes the devices' domain. ScratchLimit caps each thread's
+// scratch, past which a call fails with StatusOutOfMemory; zero takes 1 GiB. The same threads
+// serve RAM-resident indexes too.
+func ExecutorForNvme(
+	paths []string, memoryDomains []int32, cpuClassCeiling CPUClass, threads uint, nvmeClass NvmeClass, scratchLimit uint,
+) (*Executor, error) {
+	var call callWithResult[C.usearch_executor_t]
+	arguments := open[C.usearch_executor_for_nvme_t](&call)
 	*arguments = C.usearch_executor_for_nvme_t{
-		executor:   lent.result,
-		outcome:    lent.outcome(),
-		nvme:       lent.nvme(paths, cpuClassCeiling),
-		threads:    C.size_t(threads),
-		nvme_class: C.usearch_nvme_class_t(nvmeClass),
+		executor:      call.result,
+		outcome:       call.outcome(),
+		nvme:          call.nvme(paths, cpuClassCeiling),
+		ram:           call.ram(memoryDomains, CPUClassUnknown),
+		threads:       C.size_t(threads),
+		nvme_class:    C.usearch_nvme_class_t(nvmeClass),
+		scratch_limit: C.size_t(scratchLimit),
 	}
 	C.usearch_executor_for_nvme(arguments)
-	return executorOf(block(&lent, nil))
+	return executorOf(block(&call, nil))
 }
 
-// ExecutorForVram opens one submission stream on every named device, or borrows the caller's,
-// all of them driven by the one host thread that calls the verbs - which is why it takes no thread
-// count.
+// ExecutorForVram opens one non-blocking stream on every named device, created with the executor
+// and destroyed when it closes, all of them driven by the one host thread that calls the verbs -
+// which is why it takes no thread count.
 //
-// Streams is empty, or holds one live CUDA stream per device in devices order, each outliving the
-// executor. Zero scratchLimit lets scratch grow as geometry asks. A gpuClassCeiling no named device
-// loads is refused with StatusUnsupported.
+// Streams is empty; one CUDA stream per device in devices order is declared for the caller's own
+// streams, which answer StatusUnsupported, since the executor drives only its own. Zero
+// scratchLimit lets scratch grow as geometry asks.
+// A gpuClassCeiling no named device loads is refused with StatusUnsupported.
 func ExecutorForVram(
 	devices []int32, gpuClassCeiling GPUClass, streams []unsafe.Pointer, scratchLimit uint,
 ) (*Executor, error) {
@@ -1065,17 +1057,17 @@ func ExecutorForVram(
 	if len(streams) != 0 && len(streams) != len(devices) {
 		return nil, fail(StatusShapeMismatch, "pass no streams or one per device")
 	}
-	var lent lent[C.usearch_executor_t]
-	arguments := open[C.usearch_executor_for_vram_t](&lent)
+	var call callWithResult[C.usearch_executor_t]
+	arguments := open[C.usearch_executor_for_vram_t](&call)
 	*arguments = C.usearch_executor_for_vram_t{
-		executor:      lent.result,
-		outcome:       lent.outcome(),
-		vram:          lent.vram(devices, gpuClassCeiling),
-		streams:       (*unsafe.Pointer)(lent.lend(unsafe.Pointer(unsafe.SliceData(streams)), len(streams))),
+		executor:      call.result,
+		outcome:       call.outcome(),
+		vram:          call.vram(devices, gpuClassCeiling),
+		streams:       (*unsafe.Pointer)(call.pinSlice(unsafe.Pointer(unsafe.SliceData(streams)), len(streams))),
 		scratch_limit: C.size_t(scratchLimit),
 	}
 	C.usearch_executor_for_vram(arguments)
-	return executorOf(block(&lent, nil))
+	return executorOf(block(&call, nil))
 }
 
 // executorOf wraps the handle an executor factory wrote.
@@ -1094,11 +1086,11 @@ func (executor *Executor) Drain(mood Mood) error {
 	if err != nil {
 		return err
 	}
-	var lent lent[struct{}]
-	arguments := open[C.usearch_executor_drain_t](&lent)
-	*arguments = C.usearch_executor_drain_t{executor: handle, outcome: lent.outcome(), mood: C.usearch_mood_t(mood)}
+	var call callWithResult[struct{}]
+	arguments := open[C.usearch_executor_drain_t](&call)
+	*arguments = C.usearch_executor_drain_t{executor: handle, outcome: call.outcome(), mood: C.usearch_mood_t(mood)}
 	C.usearch_executor_drain(arguments)
-	_, err = block(&lent, nil)
+	_, err = block(&call, nil)
 	return err
 }
 
@@ -1110,11 +1102,11 @@ func (executor *Executor) Drain(mood Mood) error {
 // rows, products, monoliths, cursor and stream batches alike - reused so a steady loop allocates once.
 //
 // Every call given an arena rewinds and refills it, so the views of its previous call and every
-// slice they handed out end there, as they do once it is closed; to keep one call's views past
-// the next, give that call another arena. An arena serves one call at a time, and a second
-// overlapping it fails with StatusContended. Deferred verbs borrow it as blocking ones do,
-// since Close waits for every deferred call naming it. Views over a GPU arena hold device
-// memory, which Describe reports and no Go code may read.
+// slice they handed out end there, as they do once it is closed; to keep one call's views past the
+// next, give that call another arena. An arena serves one call at a time, and a second overlapping
+// it fails with StatusContended. Deferred verbs view it as blocking ones do, since Close waits for
+// every deferred call naming it. Views over a GPU arena hold device memory, which Describe reports
+// and no Go code may read.
 type Arena struct {
 	handle C.usearch_arena_t
 }
@@ -1130,11 +1122,11 @@ func NewArena(executor *Executor) (*Arena, error) {
 	if err != nil {
 		return nil, err
 	}
-	var lent lent[C.usearch_arena_t]
-	arguments := open[C.usearch_arena_init_t](&lent)
-	*arguments = C.usearch_arena_init_t{arena: lent.result, executor: handle, outcome: lent.outcome()}
+	var call callWithResult[C.usearch_arena_t]
+	arguments := open[C.usearch_arena_init_t](&call)
+	*arguments = C.usearch_arena_init_t{arena: call.result, executor: handle, outcome: call.outcome()}
 	C.usearch_arena_init(arguments)
-	arena, err := block(&lent, nil)
+	arena, err := block(&call, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1156,15 +1148,15 @@ func (arena *Arena) Describe() (ArenaDescription, error) {
 	if err != nil {
 		return ArenaDescription{}, err
 	}
-	var lent lent[ArenaDescription]
-	arguments := open[C.usearch_arena_describe_t](&lent)
+	var call callWithResult[ArenaDescription]
+	arguments := open[C.usearch_arena_describe_t](&call)
 	*arguments = C.usearch_arena_describe_t{
 		arena:       handle,
-		outcome:     lent.outcome(),
-		description: (*C.usearch_arena_description_t)(unsafe.Pointer(lent.result)),
+		outcome:     call.outcome(),
+		description: (*C.usearch_arena_description_t)(unsafe.Pointer(call.result)),
 	}
 	C.usearch_arena_describe(arguments)
-	return block(&lent, nil)
+	return block(&call, nil)
 }
 
 // endregion: Arenas
@@ -1187,7 +1179,7 @@ type frame[Arguments, Result any] struct {
 }
 
 // call is one verb crossing into the library: the pins that keep every Go pointer its argument
-// structure carries in place until the call is final, and the slots it reports through. cgo lets C
+// structure holds in place until the call is final, and the slots it reports through. cgo lets C
 // keep a Go pointer only while it is pinned, and pinning is also what keeps every pointee on the
 // heap, which the noescape promises rely on.
 type call struct {
@@ -1198,8 +1190,8 @@ type call struct {
 	arguments []byte
 }
 
-// lent is a call and the slot its result lands in, which the library writes in place.
-type lent[Result any] struct {
+// callWithResult is a call and the slot its result lands in, which the library writes in place.
+type callWithResult[Result any] struct {
 	call
 	result *Result
 }
@@ -1207,11 +1199,11 @@ type lent[Result any] struct {
 // open pins a fresh frame and hands back its argument structure, which a verb fills and passes to
 // C; verbs refuse before opening, so a refusal pins and allocates nothing. The arguments live in
 // the frame because cgo moves to the heap whatever a C function that may call back into Go reaches.
-func open[Arguments, Result any](lent *lent[Result]) *Arguments {
+func open[Arguments, Result any](opened *callWithResult[Result]) *Arguments {
 	frame := new(frame[Arguments, Result])
-	lent.pinner.Pin(frame)
-	lent.slots, lent.result = &frame.slots, &frame.result
-	lent.arguments = unsafe.Slice((*byte)(unsafe.Pointer(&frame.arguments)), unsafe.Sizeof(frame.arguments))
+	opened.pinner.Pin(frame)
+	opened.slots, opened.result = &frame.slots, &frame.result
+	opened.arguments = unsafe.Slice((*byte)(unsafe.Pointer(&frame.arguments)), unsafe.Sizeof(frame.arguments))
 	return &frame.arguments
 }
 
@@ -1223,7 +1215,7 @@ func (call *call) status() Status {
 	return Status(C.usearch_outcome_status(call.outcome()))
 }
 
-// settle waits until the call is final, releases everything it lent, and reports its failure, the
+// settle waits until the call is final, releases everything it pinned, and reports its failure, the
 // same every time it is asked.
 func (call *call) settle() error {
 	if call.status() == StatusDeferred {
@@ -1241,15 +1233,15 @@ func (call *call) settle() error {
 }
 
 // block settles the call a verb opened and hands back its result, or the verb's refusal.
-func block[Result any](lent *lent[Result], refusal error) (Result, error) {
+func block[Result any](call *callWithResult[Result], refusal error) (Result, error) {
 	var none Result
 	if refusal != nil {
 		return none, refusal
 	}
-	if err := lent.settle(); err != nil {
+	if err := call.settle(); err != nil {
 		return none, err
 	}
-	return *lent.result, nil
+	return *call.result, nil
 }
 
 // configOf reads a nil config as the zero one, by value, so generic verbs allocate nothing for it.
@@ -1263,22 +1255,22 @@ func configOf[Config any](config *Config) Config {
 
 // pin keeps a Go object in place until the call is final and hands back its address. It takes no
 // type parameter, since a generic call inlined into a generic verb reaches its callee through a
-// dictionary, and escape analysis then moves the verb's lent to the heap.
+// dictionary, and escape analysis then moves the verb's call to the heap.
 func (call *call) pin(pointer unsafe.Pointer) unsafe.Pointer {
 	call.pinner.Pin(pointer)
 	return pointer
 }
 
-// lend pins the backing array of a slice of length elements at data until the call is final, and
-// lends an empty slice as nil.
-func (call *call) lend(data unsafe.Pointer, length int) unsafe.Pointer {
+// pinSlice pins the backing array of a slice of length elements at data until the call is final,
+// and answers nil for an empty slice.
+func (call *call) pinSlice(data unsafe.Pointer, length int) unsafe.Pointer {
 	if length == 0 {
 		return nil
 	}
 	return call.pin(data)
 }
 
-// view lends a string to a call that only reads it before returning.
+// view passes a string to a call that only reads it before returning.
 func view(text string) C.usearch_bytes_view_t {
 	view := C.usearch_bytes_view_t{data: (*C.uint8_t)(unsafe.Pointer(unsafe.StringData(text)))}
 	// cgo names the length's typedef apart from size_t, though the two are as wide.
@@ -1292,7 +1284,7 @@ func view(text string) C.usearch_bytes_view_t {
 // dropped without Wait or Close is released by the collector once the call is final, never
 // blocking on it: until then every later collection checks it again.
 type Deferred[Result any] struct {
-	lent    lent[Result]
+	call    callWithResult[Result]
 	cleanup runtime.Cleanup
 }
 
@@ -1302,7 +1294,7 @@ func submitted[Result any](deferred *Deferred[Result], refusal error) (*Deferred
 	if refusal != nil {
 		return nil, refusal
 	}
-	deferred.cleanup = runtime.AddCleanup(deferred, release, deferred.lent.call)
+	deferred.cleanup = runtime.AddCleanup(deferred, release, deferred.call.call)
 	return deferred, nil
 }
 
@@ -1317,20 +1309,20 @@ func release(call call) {
 }
 
 // Status reports StatusDeferred until the call is final, then its final status, without blocking.
-func (deferred *Deferred[Result]) Status() Status { return deferred.lent.status() }
+func (deferred *Deferred[Result]) Status() Status { return deferred.call.status() }
 
 // Wait blocks until the call is final, releases its pins, then hands back its result, the same
 // every time it is asked.
 func (deferred *Deferred[Result]) Wait() (Result, error) {
 	deferred.cleanup.Stop()
-	return block(&deferred.lent, nil)
+	return block(&deferred.call, nil)
 }
 
 // Close blocks until the call is final, releases its pins, and reports the call's failure. It is
 // idempotent and safe after Wait.
 func (deferred *Deferred[Result]) Close() error {
 	deferred.cleanup.Stop()
-	return deferred.lent.settle()
+	return deferred.call.settle()
 }
 
 // endregion: Calls
@@ -1375,8 +1367,9 @@ func (executor *Executor) lower() (C.usearch_executor_t, error) {
 	return executor.handle, nil
 }
 
-// Close waits out the call holding the executor, then releases its threads, rings or streams; every
-// arena it made must be closed first. It is idempotent; a closed executor must not be used again.
+// Close waits out the call holding the executor and its devices, then releases its threads, rings,
+// streams and scratch; every arena it made must be closed first. It is idempotent; a closed
+// executor must not be used again.
 func (executor *Executor) Close() error {
 	if executor == nil || executor.handle == nil {
 		return nil
@@ -1429,12 +1422,12 @@ func CapabilitiesAvailable() string { return C.GoString(C.usearch_capabilities_a
 
 // region: Helpers
 
-// ints lends a slice of IDs until the call is final.
+// ints passes a slice of IDs until the call is final.
 func (call *call) ints(values []int32) (*C.int32_t, C.size_t) {
-	return (*C.int32_t)(call.lend(unsafe.Pointer(unsafe.SliceData(values)), len(values))), C.size_t(len(values))
+	return (*C.int32_t)(call.pinSlice(unsafe.Pointer(unsafe.SliceData(values)), len(values))), C.size_t(len(values))
 }
 
-// ram lends the memory domains of a RAM placement or executor, beside the class ceiling.
+// ram passes the memory domains of a RAM placement or executor, beside the class ceiling.
 func (call *call) ram(memoryDomains []int32, cpuClassCeiling CPUClass) C.usearch_ram_options_t {
 	domains, count := call.ints(memoryDomains)
 	return C.usearch_ram_options_t{
@@ -1444,7 +1437,7 @@ func (call *call) ram(memoryDomains []int32, cpuClassCeiling CPUClass) C.usearch
 	}
 }
 
-// vram lends the devices of a VRAM placement or executor, beside the class ceiling.
+// vram passes the devices of a VRAM placement or executor, beside the class ceiling.
 func (call *call) vram(devices []int32, gpuClassCeiling GPUClass) C.usearch_vram_options_t {
 	ordinals, count := call.ints(devices)
 	return C.usearch_vram_options_t{
@@ -1454,7 +1447,7 @@ func (call *call) vram(devices []int32, gpuClassCeiling GPUClass) C.usearch_vram
 	}
 }
 
-// ramPlacement lends an optional RAM placement, nil for none, which keeps the handle's own.
+// ramPlacement passes an optional RAM placement, nil for none, which keeps the handle's own.
 func (call *call) ramPlacement(
 	memoryDomains []int32, cpuClassCeiling CPUClass, shardCapacity uint,
 ) *C.usearch_ram_options_t {
@@ -1466,7 +1459,7 @@ func (call *call) ramPlacement(
 	return (*C.usearch_ram_options_t)(call.pin(unsafe.Pointer(&placement)))
 }
 
-// vramPlacement lends an optional VRAM placement, nil for none.
+// vramPlacement passes an optional VRAM placement, nil for none.
 func (call *call) vramPlacement(devices []int32, shardCapacity uint) *C.usearch_vram_options_t {
 	if devices == nil {
 		return nil
@@ -1476,7 +1469,7 @@ func (call *call) vramPlacement(devices []int32, shardCapacity uint) *C.usearch_
 	return (*C.usearch_vram_options_t)(call.pin(unsafe.Pointer(&placement)))
 }
 
-// nvmePlacement lends an optional NVMe placement, nil for none.
+// nvmePlacement passes an optional NVMe placement, nil for none.
 func (call *call) nvmePlacement(paths []string) *C.usearch_nvme_options_t {
 	if paths == nil {
 		return nil
@@ -1485,7 +1478,7 @@ func (call *call) nvmePlacement(paths []string) *C.usearch_nvme_options_t {
 	return (*C.usearch_nvme_options_t)(call.pin(unsafe.Pointer(&placement)))
 }
 
-// nvme lends a run of device paths, each borrowed rather than copied. Go strings are not
+// nvme passes a run of device paths, each viewed rather than copied. Go strings are not
 // null-terminated and the interface never assumes one, so the bytes cross as they are.
 func (call *call) nvme(paths []string, cpuClassCeiling CPUClass) C.usearch_nvme_options_t {
 	views := make([]C.usearch_bytes_view_t, len(paths))
@@ -1493,16 +1486,16 @@ func (call *call) nvme(paths []string, cpuClassCeiling CPUClass) C.usearch_nvme_
 		views[position] = call.text(path)
 	}
 	return C.usearch_nvme_options_t{
-		paths:             (*C.usearch_bytes_view_t)(call.lend(unsafe.Pointer(unsafe.SliceData(views)), len(views))),
+		paths:             (*C.usearch_bytes_view_t)(call.pinSlice(unsafe.Pointer(unsafe.SliceData(views)), len(views))),
 		paths_count:       C.size_t(len(views)),
 		cpu_class_ceiling: C.usearch_cpu_class_t(cpuClassCeiling),
 	}
 }
 
-// bytes lends a byte slab as the view the C interface reads, with no terminator and no copy.
+// bytes passes a byte slab as the view the C interface reads, with no terminator and no copy.
 func (call *call) bytes(bytes []byte) C.usearch_bytes_view_t {
 	return C.usearch_bytes_view_t{
-		data:   (*C.uint8_t)(call.lend(unsafe.Pointer(unsafe.SliceData(bytes)), len(bytes))),
+		data:   (*C.uint8_t)(call.pinSlice(unsafe.Pointer(unsafe.SliceData(bytes)), len(bytes))),
 		length: C.size_t(len(bytes)),
 	}
 }
@@ -1519,19 +1512,19 @@ func (call *call) text(text string) C.usearch_bytes_view_t {
 	}
 }
 
-// keys lends a packed key slice as the run the C interface reads, one key per row of the batch
+// keys passes a packed key slice as the run the C interface reads, one key per row of the batch
 // it accompanies.
 func (call *call) keys(keys []Key) C.usearch_keys_view_t {
 	return C.usearch_keys_view_t{
-		data:   (*C.usearch_key_t)(call.lend(unsafe.Pointer(unsafe.SliceData(keys)), len(keys))),
+		data:   (*C.usearch_key_t)(call.pinSlice(unsafe.Pointer(unsafe.SliceData(keys)), len(keys))),
 		stride: C.size_t(unsafe.Sizeof(Key{})),
 	}
 }
 
-// points lends places in three dimensions as the f32 rows a sampling verb reads.
+// points passes places in three dimensions as the f32 rows a sampling verb reads.
 func (call *call) points(points [][3]float32) C.usearch_rows_view_t {
 	return C.usearch_rows_view_t{
-		data:    call.lend(unsafe.Pointer(unsafe.SliceData(points)), len(points)),
+		data:    call.pinSlice(unsafe.Pointer(unsafe.SliceData(points)), len(points)),
 		stride:  C.size_t(unsafe.Sizeof([3]float32{})),
 		columns: 3,
 		scalar:  C.usearch_scalar_t(ScalarF32),
@@ -1542,12 +1535,12 @@ func (call *call) points(points [][3]float32) C.usearch_rows_view_t {
 
 // region: Tapes
 
-// Tape borrows a ragged batch as Apache Arrow lays one out: elements end to end, and one more
+// Tape views a ragged batch as Apache Arrow lays one out: elements end to end, and one more
 // offset than entries around them, entry i spanning offsets[i] up to offsets[i+1]. An element is
 // a byte of a sequence or a point of a shape, three scalars wide.
 //
-// Like a RowsView, a Tape borrows and never owns, and the binding pins both slices until each call
-// it crosses is final.
+// Like a RowsView, a Tape only points at memory it never owns, and the binding pins both slices
+// until each call it crosses is final.
 type Tape struct {
 	pointer unsafe.Pointer
 	offsets unsafe.Pointer
@@ -1627,7 +1620,7 @@ func (tape Tape) Entries() uint { return tape.entries }
 // Scalar reports the scalar type the elements hold.
 func (tape Tape) Scalar() Scalar { return tape.scalar }
 
-// lower lends the tape as the batch view a verb reads, with the offsets as wide as it holds them.
+// lower passes the tape as the batch view a verb reads, with the offsets as wide as it holds them.
 func (tape Tape) lower(call *call) C.usearch_tape_view_t {
 	view := C.usearch_tape_view_t{data: call.pin(tape.pointer), layout: tape.layout, scalar: C.usearch_scalar_t(tape.scalar)}
 	*(*unsafe.Pointer)(unsafe.Pointer(&view.offsets)) = call.pin(tape.offsets)
@@ -1658,7 +1651,7 @@ func (tape TapeView) span(entry uint) (uint, uint) {
 	return uint(offsets[entry]), uint(offsets[entry+1])
 }
 
-// TapeEntry borrows one entry's scalars from the arena - a sequence's bytes, or a shape's points
+// TapeEntry views one entry's scalars from the arena - a sequence's bytes, or a shape's points
 // with x, y and z interleaved - refused with StatusInvalidArgument when Value is not the scalar
 // type they were written as; entry must be below Written.
 func TapeEntry[Value Element](tape TapeView, entry uint) ([]Value, error) {
@@ -1790,7 +1783,7 @@ type RefineReport struct {
 	Reachability Reachability
 }
 
-// stats lends optional telemetry as the pointer the C interface fills.
+// stats passes optional telemetry as the pointer the C interface fills.
 func (call *call) stats(stats *TraversalStats) *C.usearch_traversal_stats_t {
 	if stats == nil {
 		return nil
@@ -1811,7 +1804,7 @@ type livePlan[Handle comparable] struct {
 	handle Handle
 }
 
-// lower lends the plan's handle and phase to a call, both nil for no plan.
+// lower passes the plan's handle and phase to a call, both nil for no plan.
 func (plan *livePlan[Handle]) lower(call *call) (*Handle, *C.usearch_phase_progress_t) {
 	if plan == nil {
 		return nil, nil

@@ -15,6 +15,7 @@
 //! Date: September 7, 2026
 
 const std = @import("std");
+const build_options = @import("build_options");
 
 const types = @import("types.zig");
 const Arena = types.Arena;
@@ -51,7 +52,7 @@ const usearch_vram_options_t = types.abi.vram_options_t;
 /// Mirrors `usearch_value_lookup_t`.
 const ValueLookupFunction = *const fn (?*anyopaque, [*]const Key, usize, Scalar, usize, [*]?*const anyopaque) callconv(.c) void;
 
-/// Where `attend` reads value rows, as the C interface carries it: a `usearch_value_lookup_t` and
+/// Where `attend` reads value rows, as the C interface holds it: a `usearch_value_lookup_t` and
 /// the state forwarded into it. Build one with `ValueLookup.of`.
 pub const ValueLookup = struct {
     callback: ?ValueLookupFunction = null,
@@ -152,7 +153,7 @@ pub const DenseOptions = struct {
 /// nothing a reader must choose for itself. Mirrors `usearch_dense_metadata_t`.
 ///
 /// `values_per_key` is absent because it bounds a live handle's mutable state rather than anything
-/// the serialized form carries, and the placement is absent because a checkpoint records where it
+/// the serialized form holds, and the placement is absent because a checkpoint records where it
 /// was written and never where a reader must keep it. Both stay the caller's to set when loading.
 pub const DenseMetadata = extern struct {
     /// The metric kind the checkpoint scores with.
@@ -525,7 +526,8 @@ pub const DenseAttendConfig = struct {
     /// The query heads sharing the index's key-value head, and with it one walk per token: row
     /// `t · head_count + h` is head `h` of token `t`. It must divide the rows; zero means one.
     head_count: usize = 0,
-    /// The softmax state, one per query row, lent rather than written in the arena; null skips it.
+    /// The softmax state, one per query row, passed rather than written in the arena; null skips
+    /// it.
     carry: ?[]DenseSoftmaxState = null,
     /// The breadth of the candidates; zero derives. Wider candidates walk further, folding more of the tail.
     expansion_factor: usize = 0,
@@ -821,11 +823,13 @@ const usearch_dense_sample_t = extern struct {
 
 const usearch_dense_cursor_init_t = extern struct {
     index: ?*anyopaque,
+    executor: ?*anyopaque = null,
     outcome: *Outcome,
     starts_count: usize,
     starts: ?[*]const Key,
     cursor: *?*anyopaque,
 };
+
 
 const usearch_dense_cursor_next_t = extern struct {
     index: ?*anyopaque,
@@ -1394,7 +1398,7 @@ pub const DenseIndex = extern struct {
     /// every pair the traversal scored instead of only the nearest, as a ragged output written in
     /// `arena` with Apache Arrow offsets.
     ///
-    /// Pairs arrive in traversal order rather than sorted, and carry no duplicates. Cost is
+    /// Pairs arrive in traversal order rather than sorted, and hold no duplicates. Cost is
     /// roughly `rows × expansion × connectivity × dimensions`, sublinear in the indexed entries.
     /// Runs on the inner-product kind only, refusing others with `Error.ConfigMismatch`.
     /// Calls `usearch_dense_multiply`.
@@ -1419,7 +1423,7 @@ pub const DenseIndex = extern struct {
     /// Late-interaction scoring of multi-row queries against multi-vector documents: every query
     /// row takes its best match within a key, and those maxima sum to that key's score.
     ///
-    /// `queries` carries the queries laid end to end, `rows_per_query` rows apiece and uniform, so
+    /// `queries` holds the queries laid end to end, `rows_per_query` rows apiece and uniform, so
     /// ColBERT's padding applies as is, and each query's keys land in `arena` largest first, up to
     /// `wanted` of them, or every key it scored when `wanted` is zero. Approximate downward only,
     /// and runs on the inner-product kind only. Calls `usearch_dense_maxsim`.
@@ -1478,7 +1482,7 @@ fn Receiver(comptime completion: Completion, comptime Into: type) type {
         /// The result of a blocking call, final on return; nothing for a submitted one.
         fn end(self: Self, held: anytype) Answer(@TypeOf(held.result)) {
             if (completion == .deferred) return;
-            if (self.diagnostics) |lent| lent.* = held.outcome;
+            if (self.diagnostics) |passed| passed.* = held.outcome;
             try held.outcome.check();
             return held.result;
         }
@@ -1495,9 +1499,9 @@ fn Receiver(comptime completion: Completion, comptime Into: type) type {
         pub const contains = if (completion == .blocking) containsBlocking else {};
 
         fn diagnosedBlocking(self: Self, outcome: *Outcome) Self {
-            var lending = self;
-            lending.diagnostics = outcome;
-            return lending;
+            var passing = self;
+            passing.diagnostics = outcome;
+            return passing;
         }
 
         fn containsBlocking(self: Self, key: Key) Error!bool {
@@ -1887,7 +1891,7 @@ fn Receiver(comptime completion: Completion, comptime Into: type) type {
     };
 }
 
-/// The placements a reshard lends until its call is final.
+/// The placements a reshard passes until its call is final.
 const Placements = struct {
     ram: usearch_ram_options_t = .{},
     vram: usearch_vram_options_t = .{},
@@ -1896,7 +1900,7 @@ const Placements = struct {
 
 /// A submitted call, held in storage the caller places - on the stack, in a struct, or from an
 /// allocator - which owns its outcome and result slot until the call is final, while the arena,
-/// the handles and the slices it was handed stay borrowed until then.
+/// the handles and the slices it was handed stay allocated and unchanged until then.
 ///
 /// `status` polls without blocking, `wait` blocks until the call is final and answers its result or
 /// error, and `deinit` waits the same way. A submitted `Deferred` stays put until `deinit`, and has
@@ -1921,7 +1925,7 @@ pub fn Deferred(comptime Result: type) type {
         }
 
         /// Blocks until the call is final, then answers its result, the same views a blocking call
-        /// answers over the arena it borrowed. Calls `usearch_outcome_wait`.
+        /// answers over the arena it viewed. Calls `usearch_outcome_wait`.
         pub fn wait(self: *Self) Error!Result {
             _ = usearch_outcome_wait(&self.outcome);
             try self.outcome.check();
@@ -2111,7 +2115,7 @@ pub const DenseSearchStream = struct {
     /// Opens a stream for one query row, refusing a run of several with `Error.ShapeMismatch`.
     /// Calls `usearch_dense_search_stream_init`.
     pub fn init(index: DenseIndex, query: RowsView, config: DenseSearchStreamInitConfig) Error!DenseSearchStream {
-        // The stream's query carries no count, so only the binding sees a run of several.
+        // The stream's query holds no count, so only the binding sees a run of several.
         if (query.rows != 1) return refuseInto(config.diagnostics, .shape_mismatch, "A stream takes exactly one query row");
         var handle: ?*anyopaque = null;
         var outcome: Outcome = .{};
@@ -2270,7 +2274,7 @@ test "a batch crosses the ABI and comes back as views over the arena it lands in
     try std.testing.expectEqual(frozen, description.metadata);
     try std.testing.expectEqual(@as(usize, 3), description.size);
 
-    // A lent outcome carries the message an error cannot, the binding's own refusals included.
+    // A passed outcome holds the message an error cannot, the binding's own refusals included.
     var outcome: Outcome = .{};
     try std.testing.expectError(Error.ShapeMismatch, index.diagnosed(&outcome).insert(keys[0..2], try .of(f32, &slab, dimensions), .{}));
     try std.testing.expectEqual(types.Status.shape_mismatch, outcome.status);
@@ -2328,11 +2332,11 @@ test "a batch crosses the ABI and comes back as views over the arena it lands in
     );
     try std.testing.expectEqual(types.Status.shape_mismatch, outcome.status);
 
-    // A constructor's config lends one the same way.
+    // A constructor's config passes one the same way.
     try std.testing.expectError(Error.Io, DenseIndex.loadRam("absent.safegraphs", .{ .diagnostics = &outcome }));
     try std.testing.expectEqual(types.Status.io, outcome.status);
 
-    // A stream yields one query's matches nearest first, and refuses a run carrying more; a
+    // A stream yields one query's matches nearest first, and refuses a run holding more; a
     // residency that streams no matches yet refuses the stream itself.
     try std.testing.expectError(Error.ShapeMismatch, DenseSearchStream.init(index, try .of(f32, &slab, dimensions), .{}));
     if (DenseSearchStream.init(index, try .ofRow(f32, slab[0..dimensions]), .{})) |opened| {
@@ -2481,7 +2485,51 @@ test "a deferred call is the same verb, final once waited on" {
     try std.testing.expectEqualSlices(f32, &.{ 0, 1 }, vectors.row(0));
     try std.testing.expectEqual(vectors, try getting.wait());
 
-    // The arena is borrowed as a blocking call borrows it, so a second call while one holds it is
+    // Storage is the caller's, so a batch of calls is an array and a reused slot is resubmitted;
+    // an executor runs one call at a time, so each call running at once takes its own.
+    var counting: [2]Deferred(usize) = undefined;
+    var executors: [2]Executor = .{ try Executor.forRam(.{}), try Executor.forRam(.{}) };
+    defer for (&executors) |*own| own.deinit();
+    for (&counting, &executors, keys) |*slot, own, key| try index.deferred(own, slot).count(key);
+    for (&counting) |*slot| try std.testing.expectEqual(@as(usize, 1), try slot.wait());
+    for (&counting) |*slot| slot.deinit();
+    try index.deferred(executor, &counting[0]).count(.fromInteger(99));
+    defer counting[0].deinit();
+    try std.testing.expectEqual(@as(usize, 0), try counting[0].wait());
+
+    // A failure the engine reports arrives through the same wait, as often as it is asked.
+    const narrow = [_]f32{1};
+    var refused: Deferred(Matches) = undefined;
+    try index.deferred(executor, &refused).search(try .ofRow(f32, &narrow), 1, &arena, .{});
+    defer refused.deinit();
+    try std.testing.expectError(Error.ShapeMismatch, refused.wait());
+    try std.testing.expectError(Error.ShapeMismatch, refused.wait());
+
+    // Its message is the one the same call reports blocking.
+    var outcome: Outcome = .{};
+    try std.testing.expectError(Error.ShapeMismatch, index.diagnosed(&outcome).search(try .ofRow(f32, &narrow), 1, &arena, .{}));
+    try std.testing.expectEqualStrings(outcome.text(), refused.message());
+
+    // A shape only the binding sees is refused before anything is submitted.
+    var mismatched: Deferred(void) = undefined;
+    try std.testing.expectError(Error.ShapeMismatch, index.deferred(executor, &mismatched).insert(keys[0..1], try .of(f32, &slab, dimensions), .{}));
+}
+
+test "a running call holds its arena, so another call naming it is contended" {
+    if (build_options.stub) return error.SkipZigTest;
+    const dimensions = 2;
+    var executor = try Executor.forRam(.{});
+    defer executor.deinit();
+    var index = try DenseIndex.initRam(.{ .dimensions = dimensions, .metric = .euclidean }, &.{});
+    defer index.deinit();
+    try index.reserve(4);
+    const slab = [_]f32{ 1, 0, 0, 1 };
+    const keys = [_]Key{ .fromInteger(1), .fromInteger(2) };
+    try index.insert(&keys, try .of(f32, &slab, dimensions), .{});
+    var arena: Arena = try .init(executor);
+    defer arena.deinit();
+
+    // The arena is viewed as a blocking call views it, so a second call while one holds it is
     // refused as contended and leaves the holder's views alone.
     // The search waits at its last report until released, so the test meets it holding the arena.
     const Gate = struct {
@@ -2518,35 +2566,6 @@ test "a deferred call is the same verb, final once waited on" {
     gate.released.store(true, .release);
     const held = try holding.wait();
     try std.testing.expectEqualSlices(Key, keys[0..1], held.query(0).keys);
-
-    // Storage is the caller's, so a batch of calls is an array and a reused slot is resubmitted;
-    // an executor runs one call at a time, so each call running at once takes its own.
-    var counting: [2]Deferred(usize) = undefined;
-    var executors: [2]Executor = .{ try Executor.forRam(.{}), try Executor.forRam(.{}) };
-    defer for (&executors) |*own| own.deinit();
-    for (&counting, &executors, keys) |*slot, own, key| try index.deferred(own, slot).count(key);
-    for (&counting) |*slot| try std.testing.expectEqual(@as(usize, 1), try slot.wait());
-    for (&counting) |*slot| slot.deinit();
-    try index.deferred(executor, &counting[0]).count(.fromInteger(99));
-    defer counting[0].deinit();
-    try std.testing.expectEqual(@as(usize, 0), try counting[0].wait());
-
-    // A failure the engine reports arrives through the same wait, as often as it is asked.
-    const narrow = [_]f32{1};
-    var refused: Deferred(Matches) = undefined;
-    try index.deferred(executor, &refused).search(try .ofRow(f32, &narrow), 1, &arena, .{});
-    defer refused.deinit();
-    try std.testing.expectError(Error.ShapeMismatch, refused.wait());
-    try std.testing.expectError(Error.ShapeMismatch, refused.wait());
-
-    // Its message is the one the same call reports blocking.
-    var outcome: Outcome = .{};
-    try std.testing.expectError(Error.ShapeMismatch, index.diagnosed(&outcome).search(try .ofRow(f32, &narrow), 1, &arena, .{}));
-    try std.testing.expectEqualStrings(outcome.text(), refused.message());
-
-    // A shape only the binding sees is refused before anything is submitted.
-    var mismatched: Deferred(void) = undefined;
-    try std.testing.expectError(Error.ShapeMismatch, index.deferred(executor, &mismatched).insert(keys[0..1], try .of(f32, &slab, dimensions), .{}));
 }
 
 test "a product lands ragged, and a softmax weighs every key the walk scores" {

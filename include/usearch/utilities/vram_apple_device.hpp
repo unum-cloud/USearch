@@ -444,14 +444,32 @@ struct metal_stream_t {
         : device(device), context_(&context), handle_(handle) {}
     metal_stream_t(metal_stream_t&& other) noexcept
         : device(other.device), context_(other.context_), handle_(std::exchange(other.handle_, nullptr)) {}
+
+    /**
+     *  @brief Opens a command queue on @p device, whose context is @p context, owned from now on.
+     *
+     *  @par Statuses:
+     *  - @c device_k The device refused the queue.
+     */
+    static expected<metal_stream_t> open(metal_context_t& context, int device) noexcept {
+        void* const queue = metal_send(*context.api, context.device, "newCommandQueue");
+        if (!queue) return {{}, {status_code_t::device_k, "Device refused a command queue"}};
+        return {metal_stream_t {context, device, queue}, status_code_t::success_k};
+    }
+
+    /** The default queue of @p device, which its context made when the process listed the device
+     *  and keeps, for a call without an executor; it owns nothing. */
+    static metal_stream_t legacy(metal_context_t& context, int device) noexcept {
+        return metal_stream_t {context, device};
+    }
     metal_stream_t(metal_stream_t const&) = delete;
     metal_stream_t& operator=(metal_stream_t const&) = delete;
     ~metal_stream_t() noexcept {
         if (handle_) metal_send<void>(*context_->api, handle_, "release");
     }
 
-    /** Another owner of the same queue, retained, so a context holds an executor's stream without
-     *  borrowing it. */
+    /** Another owner of the same queue, retained, so a context keeps an executor's queue alive on
+     *  its own. */
     metal_stream_t share() const noexcept {
         if (!context_) return {};
         return metal_stream_t {*context_, device, handle_ ? metal_send(*context_->api, handle_, "retain") : nullptr};
@@ -669,7 +687,7 @@ struct metal_executor_t {
      *  - @c contended_k Another call holds the executor.
      */
     expected<claim_t> claim() noexcept {
-        if (!held_.lock_if_free()) return {{}, status_code_t::contended_k};
+        if (!held_.lock_if_free()) return {{}, {status_code_t::contended_k, "Another call holds the executor"}};
         return {claim_t {held_, std::adopt_lock}, status_code_t::success_k};
     }
 
@@ -701,11 +719,11 @@ struct metal_executor_t {
     std::size_t cache_bytes_per_core() const noexcept { return cache_bytes_per_core_; }
 
     /**
-     *  @brief Opens one stream per entry of @p devices among @p contexts, whose scratch never grows
-     *      past @p scratch_limit bytes, zero for no ceiling.
+     *  @brief Opens one command queue per entry of @p devices among @p contexts, whose scratch
+     *      never grows past @p scratch_limit bytes, zero for no ceiling.
      *
      *  @par Statuses:
-     *  - @c device_k A device is not listed.
+     *  - @c device_k A device is not listed, or refused its queue.
      *  - @c config_mismatch_k The @p devices are empty.
      */
     static expected<metal_executor_t> spawn(metal_contexts_t& contexts, std::span<int const> devices,
@@ -714,14 +732,34 @@ struct metal_executor_t {
         if (failed(streams.reserve_exactly(devices.size()))) return {{}, status_code_t::out_of_memory_k};
         for (int const device : devices) {
             metal_context_t* const context = contexts.context(device);
-            if (!context) return {{}, status_code_t::device_k};
-            void* const queue = metal_send(*context->api, context->device, "newCommandQueue");
-            if (!queue) return {{}, status_code_t::device_k};
-            streams.push_back_reserved(stream_t {metal_stream_t {*context, device, queue}});
+            if (!context) return {{}, {status_code_t::device_k, "Device is not listed"}};
+            auto [opened, opened_status] = metal_stream_t::open(*context, device);
+            if (failed(opened_status)) return {{}, opened_status};
+            streams.push_back_reserved(stream_t {std::move(opened)});
         }
         auto [executor, status] = acquire(std::move(streams));
         executor.scratch_limit_ = scratch_limit;
         return {std::move(executor), status};
+    }
+
+    /**
+     *  @brief Submits a call without an executor to the default queue of every entry of @p devices,
+     *      opening no queue, so the call is final once its work drains.
+     *
+     *  @par Statuses:
+     *  - @c device_k A device is not listed.
+     *  - @c config_mismatch_k The @p devices are empty.
+     */
+    static expected<metal_executor_t> on_default_streams(metal_contexts_t& contexts,
+                                                         std::span<int const> devices) noexcept {
+        growing_buffer<stream_t> streams {global_allocator};
+        if (failed(streams.reserve_exactly(devices.size()))) return {{}, status_code_t::out_of_memory_k};
+        for (int const device : devices) {
+            metal_context_t* const context = contexts.context(device);
+            if (!context) return {{}, {status_code_t::device_k, "Device is not listed"}};
+            streams.push_back_reserved(stream_t {metal_stream_t::legacy(*context, device)});
+        }
+        return acquire(std::move(streams));
     }
 
     /**

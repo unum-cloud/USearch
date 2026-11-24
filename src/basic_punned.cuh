@@ -306,7 +306,8 @@ struct basic_verbs {
     // Exploration
 
     /** Opens a walk over every entry as stored, or breadth-first from @p starts. */
-    util::expected<void*> (*cursor_init)(void* variant, std::span<usearch_key_t const> starts) noexcept;
+    util::expected<void*> (*cursor_init)(void* variant, std::span<usearch_key_t const> starts,
+                                         util::forkunion_allocator_t allocator) noexcept;
 
     /** Pulls up to @p wanted next keys into @p memory, gathering their links into @p links where
      *  named. */
@@ -354,12 +355,12 @@ struct punned_basic_index {
     void* variant;
 };
 
-/** The executor a null handle runs a device variant's work on: a stream of its own on every device
- *  its shards sit on, never a legacy default stream. */
+/** The executor a null handle runs a device variant's work on: the null legacy stream of every
+ *  device its shards sit on, which the call opens nothing for. */
 template <typename traits_type_, vendored_residency_t residency_>
     requires is_gpu_executor<typename punned_basic_index<traits_type_, residency_>::executor_t>
-usearch_executor_t call_executor_for(punned_basic_index<traits_type_, residency_> const& punned,
-                                     usearch_executor_handle_t& call_executor, usearch_outcome_t* outcome) noexcept {
+usearch_executor_t make_call_executor(punned_basic_index<traits_type_, residency_> const& punned,
+                                      usearch_executor_handle_t& call_executor, usearch_outcome_t* outcome) noexcept {
     std::array<arena_residency_t, util::gpu_devices_capacity_k> residencies;
     std::size_t devices_count = punned.verbs.devices(punned.variant, residencies);
     if (!devices_count) residencies[devices_count++] = punned.verbs.residency(punned.variant);
@@ -367,8 +368,8 @@ usearch_executor_t call_executor_for(punned_basic_index<traits_type_, residency_
     for (std::size_t device = 0; device != devices_count; ++device)
         devices[device] = static_cast<int>(residencies[device].device);
     using executor_t = typename punned_basic_index<traits_type_, residency_>::executor_t;
-    auto [built, status] = executor_t::spawn(driver_of(gpu_drivers(), std::type_identity<executor_t> {}),
-                                             std::span<int const> {devices.data(), devices_count});
+    auto [built, status] = executor_t::on_default_streams(driver_of(gpu_drivers(), std::type_identity<executor_t> {}),
+                                                          std::span<int const> {devices.data(), devices_count});
     if (failed(status)) return propagate_error(status, outcome), nullptr;
     call_executor.executor.emplace<util::gpu_executor_t>(std::in_place_type<executor_t>, std::move(built));
     return &call_executor;
@@ -801,7 +802,7 @@ inline bool accepts_terrain(usearch_geospatial_terrain_t const& terrain, usearch
         return propagate_error(usearch_status_unsupported_k, outcome, "No residency reads a terrain dataset yet");
     if (terrain.heights && terrain.callback)
         return propagate_error(usearch_status_invalid_argument_k, outcome,
-                               "A terrain is either borrowed or filled, never both");
+                               "A terrain is either read in place or filled, never both");
     return true;
 }
 

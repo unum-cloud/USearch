@@ -6,7 +6,7 @@
  *      @c sorted_buffer, and @c growing_hash_set - and the @c ram_sorts.hpp @c radix_group.
  *
  *  The containers' four-wide and larger-N batch overloads are covered, plus @c insert_many and @c pop_many
- *  on the heap.
+ *  on the heap. Eight threads race the first-failure latch of @c types.hpp.
  *
  *  Mirrors the structure of @c test/dense_metric.hpp:
  *
@@ -27,6 +27,8 @@
 #include <vector>
 
 #include <fmt/format.h>
+
+#include <forkunion.hpp> // `fu::flat_pool_t`, `fu::standard_atomic_ref` - the threads racing the latch
 
 #include "usearch/utilities/ram_buffers.hpp"
 #include "usearch/utilities/ram_sorts.hpp"
@@ -511,6 +513,32 @@ void test_expand_entries_forward() noexcept {
     expect_true(storage == unchanged);
 }
 
+/** Threads fail at once with distinct codes and notes, and the latch keeps one thread's pair whole,
+ *  never one thread's code beside another's note. */
+void test_keep_first_failure_pairs() noexcept {
+    constexpr std::size_t threads_k = 8;
+    std::array<util::status_t, threads_k> const failures {{
+        {util::status_code_t::out_of_memory_k, "First thread failed"},
+        {util::status_code_t::shape_mismatch_k, "Second thread failed"},
+        {util::status_code_t::io_k, "Third thread failed"},
+        {util::status_code_t::device_k, "Fourth thread failed"},
+        {util::status_code_t::malformed_k, "Fifth thread failed"},
+        {util::status_code_t::overflow_k, "Sixth thread failed"},
+        {util::status_code_t::contended_k, "Seventh thread failed"},
+        {util::status_code_t::invalid_argument_k, "Eighth thread failed"},
+    }};
+    fu::flat_pool_t pool;
+    if (fu::failed(pool.spawn(threads_k))) return void(expect_true(false));
+    for (std::size_t repetition = 0; repetition != 256; ++repetition) {
+        util::status_t first;
+        pool.for_threads([&](std::size_t thread) noexcept {
+            if (thread < threads_k) util::keep_first_failure<fu::standard_atomic_ref>(first, failures[thread]);
+        });
+        auto const winner = std::ranges::find(failures, first.code, &util::status_t::code);
+        expect_true(winner != failures.end() && winner->note == first.note);
+    }
+}
+
 void run_ram_buffers_cases() {
     util::u64_t const seed = test_run.settings.seed;
     run_test_case("test_sorted_buffer_single_element", test_sorted_buffer_single_element);
@@ -571,6 +599,7 @@ void run_ram_buffers_cases() {
     run_test_case("test_max_heap_pop_many<8>", test_max_heap_pop_many<8>);
     run_test_case("test_chunked_column", test_chunked_column);
     run_test_case("test_expand_entries_forward", test_expand_entries_forward);
+    run_test_case("test_keep_first_failure_pairs", test_keep_first_failure_pairs);
 }
 
 } // namespace unum::usearch::test::utilities

@@ -32,10 +32,10 @@ use numkong::MatrixView;
 
 use crate::types::{
     Accepts, Arena, ArrowDeviceArray, ArrowExport, ArrowSchema, Batch, Blocking, CPUClass, Calling, Completion,
-    Deferring, Element, Error, Executor, GPUClass, Handles, Key, Lending, Matches, On, PhaseProgress, Predicate,
-    Progress, QueryMatches, Residency, Result, RowsView, Scalar, Status, Traversal, arena_slice, arrow_checked, check,
-    fail, lower_predicate, lower_progress, nvme_options, output_slot, path_view, path_views, ram_options, read_named,
-    spelling, usearch_arena_t, usearch_bytes_view_t, usearch_completion_blocking_k, usearch_completion_t,
+    Deferring, Element, Error, Executor, GPUClass, Handles, Key, Matches, On, PhaseProgress, Predicate, Progress,
+    QueryMatches, Residency, Result, RowsView, Scalar, Status, Submitting, Traversal, arena_slice, arrow_checked,
+    check, fail, lower_predicate, lower_progress, nvme_options, output_slot, path_view, path_views, ram_options,
+    read_named, spelling, usearch_arena_t, usearch_bytes_view_t, usearch_completion_blocking_k, usearch_completion_t,
     usearch_cpu_class_name, usearch_cpu_class_t, usearch_executor_t, usearch_gpu_class_name, usearch_gpu_class_t,
     usearch_key_t, usearch_keys_tape_view_t, usearch_keys_view_t, usearch_load_path_name, usearch_load_path_t,
     usearch_matches_tape_view_t, usearch_matches_tape_view_to_arrow, usearch_matches_view_t, usearch_nvme_options_t,
@@ -332,6 +332,7 @@ pub struct usearch_dense_sample_t {
 #[repr(C)]
 pub struct usearch_dense_cursor_init_t {
     pub index: usearch_dense_index_t,
+    pub executor: usearch_executor_t,
     pub outcome: *mut usearch_outcome_t,
     pub starts_count: usize,
     pub starts: *const usearch_key_t,
@@ -847,8 +848,8 @@ pub struct DenseSoftmaxState {
     pub partition: f32,
 }
 
-/// An attention's value lookup, lent as the callback and state the attention takes: one key at a
-/// time, it resolves the value row, stored in the index's own quantization and borrowed from
+/// An attention's value lookup, passed as the callback and state the attention takes: one key at a
+/// time, it resolves the value row, stored in the index's own quantization and pointing into
 /// storage outliving the call, and `None` refuses the call.
 ///
 /// The handler runs on the executor's threads together, so it owes `Sync`; a panic inside it
@@ -860,7 +861,7 @@ pub struct ValueLookup<'handler, Value> {
     handler: PhantomData<&'handler [Value]>,
 }
 
-// Safety: it points at a `Sync` handler it borrows shared.
+// Safety: it points at a `Sync` handler it references shared.
 unsafe impl<Value> Send for ValueLookup<'_, Value> {}
 
 impl<Value> Clone for ValueLookup<'_, Value> {
@@ -872,7 +873,7 @@ impl<Value> Clone for ValueLookup<'_, Value> {
 impl<Value> Copy for ValueLookup<'_, Value> {}
 
 impl<'handler, Value: Element> ValueLookup<'handler, Value> {
-    /// Lends `handler`, asked one key at a time.
+    /// Passes `handler`, asked one key at a time.
     pub fn each<Handler: Fn(Key) -> Option<&'handler [Value]> + Sync>(handler: &'handler Handler) -> Self {
         ValueLookup {
             callback: value_lookup_trampoline::<Value, Handler>,
@@ -1067,7 +1068,7 @@ impl<'config, Location: AsRef<Path> + ?Sized> From<&'config Location> for DenseV
 
 /// The rows of an insertion and the knobs of its walk; see [`DenseVerbs::insert`].
 pub struct DenseInsertConfig<'config, Rows> {
-    /// One row per key, borrowed or owned.
+    /// One row per key, referenced or owned.
     pub vectors: Rows,
     /// The breadth of the candidates the walk explores; zero derives it from the geometry.
     pub expansion_factor: usize,
@@ -1088,8 +1089,8 @@ impl<Rows: RowsView> From<Rows> for DenseInsertConfig<'_, Rows> {
 
 /// The knobs of [`DenseVerbs::refine`].
 ///
-/// A blocking call borrows its plan; a deferred one owns it, and [`Deferred::wait_with_inputs`]
-/// hands it back.
+/// A blocking call takes its plan by reference; a deferred one owns it, and
+/// [`Deferred::wait_with_inputs`] hands it back.
 pub struct DenseRefineConfig<'config, Plan = &'config mut DenseRefinePlan> {
     /// The breadth of any walk beside the round; zero derives it from the geometry.
     pub expansion_factor: usize,
@@ -1288,8 +1289,8 @@ impl From<usize> for DenseAttendConfig<'_> {
 /// The handles a reshard moves entries between, the placement a recut in place packs toward, and
 /// the knobs of the closing rounds; see [`DenseVerbs::reshard`].
 ///
-/// A blocking call borrows its plan; a deferred one owns it, and [`Deferred::wait_with_inputs`]
-/// hands it back.
+/// A blocking call takes its plan by reference; a deferred one owns it, and
+/// [`Deferred::wait_with_inputs`] hands it back.
 pub struct DenseReshardConfig<'config, Plan = &'config mut DenseReshardPlan> {
     /// The handles whose entries move, each named once.
     pub sources: &'config [&'config DenseIndex],
@@ -1398,7 +1399,7 @@ impl<Location: AsRef<Path>> From<Location> for DenseSaveConfig<'_, Location> {
 /// The arena a monolith is written into and the handler counting its bytes; see
 /// [`DenseVerbs::save_buffer`].
 pub struct DenseSaveBufferConfig<'config, 'arena, 'executor> {
-    /// The arena the monolith lands in, which the result borrows.
+    /// The arena the monolith lands in, which the result points into.
     pub arena: &'arena mut Arena<'executor>,
     /// Reports the bytes written and stops wherever it says to; a stopped save leaves no monolith.
     pub progress: Option<Progress<'config>>,
@@ -1442,7 +1443,7 @@ impl Accepts<DenseSaveBufferConfig<'static, '_, '_>> for Deferring {}
 
 // region: Results
 
-/// The rows [`DenseVerbs::get`] or [`DenseVerbs::attend`] exported into the arena it borrows.
+/// The rows [`DenseVerbs::get`] or [`DenseVerbs::attend`] exported into the arena it points into.
 ///
 /// Rust-only.
 pub struct DenseVectors<'arena, Value> {
@@ -1469,7 +1470,7 @@ impl<'arena, Value: Element> DenseVectors<'arena, Value> {
 
     /// Exports the rows as one Arrow `FixedSizeList` column of their scalar in place.
     ///
-    /// The export borrows the arena, so no verb reaches it while the export lives:
+    /// The export points into the arena, so no verb reaches it while the export lives:
     ///
     /// ```compile_fail
     /// use usearch::*;
@@ -1495,7 +1496,7 @@ impl<'arena, Value: Element> DenseVectors<'arena, Value> {
 }
 
 /// The ragged run [`DenseVerbs::multiply`] or [`DenseVerbs::maxsim`] exported into the arena it
-/// borrows: per left row, every pair its walk scored, in traversal order, or per query, its kept
+/// views: per left row, every pair its walk scored, in traversal order, or per query, its kept
 /// keys, largest score first.
 pub struct DenseProducts<'arena> {
     arena: &'arena Arena<'arena>,
@@ -1541,7 +1542,7 @@ impl<'arena> DenseProducts<'arena> {
     /// Exports every left row's pairs, or every query's keys, as one Arrow `LargeList` of
     /// `Struct<key, distance>` in place.
     ///
-    /// The export borrows the arena, so no verb reaches it while the export lives:
+    /// The export points into the arena, so no verb reaches it while the export lives:
     ///
     /// ```compile_fail
     /// use usearch::*;
@@ -1568,7 +1569,7 @@ impl<'arena> DenseProducts<'arena> {
     }
 }
 
-/// The bytes [`DenseVerbs::save_buffer`] exported into the arena it borrows.
+/// The bytes [`DenseVerbs::save_buffer`] exported into the arena it points into.
 ///
 /// Rust-only.
 pub struct Monolith<'arena> {
@@ -1589,7 +1590,7 @@ impl<'arena> Monolith<'arena> {
     }
 }
 
-/// The draws [`DenseVerbs::sample`] exported into the arena it borrows.
+/// The draws [`DenseVerbs::sample`] exported into the arena it points into.
 ///
 /// Rust-only.
 pub struct Sample<'arena> {
@@ -1644,7 +1645,7 @@ impl<'arena> Sample<'arena> {
     }
 }
 
-/// One cursor pull exported into the arena it borrows: the keys, and beside them the keys each
+/// One cursor pull exported into the arena it points into: the keys, and beside them the keys each
 /// entry links to when the pull asked; the vectors themselves come from [`DenseVerbs::get`].
 ///
 /// Rust-only.
@@ -1678,7 +1679,7 @@ impl<'arena> DenseBatch<'arena> {
     }
 }
 
-// Safety: every view points into the arena borrowed beside it, which is `Sync`.
+// Safety: every view points into the arena referenced beside it, which is `Sync`.
 unsafe impl<Value: Send> Send for DenseVectors<'_, Value> {}
 unsafe impl Send for DenseProducts<'_> {}
 unsafe impl Send for Monolith<'_> {}
@@ -1751,7 +1752,7 @@ impl DenseIndex {
     /// The receiver whose verbs submit their calls to `executor`, answering a
     /// [`Deferred`](crate::Deferred) from the same verbs given owned arguments.
     ///
-    /// The library reads a deferred call's inputs after the verb returns, so lending a borrowed
+    /// The library reads a deferred call's inputs after the verb returns, so passing a referenced
     /// query does not compile:
     ///
     /// ```compile_fail,E0277
@@ -1765,7 +1766,7 @@ impl DenseIndex {
     /// # Ok::<(), usearch::Error>(())
     /// ```
     ///
-    /// The arena is borrowed as a blocking call borrows it, and so is the waited result:
+    /// The arena is referenced as a blocking call references it, and so is the waited result:
     ///
     /// ```no_run
     /// use usearch::*;
@@ -2030,12 +2031,12 @@ type Deferrable<'index, Receiver, Verb> =
 /// and the [`On`] that [`DenseIndex::on`] or [`DenseIndex::deferred`] makes runs on an executor.
 ///
 /// A blocking receiver answers what the call produced; a deferring one answers a
-/// [`Deferred`](crate::Deferred) that borrows the index and owns the inputs, and submits the call
+/// [`Deferred`](crate::Deferred) that refers to the index and owns the inputs, and submits the call
 /// once first polled or waited on. Every configurable verb's config converts into its
 /// `Dense*Config`, so the bare value is the whole call and `..DenseSearchConfig::from(10)` reaches
-/// every knob. Every verb whose output scales with the call borrows an [`Arena`] last as
+/// every knob. Every verb whose output scales with the call takes an [`Arena`] last as
 /// `&mut Arena`, blocking or deferring alike, except `save_buffer`, whose config holds it, and its
-/// result borrows the arena in turn.
+/// result points into the arena in turn.
 ///
 /// Rust-only.
 pub trait DenseVerbs<'index>: Copy {
@@ -2079,7 +2080,7 @@ pub trait DenseVerbs<'index>: Copy {
     }
 
     /// Retrieves every vector stored under `key` into `arena` as `Value` rows, which the result
-    /// borrows; an absent key yields no rows.
+    /// points into; an absent key yields no rows.
     fn get<'arena, Value: Element>(
         self,
         key: Key,
@@ -2110,7 +2111,7 @@ pub trait DenseVerbs<'index>: Copy {
         let (index, executor) = self.handles();
         let config = config.into();
         let batch = config.vectors.batch()?;
-        // The keys view carries no count, so only this side can see the two disagree.
+        // The keys view holds no count, so only this side can see the two disagree.
         if batch.count != keys.as_ref().len() {
             return Err(fail(Status::ShapeMismatch, "the key count does not match the vector row count"));
         }
@@ -2396,7 +2397,7 @@ pub trait DenseVerbs<'index>: Copy {
         Self::Completion::answer(DenseSave { handles: Handles::of(index, executor), path, config })
     }
 
-    /// Saves the index as one monolith into the arena its config carries.
+    /// Saves the index as one monolith into the arena its config holds.
     fn save_buffer<'config, 'arena, 'executor>(
         self,
         config: impl Into<DenseSaveBufferConfig<'config, 'arena, 'executor>>,
@@ -2432,7 +2433,7 @@ impl<'index, Completion: crate::types::Completion> DenseVerbs<'index> for On<'in
     }
 }
 
-/// The handle lists and placements a reshard lends, laid out as the library reads them.
+/// The handle lists and placements a reshard passes, laid out as the library reads them.
 struct ReshardLists {
     sources: Vec<usearch_dense_index_t>,
     targets: Vec<usearch_dense_index_t>,
@@ -2443,12 +2444,12 @@ struct ReshardLists {
     nvme: Option<usearch_nvme_options_t>,
 }
 
-// Safety: the handles belong to borrowed `DenseIndex`es, which are `Sync`, and the options point
-// into the borrowed config and the paths beside them.
+// Safety: the handles belong to referenced `DenseIndex`es, which are `Sync`, and the options point
+// into the referenced config and the paths beside them.
 unsafe impl Send for ReshardLists {}
 
 /// # Safety
-/// `state` must address the `Handler` a [`ValueLookup`] lent to the call, and `keys` and `rows`
+/// `state` must address the `Handler` a [`ValueLookup`] passed to the call, and `keys` and `rows`
 /// must hold `count` entries each.
 unsafe extern "C" fn value_lookup_trampoline<
     'handler,
@@ -2668,7 +2669,7 @@ impl<'config, Plan: BorrowMut<DenseRefinePlan>> Calling for DenseRefine<'config,
     }
 }
 
-impl<'config, Plan: BorrowMut<DenseRefinePlan>> Lending for DenseRefine<'config, Plan> {
+impl<'config, Plan: BorrowMut<DenseRefinePlan>> Submitting for DenseRefine<'config, Plan> {
     type Inputs = DenseRefineConfig<'config, Plan>;
 
     fn finish_with_inputs(self, status: Result<()>) -> (Result<RefineReport>, Self::Inputs) {
@@ -2923,7 +2924,7 @@ impl<'arena, Queries: RowsView, Value> Calling for DenseAttend<'_, '_, 'arena, Q
     }
 }
 
-/// What [`DenseVerbs::reshard`] runs: its config, plan included, the lists it lends and the report
+/// What [`DenseVerbs::reshard`] runs: its config, plan included, the lists it passes and the report
 /// it fills.
 pub struct DenseReshard<'config, Plan> {
     handles: Handles,
@@ -2971,7 +2972,7 @@ impl<'config, Plan: BorrowMut<DenseReshardPlan>> Calling for DenseReshard<'confi
     }
 }
 
-impl<'config, Plan: BorrowMut<DenseReshardPlan>> Lending for DenseReshard<'config, Plan> {
+impl<'config, Plan: BorrowMut<DenseReshardPlan>> Submitting for DenseReshard<'config, Plan> {
     type Inputs = DenseReshardConfig<'config, Plan>;
 
     fn finish_with_inputs(self, status: Result<()>) -> (Result<RefineReport>, Self::Inputs) {
@@ -3139,12 +3140,13 @@ impl DenseIndex {
     /// Without `starts` the walk yields every entry as stored. With them it yields the start keys'
     /// own entries first, in order, then the entries those link to breadth-first, each entry once.
     pub fn cursor(&self, starts: &[Key]) -> Result<DenseCursor<'_>> {
-        let mut cursor = DenseCursor { handle: ptr::null_mut(), index: self.handle, marker: PhantomData };
+        let mut cursor = DenseCursor { handle: ptr::null_mut(), index: self.handle, owner: PhantomData };
         let mut outcome = usearch_outcome_t::default();
         unsafe {
             usearch_dense_cursor_init(&mut usearch_dense_cursor_init_t {
                 cursor: &mut cursor.handle,
                 index: self.handle,
+                executor: ptr::null_mut(),
                 outcome: &mut outcome,
                 starts_count: starts.len(),
                 starts: starts.as_ptr(),
@@ -3170,7 +3172,7 @@ impl DenseIndex {
             batch if batch.count == 1 => batch.rows,
             _ => return Err(fail(Status::ShapeMismatch, "a stream walks exactly one query row")),
         };
-        let mut stream = DenseSearchStream { handle: ptr::null_mut(), index: self.handle, marker: PhantomData };
+        let mut stream = DenseSearchStream { handle: ptr::null_mut(), index: self.handle, owner: PhantomData };
         let mut outcome = usearch_outcome_t::default();
         unsafe {
             usearch_dense_search_stream_init(&mut usearch_dense_search_stream_init_t {
@@ -3196,7 +3198,7 @@ impl DenseIndex {
 pub struct DenseCursor<'index> {
     handle: usearch_dense_cursor_t,
     index: usearch_dense_index_t,
-    marker: PhantomData<&'index DenseIndex>,
+    owner: PhantomData<&'index DenseIndex>,
 }
 
 impl<'index> DenseCursor<'index> {
@@ -3284,7 +3286,7 @@ impl Drop for DenseCursor<'_> {
 pub struct DenseSearchStream<'index> {
     handle: usearch_dense_search_stream_t,
     index: usearch_dense_index_t,
-    marker: PhantomData<&'index DenseIndex>,
+    owner: PhantomData<&'index DenseIndex>,
 }
 
 impl<'index> DenseSearchStream<'index> {
@@ -3630,7 +3632,7 @@ mod tests {
         ));
     }
 
-    /// Every view carries the width the caller laid out, so the call refuses a narrow row before
+    /// Every view holds the width the caller laid out, so the call refuses a narrow row before
     /// reading past it.
     #[test]
     fn rejects_wrong_dimension_matrices() {
@@ -3662,7 +3664,7 @@ mod tests {
         let slab = seeded_rows(2, DIMENSIONS * 2, case_stream_key(0));
         let element = core::mem::size_of::<f32>() as isize;
         // A column stride of two elements interleaves the rows, which the boundary forbids:
-        // the ABI carries one row stride and no column stride.
+        // the ABI holds one row stride and no column stride.
         let interleaved: MatrixView<'_, f32> =
             unsafe { MatrixView::from_raw_parts(slab.as_ptr(), &[2, DIMENSIONS], &[element * 8, element * 2]) }
                 .unwrap();
@@ -4688,7 +4690,7 @@ mod tests {
         assert!(report.changed <= report.reselected);
     }
 
-    /// A plan carries a refine across calls: a stop leaves it live, the next call ends the round,
+    /// A plan holds a refine across calls: a stop leaves it live, the next call ends the round,
     /// and the finish reports the whole plan.
     #[test]
     fn a_refine_plan_resumes_and_finishes() {
@@ -4822,7 +4824,7 @@ mod tests {
         call.poll(&mut context).is_pending()
     }
 
-    /// A deferred search owns its queries, borrows its arena as the blocking one does, and answers
+    /// A deferred search owns its queries, takes its arena as the blocking one does, and answers
     /// what the blocking one does once waited on.
     #[test]
     fn a_deferred_search_matches_the_blocking_one() {
@@ -4868,6 +4870,7 @@ mod tests {
     /// A leaked deferred call leaves its arena busy rather than unsafe: a call naming it finishes
     /// contended, and dropping it waits for the leaked call.
     #[test]
+    #[cfg(not(feature = "stub"))]
     fn a_leaked_deferred_call_keeps_its_arena_busy() {
         use std::sync::atomic::AtomicBool;
 
@@ -4902,6 +4905,7 @@ mod tests {
     /// A call meeting a running one on its executor finishes contended without running, and the
     /// executor serves the next call once the first is final.
     #[test]
+    #[cfg(not(feature = "stub"))]
     fn a_running_call_holds_its_executor() {
         use std::sync::atomic::AtomicBool;
 
@@ -4910,7 +4914,7 @@ mod tests {
         const DIMENSIONS: usize = 8;
         let (index, keys, slab) = populated_index(16, DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
         let queries = Matrix::<f32>::from_slice(&slab[..DIMENSIONS], &[1, DIMENSIONS]).unwrap();
-        // A deferred call borrows its handler for as long as it may run, so the gate is leaked.
+        // A deferred call references its handler for as long as it may run, so the gate is leaked.
         let gate = Box::leak(Box::new(|_, _| {
             ENTERED.store(true, Ordering::Release);
             while !RELEASED.load(Ordering::Acquire) {
@@ -4970,9 +4974,9 @@ mod tests {
         assert!(matches!(awaited.as_mut().poll(&mut context), Poll::Ready(Err(_))));
     }
 
-    /// Deferred calls running together each borrow an arena, which their results borrow in turn.
+    /// Deferred calls running together each take an arena, which their results point into in turn.
     #[test]
-    fn deferred_calls_borrow_their_arenas() {
+    fn deferred_calls_hold_their_arenas() {
         const DIMENSIONS: usize = 4;
         let (index, keys, slab) = populated_index(4, DIMENSIONS, DenseMetric::Angular, Scalar::BF16).unwrap();
         // One call holds an executor at a time, so calls running together take one apiece.

@@ -6,17 +6,17 @@
  *      pure state machine of reads, and what a SAMPLE call reads beside its scores.
  *
  *  A walk never performs I/O itself: it only emits read requests and consumes completions, and the
- *  engines of @c nvme_device.hpp submit them. What a fetched value row means belongs to the tier
- *  that drives the walk, so the walker names only the tier's own vocabulary:
+ *  queues of @c nvme_device.hpp submit them. What a fetched value means belongs to the tier that
+ *  drives the walk, so the walker names only the tier's own vocabulary:
  *
- *  - @c engine_t, @c arena_t and @c medium_t, the executor's engine, arena and medium;
+ *  - @c queue_t, @c arena_t and @c medium_t, the executor's queue, arena and medium;
  *  - @c node_id_t, @c search_result_t, @c scratch_allocator_t and @c results_array_t;
  *  - @c part_t, where one part keeps its columns, with @c nodes, @c connectivity as its widest
  *    neighbors row, and @c key_dtype;
  *  - @c row_offset_ and @c row_length_, which locate any row of a part's key, value or neighbors
  *    column;
  *  - @c walk_t, one walk's candidates and admitted set, and @c walk_shape_t, the call's sizes;
- *  - @c walk_payload_t, what an aggregating predicate carries beside each key it gathers;
+ *  - @c walk_payload_t, what an aggregating predicate holds beside each key it gathers;
  *  - @c prime_scoring_, which prepares a query once it primes;
  *  - @c score_staged_, which scores a walk's staged flights, folds and releases them, and ranks the
  *    rest through the walker's @c rank_;
@@ -89,7 +89,7 @@ inline u64_t nvme_covering_bytes(u64_t row_bytes, u64_t block_bytes) noexcept {
 }
 
 /** The read of whole @p block_bytes blocks covering the @p bytes at @p begin on medium @p medium,
- *  arriving in @p buffer, its completion carrying @p context back. */
+ *  arriving in @p buffer, its completion holding @p context back. */
 inline io_request_t nvme_covering_read(u64_t begin, u64_t bytes, u64_t block_bytes, io_medium_id_t medium,
                                        io_buffer_id_t buffer, u64_t context) noexcept {
     u64_t const first = begin - begin % block_bytes;
@@ -115,42 +115,42 @@ struct nvme_extent_t {
 static_assert(sizeof(nvme_extent_t) == 16, "An extent is two words, so a round's extents pack densely");
 
 /**
- *  @brief Reads every extent of @p extents through @p engine in one round and waits until all
+ *  @brief Reads every extent of @p extents through @p queue in one round and waits until all
  *      arrive, extent @c i in staging buffer @c i and @p bytes[i] pointing at its first byte there.
  *
- *  The engine holds @p media attached, is at least as deep as @p extents is long, and its buffers
+ *  The queue holds @p media attached, is at least as deep as @p extents is long, and its buffers
  *  cover every extent's read.
  *
  *  @par Statuses:
- *  - @c overflow_k The engine holds fewer reads than the round issues.
+ *  - @c overflow_k The queue holds fewer reads than the round issues.
  *  - @c io_k A read failed or ended before the last byte of its extent.
  */
-template <typename engine_type_>
-status_t nvme_read_round(engine_type_& engine, std::span<typename engine_type_::medium_t const> media,
+template <typename queue_type_>
+status_t nvme_read_round(queue_type_& queue, std::span<typename queue_type_::medium_t const> media,
                          std::span<nvme_extent_t const> extents, std::span<byte_t const*> bytes) noexcept {
     assert(bytes.size() >= extents.size() && "Every extent lands in a pointer of its own");
     status_t status = status_code_t::success_k;
     std::size_t issued = 0;
     for (; issued != extents.size(); ++issued) {
         nvme_extent_t const& extent = extents[issued];
-        typename engine_type_::medium_t const& medium = media[extent.medium];
+        typename queue_type_::medium_t const& medium = media[extent.medium];
         io_request_t const request = nvme_covering_read(byte_base_of(medium) + extent.begin, extent.length,
                                                         block_bytes_of(medium), extent.medium,
                                                         static_cast<io_buffer_id_t>(issued), issued);
-        if (failed(status = engine.enqueue_read(request))) break;
+        if (failed(status = queue.enqueue_read(request))) break;
     }
     // Every enqueued read is polled past a failure, as its buffer serves nothing else till then.
     for (std::size_t arrived = 0; arrived != issued;) {
-        if (status_t const submitted = engine.submit(io_wait_t::blocking_k); failed(submitted)) return submitted;
+        if (status_t const submitted = queue.submit(io_wait_t::blocking_k); failed(submitted)) return submitted;
         std::array<io_completion_t, 1> completion;
-        for (; engine.poll_completions(completion); ++arrived) {
+        for (; queue.poll_completions(completion); ++arrived) {
             std::size_t const position = static_cast<std::size_t>(completion[0].context);
             nvme_extent_t const& extent = extents[position];
-            typename engine_type_::medium_t const& medium = media[extent.medium];
+            typename queue_type_::medium_t const& medium = media[extent.medium];
             u64_t const skipped = (byte_base_of(medium) + extent.begin) % block_bytes_of(medium);
             if (completion[0].result < 0 || static_cast<u64_t>(completion[0].result) < skipped + extent.length)
                 status = status_code_t::io_k;
-            bytes[position] = engine.buffer(completion[0].buffer) + skipped;
+            bytes[position] = queue.buffer(completion[0].buffer) + skipped;
         }
     }
     return status;
@@ -165,7 +165,7 @@ concept measurable_medium = requires(source_type_ const& source) { medium_bytes_
  *  <tt>read_at(offset, bytes)</tt>, into @p header_bytes.
  *
  *  @par Statuses:
- *  - @c malformed_k The prefix cannot be read or carries no monolith's magic.
+ *  - @c malformed_k The prefix cannot be read or holds no monolith's magic.
  *  - @c malformed_k The header cannot be read, or claims more bytes than the medium holds.
  *  - @c io_k The medium cannot be measured.
  */
@@ -376,7 +376,7 @@ struct nvme_seed {
 static_assert(sizeof(nvme_seed<u32_t>) == 8, "A seed is an 8-byte hot entry");
 
 /** The three queue reservations one walk starts from, at one expansion over parts whose widest row
- *  holds @c connectivity neighbors - derived once with the call's shape and carried in it. */
+ *  holds @c connectivity neighbors - derived once with the call's shape and held in it. */
 struct nvme_queue_sizes_t {
 
     /** How many candidates the walk keeps: the expansion factor. */
@@ -480,7 +480,7 @@ struct nvme_flight {
 
 static_assert(sizeof(nvme_flight<u32_t>) == 16, "A flight is 16 bytes, so none straddles a cache line");
 
-/** A node one walk scored, which an aggregating predicate carries beside its key until the walker
+/** A node one walk scored, which an aggregating predicate holds beside its key until the walker
  *  settles the batch it finished in; flat, so a 32-bit node and a 64-bit distance fit 16 bytes. */
 template <typename node_id_type_, typename distance_type_>
 struct nvme_walk_payload {
@@ -534,19 +534,15 @@ struct nvme_query_slot_t {
     std::chrono::steady_clock::time_point primed;
 };
 
-/** One call's hold on an executor: the claim, then the media, which detach before the claim
- *  lifts. */
+/** One call's hold on an executor, from its claim to its end. */
 template <typename executor_type_>
 struct nvme_call {
 
     /** The executor's one-caller hold. */
     typename executor_type_::claim_t claim;
-
-    /** The media every engine reads until the call ends. */
-    typename executor_type_::attachment_t attachment;
 };
 
-/** The reads each engine of @p executor keeps in flight for a call over @p media holding @p parts:
+/** The reads each queue of @p executor keeps in flight for a call over @p media holding @p parts:
  *  the depth the executor pins, else what the media's block queues admit per thread, else, for
  *  media with no block queue, the first hop over the most neighbors any node of @p parts holds. */
 template <typename executor_type_, typename part_type_>
@@ -558,36 +554,40 @@ std::size_t nvme_call_depth(executor_type_ const& executor, std::span<typename e
 }
 
 /**
- *  @brief Claims @p executor, fits its engines @p queue_depth reads deep under the reaping @p media
- *      admit, sizes their arenas and staging buffers, and attaches @p media.
+ *  @brief Claims @p executor, grows its queues to @p queue_depth reads deep under the polling
+ *      @p media admit, sizes their arenas and staging buffers, and registers @p media under
+ *      @p media_list_key, the key of their list.
  *
- *  Every thread's arena holds @p scratch_bytes and every engine @p buffers staging buffers of
+ *  Every thread's arena holds @p scratch_bytes and every queue @p buffers staging buffers of
  *  @p buffer_bytes. Nothing rewinds the arenas again before the call ends, so whatever a call
  *  carves lasts all of it.
  *
  *  @par Statuses:
+ *  - @c uninitialized_k @p media holds a medium but @p media_list_key no identity, the executor
+ *    holds no threads, or its pool has no workers.
  *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
- *  - @c uninitialized_k The executor holds no threads, or its pool has no workers.
- *  - @c io_k An engine's setup was refused at the fitted shape.
+ *  - @c io_k A queue's setup was refused at the grown depth, or the kernel refused a file table.
  *  - @c overflow_k A staging region's byte count overflows, or passes what Windows registers.
- *  - @c config_mismatch_k A medium the engines cannot read.
+ *  - @c config_mismatch_k A medium the queues cannot read, or polled rings over media that never
+ *    poll their device queues.
  */
 template <typename executor_type_>
 expected<nvme_call<executor_type_>> nvme_begin_call(executor_type_& executor,
                                                     std::span<typename executor_type_::medium_t const> media,
-                                                    std::size_t queue_depth, std::size_t scratch_bytes,
-                                                    std::size_t buffers, std::size_t buffer_bytes) noexcept {
+                                                    media_list_key_t media_list_key, std::size_t queue_depth,
+                                                    std::size_t scratch_bytes, std::size_t buffers,
+                                                    std::size_t buffer_bytes) noexcept {
     nvme_call<executor_type_> call;
+    if (!media.empty() && !media_list_key.identity)
+        return {std::move(call), {status_code_t::uninitialized_k, "Media list opened without an identity"}};
     auto [claim, claim_status] = executor.claim();
     if (failed(claim_status)) return {std::move(call), claim_status};
     call.claim = std::move(claim);
-    if (status_t const fitted = executor.fit(queue_depth, nvme_reaping(media)); failed(fitted))
-        return {std::move(call), fitted};
+    if (status_t const grown = executor.grow_queue_depth_to(queue_depth, nvme_polling(media)); failed(grown))
+        return {std::move(call), grown};
     if (status_t const reserved = executor.reserve(scratch_bytes, buffers, buffer_bytes); failed(reserved))
         return {std::move(call), reserved};
-    auto [attachment, attach_status] = executor.attach(media);
-    call.attachment = std::move(attachment);
-    return {std::move(call), attach_status};
+    return {std::move(call), executor.register_media(media, media_list_key)};
 }
 
 /**
@@ -606,7 +606,7 @@ class query_walker {
     friend tier_type_;
 
     using tier_t = tier_type_;
-    using engine_t = typename tier_t::engine_t;
+    using queue_t = typename tier_t::queue_t;
     using arena_t = typename tier_t::arena_t;
     using medium_t = typename tier_t::medium_t;
     using part_t = typename tier_t::part_t;
@@ -629,9 +629,9 @@ class query_walker {
 
     /** The walker of executor thread @p thread, whose queries are built from @p inputs, and which
      *  asks that thread's predicate among them. */
-    query_walker(engine_t& engine, arena_t& arena, std::span<medium_t const> media, std::span<part_t const> parts,
+    query_walker(queue_t& queue, arena_t& arena, std::span<medium_t const> media, std::span<part_t const> parts,
                  walk_shape_t const& shape, inputs_t const& inputs, std::size_t thread, std::size_t line_bytes) noexcept
-        : engine_(engine), arena_(arena), media_(media), parts_(parts), shape_(shape), inputs_(inputs), thread_(thread),
+        : queue_(queue), arena_(arena), media_(media), parts_(parts), shape_(shape), inputs_(inputs), thread_(thread),
           prefetcher_ {line_bytes} {}
 
     query_walker(query_walker const&) = delete;
@@ -698,7 +698,7 @@ class query_walker {
     }
 
     /** Primes queries until the batch runs out, keeping every slot's walks in flight, and drains
-     *  the engine before it returns, whatever happened; a failure on any thread stops this one too.
+     *  the queue before it returns, whatever happened; a failure on any thread stops this one too.
      *  Answers the first query that refused, as a failure is published to every thread instead. */
     status_t drive_walks() noexcept {
         while (true) {
@@ -715,15 +715,15 @@ class query_walker {
                 assert((failed(failure_) || !queries_in_flight_) && "A query in flight always waits on a read");
                 continue;
             }
-            if (status_t const submitted = engine_.submit(io_wait_t::blocking_k); failed(submitted)) {
+            if (status_t const submitted = queue_.submit(io_wait_t::blocking_k); failed(submitted)) {
                 // A refused submission returns with nothing in flight and nothing left to poll.
                 fail(submitted);
                 outstanding_ = 0;
                 break;
             }
             telemetry_.round_trips += queries_in_flight_;
-            for (std::size_t polled = engine_.poll_completions(completions_); polled;
-                 polled = engine_.poll_completions(completions_)) {
+            for (std::size_t polled = queue_.poll_completions(completions_); polled;
+                 polled = queue_.poll_completions(completions_)) {
                 // Completions of walk reads move to the front, as their flights may serve
                 // other queries by the end of the batch.
                 std::size_t advancing = 0;
@@ -783,7 +783,7 @@ class query_walker {
         };
         auto walk_thread = [&](std::size_t thread, std::size_t) noexcept {
             query_walker walker {
-                executor.engine(thread), executor.arena(thread), media, parts, shape, inputs, thread, line_bytes};
+                executor.queue(thread), executor.arena(thread), media, parts, shape, inputs, thread, line_bytes};
             status_t const reserved = walker.reserve();
             if (failed(reserved)) walker.fail(reserved);
             status_t const refused = walker.drive_walks();
@@ -877,7 +877,7 @@ class query_walker {
     /** The fetched row of @p flight_index in the column @p purpose read, inside @p buffer. */
     byte_t const* fetched_row_(u32_t flight_index, nvme_purpose_t purpose, io_buffer_id_t buffer) noexcept {
         flight_t const& flight = flights_[flight_index];
-        return engine_.buffer(buffer) + row_begin_(flight, purpose) % block_bytes_of(media_[shard_of_(flight)]);
+        return queue_.buffer(buffer) + row_begin_(flight, purpose) % block_bytes_of(media_[shard_of_(flight)]);
     }
 
     /** Stages the covering read of @p flight_index 's row in the column @p purpose reads, into
@@ -894,13 +894,13 @@ class query_walker {
         reads += nvme_reads_t {1, request.length};
     }
 
-    /** Hands the staged reads to the engine until it holds no more; the rest wait for
+    /** Hands the staged reads to the queue until it holds no more; the rest wait for
      *  completions. */
     void enqueue_backlog_() noexcept {
         while (backlog_size_) {
-            status_t const enqueued = engine_.enqueue_read(backlog_[backlog_size_ - 1]);
+            status_t const enqueued = queue_.enqueue_read(backlog_[backlog_size_ - 1]);
             if (enqueued == status_code_t::overflow_k && outstanding_) return;
-            // A full engine holding none of this thread's reads would never drain, so the
+            // A full queue holding none of this thread's reads would never drain, so the
             // thread fails instead.
             if (failed(enqueued)) return fail(enqueued == status_code_t::overflow_k ? status_code_t::io_k : enqueued);
             --backlog_size_;
@@ -1157,7 +1157,7 @@ class query_walker {
         for (walk_payload_t const& payload : payloads) admit_payload_(payload);
     }
 
-    /** Asks @p predicate about the keys fetched beside @p flights, each carrying its payload. */
+    /** Asks @p predicate about the keys fetched beside @p flights, each holding its payload. */
     template <typename predicate_type_, std::size_t extent_>
     void ask_predicate_(predicate_type_& predicate, std::span<u32_t const, extent_> flights,
                         std::span<walk_payload_t const, extent_> payloads) noexcept {
@@ -1294,7 +1294,7 @@ class query_walker {
         --queries_in_flight_;
     }
 
-    engine_t& engine_;
+    queue_t& queue_;
     arena_t& arena_;
     std::span<medium_t const> media_;
     std::span<part_t const> parts_;
@@ -1344,7 +1344,7 @@ struct nvme_scan_slot {
     std::size_t reads_left = 0;
 };
 
-/** Arena bytes one @c nvme_scan_reads carves on every thread of an engine @p depth reads deep. */
+/** Arena bytes one @c nvme_scan_reads carves on every thread of a queue @p depth reads deep. */
 template <std::size_t reads_per_task_>
 constexpr std::size_t nvme_scan_bytes(std::size_t depth) noexcept {
     using slice_t = arena_allocator<byte_t>;
@@ -1353,40 +1353,41 @@ constexpr std::size_t nvme_scan_bytes(std::size_t depth) noexcept {
            slice_t::reserved_bytes(depth * reads_per_task_ * sizeof(io_completion_t));
 }
 
-/** Begins a call of @p scans scans of @p reads_per_task_ reads per task over @p media, as
- *  @ref nvme_begin_call begins one: every engine @p depth slots deep, each slot as many staging
- *  buffers of @p buffer_bytes as reads, at least @p buffers for a walk sharing the call, and every
- *  arena sized for the slots and @p scratch_bytes more. */
+/** Begins a call of @p scans scans of @p reads_per_task_ reads per task over @p media, the list
+ *  of @p media_list_key, as @ref nvme_begin_call begins one: every queue @p depth slots deep,
+ *  each slot as many staging buffers of @p buffer_bytes as reads, at least @p buffers for a walk
+ *  sharing the call, and every arena sized for the slots and @p scratch_bytes more. */
 template <std::size_t reads_per_task_ = 1, typename executor_type_>
 expected<nvme_call<executor_type_>> nvme_begin_scans(executor_type_& executor,
                                                      std::span<typename executor_type_::medium_t const> media,
-                                                     std::size_t depth, std::size_t scans, std::size_t scratch_bytes,
-                                                     std::size_t buffers, std::size_t buffer_bytes) noexcept {
-    return nvme_begin_call(executor, media, depth,
+                                                     media_list_key_t media_list_key, std::size_t depth,
+                                                     std::size_t scans, std::size_t scratch_bytes, std::size_t buffers,
+                                                     std::size_t buffer_bytes) noexcept {
+    return nvme_begin_call(executor, media, media_list_key, depth,
                            scans * nvme_scan_bytes<reads_per_task_>(depth) + scratch_bytes + default_alignment_k,
                            max_of(depth * reads_per_task_, buffers), buffer_bytes);
 }
 
 /**
- *  @brief One thread's share of @c nvme_scan_reads: its engine and slots, the task it claimed and
+ *  @brief One thread's share of @c nvme_scan_reads: its queue and slots, the task it claimed and
  *      describes, the slot whose reads it enqueues, and the reads it issued.
  *
  *  A thread claims a task whole and describes it slot by slot until an empty first extent ends it.
  *  Read r of slot s arrives in buffer s + r · depth, so the buffer alone names what arrived, and a
  *  slot's reads are consumed together once the last one lands.
  */
-template <std::size_t reads_per_task_, template <typename> class atomic_ref_template_, typename engine_type_,
+template <std::size_t reads_per_task_, template <typename> class atomic_ref_template_, typename queue_type_,
           typename describe_type_, typename consume_type_>
-struct nvme_scan_lane {
+struct nvme_scan_thread {
     using slot_t = nvme_scan_slot<reads_per_task_>;
-    using medium_t = typename engine_type_::medium_t;
+    using medium_t = typename queue_type_::medium_t;
     template <typename word_type_>
     using atomic_ref = atomic_ref_template_<word_type_>;
 
-    /** The task a lane holds when it holds none. */
+    /** The task a thread holds when it holds none. */
     inline static constexpr std::size_t unclaimed_k = ~std::size_t {0};
 
-    engine_type_& engine;
+    queue_type_& queue;
     std::span<medium_t const> media;
     describe_type_& describe;
     consume_type_& consume;
@@ -1409,7 +1410,7 @@ struct nvme_scan_lane {
     std::size_t task = unclaimed_k;
     u64_t progress = 0;
 
-    /** The slot whose reads are being enqueued and its next read, which a full engine may refuse
+    /** The slot whose reads are being enqueued and its next read, which a full queue may refuse
      *  until a completion frees room in it; @c depth while none is. */
     std::size_t issuing = depth, next_read = 0;
     nvme_reads_t reads;
@@ -1420,18 +1421,17 @@ struct nvme_scan_lane {
         for (; free_count != depth; ++free_count) free_slots[free_count] = static_cast<u32_t>(free_count);
         std::span<io_completion_t> const polling {completions, depth * reads_per_task_};
         for (issue(); outstanding; issue()) {
-            if (status_t const submitted = engine.submit(io_wait_t::blocking_k); failed(submitted)) {
+            if (status_t const submitted = queue.submit(io_wait_t::blocking_k); failed(submitted)) {
                 // A refused submission returns with nothing in flight and nothing left to poll.
                 if (succeeded(local)) local = submitted;
                 break;
             }
-            for (std::size_t polled = engine.poll_completions(polling); polled;
-                 polled = engine.poll_completions(polling))
+            for (std::size_t polled = queue.poll_completions(polling); polled; polled = queue.poll_completions(polling))
                 for (io_completion_t const& completion : polling.first(polled)) arrive(completion);
         }
     }
 
-    /** Enqueues reads until the engine is full, every slot is busy, the tasks ran out, or a thread
+    /** Enqueues reads until the queue is full, every slot is busy, the tasks ran out, or a thread
      *  failed. */
     void issue() noexcept {
         while (succeeded(local) &&
@@ -1465,7 +1465,7 @@ struct nvme_scan_lane {
         return true;
     }
 
-    /** Enqueues the issuing slot's next read; false when the engine refused it. */
+    /** Enqueues the issuing slot's next read; false when the queue refused it. */
     bool enqueue() noexcept {
         slot_t& slot = slots[issuing];
         nvme_extent_t const& extent = slot.extents[next_read];
@@ -1475,9 +1475,9 @@ struct nvme_scan_lane {
         io_request_t const request = nvme_covering_read(begin, extent.length, block_bytes_of(medium), extent.medium,
                                                         static_cast<io_buffer_id_t>(issuing + next_read * depth), 0);
         slot.offsets[next_read] = begin - request.offset;
-        status_t const enqueued = engine.enqueue_read(request);
+        status_t const enqueued = queue.enqueue_read(request);
         if (enqueued == status_code_t::overflow_k && outstanding) return false;
-        // A full engine holding none of this thread's reads would never drain, so it fails instead.
+        // A full queue holding none of this thread's reads would never drain, so it fails instead.
         if (failed(enqueued))
             return local = enqueued == status_code_t::overflow_k ? status_code_t::io_k : enqueued, false;
         reads += nvme_reads_t {1, request.length};
@@ -1499,8 +1499,7 @@ struct nvme_scan_lane {
         if (succeeded(local)) {
             std::array<byte_t const*, reads_per_task_> bytes;
             for (std::size_t each = 0; each != reads_per_task_; ++each)
-                bytes[each] = engine.buffer(static_cast<io_buffer_id_t>(slot_index + each * depth)) +
-                              slot.offsets[each];
+                bytes[each] = queue.buffer(static_cast<io_buffer_id_t>(slot_index + each * depth)) + slot.offsets[each];
             consume(thread, slot.task, slot.progress, slot.extents, bytes);
         }
         free_slots[free_count++] = static_cast<u32_t>(slot_index);
@@ -1509,7 +1508,7 @@ struct nvme_scan_lane {
 
 /**
  *  @brief Scans the reads of @p tasks_count tasks over every thread of @p executor, as many slots
- *      in flight per thread as its engine's depth and its staging buffers allow, answering how
+ *      in flight per thread as its queue's depth and its staging buffers allow, answering how
  *      many reads it issued.
  *
  *  A thread claims a task whole and asks @p describe for its reads in turn, as
@@ -1520,7 +1519,7 @@ struct nvme_scan_lane {
  *  <tt>consume(thread, task, progress, extents, bytes)</tt> on the thread that read them, @c progress as
  *  the describe that answered them found it, both arrays in read order. Runs inside a call
  *  @c nvme_begin_scans began for as many reads per task; a failed read stops every thread, which
- *  drains its engine.
+ *  drains its queue.
  */
 template <std::size_t reads_per_task_, template <typename> class atomic_ref_template_, typename executor_type_,
           typename describe_type_, typename consume_type_>
@@ -1528,9 +1527,9 @@ expected<nvme_reads_t> nvme_scan_reads(executor_type_& executor,
                                        std::span<typename executor_type_::medium_t const> media,
                                        std::size_t tasks_count, describe_type_&& describe,
                                        consume_type_&& consume) noexcept {
-    using lane_t = nvme_scan_lane<reads_per_task_, atomic_ref_template_, typename executor_type_::engine_t,
-                                  describe_type_, consume_type_>;
-    using slot_t = typename lane_t::slot_t;
+    using scan_thread_t = nvme_scan_thread<reads_per_task_, atomic_ref_template_, typename executor_type_::queue_t,
+                                           describe_type_, consume_type_>;
+    using slot_t = typename scan_thread_t::slot_t;
     std::size_t const depth = max_of<std::size_t>(
         min_of(executor.queue_depth(), executor.buffers_cut().buffers / reads_per_task_), 1);
     alignas(default_alignment_k) std::size_t cursor = 0;
@@ -1538,16 +1537,17 @@ expected<nvme_reads_t> nvme_scan_reads(executor_type_& executor,
     nvme_reads_t issued;
     auto scan_thread = [&](std::size_t thread, std::size_t) noexcept {
         auto& arena = executor.arena(thread);
-        lane_t lane {executor.engine(thread), media, describe, consume, cursor, failure, thread, depth, tasks_count};
-        lane.slots = reinterpret_cast<slot_t*>(arena.allocate(depth * sizeof(slot_t), default_alignment_k));
-        lane.free_slots = reinterpret_cast<u32_t*>(arena.allocate(depth * sizeof(u32_t), default_alignment_k));
-        lane.completions = reinterpret_cast<io_completion_t*>(
+        scan_thread_t scanner {
+            executor.queue(thread), media, describe, consume, cursor, failure, thread, depth, tasks_count};
+        scanner.slots = reinterpret_cast<slot_t*>(arena.allocate(depth * sizeof(slot_t), default_alignment_k));
+        scanner.free_slots = reinterpret_cast<u32_t*>(arena.allocate(depth * sizeof(u32_t), default_alignment_k));
+        scanner.completions = reinterpret_cast<io_completion_t*>(
             arena.allocate(depth * reads_per_task_ * sizeof(io_completion_t), default_alignment_k));
-        if (lane.slots && lane.free_slots && lane.completions) lane.run();
-        else lane.local = status_code_t::out_of_memory_k;
-        atomic_ref_template_<std::size_t>(issued.count).store_add(lane.reads.count, std::memory_order_relaxed);
-        atomic_ref_template_<std::size_t>(issued.bytes).store_add(lane.reads.bytes, std::memory_order_relaxed);
-        keep_first_failure<atomic_ref_template_>(failure, lane.local);
+        if (scanner.slots && scanner.free_slots && scanner.completions) scanner.run();
+        else scanner.local = {status_code_t::out_of_memory_k, "No room for scan slots"};
+        atomic_ref_template_<std::size_t>(issued.count).store_add(scanner.reads.count, std::memory_order_relaxed);
+        atomic_ref_template_<std::size_t>(issued.bytes).store_add(scanner.reads.bytes, std::memory_order_relaxed);
+        keep_first_failure<atomic_ref_template_>(failure, scanner.local);
     };
     if (status_t const fanned = executor.for_threads(scan_thread); failed(fanned)) return {issued, fanned};
     return {issued, failure};
@@ -1582,7 +1582,7 @@ bool nvme_extends_read(medium_type_ const& medium, nvme_extent_t const& read, nv
  *
  *  @par Statuses:
  *  - @c out_of_memory_k Thread zero's arena could not hold the order.
- *  - @c overflow_k A read finds its engine's queue full.
+ *  - @c overflow_k A read finds its queue full.
  *  - @c io_k A read came back short.
  */
 template <template <typename> class atomic_ref_template_, typename executor_type_, typename node_id_type_,
@@ -1724,7 +1724,7 @@ status_t nvme_list_entries(std::span<key_type_ const> keys, std::span<std::size_
  *  entry, sized for the widest part and reused by every narrower one. */
 struct audit_columns_t {
 
-    /** Lanes one word of a bitset carries. */
+    /** Lanes one word of a bitset holds. */
     inline static constexpr std::size_t lanes_k = std::numeric_limits<u64_t>::digits;
 
     /** The bitsets in @c bitset_words, one run of words each: reached from the root, reaching it
@@ -1850,7 +1850,7 @@ struct audit_islands {
  *
  *  @par Statuses:
  *  - @c out_of_memory_k Thread zero's arena could not hold the islands.
- *  - @c overflow_k A read finds its engine's queue full.
+ *  - @c overflow_k A read finds its queue full.
  *  - @c io_k A neighbors read came back short.
  */
 template <typename node_id_type_, template <typename> class atomic_ref_template_, typename executor_type_,
@@ -1981,7 +1981,7 @@ expected<reachability_t> nvme_audit_reachability(executor_type_& executor,
                 if (read.length && extent.length && !nvme_extends_read(media[read.medium], read, extent, buffer_bytes))
                     break;
                 progress = node + 1 - task_first;
-                // No read carries an empty row, so the describe passing it visits it, and
+                // No read holds an empty row, so the describe passing it visits it, and
                 // consume skips it.
                 if (!extent.length) visit(node, bytes_view_t {}, counts);
                 else if (!read.length) read = extent;
@@ -2347,8 +2347,8 @@ struct nvme_parts_cursor {
      *  - @c out_of_memory_k A link or a newly visited entry found no memory; earlier batches stand.
      *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
      *  - @c uninitialized_k @p executor holds no threads or pool workers.
-     *  - @c config_mismatch_k A medium the engines cannot read.
-     *  - @c overflow_k A staging region's byte count overflows, or a read finds its engine's queue
+     *  - @c config_mismatch_k A medium the queues cannot read.
+     *  - @c overflow_k A staging region's byte count overflows, or a read finds its queue
      *    full.
      *  - @c io_k A read came back short; the batches written before stand.
      */
@@ -2457,26 +2457,26 @@ struct nvme_parts_cursor {
 
 /**
  *  @brief What every NVMe tier's SAMPLE source reads beside its scores: the shown and focus keys'
- *      entries, the keys of nodes already read, neighbors rows, and blocking rounds on one engine.
+ *      entries, the keys of nodes already read, neighbor lists, and blocking rounds on one queue.
  *
  *  Each tower's source owns one, names its own rows' extents, and scores; see @c sample_source.
- *  Every read lands in the engine's staging buffers, valid until the next read. A failed read
+ *  Every read lands in the queue's staging buffers, valid until the next read. A failed read
  *  lands in @c failure, and every later row read answers no row.
  */
-template <typename part_type_, typename key_type_, typename node_id_type_, typename engine_type_>
+template <typename part_type_, typename key_type_, typename node_id_type_, typename queue_type_>
 struct nvme_sample_rows {
     using key_t = key_type_;
     using node_id_t = node_id_type_;
     using shard_node_t = shard_node<node_id_t>;
-    using medium_t = typename engine_type_::medium_t;
+    using medium_t = typename queue_type_::medium_t;
 
     /** Every distinct shown and focus key filed under its listed position, in thread zero's
      *  arena. */
     using listed_positions_t =
         chunked_multimap<key_t, u32_t, std::hash<key_t>, arena_allocator<byte_t, forkunion_allocator_t>>;
 
-    /** Thread zero's engine, which the plan reads through, and the media it holds attached. */
-    engine_type_& engine;
+    /** Thread zero's queue, which the plan reads through, and the media it holds attached. */
+    queue_type_& queue;
     std::span<medium_t const> media;
 
     /** Every part, for where its key column starts and how its keys are stored. */
@@ -2533,7 +2533,7 @@ struct nvme_sample_rows {
     bytes_view_t read_row(nvme_extent_t extent) const noexcept {
         if (!extent.length || failed(*failure)) return {};
         round_extents[0] = extent;
-        if (status_t const read = nvme_read_round(engine, media, round_extents.first(1), round_bytes.first(1));
+        if (status_t const read = nvme_read_round(queue, media, round_extents.first(1), round_bytes.first(1));
             failed(read))
             return fail(read, {}), bytes_view_t {};
         return {round_bytes[0], extent.length};
@@ -2546,7 +2546,7 @@ struct nvme_sample_rows {
         for (std::size_t lane = 0; lane != round.size(); ++lane)
             round_extents[1 + round.size() + lane] = key_extent_(round[lane]);
         std::size_t const reads = 2 * round.size() + 1;
-        status_t const read = nvme_read_round(engine, media, round_extents.first(reads), round_bytes.first(reads));
+        status_t const read = nvme_read_round(queue, media, round_extents.first(reads), round_bytes.first(reads));
         if (failed(read)) fail(read, distances);
         return read;
     }
@@ -2580,10 +2580,11 @@ struct nvme_sample_rows {
 };
 
 /**
- *  @brief Opens a SAMPLE call over @p parts on @p media as every NVMe tier opens one, lists the
- *      shown and focus keys' entries, and hands what the plan reads to @p draw.
+ *  @brief Opens a SAMPLE call over @p parts on @p media, the list of @p media_list_key, as every
+ *      NVMe tier opens one, lists the shown and focus keys' entries, and hands what the plan reads
+ *      to @p draw.
  *
- *  The call holds the media with every engine at least a round deep, a round reading the query's
+ *  The call holds the media with every queue at least a round deep, a round reading the query's
  *  row, then a row and a key per node of a neighbors row @p width wide, each into a staging buffer
  *  of @p buffer_bytes. Thread zero's arena holds the listed keys and their entries, the keys cached
  *  for as many visits as @p draws make under @p config, and one round's extents. @p scan_keys runs
@@ -2594,22 +2595,24 @@ struct nvme_sample_rows {
  *  - @c uninitialized_k No part is viewed, or @p executor holds no threads or pool workers.
  *  - @c out_of_memory_k The arenas cannot hold the scratch.
  *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
- *  - @c config_mismatch_k A medium the engines cannot read.
+ *  - @c config_mismatch_k A medium the queues cannot read.
  */
 template <typename key_type_, typename node_id_type_, typename part_type_, typename executor_type_,
           typename scan_keys_type_, typename draw_type_>
 expected<sample_result_t> nvme_sample(executor_type_& executor,
                                       std::span<typename executor_type_::medium_t const> media,
-                                      std::span<part_type_ const> parts, std::size_t width, std::size_t buffer_bytes,
-                                      sample_inputs<key_type_> inputs, std::size_t draws, sample_config_t config,
-                                      scan_keys_type_&& scan_keys, draw_type_&& draw) noexcept {
-    using rows_t = nvme_sample_rows<part_type_, key_type_, node_id_type_, typename executor_type_::engine_t>;
+                                      media_list_key_t media_list_key, std::span<part_type_ const> parts,
+                                      std::size_t width, std::size_t buffer_bytes, sample_inputs<key_type_> inputs,
+                                      std::size_t draws, sample_config_t config, scan_keys_type_&& scan_keys,
+                                      draw_type_&& draw) noexcept {
+    using rows_t = nvme_sample_rows<part_type_, key_type_, node_id_type_, typename executor_type_::queue_t>;
     using shard_node_t = shard_node<node_id_type_>;
     using scratch_allocator_t = arena_allocator<byte_t, forkunion_allocator_t>;
     if (parts.empty()) return {{}, status_code_t::uninitialized_k};
     std::size_t const round_reads = 2 * width + 1;
     std::size_t const queue_depth = max_of(nvme_call_depth(executor, media, parts), round_reads);
-    auto [call, call_status] = nvme_begin_call(executor, media, queue_depth, 0, round_reads, buffer_bytes);
+    auto [call, call_status] = nvme_begin_call(executor, media, media_list_key, queue_depth, 0, round_reads,
+                                               buffer_bytes);
     if (failed(call_status)) return {{}, call_status};
 
     scratch_allocator_t const scratch {executor.arena(0)};
@@ -2646,7 +2649,7 @@ expected<sample_result_t> nvme_sample(executor_type_& executor,
         return {{}, listed};
 
     status_t failure = status_code_t::success_k;
-    return draw(rows_t {executor.engine(0), media, parts, to_span(watermarks), listed_positions, distinct_starts,
+    return draw(rows_t {executor.queue(0), media, parts, to_span(watermarks), listed_positions, distinct_starts,
                         to_span(listed_nodes), to_writable_span(cached_nodes), to_writable_span(cached_keys),
                         to_writable_span(staged_neighbors), to_writable_span(round_extents),
                         to_writable_span(round_bytes), &failure});
@@ -2654,7 +2657,7 @@ expected<sample_result_t> nvme_sample(executor_type_& executor,
 
 /**
  *  @brief Draws and places through a @c sample_plan over @p source on executor thread zero, the
- *      pool thread whose engine the source reads through, then counts the draws' ordinals; the
+ *      pool thread whose queue the source reads through, then counts the draws' ordinals; the
  *      @p failure the source's reads kept answers last.
  *
  *  @par Statuses:
@@ -2671,7 +2674,7 @@ expected<sample_result_t> nvme_draw_sample(source_type_ const& source, sample_in
     byte_t* const plan_scratch = executor.arena(0).allocate(plan_bytes, default_alignment_k);
     if (!plan_scratch) return {{}, status_code_t::out_of_memory_k};
     plan_t plan {source, inputs, outputs, config, {plan_scratch, plan_bytes}};
-    // Thread zero's engine reads for the plan and serves only the pool thread that opened it.
+    // Thread zero's queue reads for the plan and serves only the pool thread that opened it.
     status_t status = status_code_t::success_k;
     status_t const dispatched = executor.for_threads([&](std::size_t thread, std::size_t) noexcept {
         if (thread) return;

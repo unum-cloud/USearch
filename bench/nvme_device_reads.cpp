@@ -2,19 +2,19 @@
  *  @file bench/nvme_device_reads.cpp
  *  @author Ash Vardanian
  *  @date October 31, 2026
- *  @brief The I/O engines alone, beside @c fio : each engine reads the covering rows of a live
- *      monolith at the depth its drive admits, one table row per engine and column.
+ *  @brief The I/O queues alone, beside @c fio : each queue reads the covering rows of a live
+ *      monolith at the depth its drive admits, one table row per queue and column.
  *
  *  Every number derives from the device, the monolith and the caller. The address is a slot holding
  *  a live monolith, so reads land on written blocks, which a drive serves from NAND rather than
  *  answering from its mapping table. A read is the covering read of one random row of the key,
  *  neighbors or value column, as a walk issues it, and each column takes as many reads as the
  *  monolith has nodes. Each thread keeps the depth @c nvme_queue_depth derives from the disk's tags
- *  and hardware queues in flight, or its share of @c --depth. Engines run in turn: blocking reads,
+ *  and hardware queues in flight, or its share of @c --depth. Queues run in turn: blocking reads,
  *  AIO and io_uring over the block node, and io_uring passthrough over its generic character node,
  *  <tt>/dev/ngXnY</tt>.
  *
- *  An @c spdk:// monolith reads through the SPDK engine alone, its depth derived from the queues
+ *  An @c spdk:// monolith reads through the SPDK queue alone, its depth derived from the queues
  *  the controller granted, and each of its rows prints an @c spdk_nvme_perf line for a fio one.
  *
  *  @code{.sh}
@@ -41,8 +41,8 @@
 namespace unum::usearch::bench {
 using namespace unum::usearch::tools;
 
-/** The executor over every engine the build admits, yielding between polls as the library does. */
-using nvme_executor_t = util::nvme_executor<util::default_io_engine<fu::standard_yield_t>>;
+/** The executor over every queue the build admits, yielding between polls as the library does. */
+using nvme_executor_t = util::nvme_executor<util::default_io_queue<fu::standard_yield_t>>;
 
 /** What one table row reads: the column's rows on the medium, the block reads round to, and the
  *  depth and count of reads the threads share. */
@@ -73,7 +73,7 @@ struct reads_plan_t {
     util::u64_t seed = 0;
 };
 
-/** Nanoseconds on the steady clock, which a read's context carries from issue to completion. */
+/** Nanoseconds on the steady clock, which a read's context holds from issue to completion. */
 inline util::u64_t steady_nanoseconds() noexcept {
     return static_cast<util::u64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
@@ -86,19 +86,21 @@ inline std::size_t share_begin(std::size_t reads, std::size_t threads, std::size
     return thread * (reads / threads) + util::min_of(thread, reads % threads);
 }
 
-/** One engine's row: each thread keeps @p plan.depth covering reads of random rows in flight until
- *  its share of @p plan.reads completes, writing each read's nanoseconds into @p latencies and the
- *  bytes it moved into @p moved, one slot per thread, and its failure into @p statuses. */
-inline util::status_t engine_reads(nvme_executor_t& executor, std::span<nvme_executor_t::medium_t const> media,
-                                   reads_plan_t const& plan, std::span<util::u64_t> latencies,
-                                   std::span<util::u64_t> moved, std::span<util::status_t> statuses) noexcept {
+/** One queue's row over @p media, the list of @p media_list_key: each thread keeps @p plan.depth
+ *  covering reads of random rows in flight until its share of @p plan.reads completes, writing each
+ *  read's nanoseconds into @p latencies and the bytes it moved into @p moved, one slot per thread,
+ *  and its failure into @p statuses. */
+inline util::status_t queue_reads(nvme_executor_t& executor, std::span<nvme_executor_t::medium_t const> media,
+                                  util::media_list_key_t media_list_key, reads_plan_t const& plan,
+                                  std::span<util::u64_t> latencies, std::span<util::u64_t> moved,
+                                  std::span<util::status_t> statuses) noexcept {
     std::size_t const scratch_bytes = plan.depth * sizeof(util::io_completion_t) + alignof(util::io_completion_t);
-    auto [call, call_status] = nvme_begin_call(executor, media, plan.depth, scratch_bytes, plan.depth,
+    auto [call, call_status] = nvme_begin_call(executor, media, media_list_key, plan.depth, scratch_bytes, plan.depth,
                                                plan.buffer_bytes);
     if (failed(call_status)) return call_status;
     std::size_t const threads = executor.size();
     return executor.for_threads([&](std::size_t thread, std::size_t) noexcept {
-        nvme_executor_t::engine_t& engine = executor.engine(thread);
+        nvme_executor_t::queue_t& queue = executor.queue(thread);
         std::span<util::io_completion_t> const polled_into {
             reinterpret_cast<util::io_completion_t*>(executor.arena(thread).allocate(
                 plan.depth * sizeof(util::io_completion_t), alignof(util::io_completion_t))),
@@ -115,17 +117,17 @@ inline util::status_t engine_reads(nvme_executor_t& executor, std::span<nvme_exe
                                             0, buffer, steady_nanoseconds());
         };
         for (; issued != util::min_of(plan.depth, timings.size()) && succeeded(status); ++issued)
-            status = engine.enqueue_read(random_read(static_cast<util::io_buffer_id_t>(issued)));
+            status = queue.enqueue_read(random_read(static_cast<util::io_buffer_id_t>(issued)));
         while (completed != issued && succeeded(status)) {
-            if (failed(status = engine.submit(util::io_wait_t::blocking_k))) return;
-            std::size_t const polled = engine.poll_completions(polled_into);
+            if (failed(status = queue.submit(util::io_wait_t::blocking_k))) return;
+            std::size_t const polled = queue.poll_completions(polled_into);
             util::u64_t const now = steady_nanoseconds();
             for (util::io_completion_t const& completion : polled_into.first(polled)) {
                 if (completion.result <= 0) status = util::status_code_t::io_k;
                 moved[thread] += static_cast<util::u64_t>(util::max_of<util::i32_t>(completion.result, 0));
                 timings[completed++] = now - completion.context;
                 if (issued != timings.size() && succeeded(status))
-                    status = engine.enqueue_read(random_read(completion.buffer)), ++issued;
+                    status = queue.enqueue_read(random_read(completion.buffer)), ++issued;
             }
         }
     });
@@ -138,19 +140,19 @@ struct column_reads_t {
     util::u64_t read_bytes = 0;
 };
 
-/** One engine a row reads through: its name, its transport, and the address it opens. */
-struct engine_row_t {
+/** One queue a row reads through: its name, its transport, and the address it opens. */
+struct queue_row_t {
     std::string_view name;
     util::io_transport_t transport = util::io_transport_t::automatic_k;
     std::string address;
 };
 
-/** The @c fio line reading what @p plan reads through @p engine on @p threads threads. */
-inline std::string fio_line(engine_row_t const& engine, reads_plan_t const& plan, util::u64_t read_bytes,
-                            std::size_t threads, std::string_view location, util::linux_uring_reaping_t reaping) {
-    std::string_view const ioengine = engine.transport == util::io_transport_t::blocking_k    ? "psync"
-                                      : engine.transport == util::io_transport_t::linux_aio_k ? "libaio"
-                                      : engine.transport == util::io_transport_t::linux_uring_nvme_k
+/** The @c fio line reading what @p plan reads through @p queue on @p threads threads. */
+inline std::string fio_line(queue_row_t const& queue, reads_plan_t const& plan, util::u64_t read_bytes,
+                            std::size_t threads, std::string_view location, util::linux_uring_polling_t polling) {
+    std::string_view const ioengine = queue.transport == util::io_transport_t::blocking_k    ? "psync"
+                                      : queue.transport == util::io_transport_t::linux_aio_k ? "libaio"
+                                      : queue.transport == util::io_transport_t::linux_uring_nvme_k
                                           ? "io_uring_cmd --cmd_type=nvme"
                                           : "io_uring --fixedbufs --registerfiles";
     util::u64_t const offset = plan.column_begin - plan.column_begin % plan.block_bytes;
@@ -158,12 +160,12 @@ inline std::string fio_line(engine_row_t const& engine, reads_plan_t const& plan
                                                                      plan.block_bytes) -
                              offset;
     // fio refuses direct=1 on a generic char node, which has no page cache to bypass.
-    std::string_view const direct = engine.transport == util::io_transport_t::linux_uring_nvme_k ? "" : " --direct=1";
+    std::string_view const direct = queue.transport == util::io_transport_t::linux_uring_nvme_k ? "" : " --direct=1";
     return fmt::format("fio --name={} --filename={} --offset={} --size={}{} --ioengine={} --rw=randread " //
                        "--bs={} --iodepth={} --numjobs={} --number_ios={} --group_reporting{}",
-                       engine.name, location, offset, size, direct, ioengine, read_bytes,
-                       engine.transport == util::io_transport_t::blocking_k ? 1 : plan.depth, threads,
-                       plan.reads / threads, reaping == util::linux_uring_reaping_t::polled_k ? " --hipri" : "");
+                       queue.name, location, offset, size, direct, ioengine, read_bytes,
+                       queue.transport == util::io_transport_t::blocking_k ? 1 : plan.depth, threads,
+                       plan.reads / threads, polling == util::linux_uring_polling_t::polled_k ? " --hipri" : "");
 }
 
 /** The @c spdk_nvme_perf line reading what @p plan reads on @p threads cores of the namespace
@@ -177,7 +179,7 @@ inline std::string spdk_perf_line(reads_plan_t const& plan, util::u64_t read_byt
                        threads - 1, pcie_keys, parsed.location, name_space);
 }
 
-/** Runs the engine reads benchmark over the flags in @p argv. */
+/** Runs the queue reads benchmark over the flags in @p argv. */
 int bench_nvme_device_reads(int argc, char const* const* argv) {
     std::string_view monolith;
     count_t total_depth {.minimum = 0};
@@ -189,7 +191,7 @@ int bench_nvme_device_reads(int argc, char const* const* argv) {
     settings_t const settings = read_settings(
         argc, argv,
         "usearch_bench_nvme_device_reads --monolith <address> [--threads <count>] " //
-        "[--depth <reads>] [--filter <engines>]",
+        "[--depth <reads>] [--filter <queues>]",
         flags);
     if (monolith.empty()) return fmt::println(stderr, "--monolith is required"), 1;
     util::growing_buffer<util::byte_t> header_bytes {util::global_allocator};
@@ -206,10 +208,10 @@ int bench_nvme_device_reads(int argc, char const* const* argv) {
                1;
     std::string_view const location = monolith_address.location;
     std::string const character_address = character_sibling(monolith);
-    std::vector<engine_row_t> const engines =
+    std::vector<queue_row_t> const queues =
         util::names_transport_id(monolith)
-            ? std::vector<engine_row_t> {{"spdk", util::io_transport_t::linux_spdk_k, std::string {monolith}}}
-            : std::vector<engine_row_t> {{
+            ? std::vector<queue_row_t> {{"spdk", util::io_transport_t::linux_spdk_k, std::string {monolith}}}
+            : std::vector<queue_row_t> {{
                   {"blocking", util::io_transport_t::blocking_k, std::string {monolith}},
                   {"aio", util::io_transport_t::linux_aio_k, std::string {monolith}},
                   {"uring", util::io_transport_t::linux_uring_k, std::string {monolith}},
@@ -223,15 +225,15 @@ int bench_nvme_device_reads(int argc, char const* const* argv) {
     util::u64_t memory_limit = 0;
     if (memory_cap) std::from_chars(memory_cap->data(), memory_cap->data() + memory_cap->size(), memory_limit);
 
-    for (engine_row_t const& engine : engines) {
-        if (!settings.regex_filter.selects(engine.name)) continue;
-        if (engine.address.empty()) {
-            fmt::println("- {}: skipped, {} has no generic character node", engine.name, location);
+    for (queue_row_t const& queue : queues) {
+        if (!settings.regex_filter.selects(queue.name)) continue;
+        if (queue.address.empty()) {
+            fmt::println("- {}: skipped, {} has no generic character node", queue.name, location);
             continue;
         }
         std::array<nvme_executor_t::medium_t, 1> media;
         nvme_executor_t executor;
-        // SPDK holds go back explicitly, so every way out of this engine's row releases them.
+        // SPDK holds go back explicitly, so every way out of this queue's row releases them.
         struct holds_t {
             std::array<nvme_executor_t::medium_t, 1>& media;
             nvme_executor_t& executor;
@@ -240,50 +242,55 @@ int bench_nvme_device_reads(int argc, char const* const* argv) {
                 release_medium<fu::standard_yield_t>(media[0]);
             }
         } const holds {media, executor};
-        util::io_engine_config_t config;
-        config.transport = engine.transport;
+        util::io_queue_config_t config;
+        config.transport = queue.transport;
         util::status_t open_status = util::status_code_t::success_k;
 #if USEARCH_WITH_LINUX_SPDK
-        if (engine.transport == io_transport_t::linux_spdk_k) {
-            auto [name_space, spdk_status] = spdk_medium_t::open<fu::standard_yield_t>(engine.address);
+        if (queue.transport == io_transport_t::linux_spdk_k) {
+            auto [name_space, spdk_status] = spdk_medium_t::open<fu::standard_yield_t>(queue.address);
             media[0] = nvme_executor_t::medium_t {std::move(name_space)}, open_status = spdk_status;
         }
         else
 #endif
         {
-            auto [file, file_status] = util::file_medium_t::open(engine.address);
+            auto [file, file_status] = util::file_medium_t::open(queue.address);
             media[0] = nvme_executor_t::medium_t {std::move(file)}, open_status = file_status;
         }
         if (failed(open_status)) {
-            fmt::println("- {}: skipped, {} does not open: {}", engine.name, engine.address,
+            fmt::println("- {}: skipped, {} does not open: {}", queue.name, queue.address,
                          status_to_string(open_status));
             continue;
         }
+        auto const [identity, identity_status] = util::media_identity_from_entropy();
+        if (failed(identity_status))
+            return fmt::println(stderr, "The system refused entropy: {}", status_to_string(identity_status)), 1;
+        util::media_list_key_t const media_list_key {identity, 0};
+        // Rings poll from creation when the medium does, since they keep their polling for life.
+        config.polling = nvme_polling<nvme_executor_t::medium_t>(media);
         auto [spawned, spawn_status] = nvme_executor_t::spawn(topology, settings.threads.value, config);
         if (failed(spawn_status)) {
-            fmt::println("- {}: skipped, the engine does not open: {}", engine.name, status_to_string(spawn_status));
+            fmt::println("- {}: skipped, the queue does not open: {}", queue.name, status_to_string(spawn_status));
             continue;
         }
         executor = std::move(spawned);
         std::size_t const threads = executor.size();
-        auto const [engine_address, engine_address_status] = util::parse_file_address(engine.address);
-        if (failed(engine_address_status)) {
-            fmt::println("- {}: skipped, {} is no address: {}", engine.name, engine.address,
-                         status_to_string(engine_address_status));
+        auto const [queue_address, queue_address_status] = util::parse_file_address(queue.address);
+        if (failed(queue_address_status)) {
+            fmt::println("- {}: skipped, {} is no address: {}", queue.name, queue.address,
+                         status_to_string(queue_address_status));
             continue;
         }
-        std::string_view const engine_location = engine_address.location;
+        std::string_view const queue_location = queue_address.location;
         // A pinned total splits evenly over the threads, as fio's iodepth times numjobs does.
         std::size_t const depth = total_depth.value ? total_depth.value / threads
                                                     : nvme_queue_depth<nvme_executor_t::medium_t>(media, threads);
         util::io_device_queues_t const queues = device_queues_of(media[0]);
         if (!depth)
             return fmt::println(stderr, "{} has no block queue to derive a depth from, and no --depth of {} or more",
-                                engine.address, threads),
+                                queue.address, threads),
                    1;
-        fmt::println("- {}: {} threads · {} reads deep each, {} tags over {} hardware queues · {}", engine.name,
-                     threads, depth, queues.tags, queues.hardware_queues,
-                     reads_directly(media[0]) ? "direct" : "buffered");
+        fmt::println("- {}: {} threads · {} reads deep each, {} tags over {} hardware queues · {}", queue.name, threads,
+                     depth, queues.tags, queues.hardware_queues, reads_directly(media[0]) ? "direct" : "buffered");
 
         util::u64_t const block_bytes = block_bytes_of(media[0]);
         util::u64_t const column_base = byte_base_of(media[0]) + header.data_offset;
@@ -315,29 +322,29 @@ int bench_nvme_device_reads(int argc, char const* const* argv) {
             util::u64_t const stride = util::round_up_to_multiple<util::u64_t>(plan.buffer_bytes, util::io_alignment_k);
             util::u64_t const needed = plan.reads * sizeof(util::u64_t) + threads * plan.depth * stride;
             if (memory_limit && needed > memory_limit) {
-                fmt::println(stderr, "{} {} reads need {} bytes past the cgroup's memory.max of {}", engine.name,
+                fmt::println(stderr, "{} {} reads need {} bytes past the cgroup's memory.max of {}", queue.name,
                              column.name, needed, memory_limit);
                 return 1;
             }
             std::vector<util::u64_t> latencies(plan.reads), moved(threads);
             std::vector<util::status_t> statuses(threads, util::status_code_t::success_k);
             std::chrono::steady_clock::time_point const started = std::chrono::steady_clock::now();
-            util::status_t const ran = engine_reads(executor, media, plan, latencies, moved, statuses);
+            util::status_t const ran = queue_reads(executor, media, media_list_key, plan, latencies, moved, statuses);
             double const seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
             for (util::status_t const status : statuses)
                 if (failed(status))
-                    return fmt::println(stderr, "{} reads failed: {}", engine.name, status_to_string(status)), 1;
-            if (failed(ran)) return fmt::println(stderr, "{} reads failed: {}", engine.name, status_to_string(ran)), 1;
+                    return fmt::println(stderr, "{} reads failed: {}", queue.name, status_to_string(status)), 1;
+            if (failed(ran)) return fmt::println(stderr, "{} reads failed: {}", queue.name, status_to_string(ran)), 1;
             util::u64_t bytes = 0;
             for (util::u64_t const thread_bytes : moved) bytes += thread_bytes;
             fmt::println("  {} rows of {} B: {} B reads · {:.0f} IOPS · {:.2f} GB/s · p50 {:.0f} µs · p99 {:.0f} µs",
                          column.name, plan.row_bytes, column.read_bytes, static_cast<double>(plan.reads) / seconds,
                          static_cast<double>(bytes) / seconds / 1e9, percentile(latencies, 0.50) / 1e3,
                          percentile(latencies, 0.99) / 1e3);
-            fmt::println("  {}", engine.transport == util::io_transport_t::linux_spdk_k
-                                     ? spdk_perf_line(plan, column.read_bytes, threads, engine_address)
-                                     : fio_line(engine, plan, column.read_bytes, threads, engine_location,
-                                                nvme_reaping<nvme_executor_t::medium_t>(media)));
+            fmt::println("  {}", queue.transport == util::io_transport_t::linux_spdk_k
+                                     ? spdk_perf_line(plan, column.read_bytes, threads, queue_address)
+                                     : fio_line(queue, plan, column.read_bytes, threads, queue_location,
+                                                nvme_polling<nvme_executor_t::medium_t>(media)));
         }
     }
     return 0;

@@ -51,9 +51,9 @@
 #define key(shard, id) (3 + (shard) * 2 + (id))
 #define map_slot(shard, position) (7 + (shard) * 2 + (position))
 
-// The values a key slot carries: unset, or the key of the thread that placed the row. A map slot
-// is the key beside its node in one word, published with one release: its tag's ordering against
-// its slot is `ram_tables.pml`'s concern.
+/** The values a key slot holds: unset, or the key of the thread that placed the row. A map slot
+ *  is the key beside its node in one word, published with one release: its tag's ordering against
+ *  its slot is @c ram_tables.pml 's concern. */
 #define unset 0
 #define key_of(thread) (10 + (thread))
 #define empty 0
@@ -102,7 +102,8 @@
 #define reopen_in_reverse true
 #endif
 
-// the word's step after the turns: the counted word's carry into its high part, or the parity's
+/** The word's step after the turns: the counted word's overflow into its high part, or the
+ *  parity's. */
 #define sequence_unit (sequence == counted -> 4 : 2)
 
 byte dispensed[shards];              // each shard's `next_dispensed_id_`, a ghost, since no plan reads it

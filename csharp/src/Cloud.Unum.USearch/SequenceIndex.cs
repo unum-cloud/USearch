@@ -201,7 +201,7 @@ public sealed unsafe class SequenceIndex : IDisposable
 
     private SequenceIndex(NativeSequenceIndexHandle handle) => this._handle = handle;
 
-    /// <summary>The engine handle the verbs lease.</summary>
+    /// <summary>The engine handle the verbs reference.</summary>
     internal NativeSequenceIndexHandle Handle => this._handle;
 
     /// <summary>Creates an empty, mutable sequence index in host memory. Calls
@@ -287,7 +287,7 @@ public sealed unsafe class SequenceIndex : IDisposable
         ulong valuesPerKey = 0, Executor? executor = null, CPUClass? cpuClassCeiling = null)
     {
         byte[] encoded = Encoding.UTF8.GetBytes(path);
-        using Lease pool = Lease.Of(executor?.Handle, "executor");
+        using HandleReference pool = HandleReference.Of(executor?.Handle, "executor");
         IntPtr created = IntPtr.Zero;
         NativeOutcome outcome = default;
         NativeSequenceWeights lowered = default;
@@ -297,7 +297,7 @@ public sealed unsafe class SequenceIndex : IDisposable
         {
             NativeSequenceLoadRam arguments = new()
             {
-                Index = &created, Executor = pool.Pointer, Outcome = &outcome, Path = Borrow(data, encoded.Length),
+                Index = &created, Executor = pool.Pointer, Outcome = &outcome, Path = View(data, encoded.Length),
                 Ram = new NativeRamOptions
                 {
                     MemoryDomains = (IntPtr)domains, MemoryDomainsCount = (nuint)memoryDomains.Length,
@@ -325,7 +325,7 @@ public sealed unsafe class SequenceIndex : IDisposable
         Executor? executor = null, GPUClass? gpuClassCeiling = null)
     {
         byte[] encoded = Encoding.UTF8.GetBytes(path);
-        using Lease pool = Lease.Of(executor?.Handle, "executor");
+        using HandleReference pool = HandleReference.Of(executor?.Handle, "executor");
         IntPtr created = IntPtr.Zero;
         NativeOutcome outcome = default;
         NativeSequenceWeights lowered = default;
@@ -335,7 +335,7 @@ public sealed unsafe class SequenceIndex : IDisposable
         {
             NativeSequenceLoadVram arguments = new()
             {
-                Index = &created, Executor = pool.Pointer, Outcome = &outcome, Path = Borrow(data, encoded.Length),
+                Index = &created, Executor = pool.Pointer, Outcome = &outcome, Path = View(data, encoded.Length),
                 Vram = new NativeVramOptions
                 {
                     Devices = (IntPtr)ordinals, DevicesCount = (nuint)devices.Length,
@@ -362,7 +362,7 @@ public sealed unsafe class SequenceIndex : IDisposable
         ReadOnlySpan<byte> buffer, SequenceWeights? weights = null, ReadOnlySpan<int> memoryDomains = default,
         ulong valuesPerKey = 0, Executor? executor = null, CPUClass? cpuClassCeiling = null)
     {
-        using Lease pool = Lease.Of(executor?.Handle, "executor");
+        using HandleReference pool = HandleReference.Of(executor?.Handle, "executor");
         IntPtr created = IntPtr.Zero;
         NativeOutcome outcome = default;
         NativeSequenceWeights lowered = default;
@@ -372,7 +372,7 @@ public sealed unsafe class SequenceIndex : IDisposable
         {
             NativeSequenceLoadRamBuffer arguments = new()
             {
-                Index = &created, Executor = pool.Pointer, Outcome = &outcome, Buffer = Borrow(source, buffer.Length),
+                Index = &created, Executor = pool.Pointer, Outcome = &outcome, Buffer = View(source, buffer.Length),
                 Ram = new NativeRamOptions
                 {
                     MemoryDomains = (IntPtr)domains, MemoryDomainsCount = (nuint)memoryDomains.Length,
@@ -399,7 +399,7 @@ public sealed unsafe class SequenceIndex : IDisposable
         ReadOnlySpan<byte> buffer, SequenceWeights? weights = null, ReadOnlySpan<int> devices = default,
         ulong valuesPerKey = 0, Executor? executor = null, GPUClass? gpuClassCeiling = null)
     {
-        using Lease pool = Lease.Of(executor?.Handle, "executor");
+        using HandleReference pool = HandleReference.Of(executor?.Handle, "executor");
         IntPtr created = IntPtr.Zero;
         NativeOutcome outcome = default;
         NativeSequenceWeights lowered = default;
@@ -409,7 +409,7 @@ public sealed unsafe class SequenceIndex : IDisposable
         {
             NativeSequenceLoadVramBuffer arguments = new()
             {
-                Index = &created, Executor = pool.Pointer, Outcome = &outcome, Buffer = Borrow(source, buffer.Length),
+                Index = &created, Executor = pool.Pointer, Outcome = &outcome, Buffer = View(source, buffer.Length),
                 Vram = new NativeVramOptions
                 {
                     Devices = (IntPtr)ordinals, DevicesCount = (nuint)devices.Length,
@@ -444,7 +444,7 @@ public sealed unsafe class SequenceIndex : IDisposable
         {
             NativeSequenceViewRam arguments = new()
             {
-                Index = &created, Outcome = &outcome, Path = Borrow(data, encoded.Length),
+                Index = &created, Outcome = &outcome, Path = View(data, encoded.Length),
                 Weights = SequenceWeights.Lower(weights, matrix, &lowered),
                 Ram = new NativeRamOptions
                 {
@@ -473,7 +473,7 @@ public sealed unsafe class SequenceIndex : IDisposable
         CPUClass? cpuClassCeiling = null)
     {
         byte[] encoded = Encoding.UTF8.GetBytes(path);
-        using Lease pool = Lease.Of(executor?.Handle, "executor");
+        using HandleReference pool = HandleReference.Of(executor?.Handle, "executor");
         IntPtr created = IntPtr.Zero;
         NativeOutcome outcome = default;
         NativeSequenceWeights lowered = default;
@@ -485,7 +485,7 @@ public sealed unsafe class SequenceIndex : IDisposable
             {
                 NativeSequenceViewNvme arguments = new()
                 {
-                    Index = &created, Executor = pool.Pointer, Outcome = &outcome, Path = Borrow(data, encoded.Length),
+                    Index = &created, Executor = pool.Pointer, Outcome = &outcome, Path = View(data, encoded.Length),
                     Nvme = new NativeNvmeOptions
                     {
                         Paths = (IntPtr)views, PathsCount = (nuint)paths.Length,
@@ -512,14 +512,14 @@ public sealed unsafe class SequenceIndex : IDisposable
     public static SequenceMetadata MetadataRead(string path, Executor? executor = null)
     {
         byte[] encoded = Encoding.UTF8.GetBytes(path);
-        using Lease pool = Lease.Of(executor?.Handle, "executor");
+        using HandleReference pool = HandleReference.Of(executor?.Handle, "executor");
         NativeSequenceMetadata lowered = default;
         NativeOutcome outcome = default;
         fixed (byte* data = encoded)
         {
             NativeSequenceMetadataRead arguments = new()
             {
-                Executor = pool.Pointer, Outcome = &outcome, Path = Borrow(data, encoded.Length), Metadata = &lowered,
+                Executor = pool.Pointer, Outcome = &outcome, Path = View(data, encoded.Length), Metadata = &lowered,
             };
             usearch_sequence_metadata_read(&arguments);
         }
@@ -535,14 +535,14 @@ public sealed unsafe class SequenceIndex : IDisposable
     /// <returns>What the checkpoint froze.</returns>
     public static SequenceMetadata MetadataReadBuffer(ReadOnlySpan<byte> buffer, Executor? executor = null)
     {
-        using Lease pool = Lease.Of(executor?.Handle, "executor");
+        using HandleReference pool = HandleReference.Of(executor?.Handle, "executor");
         NativeSequenceMetadata lowered = default;
         NativeOutcome outcome = default;
         fixed (byte* source = buffer)
         {
             NativeSequenceMetadataReadBuffer arguments = new()
             {
-                Executor = pool.Pointer, Outcome = &outcome, Buffer = Borrow(source, buffer.Length),
+                Executor = pool.Pointer, Outcome = &outcome, Buffer = View(source, buffer.Length),
                 Metadata = &lowered,
             };
             usearch_sequence_metadata_read_buffer(&arguments);
@@ -632,14 +632,17 @@ public sealed unsafe class SequenceIndex : IDisposable
     public Monolith SaveBuffer(Arena arena, Progress? progress = null) =>
         new SequenceIndexOn(this, null).SaveBuffer(arena, progress);
 
-    /// <inheritdoc cref="SequenceIndexOn.Cursor"/>
-    public SequenceCursor Cursor(ReadOnlySpan<Key> starts = default) => new SequenceIndexOn(this, null).Cursor(starts);
+    /// <summary>Opens a snapshot cursor over the current contents, pulled on the caller's thread or
+    /// through <see cref="SequenceCursor.On"/>. Calls <c>usearch_sequence_cursor_init</c>.</summary>
+    /// <param name="starts">The keys to walk from breadth-first; empty yields every entry as stored.</param>
+    /// <returns>The cursor, which keeps the index alive until disposed.</returns>
+    public SequenceCursor Cursor(ReadOnlySpan<Key> starts = default) => SequenceCursor.Open(this.Handle, starts);
 
     /// <summary>Releases the index, once every deferred call naming it is final. Calls
     /// <c>usearch_sequence_free</c>.</summary>
     public void Dispose() => this._handle.Dispose();
 
-    private static NativeBytesView Borrow(byte* data, int length) =>
+    private static NativeBytesView View(byte* data, int length) =>
         new() { Data = (IntPtr)data, Length = (nuint)length };
 }
 
@@ -804,12 +807,6 @@ public readonly unsafe struct SequenceIndexOn
     /// <returns>The checkpoint, readable until the arena's next call.</returns>
     public Monolith SaveBuffer(Arena arena, Progress? progress = null) =>
         Calls.Block(new SequenceSaveBufferCall(this.Handles, arena, progress)).Result;
-
-    /// <summary>Opens a snapshot cursor over the current contents, pulled on the receiver's thread or
-    /// executor. Calls <c>usearch_sequence_cursor_init</c>.</summary>
-    /// <param name="starts">The keys to walk from breadth-first; empty yields every entry as stored.</param>
-    /// <returns>The cursor, which keeps the index alive until disposed.</returns>
-    public SequenceCursor Cursor(ReadOnlySpan<Key> starts = default) => SequenceCursor.Open(this.Handles, starts);
 }
 
 /// <summary>A sequence index bound to the executor its verbs submit to, as <c>index.Deferred(executor)</c>
@@ -929,27 +926,18 @@ public sealed unsafe class SequenceReshardPlan
 }
 
 /// <summary>A snapshot cursor over a sequence index, yielding each entry's key with the keys it links
-/// to; the sequences come from <see cref="SequenceIndex.Get"/>. It keeps the index and the executor it
-/// pulls on alive until disposed.</summary>
+/// to; the sequences come from <see cref="SequenceIndex.Get"/>. It keeps the index alive until disposed
+/// and no executor: its pulls run on the caller's thread, or block on the executor <see cref="On"/>
+/// names for each.</summary>
 public sealed unsafe class SequenceCursor : IDisposable
 {
     private readonly NativeSequenceCursorHandle _handle;
 
     private SequenceCursor(NativeSequenceCursorHandle handle) => this._handle = handle;
 
-    internal static SequenceCursor Open(CallHandles handles, ReadOnlySpan<Key> starts)
+    internal static SequenceCursor Open(EngineHandle index, ReadOnlySpan<Key> starts)
     {
-        Lease held = handles.LendIndex();
-        Lease pool;
-        try
-        {
-            pool = handles.LendExecutor();
-        }
-        catch
-        {
-            held.Dispose();
-            throw;
-        }
+        HandleReference held = HandleReference.Of(index, "index");
 
         IntPtr created = IntPtr.Zero;
         NativeOutcome outcome = default;
@@ -966,11 +954,10 @@ public sealed unsafe class SequenceCursor : IDisposable
         if (outcome.Status != Status.Success)
         {
             held.Dispose();
-            pool.Dispose();
             outcome.ThrowIfFailed();
         }
 
-        return new SequenceCursor(new NativeSequenceCursorHandle(created, held, pool));
+        return new SequenceCursor(new NativeSequenceCursorHandle(created, held));
     }
 
     /// <summary>Copies the next batch of entries into an arena, the keys always and the keys each links
@@ -979,29 +966,55 @@ public sealed unsafe class SequenceCursor : IDisposable
     /// <param name="arena">Where the batch lands, rewound by the pull.</param>
     /// <param name="links">Whether to export the keys each entry links to.</param>
     /// <returns>The batch, empty once the snapshot is exhausted.</returns>
-    public DenseBatch Next(int wanted, Arena arena, bool links = false)
+    public DenseBatch Next(int wanted, Arena arena, bool links = false) => this.Pull(null, wanted, arena, links);
+
+    /// <summary>The receiver whose pulls block on <paramref name="executor"/>, named again for every pull.</summary>
+    /// <param name="executor">The executor every pull through the receiver runs on.</param>
+    /// <returns>The receiver, which offers the same pulls.</returns>
+    public SequenceCursorOn On(Executor executor) => new(this, executor);
+
+    /// <summary>One pull on <paramref name="executor"/>, or the caller's thread when null.</summary>
+    internal DenseBatch Pull(Executor? executor, int wanted, Arena arena, bool links)
     {
         nuint bound = Calls.Bound(wanted);
-        using Lease cursor = Lease.Of(this._handle, "cursor");
-        using Lease lent = Arena.Lend(arena);
+        using HandleReference cursor = HandleReference.Of(this._handle, "cursor");
+        using HandleReference passed = Arena.Reference(arena);
+        using HandleReference pool = HandleReference.Of(executor?.Handle, "executor");
         nuint written = 0;
         NativeOutcome outcome = default;
         NativeKeysView keys = default;
         NativeKeysTapeView linked = default;
         NativeSequenceCursorNext arguments = new()
         {
-            Index = this._handle.Index, Executor = this._handle.Executor, Outcome = &outcome,
+            Index = this._handle.Index, Executor = pool.Pointer, Outcome = &outcome,
             Cursor = cursor.Pointer, Keys = &keys, Links = links ? &linked : null, Written = &written,
-            Arena = lent.Pointer, Wanted = bound,
+            Arena = passed.Pointer, Wanted = bound,
         };
         usearch_sequence_cursor_next(&arguments);
         outcome.ThrowIfFailed();
         return new DenseBatch(keys, linked, links, (int)written);
     }
 
-    /// <summary>Releases the cursor, then the index and executor it kept alive. Calls
+    /// <summary>Releases the cursor, then the index it kept alive. Calls
     /// <c>usearch_sequence_cursor_free</c>.</summary>
     public void Dispose() => this._handle.Dispose();
+}
+
+/// <summary>A cursor's pulls blocking on one executor, as <see cref="SequenceCursor.On"/> makes them.</summary>
+public readonly struct SequenceCursorOn
+{
+    private readonly SequenceCursor _cursor;
+    private readonly Executor _executor;
+
+    internal SequenceCursorOn(SequenceCursor cursor, Executor executor)
+    {
+        this._cursor = cursor;
+        this._executor = executor;
+    }
+
+    /// <inheritdoc cref="SequenceCursor.Next"/>
+    public DenseBatch Next(int wanted, Arena arena, bool links = false) =>
+        this._cursor.Pull(this._executor, wanted, arena, links);
 }
 
 #endregion Index
@@ -1013,8 +1026,8 @@ internal unsafe struct SequenceReserveCall(CallHandles handles, ulong entries, u
 {
     public readonly void Submit(CallOutputs* outputs, Completion completion)
     {
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
         NativeSequenceReserve arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
@@ -1033,8 +1046,8 @@ internal unsafe struct SequenceClearCall(CallHandles handles) : ICall
 {
     public readonly void Submit(CallOutputs* outputs, Completion completion)
     {
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
         NativeSequenceClear arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
@@ -1054,8 +1067,8 @@ internal unsafe struct SequenceDescribeCall(CallHandles handles) : ICall<Sequenc
 
     public readonly void Submit(CallOutputs* outputs, Completion completion)
     {
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
         NativeSequenceDescribe arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
@@ -1088,8 +1101,8 @@ internal unsafe struct SequenceCountCall(CallHandles handles, Key key) : ICall<S
 
     public readonly void Submit(CallOutputs* outputs, Completion completion)
     {
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
         NativeSequenceCount arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
@@ -1115,13 +1128,13 @@ internal unsafe struct SequenceGetCall(CallHandles handles, Key key, Arena arena
 
     public readonly void Submit(CallOutputs* outputs, Completion completion)
     {
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
-        using Lease lent = Arena.Lend(arena);
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
+        using HandleReference passed = Arena.Reference(arena);
         NativeSequenceGet arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
-            Key = key, Sequences = (NativeTapeView*)outputs->View, Written = &outputs->Written, Arena = lent.Pointer,
+            Key = key, Sequences = (NativeTapeView*)outputs->View, Written = &outputs->Written, Arena = passed.Pointer,
         };
         usearch_sequence_get(&arguments);
     }
@@ -1157,8 +1170,8 @@ internal unsafe struct SequenceInsertCall(
         this._keys = keys.Pin();
         this._elements = sequences.PinElements();
         this._offsets = sequences.PinOffsets();
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
         NativeSequenceInsert arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
@@ -1197,8 +1210,8 @@ internal unsafe struct SequenceRefineCall(
 
     public void Submit(CallOutputs* outputs, Completion completion)
     {
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
         NativeSequenceRefine arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
@@ -1228,8 +1241,8 @@ internal unsafe struct SequenceRefinePlanFinishCall(CallHandles handles, Sequenc
 
     public readonly void Submit(CallOutputs* outputs, Completion completion)
     {
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
         NativeSequenceRefinePlanFinish arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
@@ -1255,8 +1268,8 @@ internal unsafe struct SequenceHealthCall(CallHandles handles) : ICall<DenseReac
 
     public readonly void Submit(CallOutputs* outputs, Completion completion)
     {
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
         NativeSequenceHealth arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
@@ -1291,14 +1304,14 @@ internal unsafe struct SequenceSearchCall(
         nuint bound = Calls.Bound(wanted);
         this._elements = queries.PinElements();
         this._offsets = queries.PinOffsets();
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
-        using Lease lent = Arena.Lend(arena);
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
+        using HandleReference passed = Arena.Reference(arena);
         NativeSequenceSearch arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
             Count = (nuint)queries.Count, Queries = queries.AsView(this._elements.Pointer, this._offsets.Pointer),
-            Matches = (NativeMatchesView*)outputs->View, Arena = lent.Pointer, Wanted = bound,
+            Matches = (NativeMatchesView*)outputs->View, Arena = passed.Pointer, Wanted = bound,
             ExpansionFactor = (nuint)expansionFactor, Traversal = traversal,
             Predicate = this._predicate.Predicate(predicate), Progress = this._progress.Progress(progress),
             Stats = (NativeDenseTraversalStats*)outputs->Report,
@@ -1328,7 +1341,7 @@ internal unsafe struct SequenceReshardCall(
     ulong memoryLimit, DenseTraversalStats? stats, Progress? progress, SequenceReshardPlan? plan)
     : ICall<RefineReport>
 {
-    private readonly Lease[] _leases = new Lease[sources.Length + targets.Length];
+    private readonly HandleReference[] _references = new HandleReference[sources.Length + targets.Length];
     private readonly IntPtr[] _slots = new IntPtr[sources.Length + targets.Length];
     private MemoryHandle _pinnedSlots;
     private Registration _progress;
@@ -1340,13 +1353,13 @@ internal unsafe struct SequenceReshardCall(
         for (int position = 0; position < this._slots.Length; position++)
         {
             SequenceIndex named = position < sources.Length ? sources[position] : targets[position - sources.Length];
-            this._leases[position] = Lease.Of(named?.Handle, "index");
-            this._slots[position] = this._leases[position].Pointer;
+            this._references[position] = HandleReference.Of(named?.Handle, "index");
+            this._slots[position] = this._references[position].Pointer;
         }
 
         this._pinnedSlots = this._slots.AsMemory().Pin();
         IntPtr* slots = (IntPtr*)this._pinnedSlots.Pointer;
-        using Lease executor = handles.LendExecutor();
+        using HandleReference executor = handles.ReferenceExecutor();
         NativeSequenceReshard arguments = new()
         {
             SourcesCount = (nuint)sources.Length, Sources = slots, TargetsCount = (nuint)targets.Length,
@@ -1362,9 +1375,9 @@ internal unsafe struct SequenceReshardCall(
 
     public void Release(CallOutputs* outputs)
     {
-        for (int position = 0; position < this._leases.Length; position++)
+        for (int position = 0; position < this._references.Length; position++)
         {
-            this._leases[position].Dispose();
+            this._references[position].Dispose();
         }
 
         this._pinnedSlots.Dispose();
@@ -1387,7 +1400,7 @@ internal unsafe struct SequenceReshardPlanFinishCall(CallHandles handles, Sequen
 
     public readonly void Submit(CallOutputs* outputs, Completion completion)
     {
-        using Lease executor = handles.LendExecutor();
+        using HandleReference executor = handles.ReferenceExecutor();
         NativeSequenceReshardPlanFinish arguments = new()
         {
             Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
@@ -1432,9 +1445,9 @@ internal unsafe struct SequenceSampleCall(CallHandles handles, int wanted, Arena
         this._shown = shown.Pin();
         this._shownCoordinates = shownCoordinates.Pin();
         this._focus = focus.Pin();
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
-        using Lease lent = Arena.Lend(arena);
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
+        using HandleReference passed = Arena.Reference(arena);
         NativeSequenceSample arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
@@ -1449,7 +1462,7 @@ internal unsafe struct SequenceSampleCall(CallHandles handles, int wanted, Arena
             Focus = new NativeKeysView { Data = (IntPtr)this._focus.Pointer, Stride = (nuint)sizeof(Key) },
             Keys = &reports->Keys, EntryOrdinals = &reports->EntryOrdinals,
             Parents = (NativeMatchesView*)outputs->View, Coordinates = &reports->Coordinates,
-            Written = &outputs->Written, Arena = lent.Pointer, Wanted = bound, Seed = config.Seed,
+            Written = &outputs->Written, Arena = passed.Pointer, Wanted = bound, Seed = config.Seed,
             ExpansionFactor = (nuint)config.ExpansionFactor, Progress = this._progress.Progress(config.Progress),
             Stats = &reports->Stats,
         };
@@ -1485,8 +1498,8 @@ internal unsafe struct SequenceSaveCall(CallHandles handles, string path, Progre
     public void Submit(CallOutputs* outputs, Completion completion)
     {
         this._pinnedPath = this._path.AsMemory().Pin();
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
         NativeSequenceSave arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
@@ -1514,13 +1527,13 @@ internal unsafe struct SequenceSaveBufferCall(CallHandles handles, Arena arena, 
 
     public void Submit(CallOutputs* outputs, Completion completion)
     {
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
-        using Lease lent = Arena.Lend(arena);
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
+        using HandleReference passed = Arena.Reference(arena);
         NativeSequenceSaveBuffer arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
-            Monolith = (NativeBytesView*)outputs->View, Arena = lent.Pointer,
+            Monolith = (NativeBytesView*)outputs->View, Arena = passed.Pointer,
             Progress = this._progress.Progress(progress),
         };
         usearch_sequence_save_buffer(&arguments);
@@ -1827,6 +1840,7 @@ internal unsafe struct NativeSequenceReshardPlanFinish
 internal unsafe struct NativeSequenceCursorInit
 {
     public IntPtr Index;
+    public IntPtr Executor;
     public NativeOutcome* Outcome;
     public nuint StartsCount;
     public Key* Starts;
@@ -2073,32 +2087,26 @@ internal sealed class NativeSequenceIndexHandle : EngineHandle
     }
 }
 
-/// <summary>A <c>usearch_sequence_cursor_t</c> and the leases on the index and executor every pull
-/// names, all released when the wrapper is disposed or collected.</summary>
+/// <summary>A <c>usearch_sequence_cursor_t</c> and the reference on the index every pull names, both
+/// released when the wrapper is disposed or collected.</summary>
 internal sealed class NativeSequenceCursorHandle : EngineHandle
 {
-    private Lease _index;
-    private Lease _executor;
+    private HandleReference _index;
 
-    internal NativeSequenceCursorHandle(IntPtr cursor, Lease index, Lease executor)
+    internal NativeSequenceCursorHandle(IntPtr cursor, HandleReference index)
     {
         this.SetHandle(cursor);
         this._index = index;
-        this._executor = executor;
     }
 
     /// <summary>The index the cursor was opened on.</summary>
     internal IntPtr Index => this._index.Pointer;
-
-    /// <summary>The executor every pull runs on, null for the caller's thread.</summary>
-    internal IntPtr Executor => this._executor.Pointer;
 
     /// <inheritdoc/>
     protected override bool ReleaseHandle()
     {
         NativeMethods.usearch_sequence_cursor_free(this.handle);
         this._index.Dispose();
-        this._executor.Dispose();
         return true;
     }
 }

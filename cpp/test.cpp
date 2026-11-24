@@ -545,6 +545,57 @@ struct cancel_at_first_t {
     usearch_continuation_t operator()(std::size_t, std::size_t) noexcept { return usearch_cancel_k; }
 };
 
+/** A predicate counting the keys it is asked about, which only one thread could call safely, as a
+ *  @c mutable lambda would. */
+struct counting_predicate_t {
+    std::size_t asked = 0;
+    bool operator()(usearch_key_t) noexcept { return ++asked != 0; }
+};
+
+/** A predicate reading only what it was built with, safe on every executor thread at once. */
+struct reading_predicate_t {
+    std::size_t refused_first_byte = 0;
+    bool operator()(usearch_key_t key) const noexcept { return key.bytes[0] != refused_first_byte; }
+};
+
+static_assert(!us::key_predicate_handler<counting_predicate_t>, "a predicate runs on several threads at once");
+static_assert(us::key_predicate_handler<reading_predicate_t>);
+
+/** A batch predicate counting the batches it is asked about, as a @c mutable lambda would. */
+struct counting_batch_predicate_t {
+    std::size_t batches = 0;
+    void operator()(std::span<usearch_key_t const>, std::span<usearch_admission_t>) noexcept { ++batches; }
+};
+
+/** A batch predicate admitting every key, reading nothing it changes. */
+struct admitting_batch_predicate_t {
+    void operator()(std::span<usearch_key_t const>, std::span<usearch_admission_t> admissions) const noexcept {
+        for (usearch_admission_t& admission : admissions) admission = usearch_admit_k;
+    }
+};
+
+static_assert(!us::keys_predicate_handler<counting_batch_predicate_t>, "a predicate runs on several threads at once");
+static_assert(us::keys_predicate_handler<admitting_batch_predicate_t>);
+
+/** A terrain counting the tiles it fills, as a @c mutable lambda would. */
+struct counting_terrain_t {
+    std::size_t tiles = 0;
+    void operator()(std::size_t, std::size_t, std::size_t, std::size_t, float*, std::size_t) noexcept { ++tiles; }
+};
+
+/** A terrain filling every tile with sea level, rows @p heights_stride bytes apart. */
+struct flat_terrain_t {
+    void operator()(std::size_t, std::size_t, std::size_t rows, std::size_t columns, float* heights,
+                    std::size_t heights_stride) const noexcept {
+        for (std::size_t row = 0; row != rows; ++row)
+            std::fill_n(reinterpret_cast<float*>(reinterpret_cast<char*>(heights) + row * heights_stride), columns,
+                        0.f);
+    }
+};
+
+static_assert(!us::terrain_handler<counting_terrain_t>, "a terrain fills tiles on several threads at once");
+static_assert(us::terrain_handler<flat_terrain_t>);
+
 #pragma region Modality Fixtures
 
 /** The most entries a fixture holds, so its storage is a fixed array. */
@@ -1052,10 +1103,15 @@ static void test_arena_devices_and_version() {
     expect_true(!us::version_name().empty(), "The library must name its version");
 }
 
-/** The README's Quickstart finds both of its entries. */
-static void test_readme_quickstart() {
+/** The README's Quickstart finds both of its entries, skipping with the library's note in a build
+ *  that leaves its @c i8 index out. */
+static case_result_t test_readme_quickstart() {
+    auto [probe, probe_status] = us::dense_index_t::init_ram(
+        {.metric = usearch_dense_metric_angular_k, .quantization = usearch_scalar_i8_k, .dimensions = 4});
+    if (probe_status.code == us::status_code_t::unsupported_k) return case_result_t::skipped(probe_status.note);
     std::size_t found = 0;
     expect_true(quickstart(found) == 0 && found == 2, "The README's Quickstart must find both entries");
+    return {};
 }
 
 /** A fixed ring of posted polls, the loop a deferred call is awaited on, allocating nothing. */

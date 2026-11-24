@@ -804,8 +804,9 @@ inline bool metal_converged(constant metal_arguments_t& arguments, device uint c
 }
 
 /** A growth round's second pass, one thread per row: counts the rows proposed to each part, and
- *  empties the next frontier and the round's placed word for the passes after it, since the host
- *  writes nothing between the round's command buffers. */
+ *  empties the next frontier and the round's placed word for the passes after it, converged or not,
+ *  as the CUDA queue fills them before each round, since the host writes nothing between the
+ *  round's command buffers. */
 [[host_name("metal_partition_count_kernel")]] kernel void metal_partition_count_kernel(
     constant metal_arguments_t& arguments [[buffer(metal_arguments_buffer_k)]],
     device uint const* node_parts [[buffer(metal_node_parts_buffer_k)]],
@@ -814,9 +815,9 @@ inline bool metal_converged(constant metal_arguments_t& arguments, device uint c
     device atomic_uint* round_counts [[buffer(metal_round_counts_buffer_k)]],
     device uint* placed [[buffer(metal_placed_buffer_k)]], uint position [[thread_position_in_grid]],
     uint threads [[threads_per_grid]]) {
-    if (metal_converged(arguments, placed)) return;
     for (uint word = position; word < (arguments.end_id + 31) / 32; word += threads) next_frontier[word] = 0;
     if (position == 0) placed[arguments.round & 1u] = 0;
+    if (metal_converged(arguments, placed)) return;
     for (uint row = position; row < arguments.end_id; row += threads) {
         uint const proposal = proposals[row];
         if (proposal != metal_unknown_k)

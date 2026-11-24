@@ -97,7 +97,7 @@ decltype(auto) with_sequence_metric(sequence_geometry_t const& geometry,
  *  the dispatch unit. Checkpoints and refinements serve an index of one shard. */
 template <cpu_class_t cpu_class_>
 struct sequence_ram_variant {
-    using executor_t = util::forkunion_executor_t;
+    using executor_t = util::ram_executor_t;
     using cache_hints_t = typename cache_hints_for_cpu_class<cpu_class_>::type;
     using shard_t = us::sequence::ram_index<util::uuid128_t, util::u32_t, waiter_of<cpu_class_>,
                                             atomic_ref_for_cpu_class<cpu_class_>::template type,
@@ -291,7 +291,7 @@ template <cpu_class_t cpu_class_>
 struct sequence_nvme_variant {
     using executor_t = nvme_executor_t;
     using index_t = basic::nvme_indexes<us::sequence::codec_t, util::uuid128_t, util::u32_t, sz_size_t,
-                                        default_io_engine_t, row_kit_of<cpu_class_>,
+                                        default_io_queue_t, row_kit_of<cpu_class_>,
                                         atomic_ref_for_cpu_class<cpu_class_>::template type, waiter_of<cpu_class_>>;
     using cache_hints_t = typename cache_hints_for_cpu_class<cpu_class_>::type;
     static constexpr cpu_class_t cpu_class_k = cpu_class_;

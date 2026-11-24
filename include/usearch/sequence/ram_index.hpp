@@ -34,7 +34,7 @@
 
 #include <memory>      // `std::allocator`, `std::allocator_traits`
 #include <span>        // `std::span`, `std::as_bytes`
-#include <string_view> // `std::string_view` - a stored sequence, borrowed
+#include <string_view> // `std::string_view` - a stored sequence, viewed
 
 #include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the default reference
 
@@ -97,7 +97,7 @@ struct codec_t {
     /** What @ref view hands out for a stored sequence. */
     using view_t = std::string_view;
 
-    /** The string a stored @p sequence holds, borrowed. */
+    /** The string a stored @p sequence holds, viewed. */
     view_t view(bytes_view_t sequence) const noexcept { return chars_of(sequence); }
 };
 

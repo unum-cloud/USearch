@@ -10,7 +10,7 @@
  *  every ROCm device runs, @c cdna3 for @c v_dot4_i32_i8 and @c v_dot2_f32_f16, which MI400
  *  dropped, @c cdna4 for @c v_dot2_f32_bf16 and the OCP fp8 conversions, and @c cdna5 for
  *  @c v_dot4_i32_iu8. Every kit compiles in every unit, and its @c capability_k lists the classes
- *  it runs on, whose masks carry exactly the tiers they keep, so CDNA5 never picks a kit needing a
+ *  it runs on, whose masks hold exactly the tiers they keep, so CDNA5 never picks a kit needing a
  *  dot it dropped and only the picked kit's instructions are emitted. A ladder picks the first kit
  *  whose @c capability_k the class admits through @c highest_kit. MI300's fp8 conversions read the
  *  FNUZ encodings rather than the OCP ones the vectors matrix stores, so CDNA3 widens fp8 in
@@ -1112,7 +1112,7 @@ struct e4m3_cdna4_quads_kit_t {
 #pragma region Packed Nibbles
 
 /** Unpacks a word of eight signed nibbles into two byte-lane words, sign-extended through an
- *  xor-add-xor bias, since a word-wide subtraction would borrow across lanes. */
+ *  xor-add-xor bias, since a word-wide subtraction lets one lane's underflow reach the next. */
 __device__ __forceinline__ uint2 hip_unpack_i4x8_rocm(u32_t word) noexcept {
     u32_t const low = (((word & 0x0F0F0F0Fu) ^ 0x08080808u) + 0x78787878u) ^ 0x80808080u;
     u32_t const high = ((((word >> 4) & 0x0F0F0F0Fu) ^ 0x08080808u) + 0x78787878u) ^ 0x80808080u;
@@ -1700,11 +1700,10 @@ struct cdna4_lds_schedule_t {
 
 #pragma endregion Schedules
 
-#pragma region Ladders
-
-/*  A class's ceiling carries every older tier's bit, so each ladder lists the newest tier first.
+/*  A class's ceiling includes every older tier's bit, so each ladder lists the newest tier first.
  *  MI400 keeps the CDNA4 conversions but drops CDNA3's signed byte and half dots, and its unit
  *  compiles neither those nor CDNA4's brain-float dot, so its ladders fall past them. */
+#pragma region Ladders
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_rocm_k) != 0)

@@ -633,7 +633,7 @@ static napi_value usearch_js_index_insert(napi_env env, napi_callback_info info)
         usearch_js_call_abandon(&call->call, &local.call);
         return NULL;
     }
-    // The keys view carries no count, so only this side can see the two disagree; one key
+    // The keys view holds no count, so only this side can see the two disagree; one key
     // broadcasts.
     if (keys_count != insert.count && keys_count != 1) {
         usearch_js_call_abandon(&call->call, &local.call);
@@ -926,7 +926,7 @@ static napi_value usearch_js_index_sample(napi_env env, napi_callback_info info)
         usearch_js_call_abandon(&call->call, &local.call);
         return NULL;
     }
-    // The coordinates carry no count of their own, so only this side can see them disagree.
+    // The coordinates hold no count of their own, so only this side can see them disagree.
     if (placed != sample.shown_count) {
         usearch_js_call_abandon(&call->call, &local.call);
         usearch_js_throw(env, usearch_status_shape_mismatch_k, "The shown keys need one place apiece");
@@ -1233,7 +1233,7 @@ typedef struct usearch_js_value_rows_t {
     /** The caller's function, reachable for as long as the verb runs. */
     napi_value row_of;
 
-    /** The value rows, borrowed for the whole call. */
+    /** The value rows, viewed for the whole call. */
     usearch_rows_view_t values;
 
     /** Rows @c values holds, which bounds every row @c row_of answers. */
@@ -1328,7 +1328,7 @@ static napi_value usearch_js_finish_attend(napi_env env, usearch_js_call_t* call
  *      row per query in @p arena.
  *
  *  The @p carry is a @c Float32Array of two floats per query row - the largest logit and the
- *  partition taken against it - lent by the caller, since folding a second branch over the same
+ *  partition taken against it - passed by the caller, since folding a second branch over the same
  *  queries needs both, which is why they share a row rather than travelling apart. Every lookup
  *  re-enters JavaScript, which no executor thread may, so the verb takes no executor and no
  *  completion and runs on the calling thread.
@@ -1433,7 +1433,7 @@ usearch_js_walk_t* usearch_js_walk_self(napi_env env, napi_callback_info info, s
     }
     if (napi_get_reference_value(env, walk->index, &index_value) != napi_ok ||
         napi_unwrap(env, index_value, (void**)&wrapper) != napi_ok || !wrapper) {
-        usearch_js_throw(env, usearch_status_internal_k, "The index the walk borrows is missing");
+        usearch_js_throw(env, usearch_status_internal_k, "The index the walk views is missing");
         return NULL;
     }
     if (walk->executor && napi_get_reference_value(env, walk->executor, &executor_value) != napi_ok) {
@@ -1447,7 +1447,7 @@ usearch_js_walk_t* usearch_js_walk_self(napi_env env, napi_callback_info info, s
 
 /**
  *  @brief Wraps an engine walk into an object exposing @p next, @c free and @c [Symbol.dispose],
- *      holding the index the walk borrows and the executor every pull runs on.
+ *      holding the index the walk views and the executor every pull runs on.
  *  @return The object, or @c NULL with an exception pending and the walk released.
  */
 napi_value usearch_js_walk_object(napi_env env, void* handle, napi_value index, napi_value executor, napi_callback next,
@@ -1517,28 +1517,28 @@ napi_value usearch_js_finish_cursor_links(napi_env env, usearch_js_call_t* call,
     return batch;
 }
 
-/** @c next(wanted, arena, links) → @c {keys, entries, links}, the next batch viewed inside
- *  @p arena; @c links is present when the truthy flag asked for it, and zero entries mean the walk
- *  ended. */
+/** <tt>next(executor, wanted, arena, links)</tt> → @c {keys, entries, links}, the next batch viewed
+ *  inside @p arena, pulled on @p executor or the calling thread; @c links is present when the
+ *  truthy flag asked for it, and zero entries end the walk. */
 static napi_value usearch_js_cursor_next(napi_env env, napi_callback_info info) {
-    napi_value arguments[3];
+    napi_value arguments[4];
     usearch_dense_cursor_next_t next = {0};
     void* index = NULL;
-    usearch_js_walk_t* const walk = usearch_js_walk_self(env, info, 3, arguments, &index, &next.executor);
-    if (!walk) return NULL;
+    usearch_js_walk_t* const walk = usearch_js_walk_self(env, info, 4, arguments, &index, &next.executor);
+    if (!walk || !usearch_js_executor_from_value(env, arguments[0], &next.executor)) return NULL;
     next.index = index;
     usearch_js_index_call_t call;
     memset(&call, 0, sizeof(call));
     bool exports_links = false;
-    if (!usearch_js_value_absent(env, arguments[2]) &&
-        napi_get_value_bool(env, arguments[2], &exports_links) != napi_ok) {
+    if (!usearch_js_value_absent(env, arguments[3]) &&
+        napi_get_value_bool(env, arguments[3], &exports_links) != napi_ok) {
         usearch_js_throw_field(env, "links", "must be a boolean");
         return NULL;
     }
-    if (!usearch_js_size_from_value(env, arguments[0], "wanted", &next.wanted) ||
-        !usearch_js_arena_from_value(env, arguments[1], &next.arena))
+    if (!usearch_js_size_from_value(env, arguments[1], "wanted", &next.wanted) ||
+        !usearch_js_arena_from_value(env, arguments[2], &next.arena))
         return NULL;
-    napi_value const slots[usearch_js_slots_k] = {NULL, NULL, arguments[1]};
+    napi_value const slots[usearch_js_slots_k] = {NULL, NULL, arguments[2]};
     call.call.finish = exports_links ? usearch_js_finish_cursor_links : usearch_js_finish_cursor_keys;
     next.outcome = &call.call.outcome;
     next.cursor = (usearch_dense_cursor_t)walk->handle;
@@ -1599,27 +1599,26 @@ static napi_value usearch_js_search_stream_release(napi_env env, napi_callback_i
     return usearch_js_undefined(env);
 }
 
-/** @c cursor(executor, starts) → a walk over the entries published so far, pulling on @p executor;
+/** @c cursor(starts) → a walk over the entries published so far, keeping no executor;
  *  @p starts is absent for every entry as stored, else the keys to walk out from. */
 static napi_value usearch_js_index_cursor(napi_env env, napi_callback_info info) {
-    napi_value arguments[2], self = NULL;
-    usearch_js_index_t* const index = usearch_js_index_self(env, info, 2, arguments, &self);
-    usearch_executor_t executor = NULL;
+    napi_value arguments[1], self = NULL;
+    usearch_js_index_t* const index = usearch_js_index_self(env, info, 1, arguments, &self);
     usearch_dense_cursor_t handle = NULL;
     usearch_outcome_t outcome = {usearch_status_success_k, NULL};
     usearch_dense_cursor_init_t init = {.cursor = &handle, .outcome = &outcome};
     usearch_key_t* gathered = NULL;
-    if (!index || !usearch_js_executor_from_value(env, arguments[0], &executor)) return NULL;
-    if (!usearch_js_value_absent(env, arguments[1]) &&
-        !usearch_js_keys_from_value(env, arguments[1], "starts", &init.starts, &init.starts_count, &gathered))
+    if (!index) return NULL;
+    if (!usearch_js_value_absent(env, arguments[0]) &&
+        !usearch_js_keys_from_value(env, arguments[0], "starts", &init.starts, &init.starts_count, &gathered))
         return NULL;
 
     init.index = index->handle;
     usearch_dense_cursor_init(&init);
     free(gathered);
     if (!usearch_js_succeeded(env, &outcome)) return NULL;
-    return usearch_js_walk_object(env, handle, self, arguments[0], usearch_js_cursor_next, usearch_js_cursor_release,
-                                  usearch_js_cursor_finalize, usearch_js_cursor_free);
+    return usearch_js_walk_object(env, handle, self, usearch_js_undefined(env), usearch_js_cursor_next,
+                                  usearch_js_cursor_release, usearch_js_cursor_finalize, usearch_js_cursor_free);
 }
 
 /** @c searchStream(executor, data, rows, columns, stride, scalar, expansion) → a resumable

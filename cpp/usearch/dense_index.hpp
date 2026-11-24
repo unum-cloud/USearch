@@ -9,8 +9,8 @@
  *  itself blocks on the calling thread and @c on blocks on an executor, both answering a
  *  @c status_t or an @c expected, while @c deferred submits to an executor and answers a
  *  @c deferred call its one owner polls, waits on or awaits. Each verb names the scalar of the
- *  matrix it passes, as in @c search<float>, and takes its handlers as @c noexcept callables
- *  borrowed for the call. Each verb answers the statuses its C function lists in
+ *  matrix it passes, as in @c search<float>, and takes its handlers as @c noexcept callables it
+ *  calls only during the call. Each verb answers the statuses its C function lists in
  *  @c usearch/dense_index.h.
  *
  *  @code{.cpp}
@@ -88,7 +88,8 @@ template <typename handler_type_>
 concept value_lookup_handler = std::is_nothrow_invocable_r_v<void, handler_type_&, usearch_key_t const*, std::size_t,
                                                              usearch_scalar_t, std::size_t, void const**>;
 
-/** The value rows @c attend gathers: a host handler borrowed for the call, or a device function. */
+/** The value rows @c attend gathers: a host handler read only during the call, or a device
+ *  function. */
 class value_lookup_t {
   public:
     value_lookup_t() noexcept = default;
@@ -217,7 +218,7 @@ struct dense_attend_config_t {
     /** Query heads sharing the index's key-value head, dividing the row count; zero means one. */
     std::size_t head_count = 0;
 
-    /** One online-softmax state per query row, lent by the caller; @c nullptr skips it. */
+    /** One online-softmax state per query row, passed by the caller; @c nullptr skips it. */
     usearch_dense_softmax_state_t* carry = nullptr;
 
     /** The breadth of the candidates the walk explores; zero derives. */
@@ -268,8 +269,9 @@ struct dense_maxsim_config_t {
  *      blocks on the calling thread, @c on blocks on an executor, and both answer a @c status_t or
  *      an @c expected, while @c deferred submits to an executor and answers a @c deferred call.
  *
- *  Each verb is written once, filling its C struct with the call's @c outputs. Every
- *  input, handler, plan and arena a deferred call names stays borrowed until it is final.
+ *  Each verb is written once, filling its C struct with the call's @c outputs.
+ *  Every input, handler, plan and arena a deferred call names must stay allocated and unchanged
+ *  until the call is final.
  */
 template <typename receiver_type_>
 class dense_index {
@@ -297,16 +299,16 @@ class dense_index {
     }
 
     /** The same handle, whose verbs block on @p executor. */
-    dense_index<borrowing<usearch_dense_index_t, usearch_completion_blocking_k>> on(
+    dense_index<caller_owned<usearch_dense_index_t, usearch_completion_blocking_k>> on(
         executor_t const& executor) const noexcept {
-        return dense_index<borrowing<usearch_dense_index_t, usearch_completion_blocking_k>>(
+        return dense_index<caller_owned<usearch_dense_index_t, usearch_completion_blocking_k>>(
             {receiver_.handle(), executor.handle()});
     }
 
     /** The same handle, whose verbs submit to @p executor, each answering a @c deferred call. */
-    dense_index<borrowing<usearch_dense_index_t, usearch_completion_deferred_k>> deferred(
+    dense_index<caller_owned<usearch_dense_index_t, usearch_completion_deferred_k>> deferred(
         executor_t const& executor) const noexcept {
-        return dense_index<borrowing<usearch_dense_index_t, usearch_completion_deferred_k>>(
+        return dense_index<caller_owned<usearch_dense_index_t, usearch_completion_deferred_k>>(
             {receiver_.handle(), executor.handle()});
     }
 
@@ -766,7 +768,7 @@ class dense_index {
     expected<dense_cursor_t> cursor_init(std::span<usearch_key_t const> starts = {}) const noexcept
         requires owns_handle<receiver_type_>
     {
-        usearch_dense_cursor_init_t arguments {handle(), nullptr, starts.size(), starts.data(), nullptr};
+        usearch_dense_cursor_init_t arguments {handle(), nullptr, nullptr, starts.size(), starts.data(), nullptr};
         return opened_<dense_cursor_t>(usearch_dense_cursor_init, arguments, &usearch_dense_cursor_init_t::cursor);
     }
 
@@ -787,8 +789,9 @@ class dense_index {
 /** Owns one dense index; destruction waits for its deferred calls. */
 using dense_index_t = dense_index<owning<usearch_dense_index_t, usearch_dense_free>>;
 
-/** A borrowed dense index and its executor, completing its verbs as @p completion_ says. */
+/** A dense index its caller owns and the executor its verbs run on, completing them as
+ *  @p completion_ says. */
 template <usearch_completion_t completion_>
-using dense_index_on = dense_index<borrowing<usearch_dense_index_t, completion_>>;
+using dense_index_on = dense_index<caller_owned<usearch_dense_index_t, completion_>>;
 
 } // namespace unum::usearch

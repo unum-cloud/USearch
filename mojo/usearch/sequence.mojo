@@ -116,7 +116,7 @@ struct SequenceWeights[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyabl
     """The substitution matrix and gap cost Needleman-Wunsch scores with - `usearch_sequence_weights_t`.
 
     Parameters:
-        origin: The borrowed matrix, named so it outlives every call these weights cross.
+        origin: The viewed matrix, named so it outlives every call these weights cross.
     """
 
     var substitution_matrix: Span[Int8, Self.origin]
@@ -125,7 +125,7 @@ struct SequenceWeights[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyabl
     """Cost of one unaligned symbol."""
 
     def arguments(self) -> SequenceWeightsArguments:
-        """The weights as the engine reads them, their borrow erased.
+        """The weights as the engine reads them, their view erased.
 
         Returns:
             The matrix's first score and the gap cost.
@@ -141,8 +141,8 @@ struct SequenceOptions[weights_origin: ImmOrigin = ImmUntrackedOrigin, widths_or
     `usearch_sequence_init_vram_t` share, without the placement each names its own way.
 
     Parameters:
-        weights_origin: The borrowed substitution matrix, inferred where weights are named.
-        widths_origin: The borrowed window widths, inferred where any are named.
+        weights_origin: The viewed substitution matrix, inferred where weights are named.
+        widths_origin: The viewed window widths, inferred where any are named.
     """
 
     var metric: SequenceMetric
@@ -180,7 +180,7 @@ struct SequenceOptions[weights_origin: ImmOrigin = ImmUntrackedOrigin, widths_or
         self.values_per_key = c_size_t(values_per_key)
 
 
-def _lend_weights[
+def _pass_weights[
     origin: ImmOrigin
 ](weights: Optional[SequenceWeights[origin]], slot: Pointer[SequenceWeightsArguments, MutAnyOrigin]) -> Optional[
     Pointer[SequenceWeightsArguments, ImmUntrackedOrigin]
@@ -261,7 +261,7 @@ struct SequenceKeyStats(Defaultable, ImplicitlyCopyable):
 struct SequenceRefinePlan(Movable):
     """One refine in flight - `usearch_sequence_refine_plan_t`. Binding-only.
 
-    Lent through `SequenceRefineConfig.plan`, it opens on the first refine, stays live past a cancel
+    Passed through `SequenceRefineConfig.plan`, it opens on the first refine, stays live past a cancel
     or the end of a round, continues on every later refine, and closes with `refine_plan_finish`.
     While it lives, the index admits no insertion and no save.
     """
@@ -278,7 +278,7 @@ struct SequenceReshardPlan(Movable):
     """One reshard in flight - `usearch_sequence_reshard_plan_t`, with its own lists of sources and
     targets. Binding-only.
 
-    Lent through `SequenceReshardConfig.plan`, it opens on the first reshard, stays live past a
+    Passed through `SequenceReshardConfig.plan`, it opens on the first reshard, stays live past a
     cancel, moves what is still pending and continues the rounds on every later one, and closes with
     `sequence_reshard_plan_finish`. While it lives, every index it names admits no insertion and no
     save.
@@ -305,9 +305,9 @@ struct SequenceRefineConfig[
     """The knobs of `usearch_sequence_refine_t`; zeroed or absent ones derive what the C interface derives.
 
     Parameters:
-        stats_origin: The lent telemetry slot's origin, inferred where one is lent.
-        plan_origin: The lent plan's origin, inferred where one is lent.
-        phase_origin: The lent phase slot's origin, inferred where one is lent.
+        stats_origin: The passed telemetry slot's origin, inferred where one is passed.
+        plan_origin: The passed plan's origin, inferred where one is passed.
+        phase_origin: The passed phase slot's origin, inferred where one is passed.
     """
 
     var expansion_factor: Int
@@ -365,9 +365,9 @@ struct SequenceReshardConfig[
     """The knobs of `usearch_sequence_reshard_t`; zeroed or absent ones derive what the C interface derives.
 
     Parameters:
-        stats_origin: The lent telemetry slot's origin, inferred where one is lent.
-        plan_origin: The lent plan's origin, inferred where one is lent.
-        phase_origin: The lent phase slot's origin, inferred where one is lent.
+        stats_origin: The passed telemetry slot's origin, inferred where one is passed.
+        plan_origin: The passed plan's origin, inferred where one is passed.
+        phase_origin: The passed phase slot's origin, inferred where one is passed.
     """
 
     var expansion_factor: Int
@@ -780,7 +780,7 @@ struct SequenceGetOutputs(Defaultable, ImplicitlyCopyable):
 
 @fieldwise_init
 struct _SequenceGetCall[origin: MutOrigin](Call):
-    """The crossing of `usearch_sequence_get`, which borrows the arena its tape lands in."""
+    """The crossing of `usearch_sequence_get`, which uses the arena its tape lands in."""
 
     comptime Arguments = SequenceGetArguments
     comptime Outputs = SequenceGetOutputs
@@ -1015,7 +1015,7 @@ struct _SequenceReshardPlanFinishCall(Call):
 
 @fieldwise_init
 struct _SequenceSampleCall[origin: MutOrigin](Call):
-    """The crossing of `usearch_sequence_sample`, which borrows the arena its draws are written in."""
+    """The crossing of `usearch_sequence_sample`, which uses the arena its draws are written in."""
 
     comptime Arguments = DenseSampleArguments
     comptime Outputs = DenseSampleOutputs
@@ -1069,7 +1069,7 @@ struct _SequenceSampleCall[origin: MutOrigin](Call):
 
 @fieldwise_init
 struct _SequenceSearchCall[origin: MutOrigin](Call):
-    """The crossing of `usearch_sequence_search`, which borrows the arena its matches land in."""
+    """The crossing of `usearch_sequence_search`, which uses the arena its matches land in."""
 
     comptime Arguments = SequenceSearchArguments
     comptime Outputs = MatchesViewArguments
@@ -1134,7 +1134,7 @@ struct _SequenceSaveCall(Call):
 
 @fieldwise_init
 struct _SequenceSaveBufferCall[origin: MutOrigin](Call):
-    """The crossing of `usearch_sequence_save_buffer`, which borrows the arena the monolith lands in."""
+    """The crossing of `usearch_sequence_save_buffer`, which uses the arena the monolith lands in."""
 
     comptime Arguments = DenseSaveBufferArguments
     comptime Outputs = DenseSaveBufferOutputs
@@ -1155,7 +1155,7 @@ struct _SequenceSaveBufferCall[origin: MutOrigin](Call):
 
 @fieldwise_init
 struct _SequenceCursorNextCall[origin: MutOrigin](Call):
-    """The crossing of `usearch_sequence_cursor_next`, which borrows the arena its batch lands in."""
+    """The crossing of `usearch_sequence_cursor_next`, which uses the arena its batch lands in."""
 
     comptime Arguments = DenseCursorNextArguments
     comptime Outputs = DenseCursorNextOutputs
@@ -1229,9 +1229,9 @@ struct SequenceIndex(Movable, SequenceVerbs):
         """Initializes an empty, mutable index in host memory. Calls `usearch_sequence_init_ram`.
 
         Parameters:
-            weights_origin: The options' borrowed substitution matrix, inferred from the argument.
-            widths_origin: The options' borrowed window widths, inferred with it.
-            ram_origin: The placement's borrowed domain array, inferred from the argument.
+            weights_origin: The options' viewed substitution matrix, inferred from the argument.
+            widths_origin: The options' viewed window widths, inferred with it.
+            ram_origin: The placement's viewed domain array, inferred from the argument.
 
         Args:
             library: The loaded engine, kept so the shared object stays mapped.
@@ -1254,8 +1254,8 @@ struct SequenceIndex(Movable, SequenceVerbs):
                 created.unsafe_origin_cast[MutUntrackedOrigin](),
                 outcome.unsafe_origin_cast[MutUntrackedOrigin](),
                 options.metric,
-                _lend_weights(options.weights, weights.unsafe_origin_cast[MutAnyOrigin]()),
-                _lend_widths(options.window_widths),
+                _pass_weights(options.weights, weights.unsafe_origin_cast[MutAnyOrigin]()),
+                _pass_widths(options.window_widths),
                 c_size_t(len(options.window_widths)),
                 options.connectivity,
                 options.values_per_key,
@@ -1277,9 +1277,9 @@ struct SequenceIndex(Movable, SequenceVerbs):
         """Initializes an empty, mutable index in device memory. Calls `usearch_sequence_init_vram`.
 
         Parameters:
-            weights_origin: The options' borrowed substitution matrix, inferred from the argument.
-            widths_origin: The options' borrowed window widths, inferred with it.
-            vram_origin: The placement's borrowed ordinal array, inferred from the argument.
+            weights_origin: The options' viewed substitution matrix, inferred from the argument.
+            widths_origin: The options' viewed window widths, inferred with it.
+            vram_origin: The placement's viewed ordinal array, inferred from the argument.
 
         Args:
             library: The loaded engine, kept so the shared object stays mapped.
@@ -1302,8 +1302,8 @@ struct SequenceIndex(Movable, SequenceVerbs):
                 created.unsafe_origin_cast[MutUntrackedOrigin](),
                 outcome.unsafe_origin_cast[MutUntrackedOrigin](),
                 options.metric,
-                _lend_weights(options.weights, weights.unsafe_origin_cast[MutAnyOrigin]()),
-                _lend_widths(options.window_widths),
+                _pass_weights(options.weights, weights.unsafe_origin_cast[MutAnyOrigin]()),
+                _pass_widths(options.window_widths),
                 c_size_t(len(options.window_widths)),
                 options.connectivity,
                 options.values_per_key,
@@ -1328,15 +1328,15 @@ struct SequenceIndex(Movable, SequenceVerbs):
 
         Parameters:
             path_origin: The path bytes' origin, inferred from the argument.
-            ram_origin: The placement's borrowed domain array, inferred from the argument.
-            weights_origin: The borrowed substitution matrix, inferred from the argument.
+            ram_origin: The placement's viewed domain array, inferred from the argument.
+            weights_origin: The viewed substitution matrix, inferred from the argument.
 
         Args:
-            executor: The executor the read fans out over; it also lends its engine.
+            executor: The executor the read fans out over; it also supplies its queues.
             path: The manifest of a sharded checkpoint, or a single `.safegraphs` monolith.
             ram: The memory domains to place the parts on.
             values_per_key: Upper bound on entries sharing one key, which no checkpoint records.
-            weights: The weights a Needleman-Wunsch checkpoint scores with, which it does not carry.
+            weights: The weights a Needleman-Wunsch checkpoint scores with, which it does not hold.
 
         Returns:
             The new index; a failed load creates none.
@@ -1369,15 +1369,15 @@ struct SequenceIndex(Movable, SequenceVerbs):
 
         Parameters:
             buffer_origin: The source bytes' origin, inferred from the argument.
-            ram_origin: The placement's borrowed domain array, inferred from the argument.
-            weights_origin: The borrowed substitution matrix, inferred from the argument.
+            ram_origin: The placement's viewed domain array, inferred from the argument.
+            weights_origin: The viewed substitution matrix, inferred from the argument.
 
         Args:
-            executor: The executor the copy fans out over; it also lends its engine.
+            executor: The executor the copy fans out over; it also supplies its queues.
             buffer: Source holding one serialized monolith.
             ram: The memory domains to place shards on; the monolith lands whole on the first.
             values_per_key: Upper bound on entries sharing one key, which no checkpoint records.
-            weights: The weights a Needleman-Wunsch monolith scores with, which it does not carry.
+            weights: The weights a Needleman-Wunsch monolith scores with, which it does not hold.
 
         Returns:
             The new index; a failed load creates none.
@@ -1412,7 +1412,7 @@ struct SequenceIndex(Movable, SequenceVerbs):
         created[unsafe_offset=0] = NULL_ADDRESS
         var outcome = stack_allocation[1, Outcome]()
         outcome[unsafe_offset=0] = Outcome()
-        var lent = stack_allocation[1, SequenceWeightsArguments]()
+        var passed = stack_allocation[1, SequenceWeightsArguments]()
         _cross(
             SequenceLoadRamArguments(
                 created.unsafe_origin_cast[MutUntrackedOrigin](),
@@ -1422,7 +1422,7 @@ struct SequenceIndex(Movable, SequenceVerbs):
                 source,
                 ram,
                 c_size_t(values_per_key),
-                _lend_weights(weights, lent.unsafe_origin_cast[MutAnyOrigin]()),
+                _pass_weights(weights, passed.unsafe_origin_cast[MutAnyOrigin]()),
                 ProgressArguments(),
             ),
             verb,
@@ -1444,15 +1444,15 @@ struct SequenceIndex(Movable, SequenceVerbs):
 
         Parameters:
             path_origin: The path bytes' origin, inferred from the argument.
-            vram_origin: The placement's borrowed ordinal array, inferred from the argument.
-            weights_origin: The borrowed substitution matrix, inferred from the argument.
+            vram_origin: The placement's viewed ordinal array, inferred from the argument.
+            weights_origin: The viewed substitution matrix, inferred from the argument.
 
         Args:
-            executor: The executor the upload runs on; it also lends its engine.
+            executor: The executor the upload runs on; it also supplies its queues.
             path: The manifest of a sharded checkpoint, or a single `.safegraphs` monolith.
             vram: The device to place the index on.
             values_per_key: Upper bound on entries sharing one key, which no checkpoint records.
-            weights: The weights a Needleman-Wunsch checkpoint scores with, which it does not carry.
+            weights: The weights a Needleman-Wunsch checkpoint scores with, which it does not hold.
 
         Returns:
             The new index; a failed load creates none.
@@ -1485,15 +1485,15 @@ struct SequenceIndex(Movable, SequenceVerbs):
 
         Parameters:
             buffer_origin: The source bytes' origin, inferred from the argument.
-            vram_origin: The placement's borrowed ordinal array, inferred from the argument.
-            weights_origin: The borrowed substitution matrix, inferred from the argument.
+            vram_origin: The placement's viewed ordinal array, inferred from the argument.
+            weights_origin: The viewed substitution matrix, inferred from the argument.
 
         Args:
-            executor: The executor the upload runs on; it also lends its engine.
+            executor: The executor the upload runs on; it also supplies its queues.
             buffer: Source holding one serialized monolith.
             vram: The device to place the index on.
             values_per_key: Upper bound on entries sharing one key, which no checkpoint records.
-            weights: The weights a Needleman-Wunsch monolith scores with, which it does not carry.
+            weights: The weights a Needleman-Wunsch monolith scores with, which it does not hold.
 
         Returns:
             The new index; a failed load creates none.
@@ -1528,7 +1528,7 @@ struct SequenceIndex(Movable, SequenceVerbs):
         created[unsafe_offset=0] = NULL_ADDRESS
         var outcome = stack_allocation[1, Outcome]()
         outcome[unsafe_offset=0] = Outcome()
-        var lent = stack_allocation[1, SequenceWeightsArguments]()
+        var passed = stack_allocation[1, SequenceWeightsArguments]()
         _cross(
             SequenceLoadVramArguments(
                 created.unsafe_origin_cast[MutUntrackedOrigin](),
@@ -1538,7 +1538,7 @@ struct SequenceIndex(Movable, SequenceVerbs):
                 source,
                 vram,
                 c_size_t(values_per_key),
-                _lend_weights(weights, lent.unsafe_origin_cast[MutAnyOrigin]()),
+                _pass_weights(weights, passed.unsafe_origin_cast[MutAnyOrigin]()),
                 ProgressArguments(),
             ),
             verb,
@@ -1559,12 +1559,12 @@ struct SequenceIndex(Movable, SequenceVerbs):
 
         Parameters:
             path_origin: The path bytes' origin, inferred from the argument.
-            weights_origin: The borrowed substitution matrix, inferred from the argument.
+            weights_origin: The viewed substitution matrix, inferred from the argument.
 
         Args:
             library: The loaded engine, kept so the shared object stays mapped.
             path: The manifest of a sharded checkpoint, or a single `.safegraphs` monolith.
-            weights: The weights a Needleman-Wunsch checkpoint scores with, which it does not carry.
+            weights: The weights a Needleman-Wunsch checkpoint scores with, which it does not hold.
 
         Returns:
             The read-only index.
@@ -1576,13 +1576,13 @@ struct SequenceIndex(Movable, SequenceVerbs):
         created[unsafe_offset=0] = NULL_ADDRESS
         var outcome = stack_allocation[1, Outcome]()
         outcome[unsafe_offset=0] = Outcome()
-        var lent = stack_allocation[1, SequenceWeightsArguments]()
+        var passed = stack_allocation[1, SequenceWeightsArguments]()
         _cross(
             SequenceViewRamArguments(
                 created.unsafe_origin_cast[MutUntrackedOrigin](),
                 outcome.unsafe_origin_cast[MutUntrackedOrigin](),
                 BytesView.of(path).arguments(),
-                _lend_weights(weights, lent.unsafe_origin_cast[MutAnyOrigin]()),
+                _pass_weights(weights, passed.unsafe_origin_cast[MutAnyOrigin]()),
                 RamOptions().arguments(),
             ),
             library.symbols().sequence_view_ram,
@@ -1604,14 +1604,14 @@ struct SequenceIndex(Movable, SequenceVerbs):
 
         Parameters:
             path_origin: The path bytes' origin, inferred from the argument.
-            nvme_origin: The options' borrowed path array, inferred from the argument.
-            weights_origin: The borrowed substitution matrix, inferred from the argument.
+            nvme_origin: The options' viewed path array, inferred from the argument.
+            weights_origin: The viewed substitution matrix, inferred from the argument.
 
         Args:
-            executor: The NVMe executor whose rings read the checkpoint; it also lends its engine.
+            executor: The NVMe executor whose rings read the checkpoint; it also supplies its queues.
             path: The manifest of a sharded checkpoint, or a single `.safegraphs` monolith.
             nvme: The devices the parts are served from; naming none serves each where it points.
-            weights: The weights a Needleman-Wunsch checkpoint scores with, which it does not carry.
+            weights: The weights a Needleman-Wunsch checkpoint scores with, which it does not hold.
 
         Returns:
             The read-only index.
@@ -1623,7 +1623,7 @@ struct SequenceIndex(Movable, SequenceVerbs):
         created[unsafe_offset=0] = NULL_ADDRESS
         var outcome = stack_allocation[1, Outcome]()
         outcome[unsafe_offset=0] = Outcome()
-        var lent = stack_allocation[1, SequenceWeightsArguments]()
+        var passed = stack_allocation[1, SequenceWeightsArguments]()
         _cross(
             SequenceViewNvmeArguments(
                 created.unsafe_origin_cast[MutUntrackedOrigin](),
@@ -1632,7 +1632,7 @@ struct SequenceIndex(Movable, SequenceVerbs):
                 Completion.BLOCKING,
                 BytesView.of(path).arguments(),
                 nvme.arguments(),
-                _lend_weights(weights, lent.unsafe_origin_cast[MutAnyOrigin]()),
+                _pass_weights(weights, passed.unsafe_origin_cast[MutAnyOrigin]()),
             ),
             executor.library.symbols().sequence_view_nvme,
         )
@@ -1661,7 +1661,7 @@ struct SequenceIndex(Movable, SequenceVerbs):
             executor: The executor every verb runs on; its kind must match the handle's residency.
 
         Returns:
-            A receiver borrowing both, which neither may outlive.
+            A receiver viewing both, which neither may outlive.
         """
         return SequenceIndexOn[ImmOrigin(origin_of(self, executor))](
             Pointer[SequenceIndex, ImmOrigin(origin_of(self, executor))](unsafe_from_address=Int(Pointer(to=self))),
@@ -1675,7 +1675,7 @@ struct SequenceIndex(Movable, SequenceVerbs):
             executor: The executor every verb is submitted to; its kind must match the handle's residency.
 
         Returns:
-            A receiver borrowing both, which neither it nor any `Deferred` it answers may outlive.
+            A receiver viewing both, which neither it nor any `Deferred` it answers may outlive.
         """
         return SequenceIndexDeferredOn[ImmOrigin(origin_of(self, executor))](
             Pointer[SequenceIndex, ImmOrigin(origin_of(self, executor))](unsafe_from_address=Int(Pointer(to=self))),
@@ -1691,12 +1691,12 @@ struct SequenceIndex(Movable, SequenceVerbs):
         Calls `usearch_sequence_cursor_init`.
 
         Returns:
-            The cursor, which borrows the index and cannot outlive it.
+            The cursor, which uses the index and cannot outlive it.
 
         Raises:
             `Error` if the residency has no cursor, as VRAM does not.
         """
-        return SequenceCursor[ImmOrigin(origin_of(self))](self.library, self.address, NULL_ADDRESS, 0, None)
+        return SequenceCursor[ImmOrigin(origin_of(self))](self.library, self.address, 0, None)
 
     def cursor[
         starts_origin: ImmOrigin, //
@@ -1710,7 +1710,7 @@ struct SequenceIndex(Movable, SequenceVerbs):
             starts: The keys to walk from, the walk yielding their entries first.
 
         Returns:
-            The cursor, which borrows the index and cannot outlive it.
+            The cursor, which uses the index and cannot outlive it.
 
         Raises:
             `Error` if the residency has no cursor, as VRAM does not.
@@ -1718,7 +1718,6 @@ struct SequenceIndex(Movable, SequenceVerbs):
         return SequenceCursor[ImmOrigin(origin_of(self))](
             self.library,
             self.address,
-            NULL_ADDRESS,
             len(starts),
             starts.unsafe_ptr().unsafe_origin_cast[ImmUntrackedOrigin](),
         )
@@ -1726,8 +1725,8 @@ struct SequenceIndex(Movable, SequenceVerbs):
     # endregion Receivers
 
 
-def _lend_widths[origin: ImmOrigin](widths: Span[c_size_t, origin]) -> Optional[Pointer[c_size_t, ImmUntrackedOrigin]]:
-    """The first window width, or `None` for none, its borrow erased for the call it crosses."""
+def _pass_widths[origin: ImmOrigin](widths: Span[c_size_t, origin]) -> Optional[Pointer[c_size_t, ImmUntrackedOrigin]]:
+    """The first window width, or `None` for none, its view erased for the call it crosses."""
     if len(widths) == 0:
         return None
     return widths.unsafe_ptr().unsafe_origin_cast[ImmUntrackedOrigin]()
@@ -1785,7 +1784,7 @@ trait SequenceVerbs:
         Parameters:
             keys_origin: The key run's origin, inferred from the argument.
             sequences_origin: The tape's origin, inferred with it.
-            stats_origin: The lent telemetry slot's origin, inferred with it.
+            stats_origin: The passed telemetry slot's origin, inferred with it.
 
         Args:
             keys: One key per sequence; keys need not be unique.
@@ -1807,9 +1806,9 @@ trait SequenceVerbs:
         continues `config.plan`. Calls `usearch_sequence_refine`.
 
         Parameters:
-            stats_origin: The lent telemetry slot's origin, inferred from the argument.
-            plan_origin: The lent plan's origin, inferred with it.
-            phase_origin: The lent phase slot's origin, inferred with it.
+            stats_origin: The passed telemetry slot's origin, inferred from the argument.
+            plan_origin: The passed plan's origin, inferred with it.
+            phase_origin: The passed phase slot's origin, inferred with it.
 
         Args:
             config: The round's spending, the handler, the telemetry slot, and the plan and phase slots.
@@ -1867,7 +1866,7 @@ trait SequenceVerbs:
 
         Args:
             wanted: The upper bound on draws.
-            arena: The arena to rewind and refill, which the result borrows; a failed call leaves it valid.
+            arena: The arena to rewind and refill, which the result views; a failed call leaves it valid.
             config: The shown keys and their coordinates, the focus and the seed.
 
         Returns:
@@ -1887,17 +1886,17 @@ trait SequenceVerbs:
         mut arena: Arena,
         config: DenseSearchConfig[stats_origin] = DenseSearchConfig(),
     ) raises Error -> Matches[origin_of(arena)]:
-        """Finds the `wanted` nearest entries of every query sequence, writing the matches in a lent
+        """Finds the `wanted` nearest entries of every query sequence, writing the matches in a passed
         arena. Calls `usearch_sequence_search`.
 
         Parameters:
             queries_origin: The query tape's origin, inferred from the argument.
-            stats_origin: The lent telemetry slot's origin, inferred with it.
+            stats_origin: The passed telemetry slot's origin, inferred with it.
 
         Args:
             queries: The query sequences, a tape of bytes.
             wanted: Matches per query - the "k"; zero lands only the counts.
-            arena: The arena to rewind and refill, which the result borrows; a failed call leaves it valid.
+            arena: The arena to rewind and refill, which the result views; a failed call leaves it valid.
             config: The breadth of the candidates, the predicate, and the telemetry slot.
 
         Returns:
@@ -1923,12 +1922,12 @@ trait SequenceVerbs:
         return self._route(_SequenceCountCall(key))
 
     def get(self, key: Key, mut arena: Arena) raises Error -> TapeEntries[DType.uint8, origin_of(arena)]:
-        """Exports every sequence stored under one key into a lent arena, in insertion order.
+        """Exports every sequence stored under one key into a passed arena, in insertion order.
         Calls `usearch_sequence_get`.
 
         Args:
             key: The key whose entries are exported.
-            arena: The arena to rewind and refill, which the result borrows; a failed call leaves it valid.
+            arena: The arena to rewind and refill, which the result views; a failed call leaves it valid.
 
         Returns:
             The sequences, read in place from the arena; none when the key is absent.
@@ -1953,10 +1952,10 @@ trait SequenceVerbs:
         _ = self._route(_SequenceSaveCall(BytesView.of(path).arguments()))
 
     def save_buffer(self, mut arena: Arena) raises Error -> Monolith[origin_of(arena)]:
-        """Serializes the index as one monolith into a lent arena. Calls `usearch_sequence_save_buffer`.
+        """Serializes the index as one monolith into a passed arena. Calls `usearch_sequence_save_buffer`.
 
         Args:
-            arena: The arena to rewind and refill, which the result borrows; a failed call leaves it valid.
+            arena: The arena to rewind and refill, which the result views; a failed call leaves it valid.
 
         Returns:
             The monolith, read in place from the arena.
@@ -1971,7 +1970,7 @@ struct SequenceIndexOn[origin: ImmOrigin](ImplicitlyCopyable, SequenceVerbs):
     """An index bound to the executor its verbs block on, as `index.on(executor)` answers it. Binding-only.
 
     Parameters:
-        origin: The index and the executor, which this receiver borrows.
+        origin: The index and the executor, which this receiver views.
     """
 
     var index: Pointer[SequenceIndex, Self.origin]
@@ -1993,48 +1992,11 @@ struct SequenceIndexOn[origin: ImmOrigin](ImplicitlyCopyable, SequenceVerbs):
         """Runs `call` on the bound executor, refused while another call holds it."""
         return _block(self.index[].library, call^, self.index[].address, self.executor)
 
-    def cursor(self) raises Error -> SequenceCursor[Self.origin]:
-        """Opens a walk over every entry as stored, its pulls on the bound executor.
-        Calls `usearch_sequence_cursor_init`.
-
-        Returns:
-            The cursor, which borrows the index and the executor and cannot outlive them.
-
-        Raises:
-            `Error` if the residency has no cursor, as VRAM does not.
-        """
-        return SequenceCursor[Self.origin](self.index[].library, self.index[].address, self.executor, 0, None)
-
-    def cursor[
-        starts_origin: ImmOrigin, //
-    ](self, starts: Span[Key, starts_origin]) raises Error -> SequenceCursor[Self.origin]:
-        """Opens a walk from `starts`, its pulls on the bound executor. Calls `usearch_sequence_cursor_init`.
-
-        Parameters:
-            starts_origin: The start keys' origin, inferred from the argument.
-
-        Args:
-            starts: The keys to walk from, the walk yielding their entries first.
-
-        Returns:
-            The cursor, which borrows the index and the executor and cannot outlive them.
-
-        Raises:
-            `Error` if the residency has no cursor, as VRAM does not.
-        """
-        return SequenceCursor[Self.origin](
-            self.index[].library,
-            self.index[].address,
-            self.executor,
-            len(starts),
-            starts.unsafe_ptr().unsafe_origin_cast[ImmUntrackedOrigin](),
-        )
-
 
 def _refine_call[
     stats_origin: MutOrigin, plan_origin: MutOrigin, phase_origin: MutOrigin
 ](config: SequenceRefineConfig[stats_origin, plan_origin, phase_origin]) -> _SequenceRefineCall:
-    """Lowers a refinement's lent slots into its crossing."""
+    """Lowers a refinement's passed slots into its crossing."""
     return _SequenceRefineCall(
         RefineOptionsArguments(c_size_t(config.expansion_factor), c_size_t(config.memory_limit)),
         config.progress,
@@ -2049,7 +2011,7 @@ def _insert_call[
 ](
     keys: Span[Key, keys_origin], sequences: TapeView[sequences_origin], config: DenseInsertConfig[stats_origin]
 ) -> _SequenceInsertCall:
-    """Lowers an insertion's borrowed inputs into its crossing."""
+    """Lowers an insertion's viewed inputs into its crossing."""
     return _SequenceInsertCall(
         KeysView.of(keys).arguments(),
         len(keys),
@@ -2068,7 +2030,7 @@ def _sample_call[
     arena: Address,
     config: DenseSampleConfig[shown_origin, coordinates_origin, focus_origin],
 ) -> _SequenceSampleCall[origin]:
-    """Lowers a sample's borrowed inputs into its crossing."""
+    """Lowers a sample's viewed inputs into its crossing."""
     return _SequenceSampleCall[origin](
         KeysView.of(config.shown).arguments(),
         len(config.shown),
@@ -2093,7 +2055,7 @@ def _search_call[
     arena: Address,
     config: DenseSearchConfig[stats_origin],
 ) -> _SequenceSearchCall[origin]:
-    """Lowers a search's borrowed inputs into its crossing."""
+    """Lowers a search's viewed inputs into its crossing."""
     return _SequenceSearchCall[origin](
         queries.view,
         queries.entries,
@@ -2112,7 +2074,7 @@ struct SequenceIndexDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
     it: every verb answers a `Deferred` at once. Binding-only.
 
     Parameters:
-        origin: The index and the executor, which this receiver borrows.
+        origin: The index and the executor, which this receiver views.
     """
 
     var index: Pointer[SequenceIndex, Self.origin]
@@ -2162,7 +2124,7 @@ struct SequenceIndexDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
             )
         ),
     ]:
-        """Submits `SequenceVerbs.insert`; the keys, tape and telemetry slot stay borrowed until final.
+        """Submits `SequenceVerbs.insert`; the keys, tape and telemetry slot must stay allocated and unchanged until final.
         Calls `usearch_sequence_insert`."""
         return {self.index[].library, _insert_call(keys, sequences, config), self.index[].address, self.executor}
 
@@ -2174,7 +2136,7 @@ struct SequenceIndexDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
             origin_of(_anchor[Self.origin](), _anchor[stats_origin](), _anchor[plan_origin](), _anchor[phase_origin]())
         ),
     ]:
-        """Submits `SequenceVerbs.refine`; the telemetry, plan and phase slots stay borrowed until final.
+        """Submits `SequenceVerbs.refine`; the telemetry, plan and phase slots must stay allocated and unchanged until final.
         Calls `usearch_sequence_refine`."""
         return {self.index[].library, _refine_call(config), self.index[].address, self.executor}
 
@@ -2209,7 +2171,7 @@ struct SequenceIndexDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
             )
         ),
     ]:
-        """Submits `SequenceVerbs.sample`; the shown keys, focus and arena stay borrowed until final.
+        """Submits `SequenceVerbs.sample`; the shown keys, focus and arena must stay allocated and unchanged until final.
         Calls `usearch_sequence_sample`."""
         return {
             self.index[].library,
@@ -2230,7 +2192,7 @@ struct SequenceIndexDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
         _SequenceSearchCall[origin_of(arena)],
         ImmOrigin(origin_of(_anchor[Self.origin](), _anchor[queries_origin](), _anchor[stats_origin]())),
     ]:
-        """Submits `SequenceVerbs.search`; the queries, telemetry slot and arena stay borrowed until final.
+        """Submits `SequenceVerbs.search`; the queries, telemetry slot and arena must stay allocated and unchanged until final.
         Calls `usearch_sequence_search`."""
         return {
             self.index[].library,
@@ -2244,7 +2206,7 @@ struct SequenceIndexDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
         return {self.index[].library, _SequenceCountCall(key), self.index[].address, self.executor}
 
     def get(self, key: Key, mut arena: Arena) -> Deferred[_SequenceGetCall[origin_of(arena)], Self.origin]:
-        """Submits `SequenceVerbs.get`; the arena stays borrowed until final. Calls `usearch_sequence_get`."""
+        """Submits `SequenceVerbs.get`; the arena must stay allocated and unchanged until final. Calls `usearch_sequence_get`."""
         return {
             self.index[].library,
             _SequenceGetCall[origin_of(arena)](key, arena._address),
@@ -2257,7 +2219,7 @@ struct SequenceIndexDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
     ](self, path: StringSlice[path_origin]) -> Deferred[
         _SequenceSaveCall, ImmOrigin(origin_of(_anchor[Self.origin](), _anchor[path_origin]()))
     ]:
-        """Submits `SequenceVerbs.save`; the path stays borrowed until final. Calls `usearch_sequence_save`."""
+        """Submits `SequenceVerbs.save`; the path must stay allocated and unchanged until final. Calls `usearch_sequence_save`."""
         return {
             self.index[].library,
             _SequenceSaveCall(BytesView.of(path).arguments()),
@@ -2266,7 +2228,7 @@ struct SequenceIndexDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
         }
 
     def save_buffer(self, mut arena: Arena) -> Deferred[_SequenceSaveBufferCall[origin_of(arena)], Self.origin]:
-        """Submits `SequenceVerbs.save_buffer`; the arena stays borrowed until final.
+        """Submits `SequenceVerbs.save_buffer`; the arena must stay allocated and unchanged until final.
         Calls `usearch_sequence_save_buffer`."""
         return {
             self.index[].library,
@@ -2279,19 +2241,18 @@ struct SequenceIndexDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
 struct SequenceCursor[origin: ImmOrigin]:
     """A walk over the index contents - `usearch_sequence_cursor_t`.
 
-    Export, migration, and visualization feed off it. It borrows the index and the executor its
-    pulls run on, so neither can be released while it lives.
+    Export, migration, and visualization feed off it. It uses the index, so the index cannot be
+    released while it lives, and it keeps no executor: its pulls run on the calling thread, or
+    block on the executor `on` names for each of them.
 
     Parameters:
-        origin: The index and the executor, which the cursor borrows.
+        origin: The index, which the cursor views.
     """
 
     var library: Library
     """The loaded engine, held so the release can still reach `usearch_sequence_cursor_free`."""
     var index: Address
     """The `usearch_sequence_index_t` the cursor was opened on, which every pull names again."""
-    var executor: Address
-    """The `usearch_executor_t` every pull runs on."""
     var address: Address
     """The `usearch_sequence_cursor_t` this struct owns."""
 
@@ -2299,7 +2260,6 @@ struct SequenceCursor[origin: ImmOrigin]:
         out self,
         library: Library,
         index: Address,
-        executor: Address,
         starts_count: Int,
         starts: Optional[Pointer[Key, ImmUntrackedOrigin]],
     ) raises Error:
@@ -2308,7 +2268,6 @@ struct SequenceCursor[origin: ImmOrigin]:
         Args:
             library: The loaded engine the cursor is opened through.
             index: The handle to scan.
-            executor: The executor every pull runs on.
             starts_count: The start keys at `starts`; zero walks every entry as stored.
             starts: The first start key, or `None` for none.
 
@@ -2322,6 +2281,7 @@ struct SequenceCursor[origin: ImmOrigin]:
         _cross(
             DenseCursorInitArguments(
                 index,
+                NULL_ADDRESS,
                 outcome.unsafe_origin_cast[MutUntrackedOrigin](),
                 c_size_t(starts_count),
                 starts,
@@ -2332,7 +2292,6 @@ struct SequenceCursor[origin: ImmOrigin]:
         library._check(outcome.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0], "usearch_sequence_cursor_init")
         self.library = library
         self.index = index
-        self.executor = executor
         self.address = created.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0]
 
     def __deinit__(deinit self):
@@ -2341,12 +2300,12 @@ struct SequenceCursor[origin: ImmOrigin]:
         _ = self.library^
 
     def next_keys(self, wanted: Int, mut arena: Arena) raises Error -> DenseBatch[origin_of(arena)]:
-        """Copies up to `wanted` next keys into a lent arena, skipping their links.
+        """Copies up to `wanted` next keys into a passed arena, skipping their links.
         Calls `usearch_sequence_cursor_next`.
 
         Args:
             wanted: The upper bound on keys this pull writes.
-            arena: The arena to rewind and refill, which the batch borrows; a failed call leaves it valid.
+            arena: The arena to rewind and refill, which the batch views; a failed call leaves it valid.
 
         Returns:
             The keys, read in place from the arena; an empty batch once the walk is exhausted.
@@ -2354,15 +2313,15 @@ struct SequenceCursor[origin: ImmOrigin]:
         Raises:
             `Error` if the engine refuses the copy.
         """
-        return self._next(_SequenceCursorNextCall[origin_of(arena)](self.address, False, wanted, arena._address))
+        return self._next(_SequenceCursorNextCall[origin_of(arena)](self.address, False, wanted, arena._address), NULL_ADDRESS)
 
     def next_links(self, wanted: Int, mut arena: Arena) raises Error -> DenseBatch[origin_of(arena)]:
-        """Copies up to `wanted` next keys into a lent arena, each with the keys it links to.
+        """Copies up to `wanted` next keys into a passed arena, each with the keys it links to.
         Calls `usearch_sequence_cursor_next`.
 
         Args:
             wanted: The upper bound on entries this pull writes.
-            arena: The arena to rewind and refill, which the batch borrows; a failed call leaves it valid.
+            arena: The arena to rewind and refill, which the batch views; a failed call leaves it valid.
 
         Returns:
             The keys and their links, read in place from the arena; an empty batch once the walk is exhausted.
@@ -2370,11 +2329,87 @@ struct SequenceCursor[origin: ImmOrigin]:
         Raises:
             `Error` if the engine refuses the copy.
         """
-        return self._next(_SequenceCursorNextCall[origin_of(arena)](self.address, True, wanted, arena._address))
+        return self._next(_SequenceCursorNextCall[origin_of(arena)](self.address, True, wanted, arena._address), NULL_ADDRESS)
 
-    def _next[C: Call](self, var call: C) raises Error -> C.Result:
-        """One blocking pull on the cursor's executor."""
-        return _block(self.library, call^, self.index, self.executor)
+    def on(ref self, ref executor: Executor) -> SequenceCursorOn[Self.origin, ImmOrigin(origin_of(self, executor))]:
+        """The receiver whose pulls block on `executor`, named again for every pull. Binding-only.
+
+        Args:
+            executor: The executor every pull runs on; its kind must match the index's residency.
+
+        Returns:
+            A receiver viewing the cursor and the executor, which neither may outlive.
+        """
+        return SequenceCursorOn[Self.origin, ImmOrigin(origin_of(self, executor))](
+            Pointer[SequenceCursor[Self.origin], ImmOrigin(origin_of(self, executor))](
+                unsafe_from_address=Int(Pointer(to=self))
+            ),
+            executor.address,
+        )
+
+    def _next[C: Call](self, var call: C, executor: Address) raises Error -> C.Result:
+        """One blocking pull on `executor`, or on the calling thread for `NULL_ADDRESS`."""
+        return _block(self.library, call^, self.index, executor)
+
+
+struct SequenceCursorOn[cursor_origin: ImmOrigin, origin: ImmOrigin]:
+    """A cursor's pulls blocking on one executor, as `SequenceCursor.on` makes them. Binding-only.
+
+    Parameters:
+        cursor_origin: The index the cursor views.
+        origin: The cursor and the executor, which this receiver views.
+    """
+
+    var cursor: Pointer[SequenceCursor[Self.cursor_origin], Self.origin]
+    """The cursor every pull advances."""
+    var executor: Address
+    """The `usearch_executor_t` every pull runs on."""
+
+    def __init__(out self, cursor: Pointer[SequenceCursor[Self.cursor_origin], Self.origin], executor: Address):
+        """Binds a cursor to an executor.
+
+        Args:
+            cursor: The cursor every pull advances.
+            executor: The `usearch_executor_t` every pull runs on.
+        """
+        self.cursor = cursor
+        self.executor = executor
+
+    def next_keys(self, wanted: Int, mut arena: Arena) raises Error -> DenseBatch[origin_of(arena)]:
+        """Copies up to `wanted` next keys into a passed arena on the bound executor, skipping their
+        links. Calls `usearch_sequence_cursor_next`.
+
+        Args:
+            wanted: The upper bound on keys this pull writes.
+            arena: The arena to rewind and refill, which the batch views; a failed call leaves it valid.
+
+        Returns:
+            The keys, read in place from the arena; an empty batch once the walk is exhausted.
+
+        Raises:
+            `Error` if the engine refuses the copy.
+        """
+        return self.cursor[]._next(
+            _SequenceCursorNextCall[origin_of(arena)](self.cursor[].address, False, wanted, arena._address), self.executor
+        )
+
+    def next_links(self, wanted: Int, mut arena: Arena) raises Error -> DenseBatch[origin_of(arena)]:
+        """Copies up to `wanted` next keys into a passed arena on the bound executor, each with the
+        keys it links to. Calls `usearch_sequence_cursor_next`.
+
+        Args:
+            wanted: The upper bound on entries this pull writes.
+            arena: The arena to rewind and refill, which the batch views; a failed call leaves it valid.
+
+        Returns:
+            The keys and their links, read in place from the arena; an empty batch once the walk is exhausted.
+
+        Raises:
+            `Error` if the engine refuses the copy.
+        """
+        return self.cursor[]._next(
+            _SequenceCursorNextCall[origin_of(arena)](self.cursor[].address, True, wanted, arena._address), self.executor
+        )
 
 
 # endregion Index
@@ -2405,12 +2440,12 @@ def sequence_reshard[
     Parameters:
         sources_origin: The sources' origin, inferred from the argument.
         targets_origin: The targets' origin, inferred from the argument.
-        stats_origin: The lent telemetry slot's origin, inferred from the config.
-        plan_origin: The lent plan's origin, inferred with it.
-        phase_origin: The lent phase slot's origin, inferred with it.
+        stats_origin: The passed telemetry slot's origin, inferred from the config.
+        plan_origin: The passed plan's origin, inferred with it.
+        phase_origin: The passed phase slot's origin, inferred with it.
 
     Args:
-        executor: The executor every move and the closing rounds fan out over; it also lends its engine.
+        executor: The executor every move and the closing rounds fan out over; it also supplies its queues.
         sources: The indexes whose entries move, each named once.
         targets: The indexes the entries move into, each named once, a source itself or empty.
         config: The rounds' spending, the seed of a cut, the handler, and the telemetry, plan and
@@ -2453,7 +2488,7 @@ def sequence_reshard_deferred[
     ),
 ]:
     """Submits `sequence_reshard` to `executor`, answering a `Deferred` at once; the indexes and slots
-    stay borrowed until final. Calls `usearch_sequence_reshard`."""
+    must stay allocated and unchanged until final. Calls `usearch_sequence_reshard`."""
     return {executor.library, _SequenceReshardCall(sources, targets, config), NULL_ADDRESS, executor.address}
 
 
@@ -2462,7 +2497,7 @@ def sequence_reshard_plan_finish(executor: Executor, var plan: SequenceReshardPl
     Calls `usearch_sequence_reshard_plan_finish`.
 
     Args:
-        executor: The executor the plan was opened with; it also lends its engine.
+        executor: The executor the plan was opened with; it also supplies its queues.
         plan: The plan a reshard opened, consumed by the call.
 
     Returns:
@@ -2518,7 +2553,7 @@ def sequence_metadata_read[
         path_origin: The path bytes' origin, inferred from the argument.
 
     Args:
-        executor: The executor the read runs on; it also lends its engine.
+        executor: The executor the read runs on; it also supplies its queues.
         path: The manifest of a sharded checkpoint, or a single monolith.
 
     Returns:
@@ -2545,7 +2580,7 @@ def sequence_metadata_read_buffer[
         buffer_origin: The source bytes' origin, inferred from the argument.
 
     Args:
-        executor: The executor the read runs on; it also lends its engine.
+        executor: The executor the read runs on; it also supplies its queues.
         buffer: Source holding one serialized monolith.
 
     Returns:

@@ -28,7 +28,7 @@
 
 #include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the published words
 
-#include <numkong/capabilities.h> // `nk_kernel_kind_t` - the records carry the kernel kind
+#include <numkong/capabilities.h> // `nk_kernel_kind_t` - the records hold the kernel kind
 #include <numkong/tensor.hpp>     // `nk::matrix_span` - the outputs of a search
 
 #include "usearch/utilities/types.hpp"
@@ -159,7 +159,7 @@ inline constexpr metal_basic_rung_t metal_basic_rungs[] = {
 /** The kernels a load queues, which each face's kits export once, on their first rung. */
 inline constexpr vram_kernel_t metal_basic_load_kernels[] = {vram_kernel_t::load_values_k, vram_kernel_t::size_spans_k};
 
-/** Every kernel over the neighbors matrix alone, which the contexts' source carries for every Apple
+/** Every kernel over the neighbors matrix alone, which the contexts' source holds for every Apple
  *  design: the health check, the heal and a cut's partition. */
 inline constexpr vram_kernel_t metal_graph_kernels[] = {
     vram_kernel_t::health_expand_k,   vram_kernel_t::health_recheck_k,    vram_kernel_t::order_islands_k,
@@ -1052,9 +1052,16 @@ struct vram_apple_graph {
 
   private:
 
-    /** Who holds the claim word of a refine plan's graph: the plan, as @ref plan_refine closes it,
-     *  or the reshard plan running its rounds. */
-    enum class claim_t : u8_t { borrowed_k, held_k };
+    /** Who reopens the claim word a refine plan's graph holds closed. */
+    enum class claim_t : u8_t {
+
+        /** The caller that closed it, such as the reshard plan running its rounds, or nobody for
+         *  an unbound plan. */
+        caller_reopens_k,
+
+        /** The plan at its death, since @ref plan_refine closed it. */
+        plan_reopens_k,
+    };
 
     /** How a round over @c entries entries sizes its columns: the hubs one gather draws at most and
      *  the most entries a neighborhood holds, as RAM names them, then the room for the hubs of
@@ -1407,7 +1414,7 @@ struct vram_apple_graph {
         /** The depth the next expansion reaches from, and the depths each direction took. */
         std::size_t depth_ = 0, depth_from_root_ = 0, depth_to_root_ = 0;
 
-        /** The population counts the report carries, as @c reachability_t names them. */
+        /** The population counts the report holds, as @c reachability_t names them. */
         std::size_t unlinked_ = 0, underlinked_ = 0, unreached_islands_ = 0, stranded_islands_ = 0, components_ = 0;
 
         /** The pass within the components or labels the next commit takes. */
@@ -1437,15 +1444,15 @@ struct vram_apple_graph {
         refine_plan_t() noexcept = default;
         refine_plan_t(refine_plan_t&& other) noexcept
             : health(other.health), index_(std::exchange(other.index_, nullptr)),
-              claim_(std::exchange(other.claim_, claim_t::borrowed_k)), shape_(other.shape_),
+              claim_(std::exchange(other.claim_, claim_t::caller_reopens_k)), shape_(other.shape_),
               neighborhoods_(other.neighborhoods_), runs_(other.runs_), gathered_(other.gathered_),
               round_seed_(other.round_seed_), swept_after_(other.swept_after_), phase_(other.phase_),
               status_(other.status_), tally_(other.tally_) {}
         refine_plan_t& operator=(refine_plan_t&& other) noexcept {
             if (this == &other) return *this;
-            if (claim_ == claim_t::held_k) index_->reopen_();
+            if (claim_ == claim_t::plan_reopens_k) index_->reopen_();
             health = other.health, index_ = std::exchange(other.index_, nullptr);
-            claim_ = std::exchange(other.claim_, claim_t::borrowed_k), shape_ = other.shape_;
+            claim_ = std::exchange(other.claim_, claim_t::caller_reopens_k), shape_ = other.shape_;
             neighborhoods_ = other.neighborhoods_, runs_ = other.runs_, gathered_ = other.gathered_;
             round_seed_ = other.round_seed_, swept_after_ = other.swept_after_, phase_ = other.phase_;
             status_ = other.status_, tally_ = other.tally_;
@@ -1456,7 +1463,7 @@ struct vram_apple_graph {
 
         /** Reopens the claim word @ref plan_refine closed, whether the round finished or not. */
         ~refine_plan_t() noexcept {
-            if (claim_ == claim_t::held_k) index_->reopen_();
+            if (claim_ == claim_t::plan_reopens_k) index_->reopen_();
         }
 
         /**
@@ -1713,8 +1720,8 @@ struct vram_apple_graph {
 
         vram_apple_graph* index_ = nullptr;
 
-        /** Who holds @c index_ 's claim word, which the plan reopens at its death when it does. */
-        claim_t claim_ = claim_t::borrowed_k;
+        /** Who reopens @c index_ 's claim word: the plan at its death, or its caller. */
+        claim_t claim_ = claim_t::caller_reopens_k;
 
         /** The round's sizes, as RAM names them. */
         round_shape_t shape_ {};
@@ -1975,7 +1982,7 @@ struct vram_apple_graph {
         if (!connectivity()) return {std::move(plan), status_code_t::uninitialized_k};
         if (context.device() != device_.ordinal || !context) return {std::move(plan), status_code_t::config_mismatch_k};
         if (status_t const closed = close_(); failed(closed)) return {std::move(plan), closed};
-        plan.index_ = this, plan.claim_ = claim_t::held_k;
+        plan.index_ = this, plan.claim_ = claim_t::plan_reopens_k;
         std::size_t const entries = size();
         plan.shape_ = round_shape_(entries, mean_value_bytes_(), config.cache_bytes);
         round_layout_t const layout = round_layout_(entries, plan.shape_);
@@ -2426,7 +2433,7 @@ struct vram_apple_graph {
             if (!kept) row[0] = static_cast<node_id_t>(base + node);
         }
 
-        /** The saved columns, read in place from the mapping or the lent buffer. */
+        /** The saved columns, read in place from the mapping or the caller's buffer. */
         safegraphs_saved_columns<node_id_t> saved_;
 
         /** Each node's start in the tape, from the plan's first, @b [nodes+1], absolute. */
@@ -2933,7 +2940,7 @@ struct vram_apple_graph {
             if (status_t const built = build(graph_pipelines_[static_cast<std::size_t>(kernel)]); failed(built))
                 return built;
         }
-        // The pipelines report the simdgroup width the specification carries, so they build first.
+        // The pipelines report the simdgroup width the specification names, so they build first.
         auto const [specs, status] = metal_device_specs_t::query(*device, device_.ordinal);
         if (failed(status)) return status;
         device_ = specs;

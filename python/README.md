@@ -18,7 +18,7 @@ Every modality takes the same receivers, `refine` and `reshard`, each with its o
 pip install usearch
 ```
 
-The wheels carry every dense storage type.
+The wheels hold every dense storage type.
 A build from source takes its count from `USEARCH_DENSE_DTYPES` in `pyproject.toml`, eleven, and a leaner one can override it:
 
 ```sh
@@ -86,11 +86,10 @@ Its residency must match that of every index it drives:
 pool = usearch.Executor.for_ram(threads=8, memory_domains=[0, 1])  # 0 threads derives from the hardware
 device_pool = usearch.Executor.for_vram(devices=[0, 1])  # One host thread, one stream per device
 disk_pool = usearch.Executor.for_nvme(threads=8, paths=["/mnt/nvme0", "/mnt/nvme1"])
-shared_pool = usearch.Executor.on_pool(fu_pool_address)  # Borrows a ForkUnion pool by address
 pool.drain(usearch.Mood.SPINNING)  # Waits, then keeps idle workers hot
 ```
 
-`memory_domains` are the NUMA nodes the threads stay local to, `for_nvme` opens one submission ring per worker, and `on_pool` takes a `fu_pool_t` as an integer address, as `ctypes` hands pointers over, which must outlive the executor.
+`memory_domains` are the NUMA nodes the threads stay local to, and `for_nvme` opens one submission ring per worker.
 One call holds an executor at a time and nothing queues, so a second call raises `ContendedError`.
 A deferred call on a pool of several threads runs on its thread 0, so polling `status` alone finishes it, and its callbacks run on the pool's threads under the GIL.
 Used as a context manager, an executor waits for its calls and closes on exit.
@@ -132,11 +131,11 @@ Key(uuid.uuid4())  # from a `uuid.UUID`
 ```
 
 A key equals and hashes as the integer or `uuid.UUID` it reads as, and pickles as its sixteen bytes.
-No NumPy dtype holds a 128-bit integer, so batch keys travel as big-endian sixteen-byte rows, an `(N, 16)` buffer of `uint8`, and `usearch.keys` carries `integers_to_keys` and `keys_to_integers` for keys that are entry numbers.
+No NumPy dtype holds a 128-bit integer, so batch keys travel as big-endian sixteen-byte rows, an `(N, 16)` buffer of `uint8`, and `usearch.keys` holds `integers_to_keys` and `keys_to_integers` for keys that are entry numbers.
 
 ## Errors
 
-Every failure raises a subclass of `usearch.Error`, a `RuntimeError` carrying the C status as its `status` attribute, a `usearch.Status` member:
+Every failure raises a subclass of `usearch.Error`, a `RuntimeError` holding the C status as its `status` attribute, a `usearch.Status` member:
 
 ```python
 try:
@@ -248,8 +247,8 @@ A `progress` handler is called with `(completed, total)` units, and `False` stop
 
 ```python
 index.get(42, arena)  # a (count, dimensions) `DenseVectors` of what is stored under it
-cursor = index.on(pool).cursor()  # entry scan, pulled in batches; `cursor([42])` walks out from key 42
-while batch := cursor.next(1024, arena, links=True):
+cursor = index.cursor()  # entry scan, pulled in batches; `cursor([42])` walks out from key 42
+while batch := cursor.on(pool).next(1024, arena, links=True):  # each pull names its executor
     ...  # batch.keys, and batch.links as (offsets, keys) when asked; vectors come from `get`
 with index.on(pool).search_stream(query) as stream:  # resumable best-first stream
     while pulled := stream.next(16, arena)[0]:  # one query of `Matches`, empty once drained
@@ -257,6 +256,7 @@ with index.on(pool).search_stream(query) as stream:  # resumable best-first stre
             break
 ```
 
+A cursor keeps no executor: `cursor.next` runs on the calling thread, and `cursor.on(executor).next` blocks on that executor.
 An absent key, a drained cursor and a drained stream all answer empty, falsy results.
 A cursor or a stream releases its walk on `close()` or at the end of a `with` block.
 
@@ -406,7 +406,7 @@ assert sorted(keys_to_integers(np.asarray(keys)).tolist()) == [1, 2]  # The two 
 ```
 
 `search` ranks the `wanted` nearest entries a `GeospatialRelation` admits, in chord metres, and `within` reports every entry inside the radius as one ragged run per query; `seconds=` widens each query's time interval.
-No handle here carries a terrain, so `GeospatialRelation.VISIBLE` raises `UnsupportedError`, and `get` returns a key's observations within the stored rounding.
+No handle here holds a terrain, so `GeospatialRelation.VISIBLE` raises `UnsupportedError`, and `get` returns a key's observations within the stored rounding.
 
 ## Apache Arrow
 
@@ -426,7 +426,7 @@ Sequences and shapes cross as Python values, so the tape converters stay unbound
 
 ## Tooling
 
-`usearch.io` reads and writes the `fbin` / `ibin` / `i8bin` matrix formats, and `usearch.eval` carries the recall harness, which takes the index or any blocking receiver:
+`usearch.io` reads and writes the `fbin` / `ibin` / `i8bin` matrix formats, and `usearch.eval` holds the recall harness, which takes the index or any blocking receiver:
 
 ```python
 from usearch.eval import self_recall

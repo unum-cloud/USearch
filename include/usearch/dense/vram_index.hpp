@@ -44,7 +44,7 @@ namespace unum::usearch::dense {
 
 #pragma region Kernel Records
 
-/** Bytes of a value lookup an attend carries to its kernels. */
+/** Bytes of a value lookup an attend passes to its kernels. */
 inline constexpr std::size_t vram_value_lookup_capacity_k = 64;
 
 /** Bytes of one walking warp's attend scratch over @p heads_count heads of @p columns columns and
@@ -265,7 +265,7 @@ struct vram_restitch_t {
     vram_telemetry_block_t* telemetry = nullptr;
 };
 
-/** Where an attend writes its outputs, and the value lookup its walks resolve rows through, carried
+/** Where an attend writes its outputs, and the value lookup its walks resolve rows through, passed
  *  as the lookup's own bytes; the sharded gather reads the outputs as @p shards blocks, @p rows
  *  rows in each. */
 struct vram_attend_t {
@@ -553,7 +553,7 @@ struct vram_shard_core {
     /** The page-locked host bytes a save moves through, one batch at a time. */
     using bounce_t = growing_buffer<byte_t, typename vendor_t::pinned_allocator_t>;
 
-    /** Rows one checkpoint batch carries between a matrix and the caller: one slab, the row
+    /** Rows one checkpoint batch moves between a matrix and the caller: one slab, the row
      *  granularity the RAM residency grows by. */
     inline static constexpr std::size_t batch_rows_log2_k = 20;
     using traversal_context_t = typename vendor_t::template traversal_context<traversals_allocator_t>;
@@ -569,7 +569,7 @@ struct vram_shard_core {
     /** Default visited-set slot count; the scratch slice must also fit the candidate cache. */
     inline static constexpr u32_t default_visited_capacity_k = 2048;
 
-    /** Source rows one import window carries at most, so rows in another scalar cross through
+    /** Source rows one import window moves at most, so rows in another scalar cross through
      *  bounded staging. */
     inline static constexpr std::size_t import_window_rows_k = 4096;
 
@@ -597,7 +597,7 @@ struct vram_shard_core {
     using geometry_t = dense::geometry_t;
 
     /** The @p kernel every walk scores by and the @p geometry every row keeps, both checked at the
-     *  first growth, and one allocator per storage concern, each carrying its placement; the index
+     *  first growth, and one allocator per storage concern, each holding its placement; the index
      *  pins itself to the vectors allocator's device, demands the neighbors allocator agree, and
      *  keeps its host key column and key map on @p keys_allocator. */
     explicit vram_shard_core(nk_kernel_kind_t kernel, geometry_t geometry,
@@ -663,7 +663,7 @@ struct vram_shard_core {
     device_specs_t const& device_specs() const noexcept { return device_; }
 
     /** The driver table every call on the pinned device goes through, the one its storage
-     *  carries. */
+     *  holds. */
     api_t const& api() const noexcept { return vectors_matrix_.api(); }
 
     /** The metric every walk scores by, fixed at construction. */
@@ -674,7 +674,7 @@ struct vram_shard_core {
     kernels_type_ const& kernels() const noexcept { return kernels_; }
 
     /** Whether rows keep norms: every metric but dot finalizes through them, so dot leaves the
-     *  norms column empty and checkpoints carry none. */
+     *  norms column empty and checkpoints hold none. */
     bool stores_norms() const noexcept { return kernel_ != nk_kernel_dot_k; }
 
     /** Device-side flat storage views - the audit surface for invariant checkers & tests. */
@@ -909,7 +909,7 @@ struct vram_shard_core {
                                         vram_warps_per_block_k;
         std::size_t const results_bytes = // A default single query's device outputs.
             non_zero_expansion_factor(search_config_t {}) * (sizeof(node_id_t) + sizeof(distance_t));
-        // The staging also carries the back-link chains: a head per row after the batch, two words
+        // The staging also holds the back-link chains: a head per row after the batch, two words
         // per pick and a count.
         std::size_t const links_bytes = (size() + rows + 2 * rows * connectivity() + 1) * sizeof(u32_t);
         return aligned(sizeof(vram_telemetry_block_t)) + 2 * aligned(sizeof(u32_t)) +
@@ -1160,7 +1160,7 @@ struct vram_shard_core {
      *  @param[in] completion Blocking drains the context's stream and reports the telemetry;
      *      deferred returns once queued, and the caller drains before reading any output.
      *  @return The pairs scored over every row once blocking - zero when deferred, where @p counts
-     *      carry them after the drain - and the traversal telemetry this call spent.
+     *      hold them after the drain - and the traversal telemetry this call spent.
      *
      *  @par Statuses:
      *  - @c config_mismatch_k The index scores by another metric than dot, the outputs or
@@ -1286,7 +1286,7 @@ struct vram_shard_core {
         std::size_t offsets = 0, hubs = 0, runs = 0;
     };
 
-    /** The page-locked host bytes a round's barriers order on, borrowed from its context's results:
+    /** The page-locked host bytes a round's barriers order on, inside its context's results:
      *  the entries by neighborhood, the starts with split room, the hubs, runs and items of the
      *  next gather, and each entry's neighborhood. */
     struct round_mirrors_t {
@@ -1322,7 +1322,7 @@ struct vram_shard_core {
         /** The device scratch, laid out as @c split_scratch_ reads it. */
         typename traversal_context_t::bytes_ptr_t device_bytes;
 
-        /** Page-locked host bytes borrowed from the plan's context, laid out as @c split_layout_
+        /** Page-locked host bytes inside the plan's context results, laid out as @c split_layout_
          *  places them, which the round's mirrors take over once the parts publish. */
         byte_t* host_bytes = nullptr;
 
@@ -2148,7 +2148,8 @@ struct vram_shard_core {
             return {std::move(plan), status_code_t::unsupported_k};
         for (owner_type_* const into : targets)
             if (&(into->*core) == this) return {std::move(plan), status_code_t::config_mismatch_k};
-        if (!claims_.closed()) return {std::move(plan), status_code_t::contended_k};
+        if (!claims_.closed())
+            return {std::move(plan), {status_code_t::contended_k, "The source's claim word is open"}};
         split_t& split = plan.split_;
         if (failed(split.targets.reserve_exactly(parts)) || failed(split.parts.resize(parts)))
             return {std::move(plan), status_code_t::out_of_memory_k};
@@ -2157,7 +2158,8 @@ struct vram_shard_core {
             if (part.device_.ordinal != device_.ordinal || part.kernel_ != kernel_ || !(part.geometry_ == geometry_) ||
                 part.size())
                 return {std::move(plan), status_code_t::config_mismatch_k};
-            if (!part.claims_.closed()) return {std::move(plan), status_code_t::contended_k};
+            if (!part.claims_.closed())
+                return {std::move(plan), {status_code_t::contended_k, "A target's claim word is open"}};
             split.targets.push_back_reserved(&part);
         }
         split.source = this;
@@ -2263,7 +2265,7 @@ struct vram_shard_core {
      *      cannot be read in place.
      *
      *  Vectors travel as logical rows with the fragment padding stripped, neighbors verbatim under
-     *  the positional sentinel convention, and norms verbatim when the columns carry theirs.
+     *  the positional sentinel convention, and norms verbatim when the columns hold theirs.
      *
      *  A batch crosses half a batch at a time: each half reaches the host while the next one is
      *  still copying off the device, so the host awaits each half's event once, and the last one is
@@ -2344,12 +2346,12 @@ struct vram_shard_core {
             return {this, index_ && visible ? divide_round_up<std::size_t>(visible, batch_rows()) : 0};
         }
 
-        /** Rows one batch carries - a bounce's worth, or every row when fewer. */
+        /** Rows one batch moves - a bounce's worth, or every row when fewer. */
         std::size_t batch_rows() const noexcept {
             return min_of(static_cast<std::size_t>(visible), power_of_two<std::size_t>(batch_rows_log2_k));
         }
 
-        /** Rows one half of the bounce carries: half a batch, so two halves pin what one batch
+        /** Rows one half of the bounce moves: half a batch, so two halves pin what one batch
          *  would. */
         std::size_t half_rows() const noexcept { return divide_round_up<std::size_t>(batch_rows(), 2); }
 
@@ -2544,7 +2546,7 @@ struct vram_shard_core {
      *      hold them, and the tasks they span.
      *
      *  Each task copies on the stream from host or device columns, or from another index's
-     *  storage, and @ref finish derives the norms no task carried before it publishes the rows.
+     *  storage, and @ref finish derives the norms no task supplied before it publishes the rows.
      *
      *  Holds the claim for its whole life, so nothing else claims rows while it runs. A source's
      *  IDs are local to the rows it delivers, so every batch shifts them onto the appended range
@@ -2635,7 +2637,7 @@ struct vram_shard_core {
             return {this, index_ && rows ? divide_round_up(rows, batch_rows()) : 0};
         }
 
-        /** Rows one batch carries - a slab, or every row when fewer. */
+        /** Rows one batch moves - a slab, or every row when fewer. */
         std::size_t batch_rows() const noexcept { return min_of(rows, power_of_two<std::size_t>(batch_rows_log2_k)); }
 
         /**
@@ -2644,7 +2646,7 @@ struct vram_shard_core {
          *      into the host's.
          *
          *  The vectors go into the fragment-padded matrix rows, whose fresh tails arrive zeroed,
-         *  and their norms where the columns carry them, then the neighbors, which
+         *  and their norms where the columns hold them, then the neighbors, which
          *  @c launch_rebase_links_ folds on the plan's stream, every ID inside @p source_range onto
          *  the appended range and every other onto the sentinel. Columns stay alive until
          *  @c finish, whose one wait covers every copy. A sharded plan drives it one part's slice
@@ -2787,9 +2789,9 @@ struct vram_shard_core {
         /**
          *  @brief Publishes the appended nodes once every batch's vectors and neighbors arrived.
          *
-         *  The norms derive on the device unless the metric is dot or every batch carried them, the
+         *  The norms derive on the device unless the metric is dot or every batch held them, the
          *  row count goes beside the keys, uploaded on the plan's stream, the claim lifts, and the
-         *  watermark turns over the rows once every earlier batch has, carrying along the keys that
+         *  watermark turns over the rows once every earlier batch has, taking along the keys that
          *  @ref publish_keys filed. A success spends the plan, so @c uninitialized_k answers a
          *  second call instead of publishing twice, and also a turn refused by a failure an earlier
          *  batch kept; any other refusal leaves it whole, so the missing tasks can still arrive.
@@ -2809,13 +2811,13 @@ struct vram_shard_core {
             if (rows) {
                 if (failed(index_->upload_keys_({base, base + rows}, stream)))
                     return index_->fail_(status_code_t::device_k);
-                // One launch derives every row, so a load mixing carried and missing norms
-                // re-derives the carried.
+                // One launch derives every row, so a load mixing supplied and missing norms
+                // re-derives the supplied.
                 if (index_->stores_norms() &&
                     fu::standard_atomic_ref<std::size_t> {covered_norms}.load(std::memory_order_acquire) != rows &&
                     failed(index_->launch_derive_norms_(*kernels_, base, rows, stream)))
                     return index_->fail_(status_code_t::device_k);
-                // A fill carries the count by value, so no host word must outlive a copy; the one
+                // A fill passes the count by value, so no host word must outlive a copy; the one
                 // wait finishes every task, the norms and the count before the watermark turns.
                 if (failed(vendor_t::fill_words(index_->api(), index_->published_rows_(),
                                                 static_cast<u32_t>(base + rows), 1, stream)) ||
@@ -2861,7 +2863,7 @@ struct vram_shard_core {
      *
      *  @param[in] rows Rows to append.
      *  @param[in] stream The stream every copy and the norms kernel queue on.
-     *  @param[in] sources The mapped parts host columns are read from, empty for a lent buffer.
+     *  @param[in] sources The mapped parts host columns are read from, empty for a caller's buffer.
      *
      *  @par Statuses:
      *  - @c uninitialized_k The index never grew, or @ref status keeps it.
@@ -3029,7 +3031,7 @@ struct vram_shard_core {
 
     using attend_heads_t = vram_attend_heads_t;
 
-    /** Whether the device casts carry @p from values into @p to, as NumKong's plan of one value
+    /** Whether the device casts convert @p from values into @p to, as NumKong's plan of one value
      *  says. */
     static bool casts_(nk_dtype_t from, nk_dtype_t to) noexcept {
         nk_cast_plan_t plan;
@@ -3037,7 +3039,7 @@ struct vram_shard_core {
     }
 
     /** Why @p rows cannot cross into the staging: a width other than the index's, a scalar the
-     *  device casts cannot carry into the stored one, or rows closer than one packed row apart, a
+     *  device casts cannot convert into the stored one, or rows closer than one packed row apart, a
      *  zero stride repeating the first. */
     status_t rows_refusal_(rows_view_t rows) const noexcept {
         if (rows.columns != dimensions()) return status_code_t::config_mismatch_k;
@@ -3118,7 +3120,7 @@ struct vram_shard_core {
     }
 
     /** Why an attend over @p rows rows cannot be written to @p outputs and @p carry: shapes other
-     *  than the rows', a scalar the device casts cannot carry f32 into, or rows closer than one row
+     *  than the rows', a scalar the device casts cannot turn f32 into, or rows closer than one row
      *  apart. */
     status_t attend_refusal_(std::size_t rows, rows_span_t outputs,
                              std::span<softmax_state_t const> carry) const noexcept {
@@ -3699,7 +3701,7 @@ struct vram_shard_core {
         return carved;
     }
 
-    /** Carves @p split 's device scratch from @p context 's allocator, borrows its pinned results,
+    /** Carves @p split 's device scratch from @p context 's allocator, takes its pinned results,
      *  which the rounds' mirrors already sized, as the host bytes, and queues the upload of the
      *  targets' columns and of the roots that @p seed picks. */
     status_t carve_split_(split_t& split, u64_t seed, traversal_context_t& context) noexcept {

@@ -127,7 +127,7 @@ final class DenseCalls {
             call.progress(DenseIndex.REFINE_PROGRESS, config.progress);
             call.stats(DenseIndex.REFINE_STATS, config.stats);
             if (config.plan != null) {
-                config.plan.lend(call);
+                config.plan.pass(call);
             }
             return () -> RefineReport.lift(report);
         });
@@ -222,7 +222,7 @@ final class DenseCalls {
             call.size(DenseIndex.ATTEND_COUNT, queries.rows());
             call.rows(DenseIndex.ATTEND_QUERIES, queries);
             call.size(DenseIndex.ATTEND_HEAD_COUNT, config.headCount);
-            valueLookup.lend(call);
+            valueLookup.pass(call);
             call.enumeration(DenseIndex.ATTEND_OUTPUTS_SCALAR, config.outputsScalar.code());
             MemorySegment outputs = call.output(DenseIndex.ATTEND_OUTPUTS, Library.ROWS_VIEW);
             call.arena(DenseIndex.ATTEND_ARENA, arena);
@@ -272,7 +272,7 @@ final class DenseCalls {
             call.progress(DenseIndex.RESHARD_PROGRESS, config.progress);
             call.stats(DenseIndex.RESHARD_STATS, config.stats);
             if (config.plan != null) {
-                config.plan.lend(call);
+                config.plan.pass(call);
             }
             return () -> RefineReport.lift(report);
         });
@@ -286,12 +286,12 @@ final class DenseCalls {
         });
     }
 
-    /** Lends every index to the call and copies their handles into the array C reads. */
+    /** Passes every index to the call and copies their handles into the array C reads. */
     private static MemorySegment handles(Call call, DenseIndex[] indexes) {
         MemorySegment[] addresses = new MemorySegment[indexes.length];
         for (int order = 0; order != indexes.length; ++order) {
             addresses[order] = indexes[order].handle.address();
-            call.lend(indexes[order]);
+            call.pass(indexes[order]);
         }
         return call.addresses(addresses);
     }
@@ -350,14 +350,14 @@ final class DenseCalls {
         });
     }
 
-    static Request<DenseCursor> cursorOpening(DenseIndex index, @Nullable Executor executor, Key[] starts) {
+    static Request<DenseCursor> cursorOpening(DenseIndex index, Key[] starts) {
         return new Request<>(DenseIndex.CURSOR_INIT, call -> {
             MemorySegment opened = call.output(DenseIndex.CURSOR_INIT_CURSOR, Library.POINTER);
             if (starts.length != 0) {
                 call.size(DenseIndex.CURSOR_INIT_STARTS_COUNT, starts.length);
                 call.pointer(DenseIndex.CURSOR_INIT_STARTS, call.staged(starts));
             }
-            return () -> new DenseCursor(opened.get(Library.POINTER, 0), index, executor);
+            return () -> new DenseCursor(opened.get(Library.POINTER, 0), index);
         });
     }
 

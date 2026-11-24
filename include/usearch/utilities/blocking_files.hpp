@@ -15,7 +15,7 @@
  *  works on @c bytes_view_t. Writing has two shapes for one reason: a mapping dirties the page
  *  cache, which a terabyte checkpoint should not, so @ref unum::usearch::utilities::file_span_t
  *  addresses a descriptor positionally and @ref unum::usearch::utilities::copy_bytes puts the
- *  difference in an overload rather than at a call site. Slices carry their own absolute offset,
+ *  difference in an overload rather than at a call site. Slices hold their own absolute offset,
  *  which is what an aligned direct write will want.
  *
  *  Both stand on one set of native file verbs, @ref unum::usearch::utilities::open_native_file and
@@ -105,7 +105,7 @@ inline constexpr std::size_t native_transfer_bytes_k = std::size_t {1} << 30;
  *  offset. */
 using native_file_t = HANDLE;
 
-/** The handle no open file carries. */
+/** The handle no open file holds. */
 inline native_file_t const invalid_native_file_k = INVALID_HANDLE_VALUE;
 
 /** The event one thread waits its positional transfers out on, so threads sharing a file never
@@ -136,7 +136,7 @@ class native_file_event_t {
 /** What the platform calls an open file: a descriptor. */
 using native_file_t = int;
 
-/** The descriptor no open file carries. */
+/** The descriptor no open file holds. */
 inline constexpr native_file_t invalid_native_file_k = -1;
 
 /** Nothing: a positional transfer blocks in its own syscall, so no thread waits on another's. */
@@ -391,7 +391,7 @@ inline bool names_regular_file_or_nothing_(char const* path) noexcept {
 
 #if USEARCH_OS_LINUX_
 
-/** The most bytes one request to the block device under @p descriptor carries, its queue's
+/** The most bytes one request to the block device under @p descriptor holds, its queue's
  *  @c max_sectors_kb; zero where sysfs does not say. */
 inline std::size_t device_request_bytes_(int descriptor) noexcept {
     struct stat description;
@@ -872,7 +872,7 @@ class mapped_file_t {
      *  filesystem refusing it, or WASI, whose mapping already is a heap copy of the bytes. */
     seekable_file_t open_direct() const noexcept;
 
-    /** The most bytes one request to the drive under the mapped file carries; zero where the
+    /** The most bytes one request to the drive under the mapped file holds; zero where the
      *  platform does not say. */
     std::size_t request_bytes() const noexcept;
 
@@ -1143,13 +1143,13 @@ inline void mapped_file_t::unmap_() noexcept {
  *  where one could be opened. */
 struct column_source_t {
 
-    /** The column's bytes, mapped or lent. */
+    /** The column's bytes, mapped or passed. */
     bytes_view_t mapped;
 
     /** The same bytes in the part's unbuffered file; empty where none opened. */
     file_view_t direct;
 
-    /** Whether the column holds no bytes - a part that carries none of it. */
+    /** Whether the column holds no bytes - a part that holds none of it. */
     bool empty() const noexcept { return mapped.empty(); }
 };
 

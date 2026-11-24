@@ -10,7 +10,7 @@ It exposes all four modalities, each served by the engine in RAM, on NVMe and on
 cmake -B build_release -D CMAKE_BUILD_TYPE=Release -D USEARCH_BUILD_SHARED=1 -D USEARCH_DENSE_DTYPES=11 && cmake --build build_release --config Release
 ```
 
-That leaves both libraries in `build_release/`, carrying all eleven dense storage types; precompiled ones ship on the [releases page](https://github.com/unum-cloud/USearch/releases).
+That leaves both libraries in `build_release/`, holding all eleven dense storage types; precompiled ones ship on the [releases page](https://github.com/unum-cloud/USearch/releases).
 Put `c/` on the include path, or `include/` once installed, where the C headers sit beside the C++ ones, and link either library.
 One header, `usearch/usearch.h`, pulls in every modality: `dense_index.h`, `sequence_index.h`, `shapes_index.h` and `geospatial_index.h`.
 `ctest --test-dir build_release -R usearch_test_c` runs the smoke test in `c/test.c`.
@@ -35,7 +35,7 @@ Its search is exact, its traversal statistics are invented, and its checkpoints 
 
 Every verb takes one argument struct, initialized by designator, so every field left out keeps its default.
 Every struct opens in the same order: the handle, `executor`, `outcome`, then `completion`; inputs follow, then outputs and the `arena` they land in, then knobs, and last `progress` and `stats`.
-Structs carry no size or version field, so they grow source-compatibly only, and the major version changes whenever one does.
+Structs hold no size or version field, so they grow source-compatibly only, and the major version changes whenever one does.
 
 ```c
 #include <stdio.h>           // For printing.
@@ -102,7 +102,7 @@ Every call reports through its `outcome` and names its `completion` in the same 
 `usearch_completion_deferred_k` returns once submitted, as an io_uring entry does, and the call finishes on its executor.
 A thread pool, a GPU stream or a remote server can serve the same verbs without changing a call site.
 
-Submission copies the argument struct, but everything it points to stays borrowed until the outcome is final.
+Submission copies the argument struct, but everything it points to must stay allocated and unchanged until the outcome is final.
 One call holds an executor at a time, so calls overlap by running on different executors, each with its own outcome and arena:
 
 ```c
@@ -151,6 +151,7 @@ Together these let one manager thread in `int main()` overlap a RAM, an NVMe and
 An executor owns the threads or device streams that run calls, the traversal scratch they walk with, and the pinned bounce buffer staging passes through.
 One executor serves any number of indexes, of any quantization and metric, since its scratch is sized from geometry, grown to the widest asked of it, and kept between calls.
 A VRAM executor's `scratch_limit` caps each stream's run, which every call's walk scratch and outputs carve from, and a call needing more reports `usearch_status_out_of_memory_k`.
+A RAM or NVMe executor's `scratch_limit` caps each thread's scratch the same way, and zero takes 1 GiB per thread rather than letting it grow unbounded.
 One call holds an executor at a time, while a handle admits any number of concurrent callers: the executor serializes, never the index.
 
 ```c
@@ -162,8 +163,7 @@ usearch_executor_for_ram(&(usearch_executor_for_ram_t) {.executor = &executor,
 ```
 
 Threads interleave across the named domains, so a half-size executor takes half of every socket rather than all of one, and the default stops at 7/8 because full occupancy starves ordered publication.
-`usearch_executor_for_vram` opens one stream per device, or borrows the caller's, and `usearch_executor_for_nvme` spawns one thread per submission ring.
-An application with its own ForkUnion pool lends it with `usearch_executor_on_pool` instead, though the engine refuses borrowed pools with `usearch_status_unsupported_k` for now.
+`usearch_executor_for_vram` opens one non-blocking stream per device and destroys it with the executor, and `usearch_executor_for_nvme` spawns one thread per submission ring.
 An executor's kind must match the residency of every handle it drives, and a mismatch reports `usearch_status_device_k`.
 
 A `NULL` executor is accepted by every verb and runs the call on the caller's own thread, final when it returns whatever its `completion`, which suits size lookups and other short calls.
@@ -259,7 +259,7 @@ Both take a `shard_capacity`, the entries one shard may hold, zero meaning the 3
 
 Memory follows residency: an index keeps its payload where its lifecycle verb put it, an executor keeps its scratch next to its threads or devices, and an arena lives where the executor that created it computes.
 So outputs come back in RAM from a RAM executor and in VRAM from a VRAM executor, and moving them elsewhere is the caller's own copy.
-Callers lend memory, never a way to allocate it: no allocator callback crosses the interface, because large systems hold too many kinds of memory for one ABI to describe them all.
+The caller allocates every buffer a call reads or writes, and frees it after the call is final: no allocator callback crosses the interface, because large systems hold too many kinds of memory for one ABI to describe them all.
 
 Every dense verb is exported for every residency, and the engine answers what a residency lacks with `usearch_status_unsupported_k`:
 
@@ -275,18 +275,13 @@ Every dense verb is exported for every residency, and the engine answers what a 
 
 ### GPUs
 
-A VRAM index lives on the devices its `vram` options name, one shard per device, and a VRAM executor drives it through one stream per device.
-Passing your own streams lets USearch work join the rest of your pipeline, though the engine refuses borrowed streams with `usearch_status_unsupported_k` for now:
+A VRAM index lives on the devices its `vram` options name, one shard per device, and a VRAM executor drives it through the non-blocking stream it opens on each device and destroys with itself.
+The executor drives only its own streams, so passing your own in `streams` answers `usearch_status_unsupported_k`, and a call without an executor runs on each device's null legacy stream:
 
 ```c
-#include <cuda_runtime.h>
-
-cudaStream_t stream;
-cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking);
 int32_t const device = 0;
 usearch_executor_t gpu = NULL;
-usearch_executor_for_vram(&(usearch_executor_for_vram_t) {
-    .executor = &gpu, .outcome = &outcome, .vram = {&device, 1}, .streams = (void* const*)&stream});
+usearch_executor_for_vram(&(usearch_executor_for_vram_t) {.executor = &gpu, .outcome = &outcome, .vram = {&device, 1}});
 
 usearch_dense_index_t index = NULL;
 usearch_dense_init_vram(&(usearch_dense_init_vram_t) {.index = &index,
@@ -393,7 +388,7 @@ A batch of rows is a `usearch_rows_view_t`: a base pointer, a byte stride, the v
 A zero stride repeats the first row, as in BLAS, and the call's `count` alone is the batch axis.
 Vectors are quantized on insertion into the index's `quantization`, from `f64` down to `i8`, `u8`, the four 8- and 6-bit floats `e5m2`, `e4m3`, `e3m2` and `e2m3`, and packed 4- and 1-bit integers.
 The library compiles the first `USEARCH_DENSE_DTYPES` storage types of `bf16`, `u1x8`, `i8`, `e4m3`, `f16`, `u8`, `e5m2`, `i4x2`, `u4x2`, `e3m2` and `e2m3`, and refuses the rest with `usearch_status_unsupported_k`.
-The precompiled binaries carry all eleven, while a CMake build takes the first four unless configured with `-D USEARCH_DENSE_DTYPES=11`.
+The precompiled binaries hold all eleven, while a CMake build takes the first four unless configured with `-D USEARCH_DENSE_DTYPES=11`.
 
 USearch comes pre-packaged with NumKong, bringing SIMD-accelerated distance kernels for x86, Arm, RISC-V and GPUs.
 The dense metric kinds are:
@@ -501,8 +496,8 @@ for (size_t written = 1; written != 0 && outcome.status == usearch_status_succes
 usearch_dense_cursor_free(cursor);
 ```
 
-Each shard's publication watermark is read as the walk enters it, so an entry once passed is never revisited, while a later shard may carry entries published after the walk began.
-Opened at `starts`, a cursor yields their own entries first, in the order given, then breadth-first the entries they link to, each entry once, so the first entries pulled carry the starts' immediate links.
+Each shard's publication watermark is read as the walk enters it, so an entry once passed is never revisited, while a later shard may hold entries published after the walk began.
+Opened at `starts`, a cursor yields their own entries first, in the order given, then breadth-first the entries they link to, each entry once, so the first entries pulled hold the starts' immediate links.
 `links` is a `usearch_keys_tape_view_t`, entry `i` spanning `offsets[i]` up to `offsets[i+1]`, and the vectors themselves come from `usearch_dense_get`.
 
 When a predicate is selective enough that no `wanted` can be guessed upfront, a search stream keeps pulling matches in distance order:
@@ -872,7 +867,7 @@ Every score is the chord between the two positions in metres, altitude included,
 `visible_k` also needs a clear line of sight over the handle's `terrain`, and a handle without one refuses it.
 `sees_k` needs the entry's view cone to hold the query, which cameras see this place, and `seen_k` the query's cone to hold the entry, what this camera sees; both clear the terrain too when the handle has one.
 The tolerance's `seconds` widen the query's interval on both ends, and a query without a time matches entries of any time.
-The terrain is a north-up grid of heights above the ellipsoid, borrowed in place or filled on demand by a callback; a checkpoint never carries it, so every load and view names it again, and a GPU index takes borrowed heights alone.
+The terrain is a north-up grid of heights above the ellipsoid, read in place or filled on demand by a callback; a checkpoint never holds it, so every load and view names it again, and a GPU index takes only heights read in place.
 The remaining verbs are the shapes ones, where `get` returns observations within the stored rounding, centimetres and milliseconds among them, `count` reports a key's entries, and `sample` places its draws at their Earth-fixed positions.
 The engine serves every relation in RAM, on NVMe and on NVIDIA and AMD GPUs, answering `view_ram` and Apple GPUs with `usearch_status_unsupported_k`; `sample`, `health` and cursors with `starts` and `links` serve RAM indexes and NVMe views.
 The stand-in scans every entry exactly, keeps the doubles inserted, refuses every terrain and so `visible_k`, and refuses every VRAM verb with `usearch_status_device_k`.
@@ -894,7 +889,7 @@ The stand-in scans every entry exactly, keeps the doubles inserted, refuses ever
   `usearch_outcome_status` polls and `usearch_outcome_wait` blocks, both with the acquire ordering the final store pairs with.
 - __No life of its own.__
   Threads live only in executors, and a deferred call only on its executor's thread 0; every `*_free` waits for the calls naming its handle first.
-- __Arenas are lent and reused, never shared.__
+- __Arenas belong to the caller and are reused, never shared.__
   Every output whose length scales with the call lands in an arena the caller passes; each call rewinds it, so the previous call's views go stale the moment the next one starts.
 - __Nothing costs anything until it is used.__
   Submitting a call allocates nothing, and an arena allocates only when a call writes into it.

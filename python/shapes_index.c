@@ -101,9 +101,9 @@ static int plan_parse(usearch_py_call_t* call, PyObject* plan, PyTypeObject* typ
     return 0;
 }
 
-/** Borrows the points of one shape, a matrix of x, y and z columns, into @p points. */
-static int shape_borrow(PyObject* item, usearch_scalar_t scalar_hint, usearch_matrix_view_t* points,
-                        usearch_py_buffer_backing_t* backing) {
+/** Views the points of one shape, a matrix of x, y and z columns, into @p points. */
+static int shape_view(PyObject* item, usearch_scalar_t scalar_hint, usearch_matrix_view_t* points,
+                      usearch_py_buffer_backing_t* backing) {
     if (usearch_py_matrix_from_object(item, scalar_hint, points, backing) != 0) return -1;
     if (points->columns == 3) return 0;
     size_t const columns = points->columns;
@@ -117,7 +117,7 @@ static int shape_borrow(PyObject* item, usearch_scalar_t scalar_hint, usearch_ma
  *      matrix is a tape of one.
  *
  *  The items are separate objects, so their points are copied once into the run the library
- *  reads: the @c count + 1 offsets, then every shape's points end to end, in one block lent to
+ *  reads: the @c count + 1 offsets, then every shape's points end to end, in one block passed to
  *  @p block. The point counts are read in a first pass and checked again while copying, since an
  *  exporter may be resized by another thread in between.
  *
@@ -135,9 +135,9 @@ static int shapes_from_object(PyObject* object, usearch_scalar_t scalar_hint, vo
     usearch_scalar_t scalar = scalar_hint;
     size_t total_points = 0;
     for (Py_ssize_t position = 0; position != items_count; ++position) {
-        if (shape_borrow(item_objects[position], scalar_hint, &points, &backing) != 0) goto failed;
+        if (shape_view(item_objects[position], scalar_hint, &points, &backing) != 0) goto failed;
         usearch_py_buffer_release(&backing);
-        // One tape carries one scalar type, so a batch mixing them has no single reading.
+        // One tape holds one scalar type, so a batch mixing them has no single reading.
         if (position && points.scalar != scalar) {
             usearch_py_raise(usearch_status_shape_mismatch_k, "shape %zd holds another scalar type than the first",
                              position);
@@ -157,7 +157,7 @@ static int shapes_from_object(PyObject* object, usearch_scalar_t scalar_hint, vo
     uint8_t* const bytes = (uint8_t*)(offsets + items_count + 1);
     offsets[0] = 0;
     for (Py_ssize_t position = 0; position != items_count; ++position) {
-        if (shape_borrow(item_objects[position], scalar, &points, &backing) != 0) goto failed;
+        if (shape_view(item_objects[position], scalar, &points, &backing) != 0) goto failed;
         size_t const begin = (size_t)offsets[position];
         if (points.rows > total_points - begin) {
             usearch_py_buffer_release(&backing);
@@ -777,7 +777,7 @@ static char const doc_ShapesIndex_refine[] =                                    
     "  memory_limit (int, optional): Bytes a loaded NVMe handle holds for the part it\n"          //
     "    rewrites; 0 derives what rounds that part in RAM.\n"                                     //
     "  progress (callable, optional): Called with (completed, total) units of each phase;\n"      //
-    "    returning False stops the round, None carries on.\n"                                     //
+    "    returning False stops the round, None continues.\n"                                      //
     "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"       //
     "  stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.\n"          //
     "  plan (ShapesRefinePlan, optional): The round to open or continue; None runs one\n"         //
@@ -863,7 +863,7 @@ static char const doc_ShapesIndex_search[] =                                    
     "    the key is rejected.\n"                                                                 //
     "    A `Batch` answers many keys per call instead.\n"                                        //
     "  progress (callable, optional): Called with (completed, total) queries; returning False\n" //
-    "    stops the batch and raises `CancelledError`, None carries on.\n"                        //
+    "    stops the batch and raises `CancelledError`, None continues.\n"                         //
     "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"      //
     "  stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.\n"         //
     "\n"                                                                                         //
@@ -1107,7 +1107,7 @@ static char const doc_ShapesIndex_reshard[] =                                   
     "    rewrites; 0 derives what rounds that part in RAM.\n"                                    //
     "  seed (int, optional): Picks the part roots of a cut; equal seeds cut equally.\n"          //
     "  progress (callable, optional): Called with (completed, total) units of each phase of\n"   //
-    "    the closing rounds; returning False stops them, None carries on.\n"                     //
+    "    the closing rounds; returning False stops them, None continues.\n"                      //
     "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"      //
     "  stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.\n"         //
     "  plan (ShapesReshardPlan, optional): The reshard to open or continue; None runs it to\n"   //
@@ -1117,7 +1117,7 @@ static char const doc_ShapesIndex_reshard[] =                                   
     "  RefineReport: What the closing rounds did to the graph, across the targets.";
 
 /**
- *  @brief Holds the sequence of indexes @p object names in @p held and lends their handles as one
+ *  @brief Holds the sequence of indexes @p object names in @p held and passes their handles as one
  *      block in @p handles.
  *  @return 0 on success, -1 with an exception set otherwise.
  */
@@ -1440,7 +1440,7 @@ static char const doc_ShapesIndex_save_buffer[] =                               
     "Args:\n"                                                                                 //
     "  arena (Arena): Where the checkpoint lands, rewound by the call.\n"                     //
     "  progress (callable, optional): Called with (completed, total) parts; returning\n"      //
-    "    False stops the write and raises `CancelledError`, None carries on.\n"               //
+    "    False stops the write and raises `CancelledError`, None continues.\n"                //
     "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"   //
     "\n"                                                                                      //
     "Returns:\n"                                                                              //

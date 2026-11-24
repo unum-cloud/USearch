@@ -456,7 +456,7 @@ template <typename indexes_type_, nk_kernel_kind_t kernel_>
 void test_dense_vram_indexes_nvme_round_trip(u64_t seed, typename indexes_type_::executor_t& placement) {
     using key_t = typename indexes_type_::key_t;
     using nvme_t = nvme_indexes_for<key_t, indexes_type_::vector_dtype_k, nk_cap_serial_k,
-                                    blocking_files_engine<fu::standard_yield_t>>;
+                                    blocking_files_queue<fu::standard_yield_t>>;
     using scalar_t = typename nvme_t::scalar_t;
     std::size_t const rows_count = 2 * dense_thread_nodes_k;
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
@@ -500,7 +500,7 @@ void test_dense_vram_indexes_reshard(u64_t seed, typename indexes_type_::executo
     using key_t = typename indexes_type_::key_t;
     using scalar_t = typename indexes_type_::scalar_t;
     using nvme_t = nvme_indexes_for<key_t, indexes_type_::vector_dtype_k, nk_cap_serial_k,
-                                    blocking_files_engine<fu::standard_yield_t>>;
+                                    blocking_files_queue<fu::standard_yield_t>>;
     using ram_t = typename nvme_reference<nvme_t>::ram_t;
     using node_id_t = typename ram_t::index_t::node_id_t;
     constexpr std::size_t samples_k = 32;
@@ -593,7 +593,7 @@ void test_dense_vram_indexes_cut(u64_t seed, typename indexes_type_::executor_t&
     using scalar_t = typename indexes_type_::scalar_t;
     using distance_t = typename indexes_type_::distance_t;
     using nvme_t = nvme_indexes_for<key_t, indexes_type_::vector_dtype_k, nk_cap_serial_k,
-                                    blocking_files_engine<fu::standard_yield_t>>;
+                                    blocking_files_queue<fu::standard_yield_t>>;
     using ram_t = typename nvme_reference<nvme_t>::ram_t;
     using reference_t = typename ram_t::index_t;
     constexpr std::size_t samples_k = 32;
@@ -909,7 +909,7 @@ void test_vram_indexes_configuration(u64_t seed, executor_type_& executor) {
 }
 
 /** The sharded VRAM cases its translation unit defines once per vendor, for its executor, which
- *  each carried vendor's entry runs over the executor it opened. */
+ *  each covered vendor's entry runs over the executor it opened. */
 template <typename executor_type_>
 void run_vram_indexes_cases(executor_type_& executor);
 

@@ -153,7 +153,7 @@ inline usearch_keys_view_t keys_view(std::span<usearch_key_t const> keys) noexce
     return {keys.data(), sizeof(usearch_key_t)};
 }
 
-/** @p bytes as the C interface borrows a buffer. */
+/** @p bytes as the C interface views a buffer. */
 inline usearch_bytes_view_t bytes_view(util::bytes_view_t bytes) noexcept {
     return {reinterpret_cast<usearch_byte_t const*>(bytes.data()), bytes.size()};
 }
@@ -433,7 +433,7 @@ inline st::vector<flag_t> joined_flags(std::initializer_list<std::span<flag_t co
 
 /** Reads the environment, then parses @p argv against the shared flags and @p binary_flags. On
  *  <tt>--help</tt> prints the usage and exits with status 0; on a setting that does not parse, or huge
- *  pages the host does not hold, prints one line and exits with status 1. */
+ *  pages the host does not have, prints one line and exits with status 1. */
 inline settings_t read_settings(int argc, char const* const* argv, std::string_view synopsis,
                                 std::span<flag_t const> binary_flags = {}) {
     settings_t settings = read_environment();
@@ -516,9 +516,9 @@ inline st::vector<usearch_gpu_device_t> listed_devices() noexcept {
  *  @brief The executors and the arena one residency's calls run on, freed together.
  *
  *  A RAM session builds and serves on one RAM executor. A VRAM session builds and serves on the
- *  executor of its devices, writing outputs to an arena on the first of them. An NVMe session
- *  builds on a RAM executor and serves views on an NVMe executor of its own, so a built index is
- *  saved and viewed before it is searched there.
+ *  executor of its devices, writing outputs to an arena on the first of them, and runs its RAM
+ *  copies on a RAM executor of its own. An NVMe session builds on a RAM executor and serves views
+ *  on an NVMe executor of its own, so a built index is saved and viewed before any search.
  */
 struct session_t {
     usearch_residency_t residency = usearch_residency_ram_k;
@@ -533,14 +533,14 @@ struct session_t {
     /** The USearch device ordinals a VRAM index places shards on, in turn. */
     st::vector<std::int32_t> devices;
 
-    /** The NVMe namespaces a save places its parts on, one per part, borrowed from the settings. */
+    /** The NVMe namespaces a save places its parts on, one per part, viewed from the settings. */
     st::vector<std::string_view> places;
 
     /** What views read those parts through: the places themselves, or under passthrough each block
      *  node's generic character node. */
     st::vector<sz::string_t> served;
 
-    /** The served namespaces as the C interface borrows them. */
+    /** The served namespaces as the C interface views them. */
     st::vector<usearch_bytes_view_t> paths;
 
     /** The memory domains RAM shards repeat over, in turn. */
@@ -554,6 +554,9 @@ struct session_t {
 
     /** The NVMe executor views serve on; null outside an NVMe session. */
     usearch_executor_t storage = nullptr;
+
+    /** The RAM executor a VRAM session's RAM copies run on; null outside a VRAM session. */
+    usearch_executor_t host = nullptr;
 
     /** The RAM every view's key table may take, @c memory_limit zero holding none. */
     usearch_ram_options_t nvme_ram {};
@@ -577,6 +580,7 @@ struct session_t {
     ~session_t() noexcept {
         usearch_arena_free(host_arena);
         usearch_arena_free(arena);
+        usearch_executor_free(host);
         usearch_executor_free(storage);
         usearch_executor_free(executor);
     }
@@ -588,19 +592,21 @@ struct session_t {
         std::swap(places, other.places), std::swap(served, other.served), std::swap(paths, other.paths);
         std::swap(memory_domains, other.memory_domains);
         std::swap(shard_capacity, other.shard_capacity), std::swap(executor, other.executor);
-        std::swap(storage, other.storage), std::swap(arena, other.arena), std::swap(host_arena, other.host_arena);
+        std::swap(storage, other.storage), std::swap(host, other.host);
+        std::swap(arena, other.arena), std::swap(host_arena, other.host_arena);
     }
 
     /** Whether every executor and the arena the residency needs opened. */
     explicit operator bool() const noexcept {
-        return executor && arena && (residency != usearch_residency_nvme_k || storage);
+        return executor && arena && (residency != usearch_residency_nvme_k || storage) &&
+               (residency != usearch_residency_vram_k || (host && host_arena));
     }
 
-    /** The executor serving an index of @p index_residency : the storage one for a view, and none
-     *  for a RAM copy of a VRAM session's index, which runs on the calling thread. */
+    /** The executor serving an index of @p index_residency : the storage one for a view, and the
+     *  host one for a RAM copy of a VRAM session's index. */
     usearch_executor_t executor_for(usearch_residency_t index_residency) const noexcept {
         if (index_residency == usearch_residency_nvme_k) return storage;
-        return index_residency == usearch_residency_ram_k && residency == usearch_residency_vram_k ? nullptr : executor;
+        return index_residency == usearch_residency_ram_k && residency == usearch_residency_vram_k ? host : executor;
     }
 
     /** The arena serving an index of @p index_residency , which @ref executor_for pairs it with. */
@@ -701,6 +707,14 @@ inline session_t open_session(settings_t const& settings, usearch_cpu_class_t cp
         usearch_executor_for_ram(&placement);
     }
     if (report_failure(outcome, "Opening the executor")) return session;
+    if (session.residency == usearch_residency_vram_k) {
+        usearch_executor_for_ram_t placement {.executor = &session.host,
+                                              .outcome = &outcome,
+                                              .ram = {nullptr, 0, session.shard_capacity, cpu_class_ceiling},
+                                              .threads = settings.threads.value};
+        usearch_executor_for_ram(&placement);
+        if (report_failure(outcome, "Opening the host executor")) return session;
+    }
     if (session.residency == usearch_residency_nvme_k) {
         usearch_executor_for_nvme_t placement {.executor = &session.storage,
                                                .outcome = &outcome,
@@ -934,10 +948,10 @@ struct dense_verbs_t {
         usearch_dense_reshard_plan_finish(&arguments);
     }
     using cursor_t = usearch_dense_cursor_t;
-    static void cursor_init(index_t index, std::span<usearch_key_t const> starts, cursor_t* cursor,
-                            usearch_outcome_t* outcome) noexcept {
+    static void cursor_init(index_t index, usearch_executor_t executor, std::span<usearch_key_t const> starts,
+                            cursor_t* cursor, usearch_outcome_t* outcome) noexcept {
         usearch_dense_cursor_init_t arguments {};
-        arguments.cursor = cursor, arguments.index = index, arguments.outcome = outcome;
+        arguments.cursor = cursor, arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
         arguments.starts_count = starts.size(), arguments.starts = starts.data();
         usearch_dense_cursor_init(&arguments);
     }
@@ -970,14 +984,15 @@ struct dense_verbs_t {
 };
 
 /** What a sequence index is opened with beyond its metadata: the weights and window widths,
- *  borrowed. */
+ *  viewed. */
 struct sequence_geometry_t {
     usearch_sequence_metadata_t metadata {};
     usearch_sequence_weights_t const* weights = nullptr;
     std::span<std::size_t const> window_widths;
 };
 
-/** A tape over @p offsets as a caller holding @c std::size_t offsets lends them, in their width. */
+/** A tape over @p offsets as a caller holding @c std::size_t offsets passes them, in their
+ *  width. */
 inline usearch_tape_view_t tape_of(void const* data, std::size_t const* offsets, usearch_scalar_t scalar) noexcept {
     usearch_tape_view_t tape {};
     tape.data = data, tape.scalar = scalar;
@@ -1179,10 +1194,10 @@ struct sequence_verbs_t {
         usearch_sequence_reshard_plan_finish(&arguments);
     }
     using cursor_t = usearch_sequence_cursor_t;
-    static void cursor_init(index_t index, std::span<usearch_key_t const> starts, cursor_t* cursor,
-                            usearch_outcome_t* outcome) noexcept {
+    static void cursor_init(index_t index, usearch_executor_t executor, std::span<usearch_key_t const> starts,
+                            cursor_t* cursor, usearch_outcome_t* outcome) noexcept {
         usearch_sequence_cursor_init_t arguments {};
-        arguments.cursor = cursor, arguments.index = index, arguments.outcome = outcome;
+        arguments.cursor = cursor, arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
         arguments.starts_count = starts.size(), arguments.starts = starts.data();
         usearch_sequence_cursor_init(&arguments);
     }
@@ -1377,10 +1392,10 @@ struct shapes_verbs_t {
         usearch_shapes_reshard_plan_finish(&arguments);
     }
     using cursor_t = usearch_shapes_cursor_t;
-    static void cursor_init(index_t index, std::span<usearch_key_t const> starts, cursor_t* cursor,
-                            usearch_outcome_t* outcome) noexcept {
+    static void cursor_init(index_t index, usearch_executor_t executor, std::span<usearch_key_t const> starts,
+                            cursor_t* cursor, usearch_outcome_t* outcome) noexcept {
         usearch_shapes_cursor_init_t arguments {};
-        arguments.cursor = cursor, arguments.index = index, arguments.outcome = outcome;
+        arguments.cursor = cursor, arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
         arguments.starts_count = starts.size(), arguments.starts = starts.data();
         usearch_shapes_cursor_init(&arguments);
     }
@@ -1413,7 +1428,7 @@ struct shapes_verbs_t {
 };
 
 /** What a geospatial index is opened with beyond its metadata: its terrain, whose heights are
- *  borrowed. */
+ *  viewed. */
 struct geospatial_geometry_t {
     usearch_geospatial_metadata_t metadata {};
     usearch_geospatial_terrain_t terrain {};
@@ -1592,10 +1607,10 @@ struct geospatial_verbs_t {
         usearch_geospatial_reshard_plan_finish(&arguments);
     }
     using cursor_t = usearch_geospatial_cursor_t;
-    static void cursor_init(index_t index, std::span<usearch_key_t const> starts, cursor_t* cursor,
-                            usearch_outcome_t* outcome) noexcept {
+    static void cursor_init(index_t index, usearch_executor_t executor, std::span<usearch_key_t const> starts,
+                            cursor_t* cursor, usearch_outcome_t* outcome) noexcept {
         usearch_geospatial_cursor_init_t arguments {};
-        arguments.cursor = cursor, arguments.index = index, arguments.outcome = outcome;
+        arguments.cursor = cursor, arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
         arguments.starts_count = starts.size(), arguments.starts = starts.data();
         usearch_geospatial_cursor_init(&arguments);
     }
@@ -2170,7 +2185,7 @@ inline st::vector<std::size_t> match_offsets(copied_matches_t const& copied) noe
  *  the first @p k matches @p found holds lies within the true nearest distance, and whether each
  *  lies within the true k-th distance.
  *
- *  Both sides carry exact distances, so a match tied with a true neighbor counts wherever the
+ *  Both sides hold exact distances, so a match tied with a true neighbor counts wherever the
  *  oracle broke the tie.
  */
 template <typename visit_type_>
@@ -2397,14 +2412,15 @@ inline bool dense_opens(usearch_residency_t residency, usearch_scalar_t scalar) 
     return outcome.status == usearch_status_success_k;
 }
 
-/** The class a bf16 RAM index picks under @p cpu_class_ceiling, or unknown if it does not open. */
-inline usearch_cpu_class_t picked_class(usearch_cpu_class_t cpu_class_ceiling) noexcept {
+/** The class a bf16 RAM index picks under @p cpu_class_ceiling, described on @p executor , or
+ *  unknown if it does not open. */
+inline usearch_cpu_class_t picked_class(usearch_executor_t executor, usearch_cpu_class_t cpu_class_ceiling) noexcept {
     usearch_dense_index_t index = nullptr;
     usearch_outcome_t outcome {};
     usearch_dense_index_description_t described {};
     dense_verbs_t::init_ram(&index, {usearch_dense_metric_inner_k, usearch_scalar_bf16_k, 64, 0},
                             {nullptr, 0, 0, cpu_class_ceiling}, &outcome);
-    if (index) dense_verbs_t::describe(index, nullptr, &described, &outcome);
+    if (index) dense_verbs_t::describe(index, executor, &described, &outcome);
     dense_verbs_t::free(index);
     return outcome.status == usearch_status_success_k ? described.cpu_class : usearch_cpu_class_unknown_k;
 }
@@ -2438,11 +2454,12 @@ inline st::vector<usearch_scalar_t> compiled_scalars(usearch_residency_t residen
  *  the last class the header declares, since a value past it is no @c usearch_cpu_class_t, and a
  *  gap in between spells its name "unknown"; a class the machine lacks narrows to another one, so
  *  the sweep leaves it out. */
-inline st::vector<usearch_cpu_class_t> admitted_classes() noexcept {
+inline st::vector<usearch_cpu_class_t> admitted_classes(usearch_executor_t executor) noexcept {
     st::vector<usearch_cpu_class_t> classes;
     for (int code = usearch_cpu_class_serial_k; code <= usearch_cpu_class_wasm64_extended_k; ++code) {
         usearch_cpu_class_t const cpu_class = static_cast<usearch_cpu_class_t>(code);
-        if (std::string_view(usearch_cpu_class_name(cpu_class)) != "unknown" && picked_class(cpu_class) == cpu_class &&
+        if (std::string_view(usearch_cpu_class_name(cpu_class)) != "unknown" &&
+            picked_class(executor, cpu_class) == cpu_class &&
             st::failed(classes.push_back(usearch_cpu_class_t {cpu_class})))
             exit_out_of_memory("the CPU classes");
     }
@@ -2451,8 +2468,8 @@ inline st::vector<usearch_cpu_class_t> admitted_classes() noexcept {
 
 /** The ceiling naming the portable floor: serial, or the one class a monoversioned build compiles
  *  in its place, which a RAM index without a ceiling then describes. */
-inline usearch_cpu_class_t floor_class() {
-    return picked_class(usearch_cpu_class_unknown_k) == usearch_cpu_class_monoversioned_k
+inline usearch_cpu_class_t floor_class(usearch_executor_t executor) {
+    return picked_class(executor, usearch_cpu_class_unknown_k) == usearch_cpu_class_monoversioned_k
                ? usearch_cpu_class_monoversioned_k
                : usearch_cpu_class_serial_k;
 }
@@ -2477,8 +2494,15 @@ struct sweep_cell_t {
  */
 inline st::vector<sweep_cell_t> diagonal_sweep(usearch_scalar_t first) noexcept {
     st::vector<sweep_cell_t> cells;
-    st::vector<usearch_cpu_class_t> const classes = admitted_classes();
-    usearch_cpu_class_t const floor = floor_class();
+    // One thread is enough to describe each probing index.
+    usearch_executor_t probing = nullptr;
+    usearch_outcome_t outcome {};
+    usearch_executor_for_ram_t placement {.executor = &probing, .outcome = &outcome, .threads = 1};
+    usearch_executor_for_ram(&placement);
+    if (report_failure(outcome, "Opening the probing executor")) return cells;
+    st::vector<usearch_cpu_class_t> const classes = admitted_classes(probing);
+    usearch_cpu_class_t const floor = floor_class(probing);
+    usearch_executor_free(probing);
     for (usearch_residency_t const residency : compiled_residencies()) {
         st::vector<usearch_scalar_t> scalars;
         if (first != usearch_scalar_unknown_k) scalars = compiled_scalars(residency);

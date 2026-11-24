@@ -98,14 +98,13 @@ There is a constructor per C one, each taking every argument its own hardware ha
 
 ```wolfram
 ExecutorForRam["MemoryDomains"->{0, 1}, "Threads"->0]
-ExecutorOnPool[poolAddress, "MemoryDomains"->{}]                     (* borrows a fu_pool_t *)
 ExecutorForVram["Devices"->{0}, "Streams"->{}, "ScratchLimit"->0]
 ExecutorForNvme["Paths"->{"/dev/nvme0n1"}, "Threads"->0]
 ExecutorDrain[executor, "parked"]                                    (* or "spinning" *)
 ```
 
 `ExecutorDrain` picks whether the workers sleep or spin once idle, `parked` when the mood is left out.
-`"Streams"` lists borrowed CUDA stream addresses, one per device, and an empty list makes the executor create its own.
+`"Streams"` is declared for your CUDA stream addresses, one per device, which answer `"unsupported"`, since the executor drives only its own; an empty list uses the one stream per device the executor opens and destroys with itself.
 
 ## Arenas
 
@@ -174,7 +173,7 @@ A viewed index is read-only, and every mutating verb on it fails as `read-only`.
 
 ## Serialization
 
-`DenseSave[receiver, path]` writes a checkpoint, and the path carries the SafeGraphs extension that picks the layout: `.safegraphs` for one monolith, `.safegraphs.json` for a manifest beside its shards.
+`DenseSave[receiver, path]` writes a checkpoint, and the path holds the SafeGraphs extension that picks the layout: `.safegraphs` for one monolith, `.safegraphs.json` for a manifest beside its shards.
 `DenseMetadataRead[path]` answers the frozen geometry, the metric, quantization, dimensions and connectivity, without loading a shard.
 In-memory buffers hold single monoliths only, as `UnsignedInteger8` numeric arrays, and the loaders take a `ByteArray` too:
 
@@ -191,7 +190,7 @@ DenseMetadataReadBuffer[monolith]
 ### Rows & Scalars
 
 Packed real lists cross as `f64`; `NumericArray` inputs keep their `Real32` or `Real64` storage.
-LibraryLink lends both as `"Shared"` arguments, which the kernel keeps until the call is final, so an existing packed list or typed array needs no input copy at this boundary on any receiver.
+LibraryLink passes both as `"Shared"` arguments, which the kernel keeps until the call is final, so an existing packed list or typed array needs no input copy at this boundary on any receiver.
 The engine still converts the input into the index's quantization.
 
 ```wolfram
@@ -395,7 +394,7 @@ Refinement, resharding and plans work as in a sequence index.
   The index runs a verb on the kernel's own thread, `DenseIndexOn[index, executor]` runs it on an executor's workers, and `DenseIndexDeferred[index, executor]` submits it there, all with the same arguments.
 - __No life of its own.__
   The package starts no threads and keeps no queues, so every worker belongs to an executor you made.
-- __Arenas are lent and reused, never shared.__
+- __Arenas belong to the caller and are reused, never shared.__
   Every output whose length scales with the call lands in an arena the caller passes, and is copied into Wolfram arrays once the call is final, so no result reads an arena a later call rewound.
 - __Nothing costs anything until it is used.__
   A call reads the kernel's tensors in place, and an arena allocates only when a call writes into it.

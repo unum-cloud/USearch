@@ -6,7 +6,7 @@
  *
  *  Entries vary in size, so batches arrive as tapes rather than strided matrices: a list of text
  *  or bytes-like objects is gathered once into one run of bytes and the offsets around it, and the
- *  handle carries no dimensions or quantization.
+ *  handle holds no dimensions or quantization.
  *
  *  Every verb is written once and reached through three receivers, as in @c dense_index.c: the
  *  index runs it on the calling thread, an @c On blocks on its executor, and a @c DeferredOn
@@ -99,8 +99,8 @@ static int plan_parse(usearch_py_call_t* call, PyObject* plan, PyTypeObject* typ
     return 0;
 }
 
-/** Borrows the bytes of one sequence: text as UTF-8, anything else through the buffer protocol. */
-static int sequence_borrow(PyObject* item, Py_buffer* buffer) {
+/** Views the bytes of one sequence: text as UTF-8, anything else through the buffer protocol. */
+static int sequence_view(PyObject* item, Py_buffer* buffer) {
     if (PyUnicode_Check(item)) {
         Py_ssize_t length = 0;
         char const* const text = PyUnicode_AsUTF8AndSize(item, &length);
@@ -115,8 +115,8 @@ static int sequence_borrow(PyObject* item, Py_buffer* buffer) {
  *  @brief Gathers text, a bytes-like object, or a sequence of them into one tape; a lone sequence
  *      is a tape of one.
  *
- *  The items are separate objects, so their bytes are copied once into the run the library
- *  reads: the @c count + 1 offsets, then every sequence's bytes end to end, in one block lent to
+ *  The items are separate objects, so their bytes are copied once into the run the library reads:
+ *  the @c count + 1 offsets, then every sequence's bytes end to end, in one block passed to
  *  @p block. The lengths are read in a first pass and checked again while copying, since another
  *  thread may resize a byte array in between.
  *
@@ -132,7 +132,7 @@ static int sequences_from_object(PyObject* object, void** block, size_t* count, 
     size_t total = 0;
     Py_buffer buffer;
     for (Py_ssize_t position = 0; position != items_count; ++position) {
-        if (sequence_borrow(item_objects[position], &buffer) != 0) goto failed;
+        if (sequence_view(item_objects[position], &buffer) != 0) goto failed;
         total += (size_t)buffer.len;
         PyBuffer_Release(&buffer);
     }
@@ -146,7 +146,7 @@ static int sequences_from_object(PyObject* object, void** block, size_t* count, 
     uint8_t* const bytes = (uint8_t*)(offsets + items_count + 1);
     offsets[0] = 0;
     for (Py_ssize_t position = 0; position != items_count; ++position) {
-        if (sequence_borrow(item_objects[position], &buffer) != 0) goto failed;
+        if (sequence_view(item_objects[position], &buffer) != 0) goto failed;
         size_t const begin = (size_t)offsets[position];
         if ((size_t)buffer.len > total - begin) {
             PyBuffer_Release(&buffer);
@@ -169,14 +169,14 @@ failed:
     return -1;
 }
 
-/** The weights an alignment kind scores with, and the matrix buffer they borrow. */
+/** The weights an alignment kind scores with, and the matrix buffer they view. */
 typedef struct weights_t {
     usearch_sequence_weights_t values;
     usearch_py_buffer_backing_t matrix;
 } weights_t;
 
 /**
- *  @brief Reads the @p matrix_object and @p gap_object an alignment kind takes, the matrix borrowed
+ *  @brief Reads the @p matrix_object and @p gap_object an alignment kind takes, the matrix viewed
  *      as 256 × 256 signed bytes.
  *  @param[out] passed The weights to hand the library, or NULL when the caller named neither.
  *  @return 0 on success, -1 with an exception set otherwise; the matrix is released either way by
@@ -870,7 +870,7 @@ static char const doc_SequenceIndex_refine[] =                                  
     "  memory_limit (int, optional): Bytes a loaded NVMe handle holds for the part it\n"          //
     "    rewrites; 0 derives what rounds that part in RAM.\n"                                     //
     "  progress (callable, optional): Called with (completed, total) units of each phase;\n"      //
-    "    returning False stops the round, None carries on.\n"                                     //
+    "    returning False stops the round, None continues.\n"                                      //
     "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"       //
     "  stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.\n"          //
     "  plan (SequenceRefinePlan, optional): The round to open or continue; None runs one\n"       //
@@ -954,7 +954,7 @@ static char const doc_SequenceIndex_search[] =                                  
     "    the key is rejected.\n"                                                                 //
     "    A `Batch` answers many keys per call instead.\n"                                        //
     "  progress (callable, optional): Called with (completed, total) queries; returning False\n" //
-    "    stops the batch and raises `CancelledError`, None carries on.\n"                        //
+    "    stops the batch and raises `CancelledError`, None continues.\n"                         //
     "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"      //
     "  stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.\n"         //
     "\n"                                                                                         //
@@ -1179,7 +1179,7 @@ static char const doc_SequenceIndex_reshard[] =                                 
     "    rewrites; 0 derives what rounds that part in RAM.\n"                                      //
     "  seed (int, optional): Picks the part roots of a cut; equal seeds cut equally.\n"            //
     "  progress (callable, optional): Called with (completed, total) units of each phase of\n"     //
-    "    the closing rounds; returning False stops them, None carries on.\n"                       //
+    "    the closing rounds; returning False stops them, None continues.\n"                        //
     "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"        //
     "  stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.\n"           //
     "  plan (SequenceReshardPlan, optional): The reshard to open or continue; None runs it to\n"   //
@@ -1189,7 +1189,7 @@ static char const doc_SequenceIndex_reshard[] =                                 
     "  RefineReport: What the closing rounds did to the graph, across the targets.";
 
 /**
- *  @brief Holds the sequence of indexes @p object names in @p held and lends their handles as one
+ *  @brief Holds the sequence of indexes @p object names in @p held and passes their handles as one
  *      block in @p handles.
  *  @return 0 on success, -1 with an exception set otherwise.
  */
@@ -1514,7 +1514,7 @@ static char const doc_SequenceIndex_save_buffer[] =                             
     "Args:\n"                                                                                 //
     "  arena (Arena): Where the checkpoint lands, rewound by the call.\n"                     //
     "  progress (callable, optional): Called with (completed, total) parts; returning\n"      //
-    "    False stops the write and raises `CancelledError`, None carries on.\n"               //
+    "    False stops the write and raises `CancelledError`, None continues.\n"                //
     "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"   //
     "\n"                                                                                      //
     "Returns:\n"                                                                              //

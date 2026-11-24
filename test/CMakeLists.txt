@@ -111,7 +111,7 @@ endif ()
 
 # The engine suite: the dense behavior cells, one per mechanism, with each storage dtype's cells in a unit of its own
 # that compiles only when `USEARCH_DENSE_DTYPES` keeps the dtype and registers itself with the runner; the sequence,
-# shapes and geospatial engines; the suites over the C interface; and every vendor's VRAM cells the build carries. It
+# shapes and geospatial engines; the suites over the C interface; and every vendor's VRAM cells the build holds. It
 # links the library, which the suites over the C interface call and the device listing names its classes through.
 # Optimization level comes from the configuration: measured on these units, -O1 costs as much as -O3 and only slows the
 # suite down.

@@ -2,13 +2,13 @@
  *  @file test/utilities/safegraphs_format.cpp
  *  @author Ash Vardanian
  *  @date September 3, 2026
- *  @brief The interchange unit of the suite: a fixed-width embedding fixture carried through the
+ *  @brief The interchange unit of the suite: a fixed-width embedding fixture held through the
  *      shared basic-tier SafeGraphs scenarios - monolith, hostile headers, and the distributed
  *      manifest form.
  *
  *  Every modality unit brings a ragged value column, so a fixed-width one is what this fixture
  *  adds: its header must say @c FixedSizeList where theirs say a prefix-sum list, and the same
- *  scenarios must carry it end to end.
+ *  scenarios must hold it end to end.
  */
 #undef NDEBUG // ! A test's oracle must stay live in every build
 
@@ -153,7 +153,7 @@ using widened_index_t = ram_index<embedding_t, util::uuid128_t, u32_t, f32_t, du
 
 /** A UUID-keyed view of the embeddings on storage. */
 using widened_view_t = us::basic::nvme_indexes<embedding_codec_t, util::uuid128_t, u32_t, f32_t,
-                                               blocking_files_engine<fu::standard_yield_t>>;
+                                               blocking_files_queue<fu::standard_yield_t>>;
 
 /**
  *  @brief A monolith of @p fixture_type_ 's keys widens into UUID keys on every reader.
@@ -241,7 +241,7 @@ static void test_keys_widen(u64_t seed, std::string_view label) {
     fu_topology_t topology = nullptr;
     expect_true(fu_topology_new(&topology) == fu_success_k);
     {
-        io_engine_config_t config;
+        io_queue_config_t config;
         config.queue_depth = 64;
         auto [executor, spawn_status] = widened_view_t::executor_t::spawn(topology, 1, config);
         expect_equal(spawn_status, status_code_t::success_k);
@@ -311,7 +311,7 @@ static void test_wide_nodes_refused(u64_t seed) {
     fu_topology_t topology = nullptr;
     expect_true(fu_topology_new(&topology) == fu_success_k);
     {
-        io_engine_config_t config;
+        io_queue_config_t config;
         config.queue_depth = 64;
         auto [executor, spawn_status] = widened_view_t::executor_t::spawn(topology, 1, config);
         expect_equal(spawn_status, status_code_t::success_k);

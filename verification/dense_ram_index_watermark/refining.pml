@@ -5,7 +5,7 @@
  *  @brief A refinement beside a concurrent save: @c rewrite_row_ relocks a published row and
  *      rewrites its tail, and moves no counter the save's settlement probe re-reads.
  *
- *  The index rests at two published rows, so the save plans; row 0 carries a second tail slot. The
+ *  The index rests at two published rows, so the save plans; row 0 holds a second tail slot. The
  *  refiner closes the dispenser, which a save reads as settled, and reopens it at the end; between
  *  the two it runs @c rewrite_row_ on row 0 and @c add_or_swap_link_ into row 1, keeping each row's
  *  first neighbor, so every unlock stores back the slot-zero value its lock displaced. The saver

@@ -67,11 +67,11 @@ The receiver decides where a verb runs and how it completes, while the verb and 
 - `index.on(executor).search<float>(..)` blocks on the executor.
 - `index.deferred(executor).search<float>(..)` submits the call and answers a `deferred`.
 
-All three are one class template over its receiver, `dense_index<receiver>`, so each verb is written once: `dense_index_t` owns the index, while `on` and `deferred` answer a `dense_index_on<completion>` that borrows it with the executor.
+All three are one class template over its receiver, `dense_index<receiver>`, so each verb is written once: `dense_index_t` owns the index, while `on` and `deferred` answer a `dense_index_on<completion>` naming it and the executor, both owned by the caller.
 Only the owning `dense_index_t` opens, loads and hands out cursors and streams.
 A blocking verb answers a `status_t` when it outputs nothing else and an `expected<T>` otherwise, so nothing about asynchrony reaches a caller who never asks for it.
 Each class spells that choice once, as its `deferrable<T>`, which names a `deferred<T>` under a deferred receiver.
-A borrowing receiver borrows the index and the executor, so neither may die while it, or a `deferred` it submitted, lives.
+A `caller_owned` receiver names an index and an executor the caller owns, so neither may die while it, or a `deferred` it submitted, lives.
 
 Any coroutine type awaits a deferred call, with any loop offering `post(void (*)(void*) noexcept, void*)`, so two shards are searched at once:
 
@@ -91,7 +91,7 @@ app::task search_both(us::dense_index_t const& east, us::dense_index_t const& we
 ```
 
 A `deferred` holds the outcome and the outputs the library writes until the call is final, and never moves, so it lives on the caller's stack or in the awaiting coroutine's frame.
-The waited result is what a blocking search answers, borrowing the same arena.
+The waited result is what a blocking search answers, a view into the same arena, valid until its next call.
 `status` answers `status_code_t::deferred_k` while the call is not final, then its final status.
 Inside a coroutine, `co_await call.wait(loop)` posts a poll to `loop` that reads the status and posts itself again until the call is final, so other tasks run meanwhile, while `call.wait()` blocks the thread without spinning.
 A `loop` is any type with `post(void (*poll)(void*) noexcept, void* state)` that later runs `poll(state)` on its own thread, storing the two words; a fixed ring of them, like `test_loop_t` in `cpp/test.cpp`, is enough.
@@ -107,7 +107,7 @@ Calls depending on each other are ordered by waiting on the first before submitt
 
 ## Executors
 
-An executor owns host threads or device streams, and the traversal scratch each of them walks with, grown to a high-water mark.
+An executor owns host threads and their I/O queues, or orders work on device streams it never opens, and owns the traversal scratch each of them walks with, grown to a high-water mark.
 One executor serves any number of indexes, and its residency must match the one their handles were built for.
 There is a constructor per residency, each taking only what its own hardware has, and the placement lists are the ones the indexes were built with, which keeps compute and memory domains in agreement.
 
@@ -122,18 +122,17 @@ auto [domains, domains_status] = us::executor_t::for_ram({.ram = {.memory_domain
 auto [capped, capped_status] = us::executor_t::for_ram({.ram = {.cpu_class_ceiling = usearch_cpu_class_intel_haswell_k}});
 auto [rings, rings_status] = us::executor_t::for_nvme({.nvme = {.paths = drives, .paths_count = 1}, .threads = 4});
 auto [streams, streams_status] = us::executor_t::for_vram({.vram = {.devices = devices, .devices_count = 2}});
-auto [shared, shared_status] = us::executor_t::on_pool({.pool = pool}); // the threads another library spawned
 us::executor_t const local;                                              // owns nothing, runs on the calling thread
 
 us::status_t const drained = threads.drain({.mood = usearch_mood_spinning_k}); // waits out the holding call, then spins
 ```
 
 `for_ram` and `for_nvme` take a thread count, where zero derives one, and `for_nvme` gives every thread one submission ring.
-`for_vram` takes none, since one host thread drives one stream per device, and its `streams` borrow your CUDA streams instead, one per device.
-Borrowed streams and `on_pool` must outlive the executor; the engine wires neither borrowing yet and answers `status_code_t::unsupported_k`.
+`for_vram` takes none, since one host thread drives one stream per device, which the executor opens with itself and destroys with itself.
+Your own CUDA streams in `streams` answer `status_code_t::unsupported_k` until they are wired.
 A default `executor_t` owns nothing and runs every call handed to it on the calling thread.
 One call holds an executor at a time, so two threads that genuinely overlap take one apiece, while index handles stay freely shared.
-`drain` waits until no call holds the executor and sets the mood idle workers adopt, and destroying an executor drains it, unless a GPU arena it made still holds it, which then does so on its own destruction.
+`drain` waits until no call holds the executor and sets the mood idle workers adopt, and destroying an executor drains it, so every arena it made is destroyed first.
 `us::gpu_devices(devices)` fills a span of `usearch_gpu_device_t` and answers how many GPUs the process can drive, a device's position there being the ordinal `for_vram` names it by, while `us::version_name()` spells the linked library's version.
 
 ## Arenas
@@ -146,7 +145,7 @@ An arena serves one call at a time, so each deferred call needs its own.
 Nothing in C++ retires a stale view at compile time, so a view read after its arena's next call reads whatever that call wrote.
 An arena from a VRAM executor holds device memory, which host code must not read; `arena.describe()` answers where an arena's outputs live.
 It grows, fills and frees on that executor's first stream, so it serves only calls on that executor, any other refused with `status_code_t::device_k`.
-Every arena holds the executor that made it until it is destroyed.
+Destroy every arena before the executor that made it.
 
 ```cpp
 auto [arena, arena_status] = us::arena_t::make({.executor = executor.handle()}); // make() is host pages
@@ -275,7 +274,7 @@ Every metric derives from a single inner-product kernel with pre-computed magnit
 
 ### Rows & Scalars
 
-`rows_view<T>` borrows a packed slab from a pointer, a row count and the values per row; a dataset whose rows are padded to a wider pitch passes the byte stride as a fourth argument, and a zero stride repeats the first row.
+`rows_view<T>` views a packed slab the caller owns from a pointer, a row count and the values per row; a dataset whose rows are padded to a wider pitch passes the byte stride as a fourth argument, and a zero stride repeats the first row.
 The scalar type of the input is independent of the stored quantization, so the `float` slab of the Quickstart lands in an `i8` index with nothing converted beforehand.
 Formats C++ has no arithmetic type for are bit containers, so a call can still name them, and NumKong's types convert to them by layout.
 
@@ -339,7 +338,7 @@ auto in_stock = [&](std::span<usearch_key_t const> keys, std::span<usearch_admis
 auto [stocked, stocked_status] = index.on(executor).search<float>({query, 1, 768}, 10, arena, {.predicate = {in_stock}});
 ```
 
-A predicate is a `noexcept` callable, called by the executor's threads together, so it holds no unguarded state.
+A predicate is a `noexcept` callable with a `const` call operator, called by the executor's threads together, so a `mutable` lambda is refused at compile time and any state it reaches is guarded.
 One answering a single key as a `bool` is cheap, asked as candidates are scored.
 One writing an admission per key of a batch is expensive by default, asked once per round, unless `us::predicate_t {handler, usearch_predicate_cost_cheap_k}` says otherwise.
 A VRAM handle refuses a host predicate with `status_code_t::device_k`.
@@ -432,7 +431,7 @@ while (receiver.refine({.progress = {before_the_deadline}, .plan = &plan}) == us
 auto [report, status] = receiver.refine_plan_finish(std::move(plan));
 ```
 
-A deferred call borrows the plan it carries, which stays where it is until the call is final.
+A deferred call reads and writes the plan it carries, which stays where it is until the call is final.
 
 ```cpp
 us::deferred<usearch_refine_report_t> call = index.deferred(executor).refine({.plan = &plan});
@@ -500,12 +499,12 @@ for (std::size_t query = 0; query != rows / tokens_per_query; ++query)
 ### Attention
 
 `attend` is Flash Attention folded into the walk: every key it scores folds into each head's running maximum, partition and weighted value sum, with no top-k cut, and the outputs land in an arena already divided by the partition, as rows of the scalar type you name.
-The index stores no values, so a `value_lookup_t` handler resolves every scored key to its value row, as wide as the keys, stored in the index's own quantization, and borrowed from storage outliving the call.
+The index stores no values, so a `value_lookup_t` handler resolves every scored key to its value row, as wide as the keys, stored in the index's own quantization, and read in place from storage the caller keeps until the call is final.
 A null row, or rows of another scalar type or width than the library reads, refuses the call with `status_code_t::shape_mismatch_k`.
 It runs on the executor's threads together.
 A VRAM walk resolves values on the device, where no host handler runs, so `value_lookup_t::device` names a device function and its state instead, and a host handler with an arena from a VRAM executor is refused with `status_code_t::device_k`.
 With a `head_count` of 8, row `t * 8 + h` of the queries is head `h` of token `t`, and the heads of one token share its walk.
-A `carry` of one `usearch_dense_softmax_state_t` per query row, lent by you, folds this branch into another over the same queries, such as a recent window kept out of the index.
+A `carry` of one `usearch_dense_softmax_state_t` per query row, owned by you, folds this branch into another over the same queries, such as a recent window kept out of the index.
 `score_scale` is conventionally the inverse square root of the head width, and zero derives it from the frozen geometry.
 
 ```cpp
@@ -606,6 +605,7 @@ assert(nearby.view.offsets[1] == 2); // both stops within 500 metres, in chord m
 
 `within` reports every entry the relation admits inside the radius, however many, while `search` ranks the `wanted` nearest, a zero `metres` ranking by distance alone.
 The relation is an argument of each call: `near` widens the radius by both positions' accuracies, `sees` and `seen` test the view cones, and `visible` tests a line of sight over the terrain the handle was built with, which `us::geospatial_terrain(handler, grid)` fills on demand.
+The index keeps that handler for its whole life and calls it from the executor's threads at once, so its call operator is `const`.
 `get` answers a key's observations within the stored rounding.
 
 ## Apache Arrow
@@ -652,11 +652,11 @@ No verb throws, so a caller wanting exceptions wraps `status_t` in one place of 
   `status` polls the status word, `wait()` blocks on it, and `co_await call.wait(loop)` suspends and re-polls through the caller's scheduler, as Rust's `Deferred` re-wakes itself through its `RawWaker`, since the library has no wake-up.
 - __No life of its own.__
   The SDK starts no threads, keeps no queues and caches nothing; destroying a `deferred` waits for the call first.
-- __Arenas are lent and reused, never shared.__
+- __Arenas are the caller's, reused, never shared.__
   Every output whose length scales with the call lands in an arena the caller passes, and the answer is a view over it.
 - __Nothing costs anything until it is used.__
   A blocking call allocates nothing, keeping its outcome and outputs on the stack; a deferred submission allocates nothing, keeping them in the immovable `deferred` the caller holds; an awaiter lives in the coroutine frame, and the scheduler stores two words, a function and a state pointer.
-- __Callers lend memory, never an allocator.__
+- __Callers pass memory, never an allocator.__
   No allocation callback crosses into the library: payload belongs to the index, placed by its constructor's residency, and scratch belongs to the executor.
 - __Callbacks cannot throw.__
   Every handler concept requires a `noexcept` call, and its trampoline is `noexcept`.

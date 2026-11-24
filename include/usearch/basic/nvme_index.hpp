@@ -16,7 +16,7 @@
  *  code.
  *
  *  A search keeps one metric per query slot, built by the caller's factory on the slot's arena,
- *  since every walk of a query shares it, and hands it each finished value as the codec's borrowed
+ *  since every walk of a query shares it, and hands it each finished value as the codec's viewed
  *  @c view. A caller's relation reads the same views before the flights recycle, so a relation
  *  tested on stored values needs no second read. Key lookups scan the key columns, and @c get reads
  *  the value rows of the keys it found.
@@ -62,16 +62,16 @@ struct nvme_indexes_cursor;
  *  A catalog walks every part of a query on one thread, merging the parts' rankings by key; it owns
  *  nothing, so it lives no longer than the call its owner builds it for.
  *
- *  @tparam codec_type_ The value codec the parts were saved with, whose @c view borrows a fetched
+ *  @tparam codec_type_ The value codec the parts were saved with, whose @c view views a fetched
  *      row.
  *  @tparam key_type_ The caller-visible identity, read from every part's key column.
  *  @tparam node_id_type_ Identity within one part, as wide as the neighbor IDs the parts were saved
  *      with; @c u32_t or @c u64_t.
  *  @tparam distance_type_ The distance the metrics drain and the walks rank by.
- *  @tparam engine_type_ The I/O engine every executor thread drives.
+ *  @tparam queue_type_ The I/O queue every executor thread drives.
  */
 template <typename codec_type_, typename key_type_ = uuid128_t, typename node_id_type_ = u32_t,
-          typename distance_type_ = f64_t, typename engine_type_ = default_io_engine<dummy_waiter_t>,
+          typename distance_type_ = f64_t, typename queue_type_ = default_io_queue<dummy_waiter_t>,
           typename row_kit_type_ = st::serial_row_kit_t,
           template <typename> class atomic_ref_template_ = fu::standard_atomic_ref,
           typename wait_type_ = dummy_waiter_t>
@@ -84,9 +84,9 @@ class nvme_parts_catalog {
     using codec_t = codec_type_;
     using key_t = key_type_;
     using distance_t = distance_type_;
-    using engine_t = engine_type_;
-    using executor_t = nvme_executor<engine_t>;
-    using medium_t = typename engine_t::medium_t;
+    using queue_t = queue_type_;
+    using executor_t = nvme_executor<queue_t>;
+    using medium_t = typename queue_t::medium_t;
     using arena_t = typename executor_t::arena_t;
 
     /** The CPU class's reference over the words one call's threads share, and its waiter, as
@@ -142,7 +142,7 @@ class nvme_parts_catalog {
         /** Key rows read to resolve written outputs. */
         nvme_reads_t key_reads;
 
-        /** Submit-and-wait cycles of the engines, counted once for every query in flight through
+        /** Submit-and-wait cycles of the queues, counted once for every query in flight through
          *  each. */
         std::size_t round_trips = 0;
     };
@@ -199,7 +199,7 @@ class nvme_parts_catalog {
      *      @p score_type_.
      *  @param[out] counts Matches written per query.
      *  @param[in] config The per-shard walk breadth, applied uniformly.
-     *  @param[in,out] executor The threads, their engines and their scratch; held for the call.
+     *  @param[in,out] executor The threads, their queues and their scratch; held for the call.
      *
      *  The relation hears only entries that could still enter their walk's admitted set, and a walk
      *  stops once that set fills; the query then holds the nearest entries both admitted, merged
@@ -215,7 +215,7 @@ class nvme_parts_catalog {
      *  @par Statuses:
      *  - @c uninitialized_k No part is viewed, or @p executor holds no threads or pool workers.
      *  - @c config_mismatch_k @p counts is not @p count long, @p keys and @p distances differ in
-     *    length or do not split into @p count queries, or a medium the engines cannot read.
+     *    length or do not split into @p count queries, or a medium the queues cannot read.
      *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
      *  - @c overflow_k A staging region's byte count overflows.
      */
@@ -236,7 +236,7 @@ class nvme_parts_catalog {
                                      relation_type_&& relation, executor_t& executor) noexcept {
         static_assert(!aggregating_predicate<std::remove_cvref_t<predicate_type_>, key_t, walk_payload_t> ||
                           per_thread_predicates<std::remove_cvref_t<predicate_type_>>,
-                      "An engine driving its own threads takes an aggregating predicate per thread");
+                      "A queue driving its own threads takes an aggregating predicate per thread");
         if (parts_.empty()) return {{}, status_code_t::uninitialized_k};
         if (counts.size() != count || keys.size() != distances.size() || (count && keys.size() % count))
             return {{}, status_code_t::config_mismatch_k};
@@ -247,8 +247,8 @@ class nvme_parts_catalog {
         std::size_t const wanted = keys.size() / count, expansion_factor = non_zero_expansion_factor(config);
         typename query_t::inputs_t const inputs {&make_metric, &query_of, &predicate, &relation, wanted,
                                                  wanted,       keys,      distances,  counts};
-        return walk_queries_<query_t>(to_span(media_), to_span(parts_), executor, count, expansion_factor, inputs,
-                                      counts);
+        return walk_queries_<query_t>(to_span(media_), media_list_key_, to_span(parts_), executor, count,
+                                      expansion_factor, inputs, counts);
     }
 
     /**
@@ -265,9 +265,9 @@ class nvme_parts_catalog {
      *  @par Statuses:
      *  - @c uninitialized_k No part is viewed, or @p executor holds no threads or pool workers.
      *  - @c config_mismatch_k @p counts is not @p count long, @p keys and @p distances differ in
-     *    length or do not split into @p count queries, or a medium the engines cannot read.
+     *    length or do not split into @p count queries, or a medium the queues cannot read.
      *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
-     *  - @c overflow_k A staging region's byte count overflows, or a read finds its engine's queue
+     *  - @c overflow_k A staging region's byte count overflows, or a read finds its queue
      *    full.
      */
     template <typename make_metric_type_, typename query_of_type_, typename score_type_>
@@ -286,7 +286,7 @@ class nvme_parts_catalog {
                                    relation_type_&& relation, executor_t& executor) noexcept {
         static_assert(!aggregating_predicate<std::remove_cvref_t<predicate_type_>, key_t, scan_payload_t> ||
                           per_thread_predicates<std::remove_cvref_t<predicate_type_>>,
-                      "An engine driving its own threads takes an aggregating predicate per thread");
+                      "A queue driving its own threads takes an aggregating predicate per thread");
         using query_t =
             typename std::invoke_result_t<query_of_type_&, std::size_t, scratch_allocator_t const&>::value_t;
         constexpr bool filtered_k = !std::is_same_v<std::remove_cvref_t<predicate_type_>, dummy_predicate_t>;
@@ -401,17 +401,17 @@ class nvme_parts_catalog {
      *  @param[in] query_of Builds the query of one batch query, as @ref scan takes it.
      *  @param[in] outputs Takes a quad of one query's entries within reach as <tt>outputs(thread,
      *      query, keys, values, distances) noexcept</tt>, three spans of one static extent in run
-     *      order, the codec's views borrowed for the call alone.
-     *  @param[in,out] executor The threads, their engines and their scratch; held for the call.
+     *      order, the codec's views read only during the call alone.
+     *  @param[in,out] executor The threads, their queues and their scratch; held for the call.
      *
      *  A failed read stops the call, which answers @c io_k.
      *
      *  @par Statuses:
      *  - @c uninitialized_k No part is viewed, or @p executor holds no threads or pool workers.
      *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
-     *  - @c overflow_k A staging region's byte count overflows, or a read finds its engine's queue
+     *  - @c overflow_k A staging region's byte count overflows, or a read finds its queue
      *    full.
-     *  - @c config_mismatch_k A medium the engines cannot read.
+     *  - @c config_mismatch_k A medium the queues cannot read.
      */
     template <typename make_metric_type_, typename query_of_type_, typename outputs_type_>
     expected<search_result_t> scan_within(std::span<distance_t const> reaches, make_metric_type_&& make_metric,
@@ -467,14 +467,14 @@ class nvme_parts_catalog {
      *
      *  @param[in] keys The keys to count, repeats and absent ones included.
      *  @param[out] entries The entries under each key, parallel to @p keys; zero means absent.
-     *  @param[in,out] executor The threads, their engines and their scratch; held for the call.
+     *  @param[in,out] executor The threads, their queues and their scratch; held for the call.
      *
      *  @par Statuses:
-     *  - @c config_mismatch_k @p entries and @p keys differ in length, or a medium the engines
+     *  - @c config_mismatch_k @p entries and @p keys differ in length, or a medium the queues
      *    cannot read.
      *  - @c uninitialized_k No part is viewed, or @p executor holds no threads or pool workers.
      *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
-     *  - @c overflow_k A staging region's byte count overflows, or a read finds its engine's queue
+     *  - @c overflow_k A staging region's byte count overflows, or a read finds its queue
      *    full.
      */
     status_t count(std::span<key_t const> keys, std::span<std::size_t> entries, executor_t& executor) const noexcept {
@@ -490,15 +490,15 @@ class nvme_parts_catalog {
     }
 
     /**
-     *  The batched @ref count reduced to one in @p entries where a key of @p keys holds any entry,
-     *  zero where it holds none.
+     *  @brief The batched @ref count reduced to one in @p entries where a key of @p keys holds any
+     *      entry, zero where it holds none.
      *
      *  @par Statuses:
-     *  - @c config_mismatch_k @p entries and @p keys differ in length, or a medium the engines
+     *  - @c config_mismatch_k @p entries and @p keys differ in length, or a medium the queues
      *    cannot read.
      *  - @c uninitialized_k No part is viewed, or @p executor holds no threads or pool workers.
      *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
-     *  - @c overflow_k A staging region's byte count overflows, or a read finds its engine's queue
+     *  - @c overflow_k A staging region's byte count overflows, or a read finds its queue
      *    full.
      */
     status_t contains(std::span<key_t const> keys, std::span<std::size_t> entries,
@@ -517,17 +517,17 @@ class nvme_parts_catalog {
      *      its values truncated, zero when absent.
      *  @param[in] wanted Values kept per key, a key holding more keeping its earliest ones, in
      *      shard and node order.
-     *  @param[in,out] executor The threads, their engines and their scratch; held for the call.
+     *  @param[in,out] executor The threads, their queues and their scratch; held for the call.
      *  @param[in] on_value Takes every kept value as <tt>on_value(position, rank, thread,
-     *      view)</tt>, the codec's view borrowed for the call alone, on the executor thread that
-     *      read it, in no particular order.
+     *      view)</tt>, the codec's view read only during the call alone, on the executor thread
+     *      that read it, in no particular order.
      *
      *  @par Statuses:
-     *  - @c config_mismatch_k @p entries and @p keys differ in length, or a medium the engines
+     *  - @c config_mismatch_k @p entries and @p keys differ in length, or a medium the queues
      *    cannot read.
      *  - @c uninitialized_k No part is viewed, or @p executor holds no threads or pool workers.
      *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
-     *  - @c overflow_k A staging region's byte count overflows, or a read finds its engine's queue
+     *  - @c overflow_k A staging region's byte count overflows, or a read finds its queue
      *    full.
      */
     template <typename on_value_type_>
@@ -582,16 +582,16 @@ class nvme_parts_catalog {
      *
      *  @param[in] first The first entry read; every entry read must lie before @ref size.
      *  @param[out] keys The key of every entry read, in entry order.
-     *  @param[in,out] executor The threads, their engines and their scratch; held for the call.
+     *  @param[in,out] executor The threads, their queues and their scratch; held for the call.
      *  @param[in] on_value Takes every entry's value as <tt>on_value(entry, thread, view)</tt>,
-     *      @c entry counted from @p first, the codec's view borrowed for the call alone, on the
+     *      @c entry counted from @p first, the codec's view read only during the call, on the
      *      executor thread that read it, in no particular order.
      *
      *  @par Statuses:
      *  - @c uninitialized_k No part is viewed, or @p executor holds no threads or pool workers.
-     *  - @c config_mismatch_k The entries run past @ref size, or a medium the engines cannot read.
+     *  - @c config_mismatch_k The entries run past @ref size, or a medium the queues cannot read.
      *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
-     *  - @c overflow_k A staging region's byte count overflows, or a read finds its engine's queue
+     *  - @c overflow_k A staging region's byte count overflows, or a read finds its queue
      *    full.
      */
     template <typename on_value_type_>
@@ -642,14 +642,14 @@ class nvme_parts_catalog {
      *  @param[in] keys The keys to locate, repeats and absent ones included.
      *  @param[out] locators The earliest entry under each key, parallel to @p keys; a key held
      *      nowhere gets the part @ref shards_count.
-     *  @param[in,out] executor The threads, their engines and their scratch; held for the call.
+     *  @param[in,out] executor The threads, their queues and their scratch; held for the call.
      *
      *  @par Statuses:
-     *  - @c config_mismatch_k @p locators and @p keys differ in length, or a medium the engines
+     *  - @c config_mismatch_k @p locators and @p keys differ in length, or a medium the queues
      *    cannot read.
      *  - @c uninitialized_k No part is viewed, or @p executor holds no threads or pool workers.
      *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
-     *  - @c overflow_k A staging region's byte count overflows, or a read overfills its engine's
+     *  - @c overflow_k A staging region's byte count overflows, or a read overfills its queue's
      *    queue of reads.
      */
     status_t find_first(std::span<key_t const> keys, std::span<shard_node_t> locators,
@@ -668,18 +668,18 @@ class nvme_parts_catalog {
     /**
      *  @brief The keys of the entries @p nodes locates, in any order and with repeats: the key rows
      *      sorted by locator, rows whose blocks touch merged into one read of at most a staging
-     *      buffer, as many in flight as the engines hold.
+     *      buffer, as many in flight as the queues hold.
      *
      *  @param[in] nodes The entries to read, each below its part's @ref part_size.
      *  @param[out] keys The key of every entry, parallel to @p nodes.
-     *  @param[in,out] executor The threads, their engines and their scratch; held for the call.
+     *  @param[in,out] executor The threads, their queues and their scratch; held for the call.
      *
      *  @par Statuses:
-     *  - @c config_mismatch_k @p keys and @p nodes differ in length, or a medium the engines cannot
+     *  - @c config_mismatch_k @p keys and @p nodes differ in length, or a medium the queues cannot
      *    read.
      *  - @c uninitialized_k No part is viewed, or @p executor holds no threads or pool workers.
      *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
-     *  - @c overflow_k A staging region's byte count overflows, or a read overfills its engine's
+     *  - @c overflow_k A staging region's byte count overflows, or a read overfills its queue's
      *    queue of reads.
      *  - @c io_k A key read came back short.
      */
@@ -709,15 +709,15 @@ class nvme_parts_catalog {
      *      each entry's run starts in @p neighbors, then the end of the last.
      *  @param[out] neighbors Every entry's neighbor IDs end to end, resized to the last offset;
      *      an ID at or past its part's @ref part_size is a sentinel.
-     *  @param[in,out] executor The threads, their engines and their scratch; held for the call.
+     *  @param[in,out] executor The threads, their queues and their scratch; held for the call.
      *
      *  @par Statuses:
-     *  - @c config_mismatch_k @p offsets is not one longer than @p entries, or a medium the engines
+     *  - @c config_mismatch_k @p offsets is not one longer than @p entries, or a medium the queues
      *    cannot read.
      *  - @c uninitialized_k No part is viewed, or @p executor holds no threads or pool workers.
      *  - @c out_of_memory_k @p neighbors could not grow.
      *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
-     *  - @c overflow_k A staging region's byte count overflows, or a read overfills its engine's
+     *  - @c overflow_k A staging region's byte count overflows, or a read overfills its queue's
      *    queue of reads.
      *  - @c io_k A neighbors read came back short.
      */
@@ -759,16 +759,16 @@ class nvme_parts_catalog {
      *  A part of N rows holds four byte columns and three bitsets of N bits from the first thread's
      *  arena, the widest part's reused by every part. A level reads its rows' neighbors in ID
      *  order, rows whose blocks touch merged into one read of at most a staging buffer, as many in
-     *  flight as the engines hold, each row located through the neighbors directory.
+     *  flight as the queues hold, each row located through the neighbors directory.
      *
-     *  @param[in,out] executor The threads, their engines and their scratch; held for the call.
+     *  @param[in,out] executor The threads, their queues and their scratch; held for the call.
      *
      *  @par Statuses:
      *  - @c uninitialized_k No part is viewed, or @p executor holds no threads or pool workers.
      *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
-     *  - @c overflow_k A staging region's byte count overflows, or a read finds its engine's queue
+     *  - @c overflow_k A staging region's byte count overflows, or a read finds its queue
      *    full.
-     *  - @c config_mismatch_k A medium the engines cannot read.
+     *  - @c config_mismatch_k A medium the queues cannot read.
      *  - @c io_k A neighbors read came back short.
      */
     expected<reachability_t> health(executor_t& executor) const noexcept {
@@ -806,7 +806,7 @@ class nvme_parts_catalog {
      *      without any, and assigns them three coordinates among the shown points of @p inputs, as
      *      the RAM index samples the graph the parts were saved from.
      *
-     *  The plan draws and places on executor thread zero, the pool thread its engine answers,
+     *  The plan draws and places on executor thread zero, the pool thread its queue answers,
      *  inside one call holding the media, and every verb of its source blocks until its round
      *  lands. One scan of the key columns lists the entries of the shown and focus keys before the
      *  plan, and one more counts each draw's ordinal after it. Scoring reads one round per
@@ -819,7 +819,7 @@ class nvme_parts_catalog {
      *  @param[in] make_metric Builds the call's metric, as @ref search takes it.
      *  @param[in] query_of Turns a stored value into a query, as <tt>query_of(view,
      *      scratch_allocator) noexcept → expected<query></tt>.
-     *  @param[in,out] executor The threads, their engines and their scratch; held for the call.
+     *  @param[in,out] executor The threads, their queues and their scratch; held for the call.
      *  @param[in] coordinates_of Writes a stored value's fixed coordinates from its view into
      *      three floats, or is @c no_fixed_coordinates_t, so they are solved from distances.
      *
@@ -828,7 +828,7 @@ class nvme_parts_catalog {
      *  - @c shape_mismatch_k An output's or the shown coordinates' length disagrees.
      *  - @c out_of_memory_k The arenas cannot hold the scratch.
      *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
-     *  - @c config_mismatch_k A medium the engines cannot read.
+     *  - @c config_mismatch_k A medium the queues cannot read.
      *  - @c io_k A read came back short; the draws written stand, their later reads unscored.
      */
     template <typename make_metric_type_, typename query_of_type_, typename coordinates_type_ = no_fixed_coordinates_t>
@@ -851,7 +851,7 @@ class nvme_parts_catalog {
             return nvme_draw_sample(source, inputs, outputs, config, executor, *rows.failure);
         };
         return nvme_sample<key_t, node_id_t>(
-            executor, media_, parts_, width, scan_buffer_bytes_(), inputs, outputs.keys.size(), config,
+            executor, media_, media_list_key_, parts_, width, scan_buffer_bytes_(), inputs, outputs.keys.size(), config,
             [&](std::span<key_t const> scanned, auto&& on_hit) noexcept {
                 return scan_keys_(scanned, executor, on_hit);
             },
@@ -901,7 +901,7 @@ class nvme_parts_catalog {
     using candidates_allocator_t = arena_allocator<scored_node_t, forkunion_allocator_t>;
     using results_array_t = sorted_buffer<scored_node_t, typename scored_node_t::closer_t, candidates_allocator_t>;
 
-    /** What the codec's @c view borrows a fetched value row as. */
+    /** What the codec's @c view views a fetched value row as. */
     using value_view_t = typename codec_t::view_t;
 
     /** 8-ary: eight scored nodes of the narrowest distances fill one cache line per level scan. */
@@ -1090,7 +1090,7 @@ class nvme_parts_catalog {
         /** Bytes every thread's arena carves for its walks, queries and flights. */
         std::size_t scratch_bytes = 0;
 
-        /** Staging buffers every engine holds: @c buffers_per_flight per flight. */
+        /** Staging buffers every queue holds: @c buffers_per_flight per flight. */
         std::size_t buffers = 0;
 
         /** Bytes of one staging buffer: the covering read of the widest row any part holds. */
@@ -1122,7 +1122,7 @@ class nvme_parts_catalog {
     }
 
     /** The shape of a walk of @p queries_count queries of @p query_type_ over every part in
-     *  @p parts, each walk @p expansion_factor wide, on @p threads engines @p queue_depth reads
+     *  @p parts, each walk @p expansion_factor wide, on @p threads queues @p queue_depth reads
      *  deep, every query in flight staging @p staged_bytes. */
     template <typename query_type_>
     static walk_shape_t walk_shape_(std::span<medium_t const> media, std::span<part_t const> parts,
@@ -1168,19 +1168,19 @@ class nvme_parts_catalog {
         return shape;
     }
 
-    /** Walks @p queries_count queries of @p query_type_ over every part in @p parts inside a call
-     *  of its own, each walk @p expansion_factor wide. */
+    /** Walks @p queries_count queries of @p query_type_, each @p expansion_factor wide, over every
+     *  part in @p parts on @p media, the list of @p media_list_key, inside a call of its own. */
     template <typename query_type_>
-    static expected<search_result_t> walk_queries_(std::span<medium_t const> media, std::span<part_t const> parts,
-                                                   executor_t& executor, std::size_t queries_count,
-                                                   std::size_t expansion_factor,
+    static expected<search_result_t> walk_queries_(std::span<medium_t const> media, media_list_key_t media_list_key,
+                                                   std::span<part_t const> parts, executor_t& executor,
+                                                   std::size_t queries_count, std::size_t expansion_factor,
                                                    typename query_type_::inputs_t const& inputs,
                                                    std::span<std::size_t const> counts) noexcept {
         std::size_t const queue_depth = nvme_call_depth(executor, media, parts);
         walk_shape_t const shape = walk_shape_<query_type_>(media, parts, queue_depth, executor.size(), queries_count,
                                                             expansion_factor, query_type_::staged_bytes(inputs));
-        auto [call, call_status] = nvme_begin_call(executor, media, queue_depth, shape.scratch_bytes, shape.buffers,
-                                                   shape.buffer_bytes);
+        auto [call, call_status] = nvme_begin_call(executor, media, media_list_key, queue_depth, shape.scratch_bytes,
+                                                   shape.buffers, shape.buffer_bytes);
         if (failed(call_status)) return {{}, call_status};
         if constexpr (query_type_::admitting_k)
             if (status_t const opened = open_predicate(*inputs.predicate, executor); failed(opened))
@@ -1396,38 +1396,38 @@ class nvme_parts_catalog {
         return static_cast<std::size_t>(bytes);
     }
 
-    /** Begins a call of scans over every shard: one staging buffer per engine, read one at a
+    /** Begins a call of scans over every shard: one staging buffer per queue, read one at a
      *  time. */
     expected<nvme_call<executor_t>> begin_scans_(executor_t& executor) const noexcept {
-        return nvme_begin_call(executor, to_span(media_), nvme_call_depth(executor, to_span(media_), to_span(parts_)),
-                               0, 1, scan_buffer_bytes_());
+        return nvme_begin_call(executor, to_span(media_), media_list_key_,
+                               nvme_call_depth(executor, to_span(media_), to_span(parts_)), 0, 1, scan_buffer_bytes_());
     }
 
     /** Begins a call of located reads over every shard, as @ref nvme_read_located and the
      *  reachability audit read: a staging buffer per read in flight, each as wide as a walk's. */
     expected<nvme_call<executor_t>> begin_located_reads_(executor_t& executor) const noexcept {
-        return nvme_begin_scans(executor, media_, nvme_call_depth(executor, media_, parts_), 1, 0, 0,
+        return nvme_begin_scans(executor, media_, media_list_key_, nvme_call_depth(executor, media_, parts_), 1, 0, 0,
                                 staging_bytes_(media_, parts_));
     }
 
-    /** Reads the @p bytes at @p begin of part @p part through thread @p thread 's engine into its
+    /** Reads the @p bytes at @p begin of part @p part through thread @p thread 's queue into its
      *  staging @p buffer, blocking, and answers where they start in it; a short read answers
      *  @c io_k. */
     expected<byte_t const*> read_(executor_t& executor, std::size_t thread, u32_t part, u64_t begin, u64_t bytes,
                                   io_buffer_id_t buffer = 0) const noexcept {
-        engine_t& engine = executor.engine(thread);
+        queue_t& queue = executor.queue(thread);
         medium_t const& medium = media_[part];
         u64_t const absolute = byte_base_of(medium) + begin;
         io_request_t const request = nvme_covering_read(absolute, bytes, block_bytes_of(medium), part, buffer, 0);
-        if (status_t const enqueued = engine.enqueue_read(request); failed(enqueued)) return {nullptr, enqueued};
-        if (status_t const submitted = engine.submit(io_wait_t::blocking_k); failed(submitted))
+        if (status_t const enqueued = queue.enqueue_read(request); failed(enqueued)) return {nullptr, enqueued};
+        if (status_t const submitted = queue.submit(io_wait_t::blocking_k); failed(submitted))
             return {nullptr, submitted};
         std::array<io_completion_t, 1> completions;
         u64_t const skipped = absolute - request.offset;
-        if (!engine.poll_completions(completions) || completions[0].result < 0 ||
+        if (!queue.poll_completions(completions) || completions[0].result < 0 ||
             static_cast<u64_t>(completions[0].result) < skipped + bytes)
             return {nullptr, status_code_t::io_k};
-        return {engine.buffer(buffer) + skipped, status_code_t::success_k};
+        return {queue.buffer(buffer) + skipped, status_code_t::success_k};
     }
 
     /** One round of rows a scan scores together: rows @c first_row up to @c end_row of a run of
@@ -1483,7 +1483,7 @@ class nvme_parts_catalog {
         std::size_t const entries = size(), threads = executor.size();
         // A chunk holds as many entries as a walk's default candidates.
         std::size_t const chunk_entries = default_expansion_factor(connectivity());
-        auto [call, call_status] = nvme_begin_call(executor, to_span(media_),
+        auto [call, call_status] = nvme_begin_call(executor, to_span(media_), media_list_key_,
                                                    nvme_call_depth(executor, to_span(media_), to_span(parts_)), 0, 2,
                                                    scan_buffer_bytes_());
         if (failed(call_status)) return call_status;
@@ -1663,14 +1663,14 @@ class nvme_parts_catalog {
 
 #pragma region Sampling
 
-    /** Every part as SAMPLE reads it, each verb a blocking read on thread zero's engine; see
+    /** Every part as SAMPLE reads it, each verb a blocking read on thread zero's queue; see
      *  @c sample_source. A failed read lands in @c rows.failure, and its verb answers nothing. */
     template <typename metric_type_, typename query_of_type_, typename coordinates_type_>
     struct nvme_sample_source {
         using key_t = key_type_;
         using node_id_t = node_id_type_;
         using shard_node_t = shard_node<node_id_t>;
-        using rows_t = nvme_sample_rows<part_t, key_t, node_id_t, engine_t>;
+        using rows_t = nvme_sample_rows<part_t, key_t, node_id_t, queue_t>;
 
         nvme_parts_catalog const& catalog;
         executor_t& executor;
@@ -1848,7 +1848,7 @@ class nvme_parts_catalog {
 
     /** Opens the part @p file holds as @p columns locate its rows: the directories of its ragged
      *  columns, built through blocking reads of @p file and streamed through @p chunk, then the
-     *  file as the engines' medium. */
+     *  file as the queues' medium. */
     template <typename chunk_allocator_type_>
     static status_t open_part_(file_medium_t&& file, persisted_columns_t const& columns,
                                growing_buffer<u64_t, chunk_allocator_type_>& chunk, forkunion_allocator_t allocator,
@@ -1897,14 +1897,19 @@ class nvme_parts_catalog {
 
 #pragma endregion Opening
 
-    /** A catalog walking the parts @p parts locates on the media @p media, in part order. */
-    nvme_parts_catalog(std::span<medium_t const> media, std::span<part_t const> parts) noexcept
-        : media_(media), parts_(parts) {}
+    /** A catalog walking the parts @p parts locates on the media @p media, the list of
+     *  @p media_list_key, in part order. */
+    nvme_parts_catalog(std::span<medium_t const> media, media_list_key_t media_list_key,
+                       std::span<part_t const> parts) noexcept
+        : media_(media), media_list_key_(media_list_key), parts_(parts) {}
 
   private:
 
     /** The media every verb walks, in part order. */
     std::span<medium_t const> media_;
+
+    /** The list the media form, as their owner keyed it, which the rings' file tables hold. */
+    media_list_key_t media_list_key_;
 
     /** Where every part keeps its columns and its row directories, parallel to @c media_. */
     std::span<part_t const> parts_;
@@ -1915,23 +1920,23 @@ class nvme_parts_catalog {
  *
  *  The class is a frozen directory of one part: its medium, its columns' offsets and the
  *  directories of its ragged columns, and nothing per node beyond those few bits a row. Every call
- *  borrows an executor, attaches the medium to its engines for its own duration, and carves its
- *  walks from the executor's arenas, all through a @c nvme_parts_catalog over its one part.
+ *  uses an executor, attaches the medium to its queues for its own duration, and carves its walks
+ *  from the executor's arenas, all through a @c nvme_parts_catalog over its one part.
  *
  *  It stands alone as the RAM index does: any key type and either node-ID width the part was saved
  *  with serve, and only the compiled library narrows the choice, to the 32-bit IDs that its own
  *  sharded indexes write.
  *
- *  @tparam codec_type_ The value codec the part was saved with, whose @c view borrows each fetched
+ *  @tparam codec_type_ The value codec the part was saved with, whose @c view views each fetched
  *      row as is.
  *  @tparam key_type_ The caller-visible identity, read from the part's key column.
  *  @tparam node_id_type_ Identity within the part, as wide as the neighbor IDs it was saved with;
  *      @c u32_t or @c u64_t.
  *  @tparam distance_type_ The distance the metrics drain and the walks rank by.
- *  @tparam engine_type_ The I/O engine every executor thread drives.
+ *  @tparam queue_type_ The I/O queue every executor thread drives.
  */
 template <typename codec_type_, typename key_type_ = uuid128_t, typename node_id_type_ = u32_t,
-          typename distance_type_ = f64_t, typename engine_type_ = default_io_engine<dummy_waiter_t>,
+          typename distance_type_ = f64_t, typename queue_type_ = default_io_queue<dummy_waiter_t>,
           typename row_kit_type_ = st::serial_row_kit_t,
           template <typename> class atomic_ref_template_ = fu::standard_atomic_ref,
           typename wait_type_ = dummy_waiter_t>
@@ -1943,13 +1948,13 @@ class nvme_index {
   public:
 
     /** The walks every verb runs over this index's one part. */
-    using catalog_t = nvme_parts_catalog<codec_type_, key_type_, node_id_type_, distance_type_, engine_type_,
+    using catalog_t = nvme_parts_catalog<codec_type_, key_type_, node_id_type_, distance_type_, queue_type_,
                                          row_kit_type_, atomic_ref_template_, wait_type_>;
 
     using codec_t = typename catalog_t::codec_t;
     using key_t = typename catalog_t::key_t;
     using distance_t = typename catalog_t::distance_t;
-    using engine_t = typename catalog_t::engine_t;
+    using queue_t = typename catalog_t::queue_t;
     using executor_t = typename catalog_t::executor_t;
     using medium_t = typename catalog_t::medium_t;
     using arena_t = typename catalog_t::arena_t;
@@ -1984,7 +1989,7 @@ class nvme_index {
      *  @par Statuses:
      *  - @c invalid_argument_k @p path names no location, its base or namespace is unreadable, or
      *    the base is off the medium's block.
-     *  - @c config_mismatch_k The engines read no files, or @p columns lay out keys, neighbors or
+     *  - @c config_mismatch_k The queues read no files, or @p columns lay out keys, neighbors or
      *    node counts this instantiation cannot walk.
      *  - @c malformed_k A row directory's prefix sums do not cover the part's rows.
      *  - @c overflow_k A row directory read spans more than one read can move.
@@ -2034,7 +2039,7 @@ class nvme_index {
      *  @par Statuses:
      *  - @c uninitialized_k Nothing is opened, or the executor holds no threads or pool workers.
      *  - @c config_mismatch_k The counts are not one per query, the keys and distances differ in
-     *    length or do not split into one run per query, or a medium the engines cannot read.
+     *    length or do not split into one run per query, or a medium the queues cannot read.
      *  - @c contended_k Another call holds the executor, or its pool is running another dispatch.
      *  - @c overflow_k A staging region's byte count overflows.
      */
@@ -2049,9 +2054,9 @@ class nvme_index {
      *  @par Statuses:
      *  - @c uninitialized_k Nothing is opened, or the executor holds no threads or pool workers.
      *  - @c config_mismatch_k The counts are not one per query, the keys and distances differ in
-     *    length or do not split into one run per query, or a medium the engines cannot read.
+     *    length or do not split into one run per query, or a medium the queues cannot read.
      *  - @c contended_k Another call holds the executor, or its pool is running another dispatch.
-     *  - @c overflow_k A staging region's byte count overflows, or a read finds its engine's queue
+     *  - @c overflow_k A staging region's byte count overflows, or a read finds its queue
      *    full.
      */
     template <typename... arguments_type_>
@@ -2065,9 +2070,9 @@ class nvme_index {
      *  @par Statuses:
      *  - @c uninitialized_k Nothing is opened, or the executor holds no threads or pool workers.
      *  - @c contended_k Another call holds the executor, or its pool is running another dispatch.
-     *  - @c overflow_k A staging region's byte count overflows, or a read finds its engine's queue
+     *  - @c overflow_k A staging region's byte count overflows, or a read finds its queue
      *    full.
-     *  - @c config_mismatch_k A medium the engines cannot read.
+     *  - @c config_mismatch_k A medium the queues cannot read.
      */
     template <typename... arguments_type_>
     expected<search_result_t> scan_within(arguments_type_&&... arguments) noexcept {
@@ -2078,11 +2083,11 @@ class nvme_index {
      *  @ref nvme_parts_catalog::count over the part.
      *
      *  @par Statuses:
-     *  - @c config_mismatch_k @p entries and @p keys differ in length, or a medium the engines
+     *  - @c config_mismatch_k @p entries and @p keys differ in length, or a medium the queues
      *    cannot read.
      *  - @c uninitialized_k Nothing is opened, or @p executor holds no threads or pool workers.
      *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
-     *  - @c overflow_k A staging region's byte count overflows, or a read finds its engine's queue
+     *  - @c overflow_k A staging region's byte count overflows, or a read finds its queue
      *    full.
      */
     status_t count(std::span<key_t const> keys, std::span<std::size_t> entries, executor_t& executor) const noexcept {
@@ -2093,11 +2098,11 @@ class nvme_index {
      *  @ref nvme_parts_catalog::contains over the part.
      *
      *  @par Statuses:
-     *  - @c config_mismatch_k The entries and the keys differ in length, or a medium the engines
+     *  - @c config_mismatch_k The entries and the keys differ in length, or a medium the queues
      *    cannot read.
      *  - @c uninitialized_k Nothing is opened, or the executor holds no threads or pool workers.
      *  - @c contended_k Another call holds the executor, or its pool is running another dispatch.
-     *  - @c overflow_k A staging region's byte count overflows, or a read finds its engine's queue
+     *  - @c overflow_k A staging region's byte count overflows, or a read finds its queue
      *    full.
      */
     template <typename... arguments_type_>
@@ -2109,11 +2114,11 @@ class nvme_index {
      *  @ref nvme_parts_catalog::get over the part.
      *
      *  @par Statuses:
-     *  - @c config_mismatch_k The entries and the keys differ in length, or a medium the engines
+     *  - @c config_mismatch_k The entries and the keys differ in length, or a medium the queues
      *    cannot read.
      *  - @c uninitialized_k Nothing is opened, or the executor holds no threads or pool workers.
      *  - @c contended_k Another call holds the executor, or its pool is running another dispatch.
-     *  - @c overflow_k A staging region's byte count overflows, or a read finds its engine's queue
+     *  - @c overflow_k A staging region's byte count overflows, or a read finds its queue
      *    full.
      */
     template <typename... arguments_type_>
@@ -2126,9 +2131,9 @@ class nvme_index {
      *
      *  @par Statuses:
      *  - @c uninitialized_k Nothing is opened, or the executor holds no threads or pool workers.
-     *  - @c config_mismatch_k The entries run past @ref size, or a medium the engines cannot read.
+     *  - @c config_mismatch_k The entries run past @ref size, or a medium the queues cannot read.
      *  - @c contended_k Another call holds the executor, or its pool is running another dispatch.
-     *  - @c overflow_k A staging region's byte count overflows, or a read finds its engine's queue
+     *  - @c overflow_k A staging region's byte count overflows, or a read finds its queue
      *    full.
      */
     template <typename... arguments_type_>
@@ -2143,9 +2148,9 @@ class nvme_index {
      *  @par Statuses:
      *  - @c uninitialized_k Nothing is opened, or @p executor holds no threads or pool workers.
      *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
-     *  - @c overflow_k A staging region's byte count overflows, or a read finds its engine's queue
+     *  - @c overflow_k A staging region's byte count overflows, or a read finds its queue
      *    full.
-     *  - @c config_mismatch_k A medium the engines cannot read.
+     *  - @c config_mismatch_k A medium the queues cannot read.
      *  - @c io_k A neighbors read came back short.
      */
     expected<reachability_t> health(executor_t& executor) const noexcept { return catalog_().health(executor); }
@@ -2158,7 +2163,7 @@ class nvme_index {
      *  - @c shape_mismatch_k An output's or the shown coordinates' length disagrees.
      *  - @c out_of_memory_k The arenas cannot hold the scratch.
      *  - @c contended_k Another call holds the executor, or its pool is running another dispatch.
-     *  - @c config_mismatch_k A medium the engines cannot read.
+     *  - @c config_mismatch_k A medium the queues cannot read.
      *  - @c io_k A read came back short.
      */
     template <typename... arguments_type_>
@@ -2175,7 +2180,7 @@ class nvme_index {
         return catalog_t {std::span<medium_t const>(&medium_, opened), std::span<part_t const>(&part_, opened)};
     }
 
-    /** The part's file, open for the engines. */
+    /** The part's file, open for the queues. */
     medium_t medium_ {};
 
     /** Where the part keeps its columns and its row directories; a zero connectivity until

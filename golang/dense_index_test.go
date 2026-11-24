@@ -80,7 +80,7 @@ func keysFrom(first, count uint) []Key {
 // pool spawns the executor every fanned-out verb runs on; the engine derives none.
 func pool(t *testing.T) *Executor {
 	t.Helper()
-	executor, err := ExecutorForRam(nil, CPUClassUnknown, 2)
+	executor, err := ExecutorForRam(nil, CPUClassUnknown, 2, 0)
 	if err != nil {
 		t.Fatalf("the executor must spawn: %v", err)
 	}
@@ -233,7 +233,7 @@ func TestKeysRejectMalformedRenderings(t *testing.T) {
 	}
 }
 
-func TestKeysCarryTheirIntegerIdentity(t *testing.T) {
+func TestKeysHoldTheirIntegerIdentity(t *testing.T) {
 	t.Parallel()
 	for _, value := range []uint64{0, 42, 1 << 32, ^uint64(0)} {
 		recovered, integral := KeyFromUint64(value).Uint64()
@@ -249,7 +249,7 @@ func TestKeysCarryTheirIntegerIdentity(t *testing.T) {
 	}
 }
 
-// The text interfaces are what carries a key through a JSON document.
+// The text interfaces are what holds a key through a JSON document.
 func TestKeysCrossJSONAsTheirRendering(t *testing.T) {
 	t.Parallel()
 	type record struct {
@@ -317,7 +317,7 @@ func TestEnumeratorsSpellTheLibrarysNames(t *testing.T) {
 	}
 }
 
-// Every dense metric reads back from its own spelling, and a spelling no metric carries is refused.
+// Every dense metric reads back from its own spelling, and a spelling no metric holds is refused.
 func TestDenseMetricsReadBackFromTheirNames(t *testing.T) {
 	t.Parallel()
 	for _, metric := range []DenseMetric{DenseMetricInner, DenseMetricAngular, DenseMetricEuclidean,
@@ -535,12 +535,12 @@ func TestClosingTwiceIsHarmless(t *testing.T) {
 // One constructor per residency, each reading only what its own hardware has - the VRAM one drives
 // a stream per device from the calling thread and takes no thread count.
 //
-// Whether a build carries the accelerator and block backends decides the outcome, so what is
+// Whether a build holds the accelerator and block backends decides the outcome, so what is
 // asserted is the invariant either way: a constructor hands back an executor or a failure, never
 // both and never neither.
 func TestExecutorConstructorsTakeOnlyWhatTheirResidencyHas(t *testing.T) {
 	t.Parallel()
-	memory, err := ExecutorForRam(nil, CPUClassUnknown, 2)
+	memory, err := ExecutorForRam(nil, CPUClassUnknown, 2, 0)
 	if err != nil {
 		t.Fatalf("the RAM executor must spawn: %v", err)
 	}
@@ -552,7 +552,7 @@ func TestExecutorConstructorsTakeOnlyWhatTheirResidencyHas(t *testing.T) {
 	}
 	devices.Close()
 
-	drives, err := ExecutorForNvme(nil, CPUClassUnknown, 2, NvmeClassUnknown)
+	drives, err := ExecutorForNvme(nil, nil, CPUClassUnknown, 2, NvmeClassUnknown, 0)
 	if (drives == nil) == (err == nil) {
 		t.Errorf("the NVMe constructor answered with %v and %v", drives, err)
 	}
@@ -573,7 +573,7 @@ func TestExecutorConstructorsTakeOnlyWhatTheirResidencyHas(t *testing.T) {
 func TestExecutorRefusesUseAfterClose(t *testing.T) {
 	t.Parallel()
 	index := newIndex(t, angularBF16(4), 4)
-	executor, err := ExecutorForRam(nil, CPUClassUnknown, 2)
+	executor, err := ExecutorForRam(nil, CPUClassUnknown, 2, 0)
 	if err != nil {
 		t.Fatalf("the executor must spawn: %v", err)
 	}
@@ -803,8 +803,8 @@ func TestSearchStreamsYieldNearestFirst(t *testing.T) {
 
 // region: Shape Rejection
 
-// The keys-to-rows, documents-to-rows and carry-to-queries guards are this binding's, since each
-// call has one count and C pointers carry no lengths; widths cross untouched and come back refused
+// The keys-to-rows, documents-to-rows and state-to-queries guards are this binding's, since each
+// call has one count and C pointers hold no lengths; widths cross untouched and come back refused
 // by the library.
 func TestRejectsMalformedShapes(t *testing.T) {
 	t.Parallel()
@@ -839,7 +839,7 @@ func TestRejectsMalformedShapes(t *testing.T) {
 			_, err := on.Maxsim(queries, 0, 4, arena, nil)
 			return err
 		}},
-		{"a carry shorter than the queries", func() error {
+		{"a hold shorter than the queries", func() error {
 			lookup := ValueLookup{Values: RowsOf(slab, dimensions), Row: func(Key) (uint, bool) { return 0, true }}
 			_, err := on.Attend(queries, lookup, arena, &DenseAttendConfig{Carry: make([]DenseSoftmaxState, 1)})
 			return err
@@ -1359,7 +1359,7 @@ func TestLoadNvmeWantsAManifest(t *testing.T) {
 	if err := index.Save(path, nil); err != nil {
 		t.Fatalf("the checkpoint must write: %v", err)
 	}
-	drives, err := ExecutorForNvme(nil, CPUClassUnknown, 1, NvmeClassUnknown)
+	drives, err := ExecutorForNvme(nil, nil, CPUClassUnknown, 1, NvmeClassUnknown, 0)
 	if err != nil {
 		t.Fatalf("the NVMe executor must open: %v", err)
 	}
@@ -1480,7 +1480,7 @@ func TestSerializationPreservesEveryOption(t *testing.T) {
 	}
 
 	// An NVMe view resolves keys only through the key table it was opened with.
-	drives, err := ExecutorForNvme(nil, CPUClassUnknown, 1, NvmeClassUnknown)
+	drives, err := ExecutorForNvme(nil, nil, CPUClassUnknown, 1, NvmeClassUnknown, 0)
 	if err != nil {
 		t.Fatalf("the NVMe executor must open: %v", err)
 	}
@@ -1519,7 +1519,7 @@ func TestSerializationPreservesEveryOption(t *testing.T) {
 
 // region: Deferred Calls
 
-// A deferred search pins its queries and borrows its arena, and answers what the blocking one does
+// A deferred search pins its queries and uses its arena, and answers what the blocking one does
 // once waited on, as many times as it is asked.
 func TestDeferredSearchMatchesTheBlockingOne(t *testing.T) {
 	t.Parallel()
@@ -1563,9 +1563,9 @@ func TestDeferredSearchMatchesTheBlockingOne(t *testing.T) {
 	}
 }
 
-// A deferred call's view borrows the caller's arena as a blocking one's does, so the arena
+// A deferred call's view uses the caller's arena as a blocking one's does, so the arena
 // serves the next call once the deferred one is final.
-func TestDeferredViewsBorrowTheCallersArenas(t *testing.T) {
+func TestDeferredViewsPointIntoTheCallersArenas(t *testing.T) {
 	t.Parallel()
 	const dimensions = 4
 	index, keys, slab := populated(t, angularBF16(dimensions), 4)
@@ -1688,7 +1688,7 @@ func TestDeferredRefusalsComeBackAtSubmission(t *testing.T) {
 	index := newIndex(t, angularBF16(dimensions), count)
 	slab := seededRows(count, dimensions)
 
-	executor, err := ExecutorForRam(nil, CPUClassUnknown, 1)
+	executor, err := ExecutorForRam(nil, CPUClassUnknown, 1, 0)
 	if err != nil {
 		t.Fatalf("the executor must spawn: %v", err)
 	}

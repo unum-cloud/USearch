@@ -93,7 +93,7 @@ struct vram_scored_node;
 /**
  *  @brief One traversal candidate packed into eight bytes, ordered by distance as raw
  *      unsigned words: bits [63:33] hold the top 31 bits of the sign-flipped @c f32
- *      distance, bit 32 carries the "already expanded" flag, bits [31:0] the full node ID.
+ *      distance, bit 32 holds the "already expanded" flag, bits [31:0] the full node ID.
  *
  *  The all-ones pattern is the empty slot: its distance prefix is the flipped NaN that sorts last,
  *  it reads as expanded, and its ID is the all-ones unknown ID - so traversal loops need no
@@ -140,7 +140,7 @@ static_assert(std::is_trivially_copyable_v<vram_scored_node<u32_t>>);
 
 /**
  *  @brief One traversal candidate with a 64-bit ID, in two words ordered by distance, then ID:
- *      bits [63:32] of the first hold the whole sign-flipped @c f32 distance, bit 0 carries the
+ *      bits [63:32] of the first hold the whole sign-flipped @c f32 distance, bit 0 holds the
  *      "already expanded" flag, and the second word is the full node ID.
  *
  *  The all-ones pair is the empty slot, as in the 32-bit twin: its distance is the flipped NaN that
@@ -306,7 +306,7 @@ struct vram_sorted_candidates {
 #pragma unroll
             for (u32_t slot = 0; slot != slots_; ++slot) rank += warp_t::count(warp_t::ballot(entries_[slot] < value));
             if (rank == capacity_k) continue; // An earlier entry of this batch already pushed the worst below it.
-            // Highest slot first, so each slot's old last lane carries up before that slot
+            // Highest slot first, so each slot's old last lane moves up before that slot
             // is rewritten.
 #pragma unroll
             for (u32_t slot = slots_; slot-- != 0;) {
@@ -723,7 +723,7 @@ struct vram_arena_frontier {
  *  The @b only kind of membership structure this codebase allows: lossy variants are banned
  *  outright, their false negatives silently invert the recall-vs-expansion curve.
  *
- *  Lanes carrying the same ID in one call collapse to their lowest lane via value matching, so a
+ *  Lanes holding the same ID in one call collapse to their lowest lane via value matching, so a
  *  batch can never stage intra-batch duplicates; the compare-exchange only arbitrates two distinct
  *  IDs claiming one empty slot - scratch bookkeeping, not part of the graph's all-RMW protocol. A
  *  saturated set - the probe budget exhausted on a full neighborhood - reports the ID fresh, so it
@@ -741,7 +741,7 @@ struct vram_visited_set {
      *  a probe loads that one slot. */
     u64_t* slots_;
 
-    /** One field carries the whole shape: the slot count is a power of two by
+    /** One field holds the whole shape: the slot count is a power of two by
      *  construction in @c arena_shape_for, so the probe mask derives as
      *  @b 0xFFFFFFFF>>hash_shift_ and no capacity is stored. */
     u32_t hash_shift_;
@@ -910,7 +910,7 @@ struct vram_telemetry_t {
 };
 
 /** What a walk asks of its frontier, the register ladder's or the arena's: start and renew a walk,
- *  take a scored batch, hand back the nearest unexpanded entry, tell a staged ID it already holds,
+ *  take a scored batch, return the nearest unexpanded entry, tell a staged ID it already holds,
  *  and count what its tail compacted and dropped. */
 template <typename frontier_>
 concept vram_frontier = requires(frontier_& frontier, frontier_ const& held, typename frontier_::scored_node_t entry,
@@ -946,7 +946,7 @@ struct vram_warp_context {
  *
  *  Every row's slots load in one window, the rows claim in pop order, and every @p round_rows of
  *  fresh IDs, a warp's width or more, reach @p score through the @p staged buffer, which holds
- *  @p round_rows and a warp's width more, and whose @p pending entries past them carry across
+ *  @p round_rows and a warp's width more, and whose @p pending entries past them stay staged across
  *  rounds.
  *
  *  Lane @b r reads row @b r 's lock word once and the warp shuffles it, so no two lanes branch on
@@ -1128,7 +1128,7 @@ struct vram_selection_scratch {
     }
 };
 
-/** Layout of one warp's slice of the traversal arena, computed on the host and carried by the
+/** Layout of one warp's slice of the traversal arena, computed on the host and passed through the
  *  views: the exact visited set, the wide frontier's spill tail when it has one, then a builder's
  *  scratch when shared memory cannot fit its rows. Its spans are as wide as node IDs. */
 struct vram_arena_shape_t {

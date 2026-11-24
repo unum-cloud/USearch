@@ -117,14 +117,13 @@ static std::array<char, 8> make_tag(std::size_t ordinal) noexcept {
 }
 
 int main() {
-    // The type vocabulary: statuses, expected & its borrowing face, hashes & mixers.
+    // The type vocabulary: statuses, expected & its viewing face, hashes & mixers.
     if (std::string_view {util::status_to_string(util::status_code_t::success_k)}.empty()) return 1;
     auto const [answered, answered_status] = util::expected<util::u32_t> {42, util::status_code_t::success_k};
     if (util::failed(answered_status) || answered != 42) return 1;
     util::u64_t seven = 7;
-    auto const [borrowed, borrowed_status] = util::expected<util::u64_t const&> {&seven,
-                                                                                 util::status_code_t::success_k};
-    if (util::failed(borrowed_status) || *borrowed != 7) return 1;
+    auto const [viewed, viewed_status] = util::expected<util::u64_t const&> {&seven, util::status_code_t::success_k};
+    if (util::failed(viewed_status) || *viewed != 7) return 1;
     util::uuid128_t const uuid {};
     if (std::hash<util::uuid128_t> {}(uuid) != std::hash<util::uuid128_t> {}(uuid)) return 1;
     if (util::mix_bits(1) == util::mix_bits(2)) return 1;

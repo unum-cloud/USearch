@@ -926,9 +926,9 @@ struct gathering_predicate {
     }
 
     template <std::size_t extent_>
-    void push(std::span<item_type_ const, extent_> asked, std::span<payload_type_ const, extent_> carried) noexcept {
+    void push(std::span<item_type_ const, extent_> asked, std::span<payload_type_ const, extent_> held) noexcept {
         items.insert(items.end(), asked.begin(), asked.end());
-        payloads.insert(payloads.end(), carried.begin(), carried.end());
+        payloads.insert(payloads.end(), held.begin(), held.end());
     }
 
     template <typename on_admitted_type_>
@@ -1003,8 +1003,8 @@ inline void expect_contiguous_ids(std::span<node_id_type_> ids, std::size_t firs
 
 /** The reader-lane invariants over one search's scored results: every ID below the watermark
  *  sampled after the search, distances ascending, the candidate breadth bound honored. Answers the
- *  violation count silently - racing lanes add it to their shared counter, since printing from
- *  inside a race would interleave & flood - and the status verdict stays at the call site: lanes
+ *  violation count silently - racing threads add it to their shared counter, since printing from
+ *  inside a race would interleave & flood - and the status verdict stays at the call site: threads
  *  differ in how they record it. */
 template <typename scored_type_>
 inline std::size_t scored_violations(scored_type_ const* results, std::size_t results_count,
@@ -1560,16 +1560,16 @@ void expect_health(handle<verbs_type_>& index, std::size_t count) {
     expect_true(reachability.audited == count && reachability.reachable == count);
 }
 
-/** A cursor over @p index yields each of its @p count entries once as stored, and from the first
- *  entry's key breadth-first that key first and then only what links lead to, once each; every
- *  yielded and linked key was minted, and a walk past one entry hands links. */
+/** A cursor opened on the executor of @p index yields each of its @p count entries once as stored,
+ *  and from the first entry's key breadth-first that key first and then only what links lead to,
+ *  once each; every yielded and linked key was minted, and a walk past one entry hands links. */
 template <typename verbs_type_>
 void expect_cursor(handle<verbs_type_>& index, std::size_t count) {
     usearch_key_t const start = key_of_offset(index.session->seed, 0);
     for (std::span<usearch_key_t const> const starts : {std::span<usearch_key_t const> {}, std::span {&start, 1}}) {
         usearch_outcome_t outcome {};
         typename verbs_type_::cursor_t cursor = nullptr;
-        verbs_type_::cursor_init(index.get(), starts, &cursor, &outcome);
+        verbs_type_::cursor_init(index.get(), index.executor(), starts, &cursor, &outcome);
         expect_success(outcome);
         if (!cursor) continue;
         std::vector<bool> yielded(count);
@@ -1975,7 +1975,7 @@ void expect_cleared(handle<verbs_type_>& index, typename verbs_type_::values_t i
     if (!describe(index).size) expect_success(insert_entries(index, inputs, 1, 0, cell_batch_k, 0, stats));
     usearch_outcome_t outcome {};
     typename verbs_type_::cursor_t cursor = nullptr;
-    verbs_type_::cursor_init(index.get(), {}, &cursor, &outcome);
+    verbs_type_::cursor_init(index.get(), index.executor(), {}, &cursor, &outcome);
     expect_success(outcome);
     verbs_type_::clear(index.get(), index.executor(), &outcome);
     expect_success(outcome);

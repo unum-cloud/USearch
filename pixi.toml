@@ -13,7 +13,7 @@ name = "usearch"
 platforms = [
   { name = "linux-64-glibc239", platform = "linux-64", glibc = "2.39" },
   { name = "linux-aarch64-glibc239", platform = "linux-aarch64", glibc = "2.39" },
-  "osx-arm64",
+  { name = "osx-arm64-macos26", platform = "osx-arm64", macos = "26.0" },
 ]
 preview = ["pixi-build"]
 readme = "README.md"
@@ -25,6 +25,10 @@ c_stdlib_version = ["2.39"]
 
 [workspace.target.linux-aarch64.build-variants]
 c_stdlib_version = ["2.39"]
+
+# macOS builds at the Apple floor every Unum project shares, as `to_chars` for floats needs 13.3 or newer.
+[workspace.target.osx-arm64.build-variants]
+c_stdlib_version = ["26.0"]
 
 # A dependency of the environment too, so `pixi run` puts the library in the prefix `mojo build` bakes as runpath.
 [dependencies]

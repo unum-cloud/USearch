@@ -159,7 +159,7 @@ constexpr i64_t frame_scale_k = i64_t {1} << 30;
  *  The axes are named for reading and are not geographic: the basis is built against the
  *  coordinate axis least aligned with the position, which is well conditioned everywhere on
  *  the sphere, where a geographic east is undefined at the poles. Cone tests hold for any
- *  orthonormal basis, so every node may carry its own rotation.
+ *  orthonormal basis, so every node may hold its own rotation.
  */
 struct tangent_frame_t {
     std::array<i32_t, 3> east {};

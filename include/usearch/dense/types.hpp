@@ -188,7 +188,7 @@ struct refine_config_t {
      *  walk. */
     candidates_count_t expansion_factor = 0;
 
-    /** Bytes the whole pass may hold beyond the index: the audit and a bit per row carried across
+    /** Bytes the whole pass may hold beyond the index: the audit and a bit per row held across
      *  tiles, then tiles of contiguous rows at 8 B per neighbor slot plus 4 B each, as many rows as
      *  fit, or on VRAM at 4 B per slot past the walks' arena too. Zero walks one storage chunk per
      *  tile, or on VRAM every walked row in one tile. */
@@ -539,7 +539,7 @@ struct rows_view_t {
         return {row(first), count, columns, stride, dtype};
     }
 
-    /** Whether the rows can be borrowed as @p scalar_type_ in place: that scalar, not repeated. */
+    /** Whether the rows can be viewed as @p scalar_type_ in place: that scalar, not repeated. */
     template <row_scalar scalar_type_>
     bool holds() const noexcept {
         return dtype == dtype_of<scalar_type_>() && stride;

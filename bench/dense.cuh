@@ -42,6 +42,7 @@
 #include "usearch/utilities/safegraphs_format.hpp"
 #include "usearch/dense/types.hpp"             // `dense::dtype_of` - the checkpoint columns
 #include "usearch/dense/shard_checkpoints.hpp" // `dense::norms_column_of`, `dense::monolith_header` - the norms column
+#include "usearch/utilities/ram_device.hpp"    // `ram_executor_t` - the executor every phase fans out on
 
 #if !USEARCH_OS_WINDOWS_
 #include <unistd.h> // `isatty`
@@ -247,7 +248,7 @@ int dispatch_stored_value(nk_dtype_t dtype, auto on_dtype, auto on_unknown) {
     else return on_unknown(dtype);
 }
 
-/** The stored dtypes the CPU benchmarks carry, by shrinking dynamic range. */
+/** The stored dtypes the CPU benchmarks cover, by shrinking dynamic range. */
 template <typename dataset_scalar_type_>
 int dispatch_stored_dtype(nk_dtype_t dtype, auto on_dtype, auto on_unknown) {
     return dispatch_stored_value<dataset_scalar_type_, nk_f32_k, nk_bf16_k, nk_f16_k, nk_e5m2_k, nk_e4m3_k, nk_e3m2_k,
@@ -332,7 +333,7 @@ struct settings_t {
     nk_capability_t max_compute = nk_cap_any_k;
 
     /** The scheduling ceiling as named, and its allow-mask over ForkUnion scheduling capabilities, forwarded
-     *  verbatim to @c fu_pool_new and mirrored by the waiter type the index instantiates. */
+     *  verbatim to the executor's pool and mirrored by the waiter type the index instantiates. */
     std::string_view max_schedule_name;
     fu_capabilities_t max_schedule = fu_capabilities_all_k;
 
@@ -665,7 +666,7 @@ std::string checkpoint_path_of(settings_t const& settings, index_type_ const& in
     return (checkpoints_folder(settings) / file).string();
 }
 
-/** The norms column dtype a single index's checkpoint carries: the dot product's own token where
+/** The norms column dtype a single index's checkpoint holds: the dot product's own token where
  *  the index keeps norms, @c unknown_k where it keeps none. */
 template <typename index_type_>
 util::dtype_t checkpoint_norms_dtype(index_type_ const& index) noexcept {
@@ -839,8 +840,9 @@ std::vector<scalar_type_> stage_rows(nk::matrix_view<dataset_scalar_type_> rows,
     return stage_widened<scalar_type_>(std::move(widened), scale);
 }
 
-/** NumKong's @c component_max of @p scalar_type_ - the largest magnitude one stored dimension carries - extended to
- *  the plain scalars, each its own component, whose largest is their @c finite_max. */
+/** NumKong's @c component_max of @p scalar_type_ - the largest magnitude one stored dimension
+ *  holds - extended to the plain scalars, each its own component, whose largest magnitude is their
+ *  @c finite_max value. */
 template <typename scalar_type_>
 constexpr float component_max() noexcept {
     if constexpr (requires { scalar_type_::component_max(); }) return float(scalar_type_::component_max());
@@ -955,7 +957,6 @@ auto searched_rows(streamed_dataset_type_ const& streamed) noexcept {
 struct machine_t {
     fu_topology_t topology = nullptr;
     fu_fabric_t fabric = nullptr;
-    fu_pool_t pool = nullptr;
     std::size_t logical_cores = 0;
     std::size_t compute_domains = 0;
     std::size_t memory_domains = 0;
@@ -1071,6 +1072,9 @@ struct bench_launch {
     mapped_dataset<dataset_scalar_type_> const& dataset;
     settings_t const& settings;
     machine_t const& machine;
+
+    /** The executor every phase fans out on, as the library's RAM executors do. */
+    util::ram_executor_t& executor;
 };
 
 /** Opens the RetriEval matrix @p path, or the parts its glob pattern names, in the scalar its
@@ -1097,17 +1101,17 @@ int open_dataset(std::string_view path, std::string_view queries_path, std::stri
         });
 }
 
-/** The process every CPU binary on one ForkUnion pool runs around its cascade: reads the flags of @p binary_name and
- *  the ones each of @p binary_flags adds, probes the machine, resolves the placement against it, spawns the pool,
- *  prints both, then opens the dataset and exits with what @p on_launch makes of its @ref bench_launch. */
+/** The process every CPU binary on one executor runs around its cascade: reads the flags of
+ *  @p binary_name and the ones each of @p binary_flags adds, probes the machine, resolves the
+ *  placement against it, spawns the executor, prints both, then opens the dataset and exits with
+ *  what @p on_launch makes of its @ref bench_launch. */
 template <typename on_launch_type_, typename... binary_flags_types_>
 int run_cpu_bench(int argc, char const* const* argv, char const* binary_name, on_launch_type_&& on_launch,
                   binary_flags_types_... binary_flags) {
     settings_t settings = read_settings(argc, argv, binary_name, binary_flags...);
     machine_t machine = probe_machine();
-    if (!machine.topology || !machine.fabric ||
-        fu_pool_new(binary_name, settings.max_schedule, &machine.pool) != fu_success_k) {
-        fmt::println("Failed to inspect the topology or create the pool");
+    if (!machine.topology || !machine.fabric) {
+        fmt::println("Failed to inspect the topology");
         return 1;
     }
 
@@ -1130,7 +1134,6 @@ int run_cpu_bench(int argc, char const* const* argv, char const* binary_name, on
     // publication convoy serializes on scheduler latency, and throughput collapses by an order
     // of magnitude. A single pinned domain carves the core budget from every compute domain
     // whose local memory it is - several clusters can share one NUMA node.
-    bool spawned = false;
     if (settings.memory_domains.size() == 1) {
         if (!settings.threads.value) {
             std::size_t local_cores = 0;
@@ -1144,16 +1147,15 @@ int run_cpu_bench(int argc, char const* const* argv, char const* binary_name, on
             }
             settings.threads.value = util::max_of<std::size_t>(1, local_cores * 7 / 8);
         }
-        spawned = fu_pool_spawn_near_memory_domain(machine.topology, machine.pool, settings.memory_domains.front(),
-                                                   settings.threads.value, fu_caller_inclusive_k) == fu_success_k;
     }
-    else {
-        if (!settings.threads.value)
-            settings.threads.value = util::max_of<std::size_t>(1, machine.logical_cores * 7 / 8);
-        spawned = fu_pool_spawn(machine.topology, machine.pool, settings.threads.value, fu_caller_inclusive_k) ==
-                  fu_success_k;
-    }
-    if (!spawned) {
+    else if (!settings.threads.value)
+        settings.threads.value = util::max_of<std::size_t>(1, machine.logical_cores * 7 / 8);
+    auto [executor, spawn_status] =
+        settings.memory_domains.size() == 1
+            ? util::ram_executor_t::spawn_near(machine.topology, settings.memory_domains.front(),
+                                               settings.threads.value, settings.max_schedule)
+            : util::ram_executor_t::spawn(machine.topology, settings.threads.value, settings.max_schedule);
+    if (failed(spawn_status)) {
         fmt::println("Failed to spawn {} threads", settings.threads.value);
         return 1;
     }
@@ -1165,9 +1167,8 @@ int run_cpu_bench(int argc, char const* const* argv, char const* binary_name, on
     int const exit_code = open_dataset(
         settings.base_vectors_path, settings.query_vectors_path, settings.query_neighbors_path,
         [&]<typename dataset_scalar_type_>(mapped_dataset<dataset_scalar_type_> const& dataset) {
-            return on_launch(bench_launch<dataset_scalar_type_> {dataset, settings, machine});
+            return on_launch(bench_launch<dataset_scalar_type_> {dataset, settings, machine, executor});
         });
-    fu_pool_delete(machine.pool);
     fu_fabric_delete(machine.fabric);
     fu_topology_delete(machine.topology);
     return exit_code;

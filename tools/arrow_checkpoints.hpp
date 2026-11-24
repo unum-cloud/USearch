@@ -21,8 +21,8 @@
  *  An element Arrow has no type for, like bf16 or e4m3, travels as fixed-size binary of its bytes.
  *  Each field's metadata names the column's own dtype and shape under @c safegraphs:dtype and
  *  @c safegraphs:shape, so an import restores what Arrow cannot spell, and reads a field lacking
- *  them from its Arrow type alone. The schema's metadata carries the first part's string metadata,
- *  the metric among them, since every part carries the same schema.
+ *  them from its Arrow type alone. The schema's metadata holds the first part's string metadata,
+ *  the metric among them, since every part holds the same schema.
  *
  *  An import validates every batch against the schema, then lays each one out as a monolith whose
  *  columns hold the batch's buffers, behind a manifest when there are several, in the one buffer
@@ -184,7 +184,7 @@ inline util::dtype_t arrow_dtype_of(ipc_field_t const& element) noexcept {
     }
 }
 
-/** One string field a checkpoint's header carries, copied out of the header's parse. */
+/** One string field a checkpoint's header holds, copied out of the header's parse. */
 struct arrow_custom_field_t {
     sz::string_t key;
     sz::string_t value;
@@ -397,7 +397,7 @@ inline sz::string_t arrow_export(std::string_view checkpoint, std::string_view a
         util::failed(listed))
         return formatted("{} holds no SafeGraphs checkpoint: {}", checkpoint, util::status_to_string(listed));
 
-    // Every part carries the whole schema, so the first one's header and string metadata name it.
+    // Every part holds the whole schema, so the first one's header and string metadata name it.
     util::safegraphs_header_t const& first = parts[0].header;
     st::vector<arrow_custom_field_t> custom_fields;
     auto keep_field = [&](util::safegraphs_custom_field_t field) noexcept {
@@ -1151,7 +1151,7 @@ inline sz::string_t arrow_import(std::string_view arrow_path, std::string_view m
         part.offset = offsets[index];
         bytes_span_t const monolith = buffer.subspan(part.offset, part.bytes);
         bytes_span_t const segment = monolith.subspan(part.header.data_offset);
-        // An empty batch may carry no offsets at all, and its one zero sum is already in place.
+        // An empty batch may hold no offsets at all, and its one zero sum is already in place.
         auto copy = [&](util::iota_view<std::size_t> range, bytes_view_t source) {
             if (std::size_t const bytes = util::min_of(range.size(), source.size()))
                 std::memcpy(segment.data() + range.first, source.data(), bytes);

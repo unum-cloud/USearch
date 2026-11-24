@@ -969,11 +969,33 @@ struct hip_pinned_slots_t {
     fu::spin_mutex_t guard_;
 };
 
-/** Owned non-blocking stream, born on the current device; destruction drains it first. */
+/** One device's ordering identity: a non-blocking stream an executor opens with itself and drains
+ *  and destroys when it dies, or the device's null legacy stream, which owns nothing. */
 struct hip_stream_t {
-    explicit hip_stream_t(hip_api_t const& api) noexcept : api_(&api) {
-        if (api) api.stream_create_with_flags(&handle_, hip_stream_non_blocking_k);
+
+    /**
+     *  @brief Opens a non-blocking stream on the current device, owned from now on.
+     *
+     *  @par Statuses:
+     *  - @c device_k The runtime refused the stream.
+     */
+    static expected<hip_stream_t> open(hip_api_t const& api) noexcept {
+        hip_stream_t stream;
+        stream.api_ = &api;
+        if (!api || api.stream_create_with_flags(&stream.handle_, hip_stream_non_blocking_k) != hip_success_k)
+            return {std::move(stream), {status_code_t::device_k, "Runtime refused a stream"}};
+        return {std::move(stream), status_code_t::success_k};
     }
+
+    /** The null legacy stream of the current device, which nobody creates or destroys, for a call
+     *  without an executor. */
+    static hip_stream_t legacy(hip_api_t const& api) noexcept {
+        hip_stream_t stream;
+        stream.api_ = &api;
+        return stream;
+    }
+
+    hip_stream_t() noexcept = default;
     hip_stream_t(hip_stream_t&& other) noexcept : api_(other.api_), handle_(std::exchange(other.handle_, nullptr)) {}
     hip_stream_t(hip_stream_t const&) = delete;
     hip_stream_t& operator=(hip_stream_t const&) = delete;
@@ -1103,7 +1125,7 @@ struct hip_device_arena_t {
     int device_ = 0;
 };
 
-/** The @c std::unique_ptr deleter carrying the allocator and the element count. */
+/** The @c std::unique_ptr deleter holding the allocator and the element count. */
 template <typename allocator_>
 struct hip_deleter {
     allocator_ allocator;
@@ -1472,7 +1494,7 @@ struct hip_traversal_context {
      *  for, zeroed when it was queued. */
     hip_unique_ptr<u32_t, counter_allocator_t> missed_;
 
-    /** Borrowed from the stream's page-locked slots, so the copies @ref record queues into it
+    /** Taken from the stream's page-locked slots, so the copies @ref record queues into it
      *  never wait on the device, and no context pins memory of its own. */
     host_counters_ptr_t host_counters_;
     device_bytes_ptr_t arena_;
@@ -1515,7 +1537,7 @@ struct hip_traversal_context {
     /** Grows @p buffer to @p bytes when @p capacity falls short; @return the base, or null. */
     byte_t* ensure_(device_bytes_ptr_t& buffer, std::size_t& capacity, std::size_t bytes) noexcept {
         if (bytes <= capacity) return buffer.get();
-        // The deleter already carries the stream's pool, so only the allocation and its count
+        // The deleter already holds the stream's pool, so only the allocation and its count
         // change; the old one frees behind the work queued on it.
         buffer.reset(buffer.get_deleter().allocator.allocate(bytes));
         buffer.get_deleter().count = bytes;
@@ -1541,9 +1563,9 @@ struct hip_executor_t {
     /** One call's hold on the executor, released when it dies. */
     using claim_t = std::unique_lock<fu::spin_mutex_t>;
 
-    /** One shard's stream, run and contexts; the pinned slots are declared before the stream, so
-     *  they unpin only once it drained, then the arena and the contexts, so they free onto a live
-     *  stream, the contexts first. */
+    /** One shard's stream, run and contexts; the executor drains the stream before any of them
+     *  dies, and the pinned slots and kernel tables are declared first, so they go only after the
+     *  arena and the contexts freed onto the stream, the contexts first. */
     struct stream_t {
 
         /** The runtime every transfer, launch and allocation on this stream goes through. */
@@ -1557,11 +1579,11 @@ struct hip_executor_t {
         std::unique_ptr<hip_pinned_slots_t> pinned_slots;
 
         /** The code objects loaded on this device, one table each, held apart so the contexts
-         *  keep their address as the stream moves, and declared before the stream, so they unload
-         *  only once it drained. */
+         *  keep their address as the stream moves. */
         std::unique_ptr<hip_kernel_tables_t> kernel_tables;
 
-        /** The ordering identity every transfer and launch on this device rides. */
+        /** The ordering identity every transfer and launch on this device rides: the stream the
+         *  executor opened, or the device's null legacy stream for a call without an executor. */
         hip_stream_t handle;
 
         /** The point @ref wait and the C layer's arena record and sleep on, so a wait frees its
@@ -1575,7 +1597,7 @@ struct hip_executor_t {
          *  across calls with their buffers, events and pinned slots. */
         growing_buffer<traversal_context_t> contexts {global_allocator};
 
-        /** Takes @p handle, opened on @p device, and binds the arena to it; the event is born
+        /** Takes @p handle, a stream of @p device, and binds the arena to it; the event is born
          *  there too, so @p device must be current. */
         stream_t(hip_api_t const& api, int device, hip_stream_t&& handle) noexcept
             : api(&api), device(device), pinned_slots(new (std::nothrow) hip_pinned_slots_t {api, device}),
@@ -1601,6 +1623,14 @@ struct hip_executor_t {
     hip_executor_t(hip_executor_t const&) = delete;
     hip_executor_t& operator=(hip_executor_t const&) = delete;
 
+    /** Drains every stream, then frees each one's contexts and run with its device current, so the
+     *  runs, contexts and pinned slots die after the work on them, and its streams close last. */
+    ~hip_executor_t() noexcept {
+        [[maybe_unused]] status_t const drained = wait();
+        for (stream_t& opened : streams_)
+            if (hip_set_device(*api_, opened.device) == hip_success_k) opened.contexts.reset(), opened.arena.reset();
+    }
+
     /** Exchanges the stream tables; @c held_ stays, as a move with a call in flight is misuse. */
     void swap(hip_executor_t& other) noexcept {
         std::swap(api_, other.api_);
@@ -1616,12 +1646,12 @@ struct hip_executor_t {
      *  - @c contended_k Another call holds the executor.
      */
     expected<claim_t> claim() noexcept {
-        if (!held_.lock_if_free()) return {{}, status_code_t::contended_k};
+        if (!held_.lock_if_free()) return {{}, {status_code_t::contended_k, "Another call holds the executor"}};
         return {claim_t {held_, std::adopt_lock}, status_code_t::success_k};
     }
 
     /**
-     *  @brief Takes over streams the caller already opened, owned and destroyed here from now on.
+     *  @brief Takes over @p streams, each one's handle owned here from now on.
      *
      *  @par Statuses:
      *  - @c config_mismatch_k The @p streams are empty.
@@ -1644,30 +1674,53 @@ struct hip_executor_t {
     }
 
     /** Bytes of local data share a block keeps to itself on the smallest of this executor's
-     *  devices, the twin of @c forkunion_executor_t::cache_bytes_per_core. */
+     *  devices, the twin of @c ram_executor_t::cache_bytes_per_core. */
     std::size_t cache_bytes_per_core() const noexcept { return cache_bytes_per_core_; }
 
     /**
-     *  @brief Opens one stream per entry of @p devices, binding each first, since a stream is born
-     *      on the current device; their runs never grow past @p scratch_limit bytes, zero for none.
+     *  @brief Opens one non-blocking stream per entry of @p devices, binding each first, since a
+     *      stream is born on the current device; their runs never grow past @p scratch_limit bytes,
+     *      zero for none.
      *
      *  @par Statuses:
      *  - @c config_mismatch_k The @p devices are empty.
+     *  - @c device_k A device or the runtime refused its stream.
      */
     static expected<hip_executor_t> spawn(hip_api_t const& api, std::span<int const> devices,
                                           std::size_t scratch_limit = 0) noexcept {
-        growing_buffer<stream_t> streams {global_allocator};
-        if (failed(streams.reserve_exactly(devices.size()))) return {{}, status_code_t::out_of_memory_k};
-        for (int device : devices) {
-            if (hip_set_device(api, device) != hip_success_k) return {{}, status_code_t::device_k};
-            stream_t opened {api, device, hip_stream_t {api}};
-            if (!opened.pinned_slots || !opened.kernel_tables) return {{}, status_code_t::out_of_memory_k};
-            if (!opened.handle || !opened.event) return {{}, status_code_t::device_k};
-            streams.push_back_reserved(std::move(opened));
+        growing_buffer<stream_t> bound {global_allocator};
+        if (failed(bound.reserve_exactly(devices.size()))) return {{}, status_code_t::out_of_memory_k};
+        for (int const device : devices) {
+            if (hip_set_device(api, device) != hip_success_k)
+                return {{}, {status_code_t::device_k, "Device selection failed"}};
+            auto [opened, opened_status] = hip_stream_t::open(api);
+            if (failed(opened_status)) return {{}, opened_status};
+            if (status_t const appended = bind_stream_(api, device, std::move(opened), bound); failed(appended))
+                return {{}, appended};
         }
-        auto [executor, status] = acquire(std::move(streams));
+        auto [executor, status] = acquire(std::move(bound));
         executor.scratch_limit_ = scratch_limit;
         return {std::move(executor), status};
+    }
+
+    /**
+     *  @brief Orders a call without an executor on the null legacy stream of every entry of
+     *      @p devices, opening no stream, so the call is final once its work drains.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The @p devices are empty.
+     *  - @c device_k A device could not be bound.
+     */
+    static expected<hip_executor_t> on_default_streams(hip_api_t const& api, std::span<int const> devices) noexcept {
+        growing_buffer<stream_t> bound {global_allocator};
+        if (failed(bound.reserve_exactly(devices.size()))) return {{}, status_code_t::out_of_memory_k};
+        for (int const device : devices) {
+            if (hip_set_device(api, device) != hip_success_k)
+                return {{}, {status_code_t::device_k, "Device selection failed"}};
+            if (status_t const appended = bind_stream_(api, device, hip_stream_t::legacy(api), bound); failed(appended))
+                return {{}, appended};
+        }
+        return acquire(std::move(bound));
     }
 
     /**
@@ -1685,6 +1738,9 @@ struct hip_executor_t {
         if (streams_.empty()) return status_code_t::uninitialized_k;
         if (scratch_limit_ && bytes_per_stream > scratch_limit_) return status_code_t::out_of_memory_k;
         for (stream_t& opened : streams_) {
+            // The null legacy stream is the current device's, so that device is set first.
+            if (hip_set_device(*api_, opened.device) != hip_success_k)
+                return {status_code_t::device_k, "Device selection failed"};
             opened.arena.clear();
             // A rewound run holds one chunk, its widest, which a wider call replaces whole.
             if (opened.arena.capacity() < bytes_per_stream) {
@@ -1692,7 +1748,6 @@ struct hip_executor_t {
                 if (failed(opened.arena.reserve_exactly(bytes_per_stream))) return status_code_t::out_of_memory_k;
             }
             if (opened.contexts.size() >= contexts_per_stream) continue;
-            if (hip_set_device(*api_, opened.device) != hip_success_k) return status_code_t::device_k;
             if (failed(opened.contexts.reserve_exactly(contexts_per_stream))) return status_code_t::out_of_memory_k;
             while (opened.contexts.size() != contexts_per_stream) {
                 opened.contexts.push_back_reserved(traversal_context_t {hip_arena_allocator_t {opened.arena, opened}});
@@ -1702,7 +1757,7 @@ struct hip_executor_t {
         return status_code_t::success_k;
     }
 
-    /** The contexts @ref reserve keeps on stream @p index, the ones its shards borrow in the order
+    /** The contexts @ref reserve keeps on stream @p index, the ones its shards use in the order
      *  they are paired with it. */
     std::span<traversal_context_t> traversals(std::size_t index) noexcept {
         return to_writable_span(streams_[index].contexts);
@@ -1739,6 +1794,16 @@ struct hip_executor_t {
     hip_api_t const& api() const noexcept { return *api_; }
 
   private:
+
+    /** Appends @p handle to @p bound as the stream of @p device, which is current. */
+    static status_t bind_stream_(hip_api_t const& api, int device, hip_stream_t&& handle,
+                                 growing_buffer<stream_t>& bound) noexcept {
+        stream_t stream {api, device, std::move(handle)};
+        if (!stream.pinned_slots || !stream.kernel_tables) return status_code_t::out_of_memory_k;
+        if (!stream.event) return {status_code_t::device_k, "Runtime refused a stream event"};
+        bound.push_back_reserved(std::move(stream));
+        return status_code_t::success_k;
+    }
 
     /** The runtime the streams were opened through. */
     hip_api_t const* api_ = nullptr;

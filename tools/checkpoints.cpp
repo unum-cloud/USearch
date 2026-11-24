@@ -15,6 +15,7 @@
 
 #include <algorithm>   // `std::count_if`, `std::max_element`, `std::min`, `std::ranges::equal`
 #include <array>       // `std::array`
+#include <memory>      // `std::unique_ptr` - the metadata executor, freed on every return
 #include <span>        // `std::span`
 #include <string_view> // `std::string_view`
 
@@ -133,13 +134,22 @@ int checkpoints_metadata(world_t& world, int argc, char const* const* argv) {
                  dtype_name(header.key_dtype));
 
     usearch_outcome_t outcome {};
+    usearch_executor_t executor = nullptr;
+    usearch_executor_for_ram_t placement {.executor = &executor, .outcome = &outcome, .threads = 1};
+    usearch_executor_for_ram(&placement);
+    if (report_failure(outcome, "creating the CPU executor")) return EXIT_FAILURE;
+    std::unique_ptr<usearch_executor_handle_t, void (*)(usearch_executor_t)> const owned_executor {
+        executor, usearch_executor_free};
     usearch_bytes_view_t const path = bytes_view(address);
     usearch_bytes_view_t const buffer = bytes_view(piped_bytes);
     switch (checkpoints_modality_of(metric)) {
     case checkpoints_modality_t::dense_k: {
         usearch_dense_metadata_t metadata {};
-        usearch_dense_metadata_read_t read {.outcome = &outcome, .path = path, .metadata = &metadata};
-        if (piped) dense_verbs_t::metadata_read_buffer(nullptr, buffer, &metadata, &outcome);
+        usearch_dense_metadata_read_t read {.executor = executor,
+                                            .outcome = &outcome,
+                                            .path = path,
+                                            .metadata = &metadata};
+        if (piped) dense_verbs_t::metadata_read_buffer(executor, buffer, &metadata, &outcome);
         else usearch_dense_metadata_read(&read);
         if (report_failure(outcome, "reading {}", address)) return EXIT_FAILURE;
         fmt::println("dense: {} metric, {} dimensions of {}, connectivity {}",
@@ -149,8 +159,11 @@ int checkpoints_metadata(world_t& world, int argc, char const* const* argv) {
     }
     case checkpoints_modality_t::sequence_k: {
         usearch_sequence_metadata_t metadata {};
-        usearch_sequence_metadata_read_t read {.outcome = &outcome, .path = path, .metadata = &metadata};
-        if (piped) sequence_verbs_t::metadata_read_buffer(nullptr, buffer, &metadata, &outcome);
+        usearch_sequence_metadata_read_t read {.executor = executor,
+                                               .outcome = &outcome,
+                                               .path = path,
+                                               .metadata = &metadata};
+        if (piped) sequence_verbs_t::metadata_read_buffer(executor, buffer, &metadata, &outcome);
         else usearch_sequence_metadata_read(&read);
         if (report_failure(outcome, "reading {}", address)) return EXIT_FAILURE;
         fmt::println("sequence: connectivity {}", metadata.connectivity);
@@ -158,8 +171,11 @@ int checkpoints_metadata(world_t& world, int argc, char const* const* argv) {
     }
     case checkpoints_modality_t::shapes_k: {
         usearch_shapes_metadata_t metadata {};
-        usearch_shapes_metadata_read_t read {.outcome = &outcome, .path = path, .metadata = &metadata};
-        if (piped) shapes_verbs_t::metadata_read_buffer(nullptr, buffer, &metadata, &outcome);
+        usearch_shapes_metadata_read_t read {.executor = executor,
+                                             .outcome = &outcome,
+                                             .path = path,
+                                             .metadata = &metadata};
+        if (piped) shapes_verbs_t::metadata_read_buffer(executor, buffer, &metadata, &outcome);
         else usearch_shapes_metadata_read(&read);
         if (report_failure(outcome, "reading {}", address)) return EXIT_FAILURE;
         fmt::println("shapes: {} points of {}, connectivity {}", metadata.points,
@@ -168,8 +184,11 @@ int checkpoints_metadata(world_t& world, int argc, char const* const* argv) {
     }
     case checkpoints_modality_t::geospatial_k: {
         usearch_geospatial_metadata_t metadata {};
-        usearch_geospatial_metadata_read_t read {.outcome = &outcome, .path = path, .metadata = &metadata};
-        if (piped) geospatial_verbs_t::metadata_read_buffer(nullptr, buffer, &metadata, &outcome);
+        usearch_geospatial_metadata_read_t read {.executor = executor,
+                                                 .outcome = &outcome,
+                                                 .path = path,
+                                                 .metadata = &metadata};
+        if (piped) geospatial_verbs_t::metadata_read_buffer(executor, buffer, &metadata, &outcome);
         else usearch_geospatial_metadata_read(&read);
         if (report_failure(outcome, "reading {}", address)) return EXIT_FAILURE;
         fmt::println("geospatial: connectivity {}", metadata.connectivity);

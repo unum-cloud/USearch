@@ -80,7 +80,7 @@ struct serial_visits_hash_set_kit_t {
  *  needed and a full linear probe never runs: a refused @c reserve leaves the table as it
  *  was, and the caller stops marking. All-ones slots are unused, to simplify the design; the
  *  slot count stays a power of two, and bucket collisions resolve by the walk its kit spells -
- *  the serial one here, a wider group scan where a dense class carries it.
+ *  the serial one here, a wider group scan where a dense class holds it.
  */
 template <                                             //
     typename element_type_,                            //

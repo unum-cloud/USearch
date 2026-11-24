@@ -23,9 +23,9 @@
 #define sequence_word 8
 #define map_slot(shard, position) (9 + (shard) * row_limit + (position))
 
-// The values a key slot carries: unset, or the key of the thread that placed the row. A map slot
-// is the key beside its node in one word, published with one release: its tag's ordering against
-// its slot is `ram_tables.pml`'s concern.
+/** The values a key slot holds: unset, or the key of the thread that placed the row. A map slot
+ *  is the key beside its node in one word, published with one release: its tag's ordering against
+ *  its slot is @c ram_tables.pml 's concern. */
 #define unset 0
 #define key_of(thread) (10 + (thread))
 #define empty 0
@@ -177,8 +177,8 @@ inline search(t) {
     }
 }
 
-// once every thread is done: every filed node lies below its shard's watermark, under the key its
-// row carries, so no entry of a refused or abandoned plan is keyed
+/** Once every thread is done: every filed node lies below its shard's watermark, under the key its
+ *  row holds, so no entry of a refused or abandoned plan is keyed. */
 inline audit_keys() {
     byte shard, position;
     atomic {

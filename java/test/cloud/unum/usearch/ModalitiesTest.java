@@ -328,9 +328,9 @@ public class ModalitiesTest {
     @Test
     public void sequenceCursorWalksEveryEntryWithItsLinks() {
         try (SequenceIndex index = sequenceBuilt(16, 0, 0);
-                SequenceCursor cursor = index.on(POOL).cursor();
+                SequenceCursor cursor = index.cursor();
                 Arena arena = new Arena(POOL)) {
-            DenseBatch batch = cursor.nextLinks(64, arena);
+            DenseBatch batch = cursor.on(POOL).nextLinks(64, arena);
             assertEquals(16, batch.written());
             assertTrue(batch.linkCount(0) > 0);
         }
@@ -506,9 +506,9 @@ public class ModalitiesTest {
     @Test
     public void shapesCursorWalksEveryEntryWithItsLinks() {
         try (ShapesIndex index = shapesBuilt(16, 0, 0);
-                ShapesIndex.ShapesCursor cursor = index.on(POOL).cursor();
+                ShapesIndex.ShapesCursor cursor = index.cursor();
                 Arena arena = new Arena(POOL)) {
-            DenseBatch batch = cursor.nextLinks(64, arena);
+            DenseBatch batch = cursor.on(POOL).nextLinks(64, arena);
             assertEquals(16, batch.written());
             assertTrue(batch.linkCount(0) > 0);
         }
@@ -692,9 +692,9 @@ public class ModalitiesTest {
     @Test
     public void geospatialCursorWalksEveryEntryWithItsLinks() {
         try (GeospatialIndex index = geospatialBuilt(16, 0, 0);
-                GeospatialIndex.GeospatialCursor cursor = index.on(POOL).cursor();
+                GeospatialIndex.GeospatialCursor cursor = index.cursor();
                 Arena arena = new Arena(POOL)) {
-            DenseBatch batch = cursor.nextLinks(64, arena);
+            DenseBatch batch = cursor.on(POOL).nextLinks(64, arena);
             assertEquals(16, batch.written());
             assertTrue(batch.linkCount(0) > 0);
         }

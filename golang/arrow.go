@@ -63,7 +63,7 @@ func arrowed(status C.usearch_status_t) error {
 }
 
 // KeysViewFromArrow views the 16-byte keys of a fixed_size_binary(16) column in place, tagged
-// arrow.uuid or not, borrowing the column's buffers.
+// arrow.uuid or not, viewing the column's buffers.
 func KeysViewFromArrow(schema *ArrowSchema, array *ArrowArray) ([]Key, error) {
 	var keys C.usearch_keys_view_t
 	var count C.size_t
@@ -74,7 +74,7 @@ func KeysViewFromArrow(schema *ArrowSchema, array *ArrowArray) ([]Key, error) {
 }
 
 // RowsViewFromArrow views the rows of a fixed_size_list column, or of a fixed_size_binary one
-// tagged numkong.u1x8, in place, borrowing the column's buffers.
+// tagged numkong.u1x8, in place, viewing the column's buffers.
 func RowsViewFromArrow(schema *ArrowSchema, array *ArrowArray) (RowsView, error) {
 	var rows C.usearch_rows_view_t
 	var count C.size_t

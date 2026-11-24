@@ -6,7 +6,7 @@
  *
  *  Every entry is one observation of eleven doubles in natural units, so a batch is a float64
  *  matrix of eleven columns read in place, NaN wherever a device recorded nothing. The handle
- *  carries no metric or quantization, and the surface adds a containment walk, @c within, beside
+ *  holds no metric or quantization, and the surface adds a containment walk, @c within, beside
  *  the ranked search.
  *
  *  Every verb is written once and reached through three receivers, as in @c dense_index.c: the
@@ -104,7 +104,7 @@ static int plan_parse(usearch_py_call_t* call, PyObject* plan, PyTypeObject* typ
 static size_t const observation_fields = sizeof(usearch_geospatial_observation_t) / sizeof(double);
 
 /**
- *  @brief Borrows a float64 matrix of observations in place; one observation is a one-row matrix.
+ *  @brief Views a float64 matrix of observations in place; one observation is a one-row matrix.
  *
  *  The library reads an array of observation structures, so the rows must be packed as the
  *  structure lays them out.
@@ -692,7 +692,7 @@ static char const doc_GeospatialIndex_refine[] =                                
     "  memory_limit (int, optional): Bytes a loaded NVMe handle holds for the part it\n"          //
     "    rewrites; 0 derives what rounds that part in RAM.\n"                                     //
     "  progress (callable, optional): Called with (completed, total) units of each phase;\n"      //
-    "    returning False stops the round, None carries on.\n"                                     //
+    "    returning False stops the round, None continues.\n"                                      //
     "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"       //
     "  stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.\n"          //
     "  plan (GeospatialRefinePlan, optional): The round to open or continue; None runs one\n"     //
@@ -781,7 +781,7 @@ static char const doc_GeospatialIndex_search[] =                                
     "    the key is rejected.\n"                                                                  //
     "    A `Batch` answers many keys per call instead.\n"                                         //
     "  progress (callable, optional): Called with (completed, total) queries; returning False\n"  //
-    "    stops the batch and raises `CancelledError`, None carries on.\n"                         //
+    "    stops the batch and raises `CancelledError`, None continues.\n"                          //
     "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"       //
     "  stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.\n"          //
     "\n"                                                                                          //
@@ -1102,7 +1102,7 @@ static char const doc_GeospatialIndex_reshard[] =                               
     "    rewrites; 0 derives what rounds that part in RAM.\n"                                      //
     "  seed (int, optional): Picks the part roots of a cut; equal seeds cut equally.\n"            //
     "  progress (callable, optional): Called with (completed, total) units of each phase of\n"     //
-    "    the closing rounds; returning False stops them, None carries on.\n"                       //
+    "    the closing rounds; returning False stops them, None continues.\n"                        //
     "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"        //
     "  stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.\n"           //
     "  plan (GeospatialReshardPlan, optional): The reshard to open or continue; None runs it to\n" //
@@ -1112,7 +1112,7 @@ static char const doc_GeospatialIndex_reshard[] =                               
     "  RefineReport: What the closing rounds did to the graph, across the targets.";
 
 /**
- *  @brief Holds the sequence of indexes @p object names in @p held and lends their handles as one
+ *  @brief Holds the sequence of indexes @p object names in @p held and passes their handles as one
  *      block in @p handles.
  *  @return 0 on success, -1 with an exception set otherwise.
  */
@@ -1438,7 +1438,7 @@ static char const doc_GeospatialIndex_save_buffer[] =                           
     "Args:\n"                                                                                 //
     "  arena (Arena): Where the checkpoint lands, rewound by the call.\n"                     //
     "  progress (callable, optional): Called with (completed, total) parts; returning\n"      //
-    "    False stops the write and raises `CancelledError`, None carries on.\n"               //
+    "    False stops the write and raises `CancelledError`, None continues.\n"                //
     "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"   //
     "\n"                                                                                      //
     "Returns:\n"                                                                              //

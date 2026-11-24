@@ -109,7 +109,7 @@ func TestCallsAllocateOnlyTheirFrames(t *testing.T) {
 	if err := index.Insert(keys, rows, nil); err != nil {
 		t.Fatalf("the batch must insert: %v", err)
 	}
-	executor, err := usearch.ExecutorForRam(nil, usearch.CPUClassUnknown, 1)
+	executor, err := usearch.ExecutorForRam(nil, usearch.CPUClassUnknown, 1, 0)
 	if err != nil {
 		t.Fatalf("the executor must spawn: %v", err)
 	}

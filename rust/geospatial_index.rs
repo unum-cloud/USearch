@@ -27,8 +27,8 @@ use crate::dense_index::{
     usearch_refine_report_t, usearch_traversal_stats_t,
 };
 use crate::types::{
-    Accepts, Arena, Blocking, CPUClass, Calling, Completion, Deferring, Executor, GPUClass, Handles, Key, Lending,
-    Matches, On, PhaseProgress, Predicate, Progress, QueryMatches, ReshardHandles, Result, Scalar, Status, Traversal,
+    Accepts, Arena, Blocking, CPUClass, Calling, Completion, Deferring, Executor, GPUClass, Handles, Key, Matches, On,
+    PhaseProgress, Predicate, Progress, QueryMatches, ReshardHandles, Result, Scalar, Status, Submitting, Traversal,
     arena_slice, check, fail, lower_predicate, lower_progress, nvme_options, output_slot, path_view, path_views,
     ram_options, spelling, usearch_arena_t, usearch_bytes_view_t, usearch_completion_blocking_k, usearch_completion_t,
     usearch_cpu_class_name, usearch_cpu_class_t, usearch_executor_t, usearch_gpu_class_name, usearch_gpu_class_t,
@@ -331,6 +331,7 @@ pub struct usearch_geospatial_reshard_plan_finish_t {
 #[repr(C)]
 pub struct usearch_geospatial_cursor_init_t {
     pub index: usearch_geospatial_index_t,
+    pub executor: usearch_executor_t,
     pub outcome: *mut usearch_outcome_t,
     pub starts_count: usize,
     pub starts: *const usearch_key_t,
@@ -542,7 +543,7 @@ pub enum GeospatialRelation {
     Seen = 4,
 }
 
-/// A fill of terrain windows, lent as the callback and state the handle reads for as long as it
+/// A fill of terrain windows, passed as the callback and state the handle reads for as long as it
 /// lives: it fills `rows` by `columns` heights from `first_row` and `first_column`, in metres above
 /// the ellipsoid, rows `stride` heights apart, and a cell left NaN never blocks a sight line.
 ///
@@ -554,12 +555,12 @@ pub struct GeospatialTerrainFill {
     state: *mut c_void,
 }
 
-// Safety: it points at a `Sync` handler borrowed for the whole program.
+// Safety: it points at a `Sync` handler referenced for the whole program.
 unsafe impl Send for GeospatialTerrainFill {}
 unsafe impl Sync for GeospatialTerrainFill {}
 
 impl GeospatialTerrainFill {
-    /// Lends `handler`, called with the window's first row and column, its rows and columns, the
+    /// Passes `handler`, called with the window's first row and column, its rows and columns, the
     /// heights to fill and their row stride.
     pub fn new<Handler: Fn(usize, usize, usize, usize, &mut [f32], usize) + Sync>(handler: &'static Handler) -> Self {
         GeospatialTerrainFill {
@@ -570,8 +571,8 @@ impl GeospatialTerrainFill {
 }
 
 /// # Safety
-/// `state` must address the `Handler` a [`GeospatialTerrainFill`] lent, and `heights` must address
-/// `rows` rows of `heights_stride` bytes, the last holding `columns` heights.
+/// `state` must address the `Handler` a [`GeospatialTerrainFill`] passed, and `heights` must
+/// address `rows` rows of `heights_stride` bytes, the last holding `columns` heights.
 unsafe extern "C" fn terrain_trampoline<Handler: Fn(usize, usize, usize, usize, &mut [f32], usize)>(
     first_row: usize,
     first_column: usize,
@@ -593,8 +594,8 @@ unsafe extern "C" fn terrain_trampoline<Handler: Fn(usize, usize, usize, usize, 
 }
 
 /// The elevation every line of sight is tested over: a north-up grid of heights in metres above
-/// the WGS-84 ellipsoid, given by borrowed heights or a fill function, which the handle reads for
-/// as long as it lives. A checkpoint never carries it, so every load and view names it again.
+/// the WGS-84 ellipsoid, given by the caller's heights or a fill function, which the handle reads
+/// for as long as it lives. A checkpoint never holds it, so every load and view names it again.
 #[derive(Clone, Copy, Debug)]
 pub struct GeospatialTerrain {
     /// The grid's row count; rows run south from the north edge.
@@ -1017,7 +1018,8 @@ impl From<f64> for GeospatialWithinConfig<'_> {
     }
 }
 
-/// How [`GeospatialVerbs::refine`] runs; a blocking call borrows its plan, a deferred one owns it.
+/// How [`GeospatialVerbs::refine`] runs; a blocking call takes its plan by reference, a deferred
+/// one owns it.
 pub struct GeospatialRefineConfig<'config, Plan = &'config mut GeospatialRefinePlan> {
     /// The breadth of any walk beside the round; zero derives it.
     pub expansion_factor: usize,
@@ -1480,7 +1482,7 @@ pub trait GeospatialVerbs<'index>: Copy {
     }
 
     /// Retrieves every observation stored under `key` into `arena`, within the stored rounding,
-    /// which the result borrows; an absent key yields none.
+    /// which the result points into; an absent key yields none.
     fn get<'arena>(
         self,
         key: Key,
@@ -1506,7 +1508,7 @@ pub trait GeospatialVerbs<'index>: Copy {
     {
         let (index, executor) = self.handles();
         let config = config.into();
-        // The keys view carries no count, so only this side can see the two disagree.
+        // The keys view holds no count, so only this side can see the two disagree.
         if config.observations.as_ref().len() != keys.as_ref().len() {
             return Err(fail(Status::ShapeMismatch, "the key count does not match the observation count"));
         }
@@ -1673,7 +1675,7 @@ pub trait GeospatialVerbs<'index>: Copy {
         Self::Completion::answer(GeospatialSave { handles: Handles::of(index, executor), path, config })
     }
 
-    /// Saves the index as one monolith into the arena its config carries.
+    /// Saves the index as one monolith into the arena its config holds.
     fn save_buffer<'config, 'arena, 'executor>(
         self,
         config: impl Into<DenseSaveBufferConfig<'config, 'arena, 'executor>>,
@@ -1709,7 +1711,7 @@ impl<'index, Completion: crate::types::Completion> GeospatialVerbs<'index> for O
     }
 }
 
-/// The observations [`GeospatialVerbs::get`] wrote into the arena it borrows.
+/// The observations [`GeospatialVerbs::get`] wrote into the arena it points into.
 ///
 /// Rust-only.
 pub struct GeospatialObservations<'arena> {
@@ -1726,8 +1728,8 @@ impl<'arena> GeospatialObservations<'arena> {
     }
 }
 
-/// The ragged matches [`GeospatialVerbs::within`] wrote into the arena it borrows: query `i` spans
-/// its two offsets, scored in chord metres.
+/// The ragged matches [`GeospatialVerbs::within`] wrote into the arena it points into: query `i`
+/// spans its two offsets, scored in chord metres.
 ///
 /// Rust-only.
 pub struct GeospatialMatches<'arena> {
@@ -1759,7 +1761,7 @@ impl<'arena> GeospatialMatches<'arena> {
     }
 }
 
-// Safety: every view points into the arena borrowed beside it, which is `Sync`.
+// Safety: every view points into the arena referenced beside it, which is `Sync`.
 unsafe impl Send for GeospatialObservations<'_> {}
 unsafe impl Send for GeospatialMatches<'_> {}
 
@@ -1767,11 +1769,12 @@ impl GeospatialIndex {
     /// Opens a walk over the current contents: without `starts` every entry as stored, with them
     /// the start keys' entries first, then the entries those link to breadth-first.
     pub fn cursor(&self, starts: &[Key]) -> Result<GeospatialCursor<'_>> {
-        let mut cursor = GeospatialCursor { handle: ptr::null_mut(), index: self.handle, marker: PhantomData };
+        let mut cursor = GeospatialCursor { handle: ptr::null_mut(), index: self.handle, owner: PhantomData };
         let mut outcome = usearch_outcome_t::default();
         unsafe {
             usearch_geospatial_cursor_init(&mut usearch_geospatial_cursor_init_t {
                 index: self.handle,
+                executor: ptr::null_mut(),
                 outcome: &mut outcome,
                 starts_count: starts.len(),
                 starts: starts.as_ptr(),
@@ -1792,7 +1795,7 @@ impl GeospatialIndex {
 pub struct GeospatialCursor<'index> {
     handle: usearch_geospatial_cursor_t,
     index: usearch_geospatial_index_t,
-    marker: PhantomData<&'index GeospatialIndex>,
+    owner: PhantomData<&'index GeospatialIndex>,
 }
 
 impl<'index> GeospatialCursor<'index> {
@@ -2065,7 +2068,7 @@ impl<'config, Plan: BorrowMut<GeospatialRefinePlan>> Calling for GeospatialRefin
     }
 }
 
-impl<'config, Plan: BorrowMut<GeospatialRefinePlan>> Lending for GeospatialRefine<'config, Plan> {
+impl<'config, Plan: BorrowMut<GeospatialRefinePlan>> Submitting for GeospatialRefine<'config, Plan> {
     type Inputs = GeospatialRefineConfig<'config, Plan>;
 
     fn finish_with_inputs(self, status: Result<()>) -> (Result<RefineReport>, Self::Inputs) {
@@ -2217,7 +2220,7 @@ impl<'arena, Queries: AsRef<[GeospatialObservation]>> Calling for GeospatialWith
     }
 }
 
-/// What [`GeospatialVerbs::reshard`] runs: its config, plan included, the handles it lends and the
+/// What [`GeospatialVerbs::reshard`] runs: its config, plan included, the handles it passes and the
 /// report it fills.
 pub struct GeospatialReshard<'config, Plan> {
     handles: Handles,
@@ -2262,7 +2265,7 @@ impl<'config, Plan: BorrowMut<GeospatialReshardPlan>> Calling for GeospatialResh
     }
 }
 
-impl<'config, Plan: BorrowMut<GeospatialReshardPlan>> Lending for GeospatialReshard<'config, Plan> {
+impl<'config, Plan: BorrowMut<GeospatialReshardPlan>> Submitting for GeospatialReshard<'config, Plan> {
     type Inputs = GeospatialReshardConfig<'config, Plan>;
 
     fn finish_with_inputs(self, status: Result<()>) -> (Result<RefineReport>, Self::Inputs) {

@@ -37,9 +37,9 @@ static bool ram_index_row_matches(index_type_ const& index, node_id_t node, vect
 }
 
 /** A lone index keeps its keys without a reservation: the first insert grows it, every key resolves
- *  to both of its rows through @c key_of, @c count, @c find_each and @c get, a cut carries every
- *  key beside its row, and a save and load round trip keeps every key, into a wider index too,
- *  whose rows one refine grows past the saved width while every node stays reachable. */
+ *  to both of its rows through @c key_of, @c count, @c find_each and @c get, a cut holds every key
+ *  beside its row, and a save and load round trip keeps every key, into a wider index too, whose
+ *  rows one refine grows past the saved width while every node stays reachable. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
 static void test_ram_index_keys(make_index_type_ const& make_index, u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
@@ -80,7 +80,7 @@ static void test_ram_index_keys(make_index_type_ const& make_index, u64_t seed) 
         expect_equal(index.get(keys[0], rows_span_t {exported.span()}, 1), 2u);
         expect_equal(index.get(dense_key<key_t>(rows), rows_span_t {exported.span()}, 2), 0u);
 
-        // A reshard into two targets carries every key beside its row into one of the parts, and
+        // A reshard into two targets holds every key beside its row into one of the parts, and
         // the source forgets it.
         std::unique_ptr<index_type_> const first_ptr = make_index(ledger), second_ptr = make_index(ledger);
         std::array<index_type_*, 2> targets {first_ptr.get(), second_ptr.get()};

@@ -153,7 +153,7 @@ enum metal_round_staging_t : unsigned int {
     metal_round_staged_bytes_k = metal_threadgroup_bytes_k - 4096,
 };
 
-/** Every scalar a launch carries, bound at @c metal_arguments_buffer_k. */
+/** Every scalar a launch passes, bound at @c metal_arguments_buffer_k. */
 struct metal_arguments_t {
     unsigned int row_fragments, lanes_per_row, steps_per_row, connectivity;
     unsigned int metric, has_norms, first_id, end_id;

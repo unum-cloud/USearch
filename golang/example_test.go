@@ -7,64 +7,73 @@
 package usearch_test
 
 import (
+	"errors"
 	"fmt"
 	"log"
+	"testing"
 
 	usearch "github.com/unum-cloud/usearch/golang"
 )
 
 // region: Examples
 
-// The Quickstart of golang/README.md, whose main function runs these same lines.
-func Example() {
+// TestQuickstart runs the Quickstart of golang/README.md line by line, failing where its main
+// function exits, and skips with the library's note when the build leaves its quantization out.
+func TestQuickstart(t *testing.T) {
 	options := usearch.DefaultDenseOptions()
 	options.Dimensions = 4
 	options.Metric = usearch.DenseMetricAngular
 	options.Quantization = usearch.ScalarI8
 	index, err := usearch.DenseInitRam(options, nil)
+	var refusal *usearch.Error
+	if errors.As(err, &refusal) && refusal.Status == usearch.StatusUnsupported {
+		t.Skip(refusal.Message)
+	}
 	if err != nil {
-		log.Fatal(err)
+		t.Fatal(err)
 	}
 	defer index.Close()
 	if err := index.Reserve(1_000); err != nil { // optional capacity hint; inserts grow on demand
-		log.Fatal(err)
+		t.Fatal(err)
 	}
 
 	keys := []usearch.Key{usearch.KeyFromUint64(42), usearch.KeyFromUint64(43)}
 	slab := []float32{0.2, 0.1, 0.2, 0.1, 0.1, 0.2, 0.1, 0.2}
 	if err := index.Insert(keys, usearch.RowsOf(slab, 4), nil); err != nil {
-		log.Fatal(err)
+		t.Fatal(err)
 	}
 
-	executor, err := usearch.ExecutorForRam(nil, usearch.CPUClassUnknown, 0)
+	executor, err := usearch.ExecutorForRam(nil, usearch.CPUClassUnknown, 0, 0)
 	if err != nil {
-		log.Fatal(err)
+		t.Fatal(err)
 	}
 	defer executor.Close()
 	arena, err := usearch.NewArena(executor)
 	if err != nil {
-		log.Fatal(err)
+		t.Fatal(err)
 	}
 	defer arena.Close()
 	query := []float32{0.2, 0.1, 0.2, 0.1}
 	matches, err := index.On(executor).Search(usearch.RowsOf(query, 4), 10, arena, nil) // on an executor, into its arena
 	if err != nil {
-		log.Fatal(err)
+		t.Fatal(err)
 	}
 	localArena, err := usearch.NewArena(nil)
 	if err != nil {
-		log.Fatal(err)
+		t.Fatal(err)
 	}
 	defer localArena.Close()
 	local, err := index.Search(usearch.RowsOf(query, 4), 10, localArena, nil) // the calling goroutine, into host pages
 	if err != nil {
-		log.Fatal(err)
+		t.Fatal(err)
 	}
 
 	found, _ := matches.Query(0)
 	foundLocally, _ := local.Query(0)
-	fmt.Println(found[0], foundLocally[0])
-	// Output: 00000000-0000-0000-0000-00000000002a 00000000-0000-0000-0000-00000000002a
+	const expected = "00000000-0000-0000-0000-00000000002a 00000000-0000-0000-0000-00000000002a\n"
+	if printed := fmt.Sprintln(found[0], foundLocally[0]); printed != expected {
+		t.Fatalf("the Quickstart printed %q", printed)
+	}
 }
 
 func ExampleKey_String() {
@@ -126,7 +135,7 @@ func ExampleDenseIndexOn_Deferred() {
 		log.Fatal(err)
 	}
 	defer index.Close()
-	executor, err := usearch.ExecutorForRam(nil, usearch.CPUClassUnknown, 0)
+	executor, err := usearch.ExecutorForRam(nil, usearch.CPUClassUnknown, 0, 0)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -150,7 +159,7 @@ func ExampleDenseIndexOn_Deferred() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	matches, err := call.Wait() // a view borrowing arena, as a blocking call's does
+	matches, err := call.Wait() // a view into arena, as a blocking call's is
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -159,7 +168,7 @@ func ExampleDenseIndexOn_Deferred() {
 	// Output: 00000000-0000-0000-0000-000000000003
 }
 
-// Mirrors the Sequence Indexes snippet of golang/README.md, adding the arena it borrows and the
+// Mirrors the Sequence Indexes snippet of golang/README.md, adding the arena it views and the
 // checks it skips.
 func ExampleSequenceIndex() {
 	index, err := usearch.SequenceInitRam(usearch.SequenceOptions{Metric: usearch.SequenceMetricLevenshteinUTF8}, nil)
@@ -188,7 +197,7 @@ func ExampleSequenceIndex() {
 	// Output: 00000000-0000-0000-0000-000000000002 1
 }
 
-// Mirrors the Shape Indexes snippet of golang/README.md, adding the arena it borrows and the checks
+// Mirrors the Shape Indexes snippet of golang/README.md, adding the arena it views and the checks
 // it skips.
 func ExampleShapesIndex() {
 	index, err := usearch.ShapesInitRam(usearch.DefaultShapesOptions(), nil)
@@ -218,7 +227,7 @@ func ExampleShapesIndex() {
 	// Output: 00000000-0000-0000-0000-000000000001
 }
 
-// Mirrors the Geospatial Indexes snippet of golang/README.md, adding the arena it borrows and the
+// Mirrors the Geospatial Indexes snippet of golang/README.md, adding the arena it views and the
 // checks it skips.
 func ExampleGeospatialIndex() {
 	index, err := usearch.GeospatialInitRam(usearch.GeospatialOptions{}, nil)

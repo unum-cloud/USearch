@@ -40,7 +40,7 @@ _DOCUMENTED: list[str] = [
     "capabilities_compiled",
     "capabilities_available",
 ]
-"""The names carrying examples. Docstrings on a C extension's types are not reachable through
+"""The names holding examples. Docstrings on a C extension's types are not reachable through
 `testmod` on the package, so each type is searched directly."""
 
 

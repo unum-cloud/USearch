@@ -79,7 +79,7 @@ enum metal_basic_buffer_index_t : unsigned int {
     metal_basic_parameters_buffer_k = 23,
 };
 
-/** Every scalar a kit's launch carries, bound at @c metal_basic_arguments_buffer_k, the CUDA
+/** Every scalar a kit's launch passes, bound at @c metal_basic_arguments_buffer_k, the CUDA
  *  records' scalars field by field: the storage's connectivity and the raw @c nk_kernel_kind_t its
  *  kits score under, a wave's or a walk's bounds and spans, the arena slice and its epochs, a
  *  search's breadth and outputs, a load's run, and the runs, the neighborhoods and the gather pass

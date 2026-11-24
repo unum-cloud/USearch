@@ -8,7 +8,7 @@
 //!
 //! One implementation of the C interface is linked, never two. Each names a CMake target and the
 //! directory it lands in; all of them answer the same verbs, and the engine and the stand-in even
-//! carry the same library name, so choosing between them is a search path rather than a different
+//! hold the same library name, so choosing between them is a search path rather than a different
 //! link line.
 //!
 //! File: build.rs

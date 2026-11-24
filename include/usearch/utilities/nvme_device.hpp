@@ -2,39 +2,39 @@
  *  @file include/usearch/utilities/nvme_device.hpp
  *  @author Ash Vardanian
  *  @date July 22, 2026
- *  @brief Host-side vocabulary for reading block storage: the media, the I/O engines that read
- *      them, and the executor that drives one engine per thread.
+ *  @brief Host-side vocabulary for reading block storage: the media, the I/O queues that read
+ *      them, and the executor that drives one queue per thread.
  *
  *  A walk over storage is a chain of dependent reads, each bounded by device latency, so throughput
- *  comes from keeping many independent reads in flight. Engines never decide what to read: they
- *  take requests, submit them through whatever asynchronous interface the platform offers, and hand
- *  back completions, so the walks above them stay pure state machines.
+ *  comes from keeping many independent reads in flight. Queues never decide what to read: they take
+ *  requests, submit them through whatever asynchronous interface the platform offers, and hand back
+ *  completions, so the walks above them stay pure state machines.
  *
- *  @section nvme_device_engines I/O Engines
+ *  @section nvme_device_queues I/O Queues
  *
- *  Every engine satisfies the same @c io_engine concept and is named after the exact facility it
+ *  Every queue satisfies the same @c io_queue concept and is named after the exact facility it
  *  drives:
  *
- *  - @c blocking_files_engine: blocking @c pread or @c ReadFile, the portable reference & macOS
+ *  - @c blocking_files_queue: blocking @c pread or @c ReadFile, the portable reference & macOS
  *    path,
- *  - @c linux_aio_files_engine: @c io_submit / @c io_getevents, for io_uring-gated clouds,
- *  - @c linux_uring_files_engine: io_uring reads, over registered buffers and polled queues on
+ *  - @c linux_aio_files_queue: @c io_submit / @c io_getevents, for io_uring-gated clouds,
+ *  - @c linux_uring_files_queue: io_uring reads, over registered buffers and polled queues on
  *    request,
- *  - @c linux_uring_nvme_engine: NVMe passthrough via @c IORING_OP_URING_CMD,
- *  - @c windows_ioring_files_engine: I/O Rings on Windows 11 22H2 & newer,
- *  - @c linux_spdk_engine: the SPDK user-space driver, in builds with @c USEARCH_WITH_LINUX_SPDK.
+ *  - @c linux_uring_nvme_queue: NVMe passthrough via @c IORING_OP_URING_CMD,
+ *  - @c windows_ioring_files_queue: I/O Rings on Windows 11 22H2 & newer,
+ *  - @c linux_spdk_queue: the SPDK user-space driver, in builds with @c USEARCH_WITH_LINUX_SPDK.
  *
- *  Engines own their staging buffers, since buffer registration is an engine-side resource on every
- *  ring API, and requests address buffers and media only by index. Requests carry an offset, a
+ *  Queues own their staging buffers, since buffer registration is a queue-side resource on every
+ *  ring API, and requests address buffers and media only by index. Requests hold an offset, a
  *  length, a medium ID, a buffer ID and an opaque context; completions return the buffer, a signed
- *  result and the context. The buffer is the cookie every kernel interface echoes, and an engine
+ *  result and the context. The buffer is the cookie every kernel interface echoes, and a queue
  *  keeps each buffer's context beside it. No pointers cross the contract in either direction.
- *  The Linux ring engines mirror the kernel ABI they use, so they build against any headers, while
+ *  The Linux ring queues mirror the kernel ABI they use, so they build against any headers, while
  *  runtime degrades gracefully on older kernels through setup fallbacks.
  *
  *  @section nvme_device_alignment Platform Alignment
  *
- *  The engine contract is the intersection of four asynchronous-read APIs. Each bullet is one
+ *  The queue contract is the intersection of four asynchronous-read APIs. Each bullet is one
  *  contract verb, with the platforms in a fixed order: io_uring, then Linux AIO, then Windows
  *  IoRing, then the portable and macOS path.
  *
@@ -44,7 +44,7 @@
  *    none portably.
  *  - @b Attach: @c IORING_REGISTER_FILES; no AIO equivalent; @c BuildIoRingRegisterFileHandles;
  *    none portably.
- *  - @b Enqueue: an SQE written in the shared ring; an @c iocb in an engine array;
+ *  - @b Enqueue: an SQE written in the shared ring; an @c iocb in a queue array;
  *    @c BuildIoRingReadFile builds into the ring; portably a staged request.
  *  - @b Submit: one @c io_uring_enter per batch; @c io_submit; @c SubmitIoRing; portably a loop
  *    of @c pread calls.
@@ -59,7 +59,7 @@
  *  @c user_data, plus @c buf_index for @c READ_FIXED, where @c fd becomes a registered-file index
  *  under @c IOSQE_FIXED_FILE, and @c cmd_op with the 72-byte inline @c nvme_uring_cmd for
  *  passthrough. A CQE returns only @c user_data, @c res and @c flags. Everything else in those
- *  64- or 128-byte slots stays zero, which is why the request below carries exactly four words.
+ *  64- or 128-byte slots stays zero, which is why the request below holds exactly four words.
  *
  *  @section nvme_device_emulation R&D Emulation
  *
@@ -93,7 +93,7 @@
 #include <cstdio>  // `std::snprintf`, for the sysfs path of a medium's disk
 #include <cstring> // `std::memcpy`, `std::memset`
 
-#include <bit>         // `std::countr_zero`
+#include <bit>         // `std::countr_zero`, `std::bit_ceil` - a file table's slots
 #include <charconv>    // `std::from_chars`, for sysfs attributes
 #include <concepts>    // `std::same_as`
 #include <limits>      // `std::numeric_limits`, for the longest read a result counts
@@ -111,7 +111,7 @@
 
 #include "usearch/utilities/blocking_files.hpp" // `native_file_t`, `open_native_file`, `read_native_file`
 #include "usearch/utilities/ram_buffers.hpp"    // `growing_buffer`
-#include "usearch/utilities/ram_device.hpp"     // `forkunion_executor_t`, `forkunion_allocator_t`
+#include "usearch/utilities/ram_device.hpp"     // `ram_executor_t`, `forkunion_allocator_t`
 #include "usearch/utilities/types.hpp"          // `status_t`, `expected`, `min_of`, `max_of`
 
 /*  `<winsock2.h>` goes first to keep Winsock 1.1 out, unless a user's earlier `<windows.h>` already
@@ -121,10 +121,12 @@
 #endif
 #if USEARCH_OS_WINDOWS_
 #include <windows.h> // `CreateFileA`, `ReadFile`, `GetOverlappedResult`, `GetFileInformationByHandleEx`
+#include <bcrypt.h>  // `BCryptGenRandom` - a media list's identity
 #else
-#include <fcntl.h>    // `open`, `fcntl`, `O_DIRECT`, `F_NOCACHE`
-#include <sys/stat.h> // `fstat`, `statx`, `S_ISBLK`
-#include <unistd.h>   // `pread`, `close`, `syscall`
+#include <fcntl.h>      // `open`, `fcntl`, `O_DIRECT`, `F_NOCACHE`
+#include <sys/random.h> // `getentropy` - a media list's identity
+#include <sys/stat.h>   // `fstat`, `statx`, `S_ISBLK`
+#include <unistd.h>     // `pread`, `close`, `syscall`
 #endif
 
 #if USEARCH_OS_LINUX_
@@ -162,11 +164,11 @@ inline constexpr std::size_t io_alignment_k = 4096;
 /** The block a medium reports when nothing finer is known: the finest NVMe logical block. */
 inline constexpr u32_t io_block_bytes_default_k = 512;
 
-/** Index of one staging buffer an engine owns: requests name their destination by it. */
+/** Index of one staging buffer a queue owns: requests name their destination by it. */
 using io_buffer_id_t = u32_t;
 
-/** Index into the media an engine's @c attach received, so one engine serves every shard a call
- *  reads. */
+/** Index into the media a queue's @c register_media received, so one queue serves every
+ *  shard a call reads. */
 using io_medium_id_t = u32_t;
 
 /** The longest read a request may ask for: the most bytes a completion's signed result counts. */
@@ -186,8 +188,8 @@ enum class io_wait_t : u32_t {
     blocking_k,
 };
 
-/** One read an engine performs: where, how much, into which buffer, and the context to hand back.
- *  The destination address never appears; the engine derives it from @c buffer. */
+/** One read a queue performs: where, how much, into which buffer, and the context to hand back.
+ *  The destination address never appears; the queue derives it from @c buffer. */
 struct io_request_t {
 
     /** Byte offset on the medium, a multiple of its block. */
@@ -203,7 +205,7 @@ struct io_request_t {
      *  polled. */
     io_buffer_id_t buffer = 0;
 
-    /** Opaque to engines, handed back verbatim in the completion. */
+    /** Opaque to queues, handed back verbatim in the completion. */
     u64_t context = 0;
 };
 
@@ -225,11 +227,11 @@ static_assert(sizeof(io_request_t) == 4 * sizeof(u64_t) && std::is_trivially_cop
 static_assert(sizeof(io_completion_t) == 2 * sizeof(u64_t) && std::is_trivially_copyable_v<io_completion_t>,
               "Completions are carved without construction and copied as two words");
 
-/** The transport an engine drives, and the one a configuration asks for. */
+/** The transport a queue drives, and the one a configuration asks for. */
 enum class io_transport_t : u32_t {
 
-    /** The first kernel files engine whose setup the host admits: io_uring, then AIO, then blocking
-     *  reads. Any other transport is named exactly: its engine opens, or the open says why not. */
+    /** The first kernel files queue whose setup the host admits: io_uring, then AIO, then blocking
+     *  reads. Any other transport is named exactly: its queue opens, or the open says why not. */
     automatic_k,
 
     /** @c pread or @c ReadFile on the calling thread. */
@@ -263,7 +265,7 @@ enum class linux_uring_buffer_registration_t : u32_t {
 };
 
 /** Whether io_uring learns of completions by interrupt or by polling the device's queues. */
-enum class linux_uring_reaping_t : u8_t {
+enum class linux_uring_polling_t : u8_t {
 
     /** Interrupt-driven completions. */
     interrupted_k,
@@ -292,9 +294,9 @@ struct io_device_queues_t {
     u16_t hardware_queues = 0;
 
     /** @c polled_k when the disk has poll queues and the medium reads direct. */
-    linux_uring_reaping_t reaping = linux_uring_reaping_t::interrupted_k;
+    linux_uring_polling_t polling = linux_uring_polling_t::interrupted_k;
 
-    /** The most KiB one request carries before the disk splits it: the disk's
+    /** The most KiB one request holds before the disk splits it: the disk's
      *  @c queue/max_sectors_kb, or the controller's maximum transfer; zero when unknown. */
     u16_t request_kibibytes = 0;
 };
@@ -313,7 +315,7 @@ struct file_medium_t {
     /** The granularity of a direct read's offset and length on it. */
     u32_t block_bytes = 0;
 
-    /** The block queue of the disk under it, which a call's queue depth and reaping derive from. */
+    /** The block queue of the disk under it, which a call's queue depth and polling derive from. */
     io_device_queues_t queues;
 
     file_medium_t() noexcept = default;
@@ -531,7 +533,7 @@ struct linux_nvme_passthru_cmd_t {
 };
 static_assert(sizeof(linux_nvme_passthru_cmd_t) == 72, "the kernel reads a 72-byte NVMe ioctl command");
 
-/** @c nvme_uring_cmd: the NVMe command an @c IORING_OP_URING_CMD entry carries in @c cmd, from
+/** @c nvme_uring_cmd: the NVMe command an @c IORING_OP_URING_CMD entry holds in @c cmd, from
  *  Linux 5.19. */
 struct linux_nvme_uring_cmd_t {
     u8_t opcode;
@@ -676,7 +678,7 @@ inline int sysfs_namespace_disk_(int descriptor, int controller) noexcept {
         if (entry->d_name[0] == '.') continue;
         int const candidate = ::openat(controller, entry->d_name, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
         if (candidate < 0) continue;
-        // The char node's own entry carries no `nsid`, and neither do the controller's attributes.
+        // The char node's own entry holds no `nsid`, and neither do the controller's attributes.
         if (sysfs_number_(candidate, "nsid") == static_cast<u64_t>(identifier) &&
             ::faccessat(candidate, "queue", F_OK, 0) == 0)
             disk = candidate;
@@ -711,7 +713,7 @@ inline int sysfs_disk_of_(int descriptor, struct stat const& description) noexce
 }
 
 /** Reads the block queue of the whole disk under @p descriptor, described by @p description, from
- *  sysfs. @p refused is the @c errno of the @c O_DIRECT open, zero when it held, and reaping polls
+ *  sysfs. @p refused is the @c errno of the @c O_DIRECT open, zero when it held, and polling polls
  *  only on direct reads. */
 inline io_block_queue_t io_block_queue_of_(int descriptor, struct stat const& description, int refused) noexcept {
     io_block_queue_t queue;
@@ -730,7 +732,7 @@ inline io_block_queue_t io_block_queue_of_(int descriptor, struct stat const& de
         queue.queues.tags = static_cast<u16_t>(min_of<u64_t>(tags, (std::numeric_limits<u16_t>::max)()));
         queue.queues.hardware_queues = static_cast<u16_t>(
             min_of<u32_t>(hardware_queues, (std::numeric_limits<u16_t>::max)()));
-        queue.queues.reaping = polls ? linux_uring_reaping_t::polled_k : linux_uring_reaping_t::interrupted_k;
+        queue.queues.polling = polls ? linux_uring_polling_t::polled_k : linux_uring_polling_t::interrupted_k;
         queue.queues.request_kibibytes = static_cast<u16_t>(
             min_of<u64_t>(sysfs_number_(disk, "queue/max_sectors_kb"), (std::numeric_limits<u16_t>::max)()));
     }
@@ -851,7 +853,7 @@ inline u64_t byte_base_of(file_medium_t const& medium) noexcept { return medium.
 inline io_device_queues_t device_queues_of(file_medium_t const& medium) noexcept { return medium.queues; }
 
 /** Whether @p path names a namespace by its SPDK transport ID or an @c spdk:// address, which only
- *  the SPDK engine reaches, rather than a file or a device node. */
+ *  the SPDK queue reaches, rather than a file or a device node. */
 inline bool names_transport_id(std::string_view path) noexcept {
     return path.starts_with("spdk://") || path.find("trtype:") != std::string_view::npos;
 }
@@ -871,16 +873,16 @@ enum class linux_spdk_memory_t : u32_t {
 
 /**
  *  @brief The SPDK environment and the controllers this process attached, shared by every view and
- *      engine that reads through them.
+ *      queue that reads through them.
  *
  *  The environment starts once per process and never finishes, since DPDK cannot start twice, so
  *  every later @c start shares it, config and all. A controller counts its holders, each namespace
- *  a view reads and each engine's queue pair on it, and the last @c release detaches it. SPDK
- *  answers a transport ID with the controller still attached to it, failed or not, so a failed
- *  controller refuses new holders until its last one releases, and the next @c connect attaches
- *  whichever drive answers then. Every change waits on one claim word through the @p wait_type_
- *  its caller names, and none happens in a destructor. DPDK is not fork-safe, so a child process
- *  never touches the environment, and its multi-process mode is out of scope.
+ *  a view reads and each queue's pair on it, and the last @c release detaches it. SPDK answers a
+ *  transport ID with the controller still attached to it, failed or not, so a failed controller
+ *  refuses new holders until its last one releases, and the next @c connect attaches whichever
+ *  drive answers then. Every change waits on one claim word through the @p wait_type_ its caller
+ *  names, and none happens in a destructor. DPDK is not fork-safe, so a child process never touches
+ *  the environment, and its multi-process mode is out of scope.
  */
 class linux_spdk_process_t {
   public:
@@ -902,7 +904,7 @@ class linux_spdk_process_t {
         std::size_t holders;
     };
 
-    /** Whether the environment runs, so engines may take DMA buffers and queue pairs from it. */
+    /** Whether the environment runs, so queues may take DMA buffers and queue pairs from it. */
     static bool running() noexcept {
         return fu::standard_atomic_ref<u32_t const>(running_).load(std::memory_order_acquire);
     }
@@ -942,7 +944,7 @@ class linux_spdk_process_t {
         return {connected, status};
     }
 
-    /** Adds a holder to @p connected, as an engine's queue pair on its controller does. */
+    /** Adds a holder to @p connected, as a queue's pair on its controller does. */
     template <typename wait_type_>
     static void hold(connected_t& connected) noexcept {
         claim_<wait_type_>();
@@ -1066,7 +1068,7 @@ struct spdk_medium_t {
     spdk_medium_t& operator=(spdk_medium_t const&) = delete;
     ~spdk_medium_t() noexcept { assert(!connection && "A namespace is released before it dies"); }
 
-    /** Gives back its hold on the controller, which detaches once no view or engine holds it. */
+    /** Gives back its hold on the controller, which detaches once no view or queue holds it. */
     template <typename wait_type_>
     void release() noexcept {
         if (connection) linux_spdk_process_t::release<wait_type_>(*std::exchange(connection, nullptr));
@@ -1189,7 +1191,7 @@ inline io_device_queues_t device_queues_of(spdk_medium_t const& medium) noexcept
     queues.tags = static_cast<u16_t>(options.io_queue_size - 1);
     // Attach lowers `num_io_queues` to what Set Features - Number of Queues allocated.
     queues.hardware_queues = static_cast<u16_t>(options.num_io_queues);
-    queues.reaping = linux_uring_reaping_t::polled_k;
+    queues.polling = linux_uring_polling_t::polled_k;
     queues.request_kibibytes = static_cast<u16_t>(min_of<u32_t>(
         spdk_nvme_ns_get_max_io_xfer_size(medium.name_space) / 1024, (std::numeric_limits<u16_t>::max)()));
     return queues;
@@ -1247,7 +1249,11 @@ io_device_queues_t device_queues_of(std::variant<media_types_...> const& medium)
     return std::visit([](auto const& alternative) noexcept { return device_queues_of(alternative); }, medium);
 }
 
-/** The reads each of @p threads engines keeps in flight over @p media without waiting on a tag:
+/** The block queue @p queues describes, so an executor derives its rings' depth and polling from
+ *  queues read when it was created, with no medium left open. */
+inline io_device_queues_t device_queues_of(io_device_queues_t const& queues) noexcept { return queues; }
+
+/** The reads each of @p threads queues keeps in flight over @p media without waiting on a tag:
  *  the sum over distinct disks of their tags divided by the threads sharing each hardware queue,
  *  as blk-mq spreads CPUs evenly over a disk's queues; zero when no medium has a block queue. */
 template <typename media_type_>
@@ -1264,27 +1270,27 @@ std::size_t nvme_queue_depth(std::span<media_type_ const> media, std::size_t thr
     return depth;
 }
 
-/** Polled reaping when every medium of @p media polls, interrupts otherwise. */
+/** Polled polling when every medium of @p media polls, interrupts otherwise. */
 template <typename media_type_>
-linux_uring_reaping_t nvme_reaping(std::span<media_type_ const> media) noexcept {
+linux_uring_polling_t nvme_polling(std::span<media_type_ const> media) noexcept {
     for (media_type_ const& medium : media)
-        if (device_queues_of(medium).reaping != linux_uring_reaping_t::polled_k)
-            return linux_uring_reaping_t::interrupted_k;
-    return media.empty() ? linux_uring_reaping_t::interrupted_k : linux_uring_reaping_t::polled_k;
+        if (device_queues_of(medium).polling != linux_uring_polling_t::polled_k)
+            return linux_uring_polling_t::interrupted_k;
+    return media.empty() ? linux_uring_polling_t::interrupted_k : linux_uring_polling_t::polled_k;
 }
 
 #pragma endregion Media
 
-#pragma region Engine Contract
+#pragma region Queue Contract
 
-/** How an engine opens; each engine reads the fields its transport knows. */
-struct io_engine_config_t {
+/** How a queue opens; each queue reads the fields its transport knows. */
+struct io_queue_config_t {
 
     /** Reads outstanding at most between @c enqueue_read and @c poll_completions; an executor
      *  spawned with zero lets each call derive it from the block queues of its media. */
     std::size_t queue_depth = 0;
 
-    /** The transport an engine set opens. */
+    /** The transport a queue set opens. */
     io_transport_t transport = io_transport_t::automatic_k;
 
     /** Whether io_uring reads arrive in registered buffers; passthrough honors @c fixed_k from
@@ -1292,34 +1298,63 @@ struct io_engine_config_t {
     linux_uring_buffer_registration_t buffer_registration = linux_uring_buffer_registration_t::fixed_k;
 
     /** Whether io_uring learns of completions by interrupt or by polling the device's queues; an
-     *  executor's calls derive it from their media through @c nvme_reaping. */
-    linux_uring_reaping_t reaping = linux_uring_reaping_t::interrupted_k;
+     *  executor opens with its paths' @c nvme_polling and keeps it for life. */
+    linux_uring_polling_t polling = linux_uring_polling_t::interrupted_k;
 };
 
-/** What an engine driving @p transport answers @p config before setting anything up:
+/** What a queue driving @p transport answers @p config before setting anything up:
  *  @c invalid_argument_k without a queue depth, and @c unsupported_k when the configuration names
  *  another transport. */
-constexpr status_t io_engine_vet_(io_engine_config_t const& config, io_transport_t transport) noexcept {
-    if (!config.queue_depth) return status_code_t::invalid_argument_k;
+constexpr status_t io_queue_vet_(io_queue_config_t const& config, io_transport_t transport) noexcept {
+    if (!config.queue_depth) return {status_code_t::invalid_argument_k, "Queue opened without a depth"};
     if (config.transport != io_transport_t::automatic_k && config.transport != transport)
-        return status_code_t::unsupported_k;
+        return {status_code_t::unsupported_k, "Queue opened for another transport"};
     return status_code_t::success_k;
 }
 
-/** What an engine holding @p media_count attached media answers @p request before encoding it:
+/** What a queue holding @p media_count attached media answers @p request before encoding it:
  *  @c invalid_argument_k for a medium it never attached, or for a length past what a completion's
  *  result counts. */
-inline status_t io_request_vet_(io_request_t const& request, std::size_t media_count) noexcept {
+inline status_t validate_io_request_(io_request_t const& request, std::size_t media_count) noexcept {
     assert(request.length <= io_max_length_k && "A completion's result must count every byte its read moves");
     if (request.medium >= media_count || request.length > io_max_length_k) return status_code_t::invalid_argument_k;
     return status_code_t::success_k;
 }
 
+/** Which media list a ring's registered-file table holds: 64 random bits read when the index
+ *  opened the list, and the index's swap epoch under it; zeros for none. */
+struct media_list_key_t {
+    u64_t identity = 0;
+    u64_t epoch = 0;
+    friend bool operator==(media_list_key_t const&, media_list_key_t const&) noexcept = default;
+};
+static_assert(sizeof(media_list_key_t) == 16, "A media list key is two words");
+
 /**
- *  @brief The contract every I/O engine meets, so a walk drives any of them unchanged.
+ *  @brief 64 bits from the system's entropy, odd so it never reads as no list.
  *
- *  @c reserve grows the staging buffers, re-registering them only on growth; @c attach makes
- *  request medium IDs index the given media until @c detach; @c enqueue_read only encodes;
+ *  @par Statuses:
+ *  - @c io_k The system refused entropy.
+ */
+inline expected<u64_t> media_identity_from_entropy() noexcept {
+    u64_t identity = 0;
+#if USEARCH_OS_WINDOWS_
+    bool const drawn = ::BCryptGenRandom(nullptr, reinterpret_cast<PUCHAR>(&identity), sizeof(identity),
+                                         BCRYPT_USE_SYSTEM_PREFERRED_RNG) >= 0;
+#else
+    bool const drawn = ::getentropy(&identity, sizeof(identity)) == 0;
+#endif
+    if (!drawn) return {0, {status_code_t::io_k, "System refused entropy for a media identity"}};
+    return {identity | 1u, status_code_t::success_k};
+}
+
+/**
+ *  @brief The contract every I/O queue meets, so a walk drives any of them unchanged.
+ *
+ *  @c reserve grows the staging buffers, re-registering them only on growth; @c register_media
+ *  makes request medium IDs index the given media until the next call registers another list, and
+ *  a queue that registers them with the kernel skips a list whose key it already holds;
+ *  @c enqueue_read only encodes;
  *  @c submit hands every encoded read to the device and, under @c blocking_k, holds for a
  *  completion; @c poll_completions moves finished reads out; @c buffer maps an index to the memory
  *  a read arrived in.
@@ -1328,20 +1363,29 @@ inline status_t io_request_vet_(io_request_t const& request, std::size_t media_c
  *  context, and that buffer serves no other read until the completion is polled. A failed
  *  @c submit is the one exception: it waits out every read the kernel holds and drops the rest, so
  *  it returns with nothing in flight and nothing left to poll, and the call that saw it fails.
- *  @c reserve and @c attach run with nothing outstanding, on the thread that drives the engine.
+ *  @c reserve and @c register_media run with nothing outstanding, on the queue's own thread.
  */
-template <typename engine_type_>
-concept io_engine = requires(engine_type_& engine, io_request_t request, std::span<io_completion_t> completions,
-                             io_wait_t wait, io_buffer_id_t buffer,
-                             std::span<typename engine_type_::medium_t const> media, std::size_t buffers,
-                             std::size_t buffer_bytes) {
-    { engine.reserve(buffers, buffer_bytes) } noexcept -> std::same_as<status_t>;
-    { engine.attach(media) } noexcept -> std::same_as<status_t>;
-    { engine.detach() } noexcept -> std::same_as<void>;
-    { engine.enqueue_read(request) } noexcept -> std::same_as<status_t>;
-    { engine.submit(wait) } noexcept -> std::same_as<status_t>;
-    { engine.poll_completions(completions) } noexcept -> std::same_as<std::size_t>;
-    { engine.buffer(buffer) } noexcept -> std::same_as<std::byte*>;
+template <typename queue_type_>
+concept io_queue = requires(queue_type_& queue, io_request_t request, std::span<io_completion_t> completions,
+                            io_wait_t wait, io_buffer_id_t buffer,
+                            std::span<typename queue_type_::medium_t const> media, media_list_key_t key,
+                            std::size_t buffers, std::size_t buffer_bytes) {
+    { queue.reserve(buffers, buffer_bytes) } noexcept -> std::same_as<status_t>;
+    { queue.register_media(media, key) } noexcept -> std::same_as<status_t>;
+    { queue.enqueue_read(request) } noexcept -> std::same_as<status_t>;
+    { queue.submit(wait) } noexcept -> std::same_as<status_t>;
+    { queue.poll_completions(completions) } noexcept -> std::same_as<std::size_t>;
+    { queue.buffer(buffer) } noexcept -> std::same_as<std::byte*>;
+};
+
+/** A queue holding devices other queues share, as SPDK queue pairs, released on its own thread. */
+template <typename queue_type_>
+concept releasing_queue = requires(queue_type_& queue) { queue.release(); };
+
+/** A queue that may read into buffers registered once, and answers whether it does. */
+template <typename queue_type_>
+concept registering_queue = requires(queue_type_ const& queue) {
+    { queue.buffer_registration() } noexcept -> std::same_as<linux_uring_buffer_registration_t>;
 };
 
 /** How a staging region is cut: its buffers and the bytes of each. */
@@ -1350,7 +1394,7 @@ struct io_buffers_cut_t {
     std::size_t buffer_bytes = 0;
 };
 
-/** The staging buffers an engine owns: one region of whole pages, placed through its allocator,
+/** The staging buffers a queue owns: one region of whole pages, placed through its allocator,
  *  which aligns it to a page, cut per call into equal strides on @c io_alignment_k, and regrown
  *  only when a call needs more bytes than it holds. */
 template <typename allocator_type_>
@@ -1433,7 +1477,9 @@ status_t copy_descriptors_(growing_buffer<native_file_t, allocator_type_>& descr
     if (status_t const reserved = descriptors.reserve(media.size()); failed(reserved)) return reserved;
     for (media_type_ const& medium : media) {
         file_medium_t const* const file = medium_as<file_medium_t>(medium);
-        if (!file) return descriptors.clear(), status_code_t::config_mismatch_k;
+        if (!file)
+            return descriptors.clear(),
+                   status_t {status_code_t::config_mismatch_k, "Blocking queue met a non-file medium"};
         descriptors.push_back_reserved(file->descriptor);
     }
     return status_code_t::success_k;
@@ -1451,9 +1497,9 @@ std::size_t poll_queued_completions_(growing_buffer<io_completion_t, allocator_t
     return polled;
 }
 
-#pragma endregion Engine Contract
+#pragma endregion Queue Contract
 
-#pragma region Blocking and AIO Engines
+#pragma region Blocking and AIO Queues
 
 inline status_t file_medium_t::read_at(u64_t offset, bytes_span_t bytes) const noexcept {
     if (bytes.empty()) return status_code_t::success_k;
@@ -1473,11 +1519,11 @@ inline status_t file_medium_t::read_at(u64_t offset, bytes_span_t bytes) const n
 }
 
 /**
- *  @brief Portable blocking engine: @c submit services every enqueued read with one @c pread or
+ *  @brief Portable blocking queue: @c submit services every enqueued read with one @c pread or
  *      @c ReadFile apiece on the calling thread.
  *
  *  The reference implementation of the concept, the debugging harness, and the macOS production
- *  path, where a pool of threads, each driving its own engine, is the realistic ceiling anyway.
+ *  path, where a pool of threads, each driving its own queue, is the realistic ceiling anyway.
  *
  *  macOS specifics: there is no async-file syscall surface, since POSIX AIO is capped at a queue
  *  depth of ~16 by @c kern.aiomax -class sysctls and kqueue cannot watch regular files, so threads
@@ -1486,19 +1532,19 @@ inline status_t file_medium_t::read_at(u64_t offset, bytes_span_t bytes) const n
  *  still served from cache.
  */
 template <typename wait_type_, typename allocator_type_ = forkunion_allocator_t>
-class blocking_files_engine {
+class blocking_files_queue {
   public:
     using wait_t = wait_type_;
     using allocator_t = allocator_type_;
     using medium_t = file_medium_t;
-    using config_t = io_engine_config_t;
+    using config_t = io_queue_config_t;
 
     static constexpr io_transport_t transport() noexcept { return io_transport_t::blocking_k; }
 
-    explicit blocking_files_engine(allocator_t const& allocator = {}) noexcept
+    explicit blocking_files_queue(allocator_t const& allocator = {}) noexcept
         : buffers_(allocator), descriptors_(allocator), pending_(allocator), completions_(allocator) {}
-    blocking_files_engine(blocking_files_engine&&) noexcept = default;
-    blocking_files_engine& operator=(blocking_files_engine&&) noexcept = default;
+    blocking_files_queue(blocking_files_queue&&) noexcept = default;
+    blocking_files_queue& operator=(blocking_files_queue&&) noexcept = default;
 
     /**
      *  Sizes the request and completion queues for @p config's depth.
@@ -1508,10 +1554,10 @@ class blocking_files_engine {
      *  - @c unsupported_k @p config names another transport.
      */
     status_t open(config_t const& config) noexcept {
-        if (status_t const vetted = io_engine_vet_(config, transport()); failed(vetted)) return vetted;
+        if (status_t const vetted = io_queue_vet_(config, transport()); failed(vetted)) return vetted;
         if (failed(pending_.reserve_exactly(config.queue_depth)) ||
             failed(completions_.reserve_exactly(config.queue_depth)))
-            return status_code_t::out_of_memory_k;
+            return {status_code_t::out_of_memory_k, "Blocking queue failed to open"};
         queue_depth_ = config.queue_depth;
         return status_code_t::success_k;
     }
@@ -1527,17 +1573,16 @@ class blocking_files_engine {
     }
 
     /**
-     *  Takes the descriptors of @p media, which request medium IDs index until @c detach.
+     *  @brief Takes the descriptors of @p media, which request medium IDs index; nothing is
+     *      registered with the kernel, so every key copies them alike.
      *
      *  @par Statuses:
      *  - @c config_mismatch_k A medium that is not a file.
      */
     template <typename media_type_>
-    status_t attach(std::span<media_type_ const> media) noexcept {
+    status_t register_media(std::span<media_type_ const> media, media_list_key_t) noexcept {
         return copy_descriptors_(descriptors_, media);
     }
-
-    void detach() noexcept { descriptors_.clear(); }
 
     /**
      *  Queues @p request for the next @c submit.
@@ -1548,7 +1593,7 @@ class blocking_files_engine {
      */
     status_t enqueue_read(io_request_t request) noexcept {
         if (pending_.size() + completions_.size() == queue_depth_) return status_code_t::overflow_k;
-        if (status_t const vetted = io_request_vet_(request, descriptors_.size()); failed(vetted)) return vetted;
+        if (status_t const vetted = validate_io_request_(request, descriptors_.size()); failed(vetted)) return vetted;
         pending_.push_back_reserved(request);
         return status_code_t::success_k;
     }
@@ -1585,7 +1630,7 @@ class blocking_files_engine {
     /** Reads finished and not yet polled. */
     growing_buffer<io_completion_t, allocator_t> completions_;
 
-    /** The event this engine's thread waits its reads out on, empty off Windows. */
+    /** The event this queue's thread waits its reads out on, empty off Windows. */
     [[no_unique_address]] native_file_event_t event_;
 
     /** Reads outstanding at most; zero until @c open. */
@@ -1626,11 +1671,11 @@ struct linux_aio_context_t {
 };
 
 /**
- *  @brief Linux AIO engine over raw @c io_submit / @c io_getevents syscalls, with @c O_DIRECT
+ *  @brief Linux AIO queue over raw @c io_submit / @c io_getevents syscalls, with @c O_DIRECT
  *      media.
  *
  *  Roughly two thirds of io_uring's per-core throughput, but its syscalls predate every seccomp
- *  profile in existence: the engine for container platforms and hardened fleets where io_uring is
+ *  profile in existence: the queue for container platforms and hardened fleets where io_uring is
  *  administratively gated. Default Docker/containerd seccomp profiles block the io_uring family,
  *  gVisor rejects it, and the 6.6+ @c kernel.io_uring_disabled sysctl can turn it off fleet-wide.
  *
@@ -1640,24 +1685,24 @@ struct linux_aio_context_t {
  *  costs this design nothing, as every read is already block-aligned.
  */
 template <typename wait_type_, typename allocator_type_ = forkunion_allocator_t>
-class linux_aio_files_engine {
+class linux_aio_files_queue {
   public:
     using wait_t = wait_type_;
     using allocator_t = allocator_type_;
     using medium_t = file_medium_t;
-    using config_t = io_engine_config_t;
+    using config_t = io_queue_config_t;
 
     static constexpr io_transport_t transport() noexcept { return io_transport_t::linux_aio_k; }
 
-    explicit linux_aio_files_engine(allocator_t const& allocator = {}) noexcept
+    explicit linux_aio_files_queue(allocator_t const& allocator = {}) noexcept
         : buffers_(allocator), request_contexts_(allocator), descriptors_(allocator), control_blocks_(allocator),
           control_pointers_(allocator), events_(allocator), completions_(allocator) {}
-    linux_aio_files_engine(linux_aio_files_engine&&) noexcept = default;
-    linux_aio_files_engine& operator=(linux_aio_files_engine&&) noexcept = default;
+    linux_aio_files_queue(linux_aio_files_queue&&) noexcept = default;
+    linux_aio_files_queue& operator=(linux_aio_files_queue&&) noexcept = default;
 
     /** Sets up the context and sizes every queue for @p config's depth. */
     status_t open(config_t const& config) noexcept {
-        if (status_t const vetted = io_engine_vet_(config, transport()); failed(vetted)) return vetted;
+        if (status_t const vetted = io_queue_vet_(config, transport()); failed(vetted)) return vetted;
         if (failed(control_blocks_.reserve_exactly(config.queue_depth)) ||
             failed(control_pointers_.reserve_exactly(config.queue_depth)) ||
             failed(events_.resize(config.queue_depth)) || failed(completions_.reserve_exactly(config.queue_depth)))
@@ -1673,17 +1718,16 @@ class linux_aio_files_engine {
     }
 
     template <typename media_type_>
-    status_t attach(std::span<media_type_ const> media) noexcept {
+    status_t register_media(std::span<media_type_ const> media, media_list_key_t) noexcept {
         return copy_descriptors_(descriptors_, media);
     }
-
-    void detach() noexcept { descriptors_.clear(); }
 
     /** Encodes the control block in place, so @c submit only submits. */
     status_t enqueue_read(io_request_t request) noexcept {
         if (!context_.context) return status_code_t::io_k;
-        if (control_blocks_.size() + in_flight_ + completions_.size() == queue_depth_) return status_code_t::overflow_k;
-        if (status_t const vetted = io_request_vet_(request, descriptors_.size()); failed(vetted)) return vetted;
+        if (control_blocks_.size() + outstanding_ + completions_.size() == queue_depth_)
+            return status_code_t::overflow_k;
+        if (status_t const vetted = validate_io_request_(request, descriptors_.size()); failed(vetted)) return vetted;
         struct iocb control {};
         control.aio_data = request.buffer;
         control.aio_lio_opcode = IOCB_CMD_PREAD;
@@ -1699,16 +1743,16 @@ class linux_aio_files_engine {
 
     status_t submit(io_wait_t wait) noexcept {
         submit_staged_();
-        if (!in_flight_) return status_code_t::success_k;
+        if (!outstanding_) return status_code_t::success_k;
         long const minimum = wait == io_wait_t::blocking_k && completions_.empty() ? 1 : 0;
         // AIO posts no completion word to watch, so one `io_getevents` both polls and parks.
-        long const reaped = syscall(SYS_io_getevents, context_.context, minimum, static_cast<long>(in_flight_),
+        long const reaped = syscall(SYS_io_getevents, context_.context, minimum, static_cast<long>(outstanding_),
                                     events_.data(), nullptr);
         if (reaped < 0 && errno == EINTR) return status_code_t::success_k;
         if (reaped < 0) return abandon_();
         for (long event = 0; event != reaped; ++event)
             complete_(static_cast<io_buffer_id_t>(events_[event].data), static_cast<i32_t>(events_[event].res));
-        in_flight_ -= static_cast<std::size_t>(reaped);
+        outstanding_ -= static_cast<std::size_t>(reaped);
         return status_code_t::success_k;
     }
 
@@ -1734,7 +1778,7 @@ class linux_aio_files_engine {
                                           control_pointers_.data() + submitted);
             if (accepted > 0) {
                 submitted += static_cast<std::size_t>(accepted);
-                in_flight_ += static_cast<std::size_t>(accepted);
+                outstanding_ += static_cast<std::size_t>(accepted);
                 continue;
             }
             i32_t const error = accepted < 0 ? errno : EIO;
@@ -1745,13 +1789,13 @@ class linux_aio_files_engine {
         control_pointers_.clear();
     }
 
-    /** Waits out every read the kernel holds by dropping the context, empties the engine, and sets
+    /** Waits out every read the kernel holds by dropping the context, empties the queue, and sets
      *  up a fresh context for the next call. */
     status_t abandon_() noexcept {
         context_.destroy();
         completions_.clear();
-        in_flight_ = 0;
-        // A context that cannot come back fails every later read rather than reporting the engine
+        outstanding_ = 0;
+        // A context that cannot come back fails every later read rather than reporting the queue
         // full.
         [[maybe_unused]] status_t const reopened = context_.setup(queue_depth_);
         return status_code_t::io_k;
@@ -1787,19 +1831,19 @@ class linux_aio_files_engine {
     std::size_t queue_depth_ = 0;
 
     /** Reads the kernel holds. */
-    std::size_t in_flight_ = 0;
+    std::size_t outstanding_ = 0;
 };
 
 #endif
 
-#pragma endregion Blocking and AIO Engines
+#pragma endregion Blocking and AIO Queues
 
-#pragma region Ring Engines
+#pragma region Ring Queues
 
 #if USEARCH_WITH_LINUX_URING
 
 /** SQE geometry of one ring: 64-byte entries for block-layer reads, or the
- *  128-byte form whose inline command area carries NVMe passthrough. */
+ *  128-byte form whose inline command area holds NVMe passthrough. */
 enum class linux_uring_form_t : u32_t {
     compact_k,
     nvme_k,
@@ -1870,7 +1914,7 @@ struct linux_uring_completions_t {
 };
 
 /**
- *  @brief Shared io_uring plumbing of the Linux ring engines.
+ *  @brief Shared io_uring plumbing of the Linux ring queues.
  *
  *  Setup with graceful flag degradation, the ring mappings, submission-queue slot claims, resource
  *  registration, and completion-queue draining, all parameterized by SQE and CQE strides at
@@ -1906,7 +1950,7 @@ class linux_uring_ring_t {
 
     void swap(linux_uring_ring_t& other) noexcept {
         std::swap(ring_descriptor_, other.ring_descriptor_);
-        std::swap(reaping_, other.reaping_);
+        std::swap(polling_, other.polling_);
         std::swap(posting_, other.posting_);
         std::swap(submission_mapping_, other.submission_mapping_);
         std::swap(completion_mapping_, other.completion_mapping_);
@@ -1916,6 +1960,7 @@ class linux_uring_ring_t {
         std::swap(pending_tail_, other.pending_tail_);
         std::swap(registered_ring_index_, other.registered_ring_index_);
         std::swap(registered_regions_, other.registered_regions_);
+        std::swap(registered_files_, other.registered_files_);
         std::swap(queue_depth_, other.queue_depth_);
         std::swap(outstanding_, other.outstanding_);
     }
@@ -1926,12 +1971,12 @@ class linux_uring_ring_t {
      *  @param[in] queue_depth Submission-queue entries, and the reads the ring holds at most;
      *      completions sized 2x by the kernel.
      *  @param[in] form SQE & CQE strides: compact, or doubled for NVMe passthrough.
-     *  @param[in] reaping Interrupt-driven completions, or device-queue polling, which a refused
+     *  @param[in] polling Interrupt-driven completions, or device-queue polling, which a refused
      *      IOPOLL ring trades for interrupts.
      *
      *  SQE128 and CQE32 need Linux 5.19, SINGLE_ISSUER 6.0 and DEFER_TASKRUN 6.1.
      */
-    status_t setup(std::size_t queue_depth, linux_uring_form_t form, linux_uring_reaping_t reaping) noexcept {
+    status_t setup(std::size_t queue_depth, linux_uring_form_t form, linux_uring_polling_t polling) noexcept {
         long const setup_syscall = 425 + linux_syscall_offset_k; // __NR_io_uring_setup
 
         u32_t const iopoll = 1u << 0;                   // IORING_SETUP_IOPOLL
@@ -1945,7 +1990,7 @@ class linux_uring_ring_t {
         u64_t const submission_entries = 0x10000000ull; // IORING_OFF_SQES
         linux_uring_params_t params;
         u32_t const interrupted_flags = form == linux_uring_form_t::nvme_k ? sqe128 | cqe32 : 0u;
-        u32_t const shape_flags = interrupted_flags | (reaping == linux_uring_reaping_t::polled_k ? iopoll : 0u);
+        u32_t const shape_flags = interrupted_flags | (polling == linux_uring_polling_t::polled_k ? iopoll : 0u);
         u32_t const deferred_flags = single_issuer | defer_taskrun;
         // A refused IOPOLL ring falls to interrupts, as a refused deferred task-run does to plain.
         for (u32_t const flags :
@@ -1961,7 +2006,7 @@ class linux_uring_ring_t {
             if (flags == interrupted_flags)
                 return form == linux_uring_form_t::nvme_k ? status_code_t::unsupported_k : status_code_t::io_k;
         }
-        reaping_ = params.setup_flags & iopoll ? linux_uring_reaping_t::polled_k : linux_uring_reaping_t::interrupted_k;
+        polling_ = params.setup_flags & iopoll ? linux_uring_polling_t::polled_k : linux_uring_polling_t::interrupted_k;
         posting_ = params.setup_flags & defer_taskrun ? linux_uring_posting_t::deferred_k
                                                       : linux_uring_posting_t::immediate_k;
         submissions_.stride = form == linux_uring_form_t::nvme_k ? sizeof(linux_uring_sqe128_t)
@@ -2029,6 +2074,32 @@ class linux_uring_ring_t {
     void unregister_files() noexcept {
         u32_t const unregister = 3; // IORING_UNREGISTER_FILES
         [[maybe_unused]] long const unregistered = register_(unregister, nullptr, 0u);
+        registered_files_ = 0;
+    }
+
+    /** Slots the fixed-file table holds, zero while it holds none. */
+    std::size_t registered_files() const noexcept { return registered_files_; }
+
+    /**
+     *  @brief Rewrites the fixed-file table slot for slot from @p table, an invalid descriptor
+     *      emptying its slot, registering the table anew only when its length differs.
+     *
+     *  @par Statuses:
+     *  - @c io_k The kernel refused the registration or the update.
+     */
+    status_t update_registered_files(std::span<int const> table) noexcept {
+        if (table.size() == registered_files_) {
+            u32_t const files_update = 6; // IORING_REGISTER_FILES_UPDATE
+            linux_uring_rsrc_update_t update {};
+            update.update_value = reinterpret_cast<std::uintptr_t>(table.data());
+            if (register_(files_update, &update, static_cast<unsigned>(table.size())) < 0)
+                return {status_code_t::io_k, "Kernel refused the file table update"};
+            return status_code_t::success_k;
+        }
+        if (registered_files_) unregister_files();
+        if (status_t const registered = register_files(table); failed(registered)) return registered;
+        registered_files_ = table.size();
+        return status_code_t::success_k;
     }
 
     /** Claims the next SQE slot, or returns null when the ring is full or holds its queue depth of
@@ -2046,7 +2117,7 @@ class linux_uring_ring_t {
         return reinterpret_cast<linux_uring_sqe_t*>(submissions_.entries + index * submissions_.stride);
     }
 
-    /** The full submit-and-wait discipline shared by every ring engine: nonblocking submits &
+    /** The full submit-and-wait discipline shared by every ring queue: nonblocking submits &
      *  returns; blocking on an async-posting ring pays one capped @p wait_type_ monitor on the CQ
      *  tail before the blocking enter, so a completion arriving in that window costs zero syscalls,
      *  while deferred & polled rings fuse the pending batch and the wait into a single enter, and
@@ -2060,7 +2131,7 @@ class linux_uring_ring_t {
     }
 
     /** Moves as many CQEs as @p completions holds, answering how many, each naming the buffer its
-     *  @c user_data carried and its context from @p request_contexts; NVMe passthrough status
+     *  @c user_data held and its context from @p request_contexts; NVMe passthrough status
      *  decoding is the caller's job, since this layer only surfaces the primary result word. */
     std::size_t poll_completions(std::span<io_completion_t> completions,
                                  std::span<u64_t const> request_contexts) noexcept {
@@ -2093,7 +2164,7 @@ class linux_uring_ring_t {
         // Polled rings only harvest device completions inside the syscall, and deferred task-run
         // rings only post them there, so both must ask for events every time.
         bool const getevents = min_complete || posting_ == linux_uring_posting_t::deferred_k ||
-                               reaping_ == linux_uring_reaping_t::polled_k;
+                               polling_ == linux_uring_polling_t::polled_k;
         if (!to_submit && !getevents) return status_code_t::success_k;
         long const enter_syscall = 426 + linux_syscall_offset_k; // __NR_io_uring_enter
 
@@ -2153,11 +2224,11 @@ class linux_uring_ring_t {
     }
 
     /** True only when CQEs arrive in shared memory between syscalls: immediate posting under
-     *  interrupt-driven reaping. Deferred task-run and IOPOLL rings post CQEs strictly inside
+     *  interrupt-driven polling. Deferred task-run and IOPOLL rings post CQEs strictly inside
      *  @c io_uring_enter, so a user-space tail monitor can never observe them and the submit & wait
      *  pair fuses into one enter. */
     bool reaps_asynchronously_() const noexcept {
-        return posting_ == linux_uring_posting_t::immediate_k && reaping_ == linux_uring_reaping_t::interrupted_k;
+        return posting_ == linux_uring_posting_t::immediate_k && polling_ == linux_uring_polling_t::interrupted_k;
     }
 
     /** Registers the ring descriptor so every enter addresses it by index,
@@ -2173,7 +2244,7 @@ class linux_uring_ring_t {
     }
 
     int ring_descriptor_ = -1;
-    linux_uring_reaping_t reaping_ = linux_uring_reaping_t::interrupted_k;
+    linux_uring_polling_t polling_ = linux_uring_polling_t::interrupted_k;
     linux_uring_posting_t posting_ = linux_uring_posting_t::immediate_k;
     linux_uring_mapping_t submission_mapping_;
     linux_uring_mapping_t completion_mapping_;
@@ -2185,18 +2256,35 @@ class linux_uring_ring_t {
 
     /** Regions the registered-buffer table holds, zero while it holds none. */
     u32_t registered_regions_ = 0;
+
+    /** Slots the fixed-file table holds, zero while it holds none. */
+    std::size_t registered_files_ = 0;
     std::size_t queue_depth_ = 0;
     std::size_t outstanding_ = 0;
 };
+
+/** Lays the descriptors of @p media into @p table, padded with empty slots to a power of two at
+ *  least as long as the table @p ring holds, and registers it with @p ring: a list that fits the
+ *  table updates it in place, and the emptied slots release the files no list names. */
+template <typename allocator_type_, typename media_type_>
+status_t linux_uring_register_media_files_(linux_uring_ring_t& ring,
+                                           growing_buffer<native_file_t, allocator_type_>& table,
+                                           std::span<media_type_ const> media) noexcept {
+    std::size_t const slots = max_of(ring.registered_files(), std::bit_ceil(media.size()));
+    if (status_t const copied = copy_descriptors_(table, media); failed(copied)) return copied;
+    if (status_t const reserved = table.reserve(slots); failed(reserved)) return reserved;
+    while (table.size() != slots) table.push_back_reserved(invalid_native_file_k);
+    return ring.update_registered_files(to_span(table));
+}
 
 /** The most bytes the kernel pins as one registered buffer. */
 inline constexpr std::size_t linux_uring_registered_range_bytes_k = std::size_t {1} << 30;
 
 /**
- *  @brief The staging region a ring engine reads into, registered as pieces of whole buffers under
+ *  @brief The staging region a ring queue reads into, registered as pieces of whole buffers under
  *      the kernel's 1 GiB cap per registered buffer, and what became of that registration.
  *
- *  Each ring engine owns one and keeps its region through it. The piece table grows only when the
+ *  Each ring queue owns one and keeps its region through it. The piece table grows only when the
  *  region regrows, at reserve time, so a warm read allocates nothing, and names its piece in the
  *  entry's @c buf_index.
  */
@@ -2204,10 +2292,12 @@ template <typename allocator_type_>
 class linux_uring_registered_buffers {
   public:
     explicit linux_uring_registered_buffers(allocator_type_ const& allocator) noexcept
-        : buffers_(allocator), regions_(allocator) {}
+        : buffers_(allocator), registered_iovecs_(allocator) {}
 
     /** Asks for registration as @p registration says, from the next region on. */
-    void request(linux_uring_buffer_registration_t registration) noexcept { registration_ = registration; }
+    void set_registration_mode(linux_uring_buffer_registration_t registration) noexcept {
+        registration_ = registration;
+    }
 
     /**
      *  @brief Cuts the region into @p count buffers of @p bytes each, and under @c fixed_k
@@ -2229,14 +2319,14 @@ class linux_uring_registered_buffers {
         buffers_per_region_ = max_of<std::size_t>(linux_uring_registered_range_bytes_k / buffers_.stride(), 1);
         std::size_t const held = buffers_.capacity() / buffers_.stride();
         std::size_t const pieces = divide_round_up<std::size_t>(held, buffers_per_region_);
-        if (status_t const sized = regions_.resize_uninitialized(pieces); failed(sized)) return sized;
+        if (status_t const sized = registered_iovecs_.resize_uninitialized(pieces); failed(sized)) return sized;
         for (std::size_t piece = 0; piece != pieces; ++piece) {
             std::size_t const first = piece * buffers_per_region_;
             std::size_t const piece_buffers = min_of(buffers_per_region_, held - first);
-            regions_[piece] = iovec {buffers_.buffer(static_cast<io_buffer_id_t>(first)),
-                                     piece_buffers * buffers_.stride()};
+            registered_iovecs_[piece] = iovec {buffers_.buffer(static_cast<io_buffer_id_t>(first)),
+                                               piece_buffers * buffers_.stride()};
         }
-        long const registered = ring.register_buffers(to_span(regions_));
+        long const registered = ring.register_buffers(to_span(registered_iovecs_));
         if (registered == -ENOMEM) registration_ = linux_uring_buffer_registration_t::plain_k;
         else if (registered < 0) return status_code_t::io_k;
         return status_code_t::success_k;
@@ -2256,7 +2346,7 @@ class linux_uring_registered_buffers {
     io_buffers<allocator_type_> buffers_;
 
     /** The pieces registered with the ring, whole buffers each, under the kernel's cap. */
-    growing_buffer<struct iovec, allocator_type_> regions_;
+    growing_buffer<struct iovec, allocator_type_> registered_iovecs_;
 
     /** Buffers one registered piece holds, the last piece holding the rest. */
     std::size_t buffers_per_region_ = 1;
@@ -2285,28 +2375,29 @@ class linux_uring_registered_buffers {
  *  skipped, since completions only post inside @c io_uring_enter by design.
  */
 template <typename wait_type_, typename allocator_type_ = forkunion_allocator_t>
-class linux_uring_files_engine {
+class linux_uring_files_queue {
   public:
     using wait_t = wait_type_;
     using allocator_t = allocator_type_;
     using medium_t = file_medium_t;
-    using config_t = io_engine_config_t;
+    using config_t = io_queue_config_t;
 
     static constexpr io_transport_t transport() noexcept { return io_transport_t::linux_uring_k; }
 
-    explicit linux_uring_files_engine(allocator_t const& allocator = {}) noexcept
-        : buffers_(allocator), request_contexts_(allocator), descriptors_(allocator) {}
-    linux_uring_files_engine(linux_uring_files_engine&&) noexcept = default;
-    linux_uring_files_engine& operator=(linux_uring_files_engine&&) noexcept = default;
+    explicit linux_uring_files_queue(allocator_t const& allocator = {}) noexcept
+        : buffers_(allocator), request_contexts_(allocator),
+          registered_files_ {growing_buffer<int, allocator_t> {allocator}} {}
+    linux_uring_files_queue(linux_uring_files_queue&&) noexcept = default;
+    linux_uring_files_queue& operator=(linux_uring_files_queue&&) noexcept = default;
 
-    /** Sets up the ring for @p config's depth, buffers and reaping; a refused @c io_uring_setup
+    /** Sets up the ring for @p config's depth, buffers and polling; a refused @c io_uring_setup
      *  answers @c io_k. */
     status_t open(config_t const& config) noexcept {
-        if (status_t const vetted = io_engine_vet_(config, transport()); failed(vetted)) return vetted;
-        if (status_t const created = ring_.setup(config.queue_depth, linux_uring_form_t::compact_k, config.reaping);
+        if (status_t const vetted = io_queue_vet_(config, transport()); failed(vetted)) return vetted;
+        if (status_t const created = ring_.setup(config.queue_depth, linux_uring_form_t::compact_k, config.polling);
             failed(created))
             return created;
-        buffers_.request(config.buffer_registration);
+        buffers_.set_registration_mode(config.buffer_registration);
         return status_code_t::success_k;
     }
 
@@ -2318,25 +2409,32 @@ class linux_uring_files_engine {
     /** Whether reads land in buffers registered once, or at addresses the kernel pins per read. */
     linux_uring_buffer_registration_t buffer_registration() const noexcept { return buffers_.registration(); }
 
+    /**
+     *  @brief Registers @p media in the ring's file table, unless it already holds the list of
+     *      @p key, so a warm call over the same media registers nothing; an empty list keeps the
+     *      table for the next call over the last one.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k A medium that is not a file.
+     *  - @c io_k The kernel refused the table.
+     */
     template <typename media_type_>
-    status_t attach(std::span<media_type_ const> media) noexcept {
-        detach();
-        if (status_t const copied = copy_descriptors_(descriptors_, media); failed(copied)) return copied;
-        if (descriptors_.empty()) return status_code_t::success_k;
-        if (status_t const registered = ring_.register_files(descriptors_); failed(registered))
-            return descriptors_.clear(), registered;
+    status_t register_media(std::span<media_type_ const> media, media_list_key_t key) noexcept {
+        registered_files_.media_count = media.size();
+        if (media.empty() || registered_files_.key == key) return status_code_t::success_k;
+        registered_files_.key = {};
+        if (status_t const registered = linux_uring_register_media_files_(ring_, registered_files_.descriptors, media);
+            failed(registered))
+            return registered_files_.media_count = 0, registered;
+        registered_files_.key = key;
         return status_code_t::success_k;
-    }
-
-    void detach() noexcept {
-        if (!descriptors_.empty()) ring_.unregister_files();
-        descriptors_.clear();
     }
 
     status_t enqueue_read(io_request_t request) noexcept {
         u8_t const read = 22;      // IORING_OP_READ
         u8_t const read_fixed = 4; // IORING_OP_READ_FIXED
-        if (status_t const vetted = io_request_vet_(request, descriptors_.size()); failed(vetted)) return vetted;
+        if (status_t const vetted = validate_io_request_(request, registered_files_.media_count); failed(vetted))
+            return vetted;
         linux_uring_sqe_t* const entry = ring_.next_submission();
         if (!entry) return status_code_t::overflow_k;
         *entry = linux_uring_sqe_t {};
@@ -2370,15 +2468,26 @@ class linux_uring_files_engine {
     /** The context of the read each buffer serves, indexed by buffer. */
     growing_buffer<u64_t, allocator_t> request_contexts_;
 
-    /** The attached media's descriptors, registered as the ring's fixed files. */
-    growing_buffer<int, allocator_t> descriptors_;
+    /** The user-space copy of the ring's registered-file table: what was registered, and for
+     *  which list. */
+    struct registered_files_t {
+
+        /** The registered media's descriptors, then empty slots. */
+        growing_buffer<int, allocator_t> descriptors;
+
+        /** The list the table holds, zeros for none. */
+        media_list_key_t key;
+
+        /** Media the current call registered, the medium IDs its reads may name. */
+        std::size_t media_count = 0;
+    } registered_files_;
 
     /** The ring, declared after the buffers so it dies first and releases its pins on them. */
     linux_uring_ring_t ring_;
 };
 
 /**
- *  @brief NVMe passthrough engine: raw Read commands to the namespace character device
+ *  @brief NVMe passthrough queue: raw Read commands to the namespace character device
  *      @c /dev/ngXnY through 128-byte SQEs, bypassing the filesystem and the block layer, worth
  *      ~20-30% IOPS per core over the block path.
  *
@@ -2402,28 +2511,29 @@ class linux_uring_files_engine {
  *  bytes read.
  */
 template <typename wait_type_, typename allocator_type_ = forkunion_allocator_t>
-class linux_uring_nvme_engine {
+class linux_uring_nvme_queue {
   public:
     using wait_t = wait_type_;
     using allocator_t = allocator_type_;
     using medium_t = file_medium_t;
-    using config_t = io_engine_config_t;
+    using config_t = io_queue_config_t;
 
     static constexpr io_transport_t transport() noexcept { return io_transport_t::linux_uring_nvme_k; }
 
-    explicit linux_uring_nvme_engine(allocator_t const& allocator = {}) noexcept
-        : buffers_(allocator), request_contexts_(allocator), lengths_(allocator), descriptors_(allocator),
-          namespaces_(allocator) {}
-    linux_uring_nvme_engine(linux_uring_nvme_engine&&) noexcept = default;
-    linux_uring_nvme_engine& operator=(linux_uring_nvme_engine&&) noexcept = default;
+    explicit linux_uring_nvme_queue(allocator_t const& allocator = {}) noexcept
+        : buffers_(allocator), request_contexts_(allocator), request_lengths_(allocator),
+          registered_files_ {growing_buffer<int, allocator_t> {allocator},
+                             growing_buffer<nvme_namespace_t, allocator_t> {allocator}} {}
+    linux_uring_nvme_queue(linux_uring_nvme_queue&&) noexcept = default;
+    linux_uring_nvme_queue& operator=(linux_uring_nvme_queue&&) noexcept = default;
 
-    /** Sets up a 128-byte-entry ring for @p config's depth, buffers and reaping. */
+    /** Sets up a 128-byte-entry ring for @p config's depth, buffers and polling. */
     status_t open(config_t const& config) noexcept {
-        if (status_t const vetted = io_engine_vet_(config, transport()); failed(vetted)) return vetted;
-        if (status_t const created = ring_.setup(config.queue_depth, linux_uring_form_t::nvme_k, config.reaping);
+        if (status_t const vetted = io_queue_vet_(config, transport()); failed(vetted)) return vetted;
+        if (status_t const created = ring_.setup(config.queue_depth, linux_uring_form_t::nvme_k, config.polling);
             failed(created))
             return created;
-        buffers_.request(config.buffer_registration);
+        buffers_.set_registration_mode(config.buffer_registration);
         return status_code_t::success_k;
     }
 
@@ -2431,8 +2541,8 @@ class linux_uring_nvme_engine {
         if (status_t const grown = buffers_.reserve(ring_, buffers, buffer_bytes); failed(grown)) return grown;
         // The lengths grow second, so a refusal between the two leaves them short and the next call
         // grows both.
-        if (lengths_.size() >= buffers) return status_code_t::success_k;
-        if (failed(request_contexts_.resize(buffers)) || failed(lengths_.resize(buffers)))
+        if (request_lengths_.size() >= buffers) return status_code_t::success_k;
+        if (failed(request_contexts_.resize(buffers)) || failed(request_lengths_.resize(buffers)))
             return status_code_t::out_of_memory_k;
         return status_code_t::success_k;
     }
@@ -2441,48 +2551,47 @@ class linux_uring_nvme_engine {
     linux_uring_buffer_registration_t buffer_registration() const noexcept { return buffers_.registration(); }
 
     /**
-     *  @brief Learns each medium's namespace ID and LBA shift, and registers every medium as a
-     *      fixed file of the ring.
+     *  @brief Learns each medium's namespace ID and LBA shift, and registers every medium in the
+     *      ring's file table, unless it already holds the list of @p key; an empty list keeps the
+     *      table for the next call over the last one.
      *
      *  @par Statuses:
      *  - @c config_mismatch_k A medium that is not a generic NVMe char node, like @c /dev/ng1n1.
-     *  - @c io_k A char node that answers no namespace ID.
+     *  - @c io_k A char node that answers no namespace ID, or the kernel refused the table.
      */
     template <typename media_type_>
-    status_t attach(std::span<media_type_ const> media) noexcept {
-        detach();
-        if (status_t const copied = copy_descriptors_(descriptors_, media); failed(copied)) return copied;
-        if (status_t const reserved = namespaces_.reserve(media.size()); failed(reserved))
-            return descriptors_.clear(), reserved;
+    status_t register_media(std::span<media_type_ const> media, media_list_key_t key) noexcept {
+        registered_files_.media_count = media.size();
+        if (media.empty() || registered_files_.key == key) return status_code_t::success_k;
+        registered_files_.key = {}, registered_files_.media_count = 0;
+        growing_buffer<nvme_namespace_t, allocator_t>& namespaces = registered_files_.namespaces;
+        namespaces.clear();
+        if (status_t const reserved = namespaces.reserve(media.size()); failed(reserved)) return reserved;
         for (media_type_ const& medium : media) {
-            file_medium_t const& file = *medium_as<file_medium_t>(medium);
+            file_medium_t const* const file = medium_as<file_medium_t>(medium);
+            if (!file) return {status_code_t::config_mismatch_k, "Passthrough medium is not a file"};
             // Block nodes answer NVME_IOCTL_ID too, but only the generic char node takes URING_CMD.
             struct stat description;
-            if (::fstat(file.descriptor, &description) != 0 || !S_ISCHR(description.st_mode))
-                return descriptors_.clear(), namespaces_.clear(), status_code_t::config_mismatch_k;
-            int const identifier = ::ioctl(file.descriptor, linux_nvme_ioctl_id_k);
-            if (identifier < 0 || !file.block_bytes)
-                return descriptors_.clear(), namespaces_.clear(), status_code_t::io_k;
-            namespaces_.push_back_reserved(nvme_namespace_t {static_cast<u32_t>(identifier),
-                                                             static_cast<u32_t>(std::countr_zero(file.block_bytes))});
+            if (::fstat(file->descriptor, &description) != 0 || !S_ISCHR(description.st_mode))
+                return {status_code_t::config_mismatch_k, "Passthrough medium is not a char node"};
+            int const identifier = ::ioctl(file->descriptor, linux_nvme_ioctl_id_k);
+            if (identifier < 0 || !file->block_bytes) return {status_code_t::io_k, "Char node answers no namespace ID"};
+            namespaces.push_back_reserved(nvme_namespace_t {static_cast<u32_t>(identifier),
+                                                            static_cast<u32_t>(std::countr_zero(file->block_bytes))});
         }
-        if (descriptors_.empty()) return status_code_t::success_k;
-        if (status_t const registered = ring_.register_files(descriptors_); failed(registered))
-            return descriptors_.clear(), namespaces_.clear(), registered;
+        if (status_t const registered = linux_uring_register_media_files_(ring_, registered_files_.descriptors, media);
+            failed(registered))
+            return registered;
+        registered_files_.key = key, registered_files_.media_count = media.size();
         return status_code_t::success_k;
-    }
-
-    void detach() noexcept {
-        if (!descriptors_.empty()) ring_.unregister_files();
-        descriptors_.clear();
-        namespaces_.clear();
     }
 
     status_t enqueue_read(io_request_t request) noexcept {
         u8_t const uring_cmd = 46;                                           // IORING_OP_URING_CMD
         u32_t const uring_cmd_io = _IOWR('N', 0x80, linux_nvme_uring_cmd_t); // NVME_URING_CMD_IO
         u32_t const fixed = 1u << 0;                                         // IORING_URING_CMD_FIXED
-        if (status_t const vetted = io_request_vet_(request, descriptors_.size()); failed(vetted)) return vetted;
+        if (status_t const vetted = validate_io_request_(request, registered_files_.media_count); failed(vetted))
+            return vetted;
         // A passthrough ring's slots are the 128-byte form.
         linux_uring_sqe128_t* const entry = reinterpret_cast<linux_uring_sqe128_t*>(ring_.next_submission());
         if (!entry) return status_code_t::overflow_k;
@@ -2494,7 +2603,7 @@ class linux_uring_nvme_engine {
         entry->user_data = request.buffer;
         if (buffers_.registration() == linux_uring_buffer_registration_t::fixed_k)
             entry->uring_cmd_flags = fixed, entry->buf_index = buffers_.piece_of(request.buffer);
-        nvme_namespace_t const& name_space = namespaces_[request.medium];
+        nvme_namespace_t const& name_space = registered_files_.namespaces[request.medium];
         linux_nvme_uring_cmd_t* const command = reinterpret_cast<linux_nvme_uring_cmd_t*>(entry->cmd);
         command->opcode = nvme_read_opcode_k;
         command->nsid = name_space.identifier;
@@ -2506,7 +2615,7 @@ class linux_uring_nvme_engine {
         command->cdw11 = static_cast<u32_t>(first_block >> 32);
         command->cdw12 = block_count - 1;
         request_contexts_[request.buffer] = request.context;
-        lengths_[request.buffer] = request.length;
+        request_lengths_[request.buffer] = request.length;
         return status_code_t::success_k;
     }
 
@@ -2516,7 +2625,7 @@ class linux_uring_nvme_engine {
     std::size_t poll_completions(std::span<io_completion_t> completions) noexcept {
         std::size_t const polled = ring_.poll_completions(completions, to_span(request_contexts_));
         for (io_completion_t& completion : completions.first(polled))
-            completion.result = completion.result == 0 ? static_cast<i32_t>(lengths_[completion.buffer])
+            completion.result = completion.result == 0 ? static_cast<i32_t>(request_lengths_[completion.buffer])
                                                        : (completion.result > 0 ? -EIO : completion.result);
         return polled;
     }
@@ -2525,7 +2634,7 @@ class linux_uring_nvme_engine {
 
   private:
 
-    /** One attached namespace: its ID and the shift from bytes to its logical blocks. */
+    /** One registered namespace: its ID and the shift from bytes to its logical blocks. */
     struct nvme_namespace_t {
 
         /** The namespace ID @c NVME_IOCTL_ID reports. */
@@ -2543,13 +2652,24 @@ class linux_uring_nvme_engine {
 
     /** The bytes the command each buffer serves moves when it succeeds, since an NVMe completion
      *  reports a status rather than a byte count. */
-    growing_buffer<u32_t, allocator_t> lengths_;
+    growing_buffer<u32_t, allocator_t> request_lengths_;
 
-    /** The attached media's descriptors, registered as the ring's fixed files. */
-    growing_buffer<int, allocator_t> descriptors_;
+    /** The user-space copy of the ring's registered-file table: what was registered, for which
+     *  list, and each medium's namespace. */
+    struct registered_files_t {
 
-    /** The attached media's namespaces, indexed by medium ID. */
-    growing_buffer<nvme_namespace_t, allocator_t> namespaces_;
+        /** The registered media's descriptors, then empty slots. */
+        growing_buffer<int, allocator_t> descriptors;
+
+        /** The registered media's namespaces, indexed by medium ID. */
+        growing_buffer<nvme_namespace_t, allocator_t> namespaces;
+
+        /** The list the table holds, zeros for none. */
+        media_list_key_t key;
+
+        /** Media the current call registered, the medium IDs its reads may name. */
+        std::size_t media_count = 0;
+    } registered_files_;
 
     /** The ring, declared after the buffers so it dies first and releases its pins on them. */
     linux_uring_ring_t ring_;
@@ -2560,7 +2680,7 @@ class linux_uring_nvme_engine {
 #if USEARCH_WITH_WINDOWS_IORING
 
 /**
- *  @brief Windows I/O Rings engine, the closest io_uring sibling: shared rings, user-mode
+ *  @brief Windows I/O Rings queue, the closest io_uring sibling: shared rings, user-mode
  *      completion polling, batched submission, and registered buffers & files mirroring the Linux
  *      fixed path.
  *
@@ -2568,28 +2688,28 @@ class linux_uring_nvme_engine {
  *  whose alignment contract matches this format: offsets, lengths & buffers aligned to the volume
  *  sector size, 512 or 4096, queried via @c FILE_STORAGE_INFO.
  *
- *  Registration ops are themselves asynchronous SQEs, so @c reserve and @c attach submit each and
- *  wait for its completion before any read can share the queue with it. Note WSL2 cannot substitute
- *  for this engine's testing: its storage arrives via a paravirtual SCSI path, so neither IoRing
- *  nor NVMe character devices exist there; only native Windows exercises this code.
+ *  Registration ops are themselves asynchronous SQEs, so @c reserve and @c register_media submit
+ *  each and wait for its completion before any read can share the queue with it. Note WSL2 cannot
+ *  substitute for this queue's testing: its storage arrives via a paravirtual SCSI path, so
+ *  neither IoRing nor NVMe character devices exist there; only native Windows exercises this code.
  */
 template <typename wait_type_, typename allocator_type_ = forkunion_allocator_t>
-class windows_ioring_files_engine {
+class windows_ioring_files_queue {
   public:
     using wait_t = wait_type_;
     using allocator_t = allocator_type_;
     using medium_t = file_medium_t;
-    using config_t = io_engine_config_t;
+    using config_t = io_queue_config_t;
 
     static constexpr io_transport_t transport() noexcept { return io_transport_t::windows_ioring_k; }
 
-    explicit windows_ioring_files_engine(allocator_t const& allocator = {}) noexcept
+    explicit windows_ioring_files_queue(allocator_t const& allocator = {}) noexcept
         : buffers_(allocator), request_contexts_(allocator), descriptors_(allocator) {}
-    windows_ioring_files_engine(windows_ioring_files_engine&& other) noexcept
+    windows_ioring_files_queue(windows_ioring_files_queue&& other) noexcept
         : buffers_(std::move(other.buffers_)), request_contexts_(std::move(other.request_contexts_)),
           descriptors_(std::move(other.descriptors_)), ring_(std::exchange(other.ring_, nullptr)),
           queue_depth_(other.queue_depth_), outstanding_(std::exchange(other.outstanding_, 0u)) {}
-    windows_ioring_files_engine& operator=(windows_ioring_files_engine&& other) noexcept {
+    windows_ioring_files_queue& operator=(windows_ioring_files_queue&& other) noexcept {
         buffers_ = std::move(other.buffers_);
         request_contexts_ = std::move(other.request_contexts_);
         descriptors_ = std::move(other.descriptors_);
@@ -2598,12 +2718,12 @@ class windows_ioring_files_engine {
         std::swap(outstanding_, other.outstanding_);
         return *this;
     }
-    ~windows_ioring_files_engine() noexcept {
+    ~windows_ioring_files_queue() noexcept {
         if (ring_) ::CloseIoRing(ring_);
     }
 
     status_t open(config_t const& config) noexcept {
-        if (status_t const vetted = io_engine_vet_(config, transport()); failed(vetted)) return vetted;
+        if (status_t const vetted = io_queue_vet_(config, transport()); failed(vetted)) return vetted;
         IORING_CREATE_FLAGS const flags {IORING_CREATE_REQUIRED_FLAGS_NONE, IORING_CREATE_ADVISORY_FLAGS_NONE};
         // At most the queue depth of reads is outstanding, each leaving one completion.
         HRESULT const created = ::CreateIoRing(IORING_VERSION_3, flags, static_cast<UINT32>(config.queue_depth),
@@ -2628,7 +2748,7 @@ class windows_ioring_files_engine {
     }
 
     template <typename media_type_>
-    status_t attach(std::span<media_type_ const> media) noexcept {
+    status_t register_media(std::span<media_type_ const> media, media_list_key_t) noexcept {
         if (status_t const copied = copy_descriptors_(descriptors_, media); failed(copied)) return copied;
         if (descriptors_.empty()) return status_code_t::success_k;
         HRESULT const built = ::BuildIoRingRegisterFileHandles(ring_, static_cast<UINT32>(descriptors_.size()),
@@ -2637,11 +2757,9 @@ class windows_ioring_files_engine {
         return status_code_t::success_k;
     }
 
-    void detach() noexcept { descriptors_.clear(); }
-
     status_t enqueue_read(io_request_t request) noexcept {
         if (outstanding_ == queue_depth_) return status_code_t::overflow_k;
-        if (status_t const vetted = io_request_vet_(request, descriptors_.size()); failed(vetted)) return vetted;
+        if (status_t const vetted = validate_io_request_(request, descriptors_.size()); failed(vetted)) return vetted;
         IORING_HANDLE_REF const file = ::IoRingHandleRefFromIndex(request.medium);
         IORING_BUFFER_REF const destination = ::IoRingBufferRefFromIndexAndOffset(
             0, static_cast<UINT32>(static_cast<std::size_t>(request.buffer) * buffers_.stride()));
@@ -2714,9 +2832,9 @@ class windows_ioring_files_engine {
 
 #endif
 
-#pragma endregion Ring Engines
+#pragma endregion Ring Queues
 
-#pragma region SPDK Engine
+#pragma region SPDK Queue
 
 #if USEARCH_WITH_LINUX_SPDK
 
@@ -2754,31 +2872,30 @@ struct linux_spdk_dma_allocator {
  *
  *  Nothing here blocks, because the driver offers no interrupt at all:
  *  @c spdk_nvme_qpair_process_completions is the only way a command is ever seen to finish, so a
- *  blocking @c submit spins on it with the engine's waiter between polls. Queue pairs carry no
- *  lock, which is why each engine keeps its own and only its thread drives them. Commands are
- *  queued with delayed doorbells, so @c enqueue_read only encodes and the next poll rings once per
- *  batch.
+ *  blocking @c submit spins on it with the queue's waiter between polls. Queue pairs hold no lock,
+ *  which is why each queue keeps its own and only its thread drives them. Commands are queued with
+ *  delayed doorbells, so @c enqueue_read only encodes and the next poll rings once per batch.
  */
 template <typename wait_type_, typename allocator_type_ = forkunion_allocator_t>
-class linux_spdk_engine {
+class linux_spdk_queue {
   public:
     using wait_t = wait_type_;
     using allocator_t = allocator_type_;
     using medium_t = spdk_medium_t;
-    using config_t = io_engine_config_t;
+    using config_t = io_queue_config_t;
 
     static constexpr io_transport_t transport() noexcept { return io_transport_t::linux_spdk_k; }
 
-    explicit linux_spdk_engine(allocator_t const& allocator = {}) noexcept
+    explicit linux_spdk_queue(allocator_t const& allocator = {}) noexcept
         : buffers_(linux_spdk_dma_allocator<> {allocator.memory_domain}), queue_pairs_(allocator),
           namespaces_(allocator), commands_(allocator), request_contexts_(allocator), completions_(allocator) {}
-    linux_spdk_engine(linux_spdk_engine&&) noexcept = default;
-    linux_spdk_engine& operator=(linux_spdk_engine&&) noexcept = default;
-    ~linux_spdk_engine() noexcept { assert(queue_pairs_.empty() && "An engine is released before it dies"); }
+    linux_spdk_queue(linux_spdk_queue&&) noexcept = default;
+    linux_spdk_queue& operator=(linux_spdk_queue&&) noexcept = default;
+    ~linux_spdk_queue() noexcept { assert(queue_pairs_.empty() && "A queue is released before it dies"); }
 
     /** Sizes the completion queue for @p config's depth, once the environment runs. */
     status_t open(config_t const& config) noexcept {
-        if (status_t const vetted = io_engine_vet_(config, transport()); failed(vetted)) return vetted;
+        if (status_t const vetted = io_queue_vet_(config, transport()); failed(vetted)) return vetted;
         if (!linux_spdk_process_t::running()) return status_code_t::uninitialized_k;
         if (failed(completions_.reserve_exactly(config.queue_depth))) return status_code_t::out_of_memory_k;
         queue_depth_ = config.queue_depth;
@@ -2798,7 +2915,7 @@ class linux_spdk_engine {
     /** Maps each medium to this thread's queue pair on its controller, allocating that queue pair
      *  once. */
     template <typename media_type_>
-    status_t attach(std::span<media_type_ const> media) noexcept {
+    status_t register_media(std::span<media_type_ const> media, media_list_key_t) noexcept {
         namespaces_.clear();
         if (status_t const reserved = namespaces_.reserve(media.size()); failed(reserved)) return reserved;
         for (media_type_ const& medium : media) {
@@ -2812,14 +2929,12 @@ class linux_spdk_engine {
         return status_code_t::success_k;
     }
 
-    void detach() noexcept { namespaces_.clear(); }
-
-    /** Frees every queue pair and its hold on the controller, on the engine's own thread. */
+    /** Frees every queue pair and its hold on the controller, on the queue's own thread. */
     void release() noexcept { release_queue_pairs_(); }
 
     status_t enqueue_read(io_request_t request) noexcept {
         if (outstanding_ == queue_depth_) return status_code_t::overflow_k;
-        if (status_t const vetted = io_request_vet_(request, namespaces_.size()); failed(vetted)) return vetted;
+        if (status_t const vetted = validate_io_request_(request, namespaces_.size()); failed(vetted)) return vetted;
         attached_namespace_t const& name_space = namespaces_[request.medium];
         request_contexts_[request.buffer] = request.context;
         // Commands address whole sectors, so a read off the grid fails alone, as `O_DIRECT` answers
@@ -2834,7 +2949,7 @@ class linux_spdk_engine {
         int const issued = spdk_nvme_ns_cmd_read(
             name_space.name_space, name_space.queue_pair, buffers_.buffer(request.buffer),
             request.offset / name_space.block_bytes, request.length / name_space.block_bytes,
-            &linux_spdk_engine::completed_, &command, 0);
+            &linux_spdk_queue::completed_, &command, 0);
         if (issued == -ENOMEM) return status_code_t::overflow_k;
         // A command the driver refuses outright fails alone.
         if (issued != 0) complete_(request.buffer, issued);
@@ -2885,11 +3000,11 @@ class linux_spdk_engine {
         u32_t block_bytes;
     };
 
-    /** What a command's callback receives: its engine, the buffer it arrives in, and its length. */
+    /** What a command's callback receives: its queue, the buffer it arrives in, and its length. */
     struct command_t {
 
-        /** The engine whose completion queue the callback fills. */
-        linux_spdk_engine* engine;
+        /** The queue whose completion queue the callback fills. */
+        linux_spdk_queue* queue;
 
         /** The buffer the command arrives in, which its completion names. */
         io_buffer_id_t buffer;
@@ -2907,7 +3022,7 @@ class linux_spdk_engine {
     static void completed_(void* callback_argument, spdk_nvme_cpl const* completion) noexcept {
         command_t const& command = *static_cast<command_t const*>(callback_argument);
         i32_t const result = spdk_nvme_cpl_is_error(completion) ? -EIO : static_cast<i32_t>(command.length);
-        command.engine->complete_(command.buffer, result);
+        command.queue->complete_(command.buffer, result);
     }
 
     /** This thread's queue pair on @p connected, allocated with delayed doorbells on first use. */
@@ -2939,7 +3054,7 @@ class linux_spdk_engine {
         namespaces_.clear();
     }
 
-    /** Frees the failed queue pairs, which aborts what they held, and empties the engine. */
+    /** Frees the failed queue pairs, which aborts what they held, and empties the queue. */
     status_t abandon_() noexcept {
         release_queue_pairs_();
         completions_.clear();
@@ -2974,9 +3089,9 @@ class linux_spdk_engine {
 
 #endif
 
-#pragma endregion SPDK Engine
+#pragma endregion SPDK Queue
 
-#pragma region Engine Sets
+#pragma region Queue Sets
 
 /** Folds @p types_ into a @c std::variant of the distinct ones in order, or the lone type when they
  *  agree. */
@@ -2999,274 +3114,269 @@ struct distinct_media_<std::variant<kept_types_...>, next_type_, types_...> {
 };
 
 /**
- *  @brief Several engines behind one type: @c open picks one at runtime, and every concept member
+ *  @brief Several queues behind one type: @c open picks one at runtime, and every concept member
  *      forwards to it through one @c std::visit, a predictable switch per call.
  *
- *  An @c automatic_k configuration tries the kernel files engines in order, so io_uring refused by
- *  a seccomp profile falls to AIO, and a refused AIO context to blocking reads. Any other transport
- *  opens exactly its own engine or answers why it could not. The media are a @c std::variant of the
- *  engines' distinct media types, or the one type they share.
+ *  An @c automatic_k configuration tries the kernel files queues in order, so io_uring refused by a
+ *  seccomp profile falls to AIO, and a refused AIO context to blocking reads. Any other transport
+ *  opens exactly its own queue or answers why it could not. The media are a @c std::variant of the
+ *  queues' distinct media types, or the one type they share.
  */
-template <typename... engine_types_>
-class io_engine_variant {
+template <typename... queue_types_>
+class io_queue_variant {
   public:
-    using engines_t = std::variant<engine_types_...>;
-    using allocator_t = typename std::variant_alternative_t<0, engines_t>::allocator_t;
-    using medium_t = typename distinct_media_<std::variant<>, typename engine_types_::medium_t...>::type;
-    using config_t = io_engine_config_t;
+    using queues_t = std::variant<queue_types_...>;
+    using allocator_t = typename std::variant_alternative_t<0, queues_t>::allocator_t;
+    using medium_t = typename distinct_media_<std::variant<>, typename queue_types_::medium_t...>::type;
+    using config_t = io_queue_config_t;
 
-    static_assert((std::is_same_v<typename engine_types_::allocator_t, allocator_t> && ...),
-                  "Every engine of a set places its buffers through one allocator");
+    static_assert((std::is_same_v<typename queue_types_::allocator_t, allocator_t> && ...),
+                  "Every queue of a set places its buffers through one allocator");
 
-    explicit io_engine_variant(allocator_t const& allocator = {}) noexcept
-        : engines_(std::in_place_index<0>, allocator), allocator_(allocator) {}
+    explicit io_queue_variant(allocator_t const& allocator = {}) noexcept
+        : queues_(std::in_place_index<0>, allocator), allocator_(allocator) {}
 
     /**
-     *  @brief Opens the engine @p config names, or under @c automatic_k the first kernel files
-     *      engine whose setup the host admits, a refused setup passing to the next.
+     *  @brief Opens the queue @p config names, or under @c automatic_k the first kernel files
+     *      queue whose setup the host admits, a refused setup passing to the next.
      *
      *  @par Statuses:
-     *  - @c unsupported_k The set has no engine for the named transport, or none set up.
-     *  - @c io_k The named engine's setup was refused.
+     *  - @c unsupported_k The set has no queue for the named transport, or none set up.
+     *  - @c io_k The named queue's setup was refused.
      *  - @c invalid_argument_k A zero queue depth.
      *  - @c uninitialized_k SPDK named before its environment started.
      */
     status_t open(config_t const& config) noexcept { return open_<0>(config); }
 
-    /** The transport of the engine @c open picked. */
+    /** The transport of the queue @c open picked. */
     io_transport_t transport() const noexcept {
-        return std::visit([](auto const& engine) noexcept { return engine.transport(); }, engines_);
+        return std::visit([](auto const& queue) noexcept { return queue.transport(); }, queues_);
     }
 
     /**
-     *  Cuts the picked engine's staging region into @p buffers buffers of @p buffer_bytes each.
+     *  @brief Cuts the staging region of the picked queue into @p buffers buffers, each of
+     *      @p buffer_bytes bytes.
      *
      *  @par Statuses:
      *  - @c overflow_k The region's byte count overflows, or passes what Windows registers.
      */
     status_t reserve(std::size_t buffers, std::size_t buffer_bytes) noexcept {
-        return std::visit([&](auto& engine) noexcept { return engine.reserve(buffers, buffer_bytes); }, engines_);
+        return std::visit([&](auto& queue) noexcept { return queue.reserve(buffers, buffer_bytes); }, queues_);
     }
 
     /**
-     *  Attaches @p media to the picked engine, which request medium IDs index until @c detach.
+     *  @brief Registers @p media, the list of @p key, with the picked queue, so request medium
+     *      IDs index them.
      *
      *  @par Statuses:
-     *  - @c config_mismatch_k A medium the picked engine cannot read.
+     *  - @c config_mismatch_k A medium the picked queue cannot read.
      */
-    status_t attach(std::span<medium_t const> media) noexcept {
-        return std::visit([&](auto& engine) noexcept { return engine.attach(media); }, engines_);
+    status_t register_media(std::span<medium_t const> media, media_list_key_t key) noexcept {
+        return std::visit([&](auto& queue) noexcept { return queue.register_media(media, key); }, queues_);
     }
 
-    void detach() noexcept {
-        std::visit([](auto& engine) noexcept { engine.detach(); }, engines_);
-    }
-
-    /** Gives back what the engine holds on devices other engines share, as SPDK queue pairs do. */
+    /** Gives back what the queue holds on devices other queues share, as SPDK queue pairs do. */
     void release() noexcept {
         std::visit(
-            [](auto& engine) noexcept {
-                if constexpr (requires { engine.release(); }) engine.release();
+            []<typename queue_type_>(queue_type_& queue) noexcept {
+                if constexpr (releasing_queue<queue_type_>) queue.release();
             },
-            engines_);
+            queues_);
     }
 
     /**
-     *  Queues @p request on the picked engine for the next @c submit.
+     *  @brief Queues @p request on the picked queue for the next @c submit.
      *
      *  @par Statuses:
      *  - @c overflow_k The queue already holds its depth.
      *  - @c invalid_argument_k A medium never attached, or a length past what a completion counts.
      */
     status_t enqueue_read(io_request_t request) noexcept {
-        return std::visit([&](auto& engine) noexcept { return engine.enqueue_read(request); }, engines_);
+        return std::visit([&](auto& queue) noexcept { return queue.enqueue_read(request); }, queues_);
     }
 
-    /** Submits every queued request on the picked engine, waiting as @p wait says. */
+    /** Submits every queued request on the picked queue, waiting as @p wait says. */
     status_t submit(io_wait_t wait) noexcept {
-        return std::visit([&](auto& engine) noexcept { return engine.submit(wait); }, engines_);
+        return std::visit([&](auto& queue) noexcept { return queue.submit(wait); }, queues_);
     }
 
     std::size_t poll_completions(std::span<io_completion_t> completions) noexcept {
-        return std::visit([&](auto& engine) noexcept { return engine.poll_completions(completions); }, engines_);
+        return std::visit([&](auto& queue) noexcept { return queue.poll_completions(completions); }, queues_);
     }
 
     std::byte* buffer(io_buffer_id_t buffer) noexcept {
-        return std::visit([&](auto& engine) noexcept { return engine.buffer(buffer); }, engines_);
+        return std::visit([&](auto& queue) noexcept { return queue.buffer(buffer); }, queues_);
     }
 
-    /** Whether the picked engine reads into buffers registered once; @c plain_k for one that
+    /** Whether the picked queue reads into buffers registered once; @c plain_k for one that
      *  registers none. */
     linux_uring_buffer_registration_t buffer_registration() const noexcept {
         return std::visit(
-            [](auto const& engine) noexcept {
-                if constexpr (requires { engine.buffer_registration(); }) return engine.buffer_registration();
+            []<typename queue_type_>(queue_type_ const& queue) noexcept {
+                if constexpr (registering_queue<queue_type_>) return queue.buffer_registration();
                 else return linux_uring_buffer_registration_t::plain_k;
             },
-            engines_);
+            queues_);
     }
 
   private:
     template <std::size_t index_>
-        requires(index_ == sizeof...(engine_types_))
+        requires(index_ == sizeof...(queue_types_))
     status_t open_(config_t const&) noexcept {
         return status_code_t::unsupported_k;
     }
 
     template <std::size_t index_>
-        requires(index_ < sizeof...(engine_types_))
+        requires(index_ < sizeof...(queue_types_))
     status_t open_(config_t const& config) noexcept {
-        using engine_t = std::variant_alternative_t<index_, engines_t>;
-        if (!opens_(engine_t::transport(), config.transport)) return open_<index_ + 1>(config);
-        status_t const opened = engines_.template emplace<index_>(allocator_).open(config);
+        using queue_t = std::variant_alternative_t<index_, queues_t>;
+        if (!opens_(queue_t::transport(), config.transport)) return open_<index_ + 1>(config);
+        status_t const opened = queues_.template emplace<index_>(allocator_).open(config);
         // A named transport opens exactly or answers why; only the automatic ladder degrades.
         if (opened != status_code_t::io_k || config.transport != io_transport_t::automatic_k) return opened;
         return open_<index_ + 1>(config);
     }
 
-    /** Whether an engine driving @p engine answers a request for @p wanted: the named one alone,
-     *  or under @c automatic_k every kernel files engine. */
-    static constexpr bool opens_(io_transport_t engine, io_transport_t wanted) noexcept {
+    /** Whether a queue driving @p queue answers a request for @p wanted: the named one alone,
+     *  or under @c automatic_k every kernel files queue. */
+    static constexpr bool opens_(io_transport_t queue, io_transport_t wanted) noexcept {
         if (wanted == io_transport_t::automatic_k)
-            return engine != io_transport_t::linux_spdk_k && engine != io_transport_t::linux_uring_nvme_k;
-        return engine == wanted;
+            return queue != io_transport_t::linux_spdk_k && queue != io_transport_t::linux_uring_nvme_k;
+        return queue == wanted;
     }
 
-    engines_t engines_;
+    queues_t queues_;
     [[no_unique_address]] allocator_t allocator_;
 };
 
-/** The engine a set materializes: the one engine itself, so a single-engine build dispatches
- *  nothing, or an @c io_engine_variant over several. */
-template <typename... engine_types_>
-using any_io_engine =
-    std::conditional_t<sizeof...(engine_types_) == 1, std::variant_alternative_t<0, std::variant<engine_types_...>>,
-                       io_engine_variant<engine_types_...>>;
+/** The queue a set materializes: the one queue itself, so a single-queue build dispatches
+ *  nothing, or an @c io_queue_variant over several. */
+template <typename... queue_types_>
+using any_io_queue =
+    std::conditional_t<sizeof...(queue_types_) == 1, std::variant_alternative_t<0, std::variant<queue_types_...>>,
+                       io_queue_variant<queue_types_...>>;
 
-/** Every engine this build admits, each waiting through @p wait_type_, in the order a kernel path
+/** Every queue this build admits, each waiting through @p wait_type_, in the order a kernel path
  *  tries them; blocking reads close every list, and passthrough opens only when named. */
 template <typename wait_type_>
-using default_io_engine = any_io_engine<
+using default_io_queue = any_io_queue<
 #if USEARCH_WITH_LINUX_URING
-    linux_uring_nvme_engine<wait_type_>, linux_uring_files_engine<wait_type_>,
+    linux_uring_nvme_queue<wait_type_>, linux_uring_files_queue<wait_type_>,
 #endif
 #if USEARCH_WITH_LINUX_AIO
-    linux_aio_files_engine<wait_type_>,
+    linux_aio_files_queue<wait_type_>,
 #endif
 #if USEARCH_WITH_LINUX_SPDK
-    linux_spdk_engine<wait_type_>,
+    linux_spdk_queue<wait_type_>,
 #endif
 #if USEARCH_WITH_WINDOWS_IORING
-    windows_ioring_files_engine<wait_type_>,
+    windows_ioring_files_queue<wait_type_>,
 #endif
-    blocking_files_engine<wait_type_>>;
+    blocking_files_queue<wait_type_>>;
 
-#pragma endregion Engine Sets
+#pragma endregion Queue Sets
 
 #pragma region Executor
 
 /**
- *  @brief The threads a storage walk advances on, each with its scratch arena and its own engine.
+ *  @brief The threads a storage walk advances on, each with its scratch arena and its own queue.
  *
- *  Composes @c forkunion_executor_t for the threads, their arenas and the one-caller hold, and
- *  builds each engine on its own thread, so a ring's single issuer is the thread that submits to
- *  it. A call attaches a view's media to every engine for its own duration and detaches on return,
- *  so no state outlives a call and any executor serves any view.
+ *  Composes @c ram_executor_t for the threads, their arenas and the one-caller hold, and builds
+ *  each queue on its own thread, so a ring's single issuer is the thread that submits to it. A call
+ *  registers a view's media with every queue, which keeps them until a call over another list
+ *  replaces them, so a warm call over the same list registers nothing and any executor serves any
+ *  view. A ring's file table keeps the last list's files open in the kernel after their index
+ *  closes them, until another list replaces them or the executor is freed.
  */
-template <typename engine_type_>
+template <typename queue_type_>
 class nvme_executor {
   public:
-    using engine_t = engine_type_;
-    using medium_t = typename engine_t::medium_t;
-    using config_t = typename engine_t::config_t;
-    using allocator_t = typename engine_t::allocator_t;
-    using arena_t = forkunion_executor_t::arena_t;
-    using claim_t = forkunion_executor_t::claim_t;
+    using queue_t = queue_type_;
+    using medium_t = typename queue_t::medium_t;
+    using config_t = typename queue_t::config_t;
+    using allocator_t = typename queue_t::allocator_t;
+    using arena_t = ram_executor_t::arena_t;
+    using claim_t = ram_executor_t::claim_t;
 
-    static_assert(io_engine<engine_t>, "An executor drives engines through the I/O engine concept");
-
-    /** One call's media, attached on every thread until it dies. */
-    class attachment_t {
-      public:
-        attachment_t() noexcept = default;
-        attachment_t(attachment_t&& other) noexcept : executor_(std::exchange(other.executor_, nullptr)) {}
-        attachment_t& operator=(attachment_t&& other) noexcept {
-            std::swap(executor_, other.executor_);
-            return *this;
-        }
-        attachment_t(attachment_t const&) = delete;
-        attachment_t& operator=(attachment_t const&) = delete;
-        ~attachment_t() noexcept {
-            if (executor_) executor_->detach_();
-        }
-
-      private:
-        friend class nvme_executor;
-        explicit attachment_t(nvme_executor* executor) noexcept : executor_(executor) {}
-
-        /** The executor whose engines hold the media, null once moved out. */
-        nvme_executor* executor_ = nullptr;
-    };
+    static_assert(io_queue<queue_t>, "An executor drives queues through the I/O queue concept");
 
     nvme_executor() noexcept = default;
     nvme_executor(nvme_executor&&) noexcept = default;
     nvme_executor& operator=(nvme_executor&&) noexcept = default;
 
-    ~nvme_executor() noexcept { close_engines_(); }
+    ~nvme_executor() noexcept { close_queues_(); }
 
-    /** Releases every engine on its own thread, which must precede the executor's death once an
-     *  engine holds devices other engines share. */
+    /** Releases every queue on its own thread, which must precede the executor's death once an
+     *  queue holds devices other queues share. */
     void release() noexcept {
-        if constexpr (requires(engine_t& engine) { engine.release(); }) {
+        if constexpr (releasing_queue<queue_t>) {
             [[maybe_unused]] status_t const released = threads_.for_threads(
                 [&](std::size_t thread, std::size_t) noexcept {
-                    if (thread < engines_.size()) engines_[thread].release();
+                    if (thread < queues_.size()) queues_[thread].release();
                 });
         }
     }
 
     /**
      *  @brief Spawns @p threads over @p topology under the ForkUnion facilities @p allowed names,
-     *      zero threads meaning @c forkunion_executor_t::default_threads, on the compute domains
-     *      local to @p near_domain, or across the machine without one.
+     *      zero threads meaning @c ram_executor_t::default_threads, on the compute domains local to
+     *      @p near_domain, or across the machine without one, each thread's scratch holding at most
+     *      @p scratch_limit bytes, zero for @c scratch_limit_default_k.
      *
-     *  Each engine opens with @p config on its own thread, every one on the transport thread zero's
-     *  engine picked. A nonzero @p config queue depth pins every call's depth, while zero leaves
-     *  each call to derive its own from the media it reads, the engines one read deep until then.
+     *  Each queue opens with @p config on its own thread, every one on the transport thread zero's
+     *  queue picked. A nonzero @p config queue depth pins every call's depth, while zero leaves
+     *  each call to derive its own from the media it reads, the queues @p opening_depth reads
+     *  deep, at least one, until a call needs more.
      *
      *  @par Statuses:
      *  - @c uninitialized_k SPDK is named without a driver.
-     *  - @c unsupported_k The build has no engine for @p config's transport, or none set up.
-     *  - @c io_k The named engine's setup was refused.
+     *  - @c unsupported_k The build has no queue for @p config's transport, or none set up.
+     *  - @c io_k The named queue's setup was refused.
      */
     static expected<nvme_executor> spawn(fu_topology_t topology, std::size_t threads, config_t const& config,
                                          fu_capabilities_t allowed = fu_capabilities_all_k,
-                                         fu_memory_domain_id_t near_domain = no_memory_domain_k) noexcept {
-        nvme_executor executor;
+                                         fu_memory_domain_id_t near_domain = no_memory_domain_k,
+                                         std::size_t scratch_limit = 0, std::size_t opening_depth = 0) noexcept {
         // The caller never runs a slice, so each thread index stays one OS thread, the single
         // issuer a ring wants.
         bool const os_threads = fu_comptime_capabilities() & fu_capability_os_threads_k;
         auto [threads_executor, spawn_status] =
             os_threads && near_domain != no_memory_domain_k
-                ? forkunion_executor_t::spawn_near(topology, near_domain, threads, allowed)
-                : forkunion_executor_t::spawn(topology, threads,
-                                              os_threads ? fu_caller_exclusive_k : fu_caller_inclusive_k, allowed);
-        executor.threads_ = std::move(threads_executor);
-        if (failed(spawn_status)) return {std::move(executor), spawn_status};
-        if (status_t const sized = executor.engines_.resize(executor.threads_.size()); failed(sized))
+                ? ram_executor_t::spawn_near(topology, near_domain, threads, allowed, scratch_limit)
+                : ram_executor_t::spawn(topology, threads, os_threads ? fu_caller_exclusive_k : fu_caller_inclusive_k,
+                                        allowed, scratch_limit);
+        if (failed(spawn_status)) return {nvme_executor {}, spawn_status};
+        return acquire(std::move(threads_executor), config, opening_depth);
+    }
+
+    /**
+     *  @brief Takes over @p threads and opens a queue with @p config on each of its threads,
+     *      @p opening_depth reads deep without a pinned depth, as @ref spawn does, so the calling
+     *      thread alone can drive one queue without an OS thread.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k SPDK is named without a driver, or @p threads hold no pool.
+     *  - @c unsupported_k The build has no queue for @p config's transport, or none set up.
+     *  - @c io_k The named queue's setup was refused.
+     */
+    static expected<nvme_executor> acquire(ram_executor_t&& threads, config_t const& config,
+                                           std::size_t opening_depth = 0) noexcept {
+        nvme_executor executor;
+        executor.threads_ = std::move(threads);
+        if (status_t const sized = executor.queues_.resize(executor.threads_.size()); failed(sized))
             return {std::move(executor), sized};
         executor.pinned_depth_ = config.queue_depth;
-        // An unpinned depth waits for the media; one read deep picks the transport.
-        executor.opened_ = config, executor.opened_.queue_depth = max_of<std::size_t>(config.queue_depth, 1);
+        executor.opened_ = config;
+        executor.opened_.queue_depth = config.queue_depth ? config.queue_depth : max_of<std::size_t>(opening_depth, 1);
         // A fallback decided per thread could mix transports, so the others follow thread zero's
         // choice or fail.
         status_t opened = executor.on_every_thread_([&](std::size_t thread) noexcept {
-            return thread ? status_code_t::success_k : executor.open_engine_(thread, executor.opened_);
+            return thread ? status_code_t::success_k : executor.open_queue_(thread, executor.opened_);
         });
         if (failed(opened)) return {std::move(executor), opened};
-        executor.opened_.transport = executor.engines_[0].transport();
+        executor.opened_.transport = executor.queues_[0].transport();
         opened = executor.on_every_thread_([&](std::size_t thread) noexcept {
-            return thread ? executor.open_engine_(thread, executor.opened_) : status_code_t::success_k;
+            return thread ? executor.open_queue_(thread, executor.opened_) : status_code_t::success_k;
         });
         return {std::move(executor), opened};
     }
@@ -3280,33 +3390,37 @@ class nvme_executor {
     expected<claim_t> claim() noexcept { return threads_.claim(); }
 
     /**
-     *  @brief Reopens every engine @p queue_depth reads deep under @p reaping, on the transport
-     *      they hold, when they were opened to another shape.
+     *  @brief Reopens every queue @p queue_depth reads deep, on the transport and polling they
+     *      hold, when they were opened shallower, so the rings grow once and never shrink.
      *
-     *  Runs with nothing in flight, and the buffers are reserved afresh after it.
+     *  Interrupt-driven rings read media of either @p polling, while polled ones read only media
+     *  that poll. Runs with nothing in flight, and the buffers are reserved afresh after it.
      *
      *  @par Statuses:
+     *  - @c config_mismatch_k Polled rings asked to read media that do not poll.
      *  - @c contended_k The pool is running another dispatch.
-     *  - @c io_k A thread's setup was refused at that shape.
+     *  - @c io_k A thread's setup was refused at that depth.
      */
-    status_t fit(std::size_t queue_depth, linux_uring_reaping_t reaping) noexcept {
-        if (queue_depth == opened_.queue_depth && reaping == opened_.reaping) return status_code_t::success_k;
-        config_t fitted = opened_;
-        fitted.queue_depth = queue_depth, fitted.reaping = reaping;
-        // Rings share a memlock limit with pinned buffers, so all engines close before any reopens.
-        close_engines_();
+    status_t grow_queue_depth_to(std::size_t queue_depth, linux_uring_polling_t polling) noexcept {
+        if (opened_.polling == linux_uring_polling_t::interrupted_k) polling = opened_.polling;
+        if (polling != opened_.polling)
+            return {status_code_t::config_mismatch_k, "Polled rings cannot read unpolled media"};
+        if (queue_depth <= opened_.queue_depth) return status_code_t::success_k;
+        config_t grown = opened_;
+        grown.queue_depth = queue_depth;
+        // Rings share a memlock limit with pinned buffers, so all queues close before any reopens.
+        close_queues_();
         status_t const opened = on_every_thread_(
-            [&](std::size_t thread) noexcept { return open_engine_(thread, fitted); });
-        // A refusal may leave some engines reopened, so no shape is held and the next call reopens.
+            [&](std::size_t thread) noexcept { return open_queue_(thread, grown); });
+        // A refusal may leave some queues reopened, so no depth is held and the next call reopens.
         opened_.queue_depth = succeeded(opened) ? queue_depth : 0;
-        opened_.reaping = reaping;
         return opened;
     }
 
     /**
-     *  Rewinds and seeds every thread's arena at @p scratch_bytes_per_thread, and cuts every
-     *  engine's staging region into @p buffers buffers of @p buffer_bytes each, regrowing and
-     *  re-registering it only when they do not fit.
+     *  @brief Rewinds and seeds every thread's arena at @p scratch_bytes_per_thread, and cuts every
+     *      queue's staging region into @p buffers buffers of @p buffer_bytes each, regrowing and
+     *      re-registering it only when they do not fit.
      *
      *  @par Statuses:
      *  - @c uninitialized_k The executor holds no threads.
@@ -3319,7 +3433,7 @@ class nvme_executor {
     }
 
     /**
-     *  @brief Cuts every engine's staging region into @p buffers buffers of @p buffer_bytes each,
+     *  @brief Cuts every queue's staging region into @p buffers buffers of @p buffer_bytes each,
      *      as @ref reserve does, with nothing in flight, while the arenas keep what a call carved.
      *
      *  @par Statuses:
@@ -3328,33 +3442,32 @@ class nvme_executor {
      */
     status_t reserve_buffers(std::size_t buffers, std::size_t buffer_bytes) noexcept {
         status_t const cut = on_every_thread_(
-            [&](std::size_t thread) noexcept { return engines_[thread].reserve(buffers, buffer_bytes); });
+            [&](std::size_t thread) noexcept { return queues_[thread].reserve(buffers, buffer_bytes); });
         cut_ = succeeded(cut) ? io_buffers_cut_t {buffers, buffer_bytes} : io_buffers_cut_t {};
         return cut;
     }
 
-    /** The buffers every engine's staging region was last cut into, and their bytes; zeros after a
+    /** The buffers every queue's staging region was last cut into, and their bytes; zeros after a
      *  refused cut. */
     io_buffers_cut_t buffers_cut() const noexcept { return cut_; }
 
     /**
-     *  Attaches @p media to every engine, so request medium IDs index them until the attachment
-     *  dies; a refusal on any thread detaches them all.
+     *  @brief Registers @p media, the list of @p key, with every queue, so request medium IDs
+     *      index them; a queue already holding @p key registers nothing.
      *
      *  @par Statuses:
      *  - @c uninitialized_k The executor holds no pool, or the pool has no workers.
      *  - @c contended_k The pool is running another dispatch.
-     *  - @c config_mismatch_k A medium the engines cannot read.
+     *  - @c config_mismatch_k A medium the queues cannot read.
+     *  - @c io_k The kernel refused a ring's file table.
      */
-    expected<attachment_t> attach(std::span<medium_t const> media) noexcept {
-        status_t const attached = on_every_thread_(
-            [&](std::size_t thread) noexcept { return engines_[thread].attach(media); });
-        if (failed(attached)) return detach_(), expected<attachment_t> {attachment_t {}, attached};
-        return {attachment_t {this}, status_code_t::success_k};
+    status_t register_media(std::span<medium_t const> media, media_list_key_t key) noexcept {
+        return on_every_thread_(
+            [&](std::size_t thread) noexcept { return queues_[thread].register_media(media, key); });
     }
 
-    /** Thread @p thread 's engine, driven only from that thread. */
-    engine_t& engine(std::size_t thread) noexcept { return engines_[thread]; }
+    /** Thread @p thread 's queue, driven only from that thread. */
+    queue_t& queue(std::size_t thread) noexcept { return queues_[thread]; }
 
     /** Thread @p thread 's arena; no two threads share one. */
     arena_t& arena(std::size_t thread) noexcept { return threads_.arena(thread); }
@@ -3389,7 +3502,7 @@ class nvme_executor {
     status_t wait() noexcept { return threads_.wait(); }
 
     /** The pool, its per-domain arenas and its one-caller hold. */
-    forkunion_executor_t& threads() noexcept { return threads_; }
+    ram_executor_t& threads() noexcept { return threads_; }
 
     /** Bytes of cache each core of the host pool keeps to itself. */
     std::size_t cache_bytes_per_core() const noexcept { return threads_.cache_bytes_per_core(); }
@@ -3397,33 +3510,33 @@ class nvme_executor {
     /** Threads this executor drives. */
     std::size_t size() const noexcept { return threads_.size(); }
 
-    /** Reads each engine keeps outstanding at most: the pinned depth, or the last call's. */
+    /** Reads each queue keeps outstanding at most: the pinned depth, or the deepest call's. */
     std::size_t queue_depth() const noexcept { return opened_.queue_depth; }
 
     /** The depth the spawn's config pinned for every call, zero when each call derives its own. */
     std::size_t pinned_depth() const noexcept { return pinned_depth_; }
 
-    /** Whether every engine reads into buffers registered once: @c plain_k once any kernel refused
-     *  to pin its thread's region, or where the engines register none. */
+    /** Whether every queue reads into buffers registered once: @c plain_k once any kernel refused
+     *  to pin its thread's region, or where the queues register none. */
     linux_uring_buffer_registration_t buffer_registration() const noexcept {
-        if constexpr (requires(engine_t const& engine) { engine.buffer_registration(); }) {
-            for (engine_t const& engine : engines_)
-                if (engine.buffer_registration() == linux_uring_buffer_registration_t::plain_k)
+        if constexpr (registering_queue<queue_t>) {
+            for (queue_t const& queue : queues_)
+                if (queue.buffer_registration() == linux_uring_buffer_registration_t::plain_k)
                     return linux_uring_buffer_registration_t::plain_k;
-            return engines_.empty() ? linux_uring_buffer_registration_t::plain_k
-                                    : linux_uring_buffer_registration_t::fixed_k;
+            return queues_.empty() ? linux_uring_buffer_registration_t::plain_k
+                                   : linux_uring_buffer_registration_t::fixed_k;
         }
         return linux_uring_buffer_registration_t::plain_k;
     }
 
   private:
 
-    /** Builds thread @p thread 's engine on its domain's allocator and opens it with @p config;
+    /** Builds thread @p thread 's queue on its domain's allocator and opens it with @p config;
      *  runs on that thread. */
-    status_t open_engine_(std::size_t thread, config_t const& config) noexcept {
-        engine_t& engine = engines_[thread];
-        engine = engine_t {allocator_t {threads_.memory_domain(thread)}};
-        return engine.open(config);
+    status_t open_queue_(std::size_t thread, config_t const& config) noexcept {
+        queue_t& queue = queues_[thread];
+        queue = queue_t {allocator_t {threads_.memory_domain(thread)}};
+        return queue.open(config);
     }
 
     /** Runs @p callback on every thread, answering the first failure any of them reported. */
@@ -3436,35 +3549,29 @@ class nvme_executor {
         return failed(dispatched) ? dispatched : failure;
     }
 
-    /** Replaces every engine with an unopened one on its own thread, the only one a single-issuer
+    /** Replaces every queue with an unopened one on its own thread, the only one a single-issuer
      *  ring takes an unregistration from. */
-    void close_engines_() noexcept {
+    void close_queues_() noexcept {
         [[maybe_unused]] status_t const closed = threads_.for_threads([&](std::size_t thread, std::size_t) noexcept {
-            if (thread < engines_.size()) engines_[thread] = engine_t {allocator_t {threads_.memory_domain(thread)}};
+            if (thread < queues_.size()) queues_[thread] = queue_t {allocator_t {threads_.memory_domain(thread)}};
         });
     }
 
-    /** Detaches every engine, each on its own thread. */
-    void detach_() noexcept {
-        [[maybe_unused]] status_t const detached = threads_.for_threads(
-            [&](std::size_t thread, std::size_t) noexcept { engines_[thread].detach(); });
-    }
-
     /** The pool, the per-domain arenas and the one-caller hold. */
-    forkunion_executor_t threads_;
+    ram_executor_t threads_;
 
-    /** The shape every engine was opened to: its transport, depth and reaping. */
+    /** The shape every queue was opened to: its transport, depth and polling. */
     config_t opened_;
 
     /** The depth the spawn pinned, zero when calls derive theirs. */
     std::size_t pinned_depth_ = 0;
 
-    /** What @ref reserve_buffers last cut every engine's staging region into. */
+    /** What @ref reserve_buffers last cut every queue's staging region into. */
     io_buffers_cut_t cut_ {};
 
-    /** One engine per thread, built and driven only on its thread; declared last, so engines die
+    /** One queue per thread, built and driven only on its thread; declared last, so queues die
      *  first. */
-    growing_buffer<engine_t> engines_ {global_allocator};
+    growing_buffer<queue_t> queues_ {global_allocator};
 };
 
 #pragma endregion Executor

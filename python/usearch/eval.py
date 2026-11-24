@@ -19,7 +19,7 @@ import numpy as np
 import numpy.typing as npt
 
 import numkong as nk
-from usearch import Arena, DenseIndex, DenseMetric, DenseTraversalStats, On
+from usearch import Arena, DenseIndex, DenseMetric, DenseTraversalStats, Executor
 from usearch.keys import integers_to_keys, keys_to_integers
 
 __all__: list[str] = [
@@ -117,16 +117,20 @@ class SearchStats:
         return self.count_matches / self.count_queries
 
 
-def index_keys(index: DenseIndex | On[DenseIndex], arena: Arena) -> npt.NDArray[np.uint8]:
-    """Every identity the index holds, as a (size, 16) matrix, walked through one cursor writing into *arena*."""
+def index_keys(index: DenseIndex, arena: Arena, executor: Executor | None = None) -> npt.NDArray[np.uint8]:
+    """Every identity the index holds, as a (size, 16) matrix, walked through one cursor writing into *arena*.
+
+    Each pull runs on *executor* when one is named, else on the calling thread.
+    """
     cursor, batches = index.cursor(), [np.zeros((0, 16), dtype=np.uint8)]
-    while batch := cursor.next(1024, arena):
+    puller = cursor if executor is None else cursor.on(executor)
+    while batch := puller.next(1024, arena):
         batches.append(np.array(batch.keys))
     return np.concatenate(batches, axis=0)
 
 
 def self_recall(
-    index: DenseIndex | On[DenseIndex],
+    index: DenseIndex,
     arena: Arena,
     sample: float | int = 1.0,
     count: int = 1,
@@ -135,34 +139,35 @@ def self_recall(
     vectors=None,
     expansion_factor: int = 0,
     stats: DenseTraversalStats | None = None,
+    executor: Executor | None = None,
 ) -> SearchStats:
     """Queries the index with its own vectors, which must find themselves.
 
     The weakest recall test there is, and the cheapest: it needs no ground truth. Use
     ``exact_matches`` when the question is how the index ranks against the exact answer.
 
-    The *index* is the index or any blocking receiver - ``index.on(executor)`` runs every call on
-    that executor, and every output lands in *arena*, made by that executor or by none for the
-    index itself. The *sample* is a share when a float and a count when an integer, and *count*
+    Every call runs on *executor* when one is named, else on the calling thread, and every output
+    lands in *arena*, made by that executor or by none. The *sample* is a share when a float and a count when an integer, and *count*
     is how many matches each query retrieves. The *keys* and *vectors* default to everything the
     index holds, and the *stats* given here is what the returned telemetry reads off.
     """
-    size = index.describe().size
+    receiver = index if executor is None else index.on(executor)
+    size = receiver.describe().size
     if size == 0:
         return SearchStats(0, 0, 0, 0, 0)
 
-    keys = np.asarray(index_keys(index, arena) if keys is None else keys)
+    keys = np.asarray(index_keys(index, arena, executor) if keys is None else keys)
     if sample != 1.0:
         wanted = int(ceil(len(keys) * sample)) if isinstance(sample, float) else sample
         chosen = np.random.default_rng(0).choice(len(keys), wanted, replace=False)
         keys = keys[chosen]
 
     if vectors is None:
-        vectors = np.concatenate([np.array(index.get(key, arena)) for key in keys], axis=0)
+        vectors = np.concatenate([np.array(receiver.get(key, arena)) for key in keys], axis=0)
     vectors = np.atleast_2d(np.asarray(vectors))
 
     stats = DenseTraversalStats() if stats is None else stats
-    matches = index.search(vectors, count, arena, expansion_factor=expansion_factor, stats=stats)
+    matches = receiver.search(vectors, count, arena, expansion_factor=expansion_factor, stats=stats)
 
     expected = keys_to_integers(keys)
     found = keys_to_integers(matches.keys)

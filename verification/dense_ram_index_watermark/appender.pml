@@ -11,7 +11,7 @@
  *
  *  @verify pass sc,rc11,far
  *  @verify pass far appender_order=order_relaxed: a compare-exchange is never posted, so even a
- *      relaxed one arrives before the watermark's release store that carries it
+ *      relaxed one arrives before the watermark's release store that holds it
  *  @verify pass sc spends_plan=false: a second `finish` finds the dispenser past the load's base,
  *      so its compare-exchange moves nothing
  */

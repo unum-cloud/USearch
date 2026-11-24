@@ -33,7 +33,7 @@ _EXTENSION_DTYPES: dict[str, npt.DTypeLike] = {
     ".u64bin": np.uint64,
     ".u128bin": np.dtype("V16"),
 }
-"""The scalar type each extension names, since the header carries only the shape; ``bf16`` rows read as their ``uint16`` words."""
+"""The scalar type each extension names, since the header holds only the shape; ``bf16`` rows read as their ``uint16`` words."""
 
 _BIT_EXTENSIONS: tuple[str, ...] = (".u1x8bin", ".b1bin")
 """The extensions whose header counts bits per row, while their rows read as whole bytes."""

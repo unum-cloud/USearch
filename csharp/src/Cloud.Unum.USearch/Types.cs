@@ -19,12 +19,12 @@ namespace Cloud.Unum.USearch;
 
 /// <summary>
 /// What went wrong, in the vocabulary the C interface defines - one enumerator per
-/// <c>usearch_status_*_k</c>, numbered alike. A <see cref="USearchException"/> never carries
+/// <c>usearch_status_*_k</c>, numbered alike. A <see cref="USearchException"/> never holds
 /// <see cref="Success"/> or <see cref="Deferred"/>, which only <see cref="Deferred.Status"/> reads.
 /// </summary>
 public enum Status : int
 {
-    /// <summary>The call completed and carries no message.</summary>
+    /// <summary>The call completed and holds no message.</summary>
     Success = 0,
     /// <summary>The call was submitted deferred and is not final yet; the one non-final status.</summary>
     Deferred = 1,
@@ -67,22 +67,22 @@ public enum Status : int
 
 /// <summary>
 /// One failed call: a <see cref="USearch.Status"/> every caller can branch on, and the detail
-/// the status cannot carry. Faults this binding catches before the boundary report the status
+/// the status cannot hold. Faults this binding catches before the boundary report the status
 /// the engine would have reported for the same fault.
 /// </summary>
 public class USearchException : Exception
 {
-    /// <summary>Initializes a failure carrying a status and its detail.</summary>
+    /// <summary>Initializes a failure holding a status and its detail.</summary>
     /// <param name="status">What went wrong.</param>
-    /// <param name="message">The detail the status cannot carry.</param>
+    /// <param name="message">The detail the status cannot hold.</param>
     public USearchException(Status status, string message) : base($"usearch: {status.Name()}: {message}")
     {
         this.Status = status;
     }
 
-    /// <summary>Initializes a failure carrying a status, its detail, and the exception behind it.</summary>
+    /// <summary>Initializes a failure holding a status, its detail, and the exception behind it.</summary>
     /// <param name="status">What went wrong.</param>
-    /// <param name="message">The detail the status cannot carry.</param>
+    /// <param name="message">The detail the status cannot hold.</param>
     /// <param name="cause">The exception this failure wraps.</param>
     public USearchException(Status status, string message, Exception cause)
         : base($"usearch: {status.Name()}: {message}", cause)
@@ -96,7 +96,7 @@ public class USearchException : Exception
 
 /// <summary>
 /// The <c>usearch_outcome_t</c> one call writes: a status every caller can branch on, and a static
-/// message carrying the detail the status cannot. Messages are static library storage, so nothing
+/// message holding the detail the status cannot. Messages are static library storage, so nothing
 /// here is deallocated.
 /// </summary>
 [StructLayout(LayoutKind.Sequential)]
@@ -133,7 +133,7 @@ public static partial class Names
     /// <summary>Spells a status, as <see cref="Status.ShapeMismatch"/> spells "shape-mismatch". Calls
     /// <c>usearch_status_name</c>.</summary>
     /// <param name="status">The status to spell.</param>
-    /// <returns>The canonical spelling, or "unrecognized" for a value no status carries.</returns>
+    /// <returns>The canonical spelling, or "unrecognized" for a value no status holds.</returns>
     public static string Name(this Status status) => Spelled(usearch_status_name(status));
 
     /// <summary>Spells a scalar kind, as <see cref="Scalar.F32"/> spells "f32". Calls
@@ -223,7 +223,7 @@ public static partial class Names
     /// <summary>Copies a static spelling out of the library.</summary>
     private static string Spelled(IntPtr spelling) => Marshal.PtrToStringUTF8(spelling) ?? string.Empty;
 
-    /// <summary>Lends a spelling to a C parser, whose fallbacks the round trip above tells apart from
+    /// <summary>Passes a spelling to a C parser, whose fallbacks the round trip above tells apart from
     /// a genuine match, since the tables answer a default rather than a failure.</summary>
     private static unsafe TValue Read<TValue>(string name, Func<NativeBytesView, TValue> parse)
     {
@@ -257,7 +257,7 @@ public static partial class Names
 [StructLayout(LayoutKind.Sequential)]
 public struct Key : IEquatable<Key>
 {
-    /// <summary>The number of identity bytes a key carries.</summary>
+    /// <summary>The number of identity bytes a key holds.</summary>
     public const int ByteCount = 16;
 
     /// <summary>The sixteen identity bytes, most significant first.</summary>
@@ -289,7 +289,7 @@ public struct Key : IEquatable<Key>
     }
 
     /// <summary>Reads the integer identity in the low eight bytes.</summary>
-    /// <param name="value">The identity, when the high eight bytes carry nothing.</param>
+    /// <param name="value">The identity, when the high eight bytes hold nothing.</param>
     /// <returns>True when the high eight bytes are zero, false otherwise.</returns>
     public bool TryGetUInt64(out ulong value)
     {
@@ -465,7 +465,7 @@ public struct Key : IEquatable<Key>
 /// dimensions per byte, as their <c>xN</c> suffixes spell. Mirrors <c>usearch_scalar_t</c>.
 /// </summary>
 /// <remarks>
-/// The enumerators are ordered by shrinking dynamic range, and their values carry the numbering
+/// The enumerators are ordered by shrinking dynamic range, and their values hold the numbering
 /// gaps the C enum reserves for kinds not yet implemented.
 /// </remarks>
 public enum Scalar : int
@@ -530,7 +530,7 @@ internal static class ScalarKinds
         _ => 0,
     };
 
-    /// <summary>Reports how many logical dimensions one stored value carries.</summary>
+    /// <summary>Reports how many logical dimensions one stored value holds.</summary>
     /// <param name="kind">The scalar kind.</param>
     /// <returns>One for the byte-and-wider kinds, more for the packed ones.</returns>
     internal static int DimensionsPerValue(this Scalar kind) => kind switch
@@ -706,10 +706,10 @@ public readonly struct U1x8 : IScalar
 /// <c>usearch_rows_view_t</c>.
 /// </summary>
 /// <remarks>
-/// A view borrows and never owns: it holds the <see cref="Memory{T}"/> it was built from, so the
+/// A view only points at memory it never owns: it holds the <see cref="Memory{T}"/> it was built from, so the
 /// slab stays reachable for as long as the view is, and a deferred call pins it until final.
 /// <para>
-/// The scalar kind is carried rather than derived, so a slab of bytes reaches the index as packed
+/// The scalar kind is held rather than derived, so a slab of bytes reaches the index as packed
 /// <see cref="Scalar.U1x8"/> bit sets or as plain <see cref="Scalar.U8"/> integers, the
 /// caller having said which.
 /// </para>
@@ -814,7 +814,7 @@ public readonly struct RowsView
     /// <returns>The pin, whose pointer is the first row.</returns>
     internal MemoryHandle Pin() => this._slab?.Pin() ?? default;
 
-    /// <summary>Lends the slab as the input descriptor every batch verb reads, whose row count
+    /// <summary>Passes the slab as the input descriptor every batch verb reads, whose row count
     /// travels as the call's own count.</summary>
     /// <param name="data">The first row, fixed or pinned for the call.</param>
     /// <returns>The C struct the library reads.</returns>
@@ -945,7 +945,7 @@ internal enum Admission : int
     Admit = 1,
 }
 
-/// <summary>How costly one predicate call is, which decides how many keys each call carries.</summary>
+/// <summary>How costly one predicate call is, which decides how many keys each call holds.</summary>
 internal enum PredicateCost : int
 {
     /// <summary>Asked as candidates arrive, at most four keys a call, with nothing buffered.</summary>
@@ -954,7 +954,7 @@ internal enum PredicateCost : int
     Expensive = 1,
 }
 
-/// <summary>Whether a watched call carries on or unwinds, as a progress handler answers.</summary>
+/// <summary>Whether a watched call continues or unwinds, as a progress handler answers.</summary>
 internal enum Continuation : int
 {
     /// <summary>Carry on to the next unit of work.</summary>
@@ -974,7 +974,7 @@ internal enum Continuation : int
 /// </remarks>
 /// <param name="completed">Units finished so far, never decreasing across one call's reports.</param>
 /// <param name="total">Units the call finishes unless cancelled.</param>
-/// <returns>True to carry on, false to cancel.</returns>
+/// <returns>True to continue, false to cancel.</returns>
 public delegate bool Progress(ulong completed, ulong total);
 
 /// <summary>
@@ -988,7 +988,7 @@ internal unsafe struct Registration
     /// <summary>Holds the handler for the call, answering the state its trampoline reads.</summary>
     /// <param name="handler">The managed handler.</param>
     /// <returns>The opaque state pointer.</returns>
-    internal IntPtr Lend(object handler)
+    internal IntPtr Reference(object handler)
     {
         this._handle = GCHandle.Alloc(handler);
         return GCHandle.ToIntPtr(this._handle);
@@ -999,14 +999,14 @@ internal unsafe struct Registration
     /// <returns>The C struct the call names.</returns>
     internal NativeProgress Progress(Progress? progress) => progress is null
         ? default
-        : new NativeProgress { Callback = &Proceed, State = this.Lend(progress) };
+        : new NativeProgress { Callback = &Proceed, State = this.Reference(progress) };
 
     /// <summary>Lowers an admission predicate; null admits every key.</summary>
     /// <param name="predicate">The handler, if any.</param>
     /// <returns>The C struct the call names.</returns>
     internal NativePredicate Predicate(Func<Key, bool>? predicate) => predicate is null
         ? default
-        : new NativePredicate { Callback = &Admit, State = this.Lend(predicate) };
+        : new NativePredicate { Callback = &Admit, State = this.Reference(predicate) };
 
     /// <summary>Lets the handler go once the call is final; a second free does nothing.</summary>
     internal void Free()
@@ -1149,9 +1149,9 @@ public enum GPUClass : int
 /// that spawns rather than hidden in a constructor.
 /// <para>
 /// One factory per C constructor, each taking only what its own hardware has: host workers and
-/// memory domains for RAM, a borrowed ForkUnion pool for <see cref="OnPool"/>, one submission ring
-/// apiece per device path for NVMe, and device ordinals with optional borrowed streams for VRAM,
-/// where a single host thread drives one stream per device and there is no thread count to name.
+/// memory domains for RAM, one submission ring apiece per device path for NVMe, and device
+/// ordinals with optional caller's streams for VRAM, where a single host thread drives one stream
+/// per device and there is no thread count to name.
 /// The kind must match the residency of every handle the executor drives, and a mismatch fails
 /// the call with <see cref="Status.Device"/>.
 /// </para>
@@ -1186,16 +1186,19 @@ public sealed unsafe class Executor : IDisposable
     /// the named memory domains - the very IDs the indexes were initialized with. Calls
     /// <c>usearch_executor_for_ram</c>.
     /// </summary>
-    /// <param name="threads">The worker count; zero takes 7/8 of the cores those domains carry,
+    /// <param name="threads">The worker count; zero takes 7/8 of the cores those domains hold,
     /// since full occupancy starves the ordered publication path.</param>
     /// <param name="memoryDomains">NUMA node IDs to place shards on; empty derives every node the
     /// process may allocate on.</param>
     /// <param name="cpuClassCeiling">The newest class dispatch may pick, intersected with what the
     /// machine runs, so a class the machine lacks narrows rather than refuses; null means no
     /// ceiling.</param>
+    /// <param name="scratchLimit">The ceiling on each thread's scratch bytes, past which a call reports
+    /// out of memory; zero takes 1 GiB.</param>
     /// <returns>The spawned executor.</returns>
     public static Executor ForRam(
-        ulong threads = 0, ReadOnlySpan<int> memoryDomains = default, CPUClass? cpuClassCeiling = null)
+        ulong threads = 0, ReadOnlySpan<int> memoryDomains = default, CPUClass? cpuClassCeiling = null,
+        ulong scratchLimit = 0)
     {
         IntPtr spawned = IntPtr.Zero;
         NativeOutcome outcome = default;
@@ -1211,43 +1214,9 @@ public sealed unsafe class Executor : IDisposable
                     CpuClassCeiling = (int)(cpuClassCeiling ?? 0),
                 },
                 Threads = (nuint)threads,
+                ScratchLimit = (nuint)scratchLimit,
             };
             usearch_executor_for_ram(&arguments);
-        }
-
-        return new Executor(EngineHandle.Created<NativeExecutorHandle>(spawned, outcome));
-    }
-
-    /// <summary>
-    /// Wraps a ForkUnion pool another library already runs, so one process keeps one set of
-    /// threads while each library keeps its own scratch. Calls <c>usearch_executor_on_pool</c>.
-    /// </summary>
-    /// <param name="pool">The borrowed <c>fu_pool_t</c>, which must outlive the executor and keeps
-    /// its lender's mood.</param>
-    /// <param name="memoryDomains">NUMA node IDs of the indexes it will drive; empty derives.</param>
-    /// <param name="cpuClassCeiling">The newest class dispatch may pick, intersected with what the
-    /// machine runs, so a class the machine lacks narrows rather than refuses; null means no
-    /// ceiling.</param>
-    /// <returns>The executor over that pool.</returns>
-    public static Executor OnPool(
-        IntPtr pool, ReadOnlySpan<int> memoryDomains = default, CPUClass? cpuClassCeiling = null)
-    {
-        IntPtr spawned = IntPtr.Zero;
-        NativeOutcome outcome = default;
-        fixed (int* domains = memoryDomains)
-        {
-            NativeExecutorOnPool arguments = new()
-            {
-                Executor = &spawned,
-                Outcome = &outcome,
-                Ram = new NativeRamOptions
-                {
-                    MemoryDomains = (IntPtr)domains, MemoryDomainsCount = (nuint)memoryDomains.Length,
-                    CpuClassCeiling = (int)(cpuClassCeiling ?? 0),
-                },
-                Pool = pool,
-            };
-            usearch_executor_on_pool(&arguments);
         }
 
         return new Executor(EngineHandle.Created<NativeExecutorHandle>(spawned, outcome));
@@ -1264,9 +1233,12 @@ public sealed unsafe class Executor : IDisposable
     /// <param name="cpuClassCeiling">The newest class dispatch may pick, intersected with what the
     /// machine runs, so a class the machine lacks narrows rather than refuses; null means no
     /// ceiling.</param>
+    /// <param name="scratchLimit">The ceiling on each thread's scratch bytes, past which a call reports
+    /// out of memory; zero takes 1 GiB.</param>
     /// <returns>The spawned executor.</returns>
     public static Executor ForNvme(
-        ulong threads = 0, ReadOnlySpan<string> paths = default, CPUClass? cpuClassCeiling = null)
+        ulong threads = 0, ReadOnlySpan<string> paths = default, CPUClass? cpuClassCeiling = null,
+        ulong scratchLimit = 0)
     {
         IntPtr spawned = IntPtr.Zero;
         NativeOutcome outcome = default;
@@ -1282,6 +1254,7 @@ public sealed unsafe class Executor : IDisposable
                     Paths = (IntPtr)views, PathsCount = (nuint)paths.Length, CpuClassCeiling = (int)(cpuClassCeiling ?? 0),
                 },
                 Threads = (nuint)threads,
+                ScratchLimit = (nuint)scratchLimit,
             };
             usearch_executor_for_nvme(&arguments);
         }
@@ -1294,14 +1267,15 @@ public sealed unsafe class Executor : IDisposable
     }
 
     /// <summary>
-    /// Opens one submission stream on every named device, or borrows the caller's, all of them
-    /// driven by the one host thread that calls the verbs - which is why this factory takes no
-    /// thread count. Calls <c>usearch_executor_for_vram</c>.
+    /// Opens one non-blocking stream on every named device, created and destroyed with the
+    /// executor, all of them driven by the one host thread that calls the verbs - which is why
+    /// this factory takes no thread count. Calls <c>usearch_executor_for_vram</c>.
     /// </summary>
     /// <param name="devices">CUDA device ordinals to place shards on; empty derives one free
     /// device.</param>
-    /// <param name="streams">Borrowed CUDA streams, one per device in that order; empty opens its
-    /// own.</param>
+    /// <param name="streams">The caller's CUDA streams, one per device in that order, which answer
+    /// unsupported until they are wired; empty uses the one non-blocking stream per device the
+    /// executor opens and destroys with itself.</param>
     /// <param name="scratchLimit">The ceiling on scratch bytes per device; zero lets scratch grow as
     /// geometry asks.</param>
     /// <param name="gpuClassCeiling">The newest class dispatch may pick, capped below the best
@@ -1317,7 +1291,7 @@ public sealed unsafe class Executor : IDisposable
         IntPtr spawned = IntPtr.Zero;
         NativeOutcome outcome = default;
         fixed (int* ordinals = devices)
-        fixed (IntPtr* borrowed = streams)
+        fixed (IntPtr* streamHandles = streams)
         {
             NativeExecutorForVram arguments = new()
             {
@@ -1327,7 +1301,7 @@ public sealed unsafe class Executor : IDisposable
                 {
                     Devices = (IntPtr)ordinals, DevicesCount = (nuint)devices.Length, GpuClassCeiling = (int)(gpuClassCeiling ?? 0),
                 },
-                Streams = (IntPtr)borrowed,
+                Streams = (IntPtr)streamHandles,
                 ScratchLimit = (nuint)scratchLimit,
             };
             usearch_executor_for_vram(&arguments);
@@ -1341,7 +1315,7 @@ public sealed unsafe class Executor : IDisposable
     /// <param name="mood">What the executor does with its workers once idle; the last drain wins.</param>
     public void Drain(Mood mood = Mood.Parked)
     {
-        using Lease executor = Lease.Of(this._handle, "executor");
+        using HandleReference executor = HandleReference.Of(this._handle, "executor");
         NativeOutcome outcome = default;
         NativeExecutorDrain arguments = new() { Executor = executor.Pointer, Outcome = &outcome, Mood = mood };
         usearch_executor_drain(&arguments);
@@ -1354,7 +1328,7 @@ public sealed unsafe class Executor : IDisposable
     /// </summary>
     public void Dispose() => this._handle.Dispose();
 
-    /// <summary>The engine handle the verbs lease.</summary>
+    /// <summary>The engine handle the verbs reference.</summary>
     internal NativeExecutorHandle Handle => this._handle;
 }
 
@@ -1372,13 +1346,13 @@ public sealed unsafe class Executor : IDisposable
 /// The executor it is made for places it where it computes, host pages or its GPU's memory, decided
 /// once, and nothing is allocated until a call writes into it. Every call given it rewinds it, so
 /// the views the previous call answered end there, as they do once it is disposed. An arena serves
-/// one call at a time: a blocking call borrows it until it returns, a deferred one until final, and
+/// one call at a time: a blocking call views it until it returns, a deferred one until final, and
 /// a second call naming it meanwhile finishes with <see cref="Status.Contended"/>. A
 /// <see cref="Residency.Vram"/> arena holds device memory, as <see cref="Describe"/> reports, which
-/// its views lend to device code alone.
+/// its views pass to device code alone.
 /// It grows, fills and frees on its executor's first stream, so it serves only calls on that executor
-/// and holds it open until disposed, which defers freeing an executor disposed first; a host arena
-/// may outlive its executor.
+/// and holds it open until disposed, which defers freeing an executor disposed first; dispose every
+/// arena before its executor.
 /// </remarks>
 public sealed unsafe class Arena : IDisposable
 {
@@ -1390,7 +1364,7 @@ public sealed unsafe class Arena : IDisposable
     /// calls on the caller's thread.</param>
     public Arena(Executor? executor = null)
     {
-        using Lease pool = Lease.Of(executor?.Handle, "executor");
+        using HandleReference pool = HandleReference.Of(executor?.Handle, "executor");
         IntPtr created = IntPtr.Zero;
         NativeOutcome outcome = default;
         NativeArenaInit arguments = new() { Arena = &created, Executor = pool.Pointer, Outcome = &outcome };
@@ -1398,7 +1372,7 @@ public sealed unsafe class Arena : IDisposable
         this._handle = EngineHandle.Created<NativeArenaHandle>(created, outcome);
         if (this.Describe().Residency == Residency.Vram)
         {
-            this._handle.Executor = Lease.Of(executor!.Handle, "executor");
+            this._handle.Executor = HandleReference.Of(executor!.Handle, "executor");
         }
     }
 
@@ -1408,7 +1382,7 @@ public sealed unsafe class Arena : IDisposable
     /// <returns>The residency of the outputs and the device holding them, if any.</returns>
     public ArenaDescription Describe()
     {
-        using Lease arena = Lease.Of(this._handle, "arena");
+        using HandleReference arena = HandleReference.Of(this._handle, "arena");
         NativeOutcome outcome = default;
         NativeArenaDescription description = default;
         NativeArenaDescribe arguments = new() { Arena = arena.Pointer, Outcome = &outcome, Description = &description };
@@ -1420,10 +1394,10 @@ public sealed unsafe class Arena : IDisposable
     /// <summary>Frees the arena and every output in it. Calls <c>usearch_arena_free</c>.</summary>
     public void Dispose() => this._handle.Dispose();
 
-    /// <summary>Leases the arena for the length of one C call, as every handle is leased.</summary>
-    /// <param name="arena">The arena the caller lent; null lends none.</param>
-    /// <returns>The lease, whose pointer the call names.</returns>
-    internal static Lease Lend(Arena? arena) => Lease.Of(arena?._handle, "arena");
+    /// <summary>HandleReferences the arena for the length of one C call, as every handle is referenced.</summary>
+    /// <param name="arena">The arena the caller passed; null passes none.</param>
+    /// <returns>The reference, whose pointer the call names.</returns>
+    internal static HandleReference Reference(Arena? arena) => HandleReference.Of(arena?._handle, "arena");
 }
 
 /// <summary>Where an arena's outputs live, as <see cref="Arena.Describe"/> reports it. Mirrors
@@ -1439,7 +1413,7 @@ public readonly record struct ArenaDescription(Residency Residency, int? Device)
 
 /// <summary>
 /// A submitted call, which owns its outcome and the pins on its inputs until the call is final, and
-/// borrows its index and arena as a blocking call does; the verbs that produce nothing answer this,
+/// uses its index and arena as a blocking call does; the verbs that produce nothing answer this,
 /// the rest a <see cref="Deferred{TResult}"/>.
 /// </summary>
 /// <remarks>
@@ -1619,17 +1593,17 @@ internal unsafe struct CallOutputs
 }
 
 /// <summary>
-/// One verb's call: what it lends the library, and what it builds once final. A verb is written
+/// One verb's call: what it passes the library, and what it builds once final. A verb is written
 /// once as such a struct, and the receiver alone decides whether it blocks or defers.
 /// </summary>
 internal unsafe interface ICall
 {
-    /// <summary>Fixes what the call lends, pinning it past the C verb only when deferred, and leases its
+    /// <summary>Fixes what the call passes, pinning it past the C verb only when deferred, and references its
     /// handles for the C verb alone, then calls it with its outputs written to <paramref name="outputs"/>.
     /// Throws only before the C verb is called.</summary>
     void Submit(CallOutputs* outputs, Completion completion);
 
-    /// <summary>Settles what the call handed over, then unpins what it lent, once
+    /// <summary>Settles what the call handed over, then unpins what it passed, once
     /// the call is final.</summary>
     void Release(CallOutputs* outputs);
 
@@ -1646,18 +1620,18 @@ internal interface ICall<TResult> : ICall
 }
 
 /// <summary>
-/// The handles every call names, each leased only while the C verb runs, since freeing a handle waits
+/// The handles every call names, each referenced only while the C verb runs, since freeing a handle waits
 /// for the deferred calls naming it.
 /// </summary>
 internal readonly struct CallHandles(EngineHandle index, Executor? executor)
 {
-    /// <summary>Leases the index for the length of the C verb.</summary>
-    /// <returns>The lease, whose pointer the call names.</returns>
-    internal Lease LendIndex() => Lease.Of(index, "index");
+    /// <summary>HandleReferences the index for the length of the C verb.</summary>
+    /// <returns>The reference, whose pointer the call names.</returns>
+    internal HandleReference ReferenceIndex() => HandleReference.Of(index, "index");
 
-    /// <summary>Leases the executor for the length of the C verb.</summary>
-    /// <returns>The lease, null when the call runs on the caller's thread.</returns>
-    internal Lease LendExecutor() => Lease.Of(executor?.Handle, "executor");
+    /// <summary>HandleReferences the executor for the length of the C verb.</summary>
+    /// <returns>The reference, null when the call runs on the caller's thread.</returns>
+    internal HandleReference ReferenceExecutor() => HandleReference.Of(executor?.Handle, "executor");
 }
 
 /// <summary>Runs one verb's call to completion, or submits it.</summary>
@@ -1782,7 +1756,7 @@ internal static unsafe class Paths
 #region Native Vocabulary
 
 /// <summary>
-/// A borrowed run of bytes and its length, never null-terminated by contract - the shape every
+/// A viewed run of bytes and its length, never null-terminated by contract - the shape every
 /// path argument and every read-only buffer arrives in.
 /// </summary>
 [StructLayout(LayoutKind.Sequential)]
@@ -1795,7 +1769,7 @@ internal struct NativeBytesView
 }
 
 /// <summary>
-/// A strided run of keys - how a batch names the identities it carries, one per row of the call's
+/// A strided run of keys - how a batch names the identities it holds, one per row of the call's
 /// count, or one per entry a cursor pull wrote into its arena.
 /// </summary>
 [StructLayout(LayoutKind.Sequential)]
@@ -1808,7 +1782,7 @@ internal struct NativeKeysView
 }
 
 /// <summary>
-/// A run of rows along a call's batch axis, carrying no row count: borrowed from the caller as an
+/// A run of rows along a call's batch axis, holding no row count: viewed from the caller as an
 /// input, whose width is checked against the geometry the index froze, or written packed into an
 /// arena as an output.
 /// </summary>
@@ -1937,7 +1911,7 @@ internal unsafe struct NativePredicate
     public delegate* unmanaged[Cdecl]<Key*, Admission*, nuint, IntPtr, void> Callback;
     /// <summary>Opaque pointer forwarded into every handler call.</summary>
     public IntPtr State;
-    /// <summary>How many keys each handler call carries.</summary>
+    /// <summary>How many keys each handler call holds.</summary>
     public PredicateCost Cost;
 }
 
@@ -1949,16 +1923,7 @@ internal unsafe struct NativeExecutorForRam
     public NativeOutcome* Outcome;
     public NativeRamOptions Ram;
     public nuint Threads;
-}
-
-/// <summary>The arguments of <c>usearch_executor_on_pool</c>.</summary>
-[StructLayout(LayoutKind.Sequential)]
-internal unsafe struct NativeExecutorOnPool
-{
-    public IntPtr* Executor;
-    public NativeOutcome* Outcome;
-    public NativeRamOptions Ram;
-    public IntPtr Pool;
+    public nuint ScratchLimit;
 }
 
 /// <summary>The arguments of <c>usearch_executor_for_vram</c>.</summary>
@@ -1979,9 +1944,11 @@ internal unsafe struct NativeExecutorForNvme
     public IntPtr* Executor;
     public NativeOutcome* Outcome;
     public NativeNvmeOptions Nvme;
+    public NativeRamOptions Ram;
     public nuint Threads;
     /// <summary>The NVMe class every ring submits through; zero derives the fastest the host admits.</summary>
     public int NvmeClass;
+    public nuint ScratchLimit;
 }
 
 /// <summary>The arguments of <c>usearch_arena_init</c>.</summary>
@@ -2126,10 +2093,6 @@ internal static unsafe partial class NativeMethods
 
     [LibraryImport(LibraryName)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
-    internal static partial void usearch_executor_on_pool(NativeExecutorOnPool* arguments);
-
-    [LibraryImport(LibraryName)]
-    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     internal static partial void usearch_executor_for_nvme(NativeExecutorForNvme* arguments);
 
     [LibraryImport(LibraryName)]
@@ -2165,7 +2128,7 @@ internal static unsafe partial class NativeMethods
 /// One engine handle, released exactly once and never while a call is using it.
 /// </summary>
 /// <remarks>
-/// Every verb holds a <see cref="Lease"/> on the handles its argument struct names, which is what
+/// Every verb holds a <see cref="HandleReference"/> on the handles its argument struct names, which is what
 /// keeps a finalizer or a concurrent dispose from freeing one out from under a running call.
 /// </remarks>
 internal abstract class EngineHandle : SafeHandle
@@ -2191,18 +2154,18 @@ internal abstract class EngineHandle : SafeHandle
 }
 
 /// <summary>
-/// One call's hold on a handle, which keeps it open until released; the default lease holds nothing
-/// and lends null, which is how an absent executor reaches the library.
+/// One call's hold on a handle, which keeps it open until released; the default reference holds nothing
+/// and passes null, which is how an absent executor reaches the library.
 /// </summary>
-internal struct Lease : IDisposable
+internal struct HandleReference : IDisposable
 {
     private EngineHandle? _owner;
 
-    /// <summary>Holds the handle open, refusing one already disposed; a null handle lends null.</summary>
+    /// <summary>Holds the handle open, refusing one already disposed; a null handle passes null.</summary>
     /// <param name="owner">The handle to hold, if any.</param>
     /// <param name="subject">What the handle is, for the failure message.</param>
-    /// <returns>The lease.</returns>
-    internal static Lease Of(EngineHandle? owner, string subject)
+    /// <returns>The reference.</returns>
+    internal static HandleReference Of(EngineHandle? owner, string subject)
     {
         if (owner is null)
         {
@@ -2216,13 +2179,13 @@ internal struct Lease : IDisposable
 
         bool added = false;
         owner.DangerousAddRef(ref added);
-        return new Lease { _owner = owner };
+        return new HandleReference { _owner = owner };
     }
 
     /// <summary>The raw handle to place in an argument struct.</summary>
     internal readonly IntPtr Pointer => this._owner?.DangerousGetHandle() ?? IntPtr.Zero;
 
-    /// <summary>Whether the lease still holds a handle.</summary>
+    /// <summary>Whether the reference still holds a handle.</summary>
     internal readonly bool Holds => this._owner is not null;
 
     /// <summary>Lets the handle be released again; a second release does nothing.</summary>
@@ -2249,7 +2212,7 @@ internal sealed class NativeExecutorHandle : EngineHandle
 internal sealed class NativeArenaHandle : EngineHandle
 {
     /// <summary>The executor a GPU arena frees on, held open until the arena is freed.</summary>
-    internal Lease Executor;
+    internal HandleReference Executor;
 
     /// <inheritdoc/>
     protected override bool ReleaseHandle()

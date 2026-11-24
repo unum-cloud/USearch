@@ -92,11 +92,12 @@ inline std::size_t list_gpu_devices(gpu_drivers_t const& drivers, std::span<gpu_
  *  @brief Spawns the executor of the one vendor every device in @p devices belongs to, over that
  *      vendor's driver in @p drivers.
  *
- *  One stream per distinct device over their vendor ordinals, which every shard there shares, its
- *  run never growing past @p scratch_limit bytes per stream, zero for no ceiling.
+ *  One stream the executor opens per distinct device over their vendor ordinals, which every shard
+ *  there shares, its run never growing past @p scratch_limit bytes per stream, zero for no ceiling.
  *
  *  @par Statuses:
- *  - @c device_k No device is named, or the build drives no executor of their vendor.
+ *  - @c device_k No device is named, the build drives no executor of their vendor, or a device
+ *    refused its stream.
  *  - @c config_mismatch_k The @p devices span vendors.
  */
 inline expected<gpu_executor_t> spawn_gpu_executor(gpu_drivers_t& drivers, std::span<gpu_device_t const> devices,
@@ -105,7 +106,8 @@ inline expected<gpu_executor_t> spawn_gpu_executor(gpu_drivers_t& drivers, std::
     growing_buffer<int> ordinals {global_allocator};
     if (failed(ordinals.reserve_exactly(devices.size()))) return {{}, status_code_t::out_of_memory_k};
     for (gpu_device_t const& device : devices) {
-        if (device.vendor != devices[0].vendor) return {{}, status_code_t::config_mismatch_k};
+        if (device.vendor != devices[0].vendor)
+            return {{}, {status_code_t::config_mismatch_k, "One executor drives one GPU vendor"}};
         int const ordinal = static_cast<int>(device.vendor_ordinal);
         bool opened = false;
         for (int const earlier : ordinals) opened |= earlier == ordinal;

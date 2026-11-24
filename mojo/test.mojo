@@ -154,7 +154,7 @@ def test_scalar_kinds_follow_their_element_types() raises:
     assert_false(ScalarKind.U8.stores[DType.float32](), "bytes never read as floats")
 
 
-def test_keys_carry_integer_identities() raises:
+def test_keys_hold_integer_identities() raises:
     """An integer identity occupies bytes 8 through 15, most significant byte first."""
     var key = Key(integer=42)
     assert_equal(key.as_integer().value(), UInt64(42), "the identity round-trips")
@@ -192,7 +192,7 @@ def test_rows_derive_contiguous_strides() raises:
     var rows = [Float32(1), 2, 3, 4, 5, 6]
     var view = RowsView.of(rows, 3)
     assert_equal(Int(view.rows), 2, "six scalars of width three are two rows")
-    assert_equal(Int(view.columns), 3, "the width is carried verbatim")
+    assert_equal(Int(view.columns), 3, "the width is held verbatim")
     assert_equal(Int(view.stride), 12, "the stride is the natural row width, since zero repeats a row")
     assert_true(view.scalar == ScalarKind.F32, "the kind follows the element type")
 
@@ -323,7 +323,7 @@ def test_names_round_trip_through_the_library_and_refuse_strangers() raises:
     var library = Library()
     assert_equal(library.status_name(Status.READ_ONLY), "read-only", "a status")
     assert_equal(library.status_name(Status.DEFERRED), "deferred", "the one non-final status")
-    assert_equal(library.status_name(Status(99)), "unrecognized", "a code no status carries")
+    assert_equal(library.status_name(Status(99)), "unrecognized", "a code no status holds")
     assert_true(library.status_from_name("config-mismatch") == Status.CONFIG_MISMATCH, "and back")
     assert_equal(library.scalar_name(ScalarKind.BF16), "bf16", "a scalar")
     assert_true(library.scalar_from_name("u1x8") == ScalarKind.U1X8, "and back")
@@ -445,7 +445,7 @@ def test_buffers_round_trip_through_the_arena() raises:
 
     var arena = Arena(executor)
     var monolith = index.on(executor).save_buffer(arena)
-    assert_true(len(monolith.bytes()) != 0, "the monolith carries bytes")
+    assert_true(len(monolith.bytes()) != 0, "the monolith holds bytes")
     var frozen = dense_metadata_read_buffer(executor, monolith.bytes())
     assert_equal(Int(frozen.dimensions), 2, "the header names the width")
     assert_true(frozen.metric == DenseMetric.INNER, "and the metric")
@@ -490,9 +490,9 @@ def test_cursor_walks_every_row_once() raises:
     var library = Library()
     var executor = Executor.for_ram(library, threads=2)
     var index = _basis(library)
-    var cursor = index.on(executor).cursor()
+    var cursor = index.cursor()
     var arena = Arena(executor)
-    var batch = cursor.next_links(1, arena)
+    var batch = cursor.on(executor).next_links(1, arena)
     assert_equal(len(batch), 1, "the first batch holds one entry")
     assert_true(batch.keys()[0] == Key(integer=0), "the first key")
     _ = batch.links(0)
@@ -520,7 +520,7 @@ def test_health_audits_every_entry() raises:
 
 
 def test_refine_plans_stay_live_until_finished() raises:
-    """A refine lent a plan opens it and reports where it stopped, and finishing it reports the whole plan."""
+    """A refine passed a plan opens it and reports where it stopped, and finishing it reports the whole plan."""
     if not _library_is_present():
         _skipped(library_missing_k)
         return
@@ -556,7 +556,7 @@ def test_reshard_gathers_its_sources() raises:
     parts.append(shard^)
     var plan = DenseReshardPlan()
     var report = dense_reshard(executor, parts, Span(parts)[0:1], DenseReshardConfig(plan=Pointer(to=plan)))
-    assert_true(plan.address != NULL_ADDRESS, "a reshard lent a plan opens it")
+    assert_true(plan.address != NULL_ADDRESS, "a reshard passed a plan opens it")
     assert_equal(Int(parts[0].describe().size), 3, "the shard's entry joined")
     assert_equal(parts[0].count(Key(integer=3)), 1, "under its own key")
     assert_equal(Int(parts[1].describe().size), 0, "and the shard is left empty")
@@ -871,7 +871,7 @@ def _hold_until_released(completed: Int, total: Int, gate: Pointer[_Gate, MutAny
     return Continuation.CONTINUE
 
 
-def test_deferred_results_borrow_the_callers_arena() raises:
+def test_deferred_results_view_the_callers_arena() raises:
     """A deferred search holds the caller's arena until final, so another call on it is refused meanwhile."""
     if not _library_is_present():
         _skipped(library_missing_k)
@@ -971,7 +971,7 @@ def test_awaited_failures_raise() raises:
 
 
 def test_arenas_free_before_their_executor() raises:
-    """An arena borrows the executor that made it, so the executor outlives it past its own last use."""
+    """An arena holds the origin of the executor that made it, so the executor outlives it past its own last use."""
     if not _library_is_present():
         _skipped(library_missing_k)
         return
@@ -1112,7 +1112,7 @@ def test_attention_is_exact_over_every_key() raises:
         )
     except error:
         status = error.status
-    assert_true(status == Status.SHAPE_MISMATCH, "one softmax state cannot carry two rows")
+    assert_true(status == Status.SHAPE_MISMATCH, "one softmax state cannot hold two rows")
 
     table[unsafe_offset=0] = _ValueTable(Int(values.unsafe_ptr()), 2, 4)
     status = Status.SUCCESS
@@ -1442,8 +1442,8 @@ def test_shapes_search_get_and_count() raises:
     assert_almost_equal(exported[0][4], clouds.elements[14 * 3 + 4], atol=1e-6, msg="in the pose it was inserted in")
     assert_equal(len(index.get[DType.float32](Key(integer=9), arena)), 0, "an absent key exports nothing")
 
-    var cursor = index.on(executor).cursor(_keys(2, 1))
-    assert_true(cursor.next_links(8, arena).keys()[0] == Key(integer=2), "a walk from a start key yields it first")
+    var cursor = index.cursor(_keys(2, 1))
+    assert_true(cursor.on(executor).next_links(8, arena).keys()[0] == Key(integer=2), "a walk from a start key yields it first")
     var sampled = index.deferred(executor).sample(2, arena)
     assert_true(len(sampled.wait()) <= 2, "a deferred sample draws at most what it wants")
 
@@ -1713,7 +1713,7 @@ def main() raises:
     var suite = TestSuite()
     suite.test[test_scalar_widths_round_sub_byte_rows_up]()
     suite.test[test_scalar_kinds_follow_their_element_types]()
-    suite.test[test_keys_carry_integer_identities]()
+    suite.test[test_keys_hold_integer_identities]()
     suite.test[test_keys_render_as_dashed_uuids]()
     suite.test[test_rows_derive_contiguous_strides]()
     suite.test[test_shapes_the_lengths_cannot_support_are_refused]()
@@ -1741,7 +1741,7 @@ def main() raises:
     suite.test[test_deferred_calls_wait_until_final]()
     suite.test[test_deferred_failures_repeat]()
     suite.test[test_deferred_refusals_finish_at_submission]()
-    suite.test[test_deferred_results_borrow_the_callers_arena]()
+    suite.test[test_deferred_results_view_the_callers_arena]()
     suite.test[test_awaited_fan_out_answers_both_shards]()
     suite.test[test_awaited_failures_raise]()
     suite.test[test_arenas_free_before_their_executor]()

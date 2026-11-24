@@ -48,7 +48,7 @@ class USearchConan(ConanFile):
     implements = ["auto_shared_fpic"]
 
     # `src/` and `c/` hold the instantiations, `cmake/` the toolchains and the package templates,
-    # and `VERSION` is what every other SDK reads - so the recipe reads it too rather than carrying
+    # and `VERSION` is what every other SDK reads - so the recipe reads it too rather than holding
     # a second copy that drifts.
     exports_sources = "CMakeLists.txt", "VERSION", "LICENSE", "include/*", "src/*", "c/*", "cmake/*"
 
@@ -87,6 +87,9 @@ class USearchConan(ConanFile):
         self.cpp_info.components["templates"].set_property("cmake_target_name", "usearch::templates")
         self.cpp_info.components["templates"].bindirs = []
         self.cpp_info.components["templates"].libdirs = []
+        # A media list draws its identity from `BCryptGenRandom` on Windows.
+        if self.settings.os == "Windows":
+            self.cpp_info.components["templates"].system_libs = ["bcrypt"]
 
         self.cpp_info.components["abi"].set_property("cmake_target_name", "usearch::abi")
         self.cpp_info.components["abi"].bindirs = []
@@ -101,6 +104,8 @@ class USearchConan(ConanFile):
         self.cpp_info.components[linkage].requires = ["abi"]
         if self.settings.os in ("Linux", "FreeBSD"):
             self.cpp_info.components[linkage].system_libs = ["m", "pthread", "dl"]
+        elif self.settings.os == "Windows":
+            self.cpp_info.components[linkage].system_libs = ["bcrypt"]
 
         self.cpp_info.components["cpp"].set_property("cmake_target_name", "usearch::cpp")
         self.cpp_info.components["cpp"].requires = ["abi", linkage]

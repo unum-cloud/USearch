@@ -178,7 +178,8 @@ int bench_dense_index_search(int argc, char const* const* argv) {
     usearch_dense_metadata_t saved {};
     usearch_outcome_t saved_outcome {};
     if (!settings.checkpoint.empty()) {
-        usearch_dense_metadata_read_t read {.outcome = &saved_outcome,
+        usearch_dense_metadata_read_t read {.executor = session.executor,
+                                            .outcome = &saved_outcome,
                                             .path = bytes_view(settings.checkpoint),
                                             .metadata = &saved};
         usearch_dense_metadata_read(&read);

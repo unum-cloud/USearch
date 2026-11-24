@@ -65,7 +65,7 @@ The receiver decides where a verb runs and how it completes, while the verb and 
 
 `DenseVerbs` writes every verb once for all three.
 A blocking verb returns its `Result` directly, so nothing about asynchrony reaches a caller who never asks for it.
-An `On` borrows the index and the executor, so neither it nor a `Deferred` it makes can outlive them.
+An `On` refers to the index and the executor, so neither it nor a `Deferred` it makes can outlive them.
 A cursor or a stream takes the same `on(&executor)` per pull and keeps no executor of its own.
 
 ```rust
@@ -78,8 +78,8 @@ let matches = call.wait()?;                                            // or, in
 
 A deferred call starts when it is first polled or waited on, the way Rust futures do.
 The `?` on creation carries the binding's own refusals, such as a key count that disagrees with the rows, and the library's refusals arrive at `.await` or `.wait()`.
-A `Deferred` owns the inputs the library reads until the call is final, and borrows the index and the arena, as a blocking call does.
-The answer is the `Matches` a blocking search answers, borrowing the same arena.
+A `Deferred` owns the inputs the library reads until the call is final, and refers to the index and the arena, as a blocking call does.
+The answer is the `Matches` a blocking search answers, pointing into the same arena.
 Inside an `async` block, `.await` submits the call and polls its status word until it is final, so other tasks run meanwhile, while `wait` blocks the thread without spinning.
 Dropping a submitted `Deferred` waits for its call, and dropping one never polled runs nothing.
 
@@ -116,12 +116,12 @@ let matches = std::thread::scope(|scope| {
 ```
 
 The library reads a deferred call's inputs after the verb returns, so a deferred receiver takes owned inputs: keys in a `Vec` or an array, rows in a NumKong `Matrix` or a `'static` `MatrixView`, a `PathBuf`, `String` or `'static` path, and `'static` configs, handlers and value lookups.
-Lending `&[Key]` or `&MatrixView` fails to compile with "a deferred receiver needs owned inputs", and a config or view borrowing a local fails as "does not live long enough".
+Passing `&[Key]` or `&MatrixView` fails to compile with "a deferred receiver needs owned inputs", and a config or view referencing a local fails as "does not live long enough".
 A `Deferred` keeps its outcome, arguments, inputs and output slots inline, pinned where it is first polled or waited on, so a deferred call allocates nothing, and `Box::pin` happens only if you choose it.
 
 One call holds an executor at a time, so a second call finding it held finishes at once with `Status::Contended`, and nothing queues.
 A deferred call on a caller-exclusive pool runs on the pool's thread 0, so polling alone finishes it, and its progress handler and predicate run on the pool's threads; an inclusive pool, a single thread, WebAssembly and a VRAM executor run it at submission.
-Calls depending on each other are ordered by waiting on the first before submitting the second, since no call carries an ordering field.
+Calls depending on each other are ordered by waiting on the first before submitting the second, since no call holds an ordering field.
 
 ## Executors
 
@@ -135,15 +135,14 @@ let domains = Executor::for_ram(&[0, 1], None, 0)?;                    // thread
 let capped = Executor::for_ram(&[], Some(CPUClass::IntelHaswell), 0)?; // waiters and atomics no newer than Haswell
 let rings = Executor::for_nvme(&["/mnt/nvme0"], None, 4)?;             // one submission ring apiece
 let streams = Executor::for_vram(&[0, 1], None, 0)?;                   // one stream per device, scratch grown as asked
-let shared = unsafe { Executor::on_pool(&[], None, pool)? };           // shares the threads another library spawned
 let local = Executor::default();                                       // owns nothing, runs on the calling thread
 
 threads.drain(Mood::Spinning)?;                                        // waits out the holding call, then keeps spinning
 ```
 
 `for_ram` and `for_nvme` take a thread count, where zero derives one.
-`for_vram` takes none, since one host thread drives one stream per device, and `for_vram_on_streams` borrows your CUDA streams instead, one per device.
-`for_vram_on_streams` and `on_pool` are `unsafe`, since the streams or the pool they borrow must outlive the executor; the engine wires neither borrowing yet and answers `Status::Unsupported`.
+`for_vram` takes none, since one host thread drives one stream per device, which the executor opens with itself and destroys when dropped.
+`for_vram_on_streams` names your own CUDA streams instead, one per device, and answers `Status::Unsupported` until caller streams are wired; it stays `unsafe`, since those streams must outlive the executor.
 `Executor::default()` owns nothing and runs every call handed to it on the calling thread.
 One call holds an executor at a time, so two threads that genuinely overlap take one apiece; an executor is `Send` but not `Sync`, while index handles stay freely shared.
 `drain` waits until no call holds the executor and sets the `Mood` idle workers adopt, and dropping an executor drains it, then frees it.
@@ -190,7 +189,7 @@ for matches in futures::executor::block_on(futures::future::join_all(calls)) {
 
 The library never frees an arena under a call: dropping one waits for the calls writing into it, and a call naming an arena that serves another call finishes with `Status::Contended` and rewinds nothing, so even a leaked `Deferred` leaves it safe.
 An arena's `describe()` says where it lives, and on which device.
-Fixed-size reports, such as stats, descriptions and `required`, stay plain values, and so does state you carry between calls, like the attention `carry`.
+Fixed-size reports, such as stats, descriptions and `required`, stay plain values, and so does state you hold between calls, like the attention `carry`.
 
 ## Keys
 
@@ -210,7 +209,7 @@ Keys need not be unique: an index admits up to `values_per_key` entries under on
 
 ## Errors
 
-Every fallible call returns `usearch::Result`, whose `Error` carries a `Status` and a static `message`, so nothing allocates on the failure path.
+Every fallible call returns `usearch::Result`, whose `Error` holds a `Status` and a static `message`, so nothing allocates on the failure path.
 A failure the binding catches before the call crosses the boundary reports the status the engine would have used.
 
 ```rust
@@ -221,7 +220,7 @@ match index.on(&executor).search(&rows(&query, 4)?, 10, &mut arena) {
 }
 ```
 
-`Status` carries the C enumerators' values and leaves success to `Result`, so an `Error` never carries `Status::Deferred`, the status of a call not yet final.
+`Status` holds the C enumerators' values and leaves success to `Result`, so an `Error` never holds `Status::Deferred`, the status of a call not yet final.
 `Status`, `Mood`, `Residency`, `Traversal`, `Phase`, `RefineVerdict`, `DenseMetric` and `Scalar` print through `Display` and parse through `FromStr` the names the C tables own, such as `"out-of-memory"` or `"angular"`, so nothing is compared as a string.
 A panic inside a predicate, progress handler or value lookup aborts the process, since it cannot unwind through the library, so handlers report through what they capture.
 
@@ -265,7 +264,7 @@ let metadata = DenseIndex::metadata("index.safegraphs")?;        // geometry wit
 ```
 
 Checkpoints are residency-portable: one file materializes into RAM, uploads to a device, or opens in place on disk, decided by the constructor that reads it.
-The metadata carries only the four fields a checkpoint froze, so `values_per_key` and the placement stay yours to set in the load config.
+The metadata holds only the four fields a checkpoint froze, so `values_per_key` and the placement stay yours to set in the load config.
 `view_ram` answers `Status::Unsupported` until RAM shards can serve a mapping in place.
 A stopped `save` leaves leftovers every reader rejects, which are yours to remove.
 
@@ -290,7 +289,7 @@ Every metric derives from a single inner-product kernel with pre-computed magnit
 
 ### Rows & Scalars
 
-`rows` borrows a packed slab; a dataset whose rows are padded to a wider pitch passes `MatrixView::from_raw_parts` instead, which takes the byte stride directly.
+`rows` views a packed slab; a dataset whose rows are padded to a wider pitch passes `MatrixView::from_raw_parts` instead, which takes the byte stride directly.
 The scalar type of the input is independent of the stored quantization, so the `f32` slab of the Quickstart lands in an `i8` index with nothing converted beforehand.
 The scalar types are NumKong's, so nothing needs re-wrapping to move between the two crates, `f16` and `bf16` included, emulated where the CPU has no native support.
 
@@ -391,7 +390,7 @@ if let Err(failure) = refined {
 }
 ```
 
-The handler is `FnMut` and `Send` where a predicate is `Fn` and `Sync`: it arrives on whichever thread advanced the work and never on two at once, which is what lets it carry a counter or a deadline without a lock of its own.
+The handler is `FnMut` and `Send` where a predicate is `Fn` and `Sync`: it arrives on whichever thread advanced the work and never on two at once, which is what lets it hold a counter or a deadline without a lock of its own.
 Reports are denominated in whatever the verb consumes: entries for an insertion, queries for a search, a phase's entries or islands for a refine or a reshard, draws for a sample, shards for a checkpoint, and bytes for a buffer.
 How often they arrive is the increment's size rather than a guarantee, so read the counts and never the number of calls.
 
@@ -458,7 +457,7 @@ while receiver.refine(DenseRefineConfig { expansion_factor: 128, ..DenseRefineCo
 
 On a loaded NVMe handle `memory_limit` bounds the bytes a round holds for the one part it rewrites: zero rounds the part in RAM, and a smaller budget streams its rounds from the drives.
 
-A `DenseRefinePlan` carries a round across calls: a stop leaves it live, the next call holding it continues where it stopped, `phase` reports the `Phase` the call stopped in, and `refine_plan_finish` closes it.
+A `DenseRefinePlan` holds a round across calls: a stop leaves it live, the next call holding it continues where it stopped, `phase` reports the `Phase` the call stopped in, and `refine_plan_finish` closes it.
 
 ```rust
 let (mut plan, mut phase) = (DenseRefinePlan::default(), PhaseProgress::default());
@@ -474,7 +473,7 @@ while let Err(failure) = receiver.refine(DenseRefineConfig {
 let report = receiver.refine_plan_finish(plan)?;
 ```
 
-A deferred call owns the plan it carries rather than borrowing it, and `wait_with_inputs` hands the plan back beside the answer.
+A deferred call owns the plan it holds rather than referencing it, and `wait_with_inputs` hands the plan back beside the answer.
 
 ```rust
 let (answer, config) = index.deferred(&executor).refine(DenseRefineConfig::from(plan))?.wait_with_inputs();
@@ -541,12 +540,12 @@ for query in documents.iter() {
 ### Attention
 
 `attend` is Flash Attention folded into the walk: every key it scores folds into each head's running maximum, partition and weighted value sum, with no top-k cut, and the outputs land in an arena already divided by the partition, as rows of the queries' own scalar type.
-The index stores no values, so a `ValueLookup` resolves every scored key to its value row, as wide as the keys, stored in the index's own quantization, and borrowed from storage outliving the call.
+The index stores no values, so a `ValueLookup` resolves every scored key to its value row, as wide as the keys, stored in the index's own quantization, and pointing into storage outliving the call.
 A `None` row, or rows of another scalar type or width than the library reads, refuses the call with `Status::ShapeMismatch`.
 It runs on the executor's threads together, hence `Sync`.
 A VRAM walk resolves values on the device, where no Rust closure runs, so an arena from a VRAM executor is refused with `Status::Device`.
 With a `head_count` of 8, row `t * 8 + h` of the queries is head `h` of token `t`, and the heads of one token share its walk.
-A `carry` of one `DenseSoftmaxState` per query row, lent by you, folds this branch into another over the same queries, such as a recent window kept out of the index.
+A `carry` of one `DenseSoftmaxState` per query row, which you own, folds this branch into another over the same queries, such as a recent window kept out of the index.
 `score_scale` is conventionally the inverse square root of the head width, and zero derives it from the frozen geometry.
 
 ```rust
@@ -581,7 +580,7 @@ println!("{} entries under {key}, contained: {}", index.count(key)?, index.conta
 ## Sequence Indexes
 
 A `SequenceIndex` searches byte strings, UTF-8 text, DNA, RNA and proteins under edit distances and alignments.
-Its sequences cross as one `Tape`, the Apache Arrow `Binary` layout of bytes end to end around one more offset than entries: `Tape::of` packs separate entries, and `Tape::new` borrows the two runs of an Arrow column as they are.
+Its sequences cross as one `Tape`, the Apache Arrow `Binary` layout of bytes end to end around one more offset than entries: `Tape::of` packs separate entries, and `Tape::new` views the two runs of an Arrow column as they are.
 
 ```rust
 let options = SequenceOptions {
@@ -671,7 +670,7 @@ let mut other = Arena::new()?;
 let matches = index.search(&queries, 10, &mut other)?;
 ```
 
-The export borrows its arena, so no verb reaches it while the export lives.
+The export points into its arena, so no verb reaches it while the export lives.
 `ArrowRows::new` and `keys_from_arrow` read rows and keys from any `ArrowColumn`, such as a wrapper over the `FFI_ArrowSchema` and `FFI_ArrowArray` of `arrow::ffi`, and `DenseVectors::to_arrow`, `Matches::keys_to_arrow`, `Matches::distances_to_arrow` and `DenseProducts::to_arrow` write rows, keys, distances and ragged products.
 `ArrowExport::into_parts` hands a host export to a consumer that takes the structures by value.
 Sequences and shapes cross as a `Tape`, so the tape converters stay unbound.
@@ -697,16 +696,16 @@ These C entry points also take a deferred completion, but the crate calls them b
   A `Deferred` is the `Future` of its call: its first poll submits it, every poll reads the status word through `usearch_outcome_status`, since the library has no wake-up, and `wait` blocks through `usearch_outcome_wait`.
 - __No life of its own.__
   The binding starts no threads and keeps no queues; releasing a `Deferred` rides `Drop`, which waits for a submitted call first.
-- __Arenas are lent and reused, never shared.__
+- __Arenas belong to the caller and are reused, never shared.__
   Every output whose length scales with the call lands in an arena the caller passes; the result borrows it, so the borrow checker retires stale views at compile time.
 - __Nothing costs anything until it is used.__
   No call allocates, blocking or deferred, and an arena allocates only when a call writes into it.
-- __Callers lend memory, never an allocator.__
+- __The caller allocates every buffer; no allocator crosses the interface.__
   No allocation callback crosses into the library: payload belongs to the index, placed by its constructor's residency, and scratch belongs to the executor.
-- __A deferred receiver refuses borrowed inputs at compile time.__
-  The `Accepts` bound admits only owned inputs, so a borrow the library would read after the verb returns never compiles.
+- __A deferred receiver refuses referenced inputs at compile time.__
+  The `Accepts` bound admits only owned inputs, so a reference the library would read after the verb returns never compiles.
 - __Callbacks cross as their C structs.__
-  `Predicate`, `Progress`, `ValueLookup` and `GeospatialTerrainFill` each lend one handler as the callback and state C reads, through a trampoline built per handler type, so no handler is boxed or dynamic.
+  `Predicate`, `Progress`, `ValueLookup` and `GeospatialTerrainFill` each pass one handler as the callback and state C reads, through a trampoline built per handler type, so no handler is boxed or dynamic.
 
 | Path | Allocations |
 |---|---|

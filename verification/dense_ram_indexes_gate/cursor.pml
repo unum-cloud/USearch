@@ -10,7 +10,7 @@
  *  the unique side, closes the shard, and inside its window forgets the rows in place: the
  *  watermark and the keys column go to zero, the memory stays.
  *
- *  - A row a read returns carries a live key.
+ *  - A row a read returns holds a live key.
  *
  *  @verify pass sc
  *  @verify fail sc revalidate=false: without it, the read after the clear indexes the forgotten

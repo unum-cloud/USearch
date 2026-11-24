@@ -925,10 +925,10 @@ public sealed class DenseIndexTests : IDisposable
         DenseIndex index = SmallIndex();
         index.On(this._pool).Insert(KeysOf(1, 2, 3), Rows([.. RowOf(1f), .. RowOf(2f), .. RowOf(3f)]));
 
-        using DenseCursor cursor = index.On(this._pool).Cursor();
+        using DenseCursor cursor = index.Cursor();
         index.Dispose();
 
-        DenseBatch batch = cursor.Next(2, this._arena);
+        DenseBatch batch = cursor.On(this._pool).Next(2, this._arena); // each pull names its executor
         Assert.Equal(2, batch.Count);
         Assert.Equal(Key.FromUInt64(1), batch.Keys[0]);
 

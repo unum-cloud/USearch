@@ -6,7 +6,7 @@
  *
  *  The @c CompiledSequenceIndex class and the lifecycle verbs that instantiate it, the cursor it
  *  opens, and the checkpoint metadata readers that need no index at all. Sequences cross as one
- *  Apache Arrow tape of bytes and offsets, borrowed in place.
+ *  Apache Arrow tape of bytes and offsets, viewed in place.
  *
  *  Every instance verb takes the executor and the completion first, so one native function serves
  *  the calling thread, a blocking receiver and a deferred one alike.
@@ -97,7 +97,7 @@ static napi_value usearch_js_sequence_adopt(napi_env env, usearch_outcome_t cons
 }
 
 /** Reads the optional substitution matrix, an @c Int8Array of 256 × 256 scores, and its gap cost;
- *  an absent matrix lends no weights. */
+ *  an absent matrix passes no weights. */
 static bool usearch_js_sequence_weights_from_value(napi_env env, napi_value matrix, napi_value gap,
                                                    usearch_sequence_weights_t* weights, bool* given) {
     napi_typedarray_type type = napi_uint8_array;
@@ -147,7 +147,7 @@ static bool usearch_js_sequence_widths_from_value(napi_env env, napi_value value
 
 /** <tt>initRam(metric, substitutionMatrix, gap, windowWidths, connectivity, valuesPerKey,
  *  memoryDomains, cpuClassCeiling)</tt> and <tt>initVram(..., devices, gpuClassCeiling)</tt> → an
- *  empty, mutable index. The weights are borrowed for the call alone. */
+ *  empty, mutable index. The weights are read only during the call alone. */
 static napi_value usearch_js_sequence_init(napi_env env, napi_callback_info info, usearch_residency_t residency) {
     napi_value arguments[8];
     size_t connectivity = 0, values_per_key = 0, widths_count = 0;
@@ -251,7 +251,7 @@ static napi_value usearch_js_sequence_load(napi_env env, napi_callback_info info
 
     usearch_sequence_index_t handle = NULL;
     usearch_outcome_t outcome = {usearch_status_success_k, NULL};
-    usearch_sequence_weights_t const* const lent = weighted ? &weights : NULL;
+    usearch_sequence_weights_t const* const passed = weighted ? &weights : NULL;
     usearch_ram_options_t const ram = {ordinals, ordinals_count, 0, cpu_class_ceiling};
     usearch_vram_options_t const vram_options = {ordinals, ordinals_count, 0, gpu_class_ceiling};
     if (vram && source == usearch_js_source_path_k) {
@@ -261,7 +261,7 @@ static napi_value usearch_js_sequence_load(napi_env env, napi_callback_info info
                                              .path = bytes,
                                              .vram = vram_options,
                                              .values_per_key = values_per_key,
-                                             .weights = lent};
+                                             .weights = passed};
         usearch_sequence_load_vram(&load);
     }
     else if (vram) {
@@ -271,7 +271,7 @@ static napi_value usearch_js_sequence_load(napi_env env, napi_callback_info info
                                                     .buffer = bytes,
                                                     .vram = vram_options,
                                                     .values_per_key = values_per_key,
-                                                    .weights = lent};
+                                                    .weights = passed};
         usearch_sequence_load_vram_buffer(&load);
     }
     else if (source == usearch_js_source_path_k) {
@@ -281,7 +281,7 @@ static napi_value usearch_js_sequence_load(napi_env env, napi_callback_info info
                                             .path = bytes,
                                             .ram = ram,
                                             .values_per_key = values_per_key,
-                                            .weights = lent};
+                                            .weights = passed};
         usearch_sequence_load_ram(&load);
     }
     else {
@@ -291,7 +291,7 @@ static napi_value usearch_js_sequence_load(napi_env env, napi_callback_info info
                                                    .buffer = bytes,
                                                    .ram = ram,
                                                    .values_per_key = values_per_key,
-                                                   .weights = lent};
+                                                   .weights = passed};
         usearch_sequence_load_ram_buffer(&load);
     }
     free(ordinals);
@@ -544,7 +544,7 @@ static napi_value usearch_js_sequence_insert(napi_env env, napi_callback_info in
         usearch_js_call_abandon(&call->call, &local.call);
         return NULL;
     }
-    // The keys view carries no count, so only this side can see the two disagree.
+    // The keys view holds no count, so only this side can see the two disagree.
     if (keys_count != insert.count) {
         usearch_js_call_abandon(&call->call, &local.call);
         usearch_js_throw(env, usearch_status_shape_mismatch_k, "The keys name one key per sequence");
@@ -698,7 +698,7 @@ static napi_value usearch_js_sequence_sample(napi_env env, napi_callback_info in
         usearch_js_call_abandon(&call->call, &local.call);
         return NULL;
     }
-    // The coordinates carry no count of their own, so only this side can see them disagree.
+    // The coordinates hold no count of their own, so only this side can see them disagree.
     if (placed != sample.shown_count) {
         usearch_js_call_abandon(&call->call, &local.call);
         usearch_js_throw(env, usearch_status_shape_mismatch_k, "The shown keys need one place apiece");
@@ -859,26 +859,26 @@ static void usearch_js_sequence_cursor_finalize(napi_env env, void* data, void* 
     free(data);
 }
 
-/** <tt>next(wanted, arena, links)</tt> → @c {keys, entries, links}, the next batch viewed inside @p arena;
- *  zero entries mean the walk ended. */
+/** <tt>next(executor, wanted, arena, links)</tt> → @c {keys, entries, links}, the next batch viewed
+ *  inside @p arena, pulled on @p executor or the calling thread; zero entries end the walk. */
 static napi_value usearch_js_sequence_cursor_next(napi_env env, napi_callback_info info) {
-    napi_value arguments[3];
+    napi_value arguments[4];
     usearch_sequence_cursor_next_t next = {0};
     void* index = NULL;
-    usearch_js_walk_t* const walk = usearch_js_walk_self(env, info, 3, arguments, &index, &next.executor);
-    if (!walk) return NULL;
+    usearch_js_walk_t* const walk = usearch_js_walk_self(env, info, 4, arguments, &index, &next.executor);
+    if (!walk || !usearch_js_executor_from_value(env, arguments[0], &next.executor)) return NULL;
     usearch_js_index_call_t call;
     memset(&call, 0, sizeof(call));
     bool exports_links = false;
-    if (!usearch_js_value_absent(env, arguments[2]) &&
-        napi_get_value_bool(env, arguments[2], &exports_links) != napi_ok) {
+    if (!usearch_js_value_absent(env, arguments[3]) &&
+        napi_get_value_bool(env, arguments[3], &exports_links) != napi_ok) {
         usearch_js_throw_field(env, "links", "must be a boolean");
         return NULL;
     }
-    if (!usearch_js_size_from_value(env, arguments[0], "wanted", &next.wanted) ||
-        !usearch_js_arena_from_value(env, arguments[1], &next.arena))
+    if (!usearch_js_size_from_value(env, arguments[1], "wanted", &next.wanted) ||
+        !usearch_js_arena_from_value(env, arguments[2], &next.arena))
         return NULL;
-    napi_value const slots[usearch_js_slots_k] = {NULL, NULL, arguments[1]};
+    napi_value const slots[usearch_js_slots_k] = {NULL, NULL, arguments[2]};
     call.call.finish = exports_links ? usearch_js_finish_cursor_links : usearch_js_finish_cursor_keys;
     next.index = index;
     next.outcome = &call.call.outcome;
@@ -903,25 +903,24 @@ static napi_value usearch_js_sequence_cursor_release(napi_env env, napi_callback
     return usearch_js_undefined(env);
 }
 
-/** <tt>cursor(executor, starts)</tt> → a walk over the entries published so far, pulling on @p executor;
+/** <tt>cursor(starts)</tt> → a walk over the entries published so far, keeping no executor;
  *  @p starts is absent for every entry as stored, else the keys to walk out from. */
 static napi_value usearch_js_sequence_cursor(napi_env env, napi_callback_info info) {
-    napi_value arguments[2], self = NULL;
-    usearch_js_index_t* const index = usearch_js_index_self(env, info, 2, arguments, &self);
-    usearch_executor_t executor = NULL;
+    napi_value arguments[1], self = NULL;
+    usearch_js_index_t* const index = usearch_js_index_self(env, info, 1, arguments, &self);
     usearch_sequence_cursor_t handle = NULL;
     usearch_outcome_t outcome = {usearch_status_success_k, NULL};
     usearch_sequence_cursor_init_t init = {.cursor = &handle, .outcome = &outcome};
     usearch_key_t* gathered = NULL;
-    if (!index || !usearch_js_executor_from_value(env, arguments[0], &executor)) return NULL;
-    if (!usearch_js_value_absent(env, arguments[1]) &&
-        !usearch_js_keys_from_value(env, arguments[1], "starts", &init.starts, &init.starts_count, &gathered))
+    if (!index) return NULL;
+    if (!usearch_js_value_absent(env, arguments[0]) &&
+        !usearch_js_keys_from_value(env, arguments[0], "starts", &init.starts, &init.starts_count, &gathered))
         return NULL;
     init.index = index->handle;
     usearch_sequence_cursor_init(&init);
     free(gathered);
     if (!usearch_js_succeeded(env, &outcome)) return NULL;
-    return usearch_js_walk_object(env, handle, self, arguments[0], usearch_js_sequence_cursor_next,
+    return usearch_js_walk_object(env, handle, self, usearch_js_undefined(env), usearch_js_sequence_cursor_next,
                                   usearch_js_sequence_cursor_release, usearch_js_sequence_cursor_finalize,
                                   usearch_js_sequence_cursor_free);
 }

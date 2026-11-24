@@ -299,7 +299,7 @@ struct vram_amd_indexes {
      */
     status_t clear() noexcept {
         unique_lock_t const held {gate_, std::try_to_lock};
-        if (!held) return status_code_t::contended_k;
+        if (!held) return {status_code_t::contended_k, "A call holds the index while clearing"};
         if (status_t const closed = shards_.close(); failed(closed)) return closed;
         shards_.begin_window();
         clear_();
@@ -660,7 +660,7 @@ struct vram_amd_indexes {
         if (status_t const kept = status(); failed(kept)) return {{}, kept};
         if (status_t const paired = fanout_t::pairs_with(shards_, executor); failed(paired)) return {{}, paired};
         shared_lock_t const held {gate_};
-        if (shards_.sealed()) return {{}, status_code_t::contended_k};
+        if (shards_.sealed()) return {{}, {status_code_t::contended_k, "A plan holds the index sealed"}};
         insert_plan_t plan {shards_.allocator()};
         plan.config_ = config;
         if (!rows) {
@@ -2452,7 +2452,7 @@ struct vram_amd_indexes {
      *  it moves no epoch. */
     status_t close_gated_() noexcept {
         unique_lock_t const held {gate_, std::try_to_lock};
-        return held ? shards_.close() : status_code_t::contended_k;
+        return held ? shards_.close() : status_t {status_code_t::contended_k, "A call holds the index while closing"};
     }
 
     /** One shard of a new shard generation, on the device @p like sits on, current while its
@@ -2664,6 +2664,8 @@ struct vram_amd_indexes {
         for (shard_t const& shard : shaped.shards_)
             walk_bytes = max_of(walk_bytes, shard.index->traversal_memory_usage(plan.config_, parts));
         for (std::size_t shard = 0; shard != shards; ++shard) {
+            // The run grows on the current device's stream, so that device is bound first.
+            if (status_t const entered = fanout_t::enter(shards_, shard); failed(entered)) return entered;
             typename executor_t::stream_t& stream = executor.stream(fanout_t::stream_of(shards_, executor, shard));
             plan.arenas_.push_back_reserved(typename executor_t::arena_t {stream.arena.upstream()});
             if (failed(plan.arenas_[shard].reserve_exactly(walk_bytes))) return status_code_t::out_of_memory_k;
@@ -2686,7 +2688,7 @@ struct vram_amd_indexes {
         // The source empties once its rows are copied, so its gate comes before anything that a
         // refusal could undo.
         unique_lock_t const emptying {source.gate_, std::try_to_lock};
-        if (!emptying) return status_code_t::contended_k;
+        if (!emptying) return {status_code_t::contended_k, "A call holds the reshard source"};
 
         // Every shard claims all its rows first, so a failure before publication releases them all.
         std::size_t const source_shards = moves.size();
@@ -3434,8 +3436,10 @@ struct vram_amd_indexes_cursor {
             shard_cursor_t& cursor = shard_cursors_[entry.shard];
             index_t const& shard = indexes.shard(entry.shard);
             if (status_t const sought = cursor.seek(shard, entry.node); failed(sought))
-                return indexes.still_valid(epoch_) ? expected<std::size_t> {written, sought}
-                                                   : expected<std::size_t> {0, status_code_t::contended_k};
+                return indexes.still_valid(epoch_)
+                           ? expected<std::size_t> {written, sought}
+                           : expected<std::size_t> {0,
+                                                    {status_code_t::contended_k, "A window moved the cursor's shard"}};
             std::span<node_id_t const> const neighbors = cursor.neighbors();
             if (links_keys && (failed(links_keys->reserve(links_keys->size() + neighbors.size())) ||
                                failed(links_offsets->reserve(links_offsets->size() + 1))))
@@ -3457,7 +3461,7 @@ struct vram_amd_indexes_cursor {
             keys[written++] = key;
         }
         // Emptied shards keep their storage, so a pull that ran past a window read nothing freed.
-        if (!indexes.still_valid(epoch_)) return {0, status_code_t::contended_k};
+        if (!indexes.still_valid(epoch_)) return {0, {status_code_t::contended_k, "A window passed the cursor's pull"}};
         return {written, status_code_t::success_k};
     }
 

@@ -9,7 +9,7 @@
 import { CompiledDeferred, CompiledMatches, CompiledRows, CompiledTapeRows, compiled } from "./library";
 
 /** What went wrong, one member per failure the library reports, spelled as its canonical name.
- *  Every error the library or this binding throws carries one as its `code`, so a caller branches
+ *  Every error the library or this binding throws holds one as its `code`, so a caller branches
  *  on the identity of the fault rather than on which side of the boundary saw it. A
  *  {@link Deferred} also reports `Success`, and `Deferred` until its call is final.
  *  @enum {string}
@@ -185,13 +185,13 @@ export function keyFromInteger(value: bigint | number): Key {
  *
  *  @param key - Sixteen identity bytes.
  *  @returns The integer the trailing eight bytes spell.
- *  @throws Will throw an error if the leading eight bytes carry anything, since no integer
+ *  @throws Will throw an error if the leading eight bytes hold anything, since no integer
  *          spells that identity.
  */
 export function integerFromKey(key: Uint8Array): bigint {
   if (key.length !== keyBytes) throw fail(Status.Malformed, "A key is sixteen bytes, most significant first.");
   for (let position = 0; position < 8; position++)
-    if (key[position] !== 0) throw fail(Status.Malformed, `The key ${formatKey(key)} carries no integer identity.`);
+    if (key[position] !== 0) throw fail(Status.Malformed, `The key ${formatKey(key)} holds no integer identity.`);
   let integer = 0n;
   for (let position = 8; position < keyBytes; position++) integer = (integer << 8n) | BigInt(key[position]);
   return integer;
@@ -229,10 +229,10 @@ export function parseKey(text: string): Key {
 }
 
 /**
- *  Borrows the identity at `position` of a run, as a view rather than a copy. Binding-only.
+ *  Views the identity at `position` of a run, as a view rather than a copy. Binding-only.
  *
  *  @param keys - A run of sixteen-byte identities.
- *  @param position - Which identity to borrow.
+ *  @param position - Which identity to view.
  *  @returns A view over those sixteen bytes, backed by the run's own storage.
  */
 export function keyAt(keys: Uint8Array, position: number): Key {
@@ -310,11 +310,12 @@ export function scalarOf(data: Vector): Scalar {
   throw fail(Status.UnknownKind, "The rows spell no scalar kind on their own; name one in a RowsView.");
 }
 
-/** A borrowed run of rows of one width - what every batch argument is, and what a single row is
+/** A viewed run of rows of one width - what every batch argument is, and what a single row is
  *  when it travels as a bare TypedArray. Its row count travels beside it as the call's `count`. */
 export class RowsView {
   /**
-   *  Borrows `rows` rows of `columns` values of `scalar`, `stride` bytes apart; a zero stride repeats the first row.
+   *  Views `rows` rows of `columns` values of `scalar`, `stride` bytes apart; a zero stride repeats
+   *  the first row.
    *
    *  @param data - The array holding every row; never copied.
    *  @param rows - Rows the run holds, which the call reads as its batch.
@@ -331,7 +332,7 @@ export class RowsView {
   ) {}
 
   /**
-   *  Borrows a packed run, every row `columns` values wide and laid end to end. Binding-only sugar.
+   *  Views a packed run, every row `columns` values wide and laid end to end. Binding-only sugar.
    *
    *  @param data - The rows, end to end.
    *  @param columns - Values per row.
@@ -364,17 +365,8 @@ export function crossing(rows: RowsView | Vector): CompiledRows {
 export interface ExecutorForRamConfig {
   /** NUMA node IDs the workers are spread over; absent spreads them over every node. */
   memoryDomains?: number[];
-  /** Workers to spawn; absent takes 7/8 of the cores the domains carry. */
+  /** Workers to spawn; absent takes 7/8 of the cores the domains hold. */
   threads?: number;
-  /** The newest CPU class dispatch may pick, by canonical name, intersected with what the machine
-   *  runs, so a class it lacks narrows rather than refuses; absent means no ceiling. */
-  cpuClassCeiling?: string;
-}
-
-/** Where the borrowed pool of a RAM executor is placed. */
-export interface ExecutorOnPoolConfig {
-  /** NUMA node IDs of the indexes it will drive; absent derives every node. */
-  memoryDomains?: number[];
   /** The newest CPU class dispatch may pick, by canonical name, intersected with what the machine
    *  runs, so a class it lacks narrows rather than refuses; absent means no ceiling. */
   cpuClassCeiling?: string;
@@ -384,7 +376,9 @@ export interface ExecutorOnPoolConfig {
 export interface ExecutorForVramConfig {
   /** CUDA ordinals to drive; absent takes one free device. */
   devices?: number[];
-  /** Borrowed CUDA stream addresses, one per device in `devices` order; absent creates its own. */
+  /** The caller's CUDA stream addresses, one per device in `devices` order, which answer
+   *  unsupported, since the executor drives only its own; absent uses the executor's own stream
+   *  per device. */
   streams?: bigint[];
   /** Ceiling on scratch bytes per device; absent lets scratch grow as geometry asks. */
   scratchLimit?: number;
@@ -435,19 +429,11 @@ export interface ExecutorConstructor {
   forRam(config?: ExecutorForRamConfig): Executor;
 
   /**
-   *  Borrows a caller's thread pool for a RAM-resident index, keeping its lender's mood.
+   *  Opens one non-blocking stream per device for a VRAM-resident index, driven from a single host
+   *  thread and created and destroyed with the executor.
    *
-   *  @param pool - The pool's address; it must outlive the executor.
-   *  @param config - The NUMA nodes.
-   *  @returns The executor over the borrowed pool.
-   */
-  onPool(pool: bigint, config?: ExecutorOnPoolConfig): Executor;
-
-  /**
-   *  Opens one stream per device for a VRAM-resident index, driven from a single host thread.
-   *
-   *  @param config - The devices, borrowed streams and scratch ceiling.
-   *  @returns The streams, which must outlive every call they run.
+   *  @param config - The devices, the caller's streams and the scratch ceiling.
+   *  @returns The executor, which must outlive every call it runs.
    */
   forVram(config?: ExecutorForVramConfig): Executor;
 
@@ -472,13 +458,13 @@ export const Executor = compiled.Executor as ExecutorConstructor;
  *  steady loop allocates once. Each call rewinds the arena it is handed, which ends every view of
  *  the previous call's outputs: their arrays read whatever the arena holds from then on, and
  *  nothing once it is freed. To keep one result past the next call, give that call another arena.
- *  A deferred call borrows it as a blocking one does: another call naming it before the first is
+ *  A deferred call views it as a blocking one does: another call naming it before the first is
  *  final finishes {@link Status.Contended} and leaves the first call's outputs alone, and `free`
  *  waits for it. The collector frees the arena once nothing views it; `free` releases it now, and
  *  every later call naming it is refused with {@link Status.InvalidArgument}.
  *
  *  A `Vram` arena grows, fills and frees on its executor's first stream, so it serves only calls on
- *  that executor and keeps it alive until freed; host pages may outlive their executor. */
+ *  that executor and keeps it alive until freed; every arena is freed before its executor. */
 export interface Arena extends Disposable {
   /** Where its outputs live, as the executor that made it decided; the views of a `Vram` arena hold
    *  device memory, which only device code reads. */
@@ -507,7 +493,7 @@ export interface ArenaConstructor {
 /** The native arena class: `new Arena()` or `new Arena(executor)`. */
 export const Arena = compiled.Arena as unknown as ArenaConstructor;
 
-/** The matches of one query, borrowed out of a run rather than copied.
+/** The matches of one query, viewed out of a run rather than copied.
  *
  *  Both arrays are subarrays of the run's own storage, so reading a query costs nothing. */
 export class QueryMatches {
@@ -548,7 +534,7 @@ export class Matches {
   }
 
   /**
-   *  Borrows the matches of one query, without copying. Binding-only.
+   *  Views the matches of one query, without copying. Binding-only.
    *
    *  @param queryIndex - Which query of the run to read.
    *  @returns The keys and scores that query found.
@@ -592,7 +578,7 @@ const immediatePolls = 16;
  *
  *  It keeps everything the library reads or writes alive until then - the outcome, the inputs,
  *  the outputs and every handle it names - so none of them is collected under the call, and it
- *  borrows its arena as a blocking call does. `status` polls without blocking, `wait` blocks and
+ *  uses its arena as a blocking call does. `status` polls without blocking, `wait` blocks and
  *  answers, and `await` polls the status between turns of the event loop; both answer the same
  *  cached result, or throw the same failure, however often they are asked.
  *
@@ -678,7 +664,7 @@ export class Deferred<T> implements PromiseLike<T>, Disposable {
  *  entries around them, entry `i` spanning elements `offsets[i]` up to `offsets[i + 1]`.
  *
  *  An element is a byte of a sequence or a point of a shape, three coordinates wide. As an input
- *  it is borrowed in place for the call; as a retrieval's output it is viewed inside its arena. */
+ *  it is viewed in place for the call; as a retrieval's output it is viewed inside its arena. */
 export class Tape {
   /** Every element's scalars, end to end. */
   readonly data: Vector;
@@ -710,7 +696,7 @@ export class Tape {
   }
 
   /**
-   *  Borrows one entry's scalars, without copying. Binding-only.
+   *  Views one entry's scalars, without copying. Binding-only.
    *
    *  @param entry - Which entry to read.
    *  @returns The scalars of that entry's elements, end to end.

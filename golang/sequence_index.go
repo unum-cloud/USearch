@@ -326,7 +326,7 @@ type SequenceSaveBufferConfig struct {
 	ProgressSteps uint
 }
 
-// SequenceViewNvmeConfig carries the optional settings of SequenceViewNvme.
+// SequenceViewNvmeConfig holds the optional settings of SequenceViewNvme.
 type SequenceViewNvmeConfig struct {
 	// Executor is the NVMe executor whose rings read the checkpoint's headers; nil reads on the
 	// calling goroutine.
@@ -358,7 +358,7 @@ type SequenceSearchConfig struct {
 	Stats *TraversalStats
 }
 
-// SequenceRefineConfig carries the optional settings of Refine. A zero value derives every setting.
+// SequenceRefineConfig holds the optional settings of Refine. A zero value derives every setting.
 type SequenceRefineConfig struct {
 	// ExpansionFactor is the breadth of the candidates the re-selection walk explores; zero derives.
 	ExpansionFactor uint
@@ -375,7 +375,7 @@ type SequenceRefineConfig struct {
 	Plan *SequenceRefinePlan
 }
 
-// SequenceReshardConfig carries the optional settings of Reshard. A zero value derives every
+// SequenceReshardConfig holds the optional settings of Reshard. A zero value derives every
 // setting.
 type SequenceReshardConfig struct {
 	// Seed picks the part roots of a source split among several targets: equal seeds over an
@@ -417,13 +417,13 @@ func (weights *SequenceWeights) check() error {
 	return fail(StatusShapeMismatch, "a substitution matrix holds 256 × 256 scores")
 }
 
-// lower lends optional weights for the call alone, nil for none.
+// lower passes optional weights for the call alone, nil for none.
 func (weights *SequenceWeights) lower(call *call) *C.usearch_sequence_weights_t {
 	if weights == nil {
 		return nil
 	}
 	lowered := &C.usearch_sequence_weights_t{
-		substitution_matrix: (*C.int8_t)(call.lend(unsafe.Pointer(unsafe.SliceData(weights.SubstitutionMatrix)), len(weights.SubstitutionMatrix))),
+		substitution_matrix: (*C.int8_t)(call.pinSlice(unsafe.Pointer(unsafe.SliceData(weights.SubstitutionMatrix)), len(weights.SubstitutionMatrix))),
 		gap:                 C.int8_t(weights.Gap),
 	}
 	return (*C.usearch_sequence_weights_t)(call.pin(unsafe.Pointer(lowered)))
@@ -473,21 +473,21 @@ func SequenceInitRam(options SequenceOptions, memoryDomains []int32) (*SequenceI
 	if err := options.Weights.check(); err != nil {
 		return nil, err
 	}
-	var lent lent[C.usearch_sequence_index_t]
-	arguments := open[C.usearch_sequence_init_ram_t](&lent)
+	var call callWithResult[C.usearch_sequence_index_t]
+	arguments := open[C.usearch_sequence_init_ram_t](&call)
 	*arguments = C.usearch_sequence_init_ram_t{
-		index:               lent.result,
-		outcome:             lent.outcome(),
+		index:               call.result,
+		outcome:             call.outcome(),
 		metric:              C.usearch_sequence_metric_t(options.Metric),
-		weights:             options.Weights.lower(&lent.call),
-		window_widths:       (*C.size_t)(lent.lend(unsafe.Pointer(unsafe.SliceData(options.WindowWidths)), len(options.WindowWidths))),
+		weights:             options.Weights.lower(&call.call),
+		window_widths:       (*C.size_t)(call.pinSlice(unsafe.Pointer(unsafe.SliceData(options.WindowWidths)), len(options.WindowWidths))),
 		window_widths_count: C.size_t(len(options.WindowWidths)),
 		connectivity:        C.size_t(options.Connectivity),
 		values_per_key:      C.size_t(options.ValuesPerKey),
-		ram:                 lent.ram(memoryDomains, options.CPUClassCeiling),
+		ram:                 call.ram(memoryDomains, options.CPUClassCeiling),
 	}
 	C.usearch_sequence_init_ram(arguments)
-	return sequenceIndexOf(block(&lent, nil))
+	return sequenceIndexOf(block(&call, nil))
 }
 
 // SequenceInitVram creates an empty, mutable index in device memory, sharded across the CUDA
@@ -496,21 +496,21 @@ func SequenceInitVram(options SequenceOptions, devices []int32) (*SequenceIndex,
 	if err := options.Weights.check(); err != nil {
 		return nil, err
 	}
-	var lent lent[C.usearch_sequence_index_t]
-	arguments := open[C.usearch_sequence_init_vram_t](&lent)
+	var call callWithResult[C.usearch_sequence_index_t]
+	arguments := open[C.usearch_sequence_init_vram_t](&call)
 	*arguments = C.usearch_sequence_init_vram_t{
-		index:               lent.result,
-		outcome:             lent.outcome(),
+		index:               call.result,
+		outcome:             call.outcome(),
 		metric:              C.usearch_sequence_metric_t(options.Metric),
-		weights:             options.Weights.lower(&lent.call),
-		window_widths:       (*C.size_t)(lent.lend(unsafe.Pointer(unsafe.SliceData(options.WindowWidths)), len(options.WindowWidths))),
+		weights:             options.Weights.lower(&call.call),
+		window_widths:       (*C.size_t)(call.pinSlice(unsafe.Pointer(unsafe.SliceData(options.WindowWidths)), len(options.WindowWidths))),
 		window_widths_count: C.size_t(len(options.WindowWidths)),
 		connectivity:        C.size_t(options.Connectivity),
 		values_per_key:      C.size_t(options.ValuesPerKey),
-		vram:                lent.vram(devices, options.GPUClassCeiling),
+		vram:                call.vram(devices, options.GPUClassCeiling),
 	}
 	C.usearch_sequence_init_vram(arguments)
-	return sequenceIndexOf(block(&lent, nil))
+	return sequenceIndexOf(block(&call, nil))
 }
 
 // SequenceLoadRam copies a checkpoint into a new, mutable index in host memory. The path names a
@@ -525,20 +525,20 @@ func SequenceLoadRam(path string, weights *SequenceWeights, config *SequenceLoad
 	if err := weights.check(); err != nil {
 		return nil, err
 	}
-	var lent lent[C.usearch_sequence_index_t]
-	arguments := open[C.usearch_sequence_load_ram_t](&lent)
+	var call callWithResult[C.usearch_sequence_index_t]
+	arguments := open[C.usearch_sequence_load_ram_t](&call)
 	*arguments = C.usearch_sequence_load_ram_t{
-		index:          lent.result,
+		index:          call.result,
 		executor:       executor,
-		outcome:        lent.outcome(),
-		path:           lent.text(path),
-		ram:            lent.ram(options.MemoryDomains, options.CPUClassCeiling),
+		outcome:        call.outcome(),
+		path:           call.text(path),
+		ram:            call.ram(options.MemoryDomains, options.CPUClassCeiling),
 		values_per_key: C.size_t(options.ValuesPerKey),
-		weights:        weights.lower(&lent.call),
-		progress:       lent.progress(options.Progress, options.ProgressSteps),
+		weights:        weights.lower(&call.call),
+		progress:       call.progress(options.Progress, options.ProgressSteps),
 	}
 	C.usearch_sequence_load_ram(arguments)
-	return sequenceIndexOf(block(&lent, nil))
+	return sequenceIndexOf(block(&call, nil))
 }
 
 // SequenceLoadVram copies a checkpoint into a new, mutable index in device memory, with the
@@ -552,20 +552,20 @@ func SequenceLoadVram(path string, weights *SequenceWeights, config *SequenceLoa
 	if err := weights.check(); err != nil {
 		return nil, err
 	}
-	var lent lent[C.usearch_sequence_index_t]
-	arguments := open[C.usearch_sequence_load_vram_t](&lent)
+	var call callWithResult[C.usearch_sequence_index_t]
+	arguments := open[C.usearch_sequence_load_vram_t](&call)
 	*arguments = C.usearch_sequence_load_vram_t{
-		index:          lent.result,
+		index:          call.result,
 		executor:       executor,
-		outcome:        lent.outcome(),
-		path:           lent.text(path),
-		vram:           lent.vram(options.Devices, options.GPUClassCeiling),
+		outcome:        call.outcome(),
+		path:           call.text(path),
+		vram:           call.vram(options.Devices, options.GPUClassCeiling),
 		values_per_key: C.size_t(options.ValuesPerKey),
-		weights:        weights.lower(&lent.call),
-		progress:       lent.progress(options.Progress, options.ProgressSteps),
+		weights:        weights.lower(&call.call),
+		progress:       call.progress(options.Progress, options.ProgressSteps),
 	}
 	C.usearch_sequence_load_vram(arguments)
-	return sequenceIndexOf(block(&lent, nil))
+	return sequenceIndexOf(block(&call, nil))
 }
 
 // SequenceLoadRamBuffer copies a monolith from a buffer into a new, mutable index in host memory,
@@ -580,20 +580,20 @@ func SequenceLoadRamBuffer(buffer []byte, weights *SequenceWeights,
 	if err := weights.check(); err != nil {
 		return nil, err
 	}
-	var lent lent[C.usearch_sequence_index_t]
-	arguments := open[C.usearch_sequence_load_ram_buffer_t](&lent)
+	var call callWithResult[C.usearch_sequence_index_t]
+	arguments := open[C.usearch_sequence_load_ram_buffer_t](&call)
 	*arguments = C.usearch_sequence_load_ram_buffer_t{
-		index:          lent.result,
+		index:          call.result,
 		executor:       executor,
-		outcome:        lent.outcome(),
-		buffer:         lent.bytes(buffer),
-		ram:            lent.ram(options.MemoryDomains, options.CPUClassCeiling),
+		outcome:        call.outcome(),
+		buffer:         call.bytes(buffer),
+		ram:            call.ram(options.MemoryDomains, options.CPUClassCeiling),
 		values_per_key: C.size_t(options.ValuesPerKey),
-		weights:        weights.lower(&lent.call),
-		progress:       lent.progress(options.Progress, options.ProgressSteps),
+		weights:        weights.lower(&call.call),
+		progress:       call.progress(options.Progress, options.ProgressSteps),
 	}
 	C.usearch_sequence_load_ram_buffer(arguments)
-	return sequenceIndexOf(block(&lent, nil))
+	return sequenceIndexOf(block(&call, nil))
 }
 
 // SequenceLoadVramBuffer copies a monolith from a buffer into a new, mutable index in device
@@ -608,20 +608,20 @@ func SequenceLoadVramBuffer(buffer []byte, weights *SequenceWeights,
 	if err := weights.check(); err != nil {
 		return nil, err
 	}
-	var lent lent[C.usearch_sequence_index_t]
-	arguments := open[C.usearch_sequence_load_vram_buffer_t](&lent)
+	var call callWithResult[C.usearch_sequence_index_t]
+	arguments := open[C.usearch_sequence_load_vram_buffer_t](&call)
 	*arguments = C.usearch_sequence_load_vram_buffer_t{
-		index:          lent.result,
+		index:          call.result,
 		executor:       executor,
-		outcome:        lent.outcome(),
-		buffer:         lent.bytes(buffer),
-		vram:           lent.vram(options.Devices, options.GPUClassCeiling),
+		outcome:        call.outcome(),
+		buffer:         call.bytes(buffer),
+		vram:           call.vram(options.Devices, options.GPUClassCeiling),
 		values_per_key: C.size_t(options.ValuesPerKey),
-		weights:        weights.lower(&lent.call),
-		progress:       lent.progress(options.Progress, options.ProgressSteps),
+		weights:        weights.lower(&call.call),
+		progress:       call.progress(options.Progress, options.ProgressSteps),
 	}
 	C.usearch_sequence_load_vram_buffer(arguments)
-	return sequenceIndexOf(block(&lent, nil))
+	return sequenceIndexOf(block(&call, nil))
 }
 
 // SequenceViewRam serves a checkpoint in place through a memory mapping, as a read-only index
@@ -630,16 +630,16 @@ func SequenceViewRam(path string, weights *SequenceWeights) (*SequenceIndex, err
 	if err := weights.check(); err != nil {
 		return nil, err
 	}
-	var lent lent[C.usearch_sequence_index_t]
-	arguments := open[C.usearch_sequence_view_ram_t](&lent)
+	var call callWithResult[C.usearch_sequence_index_t]
+	arguments := open[C.usearch_sequence_view_ram_t](&call)
 	*arguments = C.usearch_sequence_view_ram_t{
-		index:   lent.result,
-		outcome: lent.outcome(),
-		path:    lent.text(path),
-		weights: weights.lower(&lent.call),
+		index:   call.result,
+		outcome: call.outcome(),
+		path:    call.text(path),
+		weights: weights.lower(&call.call),
 	}
 	C.usearch_sequence_view_ram(arguments)
-	return sequenceIndexOf(block(&lent, nil))
+	return sequenceIndexOf(block(&call, nil))
 }
 
 // SequenceViewNvme serves a checkpoint in place from NVMe drives, read through the executor's
@@ -653,18 +653,18 @@ func SequenceViewNvme(path string, weights *SequenceWeights, config *SequenceVie
 	if err := weights.check(); err != nil {
 		return nil, err
 	}
-	var lent lent[C.usearch_sequence_index_t]
-	arguments := open[C.usearch_sequence_view_nvme_t](&lent)
+	var call callWithResult[C.usearch_sequence_index_t]
+	arguments := open[C.usearch_sequence_view_nvme_t](&call)
 	*arguments = C.usearch_sequence_view_nvme_t{
-		index:    lent.result,
+		index:    call.result,
 		executor: executor,
-		outcome:  lent.outcome(),
-		path:     lent.text(path),
-		nvme:     lent.nvme(options.Paths, options.CPUClassCeiling),
-		weights:  weights.lower(&lent.call),
+		outcome:  call.outcome(),
+		path:     call.text(path),
+		nvme:     call.nvme(options.Paths, options.CPUClassCeiling),
+		weights:  weights.lower(&call.call),
 	}
 	C.usearch_sequence_view_nvme(arguments)
-	return sequenceIndexOf(block(&lent, nil))
+	return sequenceIndexOf(block(&call, nil))
 }
 
 // SequenceMetadataRead reads a checkpoint's metric and connectivity without loading it.
@@ -674,16 +674,16 @@ func SequenceMetadataRead(path string, config *SequenceMetadataReadConfig) (Sequ
 	if err != nil {
 		return SequenceMetadata{}, err
 	}
-	var lent lent[SequenceMetadata]
-	arguments := open[C.usearch_sequence_metadata_read_t](&lent)
+	var call callWithResult[SequenceMetadata]
+	arguments := open[C.usearch_sequence_metadata_read_t](&call)
 	*arguments = C.usearch_sequence_metadata_read_t{
 		executor: executor,
-		outcome:  lent.outcome(),
-		path:     lent.text(path),
-		metadata: (*C.usearch_sequence_metadata_t)(unsafe.Pointer(lent.result)),
+		outcome:  call.outcome(),
+		path:     call.text(path),
+		metadata: (*C.usearch_sequence_metadata_t)(unsafe.Pointer(call.result)),
 	}
 	C.usearch_sequence_metadata_read(arguments)
-	return block(&lent, nil)
+	return block(&call, nil)
 }
 
 // SequenceMetadataReadBuffer reads the metric and connectivity out of a serialized monolith buffer.
@@ -693,16 +693,16 @@ func SequenceMetadataReadBuffer(buffer []byte, config *SequenceMetadataReadBuffe
 	if err != nil {
 		return SequenceMetadata{}, err
 	}
-	var lent lent[SequenceMetadata]
-	arguments := open[C.usearch_sequence_metadata_read_buffer_t](&lent)
+	var call callWithResult[SequenceMetadata]
+	arguments := open[C.usearch_sequence_metadata_read_buffer_t](&call)
 	*arguments = C.usearch_sequence_metadata_read_buffer_t{
 		executor: executor,
-		outcome:  lent.outcome(),
-		buffer:   lent.bytes(buffer),
-		metadata: (*C.usearch_sequence_metadata_t)(unsafe.Pointer(lent.result)),
+		outcome:  call.outcome(),
+		buffer:   call.bytes(buffer),
+		metadata: (*C.usearch_sequence_metadata_t)(unsafe.Pointer(call.result)),
 	}
 	C.usearch_sequence_metadata_read_buffer(arguments)
-	return block(&lent, nil)
+	return block(&call, nil)
 }
 
 // endregion: Index
@@ -726,7 +726,7 @@ type SequenceIndexOn struct {
 // sugar. Binding-only.
 //
 // The library reads a deferred call's inputs until the call is final, so the slices a verb is
-// handed must not change until then; its arena is borrowed, as a blocking verb borrows it.
+// handed must not change until then; its arena is viewed, as a blocking verb views it.
 type SequenceIndexDeferredOn struct {
 	sequenceReceiver
 }
@@ -747,53 +747,53 @@ func (on SequenceIndexOn) Deferred(executor *Executor) SequenceIndexDeferredOn {
 // Reserve claims capacity for a number of incoming entries and the bytes they hold, ahead of
 // insertion. Both are desired totals, including what the index holds.
 func (on SequenceIndexOn) Reserve(entries, payloadBytes uint) error {
-	var lent lent[struct{}]
-	_, err := block(&lent, on.reserve(&lent, C.usearch_completion_blocking_k, entries, payloadBytes))
+	var call callWithResult[struct{}]
+	_, err := block(&call, on.reserve(&call, C.usearch_completion_blocking_k, entries, payloadBytes))
 	return err
 }
 
 // Reserve submits SequenceIndexOn.Reserve.
 func (on SequenceIndexDeferredOn) Reserve(entries, payloadBytes uint) (*Deferred[struct{}], error) {
 	deferred := new(Deferred[struct{}])
-	return submitted(deferred, on.reserve(&deferred.lent, C.usearch_completion_deferred_k, entries, payloadBytes))
+	return submitted(deferred, on.reserve(&deferred.call, C.usearch_completion_deferred_k, entries, payloadBytes))
 }
 
 // Clear erases all entries, keeping the reserved capacity. No other verb may overlap it on the
 // same handle.
 func (on SequenceIndexOn) Clear() error {
-	var lent lent[struct{}]
-	_, err := block(&lent, on.clear(&lent, C.usearch_completion_blocking_k))
+	var call callWithResult[struct{}]
+	_, err := block(&call, on.clear(&call, C.usearch_completion_blocking_k))
 	return err
 }
 
 // Clear submits SequenceIndexOn.Clear.
 func (on SequenceIndexDeferredOn) Clear() (*Deferred[struct{}], error) {
 	deferred := new(Deferred[struct{}])
-	return submitted(deferred, on.clear(&deferred.lent, C.usearch_completion_deferred_k))
+	return submitted(deferred, on.clear(&deferred.call, C.usearch_completion_deferred_k))
 }
 
 // Describe reports the frozen metadata and the current counters in one call.
 func (on SequenceIndexOn) Describe() (SequenceIndexDescription, error) {
-	var lent lent[SequenceIndexDescription]
-	return block(&lent, on.describe(&lent, C.usearch_completion_blocking_k))
+	var call callWithResult[SequenceIndexDescription]
+	return block(&call, on.describe(&call, C.usearch_completion_blocking_k))
 }
 
 // Describe submits SequenceIndexOn.Describe.
 func (on SequenceIndexDeferredOn) Describe() (*Deferred[SequenceIndexDescription], error) {
 	deferred := new(Deferred[SequenceIndexDescription])
-	return submitted(deferred, on.describe(&deferred.lent, C.usearch_completion_deferred_k))
+	return submitted(deferred, on.describe(&deferred.call, C.usearch_completion_deferred_k))
 }
 
 // Count reports how many entries are stored under a key, with the extent of their bytes.
 func (on SequenceIndexOn) Count(key Key) (SequenceKeyStats, error) {
-	var lent lent[SequenceKeyStats]
-	return block(&lent, on.count(&lent, C.usearch_completion_blocking_k, key))
+	var call callWithResult[SequenceKeyStats]
+	return block(&call, on.count(&call, C.usearch_completion_blocking_k, key))
 }
 
 // Count submits SequenceIndexOn.Count.
 func (on SequenceIndexDeferredOn) Count(key Key) (*Deferred[SequenceKeyStats], error) {
 	deferred := new(Deferred[SequenceKeyStats])
-	return submitted(deferred, on.count(&deferred.lent, C.usearch_completion_deferred_k, key))
+	return submitted(deferred, on.count(&deferred.call, C.usearch_completion_deferred_k, key))
 }
 
 // Contains reports whether the index holds at least one entry under a key, as a nonzero Count.
@@ -807,21 +807,21 @@ func (on SequenceIndexOn) Contains(key Key) (bool, error) {
 //
 // The call rewinds arena, and the tape stays readable until it serves another call.
 func (on SequenceIndexOn) Get(key Key, arena *Arena) (TapeView, error) {
-	var lent lent[TapeView]
-	return block(&lent, on.get(&lent, C.usearch_completion_blocking_k, key, arena))
+	var call callWithResult[TapeView]
+	return block(&call, on.get(&call, C.usearch_completion_blocking_k, key, arena))
 }
 
 // Get submits SequenceIndexOn.Get.
 func (on SequenceIndexDeferredOn) Get(key Key, arena *Arena) (*Deferred[TapeView], error) {
 	deferred := new(Deferred[TapeView])
-	return submitted(deferred, on.get(&deferred.lent, C.usearch_completion_deferred_k, key, arena))
+	return submitted(deferred, on.get(&deferred.call, C.usearch_completion_deferred_k, key, arena))
 }
 
 // Insert adds a tape of sequences under their keys - the native batch operation, where a single
 // sequence is a one-entry tape. A batch is all-or-nothing and becomes visible at once.
 func (on SequenceIndexOn) Insert(keys []Key, sequences Tape, config *SequenceInsertConfig) error {
-	var lent lent[struct{}]
-	_, err := block(&lent, on.insert(&lent, C.usearch_completion_blocking_k, keys, sequences, config))
+	var call callWithResult[struct{}]
+	_, err := block(&call, on.insert(&call, C.usearch_completion_blocking_k, keys, sequences, config))
 	return err
 }
 
@@ -829,47 +829,47 @@ func (on SequenceIndexOn) Insert(keys []Key, sequences Tape, config *SequenceIns
 func (on SequenceIndexDeferredOn) Insert(keys []Key, sequences Tape, config *SequenceInsertConfig) (*Deferred[struct{}],
 	error) {
 	deferred := new(Deferred[struct{}])
-	return submitted(deferred, on.insert(&deferred.lent, C.usearch_completion_deferred_k, keys, sequences, config))
+	return submitted(deferred, on.insert(&deferred.call, C.usearch_completion_deferred_k, keys, sequences, config))
 }
 
 // Refine re-selects the neighbors of every stored entry against the finished graph, as the dense
 // Refine does; a caller repeats rounds until the report's Verdict reads RefineConverged.
 func (on SequenceIndexOn) Refine(config *SequenceRefineConfig) (RefineReport, error) {
-	var lent lent[RefineReport]
-	return block(&lent, on.refine(&lent, C.usearch_completion_blocking_k, config))
+	var call callWithResult[RefineReport]
+	return block(&call, on.refine(&call, C.usearch_completion_blocking_k, config))
 }
 
 // Refine submits SequenceIndexOn.Refine.
 func (on SequenceIndexDeferredOn) Refine(config *SequenceRefineConfig) (*Deferred[RefineReport], error) {
 	deferred := new(Deferred[RefineReport])
-	return submitted(deferred, on.refine(&deferred.lent, C.usearch_completion_deferred_k, config))
+	return submitted(deferred, on.refine(&deferred.call, C.usearch_completion_deferred_k, config))
 }
 
 // Health measures how much of the graph a search reaches from the root. Read-only.
 func (on SequenceIndexOn) Health() (Reachability, error) {
-	var lent lent[Reachability]
-	return block(&lent, on.health(&lent, C.usearch_completion_blocking_k))
+	var call callWithResult[Reachability]
+	return block(&call, on.health(&call, C.usearch_completion_blocking_k))
 }
 
 // Health submits SequenceIndexOn.Health.
 func (on SequenceIndexDeferredOn) Health() (*Deferred[Reachability], error) {
 	deferred := new(Deferred[Reachability])
-	return submitted(deferred, on.health(&deferred.lent, C.usearch_completion_deferred_k))
+	return submitted(deferred, on.health(&deferred.call, C.usearch_completion_deferred_k))
 }
 
 // Search resolves a tape of queries into up to wanted nearest matches apiece, written into arena,
-// and filtered when the config carries a predicate. Never writes to the graph.
+// and filtered when the config holds a predicate. Never writes to the graph.
 func (on SequenceIndexOn) Search(queries Tape, wanted uint, arena *Arena, config *SequenceSearchConfig) (MatchesView,
 	error) {
-	var lent lent[MatchesView]
-	return block(&lent, on.search(&lent, C.usearch_completion_blocking_k, queries, wanted, arena, config))
+	var call callWithResult[MatchesView]
+	return block(&call, on.search(&call, C.usearch_completion_blocking_k, queries, wanted, arena, config))
 }
 
 // Search submits SequenceIndexOn.Search.
 func (on SequenceIndexDeferredOn) Search(queries Tape, wanted uint, arena *Arena,
 	config *SequenceSearchConfig) (*Deferred[MatchesView], error) {
 	deferred := new(Deferred[MatchesView])
-	return submitted(deferred, on.search(&deferred.lent, C.usearch_completion_deferred_k, queries, wanted, arena,
+	return submitted(deferred, on.search(&deferred.call, C.usearch_completion_deferred_k, queries, wanted, arena,
 		config))
 }
 
@@ -879,98 +879,98 @@ func (on SequenceIndexDeferredOn) Search(queries Tape, wanted uint, arena *Arena
 // its executor, and a refusal moves nothing.
 func (on SequenceIndexOn) Reshard(sources, targets []*SequenceIndex, config *SequenceReshardConfig) (RefineReport,
 	error) {
-	var lent lent[RefineReport]
-	return block(&lent, on.reshard(&lent, C.usearch_completion_blocking_k, sources, targets, config))
+	var call callWithResult[RefineReport]
+	return block(&call, on.reshard(&call, C.usearch_completion_blocking_k, sources, targets, config))
 }
 
 // Reshard submits SequenceIndexOn.Reshard.
 func (on SequenceIndexDeferredOn) Reshard(sources, targets []*SequenceIndex,
 	config *SequenceReshardConfig) (*Deferred[RefineReport], error) {
 	deferred := new(Deferred[RefineReport])
-	return submitted(deferred, on.reshard(&deferred.lent, C.usearch_completion_deferred_k, sources, targets, config))
+	return submitted(deferred, on.reshard(&deferred.call, C.usearch_completion_deferred_k, sources, targets, config))
 }
 
 // RefinePlanFinish closes a live refine plan and frees it whatever the call answers, reporting
 // what the whole plan did to the graph.
 func (on SequenceIndexOn) RefinePlanFinish(plan *SequenceRefinePlan) (RefineReport, error) {
-	var lent lent[RefineReport]
-	return block(&lent, on.refinePlanFinish(&lent, C.usearch_completion_blocking_k, plan))
+	var call callWithResult[RefineReport]
+	return block(&call, on.refinePlanFinish(&call, C.usearch_completion_blocking_k, plan))
 }
 
 // RefinePlanFinish submits SequenceIndexOn.RefinePlanFinish.
 func (on SequenceIndexDeferredOn) RefinePlanFinish(plan *SequenceRefinePlan) (*Deferred[RefineReport], error) {
 	deferred := new(Deferred[RefineReport])
-	return submitted(deferred, on.refinePlanFinish(&deferred.lent, C.usearch_completion_deferred_k, plan))
+	return submitted(deferred, on.refinePlanFinish(&deferred.call, C.usearch_completion_deferred_k, plan))
 }
 
 // ReshardPlanFinish closes a live reshard plan on this receiver's executor and frees it whatever
 // the call answers, reporting what the whole plan did.
 func (on SequenceIndexOn) ReshardPlanFinish(plan *SequenceReshardPlan) (RefineReport, error) {
-	var lent lent[RefineReport]
-	return block(&lent, on.reshardPlanFinish(&lent, C.usearch_completion_blocking_k, plan))
+	var call callWithResult[RefineReport]
+	return block(&call, on.reshardPlanFinish(&call, C.usearch_completion_blocking_k, plan))
 }
 
 // ReshardPlanFinish submits SequenceIndexOn.ReshardPlanFinish.
 func (on SequenceIndexDeferredOn) ReshardPlanFinish(plan *SequenceReshardPlan) (*Deferred[RefineReport], error) {
 	deferred := new(Deferred[RefineReport])
-	return submitted(deferred, on.reshardPlanFinish(&deferred.lent, C.usearch_completion_deferred_k, plan))
+	return submitted(deferred, on.reshardPlanFinish(&deferred.call, C.usearch_completion_deferred_k, plan))
 }
 
 // Sample draws up to wanted keys around the config's Focus, or across the whole index, each
 // hanging from a shown or earlier draw and placed in three dimensions beside the shown ones.
 func (on SequenceIndexOn) Sample(wanted uint, arena *Arena, config *SequenceSampleConfig) (DenseDraws, error) {
-	var lent lent[DenseDraws]
-	return block(&lent, on.sample(&lent, C.usearch_completion_blocking_k, wanted, arena, config))
+	var call callWithResult[DenseDraws]
+	return block(&call, on.sample(&call, C.usearch_completion_blocking_k, wanted, arena, config))
 }
 
 // Sample submits SequenceIndexOn.Sample.
 func (on SequenceIndexDeferredOn) Sample(wanted uint, arena *Arena, config *SequenceSampleConfig) (*Deferred[DenseDraws],
 	error) {
 	deferred := new(Deferred[DenseDraws])
-	return submitted(deferred, on.sample(&deferred.lent, C.usearch_completion_deferred_k, wanted, arena, config))
+	return submitted(deferred, on.sample(&deferred.call, C.usearch_completion_deferred_k, wanted, arena, config))
 }
 
 // Save writes the index under a path, in the layout its extension picks - one .safegraphs
 // monolith, or a .safegraphs.json manifest beside its shards.
 func (on SequenceIndexOn) Save(path string, config *SequenceSaveConfig) error {
-	var lent lent[struct{}]
-	_, err := block(&lent, on.save(&lent, C.usearch_completion_blocking_k, path, config))
+	var call callWithResult[struct{}]
+	_, err := block(&call, on.save(&call, C.usearch_completion_blocking_k, path, config))
 	return err
 }
 
 // Save submits SequenceIndexOn.Save.
 func (on SequenceIndexDeferredOn) Save(path string, config *SequenceSaveConfig) (*Deferred[struct{}], error) {
 	deferred := new(Deferred[struct{}])
-	return submitted(deferred, on.save(&deferred.lent, C.usearch_completion_deferred_k, path, config))
+	return submitted(deferred, on.save(&deferred.call, C.usearch_completion_deferred_k, path, config))
 }
 
 // SaveBuffer serializes the index as one monolith into arena.
 func (on SequenceIndexOn) SaveBuffer(arena *Arena, config *SequenceSaveBufferConfig) (Monolith, error) {
-	var lent lent[Monolith]
-	return block(&lent, on.saveBuffer(&lent, C.usearch_completion_blocking_k, arena, config))
+	var call callWithResult[Monolith]
+	return block(&call, on.saveBuffer(&call, C.usearch_completion_blocking_k, arena, config))
 }
 
 // SaveBuffer submits SequenceIndexOn.SaveBuffer.
 func (on SequenceIndexDeferredOn) SaveBuffer(arena *Arena, config *SequenceSaveBufferConfig) (*Deferred[Monolith], error) {
 	deferred := new(Deferred[Monolith])
-	return submitted(deferred, on.saveBuffer(&deferred.lent, C.usearch_completion_deferred_k, arena, config))
+	return submitted(deferred, on.saveBuffer(&deferred.call, C.usearch_completion_deferred_k, arena, config))
 }
 
 // endregion: Receivers
 
 // region: Calls
 
-func (receiver sequenceReceiver) reserve(lent *lent[struct{}], completion C.usearch_completion_t, entries,
+func (receiver sequenceReceiver) reserve(call *callWithResult[struct{}], completion C.usearch_completion_t, entries,
 	payloadBytes uint) error {
 	index, executor, err := receiver.lower()
 	if err != nil {
 		return err
 	}
-	arguments := open[C.usearch_sequence_reserve_t](lent)
+	arguments := open[C.usearch_sequence_reserve_t](call)
 	*arguments = C.usearch_sequence_reserve_t{
 		index:         index,
 		executor:      executor,
-		outcome:       lent.outcome(),
+		outcome:       call.outcome(),
 		completion:    completion,
 		entries:       C.size_t(entries),
 		payload_bytes: C.size_t(payloadBytes),
@@ -979,81 +979,81 @@ func (receiver sequenceReceiver) reserve(lent *lent[struct{}], completion C.usea
 	return nil
 }
 
-func (receiver sequenceReceiver) clear(lent *lent[struct{}], completion C.usearch_completion_t) error {
+func (receiver sequenceReceiver) clear(call *callWithResult[struct{}], completion C.usearch_completion_t) error {
 	index, executor, err := receiver.lower()
 	if err != nil {
 		return err
 	}
-	arguments := open[C.usearch_sequence_clear_t](lent)
+	arguments := open[C.usearch_sequence_clear_t](call)
 	*arguments = C.usearch_sequence_clear_t{
 		index:      index,
 		executor:   executor,
-		outcome:    lent.outcome(),
+		outcome:    call.outcome(),
 		completion: completion,
 	}
 	C.usearch_sequence_clear(arguments)
 	return nil
 }
 
-func (receiver sequenceReceiver) describe(lent *lent[SequenceIndexDescription],
+func (receiver sequenceReceiver) describe(call *callWithResult[SequenceIndexDescription],
 	completion C.usearch_completion_t) error {
 	index, executor, err := receiver.lower()
 	if err != nil {
 		return err
 	}
-	arguments := open[C.usearch_sequence_describe_t](lent)
+	arguments := open[C.usearch_sequence_describe_t](call)
 	*arguments = C.usearch_sequence_describe_t{
 		index:       index,
 		executor:    executor,
-		outcome:     lent.outcome(),
+		outcome:     call.outcome(),
 		completion:  completion,
-		description: (*C.usearch_sequence_index_description_t)(unsafe.Pointer(lent.result)),
+		description: (*C.usearch_sequence_index_description_t)(unsafe.Pointer(call.result)),
 	}
 	C.usearch_sequence_describe(arguments)
 	return nil
 }
 
-func (receiver sequenceReceiver) count(lent *lent[SequenceKeyStats], completion C.usearch_completion_t, key Key) error {
+func (receiver sequenceReceiver) count(call *callWithResult[SequenceKeyStats], completion C.usearch_completion_t, key Key) error {
 	index, executor, err := receiver.lower()
 	if err != nil {
 		return err
 	}
-	arguments := open[C.usearch_sequence_count_t](lent)
+	arguments := open[C.usearch_sequence_count_t](call)
 	*arguments = C.usearch_sequence_count_t{
 		index:      index,
 		executor:   executor,
-		outcome:    lent.outcome(),
+		outcome:    call.outcome(),
 		completion: completion,
 		key:        key.toRaw(),
-		key_stats:  (*C.usearch_sequence_key_stats_t)(unsafe.Pointer(lent.result)),
+		key_stats:  (*C.usearch_sequence_key_stats_t)(unsafe.Pointer(call.result)),
 	}
 	C.usearch_sequence_count(arguments)
 	return nil
 }
 
-func (receiver sequenceReceiver) get(lent *lent[TapeView], completion C.usearch_completion_t, key Key,
+func (receiver sequenceReceiver) get(call *callWithResult[TapeView], completion C.usearch_completion_t, key Key,
 	arena *Arena) error {
 	index, executor, outputs, err := receiver.lowerInto(arena)
 	if err != nil {
 		return err
 	}
-	arguments := open[C.usearch_sequence_get_t](lent)
-	lent.result.width = 1
+	arguments := open[C.usearch_sequence_get_t](call)
+	call.result.width = 1
 	*arguments = C.usearch_sequence_get_t{
 		index:      index,
 		executor:   executor,
-		outcome:    lent.outcome(),
+		outcome:    call.outcome(),
 		completion: completion,
 		key:        key.toRaw(),
-		sequences:  &lent.result.raw,
-		written:    (*C.size_t)(unsafe.Pointer(&lent.result.written)),
+		sequences:  &call.result.raw,
+		written:    (*C.size_t)(unsafe.Pointer(&call.result.written)),
 		arena:      outputs,
 	}
 	C.usearch_sequence_get(arguments)
 	return nil
 }
 
-func (receiver sequenceReceiver) insert(lent *lent[struct{}], completion C.usearch_completion_t, keys []Key,
+func (receiver sequenceReceiver) insert(call *callWithResult[struct{}], completion C.usearch_completion_t, keys []Key,
 	sequences Tape, config *SequenceInsertConfig) error {
 	options := configOf(config)
 	index, executor, err := receiver.lower()
@@ -1064,44 +1064,44 @@ func (receiver sequenceReceiver) insert(lent *lent[struct{}], completion C.usear
 	if uint(len(keys)) != sequences.Entries() {
 		return fail(StatusShapeMismatch, "the key count does not match the tape's entries")
 	}
-	arguments := open[C.usearch_sequence_insert_t](lent)
+	arguments := open[C.usearch_sequence_insert_t](call)
 	*arguments = C.usearch_sequence_insert_t{
 		index:            index,
 		executor:         executor,
-		outcome:          lent.outcome(),
+		outcome:          call.outcome(),
 		completion:       completion,
 		count:            C.size_t(len(keys)),
-		keys:             lent.keys(keys),
-		sequences:        sequences.lower(&lent.call),
+		keys:             call.keys(keys),
+		sequences:        sequences.lower(&call.call),
 		expansion_factor: C.size_t(options.ExpansionFactor),
-		progress:         lent.progress(options.Progress, options.ProgressSteps),
-		stats:            lent.stats(options.Stats),
+		progress:         call.progress(options.Progress, options.ProgressSteps),
+		stats:            call.stats(options.Stats),
 	}
 	C.usearch_sequence_insert(arguments)
 	return nil
 }
 
-func (receiver sequenceReceiver) refine(lent *lent[RefineReport], completion C.usearch_completion_t,
+func (receiver sequenceReceiver) refine(call *callWithResult[RefineReport], completion C.usearch_completion_t,
 	config *SequenceRefineConfig) error {
 	options := configOf(config)
 	index, executor, err := receiver.lower()
 	if err != nil {
 		return err
 	}
-	arguments := open[C.usearch_sequence_refine_t](lent)
-	plan, phase := options.Plan.lower(&lent.call)
+	arguments := open[C.usearch_sequence_refine_t](call)
+	plan, phase := options.Plan.lower(&call.call)
 	*arguments = C.usearch_sequence_refine_t{
 		index:      index,
 		executor:   executor,
-		outcome:    lent.outcome(),
+		outcome:    call.outcome(),
 		completion: completion,
-		report:     (*C.usearch_refine_report_t)(unsafe.Pointer(lent.result)),
+		report:     (*C.usearch_refine_report_t)(unsafe.Pointer(call.result)),
 		refine: C.usearch_refine_options_t{
 			expansion_factor: C.size_t(options.ExpansionFactor),
 			memory_limit:     C.size_t(options.MemoryLimit),
 		},
-		progress: lent.progress(options.Progress, options.ProgressSteps),
-		stats:    lent.stats(options.Stats),
+		progress: call.progress(options.Progress, options.ProgressSteps),
+		stats:    call.stats(options.Stats),
 		plan:     plan,
 		phase:    phase,
 	}
@@ -1109,98 +1109,98 @@ func (receiver sequenceReceiver) refine(lent *lent[RefineReport], completion C.u
 	return nil
 }
 
-func (receiver sequenceReceiver) refinePlanFinish(lent *lent[RefineReport], completion C.usearch_completion_t,
+func (receiver sequenceReceiver) refinePlanFinish(call *callWithResult[RefineReport], completion C.usearch_completion_t,
 	plan *SequenceRefinePlan) error {
 	index, executor, err := receiver.lower()
 	if err != nil {
 		return err
 	}
-	arguments := open[C.usearch_sequence_refine_plan_finish_t](lent)
+	arguments := open[C.usearch_sequence_refine_plan_finish_t](call)
 	*arguments = C.usearch_sequence_refine_plan_finish_t{
 		index:      index,
 		executor:   executor,
-		outcome:    lent.outcome(),
+		outcome:    call.outcome(),
 		completion: completion,
 		plan:       plan.take(),
-		report:     (*C.usearch_refine_report_t)(unsafe.Pointer(lent.result)),
+		report:     (*C.usearch_refine_report_t)(unsafe.Pointer(call.result)),
 	}
 	C.usearch_sequence_refine_plan_finish(arguments)
 	return nil
 }
 
-func (receiver sequenceReceiver) health(lent *lent[Reachability], completion C.usearch_completion_t) error {
+func (receiver sequenceReceiver) health(call *callWithResult[Reachability], completion C.usearch_completion_t) error {
 	index, executor, err := receiver.lower()
 	if err != nil {
 		return err
 	}
-	arguments := open[C.usearch_sequence_health_t](lent)
+	arguments := open[C.usearch_sequence_health_t](call)
 	*arguments = C.usearch_sequence_health_t{
 		index:        index,
 		executor:     executor,
-		outcome:      lent.outcome(),
+		outcome:      call.outcome(),
 		completion:   completion,
-		reachability: (*C.usearch_reachability_t)(unsafe.Pointer(lent.result)),
+		reachability: (*C.usearch_reachability_t)(unsafe.Pointer(call.result)),
 	}
 	C.usearch_sequence_health(arguments)
 	return nil
 }
 
-func (receiver sequenceReceiver) search(lent *lent[MatchesView], completion C.usearch_completion_t, queries Tape,
+func (receiver sequenceReceiver) search(call *callWithResult[MatchesView], completion C.usearch_completion_t, queries Tape,
 	wanted uint, arena *Arena, config *SequenceSearchConfig) error {
 	options := configOf(config)
 	index, executor, outputs, err := receiver.lowerInto(arena)
 	if err != nil {
 		return err
 	}
-	arguments := open[C.usearch_sequence_search_t](lent)
-	lent.result.queries = queries.Entries()
+	arguments := open[C.usearch_sequence_search_t](call)
+	call.result.queries = queries.Entries()
 	*arguments = C.usearch_sequence_search_t{
 		index:            index,
 		executor:         executor,
-		outcome:          lent.outcome(),
+		outcome:          call.outcome(),
 		completion:       completion,
 		count:            C.size_t(queries.Entries()),
-		queries:          queries.lower(&lent.call),
-		matches:          &lent.result.raw,
+		queries:          queries.lower(&call.call),
+		matches:          &call.result.raw,
 		arena:            outputs,
 		wanted:           C.size_t(wanted),
 		expansion_factor: C.size_t(options.ExpansionFactor),
 		traversal:        C.usearch_traversal_t(options.Traversal),
-		predicate:        lent.predicate(options.Predicate),
-		progress:         lent.progress(options.Progress, options.ProgressSteps),
-		stats:            lent.stats(options.Stats),
+		predicate:        call.predicate(options.Predicate),
+		progress:         call.progress(options.Progress, options.ProgressSteps),
+		stats:            call.stats(options.Stats),
 	}
 	C.usearch_sequence_search(arguments)
 	return nil
 }
 
-func (receiver sequenceReceiver) reshard(lent *lent[RefineReport], completion C.usearch_completion_t, sources,
+func (receiver sequenceReceiver) reshard(call *callWithResult[RefineReport], completion C.usearch_completion_t, sources,
 	targets []*SequenceIndex, config *SequenceReshardConfig) error {
 	options := configOf(config)
-	// A reshard names its handles in its lists, so the receiver lends only its executor.
+	// A reshard names its handles in its lists, so the receiver passes only its executor.
 	executor, err := receiver.executor.lower()
 	if err != nil {
 		return err
 	}
 	sourceHandles, targetHandles := sequenceHandles(sources), sequenceHandles(targets)
-	arguments := open[C.usearch_sequence_reshard_t](lent)
-	plan, phase := options.Plan.lower(&lent.call)
+	arguments := open[C.usearch_sequence_reshard_t](call)
+	plan, phase := options.Plan.lower(&call.call)
 	*arguments = C.usearch_sequence_reshard_t{
 		sources_count: C.size_t(len(sourceHandles)),
-		sources:       (*C.usearch_sequence_index_t)(lent.lend(unsafe.Pointer(unsafe.SliceData(sourceHandles)), len(sourceHandles))),
+		sources:       (*C.usearch_sequence_index_t)(call.pinSlice(unsafe.Pointer(unsafe.SliceData(sourceHandles)), len(sourceHandles))),
 		targets_count: C.size_t(len(targetHandles)),
-		targets:       (*C.usearch_sequence_index_t)(lent.lend(unsafe.Pointer(unsafe.SliceData(targetHandles)), len(targetHandles))),
+		targets:       (*C.usearch_sequence_index_t)(call.pinSlice(unsafe.Pointer(unsafe.SliceData(targetHandles)), len(targetHandles))),
 		executor:      executor,
-		outcome:       lent.outcome(),
+		outcome:       call.outcome(),
 		completion:    completion,
-		report:        (*C.usearch_refine_report_t)(unsafe.Pointer(lent.result)),
+		report:        (*C.usearch_refine_report_t)(unsafe.Pointer(call.result)),
 		refine: C.usearch_refine_options_t{
 			expansion_factor: C.size_t(options.ExpansionFactor),
 			memory_limit:     C.size_t(options.MemoryLimit),
 		},
 		seed:     C.uint64_t(options.Seed),
-		progress: lent.progress(options.Progress, options.ProgressSteps),
-		stats:    lent.stats(options.Stats),
+		progress: call.progress(options.Progress, options.ProgressSteps),
+		stats:    call.stats(options.Stats),
 		plan:     plan,
 		phase:    phase,
 	}
@@ -1217,26 +1217,26 @@ func sequenceHandles(indexes []*SequenceIndex) []C.usearch_sequence_index_t {
 	return handles
 }
 
-func (receiver sequenceReceiver) reshardPlanFinish(lent *lent[RefineReport], completion C.usearch_completion_t,
+func (receiver sequenceReceiver) reshardPlanFinish(call *callWithResult[RefineReport], completion C.usearch_completion_t,
 	plan *SequenceReshardPlan) error {
-	// A reshard names its handles in its lists, so the receiver lends only its executor.
+	// A reshard names its handles in its lists, so the receiver passes only its executor.
 	executor, err := receiver.executor.lower()
 	if err != nil {
 		return err
 	}
-	arguments := open[C.usearch_sequence_reshard_plan_finish_t](lent)
+	arguments := open[C.usearch_sequence_reshard_plan_finish_t](call)
 	*arguments = C.usearch_sequence_reshard_plan_finish_t{
 		executor:   executor,
-		outcome:    lent.outcome(),
+		outcome:    call.outcome(),
 		completion: completion,
 		plan:       plan.take(),
-		report:     (*C.usearch_refine_report_t)(unsafe.Pointer(lent.result)),
+		report:     (*C.usearch_refine_report_t)(unsafe.Pointer(call.result)),
 	}
 	C.usearch_sequence_reshard_plan_finish(arguments)
 	return nil
 }
 
-func (receiver sequenceReceiver) sample(lent *lent[DenseDraws], completion C.usearch_completion_t, wanted uint,
+func (receiver sequenceReceiver) sample(call *callWithResult[DenseDraws], completion C.usearch_completion_t, wanted uint,
 	arena *Arena, config *SequenceSampleConfig) error {
 	options := configOf(config)
 	index, executor, outputs, err := receiver.lowerInto(arena)
@@ -1247,69 +1247,69 @@ func (receiver sequenceReceiver) sample(lent *lent[DenseDraws], completion C.use
 	if len(options.Shown) != len(options.ShownCoordinates) {
 		return fail(StatusShapeMismatch, "the shown keys and coordinates disagree in length")
 	}
-	arguments := open[C.usearch_sequence_sample_t](lent)
+	arguments := open[C.usearch_sequence_sample_t](call)
 	*arguments = C.usearch_sequence_sample_t{
 		index:             index,
 		executor:          executor,
-		outcome:           lent.outcome(),
+		outcome:           call.outcome(),
 		completion:        completion,
 		shown_count:       C.size_t(len(options.Shown)),
-		shown:             lent.keys(options.Shown),
-		shown_coordinates: lent.points(options.ShownCoordinates),
+		shown:             call.keys(options.Shown),
+		shown_coordinates: call.points(options.ShownCoordinates),
 		focus_count:       C.size_t(len(options.Focus)),
-		focus:             lent.keys(options.Focus),
-		keys:              &lent.result.keys,
-		entry_ordinals:    &lent.result.entryOrdinals,
-		parents:           &lent.result.parents,
-		coordinates:       &lent.result.coordinates,
-		written:           (*C.size_t)(unsafe.Pointer(&lent.result.written)),
+		focus:             call.keys(options.Focus),
+		keys:              &call.result.keys,
+		entry_ordinals:    &call.result.entryOrdinals,
+		parents:           &call.result.parents,
+		coordinates:       &call.result.coordinates,
+		written:           (*C.size_t)(unsafe.Pointer(&call.result.written)),
 		arena:             outputs,
 		wanted:            C.size_t(wanted),
 		seed:              C.uint64_t(options.Seed),
 		expansion_factor:  C.size_t(options.ExpansionFactor),
-		progress:          lent.progress(options.Progress, options.ProgressSteps),
-		stats:             lent.stats(options.Stats),
+		progress:          call.progress(options.Progress, options.ProgressSteps),
+		stats:             call.stats(options.Stats),
 	}
 	C.usearch_sequence_sample(arguments)
 	return nil
 }
 
-func (receiver sequenceReceiver) save(lent *lent[struct{}], completion C.usearch_completion_t, path string,
+func (receiver sequenceReceiver) save(call *callWithResult[struct{}], completion C.usearch_completion_t, path string,
 	config *SequenceSaveConfig) error {
 	options := configOf(config)
 	index, executor, err := receiver.lower()
 	if err != nil {
 		return err
 	}
-	arguments := open[C.usearch_sequence_save_t](lent)
+	arguments := open[C.usearch_sequence_save_t](call)
 	*arguments = C.usearch_sequence_save_t{
 		index:      index,
 		executor:   executor,
-		outcome:    lent.outcome(),
+		outcome:    call.outcome(),
 		completion: completion,
-		path:       lent.text(path),
-		progress:   lent.progress(options.Progress, options.ProgressSteps),
+		path:       call.text(path),
+		progress:   call.progress(options.Progress, options.ProgressSteps),
 	}
 	C.usearch_sequence_save(arguments)
 	return nil
 }
 
-func (receiver sequenceReceiver) saveBuffer(lent *lent[Monolith], completion C.usearch_completion_t, arena *Arena,
+func (receiver sequenceReceiver) saveBuffer(call *callWithResult[Monolith], completion C.usearch_completion_t, arena *Arena,
 	config *SequenceSaveBufferConfig) error {
 	options := configOf(config)
 	index, executor, outputs, err := receiver.lowerInto(arena)
 	if err != nil {
 		return err
 	}
-	arguments := open[C.usearch_sequence_save_buffer_t](lent)
+	arguments := open[C.usearch_sequence_save_buffer_t](call)
 	*arguments = C.usearch_sequence_save_buffer_t{
 		index:      index,
 		executor:   executor,
-		outcome:    lent.outcome(),
+		outcome:    call.outcome(),
 		completion: completion,
-		monolith:   &lent.result.raw,
+		monolith:   &call.result.raw,
 		arena:      outputs,
-		progress:   lent.progress(options.Progress, options.ProgressSteps),
+		progress:   call.progress(options.Progress, options.ProgressSteps),
 	}
 	C.usearch_sequence_save_buffer(arguments)
 	return nil
@@ -1349,18 +1349,18 @@ func (index *SequenceIndex) Cursor(starts ...Key) (*SequenceCursor, error) {
 	if err != nil {
 		return nil, err
 	}
-	var lent lent[C.usearch_sequence_cursor_t]
-	arguments := open[C.usearch_sequence_cursor_init_t](&lent)
+	var call callWithResult[C.usearch_sequence_cursor_t]
+	arguments := open[C.usearch_sequence_cursor_init_t](&call)
 	*arguments = C.usearch_sequence_cursor_init_t{
 		index:        handle,
-		outcome:      lent.outcome(),
+		outcome:      call.outcome(),
 		starts_count: C.size_t(len(starts)),
-		starts:       (*C.usearch_key_t)(lent.lend(unsafe.Pointer(unsafe.SliceData(starts)), len(starts))),
-		cursor:       lent.result,
+		starts:       (*C.usearch_key_t)(call.pinSlice(unsafe.Pointer(unsafe.SliceData(starts)), len(starts))),
+		cursor:       call.result,
 	}
 	C.usearch_sequence_cursor_init(arguments)
 	cursor := new(SequenceCursor)
-	if cursor.handle, err = block(&lent, nil); err != nil {
+	if cursor.handle, err = block(&call, nil); err != nil {
 		return nil, err
 	}
 	cursor.childReceiver = childReceiver[C.usearch_sequence_cursor_t, C.usearch_sequence_index_t]{
@@ -1370,33 +1370,33 @@ func (index *SequenceIndex) Cursor(starts ...Key) (*SequenceCursor, error) {
 
 // NextKeys copies up to wanted next keys into arena; a batch of none means the walk is exhausted.
 func (on SequenceCursorOn) NextKeys(wanted uint, arena *Arena) (DenseBatch, error) {
-	var lent lent[DenseBatch]
-	return block(&lent, on.next(&lent, wanted, arena, noLinks))
+	var call callWithResult[DenseBatch]
+	return block(&call, on.next(&call, wanted, arena, noLinks))
 }
 
 // NextLinks copies up to wanted next keys into arena, each with the keys it links to; a batch of
 // none means the walk is exhausted.
 func (on SequenceCursorOn) NextLinks(wanted uint, arena *Arena) (DenseBatch, error) {
-	var lent lent[DenseBatch]
-	return block(&lent, on.next(&lent, wanted, arena, linksOf))
+	var call callWithResult[DenseBatch]
+	return block(&call, on.next(&call, wanted, arena, linksOf))
 }
 
 // next pulls a batch, exporting each entry's links into the slot links picks, if any.
-func (on SequenceCursorOn) next(lent *lent[DenseBatch], wanted uint, arena *Arena, links batchLinks) error {
+func (on SequenceCursorOn) next(call *callWithResult[DenseBatch], wanted uint, arena *Arena, links batchLinks) error {
 	cursor, index, executor, outputs, err := on.lowerInto(arena)
 	if err != nil {
 		return err
 	}
-	arguments := open[C.usearch_sequence_cursor_next_t](lent)
+	arguments := open[C.usearch_sequence_cursor_next_t](call)
 	*arguments = C.usearch_sequence_cursor_next_t{
 		index:      index,
 		executor:   executor,
-		outcome:    lent.outcome(),
+		outcome:    call.outcome(),
 		completion: C.usearch_completion_blocking_k,
 		cursor:     cursor,
-		keys:       &lent.result.keys,
-		links:      links(lent.result),
-		written:    (*C.size_t)(unsafe.Pointer(&lent.result.written)),
+		keys:       &call.result.keys,
+		links:      links(call.result),
+		written:    (*C.size_t)(unsafe.Pointer(&call.result.written)),
 		arena:      outputs,
 		wanted:     C.size_t(wanted),
 	}

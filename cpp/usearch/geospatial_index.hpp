@@ -68,18 +68,19 @@ struct geospatial_within_t {
     std::size_t written = 0;
 };
 
-/** A terrain handler: fills a block of heights in metres, leaving NaN where it has none. */
+/** A terrain handler: fills a block of heights in metres, leaving NaN where it has none, through a
+ *  const call operator, since every executor thread may ask it at once. */
 template <typename handler_type_>
-concept terrain_handler = std::is_nothrow_invocable_r_v<void, handler_type_&, std::size_t, std::size_t, std::size_t,
-                                                        std::size_t, float*, std::size_t>;
+concept terrain_handler = std::is_nothrow_invocable_r_v<void, handler_type_ const&, std::size_t, std::size_t,
+                                                        std::size_t, std::size_t, float*, std::size_t>;
 
-/** The @p grid filled on demand by @p handler, which every index naming it borrows for its life
+/** The @p grid filled on demand by @p handler, which every index naming it keeps for its life
  *  and calls from the executor's threads. */
 template <terrain_handler handler_type_>
 usearch_geospatial_terrain_t geospatial_terrain(handler_type_& handler, usearch_geospatial_terrain_t grid) noexcept {
     grid.callback = [](std::size_t first_row, std::size_t first_column, std::size_t rows, std::size_t columns,
                        float* heights, std::size_t heights_stride, void* state) noexcept {
-        (*static_cast<handler_type_*>(state))(first_row, first_column, rows, columns, heights, heights_stride);
+        (*static_cast<handler_type_ const*>(state))(first_row, first_column, rows, columns, heights, heights_stride);
     };
     grid.state = &handler;
     return grid;
@@ -125,8 +126,9 @@ struct geospatial_within_config_t {
  *      blocks on the calling thread, @c on blocks on an executor, and both answer a @c status_t or
  *      an @c expected, while @c deferred submits to an executor and answers a @c deferred call.
  *
- *  Each verb is written once, filling its C struct with the call's @c outputs. Every
- *  input, handler, plan and arena a deferred call names stays borrowed until it is final.
+ *  Each verb is written once, filling its C struct with the call's @c outputs.
+ *  Every input, handler, plan and arena a deferred call names must stay allocated and unchanged
+ *  until the call is final.
  */
 template <typename receiver_type_>
 class geospatial_index {
@@ -154,16 +156,16 @@ class geospatial_index {
     }
 
     /** The same handle, whose verbs block on @p executor. */
-    geospatial_index<borrowing<usearch_geospatial_index_t, usearch_completion_blocking_k>> on(
+    geospatial_index<caller_owned<usearch_geospatial_index_t, usearch_completion_blocking_k>> on(
         executor_t const& executor) const noexcept {
-        return geospatial_index<borrowing<usearch_geospatial_index_t, usearch_completion_blocking_k>>(
+        return geospatial_index<caller_owned<usearch_geospatial_index_t, usearch_completion_blocking_k>>(
             {receiver_.handle(), executor.handle()});
     }
 
     /** The same handle, whose verbs submit to @p executor, each answering a @c deferred call. */
-    geospatial_index<borrowing<usearch_geospatial_index_t, usearch_completion_deferred_k>> deferred(
+    geospatial_index<caller_owned<usearch_geospatial_index_t, usearch_completion_deferred_k>> deferred(
         executor_t const& executor) const noexcept {
-        return geospatial_index<borrowing<usearch_geospatial_index_t, usearch_completion_deferred_k>>(
+        return geospatial_index<caller_owned<usearch_geospatial_index_t, usearch_completion_deferred_k>>(
             {receiver_.handle(), executor.handle()});
     }
 
@@ -278,7 +280,7 @@ class geospatial_index {
             });
     }
 
-    /** Writes the index to the checkpoint at @p path, which carries no terrain. */
+    /** Writes the index to the checkpoint at @p path, which holds no terrain. */
     deferrable<> save(usearch_bytes_view_t path, progress_t progress = {}) const noexcept {
         return answered_<deferrable<>>([&](usearch_outcome_t* outcome, outputs<void>*) noexcept {
             usearch_geospatial_save_t arguments {receiver_.handle(), receiver_.executor(), outcome, completion_k, path,
@@ -438,14 +440,14 @@ class geospatial_index {
 
 #pragma region Lifecycle
 
-    /** Creates an empty RAM index over the terrain @p arguments borrows, if any. */
+    /** Creates an empty RAM index over the terrain @p arguments names, if any. */
     static expected<geospatial_index> init_ram(usearch_geospatial_init_ram_t arguments) noexcept
         requires owns_handle<receiver_type_>
     {
         return opened_<geospatial_index>(usearch_geospatial_init_ram, arguments, &usearch_geospatial_init_ram_t::index);
     }
 
-    /** Creates an empty VRAM index over the borrowed heights @p arguments names, if any, on the
+    /** Creates an empty VRAM index over the heights @p arguments points at, if any, on the
      *  devices it names. */
     static expected<geospatial_index> init_vram(usearch_geospatial_init_vram_t arguments) noexcept
         requires owns_handle<receiver_type_>
@@ -531,7 +533,7 @@ class geospatial_index {
     expected<geospatial_cursor_t> cursor_init(std::span<usearch_key_t const> starts = {}) const noexcept
         requires owns_handle<receiver_type_>
     {
-        usearch_geospatial_cursor_init_t arguments {handle(), nullptr, starts.size(), starts.data(), nullptr};
+        usearch_geospatial_cursor_init_t arguments {handle(), nullptr, nullptr, starts.size(), starts.data(), nullptr};
         return opened_<geospatial_cursor_t>(usearch_geospatial_cursor_init, arguments,
                                             &usearch_geospatial_cursor_init_t::cursor);
     }
@@ -542,8 +544,9 @@ class geospatial_index {
 /** Owns one geospatial index; destruction waits for its deferred calls. */
 using geospatial_index_t = geospatial_index<owning<usearch_geospatial_index_t, usearch_geospatial_free>>;
 
-/** A borrowed geospatial index and its executor, completing its verbs as @p completion_ says. */
+/** A geospatial index its caller owns and the executor its verbs run on, completing them as
+ *  @p completion_ says. */
 template <usearch_completion_t completion_>
-using geospatial_index_on = geospatial_index<borrowing<usearch_geospatial_index_t, completion_>>;
+using geospatial_index_on = geospatial_index<caller_owned<usearch_geospatial_index_t, completion_>>;
 
 } // namespace unum::usearch

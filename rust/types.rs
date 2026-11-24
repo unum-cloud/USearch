@@ -3,7 +3,7 @@
 //! Scalar types, matrices, and their traits come from NumKong, so a caller already holding a
 //! `MatrixView` hands it straight to an index without a reshape or a copy.
 //!
-//! An [`On`] is the receiver every modality's verbs run through: it borrows an index and an
+//! An [`On`] is the receiver every modality's verbs run through: it refers to an index and an
 //! executor, and its completion decides whether a verb answers what the call produced or a
 //! [`Deferred`] that submits the call once polled or waited on.
 //!
@@ -36,7 +36,7 @@ use numkong::{bf16, e2m3, e3m2, e4m3, e5m2, f16, i4x2, u1x8, u4x2};
 pub type usearch_key_t = Key;
 pub type usearch_distance_t = f64;
 
-/// A borrowed run of bytes, never null-terminated by contract.
+/// A run of bytes the caller owns, never null-terminated by contract.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct usearch_bytes_view_t {
@@ -45,7 +45,7 @@ pub struct usearch_bytes_view_t {
 }
 
 impl From<&[u8]> for usearch_bytes_view_t {
-    /// Borrows the bytes as the view the C interface accepts; it must not outlive them.
+    /// Views the bytes as the C interface accepts them; the view must not outlive them.
     fn from(bytes: &[u8]) -> Self {
         usearch_bytes_view_t { data: bytes.as_ptr(), length: bytes.len() }
     }
@@ -60,7 +60,7 @@ impl Default for usearch_bytes_view_t {
 // Safety: it views bytes as `&[u8]` does, which crosses threads freely.
 unsafe impl Send for usearch_bytes_view_t {}
 
-/// A strided run of keys - how a batch names the identities it carries, or a cursor pull the
+/// A strided run of keys - how a batch names the identities it holds, or a cursor pull the
 /// ones it wrote into its arena.
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -70,7 +70,7 @@ pub struct usearch_keys_view_t {
 }
 
 impl usearch_keys_view_t {
-    /// Borrows a packed slice as the view the C interface accepts.
+    /// Views a packed slice as the C interface accepts it.
     pub fn of(keys: &[Key]) -> Self {
         usearch_keys_view_t { data: keys.as_ptr(), stride: core::mem::size_of::<usearch_key_t>() }
     }
@@ -103,7 +103,7 @@ impl Default for usearch_outcome_t {
 
 pub type usearch_scalar_t = c_int;
 
-/// A run of rows along a call's batch axis, borrowed from the caller as an input and written
+/// A run of rows along a call's batch axis, read from the caller's memory as an input and written
 /// packed into an arena as an output.
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -231,7 +231,7 @@ pub const usearch_tape_u32_k: usearch_tape_layout_t = 0;
 pub const usearch_tape_u64_k: usearch_tape_layout_t = 1;
 
 /// A ragged batch as Apache Arrow lays one out - elements end to end, and one more offset than
-/// entries - borrowed as an input or written into an arena as an output; `offsets` is the C
+/// entries - the caller's as an input or written into an arena as an output; `offsets` is the C
 /// union, read as wide as `layout` says.
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -375,14 +375,7 @@ pub struct usearch_executor_for_ram_t {
     pub outcome: *mut usearch_outcome_t,
     pub ram: usearch_ram_options_t,
     pub threads: usize,
-}
-
-#[repr(C)]
-pub struct usearch_executor_on_pool_t {
-    pub executor: *mut usearch_executor_t,
-    pub outcome: *mut usearch_outcome_t,
-    pub ram: usearch_ram_options_t,
-    pub pool: *mut c_void,
+    pub scratch_limit: usize,
 }
 
 #[repr(C)]
@@ -399,8 +392,10 @@ pub struct usearch_executor_for_nvme_t {
     pub executor: *mut usearch_executor_t,
     pub outcome: *mut usearch_outcome_t,
     pub nvme: usearch_nvme_options_t,
+    pub ram: usearch_ram_options_t,
     pub threads: usize,
     pub nvme_class: usearch_nvme_class_t,
+    pub scratch_limit: usize,
 }
 
 pub type usearch_mood_t = c_int;
@@ -418,7 +413,6 @@ unsafe extern "C" {
     pub fn usearch_outcome_status(outcome: *mut usearch_outcome_t) -> usearch_status_t;
 
     pub fn usearch_executor_for_ram(arguments: *mut usearch_executor_for_ram_t);
-    pub fn usearch_executor_on_pool(arguments: *mut usearch_executor_on_pool_t);
     pub fn usearch_executor_for_vram(arguments: *mut usearch_executor_for_vram_t);
     pub fn usearch_executor_for_nvme(arguments: *mut usearch_executor_for_nvme_t);
     pub fn usearch_executor_drain(arguments: *mut usearch_executor_drain_t);
@@ -511,13 +505,13 @@ unsafe extern "C" {
 
 // endregion: Raw Declarations
 
-pub(crate) use crate::sealed::{Accepts, Calling, Completion, Lending, RowsView};
+pub(crate) use crate::sealed::{Accepts, Calling, Completion, RowsView, Submitting};
 
 // region: Errors and Introspection
 
 /// Every way a call can end besides success, numbered as the library numbers them.
 ///
-/// An [`Error`] never carries [`Status::Deferred`], the status of a call not yet final.
+/// An [`Error`] never holds [`Status::Deferred`], the status of a call not yet final.
 #[repr(i32)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 #[non_exhaustive]
@@ -612,7 +606,7 @@ impl FromStr for Status {
 pub struct Error {
     /// The identity of the failure, shared by every binding of the library.
     pub status: Status,
-    /// The detail the status alone cannot carry.
+    /// The detail the status alone cannot hold.
     pub message: &'static str,
 }
 
@@ -642,7 +636,7 @@ pub(crate) fn fail(status: Status, message: &'static str) -> Error {
     Error { status, message }
 }
 
-/// Borrows a static null-terminated string the library owns.
+/// Views a static null-terminated string the library owns.
 ///
 /// Every such string is ASCII by construction, so its bytes are read as UTF-8 unchecked.
 pub(crate) unsafe fn static_string(raw: *const c_char) -> &'static str {
@@ -807,8 +801,8 @@ pub enum Scalar {
     BF16 = 3,
     /// IEEE-754 binary16: ±65504, epsilon 9.77e-4, subnormals to 5.96e-8, with infinities and NaNs.
     F16 = 4,
-    /// FP8 with a 5-bit exponent: ±57344, epsilon 0.25, with infinities and NaNs - f16's dynamic range carried
-    /// on two mantissa bits.
+    /// FP8 with a 5-bit exponent: ±57344, epsilon 0.25, with infinities and NaNs - f16's dynamic
+    /// range held on two mantissa bits.
     E5M2 = 5,
     /// FP8 with a 4-bit exponent: ±448, epsilon 0.125, no infinities, and two NaN codes at 0x7F and 0xFF.
     E4M3 = 6,
@@ -831,7 +825,7 @@ pub enum Scalar {
     /// Two unsigned nibbles per byte spanning 0 to 15, even dimensions in the low nibble and odd ones in the high.
     U4x2 = 21,
     /// Eight single-bit dimensions per byte - the form the Hamming & Jaccard metrics score, where only the
-    /// set-bit count of a XOR or AND carries meaning.
+    /// set-bit count of a XOR or AND holds meaning.
     U1x8 = 22,
 }
 
@@ -963,7 +957,7 @@ fn packed_layout<Value: StorageElement>(values: usize, dimensions: usize) -> Res
     Ok(([values / values_per_row, dimensions], [values_per_row as isize * value_bytes, value_bytes]))
 }
 
-/// Borrows a packed slab as a row-major matrix of `dimensions`-wide rows.
+/// Views a packed slab as a row-major matrix of `dimensions`-wide rows.
 ///
 /// Slabs whose rows are padded to a wider pitch - memory-mapped datasets, cache-line-aligned
 /// arenas - go through `MatrixView::from_raw_parts` instead, which takes the byte stride.
@@ -1008,14 +1002,14 @@ impl MatrixLayout {
     }
 }
 
-/// A borrowed run of rows and the batch axis it spans.
+/// A view of rows the caller owns and the batch axis it spans.
 #[derive(Clone, Copy)]
 pub struct Batch {
     pub(crate) rows: usearch_rows_view_t,
     pub(crate) count: usize,
 }
 
-// Safety: it views plain scalars that the verb holding it owns or borrows beside it.
+// Safety: it views plain scalars that the verb holding it owns or references beside it.
 unsafe impl Send for Batch {}
 
 /// Lowers a matrix as the batch of rows a verb reads, its width passed through for the call to check.
@@ -1079,7 +1073,7 @@ unsafe impl TapeOffset for u64 {
 /// A ragged batch laid out as Apache Arrow lays one out: elements end to end, and `count + 1`
 /// non-decreasing offsets around them, so entry `i` spans `offsets[i]` up to `offsets[i + 1]`.
 ///
-/// An element is a byte of a sequence or a point of a shape. Both runs are borrowed or owned, and
+/// An element is a byte of a sequence or a point of a shape. Both runs are referenced or owned, and
 /// a deferred call takes only an owned, `'static` tape.
 ///
 /// Rust-only.
@@ -1092,7 +1086,7 @@ pub struct Tape<'data, Element: Clone, Offset: Clone = u64> {
 }
 
 impl<'data, Element: Clone, Offset: TapeOffset> Tape<'data, Element, Offset> {
-    /// Borrows an Arrow-shaped pair of runs, as a `Binary` or `List` column holds them.
+    /// Views an Arrow-shaped pair of runs, as a `Binary` or `List` column holds them.
     pub fn new(elements: &'data [Element], offsets: &'data [Offset]) -> Self {
         Tape { elements: Cow::Borrowed(elements), offsets: Cow::Borrowed(offsets) }
     }
@@ -1102,7 +1096,7 @@ impl<'data, Element: Clone, Offset: TapeOffset> Tape<'data, Element, Offset> {
         self.offsets.len().saturating_sub(1)
     }
 
-    /// Lends the tape as the view the C interface reads, its elements tagged `scalar`.
+    /// Passes the tape as the view the C interface reads, its elements tagged `scalar`.
     pub(crate) fn view(&self, scalar: Scalar) -> usearch_tape_view_t {
         usearch_tape_view_t {
             data: self.elements.as_ptr().cast(),
@@ -1127,7 +1121,7 @@ impl<Element: Clone> Tape<'static, Element, u64> {
 
 impl<Element: Clone + 'static, Offset: Clone + 'static> Accepts<Tape<'static, Element, Offset>> for Deferring {}
 
-/// The tapes a `get` wrote into the arena it borrows, one entry per value stored under its key,
+/// The tapes a `get` wrote into the arena it points into, one entry per value stored under its key,
 /// in insertion order.
 ///
 /// Rust-only.
@@ -1138,7 +1132,7 @@ pub struct TapeEntries<'arena, Element> {
     pub(crate) element: PhantomData<Element>,
 }
 
-// Safety: the view points into the arena borrowed beside it, which is `Sync`.
+// Safety: the view points into the arena referenced beside it, which is `Sync`.
 unsafe impl<Element> Send for TapeEntries<'_, Element> {}
 
 impl<'arena, Element: 'arena> TapeEntries<'arena, Element> {
@@ -1169,13 +1163,13 @@ impl<'arena, Element: 'arena> TapeEntries<'arena, Element> {
     }
 }
 
-/// The source and target handles a reshard lends, laid out as the library reads them.
+/// The source and target handles a reshard passes, laid out as the library reads them.
 pub(crate) struct ReshardHandles {
     pub(crate) sources: Vec<*mut c_void>,
     pub(crate) targets: Vec<*mut c_void>,
 }
 
-// Safety: the handles belong to borrowed indexes, which are `Sync`.
+// Safety: the handles belong to referenced indexes, which are `Sync`.
 unsafe impl Send for ReshardHandles {}
 
 // endregion: Tapes
@@ -1195,7 +1189,7 @@ pub struct QueryMatches<'matches> {
     pub distances: &'matches [Distance],
 }
 
-/// The ranked matches a search or a stream pull wrote into the arena it borrows; see
+/// The ranked matches a search or a stream pull wrote into the arena it points into; see
 /// [`DenseVerbs::search`](crate::DenseVerbs::search).
 pub struct Matches<'arena> {
     pub(crate) arena: &'arena Arena<'arena>,
@@ -1203,7 +1197,7 @@ pub struct Matches<'arena> {
     pub(crate) queries: usize,
 }
 
-// Safety: the view points into the arena borrowed beside it, which is `Sync`.
+// Safety: the view points into the arena referenced beside it, which is `Sync`.
 unsafe impl Send for Matches<'_> {}
 
 impl<'arena> Matches<'arena> {
@@ -1238,7 +1232,7 @@ impl<'arena> Matches<'arena> {
     /// `FixedSizeBinary(16)` column tagged `arrow.uuid` in place; each query's count bounds its
     /// own row.
     ///
-    /// The export borrows the arena, so no verb reaches it while the export lives:
+    /// The export points into the arena, so no verb reaches it while the export lives:
     ///
     /// ```compile_fail
     /// use usearch::*;
@@ -1265,7 +1259,7 @@ impl<'arena> Matches<'arena> {
     }
 
     /// Exports every query's padded distances as one Arrow `FixedSizeList` of `columns` `f64` per
-    /// query in place, borrowing the arena as [`Matches::keys_to_arrow`] does.
+    /// query in place, pointing into the arena as [`Matches::keys_to_arrow`] does.
     pub fn distances_to_arrow(&self) -> Result<ArrowExport<'arena>> {
         let columns = self.view.columns;
         let distances = usearch_rows_view_t {
@@ -1426,7 +1420,7 @@ unsafe impl Send for ArrowDeviceArray {}
 /// # Safety
 /// Both pointers must address live structures laid out as [`ArrowSchema`] and [`ArrowArray`] and
 /// following Arrow's C data interface, whose host buffers stay valid and unwritten for as long as
-/// `self` stays borrowed.
+/// `self` stays referenced.
 pub unsafe trait ArrowColumn {
     /// The column's type.
     fn schema(&self) -> *const ArrowSchema;
@@ -1476,7 +1470,7 @@ pub fn keys_from_arrow<Column: ArrowColumn + ?Sized>(column: &Column) -> Result<
     let mut keys = usearch_keys_view_t::default();
     let mut count = 0;
     arrow_checked(unsafe { usearch_keys_view_from_arrow(column.schema(), column.array(), &mut keys, &mut count) })?;
-    // Safety: the column's promise keeps the keys alive through its borrow, and a key is its bytes.
+    // Safety: the column's promise keeps the keys alive through its reference; a key is its bytes.
     Ok(unsafe { arena_slice(keys.data, count) })
 }
 
@@ -1500,7 +1494,7 @@ impl ArrowExport<'_> {
         &self.array
     }
 
-    /// Hands the column over past the arena's borrow, for a consumer that takes the structures by
+    /// Hands the column over past the arena's lifetime, for a consumer that takes the structures by
     /// value.
     ///
     /// # Safety
@@ -1636,8 +1630,8 @@ pub(crate) fn vram_options(devices: &[i32], gpu_class_ceiling: Option<GPUClass>)
     }
 }
 
-/// The paths an NVMe placement or executor names, borrowing `views`, which must outlive the call,
-/// and the ceiling on the class it dispatches as.
+/// The paths an NVMe placement or executor names, pointing into `views`, which must outlive the
+/// call, and the ceiling on the class it dispatches as.
 pub(crate) fn nvme_options(
     views: &[usearch_bytes_view_t],
     cpu_class_ceiling: Option<CPUClass>,
@@ -1649,7 +1643,7 @@ pub(crate) fn nvme_options(
     }
 }
 
-/// Borrows a path as the bytes the C interface exchanges, which must be UTF-8.
+/// Views a path as the bytes the C interface exchanges, which must be UTF-8.
 pub(crate) fn path_view(path: &Path) -> Result<usearch_bytes_view_t> {
     let path = path.to_str().ok_or(fail(Status::Io, "the path is not valid UTF-8"))?;
     Ok(path.as_bytes().into())
@@ -1687,9 +1681,9 @@ pub enum PredicateCost {
     Expensive = 1,
 }
 
-/// A periodic report of finished and total units, lent as the C struct every reporting verb takes;
-/// `Break` stops the call at the next increment wherever the verb can stop, which an insertion
-/// cannot.
+/// A periodic report of finished and total units, passed as the C struct every reporting verb
+/// takes; `Break` stops the call at the next increment wherever the verb can stop, which an
+/// insertion never can.
 ///
 /// The handler runs on whichever thread advanced the work, never on two at once, so it owes `Send`
 /// and may be `FnMut`. A panic inside it aborts the process, unable to unwind through the library.
@@ -1698,11 +1692,11 @@ pub struct Progress<'handler> {
     handler: PhantomData<&'handler mut ()>,
 }
 
-// Safety: it points at a `Send` handler it borrows exclusively.
+// Safety: it points at a `Send` handler it references exclusively.
 unsafe impl Send for Progress<'_> {}
 
 impl<'handler> Progress<'handler> {
-    /// Lends `handler`, called with the units finished so far and the total the call finishes.
+    /// Passes `handler`, called with the units finished so far and the total the call finishes.
     pub fn new<Handler: FnMut(usize, usize) -> ControlFlow<()> + Send>(handler: &'handler mut Handler) -> Self {
         let raw = usearch_progress_t {
             callback: Some(progress_trampoline::<Handler>),
@@ -1714,7 +1708,7 @@ impl<'handler> Progress<'handler> {
 }
 
 /// # Safety
-/// `state` must address the `Handler` a [`Progress`] lent to the call.
+/// `state` must address the `Handler` a [`Progress`] passed to the call.
 unsafe extern "C" fn progress_trampoline<Handler: FnMut(usize, usize) -> ControlFlow<()>>(
     finished: usize,
     total: usize,
@@ -1726,7 +1720,7 @@ unsafe extern "C" fn progress_trampoline<Handler: FnMut(usize, usize) -> Control
     }
 }
 
-/// Lends an optional progress and step count as reporting verbs take them; `None` lends nulls.
+/// Passes an optional progress and step count as reporting verbs take them; `None` passes nulls.
 pub(crate) fn lower_progress(progress: &Option<Progress>, steps: usize) -> usearch_progress_t {
     match progress {
         Some(progress) => usearch_progress_t { steps, ..progress.raw },
@@ -1734,7 +1728,7 @@ pub(crate) fn lower_progress(progress: &Option<Progress>, steps: usize) -> usear
     }
 }
 
-/// Which candidate keys a search may report, lent as the C struct every filtering verb takes.
+/// Which candidate keys a search may report, passed as the C struct every filtering verb takes.
 ///
 /// The handler runs on the executor's threads together, so it owes `Sync`; a panic inside it
 /// aborts the process.
@@ -1744,7 +1738,7 @@ pub struct Predicate<'handler> {
     handler: PhantomData<&'handler ()>,
 }
 
-// Safety: it points at a `Sync` handler it borrows shared.
+// Safety: it points at a `Sync` handler it references shared.
 unsafe impl Send for Predicate<'_> {}
 unsafe impl Sync for Predicate<'_> {}
 
@@ -1781,7 +1775,7 @@ impl<'handler> Predicate<'handler> {
 }
 
 /// # Safety
-/// `state` must address the `Handler` a [`Predicate`] lent to the call, and `keys` and
+/// `state` must address the `Handler` a [`Predicate`] passed to the call, and `keys` and
 /// `admissions` must each address `count` elements.
 unsafe extern "C" fn each_trampoline<Handler: Fn(Key) -> bool>(
     keys: *const Key,
@@ -1800,7 +1794,7 @@ unsafe extern "C" fn each_trampoline<Handler: Fn(Key) -> bool>(
 }
 
 /// # Safety
-/// `state` must address the `Handler` a [`Predicate`] lent to the call, and `keys` and
+/// `state` must address the `Handler` a [`Predicate`] passed to the call, and `keys` and
 /// `admissions` must each address `count` elements.
 unsafe extern "C" fn batch_trampoline<Handler: Fn(&[Key], &mut [Admission])>(
     keys: *const Key,
@@ -1817,7 +1811,7 @@ unsafe extern "C" fn batch_trampoline<Handler: Fn(&[Key], &mut [Admission])>(
     }
 }
 
-/// Lends an optional predicate as the struct every filtering verb takes; `None` lends nulls.
+/// Passes an optional predicate as the struct every filtering verb takes; `None` passes nulls.
 pub(crate) fn lower_predicate(predicate: &Option<Predicate>) -> usearch_predicate_t {
     match predicate {
         Some(predicate) => predicate.raw,
@@ -1825,7 +1819,7 @@ pub(crate) fn lower_predicate(predicate: &Option<Predicate>) -> usearch_predicat
     }
 }
 
-/// Lends an optional output as the pointer the library writes it through; `None` lends null.
+/// Passes an optional output as the pointer the library writes it through; `None` passes null.
 pub(crate) fn output_slot<Value>(output: &mut Option<&mut Value>) -> *mut Value {
     output.as_deref_mut().map_or(ptr::null_mut(), ptr::from_mut)
 }
@@ -2051,7 +2045,7 @@ impl FromStr for Traversal {
 /// [`Status::Contended`], as nothing queues, so threads wanting to overlap take one apiece; it is
 /// `Send` but not `Sync`. A deferred call on a caller-exclusive pool runs on the pool's thread 0,
 /// so polling alone finishes it, while a single thread or a VRAM executor runs it at submission.
-/// [`Arena::new_in`] places an arena where it computes, and the arena borrows it, so the executor
+/// [`Arena::new_in`] places an arena where it computes, and the arena refers to it, so the executor
 /// outlives every arena it made. Dropping an executor drains it, then frees it.
 #[derive(Debug)]
 pub struct Executor {
@@ -2077,7 +2071,7 @@ impl Executor {
     /// Spawns host workers for RAM-resident indexes, interleaved across the compute domains local
     /// to `memory_domains`, which is the same list the indexes were initialized with.
     ///
-    /// Zero `threads` takes 7/8 of the cores those domains carry, since full occupancy starves
+    /// Zero `threads` takes 7/8 of the cores those domains hold, since full occupancy starves
     /// the ordered publication path.
     ///
     /// A `cpu_class_ceiling` caps the class the threads' waiters and atomics dispatch as,
@@ -2091,34 +2085,11 @@ impl Executor {
                 outcome: &mut outcome,
                 ram: ram_options(memory_domains, cpu_class_ceiling),
                 threads,
+                scratch_limit: 0,
             })
         };
         let executor = Executor::adopt(handle);
         check(outcome).map(|()| executor)
-    }
-
-    /// Creates a RAM executor over a borrowed ForkUnion pool, so several libraries in one process
-    /// share one set of threads while each keeps its own scratch.
-    ///
-    /// # Safety
-    /// `pool` must address a live ForkUnion `fu_pool_t` that outlives the executor.
-    pub unsafe fn on_pool(
-        memory_domains: &[i32],
-        cpu_class_ceiling: Option<CPUClass>,
-        pool: *mut c_void,
-    ) -> Result<Self> {
-        unsafe {
-            let mut handle = ptr::null_mut();
-            let mut outcome = usearch_outcome_t::default();
-            usearch_executor_on_pool(&mut usearch_executor_on_pool_t {
-                executor: &mut handle,
-                outcome: &mut outcome,
-                ram: ram_options(memory_domains, cpu_class_ceiling),
-                pool,
-            });
-            let executor = Executor::adopt(handle);
-            check(outcome).map(|()| executor)
-        }
     }
 
     /// Spawns host workers for NVMe-resident indexes, one submission ring apiece, across the
@@ -2137,16 +2108,19 @@ impl Executor {
                 executor: &mut handle,
                 outcome: &mut outcome,
                 nvme: nvme_options(&views, cpu_class_ceiling),
+                ram: ram_options(&[], None),
                 threads,
                 nvme_class: 0,
+                scratch_limit: 0,
             })
         };
         let executor = Executor::adopt(handle);
         check(outcome).map(|()| executor)
     }
 
-    /// Opens one submission stream on every named device, all of them driven by the one host
-    /// thread that calls the verbs - which is why this takes no thread count.
+    /// Opens one non-blocking stream on every named device, created and destroyed with the
+    /// executor, all of them driven by the one host thread that calls the verbs - which is why this
+    /// takes no thread count.
     ///
     /// Zero `scratch_limit` lets scratch grow as geometry asks. A `gpu_class_ceiling` no named
     /// device loads is refused with [`Status::Unsupported`].
@@ -2154,11 +2128,13 @@ impl Executor {
         unsafe { Self::for_vram_on_streams(devices, gpu_class_ceiling, &[], scratch_limit) }
     }
 
-    /// Borrows the caller's CUDA streams, one per device in `devices` order, as
-    /// [`Executor::for_vram`] opens its own.
+    /// Names the caller's CUDA streams, one per device in `devices` order, in place of the ones
+    /// [`Executor::for_vram`] opens; the library answers [`Status::Unsupported`] until caller
+    /// streams are wired.
     ///
     /// # Safety
-    /// Every stream must be a live CUDA stream on its device that outlives the executor.
+    /// Every stream must be a live CUDA stream on its device, which the caller destroys only after
+    /// dropping the executor.
     pub unsafe fn for_vram_on_streams(
         devices: &[i32],
         gpu_class_ceiling: Option<GPUClass>,
@@ -2217,13 +2193,14 @@ impl Drop for Executor {
 /// An executor places it where it computes, host pages or its GPU's memory, decided once, and
 /// nothing is allocated until a call writes into it. Every call rewinds and refills it,
 /// invalidating the previous call's outputs, so a steady loop allocates once.
-/// Every verb, blocking or deferred, borrows it as `&mut Arena` and answers outputs that borrow it in turn.
+/// Every verb, blocking or deferred, takes it as `&mut Arena` and answers outputs that point into
+/// it in turn.
 /// A [`Residency::Vram`] arena holds device memory, which the host accessors of its outputs must
 /// not read; [`Arena::describe`] says where they live. It grows, fills and frees on the first
 /// stream of the executor that made it, so it serves only calls on that executor, any other refused
 /// with [`Status::Device`].
 ///
-/// `'executor` borrows the executor that made it, which therefore outlives it, and dropping it
+/// `'executor` refers to the executor that made it, which therefore outlives it, and dropping it
 /// waits for the calls still writing into it:
 ///
 /// ```compile_fail,E0505
@@ -2243,7 +2220,7 @@ pub struct Arena<'executor> {
 }
 
 // Safety: an arena serves one call at a time, which the `&mut` every verb takes already enforces,
-// and a shared borrow only asks the library where it lives.
+// and a shared reference only asks the library where it lives.
 unsafe impl Send for Arena<'_> {}
 unsafe impl Sync for Arena<'_> {}
 
@@ -2310,10 +2287,10 @@ pub struct ArenaDescription {
     pub device: Option<u32>,
 }
 
-/// Borrows `length` values the library wrote into an arena; a failed or empty call leaves null.
+/// Views `length` values the library wrote into an arena; a failed or empty call leaves null.
 ///
 /// # Safety
-/// `data` must address `length` initialized values that live as long as the arena borrow.
+/// `data` must address `length` initialized values that live as long as the arena reference.
 pub(crate) unsafe fn arena_slice<'arena, Value>(data: *const Value, length: usize) -> &'arena [Value] {
     unsafe {
         match length {
@@ -2327,7 +2304,7 @@ pub(crate) unsafe fn arena_slice<'arena, Value>(data: *const Value, length: usiz
 
 // region: Receivers
 
-/// An index borrowed with the executor its calls run on and how they complete, shared by every
+/// An index referenced with the executor its calls run on and how they complete, shared by every
 /// modality.
 ///
 /// Neither the receiver nor a [`Deferred`] it submits outlives the index or the executor.
@@ -2348,7 +2325,7 @@ impl<Index, Completion> Clone for On<'_, Index, Completion> {
 
 impl<Index, Completion> Copy for On<'_, Index, Completion> {}
 
-/// The index a verb reaches and the executor it runs on, as its receiver lent them.
+/// The index a verb reaches and the executor it runs on, as its receiver passed them.
 #[derive(Clone, Copy)]
 pub(crate) struct Handles {
     pub(crate) handle: *mut c_void,
@@ -2421,7 +2398,7 @@ enum Stage {
 struct Call<Verb: Calling> {
     outcome: usearch_outcome_t,
     arguments: MaybeUninit<Verb::Arguments>,
-    /// The owned inputs, the output slots and the arena borrow.
+    /// The owned inputs, the output slots and the arena reference.
     verb: ManuallyDrop<Verb>,
 }
 
@@ -2431,9 +2408,9 @@ struct Call<Verb: Calling> {
 /// It is the [`Future`] of its call, so `.await` submits it and polls its status word until final,
 /// while `wait` blocks the thread without spinning, and both hand back what the call produced.
 /// Dropping a submitted one waits for its call, and dropping an unsubmitted one runs nothing.
-/// `'index` borrows the [`On`] that made it, and it borrows its arena as a blocking call does.
+/// `'index` refers to the [`On`] that made it, and it references its arena as a blocking call does.
 ///
-/// The library reads its inputs until it is final, so a deferred call takes no borrow of a local:
+/// The library reads its inputs until it is final, so a deferred call keeps no local reference:
 ///
 /// ```compile_fail,E0597
 /// use usearch::*;
@@ -2530,7 +2507,7 @@ impl<Verb: Calling> Deferred<'_, Verb> {
     }
 }
 
-impl<Verb: Lending> Deferred<'_, Verb> {
+impl<Verb: Submitting> Deferred<'_, Verb> {
     /// Submits the call, then blocks until it is final and hands back what it produced beside the
     /// inputs it owned, like a plan a stop left live.
     pub fn wait_with_inputs(self) -> (Result<Verb::Output>, Verb::Inputs) {
@@ -2710,7 +2687,7 @@ mod tests {
     }
 
     #[test]
-    fn packed_slabs_borrow_as_matrices() {
+    fn packed_slabs_view_as_matrices() {
         let slab = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
         let matrix = rows(&slab, 3).unwrap();
         assert_eq!(matrix.shape(), &[2, 3]);
@@ -2759,7 +2736,7 @@ mod tests {
     }
 
     #[test]
-    fn errors_carry_a_status() {
+    fn errors_hold_a_status() {
         let failure = fail(Status::ShapeMismatch, "something specific went wrong");
         assert_eq!(failure.status, Status::ShapeMismatch);
         assert!(check(usearch_outcome_t::default()).is_ok(), "a zero status is success");
@@ -2798,7 +2775,7 @@ mod tests {
     }
 
     #[test]
-    fn placements_marshal_as_borrowed_lists() {
+    fn placements_marshal_as_list_views() {
         let derived = ram_options(&[], None);
         assert_eq!(derived.memory_domains_count, 0, "an empty list derives");
         assert_eq!(derived.cpu_class_ceiling, 0, "no ceiling dispatches as the machine");
@@ -2838,7 +2815,7 @@ mod tests {
         _bytes: PhantomData<&'bytes [u8]>,
     }
 
-    // Safety: the fields hold every node, and the borrow holds the bytes.
+    // Safety: the fields hold every node, and the reference holds the bytes.
     unsafe impl ArrowColumn for HandMadeColumn<'_> {
         fn schema(&self) -> *const ArrowSchema {
             &self.schema

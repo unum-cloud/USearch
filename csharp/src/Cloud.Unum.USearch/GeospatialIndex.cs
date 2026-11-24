@@ -86,11 +86,11 @@ public readonly record struct GeospatialTolerance(double Metres, double Seconds 
 
 /// <summary>
 /// The elevation lines of sight are tested over: a north-up grid of heights in metres above the
-/// WGS-84 ellipsoid, borrowed by every handle built over it, which keeps it alive. Mirrors
-/// <c>usearch_geospatial_terrain_t</c> with borrowed heights or a dataset path.
+/// WGS-84 ellipsoid, viewed by every handle built over it, which keeps it alive. Mirrors
+/// <c>usearch_geospatial_terrain_t</c> with viewed heights or a dataset path.
 /// </summary>
 /// <remarks>The heights live in pinned memory, since the library reads them for the handle's whole
-/// lifetime; a checkpoint never carries them, so every load and view names the terrain again.</remarks>
+/// lifetime; a checkpoint never holds them, so every load and view names the terrain again.</remarks>
 public sealed unsafe class GeospatialTerrain
 {
     private readonly float[] _heights;
@@ -272,10 +272,10 @@ public sealed unsafe class GeospatialIndex : IDisposable
         this.Terrain = terrain;
     }
 
-    /// <summary>The terrain the handle tests lines of sight over, kept alive while the handle borrows it.</summary>
+    /// <summary>The terrain the handle tests lines of sight over, kept alive while the handle views it.</summary>
     public GeospatialTerrain? Terrain { get; }
 
-    /// <summary>The engine handle the verbs lease.</summary>
+    /// <summary>The engine handle the verbs reference.</summary>
     internal NativeGeospatialIndexHandle Handle => this._handle;
 
     /// <summary>Creates an empty, mutable geospatial index in host memory. Calls
@@ -342,7 +342,7 @@ public sealed unsafe class GeospatialIndex : IDisposable
     /// <summary>Copies a checkpoint into a new, mutable index in host memory. Calls
     /// <c>usearch_geospatial_load_ram</c>.</summary>
     /// <param name="path">The checkpoint to read, a monolith or a manifest.</param>
-    /// <param name="terrain">The terrain lines of sight are tested over, which no checkpoint carries.</param>
+    /// <param name="terrain">The terrain lines of sight are tested over, which no checkpoint holds.</param>
     /// <param name="memoryDomains">Where the parts land; empty derives every node.</param>
     /// <param name="valuesPerKey">The upper bound on entries sharing one key; zero is unbounded.</param>
     /// <param name="executor">The workers the read fans out over; null reads on the caller's thread.</param>
@@ -353,7 +353,7 @@ public sealed unsafe class GeospatialIndex : IDisposable
         ulong valuesPerKey = 0, Executor? executor = null, CPUClass? cpuClassCeiling = null)
     {
         byte[] encoded = Encoding.UTF8.GetBytes(path);
-        using Lease pool = Lease.Of(executor?.Handle, "executor");
+        using HandleReference pool = HandleReference.Of(executor?.Handle, "executor");
         IntPtr created = IntPtr.Zero;
         NativeOutcome outcome = default;
         fixed (byte* data = encoded)
@@ -361,7 +361,7 @@ public sealed unsafe class GeospatialIndex : IDisposable
         {
             NativeGeospatialLoadRam arguments = new()
             {
-                Index = &created, Executor = pool.Pointer, Outcome = &outcome, Path = Borrow(data, encoded.Length),
+                Index = &created, Executor = pool.Pointer, Outcome = &outcome, Path = View(data, encoded.Length),
                 Ram = new NativeRamOptions
                 {
                     MemoryDomains = (IntPtr)domains, MemoryDomainsCount = (nuint)memoryDomains.Length,
@@ -378,7 +378,7 @@ public sealed unsafe class GeospatialIndex : IDisposable
     /// <summary>Copies a checkpoint into a new, mutable index in device memory. Calls
     /// <c>usearch_geospatial_load_vram</c>.</summary>
     /// <param name="path">The checkpoint to read.</param>
-    /// <param name="terrain">The terrain lines of sight are tested over, which no checkpoint carries.</param>
+    /// <param name="terrain">The terrain lines of sight are tested over, which no checkpoint holds.</param>
     /// <param name="devices">Where the parts land; empty derives one free device.</param>
     /// <param name="valuesPerKey">The upper bound on entries sharing one key; zero is unbounded.</param>
     /// <param name="executor">The workers the upload runs on; null uploads on the caller's thread.</param>
@@ -389,7 +389,7 @@ public sealed unsafe class GeospatialIndex : IDisposable
         ulong valuesPerKey = 0, Executor? executor = null, GPUClass? gpuClassCeiling = null)
     {
         byte[] encoded = Encoding.UTF8.GetBytes(path);
-        using Lease pool = Lease.Of(executor?.Handle, "executor");
+        using HandleReference pool = HandleReference.Of(executor?.Handle, "executor");
         IntPtr created = IntPtr.Zero;
         NativeOutcome outcome = default;
         fixed (byte* data = encoded)
@@ -397,7 +397,7 @@ public sealed unsafe class GeospatialIndex : IDisposable
         {
             NativeGeospatialLoadVram arguments = new()
             {
-                Index = &created, Executor = pool.Pointer, Outcome = &outcome, Path = Borrow(data, encoded.Length),
+                Index = &created, Executor = pool.Pointer, Outcome = &outcome, Path = View(data, encoded.Length),
                 Vram = new NativeVramOptions
                 {
                     Devices = (IntPtr)ordinals, DevicesCount = (nuint)devices.Length,
@@ -414,7 +414,7 @@ public sealed unsafe class GeospatialIndex : IDisposable
     /// <summary>Copies a checkpoint from a buffer into a new, mutable index in host memory. Calls
     /// <c>usearch_geospatial_load_ram_buffer</c>.</summary>
     /// <param name="buffer">The checkpoint's bytes, copied in before the call returns.</param>
-    /// <param name="terrain">The terrain lines of sight are tested over, which no checkpoint carries.</param>
+    /// <param name="terrain">The terrain lines of sight are tested over, which no checkpoint holds.</param>
     /// <param name="memoryDomains">Where the parts land; empty derives every node.</param>
     /// <param name="valuesPerKey">The upper bound on entries sharing one key; zero is unbounded.</param>
     /// <param name="executor">The workers the copy fans out over; null copies on the caller's thread.</param>
@@ -424,7 +424,7 @@ public sealed unsafe class GeospatialIndex : IDisposable
         ReadOnlySpan<byte> buffer, GeospatialTerrain? terrain = null, ReadOnlySpan<int> memoryDomains = default,
         ulong valuesPerKey = 0, Executor? executor = null, CPUClass? cpuClassCeiling = null)
     {
-        using Lease pool = Lease.Of(executor?.Handle, "executor");
+        using HandleReference pool = HandleReference.Of(executor?.Handle, "executor");
         IntPtr created = IntPtr.Zero;
         NativeOutcome outcome = default;
         fixed (byte* source = buffer)
@@ -432,7 +432,7 @@ public sealed unsafe class GeospatialIndex : IDisposable
         {
             NativeGeospatialLoadRamBuffer arguments = new()
             {
-                Index = &created, Executor = pool.Pointer, Outcome = &outcome, Buffer = Borrow(source, buffer.Length),
+                Index = &created, Executor = pool.Pointer, Outcome = &outcome, Buffer = View(source, buffer.Length),
                 Ram = new NativeRamOptions
                 {
                     MemoryDomains = (IntPtr)domains, MemoryDomainsCount = (nuint)memoryDomains.Length,
@@ -449,7 +449,7 @@ public sealed unsafe class GeospatialIndex : IDisposable
     /// <summary>Copies a checkpoint from a buffer into a new, mutable index in device memory. Calls
     /// <c>usearch_geospatial_load_vram_buffer</c>.</summary>
     /// <param name="buffer">The checkpoint's bytes.</param>
-    /// <param name="terrain">The terrain lines of sight are tested over, which no checkpoint carries.</param>
+    /// <param name="terrain">The terrain lines of sight are tested over, which no checkpoint holds.</param>
     /// <param name="devices">Where the parts land; empty derives one free device.</param>
     /// <param name="valuesPerKey">The upper bound on entries sharing one key; zero is unbounded.</param>
     /// <param name="executor">The workers the upload runs on; null uploads on the caller's thread.</param>
@@ -459,7 +459,7 @@ public sealed unsafe class GeospatialIndex : IDisposable
         ReadOnlySpan<byte> buffer, GeospatialTerrain? terrain = null, ReadOnlySpan<int> devices = default,
         ulong valuesPerKey = 0, Executor? executor = null, GPUClass? gpuClassCeiling = null)
     {
-        using Lease pool = Lease.Of(executor?.Handle, "executor");
+        using HandleReference pool = HandleReference.Of(executor?.Handle, "executor");
         IntPtr created = IntPtr.Zero;
         NativeOutcome outcome = default;
         fixed (byte* source = buffer)
@@ -467,7 +467,7 @@ public sealed unsafe class GeospatialIndex : IDisposable
         {
             NativeGeospatialLoadVramBuffer arguments = new()
             {
-                Index = &created, Executor = pool.Pointer, Outcome = &outcome, Buffer = Borrow(source, buffer.Length),
+                Index = &created, Executor = pool.Pointer, Outcome = &outcome, Buffer = View(source, buffer.Length),
                 Vram = new NativeVramOptions
                 {
                     Devices = (IntPtr)ordinals, DevicesCount = (nuint)devices.Length,
@@ -484,7 +484,7 @@ public sealed unsafe class GeospatialIndex : IDisposable
     /// <summary>Serves a checkpoint in place through a memory mapping, as a read-only index. Calls
     /// <c>usearch_geospatial_view_ram</c>.</summary>
     /// <param name="path">The checkpoint to serve.</param>
-    /// <param name="terrain">The terrain lines of sight are tested over, which no checkpoint carries.</param>
+    /// <param name="terrain">The terrain lines of sight are tested over, which no checkpoint holds.</param>
     /// <param name="memoryDomains">Where the parts are served from; empty derives.</param>
     /// <param name="cpuClassCeiling">The newest class dispatch may pick; null means no ceiling.</param>
     /// <returns>The read-only index.</returns>
@@ -500,7 +500,7 @@ public sealed unsafe class GeospatialIndex : IDisposable
         {
             NativeGeospatialViewRam arguments = new()
             {
-                Index = &created, Outcome = &outcome, Path = Borrow(data, encoded.Length),
+                Index = &created, Outcome = &outcome, Path = View(data, encoded.Length),
                 Terrain = GeospatialTerrain.Lower(terrain),
                 Ram = new NativeRamOptions
                 {
@@ -517,7 +517,7 @@ public sealed unsafe class GeospatialIndex : IDisposable
     /// <summary>Serves a checkpoint in place from NVMe drives as a read-only index. Calls
     /// <c>usearch_geospatial_view_nvme</c>.</summary>
     /// <param name="path">The checkpoint to serve.</param>
-    /// <param name="terrain">The terrain lines of sight are tested over, which no checkpoint carries.</param>
+    /// <param name="terrain">The terrain lines of sight are tested over, which no checkpoint holds.</param>
     /// <param name="paths">The devices the parts are served from; empty serves each where its manifest
     /// points.</param>
     /// <param name="executor">The NVMe executor whose rings read the headers; null reads on the caller's
@@ -529,7 +529,7 @@ public sealed unsafe class GeospatialIndex : IDisposable
         Executor? executor = null, CPUClass? cpuClassCeiling = null)
     {
         byte[] encoded = Encoding.UTF8.GetBytes(path);
-        using Lease pool = Lease.Of(executor?.Handle, "executor");
+        using HandleReference pool = HandleReference.Of(executor?.Handle, "executor");
         IntPtr created = IntPtr.Zero;
         NativeOutcome outcome = default;
         NativeBytesView* views = Paths.Encode(paths);
@@ -539,7 +539,7 @@ public sealed unsafe class GeospatialIndex : IDisposable
             {
                 NativeGeospatialViewNvme arguments = new()
                 {
-                    Index = &created, Executor = pool.Pointer, Outcome = &outcome, Path = Borrow(data, encoded.Length),
+                    Index = &created, Executor = pool.Pointer, Outcome = &outcome, Path = View(data, encoded.Length),
                     Nvme = new NativeNvmeOptions
                     {
                         Paths = (IntPtr)views, PathsCount = (nuint)paths.Length,
@@ -566,14 +566,14 @@ public sealed unsafe class GeospatialIndex : IDisposable
     public static GeospatialMetadata MetadataRead(string path, Executor? executor = null)
     {
         byte[] encoded = Encoding.UTF8.GetBytes(path);
-        using Lease pool = Lease.Of(executor?.Handle, "executor");
+        using HandleReference pool = HandleReference.Of(executor?.Handle, "executor");
         NativeGeospatialMetadata lowered = default;
         NativeOutcome outcome = default;
         fixed (byte* data = encoded)
         {
             NativeGeospatialMetadataRead arguments = new()
             {
-                Executor = pool.Pointer, Outcome = &outcome, Path = Borrow(data, encoded.Length), Metadata = &lowered,
+                Executor = pool.Pointer, Outcome = &outcome, Path = View(data, encoded.Length), Metadata = &lowered,
             };
             usearch_geospatial_metadata_read(&arguments);
         }
@@ -589,14 +589,14 @@ public sealed unsafe class GeospatialIndex : IDisposable
     /// <returns>What the checkpoint froze.</returns>
     public static GeospatialMetadata MetadataReadBuffer(ReadOnlySpan<byte> buffer, Executor? executor = null)
     {
-        using Lease pool = Lease.Of(executor?.Handle, "executor");
+        using HandleReference pool = HandleReference.Of(executor?.Handle, "executor");
         NativeGeospatialMetadata lowered = default;
         NativeOutcome outcome = default;
         fixed (byte* source = buffer)
         {
             NativeGeospatialMetadataReadBuffer arguments = new()
             {
-                Executor = pool.Pointer, Outcome = &outcome, Buffer = Borrow(source, buffer.Length),
+                Executor = pool.Pointer, Outcome = &outcome, Buffer = View(source, buffer.Length),
                 Metadata = &lowered,
             };
             usearch_geospatial_metadata_read_buffer(&arguments);
@@ -695,15 +695,18 @@ public sealed unsafe class GeospatialIndex : IDisposable
     public Monolith SaveBuffer(Arena arena, Progress? progress = null) =>
         new GeospatialIndexOn(this, null).SaveBuffer(arena, progress);
 
-    /// <inheritdoc cref="GeospatialIndexOn.Cursor"/>
-    public GeospatialCursor Cursor(ReadOnlySpan<Key> starts = default) =>
-        new GeospatialIndexOn(this, null).Cursor(starts);
+    /// <summary>Opens a snapshot cursor over the current contents, pulled on the caller's thread or
+    /// through <see cref="GeospatialCursor.On"/>. Calls
+    /// <c>usearch_geospatial_cursor_init</c>.</summary>
+    /// <param name="starts">The keys to walk from breadth-first; empty yields every entry as stored.</param>
+    /// <returns>The cursor, which keeps the index alive until disposed.</returns>
+    public GeospatialCursor Cursor(ReadOnlySpan<Key> starts = default) => GeospatialCursor.Open(this.Handle, starts);
 
     /// <summary>Releases the index, once every deferred call naming it is final. Calls
     /// <c>usearch_geospatial_free</c>.</summary>
     public void Dispose() => this._handle.Dispose();
 
-    private static NativeBytesView Borrow(byte* data, int length) =>
+    private static NativeBytesView View(byte* data, int length) =>
         new() { Data = (IntPtr)data, Length = (nuint)length };
 }
 
@@ -891,12 +894,6 @@ public readonly unsafe struct GeospatialIndexOn
     /// <returns>The checkpoint, readable until the arena's next call.</returns>
     public Monolith SaveBuffer(Arena arena, Progress? progress = null) =>
         Calls.Block(new GeospatialSaveBufferCall(this.Handles, arena, progress)).Result;
-
-    /// <summary>Opens a snapshot cursor over the current contents, pulled on the receiver's thread or
-    /// executor. Calls <c>usearch_geospatial_cursor_init</c>.</summary>
-    /// <param name="starts">The keys to walk from breadth-first; empty yields every entry as stored.</param>
-    /// <returns>The cursor, which keeps the index alive until disposed.</returns>
-    public GeospatialCursor Cursor(ReadOnlySpan<Key> starts = default) => GeospatialCursor.Open(this.Handles, starts);
 }
 
 /// <summary>A geospatial index bound to the executor its verbs submit to, as <c>index.Deferred(executor)</c>
@@ -1026,27 +1023,18 @@ public sealed unsafe class GeospatialReshardPlan
 }
 
 /// <summary>A snapshot cursor over a geospatial index, yielding each entry's key with the keys it links
-/// to; the geospatial come from <see cref="GeospatialIndex.Get"/>. It keeps the index and the executor it
-/// pulls on alive until disposed.</summary>
+/// to; the geospatial come from <see cref="GeospatialIndex.Get"/>. It keeps the index alive until disposed
+/// and no executor: its pulls run on the caller's thread, or block on the executor <see cref="On"/>
+/// names for each.</summary>
 public sealed unsafe class GeospatialCursor : IDisposable
 {
     private readonly NativeGeospatialCursorHandle _handle;
 
     private GeospatialCursor(NativeGeospatialCursorHandle handle) => this._handle = handle;
 
-    internal static GeospatialCursor Open(CallHandles handles, ReadOnlySpan<Key> starts)
+    internal static GeospatialCursor Open(EngineHandle index, ReadOnlySpan<Key> starts)
     {
-        Lease held = handles.LendIndex();
-        Lease pool;
-        try
-        {
-            pool = handles.LendExecutor();
-        }
-        catch
-        {
-            held.Dispose();
-            throw;
-        }
+        HandleReference held = HandleReference.Of(index, "index");
 
         IntPtr created = IntPtr.Zero;
         NativeOutcome outcome = default;
@@ -1063,11 +1051,10 @@ public sealed unsafe class GeospatialCursor : IDisposable
         if (outcome.Status != Status.Success)
         {
             held.Dispose();
-            pool.Dispose();
             outcome.ThrowIfFailed();
         }
 
-        return new GeospatialCursor(new NativeGeospatialCursorHandle(created, held, pool));
+        return new GeospatialCursor(new NativeGeospatialCursorHandle(created, held));
     }
 
     /// <summary>Copies the next batch of entries into an arena, the keys always and the keys each links
@@ -1076,29 +1063,55 @@ public sealed unsafe class GeospatialCursor : IDisposable
     /// <param name="arena">Where the batch lands, rewound by the pull.</param>
     /// <param name="links">Whether to export the keys each entry links to.</param>
     /// <returns>The batch, empty once the snapshot is exhausted.</returns>
-    public DenseBatch Next(int wanted, Arena arena, bool links = false)
+    public DenseBatch Next(int wanted, Arena arena, bool links = false) => this.Pull(null, wanted, arena, links);
+
+    /// <summary>The receiver whose pulls block on <paramref name="executor"/>, named again for every pull.</summary>
+    /// <param name="executor">The executor every pull through the receiver runs on.</param>
+    /// <returns>The receiver, which offers the same pulls.</returns>
+    public GeospatialCursorOn On(Executor executor) => new(this, executor);
+
+    /// <summary>One pull on <paramref name="executor"/>, or the caller's thread when null.</summary>
+    internal DenseBatch Pull(Executor? executor, int wanted, Arena arena, bool links)
     {
         nuint bound = Calls.Bound(wanted);
-        using Lease cursor = Lease.Of(this._handle, "cursor");
-        using Lease lent = Arena.Lend(arena);
+        using HandleReference cursor = HandleReference.Of(this._handle, "cursor");
+        using HandleReference passed = Arena.Reference(arena);
+        using HandleReference pool = HandleReference.Of(executor?.Handle, "executor");
         nuint written = 0;
         NativeOutcome outcome = default;
         NativeKeysView keys = default;
         NativeKeysTapeView linked = default;
         NativeGeospatialCursorNext arguments = new()
         {
-            Index = this._handle.Index, Executor = this._handle.Executor, Outcome = &outcome,
+            Index = this._handle.Index, Executor = pool.Pointer, Outcome = &outcome,
             Cursor = cursor.Pointer, Keys = &keys, Links = links ? &linked : null, Written = &written,
-            Arena = lent.Pointer, Wanted = bound,
+            Arena = passed.Pointer, Wanted = bound,
         };
         usearch_geospatial_cursor_next(&arguments);
         outcome.ThrowIfFailed();
         return new DenseBatch(keys, linked, links, (int)written);
     }
 
-    /// <summary>Releases the cursor, then the index and executor it kept alive. Calls
+    /// <summary>Releases the cursor, then the index it kept alive. Calls
     /// <c>usearch_geospatial_cursor_free</c>.</summary>
     public void Dispose() => this._handle.Dispose();
+}
+
+/// <summary>A cursor's pulls blocking on one executor, as <see cref="GeospatialCursor.On"/> makes them.</summary>
+public readonly struct GeospatialCursorOn
+{
+    private readonly GeospatialCursor _cursor;
+    private readonly Executor _executor;
+
+    internal GeospatialCursorOn(GeospatialCursor cursor, Executor executor)
+    {
+        this._cursor = cursor;
+        this._executor = executor;
+    }
+
+    /// <inheritdoc cref="GeospatialCursor.Next"/>
+    public DenseBatch Next(int wanted, Arena arena, bool links = false) =>
+        this._cursor.Pull(this._executor, wanted, arena, links);
 }
 
 #endregion Index
@@ -1110,8 +1123,8 @@ internal unsafe struct GeospatialReserveCall(CallHandles handles, ulong entries)
 {
     public readonly void Submit(CallOutputs* outputs, Completion completion)
     {
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
         NativeGeospatialReserve arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
@@ -1130,8 +1143,8 @@ internal unsafe struct GeospatialClearCall(CallHandles handles) : ICall
 {
     public readonly void Submit(CallOutputs* outputs, Completion completion)
     {
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
         NativeGeospatialClear arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
@@ -1151,8 +1164,8 @@ internal unsafe struct GeospatialDescribeCall(CallHandles handles) : ICall<Geosp
 
     public readonly void Submit(CallOutputs* outputs, Completion completion)
     {
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
         NativeGeospatialDescribe arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
@@ -1185,8 +1198,8 @@ internal unsafe struct GeospatialCountCall(CallHandles handles, Key key) : ICall
 
     public readonly void Submit(CallOutputs* outputs, Completion completion)
     {
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
         NativeGeospatialCount arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
@@ -1211,14 +1224,14 @@ internal unsafe struct GeospatialGetCall(CallHandles handles, Key key, Arena are
 
     public readonly void Submit(CallOutputs* outputs, Completion completion)
     {
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
-        using Lease lent = Arena.Lend(arena);
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
+        using HandleReference passed = Arena.Reference(arena);
         NativeGeospatialGet arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
             Key = key, Observations = (GeospatialObservation**)outputs->View, Written = &outputs->Written,
-            Arena = lent.Pointer,
+            Arena = passed.Pointer,
         };
         usearch_geospatial_get(&arguments);
     }
@@ -1252,8 +1265,8 @@ internal unsafe struct GeospatialInsertCall(
 
         this._keys = keys.Pin();
         this._observations = observations.Pin();
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
         NativeGeospatialInsert arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
@@ -1296,15 +1309,15 @@ internal unsafe struct GeospatialSearchCall(
     {
         nuint bound = Calls.Bound(wanted);
         this._queries = queries.Pin();
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
-        using Lease lent = Arena.Lend(arena);
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
+        using HandleReference passed = Arena.Reference(arena);
         NativeGeospatialSearch arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
             Count = (nuint)queries.Length, Queries = (GeospatialObservation*)this._queries.Pointer,
             Relation = relation, Tolerance = tolerance, Matches = (NativeMatchesView*)outputs->View,
-            Arena = lent.Pointer, Wanted = bound, ExpansionFactor = (nuint)expansionFactor, Traversal = traversal,
+            Arena = passed.Pointer, Wanted = bound, ExpansionFactor = (nuint)expansionFactor, Traversal = traversal,
             Predicate = this._predicate.Predicate(predicate), Progress = this._progress.Progress(progress),
             Stats = (NativeDenseTraversalStats*)outputs->Report,
         };
@@ -1341,15 +1354,15 @@ internal unsafe struct GeospatialWithinCall(
     public void Submit(CallOutputs* outputs, Completion completion)
     {
         this._queries = queries.Pin();
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
-        using Lease lent = Arena.Lend(arena);
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
+        using HandleReference passed = Arena.Reference(arena);
         NativeGeospatialWithin arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
             Count = (nuint)queries.Length, Queries = (GeospatialObservation*)this._queries.Pointer,
             Relation = relation, Tolerance = tolerance, Matches = (NativeMatchesTapeView*)outputs->View,
-            Written = &outputs->Written, Arena = lent.Pointer, Traversal = traversal,
+            Written = &outputs->Written, Arena = passed.Pointer, Traversal = traversal,
             Predicate = this._predicate.Predicate(predicate), Progress = this._progress.Progress(progress),
             Stats = (NativeDenseTraversalStats*)outputs->Report,
         };
@@ -1382,8 +1395,8 @@ internal unsafe struct GeospatialRefineCall(
 
     public void Submit(CallOutputs* outputs, Completion completion)
     {
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
         NativeGeospatialRefine arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
@@ -1413,8 +1426,8 @@ internal unsafe struct GeospatialRefinePlanFinishCall(CallHandles handles, Geosp
 
     public readonly void Submit(CallOutputs* outputs, Completion completion)
     {
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
         NativeGeospatialRefinePlanFinish arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
@@ -1440,8 +1453,8 @@ internal unsafe struct GeospatialHealthCall(CallHandles handles) : ICall<DenseRe
 
     public readonly void Submit(CallOutputs* outputs, Completion completion)
     {
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
         NativeGeospatialHealth arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
@@ -1465,7 +1478,7 @@ internal unsafe struct GeospatialReshardCall(
     ulong memoryLimit, DenseTraversalStats? stats, Progress? progress, GeospatialReshardPlan? plan)
     : ICall<RefineReport>
 {
-    private readonly Lease[] _leases = new Lease[sources.Length + targets.Length];
+    private readonly HandleReference[] _references = new HandleReference[sources.Length + targets.Length];
     private readonly IntPtr[] _slots = new IntPtr[sources.Length + targets.Length];
     private MemoryHandle _pinnedSlots;
     private Registration _progress;
@@ -1477,13 +1490,13 @@ internal unsafe struct GeospatialReshardCall(
         for (int position = 0; position < this._slots.Length; position++)
         {
             GeospatialIndex named = position < sources.Length ? sources[position] : targets[position - sources.Length];
-            this._leases[position] = Lease.Of(named?.Handle, "index");
-            this._slots[position] = this._leases[position].Pointer;
+            this._references[position] = HandleReference.Of(named?.Handle, "index");
+            this._slots[position] = this._references[position].Pointer;
         }
 
         this._pinnedSlots = this._slots.AsMemory().Pin();
         IntPtr* slots = (IntPtr*)this._pinnedSlots.Pointer;
-        using Lease executor = handles.LendExecutor();
+        using HandleReference executor = handles.ReferenceExecutor();
         NativeGeospatialReshard arguments = new()
         {
             SourcesCount = (nuint)sources.Length, Sources = slots, TargetsCount = (nuint)targets.Length,
@@ -1499,9 +1512,9 @@ internal unsafe struct GeospatialReshardCall(
 
     public void Release(CallOutputs* outputs)
     {
-        for (int position = 0; position < this._leases.Length; position++)
+        for (int position = 0; position < this._references.Length; position++)
         {
-            this._leases[position].Dispose();
+            this._references[position].Dispose();
         }
 
         this._pinnedSlots.Dispose();
@@ -1524,7 +1537,7 @@ internal unsafe struct GeospatialReshardPlanFinishCall(CallHandles handles, Geos
 
     public readonly void Submit(CallOutputs* outputs, Completion completion)
     {
-        using Lease executor = handles.LendExecutor();
+        using HandleReference executor = handles.ReferenceExecutor();
         NativeGeospatialReshardPlanFinish arguments = new()
         {
             Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
@@ -1569,9 +1582,9 @@ internal unsafe struct GeospatialSampleCall(CallHandles handles, int wanted, Are
         this._shown = shown.Pin();
         this._shownCoordinates = shownCoordinates.Pin();
         this._focus = focus.Pin();
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
-        using Lease lent = Arena.Lend(arena);
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
+        using HandleReference passed = Arena.Reference(arena);
         NativeGeospatialSample arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
@@ -1586,7 +1599,7 @@ internal unsafe struct GeospatialSampleCall(CallHandles handles, int wanted, Are
             Focus = new NativeKeysView { Data = (IntPtr)this._focus.Pointer, Stride = (nuint)sizeof(Key) },
             Keys = &reports->Keys, EntryOrdinals = &reports->EntryOrdinals,
             Parents = (NativeMatchesView*)outputs->View, Coordinates = &reports->Coordinates,
-            Written = &outputs->Written, Arena = lent.Pointer, Wanted = bound, Seed = config.Seed,
+            Written = &outputs->Written, Arena = passed.Pointer, Wanted = bound, Seed = config.Seed,
             ExpansionFactor = (nuint)config.ExpansionFactor, Progress = this._progress.Progress(config.Progress),
             Stats = &reports->Stats,
         };
@@ -1622,8 +1635,8 @@ internal unsafe struct GeospatialSaveCall(CallHandles handles, string path, Prog
     public void Submit(CallOutputs* outputs, Completion completion)
     {
         this._pinnedPath = this._path.AsMemory().Pin();
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
         NativeGeospatialSave arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
@@ -1651,13 +1664,13 @@ internal unsafe struct GeospatialSaveBufferCall(CallHandles handles, Arena arena
 
     public void Submit(CallOutputs* outputs, Completion completion)
     {
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
-        using Lease lent = Arena.Lend(arena);
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
+        using HandleReference passed = Arena.Reference(arena);
         NativeGeospatialSaveBuffer arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
-            Monolith = (NativeBytesView*)outputs->View, Arena = lent.Pointer,
+            Monolith = (NativeBytesView*)outputs->View, Arena = passed.Pointer,
             Progress = this._progress.Progress(progress),
         };
         usearch_geospatial_save_buffer(&arguments);
@@ -1985,6 +1998,7 @@ internal unsafe struct NativeGeospatialReshardPlanFinish
 internal unsafe struct NativeGeospatialCursorInit
 {
     public IntPtr Index;
+    public IntPtr Executor;
     public NativeOutcome* Outcome;
     public nuint StartsCount;
     public Key* Starts;
@@ -2227,32 +2241,26 @@ internal sealed class NativeGeospatialIndexHandle : EngineHandle
     }
 }
 
-/// <summary>A <c>usearch_geospatial_cursor_t</c> and the leases on the index and executor every pull
-/// names, all released when the wrapper is disposed or collected.</summary>
+/// <summary>A <c>usearch_geospatial_cursor_t</c> and the reference on the index every pull names, both
+/// released when the wrapper is disposed or collected.</summary>
 internal sealed class NativeGeospatialCursorHandle : EngineHandle
 {
-    private Lease _index;
-    private Lease _executor;
+    private HandleReference _index;
 
-    internal NativeGeospatialCursorHandle(IntPtr cursor, Lease index, Lease executor)
+    internal NativeGeospatialCursorHandle(IntPtr cursor, HandleReference index)
     {
         this.SetHandle(cursor);
         this._index = index;
-        this._executor = executor;
     }
 
     /// <summary>The index the cursor was opened on.</summary>
     internal IntPtr Index => this._index.Pointer;
-
-    /// <summary>The executor every pull runs on, null for the caller's thread.</summary>
-    internal IntPtr Executor => this._executor.Pointer;
 
     /// <inheritdoc/>
     protected override bool ReleaseHandle()
     {
         NativeMethods.usearch_geospatial_cursor_free(this.handle);
         this._index.Dispose();
-        this._executor.Dispose();
         return true;
     }
 }

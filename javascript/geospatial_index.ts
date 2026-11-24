@@ -58,7 +58,7 @@ import {
 export enum GeospatialRelation {
   /** Within the radius, widened by three standard deviations of both positions combined. */
   Near = 1,
-  /** Near, with a clear line of sight over the handle's terrain, which no handle here carries. */
+  /** Near, with a clear line of sight over the handle's terrain, which no handle here holds. */
   Visible = 2,
   /** Near, and the entry's view cone holds the query. */
   Sees = 3,
@@ -131,7 +131,7 @@ export function observationsOf(observations: ReadonlyArray<GeospatialObservation
 export interface GeospatialOptions {
   /** Neighbors per node; absent derives it. */
   connectivity?: number;
-  /** Entries one key may carry; absent is unbounded. */
+  /** Entries one key may hold; absent is unbounded. */
   valuesPerKey?: number;
   /** The newest CPU class dispatch may pick, by canonical name; absent means no ceiling. */
   cpuClassCeiling?: string;
@@ -159,7 +159,7 @@ export interface GeospatialLoadConfig {
   executor?: Executor;
   /** NUMA node IDs for a RAM load, or CUDA ordinals for a VRAM one; absent derives them. */
   placement?: number[];
-  /** Entries one key may carry; absent is unbounded. */
+  /** Entries one key may hold; absent is unbounded. */
   valuesPerKey?: number;
   /** The newest CPU or GPU class dispatch may pick, by canonical name; absent means no ceiling. */
   classCeiling?: string;
@@ -568,11 +568,6 @@ export class GeospatialIndexOn {
   saveBuffer(arena: Arena): Monolith {
     return block(geospatialSaveBuffer(this.#index, this.executor, arena));
   }
-
-  /** {@inheritDoc GeospatialIndex.cursor} */
-  cursor(starts?: KeysLike): DenseCursor {
-    return new DenseCursor(this.#index.cursor(this.executor, starts === undefined ? undefined : normalizeKeys(starts)));
-  }
 }
 
 /** The verbs of one geospatial index, submitted to one executor and answered as {@link Deferred}
@@ -857,7 +852,7 @@ export class GeospatialIndex implements Disposable {
 
   /** Opens a walk over the current contents; absent `starts` walks every entry as stored. */
   cursor(starts?: KeysLike): DenseCursor {
-    return new DenseCursor(this.compiled.cursor(undefined, starts === undefined ? undefined : normalizeKeys(starts)));
+    return new DenseCursor(this.compiled.cursor(starts === undefined ? undefined : normalizeKeys(starts)));
   }
 
   /** Releases the handle now; a freed index refuses later calls, and a second `free` is a no-op. */

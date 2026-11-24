@@ -6,7 +6,7 @@
  *      variables and prints the usage.
  *
  *  Flags are long kebab-case words whose value follows as the next argument or after @c =. Byte
- *  counts carry a binary suffix, durations carry @c ms or @c s, counts are plain integers, and
+ *  counts hold a binary suffix, durations carry @c ms or @c s, counts are plain integers, and
  *  lists are comma-separated. A flag choosing one of several names writes the index of the one
  *  given into its @c choice_t. A text value views the tail of its @c argv entry, so it is
  *  null-terminated; list items are not. A value that does not parse prints @c --flag="value"
@@ -235,12 +235,12 @@ struct arguments_t {
     return argument_status_t::parsed_k;
 }
 
-/** Parses a plain integer within the bounds @p count already carries. */
+/** Parses a plain integer within the bounds @p count already holds. */
 [[nodiscard]] inline argument_status_t parse_count(std::string_view text, count_t& count) noexcept {
     return parse_bounded_(text, count.minimum, count.maximum, count.value);
 }
 
-/** Parses comma-separated counts within the bounds @p counts carries, replacing the items it
+/** Parses comma-separated counts within the bounds @p counts holds, replacing the items it
  *  held. */
 [[nodiscard]] inline argument_status_t parse_counts(std::string_view text, counts_t& counts) noexcept {
     std::size_t const maximum_size = counts.maximum_size < counts_t::capacity_k ? counts.maximum_size
@@ -332,7 +332,7 @@ inline std::optional<double> parse_real(std::string_view text) noexcept {
     return argument_status_t::unknown_name_k;
 }
 
-/** The bytes of @p text as the C interface borrows a path or a name. */
+/** The bytes of @p text as the C interface views a path or a name. */
 inline usearch_bytes_view_t bytes_view(std::string_view text) noexcept {
     return {reinterpret_cast<usearch_byte_t const*>(text.data()), text.size()};
 }

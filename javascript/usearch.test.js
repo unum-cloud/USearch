@@ -446,7 +446,7 @@ test("Deferred calls", async (t) => {
     executor.free();
   });
 
-  await t.test("a deferred call borrows its arena until final, and the next call reuses it", () => {
+  await t.test("a deferred call uses its arena until final, and the next call reuses it", () => {
     const executor = Executor.forRam();
     const arena = new Arena();
     const call = index.deferred(executor).search(query, 2, arena);
@@ -620,7 +620,7 @@ test("A reshard in place keeps every entry, and loadNvme wants a manifest", () =
   }
 });
 
-test("Plans carry refines and reshards across calls until finished", () => {
+test("Plans hold refines and reshards across calls until finished", () => {
   const index = DenseIndex.initRam({ metric: DenseMetric.Euclidean, connectivity: 16, dimensions: 2 });
   index.reserve(8);
   index.insert([1n, 2n, 3n, 4n], rows(2, 1, 0, 0, 1, 1, 1, 2, 2));
@@ -850,13 +850,13 @@ test("Cursors walk every entry once, and keep their index alive", () => {
     const index = DenseIndex.initRam({ metric: DenseMetric.Euclidean, connectivity: 16, dimensions: 2 });
     index.reserve(3);
     index.insert([1n, 2n, 3n], rows(2, 1, 1, 2, 2, 3, 3));
-    return index.on(EXECUTOR).cursor();
+    return index.cursor();
   };
   const cursor = opened();
   collect(); // nothing but the cursor refers to the index now
 
   const arena = new Arena();
-  const pull = () => cursor.next(2, arena);
+  const pull = () => cursor.on(EXECUTOR).next(2, arena); // each pull names its executor
   const seen = [];
   for (let batch = pull(); batch.entries; batch = pull()) {
     assert.equal(batch.links, undefined);
@@ -956,7 +956,7 @@ test("Serialization through memory", async (t) => {
   index.insert(42n, new Float32Array([0.2, 0.6, 0.4]));
 
   const monolith = index.on(EXECUTOR).saveBuffer(new Arena());
-  assert(monolith instanceof usearch.Monolith && monolith.bytes.length > 0, "the monolith views its arena");
+  assert(monolith instanceof usearch.Monolith && monolith.bytes.length > 0, "the monolith uses its arena");
 
   await t.test("loadRamBuffer", () => {
     const restored = DenseIndex.loadRamBuffer(monolith, { executor: EXECUTOR });
@@ -1306,7 +1306,7 @@ for (const [name, modality] of Object.entries(MODALITIES)) {
     try {
       assert.notEqual(modality.type.initVram().describe().gpuClass, "unknown");
     } catch (error) {
-      assert(Object.values(Status).includes(error.code), "the refusal carries a library status");
+      assert(Object.values(Status).includes(error.code), "the refusal holds a library status");
       assert.notEqual(error.code, Status.Success);
     }
   });

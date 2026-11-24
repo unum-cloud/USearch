@@ -5,21 +5,21 @@
  *  @brief The index's keys beside the publication: `keyed_nodes::assign` writes a row's key right
  *      after the dispense, and the turn holder publishes it into the map before the watermark.
  *
- *  Two inserters and a saver as in `inserters.pml`, both rows carrying one key. The searcher reads
+ *  Two inserters and a saver as in @c inserters.pml, both rows holding one key. The searcher reads
  *  the rows below the watermark it acquired with their keys, then reads row 0's tail once, relaxed,
  *  and locates the ID it names only below its snapshot, the traversal's `neighbor_id >=
  *  first_invisible_id` filter. The finder acquires the watermark, probes the map and drops the nodes
  *  at or above it, as `keyed_nodes::find_each` does.
  *
- *  - A slot the finder matches carries its key and node.
+ *  - A slot the finder matches holds its key and node.
  *  - The finder counts every node below its watermark, exactly.
  *
  *  @budget 2048
  *  @verify pass sc,rc11
- *  @verify fail sc key_before_turn=false: after the turn, a reader locates a row that carries no key
+ *  @verify fail sc key_before_turn=false: after the turn, a reader locates a row that holds no key
  *      yet
  *  @verify fail sc watermark_filter=false: without the filter it follows a fresher ID, whose turn
- *      has not come and whose row the snapshot did not carry
+ *      has not come and whose row the snapshot did not hold
  *  @verify fail sc publish=after_turn: past the release, the finder acquires a watermark above a node
  *      whose key is not in the map yet, and counts one node short
  */
@@ -54,7 +54,7 @@ proctype searcher(byte t) {
 
 proctype saver(byte t) { save(t) }
 
-// `count` of the key every row carries: one per node below the watermark
+/** @c count of the key every row holds: one per node below the watermark. */
 proctype finder(byte t) {
     byte chain;
     int watermark, seen, found;

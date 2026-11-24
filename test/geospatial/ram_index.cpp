@@ -503,7 +503,7 @@ static void test_positions_nvme_within(u64_t seed) {
     using scratch_t = arena_allocator<byte_t, forkunion_allocator_t>;
     using metric_t = chord_metric<i32_serial_geospatial_kit_t, scratch_t>;
     using nvme_indexes_t = us::basic::nvme_indexes<earth_observation_codec_t, util::uuid128_t, u32_t, nk_u64_t,
-                                                   blocking_files_engine<fu::standard_yield_t>>;
+                                                   blocking_files_queue<fu::standard_yield_t>>;
     using index_t = positions_fixture_t::index_t;
     using key_t = index_t::key_t;
     constexpr std::size_t nodes_k = 256, probes_k = 6;
@@ -547,7 +547,7 @@ static void test_positions_nvme_within(u64_t seed) {
     fu_topology_t topology = nullptr;
     expect_true(fu_topology_new(&topology) == fu_success_k);
     {
-        io_engine_config_t config;
+        io_queue_config_t config;
         config.queue_depth = 64;
         auto [executor, spawn_status] = nvme_indexes_t::executor_t::spawn(topology, 1, config);
         expect_equal(spawn_status, status_code_t::success_k);

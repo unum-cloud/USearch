@@ -56,7 +56,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	executor, err := usearch.ExecutorForRam(nil, usearch.CPUClassUnknown, 0)
+	executor, err := usearch.ExecutorForRam(nil, usearch.CPUClassUnknown, 0, 0)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -109,7 +109,7 @@ if err != nil {
 if call.Status() == usearch.StatusDeferred {
 	// other work
 }
-matches, err := call.Wait() // a view borrowing arena, as a blocking call's does
+matches, err := call.Wait() // a view into arena, as a blocking call's is
 ```
 
 A deferred verb answers `(*Deferred[T], error)`: a fault this binding catches, such as keys and rows of different counts or a closed handle, comes back at once with no `Deferred`, while the engine's own failures arrive through `Status` and `Wait`.
@@ -131,18 +131,18 @@ One executor serves any number of indexes, and its residency must match the one 
 There is a constructor per residency, each taking only what its own hardware has, and the placement lists are the ones the indexes were built with, which keeps compute and memory domains in agreement.
 
 ```go
-threads, err := usearch.ExecutorForRam(nil, usearch.CPUClassUnknown, 8)                   // eight workers
-domains, err := usearch.ExecutorForRam([]int32{0, 1}, usearch.CPUClassUnknown, 0)         // threads across two NUMA nodes
-capped, err := usearch.ExecutorForRam(nil, usearch.CPUClassIntelHaswell, 0)               // nothing newer than Haswell
-rings, err := usearch.ExecutorForNvme([]string{"/mnt/nvme0"}, usearch.CPUClassUnknown, 4, usearch.NvmeClassUnknown) // one submission ring apiece
-streams, err := usearch.ExecutorForVram([]int32{0, 1}, usearch.GPUClassUnknown, nil, 0)   // one stream per device
-shared, err := usearch.ExecutorOnPool(nil, usearch.CPUClassUnknown, pool)                 // threads another library spawned
+threads, err := usearch.ExecutorForRam(nil, usearch.CPUClassUnknown, 8, 0)           // eight workers
+domains, err := usearch.ExecutorForRam([]int32{0, 1}, usearch.CPUClassUnknown, 0, 0) // threads across two NUMA nodes
+capped, err := usearch.ExecutorForRam(nil, usearch.CPUClassIntelHaswell, 0, 1<<28)   // nothing newer than Haswell, 256 MiB of scratch each
+rings, err := usearch.ExecutorForNvme([]string{"/mnt/nvme0"}, nil, usearch.CPUClassUnknown, 4, usearch.NvmeClassUnknown, 0) // one submission ring apiece
+streams, err := usearch.ExecutorForVram([]int32{0, 1}, usearch.GPUClassUnknown, nil, 0) // one stream it opens per device
 
 err = threads.Drain(usearch.MoodSpinning) // waits out the holding call, then keeps spinning
 ```
 
 `ExecutorForRam` and `ExecutorForNvme` take a thread count, where zero derives one: seven eighths of the cores for RAM, since full occupancy starves the ordered publication path, and the drives' queue capabilities for NVMe.
-`ExecutorForVram` takes none, since one host thread drives one stream per device, and borrows your CUDA streams instead when `streams` names one per device.
+The last argument caps each thread's scratch, past which a call fails with `StatusOutOfMemory`, and zero takes 1 GiB; an NVMe executor's memory domains place its threads over the drives' own domain.
+`ExecutorForVram` takes none, since one host thread drives one stream per device, which the executor opens with itself and destroys when it closes; your own CUDA streams in `streams` answer `StatusUnsupported`, since the executor drives only its own.
 A nil `*Executor` owns nothing, and every call handed it runs on the calling goroutine.
 `Drain(mood)` waits until no call holds the executor and sets the `Mood` idle workers adopt, and `Close` releases them.
 Constructors address no index yet, so no receiver offers them; the ones the C interface lets fan out take an `Executor` in their config, and run on the calling goroutine without one.
@@ -237,8 +237,8 @@ Keys need not be unique: an index admits up to `ValuesPerKey` entries under one,
 
 ## Errors
 
-Every failure carries a status shared with the C interface, so a fault this binding catches before the boundary reports the identity the engine would have reported for the same fault.
-A `Status` is itself an `error`, so `errors.Is` matches any failure carrying it, and an `*usearch.Error` adds its message:
+Every failure holds a status shared with the C interface, so a fault this binding catches before the boundary reports the identity the engine would have reported for the same fault.
+A `Status` is itself an `error`, so `errors.Is` matches any failure holding it, and an `*usearch.Error` adds its message:
 
 ```go
 matches, err := index.On(executor).Search(usearch.RowsOf(query, 4), 10, arena, nil)
@@ -253,7 +253,7 @@ case errors.As(err, &failure):
 }
 ```
 
-`Status`, like `Mood`, `Residency`, `Traversal`, `Phase`, `RefineVerdict`, `DenseMetric` and `Scalar`, carries the C enumerators' values, and its `String` spells the name the C tables own.
+`Status`, like `Mood`, `Residency`, `Traversal`, `Phase`, `RefineVerdict`, `DenseMetric` and `Scalar`, holds the C enumerators' values, and its `String` spells the name the C tables own.
 A handle, executor or arena used after its `Close` answers `StatusUninitialized` before anything crosses, rather than handing the library a dangling handle.
 `StatusUnsupported` marks a verb declared for every residency that this one does not implement yet, and `StatusContended` a call refused rather than waited for.
 A predicate, a progress handler or a value lookup must not panic: a panic unwinding through the library's frames is a bug, and nothing here recovers it.
@@ -349,7 +349,7 @@ fmt.Println(stats.ComputedDistances, "distances computed")
 ```
 
 A search returns a `MatchesView` over its arena, holding up to `wanted` keys per query and the distances paired with them.
-`Query` borrows one query's results, trimmed to the count that query reported, and copies nothing:
+`Query` views one query's results, trimmed to the count that query reported, and copies nothing:
 
 ```go
 for query := range matches.Queries() {
@@ -405,7 +405,7 @@ matches, err = index.On(executor).Search(queries, 10, arena, &usearch.DenseSearc
 ```
 
 Admissions start as `usearch.Reject`, and both slices live only until the handler returns.
-The predicate runs on the library's worker threads, so it must be safe for concurrent use.
+The predicate may run on several of the executor's threads at once, so it must be safe for concurrent use, as a function shared between goroutines is.
 
 Every long verb's config takes a `Progress` handler, called with the units finished so far and the units the call finishes if it runs to the end; answering `false` stops it wherever the verb can stop, which an `Insert` cannot.
 
@@ -417,7 +417,7 @@ report, err := index.On(executor).Refine(&usearch.DenseRefineConfig{
 })
 ```
 
-A handler never runs on two threads at once, so it may carry a counter or a deadline without a lock.
+A handler never runs on two threads at once, so it may hold a counter or a deadline without a lock.
 
 ### Retrieval and Streaming
 
@@ -499,7 +499,7 @@ On a loaded NVMe handle `MemoryLimit` bounds the bytes a round holds for the one
 
 ### Resharding
 
-`Reshard` moves the entries of its sources into its targets, keeping their links rather than re-inserting their vectors, then runs a round on every target that took entries; the receiver lends only its executor, so every handle is named.
+`Reshard` moves the entries of its sources into its targets, keeping their links rather than re-inserting their vectors, then runs a round on every target that took entries; the receiver passes only its executor, so every handle is named.
 Several sources gather into one target, itself among them, and each other source ends empty and live, still yours to close.
 Every handle must share the first source's residency, scalar, class, metric and geometry, or the call answers `StatusConfigMismatch`, and a refusal moves nothing.
 
@@ -603,7 +603,7 @@ context, err := usearch.DenseValues[float32](attended)
 ```
 
 The attended rows take the queries' scalar type unless the config's `OutputsScalar` names another.
-A `Carry` of one `DenseSoftmaxState` per query row, lent rather than written into the arena, folds this branch into another over the same queries, such as a recent window kept out of the index.
+A `Carry` of one `DenseSoftmaxState` per query row, in the caller's memory rather than in the arena, folds this branch into another over the same queries, such as a recent window kept out of the index.
 
 ### Introspection
 
@@ -627,7 +627,7 @@ Every enumeration reads back from the name its `String` prints, as `DenseMetricF
 ## Sequence Indexes
 
 A `SequenceIndex` searches byte strings, UTF-8 text, DNA, RNA and proteins under edit distances and alignments.
-Its sequences cross as one `Tape`, the Apache Arrow layout of elements end to end around one more offset than entries: `SequencesOf` packs separate entries, and `SequencesTape` borrows the two runs of an Arrow column as they are.
+Its sequences cross as one `Tape`, the Apache Arrow layout of elements end to end around one more offset than entries: `SequencesOf` packs separate entries, and `SequencesTape` views the two runs of an Arrow column as they are.
 
 ```go
 index, err := usearch.SequenceInitRam(usearch.SequenceOptions{Metric: usearch.SequenceMetricLevenshteinUTF8}, nil)
@@ -750,7 +750,7 @@ These parts of the C interface have no Go counterpart yet:
   `Status` polls through `usearch_outcome_status` and `Wait` blocks through `usearch_outcome_wait`; a goroutine calling `Wait` overlaps the wait, and a `select` reaches it through a channel that goroutine closes.
 - __No life of its own.__
   The binding starts no goroutines and keeps no queues, locks or counters; releasing a `Deferred` rides `Close`, which waits for the call first, or the collector's cleanup, which frees it only once final.
-- __Arenas are lent and reused, never shared.__
+- __Arenas belong to the caller and are reused, never shared.__
   Every output whose length scales with the call lands in an arena the caller passes, and its views end at the arena's next call.
 - __A fixed allocation budget per call.__
   cgo pins only heap objects, so each call opens one pinned frame holding its outcome, the handles its callbacks reach Go through, its argument structure and its result.

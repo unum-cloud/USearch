@@ -1,7 +1,7 @@
 # USearch for C#
 
 The C# binding calls the flat C interface in `include/usearch/` through source-generated `[LibraryImport]` stubs over `libusearch_shared`, so it compiles no native shim of its own.
-It requires .NET 10, and the package carries the native library for Linux x64 and macOS Arm64.
+It requires .NET 10, and the package holds the native library for Linux x64 and macOS Arm64.
 It exposes dense, sequence, shape and geospatial indexes.
 
 ## Installation
@@ -62,7 +62,7 @@ Matches pooled = index.On(pool).Search(queries, wanted: 10, arena);       // Blo
 Matches awaited = await index.Deferred(pool).Search(queries, 10, arena);  // Or: .Wait() in place of await
 ```
 
-A `Deferred<TResult>` owns its outcome and the pins on every input it lends the library until the call is final, and borrows its index and arena exactly as a blocking call does, so `Wait()` answers the same view a blocking call would, over the same arena.
+A `Deferred<TResult>` owns its outcome and the pins on every input it passes the library until the call is final, and uses its index and arena exactly as a blocking call does, so `Wait()` answers the same view a blocking call would, over the same arena.
 `Status` reads `Status.Deferred` until then, `Wait()` blocks and answers the result or raises the failure, and `await` runs that wait on the thread pool.
 Verbs that produce nothing answer a plain `Deferred`, as `Task` stands beside `Task<TResult>`.
 
@@ -95,7 +95,6 @@ One factory per C constructor, each taking only what its hardware has: `ForVram`
 using Executor threads = Executor.ForRam(threads: 8);             // Zero derives 7/8 of the cores
 using Executor rings = Executor.ForNvme(threads: 4);              // One submission ring apiece
 using Executor streams = Executor.ForVram(scratchLimit: 1 << 30); // One stream per device
-using Executor shared = Executor.OnPool(forkUnionPool);           // Borrows another library's threads
 
 threads.Drain(Mood.Spinning);                                     // Waits out the holding call, then keeps spinning
 ```
@@ -104,7 +103,7 @@ Each factory also names where its shards go, which is how a dual-socket or multi
 
 ```csharp
 using Executor domains = Executor.ForRam(16, memoryDomains: [0, 1]);  // One shard per NUMA node
-using Executor devices = Executor.ForVram([0, 1], cudaStreams);        // Borrowed streams, one per device
+using Executor devices = Executor.ForVram([0, 1], cudaStreams);        // Your streams, one per device
 using Executor striped = Executor.ForNvme(paths: ["/mnt/nvme0", "/mnt/nvme1"]);
 ```
 
@@ -119,7 +118,7 @@ To keep a result past the next call, or to read one while making the next, pass 
 An arena serves one call at a time, so each deferred call needs its own, and a call naming an arena that serves another call finishes with `Status.Contended`.
 A view ends at its arena's next call or disposal, so read it before then.
 An arena's `Describe()` says where it lives, and one from a VRAM executor holds device memory, whose views are for device code alone.
-It grows, fills and frees on that executor's first stream, so it serves only calls on that executor and holds it open until disposed; a host arena may outlive its executor.
+It grows, fills and frees on that executor's first stream, so it serves only calls on that executor and holds it open until disposed; free every arena before its executor, while one made without an executor lives until it is freed.
 
 ```csharp
 using Arena arena = new(pool);                                     // new Arena() is host pages for the calling thread
@@ -146,11 +145,11 @@ foreach (Deferred<Matches> call in calls) Consume(await call);   // Or: call.Wai
 Keys are 128 bits wide and render as lowercase dashed UUIDs, with integer identities parked in the low eight bytes, so `42UL` converts implicitly and `TryGetUInt64` reads one back.
 A full identity comes from `Key.Parse("0123abcd-4567-89ef-fedc-ba9876543210")`, or `Key.TryParse` when the text may be malformed.
 Parsing reads the dashes as separators rather than positions, so they may sit anywhere or nowhere, and what they leave behind must be thirty-two hexadecimal digits of either case.
-`Key.FromGuid` and `Key.ToGuid` carry an identity across to `System.Guid`, which is where a time-ordered `Guid.CreateVersion7()` key comes from.
+`Key.FromGuid` and `Key.ToGuid` hold an identity across to `System.Guid`, which is where a time-ordered `Guid.CreateVersion7()` key comes from.
 
 ## Errors
 
-Every failure arrives as a `USearchException` carrying a `Status`, one enumerator per `usearch_status_*_k`, such as `ShapeMismatch`, `Io`, `Unsupported`, or `InvalidArgument`.
+Every failure arrives as a `USearchException` holding a `Status`, one enumerator per `usearch_status_*_k`, such as `ShapeMismatch`, `Io`, `Unsupported`, or `InvalidArgument`.
 Width and geometry checks belong to the library, which sees every row view's `columns`; the binding checks only what the C interface cannot see, like a key count against the rows it accompanies, a softmax carry against the queries, or a negative `wanted`.
 
 The closed sets spell themselves through the library's own name tables, so a message reads `usearch: shape-mismatch: ...` and parsing user text never restates a table:
@@ -193,9 +192,9 @@ Monolith buffer = index.On(pool).SaveBuffer(arena);                         // O
 using DenseIndex copied = DenseIndex.LoadRamBuffer(buffer.Bytes, executor: pool);
 ```
 
-`DenseMetadata` carries the four fields a checkpoint froze: dimensions, metric, quantization and connectivity.
+`DenseMetadata` holds the four fields a checkpoint froze: dimensions, metric, quantization and connectivity.
 Residency is absent because a checkpoint records where it was written rather than where a reader must keep it, and `ValuesPerKey` is absent because it bounds a live handle's mutable state rather than the serialized form.
-A monolith reports its `Length` as a `long`, and one past 2 GiB refuses to lend its `Bytes` as one run of memory with `Status.Overflow`.
+A monolith reports its `Length` as a `long`, and one past 2 GiB refuses to expose its `Bytes` as one run of memory with `Status.Overflow`.
 
 ## Dense Indexes
 
@@ -203,7 +202,7 @@ A monolith reports its `Length` as a `long`, and one past 2 GiB refuses to lend 
 
 ### Rows & Scalars
 
-Every batch argument is a `RowsView`: a caller-owned slab viewed as rows of equal width, carrying its row count, its logical width, its byte pitch, and the scalar kind its values hold.
+Every batch argument is a `RowsView`: a caller-owned slab viewed as rows of equal width, holding its row count, its logical width, its byte pitch, and the scalar kind its values hold.
 A single vector is a one-row matrix, and the input scalar type is independent of the stored quantization, since the library converts on ingest.
 
 ```csharp
@@ -220,7 +219,7 @@ RowsView strided = RowsView.StridedRowsOf<float>(                          // Th
 
 The kind travels with the slab rather than being derived from its element type, which is what makes the packed sub-byte kinds reachable: sixty-four `Scalar.U1x8` dimensions occupy eight bytes, not sixty-four.
 
-A `RowsView` borrows and never owns: it holds the `Memory<T>` it was built from, so the slab stays reachable for as long as the view is, and a deferred call pins it until final.
+A `RowsView` only points at memory it never owns: it holds the `Memory<T>` it was built from, so the slab stays reachable for as long as the view is, and a deferred call pins it until final.
 
 ### Search
 
@@ -271,8 +270,8 @@ A host predicate cannot narrow a device walk, so a VRAM handle refuses one with 
 DenseVectors vectors = index.On(pool).Get<F32>(key, arena);         // Every entry under the key, zero-copy
 ReadOnlySpan<float> first = vectors.Row<float>(0);                  // As wide as vectors.Columns
 
-using DenseCursor cursor = index.On(pool).Cursor();    // Each entry once, in storage order; `Cursor([key])` walks out from a key
-for (DenseBatch batch = cursor.Next(128, arena); batch.Count != 0; batch = cursor.Next(128, arena))
+using DenseCursor cursor = index.Cursor();             // Each entry once, in storage order; `Cursor([key])` walks out from a key
+for (DenseBatch batch = cursor.On(pool).Next(128, arena); batch.Count != 0; batch = cursor.On(pool).Next(128, arena))
 {
     ReadOnlySpan<Key> page = batch.Keys;               // Pass `links: true` for `batch.Links(entry)`; vectors come from `Get`
 }
@@ -281,7 +280,8 @@ using DenseSearchStream stream = index.On(pool).SearchStream(RowsView.RowsOf<flo
 QueryMatches nearer = stream.Next(8, arena);             // Resumable nearest-neighbor stream
 ```
 
-A cursor or stream keeps walk state rather than a thread, pulls on the executor of the receiver that opened it, and keeps its index alive until disposed.
+A cursor or stream keeps walk state rather than a thread and keeps its index alive until disposed.
+A cursor keeps no executor: a pull on it runs on the caller's thread, and one through `cursor.On(executor)` blocks on that executor; a stream pulls on the executor of the receiver that opened it.
 Every pull takes its arena, so one arena serves a scan and any other verb between pulls, and a drained pull answers an empty view.
 
 ### Refinement
@@ -364,7 +364,7 @@ That is what a values-per-key bound above one exists for, and a graph frozen und
 ### Attention
 
 `Attend` is Flash Attention folded into the walk: every key it scores folds into each head's running maximum, partition and weighted value sum, with no top-k cut, and the outputs come back already divided by the partition.
-The index stores no values, so every scored key resolves to a row of a values `RowsView` the caller lends, as wide as the keys and stored in the index's own quantization.
+The index stores no values, so every scored key resolves to a row of a values `RowsView` the caller passes, as wide as the keys and stored in the index's own quantization.
 
 ```csharp
 DenseSoftmaxState[] carry = new DenseSoftmaxState[queryRows];
@@ -377,7 +377,7 @@ ReadOnlySpan<float> first = attended.Row<float>(0);
 
 With `headCount: 8`, row `t * 8 + h` of the queries is head `h` of token `t`, and the heads of one token share its walk.
 A key resolving outside the values, or values of another kind or width than the library reads, refuses the call with `Status.ShapeMismatch`, since a missing row is a wrong softmax rather than a smaller one.
-The `carry` holds one `DenseSoftmaxState` per query row, which folds this branch into another over the same queries, such as a recent window kept out of the index; it is state the caller carries between calls, so it stays lent rather than written into the arena.
+The `carry` holds one `DenseSoftmaxState` per query row, which folds this branch into another over the same queries, such as a recent window kept out of the index; it is state the caller keeps between calls, so it stays in the caller's memory rather than in the arena.
 The type argument names the kind the attended rows land as, `F32` here, as it names the kind `Get` exports.
 `rowOf` is a host function that must not throw, so it serves RAM handles alone: a VRAM walk resolves rows through a device function, which this binding does not build.
 
@@ -396,7 +396,7 @@ string kernels = USearchCapabilities.CapabilitiesAvailable();
 ## Sequence Indexes
 
 A sequence index searches byte strings, UTF-8 text, DNA and proteins under edit distances and alignments.
-Variable-length entries cross as a `TapeView<TElement>`, the Apache Arrow layout: elements end to end and one more offset than entries, which `Tape.Utf8` and `Tape.Bytes` pack and `Tape.Of` borrows from an Arrow column as it is:
+Variable-length entries cross as a `TapeView<TElement>`, the Apache Arrow layout: elements end to end and one more offset than entries, which `Tape.Utf8` and `Tape.Bytes` pack and `Tape.Of` wraps an Arrow column as it is:
 
 ```csharp
 using SequenceIndex index = SequenceIndex.InitRam(
@@ -456,7 +456,7 @@ ReadOnlySpan<double> chords = nearby.Scores(0);   // In chord metres
 ```
 
 `Within` reports every entry the relation admits inside the radius, however many, while `Search` ranks the `wanted` nearest, a zero `Metres` ranking by distance alone.
-The relation is an argument of each call: `Near` widens the radius by both positions' accuracies, `Sees` and `Seen` test the view cones, and `Visible` needs the `GeospatialTerrain` the handle was built over, which no checkpoint carries, so every load names it again.
+The relation is an argument of each call: `Near` widens the radius by both positions' accuracies, `Sees` and `Seen` test the view cones, and `Visible` needs the `GeospatialTerrain` the handle was built over, which no checkpoint holds, so every load names it again.
 `Get` returns a key's observations within the stored rounding, and `Count` reports how many a key holds.
 
 ## Interop
@@ -487,7 +487,7 @@ Every verb takes one argument struct, as the C interface does, and holds a refer
   `Status` polls through `usearch_outcome_status`, `Wait()` blocks through `usearch_outcome_wait`, and `await` hands that wait to the thread pool.
 - __No life of its own.__
   The binding starts no threads and keeps no queues; releasing a `Deferred` rides `Dispose` and `using`, which waits for the call first.
-- __Arenas are lent and reused, never shared.__
+- __Arenas belong to the caller and are reused, never shared.__
   Every output whose length scales with the call lands in an arena the caller passes, and a view ends at the arena's next call.
 - __C decides.__
   The binding forwards every status the library answers and checks only what the library cannot see, like a key run as long as the rows it accompanies.

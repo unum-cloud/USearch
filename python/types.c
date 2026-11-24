@@ -68,7 +68,7 @@ static struct {
 };
 
 int usearch_py_raise(usearch_status_t status, char const* format, ...) {
-    // A status this specific supersedes whatever the caller was carrying.
+    // A status this specific supersedes whatever the caller was holding.
     PyErr_Clear();
     PyObject* type = (size_t)status < usearch_py_table_size_(status_error_types) ? status_error_types[status] : NULL;
     if (!type) {
@@ -142,7 +142,7 @@ static char const doc_Error[] =                                                 
     "Attributes:\n"                                                                            //
     "  status (Status): The status the raised subclass mirrors, such as\n"                     //
     "    `Status.SHAPE_MISMATCH`.\n"                                                           //
-    "  args (tuple): The detail the status cannot carry, as on any exception.";
+    "  args (tuple): The detail the status cannot hold, as on any exception.";
 
 int usearch_py_register_error_types(PyObject* module) {
     ErrorType = PyErr_NewExceptionWithDoc("usearch.Error", (char*)doc_Error, PyExc_RuntimeError, NULL);
@@ -179,7 +179,7 @@ static char const* spell_sequence_metric(int value) {
 }
 static char const* spell_shapes_metric(int value) { return usearch_shapes_metric_name((usearch_shapes_metric_t)value); }
 
-/** The C surface spells no relation, so the members carry the names the header documents. */
+/** The C surface spells no relation, so the members hold the names the header documents. */
 static char const* spell_geospatial_relation(int value) {
     static char const* const names[] = {"unknown", "near", "visible", "sees", "seen"};
     return value >= 0 && (size_t)value < usearch_py_table_size_(names) ? names[value] : "unknown";
@@ -869,7 +869,7 @@ typedef struct DLManagedTensorVersioned {
     DLTensor dl_tensor;
 } DLManagedTensorVersioned;
 
-/** The DLPack release this module speaks, and the flag a read-only tensor carries. */
+/** The DLPack release this module speaks, and the flag a read-only tensor holds. */
 enum {
     dlpack_major_version_k = 1,
     dlpack_minor_version_k = 0,
@@ -1488,7 +1488,7 @@ int usearch_py_keys_from_object(PyObject* object, size_t expected, usearch_py_ke
         if (PyErr_Occurred()) return -1;
     }
 
-    // An identity matrix is borrowed outright and an integer vector gathered in C; everything else
+    // An identity matrix is viewed outright and an integer vector gathered in C; everything else
     // walks the sequence below.
     if (PyObject_CheckBuffer(object)) {
         if (PyObject_GetBuffer(object, &batch->backing.buffer, PyBUF_STRIDES | PyBUF_FORMAT) != 0) {
@@ -1607,7 +1607,7 @@ PyObject* usearch_py_size_getter(PyObject* self, void* closure) {
 static char const doc_DenseReachability[] = //
     "DenseReachability\n"                   //
     "\n"                                    //
-    "One reachability audit, as `health` takes it and a `RefineReport` carries it twice.";
+    "One reachability audit, as `health` takes it and a `RefineReport` holds it twice.";
 
 static PyGetSetDef DenseReachability_getset[] = {
     {"audited", usearch_py_size_getter, NULL, "Entries published when the audit started, the population it judged.",
@@ -1921,7 +1921,7 @@ static PyObject* call_answer(usearch_py_call_t* call) {
     return Py_NewRef(call->result ? call->result : Py_None);
 }
 
-/** Lets go of everything @p call holds and lends, keeping whatever exception is set. */
+/** Lets go of everything @p call holds and passes, keeping whatever exception is set. */
 static void call_release(usearch_py_call_t* call) {
     PyObject* const raised = PyErr_GetRaisedException();
     Py_CLEAR(call->arena);
@@ -1978,7 +1978,7 @@ int usearch_py_callable_from_object(PyObject* object, char const* field, PyObjec
  *  @brief Re-enters Python for one progress report, from whichever library thread advances.
  *
  *  Reports are serialized, but nothing guarantees they land on the calling thread, so the GIL is
- *  taken here rather than assumed. A handler answering None carries on and a falsy one cancels;
+ *  taken here rather than assumed. A handler answering None continues and a falsy one cancels;
  *  one that raises reports through the unraisable hook and cancels.
  */
 static usearch_continuation_t progress_trampoline(size_t completed, size_t total, void* state) {
@@ -2268,12 +2268,10 @@ static PyObject* On_repr(On* self) {
                                 self->executor);
 }
 
-/** Every index type a receiver may hold, beside the verbs its receivers offer. */
+/** Every index or cursor type a receiver may hold, beside the verbs its receivers offer. */
 static usearch_py_receiver_verbs_t const* const receiver_verbs[] = {
-    &usearch_py_dense_receiver_verbs,
-    &usearch_py_sequence_receiver_verbs,
-    &usearch_py_shapes_receiver_verbs,
-    &usearch_py_geospatial_receiver_verbs,
+    &usearch_py_dense_receiver_verbs,  &usearch_py_dense_cursor_receiver_verbs, &usearch_py_sequence_receiver_verbs,
+    &usearch_py_shapes_receiver_verbs, &usearch_py_geospatial_receiver_verbs,
 };
 
 /** Binds the verb @p name of the index the receiver holds, as its type's table names it; anything
@@ -2333,7 +2331,7 @@ static char const doc_Deferred[] =                                              
     "instead. Either answers what the blocking verb would have answered, or raises what it\n"  //
     "would have raised, as many times as it is asked; `status` polls without waiting. It\n"    //
     "holds the call and the buffers it reads until the call is final, so dropping it waits,\n" //
-    "and lends its arena as the blocking verb would.\n"                                        //
+    "and passes its arena as the blocking verb would.\n"                                       //
     "\n"                                                                                       //
     "Example:\n"                                                                               //
     "  >>> import asyncio\n"                                                                   //
@@ -2423,7 +2421,8 @@ static PyObject* Deferred_await(PyObject* self) {
 
 static void Deferred_dealloc(Deferred* self) {
     PyObject_GC_UnTrack(self);
-    // The library writes into the call this object holds, and reads the inputs it borrows, until the call is final.
+    // The library writes into the call this object holds, and reads the inputs it views, until the
+    // call is final.
     if (!atomic_load(&self->answering)) {
         deferred_block(self);
         call_release(&self->call);
@@ -2507,7 +2506,7 @@ static char const doc_Executor[] =                                              
     "apart is what lets one pool serve several indexes, and what makes the cost of\n"        //
     "spawning visible at the line that spawns rather than hidden in a constructor.\n"        //
     "\n"                                                                                     //
-    "Construct one through the residency it drives - `for_ram`, `on_pool`, `for_vram` or\n"  //
+    "Construct one through the residency it drives - `for_ram`, `for_vram` or\n"             //
     "`for_nvme` - since each spawns something different and takes different arguments.\n"    //
     "Its residency must match that of every index it is handed to. A receiver names it:\n"   //
     "`index.on(executor)` blocks on it, `index.deferred(executor)` submits to it. One\n"     //
@@ -2542,8 +2541,7 @@ static PyObject* executor_adopt(PyTypeObject* type, usearch_executor_t handle) {
 }
 
 static PyObject* Executor_tp_new(PyTypeObject* type, PyObject* args, PyObject* keywords) {
-    PyErr_SetString(PyExc_TypeError,
-                    "Executor is built through Executor.for_ram(), .on_pool(), .for_vram() or .for_nvme()");
+    PyErr_SetString(PyExc_TypeError, "Executor is built through Executor.for_ram(), .for_vram() or .for_nvme()");
     return NULL;
 }
 
@@ -2589,7 +2587,7 @@ int usearch_py_optional_executor_from_object(PyObject* object, usearch_executor_
 }
 
 static char const doc_Executor_for_ram[] =                                                                //
-    "``for_ram(threads=0, *, memory_domains=None, cpu_class_ceiling=None) -> Executor``\n"                //
+    "``for_ram(threads=0, *, memory_domains=None, cpu_class_ceiling=None, scratch_limit=0)``\n"           //
     "\n"                                                                                                  //
     "Spawns host worker threads for a RAM-resident index.\n"                                              //
     "Calls `usearch_executor_for_ram`.\n"                                                                 //
@@ -2600,6 +2598,8 @@ static char const doc_Executor_for_ram[] =                                      
     "    to; None derives every node the process may allocate on.\n"                                      //
     "  cpu_class_ceiling (CPUClass, optional): The newest class dispatch may pick, intersected\n"         //
     "    machine runs, with what the machine runs, so a class it lacks narrows; None means no ceiling.\n" //
+    "  scratch_limit (int, optional): The ceiling on each worker's scratch bytes, past which\n"           //
+    "    a call raises out of memory; 0 takes 1 GiB.\n"                                                   //
     "\n"                                                                                                  //
     "Example:\n"                                                                                          //
     "  >>> with usearch.Executor.for_ram(threads=8) as pool:\n"                                           //
@@ -2607,19 +2607,21 @@ static char const doc_Executor_for_ram[] =                                      
 
 static PyObject* Executor_for_ram(PyTypeObject* type, PyObject* const* args, Py_ssize_t positional_args_count,
                                   PyObject* args_names_tuple) {
-    PyObject *threads_object, *memory_domains_object, *cpu_class_ceiling_object;
+    PyObject *threads_object, *memory_domains_object, *cpu_class_ceiling_object, *scratch_limit_object;
     usearch_py_argument_t const arguments[] = {
         {"threads", &threads_object},
         {"memory_domains", &memory_domains_object},
         {"cpu_class_ceiling", &cpu_class_ceiling_object},
+        {"scratch_limit", &scratch_limit_object},
     };
-    size_t threads = 0;
+    size_t threads = 0, scratch_limit = 0;
     int cpu_class_ceiling = usearch_cpu_class_unknown_k;
     int32_t* memory_domains = NULL;
     size_t memory_domains_count = 0;
     if (usearch_py_arguments_parse("for_ram", args, positional_args_count, args_names_tuple, 0, 1, arguments,
                                    usearch_py_table_size_(arguments)) != 0 ||
         usearch_py_size_from_object(threads_object, "threads", &threads) != 0 ||
+        usearch_py_size_from_object(scratch_limit_object, "scratch_limit", &scratch_limit) != 0 ||
         (cpu_class_ceiling_object && cpu_class_ceiling_object != Py_None &&
          usearch_py_enum_from_object(cpu_class_ceiling_object, "cpu_class_ceiling", &usearch_py_cpu_class,
                                      &cpu_class_ceiling) != 0) ||
@@ -2633,72 +2635,10 @@ static PyObject* Executor_for_ram(PyTypeObject* type, PyObject* const* args, Py_
         .executor = &handle,
         .outcome = &outcome,
         .ram = {memory_domains, memory_domains_count, 0, (usearch_cpu_class_t)cpu_class_ceiling},
-        .threads = threads};
+        .threads = threads,
+        .scratch_limit = scratch_limit};
     Py_BEGIN_ALLOW_THREADS;
     usearch_executor_for_ram(&executor_arguments);
-    Py_END_ALLOW_THREADS;
-    PyMem_Free(memory_domains);
-
-    if (usearch_py_raise_on_outcome(&outcome) != 0) return NULL;
-    return executor_adopt(type, handle);
-}
-
-static char const doc_Executor_on_pool[] =                                                                //
-    "``on_pool(pool, /, *, memory_domains=None, cpu_class_ceiling=None) -> Executor``\n"                  //
-    "\n"                                                                                                  //
-    "Drives RAM-resident indexes on a ForkUnion pool another library already spawned, so\n"               //
-    "one process runs one set of threads while each library keeps its own scratch. The\n"                 //
-    "pool keeps its own threads and its lender's mood.\n"                                                 //
-    "Calls `usearch_executor_on_pool`.\n"                                                                 //
-    "\n"                                                                                                  //
-    "Args:\n"                                                                                             //
-    "  pool (int): The address of the `fu_pool_t` to borrow, as `ctypes` and `cffi` hand\n"               //
-    "    pointers over; the pool must outlive the executor.\n"                                            //
-    "  memory_domains (Sequence[int], optional): NUMA node IDs of the indexes it will\n"                  //
-    "    drive; None derives every node the process may allocate on.\n"                                   //
-    "  cpu_class_ceiling (CPUClass, optional): The newest class dispatch may pick, intersected\n"         //
-    "    machine runs, with what the machine runs, so a class it lacks narrows; None means no ceiling.\n" //
-    "\n"                                                                                                  //
-    "Example:\n"                                                                                          //
-    "  >>> pool = usearch.Executor.on_pool(fu_pool_address)   # doctest: +SKIP";
-
-static PyObject* Executor_on_pool(PyTypeObject* type, PyObject* const* args, Py_ssize_t positional_args_count,
-                                  PyObject* args_names_tuple) {
-    PyObject *pool_object, *memory_domains_object, *cpu_class_ceiling_object;
-    usearch_py_argument_t const arguments[] = {
-        {"pool", &pool_object},
-        {"memory_domains", &memory_domains_object},
-        {"cpu_class_ceiling", &cpu_class_ceiling_object},
-    };
-    int cpu_class_ceiling = usearch_cpu_class_unknown_k;
-    if (usearch_py_arguments_parse("on_pool", args, positional_args_count, args_names_tuple, 1, 1, arguments,
-                                   usearch_py_table_size_(arguments)) != 0 ||
-        (cpu_class_ceiling_object && cpu_class_ceiling_object != Py_None &&
-         usearch_py_enum_from_object(cpu_class_ceiling_object, "cpu_class_ceiling", &usearch_py_cpu_class,
-                                     &cpu_class_ceiling) != 0))
-        return NULL;
-
-    PyObject* const address = PyNumber_Index(pool_object);
-    if (!address) return NULL;
-    void* const pool = PyLong_AsVoidPtr(address);
-    Py_DECREF(address);
-    if (!pool && PyErr_Occurred()) return NULL;
-
-    int32_t* memory_domains = NULL;
-    size_t memory_domains_count = 0;
-    if (usearch_py_ordinals_from_object(memory_domains_object, "memory_domains", &memory_domains,
-                                        &memory_domains_count) != 0)
-        return NULL;
-
-    usearch_executor_t handle = NULL;
-    usearch_outcome_t outcome = {0};
-    usearch_executor_on_pool_t executor_arguments = {
-        .executor = &handle,
-        .outcome = &outcome,
-        .ram = {memory_domains, memory_domains_count, 0, (usearch_cpu_class_t)cpu_class_ceiling},
-        .pool = pool};
-    Py_BEGIN_ALLOW_THREADS;
-    usearch_executor_on_pool(&executor_arguments);
     Py_END_ALLOW_THREADS;
     PyMem_Free(memory_domains);
 
@@ -2709,7 +2649,8 @@ static PyObject* Executor_on_pool(PyTypeObject* type, PyObject* const* args, Py_
 static char const doc_Executor_for_vram[] =                                                          //
     "for_vram(*, devices=None, gpu_class_ceiling=None) -> Executor\n"                                //
     "\n"                                                                                             //
-    "Opens one stream per device for a VRAM-resident index.\n"                                       //
+    "Opens one non-blocking stream per device for a VRAM-resident index, created and\n"              //
+    "destroyed with the executor.\n"                                                                 //
     "\n"                                                                                             //
     "Takes no thread count: a single host thread drives every stream, so the width of\n"             //
     "the pool is the device list rather than a worker count.\n"                                      //
@@ -2758,7 +2699,7 @@ static PyObject* Executor_for_vram(PyTypeObject* type, PyObject* const* args, Py
 }
 
 static char const doc_Executor_for_nvme[] =                                                               //
-    "``for_nvme(threads=0, *, paths=None, nvme_class=None, cpu_class_ceiling=None) -> Executor``\n"       //
+    "``for_nvme(threads=0, *, paths=None, nvme_class=None, cpu_class_ceiling=None, scratch_limit=0)``\n"  //
     "\n"                                                                                                  //
     "Opens one submission ring per worker for an NVMe-resident index.\n"                                  //
     "Calls `usearch_executor_for_nvme`.\n"                                                                //
@@ -2772,25 +2713,29 @@ static char const doc_Executor_for_nvme[] =                                     
     "    the newest the host and the media admit.\n"                                                      //
     "  cpu_class_ceiling (CPUClass, optional): The newest class dispatch may pick, intersected\n"         //
     "    machine runs, with what the machine runs, so a class it lacks narrows; None means no ceiling.\n" //
+    "  scratch_limit (int, optional): The ceiling on each worker's scratch bytes, past which\n"           //
+    "    a call raises out of memory; 0 takes 1 GiB.\n"                                                   //
     "\n"                                                                                                  //
     "Example:\n"                                                                                          //
     "  >>> pool = usearch.Executor.for_nvme(threads=8, paths=['/mnt/nvme0'])  # doctest: +SKIP";
 
 static PyObject* Executor_for_nvme(PyTypeObject* type, PyObject* const* args, Py_ssize_t positional_args_count,
                                    PyObject* args_names_tuple) {
-    PyObject *threads_object, *paths_object, *nvme_class_object, *cpu_class_ceiling_object;
+    PyObject *threads_object, *paths_object, *nvme_class_object, *cpu_class_ceiling_object, *scratch_limit_object;
     usearch_py_argument_t const arguments[] = {
         {"threads", &threads_object},
         {"paths", &paths_object},
         {"nvme_class", &nvme_class_object},
         {"cpu_class_ceiling", &cpu_class_ceiling_object},
+        {"scratch_limit", &scratch_limit_object},
     };
-    size_t threads = 0;
+    size_t threads = 0, scratch_limit = 0;
     int nvme_class = usearch_nvme_class_unknown_k, cpu_class_ceiling = usearch_cpu_class_unknown_k;
     usearch_py_paths_t paths;
     if (usearch_py_arguments_parse("for_nvme", args, positional_args_count, args_names_tuple, 0, 1, arguments,
                                    usearch_py_table_size_(arguments)) != 0 ||
         usearch_py_size_from_object(threads_object, "threads", &threads) != 0 ||
+        usearch_py_size_from_object(scratch_limit_object, "scratch_limit", &scratch_limit) != 0 ||
         (nvme_class_object && nvme_class_object != Py_None &&
          usearch_py_enum_from_object(nvme_class_object, "nvme_class", &usearch_py_nvme_class, &nvme_class) != 0) ||
         (cpu_class_ceiling_object && cpu_class_ceiling_object != Py_None &&
@@ -2806,7 +2751,8 @@ static PyObject* Executor_for_nvme(PyTypeObject* type, PyObject* const* args, Py
         .outcome = &outcome,
         .nvme = {paths.views, paths.count, (usearch_cpu_class_t)cpu_class_ceiling},
         .threads = threads,
-        .nvme_class = (usearch_nvme_class_t)nvme_class};
+        .nvme_class = (usearch_nvme_class_t)nvme_class,
+        .scratch_limit = scratch_limit};
     Py_BEGIN_ALLOW_THREADS;
     usearch_executor_for_nvme(&executor_arguments);
     Py_END_ALLOW_THREADS;
@@ -2826,7 +2772,7 @@ static char const doc_Executor_drain[] =                                        
     "Args:\n"                                                                              //
     "  mood (Mood, optional): `Mood.PARKED` lets idle workers sleep, so the next call\n"   //
     "    pays a wake-up; `Mood.SPINNING` keeps them hot, trading power for the next\n"     //
-    "    call's latency. A borrowed pool keeps its lender's mood.\n"                       //
+    "    call's latency.\n"                                                                //
     "\n"                                                                                   //
     "Raises:\n"                                                                            //
     "  Error: What befell the executor itself, such as a lost device; every call\n"        //
@@ -2859,7 +2805,6 @@ static PyObject* Executor_repr(Executor* executor) {
 
 static PyMethodDef Executor_methods[] = {
     {"for_ram", (PyCFunction)Executor_for_ram, usearch_py_method_flags_k | METH_CLASS, doc_Executor_for_ram},    //
-    {"on_pool", (PyCFunction)Executor_on_pool, usearch_py_method_flags_k | METH_CLASS, doc_Executor_on_pool},    //
     {"for_vram", (PyCFunction)Executor_for_vram, usearch_py_method_flags_k | METH_CLASS, doc_Executor_for_vram}, //
     {"for_nvme", (PyCFunction)Executor_for_nvme, usearch_py_method_flags_k | METH_CLASS, doc_Executor_for_nvme}, //
     {"drain", (PyCFunction)Executor_drain, usearch_py_method_flags_k, doc_Executor_drain},                       //
@@ -3646,7 +3591,7 @@ static PyObject* DenseProducts_repr(DenseProducts* self) {
 
 static PyMethodDef DenseProducts_methods[] = {
     {"query", (PyCFunction)DenseProducts_query, METH_O,
-     "The (keys, scores) of left row or query `i`, viewing the arena. Python-only."},
+     "The (keys, scores) of left row or query `i`, using the arena. Python-only."},
     {"__arrow_c_array__", (PyCFunction)ArenaOutput_arrow_c_array, usearch_py_method_flags_k,
      doc_ArenaOutput_arrow_c_array},
     {"__arrow_c_device_array__", (PyCFunction)ArenaOutput_arrow_c_device_array, usearch_py_method_flags_k,
@@ -4080,10 +4025,10 @@ char const doc_version[] =              //
     "The library's semantic version.\n" //
     "Calls `usearch_version_name`.";
 
-char const doc_capabilities_compiled[] =                                     //
-    "capabilities_compiled() -> str\n"                                       //
-    "\n"                                                                     //
-    "The kernel families this build carries, whatever the machine offers.\n" //
+char const doc_capabilities_compiled[] =                                   //
+    "capabilities_compiled() -> str\n"                                     //
+    "\n"                                                                   //
+    "The kernel families this build holds, whatever the machine offers.\n" //
     "Calls `usearch_capabilities_compiled`.";
 
 char const doc_capabilities_available[] =                                           //

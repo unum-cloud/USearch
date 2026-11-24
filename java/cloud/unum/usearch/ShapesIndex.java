@@ -95,7 +95,7 @@ public final class ShapesIndex implements AutoCloseable {
             return code;
         }
 
-        /** Names the kind a code carries; a code this build cannot name becomes UNKNOWN. */
+        /** Names the kind a code holds; a code this build cannot name becomes UNKNOWN. */
         public static ShapesMetric of(int code) {
             for (ShapesMetric candidate : values()) {
                 if (candidate.code == code) {
@@ -406,30 +406,60 @@ public final class ShapesIndex implements AutoCloseable {
     }
 
     /**
-     * A sequential walk over the index contents, pulled blocking on the executor of the receiver that
-     * opened it; the shapes themselves come from {@link ShapesIndex#get}. An overlapping pull
-     * reports CONTENDED.
+     * A sequential walk over the index contents; the shapes themselves come from
+     * {@link ShapesIndex#get}. It keeps no executor: its pulls run on the calling thread, or block on
+     * the executor {@link #on(Executor)} names for each of them. An overlapping pull reports
+     * CONTENDED.
      */
     public static final class ShapesCursor implements AutoCloseable {
 
         private final Handle handle;
         private final ShapesIndex index;
-        private final @Nullable Executor executor;
 
-        ShapesCursor(MemorySegment opened, ShapesIndex index, @Nullable Executor executor) {
+        ShapesCursor(MemorySegment opened, ShapesIndex index) {
             this.handle = new Handle(opened, FAMILY.cursorFree());
             this.index = index;
-            this.executor = executor;
+        }
+
+        /** The receiver whose pulls block on {@code executor}, named again for every pull. Binding-only. */
+        public On on(Executor executor) {
+            return new On(this, executor);
         }
 
         /** Copies the keys of up to {@code wanted} next entries into {@code arena}. Calls {@code usearch_shapes_cursor_next}. */
         public DenseBatch next(long wanted, Arena arena) {
-            return DenseIndex.pulling(FAMILY.cursorNext(), index.handle, executor, handle, wanted, false, arena);
+            return pull(null, wanted, false, arena);
         }
 
         /** Copies up to {@code wanted} next entries, each with the keys it links to. Calls {@code usearch_shapes_cursor_next}. */
         public DenseBatch nextLinks(long wanted, Arena arena) {
-            return DenseIndex.pulling(FAMILY.cursorNext(), index.handle, executor, handle, wanted, true, arena);
+            return pull(null, wanted, true, arena);
+        }
+
+        private DenseBatch pull(@Nullable Executor executor, long wanted, boolean linked, Arena arena) {
+            return DenseIndex.pulling(FAMILY.cursorNext(), index.handle, executor, handle, wanted, linked, arena);
+        }
+
+        /** A cursor's pulls blocking on one executor, contended while another call holds it. */
+        public static final class On {
+
+            private final ShapesCursor cursor;
+            private final Executor executor;
+
+            On(ShapesCursor cursor, Executor executor) {
+                this.cursor = cursor;
+                this.executor = executor;
+            }
+
+            /** Runs {@link ShapesCursor#next(long, Arena)} on this receiver's executor. */
+            public DenseBatch next(long wanted, Arena arena) {
+                return cursor.pull(executor, wanted, false, arena);
+            }
+
+            /** Runs {@link ShapesCursor#nextLinks(long, Arena)} on this receiver's executor. */
+            public DenseBatch nextLinks(long wanted, Arena arena) {
+                return cursor.pull(executor, wanted, true, arena);
+            }
         }
 
         /** Releases the cursor; idempotent. Calls {@code usearch_shapes_cursor_free}. */
@@ -547,11 +577,6 @@ public final class ShapesIndex implements AutoCloseable {
         /** Runs {@link ShapesIndex#saveBuffer} on this receiver's executor. */
         public Monolith saveBuffer(Arena arena) {
             return block(DenseCalls.serializing(FAMILY.saveBuffer(), arena, null));
-        }
-
-        /** Runs {@link ShapesIndex#cursor} on this receiver's executor. */
-        public ShapesCursor cursor(Key... starts) {
-            return block(BasicCalls.cursorOpening(FAMILY, starts, opened -> new ShapesCursor(opened, index, executor)));
         }
     }
 
@@ -841,7 +866,7 @@ public final class ShapesIndex implements AutoCloseable {
      * {@code starts}. Calls {@code usearch_shapes_cursor_init}.
      */
     public ShapesCursor cursor(Key... starts) {
-        return block(BasicCalls.cursorOpening(FAMILY, starts, opened -> new ShapesCursor(opened, this, null)));
+        return block(BasicCalls.cursorOpening(FAMILY, starts, opened -> new ShapesCursor(opened, this)));
     }
 
     /**

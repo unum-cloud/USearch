@@ -7,7 +7,7 @@
 # ~~~
 #
 # No compiler version is named anywhere: `find_program` takes whatever the prefix resolves to. GCC's own driver supplies
-# the SME runtime routines the streaming kernels call, which is why this file carries no link flags where the LLVM
+# the SME runtime routines the streaming kernels call, which is why this file holds no link flags where the LLVM
 # sibling does.
 set(CMAKE_SYSTEM_NAME Linux)
 set(CMAKE_SYSTEM_PROCESSOR aarch64)

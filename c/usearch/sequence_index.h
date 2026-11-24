@@ -102,7 +102,7 @@ typedef struct usearch_sequence_reshard_plan_handle_t* usearch_sequence_reshard_
  *  @brief The sequence scoring kinds supported out of the box.
  *
  *  The edit kinds fill a @b [|a|+1,|b|+1] table of cell @c D[i,j], the least cost of turning the
- *  prefix of @c a ending at @c i into the prefix of @c b ending at @c j, carrying one row, so each
+ *  prefix of @c a ending at @c i into the prefix of @c b ending at @c j, holding one row, so each
  *  is quadratic in time. They write @c c for the substitution cost and @c g for the gap cost.
  */
 typedef enum usearch_sequence_metric_t {
@@ -471,7 +471,7 @@ typedef struct usearch_sequence_load_vram_t {
  *    pair above its mean self-score, a Needleman-Wunsch checkpoint recording no costs and given
  *    no weights, the executor driving no stream on some shard's device, or the checkpoint's
  *    columns differing from the shards' in dtype, shape or key width.
- *  - @c usearch_status_device_k An ordinal past the listing, devices this build carries no kernels
+ *  - @c usearch_status_device_k An ordinal past the listing, devices this build holds no kernels
  *    for, a build without GPU kernels, or an executor that is not a VRAM executor.
  *  - @c usearch_status_contended_k Another call holds the executor.
  *  - @c usearch_status_overflow_k A part passes a shard's bound or its key multimap.
@@ -525,7 +525,7 @@ typedef struct usearch_sequence_load_vram_buffer_t {
  *  - @c usearch_status_unsupported_k A @c buffer in device memory, a @c values_per_key bound, or
  *    devices that load no class under @c gpu_class_ceiling.
  *  - @c usearch_status_config_mismatch_k The mismatches @c usearch_sequence_load_vram lists.
- *  - @c usearch_status_device_k An ordinal past the listing, devices this build carries no kernels
+ *  - @c usearch_status_device_k An ordinal past the listing, devices this build holds no kernels
  *    for, a build without GPU kernels, or an executor that is not a VRAM executor.
  *  - @c usearch_status_contended_k Another call holds the executor.
  *  - @c usearch_status_overflow_k A part passes a shard's bound or its key multimap.
@@ -1185,6 +1185,10 @@ typedef struct usearch_sequence_cursor_init_t {
     /** The handle to be scanned. */
     usearch_sequence_index_t index;
 
+    /** The @b optional executor whose first thread's memory domain holds the cursor's state;
+     *  @c NULL keeps it on no domain. */
+    usearch_executor_t executor;
+
     /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
@@ -1254,8 +1258,8 @@ typedef struct usearch_sequence_cursor_next_t {
  *      links to, in the order @c usearch_sequence_cursor_init describes; the sequences themselves
  *      come from @c usearch_sequence_get.
  *
- *  Links name only entries the snapshot holds, as the graph stored them when the pull ran. The
- *  keys are copied rather than borrowed from the index, so the batch stays valid until the next
+ *  Links name only entries the snapshot holds, as the graph stored them when the pull ran. The keys
+ *  are copied rather than read in place from the index, so the batch stays valid until the next
  *  call given the same arena, however the cursor moves meanwhile.
  *
  *  @par Statuses:

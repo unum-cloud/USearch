@@ -115,7 +115,7 @@ pub const GeospatialRelation = enum(c_int) {
 /// Mirrors `usearch_geospatial_terrain_callback_t`.
 pub const TerrainFunction = *const fn (usize, usize, usize, usize, [*]f32, usize, ?*anyopaque) callconv(.c) void;
 
-/// A terrain fill handler as the C interface carries it: a `usearch_geospatial_terrain_callback_t`
+/// A terrain fill handler as the C interface holds it: a `usearch_geospatial_terrain_callback_t`
 /// and the state forwarded into it, laid out as the two fields of `usearch_geospatial_terrain_t`.
 /// Build one with `GeospatialTerrainFill.of`; the default fills nothing.
 pub const GeospatialTerrainFill = extern struct {
@@ -151,11 +151,11 @@ pub const GeospatialTerrainFill = extern struct {
 };
 
 /// The elevation every line of sight is tested over: a north-up geographic grid of heights in
-/// metres above the WGS-84 ellipsoid, given by exactly one of borrowed `heights`, a `fill`, or a
+/// metres above the WGS-84 ellipsoid, given by exactly one of viewed `heights`, a `fill`, or a
 /// dataset `path`, which the handle reads for as long as it lives. The default holds none.
 /// Mirrors `usearch_geospatial_terrain_t`.
 ///
-/// A checkpoint never carries it, so every load and view names it again.
+/// A checkpoint never holds it, so every load and view names it again.
 pub const GeospatialTerrain = extern struct {
     /// The grid's row count; rows run south from the north edge.
     rows: usize = 0,
@@ -169,7 +169,7 @@ pub const GeospatialTerrain = extern struct {
     row_step_degrees: f64 = 0,
     /// The step between columns, in degrees, positive.
     column_step_degrees: f64 = 0,
-    /// The whole grid, row-major, borrowed for the handle's lifetime.
+    /// The whole grid, row-major, viewed for the handle's lifetime.
     heights: ?[*]const f32 = null,
     /// The bytes between consecutive rows of `heights`; zero means packed.
     heights_stride: usize = 0,
@@ -262,7 +262,7 @@ pub const GeospatialLoadRamConfig = struct {
     memory_domains: []const i32 = &.{},
     /// Upper bound on entries sharing one key, which no checkpoint records; zero is unbounded.
     values_per_key: usize = 0,
-    /// The elevation sight lines clear, which no checkpoint carries; the default holds none.
+    /// The elevation sight lines clear, which no checkpoint holds; the default holds none.
     terrain: GeospatialTerrain = .{},
     /// Called with shards placed; a stopped load creates no index.
     progress: ProgressCallback = .{},
@@ -280,7 +280,7 @@ pub const GeospatialLoadVramConfig = struct {
     devices: []const i32 = &.{},
     /// Upper bound on entries sharing one key, which no checkpoint records; zero is unbounded.
     values_per_key: usize = 0,
-    /// The elevation sight lines clear, which no checkpoint carries; the default holds none.
+    /// The elevation sight lines clear, which no checkpoint holds; the default holds none.
     terrain: GeospatialTerrain = .{},
     /// Called with shards placed; a stopped load creates no index.
     progress: ProgressCallback = .{},
@@ -298,7 +298,7 @@ pub const GeospatialLoadRamBufferConfig = struct {
     memory_domains: []const i32 = &.{},
     /// Upper bound on entries sharing one key, which no checkpoint records; zero is unbounded.
     values_per_key: usize = 0,
-    /// The elevation sight lines clear, which no checkpoint carries; the default holds none.
+    /// The elevation sight lines clear, which no checkpoint holds; the default holds none.
     terrain: GeospatialTerrain = .{},
     /// Called with bytes placed; a stopped load creates no index.
     progress: ProgressCallback = .{},
@@ -316,7 +316,7 @@ pub const GeospatialLoadVramBufferConfig = struct {
     devices: []const i32 = &.{},
     /// Upper bound on entries sharing one key, which no checkpoint records; zero is unbounded.
     values_per_key: usize = 0,
-    /// The elevation sight lines clear, which no checkpoint carries; the default holds none.
+    /// The elevation sight lines clear, which no checkpoint holds; the default holds none.
     terrain: GeospatialTerrain = .{},
     /// Called with bytes placed; a stopped load creates no index.
     progress: ProgressCallback = .{},
@@ -332,7 +332,7 @@ pub const GeospatialViewNvmeConfig = struct {
     executor: ?Executor = null,
     /// The devices the parts are served from; empty serves each where its manifest points.
     paths: []const BytesView = &.{},
-    /// The elevation sight lines clear, which no checkpoint carries; the default holds none.
+    /// The elevation sight lines clear, which no checkpoint holds; the default holds none.
     terrain: GeospatialTerrain = .{},
     /// Where the call's final outcome, its static message included, is copied; null copies nothing.
     diagnostics: ?*Outcome = null,
@@ -666,11 +666,13 @@ const usearch_geospatial_reshard_plan_finish_t = extern struct {
 
 const usearch_geospatial_cursor_init_t = extern struct {
     index: ?*anyopaque,
+    executor: ?*anyopaque = null,
     outcome: *Outcome,
     starts_count: usize,
     starts: ?[*]const Key,
     cursor: *?*anyopaque,
 };
+
 
 const usearch_geospatial_cursor_next_t = extern struct {
     index: ?*anyopaque,
@@ -956,7 +958,7 @@ pub const GeospatialIndex = extern struct {
     }
 
     /// Serves a checkpoint in place through a memory mapping, as a read-only index whose mutating
-    /// verbs report `Error.ReadOnly`; the terrain is named again, as no checkpoint carries it.
+    /// verbs report `Error.ReadOnly`; the terrain is named again, as no checkpoint holds it.
     /// Calls `usearch_geospatial_view_ram`.
     pub fn viewRam(path: []const u8, terrain: GeospatialTerrain) Error!GeospatialIndex {
         var handle: ?*anyopaque = null;
@@ -1194,7 +1196,7 @@ fn Receiver(comptime completion: Completion, comptime Into: type) type {
         /// The result of a blocking call, final on return; nothing for a submitted one.
         fn end(self: Self, held: anytype) Answer(@TypeOf(held.result)) {
             if (completion == .deferred) return;
-            if (self.diagnostics) |lent| lent.* = held.outcome;
+            if (self.diagnostics) |passed| passed.* = held.outcome;
             try held.outcome.check();
             return held.result;
         }
@@ -1213,9 +1215,9 @@ fn Receiver(comptime completion: Completion, comptime Into: type) type {
         pub const contains = if (completion == .blocking) containsBlocking else {};
 
         fn diagnosedBlocking(self: Self, outcome: *Outcome) Self {
-            var lending = self;
-            lending.diagnostics = outcome;
-            return lending;
+            var passing = self;
+            passing.diagnostics = outcome;
+            return passing;
         }
 
         fn containsBlocking(self: Self, key: Key) Error!bool {

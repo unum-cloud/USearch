@@ -29,7 +29,7 @@ use crate::dense_index::{
 };
 use crate::types::{
     Accepts, Arena, Blocking, CPUClass, Calling, Completion, Deferring, Element, Error, Executor, GPUClass, Handles,
-    Key, Lending, Matches, On, PhaseProgress, Predicate, Progress, ReshardHandles, Result, Scalar, Status, Tape,
+    Key, Matches, On, PhaseProgress, Predicate, Progress, ReshardHandles, Result, Scalar, Status, Submitting, Tape,
     TapeEntries, TapeOffset, Traversal, check, fail, lower_predicate, lower_progress, nvme_options, output_slot,
     path_view, path_views, ram_options, read_named, spelling, usearch_arena_t, usearch_bytes_view_t,
     usearch_completion_blocking_k, usearch_completion_t, usearch_cpu_class_name, usearch_cpu_class_t,
@@ -276,6 +276,7 @@ pub struct usearch_shapes_reshard_plan_finish_t {
 #[repr(C)]
 pub struct usearch_shapes_cursor_init_t {
     pub index: usearch_shapes_index_t,
+    pub executor: usearch_executor_t,
     pub outcome: *mut usearch_outcome_t,
     pub starts_count: usize,
     pub starts: *const usearch_key_t,
@@ -800,7 +801,8 @@ impl From<usize> for ShapesSearchConfig<'_> {
     }
 }
 
-/// How [`ShapesVerbs::refine`] runs; a blocking call borrows its plan, a deferred one owns it.
+/// How [`ShapesVerbs::refine`] runs; a blocking call takes its plan by reference, a deferred one
+/// owns it.
 pub struct ShapesRefineConfig<'config, Plan = &'config mut ShapesRefinePlan> {
     /// The breadth of any walk beside the round; zero derives it.
     pub expansion_factor: usize,
@@ -1257,7 +1259,7 @@ pub trait ShapesVerbs<'index>: Copy {
     }
 
     /// Retrieves every shape stored under `key` into `arena` as `Value` points, each in its
-    /// inserted pose, which the result borrows; an absent key yields none.
+    /// inserted pose, which the result points into; an absent key yields none.
     fn get<'arena, Value: Element>(
         self,
         key: Key,
@@ -1284,7 +1286,7 @@ pub trait ShapesVerbs<'index>: Copy {
     {
         let (index, executor) = self.handles();
         let config = config.into();
-        // The keys view carries no count, so only this side can see the two disagree.
+        // The keys view holds no count, so only this side can see the two disagree.
         if config.shapes.count() != keys.as_ref().len() {
             return Err(fail(Status::ShapeMismatch, "the key count does not match the tape's entries"));
         }
@@ -1418,7 +1420,7 @@ pub trait ShapesVerbs<'index>: Copy {
         Self::Completion::answer(ShapesSave { handles: Handles::of(index, executor), path, config })
     }
 
-    /// Saves the index as one monolith into the arena its config carries.
+    /// Saves the index as one monolith into the arena its config holds.
     fn save_buffer<'config, 'arena, 'executor>(
         self,
         config: impl Into<DenseSaveBufferConfig<'config, 'arena, 'executor>>,
@@ -1458,11 +1460,12 @@ impl ShapesIndex {
     /// Opens a walk over the current contents: without `starts` every entry as stored, with them
     /// the start keys' entries first, then the entries those link to breadth-first.
     pub fn cursor(&self, starts: &[Key]) -> Result<ShapesCursor<'_>> {
-        let mut cursor = ShapesCursor { handle: ptr::null_mut(), index: self.handle, marker: PhantomData };
+        let mut cursor = ShapesCursor { handle: ptr::null_mut(), index: self.handle, owner: PhantomData };
         let mut outcome = usearch_outcome_t::default();
         unsafe {
             usearch_shapes_cursor_init(&mut usearch_shapes_cursor_init_t {
                 index: self.handle,
+                executor: ptr::null_mut(),
                 outcome: &mut outcome,
                 starts_count: starts.len(),
                 starts: starts.as_ptr(),
@@ -1483,7 +1486,7 @@ impl ShapesIndex {
 pub struct ShapesCursor<'index> {
     handle: usearch_shapes_cursor_t,
     index: usearch_shapes_index_t,
-    marker: PhantomData<&'index ShapesIndex>,
+    owner: PhantomData<&'index ShapesIndex>,
 }
 
 impl<'index> ShapesCursor<'index> {
@@ -1749,7 +1752,7 @@ impl<'config, Plan: BorrowMut<ShapesRefinePlan>> Calling for ShapesRefine<'confi
     }
 }
 
-impl<'config, Plan: BorrowMut<ShapesRefinePlan>> Lending for ShapesRefine<'config, Plan> {
+impl<'config, Plan: BorrowMut<ShapesRefinePlan>> Submitting for ShapesRefine<'config, Plan> {
     type Inputs = ShapesRefineConfig<'config, Plan>;
 
     fn finish_with_inputs(self, status: Result<()>) -> (Result<RefineReport>, Self::Inputs) {
@@ -1856,7 +1859,7 @@ impl<'arena, Value: Element, Offset: TapeOffset> Calling for ShapesSearch<'_, 'a
     }
 }
 
-/// What [`ShapesVerbs::reshard`] runs: its config, plan included, the handles it lends and the
+/// What [`ShapesVerbs::reshard`] runs: its config, plan included, the handles it passes and the
 /// report it fills.
 pub struct ShapesReshard<'config, Plan> {
     handles: Handles,
@@ -1901,7 +1904,7 @@ impl<'config, Plan: BorrowMut<ShapesReshardPlan>> Calling for ShapesReshard<'con
     }
 }
 
-impl<'config, Plan: BorrowMut<ShapesReshardPlan>> Lending for ShapesReshard<'config, Plan> {
+impl<'config, Plan: BorrowMut<ShapesReshardPlan>> Submitting for ShapesReshard<'config, Plan> {
     type Inputs = ShapesReshardConfig<'config, Plan>;
 
     fn finish_with_inputs(self, status: Result<()>) -> (Result<RefineReport>, Self::Inputs) {

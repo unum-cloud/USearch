@@ -7,13 +7,13 @@
  *      merge, and a round's gather and restitch.
  *
  *  Every body is templated on a basic kit, which names its vendor's warp policy as @c kit_::warp_t,
- *  and on the node-ID type its views carry, and walks over the dense design's frontiers, visited
+ *  and on the node-ID type its views hold, and walks over the dense design's frontiers, visited
  *  set, slot-0 neighbor protocol, selection spans and telemetry. A basic kit prepares a stored
  *  entry as a query once per walk, into a span of the walking warp's scratch, and scores whole
  *  entries, which a schedule hands it: a lane each in place, or the vendor's wider split, so the
  *  bodies only name an entry per lane and read back its distance. A schedule scores on one rung of
  *  its kit, the Myers words of a Levenshtein kit's queries, or zero for a kit scoring every entry
- *  alike, and the view carries the kernel kind a kit covering several metrics picks among, as dense
+ *  alike, and the view names the kernel kind a kit covering several metrics picks among, as dense
  *  views do.
  *
  *  Insertion publishes forward neighbor rows alone. A back-link re-selection costs a full diversity
@@ -33,7 +33,7 @@
 #include <limits>      // `std::numeric_limits` - an unbounded radius, the node-ID type's sentinel
 #include <type_traits> // `std::is_same_v` - a round's 32-bit IDs
 
-#include <numkong/capabilities.h> // `nk_kernel_kind_t` - the views carry the kernel kind
+#include <numkong/capabilities.h> // `nk_kernel_kind_t` - the views hold the kernel kind
 
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/vram_queue.cuh"
@@ -57,7 +57,7 @@ struct vram_entry_t {
  *  @c lanes_per_entry_k of them and a plain @c score, or, for a kit whose split follows a rung,
  *  @c lanes_per_row of the rung and a @c score templated on it, which
  *  @ref unum::usearch::basic::vram_lanes_per_entry and @ref unum::usearch::basic::vram_score tell
- *  apart. A round's entries carry no order: results go by slot, and ties break by node ID. */
+ *  apart. A round's entries have no order: results go by slot, and ties break by node ID. */
 template <typename kit_>
 concept vram_basic_kit = requires(typename kit_::query_t const& query, vram_entry_t entry, byte_t* span,
                                   byte_t const* parameters, nk_kernel_kind_t kernel, u32_t lane) {
@@ -155,7 +155,7 @@ struct vram_build_view {
     node_id_type_ sampling_bound;
 
     /** Bytes of the walking warp's dynamic-shared slice: the query span and the pivot span; zero
-     *  when the arena shape carries them instead. */
+     *  when the arena shape holds them instead. */
     u32_t scratch_bytes_per_warp;
 
     /** Bytes of one span, a multiple of 16. */
@@ -866,7 +866,7 @@ struct vram_round_view {
     vram_ragged_view<node_id_type_> storage;
 
     /** Bytes of one span, a multiple of 16, and of the warp's dynamic-shared slice, zero when the
-     *  arena shape carries it instead. */
+     *  arena shape holds it instead. */
     u32_t span_bytes;
     u32_t scratch_bytes_per_warp;
     byte_t* arena;
@@ -921,7 +921,7 @@ template <vram_basic_kit kit_, typename schedule_, typename node_id_type_>
 __device__ __forceinline__ void vram_gather_one(vram_round_view<node_id_type_> const& view, schedule_& schedule,
                                                 u32_t position, byte_t* query_span, vram_telemetry_t& telemetry,
                                                 u32_t lane) noexcept {
-    static_assert(std::is_same_v<node_id_type_, u32_t>, "A round's records carry 32-bit IDs");
+    static_assert(std::is_same_v<node_id_type_, u32_t>, "A round's records hold 32-bit IDs");
     using warp_t = typename kit_::warp_t;
     using scored_t = vram_scored_node<node_id_type_>;
     constexpr node_id_type_ unknown_k = (std::numeric_limits<node_id_type_>::max)();
@@ -970,7 +970,7 @@ __device__ __forceinline__ void vram_restitch_one(vram_round_view<node_id_type_>
                                                   vram_selection_scratch<node_id_type_> selection,
                                                   vram_telemetry_t& telemetry, u32_t& added, u32_t& dropped,
                                                   u32_t& changed, u32_t lane) noexcept {
-    static_assert(std::is_same_v<node_id_type_, u32_t>, "A round's records carry 32-bit IDs");
+    static_assert(std::is_same_v<node_id_type_, u32_t>, "A round's records hold 32-bit IDs");
     using warp_t = typename kit_::warp_t;
     using scored_t = vram_scored_node<node_id_type_>;
     constexpr node_id_type_ unknown_k = (std::numeric_limits<node_id_type_>::max)();

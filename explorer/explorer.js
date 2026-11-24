@@ -39,7 +39,7 @@ const settleMilliseconds = 250;
 const pickRadiusPixels = 14;
 const dragThresholdPixels = 4;
 const turnRadiansPerPixel = 0.008;
-// A node this close to the pointer lends a zoom its depth.
+/** A node this close to the pointer gives a zoom its depth. */
 const anchorPixels = 60;
 const layoutBudgetMilliseconds = 8;
 const layoutEpochsAfterChange = 900;

@@ -159,6 +159,8 @@ target_sources(
               include/usearch/basic/ram_index.hpp
 )
 target_compile_features(usearch_templates INTERFACE cxx_std_20)
+# A media list draws its identity from `BCryptGenRandom` on Windows.
+target_link_libraries(usearch_templates INTERFACE $<$<PLATFORM_ID:Windows>:bcrypt>)
 include(GNUInstallDirs)
 
 target_include_directories(
@@ -225,6 +227,7 @@ function (usearch_setup_target target_)
         target_link_libraries(${target_} PRIVATE "-framework CoreFoundation" "-framework Security")
     endif ()
     target_link_libraries(${target_} PRIVATE $<BUILD_INTERFACE:usearch_warnings> $<BUILD_INTERFACE:usearch_sanitizers>)
+    target_link_libraries(${target_} PRIVATE $<$<PLATFORM_ID:Windows>:bcrypt>)
 
     # One source of truth for header paths: whatever the interface target advertises, including what the dependencies
     # carry, without inheriting its compile features onto pure-C targets.
@@ -250,7 +253,7 @@ function (usearch_setup_target target_)
     endif ()
     set_target_properties(${target_} PROPERTIES CXX_STANDARD 20)
 
-    # Every library carries the `lib` prefix, Windows included, so one file name serves every platform.
+    # Every library holds the `lib` prefix, Windows included, so one file name serves every platform.
     get_target_property(target_type_ ${target_} TYPE)
     if (target_type_ STREQUAL "SHARED_LIBRARY" OR target_type_ STREQUAL "STATIC_LIBRARY")
         set_target_properties(${target_} PROPERTIES PREFIX "lib")

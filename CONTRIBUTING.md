@@ -19,7 +19,7 @@ That's how we bring in NumKong and other optional dependencies to test all of th
 git submodule update --init --recursive
 ```
 
-The repository carries its own hooks, gating each staged file against the formatter its language uses and skipping the rest:
+The repository holds its own hooks, gating each staged file against the formatter its language uses and skipping the rest:
 
 ```sh
 git config core.hooksPath .githooks
@@ -107,7 +107,7 @@ The CMakeLists.txt file has a number of options you can pass:
   - `USEARCH_BUILD_BENCH` - build the C++ benchmark suite
   - `USEARCH_BUILD_SHARED` - build and install the shared and static C libraries by default; without it they build only for a target that links them
   - `USEARCH_BUILD_STUB` - a brute-force stand-in answering the same verbs over the standard library alone, for isolating a binding from the engine while bisecting one.
-    It carries the same library names in a `stub/` subdirectory, so pointing a binding at it is a search path rather than a different link line.
+    It holds the same library names in a `stub/` subdirectory, so pointing a binding at it is a search path rather than a different link line.
   - `USEARCH_CUDA_ARCH`, `USEARCH_ROCM_ARCH`, `USEARCH_METAL_ARCH` - build the NVIDIA, AMD or Apple variants and suites for the codes they name below, each empty and off unless a preset or `-D` names one
   - `USEARCH_DENSE_DTYPES` - how many dense storage dtypes the library, tests and benchmarks compile, from the front of bf16, u1, i8, e4m3, f16, u8, e5m2, i4, u4, e3m2, e2m3, `4` by default and `11` wherever a prebuilt package comes from: the `library`, `wasm` and `msvc2026_x64` presets, `pyproject.toml`, the npm scripts, `build.gradle`, `pixi.toml` and the per-binding recipes below. Binding suites skip the kinds a narrower build refuses.
     The C interface refuses a dtype the build left out with `usearch_status_unsupported_k`; the Rust crate builds from source and keeps the default four.
@@ -115,15 +115,15 @@ The CMakeLists.txt file has a number of options you can pass:
   - `USEARCH_MARCH` - the floor of USearch's own units, seeded from the environment variable of the same name: empty for the architecture's floor, an ISA level like `x86-64-v3`, `native` for this host, or a CPU name like `graniterapids` or `neoverse-v2`, also when cross-compiling.
     Every class unit adds its class's flags over it, the tests and benchmarks drop their host tuning for it, and NumKong, StringZilla, ForkUnion and SmashTable take the same value.
   - `USEARCH_MULTIVERSIONED` - the build kind, `ON` by default and seeded from the environment too: a multiversioned build compiles every CPU class the toolchain compiles above the floor, picked at runtime, and with `OFF` a monoversioned build compiles one `monoversioned` class and no named class, `serial` included.
-    The monoversioned class carries every capability NumKong, StringZilla and ForkUnion enabled: what the floor implies, plus what `-D <LIB>_TARGET_<CAP>=1` vouches for where no compiler macro reports it, like `FORKUNION_TARGET_ARM64_WFET=1` on Vera.
+    The monoversioned class holds every capability NumKong, StringZilla and ForkUnion enabled: what the floor implies, plus what `-D <LIB>_TARGET_<CAP>=1` vouches for where no compiler macro reports it, like `FORKUNION_TARGET_ARM64_WFET=1` on Vera.
     Each modality and residency compiles one unit for it, and a handle whose `cpu_class_ceiling` sits below it, or run on a CPU lacking it, gets `usearch_status_unsupported_k`.
     `-D USEARCH_MARCH=native -D USEARCH_MULTIVERSIONED=OFF` is the native build, and the siblings take the same build kind.
 - Which GPUs to target:
   - `USEARCH_CUDA_ARCH` - the NVIDIA code the library, tests and benchmarks compile for: `all` for the release set, `native` for each GPU `nvidia-smi` lists, mapped to its family code like `100f` on a B200 or B300, or one code like `90a`.
-    A GPU class exists only when a code names it, `100`, `100a`, `100f`, `103a` or `103f` for datacenter Blackwell, so a monoversioned `100f` build compiles the Blackwell class alone, carrying every modality, and refuses a code no class runs.
-    A multiversioned build also always compiles the Ampere class, the floor, at `compute_80` PTX, which every GPU newer than any class runs, and which alone carries the sequence, shapes, geospatial and basic kernels, datacenter Blackwell adding its packed f16 shapes.
-    The release set compiles each class at the lowest code its kernels need, as PTX alone where a plain code suffices, so every later GPU runs it, and never below CUDA 13's Turing floor: `compute_80` for the Ampere floor, whose kernels carry NumKong's Ampere `bf16x2` casts and `mma.sync`, `compute_89` for Ada's FP8, and `compute_120` for the RTX line.
-    Hopper's `wgmma` and datacenter Blackwell's `tcgen05` need family codes, so their classes carry the `90a` and `100f` cubins instead.
+    A GPU class exists only when a code names it, `100`, `100a`, `100f`, `103a` or `103f` for datacenter Blackwell, so a monoversioned `100f` build compiles the Blackwell class alone, holding every modality, and refuses a code no class runs.
+    A multiversioned build also always compiles the Ampere class, the floor, at `compute_80` PTX, which every GPU newer than any class runs, and which alone holds the sequence, shapes, geospatial and basic kernels, datacenter Blackwell adding its packed f16 shapes.
+    The release set compiles each class at the lowest code its kernels need, as PTX alone where a plain code suffices, so every later GPU runs it, and never below CUDA 13's Turing floor: `compute_80` for the Ampere floor, whose kernels hold NumKong's Ampere `bf16x2` casts and `mma.sync`, `compute_89` for Ada's FP8, and `compute_120` for the RTX line.
+    Hopper's `wgmma` and datacenter Blackwell's `tcgen05` need family codes, so their classes hold the `90a` and `100f` cubins instead.
     A native or named code compiles as SASS alone, with no PTX.
     NVCC compiles only device code, into fatbins the binaries embed; nothing links `libcuda` or the CUDA runtime, as the library opens the driver at first use.
     A NumKong GPU tier turns on in the CUDA tests only when every code runs it, so the release set exercises the Ampere one; iterate on one GPU with its family code, like `100f`, to test that generation's kits.
@@ -134,7 +134,7 @@ The CMakeLists.txt file has a number of options you can pass:
 - How strict to be:
   - `USEARCH_WERROR` - treat compiler warnings as errors, as the `check` preset does
 
-The sibling libraries carry no switches.
+The sibling libraries hold no switches.
 NumKong, ForkUnion, StringZilla and SmashTable are what the headers are written against, so every build acquires all four - from the submodule when a recursive clone provides one, and from the pinned commit otherwise.
 The language bindings take their headers from the `numkong`, `forkunion`, and `stringzilla` trees in the checkout, so `pyproject.toml`, `package.json`, `build.rs`, and `Package.swift` each reach the same roots, and none of them builds from a non-recursive clone.
 
@@ -186,7 +186,7 @@ I'd recommend putting the following breakpoints when debugging the code in GDB:
 
 ### SPDK Builds
 
-The SPDK engine reads NVMe namespaces from user space, so it needs SPDK's static libraries, hugepages to DMA into, and a controller taken from the kernel's `nvme` driver.
+The SPDK queue reads NVMe namespaces from user space, so it needs SPDK's static libraries, hugepages to DMA into, and a controller taken from the kernel's `nvme` driver.
 Build SPDK once outside the checkout, and point `pkg-config` at its libraries and at the DPDK it bundles:
 
 ```sh
@@ -226,7 +226,7 @@ echo 0 | sudo tee /sys/kernel/mm/hugepages/hugepages-1048576kB/nr_hugepages
 
 No cache, pool, selection, batch or buffer takes its size from a constant picked to fit, like `64` or `2 * connectivity`.
 Each size follows from what its consumer holds, such as a walk's whole pool, or a row's live neighbors, one row of newcomers and its own row, or it comes from the caller.
-Derive each bound once on the host and carry it to the kernels in the launch record, so that no kernel and no vendor tower recomputes it with a formula of its own.
+Derive each bound once on the host and pass it to the kernels in the launch record, so that no kernel and no vendor tower recomputes it with a formula of its own.
 Hardware properties, like core counts, SIMD widths and shared-memory sizes, are read from the device at run time and never written into the code.
 Nothing is dropped past a capacity: excess candidates fold in rounds, and a failed allocation is counted.
 Graph walks have no hop budgets, thresholds or upper bounds that end them early.
@@ -259,13 +259,67 @@ The C interface's `double` `usearch_distance_t` is where scores land, never what
 
 ### Hot Entries
 
-Every struct a thread keeps or carries along a hot path is flat and 8, 16 or 32 bytes, like `scored_node_t`, `nvme_flight` and `nvme_walk_payload`.
+Every struct a thread keeps or moves along a hot path is flat and 8, 16 or 32 bytes, like `scored_node_t`, `nvme_flight` and `nvme_walk_payload`.
 Lay its fields out directly rather than nesting structs, whose padding compounds, and pin its size with a `static_assert` beside the definition.
 A would-be 24-byte entry shrinks first, through 32-bit node IDs or the kernel's own result type, and otherwise grows to 32 by a field that earns its place.
 
+### Executors
+
+An executor is its threads and their queues, one arena per thread, and its residency, and it serves one call at a time.
+A `NULL` executor runs the call on the calling thread.
+It creates no pool, thread, ring, SPDK queue pair or stream and probes no topology; its scratch and blocking queues live for that call only.
+Name an executor for calls that allocate nothing once warm.
+Such a call runs on `ram_executor_t::on_calling_thread()`, whose threads are ForkUnion's `fu::dummy_pool_t` and whose one arena serves that call alone; NVMe reads go through blocking queues over the files the index already holds, and VRAM work goes on each device's null legacy stream.
+A VRAM executor owns one non-blocking stream per device, created with it, and caller-passed streams answer `unsupported_k`.
+Tools and benchmarks open one executor and pass it to every call, and nothing outside `include/usearch/utilities/ram_device.hpp` dispatches on a raw `fu_pool_t`.
+Every executor creates its own threads and pins them to the first cores the creating thread may run on, so a caller sharing a machine between executors narrows its affinity mask before creating each.
+An NVMe executor serves RAM-resident handles through its threads too, so one executor drives a RAM index beside the views it reads.
+
+No engine compares executor addresses to pick a path; the C layer may refuse an arena or plan used on another executor than its own, and `.githooks/pre-commit` refuses any other added `executor ==` or `executor !=` under `src/` and `include/`.
+An index owns its media, never an executor: it keys its media list by a `media_list_key_t`, 64 bits from `media_identity_from_entropy()` drawn when it opens the list and the swap epoch its readers bracket, which a view leaves at zero.
+An io_uring queue registers the list in its ring's file table only when the key differs from the one it holds, so a warm call registers nothing, and `nvme_begin_call` refuses a list with no identity as uninitialized.
+The table keeps the descriptors of the last list registered, so the kernel keeps those files open after their index closes them, until the executor registers another list or is freed.
+An NVMe executor opens its rings as deep as its paths' block queues admit and polled when every path polls; a deeper call reopens them once, and polled rings refuse media that do not poll.
+
+Every RAM and NVMe executor caps each thread's arena at its `scratch_limit`, zero taking `scratch_limit_default_k`, and a call needing more answers out of memory.
+A cursor keeps its state on the memory domain of the executor it was opened on.
+
+### Threads and Placement
+
+No mutable global or static lives in `include/` or `src/`, and `.githooks/pre-commit` refuses a non-`const` namespace-scope `inline` variable.
+Who frees a resource, and which call uses it exclusively, are types such as `expected<>` owners and `claim_t`, never `bool` flags or raw pointers.
+An executor creates its threads and their queues: one queue per thread, plus one at index `threads` for I/O run on the calling thread.
+No verb creates a thread or a queue, and nothing runs that no one called.
+Warm calls allocate nothing, since sizes come from hardware facts or the caller's budget, fixed when the executor is created.
+A call with a `NULL` executor builds no pool, ring or SPDK queue pair; its blocking queues are made for it in `src/` and freed when it returns.
+Spin only on completions the call itself submitted, and wait in the kernel for events a remote party triggers.
+The library never names cores: threads and staging go on the memory domain the caller names, else the one the media sit on, inside the creating thread's affinity mask.
+Every executor covers its own core set, so callers share a machine by giving each executor its own cores.
+Residency is a type of the data handle: an executor of another residency answers `device_k`, a `NULL` executor on a residency whose queues `src/` cannot build per call, such as SPDK, answers `invalid_argument_k`, and one call runs per executor while a second answers `contended`.
+One word names one concept in every U* library, and no word hands a thing over: say who owns it and until when it is valid.
+
+### Hardening
+
+`.githooks/pre-commit` holds the rules here that a check on added lines can hold.
+
+- A `NULL` executor runs the call on the calling thread. It creates no pool, thread, ring, SPDK queue pair or stream and probes no topology; its scratch and blocking queues live for that call only. Name an executor for calls that allocate nothing once warm.
+- No static, global, shared or thread-local pool, executor, queue set, stream or handle exists, stateless ones included: whoever needs one creates it and frees it.
+- A `*_free` waits for the calls naming its handle and releases memory; it reads and writes no drive, and durability comes only from the flush verb.
+- An executor owns its streams, created with it; a call without one uses the null legacy stream or is refused, and no second origin sits beside the owner.
+- Every arena is freed before its executor; a binding enforces the order by lifetime where its language can and documents it otherwise, never by reference counts.
+- A C struct change lands with every binding that lays the struct out by hand, checked field by field in review.
+- Tests never restate a struct's layout that the compiler already pins, so no binding asserts a mirror's size or offsets.
+- A handler the engine may call from several threads at once is safe to call concurrently in every binding: predicates and terrain callbacks.
+- Every executor is equal; a handle owns its media, cache and epochs, never an executor, so no engine compares executor addresses to pick a path; the C layer may refuse an arena or plan used on another executor than its own.
+- Names say who owns a thing and until when a view is valid; no identifier in any language hands a thing over.
+- A fix lands on every residency and vendor that has the bug, or its message names the ones left and why.
+- A commit message names only what its diff shows.
+- A wave never re-wraps or rewords comments it does not otherwise touch.
+- A commit touching `.cu`, `.cuh`, `.hip` or `.metal` names the box that built and ran it, or says none did.
+
 ### Predicates
 
-A predicate carries its cost, `usearch_predicate_cost_t` in `c/usearch/types.h`, and the engines ask it accordingly.
+A predicate holds its cost, `usearch_predicate_cost_t` in `c/usearch/types.h`, and the engines ask it accordingly.
 A cheap one is asked as candidates arrive, a full quad or a round's shorter tail at a static extent, with nothing buffered.
 An expensive one gathers each thread's candidates beside the engine's payloads and answers them in one call per traversal round or scan run.
 Those per-thread buffers are the only buffers a predicate ever holds, and an engine opens a per-thread family and reserves its buffers in the executor's arenas right after the call's rewind.
@@ -330,7 +384,7 @@ Each header lists a verb's refusals under `@par Statuses` in this order and in t
 
 ### Statuses
 
-Statuses 0 to 19 carry the same numbers and meanings in every Unum library: success 0, deferred 1, out_of_memory 2, shape_mismatch 3, unsupported_layout 4, unknown_kind 5, read_only 6, io 7, device 8, malformed 9, internal 10, overflow 11, uninitialized 12, config_mismatch 13, contended 14, cancelled 15, unsupported 16, invalid_argument 17, not_found 18, already_exists 19.
+Statuses 0 to 19 keep the same numbers and meanings in every Unum library: success 0, deferred 1, out_of_memory 2, shape_mismatch 3, unsupported_layout 4, unknown_kind 5, read_only 6, io 7, device 8, malformed 9, internal 10, overflow 11, uninitialized 12, config_mismatch 13, contended 14, cancelled 15, unsupported 16, invalid_argument 17, not_found 18, already_exists 19.
 A library leaves out the ones it cannot answer but never renumbers the rest, and numbers its own statuses from 20.
 Enums pass as enum types; only the metrics and dtypes the CLI parses have a `_from_name`.
 CPU and GPU class values are ABI: each class keeps the number USearch gives the same hardware, written explicitly, with unused numbers reserved rather than reused.
@@ -534,7 +588,7 @@ An index whose devices pick different classes is refused with `config_mismatch`.
 New code never names or sizes a type through `decltype`, `decltype(auto)` included.
 Spell the type, or export it as a member alias where it is defined and read it from there, as `typename codec_t::view_t` names what a codec's `view` returns.
 A `decltype` makes every reader evaluate an expression to learn a type its author already knew.
-Templates carry no `_t` or `_k` suffix, whether class, alias or variable templates or concepts, while concrete types end in `_t` and constants in `_k`.
+Templates take no `_t` or `_k` suffix, whether class, alias or variable templates or concepts, while concrete types end in `_t` and constants in `_k`.
 
 ### Vocabulary
 
@@ -580,6 +634,9 @@ Templates carry no `_t` or `_k` suffix, whether class, alias or variable templat
 | the candidates a walk keeps                                                                         | candidates                                                                                                      | pool                                                                  |
 | a bit run of a plan, cursor or walk | one `growing_bitset_t` member named for what it holds | bitset, buffer |
 | how a batch's entries are shared among shards                                                       | split_batch_into_shards, offsets                                                                                | seat, deal, landed                                                    |
+| who owns what a call reads | owner; the caller allocates and frees it | lent, lend, lends, lending, lender, borrow, borrowed, borrows, borrowing, loan, loans, loaned, lease, leases, leased |
+
+`.githooks/pre-commit` refuses the last row's words in identifiers of every language, split at `_` and at camelCase, with comments and string literals blanked; Rust's standard `borrow`, `Borrowed` and `borrow_raw` names stay.
 
 ### Macro Naming
 
@@ -691,7 +748,7 @@ cmake --build --preset debug
 ctest --preset debug
 ```
 
-`usearch_test` holds the host suites, `usearch_test_vram` the GPU suites of every vendor the build carries, and `usearch_test_c` the C interface's.
+`usearch_test` holds the host suites, `usearch_test_vram` the GPU suites of every vendor the build holds, and `usearch_test_c` the C interface's.
 Each opens by naming the build, the machine and the settings:
 
 ```text
@@ -703,7 +760,7 @@ USearch 3.0.0
 ```
 
 Both lists come from the C interface, the same strings the bindings report.
-"Compiled for" is `usearch_capabilities_compiled()`, the NumKong capability levels this build carries kernels for, and "This machine" is `usearch_capabilities_available()`, those of them this processor can also run.
+"Compiled for" is `usearch_capabilities_compiled()`, the NumKong capability levels this build holds kernels for, and "This machine" is `usearch_capabilities_available()`, those of them this processor can also run.
 Every case then prints one verdict line, and a failed check prints where it failed, with what differed beneath it, while the case goes on, so one run lists every mismatch it reaches.
 A failed case prints a `rerun:` line naming the seed, a filter that selects it alone, and the binary, and the run ends with a summary:
 
@@ -718,7 +775,7 @@ A failed case prints a `rerun:` line naming the seed, a filter that selects it a
 ```
 
 A run exits with 1 when a case failed, a check failed outside any case, or nothing ran, with 3 when `USEARCH_NO_SKIPS` is set and a case skipped, and with 0 otherwise.
-The C suite prints the same lines, except that its `ok` carries no time and its `rerun:` line names only the seed, as it runs every case.
+The C suite prints the same lines, except that its `ok` holds no time and its `rerun:` line names only the seed, as it runs every case.
 `USEARCH_TRAP_ON_FAILURE=1` raises `SIGTRAP` at the first failed check instead, which stops a debugger there, or dumps a core without one:
 
 ```sh
@@ -797,7 +854,7 @@ The helpers several modules' tests share live in `rust/testing.rs`: `skipped(rea
 A Mojo test is registered in `main` by hand, since Mojo has no test discovery, and one that is not silently never runs.
 A test that cannot run calls `_skipped(reason)` and returns, `library_missing_k` being the reason when the shared library is not on the loader path, its generators start from `_stream_key(_run_seed(), "<family>", index)`, and its files go in a `mkdtemp()` directory.
 
-One behaviour carries one name in every language: the Rust test's, which C, C++, Python and Mojo spell `test_<name>`, as in `saves_and_loads_a_file` and `test_saves_and_loads_a_file`.
+One behaviour holds one name in every language: the Rust test's, which C, C++, Python and Mojo spell `test_<name>`, as in `saves_and_loads_a_file` and `test_saves_and_loads_a_file`.
 
 ### Benchmarks
 
@@ -809,7 +866,7 @@ Their rows take the label grammar of the tests, and they print the same header, 
 
 `usearch_test_vram` runs on the GPUs `USEARCH_DEVICES` names, comma-separated USearch device ordinals like `0` or `0,2`, positions in the listing `usearch_gpu_devices` reports: NVIDIA devices first, then AMD, then Apple.
 Unset, it takes the first device of every vendor present, and an ordinal past the listing prints the listing and exits 1.
-It links one object library per vendor the build carries, and each device opens with its vendor's line: `- CUDA: <device> nvidia-<class> #<ordinal>, <N> SMs, <M> MiB`, `- ROCm: device #<ordinal> amd-cdna<N>` or `- Metal: device #<ordinal> apple-metal<N>`.
+It links one object library per vendor the build holds, and each device opens with its vendor's line: `- CUDA: <device> nvidia-<class> #<ordinal>, <N> SMs, <M> MiB`, `- ROCm: device #<ordinal> amd-cdna<N>` or `- Metal: device #<ordinal> apple-metal<N>`.
 Without any GPU, every GPU case reports `skipped: no GPU device`.
 A vendor switch, `USEARCH_ARCH_CUDA_`, `USEARCH_ARCH_ROCM_` or `USEARCH_ARCH_METAL_`, is a fact about the unit, so each takes its own `#if`, never an `#elif` after another vendor's, and anything in a shared header whose meaning depends on the vendor takes internal linkage or the vendor's name, since the shards link into one binary.
 
@@ -850,14 +907,14 @@ A view the library hands back lives until the next call on its arena.
 The library describes where the memory sits, and the caller checks it; the binding neither copies the view to be safe nor checks its residency on the caller's behalf.
 
 Every array a verb reads shares the call's one count, so mismatched shapes cannot be expressed.
-Where a binding's own types carry two lengths, like a slice of keys beside a matrix of values, it checks once that they agree before the call crosses into the library, and nowhere else.
+Where a binding's own types hold two lengths, like a slice of keys beside a matrix of values, it checks once that they agree before the call crosses into the library, and nowhere else.
 
 Each verb has one body, which fills the C struct and calls the library with no layers in between.
 What it returns is read from the struct's output slot, a trampoline receives the handler itself as its state with no hub around it, and whether a call blocks or defers follows from the type of the receiver it is called on, never from a flag.
 Verbs are never shared through a base class; a trait whose default methods hold the one body per verb is fine, like Rust's and Mojo's, since each receiver supplies only its handle, and C++ writes each handle and its receivers as one class template over what the receiver holds, so the handle carries the verbs as Rust's `&Handle` does.
 
 A typed binding takes the scalar as a type parameter of each call, like `search::<f32>`, rather than letting a handle's type fix one.
-A deferred Rust call owns what it lends the library until the call is final, since the borrow checker cannot see the library holding it.
+A deferred Rust call owns what it passes the library until the call is final, since the borrow checker cannot see the library holding it.
 A C++ wrapper over the C interface is a full typed binding: it has a deferred receiver, `noexcept` callback types and per-call scalar templates.
 
 A dynamic binding publishes every field of every report the library fills.
@@ -958,7 +1015,7 @@ npm test                    # Run the test suite
 To compile for AWS Lambda you'd need to recompile the binding.
 
 To compile to WebAssembly make sure you have `emscripten` installed and pick one of the checked-in toolchains.
-There is no WebAssembly target of its own — the C library is what crosses, and a module carries one SIMD tier, width and threads choice, so each toolchain file fixes all three:
+There is no WebAssembly target of its own — the C library is what crosses, and a module holds one SIMD tier, width and threads choice, so each toolchain file fixes all three:
 
 - `cmake/toolchain-wasm32-emscripten.cmake` builds the `wasm32_v128_k` class — 32-bit, single-threaded, the fixed-width `simd128` tier every engine loads.
 - `cmake/toolchain-wasm64-emscripten.cmake` builds the `wasm64_extended_k` class — relaxed SIMD, shared memory for real thread pools, and 64-bit addressing.
@@ -1069,7 +1126,7 @@ swift test
 ```
 
 The suite is Swift Testing: tests are `@Test` functions grouped into `@Suite` types, and assertions read as `#expect(...)`.
-It covers what the binding itself decides — key byte order, options marshalling through the residency union, matrix lowering, handle lifetime and the span borrows — since that vector search returns near neighbors is the engine's contract and is tested where the engine lives.
+It covers what the binding itself decides — key byte order, options marshalling through the residency union, matrix lowering, handle lifetime and the span views — since that vector search returns near neighbors is the engine's contract and is tested where the engine lives.
 
 Formatting is enforced with Apple's `swift-format`, whose style lives in the `.swift-format` file at the repository root:
 
@@ -1078,7 +1135,7 @@ swift format --in-place --recursive swift Package.swift
 swift format lint --strict --recursive swift Package.swift
 ```
 
-Neither the build nor the suite needs an Apple device — both run on Linux, where [`swift.org/install`](https://www.swift.org/install) carries the toolchains.
+Neither the build nor the suite needs an Apple device — both run on Linux, where [`swift.org/install`](https://www.swift.org/install) holds the toolchains.
 A toolchain built for an older Ubuntu than the host may want that release's `libxml2` and `libicu` alongside it, since it links their older sonames.
 
 ## Go
@@ -1220,7 +1277,7 @@ The Rust crate hands CMake the same toolchain file on its own, so `cargo build -
 
 ## Documentation
 
-unum.cloud renders the reference from a symbol bundle that every release carries as `usearch_docs_<version>.tar.gz`.
+unum.cloud renders the reference from a symbol bundle that every release holds as `usearch_docs_<version>.tar.gz`.
 A function's `@par Statuses:` block lists only its contract statuses, the conditions the caller controls or can observe, since the status enum documents once which categories any allocating, device-binding, file-touching or cancellable verb may also return.
 The bundle holds each binding's own tool output: Doxygen XML for C, C++, Java and C#, griffe for Python, rustdoc JSON, a Swift symbol graph and `mojo doc`, plus the sources of the rest:
 
@@ -1238,7 +1295,7 @@ Swift typechecks against NumKong's module from the `numkong` submodule, or from 
 - The title reads `<Verb>: <Summary>`, where the verb is one of `Add`, `Break`, `Chore`, `Docs`, `Fix`, `Improve` or `Make`.
 - The summary opens with a capital letter, unless it opens with a code identifier, which keeps its own case.
 - The title runs to at most 80 characters, and a body line to at most 100 columns, unless it holds a URL or is indented code.
-- The message carries no AI-assistant attribution, since authorship is the human who committed.
+- The message holds no AI-assistant attribution, since authorship is the human who committed.
 
 Git's merge, `fixup!` and `squash!` titles are exempt from the title rules.
 A `Release: vX.Y.Z` title is exempt too, but its commit must stamp every version site, and no other commit may change `VERSION`.

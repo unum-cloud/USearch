@@ -6,7 +6,7 @@
  *      shard's SafeGraphs monolith at the path itself, or one monolith per live shard beside a
  *      manifest, the live shard count picking which; a load opens one shard per part.
  *
- *  Each shard is lent to the SafeGraphs glue as a columned index through
+ *  Each shard is passed to the SafeGraphs glue as a columned index through
  *  @ref unum::usearch::basic::shard_columns, which takes its nodes through its residency's own
  *  plans, so every residency shares one framing. What a residency does differently rides in as an
  *  object answering:

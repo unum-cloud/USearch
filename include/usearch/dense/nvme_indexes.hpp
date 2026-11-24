@@ -7,14 +7,14 @@
  *      rewrites its parts.
  *
  *  A view opens the manifest or the monolith a RAM or VRAM index saved, keeps every part's medium
- *  and column offsets, and per node only the key table @c hold_keys builds within its limit.
- *  Every verb borrows an executor and attaches the parts' media to its engines for the call alone,
- *  so any executor reaching the same devices serves any view. Walks rank rows by shard and node,
- *  and only the rows a verb writes resolve into keys, one key read each, once the row's walks
- *  finished; a filtered search and attention read every scored row's key beside its value as well.
- *  Key lookups probe that table and confirm each candidate with one key read, and refuse without
- *  one; the cursor scans the key and value columns, and the health audit the neighbors columns.
- *  A shard is the position a verb scatters over, and a part the SafeGraphs file behind it.
+ *  and column offsets, and per node only the key table @c hold_keys builds within its limit. Every
+ *  verb uses an executor and attaches the parts' media to its queues for the call alone, so any
+ *  executor reaching the same devices serves any view. Walks rank rows by shard and node, and only
+ *  the rows a verb writes resolve into keys, one key read each, once the row's walks finished; a
+ *  filtered search and attention read every scored row's key beside its value as well. Key lookups
+ *  probe that table and confirm each candidate with one key read, and refuse without one; the
+ *  cursor scans the key and value columns, and the health audit the neighbors columns. A shard is
+ *  the position a verb scatters over, and a part the SafeGraphs file behind it.
  */
 #pragma once
 
@@ -32,6 +32,7 @@
 #include <string_view> // `std::string_view`
 #include <type_traits> // `std::is_same_v`, `std::remove_reference_t`, `std::invoke_result_t`
 #include <utility>     // `std::swap` - a replaced part's medium
+#include <variant>     // `std::holds_alternative` - a medium that is no file
 
 #include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the default reference
 
@@ -66,7 +67,7 @@ template <                                                                    //
     typename elementwise_kit_type_ = serial_elementwise_kit_t,                //
     typename rmscast_kit_type_ = no_rmscast_kit_t,                            //
     typename visits_kit_type_ = serial_visits_hash_set_kit_t,                 //
-    typename engine_type_ = default_io_engine<dummy_waiter_t>,                //
+    typename queue_type_ = default_io_queue<dummy_waiter_t>,                  //
     template <typename> class atomic_ref_template_ = fu::standard_atomic_ref, //
     typename wait_type_ = dummy_waiter_t                                      //
     >
@@ -81,17 +82,17 @@ struct nvme_indexes {
     using key_t = key_type_;
 
     /** The one-part index, whose walks every verb drives over all parts at once. */
-    using index_t = nvme_index<quads_kit_type_, visits_kit_type_, engine_type_, atomic_ref_template_, wait_type_>;
+    using index_t = nvme_index<quads_kit_type_, visits_kit_type_, queue_type_, atomic_ref_template_, wait_type_>;
 
     /** The CPU class's reference over the words one call's threads share, and its waiter. */
     template <typename word_type_>
     using atomic_ref = atomic_ref_template_<word_type_>;
     using wait_t = wait_type_;
 
-    /** The threads, their engines and their scratch every verb runs on; it names no view, so one
+    /** The threads, their queues and their scratch every verb runs on; it names no view, so one
      *  executor serves every view reaching the same devices. */
     using executor_t = typename index_t::executor_t;
-    using engine_t = typename index_t::engine_t;
+    using queue_t = typename index_t::queue_t;
     using medium_t = typename index_t::medium_t;
     using distance_t = typename index_t::distance_t;
     using scalar_t = typename index_t::scalar_t;
@@ -163,6 +164,7 @@ struct nvme_indexes {
      *    environment this process cannot initialize.
      *  - @c unsupported_k A transport ID in a build without SPDK.
      *  - @c unknown_kind_k A kernel the dtype's kits cannot finalize.
+     *  - @c io_k The system refused entropy for the media list's identity.
      */
     status_t view(std::string_view path, std::span<std::string_view const> paths = {}) noexcept {
         release();
@@ -196,7 +198,7 @@ struct nvme_indexes {
      *  - @c out_of_memory_k The key table passes @p memory_limit or cannot be allocated; the view
      *    then holds none.
      *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
-     *  - @c config_mismatch_k A medium the engines cannot read.
+     *  - @c config_mismatch_k A medium the queues cannot read.
      */
     status_t hold_keys(forkunion_allocator_t allocator, std::size_t memory_limit, executor_t& executor) noexcept {
         resident_keys_ = resident_keys_t {allocator};
@@ -512,7 +514,7 @@ struct nvme_indexes {
     /** The distance kind the parts were built for, as @ref view read it; unknown before one. */
     nk_kernel_kind_t kernel() const noexcept { return kernel_; }
 
-    /** Whether the kernel reads rows' norms, which a rewrite's targets then carry as a column. */
+    /** Whether the kernel reads rows' norms, which a rewrite's targets then hold as a column. */
     bool stores_norms() const noexcept { return index_t::stores_norms_(kernel_); }
 
     /**
@@ -531,6 +533,17 @@ struct nvme_indexes {
 
     /** Shards in the view, one per part of the checkpoint, so a monolith views as one shard. */
     std::size_t shards_count() const noexcept { return parts_.size(); }
+
+    /** Whether a medium of the view is no file but an SPDK namespace, which only an executor's
+     *  queue pairs read. */
+    bool reads_spdk() const noexcept {
+        if constexpr (std::is_same_v<medium_t, file_medium_t>) return false;
+        else {
+            for (medium_t const& medium : media_)
+                if (!std::holds_alternative<file_medium_t>(medium)) return true;
+            return false;
+        }
+    }
 
     /** Entries across every shard. */
     std::size_t size() const noexcept {
@@ -570,7 +583,7 @@ struct nvme_indexes {
      *  @param[out] matches Merged rankings, one query per row, as many matches as its width: the
      *      keys, their distances as @p score_type_, and per-query merged hit counts.
      *  @param[in] config The per-shard walk configuration, applied uniformly.
-     *  @param[in,out] executor The threads, their engines and their scratch; held for the call.
+     *  @param[in,out] executor The threads, their queues and their scratch; held for the call.
      *  @param[out] latencies Steady-clock nanoseconds per query row, from its first primed walk to
      *      its final write; empty collects none.
      *  @param[in] hints Optional keys per query whose rows every shard's walk takes as landmarks
@@ -580,14 +593,14 @@ struct nvme_indexes {
      *  whole quads. Each walk probes the key table @ref hold_keys built and confirms its
      *  candidates with one key read each, and a key no shard holds counts as a missing hint.
      *
-     *  A failed read stops the call: the engines drain, every buffer returns, and the call answers
+     *  A failed read stops the call: the queues drain, every buffer returns, and the call answers
      *  @c io_k.
      *
      *  @par Statuses:
      *  - @c unsupported_k A walk handed @p hints while no key table is held.
      *  - @c uninitialized_k Nothing is viewed, or @p executor holds no threads or pool workers.
      *  - @c config_mismatch_k @p matches, @p latencies or non-empty @p hints disagree with the
-     *    batch or each other, the queries are not as wide as the rows, or a medium the engines
+     *    batch or each other, the queries are not as wide as the rows, or a medium the queues
      *    cannot read.
      *  - @c unsupported_layout_k @p matches are not packed along their rows.
      *  - @c shape_mismatch_k A query counts more @p hints than they are wide.
@@ -649,7 +662,7 @@ struct nvme_indexes {
      *  @par Statuses:
      *  - @c uninitialized_k Nothing is viewed, or @p executor holds no threads or pool workers.
      *  - @c config_mismatch_k @p matches, @p latencies or non-empty @p hints disagree with the
-     *    batch or each other, the queries are not as wide as the rows, or a medium the engines
+     *    batch or each other, the queries are not as wide as the rows, or a medium the queues
      *    cannot read.
      *  - @c unsupported_layout_k @p matches are not packed along their rows.
      *  - @c shape_mismatch_k A query counts more @p hints than they are wide.
@@ -663,7 +676,7 @@ struct nvme_indexes {
         static_assert((!aggregating_predicate<std::remove_cvref_t<predicate_type_>, key_t, walk_payload_t> &&
                        !aggregating_predicate<std::remove_cvref_t<predicate_type_>, key_t, scan_payload_t>) ||
                           per_thread_predicates<std::remove_cvref_t<predicate_type_>>,
-                      "An engine driving its own threads takes an aggregating predicate per thread");
+                      "A queue driving its own threads takes an aggregating predicate per thread");
         if (!config.cache_bytes) config.cache_bytes = executor.cache_bytes_per_core();
         if (config.traversal == traversal_t::scan_k)
             return scan_rows_(queries, executor, matches.keys, matches.scores, matches.counts, predicate, latencies,
@@ -679,7 +692,7 @@ struct nvme_indexes {
      *  @par Statuses:
      *  - @c config_mismatch_k @p config asks for a scan, @p matches or
      *    @p latencies disagree with the batch or each other, the queries are not as wide as the
-     *    rows, or a medium the engines cannot read.
+     *    rows, or a medium the queues cannot read.
      *  - @c uninitialized_k Nothing is viewed, or @p executor holds no threads or pool workers.
      *  - @c unsupported_layout_k @p matches are not packed along their rows.
      *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
@@ -703,7 +716,7 @@ struct nvme_indexes {
      *  @par Statuses:
      *  - @c config_mismatch_k @p config asks for a walk, @p matches or
      *    @p latencies disagree with the batch or each other, the queries are not as wide as the
-     *    rows, or a medium the engines cannot read.
+     *    rows, or a medium the queues cannot read.
      *  - @c uninitialized_k Nothing is viewed, or @p executor holds no threads or pool workers.
      *  - @c unsupported_layout_k @p matches are not packed along their rows.
      *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
@@ -734,7 +747,7 @@ struct nvme_indexes {
      *  @param[out] scored The pairs scored per row across every shard, above the stride when
      *      truncated.
      *  @param[in] config The per-shard walk configuration, applied uniformly.
-     *  @param[in,out] executor The threads, their engines and their scratch; held for the call.
+     *  @param[in,out] executor The threads, their queues and their scratch; held for the call.
      *  @param[out] latencies Steady-clock nanoseconds per left-hand row, as @ref search collects
      *      them.
      *
@@ -805,7 +818,7 @@ struct nvme_indexes {
      *  @param[in] config The walk configuration, whose @c search nominates as many keys per row as
      *      its expansion factor, a @c traversal_t::scan_k scan nominating every key, and whose @c
      *      wanted keys each query keeps, the best ones, zero keeping every key it scored.
-     *  @param[in,out] executor The threads, their engines and their scratch; held for the call.
+     *  @param[in,out] executor The threads, their queues and their scratch; held for the call.
      *  @param[out] latencies Steady-clock nanoseconds per query row of a walk, as @ref search
      *      collects them; normalization follows the last row.
      *  @param[in] hints Optional keys per query whose rows every row's walk takes as landmarks
@@ -855,7 +868,7 @@ struct nvme_indexes {
      *  - @c shape_mismatch_k A query with no rows.
      *  - @c config_mismatch_k @p query_offsets run past @p queries, the queries are not as wide as
      *    the rows, @p latencies, @p scored or the tape disagree with the batch, a query keeps more
-     *    than the tape's stride, or a medium the engines cannot read.
+     *    than the tape's stride, or a medium the queues cannot read.
      *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
      *  - @c overflow_k A staging region's byte count overflows.
      */
@@ -869,7 +882,7 @@ struct nvme_indexes {
         std::size_t const wanted = maxsim_config.wanted;
         static_assert(!aggregating_predicate<std::remove_cvref_t<predicate_type_>, key_t, walk_payload_t> ||
                           per_thread_predicates<std::remove_cvref_t<predicate_type_>>,
-                      "An engine driving its own threads takes an aggregating predicate per thread");
+                      "A queue driving its own threads takes an aggregating predicate per thread");
         using slice_t = arena_allocator<byte_t>;
         using query_t = search_query<dummy_heads_t, std::remove_reference_t<predicate_type_>, distance_t>;
         if (query_offsets.empty()) return {{}, {status_code_t::config_mismatch_k, "Query offsets are empty"}};
@@ -892,7 +905,7 @@ struct nvme_indexes {
         if (!queries_count) return {{}, status_code_t::success_k};
         std::memset(scored.data(), 0, scored.size_bytes());
 
-        // One call serves every pass: a walk's engines and arenas, then two scans, and the hints.
+        // One call serves every pass: a walk's queues and arenas, then two scans, and the hints.
         bool const scanning = config.traversal == traversal_t::scan_k;
         walk_shape_t const shape = scanning ? walk_shape_t {}
                                             : index_t::template walk_shape_<query_t>(
@@ -948,7 +961,7 @@ struct nvme_indexes {
      *  @param[out] carry Every query row's softmax state, which merges this call with other
      *      branches, or empty to keep none.
      *  @param[in] config The per-shard walk configuration, applied uniformly.
-     *  @param[in,out] executor The threads, their engines and their scratch; held for the call.
+     *  @param[in,out] executor The threads, their queues and their scratch; held for the call.
      *  @param[out] latencies Steady-clock nanoseconds per token, its heads walked together, as
      *      @ref search collects them.
      *  @return The query rows attended in @c count.
@@ -1021,10 +1034,10 @@ struct nvme_indexes {
      *
      *  @param[in] keys The keys to count, repeats and absent ones included.
      *  @param[out] entries The entries under each key, parallel to @p keys; zero means absent.
-     *  @param[in,out] executor The threads, their engines and their scratch; held for the call.
+     *  @param[in,out] executor The threads, their queues and their scratch; held for the call.
      *
      *  @par Statuses:
-     *  - @c config_mismatch_k @p entries and @p keys differ in length, or a medium the engines
+     *  - @c config_mismatch_k @p entries and @p keys differ in length, or a medium the queues
      *    cannot read.
      *  - @c unsupported_k No key table is held.
      *  - @c uninitialized_k Nothing is viewed, or @p executor holds no threads or pool workers.
@@ -1044,11 +1057,11 @@ struct nvme_indexes {
     }
 
     /**
-     *  The batched @ref count reduced to one in @p entries where a key of @p keys holds any entry,
-     *  zero where it holds none.
+     *  @brief The batched @ref count reduced to one in @p entries where a key of @p keys holds any
+     *      entry, zero where it holds none.
      *
      *  @par Statuses:
-     *  - @c config_mismatch_k @p entries and @p keys differ in length, or a medium the engines
+     *  - @c config_mismatch_k @p entries and @p keys differ in length, or a medium the queues
      *    cannot read.
      *  - @c uninitialized_k Nothing is viewed, or @p executor holds no threads or pool workers.
      *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
@@ -1073,11 +1086,11 @@ struct nvme_indexes {
      *  @param[out] entries The true total under each key, parallel to @p keys; above @p wanted when
      *      its rows truncated, zero when absent.
      *  @param[in] wanted Rows kept per key.
-     *  @param[in,out] executor The threads, their engines and their scratch; held for the call.
+     *  @param[in,out] executor The threads, their queues and their scratch; held for the call.
      *
      *  @par Statuses:
      *  - @c config_mismatch_k @p entries and @p keys differ in length, @p vectors hold another
-     *    count of rows or narrower ones, or a medium the engines cannot read.
+     *    count of rows or narrower ones, or a medium the queues cannot read.
      *  - @c unsupported_k No key table is held.
      *  - @c uninitialized_k Nothing is viewed, or @p executor holds no threads or pool workers.
      *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
@@ -1140,7 +1153,7 @@ struct nvme_indexes {
      *
      *  @par Statuses:
      *  - @c config_mismatch_k @p vectors hold fewer rows than @p keys or narrower ones than the
-     *    index, or a medium the engines cannot read.
+     *    index, or a medium the queues cannot read.
      *  - @c uninitialized_k @p executor holds no threads or pool workers.
      *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
      *  - @c overflow_k A staging region's byte count overflows.
@@ -1198,10 +1211,10 @@ struct nvme_indexes {
      *  @param[in] keys The keys to locate, repeats and absent ones included.
      *  @param[out] locators The earliest entry under each key, parallel to @p keys; a key held
      *      nowhere gets the part @ref shards_count.
-     *  @param[in,out] executor The threads, their engines and their scratch; held for the call.
+     *  @param[in,out] executor The threads, their queues and their scratch; held for the call.
      *
      *  @par Statuses:
-     *  - @c config_mismatch_k @p locators and @p keys differ in length, or a medium the engines
+     *  - @c config_mismatch_k @p locators and @p keys differ in length, or a medium the queues
      *    cannot read.
      *  - @c unsupported_k No key table is held.
      *  - @c uninitialized_k Nothing is viewed, or @p executor holds no threads or pool workers.
@@ -1224,10 +1237,10 @@ struct nvme_indexes {
     /**
      *  @brief The keys of the entries @p nodes locates, in any order and with repeats: the key rows
      *      sorted by locator, rows whose blocks touch merged into one read of at most a scan run,
-     *      as many in flight as the engines hold.
+     *      as many in flight as the queues hold.
      *
      *  @par Statuses:
-     *  - @c config_mismatch_k @p keys and @p nodes differ in length, or a medium the engines cannot
+     *  - @c config_mismatch_k @p keys and @p nodes differ in length, or a medium the queues cannot
      *    read.
      *  - @c uninitialized_k Nothing is viewed, or @p executor holds no threads or pool workers.
      *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
@@ -1264,7 +1277,7 @@ struct nvme_indexes {
      *  @param[in] executor The pool that runs the scans.
      *
      *  @par Statuses:
-     *  - @c config_mismatch_k @p offsets is not one longer than @p entries, or a medium the engines
+     *  - @c config_mismatch_k @p offsets is not one longer than @p entries, or a medium the queues
      *    cannot read.
      *  - @c uninitialized_k Nothing is viewed, or @p executor holds no threads or pool workers.
      *  - @c out_of_memory_k @p neighbors could not grow.
@@ -1310,18 +1323,18 @@ struct nvme_indexes {
      *  A part of N rows holds four byte columns and three bitsets of N bits from the first thread's
      *  arena, the widest part's reused by every part, and the islands' links beside them. A level
      *  reads the rows it expands in ID order, rows whose blocks touch merged into one read of at
-     *  most a scan run, as many in flight as the engines hold, and certifies their way back in the
+     *  most a scan run, as many in flight as the queues hold, and certifies their way back in the
      *  same read; then only the rows reached and not yet certified are read again, and once more
      *  the islands and the rows linked to less than a row holds.
      *
-     *  @param[in,out] executor The threads, their engines and their scratch; held for the call.
+     *  @param[in,out] executor The threads, their queues and their scratch; held for the call.
      *
      *  @par Statuses:
      *  - @c uninitialized_k Nothing is viewed, or @p executor holds no threads or pool workers.
      *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
      *  - @c out_of_memory_k The first thread's arena cannot hold the columns or the islands.
      *  - @c overflow_k A staging region's byte count overflows.
-     *  - @c config_mismatch_k A medium the engines cannot read.
+     *  - @c config_mismatch_k A medium the queues cannot read.
      */
     expected<reachability_t> health(executor_t& executor) const noexcept {
         if (parts_.empty()) return {{}, status_code_t::uninitialized_k};
@@ -1357,12 +1370,12 @@ struct nvme_indexes {
      *      without any, and assigns them three coordinates among the shown points of @p inputs, as
      *      the RAM index samples the graph the parts were saved from.
      *
-     *  The plan draws and places on executor thread zero, the pool thread its engine answers,
-     *  inside one call holding the media, and every verb of its source blocks until its round
-     *  lands. One key lookup, as @ref count takes it, lists the entries of the shown and focus keys
-     *  before the plan, and one more counts each draw's ordinal after it. Scoring reads one round
-     *  per neighbors row's width: the query's row, then a row and a key per node, scored a quad at
-     *  a time as a walk scores them. Without shown points each draw's row projects through
+     *  The plan draws and places on executor thread zero, the pool thread its queue answers, inside
+     *  one call holding the media, and every verb of its source blocks until its round lands. One
+     *  key lookup, as @ref count takes it, lists the entries of the shown and focus keys before the
+     *  plan, and one more counts each draw's ordinal after it. Scoring reads one round per
+     *  neighbors row's width: the query's row, then a row and a key per node, scored a quad at a
+     *  time as a walk scores them. Without shown points each draw's row projects through
      *  @ref sample_projection.
      *
      *  @par Statuses:
@@ -1370,7 +1383,7 @@ struct nvme_indexes {
      *  - @c shape_mismatch_k An output's or the shown coordinates' length disagrees.
      *  - @c out_of_memory_k The arenas cannot hold the scratch.
      *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
-     *  - @c config_mismatch_k A medium the engines cannot read.
+     *  - @c config_mismatch_k A medium the queues cannot read.
      *  - @c unsupported_k Shown or focus keys, or draws, while no key table is held.
      *  - @c io_k A read came back short; the draws written stand, their later reads unscored.
      */
@@ -1383,9 +1396,10 @@ struct nvme_indexes {
             dense_sample_source_t const source {*this, executor, rows, to_writable_span(projected)};
             return nvme_draw_sample(source, inputs, outputs, config, executor, *rows.failure);
         };
+        media_list_key_t const media_list_key = media_list_key_();
         return nvme_sample<key_t, node_id_t>(
-            executor, to_span(media_), to_span(parts_), connectivity(), staging_bytes_(), inputs, outputs.keys.size(),
-            config,
+            executor, to_span(media_), media_list_key, to_span(parts_), connectivity(), staging_bytes_(), inputs,
+            outputs.keys.size(), config,
             [&](std::span<key_t const> scanned, auto&& on_hit) noexcept {
                 return lookup_keys_keeping_cut_(scanned, executor, on_hit);
             },
@@ -1704,7 +1718,7 @@ struct nvme_indexes {
      *  walk into their running states, value rows looked up by the keys read beside the scored
      *  rows, only those @p predicate_type_ admits folding. Each slot imports its token's heads into
      *  its own staging, past them the @c f32 rows and softmax states that outputs of another layout
-     *  or an empty carry cannot hold. */
+     *  or an empty hold cannot hold. */
     template <typename value_lookup_type_, typename predicate_type_>
     struct attend_query {
         using key_t = key_type_;
@@ -1809,9 +1823,10 @@ struct nvme_indexes {
                                             typename query_type_::inputs_t const& inputs, std::size_t staged_bytes,
                                             std::span<std::size_t const> counts, std::span<u64_t> latencies,
                                             executor_t& executor) noexcept {
-        return index_t::template walk_queries_<query_type_>(to_span(media_), to_span(parts_), kernel_, executor,
-                                                            rows_count, non_zero_expansion_factor(config), inputs,
-                                                            staged_bytes, counts, latencies);
+        media_list_key_t const media_list_key = media_list_key_();
+        return index_t::template walk_queries_<query_type_>(to_span(media_), media_list_key, to_span(parts_), kernel_,
+                                                            executor, rows_count, non_zero_expansion_factor(config),
+                                                            inputs, staged_bytes, counts, latencies);
     }
 
     /** The batched @ref search_if under @p heads, which only a @c dummy_predicate_t accompanies,
@@ -1925,13 +1940,14 @@ struct nvme_indexes {
     };
 
     /** Begins a call of @p scans scans over every shard, each fetching @p reads_per_task_ reads per
-     *  task, as @ref nvme_begin_scans begins one: every engine as deep as the call's depth, every
+     *  task, as @ref nvme_begin_scans begins one: every queue as deep as the call's depth, every
      *  buffer @p buffer_bytes wide and never narrower than a walk's, and at least @p buffers for a
      *  walk sharing the call. */
     template <std::size_t reads_per_task_ = 1>
     expected<call_t> begin_scans_(executor_t& executor, std::size_t scans, std::size_t scratch_bytes = 0,
                                   std::size_t buffers = 0, std::size_t buffer_bytes = 0) const noexcept {
-        return nvme_begin_scans<reads_per_task_>(executor, to_span(media_),
+        media_list_key_t const media_list_key = media_list_key_();
+        return nvme_begin_scans<reads_per_task_>(executor, to_span(media_), media_list_key,
                                                  nvme_call_depth(executor, to_span(media_), to_span(parts_)), scans,
                                                  scratch_bytes, buffers, max_of(buffer_bytes, staging_bytes_()));
     }
@@ -2685,12 +2701,12 @@ struct nvme_indexes {
 
 #pragma region Sampling
 
-    /** Every part as SAMPLE reads it, each verb a blocking round on thread zero's engine; see
+    /** Every part as SAMPLE reads it, each verb a blocking round on thread zero's queue; see
      *  @c sample_source. A failed read lands in @c rows.failure, and its verb answers no row. */
     struct dense_sample_source_t {
         using key_t = key_type_;
         using node_id_t = dense::node_id_t;
-        using rows_t = nvme_sample_rows<nvme_part_t, key_t, node_id_t, engine_t>;
+        using rows_t = nvme_sample_rows<nvme_part_t, key_t, node_id_t, queue_t>;
 
         nvme_indexes const& indexes;
         executor_t& executor;
@@ -2798,6 +2814,9 @@ struct nvme_indexes {
 
     /** The body of @ref view, into an empty catalog. */
     status_t view_(std::string_view checkpoint, std::span<std::string_view const> paths) noexcept {
+        auto const [identity, identity_status] = media_identity_from_entropy();
+        if (failed(identity_status)) return identity_status;
+        media_identity_ = identity;
         if (checkpoint.empty()) return status_code_t::invalid_argument_k;
         std::array<byte_t, safegraphs_prefix_t::magic_k.size()> magic {};
         if (names_transport_id(checkpoint))
@@ -2992,6 +3011,14 @@ struct nvme_indexes {
     /** Closes the swap @ref begin_window_ opened, releasing its stores to the next reader. */
     void end_window_() noexcept { atomic_ref<u64_t>(writer_->epoch).store_add(1, std::memory_order_release); }
 
+    /** Which list the media form: the identity drawn at the view, and the swap epoch, loaded before
+     *  the media inside the readers' bracket, so a call overlapping a swap registers them again on
+     *  its retry; a view swaps nothing, so its epoch is zero. */
+    media_list_key_t media_list_key_() const noexcept {
+        u64_t const epoch = writer_ ? atomic_ref<u64_t const>(writer_->epoch).load(std::memory_order_acquire) : 0;
+        return {media_identity_, epoch};
+    }
+
     /** Drops the writer, giving back every superseded part's medium and removing its file, since
      *  no call names the index any longer. */
     void release_writer_() noexcept {
@@ -3005,8 +3032,12 @@ struct nvme_indexes {
 
 #pragma endregion Opening
 
-    /** Every part's file or device, open for the engines, in part order. */
+    /** Every part's file or device, open for the queues, in part order. */
     growing_buffer<medium_t, forkunion_allocator_t> media_;
+
+    /** The identity drawn when the media list was opened, which a swap keeps while the epoch moves;
+     *  zero before a view. */
+    u64_t media_identity_ = 0;
 
     /** Where every part keeps its columns, parallel to @c media_. */
     growing_buffer<nvme_part_t, forkunion_allocator_t> parts_;
@@ -3017,7 +3048,7 @@ struct nvme_indexes {
     /** The key table @ref hold_keys built, every part's; empty when none is held. */
     resident_keys_t resident_keys_;
 
-    /** The distance kind the parts name, every walk ranks by, and every rewrite carries on. */
+    /** The distance kind the parts name, every walk ranks by, and every rewrite keeps. */
     nk_kernel_kind_t kernel_ = nk_kernel_unknown_k;
 
     /** What @ref load opened the manifest with; a view holds none, which alone makes it a view. */

@@ -10,7 +10,7 @@
  *  the orders the ring documentation asks for. An engine and a kernel over two rings of depth two,
  *  and three requests, so each ring wraps once. The kernel refuses at most two calls.
  *
- *  - Every entry the kernel reads carries the request claimed at that index.
+ *  - Every entry the kernel reads holds the request claimed at that index.
  *  - Every request ends reaped, withdrawn or dropped, each once.
  *  - The outstanding count equals the requests not yet ended.
  *  - An abandon the kernel waited out leaves nothing in flight, and a head never passes its tail.
@@ -73,7 +73,7 @@ byte pending_tail, outstanding;
 bool entering, refusal;
 byte refused_calls;
 
-// A load across `io_uring_enter`, which reads the newest write and merges the stamp it carries
+/** A load across @c io_uring_enter, which reads the newest write and merges the stamp it holds. */
 inline load_newest(t, l, order, out) {
     do
     :: load(t, l, order, out);

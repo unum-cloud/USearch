@@ -505,7 +505,7 @@ struct probe_t {
 FIXTURE
 
 assert_rejects "bare trailing doc marker" "with a trailing marker" include/$project_directory/probe.h <<'FIXTURE'
-static int probe_value; //< The value.
+extern int probe_value; //< The value.
 FIXTURE
 
 assert_rejects "trailing field comment" "on its own line's tail" include/$project_directory/probe.h <<'FIXTURE'
@@ -1552,12 +1552,12 @@ FIXTURE
 # region C and C++ Idiom Fixtures
 
 assert_rejects "unpinned string split" "splits a string literal" include/$project_directory/probe.h <<'FIXTURE'
-static char const *probe_text = "first half "
+static char const *const probe_text = "first half "
                                 "second half";
 FIXTURE
 
 assert_accepts "pinned string split" include/$project_directory/probe.h <<'FIXTURE'
-static char const *probe_text = "first half " //
+static char const *const probe_text = "first half " //
                                 "second half";
 FIXTURE
 
@@ -2398,7 +2398,7 @@ assert_rejects "URL in code after a code block closing with its docblock" "misma
  *  @endcode */
 int probe(void);
 
-static char const *site = "https://example.com/probe";
+static char const *const site = "https://example.com/probe";
 FIXTURE
 
 stage_fixture_with_header include/$project_directory/probe.hpp <<'FIXTURE'
@@ -3175,6 +3175,18 @@ assert_accepts "span of C strings spelled const char" include/$project_directory
 void probe_name(std::span<const char* const> names) noexcept;
 FIXTURE
 
+assert_rejects "executor address comparison" "compares executor addresses" src/probe.cpp <<'FIXTURE'
+std::size_t probe_thread(probe_view_t const& view, probe_state_t const& state) noexcept {
+    return view.executor == state.executor ? view.thread_index : 0;
+}
+FIXTURE
+
+assert_accepts "null executor test and an executor's width" src/probe.cpp <<'FIXTURE'
+std::size_t probe_threads(probe_view_t const& view) noexcept {
+    return view.executor != nullptr && view.executor->size() != 0 ? view.executor->size() : 1;
+}
+FIXTURE
+
 assert_rejects "N-API mutex in a binding" "locks in a binding" javascript/probe.c <<'FIXTURE'
 static uv_mutex_t probe_guard;
 FIXTURE
@@ -3286,7 +3298,7 @@ stage_committed_fixture() { # stage_committed_fixture <relative-path> <sed-expre
 }
 
 stage_committed_fixture include/$project_directory/probe.hpp 's/probe_text =$/probe_text = "first half "/' <<'FIXTURE'
-static char const *probe_text =
+static char const *const probe_text =
                                 "second half";
 FIXTURE
 run_precommit
@@ -4116,11 +4128,11 @@ inline int probe(int count) {
 FIXTURE
 
 assert_rejects "doc trailer on a statement" "documents with a //! trailer" include/usearch/probe.hpp <<'FIXTURE'
-static int probe_value = 0; //! The value.
+constexpr int probe_value = 0; //! The value.
 FIXTURE
 
 assert_accepts "plain note on a statement" include/usearch/probe.hpp <<'FIXTURE'
-static int probe_value = 0; // Reset by every call.
+constexpr int probe_value = 0; // Read by every call.
 FIXTURE
 
 assert_rejects "fully qualified project namespace" "spells unum::usearch:: in full" include/usearch/probe.hpp <<'FIXTURE'
@@ -4680,14 +4692,14 @@ struct probe_t {
 };
 FIXTURE
 
-assert_rejects "owner beside a borrowed handle" "holds an owning unique_ptr beside a raw pointer" include/usearch/probe.hpp <<'FIXTURE'
+assert_rejects "owner beside a non-owning pointer" "holds an owning unique_ptr beside a raw pointer" include/usearch/probe.hpp <<'FIXTURE'
 struct probe_t {
     std::unique_ptr<device_t> owned_;
-    device_t *borrowed_;
+    device_t *pointed_;
 };
 FIXTURE
 
-assert_accepts "owner alone, and a borrowed handle of another type" include/usearch/probe.hpp <<'FIXTURE'
+assert_accepts "owner alone, and a non-owning handle of another type" include/usearch/probe.hpp <<'FIXTURE'
 struct probe_t {
     std::unique_ptr<device_t> device_;
     stream_t *stream_;
@@ -4729,6 +4741,185 @@ FIXTURE
 assert_rejects "refused identifier word" "names a concept by a refused word" include/usearch/probe.hpp <<'FIXTURE'
 inline void probe(int join_count) {}
 FIXTURE
+
+assert_rejects "hand-over word in an identifier" "names a concept by a refused word" include/usearch/probe.hpp <<'FIXTURE'
+inline void probe(int lent_count) {}
+FIXTURE
+
+assert_accepts "Rust std borrow names" include/usearch/probe.hpp <<'FIXTURE'
+inline void probe(BorrowedFd descriptor) {}
+FIXTURE
+
+assert_rejects "camelCase hand-over word in Swift" "names a concept by a refused word" swift/Probe.swift <<'FIXTURE'
+let lentDevices: [Int] = []
+FIXTURE
+
+assert_rejects "hand-over word in a Python identifier" "names a concept by a refused word" python/probe.py <<'FIXTURE'
+
+def probe(checkpoint_borrow: int) -> int:
+    return checkpoint_borrow
+FIXTURE
+
+assert_accepts "hand-over words in Python comments and docstrings" python/probe.py <<'FIXTURE'
+
+def probe(count: int) -> int:
+    """Returns the count; nothing is lent."""
+    return count  # nothing borrowed either
+FIXTURE
+
+assert_accepts "Rust std borrow_raw" rust/probe.rs <<'FIXTURE'
+/// The descriptor `raw` names, valid while its owner keeps it open.
+pub unsafe fn probe(raw: std::os::fd::RawFd) -> std::os::fd::BorrowedFd<'static> {
+    unsafe { std::os::fd::BorrowedFd::borrow_raw(raw) }
+}
+FIXTURE
+
+assert_rejects "pool spawned in make_call_executor" "spawns a pool or probes a topology" src/probe.hpp <<'FIXTURE'
+inline int make_call_probe(fu_pool_t* created) noexcept {
+    return fu_pool_new("probe", 0, created);
+}
+FIXTURE
+
+assert_accepts "pool spawned in the RAM device" include/usearch/utilities/ram_device.hpp <<'FIXTURE'
+inline int spawn_probe(fu_pool_t* created) noexcept {
+    return fu_pool_new("probe", 0, created);
+}
+FIXTURE
+
+assert_rejects "function-local static executor" "adds a static object" src/probe.hpp <<'FIXTURE'
+inline int probe_count() noexcept {
+    static int calls = 0;
+    return ++calls;
+}
+FIXTURE
+
+assert_rejects "constinit static counter" "adds a static object" src/probe.hpp <<'FIXTURE'
+static constinit int probe_counter = 0;
+FIXTURE
+
+assert_rejects "static mutable pointer to const characters" "adds a static object" src/probe.hpp <<'FIXTURE'
+static char const* probe_cursor = nullptr;
+FIXTURE
+
+assert_rejects "static object built by a call" "adds a static object" src/probe.hpp <<'FIXTURE'
+static probe_threads_t probe_threads(make_probe_threads());
+FIXTURE
+
+assert_accepts "static constexpr table and a static function" src/probe.hpp <<'FIXTURE'
+struct probe_t {
+    static constexpr int limit_k = 4;
+    static int twice(int value) noexcept { return value * 2; }
+};
+FIXTURE
+
+assert_rejects "flush inside a free" "does I/O inside a free" src/probe.cpp <<'FIXTURE'
+void probe_free(probe_t& probe) noexcept {
+    probe.flush();
+}
+FIXTURE
+
+assert_rejects "persist inside a free" "does I/O inside a free" src/probe.cpp <<'FIXTURE'
+void probe_free(probe_state_t& state) noexcept {
+    state.image.persist();
+}
+FIXTURE
+
+assert_accepts "flush in the flush verb" src/probe.cpp <<'FIXTURE'
+void probe_flush(probe_t& probe) noexcept {
+    probe.flush();
+}
+FIXTURE
+
+assert_rejects "per-thread stream handle" "names a per-thread default stream" include/usearch/utilities/probe.hpp <<'FIXTURE'
+inline void* probe_stream() noexcept { return cudaStreamPerThread; }
+FIXTURE
+
+assert_accepts "null legacy stream" include/usearch/utilities/probe.hpp <<'FIXTURE'
+/** The null legacy stream, which owns nothing. */
+inline void* probe_stream() noexcept { return nullptr; }
+FIXTURE
+
+assert_rejects "Arc around an executor" "counts references in a binding" rust/probe.rs <<'FIXTURE'
+/// An executor the probe keeps alive.
+pub struct Probe {
+    executor: std::sync::Arc<u32>,
+}
+FIXTURE
+
+assert_rejects "arena count kept on a C binding handle" "counts references in a binding" python/probe.c <<'FIXTURE'
+typedef struct probe_executor_t {
+    usearch_executor_t handle;
+    size_t arenas;
+} probe_executor_t;
+FIXTURE
+
+assert_rejects "atomic hold count on a C binding handle" "counts references in a binding" javascript/probe.c <<'FIXTURE'
+typedef struct probe_arena_t {
+    usearch_arena_t handle;
+    atomic_size_t holds;
+} probe_arena_t;
+FIXTURE
+
+assert_accepts "arena referencing its executor object" python/probe.c <<'FIXTURE'
+typedef struct probe_arena_t {
+    usearch_arena_t handle;
+    PyObject* executor;
+} probe_arena_t;
+FIXTURE
+
+assert_accepts "lifetime-bound arena" rust/probe.rs <<'FIXTURE'
+/// An arena valid while its executor lives.
+pub struct Probe<'executor> {
+    executor: &'executor u32,
+}
+FIXTURE
+
+assert_rejects "offset_of! in a Rust test" "asserts a struct's layout" rust/probe.rs <<'FIXTURE'
+const _: () = assert!(core::mem::offset_of!(Probe, count) == 8);
+FIXTURE
+
+assert_accepts "size_of for a stride" rust/probe.rs <<'FIXTURE'
+/// Bytes across `rows` single-precision scalars.
+pub fn probe_stride(rows: usize) -> usize {
+    rows * core::mem::size_of::<f32>()
+}
+FIXTURE
+
+stage_edited_fixture include/usearch/probe.h 's/One staged fixture for one rule\./One staged fixture, edited./'
+run_precommit
+expect_acceptance "comment-only edit warns without rejecting"
+
+stage_fixture_with_header c/usearch/probe.h <<'FIXTURE'
+typedef struct usearch_probe_t {
+    int count;
+} usearch_probe_t;
+FIXTURE
+mkdir -p "$fixture_directory/rust"
+printf 'pub struct usearch_probe_t {\n    pub count: i32,\n}\n' > "$fixture_directory/rust/probe.rs"
+git -C "$fixture_directory" add -- rust/probe.rs
+git -C "$fixture_directory" commit --quiet --no-verify -m "Chore: Seed the fixture"
+awk '{ print } /^    int count;$/ { print "    int depth;" }' "$fixture_directory/c/usearch/probe.h" > "$fixture_directory/probe.edited" &&
+    mv "$fixture_directory/probe.edited" "$fixture_directory/c/usearch/probe.h"
+git -C "$fixture_directory" add -- c/usearch/probe.h
+run_precommit
+expect_rejection "C struct changed without its Rust mirror" "changes a struct without the bindings"
+
+stage_fixture_with_header c/usearch/probe.h <<'FIXTURE'
+typedef struct usearch_probe_t {
+    int count;
+} usearch_probe_t;
+FIXTURE
+mkdir -p "$fixture_directory/rust"
+printf '//! One staged fixture for one rule.\n//!\n//! File: rust/probe.rs\n//! Author: Selftest\n//! Date: January 1, 2026\n\n/// Mirrors `usearch_probe_t`.\n#[repr(C)]\npub struct usearch_probe_t {\n    pub count: i32,\n}\n' > "$fixture_directory/rust/probe.rs"
+git -C "$fixture_directory" add -- rust/probe.rs
+git -C "$fixture_directory" commit --quiet --no-verify -m "Chore: Seed the fixture"
+awk '{ print } /^    int count;$/ { print "    int depth;" }' "$fixture_directory/c/usearch/probe.h" > "$fixture_directory/probe.edited" &&
+    mv "$fixture_directory/probe.edited" "$fixture_directory/c/usearch/probe.h"
+awk '{ print } /^    pub count: i32,$/ { print "    pub depth: i32," }' "$fixture_directory/rust/probe.rs" > "$fixture_directory/probe.edited" &&
+    mv "$fixture_directory/probe.edited" "$fixture_directory/rust/probe.rs"
+git -C "$fixture_directory" add -- c/usearch/probe.h rust/probe.rs
+run_precommit
+expect_acceptance "C struct changed with its Rust mirror"
 
 assert_accepts "vocabulary words, lanes_k and a SIMD lane" include/usearch/probe.hpp <<'FIXTURE'
 /** Awaits the shards it picked, never a join of a dirty pool. */
@@ -4787,6 +4978,7 @@ stage_fixture_verbatim CONTRIBUTING.md <<'FIXTURE'
 | the nodes a walk has met and the ones it still has to expand | visited, frontier | met, seen, queue |
 | device row storage | flat matrix, flat column | plane |
 | a sharded index's shard, the thread it claims and the work it hands out | shard, thread, partition | pool, seat, deal, landed |
+| who owns what a call reads | owner; the caller allocates, valid until final | lent, lend, lends, lending, lender, borrow, borrowed, borrows, borrowing, loan, loans, loaned, lease, leases, leased |
 | a member of a plan, cursor or walk | what it holds and when it holds it | bits, current, state, data, flags, tmp, scratch, bitset, buffer |
 FIXTURE
 run_precommit

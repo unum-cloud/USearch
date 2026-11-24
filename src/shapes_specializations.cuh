@@ -62,7 +62,7 @@ auto shapes_metric_factory(usearch_shapes_metric_t metric) noexcept {
  *  Checkpoints and refinements serve an index of one shard. */
 template <nk::shapes_dtype scalar_type_, cpu_class_t cpu_class_>
 struct shapes_ram_variant {
-    using executor_t = util::forkunion_executor_t;
+    using executor_t = util::ram_executor_t;
     template <typename word_type_>
     using atomic_ref = typename atomic_ref_for_cpu_class<cpu_class_>::template type<word_type_>;
     using scalar_t = scalar_type_;
@@ -334,7 +334,7 @@ struct shapes_nvme_variant {
     using codec_t = us::shapes::codec<kit_t>;
     using metric_t = us::shapes::shapes_metric<kit_t, thread_allocator_t>;
     using index_t = basic::nvme_indexes<codec_t, util::uuid128_t, util::u32_t, typename kit_t::distance_t,
-                                        default_io_engine_t, row_kit_of<cpu_class_>,
+                                        default_io_queue_t, row_kit_of<cpu_class_>,
                                         atomic_ref_for_cpu_class<cpu_class_>::template type, waiter_of<cpu_class_>>;
     static constexpr cpu_class_t cpu_class_k = cpu_class_;
     static constexpr nk_dtype_t dtype_k = scalar_type_::dtype();

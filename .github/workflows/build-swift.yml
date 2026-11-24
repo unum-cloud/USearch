@@ -1,7 +1,7 @@
 name: Build Swift Artifacts
 
 # The XCFramework and the artifact bundle `Package.swift` links, zipped as the release ships them. `mint-release.sh`
-# dispatches this with the version the release commit will carry, so the headers and the bundle carry it too.
+# dispatches this with the version the release commit will hold, so the headers and the bundle hold it too.
 on:
   workflow_call:
     inputs:
@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version the release commit will carry"
+        description: "Version the release commit will hold"
         type: string
         required: true
 

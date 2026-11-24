@@ -141,7 +141,7 @@ struct utf8_haswell_levenshtein_kit_t {
 };
 #else
 
-/** The kits this build cannot carry, kept so @c levenshtein_ladder stays one list rather than a run
+/** The kits this build leaves out, kept so @c levenshtein_ladder stays one list rather than a run
  *  of preprocessor branches. */
 struct u8_haswell_levenshtein_kit_t {
     static constexpr sz_capability_t capability_k = sz_cap_haswell_k;
@@ -172,7 +172,7 @@ struct utf8_skylake_levenshtein_kit_t {
 };
 #else
 
-/** The kits this build cannot carry, kept so @c levenshtein_ladder stays one list rather than a run
+/** The kits this build leaves out, kept so @c levenshtein_ladder stays one list rather than a run
  *  of preprocessor branches. */
 struct u8_skylake_levenshtein_kit_t {
     static constexpr sz_capability_t capability_k = sz_cap_skylake_k;
@@ -205,7 +205,7 @@ struct utf8_icelake_levenshtein_kit_t {
 };
 #else
 
-/** The kits this build cannot carry, kept so @c levenshtein_ladder stays one list rather than a run
+/** The kits this build leaves out, kept so @c levenshtein_ladder stays one list rather than a run
  *  of preprocessor branches. */
 struct u8_icelake_levenshtein_kit_t {
     static constexpr sz_capability_t capability_k = sz_cap_icelake_k;
@@ -236,7 +236,7 @@ struct utf8_neon_levenshtein_kit_t {
 };
 #else
 
-/** The kits this build cannot carry, kept so @c levenshtein_ladder stays one list rather than a run
+/** The kits this build leaves out, kept so @c levenshtein_ladder stays one list rather than a run
  *  of preprocessor branches. */
 struct u8_neon_levenshtein_kit_t {
     static constexpr sz_capability_t capability_k = sz_cap_neon_k;
@@ -267,7 +267,7 @@ struct utf8_powervsx_levenshtein_kit_t {
 };
 #else
 
-/** The kits this build cannot carry, kept so @c levenshtein_ladder stays one list rather than a run
+/** The kits this build leaves out, kept so @c levenshtein_ladder stays one list rather than a run
  *  of preprocessor branches. */
 struct u8_powervsx_levenshtein_kit_t {
     static constexpr sz_capability_t capability_k = sz_cap_powervsx_k;
@@ -334,7 +334,7 @@ struct u8_haswell_overlap_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c overlap_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c overlap_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct u8_haswell_overlap_kit_t {
     static constexpr sz_capability_t capability_k = sz_cap_haswell_k;
@@ -353,7 +353,7 @@ struct u8_skylake_overlap_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c overlap_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c overlap_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct u8_skylake_overlap_kit_t {
     static constexpr sz_capability_t capability_k = sz_cap_skylake_k;
@@ -371,7 +371,7 @@ struct u8_neon_overlap_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c overlap_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c overlap_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct u8_neon_overlap_kit_t {
     static constexpr sz_capability_t capability_k = sz_cap_neon_k;
@@ -389,7 +389,7 @@ struct u8_powervsx_overlap_kit_t {
 };
 #else
 
-/** The kit this build cannot carry, kept so @c overlap_ladder stays one list rather than a run of
+/** The kit this build leaves out, kept so @c overlap_ladder stays one list rather than a run of
  *  preprocessor branches. */
 struct u8_powervsx_overlap_kit_t {
     static constexpr sz_capability_t capability_k = sz_cap_powervsx_k;
@@ -656,7 +656,7 @@ class overlap_metric {
      *  engine; grows to the longest query seen. */
     growing_buffer<char, allocator_t> prepared_;
 
-    /** The widths windows are taken at, all sharing one B-tree, borrowed from @ref init's
+    /** The widths windows are taken at, all sharing one B-tree, viewed from @ref init's
      *  caller. */
     std::span<std::size_t const> window_widths_;
 
@@ -681,7 +681,7 @@ class overlap_metric {
      *  @param[in] staging_limit How many candidates one round may hold before @c push refuses; at least the
      *      index's round capacity, @c max(fan_out × connectivity, connectivity + 1), or rounds saturate rather
      *      than fail.
-     *  @param[in] window_widths Window widths in bytes, all sharing one B-tree, borrowed until the
+     *  @param[in] window_widths Window widths in bytes, all sharing one B-tree, read until the
      *      metric dies; a width past a text contributes nothing.
      *
      *  @par Statuses:
@@ -1120,7 +1120,7 @@ struct packed_skylake_needleman_wunsch_kit_t {
 #endif
 #else
 
-/** The kit this build cannot carry, kept so @c needleman_wunsch_ladder stays one list rather than a
+/** The kit this build leaves out, kept so @c needleman_wunsch_ladder stays one list rather than a
  *  run of preprocessor branches. */
 struct packed_skylake_needleman_wunsch_kit_t {
     static constexpr sz_capability_t capability_k = sz_cap_skylake_k;
@@ -1273,7 +1273,7 @@ struct packed_haswell_needleman_wunsch_kit_t {
 #endif
 #else
 
-/** The kit this build cannot carry, kept so @c needleman_wunsch_ladder stays one list rather than a
+/** The kit this build leaves out, kept so @c needleman_wunsch_ladder stays one list rather than a
  *  run of preprocessor branches. */
 struct packed_haswell_needleman_wunsch_kit_t {
     static constexpr sz_capability_t capability_k = sz_cap_haswell_k;
@@ -1409,7 +1409,7 @@ struct packed_neon_needleman_wunsch_kit_t {
 #endif
 #else
 
-/** The kit this build cannot carry, kept so @c needleman_wunsch_ladder stays one list rather than a
+/** The kit this build leaves out, kept so @c needleman_wunsch_ladder stays one list rather than a
  *  run of preprocessor branches. */
 struct packed_neon_needleman_wunsch_kit_t {
     static constexpr sz_capability_t capability_k = sz_cap_neon_k;
@@ -1560,7 +1560,7 @@ struct packed_powervsx_needleman_wunsch_kit_t {
 #endif
 #else
 
-/** The kit this build cannot carry, kept so @c needleman_wunsch_ladder stays one list rather than a
+/** The kit this build leaves out, kept so @c needleman_wunsch_ladder stays one list rather than a
  *  run of preprocessor branches. */
 struct packed_powervsx_needleman_wunsch_kit_t {
     static constexpr sz_capability_t capability_k = sz_cap_powervsx_k;
@@ -1597,7 +1597,7 @@ struct needleman_wunsch_ladder<caps_> {
  *  @c reset unpacks the query's codes, @c push stages candidate views, and @c drain scores the
  *  round in ascending length order. One instance belongs to one thread and owns the staging, the
  *  order and the kit's scratch, which grows to the longest query and candidate seen; the costs are
- *  borrowed from @ref init's caller.
+ *  viewed from @ref init's caller.
  *
  *  @tparam kit_type_ The kernel of one ISA backend, as @c needleman_wunsch_ladder picks it.
  *  @tparam allocator_type_ places every buffer, one set per metric.
@@ -1615,7 +1615,7 @@ class needleman_wunsch_metric {
 
   private:
 
-    /** The folded table and gap cost, borrowed until the metric dies. */
+    /** The folded table and gap cost, read until the metric dies. */
     needleman_wunsch_costs_t const* costs_ = nullptr;
 
     /** The query's codes, one byte apiece. */
@@ -1646,7 +1646,7 @@ class needleman_wunsch_metric {
      *  @param[in] staging_limit How many candidates one round may hold before @c push refuses; at
      *      least the index's round capacity, @c max(fan_out × connectivity, connectivity + 1), or
      *      rounds saturate rather than fail. A round is bounded to @c u32_t slots by design.
-     *  @param[in] costs A folded table, borrowed until the metric dies.
+     *  @param[in] costs A folded table, read until the metric dies.
      *
      *  @par Statuses:
      *  - @c config_mismatch_k @p staging_limit is zero or past @c u32_t slots, or @p costs is not

@@ -35,24 +35,29 @@ pub fn build(b: *std.Build) void {
     // which leaves a GCC-built archive short.
     //
     // The brute-force stand-in publishes the same name in a directory of its own, which is what
-    // lets `-Dlib-dir=build/stub` run this binding's tests without building the engine at all.
+    // lets `-Dstub` run this binding's tests against `build/stub` without building the engine at
+    // all; the stand-in runs every call at submission, so the tests read the same option.
+    const stub = b.option(bool, "stub", "Link the brute-force stand-in from `build/stub`") orelse false;
     const library_directories = b.option([]const []const u8, "lib-dir", "Directory holding the engine library; repeatable") orelse
-        &[_][]const u8{"build_release"};
+        if (stub) &[_][]const u8{"build/stub"} else &[_][]const u8{"build_release"};
+    const options = b.addOptions();
+    options.addOption(bool, "stub", stub);
     const library_names = b.option([]const []const u8, "lib", "Engine library to link; repeatable") orelse
         &[_][]const u8{"usearch_shared"};
 
     // The binding itself, which a dependent imports. It declares the C ABI with `extern fn`, so it
-    // carries the link directives too - importing it should not mean relinking it by hand.
+    // holds the link directives too - importing it should not mean relinking it by hand.
     const module = b.addModule("usearch", .{
         .root_source_file = b.path("zig/usearch.zig"),
         .target = target,
         .optimize = optimize,
     });
+    module.addOptions("build_options", options);
     link(b, module, library_directories, library_names);
 
-    // The same sources archived. An archive resolves no symbols, so it carries no link
-    // directives and compiles every declaration without the engine on disk - which is what makes
-    // a bare `zig build` a compile check.
+    // The same sources archived. An archive resolves no symbols, so it holds no link directives and
+    // compiles every declaration without the engine on disk - which is what makes a bare `zig
+    // build` a compile check.
     const library = b.addLibrary(.{
         .name = "usearch",
         .linkage = .static,
@@ -62,10 +67,11 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    library.root_module.addOptions("build_options", options);
     b.installArtifact(library);
 
     // The tests link the engine, because a test binary has to resolve every `extern fn` the
-    // module declares - `-Dlib-dir` may point them at the brute-force stand-in. The engine-free
+    // module declares - `-Dstub` points them at the brute-force stand-in. The engine-free
     // check is a bare `zig build`, which archives the same sources and resolves nothing.
     const test_step = b.step("test", "Run binding tests");
     const tests = b.addTest(.{
@@ -75,6 +81,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    tests.root_module.addOptions("build_options", options);
     link(b, tests.root_module, library_directories, library_names);
     const run_tests = b.addRunArtifact(tests);
     test_step.dependOn(&run_tests.step);

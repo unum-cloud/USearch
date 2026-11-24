@@ -10,7 +10,7 @@
  *  of its rank, so a few cities hold most places and most towns a handful, scattered over a few
  *  kilometres. Queries are the last observations, kept out of the index, and match entries recorded
  *  at any time, so a relation judges positions and view cones alone; the exact scan tests every
- *  sight line over the terrain the index borrows. A VRAM index places its shards over the devices
+ *  sight line over the terrain the index views. A VRAM index places its shards over the devices
  *  `USEARCH_DEVICES` names, and an NVMe run builds in RAM, saves a checkpoint and searches a view.
  *
  *  @verbatim
@@ -143,7 +143,7 @@ int bench_geospatial_index_search(int argc, char const* const* argv) {
         observations = places;
     }
 
-    // A terrain is borrowed in place from its file by the index.
+    // A terrain is viewed in place from its file by the index.
     mapped_rows_t terrain_file;
     usearch_geospatial_terrain_t terrain {};
     if (!terrain_path.empty()) {

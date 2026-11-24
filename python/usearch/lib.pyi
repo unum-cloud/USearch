@@ -98,7 +98,7 @@ def version() -> str:
     ...
 
 def capabilities_compiled() -> str:
-    """The kernel families this build carries."""
+    """The kernel families this build holds."""
     ...
 
 def capabilities_available() -> str:
@@ -305,7 +305,7 @@ class CPUClass(IntEnum):
     SERIAL = 1
     """The portable floor: no SIMD assumptions."""
     MONOVERSIONED = 2
-    """The one class of a monoversioned build, carrying every capability its floor implies."""
+    """The one class of a monoversioned build, holding every capability its floor implies."""
     INTEL_HASWELL = 3
     """Haswell-class x86: AVX2 and FMA, the 256-bit floor."""
     INTEL_SIERRA = 4
@@ -497,25 +497,14 @@ class Executor:
         *,
         memory_domains: Sequence[int] | None = None,
         cpu_class_ceiling: CPUClass | None = None,
+        scratch_limit: int = 0,
     ) -> Executor:
         """Spawns host worker threads for a RAM-resident index."""
         ...
 
     @classmethod
-    def on_pool(
-        cls,
-        pool: int,
-        /,
-        *,
-        memory_domains: Sequence[int] | None = None,
-        cpu_class_ceiling: CPUClass | None = None,
-    ) -> Executor:
-        """Drives RAM-resident indexes on a thread pool the caller owns."""
-        ...
-
-    @classmethod
     def for_vram(cls, *, devices: Sequence[int] | None = None, gpu_class_ceiling: GPUClass | None = None) -> Executor:
-        """Opens one stream per device for a VRAM-resident index."""
+        """Opens one non-blocking stream per device for a VRAM-resident index, created and destroyed with it."""
         ...
 
     @classmethod
@@ -526,6 +515,7 @@ class Executor:
         paths: Sequence[_PathLike] | None = None,
         nvme_class: NVMeClass | None = None,
         cpu_class_ceiling: CPUClass | None = None,
+        scratch_limit: int = 0,
     ) -> Executor:
         """Opens one submission ring per worker for an NVMe-resident index."""
         ...
@@ -639,7 +629,7 @@ class DenseProducts(_ArrowOutput):
         ...
 
     def query(self, query: int, /) -> tuple[_ArenaBuffer, _ArenaBuffer]:
-        """The (keys, scores) of left row or query `query`, viewing the arena. Python-only."""
+        """The (keys, scores) of left row or query `query`, using the arena. Python-only."""
         ...
 
     def __len__(self) -> int: ...
@@ -880,7 +870,7 @@ class On[IndexT]:
           memory_limit (int, optional): Bytes a loaded NVMe handle holds for the part it
             rewrites; 0 derives what rounds that part in RAM.
           progress (callable, optional): Called with (completed, total) units of each phase;
-            returning False stops the round, None carries on.
+            returning False stops the round, None continues.
           progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
           stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
           plan (DenseRefinePlan, optional): The round to open or continue; None runs one round
@@ -988,7 +978,7 @@ class On[IndexT]:
             callback re-enters Python, so it runs under the GIL and serializes the walk.
             A `Batch` answers many keys per call instead.
           progress (callable, optional): Called with (completed, total) queries; returning
-            False stops the batch and raises `CancelledError`, None carries on.
+            False stops the batch and raises `CancelledError`, None continues.
           progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
           stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
 
@@ -1122,7 +1112,7 @@ class On[IndexT]:
     ) -> DenseProducts:
         """Approximate sparse product of a matrix against the indexed vectors - the linear algebra
         sibling of `search`, reporting every pair the traversal scored rather than only the
-        nearest. Pairs arrive in traversal order rather than sorted, and carry no duplicates.
+        nearest. Pairs arrive in traversal order rather than sorted, and hold no duplicates.
         How many a walk scores is known only once it ends, so the pairs come back ragged.
 
         Args:
@@ -1134,7 +1124,7 @@ class On[IndexT]:
             factor widens the emitted pattern, being what the walk's breadth decides.
           dtype (Scalar, optional): Names the left-hand scalar type when the buffer cannot.
           progress (callable, optional): Called with (completed, total) rows; returning False
-            stops the batch and raises `CancelledError`, None carries on.
+            stops the batch and raises `CancelledError`, None continues.
           progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
           stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
 
@@ -1176,7 +1166,7 @@ class On[IndexT]:
           queries (buffer): A (Q, dimensions) matrix; row `t * head_count + h` is head `h`
             of token `t`.
           values (buffer): An (N, dimensions) matrix of value rows, as wide as the keys and
-            stored in the index's quantization, borrowed until the call is final.
+            stored in the index's quantization, read until the call is final.
           row_of (callable): Called with each scored Key, answers its row of `values`. None, or
             a row outside them, refuses the call with `ShapeMismatchError`, as do values of
             another width or scalar type. It re-enters Python from the library's threads, so it
@@ -1200,7 +1190,7 @@ class On[IndexT]:
             without its partition is a number nothing can rescale, which is why they travel as
             one row.
           progress (callable, optional): Called with (completed, total) tokens; returning
-            False stops the batch and raises `CancelledError`, None carries on.
+            False stops the batch and raises `CancelledError`, None continues.
           progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
           stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
 
@@ -1251,7 +1241,7 @@ class On[IndexT]:
             of its vectors are scored, so a rejected document never scores.
             A `Batch` answers many keys per call instead.
           progress (callable, optional): Called with (completed, total) queries; returning
-            False stops the batch and raises `CancelledError`, None carries on.
+            False stops the batch and raises `CancelledError`, None continues.
           progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
           stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
 
@@ -1311,7 +1301,7 @@ class On[IndexT]:
             rewrites; 0 derives what rounds that part in RAM.
           seed (int, optional): Picks the part roots of a cut; equal seeds cut equally.
           progress (callable, optional): Called with (completed, total) units of each phase of
-            the closing rounds; returning False stops them, None carries on.
+            the closing rounds; returning False stops them, None continues.
           progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
           stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
           plan (DenseReshardPlan, optional): The reshard to open or continue; None runs it to
@@ -1480,7 +1470,7 @@ class On[IndexT]:
         Args:
           arena (Arena): Where the monolith lands, rewound by the call.
           progress (callable, optional): Called with (completed, total) bytes; returning
-            False stops the write and raises `CancelledError`, None carries on.
+            False stops the write and raises `CancelledError`, None continues.
           progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
 
         Returns:
@@ -1507,10 +1497,9 @@ class On[IndexT]:
     def save_buffer(
         self: On[GeospatialIndex], arena: Arena, /, *, progress: _Progress | None = None, progress_steps: int = 0
     ) -> Monolith: ...
-    def cursor(self: On[DenseIndex], starts: Sequence[_KeyLike] | _Tensor | None = None) -> DenseCursor:
-        """Opens a walk over the stored entries that `DenseCursor.next` pulls in batches, from the
-        `starts` keys in their order when given, or across every entry as stored otherwise.
-        """
+    def next(self: On[DenseCursor], wanted: int, arena: Arena, /, *, links: bool = False) -> DenseBatch:
+        """The next batch of at most `wanted` entries the cursor walks to, in `arena`, blocking on
+        the receiver's executor."""
         ...
 
     def search_stream(
@@ -1716,7 +1705,7 @@ class DeferredOn[IndexT]:
           memory_limit (int, optional): Bytes a loaded NVMe handle holds for the part it
             rewrites; 0 derives what rounds that part in RAM.
           progress (callable, optional): Called with (completed, total) units of each phase;
-            returning False stops the round, None carries on.
+            returning False stops the round, None continues.
           progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
           stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
           plan (DenseRefinePlan, optional): The round to open or continue; None runs one round
@@ -1824,7 +1813,7 @@ class DeferredOn[IndexT]:
             callback re-enters Python, so it runs under the GIL and serializes the walk.
             A `Batch` answers many keys per call instead.
           progress (callable, optional): Called with (completed, total) queries; returning
-            False stops the batch and raises `CancelledError`, None carries on.
+            False stops the batch and raises `CancelledError`, None continues.
           progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
           stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
 
@@ -1962,7 +1951,7 @@ class DeferredOn[IndexT]:
     ) -> Deferred[DenseProducts]:
         """Approximate sparse product of a matrix against the indexed vectors - the linear algebra
         sibling of `search`, reporting every pair the traversal scored rather than only the
-        nearest. Pairs arrive in traversal order rather than sorted, and carry no duplicates.
+        nearest. Pairs arrive in traversal order rather than sorted, and hold no duplicates.
         How many a walk scores is known only once it ends, so the pairs come back ragged.
 
         Args:
@@ -1974,7 +1963,7 @@ class DeferredOn[IndexT]:
             factor widens the emitted pattern, being what the walk's breadth decides.
           dtype (Scalar, optional): Names the left-hand scalar type when the buffer cannot.
           progress (callable, optional): Called with (completed, total) rows; returning False
-            stops the batch and raises `CancelledError`, None carries on.
+            stops the batch and raises `CancelledError`, None continues.
           progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
           stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
 
@@ -2016,7 +2005,7 @@ class DeferredOn[IndexT]:
           queries (buffer): A (Q, dimensions) matrix; row `t * head_count + h` is head `h`
             of token `t`.
           values (buffer): An (N, dimensions) matrix of value rows, as wide as the keys and
-            stored in the index's quantization, borrowed until the call is final.
+            stored in the index's quantization, read until the call is final.
           row_of (callable): Called with each scored Key, answers its row of `values`. None, or
             a row outside them, refuses the call with `ShapeMismatchError`, as do values of
             another width or scalar type. It re-enters Python from the library's threads, so it
@@ -2040,7 +2029,7 @@ class DeferredOn[IndexT]:
             without its partition is a number nothing can rescale, which is why they travel as
             one row.
           progress (callable, optional): Called with (completed, total) tokens; returning
-            False stops the batch and raises `CancelledError`, None carries on.
+            False stops the batch and raises `CancelledError`, None continues.
           progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
           stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
 
@@ -2091,7 +2080,7 @@ class DeferredOn[IndexT]:
             of its vectors are scored, so a rejected document never scores.
             A `Batch` answers many keys per call instead.
           progress (callable, optional): Called with (completed, total) queries; returning
-            False stops the batch and raises `CancelledError`, None carries on.
+            False stops the batch and raises `CancelledError`, None continues.
           progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
           stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
 
@@ -2151,7 +2140,7 @@ class DeferredOn[IndexT]:
             rewrites; 0 derives what rounds that part in RAM.
           seed (int, optional): Picks the part roots of a cut; equal seeds cut equally.
           progress (callable, optional): Called with (completed, total) units of each phase of
-            the closing rounds; returning False stops them, None carries on.
+            the closing rounds; returning False stops them, None continues.
           progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
           stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
           plan (DenseReshardPlan, optional): The reshard to open or continue; None runs it to
@@ -2336,7 +2325,7 @@ class DeferredOn[IndexT]:
         Args:
           arena (Arena): Where the monolith lands, rewound by the call.
           progress (callable, optional): Called with (completed, total) bytes; returning
-            False stops the write and raises `CancelledError`, None carries on.
+            False stops the write and raises `CancelledError`, None continues.
           progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
 
         Returns:
@@ -2697,8 +2686,12 @@ class DenseCursor:
     """A sequential scan over the entries an index holds, pulled in batches by `next`."""
 
     def __new__(cls, *args: object, **keywords: object) -> NoReturn: ...
+    def on(self, executor: Executor, /) -> On[DenseCursor]:
+        """The receiver whose `next` blocks on `executor`; the cursor keeps none."""
+        ...
+
     def next(self, wanted: int, arena: Arena, /, *, links: bool = False) -> DenseBatch:
-        """The next batch of at most `wanted` entries, in `arena`."""
+        """The next batch of at most `wanted` entries, in `arena`, on the calling thread."""
         ...
 
     def close(self) -> None:

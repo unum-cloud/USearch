@@ -8,7 +8,7 @@
  *  The inserters dispense IDs 0 and 1. Each writes its own row's tail relaxed and slot zero with a
  *  release; the second, when it saw the first below the watermark, back-links into row 0. The
  *  saver runs `plan_save` and `finish` under `concurrent_k`. The lock's exchange acquires the
- *  back-link's unlock, which carries its dispense into the re-check, so no fence heads
+ *  back-link's unlock, which holds its dispense into the re-check, so no fence heads
  *  `back_link_neighbors` or the re-check.
  *
  *  - The searcher acquires the watermark and reads every row below it.
@@ -20,7 +20,7 @@
  *  @verify fail rc11 save_locks_rows=false: a save copying without the row locks has no edge to the
  *      back-link's dispense, re-reads the counter stale and settles a row caught locked
  *  @verify pass rc11 save_locks_rows=false back_link_fence=true finish_fence=true: a release fence
- *      heading the back-link and an acquire fence heading the re-check carry the dispense as the
+ *      heading the back-link and an acquire fence heading the re-check hold the dispense as the
  *      locks do, but `refining.pml` needs the locks anyway, so the header spends no fence
  */
 #define thread_count 4

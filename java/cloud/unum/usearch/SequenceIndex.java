@@ -93,7 +93,7 @@ public final class SequenceIndex implements AutoCloseable {
             return code;
         }
 
-        /** Names the kind a code carries; a code this build cannot name becomes UNKNOWN. */
+        /** Names the kind a code holds; a code this build cannot name becomes UNKNOWN. */
         public static SequenceMetric of(int code) {
             for (SequenceMetric candidate : values()) {
                 if (candidate.code == code) {
@@ -142,7 +142,7 @@ public final class SequenceIndex implements AutoCloseable {
         }
 
         /** Copies the weights into the call's memory, answering the pointer C reads, or null for none. */
-        static MemorySegment lend(Call call, @Nullable SequenceWeights weights) {
+        static MemorySegment pass(Call call, @Nullable SequenceWeights weights) {
             if (weights == null) {
                 return MemorySegment.NULL;
             }
@@ -216,7 +216,7 @@ public final class SequenceIndex implements AutoCloseable {
         /** Fills the fields both init structures share, at the same offsets in each. */
         void fill(Call call) {
             call.enumeration(INIT_METRIC, metric.code());
-            call.pointer(INIT_WEIGHTS, SequenceWeights.lend(call, weights));
+            call.pointer(INIT_WEIGHTS, SequenceWeights.pass(call, weights));
             if (windowWidths.length != 0) {
                 call.pointer(INIT_WINDOW_WIDTHS, call.memory.allocateFrom(ValueLayout.JAVA_LONG, windowWidths));
                 call.size(INIT_WINDOW_WIDTHS_COUNT, windowWidths.length);
@@ -433,30 +433,60 @@ public final class SequenceIndex implements AutoCloseable {
     }
 
     /**
-     * A sequential walk over the index contents, pulled blocking on the executor of the receiver that
-     * opened it; the sequences themselves come from {@link SequenceIndex#get}. An overlapping pull
-     * reports CONTENDED.
+     * A sequential walk over the index contents; the sequences themselves come from
+     * {@link SequenceIndex#get}. It keeps no executor: its pulls run on the calling thread, or block on
+     * the executor {@link #on(Executor)} names for each of them. An overlapping pull reports
+     * CONTENDED.
      */
     public static final class SequenceCursor implements AutoCloseable {
 
         private final Handle handle;
         private final SequenceIndex index;
-        private final @Nullable Executor executor;
 
-        SequenceCursor(MemorySegment opened, SequenceIndex index, @Nullable Executor executor) {
+        SequenceCursor(MemorySegment opened, SequenceIndex index) {
             this.handle = new Handle(opened, FAMILY.cursorFree());
             this.index = index;
-            this.executor = executor;
+        }
+
+        /** The receiver whose pulls block on {@code executor}, named again for every pull. Binding-only. */
+        public On on(Executor executor) {
+            return new On(this, executor);
         }
 
         /** Copies the keys of up to {@code wanted} next entries into {@code arena}. Calls {@code usearch_sequence_cursor_next}. */
         public DenseBatch next(long wanted, Arena arena) {
-            return DenseIndex.pulling(FAMILY.cursorNext(), index.handle, executor, handle, wanted, false, arena);
+            return pull(null, wanted, false, arena);
         }
 
         /** Copies up to {@code wanted} next entries, each with the keys it links to. Calls {@code usearch_sequence_cursor_next}. */
         public DenseBatch nextLinks(long wanted, Arena arena) {
-            return DenseIndex.pulling(FAMILY.cursorNext(), index.handle, executor, handle, wanted, true, arena);
+            return pull(null, wanted, true, arena);
+        }
+
+        private DenseBatch pull(@Nullable Executor executor, long wanted, boolean linked, Arena arena) {
+            return DenseIndex.pulling(FAMILY.cursorNext(), index.handle, executor, handle, wanted, linked, arena);
+        }
+
+        /** A cursor's pulls blocking on one executor, contended while another call holds it. */
+        public static final class On {
+
+            private final SequenceCursor cursor;
+            private final Executor executor;
+
+            On(SequenceCursor cursor, Executor executor) {
+                this.cursor = cursor;
+                this.executor = executor;
+            }
+
+            /** Runs {@link SequenceCursor#next(long, Arena)} on this receiver's executor. */
+            public DenseBatch next(long wanted, Arena arena) {
+                return cursor.pull(executor, wanted, false, arena);
+            }
+
+            /** Runs {@link SequenceCursor#nextLinks(long, Arena)} on this receiver's executor. */
+            public DenseBatch nextLinks(long wanted, Arena arena) {
+                return cursor.pull(executor, wanted, true, arena);
+            }
         }
 
         /** Releases the cursor; idempotent. Calls {@code usearch_sequence_cursor_free}. */
@@ -574,12 +604,6 @@ public final class SequenceIndex implements AutoCloseable {
         /** Runs {@link SequenceIndex#saveBuffer} on this receiver's executor. */
         public Monolith saveBuffer(Arena arena) {
             return block(DenseCalls.serializing(FAMILY.saveBuffer(), arena, null));
-        }
-
-        /** Runs {@link SequenceIndex#cursor} on this receiver's executor. */
-        public SequenceCursor cursor(Key... starts) {
-            return block(
-                    BasicCalls.cursorOpening(FAMILY, starts, opened -> new SequenceCursor(opened, index, executor)));
         }
     }
 
@@ -869,7 +893,7 @@ public final class SequenceIndex implements AutoCloseable {
      * {@code starts}. Calls {@code usearch_sequence_cursor_init}.
      */
     public SequenceCursor cursor(Key... starts) {
-        return block(BasicCalls.cursorOpening(FAMILY, starts, opened -> new SequenceCursor(opened, this, null)));
+        return block(BasicCalls.cursorOpening(FAMILY, starts, opened -> new SequenceCursor(opened, this)));
     }
 
     /**
@@ -972,7 +996,7 @@ public final class SequenceIndex implements AutoCloseable {
     public static SequenceIndex viewRam(String path, @Nullable SequenceWeights weights) {
         return create(VIEW_RAM, null, call -> {
             call.path(VIEW_RAM.at("path"), path);
-            call.pointer(VIEW_RAM_WEIGHTS, SequenceWeights.lend(call, weights));
+            call.pointer(VIEW_RAM_WEIGHTS, SequenceWeights.pass(call, weights));
         });
     }
 
@@ -992,7 +1016,7 @@ public final class SequenceIndex implements AutoCloseable {
         return create(VIEW_NVME, executor, call -> {
             call.path(VIEW_NVME.at("path"), path);
             call.nvme(call.arguments, VIEW_NVME.at("nvme"), paths, cpuClassCeiling);
-            call.pointer(VIEW_NVME_WEIGHTS, SequenceWeights.lend(call, weights));
+            call.pointer(VIEW_NVME_WEIGHTS, SequenceWeights.pass(call, weights));
         });
     }
 
@@ -1118,7 +1142,7 @@ public final class SequenceIndex implements AutoCloseable {
             call.vram(call.arguments, LOAD_VRAM.at("vram"), placement, null);
         }
         call.size(ram ? LOAD_RAM_VALUES_PER_KEY : LOAD_VRAM_VALUES_PER_KEY, valuesPerKey);
-        call.pointer(ram ? LOAD_RAM_WEIGHTS : LOAD_VRAM_WEIGHTS, SequenceWeights.lend(call, weights));
+        call.pointer(ram ? LOAD_RAM_WEIGHTS : LOAD_VRAM_WEIGHTS, SequenceWeights.pass(call, weights));
         call.progress(ram ? LOAD_RAM.at("progress") : LOAD_VRAM.at("progress"), progress);
         return call;
     }

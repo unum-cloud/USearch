@@ -84,8 +84,9 @@ struct sequence_search_config_t {
  *      blocks on the calling thread, @c on blocks on an executor, and both answer a @c status_t or
  *      an @c expected, while @c deferred submits to an executor and answers a @c deferred call.
  *
- *  Each verb is written once, filling its C struct with the call's @c outputs. Every
- *  input, handler, plan and arena a deferred call names stays borrowed until it is final.
+ *  Each verb is written once, filling its C struct with the call's @c outputs.
+ *  Every input, handler, plan and arena a deferred call names must stay allocated and unchanged
+ *  until the call is final.
  */
 template <typename receiver_type_>
 class sequence_index {
@@ -113,16 +114,16 @@ class sequence_index {
     }
 
     /** The same handle, whose verbs block on @p executor. */
-    sequence_index<borrowing<usearch_sequence_index_t, usearch_completion_blocking_k>> on(
+    sequence_index<caller_owned<usearch_sequence_index_t, usearch_completion_blocking_k>> on(
         executor_t const& executor) const noexcept {
-        return sequence_index<borrowing<usearch_sequence_index_t, usearch_completion_blocking_k>>(
+        return sequence_index<caller_owned<usearch_sequence_index_t, usearch_completion_blocking_k>>(
             {receiver_.handle(), executor.handle()});
     }
 
     /** The same handle, whose verbs submit to @p executor, each answering a @c deferred call. */
-    sequence_index<borrowing<usearch_sequence_index_t, usearch_completion_deferred_k>> deferred(
+    sequence_index<caller_owned<usearch_sequence_index_t, usearch_completion_deferred_k>> deferred(
         executor_t const& executor) const noexcept {
-        return sequence_index<borrowing<usearch_sequence_index_t, usearch_completion_deferred_k>>(
+        return sequence_index<caller_owned<usearch_sequence_index_t, usearch_completion_deferred_k>>(
             {receiver_.handle(), executor.handle()});
     }
 
@@ -450,7 +451,7 @@ class sequence_index {
     expected<sequence_cursor_t> cursor_init(std::span<usearch_key_t const> starts = {}) const noexcept
         requires owns_handle<receiver_type_>
     {
-        usearch_sequence_cursor_init_t arguments {handle(), nullptr, starts.size(), starts.data(), nullptr};
+        usearch_sequence_cursor_init_t arguments {handle(), nullptr, nullptr, starts.size(), starts.data(), nullptr};
         return opened_<sequence_cursor_t>(usearch_sequence_cursor_init, arguments,
                                           &usearch_sequence_cursor_init_t::cursor);
     }
@@ -461,8 +462,9 @@ class sequence_index {
 /** Owns one sequence index; destruction waits for its deferred calls. */
 using sequence_index_t = sequence_index<owning<usearch_sequence_index_t, usearch_sequence_free>>;
 
-/** A borrowed sequence index and its executor, completing its verbs as @p completion_ says. */
+/** A sequence index its caller owns and the executor its verbs run on, completing them as
+ *  @p completion_ says. */
 template <usearch_completion_t completion_>
-using sequence_index_on = sequence_index<borrowing<usearch_sequence_index_t, completion_>>;
+using sequence_index_on = sequence_index<caller_owned<usearch_sequence_index_t, completion_>>;
 
 } // namespace unum::usearch

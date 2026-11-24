@@ -171,8 +171,8 @@ public final class GeospatialIndex implements AutoCloseable {
 
     /**
      * The elevation every line of sight is tested over: a north-up grid of heights above the WGS-84
-     * ellipsoid, borrowed for the life of every index it is given to, or a dataset path. No
-     * checkpoint carries it, so every load and view names it again. Mirrors
+     * ellipsoid, viewed for the life of every index it is given to, or a dataset path. No
+     * checkpoint holds it, so every load and view names it again. Mirrors
      * {@code usearch_geospatial_terrain_t}, less the fill callback.
      */
     public static final class GeospatialTerrain {
@@ -264,7 +264,7 @@ public final class GeospatialIndex implements AutoCloseable {
                 throw new USearchException(Status.SHAPE_MISMATCH, "the grid overruns the heights");
             }
             if (!heights.isNative()) {
-                throw new USearchException(Status.INVALID_ARGUMENT, "borrowed heights live in native memory");
+                throw new USearchException(Status.INVALID_ARGUMENT, "viewed heights live in native memory");
             }
             return new GeospatialTerrain(
                     rows,
@@ -300,12 +300,12 @@ public final class GeospatialIndex implements AutoCloseable {
             if (terrain.path != null) {
                 call.path(at + TERRAIN_PATH, terrain.path);
             }
-            call.lend(terrain);
+            call.pass(terrain);
         }
     }
 
     /**
-     * The terrain an empty index borrows and the bounds it freezes - the fields
+     * The terrain an empty index views and the bounds it freezes - the fields
      * {@code usearch_geospatial_init_ram_t} and {@code usearch_geospatial_init_vram_t} share. Every
      * setter returns this instance.
      */
@@ -587,30 +587,60 @@ public final class GeospatialIndex implements AutoCloseable {
     }
 
     /**
-     * A sequential walk over the index contents, pulled blocking on the executor of the receiver that
-     * opened it; the observations themselves come from {@link GeospatialIndex#get}. An overlapping pull
-     * reports CONTENDED.
+     * A sequential walk over the index contents; the observations themselves come from
+     * {@link GeospatialIndex#get}. It keeps no executor: its pulls run on the calling thread, or block on
+     * the executor {@link #on(Executor)} names for each of them. An overlapping pull reports
+     * CONTENDED.
      */
     public static final class GeospatialCursor implements AutoCloseable {
 
         private final Handle handle;
         private final GeospatialIndex index;
-        private final @Nullable Executor executor;
 
-        GeospatialCursor(MemorySegment opened, GeospatialIndex index, @Nullable Executor executor) {
+        GeospatialCursor(MemorySegment opened, GeospatialIndex index) {
             this.handle = new Handle(opened, FAMILY.cursorFree());
             this.index = index;
-            this.executor = executor;
+        }
+
+        /** The receiver whose pulls block on {@code executor}, named again for every pull. Binding-only. */
+        public On on(Executor executor) {
+            return new On(this, executor);
         }
 
         /** Copies the keys of up to {@code wanted} next entries into {@code arena}. Calls {@code usearch_geospatial_cursor_next}. */
         public DenseBatch next(long wanted, Arena arena) {
-            return DenseIndex.pulling(FAMILY.cursorNext(), index.handle, executor, handle, wanted, false, arena);
+            return pull(null, wanted, false, arena);
         }
 
         /** Copies up to {@code wanted} next entries, each with the keys it links to. Calls {@code usearch_geospatial_cursor_next}. */
         public DenseBatch nextLinks(long wanted, Arena arena) {
-            return DenseIndex.pulling(FAMILY.cursorNext(), index.handle, executor, handle, wanted, true, arena);
+            return pull(null, wanted, true, arena);
+        }
+
+        private DenseBatch pull(@Nullable Executor executor, long wanted, boolean linked, Arena arena) {
+            return DenseIndex.pulling(FAMILY.cursorNext(), index.handle, executor, handle, wanted, linked, arena);
+        }
+
+        /** A cursor's pulls blocking on one executor, contended while another call holds it. */
+        public static final class On {
+
+            private final GeospatialCursor cursor;
+            private final Executor executor;
+
+            On(GeospatialCursor cursor, Executor executor) {
+                this.cursor = cursor;
+                this.executor = executor;
+            }
+
+            /** Runs {@link GeospatialCursor#next(long, Arena)} on this receiver's executor. */
+            public DenseBatch next(long wanted, Arena arena) {
+                return cursor.pull(executor, wanted, false, arena);
+            }
+
+            /** Runs {@link GeospatialCursor#nextLinks(long, Arena)} on this receiver's executor. */
+            public DenseBatch nextLinks(long wanted, Arena arena) {
+                return cursor.pull(executor, wanted, true, arena);
+            }
         }
 
         /** Releases the cursor; idempotent. Calls {@code usearch_geospatial_cursor_free}. */
@@ -752,12 +782,6 @@ public final class GeospatialIndex implements AutoCloseable {
         public Monolith saveBuffer(Arena arena) {
             return block(DenseCalls.serializing(FAMILY.saveBuffer(), arena, null));
         }
-
-        /** Runs {@link GeospatialIndex#cursor} on this receiver's executor. */
-        public GeospatialCursor cursor(Key... starts) {
-            return block(
-                    BasicCalls.cursorOpening(FAMILY, starts, opened -> new GeospatialCursor(opened, index, executor)));
-        }
     }
 
     /**
@@ -873,7 +897,7 @@ public final class GeospatialIndex implements AutoCloseable {
 
     final Handle handle;
 
-    /** Adopts a created handle, keeping the terrain it borrows reachable until the handle is freed. */
+    /** Adopts a created handle, keeping the terrain it views reachable until the handle is freed. */
     private GeospatialIndex(MemorySegment created, @Nullable GeospatialTerrain terrain) {
         handle = new Handle(created, FAMILY.free(), terrain);
     }
@@ -1097,7 +1121,7 @@ public final class GeospatialIndex implements AutoCloseable {
      * {@code starts}. Calls {@code usearch_geospatial_cursor_init}.
      */
     public GeospatialCursor cursor(Key... starts) {
-        return block(BasicCalls.cursorOpening(FAMILY, starts, opened -> new GeospatialCursor(opened, this, null)));
+        return block(BasicCalls.cursorOpening(FAMILY, starts, opened -> new GeospatialCursor(opened, this)));
     }
 
     /**

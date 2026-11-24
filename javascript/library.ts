@@ -152,7 +152,12 @@ export interface CompiledBatch {
 
 /** A walk whose every pull lands in the arena it is handed. */
 export interface CompiledCursor {
-  next(wanted: number, arena: CompiledArena, links: boolean | undefined): CompiledBatch;
+  next(
+    executor: CompiledExecutor | undefined,
+    wanted: number,
+    arena: CompiledArena,
+    links: boolean | undefined,
+  ): CompiledBatch;
   free(): void;
 }
 
@@ -255,7 +260,7 @@ export interface CompiledIndex {
       stats: CompiledStats | undefined,
     ]
   ): CompiledVectors;
-  cursor(executor: CompiledExecutor | undefined, starts: Uint8Array | BigUint64Array | undefined): CompiledCursor;
+  cursor(starts: Uint8Array | BigUint64Array | undefined): CompiledCursor;
   searchStream(
     ...arguments_: [executor: CompiledExecutor | undefined, ...query: CompiledRows, expansion: number | undefined]
   ): CompiledSearchStream;
@@ -388,7 +393,7 @@ interface CompiledBasicIndex<Description, KeyStats> {
   ): CompiledDraws | CompiledDeferred;
   save(...arguments_: [...On, path: string]): undefined | CompiledDeferred;
   saveBuffer(...arguments_: [...On, arena: CompiledArena]): Uint8Array | CompiledDeferred;
-  cursor(executor: CompiledExecutor | undefined, starts: Uint8Array | BigUint64Array | undefined): CompiledCursor;
+  cursor(starts: Uint8Array | BigUint64Array | undefined): CompiledCursor;
 }
 
 /** The lifecycle and reshard verbs every basic modality's class shares, its creation aside. */

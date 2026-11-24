@@ -659,7 +659,7 @@ struct [[nodiscard]] vram_nvidia_reshard_plan {
         // The source empties once its rows are copied, so its gate comes before anything that a
         // refusal might undo.
         typename vram_indexes_t::unique_lock_t const emptying {source.gate_, std::try_to_lock};
-        if (!emptying) return status_code_t::contended_k;
+        if (!emptying) return {status_code_t::contended_k, "A call holds the reshard source"};
 
         std::size_t const sources = moves.size();
         growing_buffer<ram_load_plan_t, forkunion_allocator_t> plans {target.shards_.allocator()};

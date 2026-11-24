@@ -66,8 +66,7 @@ template <nk_dtype_t dtype_, cpu_class_t cpu_class_>
 using nvme_indexes =
     dense::nvme_indexes<util::uuid128_t, quads_kit_of<dtype_, cpu_class_>, tiles_kit_of<dtype_, cpu_class_>,
                         elementwise_kit_of<cpu_class_>, rmscast_kit_of<dtype_, cpu_class_>, visits_kit_of<cpu_class_>,
-                        default_io_engine_t, atomic_ref_for_cpu_class<cpu_class_>::template type,
-                        waiter_of<cpu_class_>>;
+                        default_io_queue_t, atomic_ref_for_cpu_class<cpu_class_>::template type, waiter_of<cpu_class_>>;
 
 /** The start and end of every dtype's device code one GPU class unit embeds, in pairs in
  *  @c dense_dtypes_t order, as the table CMake writes for the class; each VRAM class unit
@@ -175,12 +174,12 @@ struct dense_scratch<indexes_type_> {
 
     util::growing_buffer<traversal_context_t, thread_allocator_t> traversals;
 
-    explicit dense_scratch(util::forkunion_executor_t& executor) noexcept
+    explicit dense_scratch(util::ram_executor_t& executor) noexcept
         : traversals(thread_allocator_t {executor.arena(0)}) {}
 
     /** Rewinds every arena, keeping the high-water mark of earlier calls, and carves one context
      *  per thread; the verb sizes them. */
-    util::status_t prepare(util::forkunion_executor_t& executor) noexcept {
+    util::status_t prepare(util::ram_executor_t& executor) noexcept {
         if (util::status_t const rewound = executor.reserve(0); failed(rewound)) return rewound;
         if (failed(traversals.reserve_exactly(executor.size()))) return util::status_code_t::out_of_memory_k;
         for (std::size_t thread = 0; thread != executor.size(); ++thread)
@@ -250,6 +249,10 @@ concept loads_checkpoint_sources = requires(index_type_& index, util::checkpoint
                                             typename index_type_::executor_t& executor, progress_ticks_t& ticks) {
     index.load(source, util::load_config_t {}, executor, ticks);
 };
+
+/** Whether @p index_type_ answers if its media read through SPDK, as a loaded NVMe index does. */
+template <typename index_type_>
+concept reports_spdk_reads = requires(index_type_ const& index) { index.reads_spdk(); };
 
 /**
  *  @brief One variant's bodies, every one a static member its verb table points at, taking the
@@ -363,11 +366,16 @@ struct specialized_index {
         if constexpr (viewed_k) return util::status_code_t::read_only_k;
         else if constexpr (is_ram_index<index_type_>) return of(index).emplace(memory_domain);
         else {
-            // Init names devices and no executor yet, so a stream opened for the shard alone
-            // names the device.
+            // Init names devices and no executor yet. A Metal shard keeps a queue of its own, since
+            // Metal orders work only within one queue; CUDA and HIP name the device by its null
+            // legacy stream and open nothing.
             int const device = static_cast<int>(residency.device);
-            auto [executor, status] = executor_t::spawn(driver_of(gpu_drivers(), std::type_identity<executor_t> {}),
-                                                        std::span<int const> {&device, 1});
+            std::span<int const> const devices {&device, 1};
+            auto [executor, status] = std::is_same_v<executor_t, util::metal_executor_t>
+                                          ? executor_t::spawn(
+                                                driver_of(gpu_drivers(), std::type_identity<executor_t> {}), devices)
+                                          : executor_t::on_default_streams(
+                                                driver_of(gpu_drivers(), std::type_identity<executor_t> {}), devices);
             return failed(status) ? status : of(index).emplace(executor.stream(0));
         }
     }
@@ -405,6 +413,10 @@ struct specialized_index {
         else return ram_residency_k;
     }
     static std::size_t shards_count(void const* index) noexcept { return of(index).shards_count(); }
+    static bool reads_spdk(void const* index) noexcept {
+        if constexpr (reports_spdk_reads<index_type_>) return of(index).reads_spdk();
+        else return false;
+    }
     static usearch_load_path_t load_path(void const* index) noexcept {
         if constexpr (requires { of(index).loaded_through(); }) return usearch_load_path_of(of(index).loaded_through());
         else return usearch_load_path_none_k;
@@ -782,11 +794,12 @@ struct specialized_index {
     }
 
     /** Opens a cursor over every entry, breadth-first from @p starts when it names any, which a
-     *  view resolves on its first pull; an index without a cursor answers @c unsupported_k. */
-    static util::expected<void*> cursor_init(void* index, std::span<key_t const> starts) noexcept {
+     *  view resolves on its first pull, its state placed through @p allocator; an index without a
+     *  cursor answers @c unsupported_k. */
+    static util::expected<void*> cursor_init(void* index, std::span<key_t const> starts,
+                                             util::forkunion_allocator_t allocator) noexcept {
         if constexpr (walks_cursors<index_t>) {
-            typename index_t::cursor_t* const opened = new (std::nothrow)
-                typename index_t::cursor_t(util::forkunion_allocator_t {util::no_memory_domain_k});
+            typename index_t::cursor_t* const opened = new (std::nothrow) typename index_t::cursor_t(allocator);
             if (!opened) return {nullptr, util::status_code_t::out_of_memory_k};
             if (util::status_t const walking = opened->open(of(index), starts); failed(walking))
                 return delete opened, util::expected<void*> {nullptr, walking};
@@ -865,6 +878,7 @@ struct specialized_index {
             .geometry = &geometry,
             .residency = &residency,
             .shards_count = &shards_count,
+            .reads_spdk = &reads_spdk,
             .load_path = &load_path,
             .size = &size,
             .capacity = &capacity,
@@ -914,7 +928,7 @@ struct specialized_index {
  *  On RAM it does where its 4-way or tiles kit differs from the class it degrades to, or its
  *  ForkUnion mask does; on NVMe where its kit alone differs, as a storage walk shares a few
  *  counters and never waits, so its parent's reference serves; on a device always, since each
- *  class's unit alone carries kernels for its generation. The serial floor always compiles its
+ *  class's unit alone holds kernels for its generation. The serial floor always compiles its
  *  variants, and so does the monoversioned class, which has no parent; elsewhere a variant a class
  *  drops is its parent's, which the ladder reaches on the next rung.
  */

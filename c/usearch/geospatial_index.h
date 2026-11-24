@@ -46,8 +46,8 @@
  *  @section geospatial_index_terrain Terrain
  *
  *  A handle may test lines of sight over a terrain given at its creation, as a
- *  @c usearch_geospatial_terrain_t: a north-up grid of heights, borrowed in place or filled on
- *  demand by the caller. A checkpoint never carries it, so every load and view names it again.
+ *  @c usearch_geospatial_terrain_t: a north-up grid of heights, read in place or filled on
+ *  demand by the caller. A checkpoint never holds it, so every load and view names it again.
  *  A sight line clears the terrain by the least gap between it and the heights it crosses, with
  *  the Earth's curvature and the refraction of light folded in.
  *
@@ -212,7 +212,7 @@ typedef void (*usearch_geospatial_terrain_callback_t)(size_t first_row, size_t f
 
 /**
  *  @brief The elevation every line of sight is tested over: a north-up geographic grid of
- *      heights, given by exactly one of a borrowed buffer, a fill callback or a dataset path.
+ *      heights, given by exactly one of a caller's buffer, a fill callback or a dataset path.
  *
  *  A zeroed terrain means none. Heights are metres above the WGS-84 ellipsoid, like observation
  *  altitudes, so orthometric grids such as the Copernicus DEM's need the geoid's height added
@@ -239,7 +239,7 @@ typedef struct usearch_geospatial_terrain_t {
     /** The step between columns, in degrees, positive. */
     double column_step_degrees;
 
-    /** The whole grid, row-major, borrowed for the handle's lifetime. */
+    /** The whole grid, row-major, read in place for the handle's lifetime. */
     float const* heights;
 
     /** The bytes between consecutive rows of @c heights; zero means packed. */
@@ -284,7 +284,7 @@ typedef struct usearch_geospatial_init_ram_t {
  *  @brief Creates an empty, mutable geospatial index in host memory.
  *
  *  @par Statuses:
- *  - @c usearch_status_invalid_argument_k A terrain both borrowing @c heights and naming a
+ *  - @c usearch_status_invalid_argument_k A terrain both pointing at @c heights and naming a
  *    @c callback, or a @c cpu_class_ceiling no class takes.
  *  - @c usearch_status_unsupported_k A terrain @c path, which no residency reads yet, or a
  *    @c cpu_class_ceiling below every compiled class this CPU runs.
@@ -319,14 +319,14 @@ typedef struct usearch_geospatial_init_vram_t {
  *  @brief Creates an empty, mutable geospatial index in device memory.
  *
  *  @par Statuses:
- *  - @c usearch_status_invalid_argument_k A terrain both borrowing @c heights and naming a
+ *  - @c usearch_status_invalid_argument_k A terrain both pointing at @c heights and naming a
  *    @c callback, or a @c gpu_class_ceiling no class takes.
  *  - @c usearch_status_unsupported_k A terrain @c path or @c callback, a @c values_per_key bound,
  *    devices that load no class under @c gpu_class_ceiling, or an Apple GPU, which no geospatial
  *    kernel serves to the f64 contract.
  *  - @c usearch_status_config_mismatch_k Devices of two classes, or a terrain whose row or column
  *    step is not positive.
- *  - @c usearch_status_device_k A device past the listing, one this build carries no kernels for,
+ *  - @c usearch_status_device_k A device past the listing, one this build holds no kernels for,
  *    or a build without GPU kernels.
  */
 USEARCH_EXPORT void usearch_geospatial_init_vram(usearch_geospatial_init_vram_t* arguments);
@@ -355,7 +355,7 @@ typedef struct usearch_geospatial_load_ram_t {
     /** Observations one key may hold at most, which no checkpoint records; zero is unbounded. */
     size_t values_per_key;
 
-    /** The @b optional terrain lines of sight are tested over, which no checkpoint carries. */
+    /** The @b optional terrain lines of sight are tested over, which no checkpoint holds. */
     usearch_geospatial_terrain_t terrain;
 
     /** The @b optional handler, called with parts placed and their count. */
@@ -372,8 +372,8 @@ typedef struct usearch_geospatial_load_ram_t {
  *
  *  @par Statuses:
  *  - @c usearch_status_invalid_argument_k An empty @c path, a checkpoint or part path that does not
- *    parse, a terrain both borrowing @c heights and naming a @c callback, or a @c cpu_class_ceiling
- *    no class takes.
+ *    parse, a terrain both pointing at @c heights and naming a @c callback, or a
+ *    @c cpu_class_ceiling no class takes.
  *  - @c usearch_status_malformed_k The checkpoint lists no part, or a part, its header, columns or
  *    sums do not parse.
  *  - @c usearch_status_unsupported_k A terrain @c path, or a @c cpu_class_ceiling below every
@@ -412,7 +412,7 @@ typedef struct usearch_geospatial_load_ram_buffer_t {
     /** Observations one key may hold at most, which no checkpoint records; zero is unbounded. */
     size_t values_per_key;
 
-    /** The @b optional terrain lines of sight are tested over, which no checkpoint carries. */
+    /** The @b optional terrain lines of sight are tested over, which no checkpoint holds. */
     usearch_geospatial_terrain_t terrain;
 
     /** The @b optional handler, called with parts placed and their count. */
@@ -426,7 +426,7 @@ typedef struct usearch_geospatial_load_ram_buffer_t {
  *  bytes through a mapping, so @c buffer needs no file behind it, and a mapped file no copy.
  *
  *  @par Statuses:
- *  - @c usearch_status_invalid_argument_k An empty @c buffer, a terrain both borrowing @c heights
+ *  - @c usearch_status_invalid_argument_k An empty @c buffer, a terrain both pointing at @c heights
  *    and naming a @c callback, or a @c cpu_class_ceiling no class takes.
  *  - @c usearch_status_malformed_k The manifest lists no part, or a part, its header, columns or
  *    sums do not parse.
@@ -466,7 +466,7 @@ typedef struct usearch_geospatial_load_vram_t {
     /** Observations one key may hold at most, which no checkpoint records; zero is unbounded. */
     size_t values_per_key;
 
-    /** The @b optional terrain lines of sight are tested over, which no checkpoint carries. */
+    /** The @b optional terrain lines of sight are tested over, which no checkpoint holds. */
     usearch_geospatial_terrain_t terrain;
 
     /** The @b optional handler, called with parts placed and their count. */
@@ -479,8 +479,8 @@ typedef struct usearch_geospatial_load_vram_t {
  *
  *  @par Statuses:
  *  - @c usearch_status_invalid_argument_k An empty @c path, a checkpoint or part path that does not
- *    parse, a terrain both borrowing @c heights and naming a @c callback, or a @c gpu_class_ceiling
- *    no class takes.
+ *    parse, a terrain both pointing at @c heights and naming a @c callback, or a
+ *    @c gpu_class_ceiling no class takes.
  *  - @c usearch_status_malformed_k The checkpoint lists no part, or a part, its header, columns or
  *    sums do not parse.
  *  - @c usearch_status_unsupported_k A terrain @c path or @c callback, a @c values_per_key bound,
@@ -489,7 +489,7 @@ typedef struct usearch_geospatial_load_vram_t {
  *  - @c usearch_status_config_mismatch_k Devices of two classes, a terrain whose row or column
  *    step is not positive, the executor driving no stream on some shard's device, or the
  *    checkpoint's columns differing from the shards' in dtype, shape or key width.
- *  - @c usearch_status_device_k An ordinal past the listing, devices this build carries no kernels
+ *  - @c usearch_status_device_k An ordinal past the listing, devices this build holds no kernels
  *    for, a build without GPU kernels, or an executor that is not a VRAM executor.
  *  - @c usearch_status_contended_k Another call holds the executor.
  *  - @c usearch_status_overflow_k A part passes a shard's bound or its key multimap.
@@ -522,7 +522,7 @@ typedef struct usearch_geospatial_load_vram_buffer_t {
     /** Observations one key may hold at most, which no checkpoint records; zero is unbounded. */
     size_t values_per_key;
 
-    /** The @b optional terrain lines of sight are tested over, which no checkpoint carries. */
+    /** The @b optional terrain lines of sight are tested over, which no checkpoint holds. */
     usearch_geospatial_terrain_t terrain;
 
     /** The @b optional handler, called with parts placed and their count. */
@@ -534,7 +534,7 @@ typedef struct usearch_geospatial_load_vram_buffer_t {
  *      reporting and cancelling like @c usearch_geospatial_load_vram.
  *
  *  @par Statuses:
- *  - @c usearch_status_invalid_argument_k An empty @c buffer, a terrain both borrowing @c heights
+ *  - @c usearch_status_invalid_argument_k An empty @c buffer, a terrain both pointing at @c heights
  *    and naming a @c callback, or a @c gpu_class_ceiling no class takes.
  *  - @c usearch_status_malformed_k The manifest lists no part, or a part, its header, columns or
  *    sums do not parse.
@@ -544,7 +544,7 @@ typedef struct usearch_geospatial_load_vram_buffer_t {
  *  - @c usearch_status_config_mismatch_k Devices of two classes, a terrain whose row or column
  *    step is not positive, the executor driving no stream on some shard's device, or the
  *    checkpoint's columns differing from the shards' in dtype, shape or key width.
- *  - @c usearch_status_device_k An ordinal past the listing, devices this build carries no kernels
+ *  - @c usearch_status_device_k An ordinal past the listing, devices this build holds no kernels
  *    for, a build without GPU kernels, or an executor that is not a VRAM executor.
  *  - @c usearch_status_contended_k Another call holds the executor.
  *  - @c usearch_status_overflow_k A part passes a shard's bound or its key multimap.
@@ -563,7 +563,7 @@ typedef struct usearch_geospatial_view_ram_t {
     /** Checkpoint path - a monolith, or a manifest naming many. */
     usearch_bytes_view_t path;
 
-    /** The @b optional terrain lines of sight are tested over, which no checkpoint carries. */
+    /** The @b optional terrain lines of sight are tested over, which no checkpoint holds. */
     usearch_geospatial_terrain_t terrain;
 
     /** The class to dispatch as; a view reads its shards from the checkpoint, so only
@@ -577,8 +577,8 @@ typedef struct usearch_geospatial_view_ram_t {
  *
  *  @par Statuses:
  *  - @c usearch_status_invalid_argument_k An empty @c path, a checkpoint or part path that does not
- *    parse, a terrain both borrowing @c heights and naming a @c callback, or a @c cpu_class_ceiling
- *    no class takes.
+ *    parse, a terrain both pointing at @c heights and naming a @c callback, or a
+ *    @c cpu_class_ceiling no class takes.
  *  - @c usearch_status_malformed_k The checkpoint lists no part, or a part or its header does not
  *    parse.
  *  - @c usearch_status_config_mismatch_k A terrain whose row or column step is not positive.
@@ -608,7 +608,7 @@ typedef struct usearch_geospatial_view_nvme_t {
     /** The devices the parts are served from; naming none serves each where its manifest points. */
     usearch_nvme_options_t nvme;
 
-    /** The @b optional terrain lines of sight are tested over, which no checkpoint carries. */
+    /** The @b optional terrain lines of sight are tested over, which no checkpoint holds. */
     usearch_geospatial_terrain_t terrain;
 } usearch_geospatial_view_nvme_t;
 
@@ -622,7 +622,7 @@ typedef struct usearch_geospatial_view_nvme_t {
  *  @par Statuses:
  *  - @c usearch_status_device_k @c executor is not an NVMe executor.
  *  - @c usearch_status_invalid_argument_k An empty @c path, @c NULL paths for a nonzero count, a
- *    path that does not parse or names a base off its medium's block, a terrain both borrowing
+ *    path that does not parse or names a base off its medium's block, a terrain both pointing at
  *    @c heights and naming a @c callback, or a @c cpu_class_ceiling no class takes.
  *  - @c usearch_status_malformed_k The manifest names no part, or a manifest, header or row
  *    directory does not parse.
@@ -1307,6 +1307,10 @@ typedef struct usearch_geospatial_cursor_init_t {
     /** The handle to be scanned. */
     usearch_geospatial_index_t index;
 
+    /** The @b optional executor whose first thread's memory domain holds the cursor's state;
+     *  @c NULL keeps it on no domain. */
+    usearch_executor_t executor;
+
     /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
@@ -1376,8 +1380,8 @@ typedef struct usearch_geospatial_cursor_next_t {
  *      links to, in the order @c usearch_geospatial_cursor_init describes; the observations
  *      themselves come from @c usearch_geospatial_get.
  *
- *  Links name only entries the snapshot holds, as the graph stored them when the pull ran. The
- *  keys are copied rather than borrowed from the index, so the batch stays valid until the next
+ *  Links name only entries the snapshot holds, as the graph stored them when the pull ran. The keys
+ *  are copied rather than read in place from the index, so the batch stays valid until the next
  *  call given the same arena, however the cursor moves meanwhile.
  *
  *  @par Statuses:

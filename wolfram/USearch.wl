@@ -32,8 +32,7 @@ Executor::usage = "Executor[id] owns the threads, streams or submission rings ve
 Arena::usage = "Arena[id] holds the outputs a verb writes, rewound by every call writing into it and freed once nothing references it."
 
 ExecutorForRam::usage = "ExecutorForRam[] spawns host worker threads for RAM-resident indexes. \"MemoryDomains\" lists the NUMA nodes to place shards on, {} deriving every node the process may allocate on, and \"Threads\" is how many threads to spawn, 0 taking 7/8 of the cores those nodes carry."
-ExecutorOnPool::usage = "ExecutorOnPool[pool] drives RAM-resident indexes on the ForkUnion thread pool at address pool, which the caller owns. \"MemoryDomains\" lists the NUMA nodes to place shards on, {} deriving every node the process may allocate on."
-ExecutorForVram::usage = "ExecutorForVram[] opens one stream per device for VRAM-resident indexes. \"Devices\" lists the device ordinals to place shards on, {} picking device zero; \"Streams\" lends existing streams, one per device, {} creating its own; and \"ScratchLimit\" caps the memory each stream carves scratch and outputs from, past which a call fails with \"out-of-memory\", 0 letting it grow as needed."
+ExecutorForVram::usage = "ExecutorForVram[] orders work on one stream per device for VRAM-resident indexes. \"Devices\" lists the device ordinals to place shards on, {} picking device zero; \"Streams\" is declared for your streams, one per device, which answer \"unsupported\", since the executor drives only its own, {} using the one stream per device the executor opens; and \"ScratchLimit\" caps the memory each stream carves scratch and outputs from, past which a call fails with \"out-of-memory\", 0 letting it grow as needed."
 ExecutorForNvme::usage = "ExecutorForNvme[] opens one submission ring per worker for NVMe-resident indexes. \"Paths\" lists the devices or directories to serve shards from, {} leaving every shard where its manifest points, and \"Threads\" is how many workers to spawn, 0 deriving it from the devices' queues."
 ExecutorDrain::usage = "ExecutorDrain[executor, mood] waits until no call holds the executor, then sets what idle workers do: \"parked\", the default, or \"spinning\"."
 ArenaInit::usage = "ArenaInit[] makes an arena for verb outputs, placed where its \"Executor\" computes; None, the default, holds host memory for calls on the calling thread."
@@ -147,7 +146,7 @@ GeospatialSaveBuffer::usage = "GeospatialSaveBuffer[receiver, arena] saves the i
 GeospatialDescribe::usage = "GeospatialDescribe[receiver] reports the index's frozen connectivity and its current counters."
 
 VersionName::usage = "VersionName[] gives the library's semantic version."
-CapabilitiesCompiled::usage = "CapabilitiesCompiled[] lists the kernel families this build carries."
+CapabilitiesCompiled::usage = "CapabilitiesCompiled[] lists the kernel families this build holds."
 CapabilitiesAvailable::usage = "CapabilitiesAvailable[] lists the kernel families this machine can run."
 
 Begin["`Private`"]
@@ -165,15 +164,14 @@ receivingRows[name_String, before_List, after_List] := Quiet[<|
     NumericArray -> receiving[name, Join[before, {{LibraryDataType[NumericArray], "Shared"}, Boolean}, after]]|>,
     LibraryFunction::overload]
 
-lent = {LibraryDataType[NumericArray], "Shared"};
+passed = {LibraryDataType[NumericArray], "Shared"};
 weights = Sequence["Boolean", {LibraryDataType[NumericArray], "Constant"}, Integer];
-bytesTape = Sequence[lent, {Integer, 1, "Shared"}];
+bytesTape = Sequence[passed, {Integer, 1, "Shared"}];
 pointsTape = Sequence[{Real, 2, "Shared"}, {Integer, 1, "Shared"}];
 observed = Sequence[{Real, 2, "Constant"}, {Integer, 2, "Constant"}];
 reshardLists = Sequence["DataStore", "DataStore", Integer, Integer, Integer, Integer];
 
 executorForRam = verb["ExecutorForRam", {Integer, "DataStore", Integer}];
-executorOnPool = verb["ExecutorOnPool", {Integer, "DataStore", Integer}];
 executorForVram = verb["ExecutorForVram", {Integer, "DataStore", "DataStore", Integer}];
 executorForNvme = verb["ExecutorForNvme", {Integer, "DataStore", Integer}];
 executorDrain = verb["ExecutorDrain", {Integer, "UTF8String"}];
@@ -198,7 +196,7 @@ denseMetadataRead = verb["DenseMetadataRead", {Integer, "UTF8String"}];
 denseMetadataReadBuffer = verb["DenseMetadataReadBuffer", {Integer, LibraryDataType[NumericArray]}];
 denseReserve = receiving["DenseReserve", {Integer}];
 denseClear = receiving["DenseClear", {}];
-denseInsert = receivingRows["DenseInsert", {lent}, {Integer}];
+denseInsert = receivingRows["DenseInsert", {passed}, {Integer}];
 denseRefine = receiving["DenseRefine", {Integer, Integer, Integer}];
 denseRefinePlanFinish = receiving["DenseRefinePlanFinish", {Integer}];
 denseReshard = receiving["DenseReshard", {"DataStore", "DataStore", "Boolean", "DataStore", "Boolean", "DataStore",
@@ -213,8 +211,8 @@ denseSave = receiving["DenseSave", {"UTF8String"}];
 denseSaveBuffer = receiving["DenseSaveBuffer", {Integer}];
 denseDescribe = receiving["DenseDescribe", {}];
 denseMultiply = receivingRows["DenseMultiply", {}, {Integer, Integer, Integer}];
-denseValues = receivingRows["DenseValues", {lent}, {}];
-denseAttend = receivingRows["DenseAttend", {}, {lent, lent, "UTF8String", Integer, Integer, Integer, Integer, Real}];
+denseValues = receivingRows["DenseValues", {passed}, {}];
+denseAttend = receivingRows["DenseAttend", {}, {passed, passed, "UTF8String", Integer, Integer, Integer, Integer, Real}];
 
 sequenceInitRam = verb["SequenceInitRam", {Integer, "UTF8String", weights, "DataStore", Integer, Integer, "DataStore"}];
 sequenceInitVram = verb["SequenceInitVram", {Integer, "UTF8String", weights, "DataStore", Integer, Integer, "DataStore"}];
@@ -230,7 +228,7 @@ sequenceMetadataRead = verb["SequenceMetadataRead", {Integer, "UTF8String"}];
 sequenceMetadataReadBuffer = verb["SequenceMetadataReadBuffer", {Integer, LibraryDataType[NumericArray]}];
 sequenceReserve = receiving["SequenceReserve", {Integer, Integer}];
 sequenceClear = receiving["SequenceClear", {}];
-sequenceInsert = receiving["SequenceInsert", {lent, bytesTape, Integer}];
+sequenceInsert = receiving["SequenceInsert", {passed, bytesTape, Integer}];
 sequenceRefine = receiving["SequenceRefine", {Integer, Integer, Integer}];
 sequenceRefinePlanFinish = receiving["SequenceRefinePlanFinish", {Integer}];
 sequenceReshard = receiving["SequenceReshard", {reshardLists}];
@@ -257,7 +255,7 @@ shapesMetadataRead = verb["ShapesMetadataRead", {Integer, "UTF8String"}];
 shapesMetadataReadBuffer = verb["ShapesMetadataReadBuffer", {Integer, LibraryDataType[NumericArray]}];
 shapesReserve = receiving["ShapesReserve", {Integer, Integer}];
 shapesClear = receiving["ShapesClear", {}];
-shapesInsert = receiving["ShapesInsert", {lent, pointsTape, Integer}];
+shapesInsert = receiving["ShapesInsert", {passed, pointsTape, Integer}];
 shapesRefine = receiving["ShapesRefine", {Integer, Integer, Integer}];
 shapesRefinePlanFinish = receiving["ShapesRefinePlanFinish", {Integer}];
 shapesReshard = receiving["ShapesReshard", {reshardLists}];
@@ -284,7 +282,7 @@ geospatialMetadataRead = verb["GeospatialMetadataRead", {Integer, "UTF8String"}]
 geospatialMetadataReadBuffer = verb["GeospatialMetadataReadBuffer", {Integer, LibraryDataType[NumericArray]}];
 geospatialReserve = receiving["GeospatialReserve", {Integer}];
 geospatialClear = receiving["GeospatialClear", {}];
-geospatialInsert = receiving["GeospatialInsert", {lent, observed, Integer}];
+geospatialInsert = receiving["GeospatialInsert", {passed, observed, Integer}];
 geospatialRefine = receiving["GeospatialRefine", {Integer, Integer, Integer}];
 geospatialRefinePlanFinish = receiving["GeospatialRefinePlanFinish", {Integer}];
 geospatialReshard = receiving["GeospatialReshard", {reshardLists}];
@@ -321,7 +319,7 @@ offsets[lengths_List] := Developer`ToPackedArray[Prepend[Accumulate[lengths], 0]
 sequenceBytes[text_String] := ToCharacterCode[text, "UTF-8"]
 sequenceBytes[bytes_ByteArray] := Normal[bytes]
 sequenceBytes[bytes : {___Integer}] := bytes
-(* No NumericArray or packed matrix holds zero cells, so a tape of empty entries lends one cell its offsets never
+(* No NumericArray or packed matrix holds zero cells, so a tape of empty entries passes one cell its offsets never
    reach. *)
 sequencesTape[sequences_List] := With[{bytes = sequenceBytes /@ sequences},
     {NumericArray[Replace[Join @@ bytes, {} -> {0}], "UnsignedInteger8"], offsets[Length /@ bytes]}]
@@ -404,9 +402,6 @@ PlanProgress[plan_Plan] := call[planProgress, {plan}]
 Options[ExecutorForRam] = {"MemoryDomains" -> {}, "Threads" -> 0};
 ExecutorForRam[OptionsPattern[]] := construct[Executor, executorForRam,
     {store[OptionValue["MemoryDomains"]], OptionValue["Threads"]}]
-Options[ExecutorOnPool] = {"MemoryDomains" -> {}};
-ExecutorOnPool[pool_Integer, OptionsPattern[]] := construct[Executor, executorOnPool,
-    {store[OptionValue["MemoryDomains"]], pool}]
 Options[ExecutorForVram] = {"Devices" -> {}, "Streams" -> {}, "ScratchLimit" -> 0};
 ExecutorForVram[OptionsPattern[]] := construct[Executor, executorForVram,
     {store[OptionValue["Devices"]], store[OptionValue["Streams"]], OptionValue["ScratchLimit"]}]

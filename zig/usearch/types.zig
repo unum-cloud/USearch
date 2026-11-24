@@ -16,7 +16,6 @@
 const std = @import("std");
 
 extern fn usearch_executor_for_ram(arguments: *usearch_executor_for_ram_t) void;
-extern fn usearch_executor_on_pool(arguments: *usearch_executor_on_pool_t) void;
 extern fn usearch_executor_for_nvme(arguments: *usearch_executor_for_nvme_t) void;
 extern fn usearch_executor_for_vram(arguments: *usearch_executor_for_vram_t) void;
 extern fn usearch_executor_drain(arguments: *usearch_executor_drain_t) void;
@@ -58,7 +57,7 @@ extern fn usearch_capabilities_available() [*:0]const u8;
 ///
 /// Non-exhaustive, so a status a newer engine reports arrives intact rather than coerced.
 pub const Status = enum(c_int) {
-    /// The call completed; the outcome's message carries nothing.
+    /// The call completed; the outcome's message holds nothing.
     success = 0,
     /// The call was submitted deferred and is not final yet; the one non-final status.
     deferred = 1,
@@ -96,7 +95,8 @@ pub const Status = enum(c_int) {
     invalid_argument = 17,
     _,
 
-    /// The canonical spelling, "unrecognized" for a value no status carries. Calls `usearch_status_name`.
+    /// The canonical spelling, "unrecognized" for a value no status holds. Calls
+    /// `usearch_status_name`.
     pub fn name(self: Status) [:0]const u8 {
         return std.mem.span(usearch_status_name(self));
     }
@@ -108,10 +108,10 @@ pub const Status = enum(c_int) {
     }
 };
 
-/// One error per final failure status, so `@errorName` carries as much as the status itself does.
+/// One error per final failure status, so `@errorName` holds as much as the status itself does.
 ///
 /// Zig error values hold no payload, so neither the static message nor the symbol that failed can
-/// travel with the error. Lend an `Outcome` as a call's diagnostics, or read `Deferred.message`,
+/// travel with the error. Pass an `Outcome` as a call's diagnostics, or read `Deferred.message`,
 /// where that detail matters.
 ///
 /// One set serves every verb rather than a narrower one per verb: the engine answers each call
@@ -136,10 +136,10 @@ pub const Error = error{
     InvalidArgument,
 };
 
-/// Outcome of one call: a status to branch on, and a static message carrying what the status
+/// Outcome of one call: a status to branch on, and a static message holding what the status
 /// cannot. Mirrors `usearch_outcome_t`, which every verb's argument structure points at.
 ///
-/// Every verb answers `Error!T`, and a caller wanting the message too lends an `Outcome` as the
+/// Every verb answers `Error!T`, and a caller wanting the message too passes an `Outcome` as the
 /// call's diagnostics, which the call's final outcome is copied into. Messages are static and need
 /// no deallocation.
 pub const Outcome = extern struct {
@@ -154,14 +154,14 @@ pub const Outcome = extern struct {
         return refuse(self.status);
     }
 
-    /// The static detail the status could not carry; empty where the call reported none.
+    /// The static detail the status could not hold; empty where the call reported none.
     pub fn text(self: Outcome) [:0]const u8 {
         return if (self.message) |message| std.mem.span(message) else "";
     }
 
-    /// Copies the outcome into `diagnostics` where one was lent, then lifts it as `check` does.
+    /// Copies the outcome into `diagnostics` where one was passed, then lifts it as `check` does.
     pub fn checkInto(self: Outcome, diagnostics: ?*Outcome) Error!void {
-        if (diagnostics) |lent| lent.* = self;
+        if (diagnostics) |passed| passed.* = self;
         return self.check();
     }
 };
@@ -194,9 +194,9 @@ pub fn refuse(status: Status) Error {
     };
 }
 
-/// `refuse`, leaving the binding's own `message` in `diagnostics` where one was lent.
+/// `refuse`, leaving the binding's own `message` in `diagnostics` where one was passed.
 pub fn refuseInto(diagnostics: ?*Outcome, status: Status, message: [*:0]const u8) Error {
-    if (diagnostics) |lent| lent.* = .{ .status = status, .message = message };
+    if (diagnostics) |passed| passed.* = .{ .status = status, .message = message };
     return refuse(status);
 }
 
@@ -334,7 +334,7 @@ pub const Scalar = enum(c_int) {
         };
     }
 
-    /// Logical dimensions one stored value carries: more than one for the packed kinds. Binding-only.
+    /// Logical dimensions one stored value holds: more than one for the packed kinds. Binding-only.
     pub fn dimensionsPerValue(self: Scalar) usize {
         return switch (self) {
             .i4x2, .u4x2 => 2,
@@ -396,7 +396,7 @@ pub const Traversal = enum(c_int) {
     }
 };
 
-/// A borrowed run of bytes and its length, never null-terminated by contract - the shape every
+/// A viewed run of bytes and its length, never null-terminated by contract - the shape every
 /// string argument arrives in. Mirrors `usearch_bytes_view_t`.
 pub const BytesView = extern struct {
     /// Base pointer of the run; null names an absent argument.
@@ -404,7 +404,7 @@ pub const BytesView = extern struct {
     /// Bytes the run covers.
     length: usize,
 
-    /// Borrows a slice as the view the C interface accepts - no terminator, no copy.
+    /// Views a slice as the view the C interface accepts - no terminator, no copy.
     pub fn of(bytes: []const u8) BytesView {
         return .{ .data = bytes.ptr, .length = bytes.len };
     }
@@ -418,7 +418,7 @@ const usearch_keys_view_t = extern struct {
     /// Bytes between consecutive keys; zero repeats the first.
     stride: usize = 0,
 
-    /// Borrows a packed slice as the view the C interface accepts.
+    /// Views a packed slice as the view the C interface accepts.
     pub fn of(keys: []const Key) usearch_keys_view_t {
         return .{ .data = keys.ptr, .stride = @sizeOf(Key) };
     }
@@ -439,7 +439,7 @@ const usearch_rows_view_t = extern struct {
     }
 };
 
-/// A borrowed run of rows - the batch currency every modality's row inputs take, mirroring
+/// A viewed run of rows - the batch currency every modality's row inputs take, mirroring
 /// `usearch_rows_view_t` with the row count it leaves to the call.
 ///
 /// One vector is a one-row run, so a caller never packs a special case. `rows` is the batch axis a
@@ -448,7 +448,7 @@ const usearch_rows_view_t = extern struct {
 pub const RowsView = struct {
     /// Base pointer of the first row.
     data: ?*const anyopaque,
-    /// Rows the run carries.
+    /// Rows the run holds.
     rows: usize,
     /// Logical scalars per row, as the caller counts them - dimensions, never bytes.
     columns: usize,
@@ -539,7 +539,7 @@ pub const Matches = struct {
     }
 };
 
-/// Borrows `length` elements from `first` on, of a run a call wrote into an arena; a failed or
+/// Views `length` elements from `first` on, of a run a call wrote into an arena; a failed or
 /// empty call leaves the run null. Binding-only.
 pub fn outputSlice(comptime Element: type, data: ?[*]const Element, first: usize, length: usize) []const Element {
     return if (length == 0) &.{} else data.?[first..][0..length];
@@ -605,7 +605,8 @@ pub const Admission = enum(c_int) {
     admit = 1,
 };
 
-/// Whether the operation a handler is watching carries on or unwinds. Mirrors `usearch_continuation_t`.
+/// Whether the operation a handler is watching continues or unwinds. Mirrors
+/// `usearch_continuation_t`.
 pub const Continuation = enum(c_int) {
     /// Carry on to the next unit of work.
     @"continue" = 0,
@@ -618,7 +619,7 @@ pub const ProgressFunction = *const fn (usize, usize, ?*anyopaque) callconv(.c) 
 /// Mirrors `usearch_predicate_callback_t`.
 pub const PredicateFunction = *const fn ([*]const Key, [*]Admission, usize, ?*anyopaque) callconv(.c) void;
 
-/// A progress handler as the C interface carries it: a `usearch_progress_callback_t` and the state
+/// A progress handler as the C interface holds it: a `usearch_progress_callback_t` and the state
 /// forwarded into it. Build one with `ProgressCallback.of`; the default reports nowhere.
 pub const ProgressCallback = struct {
     callback: ?ProgressFunction = null,
@@ -681,7 +682,7 @@ pub const abi = struct {
     pub const load_path_name = usearch_load_path_name;
 };
 
-/// How costly one predicate call is, which decides how many keys each call carries.
+/// How costly one predicate call is, which decides how many keys each call holds.
 pub const PredicateCost = enum(c_int) {
     /// Asked as candidates arrive, at most four keys a call, with nothing buffered.
     cheap = 0,
@@ -696,7 +697,7 @@ pub const Predicate = extern struct {
     callback: ?PredicateFunction = null,
     /// Opaque pointer forwarded into every `callback` call.
     state: ?*anyopaque = null,
-    /// How many keys each `callback` call carries.
+    /// How many keys each `callback` call holds.
     cost: PredicateCost = .cheap,
 
     /// Wraps `admits` in a trampoline generated per call site, asking it about each key of a batch.
@@ -822,13 +823,7 @@ const usearch_executor_for_ram_t = extern struct {
     outcome: *Outcome,
     ram: usearch_ram_options_t,
     threads: usize,
-};
-
-const usearch_executor_on_pool_t = extern struct {
-    executor: *?*anyopaque,
-    outcome: *Outcome,
-    ram: usearch_ram_options_t,
-    pool: ?*anyopaque,
+    scratch_limit: usize = 0,
 };
 
 const usearch_executor_for_vram_t = extern struct {
@@ -843,9 +838,12 @@ const usearch_executor_for_nvme_t = extern struct {
     executor: *?*anyopaque,
     outcome: *Outcome,
     nvme: usearch_nvme_options_t,
+    ram: usearch_ram_options_t = .{},
     threads: usize,
     nvme_class: usearch_nvme_class_t = 0,
+    scratch_limit: usize = 0,
 };
+
 
 const usearch_arena_init_t = extern struct {
     arena: *?*anyopaque,
@@ -874,16 +872,10 @@ const usearch_executor_drain_t = extern struct {
 pub const ExecutorForRamConfig = struct {
     /// The memory domains of the indexes it will drive; empty derives every node the process may use.
     memory_domains: []const i32 = &.{},
-    /// Threads to spawn; zero takes 7/8 of the cores those domains carry.
+    /// Threads to spawn; zero takes 7/8 of the cores those domains hold.
     threads: usize = 0,
-    /// Where the call's final outcome, its static message included, is copied; null copies nothing.
-    diagnostics: ?*Outcome = null,
-};
-
-/// Optional settings of `Executor.onPool`, mirroring `usearch_executor_on_pool_t`.
-pub const ExecutorOnPoolConfig = struct {
-    /// The memory domains of the indexes it will drive; empty derives every node the process may use.
-    memory_domains: []const i32 = &.{},
+    /// The ceiling on each thread's scratch bytes; zero takes 1 GiB.
+    scratch_limit: usize = 0,
     /// Where the call's final outcome, its static message included, is copied; null copies nothing.
     diagnostics: ?*Outcome = null,
 };
@@ -892,7 +884,8 @@ pub const ExecutorOnPoolConfig = struct {
 pub const ExecutorForVramConfig = struct {
     /// The devices of the indexes it will drive; empty derives one free device.
     devices: []const i32 = &.{},
-    /// Borrowed CUDA streams, one per device in `devices` order; null creates its own.
+    /// The caller's CUDA streams, one per device in `devices` order, which answer `unsupported`
+    /// until they are wired; null uses the one non-blocking stream per device the executor opens.
     streams: ?[]const ?*anyopaque = null,
     /// The ceiling on scratch bytes per device; zero lets scratch grow as geometry asks.
     scratch_limit: usize = 0,
@@ -906,6 +899,8 @@ pub const ExecutorForNvmeConfig = struct {
     paths: []const BytesView = &.{},
     /// Threads to spawn, one submission ring apiece; zero derives from the devices' queue capabilities.
     threads: usize = 0,
+    /// The ceiling on each thread's scratch bytes; zero takes 1 GiB.
+    scratch_limit: usize = 0,
     /// Where the call's final outcome, its static message included, is copied; null copies nothing.
     diagnostics: ?*Outcome = null,
 };
@@ -928,7 +923,7 @@ pub const Executor = struct {
     /// Creates an executor of host threads for RAM-resident indexes across the domains local to
     /// `memory_domains`, which should be the very slice the indexes were placed with.
     ///
-    /// Zero `threads` takes 7/8 of the cores those domains carry, because full occupancy starves
+    /// Zero `threads` takes 7/8 of the cores those domains hold, because full occupancy starves
     /// the ordered publication path. Calls `usearch_executor_for_ram`.
     pub fn forRam(config: ExecutorForRamConfig) Error!Executor {
         var handle: ?*anyopaque = null;
@@ -938,24 +933,9 @@ pub const Executor = struct {
             .outcome = &outcome,
             .ram = .of(config.memory_domains),
             .threads = config.threads,
+            .scratch_limit = config.scratch_limit,
         };
         usearch_executor_for_ram(&arguments);
-        return adopt(handle, outcome, config.diagnostics);
-    }
-
-    /// Creates a RAM executor over a borrowed ForkUnion `fu_pool_t`, so several libraries in one
-    /// process share one set of threads; the pool must outlive the executor, and keeps its lender's
-    /// mood. Calls `usearch_executor_on_pool`.
-    pub fn onPool(pool: *anyopaque, config: ExecutorOnPoolConfig) Error!Executor {
-        var handle: ?*anyopaque = null;
-        var outcome: Outcome = .{};
-        var arguments: usearch_executor_on_pool_t = .{
-            .executor = &handle,
-            .outcome = &outcome,
-            .ram = .of(config.memory_domains),
-            .pool = pool,
-        };
-        usearch_executor_on_pool(&arguments);
         return adopt(handle, outcome, config.diagnostics);
     }
 
@@ -969,17 +949,19 @@ pub const Executor = struct {
             .outcome = &outcome,
             .nvme = .of(config.paths),
             .threads = config.threads,
+            .scratch_limit = config.scratch_limit,
         };
         usearch_executor_for_nvme(&arguments);
         return adopt(handle, outcome, config.diagnostics);
     }
 
-    /// Opens one submission stream on every named device, or borrows `streams`, one CUDA stream
-    /// per device in `devices` order, all driven by whichever host thread submits.
+    /// Opens one non-blocking stream on every named device, created and destroyed with the
+    /// executor, all driven by whichever host thread submits; caller `streams` answer
+    /// `unsupported` until they are wired.
     /// Calls `usearch_executor_for_vram`.
     pub fn forVram(config: ExecutorForVramConfig) Error!Executor {
         // C reads one stream per device and has no count of its own to check them against.
-        if (config.streams) |borrowed| if (borrowed.len != config.devices.len)
+        if (config.streams) |viewed| if (viewed.len != config.devices.len)
             return refuseInto(config.diagnostics, .shape_mismatch, "The streams must number one per device");
         var handle: ?*anyopaque = null;
         var outcome: Outcome = .{};
@@ -987,7 +969,7 @@ pub const Executor = struct {
             .executor = &handle,
             .outcome = &outcome,
             .vram = .of(config.devices),
-            .streams = if (config.streams) |borrowed| borrowed.ptr else null,
+            .streams = if (config.streams) |viewed| viewed.ptr else null,
             .scratch_limit = config.scratch_limit,
         };
         usearch_executor_for_vram(&arguments);
@@ -1022,7 +1004,7 @@ pub const Executor = struct {
 /// Memory the library writes every output whose length scales with a call into - matches, rows,
 /// products, monoliths and cursor batches - mirroring `usearch_arena_t`.
 ///
-/// Every verb writing such outputs borrows one as `*Arena`, blocking or deferred alike. Each call
+/// Every verb writing such outputs views one as `*Arena`, blocking or deferred alike. Each call
 /// rewinds it, ending the previous call's views, and refills it, growing only past its high-water
 /// mark, so a steady loop allocates once. An arena serves one call at a time: a second use while a
 /// call holds it fails with `Error.Contended` and leaves that call's views alone.
@@ -1036,7 +1018,7 @@ pub const Arena = struct {
     handle: ?*anyopaque,
 
     /// Makes an arena where `executor` computes, decided once, or host pages for calls on the
-    /// calling thread when null; host pages may outlive the executor, a GPU arena may not.
+    /// calling thread when null; every arena is freed before its executor.
     /// Calls `usearch_arena_init`.
     pub fn init(executor: ?Executor) Error!Arena {
         var arena: Arena = .{ .handle = null };

@@ -32,7 +32,7 @@
 #include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the default reference
 
 #include <numkong/shapes.hpp> // `nk::shapes_packed`
-#include <numkong/tensor.hpp> // `nk::matrix_view` - a stored shape's borrowed points
+#include <numkong/tensor.hpp> // `nk::matrix_view` - the points of a stored entry
 
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/ram_device.hpp"        // `forkunion_allocator` - the default placement
@@ -131,7 +131,7 @@ struct codec {
     /** What @ref view hands out for a stored shape. */
     using view_t = nk::matrix_view<scalar_t>;
 
-    /** The @b [points,3] coordinates a stored @p shape holds, borrowed: every whole point its bytes
+    /** The @b [points,3] coordinates a stored @p shape holds, viewed: every whole point its bytes
      *  hold. */
     view_t view(bytes_view_t shape) const noexcept {
         std::span<scalar_t const> const coordinates = elements_of<scalar_t>(shape);

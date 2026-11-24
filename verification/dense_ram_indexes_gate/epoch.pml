@@ -16,11 +16,11 @@
  *  @verify fail rc11 exit_fence=false: without it, a reader that read the writer's new shard-1
  *      watermark still re-reads the even epoch it started at and validates the old shard-0
  *      watermark beside it, counting the row on neither shard
- *  @verify fail rc11 window_fence=false: without it, the rewrites carry no view of the odd epoch, so
+ *  @verify fail rc11 window_fence=false: without it, the rewrites hold no view of the odd epoch, so
  *      the reader's acquire fence moves its exit read nowhere and a torn pair validates
  *  @verify fail rc11 epoch_order=order_relaxed: both relaxed, a reader that starts at the window's
  *      even epoch reads a stale watermark beside a new one, and its exit read finds the same epoch
- *  @verify fail rc11 epoch_order=order_release: a relaxed entry load of the closing epoch carries
+ *  @verify fail rc11 epoch_order=order_release: a relaxed entry load of the closing epoch holds
  *      the window's rewrites only to the exit fence, after the reads it should have covered
  *  @verify fail rc11 epoch_order=order_acquire: the reader acquires the even epoch without the
  *      rewrites before it

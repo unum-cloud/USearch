@@ -287,7 +287,7 @@ enum class recall_reference_t {
  *  @brief One collection of @p count strings of about @p length bytes, held out @p queries_count
  *      queries, built on the GPU with @p node_id_type_ IDs and in RAM alike.
  *
- *  Every match the GPU reports must carry the pair's exact distance, ascending, and under
+ *  Every match the GPU reports must hold the pair's exact distance, ascending, and under
  *  @p reference the GPU's recall at ten must reach the RAM index's at the same breadth, give or
  *  take a twentieth.
  */

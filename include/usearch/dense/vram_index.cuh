@@ -25,7 +25,7 @@
 #include <numbers>     // `std::numbers::log2e_v` - the base-2 softmax
 #include <type_traits> // `std::conditional_t` - a builder's frontier by its rung
 
-#include <numkong/capabilities.h> // `nk_kernel_kind_t` - the views carry the metric
+#include <numkong/capabilities.h> // `nk_kernel_kind_t` - the views name the metric
 #include <numkong/types.h>        // the vendor detection the cast below tests before including it
 #include <numkong/cast/simt.cuh>  // `nk_cast_unit_simt_` - a gathered row's cast
 
@@ -748,7 +748,7 @@ __device__ __forceinline__ u32_t vram_keep_diverse( //
     using warp_t = typename schedule_::warp_t;
     u32_t* const selected_ids = selection.selected_ids;
     u32_t selected_count = 0, staged_through = 0;
-    // Rolled: unrolled, every candidate would carry its own pairwise dot and metric dispatch.
+    // Rolled: unrolled, every candidate would get its own pairwise dot and metric dispatch.
 #pragma unroll 1
     for (u32_t order = 0; order < candidates_count && selected_count < storage.connectivity; ++order) {
         u32_t const candidate_index = sorted_candidates.at(order).id() & position_mask;
@@ -882,7 +882,7 @@ struct vram_build_view {
     u32_t end_id;
 
     /** Bytes of the per-warp dynamic-shared slice: the query span, grown to fit the candidate
-     *  cache and the re-selection spans; zero when the arena shape carries them instead. */
+     *  cache and the re-selection spans; zero when the arena shape holds them instead. */
     u32_t scratch_bytes_per_warp;
 
     /** Candidates the launch's warps cache, as the host sized them: all of an insert's walk
@@ -3536,7 +3536,7 @@ struct vram_restitch_view {
     vram_scored_node<node_id_t>* mates;
 
     /** Candidates a warp's selection caches, its row last, and the bytes of its slice of the
-     *  block's shared memory, zero when its arena slice carries it. */
+     *  block's shared memory, zero when its arena slice holds it. */
     u32_t selection_nodes;
     u32_t scratch_bytes_per_warp;
     byte_t* arena;

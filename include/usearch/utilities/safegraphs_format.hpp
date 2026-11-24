@@ -285,7 +285,7 @@ struct safegraphs_header_t {
 
 /** Reads @p value into @p extent, answering false where this host cannot address it. A
  *  checkpoint written where pointers are wider may name an extent past @c size_t, and
- *  truncating it would pass every later check carrying a plausible wrong number. */
+ *  truncating it would pass every later check holding a plausible wrong number. */
 inline bool safegraphs_addressable_(u64_t value, std::size_t& extent) noexcept {
     if (value > (std::numeric_limits<std::size_t>::max)()) return false;
     extent = static_cast<std::size_t>(value);
@@ -301,7 +301,7 @@ struct safegraphs_prefix_t {
 };
 static_assert(sizeof(safegraphs_prefix_t) == 16, "The prefix is read and written as sixteen raw bytes");
 
-/** Trampolines a byte allocator into @c yyjson_alc; each block carries its size in a
+/** Trampolines a byte allocator into @c yyjson_alc; each block holds its size in a
  *  max-aligned prefix, since yyjson frees by pointer alone. */
 template <typename allocator_type_>
 struct safegraphs_yyjson_allocator_ {
@@ -518,7 +518,7 @@ expected<safegraphs_header_t> safegraphs_read_header(
 }
 
 /** Builds the header's JSON document; null when an allocation failed. A regular column
- *  carries its shape, an irregular one its prefix-sum buffer, and both their data pair. */
+ *  holds its shape, an irregular one its prefix-sum buffer, and both their data pair. */
 inline yyjson_mut_doc* safegraphs_header_document_(safegraphs_header_t const& header,
                                                    std::span<safegraphs_custom_field_t const> custom_fields,
                                                    yyjson_alc const& allocator_abi) noexcept {
@@ -1279,7 +1279,7 @@ expected<safegraphs_metadata_t> safegraphs_read_metadata(std::string_view path,
 }
 
 /** One monolith of a checkpoint a load lists: where it is, what its header says, and the metric
- *  token its metadata carries. */
+ *  token its metadata holds. */
 struct safegraphs_catalog_part_t {
 
     /** The relative path's characters inside the catalog's paths; empty names the checkpoint path
@@ -1313,7 +1313,7 @@ status_t safegraphs_keep_path(growing_buffer<char, allocator_type_>& buffer, std
  *
  *  @par Statuses:
  *  - @c malformed_k The header does not parse.
- *  - @c malformed_k The header spans more bytes than the part carries.
+ *  - @c malformed_k The header spans more bytes than the part holds.
  */
 template <typename allocator_type_>
 status_t safegraphs_describe_part(safegraphs_catalog_part_t& part, bytes_view_t leading,
@@ -1425,7 +1425,7 @@ status_t safegraphs_catalog(std::string_view path, growing_buffer<mapped_file_t,
     return status_code_t::success_k;
 }
 
-/** The ordinal of host memory beside the vendor ordinals a device's memory carries, as the CUDA and
+/** The ordinal of host memory beside the vendor ordinals a device's memory holds, as the CUDA and
  *  HIP runtimes number the host. */
 inline constexpr int host_device_k = -1;
 
@@ -1601,7 +1601,7 @@ constexpr column_shape_t safegraphs_value_shape() noexcept {
     else return scalar_shape_t {};
 }
 
-/** Whether every value of a codec occupies the same bytes, so its column carries no prefix
+/** Whether every value of a codec occupies the same bytes, so its column holds no prefix
  *  sums; a codec that declares no shape writes a tape, which always does. */
 template <typename codec_type_>
 constexpr bool safegraphs_value_is_fixed() noexcept {
@@ -1659,7 +1659,7 @@ expected<safegraphs_index_layout_t> safegraphs_index_layout(std::size_t nodes, s
     header.key.dtype = key_dtype;
     header.key.data = {0, nodes * sizeof(key_type_)};
 
-    // A fixed shape is a regular column; anything else carries element prefix sums before its rows.
+    // A fixed shape is a regular column; anything else holds element prefix sums before its rows.
     safegraphs_column_t& value = header.value;
     value.dtype = value_dtype;
     value.shape = shape;
@@ -1692,7 +1692,7 @@ expected<safegraphs_index_layout_t> safegraphs_index_layout(std::size_t nodes, s
     return {layout, status_code_t::success_k};
 }
 
-/** The custom fields a columned index's monolith carries: the metric, the producer, and
+/** The custom fields a columned index's monolith holds: the metric, the producer, and
  *  the caller's provenance. */
 template <typename allocator_type_>
 status_t safegraphs_index_fields_(growing_buffer<safegraphs_custom_field_t, allocator_type_>& fields,
@@ -1739,7 +1739,7 @@ expected<std::size_t> safegraphs_storage_requirements(index_type_& index, codec_
  *  @brief Frames a columned index as one monolith: a regular key column, a value column shaped
  *      by the codec, and a ragged neighbors column, the metric in the metadata.
  *
- *  A target lending its bytes in place hands the plan its data segment directly, so regions write
+ *  A target passing its bytes in place hands the plan its data segment directly, so regions write
  *  zero-copy; any other target stages the segment and writes it once. The index counts value bytes,
  *  the interchange counts elements, so the value prefix sums stage beside the segment and are
  *  written re-expressed once every region finished. The header is written last, so a failed or
@@ -2138,7 +2138,7 @@ status_t safegraphs_load_columns_(index_type_& index, safegraphs_saved_columns<n
  *      dtype and shape before any payload byte, the index is reserved when it has no capacity,
  *      and regions decode in parallel.
  *
- *  A source lending its bytes in place hands the plan its data segment directly; any other
+ *  A source passing its bytes in place hands the plan its data segment directly; any other
  *  source stages the segment in one read. The interchange counts elements and the index bytes,
  *  so the value prefix sums are re-expressed on the way in - synthesized for a fixed shape,
  *  scaled from the header's sums otherwise. Neighbors load from ragged rows or from fixed-degree
@@ -2258,9 +2258,9 @@ status_t safegraphs_read_index(bytes_view_t monolith, index_type_& index, codec_
 }
 
 /**
- *  Restores a columned index from the monolith at @p path, mapped read-only; every value is
- *  decoded into its record, so nothing borrows the mapping once this returns. A refusal of
- *  @p codec passes through.
+ *  @brief Restores a columned index from the monolith at @p path, mapped read-only; every value is
+ *      decoded into its record, so nothing views the mapping once this returns. A refusal of
+ *      @p codec passes through.
  *
  *  @par Statuses:
  *  - @c invalid_argument_k The path does not parse.

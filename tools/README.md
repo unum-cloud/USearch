@@ -144,7 +144,7 @@ usearch recall truth.arrow run.arrow --wanted 1,10
 
 ## Arrow Pipes
 
-Vectors, keys, matches and checkpoints all cross a pipe, so object stores are reached through their own tools and USearch carries no network code:
+Vectors, keys, matches and checkpoints all cross a pipe, so object stores are reached through their own tools and USearch holds no network code:
 
 ```sh
 aws s3 cp s3://bucket/base.arrows - | usearch dense insert --input - --keys-column id --save - | aws s3 cp - s3://bucket/index.safegraphs
@@ -275,7 +275,7 @@ Beyond those, the other verbs take only what they move:
   `--hints` reads such a file, one row per query, and every walk starts from the entries under its row's keys ahead of its random draws, so one index's matches seed another's over the same keys; a walk takes as many keys as it makes draws, the connectivity rounded up to whole quads, a view needs a key table for them, and sequence and geospatial refuse them; the throughput line then counts the hint keys no entry holds.
   Dense indexes take hints on every residency but VRAM, and shapes indexes in RAM alone.
   `--output` writes the matches as Arrow in place of printing them: one row per query, its key as `query` and its matches as `matches`, a `LargeList<Struct<key, distance>>`, the keys as `arrow.uuid` and the distances as `float64`.
-  A path ending in `.arrows` and `-`, standard output, take the stream framing, and any other path the file framing; under `-` every step prints to standard error, so standard output carries only Arrow.
+  A path ending in `.arrows` and `-`, standard output, take the stream framing, and any other path the file framing; under `-` every step prints to standard error, so standard output holds only Arrow.
   `--query-keys` names the queries in that file: a `.u128bin` of one key per query, as `--hints` reads them, defaulting to row numbers.
 - `recall` takes `--wanted`, defaulting to `1,10`.
 - `metadata` and `copy` take no flags.

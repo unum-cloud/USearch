@@ -417,7 +417,7 @@ struct vram_amd_indexes {
 #pragma region Checkpoints
 
     /** What a checkpoint does on these shards' devices, for @ref save_shards and @c load_shards:
-     *  every shard's plans on its own stream of @c executor, which carry its keys too, and a load's
+     *  every shard's plans on its own stream of @c executor, which hold its keys too, and a load's
      *  reservation at the connectivity the checkpoint froze. */
     struct checkpoint_residency_t {
         vram_amd_indexes* owner = nullptr;
@@ -681,6 +681,7 @@ struct vram_amd_indexes {
             growing_buffer<health_plan_t, forkunion_allocator_t> checks {shards_.allocator()};
             if (failed(checks.reserve_exactly(traversals.size()))) return {{}, status_code_t::out_of_memory_k};
             for (std::size_t shard = 0; shard != traversals.size(); ++shard) {
+                if (status_t const entered = fanout_t::enter(shards_, shard); failed(entered)) return {{}, entered};
                 graph_t& graph = shards_[shard].index->graph_;
                 traversal_context_t& context = traversals[shard];
                 checks.push_back_reserved(health_plan_t {graph_t::empty_round_scratch_(context)});
@@ -926,7 +927,7 @@ struct vram_amd_indexes {
         growing_buffer<vram_amd_indexes*, forkunion_allocator_t> targets_;
 
         /** A gather's source shards grouped by the live shard taking them in, or a cut's target
-         *  shards grouped by the live shard parting into them, which the shard plans borrow. */
+         *  shards grouped by the live shard parting into them, which the shard plans point at. */
         growing_buffer<index_t*, forkunion_allocator_t> slots_;
         vram_amd_indexes* owner_ = nullptr;
     };
@@ -1163,6 +1164,8 @@ struct vram_amd_indexes {
             return status_code_t::out_of_memory_k;
         plan.owner_ = this;
         for (std::size_t shard = 0; shard != live; ++shard) {
+            // The run grows on the current device's stream, so that device is bound first.
+            if (status_t const entered = fanout_t::enter(shards_, first + shard); failed(entered)) return entered;
             typename executor_t::stream_t& stream = executor.stream(
                 fanout_t::stream_of(shards_, executor, first + shard));
             plan.arenas_.push_back_reserved(typename executor_t::arena_t {stream.arena.upstream()});
@@ -1170,7 +1173,6 @@ struct vram_amd_indexes {
             plan.traversals_.push_back_reserved(
                 traversal_context_t {typename traversal_context_t::allocator_t {plan.arenas_[shard], stream}});
             if (!plan.traversals_.back()) return status_code_t::out_of_memory_k;
-            if (status_t const entered = fanout_t::enter(shards_, first + shard); failed(entered)) return entered;
             auto [shard_plan, status] = open_shard(*shards_[first + shard].index, plan.traversals_[shard], shard);
             if (failed(status)) return status;
             plan.shard_plans_.push_back_reserved(std::move(shard_plan));
@@ -1441,8 +1443,10 @@ struct vram_amd_indexes_cursor {
             shard_cursor_t& cursor = shard_cursors_[entry.shard];
             index_t const& shard = shard_(indexes, entry.shard);
             if (status_t const sought = cursor.seek(shard, entry.node); failed(sought))
-                return indexes.still_valid(epoch_) ? expected<std::size_t> {written, sought}
-                                                   : expected<std::size_t> {0, status_code_t::contended_k};
+                return indexes.still_valid(epoch_)
+                           ? expected<std::size_t> {written, sought}
+                           : expected<std::size_t> {0,
+                                                    {status_code_t::contended_k, "A window moved the cursor's shard"}};
             std::span<node_id_t const> const neighbors = cursor.neighbors();
             if (links_keys && (failed(links_keys->reserve(links_keys->size() + neighbors.size())) ||
                                failed(links_offsets->reserve(links_offsets->size() + 1))))
@@ -1464,7 +1468,7 @@ struct vram_amd_indexes_cursor {
             keys[written++] = key;
         }
         // Retired shards keep their storage, so a pull that ran past a window read nothing freed.
-        if (!indexes.still_valid(epoch_)) return {0, status_code_t::contended_k};
+        if (!indexes.still_valid(epoch_)) return {0, {status_code_t::contended_k, "A window passed the cursor's pull"}};
         return {written, status_code_t::success_k};
     }
 

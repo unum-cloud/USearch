@@ -36,16 +36,15 @@ namespace unum::usearch::basic {
  *  @brief Similarity Search over the parts a basic RAM index saved, on block storage, read-only.
  *
  *  The class is a catalog of parts: each part's medium, its columns' offsets and the directories of
- *  its ragged columns, and nothing per node beyond those few bits a row. Every call borrows an
- *  executor, attaches the media to its engines for its own duration, and walks every part of a
- *  query on one thread, merging the parts' rankings by key, through the walks of
- *  @c nvme_parts_catalog.
+ *  its ragged columns, and nothing per node beyond those few bits a row. Every call views an
+ *  executor, attaches the media to its queues for its own duration, and walks every part of a query
+ *  on one thread, merging the parts' rankings by key, through the walks of @c nvme_parts_catalog.
  *
  *  It keeps @p node_id_type_ and @p key_type_ as free as @c nvme_index does; only the compiled
  *  library narrows them, to the 32-bit IDs its sharded indexes write.
  */
 template <typename codec_type_, typename key_type_ = uuid128_t, typename node_id_type_ = u32_t,
-          typename distance_type_ = f64_t, typename engine_type_ = default_io_engine<dummy_waiter_t>,
+          typename distance_type_ = f64_t, typename queue_type_ = default_io_queue<dummy_waiter_t>,
           typename row_kit_type_ = st::serial_row_kit_t,
           template <typename> class atomic_ref_template_ = fu::standard_atomic_ref,
           typename wait_type_ = dummy_waiter_t>
@@ -57,7 +56,7 @@ class nvme_indexes {
   public:
 
     /** The walks every call runs over every part. */
-    using catalog_t = nvme_parts_catalog<codec_type_, key_type_, node_id_type_, distance_type_, engine_type_,
+    using catalog_t = nvme_parts_catalog<codec_type_, key_type_, node_id_type_, distance_type_, queue_type_,
                                          row_kit_type_, atomic_ref_template_, wait_type_>;
     template <typename word_type_>
     using atomic_ref = typename catalog_t::template atomic_ref<word_type_>;
@@ -65,7 +64,7 @@ class nvme_indexes {
     using codec_t = typename catalog_t::codec_t;
     using key_t = typename catalog_t::key_t;
     using distance_t = typename catalog_t::distance_t;
-    using engine_t = typename catalog_t::engine_t;
+    using queue_t = typename catalog_t::queue_t;
     using executor_t = typename catalog_t::executor_t;
     using medium_t = typename catalog_t::medium_t;
     using arena_t = typename catalog_t::arena_t;
@@ -126,11 +125,15 @@ class nvme_indexes {
      *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
      *  - @c uninitialized_k @p executor holds no threads or pool workers.
      *  - @c overflow_k A header read spans more than one read can move.
+     *  - @c io_k The system refused entropy for the media's identity.
      */
     status_t view(std::string_view path, std::span<std::string_view const> paths, std::string_view metric,
                   executor_t& executor) noexcept {
         media_.clear();
         parts_.clear();
+        auto const [identity, identity_status] = media_identity_from_entropy();
+        if (failed(identity_status)) return identity_status;
+        media_identity_ = identity;
         status_t const viewed = view_(path, paths, metric, executor);
         if (failed(viewed)) media_.clear(), parts_.clear();
         return viewed;
@@ -170,7 +173,7 @@ class nvme_indexes {
      *  @par Statuses:
      *  - @c uninitialized_k Nothing is viewed, or the executor holds no threads or pool workers.
      *  - @c config_mismatch_k The counts are not one per query, the keys and distances differ in
-     *    length or do not split into one run per query, or a medium the engines cannot read.
+     *    length or do not split into one run per query, or a medium the queues cannot read.
      *  - @c contended_k Another call holds the executor, or its pool is running another dispatch.
      *  - @c overflow_k A staging region's byte count overflows.
      */
@@ -185,9 +188,9 @@ class nvme_indexes {
      *  @par Statuses:
      *  - @c uninitialized_k Nothing is viewed, or the executor holds no threads or pool workers.
      *  - @c config_mismatch_k The counts are not one per query, the keys and distances differ in
-     *    length or do not split into one run per query, or a medium the engines cannot read.
+     *    length or do not split into one run per query, or a medium the queues cannot read.
      *  - @c contended_k Another call holds the executor, or its pool is running another dispatch.
-     *  - @c overflow_k A staging region's byte count overflows, or a read finds its engine's queue
+     *  - @c overflow_k A staging region's byte count overflows, or a read finds its queue
      *    full.
      */
     template <typename... arguments_type_>
@@ -201,9 +204,9 @@ class nvme_indexes {
      *  @par Statuses:
      *  - @c uninitialized_k Nothing is viewed, or the executor holds no threads or pool workers.
      *  - @c contended_k Another call holds the executor, or its pool is running another dispatch.
-     *  - @c overflow_k A staging region's byte count overflows, or a read finds its engine's queue
+     *  - @c overflow_k A staging region's byte count overflows, or a read finds its queue
      *    full.
-     *  - @c config_mismatch_k A medium the engines cannot read.
+     *  - @c config_mismatch_k A medium the queues cannot read.
      */
     template <typename... arguments_type_>
     expected<search_result_t> scan_within(arguments_type_&&... arguments) noexcept {
@@ -214,11 +217,11 @@ class nvme_indexes {
      *  @ref nvme_parts_catalog::count over every part.
      *
      *  @par Statuses:
-     *  - @c config_mismatch_k @p entries and @p keys differ in length, or a medium the engines
+     *  - @c config_mismatch_k @p entries and @p keys differ in length, or a medium the queues
      *    cannot read.
      *  - @c uninitialized_k Nothing is viewed, or @p executor holds no threads or pool workers.
      *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
-     *  - @c overflow_k A staging region's byte count overflows, or a read finds its engine's queue
+     *  - @c overflow_k A staging region's byte count overflows, or a read finds its queue
      *    full.
      */
     status_t count(std::span<key_t const> keys, std::span<std::size_t> entries, executor_t& executor) const noexcept {
@@ -229,11 +232,11 @@ class nvme_indexes {
      *  @ref nvme_parts_catalog::contains over every part.
      *
      *  @par Statuses:
-     *  - @c config_mismatch_k The entries and the keys differ in length, or a medium the engines
+     *  - @c config_mismatch_k The entries and the keys differ in length, or a medium the queues
      *    cannot read.
      *  - @c uninitialized_k Nothing is viewed, or the executor holds no threads or pool workers.
      *  - @c contended_k Another call holds the executor, or its pool is running another dispatch.
-     *  - @c overflow_k A staging region's byte count overflows, or a read finds its engine's queue
+     *  - @c overflow_k A staging region's byte count overflows, or a read finds its queue
      *    full.
      */
     template <typename... arguments_type_>
@@ -245,11 +248,11 @@ class nvme_indexes {
      *  @ref nvme_parts_catalog::get over every part.
      *
      *  @par Statuses:
-     *  - @c config_mismatch_k The entries and the keys differ in length, or a medium the engines
+     *  - @c config_mismatch_k The entries and the keys differ in length, or a medium the queues
      *    cannot read.
      *  - @c uninitialized_k Nothing is viewed, or the executor holds no threads or pool workers.
      *  - @c contended_k Another call holds the executor, or its pool is running another dispatch.
-     *  - @c overflow_k A staging region's byte count overflows, or a read finds its engine's queue
+     *  - @c overflow_k A staging region's byte count overflows, or a read finds its queue
      *    full.
      */
     template <typename... arguments_type_>
@@ -262,9 +265,9 @@ class nvme_indexes {
      *
      *  @par Statuses:
      *  - @c uninitialized_k Nothing is viewed, or the executor holds no threads or pool workers.
-     *  - @c config_mismatch_k The entries run past @ref size, or a medium the engines cannot read.
+     *  - @c config_mismatch_k The entries run past @ref size, or a medium the queues cannot read.
      *  - @c contended_k Another call holds the executor, or its pool is running another dispatch.
-     *  - @c overflow_k A staging region's byte count overflows, or a read finds its engine's queue
+     *  - @c overflow_k A staging region's byte count overflows, or a read finds its queue
      *    full.
      */
     template <typename... arguments_type_>
@@ -279,9 +282,9 @@ class nvme_indexes {
      *  @par Statuses:
      *  - @c uninitialized_k Nothing is viewed, or @p executor holds no threads or pool workers.
      *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
-     *  - @c overflow_k A staging region's byte count overflows, or a read finds its engine's queue
+     *  - @c overflow_k A staging region's byte count overflows, or a read finds its queue
      *    full.
-     *  - @c config_mismatch_k A medium the engines cannot read.
+     *  - @c config_mismatch_k A medium the queues cannot read.
      *  - @c io_k A neighbors read came back short.
      */
     expected<reachability_t> health(executor_t& executor) const noexcept { return catalog_().health(executor); }
@@ -294,7 +297,7 @@ class nvme_indexes {
      *  - @c shape_mismatch_k An output's or the shown coordinates' length disagrees.
      *  - @c out_of_memory_k The arenas cannot hold the scratch.
      *  - @c contended_k Another call holds the executor, or its pool is running another dispatch.
-     *  - @c config_mismatch_k A medium the engines cannot read.
+     *  - @c config_mismatch_k A medium the queues cannot read.
      *  - @c io_k A read came back short.
      */
     template <typename... arguments_type_>
@@ -307,7 +310,9 @@ class nvme_indexes {
     using scratch_allocator_t = arena_allocator<byte_t, forkunion_allocator_t>;
 
     /** The catalog over this index's media and parts, for one call. */
-    catalog_t catalog_() const noexcept { return catalog_t {to_span(media_), to_span(parts_)}; }
+    catalog_t catalog_() const noexcept {
+        return catalog_t {to_span(media_), media_list_key_t {media_identity_, 0}, to_span(parts_)};
+    }
 
     /** Opens the SafeGraphs part at @p path once: its header, read through a blocking read of the
      *  file, turned into the columns its producer fills and checked against this instantiation's
@@ -425,8 +430,12 @@ class nvme_indexes {
         return failure;
     }
 
-    /** Every part's file, open for the engines, in part order. */
+    /** Every part's file, open for the queues, in part order. */
     growing_buffer<medium_t, forkunion_allocator_t> media_;
+
+    /** The identity @ref view drew for the media, which keys the rings' file tables; a view never
+     *  swaps, so its epoch stays zero. */
+    u64_t media_identity_ = 0;
 
     /** Where every part keeps its columns and its row directories, parallel to @c media_. */
     growing_buffer<part_t, forkunion_allocator_t> parts_;

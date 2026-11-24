@@ -29,7 +29,7 @@ pub trait Calling: Sized {
 }
 
 /// A verb whose inputs a deferred call hands back beside its answer, like a plan a stop left live.
-pub trait Lending: Calling {
+pub trait Submitting: Calling {
     /// What the verb owned.
     type Inputs;
 
@@ -46,18 +46,18 @@ pub trait Completion: Sized {
     fn answer<'index, Verb: Calling>(verb: Verb) -> Result<Self::Deferrable<'index, Verb>>;
 }
 
-/// The inputs a completion takes: a blocking receiver takes borrows and owned values alike, while
-/// a deferring one takes only what it owns, since the library reads its inputs after the verb
-/// returns. Both borrow the arena, which no call reads as an input.
+/// The inputs a completion takes: a blocking receiver takes references and owned values alike,
+/// while a deferring one takes only what it owns, since the library reads its inputs after the
+/// verb returns. Both reference the arena, which no call reads as an input.
 #[diagnostic::on_unimplemented(
     message = "a deferred receiver needs owned inputs",
-    label = "the library would still read this borrow after the verb returns",
+    label = "the library would still read this reference after the verb returns",
     note = "pass keys in a `Vec` or an array, rows in a NumKong `Matrix` or a `'static` `MatrixView`, a `PathBuf`, \
             `String` or `'static` path, and `'static` configs, handlers and value lookups"
 )]
 pub trait Accepts<Input> {}
 
-/// A matrix a verb reads its rows from, borrowed or owned.
+/// A matrix a verb reads its rows from, referenced or owned.
 pub trait RowsView {
     /// The scalar type the rows hold.
     type Value: Element;

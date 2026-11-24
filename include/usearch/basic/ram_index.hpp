@@ -109,7 +109,7 @@ constexpr distance_type_ unbounded_radius() noexcept {
  *  returns, never longer. Every requirement is a call-validity check, so a metric is free
  *  to take converting parameters - @c std::string_view for @c std::string values.
  *
- *  A round's entries carry no order: results go by slot, and ties break by node ID.
+ *  A round's entries hold no order: results go by slot, and ties break by node ID.
  */
 template <typename metric_type_, typename value_type_, typename distance_type_>
 concept metric = value<value_type_> && requires(metric_type_& metric, value_type_ const& value, distance_type_ radius,
@@ -397,7 +397,7 @@ void fill_selection(context_type_& context, std::size_t connectivity) noexcept {
     }
 }
 
-/** Any link-selection heuristic: carries its own neighbors-per-node budget as @c connectivity,
+/** Any link-selection heuristic: holds its own neighbors-per-node budget as @c connectivity,
  *  reads the ascending candidates in @c context.results, resolves values through the index's
  *  @c published_value_of - every candidate ID is published or wired - scores pairs through the
  *  @p metric, and fills @c context.selected_neighbors. A selector may also write
@@ -538,7 +538,7 @@ struct ram_cursor;
  *
  *  The design optimizes for being read, and its storage is a column of node records in chunks that
  *  grow on demand and never move, plus the key multimap. Each record owns its neighbor list, which
- *  starts empty and grows with wiring - automatic through @c insert's selector, which carries the
+ *  starts empty and grows with wiring - automatic through @c insert's selector, which holds the
  *  neighbors-per-node budget, or manual through @c link. Metric calls cost microseconds to
  *  milliseconds here, so brief per-node locks are noise - the only hard rule is that no metric verb
  *  ever runs while any node lock is held - the shared mutex is deliberately held across whole
@@ -681,7 +681,7 @@ struct ram_index {
         /** Publishes the node to other batches' walks; nothing else reaches it before this. */
         void wire() noexcept { atomic_ref<u32_t>(state).store(wired_k, std::memory_order_release); }
 
-        /** Whether an insert wired the node, carrying its value and neighbors with the acquire. */
+        /** Whether an insert wired the node, holding its value and neighbors with the acquire. */
         bool wired() const noexcept { return atomic_ref<u32_t const>(state).load(std::memory_order_acquire) & wired_k; }
     };
 
@@ -844,7 +844,7 @@ struct ram_index {
      *      per batch, in batch order.
      *  @param[in,out] context The calling thread's scratch & telemetry, reused across batches, over
      *      any allocator.
-     *  @param[in] selector The link-selection heuristic, carrying its own
+     *  @param[in] selector The link-selection heuristic, holding its own
      *      neighbors-per-node budget - a per-call value, so heuristics & budgets swap per
      *      batch without re-instantiating the index.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
@@ -947,7 +947,7 @@ struct ram_index {
                 index_->template place_<synchronization_>(static_cast<node_id_t>(range.first + first + position),
                                                           values[position], keys[position], metric, context, selector,
                                                           walk);
-            // Releases this task's nodes to the acquire in `finish`, whose turn carries them on.
+            // Releases this task's nodes to the acquire in `finish`, whose turn holds them on.
             atomic_ref<std::size_t>(placed).store_add(count, std::memory_order_release);
         }
 
@@ -1243,7 +1243,7 @@ struct ram_index {
             typename std::allocator_traits<bits_allocator_type_>::template rebind_alloc<std::size_t>;
         using island_offsets_t = growing_buffer<std::size_t, island_offsets_allocator_t>;
 
-        /** Lanes one word carries - what an ID splits on. */
+        /** Lanes one word holds - what an ID splits on. */
         inline static constexpr std::size_t lanes_k = std::numeric_limits<u64_t>::digits;
 
         /** The depth of a node no sweep reached, 255; the deepest a reached node records is 254,
@@ -3359,7 +3359,7 @@ struct ram_index {
      *  refusing with @c contended_k while a batch is in flight.
      *
      *  @param[in] config The cache a core keeps, which sizes the hubs and the neighborhoods.
-     *  @param[in] selector Carries the budget every neighbor list is reserved for; the tasks take a
+     *  @param[in] selector Holds the budget every neighbor list is reserved for; the tasks take a
      *      selector of the same budget.
      *  @param[in] codec Measures the stored values.
      *  @param[in,out] context The planning thread's scratch, whose allocator places the plan.
@@ -4446,7 +4446,7 @@ struct ram_index {
         // Claims convert one-to-one into dispensed IDs once covered, and commit only within the
         // ceiling, so peers never observe an overshoot. Covering to this claim's end suffices:
         // of the batches dispensed up to this one, the last to claim covered past this range, and
-        // the dispenser's acquire-release carries its cover along.
+        // the dispenser's acquire-release holds its cover along.
         std::size_t const ceiling = atomic_ref<std::size_t>(ceiling_nodes_).load(std::memory_order_relaxed);
         std::size_t const claimed =
             atomic_ref<std::size_t>(claimed_count_).fetch_add_if_at_most(count, ceiling, std::memory_order_acq_rel);
@@ -4885,7 +4885,7 @@ struct ram_index {
     };
 
     /** What an insertion walks: the IDs below its snapshot, and past it every node whose state
-     *  shows it wired. The acquire of that state carries the node's value and neighbors, so batches
+     *  shows it wired. The acquire of that state holds the node's value and neighbors, so batches
      *  wired side by side link to each other rather than forming islands. */
     struct dispensed_admission_t {
 

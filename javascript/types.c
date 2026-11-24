@@ -4,7 +4,7 @@
  *  @date September 9, 2026
  *  @brief The Node-API vocabulary every modality shares.
  *
- *  Closed-set naming, argument parsing, identities, row borrowing, the @c Executor whose threads or
+ *  Closed-set naming, argument parsing, identities, row viewing, the @c Executor whose threads or
  *  streams every fanned-out verb runs on, the @c Arena every scaling output lands in, and the
  *  @c CompiledDeferred a deferred call answers.
  */
@@ -482,7 +482,7 @@ bool usearch_js_tape_from_value(napi_env env, napi_value const* arguments, char 
     uint32_t const* const offsets_u32 = (uint32_t const*)offsets;
     uint64_t const last = wide ? offsets_u64[offsets_count - 1] : offsets_u32[offsets_count - 1];
     size_t const element_bytes = usearch_js_row_bytes(view->scalar, scalars_per_element);
-    // The tape carries no length, so only this side can see its last offset overrun the array.
+    // The tape holds no length, so only this side can see its last offset overrun the array.
     if (!element_bytes || last > bytes / element_bytes)
         return usearch_js_throw(env, usearch_status_shape_mismatch_k, "The offsets reach past the end of their array");
     view->data = data;
@@ -669,9 +669,8 @@ static void usearch_js_executor_finalize(napi_env env, void* data, void* hint) {
 static napi_value usearch_js_executor_construct(napi_env env, napi_callback_info info) {
     napi_value self = NULL;
     if (!usearch_js_sealed(env, info, &self)) {
-        usearch_js_throw(
-            env, usearch_status_invalid_argument_k,
-            "An Executor is made by Executor.forRam, Executor.onPool, Executor.forVram or Executor.forNvme");
+        usearch_js_throw(env, usearch_status_invalid_argument_k,
+                         "An Executor is made by Executor.forRam, Executor.forVram or Executor.forNvme");
         return NULL;
     }
     return self;
@@ -732,26 +731,6 @@ static napi_value usearch_js_executor_for_ram(napi_env env, napi_callback_info i
         return NULL;
     for_ram.ram.memory_domains = ordinals;
     usearch_executor_for_ram(&for_ram);
-    free(ordinals);
-    return usearch_js_executor_adopt(env, &outcome, handle);
-}
-
-/** <tt>onPool(pool, {memoryDomains, cpuClassCeiling})</tt> → an executor borrowing a ForkUnion pool. */
-static napi_value usearch_js_executor_on_pool(napi_env env, napi_callback_info info) {
-    napi_value arguments[2] = {NULL, NULL};
-    usearch_outcome_t outcome = {usearch_status_success_k, NULL};
-    usearch_executor_t handle = NULL;
-    usearch_executor_on_pool_t on_pool = {.executor = &handle, .outcome = &outcome};
-    int32_t* ordinals = NULL;
-    if (!usearch_js_arguments(env, info, 2, arguments) ||
-        !usearch_js_pointer_from_value(env, arguments[0], "pool", &on_pool.pool) ||
-        !usearch_js_cpu_class_from_value(env, usearch_js_property(env, arguments[1], "cpuClassCeiling"),
-                                         &on_pool.ram.cpu_class_ceiling) ||
-        !usearch_js_ordinals_from_value(env, usearch_js_property(env, arguments[1], "memoryDomains"), "memoryDomains",
-                                        &ordinals, &on_pool.ram.memory_domains_count))
-        return NULL;
-    on_pool.ram.memory_domains = ordinals;
-    usearch_executor_on_pool(&on_pool);
     free(ordinals);
     return usearch_js_executor_adopt(env, &outcome, handle);
 }
@@ -898,7 +877,6 @@ napi_value usearch_js_executor_define(napi_env env) {
         {"forRam", NULL, usearch_js_executor_for_ram, NULL, NULL, NULL, napi_static, NULL},
         {"forVram", NULL, usearch_js_executor_for_vram, NULL, NULL, NULL, napi_static, NULL},
         {"forNvme", NULL, usearch_js_executor_for_nvme, NULL, NULL, NULL, napi_static, NULL},
-        {"onPool", NULL, usearch_js_executor_on_pool, NULL, NULL, NULL, napi_static, NULL},
     };
     napi_value executor_class = NULL;
     if (napi_define_class(env, "Executor", NAPI_AUTO_LENGTH, usearch_js_executor_construct, NULL,

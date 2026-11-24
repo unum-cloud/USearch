@@ -10,7 +10,7 @@ index and on `index.on(executor)` pass blocking completion and return with their
 their outputs readable, while `index.deferred(executor)` passes deferred completion and answers a
 `Deferred` at once. Each verb is one `Call` all three route, so the receivers stay symmetric.
 
-Batches are rows. `RowsView` carries the base pointer, the row count, the column count, the byte
+Batches are rows. `RowsView` holds the base pointer, the row count, the column count, the byte
 stride, and the scalar kind as one value, so a single vector is a one-row view. The row count
 becomes the verb's `count`, and the column count crosses with the rows, so the engine checks it
 against the geometry the index froze.
@@ -18,7 +18,7 @@ against the geometry the index froze.
 Every output whose length scales with the call - the matches of `search` and `maxsim`, the rows of
 `get` and `attend`, the pairs of `multiply`, the monolith of `save_buffer`, and every cursor and
 stream pull - lands in an `Arena` the verb requires, and is read in place. Every receiver takes the arena
-as the verb's last required argument, deferred ones too, and the result borrows it in turn, named by
+as the verb's last required argument, deferred ones too, and the result views it in turn, named by
 the arena's origin.
 
 A closure capturing anything cannot be handed to C at all, so a callback's state crosses beside it
@@ -28,7 +28,7 @@ trampoline that types the state again. The value lookup of `attend` is such a fu
 `PredicateArguments.each`, `PredicateArguments.batch` and `ProgressArguments.of`, or take a handler
 compiled in C.
 
-Telemetry is a lent output. Every config of a verb that reports traversal statistics takes an
+Telemetry is a passed output. Every config of a verb that reports traversal statistics takes an
 optional `stats` pointer, which the engine overwrites whole on every call it is passed to.
 
 File: mojo/usearch/dense.mojo
@@ -120,7 +120,7 @@ struct DenseSoftmaxState(ImplicitlyCopyable, TrivialRegisterPassable):
 
     Flash Attention's running maximum and partition. The two are one concept: a maximum without
     its partition is a number nothing can rescale, so they share an element rather than travelling
-    as two runs a caller could supply half of. Carrying them folds one attention call into another
+    as two runs a caller could supply half of. Holding them folds one attention call into another
     over the same queries.
     """
 
@@ -291,7 +291,7 @@ struct PhaseProgress(Defaultable, ImplicitlyCopyable):
 struct DenseRefinePlan(Movable):
     """One refine in flight - `usearch_dense_refine_plan_t`. Binding-only.
 
-    Lent through `DenseRefineConfig.plan`, it opens on the first refine, stays live past a cancel or
+    Passed through `DenseRefineConfig.plan`, it opens on the first refine, stays live past a cancel or
     the end of a round, continues on every later refine, and closes with `refine_plan_finish`. While
     it lives, the index admits no insertion and no save.
     """
@@ -308,7 +308,7 @@ struct DenseReshardPlan(Movable):
     """One reshard in flight - `usearch_dense_reshard_plan_t`, with its own lists of sources and targets.
     Binding-only.
 
-    Lent through `DenseReshardConfig.plan`, it opens on the first reshard, stays live past a cancel,
+    Passed through `DenseReshardConfig.plan`, it opens on the first reshard, stays live past a cancel,
     moves what is still pending and continues the rounds on every later one, and closes with
     `dense_reshard_plan_finish`. While it lives, every index it names admits no insertion and no save.
     """
@@ -413,7 +413,7 @@ struct DenseMetadata(Defaultable, ImplicitlyCopyable):
     Everything a reader learns without opening the checkpoint, and nothing a reader must choose for
     itself. Placement is absent because a checkpoint records where it was written rather than where
     a reader must keep it, and `values_per_key` is absent because it bounds a live handle's mutable
-    state rather than anything the serialized form carries.
+    state rather than anything the serialized form holds.
 
     Never marked register-passable: its address crosses to C, and Mojo mislays a struct once it is,
     so the probes would read back nothing.
@@ -483,7 +483,7 @@ struct DenseVectors[dtype: DType, origin: MutOrigin](Movable, Sized):
 
     Parameters:
         dtype: The element type each row is read as.
-        origin: The arena the rows live in, which this result borrows.
+        origin: The arena the rows live in, which this result views.
     """
 
     var view: RowsViewArguments
@@ -500,7 +500,7 @@ struct DenseVectors[dtype: DType, origin: MutOrigin](Movable, Sized):
         return self.rows
 
     def __getitem__(ref self, row: Int) -> Span[Scalar[Self.dtype], origin_of(self)]:
-        """One row, borrowed from the arena this result reads. Binding-only.
+        """One row, viewed from the arena this result reads. Binding-only.
 
         Args:
             row: Which row, below `len(self)`.
@@ -527,7 +527,7 @@ struct DenseBatch[origin: MutOrigin](Movable, Sized):
     """One cursor pull, read in place from its arena: the keys, and the keys each links to when asked for.
 
     Parameters:
-        origin: The arena the batch lives in, which this result borrows.
+        origin: The arena the batch lives in, which this result views.
     """
 
     var keys_address: Address
@@ -551,7 +551,7 @@ struct DenseBatch[origin: MutOrigin](Movable, Sized):
         """Every entry's key, in walk order.
 
         Returns:
-            The keys, borrowed from the arena this result reads.
+            The keys, viewed from the arena this result reads.
         """
         return _in_arena[Key, origin_of(self)](self.keys_address, self.written)
 
@@ -562,7 +562,7 @@ struct DenseBatch[origin: MutOrigin](Movable, Sized):
             entry: Which entry, below `len(self)`.
 
         Returns:
-            The linked keys, borrowed from the arena this result reads.
+            The linked keys, viewed from the arena this result reads.
 
         Raises:
             `Error` with `INVALID_ARGUMENT` for a pull of keys alone or an entry past the batch.
@@ -582,7 +582,7 @@ struct DenseDraws[origin: MutOrigin](Movable, Sized):
     entries it is, the shown or earlier draw it hangs from, and where it is placed.
 
     Parameters:
-        origin: The arena the draws live in, which this result borrows.
+        origin: The arena the draws live in, which this result views.
     """
 
     var outputs: DenseSampleOutputs
@@ -600,7 +600,7 @@ struct DenseDraws[origin: MutOrigin](Movable, Sized):
         """Every draw's key.
 
         Returns:
-            The keys, borrowed from the arena this result reads.
+            The keys, viewed from the arena this result reads.
         """
         return _in_arena[Key, origin_of(self)](self.outputs.keys, len(self))
 
@@ -608,7 +608,7 @@ struct DenseDraws[origin: MutOrigin](Movable, Sized):
         """Which of its key's entries each draw is, in the order `get` writes them.
 
         Returns:
-            The entry ordinals, borrowed from the arena this result reads.
+            The entry ordinals, viewed from the arena this result reads.
         """
         return _in_arena[c_size_t, origin_of(self)](self.outputs.entry_ordinals, len(self))
 
@@ -636,7 +636,7 @@ struct DenseProducts[origin: MutOrigin](Movable):
     `scores()`.
 
     Parameters:
-        origin: The arena the pairs live in, which this result borrows.
+        origin: The arena the pairs live in, which this result views.
     """
 
     var view: MatchesTapeViewArguments
@@ -653,12 +653,12 @@ struct DenseProducts[origin: MutOrigin](Movable):
         """One more offset than queries, as Apache Arrow lays a ragged batch out.
 
         Returns:
-            The offsets into `keys()` and `scores()`, borrowed from the arena this result reads.
+            The offsets into `keys()` and `scores()`, viewed from the arena this result reads.
         """
         return _in_arena[c_size_t, origin_of(self)](self.view.offsets, self.queries + 1)
 
     def keys(ref self) -> Span[Key, origin_of(self)]:
-        """Each pair's indexed entry, borrowed from the arena this result reads.
+        """Each pair's indexed entry, viewed from the arena this result reads.
 
         Returns:
             One key per pair.
@@ -681,9 +681,9 @@ struct DenseProducts[origin: MutOrigin](Movable):
 
 def _slot[
     T: AnyType, origin: MutOrigin
-](lent: Optional[Pointer[T, origin]]) -> Optional[Pointer[T, MutUntrackedOrigin]]:
-    """A slot a config lends with its origin erased, or `None` for one it lends none."""
-    if case .Some(slot) = lent:
+](passed: Optional[Pointer[T, origin]]) -> Optional[Pointer[T, MutUntrackedOrigin]]:
+    """A slot a config passes with its origin erased, or `None` for one it passes none."""
+    if case .Some(slot) = passed:
         return slot.unsafe_origin_cast[MutUntrackedOrigin]()
     return None
 
@@ -692,7 +692,7 @@ struct DenseInsertConfig[stats_origin: MutOrigin = MutUntrackedOrigin](Implicitl
     """The knobs of `usearch_dense_insert_t`; zeroed or absent ones derive what the C interface derives.
 
     Parameters:
-        stats_origin: The lent telemetry slot's origin, inferred where one is lent.
+        stats_origin: The passed telemetry slot's origin, inferred where one is passed.
     """
 
     var expansion_factor: Int
@@ -731,9 +731,9 @@ struct DenseRefineConfig[
     """The knobs of `usearch_dense_refine_t`; zeroed or absent ones derive what the C interface derives.
 
     Parameters:
-        stats_origin: The lent telemetry slot's origin, inferred where one is lent.
-        plan_origin: The lent plan's origin, inferred where one is lent.
-        phase_origin: The lent phase slot's origin, inferred where one is lent.
+        stats_origin: The passed telemetry slot's origin, inferred where one is passed.
+        plan_origin: The passed plan's origin, inferred where one is passed.
+        phase_origin: The passed phase slot's origin, inferred where one is passed.
     """
 
     var expansion_factor: Int
@@ -794,12 +794,12 @@ struct DenseReshardConfig[
     """The knobs of `usearch_dense_reshard_t`; zeroed or absent ones derive what the C interface derives.
 
     Parameters:
-        ram_origin: The RAM placement's borrowed domain array, inferred where one is named.
-        vram_origin: The VRAM placement's borrowed ordinal array, inferred where one is named.
-        nvme_origin: The NVMe placement's borrowed path array, inferred where one is named.
-        stats_origin: The lent telemetry slot's origin, inferred where one is lent.
-        plan_origin: The lent plan's origin, inferred where one is lent.
-        phase_origin: The lent phase slot's origin, inferred where one is lent.
+        ram_origin: The RAM placement's viewed domain array, inferred where one is named.
+        vram_origin: The VRAM placement's viewed ordinal array, inferred where one is named.
+        nvme_origin: The NVMe placement's viewed path array, inferred where one is named.
+        stats_origin: The passed telemetry slot's origin, inferred where one is passed.
+        plan_origin: The passed plan's origin, inferred where one is passed.
+        phase_origin: The passed phase slot's origin, inferred where one is passed.
     """
 
     var ram: Optional[RamOptions[Self.ram_origin]]
@@ -879,7 +879,7 @@ struct DenseSearchConfig[stats_origin: MutOrigin = MutUntrackedOrigin](Implicitl
     scored, an expensive one once per round.
 
     Parameters:
-        stats_origin: The lent telemetry slot's origin, inferred where one is lent.
+        stats_origin: The passed telemetry slot's origin, inferred where one is passed.
     """
 
     var expansion_factor: Int
@@ -924,7 +924,7 @@ struct DenseMaxsimConfig[stats_origin: MutOrigin = MutUntrackedOrigin](Implicitl
     """The knobs of `usearch_dense_maxsim_t`; zeroed or absent ones derive what the C interface derives.
 
     Parameters:
-        stats_origin: The lent telemetry slot's origin, inferred where one is lent.
+        stats_origin: The passed telemetry slot's origin, inferred where one is passed.
     """
 
     var expansion_factor: Int
@@ -959,7 +959,7 @@ struct DenseMultiplyConfig[stats_origin: MutOrigin = MutUntrackedOrigin](Implici
     """The knobs of `usearch_dense_multiply_t`; zeroed or absent ones derive what the C interface derives.
 
     Parameters:
-        stats_origin: The lent telemetry slot's origin, inferred where one is lent.
+        stats_origin: The passed telemetry slot's origin, inferred where one is passed.
     """
 
     var wanted: Int
@@ -1001,8 +1001,8 @@ struct DenseAttendConfig[carry_origin: MutOrigin = MutUntrackedOrigin, stats_ori
     """The knobs of `usearch_dense_attend_t`; zeroed or absent ones derive what the C interface derives.
 
     Parameters:
-        carry_origin: The lent softmax states' origin, inferred where any are lent.
-        stats_origin: The lent telemetry slot's origin, inferred where one is lent.
+        carry_origin: The passed softmax states' origin, inferred where any are passed.
+        stats_origin: The passed telemetry slot's origin, inferred where one is passed.
     """
 
     var head_count: Int
@@ -1056,9 +1056,9 @@ struct DenseSampleConfig[
     """The knobs of `usearch_dense_sample_t`; left alone, it draws across the whole index with nothing shown.
 
     Parameters:
-        shown_origin: The shown keys' origin, inferred where any are lent.
+        shown_origin: The shown keys' origin, inferred where any are passed.
         coordinates_origin: Their coordinates' origin, inferred with them.
-        focus_origin: The focus keys' origin, inferred where any are lent.
+        focus_origin: The focus keys' origin, inferred where any are passed.
     """
 
     var shown: Span[Key, Self.shown_origin]
@@ -1417,6 +1417,7 @@ struct DenseCursorInitArguments(ImplicitlyCopyable):
     """`usearch_dense_cursor_init_t`."""
 
     var index: Address
+    var executor: Address
     var outcome: Pointer[Outcome, MutUntrackedOrigin]
     var starts_count: c_size_t
     var starts: Optional[Pointer[Key, ImmUntrackedOrigin]]
@@ -1719,7 +1720,7 @@ struct DenseSaveBufferOutputs(Defaultable, ImplicitlyCopyable):
         self.length = c_size_t(0)
 
 
-def _lent[T: Copyable](list: List[T]) -> Optional[Pointer[T, ImmUntrackedOrigin]]:
+def _passed[T: Copyable](list: List[T]) -> Optional[Pointer[T, ImmUntrackedOrigin]]:
     """The first element a list keeps on the heap for a deferred call, or `None` for an empty one."""
     if len(list) == 0:
         return None
@@ -1817,7 +1818,7 @@ struct _DenseCountCall(Call):
 
 @fieldwise_init
 struct _DenseGetCall[dtype: DType, kind: ScalarKind, origin: MutOrigin](Call):
-    """The crossing of `usearch_dense_get`, which borrows the arena its rows land in."""
+    """The crossing of `usearch_dense_get`, which uses the arena its rows land in."""
 
     comptime Arguments = DenseGetArguments
     comptime Outputs = DenseGetOutputs
@@ -1966,8 +1967,8 @@ struct _DenseHealthCall(Call):
 
 
 struct _DenseReshardCall(Call):
-    """The crossing of `usearch_dense_reshard`, which keeps the handle lists and each placement it lends
-    on the heap until the call is final; an empty placement list lends none."""
+    """The crossing of `usearch_dense_reshard`, which keeps the handle lists and each placement it passes
+    on the heap until the call is final; an empty placement list passes none."""
 
     comptime Arguments = DenseReshardArguments
     comptime Outputs = DenseRefineReport
@@ -2032,9 +2033,9 @@ struct _DenseReshardCall(Call):
             head.executor,
             head.outcome,
             head.completion,
-            _lent(self.ram),
-            _lent(self.vram),
-            _lent(self.nvme),
+            _passed(self.ram),
+            _passed(self.vram),
+            _passed(self.nvme),
             outputs,
             self.refine,
             self.seed,
@@ -2071,7 +2072,7 @@ struct _DenseReshardPlanFinishCall(Call):
 
 @fieldwise_init
 struct _DenseSampleCall[origin: MutOrigin](Call):
-    """The crossing of `usearch_dense_sample`, which borrows the arena its draws are written in."""
+    """The crossing of `usearch_dense_sample`, which uses the arena its draws are written in."""
 
     comptime Arguments = DenseSampleArguments
     comptime Outputs = DenseSampleOutputs
@@ -2125,7 +2126,7 @@ struct _DenseSampleCall[origin: MutOrigin](Call):
 
 @fieldwise_init
 struct _DenseSearchCall[origin: MutOrigin](Call):
-    """The crossing of `usearch_dense_search`, which borrows the arena its matches land in."""
+    """The crossing of `usearch_dense_search`, which uses the arena its matches land in."""
 
     comptime Arguments = DenseSearchArguments
     comptime Outputs = MatchesViewArguments
@@ -2170,7 +2171,7 @@ struct _DenseSearchCall[origin: MutOrigin](Call):
 
 @fieldwise_init
 struct _DenseMaxsimCall[origin: MutOrigin](Call):
-    """The crossing of `usearch_dense_maxsim`, which borrows the arena its matches land in."""
+    """The crossing of `usearch_dense_maxsim`, which uses the arena its matches land in."""
 
     comptime Arguments = DenseMaxsimArguments
     comptime Outputs = DenseMultiplyOutputs
@@ -2222,7 +2223,7 @@ struct _DenseMaxsimCall[origin: MutOrigin](Call):
 
 @fieldwise_init
 struct _DenseMultiplyCall[origin: MutOrigin](Call):
-    """The crossing of `usearch_dense_multiply`, which borrows the arena its pairs land in."""
+    """The crossing of `usearch_dense_multiply`, which uses the arena its pairs land in."""
 
     comptime Arguments = DenseMultiplyArguments
     comptime Outputs = DenseMultiplyOutputs
@@ -2266,7 +2267,7 @@ struct _DenseMultiplyCall[origin: MutOrigin](Call):
 
 @fieldwise_init
 struct _DenseAttendCall[dtype: DType, kind: ScalarKind, origin: MutOrigin](Call):
-    """The crossing of `usearch_dense_attend`, which borrows the arena its attended rows land in."""
+    """The crossing of `usearch_dense_attend`, which uses the arena its attended rows land in."""
 
     comptime Arguments = DenseAttendArguments
     comptime Outputs = DenseAttendOutputs
@@ -2343,7 +2344,7 @@ struct _DenseSaveCall(Call):
 
 @fieldwise_init
 struct _DenseSaveBufferCall[origin: MutOrigin](Call):
-    """The crossing of `usearch_dense_save_buffer`, which borrows the arena the monolith lands in."""
+    """The crossing of `usearch_dense_save_buffer`, which uses the arena the monolith lands in."""
 
     comptime Arguments = DenseSaveBufferArguments
     comptime Outputs = DenseSaveBufferOutputs
@@ -2364,7 +2365,7 @@ struct _DenseSaveBufferCall[origin: MutOrigin](Call):
 
 @fieldwise_init
 struct _DenseCursorNextCall[origin: MutOrigin](Call):
-    """The crossing of `usearch_dense_cursor_next`, which borrows the arena its batch lands in."""
+    """The crossing of `usearch_dense_cursor_next`, which uses the arena its batch lands in."""
 
     comptime Arguments = DenseCursorNextArguments
     comptime Outputs = DenseCursorNextOutputs
@@ -2399,7 +2400,7 @@ struct _DenseCursorNextCall[origin: MutOrigin](Call):
 
 @fieldwise_init
 struct _DenseSearchStreamNextCall[origin: MutOrigin](Call):
-    """The crossing of `usearch_dense_search_stream_next`, which borrows the arena its pull lands in."""
+    """The crossing of `usearch_dense_search_stream_next`, which uses the arena its pull lands in."""
 
     comptime Arguments = DenseSearchStreamNextArguments
     comptime Outputs = MatchesViewArguments
@@ -2470,7 +2471,7 @@ struct DenseIndex(DenseVerbs, Movable):
         """Initializes an empty, mutable index in host memory. Calls `usearch_dense_init_ram`.
 
         Parameters:
-            ram_origin: The options' borrowed node-id array, inferred from the argument.
+            ram_origin: The options' viewed node-id array, inferred from the argument.
 
         Args:
             library: The loaded engine, kept so the shared object stays mapped.
@@ -2511,7 +2512,7 @@ struct DenseIndex(DenseVerbs, Movable):
         """Initializes an empty, mutable index in device memory. Calls `usearch_dense_init_vram`.
 
         Parameters:
-            vram_origin: The options' borrowed ordinal array, inferred from the argument.
+            vram_origin: The options' viewed ordinal array, inferred from the argument.
 
         Args:
             library: The loaded engine, kept so the shared object stays mapped.
@@ -2562,10 +2563,10 @@ struct DenseIndex(DenseVerbs, Movable):
 
         Parameters:
             path_origin: The path bytes' origin, inferred from the argument.
-            ram_origin: The options' borrowed node-id array, inferred from the argument.
+            ram_origin: The options' viewed node-id array, inferred from the argument.
 
         Args:
-            executor: The executor the read fans out over, one shard per thread; it also lends its engine.
+            executor: The executor the read fans out over, one shard per thread; it also supplies its queues.
             path: The manifest of a sharded checkpoint, or a single `.safegraphs` monolith.
             ram: The memory domains to place the parts on.
             values_per_key: Upper bound on entries sharing one key, which no checkpoint records.
@@ -2599,10 +2600,10 @@ struct DenseIndex(DenseVerbs, Movable):
 
         Parameters:
             buffer_origin: The source bytes' origin, inferred from the argument.
-            ram_origin: The options' borrowed node-id array, inferred from the argument.
+            ram_origin: The options' viewed node-id array, inferred from the argument.
 
         Args:
-            executor: The executor the copy fans out over; it also lends its engine.
+            executor: The executor the copy fans out over; it also supplies its queues.
             buffer: Source holding one serialized monolith.
             ram: The memory domains to place shards on; the monolith lands whole on the first.
             values_per_key: Upper bound on entries sharing one key, which no checkpoint records.
@@ -2667,10 +2668,10 @@ struct DenseIndex(DenseVerbs, Movable):
 
         Parameters:
             path_origin: The path bytes' origin, inferred from the argument.
-            vram_origin: The options' borrowed ordinal array, inferred from the argument.
+            vram_origin: The options' viewed ordinal array, inferred from the argument.
 
         Args:
-            executor: The executor the upload runs on, one stream per device; it also lends its engine.
+            executor: The executor the upload runs on, one stream per device; it also supplies its queues.
             path: The manifest of a sharded checkpoint, or a single `.safegraphs` monolith.
             vram: The devices to place the parts on.
             values_per_key: Upper bound on entries sharing one key, which no checkpoint records.
@@ -2704,10 +2705,10 @@ struct DenseIndex(DenseVerbs, Movable):
 
         Parameters:
             buffer_origin: The source bytes' origin, inferred from the argument.
-            vram_origin: The options' borrowed ordinal array, inferred from the argument.
+            vram_origin: The options' viewed ordinal array, inferred from the argument.
 
         Args:
-            executor: The executor the upload runs on, one stream per device; it also lends its engine.
+            executor: The executor the upload runs on, one stream per device; it also supplies its queues.
             buffer: Source holding one serialized monolith.
             vram: The devices to place shards on; the monolith lands whole on the first.
             values_per_key: Upper bound on entries sharing one key, which no checkpoint records.
@@ -2807,11 +2808,11 @@ struct DenseIndex(DenseVerbs, Movable):
 
         Parameters:
             path_origin: The path bytes' origin, inferred from the argument.
-            nvme_origin: The options' borrowed path array, inferred from the argument.
-            key_table_origin: The key table's borrowed domain array, inferred from the argument.
+            nvme_origin: The options' viewed path array, inferred from the argument.
+            key_table_origin: The key table's viewed domain array, inferred from the argument.
 
         Args:
-            executor: The NVMe executor whose rings read the checkpoint's headers; it also lends its engine.
+            executor: The NVMe executor whose rings read the checkpoint's headers; it also supplies its queues.
             path: The manifest of a sharded checkpoint, or a single `.safegraphs` monolith.
             nvme: The devices the parts are served from; naming none serves each where it points.
             key_table: The memory domains of a key table held in RAM, which `count`, `get`, `sample`,
@@ -2860,11 +2861,11 @@ struct DenseIndex(DenseVerbs, Movable):
 
         Parameters:
             path_origin: The path bytes' origin, inferred from the argument.
-            nvme_origin: The options' borrowed path array, inferred from the argument.
-            key_table_origin: The key table's borrowed domain array, inferred from the argument.
+            nvme_origin: The options' viewed path array, inferred from the argument.
+            key_table_origin: The key table's viewed domain array, inferred from the argument.
 
         Args:
-            executor: The NVMe executor whose rings read the checkpoint's headers; it also lends its engine.
+            executor: The NVMe executor whose rings read the checkpoint's headers; it also supplies its queues.
             path: The manifest of a sharded checkpoint.
             nvme: The class to dispatch as; its paths must name none.
             key_table: The memory domains of a key table held in RAM, as `view_nvme` takes them.
@@ -2920,7 +2921,7 @@ struct DenseIndex(DenseVerbs, Movable):
             executor: The executor every verb runs on; its kind must match the handle's residency.
 
         Returns:
-            A receiver borrowing both, which neither may outlive.
+            A receiver viewing both, which neither may outlive.
         """
         return DenseIndexOn[ImmOrigin(origin_of(self, executor))](
             Pointer[DenseIndex, ImmOrigin(origin_of(self, executor))](unsafe_from_address=Int(Pointer(to=self))),
@@ -2934,7 +2935,7 @@ struct DenseIndex(DenseVerbs, Movable):
             executor: The executor every verb is submitted to; its kind must match the handle's residency.
 
         Returns:
-            A receiver borrowing both, which neither it nor any `Deferred` it answers may outlive.
+            A receiver viewing both, which neither it nor any `Deferred` it answers may outlive.
         """
         return DenseIndexDeferredOn[ImmOrigin(origin_of(self, executor))](
             Pointer[DenseIndex, ImmOrigin(origin_of(self, executor))](unsafe_from_address=Int(Pointer(to=self))),
@@ -2953,12 +2954,12 @@ struct DenseIndex(DenseVerbs, Movable):
         passed is never revisited.
 
         Returns:
-            The cursor, which borrows the index and cannot outlive it.
+            The cursor, which uses the index and cannot outlive it.
 
         Raises:
             `Error` if the residency has no cursor, as VRAM does not.
         """
-        return DenseCursor[ImmOrigin(origin_of(self))](self.library, self.address, NULL_ADDRESS, 0, None)
+        return DenseCursor[ImmOrigin(origin_of(self))](self.library, self.address, 0, None)
 
     def cursor[
         starts_origin: ImmOrigin, //
@@ -2975,7 +2976,7 @@ struct DenseIndex(DenseVerbs, Movable):
             starts: The keys to walk from.
 
         Returns:
-            The cursor, which borrows the index and cannot outlive it.
+            The cursor, which uses the index and cannot outlive it.
 
         Raises:
             `Error` if the residency has no cursor, as VRAM does not.
@@ -2983,7 +2984,6 @@ struct DenseIndex(DenseVerbs, Movable):
         return DenseCursor[ImmOrigin(origin_of(self))](
             self.library,
             self.address,
-            NULL_ADDRESS,
             len(starts),
             starts.unsafe_ptr().unsafe_origin_cast[ImmUntrackedOrigin](),
         )
@@ -3006,7 +3006,7 @@ struct DenseIndex(DenseVerbs, Movable):
             config: The breadth of the candidates the walk explores.
 
         Returns:
-            A stream yielding matches lazily, which borrows the index and the query.
+            A stream yielding matches lazily, which uses the index and the query.
 
         Raises:
             `Error` with `UNSUPPORTED` while no residency implements the stream.
@@ -3075,7 +3075,7 @@ trait DenseVerbs:
         Parameters:
             keys_origin: The key run's origin, inferred from the argument.
             vectors_origin: The row storage's origin, inferred with it.
-            stats_origin: The lent telemetry slot's origin, inferred with it.
+            stats_origin: The passed telemetry slot's origin, inferred with it.
 
         Args:
             keys: One key per row of `vectors`; keys need not be unique.
@@ -3101,9 +3101,9 @@ trait DenseVerbs:
         until the verdict reads converged. Searches may run throughout on RAM; insertions may not.
 
         Parameters:
-            stats_origin: The lent telemetry slot's origin, inferred from the argument.
-            plan_origin: The lent plan's origin, inferred with it.
-            phase_origin: The lent phase slot's origin, inferred with it.
+            stats_origin: The passed telemetry slot's origin, inferred from the argument.
+            plan_origin: The passed plan's origin, inferred with it.
+            phase_origin: The passed phase slot's origin, inferred with it.
 
         Args:
             config: The round's spending, the handler, the telemetry slot, and the plan and phase slots.
@@ -3168,7 +3168,7 @@ trait DenseVerbs:
 
         Args:
             wanted: The upper bound on draws.
-            arena: The arena to rewind and refill, which the result borrows; a failed call leaves it valid.
+            arena: The arena to rewind and refill, which the result views; a failed call leaves it valid.
             config: The shown keys and their coordinates, the focus and the seed.
 
         Returns:
@@ -3190,18 +3190,18 @@ trait DenseVerbs:
         config: DenseSearchConfig[stats_origin] = DenseSearchConfig(),
     ) raises Error -> Matches[origin_of(arena)]:
         """Performs k-approximate nearest-neighbor search for a batch of queries, writing the matches
-        in a lent arena. Calls `usearch_dense_search`.
+        in a passed arena. Calls `usearch_dense_search`.
 
         Never writes to the graph, so any number of these may overlap with concurrent insertions.
 
         Parameters:
             queries_origin: The query rows' origin, inferred from the argument.
-            stats_origin: The lent telemetry slot's origin, inferred with it.
+            stats_origin: The passed telemetry slot's origin, inferred with it.
 
         Args:
             queries: The query rows, one per search.
             wanted: Matches per query - the "k"; zero lands only the counts.
-            arena: The arena to rewind and refill, which the result borrows; a failed call leaves it valid.
+            arena: The arena to rewind and refill, which the result views; a failed call leaves it valid.
             config: The breadth of the candidates, the predicate, and the telemetry slot.
 
         Returns:
@@ -3229,7 +3229,7 @@ trait DenseVerbs:
     def get[
         dtype: DType, kind: ScalarKind = ScalarKind.of[dtype]()
     ](self, key: Key, mut arena: Arena) raises Error -> DenseVectors[dtype, origin_of(arena)]:
-        """Exports every vector stored under one key into a lent arena, one row per entry, in
+        """Exports every vector stored under one key into a passed arena, one row per entry, in
         insertion order. Calls `usearch_dense_get`.
 
         Parameters:
@@ -3240,7 +3240,7 @@ trait DenseVerbs:
 
         Args:
             key: The key whose entries are exported.
-            arena: The arena to rewind and refill, which the result borrows; a failed call leaves it valid.
+            arena: The arena to rewind and refill, which the result views; a failed call leaves it valid.
 
         Returns:
             The rows, read in place from the arena; none when the key is absent.
@@ -3271,11 +3271,11 @@ trait DenseVerbs:
         _ = self._route(_DenseSaveCall(BytesView.of(path).arguments()))
 
     def save_buffer(self, mut arena: Arena) raises Error -> Monolith[origin_of(arena)]:
-        """Serializes the index as one monolith into a lent arena - the same bytes the path-taking
+        """Serializes the index as one monolith into a passed arena - the same bytes the path-taking
         sibling writes. Calls `usearch_dense_save_buffer`.
 
         Args:
-            arena: The arena to rewind and refill, which the result borrows; a failed call leaves it valid.
+            arena: The arena to rewind and refill, which the result views; a failed call leaves it valid.
 
         Returns:
             The monolith, read in place from the arena.
@@ -3293,7 +3293,7 @@ trait DenseVerbs:
         mut arena: Arena,
         config: DenseMultiplyConfig[stats_origin] = DenseMultiplyConfig(),
     ) raises Error -> DenseProducts[origin_of(arena)]:
-        """Approximate sparse product of a run of rows against the indexed vectors, into a lent arena.
+        """Approximate sparse product of a run of rows against the indexed vectors, into a passed arena.
         Calls `usearch_dense_multiply`.
 
         Reports every pair the traversal scored instead of only the nearest, in traversal order
@@ -3303,11 +3303,11 @@ trait DenseVerbs:
 
         Parameters:
             left_origin: The left-hand rows' origin, inferred from the argument.
-            stats_origin: The lent telemetry slot's origin, inferred with it.
+            stats_origin: The passed telemetry slot's origin, inferred with it.
 
         Args:
             left: The left-hand rows.
-            arena: The arena to rewind and refill, which the result borrows; a failed call leaves it valid.
+            arena: The arena to rewind and refill, which the result views; a failed call leaves it valid.
             config: The pairs kept per row, the breadth of the candidates, and the telemetry slot.
 
         Returns:
@@ -3334,7 +3334,7 @@ trait DenseVerbs:
         config: DenseAttendConfig[carry_origin, stats_origin] = DenseAttendConfig(),
     ) raises Error -> DenseVectors[dtype, origin_of(arena)]:
         """Softmax attention of a run of query heads over every indexed key their graph walks score,
-        written in a lent arena. Calls `usearch_dense_attend`.
+        written in a passed arena. Calls `usearch_dense_attend`.
 
         Every key a walk scores folds into each head's running maximum, partition, and weighted
         value sum, as Flash Attention folds key tiles, with no top-k cut: the long tail the walk
@@ -3347,14 +3347,14 @@ trait DenseVerbs:
 
         The index stores no values: `value_lookup` resolves the keys of every scored batch to their
         value rows, so only keys a walk scores are ever resolved. `carry` is the softmax's `m` and
-        `l`, one `DenseSoftmaxState` per query row, lent by the caller: supplying it folds this branch
+        `l`, one `DenseSoftmaxState` per query row, passed by the caller: supplying it folds this branch
         into another over the same queries, such as the recent window kept out of the index, by
         partial-softmax rescaling.
 
         Parameters:
             queries_origin: The query rows' origin, inferred from the argument.
             carry_origin: The softmax states' origin, inferred with it where any are supplied.
-            stats_origin: The lent telemetry slot's origin, inferred with it.
+            stats_origin: The passed telemetry slot's origin, inferred with it.
             dtype: The element type the attended rows are read as.
             kind: The scalar kind they land as, which `dtype` must store whole; the kind `dtype` stores
                 by default.
@@ -3364,7 +3364,7 @@ trait DenseVerbs:
             value_lookup: Resolves every scored batch of keys to their value rows - a host function on
                 RAM, and a device one on VRAM.
             value_lookup_state: The opaque state forwarded into every `value_lookup` call.
-            arena: The arena to rewind and refill, which the result borrows; a failed call leaves it valid.
+            arena: The arena to rewind and refill, which the result views; a failed call leaves it valid.
             config: The heads per token, the carry, the breadth of the candidates, the logit scale,
                 and the telemetry slot.
 
@@ -3394,7 +3394,7 @@ trait DenseVerbs:
         config: DenseMaxsimConfig[stats_origin] = DenseMaxsimConfig(),
     ) raises Error -> DenseProducts[origin_of(arena)]:
         """Late-interaction scoring: every query row takes its best match within a key, and those
-        maxima sum to that key's score, written in a lent arena. Calls `usearch_dense_maxsim`.
+        maxima sum to that key's score, written in a passed arena. Calls `usearch_dense_maxsim`.
 
         This is what `values_per_key` above one exists for. A document is one key holding its token
         rows, and the walk stays over individual tokens under a plain inner product. Approximate in
@@ -3402,14 +3402,14 @@ trait DenseVerbs:
 
         Parameters:
             queries_origin: The query rows' origin, inferred from the argument.
-            stats_origin: The lent telemetry slot's origin, inferred with it.
+            stats_origin: The passed telemetry slot's origin, inferred with it.
 
         Args:
             queries: The token rows of every query, laid end to end.
             rows_per_query: Rows in every query; uniform, so ColBERT's padding applies as is.
             wanted: Keys per query - the "k" over documents rather than rows; zero keeps every key
                 scored.
-            arena: The arena to rewind and refill, which the result borrows; a failed call leaves it valid.
+            arena: The arena to rewind and refill, which the result views; a failed call leaves it valid.
             config: The breadth of the candidates and the telemetry slot.
 
         Returns:
@@ -3426,7 +3426,7 @@ struct DenseIndexOn[origin: ImmOrigin](DenseVerbs, ImplicitlyCopyable):
     """An index bound to the executor its verbs block on, as `index.on(executor)` answers it. Binding-only.
 
     Parameters:
-        origin: The index and the executor, which this receiver borrows.
+        origin: The index and the executor, which this receiver views.
     """
 
     var index: Pointer[DenseIndex, Self.origin]
@@ -3448,43 +3448,6 @@ struct DenseIndexOn[origin: ImmOrigin](DenseVerbs, ImplicitlyCopyable):
         """Runs `call` on the bound executor, refused while another call holds it."""
         return _block(self.index[].library, call^, self.index[].address, self.executor)
 
-    def cursor(self) raises Error -> DenseCursor[Self.origin]:
-        """Opens a walk over every entry as stored, its pulls on the bound executor.
-        Calls `usearch_dense_cursor_init`.
-
-        Returns:
-            The cursor, which borrows the index and the executor and cannot outlive them.
-
-        Raises:
-            `Error` if the residency has no cursor, as VRAM does not.
-        """
-        return DenseCursor[Self.origin](self.index[].library, self.index[].address, self.executor, 0, None)
-
-    def cursor[
-        starts_origin: ImmOrigin, //
-    ](self, starts: Span[Key, starts_origin]) raises Error -> DenseCursor[Self.origin]:
-        """Opens a walk from `starts`, its pulls on the bound executor. Calls `usearch_dense_cursor_init`.
-
-        Parameters:
-            starts_origin: The start keys' origin, inferred from the argument.
-
-        Args:
-            starts: The keys to walk from, the walk yielding their entries first.
-
-        Returns:
-            The cursor, which borrows the index and the executor and cannot outlive them.
-
-        Raises:
-            `Error` if the residency has no cursor, as VRAM does not.
-        """
-        return DenseCursor[Self.origin](
-            self.index[].library,
-            self.index[].address,
-            self.executor,
-            len(starts),
-            starts.unsafe_ptr().unsafe_origin_cast[ImmUntrackedOrigin](),
-        )
-
     def search_stream[
         query_origin: ImmOrigin, //
     ](
@@ -3501,7 +3464,7 @@ struct DenseIndexOn[origin: ImmOrigin](DenseVerbs, ImplicitlyCopyable):
             config: The breadth of the candidates the walk explores.
 
         Returns:
-            A stream yielding matches lazily, which borrows the index, the executor and the query.
+            A stream yielding matches lazily, which uses the index, the executor and the query.
 
         Raises:
             `Error` with `UNSUPPORTED` while no residency implements the stream.
@@ -3514,7 +3477,7 @@ struct DenseIndexOn[origin: ImmOrigin](DenseVerbs, ImplicitlyCopyable):
 def _refine_call[
     stats_origin: MutOrigin, plan_origin: MutOrigin, phase_origin: MutOrigin
 ](config: DenseRefineConfig[stats_origin, plan_origin, phase_origin]) -> _DenseRefineCall:
-    """Lowers a refinement's lent slots into its crossing."""
+    """Lowers a refinement's passed slots into its crossing."""
     return _DenseRefineCall(
         RefineOptionsArguments(c_size_t(config.expansion_factor), c_size_t(config.memory_limit)),
         config.progress,
@@ -3529,7 +3492,7 @@ def _insert_call[
 ](
     keys: Span[Key, keys_origin], vectors: RowsView[vectors_origin], config: DenseInsertConfig[stats_origin]
 ) -> _DenseInsertCall:
-    """Lowers an insertion's borrowed inputs into its crossing."""
+    """Lowers an insertion's viewed inputs into its crossing."""
     return _DenseInsertCall(
         KeysView.of(keys).arguments(),
         len(keys),
@@ -3548,7 +3511,7 @@ def _sample_call[
     arena: Address,
     config: DenseSampleConfig[shown_origin, coordinates_origin, focus_origin],
 ) -> _DenseSampleCall[origin]:
-    """Lowers a sample's borrowed inputs into its crossing."""
+    """Lowers a sample's viewed inputs into its crossing."""
     return _DenseSampleCall[origin](
         KeysView.of(config.shown).arguments(),
         len(config.shown),
@@ -3573,7 +3536,7 @@ def _search_call[
     arena: Address,
     config: DenseSearchConfig[stats_origin],
 ) -> _DenseSearchCall[origin]:
-    """Lowers a search's borrowed inputs into its crossing."""
+    """Lowers a search's viewed inputs into its crossing."""
     return _DenseSearchCall[origin](
         queries.arguments(),
         Int(queries.rows),
@@ -3596,7 +3559,7 @@ def _maxsim_call[
     arena: Address,
     config: DenseMaxsimConfig[stats_origin],
 ) -> _DenseMaxsimCall[origin]:
-    """Lowers a late-interaction call's borrowed inputs into its crossing."""
+    """Lowers a late-interaction call's viewed inputs into its crossing."""
     return _DenseMaxsimCall[origin](
         queries.arguments(),
         Int(queries.rows),
@@ -3612,7 +3575,7 @@ def _maxsim_call[
 def _multiply_call[
     origin: MutOrigin, left_origin: ImmOrigin, stats_origin: MutOrigin
 ](left: RowsView[left_origin], arena: Address, config: DenseMultiplyConfig[stats_origin]) -> _DenseMultiplyCall[origin]:
-    """Lowers a product's borrowed inputs into its crossing."""
+    """Lowers a product's viewed inputs into its crossing."""
     return _DenseMultiplyCall[origin](
         left.arguments(),
         Int(left.rows),
@@ -3638,7 +3601,7 @@ def _attend_call[
     arena: Address,
     config: DenseAttendConfig[carry_origin, stats_origin],
 ) -> _DenseAttendCall[dtype, kind, origin]:
-    """Lowers an attention call's borrowed inputs into its crossing."""
+    """Lowers an attention call's viewed inputs into its crossing."""
     return _DenseAttendCall[dtype, kind, origin](
         queries.arguments(),
         Int(queries.rows),
@@ -3659,11 +3622,11 @@ struct DenseIndexDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
     """An index bound to the executor its verbs are submitted to, as `index.deferred(executor)` answers
     it: every verb answers a `Deferred` at once. Binding-only.
 
-    The verbs and their arguments are those of `DenseVerbs`, the arena borrowed as theirs is; only the
+    The verbs and their arguments are those of `DenseVerbs`, the arena viewed as theirs is; only the
     blocking receivers add the cursor and the search stream, whose every pull blocks.
 
     Parameters:
-        origin: The index and the executor, which this receiver borrows.
+        origin: The index and the executor, which this receiver views.
     """
 
     var index: Pointer[DenseIndex, Self.origin]
@@ -3708,7 +3671,7 @@ struct DenseIndexDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
             )
         ),
     ]:
-        """Submits `DenseVerbs.insert`; the keys, rows and telemetry slot stay borrowed until final.
+        """Submits `DenseVerbs.insert`; the keys, rows and telemetry slot must stay allocated and unchanged until final.
         Calls `usearch_dense_insert`."""
         return {self.index[].library, _insert_call(keys, vectors, config), self.index[].address, self.executor}
 
@@ -3720,7 +3683,7 @@ struct DenseIndexDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
             origin_of(_anchor[Self.origin](), _anchor[stats_origin](), _anchor[plan_origin](), _anchor[phase_origin]())
         ),
     ]:
-        """Submits `DenseVerbs.refine`; the telemetry, plan and phase slots stay borrowed until final.
+        """Submits `DenseVerbs.refine`; the telemetry, plan and phase slots must stay allocated and unchanged until final.
         Calls `usearch_dense_refine`."""
         return {self.index[].library, _refine_call(config), self.index[].address, self.executor}
 
@@ -3750,7 +3713,7 @@ struct DenseIndexDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
             )
         ),
     ]:
-        """Submits `DenseVerbs.sample`; the shown keys, focus and arena stay borrowed until final.
+        """Submits `DenseVerbs.sample`; the shown keys, focus and arena must stay allocated and unchanged until final.
         Calls `usearch_dense_sample`."""
         return {
             self.index[].library,
@@ -3771,7 +3734,7 @@ struct DenseIndexDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
         _DenseSearchCall[origin_of(arena)],
         ImmOrigin(origin_of(_anchor[Self.origin](), _anchor[queries_origin](), _anchor[stats_origin]())),
     ]:
-        """Submits `DenseVerbs.search`; the queries, telemetry slot and arena stay borrowed until final.
+        """Submits `DenseVerbs.search`; the queries, telemetry slot and arena must stay allocated and unchanged until final.
         Calls `usearch_dense_search`."""
         return {
             self.index[].library,
@@ -3787,7 +3750,7 @@ struct DenseIndexDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
     def get[
         dtype: DType, kind: ScalarKind = ScalarKind.of[dtype]()
     ](self, key: Key, mut arena: Arena) -> Deferred[_DenseGetCall[dtype, kind, origin_of(arena)], Self.origin]:
-        """Submits `DenseVerbs.get`; the arena stays borrowed until final. Calls `usearch_dense_get`."""
+        """Submits `DenseVerbs.get`; the arena must stay allocated and unchanged until final. Calls `usearch_dense_get`."""
         comptime assert kind.stores[dtype](), "the element type must store the kind whole"
         return {
             self.index[].library,
@@ -3801,7 +3764,7 @@ struct DenseIndexDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
     ](self, path: StringSlice[path_origin]) -> Deferred[
         _DenseSaveCall, ImmOrigin(origin_of(_anchor[Self.origin](), _anchor[path_origin]()))
     ]:
-        """Submits `DenseVerbs.save`; the path stays borrowed until final. Calls `usearch_dense_save`."""
+        """Submits `DenseVerbs.save`; the path must stay allocated and unchanged until final. Calls `usearch_dense_save`."""
         return {
             self.index[].library,
             _DenseSaveCall(BytesView.of(path).arguments()),
@@ -3810,7 +3773,7 @@ struct DenseIndexDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
         }
 
     def save_buffer(self, mut arena: Arena) -> Deferred[_DenseSaveBufferCall[origin_of(arena)], Self.origin]:
-        """Submits `DenseVerbs.save_buffer`; the arena stays borrowed until final. Calls `usearch_dense_save_buffer`."""
+        """Submits `DenseVerbs.save_buffer`; the arena must stay allocated and unchanged until final. Calls `usearch_dense_save_buffer`."""
         return {
             self.index[].library,
             _DenseSaveBufferCall[origin_of(arena)](arena._address),
@@ -3829,7 +3792,7 @@ struct DenseIndexDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
         _DenseMultiplyCall[origin_of(arena)],
         ImmOrigin(origin_of(_anchor[Self.origin](), _anchor[left_origin](), _anchor[stats_origin]())),
     ]:
-        """Submits `DenseVerbs.multiply`; the rows, telemetry slot and arena stay borrowed until final.
+        """Submits `DenseVerbs.multiply`; the rows, telemetry slot and arena must stay allocated and unchanged until final.
         Calls `usearch_dense_multiply`."""
         return {
             self.index[].library,
@@ -3860,7 +3823,7 @@ struct DenseIndexDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
             )
         ),
     ]:
-        """Submits `DenseVerbs.attend`; the queries, carry, telemetry slot and arena stay borrowed until
+        """Submits `DenseVerbs.attend`; the queries, carry, telemetry slot and arena must stay allocated and unchanged until
         final, and the lookup state must outlive the call too. Calls `usearch_dense_attend`."""
         comptime assert kind.stores[dtype](), "the element type must store the kind whole"
         return {
@@ -3885,7 +3848,7 @@ struct DenseIndexDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
         _DenseMaxsimCall[origin_of(arena)],
         ImmOrigin(origin_of(_anchor[Self.origin](), _anchor[queries_origin](), _anchor[stats_origin]())),
     ]:
-        """Submits `DenseVerbs.maxsim`; the queries, telemetry slot and arena stay borrowed until final.
+        """Submits `DenseVerbs.maxsim`; the queries, telemetry slot and arena must stay allocated and unchanged until final.
         Calls `usearch_dense_maxsim`."""
         return {
             self.index[].library,
@@ -3898,19 +3861,18 @@ struct DenseIndexDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
 struct DenseCursor[origin: ImmOrigin]:
     """A walk over the index contents - `usearch_dense_cursor_t`.
 
-    Export, migration, and visualization feed off it. It borrows the index and the executor its
-    pulls run on, so neither can be released while it lives.
+    Export, migration, and visualization feed off it. It uses the index, so the index cannot be
+    released while it lives, and it keeps no executor: its pulls run on the calling thread, or
+    block on the executor `on` names for each of them.
 
     Parameters:
-        origin: The index and the executor, which the cursor borrows.
+        origin: The index, which the cursor views.
     """
 
     var library: Library
     """The loaded engine, held so the release can still reach `usearch_dense_cursor_free`."""
     var index: Address
     """The `usearch_dense_index_t` the cursor was opened on, which every pull names again."""
-    var executor: Address
-    """The `usearch_executor_t` every pull runs on."""
     var address: Address
     """The `usearch_dense_cursor_t` this struct owns."""
 
@@ -3918,7 +3880,6 @@ struct DenseCursor[origin: ImmOrigin]:
         out self,
         library: Library,
         index: Address,
-        executor: Address,
         starts_count: Int,
         starts: Optional[Pointer[Key, ImmUntrackedOrigin]],
     ) raises Error:
@@ -3927,7 +3888,6 @@ struct DenseCursor[origin: ImmOrigin]:
         Args:
             library: The loaded engine the cursor is opened through.
             index: The handle to scan.
-            executor: The executor every pull runs on.
             starts_count: The start keys at `starts`; zero walks every entry as stored.
             starts: The first start key, or `None` for none.
 
@@ -3941,6 +3901,7 @@ struct DenseCursor[origin: ImmOrigin]:
         _cross(
             DenseCursorInitArguments(
                 index,
+                NULL_ADDRESS,
                 outcome.unsafe_origin_cast[MutUntrackedOrigin](),
                 c_size_t(starts_count),
                 starts,
@@ -3951,7 +3912,6 @@ struct DenseCursor[origin: ImmOrigin]:
         library._check(outcome.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0], "usearch_dense_cursor_init")
         self.library = library
         self.index = index
-        self.executor = executor
         self.address = created.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0]
 
     def __deinit__(deinit self):
@@ -3965,11 +3925,11 @@ struct DenseCursor[origin: ImmOrigin]:
         _ = self.library^
 
     def next_keys(self, wanted: Int, mut arena: Arena) raises Error -> DenseBatch[origin_of(arena)]:
-        """Copies up to `wanted` next keys into a lent arena, skipping their links. Calls `usearch_dense_cursor_next`.
+        """Copies up to `wanted` next keys into a passed arena, skipping their links. Calls `usearch_dense_cursor_next`.
 
         Args:
             wanted: The upper bound on keys this pull writes.
-            arena: The arena to rewind and refill, which the batch borrows; a failed call leaves it valid.
+            arena: The arena to rewind and refill, which the batch views; a failed call leaves it valid.
 
         Returns:
             The keys, read in place from the arena; an empty batch once the walk is exhausted.
@@ -3977,15 +3937,15 @@ struct DenseCursor[origin: ImmOrigin]:
         Raises:
             `Error` if the engine refuses the copy.
         """
-        return self._next(_DenseCursorNextCall[origin_of(arena)](self.address, False, wanted, arena._address))
+        return self._next(_DenseCursorNextCall[origin_of(arena)](self.address, False, wanted, arena._address), NULL_ADDRESS)
 
     def next_links(self, wanted: Int, mut arena: Arena) raises Error -> DenseBatch[origin_of(arena)]:
-        """Copies up to `wanted` next keys into a lent arena, each with the keys it links to.
+        """Copies up to `wanted` next keys into a passed arena, each with the keys it links to.
         Calls `usearch_dense_cursor_next`.
 
         Args:
             wanted: The upper bound on entries this pull writes.
-            arena: The arena to rewind and refill, which the batch borrows; a failed call leaves it valid.
+            arena: The arena to rewind and refill, which the batch views; a failed call leaves it valid.
 
         Returns:
             The keys and their links, read in place from the arena; an empty batch once the walk is exhausted.
@@ -3993,11 +3953,87 @@ struct DenseCursor[origin: ImmOrigin]:
         Raises:
             `Error` if the engine refuses the copy.
         """
-        return self._next(_DenseCursorNextCall[origin_of(arena)](self.address, True, wanted, arena._address))
+        return self._next(_DenseCursorNextCall[origin_of(arena)](self.address, True, wanted, arena._address), NULL_ADDRESS)
 
-    def _next[C: Call](self, var call: C) raises Error -> C.Result:
-        """One blocking pull on the cursor's executor."""
-        return _block(self.library, call^, self.index, self.executor)
+    def on(ref self, ref executor: Executor) -> DenseCursorOn[Self.origin, ImmOrigin(origin_of(self, executor))]:
+        """The receiver whose pulls block on `executor`, named again for every pull. Binding-only.
+
+        Args:
+            executor: The executor every pull runs on; its kind must match the index's residency.
+
+        Returns:
+            A receiver viewing the cursor and the executor, which neither may outlive.
+        """
+        return DenseCursorOn[Self.origin, ImmOrigin(origin_of(self, executor))](
+            Pointer[DenseCursor[Self.origin], ImmOrigin(origin_of(self, executor))](
+                unsafe_from_address=Int(Pointer(to=self))
+            ),
+            executor.address,
+        )
+
+    def _next[C: Call](self, var call: C, executor: Address) raises Error -> C.Result:
+        """One blocking pull on `executor`, or on the calling thread for `NULL_ADDRESS`."""
+        return _block(self.library, call^, self.index, executor)
+
+
+struct DenseCursorOn[cursor_origin: ImmOrigin, origin: ImmOrigin]:
+    """A cursor's pulls blocking on one executor, as `DenseCursor.on` makes them. Binding-only.
+
+    Parameters:
+        cursor_origin: The index the cursor views.
+        origin: The cursor and the executor, which this receiver views.
+    """
+
+    var cursor: Pointer[DenseCursor[Self.cursor_origin], Self.origin]
+    """The cursor every pull advances."""
+    var executor: Address
+    """The `usearch_executor_t` every pull runs on."""
+
+    def __init__(out self, cursor: Pointer[DenseCursor[Self.cursor_origin], Self.origin], executor: Address):
+        """Binds a cursor to an executor.
+
+        Args:
+            cursor: The cursor every pull advances.
+            executor: The `usearch_executor_t` every pull runs on.
+        """
+        self.cursor = cursor
+        self.executor = executor
+
+    def next_keys(self, wanted: Int, mut arena: Arena) raises Error -> DenseBatch[origin_of(arena)]:
+        """Copies up to `wanted` next keys into a passed arena on the bound executor, skipping their
+        links. Calls `usearch_dense_cursor_next`.
+
+        Args:
+            wanted: The upper bound on keys this pull writes.
+            arena: The arena to rewind and refill, which the batch views; a failed call leaves it valid.
+
+        Returns:
+            The keys, read in place from the arena; an empty batch once the walk is exhausted.
+
+        Raises:
+            `Error` if the engine refuses the copy.
+        """
+        return self.cursor[]._next(
+            _DenseCursorNextCall[origin_of(arena)](self.cursor[].address, False, wanted, arena._address), self.executor
+        )
+
+    def next_links(self, wanted: Int, mut arena: Arena) raises Error -> DenseBatch[origin_of(arena)]:
+        """Copies up to `wanted` next keys into a passed arena on the bound executor, each with the
+        keys it links to. Calls `usearch_dense_cursor_next`.
+
+        Args:
+            wanted: The upper bound on entries this pull writes.
+            arena: The arena to rewind and refill, which the batch views; a failed call leaves it valid.
+
+        Returns:
+            The keys and their links, read in place from the arena; an empty batch once the walk is exhausted.
+
+        Raises:
+            `Error` if the engine refuses the copy.
+        """
+        return self.cursor[]._next(
+            _DenseCursorNextCall[origin_of(arena)](self.cursor[].address, True, wanted, arena._address), self.executor
+        )
 
 
 struct DenseSearchStream[origin: ImmOrigin]:
@@ -4009,7 +4045,7 @@ struct DenseSearchStream[origin: ImmOrigin]:
     globally exact.
 
     Parameters:
-        origin: The index, the executor, and the query row, which the stream borrows.
+        origin: The index, the executor, and the query row, which the stream views.
     """
 
     var library: Library
@@ -4067,12 +4103,12 @@ struct DenseSearchStream[origin: ImmOrigin]:
         _ = self.library^
 
     def next(self, wanted: Int, mut arena: Arena) raises Error -> Matches[origin_of(arena)]:
-        """Pulls up to `wanted` next-nearest matches into a lent arena, as the one query of a search.
+        """Pulls up to `wanted` next-nearest matches into a passed arena, as the one query of a search.
         Calls `usearch_dense_search_stream_next`.
 
         Args:
             wanted: The upper bound on matches this pull writes.
-            arena: The arena to rewind and refill, which the pull borrows; a failed call leaves it valid.
+            arena: The arena to rewind and refill, which the pull views; a failed call leaves it valid.
 
         Returns:
             One query's matches, read in place from the arena; an empty query once the walk is drained.
@@ -4122,15 +4158,15 @@ def dense_reshard[
     Parameters:
         sources_origin: The sources' origin, inferred from the argument.
         targets_origin: The targets' origin, inferred from the argument.
-        ram_origin: The RAM placement's borrowed domain array, inferred from the config.
-        vram_origin: The VRAM placement's borrowed ordinal array, inferred with it.
-        nvme_origin: The NVMe placement's borrowed path array, inferred with it.
-        stats_origin: The lent telemetry slot's origin, inferred with it.
-        plan_origin: The lent plan's origin, inferred with it.
-        phase_origin: The lent phase slot's origin, inferred with it.
+        ram_origin: The RAM placement's viewed domain array, inferred from the config.
+        vram_origin: The VRAM placement's viewed ordinal array, inferred with it.
+        nvme_origin: The NVMe placement's viewed path array, inferred with it.
+        stats_origin: The passed telemetry slot's origin, inferred with it.
+        plan_origin: The passed plan's origin, inferred with it.
+        phase_origin: The passed phase slot's origin, inferred with it.
 
     Args:
-        executor: The executor every move and the closing rounds fan out over; it also lends its engine.
+        executor: The executor every move and the closing rounds fan out over; it also supplies its queues.
         sources: The indexes whose entries move, each named once.
         targets: The indexes the entries move into, each named once, a source itself or empty.
         config: The placement of a recut, the rounds' spending, the seed of a cut, the handler, and the
@@ -4181,7 +4217,7 @@ def dense_reshard_deferred[
     ),
 ]:
     """Submits `dense_reshard` to `executor`, answering a `Deferred` at once; the indexes, placements
-    and slots stay borrowed until final. Calls `usearch_dense_reshard`."""
+    and slots must stay allocated and unchanged until final. Calls `usearch_dense_reshard`."""
     return {executor.library, _DenseReshardCall(sources, targets, config), NULL_ADDRESS, executor.address}
 
 
@@ -4190,7 +4226,7 @@ def dense_reshard_plan_finish(executor: Executor, var plan: DenseReshardPlan) ra
     Calls `usearch_dense_reshard_plan_finish`.
 
     Args:
-        executor: The executor the plan was opened with; it also lends its engine.
+        executor: The executor the plan was opened with; it also supplies its queues.
         plan: The plan a reshard opened, consumed by the call.
 
     Returns:
@@ -4249,7 +4285,7 @@ def dense_metadata_read[
         path_origin: The path bytes' origin, inferred from the argument.
 
     Args:
-        executor: The executor the read runs on; it also lends its engine.
+        executor: The executor the read runs on; it also supplies its queues.
         path: The manifest of a sharded checkpoint, or a single monolith.
 
     Returns:
@@ -4276,7 +4312,7 @@ def dense_metadata_read_buffer[
         buffer_origin: The source bytes' origin, inferred from the argument.
 
     Args:
-        executor: The executor the read runs on; it also lends its engine.
+        executor: The executor the read runs on; it also supplies its queues.
         buffer: Source holding one serialized monolith.
 
     Returns:

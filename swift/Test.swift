@@ -58,7 +58,7 @@ private func rows<Element: ScalarValue>(_ values: [Element], columns: Int) throw
 }
 
 /// Views an array as rows of the given width for the duration of `body`, which is what keeps the
-/// borrow and the storage the same length.
+/// view and the storage the same length.
 private func withMatrix<Element: ScalarValue, Result, Failure: Swift.Error>(
     _ values: [Element],
     columns: Int,
@@ -198,7 +198,7 @@ struct VocabularyTests {
     @Test func executorFactoriesTakeOnlyTheirOwnPlacement() throws {
         let executor = try Executor.forRam(memoryDomains: [], threads: 2)
         try executor.drain(mood: .spinning)
-        // The streams cross behind a pointer that carries no count, so the binding counts them.
+        // The streams cross behind a pointer that holds no count, so the binding counts them.
         #expect(failureStatus(of: try Executor.forVram(devices: [0, 1], streams: [nil])) == .shapeMismatch)
         // An arena lives where its executor computes, and without one in host pages.
         for arena in [try Arena(on: executor), try Arena()] {
@@ -385,10 +385,10 @@ struct StreamingTests {
         let executor = try executor()
         let arena = try Arena(on: executor)
 
-        let cursor = try index.on(executor).cursor()
+        let cursor = try index.cursor()
         var walked: [Key] = []
         while true {
-            let batch = try cursor.nextLinks(wanted: 2, arena: arena)
+            let batch = try cursor.on(executor).nextLinks(wanted: 2, arena: arena)
             guard !batch.keys.isEmpty else { break }
             #expect(batch.links.count == batch.keys.count)
             walked.append(contentsOf: batch.keys)
@@ -420,7 +420,7 @@ struct StreamingTests {
             #expect(error.status == .unsupported)
         }
 
-        // A stream walks one query row, and refuses rows carrying more before asking.
+        // A stream walks one query row, and refuses rows holding more before asking.
         let pair = try rows([Float](arrayLiteral: 1, 0, 0, 1), columns: 2)
         #expect(failureStatus(of: try index.searchStream(pair)) == .shapeMismatch)
     }
@@ -489,7 +489,7 @@ struct LifetimeTests {
     @Test func arenaSurvivesFailures() throws {
         let index = try triangle()
         let arena = try Arena()
-        // A product needs logits, so a euclidean index refuses it after the arena was lent.
+        // A product needs logits, so a euclidean index refuses it after the arena was passed.
         let left = try rows([Float](arrayLiteral: 1, 0), columns: 2)
         #expect(failureStatus(of: try index.multiply(left, arena: arena)) == .configMismatch)
         let first = try index.get(key: 1, as: Float.self, arena: arena)
@@ -626,10 +626,10 @@ struct DeferredTests {
         #expect(try held.wait()[0].map(\.key) == [1])
     }
 
-    /// A deferred call borrows its arena as a blocking one does, so a call on the same arena
+    /// A deferred call uses its arena as a blocking one does, so a call on the same arena
     /// meanwhile is refused without ending the holder's views, and the arena serves again once the
     /// call is final.
-    @Test func aDeferredCallBorrowsItsArena() throws {
+    @Test func aDeferredCallViewsItsArena() throws {
         let index = try triangle()
         let executor = try executor()
         let arena = try Arena(on: executor)
@@ -776,7 +776,7 @@ struct LinearAlgebraTests {
         #expect(report.reachability == reachability)
     }
 
-    /// A plan keeps a stopped round live and the index closed to insertions, carries the phase each
+    /// A plan keeps a stopped round live and the index closed to insertions, holds the phase each
     /// call stopped in, and its finish lands the whole plan's report and frees it.
     @Test func refinePlansResumeUntilFinished() throws {
         let index = try triangle()

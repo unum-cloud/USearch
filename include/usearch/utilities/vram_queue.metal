@@ -260,7 +260,7 @@ struct metal_sorted_candidates {
             for (uint slot = 0; slot != slots_; ++slot) rank += popcount(metal_warp_t::ballot(entries[slot] < value));
             // An earlier entry already pushed the worst below it.
             if (rank == slots_ * metal_warp_t::width_k) continue;
-            // Highest slot first, so each slot's old last lane carries up before anything
+            // Highest slot first, so each slot's old last lane moves up before anything
             // rewrites the slot.
             for (uint slot = slots_; slot-- != 0;) {
                 // Lower slots keep their ranks.
@@ -691,7 +691,7 @@ struct metal_gathered_links_t {
 };
 
 /** Claims and stages the window's @c loads slot loads, every simdgroup-width of fresh IDs reaching
- *  @p score through @p walk 's two-width @c ids span, whose @p pending entries carry to the caller
+ *  @p score through @p walk 's two-width @c ids span, whose @p pending entries stay with the caller
  *  across every round. */
 template <typename walk_type_, typename frontier_, typename score_type_>
 inline void metal_stage_window(thread walk_type_& walk, thread frontier_& frontier,

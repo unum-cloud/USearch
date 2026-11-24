@@ -8,8 +8,8 @@
  *
  *  Every index wrapper answers its verbs through a receiver whose type picks how they complete: a
  *  blocking receiver answers a @c status_t or an @c expected, a deferred one answers a @c deferred
- *  call its one owner polls, waits on or awaits. Handlers are @c noexcept callables borrowed for
- *  one call, so no fault ever unwinds through the library.
+ *  call its one owner polls, waits on or awaits. Handlers are @c noexcept callables read only
+ *  during one call, so no fault ever unwinds through the library.
  */
 #pragma once
 
@@ -102,7 +102,7 @@ class awaiter;
 
 /**
  *  @brief A submitted call: its outcome and its outputs, owned until the call is final, while the
- *      receiver, the inputs, the arena and the handlers it was handed stay borrowed until then.
+ *      receiver, inputs, arena and handlers it was handed stay allocated and unchanged until then.
  *
  *  It never moves, as the library writes into it, and its one owner polls @c status, blocks in
  *  @c wait or awaits @c wait on its own loop; destruction waits, so nothing the call writes into
@@ -206,7 +206,7 @@ struct answer_value<expected<value_type_>> {
 template <typename answer_type_>
 using answer_value_t = typename answer_value<answer_type_>::type;
 
-/** Answers @p answer_type_ from a verb's @p body: a deferred call lends C its own outcome and
+/** Answers @p answer_type_ from a verb's @p body: a deferred call passes C its own outcome and
  *  outputs; a blocking call writes its outputs in place, then takes the C outcome's two words once
  *  it is final. */
 template <typename answer_type_, typename body_type_>
@@ -284,9 +284,10 @@ struct owning {
     handle_type_* handle_field() noexcept { return owner_.handle_field(); }
 };
 
-/** A borrowed handle and the executor its verbs run on, completing as @p completion_ says. */
+/** A handle its caller owns and the executor its verbs run on, both valid while this lives,
+ *  completing as @p completion_ says. */
 template <typename handle_type_, usearch_completion_t completion_>
-struct borrowing {
+struct caller_owned {
     static constexpr usearch_completion_t completion = completion_;
     handle_type_ handle_ = nullptr;
     usearch_executor_t executor_ = nullptr;
@@ -375,12 +376,12 @@ inline constexpr std::size_t values_per_element<u4x2_t> = 2;
 template <>
 inline constexpr std::size_t values_per_element<u1x8_t> = 8;
 
-/** The bytes of @p text as a call takes a path, a name or a buffer, borrowed for the call. */
+/** The bytes of @p text as a call takes a path, a name or a buffer, read only during the call. */
 inline usearch_bytes_view_t bytes_view(std::string_view text) noexcept {
     return {reinterpret_cast<std::uint8_t const*>(text.data()), text.size()};
 }
 
-/** Rows of @p element_type_ the caller lends a call, along its batch axis. */
+/** Rows of @p element_type_ the caller passes a call, along its batch axis. */
 template <element element_type_>
 struct rows_view {
 
@@ -410,7 +411,7 @@ struct rows_view {
     usearch_rows_view_t view() const noexcept { return {first_row, stride, columns, scalar_of<element_type_>}; }
 };
 
-/** Entries of @p element_type_ the caller lends a call end to end, as an Apache Arrow tape: one
+/** Entries of @p element_type_ the caller passes a call end to end, as an Apache Arrow tape: one
  *  more offset than entries, counted in the modality's own elements, bytes or points. */
 template <element element_type_>
 struct tape_view {
@@ -529,16 +530,18 @@ template <typename handler_type_>
 concept progress_handler =
     std::is_nothrow_invocable_r_v<usearch_continuation_t, handler_type_&, std::size_t, std::size_t>;
 
-/** A per-key predicate handler: answers whether one candidate key may be reported. */
+/** A per-key predicate handler: answers whether one candidate key may be reported, through a const
+ *  call operator, since every executor thread may ask it at once. */
 template <typename handler_type_>
-concept key_predicate_handler = std::is_nothrow_invocable_r_v<bool, handler_type_&, usearch_key_t>;
+concept key_predicate_handler = std::is_nothrow_invocable_r_v<bool, handler_type_ const&, usearch_key_t>;
 
 /** A batch predicate handler: writes one admission per key of a batch it is asked about. */
 template <typename handler_type_>
 concept keys_predicate_handler =
-    std::is_nothrow_invocable_r_v<void, handler_type_&, std::span<usearch_key_t const>, std::span<usearch_admission_t>>;
+    std::is_nothrow_invocable_r_v<void, handler_type_ const&, std::span<usearch_key_t const>,
+                                  std::span<usearch_admission_t>>;
 
-/** A progress handler borrowed for one call as its own state; empty hears nothing. */
+/** A progress handler read only during one call as its own state; empty hears nothing. */
 class progress_t {
   public:
     progress_t() noexcept = default;
@@ -559,7 +562,7 @@ class progress_t {
     usearch_progress_t raw_ {};
 };
 
-/** A predicate handler borrowed for one call as its own state; empty admits every key. */
+/** A predicate handler read only during one call as its own state; empty admits every key. */
 class predicate_t {
   public:
     predicate_t() noexcept = default;
@@ -580,7 +583,7 @@ class predicate_t {
     template <typename handler_type_>
     static void each_(usearch_key_t const* keys, usearch_admission_t* admissions, std::size_t count,
                       void* state) noexcept {
-        handler_type_& handler = *static_cast<handler_type_*>(state);
+        handler_type_ const& handler = *static_cast<handler_type_ const*>(state);
         for (std::size_t position = 0; position != count; ++position)
             admissions[position] = handler(keys[position]) ? usearch_admit_k : usearch_reject_k;
     }
@@ -588,8 +591,8 @@ class predicate_t {
     template <typename handler_type_>
     static void batch_(usearch_key_t const* keys, usearch_admission_t* admissions, std::size_t count,
                        void* state) noexcept {
-        (*static_cast<handler_type_*>(state))(std::span<usearch_key_t const> {keys, count},
-                                              std::span<usearch_admission_t> {admissions, count});
+        (*static_cast<handler_type_ const*>(state))(std::span<usearch_key_t const> {keys, count},
+                                                    std::span<usearch_admission_t> {admissions, count});
     }
 
     usearch_predicate_t raw_ {};
@@ -615,18 +618,14 @@ class executor_t {
         return opened_<executor_t>(usearch_executor_for_ram, arguments, &usearch_executor_for_ram_t::executor);
     }
 
-    /** Wraps a thread pool the caller lends, so libraries in one process share its threads. */
-    static expected<executor_t> on_pool(usearch_executor_on_pool_t arguments) noexcept {
-        return opened_<executor_t>(usearch_executor_on_pool, arguments, &usearch_executor_on_pool_t::executor);
-    }
-
-    /** Opens one submission stream on every distinct device @p arguments names. */
+    /** Opens one non-blocking stream on every distinct device @p arguments names, created with the
+     *  executor and destroyed with it; caller @c streams answer @c status_code_t::unsupported_k. */
     static expected<executor_t> for_vram(usearch_executor_for_vram_t arguments = {}) noexcept {
         return opened_<executor_t>(usearch_executor_for_vram, arguments, &usearch_executor_for_vram_t::executor);
     }
 
     /** Creates an executor of host threads for NVMe-resident indexes, one submission ring
-     *  apiece, interleaved across the compute domains local to the devices the paths name. */
+     *  apiece, near the first memory domain @c ram names, else the one the devices sit on. */
     static expected<executor_t> for_nvme(usearch_executor_for_nvme_t arguments = {}) noexcept {
         return opened_<executor_t>(usearch_executor_for_nvme, arguments, &usearch_executor_for_nvme_t::executor);
     }
@@ -821,7 +820,7 @@ struct reshard_config {
     plan_type_* plan = nullptr;
 };
 
-/** The keys already shown and the keys to look around, which every @c sample call borrows. */
+/** The keys already shown and the keys to look around, which every @c sample call reads. */
 struct sample_config_t {
 
     /** The keys already shown: never drawn again, and the paths reach toward them. */

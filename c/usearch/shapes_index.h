@@ -11,12 +11,12 @@
  *  scores against a 60-atom molecule, without padding, truncation, or resampling anywhere in the
  *  interface.
  *
- *  Points are unordered and carry no identity, so no kind pairs point @c i with point @c i of
+ *  Points are unordered and hold no identity, so no kind pairs point @c i with point @c i of
  *  the other side: each finds its own matching. Every kind is invariant to rotation, reflection
  *  and translation, so a shape scores zero against any rigid motion of itself - and against its
  *  mirror image, which is why enantiomers compare as equals. Sets of embeddings scored by late
  *  interaction belong to the dense modality's @c usearch_dense_maxsim, and chains whose order
- *  carries meaning to the sequence modality.
+ *  holds meaning to the sequence modality.
  *
  *  Handles are created by a lifecycle verb naming both an action and a residency, each spelled
  *  @c usearch_shapes_ and the suffix below:
@@ -321,7 +321,7 @@ typedef struct usearch_shapes_init_vram_t {
  *    other than @c f16 or @c f32, a @c values_per_key bound, devices that load no class under
  *    @c gpu_class_ceiling, or @c f32 on Apple GPUs, short of the f32 contract.
  *  - @c usearch_status_config_mismatch_k Devices of two classes.
- *  - @c usearch_status_device_k A device past the listing, one this build carries no kernels for,
+ *  - @c usearch_status_device_k A device past the listing, one this build holds no kernels for,
  *    or a build without GPU kernels.
  */
 USEARCH_EXPORT void usearch_shapes_init_vram(usearch_shapes_init_vram_t* arguments);
@@ -476,7 +476,7 @@ typedef struct usearch_shapes_load_vram_t {
  *  - @c usearch_status_config_mismatch_k Devices of two classes, the executor driving no stream on
  *    some shard's device, or the checkpoint's columns differing from the shards' in dtype, shape
  *    or key width.
- *  - @c usearch_status_device_k An ordinal past the listing, devices this build carries no kernels
+ *  - @c usearch_status_device_k An ordinal past the listing, devices this build holds no kernels
  *    for, a build without GPU kernels, or an executor that is not a VRAM executor.
  *  - @c usearch_status_contended_k Another call holds the executor.
  *  - @c usearch_status_overflow_k A part passes a shard's bound or its key multimap.
@@ -528,7 +528,7 @@ typedef struct usearch_shapes_load_vram_buffer_t {
  *  - @c usearch_status_config_mismatch_k Devices of two classes, the executor driving no stream on
  *    some shard's device, or the checkpoint's columns differing from the shards' in dtype, shape
  *    or key width.
- *  - @c usearch_status_device_k An ordinal past the listing, devices this build carries no kernels
+ *  - @c usearch_status_device_k An ordinal past the listing, devices this build holds no kernels
  *    for, a build without GPU kernels, or an executor that is not a VRAM executor.
  *  - @c usearch_status_contended_k Another call holds the executor.
  *  - @c usearch_status_overflow_k A part passes a shard's bound or its key multimap.
@@ -1196,6 +1196,10 @@ typedef struct usearch_shapes_cursor_init_t {
     /** The handle to be scanned. */
     usearch_shapes_index_t index;
 
+    /** The @b optional executor whose first thread's memory domain holds the cursor's state;
+     *  @c NULL keeps it on no domain. */
+    usearch_executor_t executor;
+
     /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
@@ -1265,8 +1269,8 @@ typedef struct usearch_shapes_cursor_next_t {
  *      links to, in the order @c usearch_shapes_cursor_init describes; the shapes themselves come
  *      from @c usearch_shapes_get.
  *
- *  Links name only entries the snapshot holds, as the graph stored them when the pull ran. The
- *  keys are copied rather than borrowed from the index, so the batch stays valid until the next
+ *  Links name only entries the snapshot holds, as the graph stored them when the pull ran. The keys
+ *  are copied rather than read in place from the index, so the batch stays valid until the next
  *  call given the same arena, however the cursor moves meanwhile.
  *
  *  @par Statuses:

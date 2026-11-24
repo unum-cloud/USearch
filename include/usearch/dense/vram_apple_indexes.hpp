@@ -268,7 +268,7 @@ struct vram_apple_indexes {
      */
     status_t clear() noexcept {
         unique_lock_t const held {gate_, std::try_to_lock};
-        if (!held) return status_code_t::contended_k;
+        if (!held) return {status_code_t::contended_k, "A call holds the index while clearing"};
         if (status_t const closed = shards_.close(); failed(closed)) return closed;
         shards_.begin_window();
         clear_();
@@ -587,7 +587,7 @@ struct vram_apple_indexes {
         if (status_t const kept = status(); failed(kept)) return {{}, kept};
         if (status_t const paired = fanout_t::pairs_with(shards_, executor); failed(paired)) return {{}, paired};
         shared_lock_t const held {gate_};
-        if (shards_.sealed()) return {{}, status_code_t::contended_k};
+        if (shards_.sealed()) return {{}, {status_code_t::contended_k, "A plan holds the index sealed"}};
         insert_plan_t plan {shards_.allocator()};
         plan.rows_ = rows;
         plan.config_ = config;
@@ -2064,31 +2064,31 @@ struct vram_apple_indexes {
     }
 
     /**
-     *  The batched @c get: up to @p wanted rows of every key of @p keys, row q · @p wanted + i
-     *  being the i-th row of key q, and every key's true total in @p entries.
+     *  @brief The batched @c get: up to @p wanted rows of every key of @p keys, and every key's
+     *      true total, read from unified memory and cast into the rows' scalar on the host.
+     *
+     *  @param[in] keys The keys to export, repeats and absent ones included.
+     *  @param[out] rows @b [keys·wanted,dimensions] in any scalar NumKong casts the stored one
+     *      into, where row q · @p wanted + i is the i-th row of key q; refused with
+     *      @c config_mismatch_k when the rows are another count or narrower than the index.
+     *  @param[out] entries The true total under each key, parallel to @p keys; above @p wanted
+     *      when its rows truncated, zero when absent.
+     *  @param[in] wanted Rows kept per key.
      *
      *  @par Statuses:
      *  - @c config_mismatch_k The @p entries are not as many as the @p keys, or @p rows hold other
      *    than @p keys · @p wanted rows or narrower ones.
-     *  - @c unsupported_k The @p rows are in another scalar than the stored one.
-     *  - @c unsupported_layout_k A row's values are not packed.
      *  - @c contended_k A destructive window overlapped the read twice.
      */
     status_t get(std::span<key_t const> keys, rows_span_t rows, std::span<std::size_t> entries, std::size_t wanted,
                  executor_t&) const noexcept {
-        if (entries.size() != keys.size()) return status_code_t::config_mismatch_k;
-        if (!rows.holds<scalar_t>()) return status_code_t::unsupported_k;
-        vectors_span_t const vectors = rows.as<scalar_t>();
-        std::size_t const row_values = divide_round_up<std::size_t>(dimensions(), nk::dimensions_per_value<scalar_t>());
-        if (status_t const refusal = rows_refusal(keys.size() * wanted, vectors, row_values); failed(refusal))
-            return refusal;
+        std::size_t const rows_count = keys.size() * wanted;
+        if (entries.size() != keys.size() || rows.rows != rows_count || (rows_count && rows.columns < dimensions()))
+            return status_code_t::config_mismatch_k;
         return bracketed_([&]() noexcept -> status_t {
-            for (std::size_t position = 0; position != keys.size(); ++position) {
-                std::size_t const first = position * wanted;
-                entries[position] = shards_.read_committed([&]() noexcept {
-                    return get_(keys[position], vectors(nk::range(first, first + wanted), nk::slice), wanted);
-                });
-            }
+            for (std::size_t position = 0; position != keys.size(); ++position)
+                entries[position] = shards_.read_committed(
+                    [&]() noexcept { return get_(keys[position], rows.slice(position * wanted, wanted), wanted); });
             return status_code_t::success_k;
         });
     }
@@ -2266,7 +2266,7 @@ struct vram_apple_indexes {
 
       private:
 
-        /** The shards the batch reads; borrowed from the tower for the call. */
+        /** The shards the batch reads, which the tower owns past the call. */
         shards_t const& shards_;
 
         /** The executor every window queues on. */
@@ -2309,6 +2309,18 @@ struct vram_apple_indexes {
         return total;
     }
 
+    /** The rows under @p key across every shard into @p vectors in their scalar, as RAM's twin
+     *  gathers them, and the key's true total. */
+    std::size_t get_(key_t const& key, rows_span_t vectors, std::size_t wanted) const noexcept {
+        std::size_t const room = min_of(wanted, vectors.rows);
+        std::size_t total = 0;
+        for (shard_t const& shard : shards_) {
+            std::size_t const kept = min_of(total, room);
+            total += shard.index->get(key, vectors.slice(kept, room - kept), room - kept);
+        }
+        return total;
+    }
+
     /** Forgets every shard's rows and keys in place, each keeping its storage:
      *  what a clear and an emptied source become, inside their own window with every shard closed.
      *  */
@@ -2322,7 +2334,7 @@ struct vram_apple_indexes {
      *  it moves no epoch. */
     status_t close_gated_() noexcept {
         unique_lock_t const held {gate_, std::try_to_lock};
-        return held ? shards_.close() : status_code_t::contended_k;
+        return held ? shards_.close() : status_t {status_code_t::contended_k, "A call holds the index while closing"};
     }
 
     /** Runs the reader @p read under the epoch, again once if a destructive window overlapped it,
@@ -2336,8 +2348,9 @@ struct vram_apple_indexes {
             read_result_t result = read();
             if (shards_.still_valid(epoch)) return result;
         }
-        if constexpr (std::is_same_v<read_result_t, status_t>) return status_code_t::contended_k;
-        else return {{}, status_code_t::contended_k};
+        if constexpr (std::is_same_v<read_result_t, status_t>)
+            return {status_code_t::contended_k, "Writes overlapped the read twice"};
+        else return {{}, {status_code_t::contended_k, "Writes overlapped the read twice"}};
     }
 
     /** Validates both lists of a reshard and opens the one they describe, as @ref plan_reshard
@@ -2497,7 +2510,7 @@ struct vram_apple_indexes {
         // The source empties once its rows are copied, so its gate comes before anything that a
         // refusal could undo.
         unique_lock_t const emptying {source.gate_, std::try_to_lock};
-        if (!emptying) return status_code_t::contended_k;
+        if (!emptying) return {status_code_t::contended_k, "A call holds the reshard source"};
 
         // Every shard claims all its rows first, so a failure before publication releases them all.
         std::size_t const source_shards = moves.size();
@@ -2807,8 +2820,10 @@ struct vram_apple_indexes_cursor {
             shard_cursor_t& cursor = shard_cursors_[entry.shard];
             index_t& shard = indexes.shard(entry.shard);
             if (status_t const sought = cursor.seek(shard, entry.node); failed(sought))
-                return indexes.still_valid(epoch_) ? expected<std::size_t> {written, sought}
-                                                   : expected<std::size_t> {0, status_code_t::contended_k};
+                return indexes.still_valid(epoch_)
+                           ? expected<std::size_t> {written, sought}
+                           : expected<std::size_t> {0,
+                                                    {status_code_t::contended_k, "A window moved the cursor's shard"}};
             std::span<node_id_t const> const neighbors = cursor.neighbors();
             if (links_keys && (failed(links_keys->reserve(links_keys->size() + neighbors.size())) ||
                                failed(links_offsets->reserve(links_offsets->size() + 1))))
@@ -2830,7 +2845,7 @@ struct vram_apple_indexes_cursor {
             keys[written++] = key;
         }
         // Emptied shards keep their storage, so a pull that ran past a window read nothing freed.
-        if (!indexes.still_valid(epoch_)) return {0, status_code_t::contended_k};
+        if (!indexes.still_valid(epoch_)) return {0, {status_code_t::contended_k, "A window passed the cursor's pull"}};
         return {written, status_code_t::success_k};
     }
 

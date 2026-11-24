@@ -101,7 +101,7 @@ struct shard_set {
 
     using reserve_capacity_t = typename index_t::reserve_capacity_t;
 
-    /** One shard: the graph, which owns its keys and carries its own placement. */
+    /** One shard: the graph, which owns its keys and holds its own placement. */
     struct shard_t {
 
         /** The graph, growing on demand; an index holds atomics and never moves. */
@@ -270,7 +270,7 @@ struct shard_set {
     indexes_range<index_t> live_indexes() noexcept { return {this, retired_shards(), size()}; }
     indexes_range<index_t const> live_indexes() const noexcept { return {this, retired_shards(), size()}; }
 
-    /** The host allocator behind the shard table and every checkpoint catalog; the shards carry
+    /** The host allocator behind the shard table and every checkpoint catalog; the shards hold
      *  their own. */
     forkunion_allocator_t allocator() const noexcept { return allocator_; }
 
@@ -797,8 +797,9 @@ struct shard_set {
             read_result_t result = read();
             if (still_valid(epoch)) return result;
         }
-        if constexpr (std::is_same_v<read_result_t, status_t>) return status_code_t::contended_k;
-        else return {{}, status_code_t::contended_k};
+        if constexpr (std::is_same_v<read_result_t, status_t>)
+            return {status_code_t::contended_k, "Writes overlapped the read twice"};
+        else return {{}, {status_code_t::contended_k, "Writes overlapped the read twice"}};
     }
 
     /** Runs the reader @p read until neither a destructive window nor a commit spanning
