@@ -16,7 +16,6 @@
 const std = @import("std");
 
 extern fn usearch_executor_for_ram(arguments: *usearch_executor_for_ram_t) void;
-extern fn usearch_executor_on_pool(arguments: *usearch_executor_on_pool_t) void;
 extern fn usearch_executor_for_nvme(arguments: *usearch_executor_for_nvme_t) void;
 extern fn usearch_executor_for_vram(arguments: *usearch_executor_for_vram_t) void;
 extern fn usearch_executor_drain(arguments: *usearch_executor_drain_t) void;
@@ -822,13 +821,7 @@ const usearch_executor_for_ram_t = extern struct {
     outcome: *Outcome,
     ram: usearch_ram_options_t,
     threads: usize,
-};
-
-const usearch_executor_on_pool_t = extern struct {
-    executor: *?*anyopaque,
-    outcome: *Outcome,
-    ram: usearch_ram_options_t,
-    pool: ?*anyopaque,
+    scratch_limit: usize = 0,
 };
 
 const usearch_executor_for_vram_t = extern struct {
@@ -843,8 +836,10 @@ const usearch_executor_for_nvme_t = extern struct {
     executor: *?*anyopaque,
     outcome: *Outcome,
     nvme: usearch_nvme_options_t,
+    ram: usearch_ram_options_t = .{},
     threads: usize,
     nvme_class: usearch_nvme_class_t = 0,
+    scratch_limit: usize = 0,
 };
 
 const usearch_arena_init_t = extern struct {
@@ -874,16 +869,10 @@ const usearch_executor_drain_t = extern struct {
 pub const ExecutorForRamConfig = struct {
     /// The memory domains of the indexes it will drive; empty derives every node the process may use.
     memory_domains: []const i32 = &.{},
-    /// Threads to spawn; zero takes 7/8 of the cores those domains carry.
+    /// Threads to spawn; zero takes 7/8 of the cores those domains hold.
     threads: usize = 0,
-    /// Where the call's final outcome, its static message included, is copied; null copies nothing.
-    diagnostics: ?*Outcome = null,
-};
-
-/// Optional settings of `Executor.onPool`, mirroring `usearch_executor_on_pool_t`.
-pub const ExecutorOnPoolConfig = struct {
-    /// The memory domains of the indexes it will drive; empty derives every node the process may use.
-    memory_domains: []const i32 = &.{},
+    /// The ceiling on each thread's scratch bytes; zero takes 1 GiB.
+    scratch_limit: usize = 0,
     /// Where the call's final outcome, its static message included, is copied; null copies nothing.
     diagnostics: ?*Outcome = null,
 };
@@ -906,6 +895,8 @@ pub const ExecutorForNvmeConfig = struct {
     paths: []const BytesView = &.{},
     /// Threads to spawn, one submission ring apiece; zero derives from the devices' queue capabilities.
     threads: usize = 0,
+    /// The ceiling on each thread's scratch bytes; zero takes 1 GiB.
+    scratch_limit: usize = 0,
     /// Where the call's final outcome, its static message included, is copied; null copies nothing.
     diagnostics: ?*Outcome = null,
 };
@@ -938,24 +929,9 @@ pub const Executor = struct {
             .outcome = &outcome,
             .ram = .of(config.memory_domains),
             .threads = config.threads,
+            .scratch_limit = config.scratch_limit,
         };
         usearch_executor_for_ram(&arguments);
-        return adopt(handle, outcome, config.diagnostics);
-    }
-
-    /// Creates a RAM executor over a borrowed ForkUnion `fu_pool_t`, so several libraries in one
-    /// process share one set of threads; the pool must outlive the executor, and keeps its lender's
-    /// mood. Calls `usearch_executor_on_pool`.
-    pub fn onPool(pool: *anyopaque, config: ExecutorOnPoolConfig) Error!Executor {
-        var handle: ?*anyopaque = null;
-        var outcome: Outcome = .{};
-        var arguments: usearch_executor_on_pool_t = .{
-            .executor = &handle,
-            .outcome = &outcome,
-            .ram = .of(config.memory_domains),
-            .pool = pool,
-        };
-        usearch_executor_on_pool(&arguments);
         return adopt(handle, outcome, config.diagnostics);
     }
 
@@ -969,6 +945,7 @@ pub const Executor = struct {
             .outcome = &outcome,
             .nvme = .of(config.paths),
             .threads = config.threads,
+            .scratch_limit = config.scratch_limit,
         };
         usearch_executor_for_nvme(&arguments);
         return adopt(handle, outcome, config.diagnostics);

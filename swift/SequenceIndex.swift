@@ -1160,9 +1160,10 @@ struct SequenceCall {
 
     func cursor(starts: [Key]) throws(USearchError) -> SequenceCursor {
         let cursor = callState.slots(usearch_sequence_cursor_t?.none)
-        try callState.lend(starts) { (run) throws(USearchError) in
+        try callState.pass(starts) { (run) throws(USearchError) in
             var arguments = usearch_sequence_cursor_init_t(
                 index: index.raw,
+                executor: nil,
                 outcome: callState.outcome,
                 starts_count: starts.count,
                 starts: UnsafeRawPointer(run)?.assumingMemoryBound(to: usearch_key_t.self),

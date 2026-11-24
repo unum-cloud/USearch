@@ -149,7 +149,6 @@ from usearch.types import (
     ExecutorForNvme,
     ExecutorForRam,
     ExecutorForVram,
-    ExecutorOnPool,
     FromName,
     Mood,
     NameOf,
@@ -266,8 +265,6 @@ struct Symbols:
     """`usearch_arena_describe`."""
     var executor_for_ram: ExecutorForRam
     """`usearch_executor_for_ram`."""
-    var executor_on_pool: ExecutorOnPool
-    """`usearch_executor_on_pool`."""
     var executor_for_nvme: ExecutorForNvme
     """`usearch_executor_for_nvme`."""
     var executor_for_vram: ExecutorForVram
@@ -579,7 +576,6 @@ struct Symbols:
         self.arena_free = _resolve[Release](handle, "usearch_arena_free")
         self.arena_describe = _resolve[ArenaDescribe](handle, "usearch_arena_describe")
         self.executor_for_ram = _resolve[ExecutorForRam](handle, "usearch_executor_for_ram")
-        self.executor_on_pool = _resolve[ExecutorOnPool](handle, "usearch_executor_on_pool")
         self.executor_for_nvme = _resolve[ExecutorForNvme](handle, "usearch_executor_for_nvme")
         self.executor_for_vram = _resolve[ExecutorForVram](handle, "usearch_executor_for_vram")
         self.executor_drain = _resolve[ExecutorDrain](handle, "usearch_executor_drain")

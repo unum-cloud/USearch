@@ -985,35 +985,6 @@ public final class Executor: @unchecked Sendable {
         return Executor(raw: try created(executor))
     }
 
-    /// Creates a RAM executor over a borrowed ForkUnion `fu_pool_t`, so several libraries in one
-    /// process share one set of threads while each keeps its own scratch. The pool must outlive
-    /// the executor, and keeps its lender's mood.
-    public static func onPool(
-        memoryDomains: [Int32] = [],
-        cpuClassCeiling: CPUClass? = nil,
-        pool: UnsafeMutableRawPointer
-    ) throws(USearchError) -> Executor {
-        let callState = CallState()
-        let executor = callState.slots(usearch_executor_t?.none)
-        try callState.lend(memoryDomains) { (domains) throws(USearchError) in
-            var arguments = usearch_executor_on_pool_t(
-                executor: executor,
-                outcome: callState.outcome,
-                ram: usearch_ram_options_t(
-                    memory_domains: domains,
-                    memory_domains_count: memoryDomains.count,
-                    shard_capacity: 0,
-                    cpu_class_ceiling: cpuClassCeiling?.raw ?? usearch_cpu_class_unknown_k,
-                    memory_limit: 0
-                ),
-                pool: pool
-            )
-            usearch_executor_on_pool(&arguments)
-        }
-        try callState.wait()
-        return Executor(raw: try created(executor))
-    }
-
     /// Creates an executor of host threads for NVMe-resident indexes, one submission ring apiece,
     /// across the compute domains local to the devices `paths` names.
     ///
@@ -1030,6 +1001,7 @@ public final class Executor: @unchecked Sendable {
                 executor: executor,
                 outcome: callState.outcome,
                 nvme: nvme,
+                ram: usearch_ram_options_t(),
                 threads: threads,
                 nvme_class: usearch_nvme_class_unknown_k
             )

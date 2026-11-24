@@ -1985,6 +1985,7 @@ internal unsafe struct NativeGeospatialReshardPlanFinish
 internal unsafe struct NativeGeospatialCursorInit
 {
     public IntPtr Index;
+    public IntPtr Executor;
     public NativeOutcome* Outcome;
     public nuint StartsCount;
     public Key* Starts;

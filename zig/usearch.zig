@@ -75,7 +75,6 @@ pub const Mood = types.Mood;
 pub const Phase = types.Phase;
 pub const PhaseProgress = types.PhaseProgress;
 pub const ExecutorForRamConfig = types.ExecutorForRamConfig;
-pub const ExecutorOnPoolConfig = types.ExecutorOnPoolConfig;
 pub const ExecutorForVramConfig = types.ExecutorForVramConfig;
 pub const ExecutorForNvmeConfig = types.ExecutorForNvmeConfig;
 pub const Executor = types.Executor;

@@ -106,7 +106,7 @@ test("Residency factories", async (t) => {
   await t.test("a direct construction is refused, and names the factories", () => {
     assert.throws(() => new Executor(), {
       code: Status.InvalidArgument,
-      message: "An Executor is made by Executor.forRam, Executor.onPool, Executor.forVram or Executor.forNvme",
+      message: "An Executor is made by Executor.forRam, Executor.forVram or Executor.forNvme",
     });
     assert.throws(() => new DenseIndex(), {
       code: Status.InvalidArgument,

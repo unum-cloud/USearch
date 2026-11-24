@@ -821,6 +821,7 @@ const usearch_dense_sample_t = extern struct {
 
 const usearch_dense_cursor_init_t = extern struct {
     index: ?*anyopaque,
+    executor: ?*anyopaque = null,
     outcome: *Outcome,
     starts_count: usize,
     starts: ?[*]const Key,

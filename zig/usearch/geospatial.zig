@@ -666,6 +666,7 @@ const usearch_geospatial_reshard_plan_finish_t = extern struct {
 
 const usearch_geospatial_cursor_init_t = extern struct {
     index: ?*anyopaque,
+    executor: ?*anyopaque = null,
     outcome: *Outcome,
     starts_count: usize,
     starts: ?[*]const Key,

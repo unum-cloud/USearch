@@ -32,8 +32,7 @@ Executor::usage = "Executor[id] owns the threads, streams or submission rings ve
 Arena::usage = "Arena[id] holds the outputs a verb writes, rewound by every call writing into it and freed once nothing references it."
 
 ExecutorForRam::usage = "ExecutorForRam[] spawns host worker threads for RAM-resident indexes. \"MemoryDomains\" lists the NUMA nodes to place shards on, {} deriving every node the process may allocate on, and \"Threads\" is how many threads to spawn, 0 taking 7/8 of the cores those nodes carry."
-ExecutorOnPool::usage = "ExecutorOnPool[pool] drives RAM-resident indexes on the ForkUnion thread pool at address pool, which the caller owns. \"MemoryDomains\" lists the NUMA nodes to place shards on, {} deriving every node the process may allocate on."
-ExecutorForVram::usage = "ExecutorForVram[] opens one stream per device for VRAM-resident indexes. \"Devices\" lists the device ordinals to place shards on, {} picking device zero; \"Streams\" lends existing streams, one per device, {} creating its own; and \"ScratchLimit\" caps the memory each stream carves scratch and outputs from, past which a call fails with \"out-of-memory\", 0 letting it grow as needed."
+ExecutorForVram::usage = "ExecutorForVram[] orders work on one stream per device for VRAM-resident indexes. \"Devices\" lists the device ordinals to place shards on, {} picking device zero; \"Streams\" names your streams, one per device, which you destroy after freeing the executor, {} taking each device's per-thread default stream; and \"ScratchLimit\" caps the memory each stream carves scratch and outputs from, past which a call fails with \"out-of-memory\", 0 letting it grow as needed."
 ExecutorForNvme::usage = "ExecutorForNvme[] opens one submission ring per worker for NVMe-resident indexes. \"Paths\" lists the devices or directories to serve shards from, {} leaving every shard where its manifest points, and \"Threads\" is how many workers to spawn, 0 deriving it from the devices' queues."
 ExecutorDrain::usage = "ExecutorDrain[executor, mood] waits until no call holds the executor, then sets what idle workers do: \"parked\", the default, or \"spinning\"."
 ArenaInit::usage = "ArenaInit[] makes an arena for verb outputs, placed where its \"Executor\" computes; None, the default, holds host memory for calls on the calling thread."
@@ -173,7 +172,6 @@ observed = Sequence[{Real, 2, "Constant"}, {Integer, 2, "Constant"}];
 reshardLists = Sequence["DataStore", "DataStore", Integer, Integer, Integer, Integer];
 
 executorForRam = verb["ExecutorForRam", {Integer, "DataStore", Integer}];
-executorOnPool = verb["ExecutorOnPool", {Integer, "DataStore", Integer}];
 executorForVram = verb["ExecutorForVram", {Integer, "DataStore", "DataStore", Integer}];
 executorForNvme = verb["ExecutorForNvme", {Integer, "DataStore", Integer}];
 executorDrain = verb["ExecutorDrain", {Integer, "UTF8String"}];
@@ -404,9 +402,6 @@ PlanProgress[plan_Plan] := call[planProgress, {plan}]
 Options[ExecutorForRam] = {"MemoryDomains" -> {}, "Threads" -> 0};
 ExecutorForRam[OptionsPattern[]] := construct[Executor, executorForRam,
     {store[OptionValue["MemoryDomains"]], OptionValue["Threads"]}]
-Options[ExecutorOnPool] = {"MemoryDomains" -> {}};
-ExecutorOnPool[pool_Integer, OptionsPattern[]] := construct[Executor, executorOnPool,
-    {store[OptionValue["MemoryDomains"]], pool}]
 Options[ExecutorForVram] = {"Devices" -> {}, "Streams" -> {}, "ScratchLimit" -> 0};
 ExecutorForVram[OptionsPattern[]] := construct[Executor, executorForVram,
     {store[OptionValue["Devices"]], store[OptionValue["Streams"]], OptionValue["ScratchLimit"]}]

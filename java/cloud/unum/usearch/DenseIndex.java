@@ -3150,6 +3150,7 @@ public final class DenseIndex implements AutoCloseable {
             "usearch_dense_cursor_init",
             MemoryLayout.structLayout(
                     Library.POINTER.withName("index"),
+                    Library.POINTER.withName("executor"),
                     Library.POINTER.withName("outcome"),
                     Library.SIZE.withName("starts_count"),
                     Library.POINTER.withName("starts"),

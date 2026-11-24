@@ -1415,6 +1415,7 @@ struct DenseCursorInitArguments(ImplicitlyCopyable):
     """`usearch_dense_cursor_init_t`."""
 
     var index: Address
+    var executor: Address
     var outcome: Pointer[Outcome, MutUntrackedOrigin]
     var starts_count: c_size_t
     var starts: Optional[Pointer[Key, ImmUntrackedOrigin]]
@@ -3939,6 +3940,7 @@ struct DenseCursor[origin: ImmOrigin]:
         _cross(
             DenseCursorInitArguments(
                 index,
+                NULL_ADDRESS,
                 outcome.unsafe_origin_cast[MutUntrackedOrigin](),
                 c_size_t(starts_count),
                 starts,
@@ -4179,7 +4181,7 @@ def dense_reshard_deferred[
     ),
 ]:
     """Submits `dense_reshard` to `executor`, answering a `Deferred` at once; the indexes, placements
-    and slots stay borrowed until final. Calls `usearch_dense_reshard`."""
+    and slots must stay allocated and unchanged until final. Calls `usearch_dense_reshard`."""
     return {executor.library, _DenseReshardCall(sources, targets, config), NULL_ADDRESS, executor.address}
 
 

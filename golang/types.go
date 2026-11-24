@@ -26,8 +26,6 @@ import (
 // Every verb here retains nothing and takes no callback, so each claims both promises.
 #cgo noescape usearch_executor_for_ram
 #cgo nocallback usearch_executor_for_ram
-#cgo noescape usearch_executor_on_pool
-#cgo nocallback usearch_executor_on_pool
 #cgo noescape usearch_executor_for_vram
 #cgo nocallback usearch_executor_for_vram
 #cgo noescape usearch_executor_for_nvme
@@ -768,28 +766,14 @@ func (class GPUClass) String() string {
 // the ordered publication path. A cpuClassCeiling intersects with what the machine runs, so a class
 // the machine lacks narrows rather than refuses.
 func ExecutorForRam(memoryDomains []int32, cpuClassCeiling CPUClass, threads uint) (*Executor, error) {
-	lent := open[C.usearch_executor_t]()
+	call := open[C.usearch_executor_t]()
 	C.usearch_executor_for_ram(&C.usearch_executor_for_ram_t{
-		executor: lent.result,
-		outcome:  lent.outcome,
-		ram:      lent.ram(memoryDomains, cpuClassCeiling),
+		executor: call.result,
+		outcome:  call.outcome,
+		ram:      call.ram(memoryDomains, cpuClassCeiling),
 		threads:  C.size_t(threads),
 	})
-	return executorOf(block(lent))
-}
-
-// ExecutorOnPool creates a RAM executor over a borrowed ForkUnion fu_pool_t, so several
-// libraries in one process share one set of threads while each keeps its own scratch. The pool
-// must outlive the executor, and keeps its lender's mood.
-func ExecutorOnPool(memoryDomains []int32, cpuClassCeiling CPUClass, pool unsafe.Pointer) (*Executor, error) {
-	lent := open[C.usearch_executor_t]()
-	C.usearch_executor_on_pool(&C.usearch_executor_on_pool_t{
-		executor: lent.result,
-		outcome:  lent.outcome,
-		ram:      lent.ram(memoryDomains, cpuClassCeiling),
-		pool:     pool,
-	})
-	return executorOf(block(lent))
+	return executorOf(block(call))
 }
 
 // ExecutorForNvme spawns host workers for NVMe-resident indexes, one submission ring apiece,
@@ -798,23 +782,24 @@ func ExecutorOnPool(memoryDomains []int32, cpuClassCeiling CPUClass, pool unsafe
 //
 // Zero threads derives from those devices' queue capabilities.
 func ExecutorForNvme(paths []string, cpuClassCeiling CPUClass, threads uint) (*Executor, error) {
-	lent := open[C.usearch_executor_t]()
+	call := open[C.usearch_executor_t]()
 	C.usearch_executor_for_nvme(&C.usearch_executor_for_nvme_t{
-		executor: lent.result,
-		outcome:  lent.outcome,
-		nvme:     lent.nvme(paths, cpuClassCeiling),
+		executor: call.result,
+		outcome:  call.outcome,
+		nvme:     call.nvme(paths, cpuClassCeiling),
 		threads:  C.size_t(threads),
 	})
-	return executorOf(block(lent))
+	return executorOf(block(call))
 }
 
-// ExecutorForVram opens one submission stream on every named device, or borrows the caller's,
-// all of them driven by the one host thread that calls the verbs - which is why it takes no thread
-// count.
+// ExecutorForVram orders work on one stream on every named device, the caller's or the device's
+// per-thread default one, all of them driven by the one host thread that calls the verbs - which is
+// why it takes no thread count.
 //
-// Streams is empty, or holds one live CUDA stream per device in devices order, each outliving the
-// executor. Zero scratchLimit lets scratch grow as geometry asks. A gpuClassCeiling no named device
-// loads is refused with StatusUnsupported.
+// Streams is empty, which takes each device's per-thread default stream, or holds one live CUDA
+// stream per device in devices order, which the caller destroys after closing the executor; the
+// executor creates and destroys no stream. Zero scratchLimit lets scratch grow as geometry asks.
+// A gpuClassCeiling no named device loads is refused with StatusUnsupported.
 func ExecutorForVram(
 	devices []int32, gpuClassCeiling GPUClass, streams []unsafe.Pointer, scratchLimit uint,
 ) (*Executor, error) {

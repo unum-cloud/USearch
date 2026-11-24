@@ -1149,9 +1149,9 @@ public enum GPUClass : int
 /// that spawns rather than hidden in a constructor.
 /// <para>
 /// One factory per C constructor, each taking only what its own hardware has: host workers and
-/// memory domains for RAM, a borrowed ForkUnion pool for <see cref="OnPool"/>, one submission ring
-/// apiece per device path for NVMe, and device ordinals with optional borrowed streams for VRAM,
-/// where a single host thread drives one stream per device and there is no thread count to name.
+/// memory domains for RAM, one submission ring apiece per device path for NVMe, and device
+/// ordinals with optional caller's streams for VRAM, where a single host thread drives one stream
+/// per device and there is no thread count to name.
 /// The kind must match the residency of every handle the executor drives, and a mismatch fails
 /// the call with <see cref="Status.Device"/>.
 /// </para>
@@ -1193,9 +1193,12 @@ public sealed unsafe class Executor : IDisposable
     /// <param name="cpuClassCeiling">The newest class dispatch may pick, intersected with what the
     /// machine runs, so a class the machine lacks narrows rather than refuses; null means no
     /// ceiling.</param>
+    /// <param name="scratchLimit">The ceiling on each thread's scratch bytes, past which a call reports
+    /// out of memory; zero takes 1 GiB.</param>
     /// <returns>The spawned executor.</returns>
     public static Executor ForRam(
-        ulong threads = 0, ReadOnlySpan<int> memoryDomains = default, CPUClass? cpuClassCeiling = null)
+        ulong threads = 0, ReadOnlySpan<int> memoryDomains = default, CPUClass? cpuClassCeiling = null,
+        ulong scratchLimit = 0)
     {
         IntPtr spawned = IntPtr.Zero;
         NativeOutcome outcome = default;
@@ -1211,43 +1214,9 @@ public sealed unsafe class Executor : IDisposable
                     CpuClassCeiling = (int)(cpuClassCeiling ?? 0),
                 },
                 Threads = (nuint)threads,
+                ScratchLimit = (nuint)scratchLimit,
             };
             usearch_executor_for_ram(&arguments);
-        }
-
-        return new Executor(EngineHandle.Created<NativeExecutorHandle>(spawned, outcome));
-    }
-
-    /// <summary>
-    /// Wraps a ForkUnion pool another library already runs, so one process keeps one set of
-    /// threads while each library keeps its own scratch. Calls <c>usearch_executor_on_pool</c>.
-    /// </summary>
-    /// <param name="pool">The borrowed <c>fu_pool_t</c>, which must outlive the executor and keeps
-    /// its lender's mood.</param>
-    /// <param name="memoryDomains">NUMA node IDs of the indexes it will drive; empty derives.</param>
-    /// <param name="cpuClassCeiling">The newest class dispatch may pick, intersected with what the
-    /// machine runs, so a class the machine lacks narrows rather than refuses; null means no
-    /// ceiling.</param>
-    /// <returns>The executor over that pool.</returns>
-    public static Executor OnPool(
-        IntPtr pool, ReadOnlySpan<int> memoryDomains = default, CPUClass? cpuClassCeiling = null)
-    {
-        IntPtr spawned = IntPtr.Zero;
-        NativeOutcome outcome = default;
-        fixed (int* domains = memoryDomains)
-        {
-            NativeExecutorOnPool arguments = new()
-            {
-                Executor = &spawned,
-                Outcome = &outcome,
-                Ram = new NativeRamOptions
-                {
-                    MemoryDomains = (IntPtr)domains, MemoryDomainsCount = (nuint)memoryDomains.Length,
-                    CpuClassCeiling = (int)(cpuClassCeiling ?? 0),
-                },
-                Pool = pool,
-            };
-            usearch_executor_on_pool(&arguments);
         }
 
         return new Executor(EngineHandle.Created<NativeExecutorHandle>(spawned, outcome));
@@ -1264,9 +1233,12 @@ public sealed unsafe class Executor : IDisposable
     /// <param name="cpuClassCeiling">The newest class dispatch may pick, intersected with what the
     /// machine runs, so a class the machine lacks narrows rather than refuses; null means no
     /// ceiling.</param>
+    /// <param name="scratchLimit">The ceiling on each thread's scratch bytes, past which a call reports
+    /// out of memory; zero takes 1 GiB.</param>
     /// <returns>The spawned executor.</returns>
     public static Executor ForNvme(
-        ulong threads = 0, ReadOnlySpan<string> paths = default, CPUClass? cpuClassCeiling = null)
+        ulong threads = 0, ReadOnlySpan<string> paths = default, CPUClass? cpuClassCeiling = null,
+        ulong scratchLimit = 0)
     {
         IntPtr spawned = IntPtr.Zero;
         NativeOutcome outcome = default;
@@ -1282,6 +1254,7 @@ public sealed unsafe class Executor : IDisposable
                     Paths = (IntPtr)views, PathsCount = (nuint)paths.Length, CpuClassCeiling = (int)(cpuClassCeiling ?? 0),
                 },
                 Threads = (nuint)threads,
+                ScratchLimit = (nuint)scratchLimit,
             };
             usearch_executor_for_nvme(&arguments);
         }
@@ -1949,16 +1922,7 @@ internal unsafe struct NativeExecutorForRam
     public NativeOutcome* Outcome;
     public NativeRamOptions Ram;
     public nuint Threads;
-}
-
-/// <summary>The arguments of <c>usearch_executor_on_pool</c>.</summary>
-[StructLayout(LayoutKind.Sequential)]
-internal unsafe struct NativeExecutorOnPool
-{
-    public IntPtr* Executor;
-    public NativeOutcome* Outcome;
-    public NativeRamOptions Ram;
-    public IntPtr Pool;
+    public nuint ScratchLimit;
 }
 
 /// <summary>The arguments of <c>usearch_executor_for_vram</c>.</summary>
@@ -1979,9 +1943,11 @@ internal unsafe struct NativeExecutorForNvme
     public IntPtr* Executor;
     public NativeOutcome* Outcome;
     public NativeNvmeOptions Nvme;
+    public NativeRamOptions Ram;
     public nuint Threads;
     /// <summary>The NVMe class every ring submits through; zero derives the fastest the host admits.</summary>
     public int NvmeClass;
+    public nuint ScratchLimit;
 }
 
 /// <summary>The arguments of <c>usearch_arena_init</c>.</summary>
@@ -2123,10 +2089,6 @@ internal static unsafe partial class NativeMethods
     [LibraryImport(LibraryName)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     internal static partial void usearch_executor_for_ram(NativeExecutorForRam* arguments);
-
-    [LibraryImport(LibraryName)]
-    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
-    internal static partial void usearch_executor_on_pool(NativeExecutorOnPool* arguments);
 
     [LibraryImport(LibraryName)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]

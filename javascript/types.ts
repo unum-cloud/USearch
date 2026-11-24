@@ -371,15 +371,6 @@ export interface ExecutorForRamConfig {
   cpuClassCeiling?: string;
 }
 
-/** Where the borrowed pool of a RAM executor is placed. */
-export interface ExecutorOnPoolConfig {
-  /** NUMA node IDs of the indexes it will drive; absent derives every node. */
-  memoryDomains?: number[];
-  /** The newest CPU class dispatch may pick, by canonical name, intersected with what the machine
-   *  runs, so a class it lacks narrows rather than refuses; absent means no ceiling. */
-  cpuClassCeiling?: string;
-}
-
 /** Which devices a VRAM executor drives, and on which streams. */
 export interface ExecutorForVramConfig {
   /** CUDA ordinals to drive; absent takes one free device. */
@@ -435,19 +426,11 @@ export interface ExecutorConstructor {
   forRam(config?: ExecutorForRamConfig): Executor;
 
   /**
-   *  Borrows a caller's thread pool for a RAM-resident index, keeping its lender's mood.
+   *  Orders work on one stream per device for a VRAM-resident index, driven from a single host
+   *  thread; it creates and destroys no stream.
    *
-   *  @param pool - The pool's address; it must outlive the executor.
-   *  @param config - The NUMA nodes.
-   *  @returns The executor over the borrowed pool.
-   */
-  onPool(pool: bigint, config?: ExecutorOnPoolConfig): Executor;
-
-  /**
-   *  Opens one stream per device for a VRAM-resident index, driven from a single host thread.
-   *
-   *  @param config - The devices, borrowed streams and scratch ceiling.
-   *  @returns The streams, which must outlive every call they run.
+   *  @param config - The devices, the caller's streams and the scratch ceiling.
+   *  @returns The executor, which must outlive every call it runs.
    */
   forVram(config?: ExecutorForVramConfig): Executor;
 

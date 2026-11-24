@@ -372,14 +372,7 @@ pub struct usearch_executor_for_ram_t {
     pub outcome: *mut usearch_outcome_t,
     pub ram: usearch_ram_options_t,
     pub threads: usize,
-}
-
-#[repr(C)]
-pub struct usearch_executor_on_pool_t {
-    pub executor: *mut usearch_executor_t,
-    pub outcome: *mut usearch_outcome_t,
-    pub ram: usearch_ram_options_t,
-    pub pool: *mut c_void,
+    pub scratch_limit: usize,
 }
 
 #[repr(C)]
@@ -396,8 +389,10 @@ pub struct usearch_executor_for_nvme_t {
     pub executor: *mut usearch_executor_t,
     pub outcome: *mut usearch_outcome_t,
     pub nvme: usearch_nvme_options_t,
+    pub ram: usearch_ram_options_t,
     pub threads: usize,
     pub nvme_class: usearch_nvme_class_t,
+    pub scratch_limit: usize,
 }
 
 pub type usearch_mood_t = c_int;
@@ -415,7 +410,6 @@ unsafe extern "C" {
     pub fn usearch_outcome_status(outcome: *mut usearch_outcome_t) -> usearch_status_t;
 
     pub fn usearch_executor_for_ram(arguments: *mut usearch_executor_for_ram_t);
-    pub fn usearch_executor_on_pool(arguments: *mut usearch_executor_on_pool_t);
     pub fn usearch_executor_for_vram(arguments: *mut usearch_executor_for_vram_t);
     pub fn usearch_executor_for_nvme(arguments: *mut usearch_executor_for_nvme_t);
     pub fn usearch_executor_drain(arguments: *mut usearch_executor_drain_t);
@@ -2026,34 +2020,11 @@ impl Executor {
                 outcome: &mut outcome,
                 ram: ram_options(memory_domains, cpu_class_ceiling),
                 threads,
+                scratch_limit: 0,
             })
         };
         let executor = Executor::adopt(handle);
         check(outcome).map(|()| executor)
-    }
-
-    /// Creates a RAM executor over a borrowed ForkUnion pool, so several libraries in one process
-    /// share one set of threads while each keeps its own scratch.
-    ///
-    /// # Safety
-    /// `pool` must address a live ForkUnion `fu_pool_t` that outlives the executor.
-    pub unsafe fn on_pool(
-        memory_domains: &[i32],
-        cpu_class_ceiling: Option<CPUClass>,
-        pool: *mut c_void,
-    ) -> Result<Self> {
-        unsafe {
-            let mut handle = ptr::null_mut();
-            let mut outcome = usearch_outcome_t::default();
-            usearch_executor_on_pool(&mut usearch_executor_on_pool_t {
-                executor: &mut handle,
-                outcome: &mut outcome,
-                ram: ram_options(memory_domains, cpu_class_ceiling),
-                pool,
-            });
-            let executor = Executor::adopt(handle);
-            check(outcome).map(|()| executor)
-        }
     }
 
     /// Spawns host workers for NVMe-resident indexes, one submission ring apiece, across the
@@ -2072,8 +2043,10 @@ impl Executor {
                 executor: &mut handle,
                 outcome: &mut outcome,
                 nvme: nvme_options(&views, cpu_class_ceiling),
+                ram: ram_options(&[], None),
                 threads,
                 nvme_class: 0,
+                scratch_limit: 0,
             })
         };
         let executor = Executor::adopt(handle);

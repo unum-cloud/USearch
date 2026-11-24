@@ -537,6 +537,7 @@ const usearch_shapes_reshard_plan_finish_t = extern struct {
 
 const usearch_shapes_cursor_init_t = extern struct {
     index: ?*anyopaque,
+    executor: ?*anyopaque = null,
     outcome: *Outcome,
     starts_count: usize,
     starts: ?[*]const Key,

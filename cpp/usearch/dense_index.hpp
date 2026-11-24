@@ -752,7 +752,7 @@ class dense_index_t {
 
     /** Opens a cursor over every entry, or over the entries @p starts names first. */
     outcome<dense_cursor_t> cursor_init(std::span<usearch_key_t const> starts = {}) const noexcept {
-        usearch_dense_cursor_init_t arguments {handle_, nullptr, starts.size(), starts.data(), nullptr};
+        usearch_dense_cursor_init_t arguments {handle_, nullptr, nullptr, starts.size(), starts.data(), nullptr};
         return cursor_opened_<dense_cursor_t>(usearch_dense_cursor_init, arguments);
     }
 

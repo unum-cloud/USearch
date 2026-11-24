@@ -148,7 +148,6 @@ There is a constructor per C one, each taking every argument its own hardware ha
 
 ```go
 usearch.ExecutorForRam(memoryDomains, cpuClassCeiling, threads)
-usearch.ExecutorOnPool(memoryDomains, cpuClassCeiling, forkUnionPool)    // shares the threads another library spawned
 usearch.ExecutorForVram(devices, gpuClassCeiling, streams, scratchLimit) // one host thread, a stream per device
 usearch.ExecutorForNvme(paths, cpuClassCeiling, threads)                 // one submission ring per thread
 ```

@@ -2227,6 +2227,7 @@ struct ShapesCursor[origin: ImmOrigin]:
         _cross(
             DenseCursorInitArguments(
                 index,
+                NULL_ADDRESS,
                 outcome.unsafe_origin_cast[MutUntrackedOrigin](),
                 c_size_t(starts_count),
                 starts,
@@ -2358,7 +2359,7 @@ def shapes_reshard_deferred[
     ),
 ]:
     """Submits `shapes_reshard` to `executor`, answering a `Deferred` at once; the indexes and slots
-    stay borrowed until final. Calls `usearch_shapes_reshard`."""
+    must stay allocated and unchanged until final. Calls `usearch_shapes_reshard`."""
     return {executor.library, _ShapesReshardCall(sources, targets, config), NULL_ADDRESS, executor.address}
 
 

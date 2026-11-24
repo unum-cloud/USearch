@@ -276,6 +276,7 @@ pub struct usearch_shapes_reshard_plan_finish_t {
 #[repr(C)]
 pub struct usearch_shapes_cursor_init_t {
     pub index: usearch_shapes_index_t,
+    pub executor: usearch_executor_t,
     pub outcome: *mut usearch_outcome_t,
     pub starts_count: usize,
     pub starts: *const usearch_key_t,
@@ -1641,6 +1642,7 @@ pub trait ShapesVerbs<'index>: Copy {
         let mut outcome = usearch_outcome_t::default();
         unsafe {
             usearch_shapes_cursor_init(&mut usearch_shapes_cursor_init_t {
+                executor: ptr::null_mut(),
                 index,
                 outcome: &mut outcome,
                 starts_count: starts.len(),

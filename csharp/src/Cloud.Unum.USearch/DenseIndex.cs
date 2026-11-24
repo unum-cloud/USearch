@@ -3115,6 +3115,7 @@ internal unsafe struct NativeDenseSample
 internal unsafe struct NativeDenseCursorInit
 {
     public IntPtr Index;
+    public IntPtr Executor;
     public NativeOutcome* Outcome;
     public nuint StartsCount;
     public Key* Starts;

@@ -1827,6 +1827,7 @@ internal unsafe struct NativeSequenceReshardPlanFinish
 internal unsafe struct NativeSequenceCursorInit
 {
     public IntPtr Index;
+    public IntPtr Executor;
     public NativeOutcome* Outcome;
     public nuint StartsCount;
     public Key* Starts;

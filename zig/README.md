@@ -97,7 +97,6 @@ There is a constructor per C one, each taking a config of exactly what its C str
 
 ```zig
 var sockets = try usearch.Executor.forRam(.{ .memory_domains = &.{ 0, 1 }, .threads = 0 });
-var shared = try usearch.Executor.onPool(fork_union_pool, .{ .memory_domains = &.{0} }); // borrows a `fu_pool_t`
 var gpus = try usearch.Executor.forVram(.{ .devices = &.{ 0, 1 }, .streams = null, .scratch_limit = 0 });
 var drives = try usearch.Executor.forNvme(.{ .paths = &.{.of("/mnt/nvme0")}, .threads = 0 });
 ```

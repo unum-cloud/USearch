@@ -332,6 +332,7 @@ pub struct usearch_dense_sample_t {
 #[repr(C)]
 pub struct usearch_dense_cursor_init_t {
     pub index: usearch_dense_index_t,
+    pub executor: usearch_executor_t,
     pub outcome: *mut usearch_outcome_t,
     pub starts_count: usize,
     pub starts: *const usearch_key_t,
@@ -2647,6 +2648,7 @@ pub trait DenseVerbs<'index>: Copy {
         let mut outcome = usearch_outcome_t::default();
         unsafe {
             usearch_dense_cursor_init(&mut usearch_dense_cursor_init_t {
+                executor: ptr::null_mut(),
                 cursor: &mut cursor.handle,
                 index,
                 outcome: &mut outcome,

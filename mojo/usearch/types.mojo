@@ -1032,8 +1032,6 @@ comptime FromName = def(BytesView[ImmUntrackedOrigin], Pointer[c_int, MutAnyOrig
 
 comptime ExecutorForRam = Verb[ExecutorForRamArguments]
 """`usearch_executor_for_ram`."""
-comptime ExecutorOnPool = Verb[ExecutorOnPoolArguments]
-"""`usearch_executor_on_pool`."""
 comptime ExecutorForVram = Verb[ExecutorForVramArguments]
 """`usearch_executor_for_vram`."""
 comptime ExecutorForNvme = Verb[ExecutorForNvmeArguments]
@@ -1239,16 +1237,7 @@ struct ExecutorForRamArguments(ImplicitlyCopyable):
     var outcome: Pointer[Outcome, MutUntrackedOrigin]
     var ram: RamOptions[ImmUntrackedOrigin]
     var threads: c_size_t
-
-
-@fieldwise_init
-struct ExecutorOnPoolArguments(ImplicitlyCopyable):
-    """`usearch_executor_on_pool_t`, laid out as the ABI declares it."""
-
-    var executor: Pointer[Address, MutUntrackedOrigin]
-    var outcome: Pointer[Outcome, MutUntrackedOrigin]
-    var ram: RamOptions[ImmUntrackedOrigin]
-    var pool: Address
+    var scratch_limit: c_size_t
 
 
 @fieldwise_init
@@ -1269,8 +1258,10 @@ struct ExecutorForNvmeArguments(ImplicitlyCopyable):
     var executor: Pointer[Address, MutUntrackedOrigin]
     var outcome: Pointer[Outcome, MutUntrackedOrigin]
     var nvme: NvmeOptions[ImmUntrackedOrigin]
+    var ram: RamOptions[ImmUntrackedOrigin]
     var threads: c_size_t
     var nvme_class: NVMeClass
+    var scratch_limit: c_size_t
 
 
 @fieldwise_init
@@ -1347,7 +1338,9 @@ struct Executor:
     @staticmethod
     def for_ram[
         ram_origin: ImmOrigin, //
-    ](library: Library, ram: RamOptions[ram_origin] = RamOptions(), threads: Int = 0) raises Error -> Self:
+    ](
+        library: Library, ram: RamOptions[ram_origin] = RamOptions(), threads: Int = 0, scratch_limit: Int = 0
+    ) raises Error -> Self:
         """Spawns host workers for RAM-resident indexes. Calls `usearch_executor_for_ram`.
 
         Passing the very options the indexes were built with is what makes compute and memory
@@ -1358,8 +1351,9 @@ struct Executor:
 
         Args:
             library: The loaded engine, kept so the shared object stays mapped.
-            ram: The same options the indexes were initialized with; copied, not borrowed.
-            threads: Worker threads; zero takes 7/8 of the cores those domains carry.
+            ram: The same options the indexes were initialized with; copied, not viewed.
+            threads: Worker threads; zero takes 7/8 of the cores those domains hold.
+            scratch_limit: The ceiling on each thread's scratch bytes; zero takes 1 GiB.
 
         Returns:
             An executor that may drive RAM-resident handles and no others.
@@ -1377,6 +1371,7 @@ struct Executor:
             outcome.unsafe_origin_cast[MutUntrackedOrigin](),
             ram.arguments(),
             c_size_t(threads),
+            c_size_t(scratch_limit),
         )
         library.symbols().executor_for_ram(arguments.unsafe_origin_cast[MutAnyOrigin]())
         library._check(outcome.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0], "usearch_executor_for_ram")
@@ -1386,48 +1381,11 @@ struct Executor:
         )
 
     @staticmethod
-    def on_pool[
-        ram_origin: ImmOrigin, //
-    ](library: Library, pool: Address, ram: RamOptions[ram_origin] = RamOptions()) raises Error -> Self:
-        """Schedules onto a borrowed ForkUnion pool, so several libraries share one set of threads.
-        Calls `usearch_executor_on_pool`.
-
-        Parameters:
-            ram_origin: The options' borrowed node-id array, inferred from the argument.
-
-        Args:
-            library: The loaded engine, kept so the shared object stays mapped.
-            pool: A live ForkUnion `fu_pool_t`, which must outlive the executor.
-            ram: The same options the indexes were initialized with; copied, not borrowed.
-
-        Returns:
-            An executor that may drive RAM-resident handles and no others.
-
-        Raises:
-            `Error` if the pool or the domains are refused.
-        """
-        var created = stack_allocation[1, Address]()
-        created[unsafe_offset=0] = NULL_ADDRESS
-        var outcome = stack_allocation[1, Outcome]()
-        outcome[unsafe_offset=0] = Outcome()
-        var arguments = stack_allocation[1, ExecutorOnPoolArguments]()
-        arguments[unsafe_offset=0] = ExecutorOnPoolArguments(
-            created.unsafe_origin_cast[MutUntrackedOrigin](),
-            outcome.unsafe_origin_cast[MutUntrackedOrigin](),
-            ram.arguments(),
-            pool,
-        )
-        library.symbols().executor_on_pool(arguments.unsafe_origin_cast[MutAnyOrigin]())
-        library._check(outcome.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0], "usearch_executor_on_pool")
-        return Self(
-            library=library,
-            address=created.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0],
-        )
-
-    @staticmethod
     def for_nvme[
         nvme_origin: ImmOrigin, //
-    ](library: Library, nvme: NvmeOptions[nvme_origin] = NvmeOptions(), threads: Int = 0) raises Error -> Self:
+    ](
+        library: Library, nvme: NvmeOptions[nvme_origin] = NvmeOptions(), threads: Int = 0, scratch_limit: Int = 0
+    ) raises Error -> Self:
         """Spawns host workers for NVMe-resident indexes, one submission ring apiece.
         Calls `usearch_executor_for_nvme`.
 
@@ -1439,8 +1397,9 @@ struct Executor:
 
         Args:
             library: The loaded engine, kept so the shared object stays mapped.
-            nvme: The same options the indexes were initialized with; copied, not borrowed.
+            nvme: The same options the indexes were initialized with; copied, not viewed.
             threads: Worker threads; zero derives from the devices' queue capabilities.
+            scratch_limit: The ceiling on each thread's scratch bytes; zero takes 1 GiB.
 
         Returns:
             An executor that may drive NVMe-resident handles and no others.
@@ -1457,8 +1416,10 @@ struct Executor:
             created.unsafe_origin_cast[MutUntrackedOrigin](),
             outcome.unsafe_origin_cast[MutUntrackedOrigin](),
             nvme.arguments(),
+            RamOptions(),
             c_size_t(threads),
             NVMeClass.UNKNOWN,
+            c_size_t(scratch_limit),
         )
         library.symbols().executor_for_nvme(arguments.unsafe_origin_cast[MutAnyOrigin]())
         library._check(outcome.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0], "usearch_executor_for_nvme")
@@ -1487,8 +1448,10 @@ struct Executor:
 
         Args:
             library: The loaded engine, kept so the shared object stays mapped.
-            vram: The same options the indexes were initialized with; copied, not borrowed.
-            streams: Borrowed CUDA streams, one per device in `vram` order; `NULL_ADDRESS` creates its own.
+            vram: The same options the indexes were initialized with; copied, not viewed.
+            streams: The caller's CUDA streams, one per device in `vram` order, which the caller destroys
+                after freeing the executor; `NULL_ADDRESS` takes each device's per-thread default stream.
+                The executor creates and destroys no stream.
             scratch_limit: Ceiling on scratch bytes per device; zero lets scratch grow as geometry asks.
 
         Returns:

@@ -1701,7 +1701,7 @@ struct GeospatialIndex(GeospatialVerbs, Movable):
 
         Args:
             library: The loaded engine, kept so the shared object stays mapped.
-            options: The terrain and the graph's bounds; the terrain stays borrowed by the handle.
+            options: The terrain and the graph's bounds; the terrain stays allocated, owned by the caller, for the handle's lifetime.
             ram: The memory domains to place one shard on apiece.
 
         Returns:
@@ -1745,7 +1745,7 @@ struct GeospatialIndex(GeospatialVerbs, Movable):
 
         Args:
             library: The loaded engine, kept so the shared object stays mapped.
-            options: The terrain and the graph's bounds; the terrain stays borrowed by the handle.
+            options: The terrain and the graph's bounds; the terrain stays allocated, owned by the caller, for the handle's lifetime.
             vram: The device to place the index on.
 
         Returns:
@@ -2849,6 +2849,7 @@ struct GeospatialCursor[origin: ImmOrigin]:
         _cross(
             DenseCursorInitArguments(
                 index,
+                NULL_ADDRESS,
                 outcome.unsafe_origin_cast[MutUntrackedOrigin](),
                 c_size_t(starts_count),
                 starts,
@@ -2980,7 +2981,7 @@ def geospatial_reshard_deferred[
     ),
 ]:
     """Submits `geospatial_reshard` to `executor`, answering a `Deferred` at once; the indexes and slots
-    stay borrowed until final. Calls `usearch_geospatial_reshard`."""
+    must stay allocated and unchanged until final. Calls `usearch_geospatial_reshard`."""
     return {executor.library, _GeospatialReshardCall(sources, targets, config), NULL_ADDRESS, executor.address}
 
 

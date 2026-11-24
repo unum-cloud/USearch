@@ -106,15 +106,14 @@ let domains = Executor::for_ram(&[0, 1], None, 0)?;                    // thread
 let capped = Executor::for_ram(&[], Some(CPUClass::IntelHaswell), 0)?; // waiters and atomics no newer than Haswell
 let rings = Executor::for_nvme(&["/mnt/nvme0"], None, 4)?;             // one submission ring apiece
 let streams = Executor::for_vram(&[0, 1], None, 0)?;                   // one stream per device, scratch grown as asked
-let shared = unsafe { Executor::on_pool(&[], None, pool)? };           // shares the threads another library spawned
 let local = Executor::default();                                       // owns nothing, runs on the calling thread
 
 threads.drain(Mood::Spinning)?;                                        // waits out the holding call, then keeps spinning
 ```
 
 `for_ram` and `for_nvme` take a thread count, where zero derives one.
-`for_vram` takes none, since one host thread drives one stream per device, and `for_vram_on_streams` borrows your CUDA streams instead, one per device.
-`for_vram_on_streams` and `on_pool` are `unsafe`, since the streams or the pool they borrow must outlive the executor; the engine wires neither borrowing yet and answers `Status::Unsupported`.
+`for_vram` takes none, since one host thread drives each device's per-thread default stream, and `for_vram_on_streams` orders work on your CUDA streams instead, one per device.
+`for_vram_on_streams` is `unsafe`, since you destroy those streams yourself, and only after dropping the executor; it creates and destroys no stream.
 `Executor::default()` owns nothing and runs every call handed to it on the calling thread.
 One call holds an executor at a time, so two threads that genuinely overlap take one apiece; an executor is `Send` but not `Sync`, while index handles stay freely shared.
 `drain` waits until no call holds the executor and sets the `Mood` idle workers adopt, and dropping an executor drains it, unless a GPU arena it made still holds it, which then does so on its own drop.

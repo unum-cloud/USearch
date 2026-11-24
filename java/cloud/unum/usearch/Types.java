@@ -701,27 +701,6 @@ public final class Types {
         }
 
         /**
-         * A RAM executor over a borrowed ForkUnion pool, so several libraries in one process share one
-         * set of threads while each keeps its own scratch. The pool keeps its own threads and its
-         * lender's mood.
-         *
-         * <p>
-         * Calls {@code usearch_executor_on_pool}.
-         *
-         * @param pool The {@code fu_pool_t} to borrow, which must outlive the executor.
-         * @param memoryDomains NUMA node ids of the indexes it will drive; an empty list derives them.
-         * @param cpuClassCeiling the newest class dispatch may pick, intersected with what the
-         *     machine runs, so a class the machine lacks narrows rather than refuses; {@code null}
-         *     means no ceiling.
-         */
-        public static Executor onPool(MemorySegment pool, int[] memoryDomains, @Nullable CPUClass cpuClassCeiling) {
-            return spawn(ON_POOL, call -> {
-                call.ram(call.arguments, ON_POOL_RAM, memoryDomains, cpuClassCeiling);
-                call.pointer(ON_POOL_POOL, pool);
-            });
-        }
-
-        /**
          * One submission stream on every named device, all of them driven by the one thread that calls
          * the verbs, which is why this takes no thread count: the work has already left for the
          * accelerator by the time a second host thread would return.
@@ -1991,22 +1970,11 @@ public final class Types {
                     Library.POINTER.withName("executor"),
                     Library.POINTER.withName("outcome"),
                     Library.placement("ram"),
-                    Library.SIZE.withName("threads")));
+                    Library.SIZE.withName("threads"),
+                    Library.SIZE.withName("scratch_limit")));
 
     private static final long FOR_RAM_RAM = FOR_RAM.at("ram");
     private static final VarHandle FOR_RAM_THREADS = FOR_RAM.field("threads");
-
-    /** {@code usearch_executor_on_pool_t}. */
-    private static final Verb ON_POOL = new Verb(
-            "usearch_executor_on_pool",
-            MemoryLayout.structLayout(
-                    Library.POINTER.withName("executor"),
-                    Library.POINTER.withName("outcome"),
-                    Library.placement("ram"),
-                    Library.POINTER.withName("pool")));
-
-    private static final long ON_POOL_RAM = ON_POOL.at("ram");
-    private static final VarHandle ON_POOL_POOL = ON_POOL.field("pool");
 
     /** {@code usearch_executor_for_vram_t}. */
     private static final Verb FOR_VRAM = new Verb(
@@ -2029,9 +1997,11 @@ public final class Types {
                     Library.POINTER.withName("executor"),
                     Library.POINTER.withName("outcome"),
                     Library.placement("nvme"),
+                    Library.placement("ram"),
                     Library.SIZE.withName("threads"),
                     Library.ENUM.withName("nvme_class"),
-                    Library.padding()));
+                    Library.padding(),
+                    Library.SIZE.withName("scratch_limit")));
 
     private static final long FOR_NVME_NVME = FOR_NVME.at("nvme");
     private static final VarHandle FOR_NVME_THREADS = FOR_NVME.field("threads");

@@ -36,7 +36,6 @@ export type {
   ExecutorForNvmeConfig,
   ExecutorForRamConfig,
   ExecutorForVramConfig,
-  ExecutorOnPoolConfig,
   Key,
   KeyLike,
   KeysLike,

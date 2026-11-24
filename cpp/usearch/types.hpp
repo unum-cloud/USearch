@@ -388,11 +388,6 @@ class executor_t {
         return spawned_(usearch_executor_for_ram, options);
     }
 
-    /** Wraps a thread pool the caller lends, so libraries in one process share its threads. */
-    static outcome<executor_t> on_pool(usearch_executor_on_pool_t options) noexcept {
-        return spawned_(usearch_executor_on_pool, options);
-    }
-
     /** Opens one submission stream on every distinct device @p options names. */
     static outcome<executor_t> for_vram(usearch_executor_for_vram_t options = {}) noexcept {
         return spawned_(usearch_executor_for_vram, options);

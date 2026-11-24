@@ -51,7 +51,7 @@ The index runs it on the calling thread, `index.on(executor)` blocks on an execu
 
 ```js
 const matches = index.search(queries, 10, arena);                 // the calling thread
-const onPool = index.on(executor).search(queries, 10, arena);     // blocking, holding the executor until it returns
+const held = index.on(executor).search(queries, 10, arena);       // blocking, holding the executor until it returns
 const call = index.deferred(executor).search(queries, 10, arena); // Deferred<Matches>
 ```
 
@@ -93,8 +93,7 @@ const diskPool = usearch.Executor.forNvme({ threads: 4, paths: ['/mnt/nvme0', '/
 ```
 
 `forRam` creates an executor of host threads and spreads them over the named NUMA nodes, absent naming none and spreading them over every node.
-`onPool` borrows an existing ForkUnion pool by its `BigInt` address instead of spawning one.
-`forVram` opens one CUDA stream per named ordinal, absent taking one free device, or borrows the `streams` given as `BigInt` addresses, one per device.
+`forVram` orders work on each named ordinal's per-thread default stream, absent taking one free device, or on the `streams` given as `BigInt` addresses, one per device, which you destroy after freeing the executor.
 It takes no thread count because one host thread drives one stream per device, so the device list is what sizes the work rather than a number of workers.
 `forNvme` opens one submission ring per worker over the named device or directory paths, absent deriving them.
 Each factory's config holds only what its own C structure takes: `memoryDomains` for RAM, `devices` for VRAM, and `paths` for NVMe.

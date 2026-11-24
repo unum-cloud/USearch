@@ -459,20 +459,9 @@ class Executor:
         *,
         memory_domains: Sequence[int] | None = None,
         cpu_class_ceiling: CPUClass | None = None,
+        scratch_limit: int = 0,
     ) -> Executor:
         """Spawns host worker threads for a RAM-resident index."""
-        ...
-
-    @classmethod
-    def on_pool(
-        cls,
-        pool: int,
-        /,
-        *,
-        memory_domains: Sequence[int] | None = None,
-        cpu_class_ceiling: CPUClass | None = None,
-    ) -> Executor:
-        """Drives RAM-resident indexes on a thread pool the caller owns."""
         ...
 
     @classmethod
@@ -488,6 +477,7 @@ class Executor:
         paths: Sequence[_PathLike] | None = None,
         nvme_class: NVMeClass | None = None,
         cpu_class_ceiling: CPUClass | None = None,
+        scratch_limit: int = 0,
     ) -> Executor:
         """Opens one submission ring per worker for an NVMe-resident index."""
         ...
@@ -841,7 +831,7 @@ class On[IndexT]:
           memory_limit (int, optional): Bytes a loaded NVMe handle holds for the part it
             rewrites; 0 derives what rounds that part in RAM.
           progress (callable, optional): Called with (completed, total) units of each phase;
-            returning False stops the round, None carries on.
+            returning False stops the round, None continues.
           progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
           stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
           plan (DenseRefinePlan, optional): The round to open or continue; None runs one round
@@ -948,7 +938,7 @@ class On[IndexT]:
             entries still route the traversal, so recall survives low selectivity. The
             callback re-enters Python, so it runs under the GIL and serializes the walk.
           progress (callable, optional): Called with (completed, total) queries; returning
-            False stops the batch and raises `CancelledError`, None carries on.
+            False stops the batch and raises `CancelledError`, None continues.
           progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
           stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
 
@@ -1094,7 +1084,7 @@ class On[IndexT]:
             factor widens the emitted pattern, being what the walk's breadth decides.
           dtype (Scalar, optional): Names the left-hand scalar type when the buffer cannot.
           progress (callable, optional): Called with (completed, total) rows; returning False
-            stops the batch and raises `CancelledError`, None carries on.
+            stops the batch and raises `CancelledError`, None continues.
           progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
           stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
 
@@ -1160,7 +1150,7 @@ class On[IndexT]:
             without its partition is a number nothing can rescale, which is why they travel as
             one row.
           progress (callable, optional): Called with (completed, total) tokens; returning
-            False stops the batch and raises `CancelledError`, None carries on.
+            False stops the batch and raises `CancelledError`, None continues.
           progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
           stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
 
@@ -1210,7 +1200,7 @@ class On[IndexT]:
           predicate (callable, optional): Admits a Key when it returns truthy, asked before any
             of its vectors are scored, so a rejected document never scores.
           progress (callable, optional): Called with (completed, total) queries; returning
-            False stops the batch and raises `CancelledError`, None carries on.
+            False stops the batch and raises `CancelledError`, None continues.
           progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
           stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
 
@@ -1270,7 +1260,7 @@ class On[IndexT]:
             rewrites; 0 derives what rounds that part in RAM.
           seed (int, optional): Picks the part roots of a cut; equal seeds cut equally.
           progress (callable, optional): Called with (completed, total) units of each phase of
-            the closing rounds; returning False stops them, None carries on.
+            the closing rounds; returning False stops them, None continues.
           progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
           stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
           plan (DenseReshardPlan, optional): The reshard to open or continue; None runs it to
@@ -1439,7 +1429,7 @@ class On[IndexT]:
         Args:
           arena (Arena): Where the monolith lands, rewound by the call.
           progress (callable, optional): Called with (completed, total) bytes; returning
-            False stops the write and raises `CancelledError`, None carries on.
+            False stops the write and raises `CancelledError`, None continues.
           progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
 
         Returns:
@@ -1675,7 +1665,7 @@ class DeferredOn[IndexT]:
           memory_limit (int, optional): Bytes a loaded NVMe handle holds for the part it
             rewrites; 0 derives what rounds that part in RAM.
           progress (callable, optional): Called with (completed, total) units of each phase;
-            returning False stops the round, None carries on.
+            returning False stops the round, None continues.
           progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
           stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
           plan (DenseRefinePlan, optional): The round to open or continue; None runs one round
@@ -1782,7 +1772,7 @@ class DeferredOn[IndexT]:
             entries still route the traversal, so recall survives low selectivity. The
             callback re-enters Python, so it runs under the GIL and serializes the walk.
           progress (callable, optional): Called with (completed, total) queries; returning
-            False stops the batch and raises `CancelledError`, None carries on.
+            False stops the batch and raises `CancelledError`, None continues.
           progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
           stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
 
@@ -1932,7 +1922,7 @@ class DeferredOn[IndexT]:
             factor widens the emitted pattern, being what the walk's breadth decides.
           dtype (Scalar, optional): Names the left-hand scalar type when the buffer cannot.
           progress (callable, optional): Called with (completed, total) rows; returning False
-            stops the batch and raises `CancelledError`, None carries on.
+            stops the batch and raises `CancelledError`, None continues.
           progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
           stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
 
@@ -1998,7 +1988,7 @@ class DeferredOn[IndexT]:
             without its partition is a number nothing can rescale, which is why they travel as
             one row.
           progress (callable, optional): Called with (completed, total) tokens; returning
-            False stops the batch and raises `CancelledError`, None carries on.
+            False stops the batch and raises `CancelledError`, None continues.
           progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
           stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
 
@@ -2048,7 +2038,7 @@ class DeferredOn[IndexT]:
           predicate (callable, optional): Admits a Key when it returns truthy, asked before any
             of its vectors are scored, so a rejected document never scores.
           progress (callable, optional): Called with (completed, total) queries; returning
-            False stops the batch and raises `CancelledError`, None carries on.
+            False stops the batch and raises `CancelledError`, None continues.
           progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
           stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
 
@@ -2108,7 +2098,7 @@ class DeferredOn[IndexT]:
             rewrites; 0 derives what rounds that part in RAM.
           seed (int, optional): Picks the part roots of a cut; equal seeds cut equally.
           progress (callable, optional): Called with (completed, total) units of each phase of
-            the closing rounds; returning False stops them, None carries on.
+            the closing rounds; returning False stops them, None continues.
           progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
           stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
           plan (DenseReshardPlan, optional): The reshard to open or continue; None runs it to
@@ -2293,7 +2283,7 @@ class DeferredOn[IndexT]:
         Args:
           arena (Arena): Where the monolith lands, rewound by the call.
           progress (callable, optional): Called with (completed, total) bytes; returning
-            False stops the write and raises `CancelledError`, None carries on.
+            False stops the write and raises `CancelledError`, None continues.
           progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
 
         Returns:

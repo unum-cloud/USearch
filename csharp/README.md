@@ -95,7 +95,6 @@ One factory per C constructor, each taking only what its hardware has: `ForVram`
 using Executor threads = Executor.ForRam(threads: 8);             // Zero derives 7/8 of the cores
 using Executor rings = Executor.ForNvme(threads: 4);              // One submission ring apiece
 using Executor streams = Executor.ForVram(scratchLimit: 1 << 30); // One stream per device
-using Executor shared = Executor.OnPool(forkUnionPool);           // Borrows another library's threads
 
 threads.Drain(Mood.Spinning);                                     // Waits out the holding call, then keeps spinning
 ```

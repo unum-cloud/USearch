@@ -1071,34 +1071,12 @@ EXTERN_C DLLEXPORT int ExecutorForRam(WolframLibraryData library_data, mint argu
     return executor_adopt(library_data, slot, executor, &outcome, result);
 }
 
-/** Calls @c usearch_executor_on_pool: @c executor → @c memoryDomains → @c pool. */
-EXTERN_C DLLEXPORT int ExecutorOnPool(WolframLibraryData library_data, mint arguments_count, MArgument* arguments,
-                                      MArgument result) {
-    void** const slot = handles_fresh(&executors, MArgument_getInteger(arguments[0]));
-    if (!slot)
-        return answer_failure(library_data, usearch_status_invalid_argument_k, "the Executor is not fresh", result);
-    int32_t* domains = NULL;
-    size_t domains_count = 0;
-    usearch_status_t const read = ordinals_from_store(library_data, arguments[1], &domains, &domains_count);
-    if (read != usearch_status_success_k)
-        return answer_failure(library_data, read, "memory domains are a list of integers", result);
-    usearch_outcome_t outcome = {usearch_status_success_k, NULL};
-    usearch_executor_t executor = NULL;
-    usearch_executor_on_pool(&(usearch_executor_on_pool_t) {
-        .executor = &executor,
-        .outcome = &outcome,
-        .ram = {domains_count ? domains : NULL, domains_count},
-        .pool = (void*)(intptr_t)MArgument_getInteger(arguments[2]),
-    });
-    free(domains);
-    return executor_adopt(library_data, slot, executor, &outcome, result);
-}
-
 /**
  *  @brief Calls @c usearch_executor_for_vram: @c executor → @c devices → @c streams →
  *      @c scratchLimit.
  *
- *  The streams are borrowed CUDA stream addresses, one per device; an empty store creates its own.
+ *  The streams are the caller's CUDA stream addresses, one per device, which the caller destroys
+ *  after freeing the executor; an empty store takes each device's per-thread default stream.
  */
 EXTERN_C DLLEXPORT int ExecutorForVram(WolframLibraryData library_data, mint arguments_count, MArgument* arguments,
                                        MArgument result) {

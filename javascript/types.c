@@ -669,9 +669,8 @@ static void usearch_js_executor_finalize(napi_env env, void* data, void* hint) {
 static napi_value usearch_js_executor_construct(napi_env env, napi_callback_info info) {
     napi_value self = NULL;
     if (!usearch_js_sealed(env, info, &self)) {
-        usearch_js_throw(
-            env, usearch_status_invalid_argument_k,
-            "An Executor is made by Executor.forRam, Executor.onPool, Executor.forVram or Executor.forNvme");
+        usearch_js_throw(env, usearch_status_invalid_argument_k,
+                         "An Executor is made by Executor.forRam, Executor.forVram or Executor.forNvme");
         return NULL;
     }
     return self;
@@ -732,26 +731,6 @@ static napi_value usearch_js_executor_for_ram(napi_env env, napi_callback_info i
         return NULL;
     for_ram.ram.memory_domains = ordinals;
     usearch_executor_for_ram(&for_ram);
-    free(ordinals);
-    return usearch_js_executor_adopt(env, &outcome, handle);
-}
-
-/** <tt>onPool(pool, {memoryDomains, cpuClassCeiling})</tt> → an executor borrowing a ForkUnion pool. */
-static napi_value usearch_js_executor_on_pool(napi_env env, napi_callback_info info) {
-    napi_value arguments[2] = {NULL, NULL};
-    usearch_outcome_t outcome = {usearch_status_success_k, NULL};
-    usearch_executor_t handle = NULL;
-    usearch_executor_on_pool_t on_pool = {.executor = &handle, .outcome = &outcome};
-    int32_t* ordinals = NULL;
-    if (!usearch_js_arguments(env, info, 2, arguments) ||
-        !usearch_js_pointer_from_value(env, arguments[0], "pool", &on_pool.pool) ||
-        !usearch_js_cpu_class_from_value(env, usearch_js_property(env, arguments[1], "cpuClassCeiling"),
-                                         &on_pool.ram.cpu_class_ceiling) ||
-        !usearch_js_ordinals_from_value(env, usearch_js_property(env, arguments[1], "memoryDomains"), "memoryDomains",
-                                        &ordinals, &on_pool.ram.memory_domains_count))
-        return NULL;
-    on_pool.ram.memory_domains = ordinals;
-    usearch_executor_on_pool(&on_pool);
     free(ordinals);
     return usearch_js_executor_adopt(env, &outcome, handle);
 }
@@ -898,7 +877,6 @@ napi_value usearch_js_executor_define(napi_env env) {
         {"forRam", NULL, usearch_js_executor_for_ram, NULL, NULL, NULL, napi_static, NULL},
         {"forVram", NULL, usearch_js_executor_for_vram, NULL, NULL, NULL, napi_static, NULL},
         {"forNvme", NULL, usearch_js_executor_for_nvme, NULL, NULL, NULL, napi_static, NULL},
-        {"onPool", NULL, usearch_js_executor_on_pool, NULL, NULL, NULL, napi_static, NULL},
     };
     napi_value executor_class = NULL;
     if (napi_define_class(env, "Executor", NAPI_AUTO_LENGTH, usearch_js_executor_construct, NULL,

@@ -2358,9 +2358,10 @@ struct DenseCall {
 
     func cursor(starts: [Key]) throws(USearchError) -> DenseCursor {
         let cursor = callState.slots(usearch_dense_cursor_t?.none)
-        try callState.lend(starts) { (run) throws(USearchError) in
+        try callState.pass(starts) { (run) throws(USearchError) in
             var arguments = usearch_dense_cursor_init_t(
                 index: index.raw,
+                executor: nil,
                 outcome: callState.outcome,
                 starts_count: starts.count,
                 starts: UnsafeRawPointer(run)?.assumingMemoryBound(to: usearch_key_t.self),

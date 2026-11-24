@@ -1761,6 +1761,7 @@ internal unsafe struct NativeShapesReshardPlanFinish
 internal unsafe struct NativeShapesCursorInit
 {
     public IntPtr Index;
+    public IntPtr Executor;
     public NativeOutcome* Outcome;
     public nuint StartsCount;
     public Key* Starts;

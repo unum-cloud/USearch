@@ -98,7 +98,6 @@ There is a constructor per C one, each taking every argument its own hardware ha
 
 ```wolfram
 ExecutorForRam["MemoryDomains"->{0, 1}, "Threads"->0]
-ExecutorOnPool[poolAddress, "MemoryDomains"->{}]                     (* borrows a fu_pool_t *)
 ExecutorForVram["Devices"->{0}, "Streams"->{}, "ScratchLimit"->0]
 ExecutorForNvme["Paths"->{"/dev/nvme0n1"}, "Threads"->0]
 ExecutorDrain[executor, "parked"]                                    (* or "spinning" *)

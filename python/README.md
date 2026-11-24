@@ -77,11 +77,10 @@ Its residency must match that of every index it drives:
 pool = usearch.Executor.for_ram(threads=8, memory_domains=[0, 1])  # 0 threads derives from the hardware
 device_pool = usearch.Executor.for_vram(devices=[0, 1])  # One host thread, one stream per device
 disk_pool = usearch.Executor.for_nvme(threads=8, paths=["/mnt/nvme0", "/mnt/nvme1"])
-shared_pool = usearch.Executor.on_pool(fu_pool_address)  # Borrows a ForkUnion pool by address
 pool.drain(usearch.Mood.SPINNING)  # Waits, then keeps idle workers hot
 ```
 
-`memory_domains` are the NUMA nodes the threads stay local to, `for_nvme` opens one submission ring per worker, and `on_pool` takes a `fu_pool_t` as an integer address, as `ctypes` hands pointers over, which must outlive the executor.
+`memory_domains` are the NUMA nodes the threads stay local to, and `for_nvme` opens one submission ring per worker.
 One call holds an executor at a time and nothing queues, so a second call raises `ContendedError`.
 A deferred call on a pool of several threads runs on its thread 0, so polling `status` alone finishes it, and its callbacks run on the pool's threads under the GIL.
 Used as a context manager, an executor waits for its calls and closes on exit.
