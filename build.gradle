@@ -41,7 +41,7 @@ sourceSets {
 
 // The Kotlin plugin adds every Java source directory to `main`'s and `test`'s own Kotlin sets, so both
 // are cleared - otherwise they sweep up the interop suites below and compile them against a classpath
-// carrying no Kotlin test framework.
+// holding no Kotlin test framework.
 sourceSets.main.kotlin.srcDirs = []
 sourceSets.test.kotlin.srcDirs = []
 
@@ -64,7 +64,7 @@ task javadocJar(type: Jar, dependsOn: javadoc) {
 dependencies {
     // Nullness is part of the published contract: `@NullMarked` on the package is what stops a
     // Kotlin caller seeing platform types across the whole boundary. The annotations are erased at
-    // runtime, so the jar carries no dependency of its own.
+    // runtime, so the jar holds no dependency of its own.
     compileOnly('org.jspecify:jspecify:1.0.0')
 
 
@@ -133,7 +133,7 @@ ext.nativeDirectory = layout.buildDirectory.dir("libs/usearch/shared").get().asF
 ext.usearchPrebuilt = (findProperty("usearchPrebuilt") ?: "").toString()
 
 // Points one `Test` task at the staged engine. `System.loadLibrary` reads `java.library.path`, and
-// the loader paths carry the engine's own dependencies, so all three suites need the same three
+// the loader paths hold the engine's own dependencies, so all three suites need the same three
 // settings and none of them should spell them out again.
 ext.loadsTheEngine = { Test task ->
     def entries = [project.ext.nativeDirectory.absolutePath, project.ext.usearchLibraryPath]
@@ -165,7 +165,7 @@ tasks.register("compileNativeLibrary", Exec) {
         "--config", "Release", "--target", "usearch_shared", "--parallel"
 }
 
-// The JAR carries one copy per platform and `Library` extracts the one it needs. A multi-config generator buries its
+// The JAR holds one copy per platform and `Library` extracts the one it needs. A multi-config generator buries its
 // output one directory deeper, so the search is recursive and the staged copies are flattened to bare file names.
 tasks.register("stageNativeLibrary", Copy) {
     if (project.ext.usearchPrebuilt.isEmpty()) {

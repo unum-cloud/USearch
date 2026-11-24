@@ -42,7 +42,7 @@ pub fn build(b: *std.Build) void {
         &[_][]const u8{"usearch_shared"};
 
     // The binding itself, which a dependent imports. It declares the C ABI with `extern fn`, so it
-    // carries the link directives too - importing it should not mean relinking it by hand.
+    // holds the link directives too - importing it should not mean relinking it by hand.
     const module = b.addModule("usearch", .{
         .root_source_file = b.path("zig/usearch.zig"),
         .target = target,
@@ -50,9 +50,9 @@ pub fn build(b: *std.Build) void {
     });
     link(b, module, library_directories, library_names);
 
-    // The same sources archived. An archive resolves no symbols, so it carries no link
-    // directives and compiles every declaration without the engine on disk - which is what makes
-    // a bare `zig build` a compile check.
+    // The same sources archived. An archive resolves no symbols, so it holds no link directives and
+    // compiles every declaration without the engine on disk - which is what makes a bare `zig
+    // build` a compile check.
     const library = b.addLibrary(.{
         .name = "usearch",
         .linkage = .static,

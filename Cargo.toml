@@ -28,7 +28,7 @@ name = "usearch"
 path = "rust/lib.rs"
 
 [dependencies]
-# Each `rev` is the one `cmake/usearch_siblings.cmake` pins, so the crates and the C library carry one
+# Each `rev` is the one `cmake/usearch_siblings.cmake` pins, so the crates and the C library hold one
 # copy of every sibling; CMake builds each crate's tree in place of downloading it again.
 forkunion = { version = "4.0.0-rc.1", git = "https://github.com/ashvardanian/ForkUnion", rev = "6bd10ce124b3804719ca297ac61092ac5773d627", default-features = false }
 numkong = { version = "8.0.0-rc.1", git = "https://github.com/ashvardanian/NumKong", rev = "0d4115072efd2f8cb93c1c16e095742a9d5cccdf" }

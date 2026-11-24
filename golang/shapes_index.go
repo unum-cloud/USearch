@@ -14,7 +14,7 @@ package usearch
 import "unsafe"
 
 /*
-// `nocallback` only where the argument structure carries no callback and no executor; `noescape`
+// `nocallback` only where the argument structure holds no callback and no executor; `noescape`
 // everywhere, since submission copies the structure and everything it names is pinned.
 #cgo noescape usearch_shapes_init_ram
 #cgo nocallback usearch_shapes_init_ram
@@ -169,7 +169,7 @@ type ShapesKeyStats struct {
 
 // region: Configs
 
-// ShapesViewNvmeConfig carries the optional settings of ShapesViewNvme.
+// ShapesViewNvmeConfig holds the optional settings of ShapesViewNvme.
 type ShapesViewNvmeConfig struct {
 	// Executor is the NVMe executor whose rings read the checkpoint's headers; nil reads on the
 	// calling goroutine.
@@ -182,7 +182,7 @@ type ShapesViewNvmeConfig struct {
 	CPUClassCeiling CPUClass
 }
 
-// ShapesRefineConfig carries the optional settings of Refine. A zero value derives every setting.
+// ShapesRefineConfig holds the optional settings of Refine. A zero value derives every setting.
 type ShapesRefineConfig struct {
 	// ExpansionFactor is the breadth of the candidates the re-selection walk explores; zero derives.
 	ExpansionFactor uint
@@ -199,7 +199,7 @@ type ShapesRefineConfig struct {
 	Plan *ShapesRefinePlan
 }
 
-// ShapesReshardConfig carries the optional settings of Reshard. A zero value derives every setting.
+// ShapesReshardConfig holds the optional settings of Reshard. A zero value derives every setting.
 type ShapesReshardConfig struct {
 	// Seed picks the part roots of a source split among several targets: equal seeds over an
 	// unchanged source split equally.
@@ -283,35 +283,35 @@ func (index *ShapesIndex) Close() error {
 // ShapesInitRam creates an empty, mutable index in host memory, one shard per NUMA node
 // memoryDomains names; empty derives every node the process may use.
 func ShapesInitRam(options ShapesOptions, memoryDomains []int32) (*ShapesIndex, error) {
-	lent := open[C.usearch_shapes_index_t]()
+	call := open[C.usearch_shapes_index_t]()
 	C.usearch_shapes_init_ram(&C.usearch_shapes_init_ram_t{
-		index:          lent.result,
-		outcome:        lent.outcome,
+		index:          call.result,
+		outcome:        call.outcome,
 		metric:         C.usearch_shapes_metric_t(options.Metric),
 		quantization:   C.usearch_scalar_t(options.Quantization),
 		points:         C.size_t(options.Points),
 		connectivity:   C.size_t(options.Connectivity),
 		values_per_key: C.size_t(options.ValuesPerKey),
-		ram:            lent.ram(memoryDomains, options.CPUClassCeiling),
+		ram:            call.ram(memoryDomains, options.CPUClassCeiling),
 	})
-	return shapesIndexOf(block(lent))
+	return shapesIndexOf(block(call))
 }
 
 // ShapesInitVram creates an empty, mutable index in device memory, sharded across the CUDA
 // ordinals devices names and never replicated; empty derives one free device.
 func ShapesInitVram(options ShapesOptions, devices []int32) (*ShapesIndex, error) {
-	lent := open[C.usearch_shapes_index_t]()
+	call := open[C.usearch_shapes_index_t]()
 	C.usearch_shapes_init_vram(&C.usearch_shapes_init_vram_t{
-		index:          lent.result,
-		outcome:        lent.outcome,
+		index:          call.result,
+		outcome:        call.outcome,
 		metric:         C.usearch_shapes_metric_t(options.Metric),
 		quantization:   C.usearch_scalar_t(options.Quantization),
 		points:         C.size_t(options.Points),
 		connectivity:   C.size_t(options.Connectivity),
 		values_per_key: C.size_t(options.ValuesPerKey),
-		vram:           lent.vram(devices, options.GPUClassCeiling),
+		vram:           call.vram(devices, options.GPUClassCeiling),
 	})
-	return shapesIndexOf(block(lent))
+	return shapesIndexOf(block(call))
 }
 
 // ShapesLoadRam copies a checkpoint into a new, mutable index in host memory. The path names a
@@ -324,17 +324,17 @@ func ShapesLoadRam(path string, config *DenseLoadRamConfig) (*ShapesIndex, error
 	if refusal != nil {
 		return nil, refusal
 	}
-	lent := open[C.usearch_shapes_index_t]()
+	call := open[C.usearch_shapes_index_t]()
 	C.usearch_shapes_load_ram(&C.usearch_shapes_load_ram_t{
-		index:          lent.result,
+		index:          call.result,
 		executor:       executor,
-		outcome:        lent.outcome,
-		path:           lent.text(path),
-		ram:            lent.ram(config.MemoryDomains, config.CPUClassCeiling),
+		outcome:        call.outcome,
+		path:           call.text(path),
+		ram:            call.ram(config.MemoryDomains, config.CPUClassCeiling),
 		values_per_key: C.size_t(config.ValuesPerKey),
-		progress:       lent.progress(config.Progress, config.ProgressSteps),
+		progress:       call.progress(config.Progress, config.ProgressSteps),
 	})
-	return shapesIndexOf(block(lent))
+	return shapesIndexOf(block(call))
 }
 
 // ShapesLoadVram copies a checkpoint into a new, mutable index in device memory, with the
@@ -347,17 +347,17 @@ func ShapesLoadVram(path string, config *DenseLoadVramConfig) (*ShapesIndex, err
 	if refusal != nil {
 		return nil, refusal
 	}
-	lent := open[C.usearch_shapes_index_t]()
+	call := open[C.usearch_shapes_index_t]()
 	C.usearch_shapes_load_vram(&C.usearch_shapes_load_vram_t{
-		index:          lent.result,
+		index:          call.result,
 		executor:       executor,
-		outcome:        lent.outcome,
-		path:           lent.text(path),
-		vram:           lent.vram(config.Devices, config.GPUClassCeiling),
+		outcome:        call.outcome,
+		path:           call.text(path),
+		vram:           call.vram(config.Devices, config.GPUClassCeiling),
 		values_per_key: C.size_t(config.ValuesPerKey),
-		progress:       lent.progress(config.Progress, config.ProgressSteps),
+		progress:       call.progress(config.Progress, config.ProgressSteps),
 	})
-	return shapesIndexOf(block(lent))
+	return shapesIndexOf(block(call))
 }
 
 // ShapesLoadRamBuffer copies a monolith from a buffer into a new, mutable index in host memory, as
@@ -370,17 +370,17 @@ func ShapesLoadRamBuffer(buffer []byte, config *DenseLoadRamBufferConfig) (*Shap
 	if refusal != nil {
 		return nil, refusal
 	}
-	lent := open[C.usearch_shapes_index_t]()
+	call := open[C.usearch_shapes_index_t]()
 	C.usearch_shapes_load_ram_buffer(&C.usearch_shapes_load_ram_buffer_t{
-		index:          lent.result,
+		index:          call.result,
 		executor:       executor,
-		outcome:        lent.outcome,
-		buffer:         lent.bytes(buffer),
-		ram:            lent.ram(config.MemoryDomains, config.CPUClassCeiling),
+		outcome:        call.outcome,
+		buffer:         call.bytes(buffer),
+		ram:            call.ram(config.MemoryDomains, config.CPUClassCeiling),
 		values_per_key: C.size_t(config.ValuesPerKey),
-		progress:       lent.progress(config.Progress, config.ProgressSteps),
+		progress:       call.progress(config.Progress, config.ProgressSteps),
 	})
-	return shapesIndexOf(block(lent))
+	return shapesIndexOf(block(call))
 }
 
 // ShapesLoadVramBuffer copies a monolith from a buffer into a new, mutable index in device memory.
@@ -392,29 +392,29 @@ func ShapesLoadVramBuffer(buffer []byte, config *DenseLoadVramBufferConfig) (*Sh
 	if refusal != nil {
 		return nil, refusal
 	}
-	lent := open[C.usearch_shapes_index_t]()
+	call := open[C.usearch_shapes_index_t]()
 	C.usearch_shapes_load_vram_buffer(&C.usearch_shapes_load_vram_buffer_t{
-		index:          lent.result,
+		index:          call.result,
 		executor:       executor,
-		outcome:        lent.outcome,
-		buffer:         lent.bytes(buffer),
-		vram:           lent.vram(config.Devices, config.GPUClassCeiling),
+		outcome:        call.outcome,
+		buffer:         call.bytes(buffer),
+		vram:           call.vram(config.Devices, config.GPUClassCeiling),
 		values_per_key: C.size_t(config.ValuesPerKey),
-		progress:       lent.progress(config.Progress, config.ProgressSteps),
+		progress:       call.progress(config.Progress, config.ProgressSteps),
 	})
-	return shapesIndexOf(block(lent))
+	return shapesIndexOf(block(call))
 }
 
 // ShapesViewRam serves a checkpoint in place through a memory mapping, as a read-only index whose
 // mutating verbs report StatusReadOnly; the files must stay unmodified while it lives.
 func ShapesViewRam(path string) (*ShapesIndex, error) {
-	lent := open[C.usearch_shapes_index_t]()
+	call := open[C.usearch_shapes_index_t]()
 	C.usearch_shapes_view_ram(&C.usearch_shapes_view_ram_t{
-		index:   lent.result,
-		outcome: lent.outcome,
-		path:    lent.text(path),
+		index:   call.result,
+		outcome: call.outcome,
+		path:    call.text(path),
 	})
-	return shapesIndexOf(block(lent))
+	return shapesIndexOf(block(call))
 }
 
 // ShapesViewNvme serves a checkpoint in place from NVMe drives, read through the executor's
@@ -427,15 +427,15 @@ func ShapesViewNvme(path string, config *ShapesViewNvmeConfig) (*ShapesIndex, er
 	if refusal != nil {
 		return nil, refusal
 	}
-	lent := open[C.usearch_shapes_index_t]()
+	call := open[C.usearch_shapes_index_t]()
 	C.usearch_shapes_view_nvme(&C.usearch_shapes_view_nvme_t{
-		index:    lent.result,
+		index:    call.result,
 		executor: executor,
-		outcome:  lent.outcome,
-		path:     lent.text(path),
-		nvme:     lent.nvme(config.Paths, config.CPUClassCeiling),
+		outcome:  call.outcome,
+		path:     call.text(path),
+		nvme:     call.nvme(config.Paths, config.CPUClassCeiling),
 	})
-	return shapesIndexOf(block(lent))
+	return shapesIndexOf(block(call))
 }
 
 // ShapesMetadataRead reads a checkpoint's metric and geometry without loading it.
@@ -447,14 +447,14 @@ func ShapesMetadataRead(path string, config *DenseMetadataReadConfig) (ShapesMet
 	if refusal != nil {
 		return ShapesMetadata{}, refusal
 	}
-	lent := open[ShapesMetadata]()
+	call := open[ShapesMetadata]()
 	C.usearch_shapes_metadata_read(&C.usearch_shapes_metadata_read_t{
 		executor: executor,
-		outcome:  lent.outcome,
-		path:     lent.text(path),
-		metadata: (*C.usearch_shapes_metadata_t)(unsafe.Pointer(lent.result)),
+		outcome:  call.outcome,
+		path:     call.text(path),
+		metadata: (*C.usearch_shapes_metadata_t)(unsafe.Pointer(call.result)),
 	})
-	return block(lent)
+	return block(call)
 }
 
 // ShapesMetadataReadBuffer reads the metric and geometry out of a serialized monolith buffer.
@@ -466,14 +466,14 @@ func ShapesMetadataReadBuffer(buffer []byte, config *DenseMetadataReadBufferConf
 	if refusal != nil {
 		return ShapesMetadata{}, refusal
 	}
-	lent := open[ShapesMetadata]()
+	call := open[ShapesMetadata]()
 	C.usearch_shapes_metadata_read_buffer(&C.usearch_shapes_metadata_read_buffer_t{
 		executor: executor,
-		outcome:  lent.outcome,
-		buffer:   lent.bytes(buffer),
-		metadata: (*C.usearch_shapes_metadata_t)(unsafe.Pointer(lent.result)),
+		outcome:  call.outcome,
+		buffer:   call.bytes(buffer),
+		metadata: (*C.usearch_shapes_metadata_t)(unsafe.Pointer(call.result)),
 	})
-	return block(lent)
+	return block(call)
 }
 
 // endregion: Index
@@ -507,7 +507,7 @@ type ShapesIndexOn struct {
 // sugar and cursors. Binding-only.
 //
 // The library reads a deferred call's inputs until the call is final, so the slices a verb is
-// handed must not change until then; its arena is borrowed, as a blocking verb borrows it.
+// handed must not change until then; its arena is viewed, as a blocking verb views it.
 type ShapesIndexDeferredOn struct {
 	shapesReceiver
 }
@@ -611,7 +611,7 @@ func (on ShapesIndexDeferredOn) Health() *Deferred[DenseReachability] {
 }
 
 // Search resolves a tape of queries into up to wanted nearest matches apiece, written into arena,
-// and filtered when the config carries a predicate. Never writes to the graph.
+// and filtered when the config holds a predicate. Never writes to the graph.
 func (on ShapesIndexOn) Search(queries Tape, wanted uint, arena *Arena, config *DenseSearchConfig) (MatchesView, error) {
 	return block(on.search(C.usearch_completion_blocking_k, queries, wanted, arena, config))
 }
@@ -695,248 +695,248 @@ func (on ShapesIndexDeferredOn) SaveBuffer(arena *Arena, config *DenseSaveBuffer
 
 // region: Calls
 
-func (receiver shapesReceiver) reserve(completion C.usearch_completion_t, entries, points uint) *lent[struct{}] {
-	lent := open[struct{}]()
+func (receiver shapesReceiver) reserve(completion C.usearch_completion_t, entries, points uint) *callWithResult[struct{}] {
+	call := open[struct{}]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	C.usearch_shapes_reserve(&C.usearch_shapes_reserve_t{
 		index:      index,
 		executor:   executor,
-		outcome:    lent.outcome,
+		outcome:    call.outcome,
 		completion: completion,
 		entries:    C.size_t(entries),
 		points:     C.size_t(points),
 	})
-	return lent
+	return call
 }
 
-func (receiver shapesReceiver) clear(completion C.usearch_completion_t) *lent[struct{}] {
-	lent := open[struct{}]()
+func (receiver shapesReceiver) clear(completion C.usearch_completion_t) *callWithResult[struct{}] {
+	call := open[struct{}]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	C.usearch_shapes_clear(&C.usearch_shapes_clear_t{
 		index:      index,
 		executor:   executor,
-		outcome:    lent.outcome,
+		outcome:    call.outcome,
 		completion: completion,
 	})
-	return lent
+	return call
 }
 
-func (receiver shapesReceiver) describe(completion C.usearch_completion_t) *lent[ShapesIndexDescription] {
-	lent := open[ShapesIndexDescription]()
+func (receiver shapesReceiver) describe(completion C.usearch_completion_t) *callWithResult[ShapesIndexDescription] {
+	call := open[ShapesIndexDescription]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	C.usearch_shapes_describe(&C.usearch_shapes_describe_t{
 		index:       index,
 		executor:    executor,
-		outcome:     lent.outcome,
+		outcome:     call.outcome,
 		completion:  completion,
-		description: (*C.usearch_shapes_index_description_t)(unsafe.Pointer(lent.result)),
+		description: (*C.usearch_shapes_index_description_t)(unsafe.Pointer(call.result)),
 	})
-	return lent
+	return call
 }
 
-func (receiver shapesReceiver) count(completion C.usearch_completion_t, key Key) *lent[ShapesKeyStats] {
-	lent := open[ShapesKeyStats]()
+func (receiver shapesReceiver) count(completion C.usearch_completion_t, key Key) *callWithResult[ShapesKeyStats] {
+	call := open[ShapesKeyStats]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	C.usearch_shapes_count(&C.usearch_shapes_count_t{
 		index:      index,
 		executor:   executor,
-		outcome:    lent.outcome,
+		outcome:    call.outcome,
 		completion: completion,
 		key:        key.toRaw(),
-		key_stats:  (*C.usearch_shapes_key_stats_t)(unsafe.Pointer(lent.result)),
+		key_stats:  (*C.usearch_shapes_key_stats_t)(unsafe.Pointer(call.result)),
 	})
-	return lent
+	return call
 }
 
 func (receiver shapesReceiver) get(completion C.usearch_completion_t, key Key, outputsScalar Scalar,
-	arena *Arena) *lent[TapeView] {
-	lent := open[TapeView]()
+	arena *Arena) *callWithResult[TapeView] {
+	call := open[TapeView]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
-	lent.result.width = 3
+	call.result.width = 3
 	C.usearch_shapes_get(&C.usearch_shapes_get_t{
 		index:          index,
 		executor:       executor,
-		outcome:        lent.outcome,
+		outcome:        call.outcome,
 		completion:     completion,
 		key:            key.toRaw(),
-		shapes:         &lent.result.raw,
-		written:        (*C.size_t)(unsafe.Pointer(&lent.result.written)),
+		shapes:         &call.result.raw,
+		written:        (*C.size_t)(unsafe.Pointer(&call.result.written)),
 		arena:          arena.lower(),
 		outputs_scalar: C.usearch_scalar_t(outputsScalar),
 	})
-	return lent
+	return call
 }
 
 func (receiver shapesReceiver) insert(completion C.usearch_completion_t, keys []Key, shapes Tape,
-	config *DenseInsertConfig) *lent[struct{}] {
+	config *DenseInsertConfig) *callWithResult[struct{}] {
 	if config == nil {
 		config = new(DenseInsertConfig)
 	}
-	lent := open[struct{}]()
+	call := open[struct{}]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	// The call has one count, so only this side sees the keys and the entries disagree.
 	if uint(len(keys)) != shapes.Entries() {
-		return lent.refuse(fail(StatusShapeMismatch, "the key count does not match the tape's entries"))
+		return call.refuse(fail(StatusShapeMismatch, "the key count does not match the tape's entries"))
 	}
 	C.usearch_shapes_insert(&C.usearch_shapes_insert_t{
 		index:            index,
 		executor:         executor,
-		outcome:          lent.outcome,
+		outcome:          call.outcome,
 		completion:       completion,
 		count:            C.size_t(len(keys)),
-		keys:             lent.keys(keys),
-		shapes:           shapes.lower(&lent.call),
+		keys:             call.keys(keys),
+		shapes:           shapes.lower(&call.call),
 		expansion_factor: C.size_t(config.ExpansionFactor),
-		progress:         lent.progress(config.Progress, config.ProgressSteps),
-		stats:            lent.stats(config.Stats),
+		progress:         call.progress(config.Progress, config.ProgressSteps),
+		stats:            call.stats(config.Stats),
 	})
-	return lent
+	return call
 }
 
 func (receiver shapesReceiver) refine(completion C.usearch_completion_t,
-	config *ShapesRefineConfig) *lent[DenseRefineReport] {
+	config *ShapesRefineConfig) *callWithResult[DenseRefineReport] {
 	if config == nil {
 		config = new(ShapesRefineConfig)
 	}
-	lent := open[DenseRefineReport]()
+	call := open[DenseRefineReport]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
-	plan, phase := config.Plan.lower(&lent.call)
+	plan, phase := config.Plan.lower(&call.call)
 	C.usearch_shapes_refine(&C.usearch_shapes_refine_t{
 		index:      index,
 		executor:   executor,
-		outcome:    lent.outcome,
+		outcome:    call.outcome,
 		completion: completion,
-		report:     (*C.usearch_refine_report_t)(unsafe.Pointer(lent.result)),
+		report:     (*C.usearch_refine_report_t)(unsafe.Pointer(call.result)),
 		refine: C.usearch_refine_options_t{
 			expansion_factor: C.size_t(config.ExpansionFactor),
 			memory_limit:     C.size_t(config.MemoryLimit),
 		},
-		progress: lent.progress(config.Progress, config.ProgressSteps),
-		stats:    lent.stats(config.Stats),
+		progress: call.progress(config.Progress, config.ProgressSteps),
+		stats:    call.stats(config.Stats),
 		plan:     plan,
 		phase:    phase,
 	})
-	return lent
+	return call
 }
 
 func (receiver shapesReceiver) refinePlanFinish(completion C.usearch_completion_t,
-	plan *ShapesRefinePlan) *lent[DenseRefineReport] {
-	lent := open[DenseRefineReport]()
+	plan *ShapesRefinePlan) *callWithResult[DenseRefineReport] {
+	call := open[DenseRefineReport]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	C.usearch_shapes_refine_plan_finish(&C.usearch_shapes_refine_plan_finish_t{
 		index:      index,
 		executor:   executor,
-		outcome:    lent.outcome,
+		outcome:    call.outcome,
 		completion: completion,
 		plan:       plan.take(),
-		report:     (*C.usearch_refine_report_t)(unsafe.Pointer(lent.result)),
+		report:     (*C.usearch_refine_report_t)(unsafe.Pointer(call.result)),
 	})
-	return lent
+	return call
 }
 
-func (receiver shapesReceiver) health(completion C.usearch_completion_t) *lent[DenseReachability] {
-	lent := open[DenseReachability]()
+func (receiver shapesReceiver) health(completion C.usearch_completion_t) *callWithResult[DenseReachability] {
+	call := open[DenseReachability]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	C.usearch_shapes_health(&C.usearch_shapes_health_t{
 		index:        index,
 		executor:     executor,
-		outcome:      lent.outcome,
+		outcome:      call.outcome,
 		completion:   completion,
-		reachability: (*C.usearch_reachability_t)(unsafe.Pointer(lent.result)),
+		reachability: (*C.usearch_reachability_t)(unsafe.Pointer(call.result)),
 	})
-	return lent
+	return call
 }
 
 func (receiver shapesReceiver) search(completion C.usearch_completion_t, queries Tape, wanted uint,
-	arena *Arena, config *DenseSearchConfig) *lent[MatchesView] {
+	arena *Arena, config *DenseSearchConfig) *callWithResult[MatchesView] {
 	if config == nil {
 		config = new(DenseSearchConfig)
 	}
-	lent := open[MatchesView]()
+	call := open[MatchesView]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
-	lent.result.queries = queries.Entries()
+	call.result.queries = queries.Entries()
 	C.usearch_shapes_search(&C.usearch_shapes_search_t{
 		index:            index,
 		executor:         executor,
-		outcome:          lent.outcome,
+		outcome:          call.outcome,
 		completion:       completion,
 		count:            C.size_t(queries.Entries()),
-		queries:          queries.lower(&lent.call),
-		matches:          &lent.result.raw,
+		queries:          queries.lower(&call.call),
+		matches:          &call.result.raw,
 		arena:            arena.lower(),
 		wanted:           C.size_t(wanted),
 		expansion_factor: C.size_t(config.ExpansionFactor),
 		traversal:        C.usearch_traversal_t(config.Traversal),
-		predicate:        lent.predicate(config.Predicate),
-		progress:         lent.progress(config.Progress, config.ProgressSteps),
-		stats:            lent.stats(config.Stats),
+		predicate:        call.predicate(config.Predicate),
+		progress:         call.progress(config.Progress, config.ProgressSteps),
+		stats:            call.stats(config.Stats),
 	})
-	return lent
+	return call
 }
 
 func (receiver shapesReceiver) reshard(completion C.usearch_completion_t, sources, targets []*ShapesIndex,
-	config *ShapesReshardConfig) *lent[DenseRefineReport] {
+	config *ShapesReshardConfig) *callWithResult[DenseRefineReport] {
 	if config == nil {
 		config = new(ShapesReshardConfig)
 	}
-	lent := open[DenseRefineReport]()
-	// A reshard names its handles in its lists, so the receiver lends only its executor.
+	call := open[DenseRefineReport]()
+	// A reshard names its handles in its lists, so the receiver passes only its executor.
 	executor, refusal := receiver.executor.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	sourceHandles, targetHandles := shapesHandles(sources), shapesHandles(targets)
-	plan, phase := config.Plan.lower(&lent.call)
+	plan, phase := config.Plan.lower(&call.call)
 	C.usearch_shapes_reshard(&C.usearch_shapes_reshard_t{
 		sources_count: C.size_t(len(sourceHandles)),
-		sources:       lend(&lent.call, sourceHandles),
+		sources:       pinSlice(&call.call, sourceHandles),
 		targets_count: C.size_t(len(targetHandles)),
-		targets:       lend(&lent.call, targetHandles),
+		targets:       pinSlice(&call.call, targetHandles),
 		executor:      executor,
-		outcome:       lent.outcome,
+		outcome:       call.outcome,
 		completion:    completion,
-		report:        (*C.usearch_refine_report_t)(unsafe.Pointer(lent.result)),
+		report:        (*C.usearch_refine_report_t)(unsafe.Pointer(call.result)),
 		refine: C.usearch_refine_options_t{
 			expansion_factor: C.size_t(config.ExpansionFactor),
 			memory_limit:     C.size_t(config.MemoryLimit),
 		},
 		seed:     C.uint64_t(config.Seed),
-		progress: lent.progress(config.Progress, config.ProgressSteps),
-		stats:    lent.stats(config.Stats),
+		progress: call.progress(config.Progress, config.ProgressSteps),
+		stats:    call.stats(config.Stats),
 		plan:     plan,
 		phase:    phase,
 	})
-	return lent
+	return call
 }
 
 // shapesHandles lists the handles of indexes.
@@ -949,103 +949,103 @@ func shapesHandles(indexes []*ShapesIndex) []C.usearch_shapes_index_t {
 }
 
 func (receiver shapesReceiver) reshardPlanFinish(completion C.usearch_completion_t,
-	plan *ShapesReshardPlan) *lent[DenseRefineReport] {
-	lent := open[DenseRefineReport]()
-	// A reshard names its handles in its lists, so the receiver lends only its executor.
+	plan *ShapesReshardPlan) *callWithResult[DenseRefineReport] {
+	call := open[DenseRefineReport]()
+	// A reshard names its handles in its lists, so the receiver passes only its executor.
 	executor, refusal := receiver.executor.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	C.usearch_shapes_reshard_plan_finish(&C.usearch_shapes_reshard_plan_finish_t{
 		executor:   executor,
-		outcome:    lent.outcome,
+		outcome:    call.outcome,
 		completion: completion,
 		plan:       plan.take(),
-		report:     (*C.usearch_refine_report_t)(unsafe.Pointer(lent.result)),
+		report:     (*C.usearch_refine_report_t)(unsafe.Pointer(call.result)),
 	})
-	return lent
+	return call
 }
 
 func (receiver shapesReceiver) sample(completion C.usearch_completion_t, wanted uint, arena *Arena,
-	config *DenseSampleConfig) *lent[DenseDraws] {
+	config *DenseSampleConfig) *callWithResult[DenseDraws] {
 	if config == nil {
 		config = new(DenseSampleConfig)
 	}
-	lent := open[DenseDraws]()
+	call := open[DenseDraws]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	// The call has one count for both, so only this side sees the keys and their places disagree.
 	if len(config.Shown) != len(config.ShownCoordinates) {
-		return lent.refuse(fail(StatusShapeMismatch, "the shown keys and coordinates disagree in length"))
+		return call.refuse(fail(StatusShapeMismatch, "the shown keys and coordinates disagree in length"))
 	}
 	C.usearch_shapes_sample(&C.usearch_shapes_sample_t{
 		index:             index,
 		executor:          executor,
-		outcome:           lent.outcome,
+		outcome:           call.outcome,
 		completion:        completion,
 		shown_count:       C.size_t(len(config.Shown)),
-		shown:             lent.keys(config.Shown),
-		shown_coordinates: lent.points(config.ShownCoordinates),
+		shown:             call.keys(config.Shown),
+		shown_coordinates: call.points(config.ShownCoordinates),
 		focus_count:       C.size_t(len(config.Focus)),
-		focus:             lent.keys(config.Focus),
-		keys:              &lent.result.keys,
-		entry_ordinals:    &lent.result.entryOrdinals,
-		parents:           &lent.result.parents,
-		coordinates:       &lent.result.coordinates,
-		written:           (*C.size_t)(unsafe.Pointer(&lent.result.written)),
+		focus:             call.keys(config.Focus),
+		keys:              &call.result.keys,
+		entry_ordinals:    &call.result.entryOrdinals,
+		parents:           &call.result.parents,
+		coordinates:       &call.result.coordinates,
+		written:           (*C.size_t)(unsafe.Pointer(&call.result.written)),
 		arena:             arena.lower(),
 		wanted:            C.size_t(wanted),
 		seed:              C.uint64_t(config.Seed),
 		expansion_factor:  C.size_t(config.ExpansionFactor),
-		progress:          lent.progress(config.Progress, config.ProgressSteps),
-		stats:             lent.stats(config.Stats),
+		progress:          call.progress(config.Progress, config.ProgressSteps),
+		stats:             call.stats(config.Stats),
 	})
-	return lent
+	return call
 }
 
 func (receiver shapesReceiver) save(completion C.usearch_completion_t, path string,
-	config *DenseSaveConfig) *lent[struct{}] {
+	config *DenseSaveConfig) *callWithResult[struct{}] {
 	if config == nil {
 		config = new(DenseSaveConfig)
 	}
-	lent := open[struct{}]()
+	call := open[struct{}]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	C.usearch_shapes_save(&C.usearch_shapes_save_t{
 		index:      index,
 		executor:   executor,
-		outcome:    lent.outcome,
+		outcome:    call.outcome,
 		completion: completion,
-		path:       lent.text(path),
-		progress:   lent.progress(config.Progress, config.ProgressSteps),
+		path:       call.text(path),
+		progress:   call.progress(config.Progress, config.ProgressSteps),
 	})
-	return lent
+	return call
 }
 
 func (receiver shapesReceiver) saveBuffer(completion C.usearch_completion_t, arena *Arena,
-	config *DenseSaveBufferConfig) *lent[Monolith] {
+	config *DenseSaveBufferConfig) *callWithResult[Monolith] {
 	if config == nil {
 		config = new(DenseSaveBufferConfig)
 	}
-	lent := open[Monolith]()
+	call := open[Monolith]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	C.usearch_shapes_save_buffer(&C.usearch_shapes_save_buffer_t{
 		index:      index,
 		executor:   executor,
-		outcome:    lent.outcome,
+		outcome:    call.outcome,
 		completion: completion,
-		monolith:   &lent.result.raw,
+		monolith:   &call.result.raw,
 		arena:      arena.lower(),
-		progress:   lent.progress(config.Progress, config.ProgressSteps),
+		progress:   call.progress(config.Progress, config.ProgressSteps),
 	})
-	return lent
+	return call
 }
 
 // endregion: Calls
@@ -1067,15 +1067,15 @@ func (on ShapesIndexOn) Cursor(starts ...Key) (*ShapesCursor, error) {
 	if refusal != nil {
 		return nil, refusal
 	}
-	lent := open[C.usearch_shapes_cursor_t]()
+	call := open[C.usearch_shapes_cursor_t]()
 	C.usearch_shapes_cursor_init(&C.usearch_shapes_cursor_init_t{
 		index:        index,
-		outcome:      lent.outcome,
+		outcome:      call.outcome,
 		starts_count: C.size_t(len(starts)),
-		starts:       (*C.usearch_key_t)(unsafe.Pointer(lend(&lent.call, starts))),
-		cursor:       lent.result,
+		starts:       (*C.usearch_key_t)(unsafe.Pointer(pinSlice(&call.call, starts))),
+		cursor:       call.result,
 	})
-	handle, err := block(lent)
+	handle, err := block(call)
 	if err != nil {
 		return nil, err
 	}
@@ -1099,24 +1099,24 @@ func (cursor *ShapesCursor) next(wanted uint, linked bool, arena *Arena) (DenseB
 	if refusal != nil {
 		return DenseBatch{}, refusal
 	}
-	lent := open[DenseBatch]()
+	call := open[DenseBatch]()
 	var links *C.usearch_keys_tape_view_t
 	if linked {
-		links = &lent.result.links
+		links = &call.result.links
 	}
 	C.usearch_shapes_cursor_next(&C.usearch_shapes_cursor_next_t{
 		index:      index,
 		executor:   executor,
-		outcome:    lent.outcome,
+		outcome:    call.outcome,
 		completion: C.usearch_completion_blocking_k,
 		cursor:     cursor.handle,
-		keys:       &lent.result.keys,
+		keys:       &call.result.keys,
 		links:      links,
-		written:    (*C.size_t)(unsafe.Pointer(&lent.result.written)),
+		written:    (*C.size_t)(unsafe.Pointer(&call.result.written)),
 		arena:      arena.lower(),
 		wanted:     C.size_t(wanted),
 	})
-	return block(lent)
+	return block(call)
 }
 
 // Close releases the cursor. It is idempotent.

@@ -118,7 +118,7 @@ inline claim(t, count, first) {
             fi;
             growing--;
             // the grower's take releases the new chunks to a lucky taker its take pushed past the
-            // released rows; the counter's own release sequence carries it
+            // released rows; the counter's own release sequence holds it
             read_modify_write(t, last_allocated_id, take_order, first, first + count);
             check_covered(t, first, count);
             add_no_return(t, remaining_capacity, order_release, added);
@@ -136,8 +136,8 @@ inline claim(t, count, first) {
     od
 }
 
-// `capacity()`: the release first, so one seen carries its deflation, then the claimed rows, an
-// output too, since a reservation claims against them
+/** @c capacity(): the release first, so one seen holds its deflation, then the claimed rows, an
+ *  output too, since a reservation claims against them. */
 inline capacity(t, claimed_rows, total) {
     load(t, remaining_capacity, order_acquire, unclaimed);
     load(t, last_allocated_id, order_acquire, claimed_rows);

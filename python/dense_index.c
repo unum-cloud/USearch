@@ -115,7 +115,7 @@ static int receiver_from_object(PyObject* self, usearch_py_receiver_t* receiver,
     return 0;
 }
 
-/** The rows a borrowed matrix holds, as a verb's batch input reads them. */
+/** The rows a viewed matrix holds, as a verb's batch input reads them. */
 static usearch_rows_view_t rows_of(usearch_matrix_view_t const* matrix) {
     usearch_rows_view_t const rows = {matrix->data, matrix->stride, matrix->columns, matrix->scalar};
     return rows;
@@ -948,7 +948,7 @@ static char const doc_DenseIndex_refine[] =                                     
     "  memory_limit (int, optional): Bytes a loaded NVMe handle holds for the part it\n"       //
     "    rewrites; 0 derives what rounds that part in RAM.\n"                                  //
     "  progress (callable, optional): Called with (completed, total) units of each phase;\n"   //
-    "    returning False stops the round, None carries on.\n"                                  //
+    "    returning False stops the round, None continues.\n"                                   //
     "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"    //
     "  stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.\n"       //
     "  plan (DenseRefinePlan, optional): The round to open or continue; None runs one round\n" //
@@ -1043,7 +1043,7 @@ static char const doc_DenseIndex_search[] =                                     
     "    callback re-enters Python, so it runs under the GIL and serializes the walk; what\n"  //
     "    it raises goes to `sys.unraisablehook`, and the key is rejected.\n"                   //
     "  progress (callable, optional): Called with (completed, total) queries; returning\n"     //
-    "    False stops the batch and raises `CancelledError`, None carries on.\n"                //
+    "    False stops the batch and raises `CancelledError`, None continues.\n"                 //
     "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"    //
     "  stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.\n"       //
     "\n"                                                                                       //
@@ -1266,7 +1266,7 @@ static char const doc_DenseIndex_multiply[] =                                   
     "\n"                                                                                        //
     "Approximate sparse product of a matrix against the indexed vectors - the linear algebra\n" //
     "sibling of `search`, reporting every pair the traversal scored rather than only the\n"     //
-    "nearest. Pairs arrive in traversal order rather than sorted, and carry no duplicates.\n"   //
+    "nearest. Pairs arrive in traversal order rather than sorted, and hold no duplicates.\n"    //
     "How many a walk scores is known only once it ends, so the pairs come back ragged.\n"       //
     "Calls `usearch_dense_multiply`.\n"                                                         //
     "\n"                                                                                        //
@@ -1279,7 +1279,7 @@ static char const doc_DenseIndex_multiply[] =                                   
     "    factor widens the emitted pattern, being what the walk's breadth decides.\n"           //
     "  dtype (Scalar, optional): Names the left-hand scalar type when the buffer cannot.\n"     //
     "  progress (callable, optional): Called with (completed, total) rows; returning False\n"   //
-    "    stops the batch and raises `CancelledError`, None carries on.\n"                       //
+    "    stops the batch and raises `CancelledError`, None continues.\n"                        //
     "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"     //
     "  stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.\n"        //
     "\n"                                                                                        //
@@ -1367,7 +1367,7 @@ static char const doc_DenseIndex_attend[] =                                     
     "  queries (buffer): A (Q, dimensions) matrix; row `t * head_count + h` is head `h`\n"       //
     "    of token `t`.\n"                                                                        //
     "  values (buffer): An (N, dimensions) matrix of value rows, as wide as the keys and\n"      //
-    "    stored in the index's quantization, borrowed until the call is final.\n"                //
+    "    stored in the index's quantization, read until the call is final.\n"                    //
     "  row_of (callable): Called with each scored Key, answers its row of `values`. None, a\n"   //
     "    row outside them or an exception, which goes to `sys.unraisablehook`, refuses the\n"    //
     "    call with `ShapeMismatchError`, as do values of another width or scalar type. It\n"     //
@@ -1392,7 +1392,7 @@ static char const doc_DenseIndex_attend[] =                                     
     "    without its partition is a number nothing can rescale, which is why they travel as\n"   //
     "    one row.\n"                                                                             //
     "  progress (callable, optional): Called with (completed, total) tokens; returning\n"        //
-    "    False stops the batch and raises `CancelledError`, None carries on.\n"                  //
+    "    False stops the batch and raises `CancelledError`, None continues.\n"                   //
     "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"      //
     "  stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.\n"         //
     "\n"                                                                                         //
@@ -1560,7 +1560,7 @@ static char const doc_DenseIndex_maxsim[] =                                     
     "  predicate (callable, optional): Admits a Key when it returns truthy, asked before any\n"  //
     "    of its vectors are scored, so a rejected document never scores.\n"                      //
     "  progress (callable, optional): Called with (completed, total) queries; returning\n"       //
-    "    False stops the batch and raises `CancelledError`, None carries on.\n"                  //
+    "    False stops the batch and raises `CancelledError`, None continues.\n"                   //
     "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"      //
     "  stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.\n"         //
     "\n"                                                                                         //
@@ -1688,7 +1688,7 @@ static char const doc_DenseIndex_reshard[] =                                    
     "    rewrites; 0 derives what rounds that part in RAM.\n"                                    //
     "  seed (int, optional): Picks the part roots of a cut; equal seeds cut equally.\n"          //
     "  progress (callable, optional): Called with (completed, total) units of each phase of\n"   //
-    "    the closing rounds; returning False stops them, None carries on.\n"                     //
+    "    the closing rounds; returning False stops them, None continues.\n"                      //
     "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"      //
     "  stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.\n"         //
     "  plan (DenseReshardPlan, optional): The reshard to open or continue; None runs it to\n"    //
@@ -1709,7 +1709,7 @@ static char const doc_DenseIndex_reshard[] =                                    
     "  >>> len(base), len(donor)\n"                                                              //
     "  (2, 0)";
 
-/** A @c usearch_dense_reshard call and the placements it lends, inside the record's arguments. */
+/** A @c usearch_dense_reshard call and the placements it passes, inside the record's arguments. */
 typedef struct reshard_call_t {
     usearch_dense_reshard_t arguments;
     usearch_ram_options_t ram;
@@ -1718,7 +1718,7 @@ typedef struct reshard_call_t {
 } reshard_call_t;
 
 /**
- *  @brief Holds the sequence of indexes @p object names in @p held and lends their handles as one
+ *  @brief Holds the sequence of indexes @p object names in @p held and passes their handles as one
  *      block in @p handles.
  *  @return 0 on success, -1 with an exception set otherwise.
  */
@@ -2138,7 +2138,7 @@ static char const doc_DenseCursor[] =                                           
     "A sequential scan over the entries an index holds, pulled in batches by `next`.\n"       //
     "\n"                                                                                      //
     "Each shard's publication watermark is read as the scan enters that shard, so an entry\n" //
-    "once passed is never revisited, while a later shard may still carry entries inserted\n"  //
+    "once passed is never revisited, while a later shard may still hold entries inserted\n"   //
     "after the cursor opened. One step runs at a time; an overlapping step raises\n"          //
     "`ContendedError`. `close()`, or the end of a `with` block, releases the scan before\n"   //
     "the cursor is collected.";
@@ -2326,7 +2326,7 @@ static char const doc_DenseIndex_cursor[] =                                     
     "arena that pull names. Without `starts` it yields every entry as stored; with them, the\n" //
     "start keys' own entries first in order, then the entries those link to breadth-first,\n"   //
     "each once. Each shard's watermark is read as the scan enters that shard, so an entry\n"    //
-    "once passed is never revisited, while a later shard may still carry entries inserted\n"    //
+    "once passed is never revisited, while a later shard may still hold entries inserted\n"     //
     "after this call. Every pull blocks, on the receiver's executor or the calling thread.\n"   //
     "Calls `usearch_dense_cursor_init`.\n"                                                      //
     "\n"                                                                                        //
@@ -2561,8 +2561,8 @@ static PyObject* DenseIndex_search_stream(PyObject* self, PyObject* const* args,
 
 #pragma region Serialization
 
-/** Borrows a whole checkpoint blob, whatever its length. */
-static int checkpoint_borrow(PyObject* object, usearch_py_buffer_backing_t* backing) {
+/** Views a whole checkpoint blob, whatever its length. */
+static int checkpoint_view(PyObject* object, usearch_py_buffer_backing_t* backing) {
     backing->synthesized_owner = NULL;
     if (PyObject_GetBuffer(object, &backing->buffer, PyBUF_C_CONTIGUOUS) != 0)
         return usearch_py_raise_from_cause(PyExc_ValueError, "the checkpoint buffer must be contiguous");
@@ -2631,7 +2631,7 @@ static char const doc_DenseIndex_save_buffer[] =                                
     "Args:\n"                                                                                //
     "  arena (Arena): Where the monolith lands, rewound by the call.\n"                      //
     "  progress (callable, optional): Called with (completed, total) bytes; returning\n"     //
-    "    False stops the write and raises `CancelledError`, None carries on.\n"              //
+    "    False stops the write and raises `CancelledError`, None continues.\n"               //
     "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"  //
     "\n"                                                                                     //
     "Returns:\n"                                                                             //
@@ -2825,7 +2825,7 @@ static PyObject* DenseIndex_load_ram_buffer(PyTypeObject* type, PyObject* const*
     if (load_parse("load_ram_buffer", args, positional_args_count, args_names_tuple, "buffer", &buffer_object,
                    "memory_domains", &memory_domains_object, &usearch_py_cpu_class, &cpu_class_ceiling, &executor,
                    &values_per_key, &progress, &progress_steps) != 0 ||
-        checkpoint_borrow(buffer_object, &backing) != 0 ||
+        checkpoint_view(buffer_object, &backing) != 0 ||
         usearch_py_ordinals_from_object(memory_domains_object, "memory_domains", &memory_domains,
                                         &memory_domains_count) != 0)
         goto release;
@@ -2948,7 +2948,7 @@ static PyObject* DenseIndex_load_vram_buffer(PyTypeObject* type, PyObject* const
     if (load_parse("load_vram_buffer", args, positional_args_count, args_names_tuple, "buffer", &buffer_object,
                    "devices", &devices_object, &usearch_py_gpu_class, &gpu_class_ceiling, &executor, &values_per_key,
                    &progress, &progress_steps) != 0 ||
-        checkpoint_borrow(buffer_object, &backing) != 0 ||
+        checkpoint_view(buffer_object, &backing) != 0 ||
         usearch_py_ordinals_from_object(devices_object, "devices", &devices, &devices_count) != 0)
         goto release;
 
@@ -3216,7 +3216,7 @@ static PyObject* DenseIndex_metadata_read_buffer(PyObject* type, PyObject* const
     usearch_py_buffer_backing_t backing;
     if (metadata_parse("metadata_read_buffer", args, positional_args_count, args_names_tuple, "buffer", &buffer_object,
                        &executor) != 0 ||
-        checkpoint_borrow(buffer_object, &backing) != 0)
+        checkpoint_view(buffer_object, &backing) != 0)
         return NULL;
     usearch_dense_metadata_t metadata = {0};
     usearch_outcome_t outcome = {0};

@@ -93,7 +93,7 @@ public final class SequenceIndex implements AutoCloseable {
             return code;
         }
 
-        /** Names the kind a code carries; a code this build cannot name becomes UNKNOWN. */
+        /** Names the kind a code holds; a code this build cannot name becomes UNKNOWN. */
         public static SequenceMetric of(int code) {
             for (SequenceMetric candidate : values()) {
                 if (candidate.code == code) {
@@ -142,7 +142,7 @@ public final class SequenceIndex implements AutoCloseable {
         }
 
         /** Copies the weights into the call's memory, answering the pointer C reads, or null for none. */
-        static MemorySegment lend(Call call, @Nullable SequenceWeights weights) {
+        static MemorySegment pass(Call call, @Nullable SequenceWeights weights) {
             if (weights == null) {
                 return MemorySegment.NULL;
             }
@@ -216,7 +216,7 @@ public final class SequenceIndex implements AutoCloseable {
         /** Fills the fields both init structures share, at the same offsets in each. */
         void fill(Call call) {
             call.enumeration(INIT_METRIC, metric.code());
-            call.pointer(INIT_WEIGHTS, SequenceWeights.lend(call, weights));
+            call.pointer(INIT_WEIGHTS, SequenceWeights.pass(call, weights));
             if (windowWidths.length != 0) {
                 call.pointer(INIT_WINDOW_WIDTHS, call.memory.allocateFrom(ValueLayout.JAVA_LONG, windowWidths));
                 call.size(INIT_WINDOW_WIDTHS_COUNT, windowWidths.length);
@@ -972,7 +972,7 @@ public final class SequenceIndex implements AutoCloseable {
     public static SequenceIndex viewRam(String path, @Nullable SequenceWeights weights) {
         return create(VIEW_RAM, null, call -> {
             call.path(VIEW_RAM.at("path"), path);
-            call.pointer(VIEW_RAM_WEIGHTS, SequenceWeights.lend(call, weights));
+            call.pointer(VIEW_RAM_WEIGHTS, SequenceWeights.pass(call, weights));
         });
     }
 
@@ -992,7 +992,7 @@ public final class SequenceIndex implements AutoCloseable {
         return create(VIEW_NVME, executor, call -> {
             call.path(VIEW_NVME.at("path"), path);
             call.nvme(call.arguments, VIEW_NVME.at("nvme"), paths, cpuClassCeiling);
-            call.pointer(VIEW_NVME_WEIGHTS, SequenceWeights.lend(call, weights));
+            call.pointer(VIEW_NVME_WEIGHTS, SequenceWeights.pass(call, weights));
         });
     }
 
@@ -1118,7 +1118,7 @@ public final class SequenceIndex implements AutoCloseable {
             call.vram(call.arguments, LOAD_VRAM.at("vram"), placement, null);
         }
         call.size(ram ? LOAD_RAM_VALUES_PER_KEY : LOAD_VRAM_VALUES_PER_KEY, valuesPerKey);
-        call.pointer(ram ? LOAD_RAM_WEIGHTS : LOAD_VRAM_WEIGHTS, SequenceWeights.lend(call, weights));
+        call.pointer(ram ? LOAD_RAM_WEIGHTS : LOAD_VRAM_WEIGHTS, SequenceWeights.pass(call, weights));
         call.progress(ram ? LOAD_RAM.at("progress") : LOAD_VRAM.at("progress"), progress);
         return call;
     }

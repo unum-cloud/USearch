@@ -7,7 +7,7 @@
  *
  *  `seek` acquires slot zero exactly once per try and waits out a sentinel on the index's monitor,
  *  then reads the tail relaxed. A back-link names a row once it is published, but a reader reaches
- *  the row's hosting chunk only behind the ID's dispense, which the watermark above the ID carries
+ *  the row's hosting chunk only behind the ID's dispense, which the watermark above the ID holds
  *  and a relaxed tail read does not. So `follow` seeks the staged ID only below the snapshot, and
  *  `refresh` widens the snapshot by acquiring the watermark.
  *

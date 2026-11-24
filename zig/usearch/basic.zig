@@ -1,5 +1,5 @@
 //! The ragged tapes the sequence and shape indexes read and write: the layout of their offsets, the
-//! borrowed input batch, and the packed entries a `get` writes into an arena.
+//! viewed input batch, and the packed entries a `get` writes into an arena.
 
 const types = @import("types.zig");
 
@@ -40,7 +40,7 @@ pub const usearch_tape_view_t = extern struct {
     }
 };
 
-/// A borrowed ragged batch - the currency the sequence and shape verbs read, mirroring
+/// A viewed ragged batch - the currency the sequence and shape verbs read, mirroring
 /// `usearch_tape_view_t` with the entry count it leaves to the call.
 ///
 /// Elements lie end to end, and one more offset than entries surrounds them, so entry `i` spans
@@ -49,7 +49,7 @@ pub const usearch_tape_view_t = extern struct {
 pub const TapeView = struct {
     /// First element, which every offset counts from.
     data: ?*const anyopaque,
-    /// Entries the tape carries, one fewer than its offsets.
+    /// Entries the tape holds, one fewer than its offsets.
     entries: usize,
     /// Which width `offsets` holds.
     layout: TapeLayout,
@@ -58,7 +58,7 @@ pub const TapeView = struct {
     /// The scalar type the elements hold, converted on the way in where it differs.
     scalar: Scalar,
 
-    /// Borrows an Arrow-shaped pair of runs, `Offset` being `u32` or `u64` - `[]const u8` with its
+    /// Views an Arrow-shaped pair of runs, `Offset` being `u32` or `u64` - `[]const u8` with its
     /// offsets for sequences, `[]const [3]f32` with point offsets for shapes.
     ///
     /// No offsets, or offsets reaching past the elements, are refused with `Error.ShapeMismatch`,

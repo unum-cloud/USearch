@@ -47,13 +47,13 @@ import "C"
 // Validation performed here before a call crosses reports the status the engine would have
 // reported for the same fault.
 //
-// A Status is an error, so errors.Is(err, usearch.StatusReadOnly) matches any failure carrying it.
+// A Status is an error, so errors.Is(err, usearch.StatusReadOnly) matches any failure holding it.
 type Status int32
 
 // The statuses a call ends in. Only Deferred.Status reports StatusDeferred, the one status
 // that is not final.
 const (
-	// StatusSuccess means the call completed and carries no message.
+	// StatusSuccess means the call completed and holds no message.
 	StatusSuccess Status = C.usearch_status_success_k
 	// StatusDeferred means the call was submitted deferred and is not final yet.
 	StatusDeferred Status = C.usearch_status_deferred_k
@@ -85,7 +85,7 @@ const (
 	// executor another call holds, or an arena still serving another call.
 	StatusContended Status = C.usearch_status_contended_k
 	// StatusCancelled means a progress handler asked the operation to stop; it unwound and published
-	// nothing, so the handle carries whatever it did before the call.
+	// nothing, so the handle holds whatever it did before the call.
 	StatusCancelled Status = C.usearch_status_cancelled_k
 	// StatusUnsupported means the verb is declared for every residency but this one does not
 	// implement it; a caller picks another residency.
@@ -104,7 +104,7 @@ func (status Status) String() string {
 func (status Status) Error() string { return status.String() }
 
 // Error is one failed call: a status every caller can branch on, and the detail the status
-// cannot carry. Reach the status with errors.Is or errors.As.
+// cannot hold. Reach the status with errors.Is or errors.As.
 type Error struct {
 	Status  Status
 	Message string
@@ -158,7 +158,7 @@ func KeyFromUint64(value uint64) Key {
 }
 
 // Uint64 reports the integer identity in the low eight bytes, and false when the high eight
-// carry anything.
+// hold anything.
 func (key Key) Uint64() (uint64, bool) {
 	if binary.BigEndian.Uint64(key[:8]) != 0 {
 		return 0, false
@@ -265,7 +265,7 @@ func (scalar Scalar) String() string {
 	return C.GoString(C.usearch_scalar_name(C.usearch_scalar_t(scalar)))
 }
 
-// dimensionsPerValue is how many logical dimensions one stored value carries: one for the
+// dimensionsPerValue is how many logical dimensions one stored value holds: one for the
 // byte-and-wider kinds, more for the packed ones.
 func (scalar Scalar) dimensionsPerValue() uint {
 	switch scalar {
@@ -347,11 +347,11 @@ func scalarOf[Value Element]() Scalar {
 
 // region: Row Views
 
-// RowsView borrows a caller-owned slab as rows of equal width: a base pointer, a row count, and
+// RowsView views a caller-owned slab as rows of equal width: a base pointer, a row count, and
 // a byte pitch between consecutive rows. It is the shape every batch argument takes.
 //
-// A RowsView borrows and never owns. It stays valid only as long as the slice it was built
-// from, which the binding pins until each call it crosses is final: the collector traces the
+// A RowsView only points at memory it never owns. It stays valid only as long as the slice it was
+// built from, which the binding pins until each call it crosses is final: the collector traces the
 // base pointer, so keeping the view alive keeps the backing array alive.
 type RowsView struct {
 	pointer    unsafe.Pointer
@@ -432,7 +432,7 @@ func (matrix RowsView) Stride() uint { return matrix.stride }
 // Scalar reports the scalar type the rows hold.
 func (matrix RowsView) Scalar() Scalar { return matrix.scalar }
 
-// lower lends the rows as the batch view a verb reads; the library checks their width against
+// lower passes the rows as the batch view a verb reads; the library checks their width against
 // the frozen geometry.
 func (matrix RowsView) lower(call *call) C.usearch_rows_view_t {
 	call.pinner.Pin(matrix.pointer)
@@ -462,7 +462,7 @@ func (matches MatchesView) Queries() uint { return matches.queries }
 // Columns reports the matches the call made room for per query, at most its wanted - the "k" in "kANN".
 func (matches MatchesView) Columns() uint { return uint(matches.raw.columns) }
 
-// Query borrows one query's keys and scores from the arena, trimmed to the count that query
+// Query views one query's keys and scores from the arena, trimmed to the count that query
 // reported; query must be below Queries.
 func (matches MatchesView) Query(query uint) ([]Key, []Distance) {
 	columns := matches.Columns()
@@ -506,7 +506,7 @@ func usearchContinues(completed, total C.size_t, state unsafe.Pointer) C.usearch
 	return C.usearch_cancel_k
 }
 
-// predicate lends an optional predicate as the struct a filtering verb takes.
+// predicate passes an optional predicate as the struct a filtering verb takes.
 func (call *call) predicate(predicate Predicate) C.usearch_predicate_t {
 	if predicate == nil {
 		return C.usearch_predicate_t{}
@@ -514,7 +514,7 @@ func (call *call) predicate(predicate Predicate) C.usearch_predicate_t {
 	return C.usearch_predicate_t{callback: C.usearch_go_admits(), state: call.callback(predicate)}
 }
 
-// progress lends an optional handler and its report count as the struct a reporting verb takes.
+// progress passes an optional handler and its report count as the struct a reporting verb takes.
 func (call *call) progress(progress ProgressCallback, steps uint) C.usearch_progress_t {
 	if progress == nil {
 		return C.usearch_progress_t{}
@@ -522,7 +522,7 @@ func (call *call) progress(progress ProgressCallback, steps uint) C.usearch_prog
 	return C.usearch_progress_t{callback: C.usearch_go_continues(), state: call.callback(progress), steps: C.size_t(steps)}
 }
 
-// callback lends a handler to its C trampoline as an opaque handle rather than a Go pointer, since
+// callback passes a handler to its C trampoline as an opaque handle rather than a Go pointer, since
 // the closure holds Go pointers the cgo rules forbid handing to C.
 func (call *call) callback(handler any) unsafe.Pointer {
 	handle := pin(call, new(cgo.Handle))
@@ -762,7 +762,7 @@ func (class GPUClass) String() string {
 // domains local to memoryDomains - the same list the indexes were initialized with, which is what
 // keeps compute and memory domains in agreement. An empty list derives them from the machine.
 //
-// Zero threads takes seven eighths of the cores those domains carry, since full occupancy starves
+// Zero threads takes seven eighths of the cores those domains hold, since full occupancy starves
 // the ordered publication path. A cpuClassCeiling intersects with what the machine runs, so a class
 // the machine lacks narrows rather than refuses.
 func ExecutorForRam(memoryDomains []int32, cpuClassCeiling CPUClass, threads uint) (*Executor, error) {
@@ -807,15 +807,15 @@ func ExecutorForVram(
 	if len(streams) != 0 && len(streams) != len(devices) {
 		return nil, fail(StatusShapeMismatch, "pass no streams or one per device")
 	}
-	lent := open[C.usearch_executor_t]()
+	call := open[C.usearch_executor_t]()
 	C.usearch_executor_for_vram(&C.usearch_executor_for_vram_t{
-		executor:      lent.result,
-		outcome:       lent.outcome,
-		vram:          lent.vram(devices, gpuClassCeiling),
-		streams:       lend(&lent.call, streams),
+		executor:      call.result,
+		outcome:       call.outcome,
+		vram:          call.vram(devices, gpuClassCeiling),
+		streams:       pinSlice(&call.call, streams),
 		scratch_limit: C.size_t(scratchLimit),
 	})
-	return executorOf(block(lent))
+	return executorOf(block(call))
 }
 
 // executorOf wraps the handle an executor factory wrote.
@@ -834,9 +834,9 @@ func (executor *Executor) Drain(mood Mood) error {
 	if refusal != nil {
 		return refusal
 	}
-	lent := open[struct{}]()
-	C.usearch_executor_drain(&C.usearch_executor_drain_t{executor: handle, outcome: lent.outcome, mood: C.usearch_mood_t(mood)})
-	_, err := block(lent)
+	call := open[struct{}]()
+	C.usearch_executor_drain(&C.usearch_executor_drain_t{executor: handle, outcome: call.outcome, mood: C.usearch_mood_t(mood)})
+	_, err := block(call)
 	return err
 }
 
@@ -872,11 +872,11 @@ func (executor *Executor) lower() (C.usearch_executor_t, *Error) {
 // rows, products, monoliths, cursor and stream batches alike - reused so a steady loop allocates once.
 //
 // Every call given an arena rewinds and refills it, so the views of its previous call and every
-// slice they handed out end there, as they do once it is closed; to keep one call's views past
-// the next, give that call another arena. An arena serves one call at a time, and a second
-// overlapping it fails with StatusContended. Deferred verbs borrow it as blocking ones do,
-// since Close waits for every deferred call naming it. Views over a GPU arena hold device
-// memory, which Describe reports and no Go code may read.
+// slice they handed out end there, as they do once it is closed; to keep one call's views past the
+// next, give that call another arena. An arena serves one call at a time, and a second overlapping
+// it fails with StatusContended. Deferred verbs view it as blocking ones do, since Close waits for
+// every deferred call naming it. Views over a GPU arena hold device memory, which Describe reports
+// and no Go code may read.
 type Arena struct {
 	handle C.usearch_arena_t
 }
@@ -891,9 +891,9 @@ func NewArena(executor *Executor) (*Arena, error) {
 	if refusal != nil {
 		return nil, refusal
 	}
-	lent := open[C.usearch_arena_t]()
-	C.usearch_arena_init(&C.usearch_arena_init_t{arena: lent.result, executor: handle, outcome: lent.outcome})
-	arena, err := block(lent)
+	call := open[C.usearch_arena_t]()
+	C.usearch_arena_init(&C.usearch_arena_init_t{arena: call.result, executor: handle, outcome: call.outcome})
+	arena, err := block(call)
 	if err != nil {
 		return nil, err
 	}
@@ -911,13 +911,13 @@ type ArenaDescription struct {
 
 // Describe reports where the arena's outputs live, as the executor that made it decided.
 func (arena *Arena) Describe() (ArenaDescription, error) {
-	lent := open[ArenaDescription]()
+	call := open[ArenaDescription]()
 	C.usearch_arena_describe(&C.usearch_arena_describe_t{
 		arena:       arena.lower(),
-		outcome:     lent.outcome,
-		description: (*C.usearch_arena_description_t)(unsafe.Pointer(lent.result)),
+		outcome:     call.outcome,
+		description: (*C.usearch_arena_description_t)(unsafe.Pointer(call.result)),
 	})
-	return block(lent)
+	return block(call)
 }
 
 // Close releases the memory, waiting for every deferred call naming the arena, and ends every view
@@ -945,12 +945,12 @@ func (arena *Arena) lower() C.usearch_arena_t {
 // region: Deferred Calls
 
 // call is one verb crossing into the library: the outcome it reports through, and the pins and
-// handles that keep every Go pointer and callback its argument structure carries in place until
+// handles that keep every Go pointer and callback its argument structure holds in place until
 // the call is final. cgo lets C keep a Go pointer only while it is pinned, and pinning is also
 // what keeps every pointee on the heap, which the noescape promises rely on.
 //
 // The outcome is its own allocation, since the pinner holds Go pointers of its own and anything
-// sharing its object would carry them across.
+// sharing its object would hold them across.
 type call struct {
 	outcome *C.usearch_outcome_t
 	pinner  runtime.Pinner
@@ -959,25 +959,25 @@ type call struct {
 	refusal *Error
 }
 
-// lent is a call and the slot its result lands in, which the library writes in place.
-type lent[Result any] struct {
+// callWithResult is a call and the slot its result lands in, which the library writes in place.
+type callWithResult[Result any] struct {
 	call
 	result *Result
 }
 
 // open starts a call; a verb fills its argument structure, pointing it at the result slot, and
 // crosses.
-func open[Result any]() *lent[Result] {
-	opened := new(lent[Result])
+func open[Result any]() *callWithResult[Result] {
+	opened := new(callWithResult[Result])
 	opened.outcome = pin(&opened.call, new(C.usearch_outcome_t))
 	opened.result = pin(&opened.call, new(Result))
 	return opened
 }
 
 // refuse records a failure the binding caught, so the call never crosses.
-func (lent *lent[Result]) refuse(refusal *Error) *lent[Result] {
-	lent.refusal = refusal
-	return lent
+func (call *callWithResult[Result]) refuse(refusal *Error) *callWithResult[Result] {
+	call.refusal = refusal
+	return call
 }
 
 // status reads the outcome word without waiting.
@@ -985,7 +985,7 @@ func (call *call) status() Status {
 	return Status(C.usearch_outcome_status(call.outcome))
 }
 
-// settle waits until the call is final, releases everything it lent, and reports its failure.
+// settle waits until the call is final, releases everything it passed, and reports its failure.
 func (call *call) settle() error {
 	if call.status() == StatusDeferred {
 		C.usearch_outcome_wait(call.outcome)
@@ -1002,12 +1002,12 @@ func (call *call) settle() error {
 }
 
 // block settles a call and hands back its result.
-func block[Result any](lent *lent[Result]) (Result, error) {
-	if err := lent.settle(); err != nil {
+func block[Result any](call *callWithResult[Result]) (Result, error) {
+	if err := call.settle(); err != nil {
 		var empty Result
 		return empty, err
 	}
-	return *lent.result, nil
+	return *call.result, nil
 }
 
 // Deferred is a submitted call, which holds its outcome and inputs until it is final, owned by the
@@ -1018,47 +1018,47 @@ func block[Result any](lent *lent[Result]) (Result, error) {
 //
 // A failure the binding catches before the call crosses is reported here too, like any other.
 type Deferred[Result any] struct {
-	lent    *lent[Result]
+	call    *callWithResult[Result]
 	cleanup runtime.Cleanup
 }
 
 // submitted hands a call to its caller, who waits on it or closes it, or drops it to the collector.
-func submitted[Result any](lent *lent[Result]) *Deferred[Result] {
-	deferred := &Deferred[Result]{lent: lent}
-	deferred.cleanup = runtime.AddCleanup(deferred, release[Result], lent)
+func submitted[Result any](call *callWithResult[Result]) *Deferred[Result] {
+	deferred := &Deferred[Result]{call: call}
+	deferred.cleanup = runtime.AddCleanup(deferred, release[Result], call)
 	return deferred
 }
 
 // release settles a dropped call once it is final, and otherwise hands it to another dropped
 // Deferred for the next collection, since the collector's goroutine must not block.
-func release[Result any](lent *lent[Result]) {
-	if lent.status() == StatusDeferred {
-		submitted(lent)
+func release[Result any](call *callWithResult[Result]) {
+	if call.status() == StatusDeferred {
+		submitted(call)
 		return
 	}
-	_ = lent.settle()
+	_ = call.settle()
 }
 
 // Status reports StatusDeferred until the call is final, then its final status, without blocking.
 func (deferred *Deferred[Result]) Status() Status {
-	if deferred.lent.refusal != nil {
-		return deferred.lent.refusal.Status
+	if deferred.call.refusal != nil {
+		return deferred.call.refusal.Status
 	}
-	return deferred.lent.status()
+	return deferred.call.status()
 }
 
 // Wait blocks until the call is final, releases its pins, then hands back its result, the same
 // every time it is asked.
 func (deferred *Deferred[Result]) Wait() (Result, error) {
 	deferred.cleanup.Stop()
-	return block(deferred.lent)
+	return block(deferred.call)
 }
 
 // Close blocks until the call is final, releases its pins, and reports the call's failure. It is
 // idempotent and safe after Wait.
 func (deferred *Deferred[Result]) Close() error {
 	deferred.cleanup.Stop()
-	return deferred.lent.settle()
+	return deferred.call.settle()
 }
 
 // endregion: Deferred Calls
@@ -1086,20 +1086,21 @@ func pin[Value any](call *call, value *Value) *Value {
 	return value
 }
 
-// lend pins a slice's backing array until the call is final, and lends an empty slice as nil.
-func lend[Value any](call *call, slice []Value) *Value {
+// pinSlice pins a slice's backing array until the call is final, and answers nil for an empty
+// slice.
+func pass[Value any](call *call, slice []Value) *Value {
 	if len(slice) == 0 {
 		return nil
 	}
 	return pin(call, &slice[0])
 }
 
-// ints lends a slice of IDs until the call is final.
+// ints passes a slice of IDs until the call is final.
 func (call *call) ints(values []int32) (*C.int32_t, C.size_t) {
-	return (*C.int32_t)(unsafe.Pointer(lend(call, values))), C.size_t(len(values))
+	return (*C.int32_t)(unsafe.Pointer(pinSlice(call, values))), C.size_t(len(values))
 }
 
-// ram lends the memory domains of a RAM placement or executor, beside the class ceiling.
+// ram passes the memory domains of a RAM placement or executor, beside the class ceiling.
 func (call *call) ram(memoryDomains []int32, cpuClassCeiling CPUClass) C.usearch_ram_options_t {
 	domains, count := call.ints(memoryDomains)
 	return C.usearch_ram_options_t{
@@ -1109,7 +1110,7 @@ func (call *call) ram(memoryDomains []int32, cpuClassCeiling CPUClass) C.usearch
 	}
 }
 
-// vram lends the devices of a VRAM placement or executor, beside the class ceiling.
+// vram passes the devices of a VRAM placement or executor, beside the class ceiling.
 func (call *call) vram(devices []int32, gpuClassCeiling GPUClass) C.usearch_vram_options_t {
 	ordinals, count := call.ints(devices)
 	return C.usearch_vram_options_t{
@@ -1119,7 +1120,7 @@ func (call *call) vram(devices []int32, gpuClassCeiling GPUClass) C.usearch_vram
 	}
 }
 
-// nvme lends a run of device paths, each borrowed rather than copied. Go strings are not
+// nvme passes a run of device paths, each viewed rather than copied. Go strings are not
 // null-terminated and the interface never assumes one, so the bytes cross as they are.
 func (call *call) nvme(paths []string, cpuClassCeiling CPUClass) C.usearch_nvme_options_t {
 	views := make([]C.usearch_bytes_view_t, len(paths))
@@ -1127,16 +1128,16 @@ func (call *call) nvme(paths []string, cpuClassCeiling CPUClass) C.usearch_nvme_
 		views[position] = call.text(path)
 	}
 	return C.usearch_nvme_options_t{
-		paths:             lend(call, views),
+		paths:             pinSlice(call, views),
 		paths_count:       C.size_t(len(views)),
 		cpu_class_ceiling: C.usearch_cpu_class_t(cpuClassCeiling),
 	}
 }
 
-// bytes lends a byte slab as the view the C interface reads, with no terminator and no copy.
+// bytes passes a byte slab as the view the C interface reads, with no terminator and no copy.
 func (call *call) bytes(bytes []byte) C.usearch_bytes_view_t {
 	return C.usearch_bytes_view_t{
-		data:   (*C.uint8_t)(unsafe.Pointer(lend(call, bytes))),
+		data:   (*C.uint8_t)(unsafe.Pointer(pinSlice(call, bytes))),
 		length: C.size_t(len(bytes)),
 	}
 }
@@ -1153,19 +1154,19 @@ func (call *call) text(text string) C.usearch_bytes_view_t {
 	}
 }
 
-// keys lends a packed key slice as the run the C interface reads, one key per row of the batch
+// keys passes a packed key slice as the run the C interface reads, one key per row of the batch
 // it accompanies.
 func (call *call) keys(keys []Key) C.usearch_keys_view_t {
 	return C.usearch_keys_view_t{
-		data:   (*C.usearch_key_t)(unsafe.Pointer(lend(call, keys))),
+		data:   (*C.usearch_key_t)(unsafe.Pointer(pinSlice(call, keys))),
 		stride: C.size_t(unsafe.Sizeof(Key{})),
 	}
 }
 
-// points lends places in three dimensions as the f32 rows a sampling verb reads.
+// points passes places in three dimensions as the f32 rows a sampling verb reads.
 func (call *call) points(points [][3]float32) C.usearch_rows_view_t {
 	return C.usearch_rows_view_t{
-		data:    unsafe.Pointer(lend(call, points)),
+		data:    unsafe.Pointer(pinSlice(call, points)),
 		stride:  C.size_t(unsafe.Sizeof([3]float32{})),
 		columns: 3,
 		scalar:  C.usearch_scalar_t(ScalarF32),
@@ -1176,12 +1177,12 @@ func (call *call) points(points [][3]float32) C.usearch_rows_view_t {
 
 // region: Tapes
 
-// Tape borrows a ragged batch as Apache Arrow lays one out: elements end to end, and one more
+// Tape views a ragged batch as Apache Arrow lays one out: elements end to end, and one more
 // offset than entries around them, entry i spanning offsets[i] up to offsets[i+1]. An element is
 // a byte of a sequence or a point of a shape, three scalars wide.
 //
-// Like a RowsView, a Tape borrows and never owns, and the binding pins both slices until each call
-// it crosses is final.
+// Like a RowsView, a Tape only points at memory it never owns, and the binding pins both slices
+// until each call it crosses is final.
 type Tape struct {
 	pointer unsafe.Pointer
 	offsets []uint64
@@ -1253,13 +1254,13 @@ func (tape Tape) Entries() uint { return uint(len(tape.offsets)) - 1 }
 // Scalar reports the scalar type the elements hold.
 func (tape Tape) Scalar() Scalar { return tape.scalar }
 
-// lower lends the tape as the batch view a verb reads, with 64-bit offsets.
+// lower passes the tape as the batch view a verb reads, with 64-bit offsets.
 func (tape Tape) lower(call *call) C.usearch_tape_view_t {
 	if tape.pointer != nil {
 		call.pinner.Pin(tape.pointer)
 	}
 	view := C.usearch_tape_view_t{data: tape.pointer, layout: C.usearch_tape_u64_k, scalar: C.usearch_scalar_t(tape.scalar)}
-	*(**C.uint64_t)(unsafe.Pointer(&view.offsets)) = (*C.uint64_t)(unsafe.Pointer(lend(call, tape.offsets)))
+	*(**C.uint64_t)(unsafe.Pointer(&view.offsets)) = (*C.uint64_t)(unsafe.Pointer(pinSlice(call, tape.offsets)))
 	return view
 }
 
@@ -1287,7 +1288,7 @@ func (tape TapeView) span(entry uint) (uint, uint) {
 	return uint(offsets[entry]), uint(offsets[entry+1])
 }
 
-// TapeEntry borrows one entry's scalars from the arena - a sequence's bytes, or a shape's points
+// TapeEntry views one entry's scalars from the arena - a sequence's bytes, or a shape's points
 // with x, y and z interleaved - refused with StatusInvalidArgument when Value is not the scalar
 // type they were written as; entry must be below Written.
 func TapeEntry[Value Element](tape TapeView, entry uint) ([]Value, error) {
@@ -1316,7 +1317,7 @@ type livePlan[Handle comparable] struct {
 	handle Handle
 }
 
-// lower lends the plan's handle and phase to a call, both nil for no plan.
+// lower passes the plan's handle and phase to a call, both nil for no plan.
 func (plan *livePlan[Handle]) lower(call *call) (*Handle, *C.usearch_phase_progress_t) {
 	if plan == nil {
 		return nil, nil

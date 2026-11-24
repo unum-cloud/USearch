@@ -195,12 +195,12 @@ public final class Types {
         /**
          * Reports the integer identity parked in the low eight bytes.
          *
-         * @throws USearchException MALFORMED when the high eight bytes carry anything, so no
+         * @throws USearchException MALFORMED when the high eight bytes hold anything, so no
          *     integer describes the key; {@link #isIntegral()} asks first.
          */
         public long toLong() {
             if (!isIntegral()) {
-                throw new USearchException(Status.MALFORMED, "the key carries more than an integer identity");
+                throw new USearchException(Status.MALFORMED, "the key holds more than an integer identity");
             }
             return identity.getLeastSignificantBits();
         }
@@ -256,7 +256,7 @@ public final class Types {
      */
     public enum Status {
 
-        /** The call succeeded and carries no message. */
+        /** The call succeeded and holds no message. */
         SUCCESS(0),
         /** The call was submitted deferred and is not final yet; the one non-final status. */
         DEFERRED(1),
@@ -288,7 +288,7 @@ public final class Types {
         CONTENDED(14),
         /**
          * A progress handler asked the operation to stop; it unwound and published nothing, so the
-         * handle carries whatever it did before the call.
+         * handle holds whatever it did before the call.
          */
         CANCELLED(15),
         /** The verb is declared for every residency but this one does not implement it. */
@@ -307,7 +307,7 @@ public final class Types {
             return code;
         }
 
-        /** Names the status a code carries; one this build cannot name reads as INVALID_ARGUMENT, as in C. */
+        /** Names the status a code holds; one this build cannot name reads as INVALID_ARGUMENT, as in C. */
         public static Status of(int code) {
             for (Status candidate : values()) {
                 if (candidate.code == code) {
@@ -325,7 +325,7 @@ public final class Types {
     }
 
     /**
-     * One failed call: a status every caller can branch on, and the detail the status cannot carry.
+     * One failed call: a status every caller can branch on, and the detail the status cannot hold.
      * Nearly every verb can report one, so it is unchecked.
      */
     public static final class USearchException extends RuntimeException {
@@ -341,7 +341,7 @@ public final class Types {
             this.status = status;
         }
 
-        /** The status this failure carries. */
+        /** The status this failure holds. */
         public Status status() {
             return status;
         }
@@ -352,7 +352,7 @@ public final class Types {
      * dimensions per byte, as their {@code xN} suffixes spell.
      *
      * <p>
-     * The enumerators are ordered by shrinking dynamic range, and their codes carry the numbering gaps
+     * The enumerators are ordered by shrinking dynamic range, and their codes hold the numbering gaps
      * the C enum reserves for kinds not yet implemented.
      */
     public enum Scalar {
@@ -408,12 +408,12 @@ public final class Types {
             return valueBytes;
         }
 
-        /** How many logical dimensions one stored value carries. */
+        /** How many logical dimensions one stored value holds. */
         public int dimensionsPerValue() {
             return dimensionsPerValue;
         }
 
-        /** Names the kind a code carries; a code this build cannot name becomes UNKNOWN. */
+        /** Names the kind a code holds; a code this build cannot name becomes UNKNOWN. */
         public static Scalar of(int code) {
             for (Scalar candidate : values()) {
                 if (candidate.code == code) {
@@ -597,7 +597,7 @@ public final class Types {
         }
 
         /**
-         * Names the residency a code carries.
+         * Names the residency a code holds.
          *
          * @throws USearchException UNKNOWN_KIND on a code this build cannot name.
          */
@@ -649,10 +649,9 @@ public final class Types {
      *
      * <p>
      * One factory per C constructor, each taking every argument its own kind takes: memory domains
-     * and a thread count for RAM, a borrowed ForkUnion pool, device ordinals and optional streams for
-     * VRAM, where a single host thread drives one stream per device, and device paths and a thread
-     * count for NVMe. Naming no hardware derives it, and the kind must match the residency of every
-     * handle it drives.
+     * and a thread count for RAM, device ordinals and optional streams for VRAM, where a single host
+     * thread drives one stream per device, and device paths and a thread count for NVMe. Naming no
+     * hardware derives it, and the kind must match the residency of every handle it drives.
      *
      * <p>
      * A receiver names the executor its verbs run on, and the index alone runs them on the caller's
@@ -689,7 +688,7 @@ public final class Types {
          * @param cpuClassCeiling the newest class dispatch may pick, intersected with what the
          *     machine runs, so a class the machine lacks narrows rather than refuses; {@code null}
          *     means no ceiling.
-         * @param threads Workers to spawn; zero takes 7/8 of the cores those domains carry, since full
+         * @param threads Workers to spawn; zero takes 7/8 of the cores those domains hold, since full
          *     occupancy starves the ordered publication path.
          * @throws USearchException OUT_OF_MEMORY when the scratch cannot be claimed.
          */
@@ -712,8 +711,9 @@ public final class Types {
          * @param gpuClassCeiling the newest class dispatch may pick, capped below the best class
          *     every named device loads; a ceiling no named device loads is refused as UNSUPPORTED;
          *     {@code null} means no ceiling.
-         * @param streams No streams, or one borrowed CUDA stream per device in {@code devices} order,
-         *     each outliving the executor.
+         * @param streams No streams, which takes each device's per-thread default stream, or one CUDA
+         *     stream per device in {@code devices} order, which the caller destroys after closing the
+         *     executor; the executor creates and destroys no stream.
          * @param scratchLimit The ceiling on scratch bytes per device; zero lets scratch grow.
          * @throws USearchException DEVICE when a named device does not answer, and OUT_OF_MEMORY when
          *     the scratch cannot be claimed.
@@ -887,7 +887,7 @@ public final class Types {
          */
         public ArenaDescription describe() {
             return Call.block(ARENA_DESCRIBE, null, null, call -> {
-                call.lease(ARENA_DESCRIBE_ARENA, handle);
+                call.reference(ARENA_DESCRIBE_ARENA, handle);
                 MemorySegment description = call.output(ARENA_DESCRIBE_DESCRIPTION, ARENA_DESCRIPTION);
                 return () -> ArenaDescription.lift(description);
             });
@@ -988,7 +988,7 @@ public final class Types {
      * The slab is a {@link MemorySegment}: a heap one, as the array factories wrap, is copied into
      * native memory for the duration of one call and never retained, and a native one - a mapped
      * file, a direct buffer through {@link MemorySegment#ofBuffer}, an arena allocation - is
-     * addressed in place with no copy. A view borrows and never owns, so a native slab must stay
+     * addressed in place with no copy. A view only points at memory it never owns, so a native slab must stay
      * open until every call it crosses is final.
      */
     public static final class RowsView {
@@ -1096,7 +1096,7 @@ public final class Types {
             return scalar;
         }
 
-        /** The slab the view borrows. */
+        /** The slab the view points into. */
         public MemorySegment segment() {
             return slab;
         }
@@ -1211,14 +1211,14 @@ public final class Types {
     }
 
     /**
-     * A submitted call, which owns its outcome, argument structure and inputs, and borrows its handles
+     * A submitted call, which owns its outcome, argument structure and inputs, and uses its handles
      * and arena, until the call is final.
      *
      * <p>
      * {@link #status()} polls without blocking and {@link #join()} blocks until the call is final,
      * then answers what it produced or raises what it reported; the first join frees the outcome and
      * every later one repeats its answer. Closing an unfinished one waits for the call before freeing
-     * what it lent, and a dropped one keeps what it lent until the call is final, when the collector
+     * what it passed, and a dropped one keeps what it passed until the call is final, when the collector
      * frees it without ever waiting. It starts no thread: waiting off the caller's thread is the
      * caller's own, as {@code withContext(Dispatchers.IO) { call.join() }} in a Kotlin coroutine or a
      * virtual thread in Java.
@@ -1300,7 +1300,7 @@ public final class Types {
             return result;
         }
 
-        /** Waits for the call if it is not final yet, then frees what it lent. It is idempotent. */
+        /** Waits for the call if it is not final yet, then frees what it passed. It is idempotent. */
         @Override
         public void close() {
             if (settled == null && !closed) {
@@ -1421,12 +1421,12 @@ public final class Types {
 
     /**
      * A native handle freed once - on close, or once neither its owner nor a call naming it reaches
-     * it. Calls lease its lifetime, so closing it while another thread's call names it raises rather
+     * it. Calls reference its lifetime, so closing it while another thread's call names it raises rather
      * than freeing memory under that call.
      */
     static final class Handle {
 
-        /** The scope calls lease; closing it is what retires the handle. */
+        /** The scope calls reference; closing it is what retires the handle. */
         final java.lang.foreign.Arena lifetime = java.lang.foreign.Arena.ofShared();
 
         private final MemorySegment address;
@@ -1443,7 +1443,7 @@ public final class Types {
             release = CLEANER.register(this, new Release(lifetime, address, free, owner));
         }
 
-        /** Frees a handle no call leases, and leaves one a call still leases to a later collection. */
+        /** Frees a handle no call references, and leaves one a call still references to a later collection. */
         private record Release(
                 java.lang.foreign.Arena lifetime,
                 MemorySegment address,
@@ -1456,7 +1456,7 @@ public final class Types {
                     if (lifetime.scope().isAlive()) {
                         lifetime.close();
                     }
-                } catch (IllegalStateException leased) {
+                } catch (IllegalStateException referenced) {
                     CLEANER.register(new Object(), this);
                     return;
                 }
@@ -1480,7 +1480,7 @@ public final class Types {
         /**
          * Frees the handle; idempotent.
          *
-         * @throws IllegalStateException while another thread's call leases the handle.
+         * @throws IllegalStateException while another thread's call references the handle.
          */
         void close() {
             if (lifetime.scope().isAlive()) {
@@ -1496,7 +1496,7 @@ public final class Types {
     }
 
     /**
-     * One call: its argument structure, its outcome, and everything it lends the library,
+     * One call: its argument structure, its outcome, and everything it passes the library,
      * in memory that lives until the call is final - confined to the caller when blocking, shared
      * when deferred. As the cleaner of a dropped {@link Deferred}, it frees nothing the library may
      * still write and never waits: an unfinished call is left to a later collection.
@@ -1508,15 +1508,15 @@ public final class Types {
         final MemorySegment outcome;
         private final Verb verb;
 
-        /** Everything the call names or borrows - handles, executor, arena, slabs - kept until final. */
-        private final List<Object> lent = new ArrayList<>();
+        /** Everything the call names or views - handles, executor, arena, slabs - kept until final. */
+        private final List<Object> passed = new ArrayList<>();
 
         /** Copies of fixed-size reports into the caller's objects, run once the call succeeded. */
         private final List<Runnable> reportCopies = new ArrayList<>();
 
-        /** The handle the downcall leases, so closing it from another thread raises instead of freeing it. */
+        /** The handle the downcall references, so closing it from another thread raises instead of freeing it. */
         @Nullable
-        Handle leased;
+        Handle referenced;
 
         /** The executor named in the structure, or {@code null} for the calling thread. */
         @Nullable
@@ -1536,7 +1536,7 @@ public final class Types {
          * Runs one verb blocking: fills its structure, calls, and answers what {@code request}'s
          * finisher reads once the call is final.
          *
-         * @param index the handle the call leases, or {@code null} for a verb that names none.
+         * @param index the handle the call references, or {@code null} for a verb that names none.
          * @param executor the executor named in the structure, or {@code null} for the calling thread.
          */
         static <Result> Result block(
@@ -1577,21 +1577,21 @@ public final class Types {
                 @Nullable Handle index, @Nullable Executor executor, Function<Call, Supplier<Result>> request) {
             VarHandle indexField = verb.index();
             if (index != null && indexField != null) {
-                lease(indexField, index);
+                reference(indexField, index);
             }
             VarHandle executorField = verb.executor();
             if (executor != null && executorField != null) {
                 pointer(executorField, executor.address());
-                lend(executor);
+                pass(executor);
                 this.executor = executor;
             }
             return request.apply(this);
         }
 
-        /** Calls the verb, passing the structure in the leased handle's lifetime. */
+        /** Calls the verb, passing the structure in the referenced handle's lifetime. */
         @SuppressWarnings("restricted")
         private void invoke() {
-            Handle handle = leased;
+            Handle handle = referenced;
             MemorySegment passed =
                     handle == null ? arguments : arguments.reinterpret(arguments.byteSize(), handle.lifetime, null);
             Library.invoke(verb.handle(), passed);
@@ -1621,20 +1621,20 @@ public final class Types {
 
         /** Lets go of everything the call named and frees its memory, once it is final or never reached the library. */
         private void release() {
-            lent.clear();
+            passed.clear();
             memory.close();
         }
 
-        /** Keeps what the call names or borrows reachable until it is final. */
-        void lend(Object borrowed) {
-            lent.add(borrowed);
+        /** Keeps what the call names or views reachable until it is final. */
+        void pass(Object viewed) {
+            passed.add(viewed);
         }
 
-        /** Points {@code field} at a handle and leases it for the downcall. */
-        void lease(VarHandle field, Handle handle) {
+        /** Points {@code field} at a handle and references it for the downcall. */
+        void reference(VarHandle field, Handle handle) {
             pointer(field, handle.address());
-            lend(handle);
-            leased = handle;
+            pass(handle);
+            referenced = handle;
         }
 
         void size(VarHandle field, long value) {
@@ -1675,10 +1675,10 @@ public final class Types {
             return allocated;
         }
 
-        /** Lends native bytes in place, or copies heap ones into the call's memory. */
+        /** Passes native bytes in place, or copies heap ones into the call's memory. */
         MemorySegment input(MemorySegment bytes) {
             if (bytes.isNative()) {
-                lend(bytes);
+                pass(bytes);
                 return bytes;
             }
             return memory.allocate(bytes.byteSize(), 8).copyFrom(bytes);
@@ -1775,7 +1775,7 @@ public final class Types {
         void arena(VarHandle field, Arena held) {
             pointer(field, held.address());
             arena = held;
-            lend(held);
+            pass(held);
         }
 
         /** Widens a pointer this call wrote into its arena to the {@code length} bytes it addresses. */
@@ -1857,7 +1857,7 @@ public final class Types {
         /** The plan ended its round, and nothing is pending. */
         DONE;
 
-        /** Names the phase a code carries. */
+        /** Names the phase a code holds. */
         static Phase of(int code) {
             return values()[code];
         }

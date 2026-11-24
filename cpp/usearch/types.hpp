@@ -8,7 +8,7 @@
  *
  *  Every index wrapper answers its verbs through a receiver whose type picks how they complete:
  *  a blocking receiver answers an @c outcome, a deferred one answers a @c deferred call its one
- *  owner polls or waits on. Handlers are @c noexcept callables borrowed for one call, so no
+ *  owner polls or waits on. Handlers are @c noexcept callables read only during one call, so no
  *  fault ever unwinds through the library.
  */
 #pragma once
@@ -49,7 +49,8 @@ struct nothing_t {};
 
 /**
  *  @brief A submitted call: its outcome and its output slot, owned until the call is final, while
- *      the arena, the handles, the inputs and the handlers it was handed stay borrowed until then.
+ *      the arena, the handles, the inputs and the handlers it was handed stay allocated and
+ *      unchanged until then.
  *
  *  It never moves, as the library writes into it, and its one owner polls @c status or blocks in
  *  @c wait; destruction waits the same way.
@@ -206,7 +207,7 @@ inline constexpr std::size_t values_per_element<u4x2_t> = 2;
 template <>
 inline constexpr std::size_t values_per_element<u1x8_t> = 8;
 
-/** Rows of @p element_type_ the caller lends a call, along its batch axis. */
+/** Rows of @p element_type_ the caller passes a call, along its batch axis. */
 template <element element_type_>
 struct rows_view {
 
@@ -236,7 +237,7 @@ struct rows_view {
     usearch_rows_view_t view() const noexcept { return {first_row, stride, columns, scalar_of<element_type_>}; }
 };
 
-/** Entries of @p element_type_ the caller lends a call end to end, as an Apache Arrow tape: one
+/** Entries of @p element_type_ the caller passes a call end to end, as an Apache Arrow tape: one
  *  more offset than entries, counted in the modality's own elements, bytes or points. */
 template <element element_type_>
 struct tape_view {
@@ -325,7 +326,7 @@ template <typename handler_type_>
 concept predicate_handler =
     std::is_nothrow_invocable_r_v<void, handler_type_&, usearch_key_t const*, usearch_admission_t*, std::size_t>;
 
-/** A progress handler borrowed for one call as its own state; empty hears nothing. */
+/** A progress handler read only during one call as its own state; empty hears nothing. */
 class progress_t {
   public:
     progress_t() noexcept = default;
@@ -346,7 +347,7 @@ class progress_t {
     usearch_progress_t raw_ {};
 };
 
-/** A predicate handler borrowed for one call as its own state; empty admits every key. */
+/** A predicate handler read only during one call as its own state; empty admits every key. */
 class predicate_t {
   public:
     predicate_t() noexcept = default;
@@ -595,7 +596,7 @@ struct reshard_config {
     plan_type_* plan = nullptr;
 };
 
-/** The keys already shown and the keys to look around, which every @c sample call borrows. */
+/** The keys already shown and the keys to look around, which every @c sample call reads. */
 struct sample_config_t {
 
     /** The keys already shown: never drawn again, and the paths reach toward them. */

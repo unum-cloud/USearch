@@ -6,7 +6,7 @@
  *
  *  The @c CompiledShapesIndex class and the lifecycle verbs that instantiate it, the cursor it
  *  opens, and the checkpoint metadata readers that need no index at all. Shapes cross as one
- *  Apache Arrow tape of interleaved coordinates and point offsets, borrowed in place.
+ *  Apache Arrow tape of interleaved coordinates and point offsets, viewed in place.
  *
  *  Every instance verb takes the executor and the completion first, so one native function serves
  *  the calling thread, a blocking receiver and a deferred one alike.
@@ -471,7 +471,7 @@ static napi_value usearch_js_shapes_insert(napi_env env, napi_callback_info info
         usearch_js_call_abandon(&call->call, &local.call);
         return NULL;
     }
-    // The keys view carries no count, so only this side can see the two disagree.
+    // The keys view holds no count, so only this side can see the two disagree.
     if (keys_count != insert.count) {
         usearch_js_call_abandon(&call->call, &local.call);
         usearch_js_throw(env, usearch_status_shape_mismatch_k, "The keys name one key per shape");
@@ -626,7 +626,7 @@ static napi_value usearch_js_shapes_sample(napi_env env, napi_callback_info info
         usearch_js_call_abandon(&call->call, &local.call);
         return NULL;
     }
-    // The coordinates carry no count of their own, so only this side can see them disagree.
+    // The coordinates hold no count of their own, so only this side can see them disagree.
     if (placed != sample.shown_count) {
         usearch_js_call_abandon(&call->call, &local.call);
         usearch_js_throw(env, usearch_status_shape_mismatch_k, "The shown keys need one place apiece");

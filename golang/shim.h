@@ -6,7 +6,7 @@
  *      trampolines a filtered search, a progress handler, and an attention's value lookup
  *      install as C callbacks.
  *
- *  The definitions live in @c shim.c because a Go file carrying an @c //export directive may hold
+ *  The definitions live in @c shim.c because a Go file holding an @c //export directive may hold
  *  only declarations in its preamble.
  */
 #ifndef UNUM_USEARCH_GO_SHIM_H

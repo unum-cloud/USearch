@@ -71,7 +71,7 @@ export enum SequenceMetric {
 export interface SequenceOptions {
   /** How sequences are scored; defaults to `levenshtein`. */
   metric?: SequenceMetric;
-  /** Row-major 256 × 256 signed scores over bytes, which Needleman-Wunsch alone takes; borrowed
+  /** Row-major 256 × 256 signed scores over bytes, which Needleman-Wunsch alone takes; viewed
    *  for the call. */
   substitutionMatrix?: Int8Array;
   /** Cost of one unaligned symbol, beside the substitution matrix. */
@@ -80,7 +80,7 @@ export interface SequenceOptions {
   windowWidths?: number[];
   /** Neighbors per node; absent derives it. */
   connectivity?: number;
-  /** Entries one key may carry; absent is unbounded. */
+  /** Entries one key may hold; absent is unbounded. */
   valuesPerKey?: number;
   /** The newest CPU class dispatch may pick, by canonical name; absent means no ceiling. */
   cpuClassCeiling?: string;
@@ -102,7 +102,7 @@ export interface SequenceLoadConfig extends SequenceWeights {
   executor?: Executor;
   /** NUMA node IDs for a RAM load, or CUDA ordinals for a VRAM one; absent derives them. */
   placement?: number[];
-  /** Entries one key may carry; absent is unbounded. */
+  /** Entries one key may hold; absent is unbounded. */
   valuesPerKey?: number;
   /** The newest CPU or GPU class dispatch may pick, by canonical name; absent means no ceiling. */
   classCeiling?: string;

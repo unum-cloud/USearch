@@ -6,7 +6,7 @@
  *
  *  The @c CompiledSequenceIndex class and the lifecycle verbs that instantiate it, the cursor it
  *  opens, and the checkpoint metadata readers that need no index at all. Sequences cross as one
- *  Apache Arrow tape of bytes and offsets, borrowed in place.
+ *  Apache Arrow tape of bytes and offsets, viewed in place.
  *
  *  Every instance verb takes the executor and the completion first, so one native function serves
  *  the calling thread, a blocking receiver and a deferred one alike.
@@ -97,7 +97,7 @@ static napi_value usearch_js_sequence_adopt(napi_env env, usearch_outcome_t cons
 }
 
 /** Reads the optional substitution matrix, an @c Int8Array of 256 × 256 scores, and its gap cost;
- *  an absent matrix lends no weights. */
+ *  an absent matrix passes no weights. */
 static bool usearch_js_sequence_weights_from_value(napi_env env, napi_value matrix, napi_value gap,
                                                    usearch_sequence_weights_t* weights, bool* given) {
     napi_typedarray_type type = napi_uint8_array;
@@ -147,7 +147,7 @@ static bool usearch_js_sequence_widths_from_value(napi_env env, napi_value value
 
 /** <tt>initRam(metric, substitutionMatrix, gap, windowWidths, connectivity, valuesPerKey,
  *  memoryDomains, cpuClassCeiling)</tt> and <tt>initVram(..., devices, gpuClassCeiling)</tt> → an
- *  empty, mutable index. The weights are borrowed for the call alone. */
+ *  empty, mutable index. The weights are read only during the call alone. */
 static napi_value usearch_js_sequence_init(napi_env env, napi_callback_info info, usearch_residency_t residency) {
     napi_value arguments[8];
     size_t connectivity = 0, values_per_key = 0, widths_count = 0;
@@ -251,7 +251,7 @@ static napi_value usearch_js_sequence_load(napi_env env, napi_callback_info info
 
     usearch_sequence_index_t handle = NULL;
     usearch_outcome_t outcome = {usearch_status_success_k, NULL};
-    usearch_sequence_weights_t const* const lent = weighted ? &weights : NULL;
+    usearch_sequence_weights_t const* const passed = weighted ? &weights : NULL;
     usearch_ram_options_t const ram = {ordinals, ordinals_count, 0, cpu_class_ceiling};
     usearch_vram_options_t const vram_options = {ordinals, ordinals_count, 0, gpu_class_ceiling};
     if (vram && source == usearch_js_source_path_k) {
@@ -261,7 +261,7 @@ static napi_value usearch_js_sequence_load(napi_env env, napi_callback_info info
                                              .path = bytes,
                                              .vram = vram_options,
                                              .values_per_key = values_per_key,
-                                             .weights = lent};
+                                             .weights = passed};
         usearch_sequence_load_vram(&load);
     }
     else if (vram) {
@@ -271,7 +271,7 @@ static napi_value usearch_js_sequence_load(napi_env env, napi_callback_info info
                                                     .buffer = bytes,
                                                     .vram = vram_options,
                                                     .values_per_key = values_per_key,
-                                                    .weights = lent};
+                                                    .weights = passed};
         usearch_sequence_load_vram_buffer(&load);
     }
     else if (source == usearch_js_source_path_k) {
@@ -281,7 +281,7 @@ static napi_value usearch_js_sequence_load(napi_env env, napi_callback_info info
                                             .path = bytes,
                                             .ram = ram,
                                             .values_per_key = values_per_key,
-                                            .weights = lent};
+                                            .weights = passed};
         usearch_sequence_load_ram(&load);
     }
     else {
@@ -291,7 +291,7 @@ static napi_value usearch_js_sequence_load(napi_env env, napi_callback_info info
                                                    .buffer = bytes,
                                                    .ram = ram,
                                                    .values_per_key = values_per_key,
-                                                   .weights = lent};
+                                                   .weights = passed};
         usearch_sequence_load_ram_buffer(&load);
     }
     free(ordinals);
@@ -544,7 +544,7 @@ static napi_value usearch_js_sequence_insert(napi_env env, napi_callback_info in
         usearch_js_call_abandon(&call->call, &local.call);
         return NULL;
     }
-    // The keys view carries no count, so only this side can see the two disagree.
+    // The keys view holds no count, so only this side can see the two disagree.
     if (keys_count != insert.count) {
         usearch_js_call_abandon(&call->call, &local.call);
         usearch_js_throw(env, usearch_status_shape_mismatch_k, "The keys name one key per sequence");
@@ -698,7 +698,7 @@ static napi_value usearch_js_sequence_sample(napi_env env, napi_callback_info in
         usearch_js_call_abandon(&call->call, &local.call);
         return NULL;
     }
-    // The coordinates carry no count of their own, so only this side can see them disagree.
+    // The coordinates hold no count of their own, so only this side can see them disagree.
     if (placed != sample.shown_count) {
         usearch_js_call_abandon(&call->call, &local.call);
         usearch_js_throw(env, usearch_status_shape_mismatch_k, "The shown keys need one place apiece");

@@ -2,12 +2,12 @@
 
 The C++ wrapper is a header-only layer over the C interface in `c/usearch/`, living in `cpp/usearch/` and linking the same `libusearch_shared` or `libusearch_static`.
 It needs a C++20 compiler and adds no ABI of its own: every verb fills the C argument struct and calls the C function, with no layers in between.
-It throws nothing, as each verb answers an `outcome` or a `deferred` call carrying the library's status.
+It throws nothing, as each verb answers an `outcome` or a `deferred` call holding the library's status.
 
 - `dense_index_t` holds fixed-width vectors under one metric, in RAM, VRAM or on NVMe.
 - `sequence_index_t`, `shapes_index_t` and `geospatial_index_t` hold byte strings, 3D point clouds and observations on the Earth.
 - `executor_t` owns the threads or streams a call runs on, and `arena_t` the outputs it writes.
-- `outcome<T>` and `deferred<T>` carry each call's answer, blocking or submitted.
+- `outcome<T>` and `deferred<T>` hold each call's answer, blocking or submitted.
 
 ## Installation
 
@@ -65,7 +65,7 @@ auto [reachability, status, message] = audit.wait();     // what the blocking ca
 ```
 
 Both receivers are one class template over the completion, so each verb has one body that fills the C struct and lands its result in the call's output slot.
-A `deferred` owns its outcome and output slot and never moves, since the library writes into it; the arena, handles, inputs and handlers it was handed stay borrowed until it is final.
+A `deferred` owns its outcome and output slot and never moves, since the library writes into it; the arena, handles, inputs and handlers it was handed stay allocated and unchanged until it is final.
 Its one owner polls `status` or blocks in `wait`, and destruction waits the same way, so a scope ending is a join.
 The full rules live in the [C README](../c/README.md#receivers--deferred-calls).
 
@@ -112,7 +112,7 @@ auto [entries, status, message] = index.on(executor).count(keys[0]);
 ## Errors
 
 No verb throws.
-Every answer carries `status` and `message`, a static string the library owns, and converts to `true` only on success, so the usual shape is a structured binding and one check:
+Every answer holds `status` and `message`, a static string the library owns, and converts to `true` only on success, so the usual shape is a structured binding and one check:
 
 ```cpp
 auto [matches, status, message] = index.on(executor).search<float>(queries, 10, arena);
@@ -155,7 +155,7 @@ Loading blocks, as the handle is its answer, and freezes the geometry from the c
 A dense index holds fixed-width vectors under one metric, with the dimensions, quantization and connectivity its constructor froze.
 Rows cross as `rows_view<T>`, a base pointer, a count, the values per row and an optional byte stride, where a zero stride repeats the first row.
 `T` names the scalar per call, so one index takes `insert<float>` and `search<us::bf16_t>` alike; the bit containers `bf16_t`, `f16_t`, the four small floats and the packed `i4x2_t`, `u4x2_t` and `u1x8_t` name formats C++ has no arithmetic type for.
-Handlers are `noexcept` callables borrowed for one call, like the predicate of a filtered search:
+Handlers are `noexcept` callables read only during one call, like the predicate of a filtered search:
 
 ```cpp
 auto even = [](usearch_key_t const* keys, usearch_admission_t* admissions, std::size_t count) noexcept {
@@ -240,7 +240,7 @@ auto nearby = places.on(executor).within({stops, 1}, usearch_geospatial_relation
 ```
 
 `search` ranks the `wanted` nearest entries the relation admits, and `within` reports every one inside the tolerance as a ragged run per query.
-A terrain filled on demand is a `noexcept` handler that `us::geospatial_terrain(handler, grid)` turns into the init struct's `terrain`, borrowed for the index's whole life and called from the executor's threads.
+A terrain filled on demand is a `noexcept` handler that `us::geospatial_terrain(handler, grid)` turns into the init struct's `terrain`, which the index keeps for its whole life and calls from the executor's threads.
 
 ## What This Binding Does Not Expose
 

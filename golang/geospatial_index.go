@@ -19,7 +19,7 @@ import (
 )
 
 /*
-// `nocallback` only where the argument structure carries no callback and no executor; `noescape`
+// `nocallback` only where the argument structure holds no callback and no executor; `noescape`
 // everywhere, since submission copies the structure and everything it names is pinned.
 #cgo noescape usearch_geospatial_init_ram
 #cgo nocallback usearch_geospatial_init_ram
@@ -178,7 +178,7 @@ type GeospatialObservations struct {
 // Written reports how many observations the call wrote; zero when the key is absent.
 func (observations GeospatialObservations) Written() uint { return observations.written }
 
-// Observations borrows the observations from the arena, in insertion order.
+// Observations views the observations from the arena, in insertion order.
 func (observations GeospatialObservations) Observations() []GeospatialObservation {
 	return unsafe.Slice((*GeospatialObservation)(unsafe.Pointer(observations.raw)), observations.written)
 }
@@ -187,7 +187,7 @@ func (observations GeospatialObservations) Observations() []GeospatialObservatio
 
 // region: Configs
 
-// GeospatialSearchConfig carries the optional settings of Search. A zero value derives every
+// GeospatialSearchConfig holds the optional settings of Search. A zero value derives every
 // setting.
 type GeospatialSearchConfig struct {
 	// Metres is the radius around each query; zero ranks by distance alone.
@@ -210,7 +210,7 @@ type GeospatialSearchConfig struct {
 	Stats *DenseTraversalStats
 }
 
-// GeospatialWithinConfig carries the optional settings of Within. A zero value derives every
+// GeospatialWithinConfig holds the optional settings of Within. A zero value derives every
 // setting.
 type GeospatialWithinConfig struct {
 	// Seconds is the slack on both ends of the query's time interval.
@@ -228,7 +228,7 @@ type GeospatialWithinConfig struct {
 	Stats *DenseTraversalStats
 }
 
-// GeospatialViewNvmeConfig carries the optional settings of GeospatialViewNvme.
+// GeospatialViewNvmeConfig holds the optional settings of GeospatialViewNvme.
 type GeospatialViewNvmeConfig struct {
 	// Executor is the NVMe executor whose rings read the checkpoint's headers; nil reads on the
 	// calling goroutine.
@@ -241,7 +241,7 @@ type GeospatialViewNvmeConfig struct {
 	CPUClassCeiling CPUClass
 }
 
-// GeospatialRefineConfig carries the optional settings of Refine. A zero value derives every
+// GeospatialRefineConfig holds the optional settings of Refine. A zero value derives every
 // setting.
 type GeospatialRefineConfig struct {
 	// ExpansionFactor is the breadth of the candidates the re-selection walk explores; zero derives.
@@ -259,7 +259,7 @@ type GeospatialRefineConfig struct {
 	Plan *GeospatialRefinePlan
 }
 
-// GeospatialReshardConfig carries the optional settings of Reshard. A zero value derives every
+// GeospatialReshardConfig holds the optional settings of Reshard. A zero value derives every
 // setting.
 type GeospatialReshardConfig struct {
 	// Seed picks the part roots of a source split among several targets: equal seeds over an
@@ -345,29 +345,29 @@ func (index *GeospatialIndex) Close() error {
 // GeospatialInitRam creates an empty, mutable index in host memory, one shard per NUMA node
 // memoryDomains names; empty derives every node the process may use.
 func GeospatialInitRam(options GeospatialOptions, memoryDomains []int32) (*GeospatialIndex, error) {
-	lent := open[C.usearch_geospatial_index_t]()
+	call := open[C.usearch_geospatial_index_t]()
 	C.usearch_geospatial_init_ram(&C.usearch_geospatial_init_ram_t{
-		index:          lent.result,
-		outcome:        lent.outcome,
+		index:          call.result,
+		outcome:        call.outcome,
 		connectivity:   C.size_t(options.Connectivity),
 		values_per_key: C.size_t(options.ValuesPerKey),
-		ram:            lent.ram(memoryDomains, options.CPUClassCeiling),
+		ram:            call.ram(memoryDomains, options.CPUClassCeiling),
 	})
-	return geospatialIndexOf(block(lent))
+	return geospatialIndexOf(block(call))
 }
 
 // GeospatialInitVram creates an empty, mutable index in device memory, sharded across the CUDA
 // ordinals devices names and never replicated; empty derives one free device.
 func GeospatialInitVram(options GeospatialOptions, devices []int32) (*GeospatialIndex, error) {
-	lent := open[C.usearch_geospatial_index_t]()
+	call := open[C.usearch_geospatial_index_t]()
 	C.usearch_geospatial_init_vram(&C.usearch_geospatial_init_vram_t{
-		index:          lent.result,
-		outcome:        lent.outcome,
+		index:          call.result,
+		outcome:        call.outcome,
 		connectivity:   C.size_t(options.Connectivity),
 		values_per_key: C.size_t(options.ValuesPerKey),
-		vram:           lent.vram(devices, options.GPUClassCeiling),
+		vram:           call.vram(devices, options.GPUClassCeiling),
 	})
-	return geospatialIndexOf(block(lent))
+	return geospatialIndexOf(block(call))
 }
 
 // GeospatialLoadRam copies a checkpoint into a new, mutable index in host memory. The path names a
@@ -380,17 +380,17 @@ func GeospatialLoadRam(path string, config *DenseLoadRamConfig) (*GeospatialInde
 	if refusal != nil {
 		return nil, refusal
 	}
-	lent := open[C.usearch_geospatial_index_t]()
+	call := open[C.usearch_geospatial_index_t]()
 	C.usearch_geospatial_load_ram(&C.usearch_geospatial_load_ram_t{
-		index:          lent.result,
+		index:          call.result,
 		executor:       executor,
-		outcome:        lent.outcome,
-		path:           lent.text(path),
-		ram:            lent.ram(config.MemoryDomains, config.CPUClassCeiling),
+		outcome:        call.outcome,
+		path:           call.text(path),
+		ram:            call.ram(config.MemoryDomains, config.CPUClassCeiling),
 		values_per_key: C.size_t(config.ValuesPerKey),
-		progress:       lent.progress(config.Progress, config.ProgressSteps),
+		progress:       call.progress(config.Progress, config.ProgressSteps),
 	})
-	return geospatialIndexOf(block(lent))
+	return geospatialIndexOf(block(call))
 }
 
 // GeospatialLoadVram copies a checkpoint into a new, mutable index in device memory, with the
@@ -403,17 +403,17 @@ func GeospatialLoadVram(path string, config *DenseLoadVramConfig) (*GeospatialIn
 	if refusal != nil {
 		return nil, refusal
 	}
-	lent := open[C.usearch_geospatial_index_t]()
+	call := open[C.usearch_geospatial_index_t]()
 	C.usearch_geospatial_load_vram(&C.usearch_geospatial_load_vram_t{
-		index:          lent.result,
+		index:          call.result,
 		executor:       executor,
-		outcome:        lent.outcome,
-		path:           lent.text(path),
-		vram:           lent.vram(config.Devices, config.GPUClassCeiling),
+		outcome:        call.outcome,
+		path:           call.text(path),
+		vram:           call.vram(config.Devices, config.GPUClassCeiling),
 		values_per_key: C.size_t(config.ValuesPerKey),
-		progress:       lent.progress(config.Progress, config.ProgressSteps),
+		progress:       call.progress(config.Progress, config.ProgressSteps),
 	})
-	return geospatialIndexOf(block(lent))
+	return geospatialIndexOf(block(call))
 }
 
 // GeospatialLoadRamBuffer copies a monolith from a buffer into a new, mutable index in host memory,
@@ -426,17 +426,17 @@ func GeospatialLoadRamBuffer(buffer []byte, config *DenseLoadRamBufferConfig) (*
 	if refusal != nil {
 		return nil, refusal
 	}
-	lent := open[C.usearch_geospatial_index_t]()
+	call := open[C.usearch_geospatial_index_t]()
 	C.usearch_geospatial_load_ram_buffer(&C.usearch_geospatial_load_ram_buffer_t{
-		index:          lent.result,
+		index:          call.result,
 		executor:       executor,
-		outcome:        lent.outcome,
-		buffer:         lent.bytes(buffer),
-		ram:            lent.ram(config.MemoryDomains, config.CPUClassCeiling),
+		outcome:        call.outcome,
+		buffer:         call.bytes(buffer),
+		ram:            call.ram(config.MemoryDomains, config.CPUClassCeiling),
 		values_per_key: C.size_t(config.ValuesPerKey),
-		progress:       lent.progress(config.Progress, config.ProgressSteps),
+		progress:       call.progress(config.Progress, config.ProgressSteps),
 	})
-	return geospatialIndexOf(block(lent))
+	return geospatialIndexOf(block(call))
 }
 
 // GeospatialLoadVramBuffer copies a monolith from a buffer into a new, mutable index in device
@@ -449,29 +449,29 @@ func GeospatialLoadVramBuffer(buffer []byte, config *DenseLoadVramBufferConfig) 
 	if refusal != nil {
 		return nil, refusal
 	}
-	lent := open[C.usearch_geospatial_index_t]()
+	call := open[C.usearch_geospatial_index_t]()
 	C.usearch_geospatial_load_vram_buffer(&C.usearch_geospatial_load_vram_buffer_t{
-		index:          lent.result,
+		index:          call.result,
 		executor:       executor,
-		outcome:        lent.outcome,
-		buffer:         lent.bytes(buffer),
-		vram:           lent.vram(config.Devices, config.GPUClassCeiling),
+		outcome:        call.outcome,
+		buffer:         call.bytes(buffer),
+		vram:           call.vram(config.Devices, config.GPUClassCeiling),
 		values_per_key: C.size_t(config.ValuesPerKey),
-		progress:       lent.progress(config.Progress, config.ProgressSteps),
+		progress:       call.progress(config.Progress, config.ProgressSteps),
 	})
-	return geospatialIndexOf(block(lent))
+	return geospatialIndexOf(block(call))
 }
 
 // GeospatialViewRam serves a checkpoint in place through a memory mapping, as a read-only index
 // whose mutating verbs report StatusReadOnly; the files must stay unmodified while it lives.
 func GeospatialViewRam(path string) (*GeospatialIndex, error) {
-	lent := open[C.usearch_geospatial_index_t]()
+	call := open[C.usearch_geospatial_index_t]()
 	C.usearch_geospatial_view_ram(&C.usearch_geospatial_view_ram_t{
-		index:   lent.result,
-		outcome: lent.outcome,
-		path:    lent.text(path),
+		index:   call.result,
+		outcome: call.outcome,
+		path:    call.text(path),
 	})
-	return geospatialIndexOf(block(lent))
+	return geospatialIndexOf(block(call))
 }
 
 // GeospatialViewNvme serves a checkpoint in place from NVMe drives, read through the executor's
@@ -484,15 +484,15 @@ func GeospatialViewNvme(path string, config *GeospatialViewNvmeConfig) (*Geospat
 	if refusal != nil {
 		return nil, refusal
 	}
-	lent := open[C.usearch_geospatial_index_t]()
+	call := open[C.usearch_geospatial_index_t]()
 	C.usearch_geospatial_view_nvme(&C.usearch_geospatial_view_nvme_t{
-		index:    lent.result,
+		index:    call.result,
 		executor: executor,
-		outcome:  lent.outcome,
-		path:     lent.text(path),
-		nvme:     lent.nvme(config.Paths, config.CPUClassCeiling),
+		outcome:  call.outcome,
+		path:     call.text(path),
+		nvme:     call.nvme(config.Paths, config.CPUClassCeiling),
 	})
-	return geospatialIndexOf(block(lent))
+	return geospatialIndexOf(block(call))
 }
 
 // GeospatialMetadataRead reads a checkpoint's connectivity without loading it.
@@ -504,14 +504,14 @@ func GeospatialMetadataRead(path string, config *DenseMetadataReadConfig) (Geosp
 	if refusal != nil {
 		return GeospatialMetadata{}, refusal
 	}
-	lent := open[GeospatialMetadata]()
+	call := open[GeospatialMetadata]()
 	C.usearch_geospatial_metadata_read(&C.usearch_geospatial_metadata_read_t{
 		executor: executor,
-		outcome:  lent.outcome,
-		path:     lent.text(path),
-		metadata: (*C.usearch_geospatial_metadata_t)(unsafe.Pointer(lent.result)),
+		outcome:  call.outcome,
+		path:     call.text(path),
+		metadata: (*C.usearch_geospatial_metadata_t)(unsafe.Pointer(call.result)),
 	})
-	return block(lent)
+	return block(call)
 }
 
 // GeospatialMetadataReadBuffer reads the connectivity out of a serialized monolith buffer.
@@ -523,14 +523,14 @@ func GeospatialMetadataReadBuffer(buffer []byte, config *DenseMetadataReadBuffer
 	if refusal != nil {
 		return GeospatialMetadata{}, refusal
 	}
-	lent := open[GeospatialMetadata]()
+	call := open[GeospatialMetadata]()
 	C.usearch_geospatial_metadata_read_buffer(&C.usearch_geospatial_metadata_read_buffer_t{
 		executor: executor,
-		outcome:  lent.outcome,
-		buffer:   lent.bytes(buffer),
-		metadata: (*C.usearch_geospatial_metadata_t)(unsafe.Pointer(lent.result)),
+		outcome:  call.outcome,
+		buffer:   call.bytes(buffer),
+		metadata: (*C.usearch_geospatial_metadata_t)(unsafe.Pointer(call.result)),
 	})
-	return block(lent)
+	return block(call)
 }
 
 // endregion: Index
@@ -564,7 +564,7 @@ type GeospatialIndexOn struct {
 // blocking-only sugar and cursors. Binding-only.
 //
 // The library reads a deferred call's inputs until the call is final, so the slices a verb is
-// handed must not change until then; its arena is borrowed, as a blocking verb borrows it.
+// handed must not change until then; its arena is viewed, as a blocking verb views it.
 type GeospatialIndexDeferredOn struct {
 	geospatialReceiver
 }
@@ -766,283 +766,283 @@ func (on GeospatialIndexDeferredOn) SaveBuffer(arena *Arena, config *DenseSaveBu
 
 // region: Calls
 
-func (receiver geospatialReceiver) reserve(completion C.usearch_completion_t, entries uint) *lent[struct{}] {
-	lent := open[struct{}]()
+func (receiver geospatialReceiver) reserve(completion C.usearch_completion_t, entries uint) *callWithResult[struct{}] {
+	call := open[struct{}]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	C.usearch_geospatial_reserve(&C.usearch_geospatial_reserve_t{
 		index:      index,
 		executor:   executor,
-		outcome:    lent.outcome,
+		outcome:    call.outcome,
 		completion: completion,
 		entries:    C.size_t(entries),
 	})
-	return lent
+	return call
 }
 
-func (receiver geospatialReceiver) clear(completion C.usearch_completion_t) *lent[struct{}] {
-	lent := open[struct{}]()
+func (receiver geospatialReceiver) clear(completion C.usearch_completion_t) *callWithResult[struct{}] {
+	call := open[struct{}]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	C.usearch_geospatial_clear(&C.usearch_geospatial_clear_t{
 		index:      index,
 		executor:   executor,
-		outcome:    lent.outcome,
+		outcome:    call.outcome,
 		completion: completion,
 	})
-	return lent
+	return call
 }
 
-func (receiver geospatialReceiver) describe(completion C.usearch_completion_t) *lent[GeospatialIndexDescription] {
-	lent := open[GeospatialIndexDescription]()
+func (receiver geospatialReceiver) describe(completion C.usearch_completion_t) *callWithResult[GeospatialIndexDescription] {
+	call := open[GeospatialIndexDescription]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	C.usearch_geospatial_describe(&C.usearch_geospatial_describe_t{
 		index:       index,
 		executor:    executor,
-		outcome:     lent.outcome,
+		outcome:     call.outcome,
 		completion:  completion,
-		description: (*C.usearch_geospatial_index_description_t)(unsafe.Pointer(lent.result)),
+		description: (*C.usearch_geospatial_index_description_t)(unsafe.Pointer(call.result)),
 	})
-	return lent
+	return call
 }
 
-func (receiver geospatialReceiver) count(completion C.usearch_completion_t, key Key) *lent[GeospatialKeyStats] {
-	lent := open[GeospatialKeyStats]()
+func (receiver geospatialReceiver) count(completion C.usearch_completion_t, key Key) *callWithResult[GeospatialKeyStats] {
+	call := open[GeospatialKeyStats]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	C.usearch_geospatial_count(&C.usearch_geospatial_count_t{
 		index:      index,
 		executor:   executor,
-		outcome:    lent.outcome,
+		outcome:    call.outcome,
 		completion: completion,
 		key:        key.toRaw(),
-		key_stats:  (*C.usearch_geospatial_key_stats_t)(unsafe.Pointer(lent.result)),
+		key_stats:  (*C.usearch_geospatial_key_stats_t)(unsafe.Pointer(call.result)),
 	})
-	return lent
+	return call
 }
 
 func (receiver geospatialReceiver) get(completion C.usearch_completion_t, key Key,
-	arena *Arena) *lent[GeospatialObservations] {
-	lent := open[GeospatialObservations]()
+	arena *Arena) *callWithResult[GeospatialObservations] {
+	call := open[GeospatialObservations]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	C.usearch_geospatial_get(&C.usearch_geospatial_get_t{
 		index:        index,
 		executor:     executor,
-		outcome:      lent.outcome,
+		outcome:      call.outcome,
 		completion:   completion,
 		key:          key.toRaw(),
-		observations: &lent.result.raw,
-		written:      (*C.size_t)(unsafe.Pointer(&lent.result.written)),
+		observations: &call.result.raw,
+		written:      (*C.size_t)(unsafe.Pointer(&call.result.written)),
 		arena:        arena.lower(),
 	})
-	return lent
+	return call
 }
 
 func (receiver geospatialReceiver) insert(completion C.usearch_completion_t, keys []Key,
-	observations []GeospatialObservation, config *DenseInsertConfig) *lent[struct{}] {
+	observations []GeospatialObservation, config *DenseInsertConfig) *callWithResult[struct{}] {
 	if config == nil {
 		config = new(DenseInsertConfig)
 	}
-	lent := open[struct{}]()
+	call := open[struct{}]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	// The call has one count, so only this side sees the keys and the observations disagree.
 	if len(keys) != len(observations) {
-		return lent.refuse(fail(StatusShapeMismatch, "the key count does not match the observations"))
+		return call.refuse(fail(StatusShapeMismatch, "the key count does not match the observations"))
 	}
 	C.usearch_geospatial_insert(&C.usearch_geospatial_insert_t{
 		index:            index,
 		executor:         executor,
-		outcome:          lent.outcome,
+		outcome:          call.outcome,
 		completion:       completion,
 		count:            C.size_t(len(keys)),
-		keys:             lent.keys(keys),
-		observations:     lent.observations(observations),
+		keys:             call.keys(keys),
+		observations:     call.observations(observations),
 		expansion_factor: C.size_t(config.ExpansionFactor),
-		progress:         lent.progress(config.Progress, config.ProgressSteps),
-		stats:            lent.stats(config.Stats),
+		progress:         call.progress(config.Progress, config.ProgressSteps),
+		stats:            call.stats(config.Stats),
 	})
-	return lent
+	return call
 }
 
-// observations lends a slice of observations as the run the library reads, laid out alike.
+// observations passes a slice of observations as the run the library reads, laid out alike.
 func (call *call) observations(observations []GeospatialObservation) *C.usearch_geospatial_observation_t {
-	return (*C.usearch_geospatial_observation_t)(unsafe.Pointer(lend(call, observations)))
+	return (*C.usearch_geospatial_observation_t)(unsafe.Pointer(pinSlice(call, observations)))
 }
 
 func (receiver geospatialReceiver) refine(completion C.usearch_completion_t,
-	config *GeospatialRefineConfig) *lent[DenseRefineReport] {
+	config *GeospatialRefineConfig) *callWithResult[DenseRefineReport] {
 	if config == nil {
 		config = new(GeospatialRefineConfig)
 	}
-	lent := open[DenseRefineReport]()
+	call := open[DenseRefineReport]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
-	plan, phase := config.Plan.lower(&lent.call)
+	plan, phase := config.Plan.lower(&call.call)
 	C.usearch_geospatial_refine(&C.usearch_geospatial_refine_t{
 		index:      index,
 		executor:   executor,
-		outcome:    lent.outcome,
+		outcome:    call.outcome,
 		completion: completion,
-		report:     (*C.usearch_refine_report_t)(unsafe.Pointer(lent.result)),
+		report:     (*C.usearch_refine_report_t)(unsafe.Pointer(call.result)),
 		refine: C.usearch_refine_options_t{
 			expansion_factor: C.size_t(config.ExpansionFactor),
 			memory_limit:     C.size_t(config.MemoryLimit),
 		},
-		progress: lent.progress(config.Progress, config.ProgressSteps),
-		stats:    lent.stats(config.Stats),
+		progress: call.progress(config.Progress, config.ProgressSteps),
+		stats:    call.stats(config.Stats),
 		plan:     plan,
 		phase:    phase,
 	})
-	return lent
+	return call
 }
 
 func (receiver geospatialReceiver) refinePlanFinish(completion C.usearch_completion_t,
-	plan *GeospatialRefinePlan) *lent[DenseRefineReport] {
-	lent := open[DenseRefineReport]()
+	plan *GeospatialRefinePlan) *callWithResult[DenseRefineReport] {
+	call := open[DenseRefineReport]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	C.usearch_geospatial_refine_plan_finish(&C.usearch_geospatial_refine_plan_finish_t{
 		index:      index,
 		executor:   executor,
-		outcome:    lent.outcome,
+		outcome:    call.outcome,
 		completion: completion,
 		plan:       plan.take(),
-		report:     (*C.usearch_refine_report_t)(unsafe.Pointer(lent.result)),
+		report:     (*C.usearch_refine_report_t)(unsafe.Pointer(call.result)),
 	})
-	return lent
+	return call
 }
 
-func (receiver geospatialReceiver) health(completion C.usearch_completion_t) *lent[DenseReachability] {
-	lent := open[DenseReachability]()
+func (receiver geospatialReceiver) health(completion C.usearch_completion_t) *callWithResult[DenseReachability] {
+	call := open[DenseReachability]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	C.usearch_geospatial_health(&C.usearch_geospatial_health_t{
 		index:        index,
 		executor:     executor,
-		outcome:      lent.outcome,
+		outcome:      call.outcome,
 		completion:   completion,
-		reachability: (*C.usearch_reachability_t)(unsafe.Pointer(lent.result)),
+		reachability: (*C.usearch_reachability_t)(unsafe.Pointer(call.result)),
 	})
-	return lent
+	return call
 }
 
 func (receiver geospatialReceiver) search(completion C.usearch_completion_t, queries []GeospatialObservation,
-	relation GeospatialRelation, wanted uint, arena *Arena, config *GeospatialSearchConfig) *lent[MatchesView] {
+	relation GeospatialRelation, wanted uint, arena *Arena, config *GeospatialSearchConfig) *callWithResult[MatchesView] {
 	if config == nil {
 		config = new(GeospatialSearchConfig)
 	}
-	lent := open[MatchesView]()
+	call := open[MatchesView]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
-	lent.result.queries = uint(len(queries))
+	call.result.queries = uint(len(queries))
 	C.usearch_geospatial_search(&C.usearch_geospatial_search_t{
 		index:            index,
 		executor:         executor,
-		outcome:          lent.outcome,
+		outcome:          call.outcome,
 		completion:       completion,
 		count:            C.size_t(len(queries)),
-		queries:          lent.observations(queries),
+		queries:          call.observations(queries),
 		relation:         C.usearch_geospatial_relation_t(relation),
 		tolerance:        C.usearch_geospatial_tolerance_t{metres: C.double(config.Metres), seconds: C.double(config.Seconds)},
-		matches:          &lent.result.raw,
+		matches:          &call.result.raw,
 		arena:            arena.lower(),
 		wanted:           C.size_t(wanted),
 		expansion_factor: C.size_t(config.ExpansionFactor),
 		traversal:        C.usearch_traversal_t(config.Traversal),
-		predicate:        lent.predicate(config.Predicate),
-		progress:         lent.progress(config.Progress, config.ProgressSteps),
-		stats:            lent.stats(config.Stats),
+		predicate:        call.predicate(config.Predicate),
+		progress:         call.progress(config.Progress, config.ProgressSteps),
+		stats:            call.stats(config.Stats),
 	})
-	return lent
+	return call
 }
 
 func (receiver geospatialReceiver) within(completion C.usearch_completion_t, queries []GeospatialObservation,
-	relation GeospatialRelation, metres float64, arena *Arena, config *GeospatialWithinConfig) *lent[DenseProducts] {
+	relation GeospatialRelation, metres float64, arena *Arena, config *GeospatialWithinConfig) *callWithResult[DenseProducts] {
 	if config == nil {
 		config = new(GeospatialWithinConfig)
 	}
-	lent := open[DenseProducts]()
+	call := open[DenseProducts]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
-	lent.result.queries = uint(len(queries))
+	call.result.queries = uint(len(queries))
 	C.usearch_geospatial_within(&C.usearch_geospatial_within_t{
 		index:      index,
 		executor:   executor,
-		outcome:    lent.outcome,
+		outcome:    call.outcome,
 		completion: completion,
 		count:      C.size_t(len(queries)),
-		queries:    lent.observations(queries),
+		queries:    call.observations(queries),
 		relation:   C.usearch_geospatial_relation_t(relation),
 		tolerance:  C.usearch_geospatial_tolerance_t{metres: C.double(metres), seconds: C.double(config.Seconds)},
-		matches:    &lent.result.raw,
-		written:    (*C.size_t)(unsafe.Pointer(&lent.result.required)),
+		matches:    &call.result.raw,
+		written:    (*C.size_t)(unsafe.Pointer(&call.result.required)),
 		arena:      arena.lower(),
 		traversal:  C.usearch_traversal_t(config.Traversal),
-		predicate:  lent.predicate(config.Predicate),
-		progress:   lent.progress(config.Progress, config.ProgressSteps),
-		stats:      lent.stats(config.Stats),
+		predicate:  call.predicate(config.Predicate),
+		progress:   call.progress(config.Progress, config.ProgressSteps),
+		stats:      call.stats(config.Stats),
 	})
-	return lent
+	return call
 }
 
 func (receiver geospatialReceiver) reshard(completion C.usearch_completion_t, sources, targets []*GeospatialIndex,
-	config *GeospatialReshardConfig) *lent[DenseRefineReport] {
+	config *GeospatialReshardConfig) *callWithResult[DenseRefineReport] {
 	if config == nil {
 		config = new(GeospatialReshardConfig)
 	}
-	lent := open[DenseRefineReport]()
-	// A reshard names its handles in its lists, so the receiver lends only its executor.
+	call := open[DenseRefineReport]()
+	// A reshard names its handles in its lists, so the receiver passes only its executor.
 	executor, refusal := receiver.executor.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	sourceHandles, targetHandles := geospatialHandles(sources), geospatialHandles(targets)
-	plan, phase := config.Plan.lower(&lent.call)
+	plan, phase := config.Plan.lower(&call.call)
 	C.usearch_geospatial_reshard(&C.usearch_geospatial_reshard_t{
 		sources_count: C.size_t(len(sourceHandles)),
-		sources:       lend(&lent.call, sourceHandles),
+		sources:       pinSlice(&call.call, sourceHandles),
 		targets_count: C.size_t(len(targetHandles)),
-		targets:       lend(&lent.call, targetHandles),
+		targets:       pinSlice(&call.call, targetHandles),
 		executor:      executor,
-		outcome:       lent.outcome,
+		outcome:       call.outcome,
 		completion:    completion,
-		report:        (*C.usearch_refine_report_t)(unsafe.Pointer(lent.result)),
+		report:        (*C.usearch_refine_report_t)(unsafe.Pointer(call.result)),
 		refine: C.usearch_refine_options_t{
 			expansion_factor: C.size_t(config.ExpansionFactor),
 			memory_limit:     C.size_t(config.MemoryLimit),
 		},
 		seed:     C.uint64_t(config.Seed),
-		progress: lent.progress(config.Progress, config.ProgressSteps),
-		stats:    lent.stats(config.Stats),
+		progress: call.progress(config.Progress, config.ProgressSteps),
+		stats:    call.stats(config.Stats),
 		plan:     plan,
 		phase:    phase,
 	})
-	return lent
+	return call
 }
 
 // geospatialHandles lists the handles of indexes.
@@ -1055,103 +1055,103 @@ func geospatialHandles(indexes []*GeospatialIndex) []C.usearch_geospatial_index_
 }
 
 func (receiver geospatialReceiver) reshardPlanFinish(completion C.usearch_completion_t,
-	plan *GeospatialReshardPlan) *lent[DenseRefineReport] {
-	lent := open[DenseRefineReport]()
-	// A reshard names its handles in its lists, so the receiver lends only its executor.
+	plan *GeospatialReshardPlan) *callWithResult[DenseRefineReport] {
+	call := open[DenseRefineReport]()
+	// A reshard names its handles in its lists, so the receiver passes only its executor.
 	executor, refusal := receiver.executor.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	C.usearch_geospatial_reshard_plan_finish(&C.usearch_geospatial_reshard_plan_finish_t{
 		executor:   executor,
-		outcome:    lent.outcome,
+		outcome:    call.outcome,
 		completion: completion,
 		plan:       plan.take(),
-		report:     (*C.usearch_refine_report_t)(unsafe.Pointer(lent.result)),
+		report:     (*C.usearch_refine_report_t)(unsafe.Pointer(call.result)),
 	})
-	return lent
+	return call
 }
 
 func (receiver geospatialReceiver) sample(completion C.usearch_completion_t, wanted uint, arena *Arena,
-	config *DenseSampleConfig) *lent[DenseDraws] {
+	config *DenseSampleConfig) *callWithResult[DenseDraws] {
 	if config == nil {
 		config = new(DenseSampleConfig)
 	}
-	lent := open[DenseDraws]()
+	call := open[DenseDraws]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	// The call has one count for both, so only this side sees the keys and their places disagree.
 	if len(config.Shown) != len(config.ShownCoordinates) {
-		return lent.refuse(fail(StatusShapeMismatch, "the shown keys and coordinates disagree in length"))
+		return call.refuse(fail(StatusShapeMismatch, "the shown keys and coordinates disagree in length"))
 	}
 	C.usearch_geospatial_sample(&C.usearch_geospatial_sample_t{
 		index:             index,
 		executor:          executor,
-		outcome:           lent.outcome,
+		outcome:           call.outcome,
 		completion:        completion,
 		shown_count:       C.size_t(len(config.Shown)),
-		shown:             lent.keys(config.Shown),
-		shown_coordinates: lent.points(config.ShownCoordinates),
+		shown:             call.keys(config.Shown),
+		shown_coordinates: call.points(config.ShownCoordinates),
 		focus_count:       C.size_t(len(config.Focus)),
-		focus:             lent.keys(config.Focus),
-		keys:              &lent.result.keys,
-		entry_ordinals:    &lent.result.entryOrdinals,
-		parents:           &lent.result.parents,
-		coordinates:       &lent.result.coordinates,
-		written:           (*C.size_t)(unsafe.Pointer(&lent.result.written)),
+		focus:             call.keys(config.Focus),
+		keys:              &call.result.keys,
+		entry_ordinals:    &call.result.entryOrdinals,
+		parents:           &call.result.parents,
+		coordinates:       &call.result.coordinates,
+		written:           (*C.size_t)(unsafe.Pointer(&call.result.written)),
 		arena:             arena.lower(),
 		wanted:            C.size_t(wanted),
 		seed:              C.uint64_t(config.Seed),
 		expansion_factor:  C.size_t(config.ExpansionFactor),
-		progress:          lent.progress(config.Progress, config.ProgressSteps),
-		stats:             lent.stats(config.Stats),
+		progress:          call.progress(config.Progress, config.ProgressSteps),
+		stats:             call.stats(config.Stats),
 	})
-	return lent
+	return call
 }
 
 func (receiver geospatialReceiver) save(completion C.usearch_completion_t, path string,
-	config *DenseSaveConfig) *lent[struct{}] {
+	config *DenseSaveConfig) *callWithResult[struct{}] {
 	if config == nil {
 		config = new(DenseSaveConfig)
 	}
-	lent := open[struct{}]()
+	call := open[struct{}]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	C.usearch_geospatial_save(&C.usearch_geospatial_save_t{
 		index:      index,
 		executor:   executor,
-		outcome:    lent.outcome,
+		outcome:    call.outcome,
 		completion: completion,
-		path:       lent.text(path),
-		progress:   lent.progress(config.Progress, config.ProgressSteps),
+		path:       call.text(path),
+		progress:   call.progress(config.Progress, config.ProgressSteps),
 	})
-	return lent
+	return call
 }
 
 func (receiver geospatialReceiver) saveBuffer(completion C.usearch_completion_t, arena *Arena,
-	config *DenseSaveBufferConfig) *lent[Monolith] {
+	config *DenseSaveBufferConfig) *callWithResult[Monolith] {
 	if config == nil {
 		config = new(DenseSaveBufferConfig)
 	}
-	lent := open[Monolith]()
+	call := open[Monolith]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	C.usearch_geospatial_save_buffer(&C.usearch_geospatial_save_buffer_t{
 		index:      index,
 		executor:   executor,
-		outcome:    lent.outcome,
+		outcome:    call.outcome,
 		completion: completion,
-		monolith:   &lent.result.raw,
+		monolith:   &call.result.raw,
 		arena:      arena.lower(),
-		progress:   lent.progress(config.Progress, config.ProgressSteps),
+		progress:   call.progress(config.Progress, config.ProgressSteps),
 	})
-	return lent
+	return call
 }
 
 // endregion: Calls
@@ -1173,15 +1173,15 @@ func (on GeospatialIndexOn) Cursor(starts ...Key) (*GeospatialCursor, error) {
 	if refusal != nil {
 		return nil, refusal
 	}
-	lent := open[C.usearch_geospatial_cursor_t]()
+	call := open[C.usearch_geospatial_cursor_t]()
 	C.usearch_geospatial_cursor_init(&C.usearch_geospatial_cursor_init_t{
 		index:        index,
-		outcome:      lent.outcome,
+		outcome:      call.outcome,
 		starts_count: C.size_t(len(starts)),
-		starts:       (*C.usearch_key_t)(unsafe.Pointer(lend(&lent.call, starts))),
-		cursor:       lent.result,
+		starts:       (*C.usearch_key_t)(unsafe.Pointer(pinSlice(&call.call, starts))),
+		cursor:       call.result,
 	})
-	handle, err := block(lent)
+	handle, err := block(call)
 	if err != nil {
 		return nil, err
 	}
@@ -1205,24 +1205,24 @@ func (cursor *GeospatialCursor) next(wanted uint, linked bool, arena *Arena) (De
 	if refusal != nil {
 		return DenseBatch{}, refusal
 	}
-	lent := open[DenseBatch]()
+	call := open[DenseBatch]()
 	var links *C.usearch_keys_tape_view_t
 	if linked {
-		links = &lent.result.links
+		links = &call.result.links
 	}
 	C.usearch_geospatial_cursor_next(&C.usearch_geospatial_cursor_next_t{
 		index:      index,
 		executor:   executor,
-		outcome:    lent.outcome,
+		outcome:    call.outcome,
 		completion: C.usearch_completion_blocking_k,
 		cursor:     cursor.handle,
-		keys:       &lent.result.keys,
+		keys:       &call.result.keys,
 		links:      links,
-		written:    (*C.size_t)(unsafe.Pointer(&lent.result.written)),
+		written:    (*C.size_t)(unsafe.Pointer(&call.result.written)),
 		arena:      arena.lower(),
 		wanted:     C.size_t(wanted),
 	})
-	return block(lent)
+	return block(call)
 }
 
 // Close releases the cursor. It is idempotent.

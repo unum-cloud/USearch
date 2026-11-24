@@ -7,8 +7,11 @@
  *      hover arcs, hubs, selection and landmarks - stays shared in `explorer.js`, and every structure in `worker.js`.
  */
 
-/** Rows of equal width, as `usearch_rows_view_t` borrows them. @typedef {{count: number, bytes: Uint8Array, scalar: string, stride: number, columns: number}} Rows */
-/** Entries end to end around `count + 1` element offsets starting at zero, each element `columns` scalars wide, as `usearch_tape_view_t` borrows them. @typedef {{count: number, bytes: Uint8Array, scalar: string, offsets: Uint32Array, columns: number}} Tape */
+/** Rows of equal width, as `usearch_rows_view_t` views them. @typedef {{count: number, bytes:
+ *  Uint8Array, scalar: string, stride: number, columns: number}} Rows */
+/** Entries end to end around `count + 1` element offsets starting at zero, each element `columns`
+ *  scalars wide, as `usearch_tape_view_t` views them. @typedef {{count: number, bytes: Uint8Array,
+ *  scalar: string, offsets: Uint32Array, columns: number}} Tape */
 /** One C structure per entry, by member name. @typedef {{count: number, records: Record<string, number>[]}} Records */
 /** @typedef {Rows | Tape | Records} Payload */
 /** @typedef {{ink: string, muted: string, paper: string, accent: string, danger: string, partial: string}} Palette */

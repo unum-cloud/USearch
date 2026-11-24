@@ -223,7 +223,7 @@ func TestKeysRejectMalformedRenderings(t *testing.T) {
 	}
 }
 
-func TestKeysCarryTheirIntegerIdentity(t *testing.T) {
+func TestKeysHoldTheirIntegerIdentity(t *testing.T) {
 	t.Parallel()
 	for _, value := range []uint64{0, 42, 1 << 32, ^uint64(0)} {
 		recovered, integral := KeyFromUint64(value).Uint64()
@@ -239,7 +239,7 @@ func TestKeysCarryTheirIntegerIdentity(t *testing.T) {
 	}
 }
 
-// The text interfaces are what carries a key through a JSON document.
+// The text interfaces are what holds a key through a JSON document.
 func TestKeysCrossJSONAsTheirRendering(t *testing.T) {
 	t.Parallel()
 	type record struct {
@@ -306,7 +306,7 @@ func TestEnumeratorsSpellTheLibrarysNames(t *testing.T) {
 	}
 }
 
-// Every dense metric reads back from its own spelling, and a spelling no metric carries is refused.
+// Every dense metric reads back from its own spelling, and a spelling no metric holds is refused.
 func TestDenseMetricsReadBackFromTheirNames(t *testing.T) {
 	t.Parallel()
 	for _, metric := range []DenseMetric{DenseMetricInner, DenseMetricAngular, DenseMetricEuclidean,
@@ -421,7 +421,7 @@ func TestArenasServeOneCallAtATime(t *testing.T) {
 		t.Error("a rewound arena must land the next rows where the last ones were")
 	}
 
-	// A deferred call borrows its arena until final, so a call contending for it is refused.
+	// A deferred call uses its arena until final, so a call contending for it is refused.
 	executor := pool(t)
 	entered, release := make(chan struct{}), make(chan struct{})
 	var enter sync.Once
@@ -493,7 +493,7 @@ func TestClosingTwiceIsHarmless(t *testing.T) {
 // One constructor per residency, each reading only what its own hardware has - the VRAM one drives
 // a stream per device from the calling thread and takes no thread count.
 //
-// Whether a build carries the accelerator and block backends decides the outcome, so what is
+// Whether a build holds the accelerator and block backends decides the outcome, so what is
 // asserted is the invariant either way: a constructor hands back an executor or a failure, never
 // both and never neither.
 func TestExecutorConstructorsTakeOnlyWhatTheirResidencyHas(t *testing.T) {
@@ -760,8 +760,8 @@ func TestSearchStreamsYieldNearestFirst(t *testing.T) {
 
 // region: Shape Rejection
 
-// The keys-to-rows, documents-to-rows and carry-to-queries guards are this binding's, since each
-// call has one count and C pointers carry no lengths; widths cross untouched and come back refused
+// The keys-to-rows, documents-to-rows and state-to-queries guards are this binding's, since each
+// call has one count and C pointers hold no lengths; widths cross untouched and come back refused
 // by the library.
 func TestRejectsMalformedShapes(t *testing.T) {
 	t.Parallel()
@@ -796,7 +796,7 @@ func TestRejectsMalformedShapes(t *testing.T) {
 			_, err := on.Maxsim(queries, 0, 4, arena, nil)
 			return err
 		}},
-		{"a carry shorter than the queries", func() error {
+		{"a hold shorter than the queries", func() error {
 			lookup := ValueLookup{Values: RowsOf(slab, dimensions), Row: func(Key) (uint, bool) { return 0, true }}
 			_, err := on.Attend(queries, lookup, arena, &DenseAttendConfig{Carry: make([]DenseSoftmaxState, 1)})
 			return err
@@ -1450,7 +1450,7 @@ func TestSerializationPreservesEveryOption(t *testing.T) {
 
 // region: Deferred Calls
 
-// A deferred search pins its queries and borrows its arena, and answers what the blocking one does
+// A deferred search pins its queries and uses its arena, and answers what the blocking one does
 // once waited on, as many times as it is asked.
 func TestDeferredSearchMatchesTheBlockingOne(t *testing.T) {
 	t.Parallel()
@@ -1490,9 +1490,9 @@ func TestDeferredSearchMatchesTheBlockingOne(t *testing.T) {
 	}
 }
 
-// A deferred call's view borrows the caller's arena as a blocking one's does, so the arena
+// A deferred call's view uses the caller's arena as a blocking one's does, so the arena
 // serves the next call once the deferred one is final.
-func TestDeferredViewsBorrowTheCallersArenas(t *testing.T) {
+func TestDeferredViewsPointIntoTheCallersArenas(t *testing.T) {
 	t.Parallel()
 	const dimensions = 4
 	index, keys, slab := populated(t, angularBF16(dimensions), 4)

@@ -27,7 +27,7 @@
  *  A fresh one submits the call with @c usearch_completion_deferred_k and parks it in that
  *  expression, which alone polls it through @c DeferredStatus and lands its outputs through
  *  @c DeferredWait; releasing it unwaited waits for the outcome first. A parked call owns what it
- *  lends the library: its tensors and arrays cross as @c Shared and are disowned once the call is
+ *  passes the library: its tensors and arrays cross as @c Shared and are disowned once the call is
  *  final, and its strings and lists are its own copies.
  *
  *  @section wolfram_plans Plans
@@ -86,7 +86,7 @@ _Static_assert(sizeof(size_t) == sizeof(mint), "counts land in integer tensors c
 
 #pragma region Vocabulary
 
-/** A borrowed run of bytes over a null-terminated Wolfram string. */
+/** A viewed run of bytes over a null-terminated Wolfram string. */
 static usearch_bytes_view_t bytes_from_text(char const* text) {
     usearch_bytes_view_t view;
     view.data = (uint8_t const*)text;
@@ -201,7 +201,7 @@ static usearch_status_t ordinals_from_store(WolframLibraryData library_data, MAr
  *  @brief Copies a @c DataStore of strings as paths into one fresh block, the views first and their
  *      bytes after them, which the caller frees at once.
  *
- *  The copy outlives the store, so a deferred call can lend the paths past the verb's return.
+ *  The copy outlives the store, so a deferred call can pass the paths past the verb's return.
  *  @return @c usearch_status_invalid_argument_k for an entry of another type.
  */
 static usearch_status_t paths_from_store(WolframLibraryData library_data, MArgument argument,
@@ -224,11 +224,11 @@ static usearch_status_t paths_from_store(WolframLibraryData library_data, MArgum
     for (DataStoreNode node = io->DataStore_getFirstNode(store); node; node = io->DataStoreNode_getNextNode(node)) {
         MArgument cell;
         io->DataStoreNode_getData(node, &cell);
-        usearch_bytes_view_t const borrowed = bytes_from_text(MArgument_getUTF8String(cell));
-        if (borrowed.length) memcpy(text, borrowed.data, borrowed.length);
+        usearch_bytes_view_t const viewed = bytes_from_text(MArgument_getUTF8String(cell));
+        if (viewed.length) memcpy(text, viewed.data, viewed.length);
         (*paths)[position].data = text;
-        (*paths)[position++].length = borrowed.length;
-        text += borrowed.length;
+        (*paths)[position++].length = viewed.length;
+        text += viewed.length;
     }
     return usearch_status_success_k;
 }
@@ -259,7 +259,7 @@ static usearch_status_t sizes_from_store(WolframLibraryData library_data, MArgum
     return usearch_status_success_k;
 }
 
-/** Reads a byte array as a borrowed buffer - the monolith the buffer verbs take. */
+/** Reads a byte array as a viewed buffer - the monolith the buffer verbs take. */
 static usearch_status_t buffer_from_array(WolframLibraryData library_data, MNumericArray array,
                                           usearch_bytes_view_t* buffer) {
     WolframNumericArrayLibrary_Functions const arrays = library_data->numericarrayLibraryFunctions;
@@ -273,7 +273,7 @@ static usearch_status_t buffer_from_array(WolframLibraryData library_data, MNume
 /**
  *  @brief Reads a byte array of sixteen cells per key: rank one is a single key, rank two a batch,
  *      and a rank-one array without cells the empty batch an empty list becomes.
- *  @param[out] keys The keys, borrowing the array's cells.
+ *  @param[out] keys The keys, viewing the array's cells.
  *  @param[out] count The keys the array holds.
  */
 static usearch_status_t keys_from_array(WolframLibraryData library_data, MNumericArray array,
@@ -290,7 +290,7 @@ static usearch_status_t keys_from_array(WolframLibraryData library_data, MNumeri
 }
 
 /**
- *  @brief Borrows a real tensor as a run of rows: rank one is a single row, rank two a batch, and a
+ *  @brief Views a real tensor as a run of rows: rank one is a single row, rank two a batch, and a
  *      rank-one tensor without cells the empty batch an empty list becomes.
  *
  *  The tensor's own width crosses as the view's @c columns, and the engine checks it against the
@@ -463,10 +463,10 @@ typedef struct value_lookup_t {
     usearch_scalar_t scalar;
 } value_lookup_t;
 
-/** The most arrays and lists one verb lends the library. */
+/** The most arrays and lists one verb passes the library. */
 #define call_holds_k 4
 
-/** One index verb: its receiver, its outcome, what it lends the library and the outputs it lands.
+/** One index verb: its receiver, its outcome, what it passes the library and the outputs it lands.
  *  A blocking call lives until the verb returns, and a deferred one until its @c DeferredCall is
  *  waited on or released. */
 struct call_t {
@@ -498,10 +498,10 @@ struct call_t {
     MNumericArray arrays[call_holds_k];
     size_t tensors_count, arrays_count;
 
-    /** The one string argument the call lends, disowned once the call is final. */
+    /** The one string argument the call passes, disowned once the call is final. */
     char* text;
 
-    /** Lists and copies the call lends, freed once the call is final. */
+    /** Lists and copies the call passes, freed once the call is final. */
     void* owned[call_holds_k];
     size_t owned_count;
 
@@ -586,13 +586,14 @@ static void call_hold_array(WolframLibraryData library_data, call_t* call, MNume
     else call->arrays[call->arrays_count++] = array;
 }
 
-/** Keeps a list the call lends until the call is final, refusing the call when it holds no more. */
+/** Keeps a list the call passes until the call is final, refusing the call when it holds no
+ *  more. */
 static void* call_own(call_t* call, void* memory) {
     if (call == &unallocated_call || call->owned_count == call_holds_k) return free(memory), NULL;
     return call->owned[call->owned_count++] = memory;
 }
 
-/** Releases what a final call lent and the call itself. */
+/** Releases what a final call passed and the call itself. */
 static void call_free(WolframLibraryData library_data, call_t* call) {
     if (call == &unallocated_call) return;
     for (size_t position = 0; position != call->tensors_count; ++position)
@@ -605,7 +606,7 @@ static void call_free(WolframLibraryData library_data, call_t* call) {
     free(call);
 }
 
-/** Borrows a string argument for the call, as a byte view that lives as long as the call. */
+/** Views a string argument for the call, as a byte view that lives as long as the call. */
 static usearch_bytes_view_t call_text(WolframLibraryData library_data, call_t* call, MArgument argument) {
     char* const text = MArgument_getUTF8String(argument);
     if (call == &unallocated_call || call->text) {
@@ -616,7 +617,7 @@ static usearch_bytes_view_t call_text(WolframLibraryData library_data, call_t* c
     return bytes_from_text(text);
 }
 
-/** Borrows packed or typed real rows, passed @c Shared, for the call. */
+/** Views packed or typed real rows, passed @c Shared, for the call. */
 static usearch_status_t call_rows(WolframLibraryData library_data, call_t* call, MArgument argument,
                                   MArgument array_argument, usearch_rows_view_t* rows, size_t* count) {
     usearch_status_t status;
@@ -638,7 +639,7 @@ static usearch_status_t call_rows(WolframLibraryData library_data, call_t* call,
     return usearch_status_success_k;
 }
 
-/** Borrows the keys of a byte array, passed @c Shared, for the call, refusing any other shape. */
+/** Views the keys of a byte array, passed @c Shared, for the call, refusing any other shape. */
 static usearch_status_t call_keys(WolframLibraryData library_data, call_t* call, MArgument argument,
                                   usearch_key_t const** keys, size_t* count) {
     MNumericArray const array = MArgument_getMNumericArray(argument);
@@ -663,7 +664,7 @@ static usearch_status_t call_key(WolframLibraryData library_data, call_t* call, 
     return usearch_status_success_k;
 }
 
-/** Borrows the @c Shared offsets of a tape for the call: one more non-negative integer than
+/** Views the @c Shared offsets of a tape for the call: one more non-negative integer than
  *  entries, which @p count receives. */
 static usearch_status_t call_offsets(WolframLibraryData library_data, call_t* call, MArgument argument,
                                      usearch_tape_view_t* tape, size_t* count) {
@@ -680,7 +681,7 @@ static usearch_status_t call_offsets(WolframLibraryData library_data, call_t* ca
     return usearch_status_success_k;
 }
 
-/** Borrows the @c Shared bytes of a sequence tape, every sequence end to end. */
+/** Views the @c Shared bytes of a sequence tape, every sequence end to end. */
 static usearch_status_t call_bytes_tape(WolframLibraryData library_data, call_t* call, MArgument argument,
                                         usearch_tape_view_t* tape) {
     MNumericArray const bytes = MArgument_getMNumericArray(argument);
@@ -694,7 +695,7 @@ static usearch_status_t call_bytes_tape(WolframLibraryData library_data, call_t*
     return usearch_status_success_k;
 }
 
-/** Borrows the @c Shared points of a shapes tape: a real matrix of three columns, @c x, @c y and
+/** Views the @c Shared points of a shapes tape: a real matrix of three columns, @c x, @c y and
  *  @c z, every shape's points end to end. */
 static usearch_status_t call_points_tape(WolframLibraryData library_data, call_t* call, MArgument argument,
                                          usearch_tape_view_t* tape) {
@@ -713,7 +714,7 @@ static usearch_status_t call_points_tape(WolframLibraryData library_data, call_t
  *  @brief Copies observations into the call: a real matrix of eleven columns beside an integer one
  *      marking each field recorded, so each unrecorded field reads as NaN.
  *
- *  A Wolfram tensor holds no NaN, so the mask carries what a device left out, and the copy is the
+ *  A Wolfram tensor holds no NaN, so the mask holds what a device left out, and the copy is the
  *  call's own until it is final.
  */
 static usearch_status_t call_observations(WolframLibraryData library_data, call_t* call, MArgument values_argument,
@@ -798,7 +799,7 @@ static usearch_status_t call_take_plan(call_t* call, MArgument argument) {
     return usearch_status_success_k;
 }
 
-/** Collects every index ID of a @c DataStore into a list of @p family handles the call lends. */
+/** Collects every index ID of a @c DataStore into a list of @p family handles the call passes. */
 static usearch_status_t call_handles(WolframLibraryData library_data, call_t* call, MArgument argument,
                                      handles_t const* family, void const** handles, size_t* count) {
     if (!call_ready(call)) return call->outcome.status;
@@ -829,7 +830,7 @@ static size_t const receiver_arguments = 3;
  *      the executor, a zero meaning the kernel's thread, and a fresh @c DeferredCall to park
  *      in, a zero blocking.
  *
- *  Never answers @c NULL: a refused call still collects what later arguments lend, so the verb
+ *  Never answers @c NULL: a refused call still collects what later arguments pass, so the verb
  *  releases them in one place.
  */
 static call_t* call_open(MArgument const* arguments, handles_t const* family, char const* released) {
@@ -927,7 +928,7 @@ static void manage_plan(WolframLibraryData library_data, mbool mode, mint id) {
     else free(handles_release(&plans, id));
 }
 
-/** Waits for a released deferred call that was never waited on, then releases what it lent. */
+/** Waits for a released deferred call that was never waited on, then releases what it passed. */
 static void manage_deferred(WolframLibraryData library_data, mbool mode, mint id) {
     if (!mode) {
         handles_admit(&deferreds, id, empty_slot);
@@ -959,7 +960,7 @@ EXTERN_C DLLEXPORT int WolframLibrary_initialize(WolframLibraryData library_data
     return LIBRARY_NO_ERROR;
 }
 
-/** Releases whatever the kernel left alive: the deferred calls first, as they lend the rest, and
+/** Releases whatever the kernel left alive: the deferred calls first, as they pass the rest, and
  *  the executors last, as the indexes and arenas may name them. */
 EXTERN_C DLLEXPORT void WolframLibrary_uninitialize(WolframLibraryData library_data) {
     for (size_t kind = 0; kind != sizeof(managers) / sizeof(managers[0]); ++kind)
@@ -1891,7 +1892,7 @@ EXTERN_C DLLEXPORT int DenseReshard(WolframLibraryData library_data, mint argume
     uint64_t const seed = (uint64_t)MArgument_getInteger(listed[11]);
     call_plan(call, listed[12]);
     call->answer = answer_refine;
-    // The placements live in the call, so a parked call lends them until it is final.
+    // The placements live in the call, so a parked call keeps them alive until it is final.
     usearch_ram_options_t* const ram = (usearch_ram_options_t*)call_own(call, calloc(1, sizeof(usearch_ram_options_t)));
     usearch_vram_options_t* const vram = (usearch_vram_options_t*)call_own(call,
                                                                            calloc(1, sizeof(usearch_vram_options_t)));
@@ -2195,7 +2196,7 @@ static nk_dtype_t value_dtype(usearch_scalar_t scalar) {
     }
 }
 
-/** Prepares sorted, quantized value rows once on a blocking receiver, for attention to borrow. */
+/** Prepares sorted, quantized value rows once on a blocking receiver, for attention to view. */
 EXTERN_C DLLEXPORT int DenseValues(WolframLibraryData library_data, mint arguments_count, MArgument* arguments,
                                    MArgument result) {
     call_t* const call = dense_open(arguments);
@@ -2305,7 +2306,7 @@ static int answer_attend(WolframLibraryData library_data, call_t* call, DataStor
 
 /** Calls @c usearch_dense_attend on a RAM index: @c queries → value keys → value rows → their
  *  scalar → their columns → @c arena → @c headCount → @c expansionFactor → @c scoreScale, the value
- *  rows read from a @c DenseValues cache the call lends. */
+ *  rows read from a @c DenseValues cache the call passes. */
 EXTERN_C DLLEXPORT int DenseAttend(WolframLibraryData library_data, mint arguments_count, MArgument* arguments,
                                    MArgument result) {
     call_t* const call = dense_open(arguments);

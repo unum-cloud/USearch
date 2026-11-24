@@ -48,7 +48,7 @@ class USearchConan(ConanFile):
     implements = ["auto_shared_fpic"]
 
     # `src/` and `c/` hold the instantiations, `cmake/` the toolchains and the package templates,
-    # and `VERSION` is what every other SDK reads - so the recipe reads it too rather than carrying
+    # and `VERSION` is what every other SDK reads - so the recipe reads it too rather than holding
     # a second copy that drifts.
     exports_sources = "CMakeLists.txt", "VERSION", "LICENSE", "include/*", "src/*", "c/*", "cmake/*"
 

@@ -1061,7 +1061,7 @@ fn Receiver(comptime completion: Completion, comptime Into: type) type {
         /// The result of a blocking call, final on return; nothing for a submitted one.
         fn end(self: Self, held: anytype) Answer(@TypeOf(held.result)) {
             if (completion == .deferred) return;
-            if (self.diagnostics) |lent| lent.* = held.outcome;
+            if (self.diagnostics) |passed| passed.* = held.outcome;
             try held.outcome.check();
             return held.result;
         }
@@ -1080,9 +1080,9 @@ fn Receiver(comptime completion: Completion, comptime Into: type) type {
         pub const contains = if (completion == .blocking) containsBlocking else {};
 
         fn diagnosedBlocking(self: Self, outcome: *Outcome) Self {
-            var lending = self;
-            lending.diagnostics = outcome;
-            return lending;
+            var passing = self;
+            passing.diagnostics = outcome;
+            return passing;
         }
 
         fn containsBlocking(self: Self, key: Key) Error!bool {

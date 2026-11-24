@@ -58,8 +58,8 @@ let matches = try await call.value  // or: try call.wait()
 ```
 
 A `Deferred` owns its outcome and its outputs, and keeps alive every object whose memory the call reads, until the call is final; one owner polls or waits on it, and nothing locks.
-It borrows the index, the executor and the arena as a blocking call does, since releasing any of them waits for the calls naming it, and its waited result is the same view a blocking call answers.
-A blocking call lends its inputs in place and frees its outcome, slots and callbacks on return; a deferred one copies only the keys and paths it borrows.
+It uses the index, the executor and the arena as a blocking call does, since releasing any of them waits for the calls naming it, and its waited result is the same view a blocking call answers.
+A blocking call passes its inputs in place and frees its outcome, slots and callbacks on return; a deferred one copies only the keys and paths it views.
 `status` reads `deferred` until then, through the outcome word with acquire ordering, and `wait()` blocks and answers the result or throws the failure, the same every time it is asked.
 `value` waits on a Dispatch thread and then reads the result in the caller's isolation, so an `async` caller suspends rather than blocks, and the cooperative pool keeps its threads.
 Releasing an unfinished one waits for it first.
@@ -76,7 +76,7 @@ A failure this binding catches before the call crosses throws at submission, and
 One call holds an executor at a time, so a second call finding it held finishes at once with `contended`, and nothing queues.
 A deferred call on a caller-exclusive pool runs on the pool's thread 0, so polling `status` alone finishes it, and its progress handler and predicate run on the pool's threads; a single thread or a VRAM executor runs it at submission.
 Calls depending on each other are ordered by waiting on the first before submitting the second.
-Rows built over a `Tensor` stay alive with the call, while memory borrowed through a `MatrixView` or a softmax carry must outlive it.
+Rows built over a `Tensor` stay alive with the call, while the memory a `MatrixView` points into, or a softmax carry, must outlive it.
 The constructors that the C interface lets fan out take an `executor` in their config and run on the calling thread without one.
 
 ## Executors
@@ -92,8 +92,8 @@ let deviceStreams = try Executor.forVram(devices: [0, 1], streams: nil, scratchL
 ```
 
 Each factory takes every argument its C constructor has, and only those.
-`forVram` can borrow your CUDA streams, one per device, or cap per-device scratch.
-A thread count of zero derives from the hardware: 7/8 of the cores those memory domains carry, since full occupancy starves the ordered publication path, and for NVMe the devices' queue capabilities.
+`forVram` orders work on your CUDA streams, one per device, which you destroy after the executor is freed, or on each device's per-thread default stream, and can cap per-device scratch.
+A thread count of zero derives from the hardware: 7/8 of the cores those memory domains hold, since full occupancy starves the ordered publication path, and for NVMe the devices' queue capabilities.
 `forVram` takes no thread count at all: one host thread drives one stream per device, so there is no count to name.
 
 One call holds an executor at a time, and index handles stay freely shareable.
@@ -209,8 +209,8 @@ A `DenseIndex` holds equidimensional vectors under keys, and its verbs below tak
 
 ### Rows & Scalars
 
-A `RowsView` borrows a NumKong `MatrixView`, or keeps a NumKong `Tensor` alive.
-A matrix view borrows and never owns, so it stays valid only for as long as the storage it points into, which is why a call over one sits inside a `withUnsafeBufferPointer`.
+A `RowsView` views a NumKong `MatrixView`, or keeps a NumKong `Tensor` alive.
+A matrix view only points at memory it never owns, so it stays valid only for as long as the storage it points into, which is why a call over one sits inside a `withUnsafeBufferPointer`.
 
 ```swift
 let padded: [Float] = load()                                               // 768 dimensions pitched at 1024
@@ -221,7 +221,7 @@ try padded.withUnsafeBufferPointer { buffer in
 ```
 
 The library checks every row view's width against the index geometry itself, so a mismatch surfaces as its own `shapeMismatch`.
-Sub-byte kinds count logical dimensions rather than stored values, so a `U1x8` view one value wide carries eight dimensions.
+Sub-byte kinds count logical dimensions rather than stored values, so a `U1x8` view one value wide holds eight dimensions.
 
 The scalar type of what you hand the index is independent of the scalar type it stores: the library converts on ingest and on export.
 `Double`, `Float`, `Int8`, and `UInt8` are native, and the low-precision encodings come from NumKong: `BFloat16`, `E5M2`, `E4M3`, `E3M2`, `E2M3` and `U1x8`, each of which converts from a `Float` rather than only naming a bit pattern.
@@ -264,7 +264,7 @@ let even = try index.on(executor).search(queries, wanted: 10, arena: arena, conf
 ```
 
 Every long verb's config, and every lifecycle config that reports, takes a `progress` handler, called with the units finished so far and the units the call finishes if it runs to the end; returning `.cancel` stops it with `cancelled` wherever the verb can stop, which an `insert` cannot.
-A handler never runs on two threads at once, so it may carry a counter or a deadline without a lock, but it may run on whichever thread advanced the work, hence `@Sendable`.
+A handler never runs on two threads at once, so it may hold a counter or a deadline without a lock, but it may run on whichever thread advanced the work, hence `@Sendable`.
 A predicate, handler or value lookup never throws, as its type says, so nothing unwinds into C; a handler stops a call by returning `.cancel`.
 
 ```swift
@@ -491,13 +491,13 @@ print(nearby[0].map(\.key)) // the two stops within 500 metres
 
 `within` reports every entry a `GeospatialRelation` admits, however many, while `search` ranks the `wanted` nearest, both scored by the chord between positions in metres.
 `.near` widens the radius by both positions' accuracies, `.visible` needs a clear line of sight over the handle's `GeospatialTerrain`, and `.sees` and `.seen` test the entry's or the query's view cone.
-The terrain is a grid of `f32` heights in a `RowsView`, which the index borrows for its lifetime and keeps alive when built over a `Tensor`; a checkpoint never carries it, so every load and view names it again.
+The terrain is a grid of `f32` heights in a `RowsView`, which the index reads in place for its lifetime and keeps alive when built over a `Tensor`; a checkpoint never holds it, so every load and view names it again.
 
 ## What This Binding Does Not Expose
 
 - `cursor` and `searchStream` pull blocking, so a `DenseIndexDeferredOn` lacks them; `contains` is a test over `count`, so the deferred receiver offers `count` alone.
 - The constructors address no index yet, so no receiver offers them.
-- A geospatial terrain filled on demand by a callback: the library calls it from the executor's threads for every sight line, so the binding lends only a grid of heights or a dataset path.
+- A geospatial terrain filled on demand by a callback: the library calls it from the executor's threads for every sight line, so the binding passes only a grid of heights or a dataset path.
 - `searchStream`, `maxsim`, `multiply` and `attend` exist for dense indexes alone, as in the C library.
 
 ## Design
@@ -510,7 +510,7 @@ The terrain is a grid of `f32` heights in a `RowsView`, which the index borrows 
   `status` polls through `usearch_outcome_status`, `wait()` blocks through `usearch_outcome_wait`, and `try await call.value` polls `status` between `Task.sleep` pauses growing from 1 µs to 1 ms, so an `async` caller suspends and no thread parks.
 - __No life of its own.__
   The binding starts no threads and keeps no queues; releasing a `Deferred` rides its `deinit`, which waits for the call first.
-- __Arenas are lent and reused, never shared.__
+- __Arenas belong to the caller and are reused, never shared.__
   Every output whose length scales with the call lands in an arena the caller passes, and its views end at the arena's next call.
 - __Nothing costs anything until it is used.__
   Submitting a call allocates nothing, and an arena allocates only when a call writes into it.

@@ -86,13 +86,13 @@ The crate starts no thread, so waiting off-thread goes through a scoped thread, 
 Dropping an unfinished `Deferred` waits for the call.
 
 The library reads a deferred call's inputs after the verb returns, so a deferred receiver takes owned inputs: keys in a `Vec` or an array, rows in a NumKong `Matrix` or a `'static` `MatrixView`, a `PathBuf`, `String` or `'static` path, and `'static` configs, handlers and value lookups.
-Lending `&[Key]` or `&MatrixView` fails to compile with "a deferred receiver needs owned inputs", and a config or view borrowing a local fails as "does not live long enough".
+Passing `&[Key]` or `&MatrixView` fails to compile with "a deferred receiver needs owned inputs", and a config or view borrowing a local fails as "does not live long enough".
 A deferred call allocates one box holding its outcome, inputs and output until it is final.
 The box is the crate's rather than yours, since a `Deferred` leaked without a wait would leave the library writing into storage you had reused.
 
 One call holds an executor at a time, so a second call finding it held finishes at once with `Status::Contended`, and nothing queues.
 A deferred call on a caller-exclusive pool runs on the pool's thread 0, so polling alone finishes it, and its progress handler and predicate run on the pool's threads; an inclusive pool, a single thread, WebAssembly and a VRAM executor run it at submission.
-Calls depending on each other are ordered by waiting on the first before submitting the second, since no call carries an ordering field.
+Calls depending on each other are ordered by waiting on the first before submitting the second, since no call holds an ordering field.
 
 ## Executors
 
@@ -160,7 +160,7 @@ for call in calls {
 
 The library never frees an arena under a call: dropping one waits for the calls writing into it, and a call naming an arena that serves another call finishes with `Status::Contended` and rewinds nothing, so even a leaked `Deferred` leaves it safe.
 An arena's `describe()` says where it lives, and on which device.
-Fixed-size reports, such as stats, descriptions and `required`, stay plain values, and so does state you carry between calls, like the attention `carry`.
+Fixed-size reports, such as stats, descriptions and `required`, stay plain values, and so does state you hold between calls, like the attention `carry`.
 
 ## Keys
 
@@ -180,7 +180,7 @@ Keys need not be unique: an index admits up to `values_per_key` entries under on
 
 ## Errors
 
-Every fallible call returns `usearch::Result`, whose `Error` carries a `Status` and a static `message`, so nothing allocates on the failure path.
+Every fallible call returns `usearch::Result`, whose `Error` holds a `Status` and a static `message`, so nothing allocates on the failure path.
 A failure the binding catches before the call crosses the boundary reports the status the engine would have used.
 
 ```rust
@@ -191,7 +191,7 @@ match index.on(&executor).search(&rows(&query, 4)?, 10, &mut arena) {
 }
 ```
 
-`Status` carries the C enumerators' values and leaves success to `Result`, so an `Error` never carries `Status::Deferred`, which only `Deferred::status` reports.
+`Status` holds the C enumerators' values and leaves success to `Result`, so an `Error` never holds `Status::Deferred`, which only `Deferred::status` reports.
 `Status`, `Mood`, `Residency`, `Traversal`, `Phase`, `RefineVerdict`, `DenseMetric` and `Scalar` print through `Display` and parse through `FromStr` the names the C tables own, such as `"out-of-memory"` or `"angular"`, so nothing is compared as a string.
 A panic inside a predicate, progress handler or value lookup aborts the process, since it cannot unwind through the library, so handlers report through what they capture.
 
@@ -235,7 +235,7 @@ let metadata = DenseIndex::metadata("index.safegraphs")?;        // geometry wit
 ```
 
 Checkpoints are residency-portable: one file materializes into RAM, uploads to a device, or opens in place on disk, decided by the constructor that reads it.
-The metadata carries only the four fields a checkpoint froze, so `values_per_key` and the placement stay yours to set in the load config.
+The metadata holds only the four fields a checkpoint froze, so `values_per_key` and the placement stay yours to set in the load config.
 `view_ram` answers `Status::Unsupported` until RAM shards can serve a mapping in place.
 A stopped `save` leaves leftovers every reader rejects, which are yours to remove.
 
@@ -359,7 +359,7 @@ if let Err(failure) = refined {
 }
 ```
 
-The handler is `FnMut` and `Send` where a predicate is `Fn` and `Sync`: it arrives on whichever thread advanced the work and never on two at once, which is what lets it carry a counter or a deadline without a lock of its own.
+The handler is `FnMut` and `Send` where a predicate is `Fn` and `Sync`: it arrives on whichever thread advanced the work and never on two at once, which is what lets it hold a counter or a deadline without a lock of its own.
 Reports are denominated in whatever the verb consumes: entries for an insertion, queries for a search, a phase's entries or islands for a refine or a reshard, draws for a sample, shards for a checkpoint, and bytes for a buffer.
 How often they arrive is the increment's size rather than a guarantee, so read the counts and never the number of calls.
 
@@ -425,7 +425,7 @@ while receiver.refine(DenseRefineConfig { expansion_factor: 128, ..DenseRefineCo
 
 On a loaded NVMe handle `memory_limit` bounds the bytes a round holds for the one part it rewrites: zero rounds the part in RAM, and a smaller budget streams its rounds from the drives.
 
-A `DenseRefinePlan` carries a round across calls: a stop leaves it live, the next call holding it continues where it stopped, `phase` reports the `Phase` the call stopped in, and `refine_plan_finish` closes it.
+A `DenseRefinePlan` holds a round across calls: a stop leaves it live, the next call holding it continues where it stopped, `phase` reports the `Phase` the call stopped in, and `refine_plan_finish` closes it.
 
 ```rust
 let (mut plan, mut phase) = (DenseRefinePlan::default(), PhaseProgress::default());
@@ -441,7 +441,7 @@ while let Err(failure) = receiver.refine(DenseRefineConfig {
 let report = receiver.refine_plan_finish(plan)?;
 ```
 
-A deferred call owns the plan it carries rather than borrowing it, and `wait_with_inputs` hands the plan back beside the answer.
+A deferred call owns the plan it holds rather than borrowing it, and `wait_with_inputs` hands the plan back beside the answer.
 
 ```rust
 let (answer, config) = index.deferred(&executor).refine(DenseRefineConfig::from(plan))?.wait_with_inputs();
@@ -513,7 +513,7 @@ A `None` row, or rows of another scalar type or width than the library reads, re
 It runs on the executor's threads together, hence `Sync`.
 A VRAM walk resolves values on the device, where no Rust closure runs, so an arena from a VRAM executor is refused with `Status::Device`.
 With a `head_count` of 8, row `t * 8 + h` of the queries is head `h` of token `t`, and the heads of one token share its walk.
-A `carry` of one `DenseSoftmaxState` per query row, lent by you, folds this branch into another over the same queries, such as a recent window kept out of the index.
+A `carry` of one `DenseSoftmaxState` per query row, which you own, folds this branch into another over the same queries, such as a recent window kept out of the index.
 `score_scale` is conventionally the inverse square root of the head width, and zero derives it from the frozen geometry.
 
 ```rust
@@ -634,11 +634,11 @@ These C entry points also take a deferred completion, but the crate calls them b
   `status` polls through `usearch_outcome_status`, `wait` blocks through `usearch_outcome_wait`, and a `Deferred` is `IntoFuture`, so `.await` polls the status word, since the library has no wake-up.
 - __No life of its own.__
   The binding starts no threads and keeps no queues; releasing a `Deferred` rides `Drop`, which waits for the call first.
-- __Arenas are lent and reused, never shared.__
+- __Arenas belong to the caller and are reused, never shared.__
   Every output whose length scales with the call lands in an arena the caller passes; the result borrows it, so the borrow checker retires stale views at compile time.
 - __Nothing costs anything until it is used.__
   Blocking calls allocate no box, and an arena allocates only when a call writes into it.
-- __Callers lend memory, never an allocator.__
+- __The caller allocates every buffer; no allocator crosses the interface.__
   No allocation callback crosses into the library: payload belongs to the index, placed by its constructor's residency, and scratch belongs to the executor.
 - __A deferred receiver refuses borrowed inputs at compile time.__
   The `Accepts` bound admits only owned inputs, so a borrow the library would read after the verb returns never compiles.

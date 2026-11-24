@@ -276,7 +276,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "$GITHUB_REF_NAME" *.zip --clobber
 
-  # One archive per checked-in Emscripten toolchain: a WebAssembly module carries one SIMD tier, width and threads
+  # One archive per checked-in Emscripten toolchain: a WebAssembly module holds one SIMD tier, width and threads
   # choice, so each row is a whole build, and its C test runs under Node before anything is packed.
   create_wasm_library:
     name: Create WASM Library for ${{ matrix.archive }}

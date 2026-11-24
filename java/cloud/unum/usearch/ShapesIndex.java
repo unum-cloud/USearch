@@ -95,7 +95,7 @@ public final class ShapesIndex implements AutoCloseable {
             return code;
         }
 
-        /** Names the kind a code carries; a code this build cannot name becomes UNKNOWN. */
+        /** Names the kind a code holds; a code this build cannot name becomes UNKNOWN. */
         public static ShapesMetric of(int code) {
             for (ShapesMetric candidate : values()) {
                 if (candidate.code == code) {

@@ -32,7 +32,7 @@ public struct SequenceMetric: Hashable, Sendable, CustomStringConvertible {
     /// The metric rendered as the library spells it.
     public var description: String { String(cString: usearch_sequence_metric_name(raw)) }
 
-    /// Reads a spelling back, and nil for one no metric carries.
+    /// Reads a spelling back, and nil for one no metric holds.
     public init?(name: String) {
         guard let raw = parsed(name, usearch_sequence_metric_from_name, usearch_sequence_metric_unknown_k) else {
             return nil
@@ -57,8 +57,8 @@ public struct SequenceWeights: Sendable {
 }
 
 extension CallState {
-    /// Lends optional weights as the pointer every sequence lifecycle verb takes; nil lends none.
-    func lend<Value>(
+    /// Passes optional weights as the pointer every sequence lifecycle verb takes; nil passes none.
+    func pass<Value>(
         _ weights: SequenceWeights?,
         _ body: (UnsafePointer<usearch_sequence_weights_t>?) throws(USearchError) -> Value
     ) throws(USearchError) -> Value {
@@ -67,7 +67,7 @@ extension CallState {
         guard weights.substitutionMatrix.count == 256 * 256 else {
             throw USearchError(status: .shapeMismatch, message: "the substitution matrix is not 256×256")
         }
-        return try lend(weights.substitutionMatrix) { (matrix) throws(USearchError) -> Value in
+        return try pass(weights.substitutionMatrix) { (matrix) throws(USearchError) -> Value in
             try body(slots(usearch_sequence_weights_t(substitution_matrix: matrix, gap: weights.gap)))
         }
     }
@@ -231,9 +231,9 @@ public final class SequenceIndex: @unchecked Sendable {
     ) throws(USearchError) -> SequenceIndex {
         let callState = CallState()
         let index = callState.slots(usearch_sequence_index_t?.none)
-        try callState.lend(options.weights) { (weights) throws(USearchError) in
-            try callState.lend(options.windowWidths) { (widths) throws(USearchError) in
-                try callState.lend(memoryDomains) { (domains) throws(USearchError) in
+        try callState.pass(options.weights) { (weights) throws(USearchError) in
+            try callState.pass(options.windowWidths) { (widths) throws(USearchError) in
+                try callState.pass(memoryDomains) { (domains) throws(USearchError) in
                     var arguments = usearch_sequence_init_ram_t(
                         index: index,
                         outcome: callState.outcome,
@@ -259,9 +259,9 @@ public final class SequenceIndex: @unchecked Sendable {
     ) throws(USearchError) -> SequenceIndex {
         let callState = CallState()
         let index = callState.slots(usearch_sequence_index_t?.none)
-        try callState.lend(options.weights) { (weights) throws(USearchError) in
-            try callState.lend(options.windowWidths) { (widths) throws(USearchError) in
-                try callState.lend(devices) { (lentDevices) throws(USearchError) in
+        try callState.pass(options.weights) { (weights) throws(USearchError) in
+            try callState.pass(options.windowWidths) { (widths) throws(USearchError) in
+                try callState.pass(devices) { (passedDevices) throws(USearchError) in
                     var arguments = usearch_sequence_init_vram_t(
                         index: index,
                         outcome: callState.outcome,
@@ -271,7 +271,7 @@ public final class SequenceIndex: @unchecked Sendable {
                         window_widths_count: options.windowWidths.count,
                         connectivity: options.connectivity,
                         values_per_key: options.valuesPerKey,
-                        vram: vramOptions(lentDevices, devices.count, options.gpuClassCeiling)
+                        vram: vramOptions(passedDevices, devices.count, options.gpuClassCeiling)
                     )
                     usearch_sequence_init_vram(&arguments)
                 }
@@ -289,10 +289,10 @@ public final class SequenceIndex: @unchecked Sendable {
     ) throws(USearchError) -> SequenceIndex {
         let callState = CallState()
         let index = callState.slots(usearch_sequence_index_t?.none)
-        let progress = callState.lend(config.progress, steps: config.progressSteps)
-        try callState.lend(path) { (path) throws(USearchError) in
-            try callState.lend(weights) { (weights) throws(USearchError) in
-                try callState.lend(config.memoryDomains) { (domains) throws(USearchError) in
+        let progress = callState.pass(config.progress, steps: config.progressSteps)
+        try callState.pass(path) { (path) throws(USearchError) in
+            try callState.pass(weights) { (weights) throws(USearchError) in
+                try callState.pass(config.memoryDomains) { (domains) throws(USearchError) in
                     var arguments = usearch_sequence_load_ram_t(
                         index: index,
                         executor: config.executor?.raw,
@@ -319,10 +319,10 @@ public final class SequenceIndex: @unchecked Sendable {
     ) throws(USearchError) -> SequenceIndex {
         let callState = CallState()
         let index = callState.slots(usearch_sequence_index_t?.none)
-        let progress = callState.lend(config.progress, steps: config.progressSteps)
-        try callState.lend(path) { (path) throws(USearchError) in
-            try callState.lend(weights) { (weights) throws(USearchError) in
-                try callState.lend(config.devices) { (devices) throws(USearchError) in
+        let progress = callState.pass(config.progress, steps: config.progressSteps)
+        try callState.pass(path) { (path) throws(USearchError) in
+            try callState.pass(weights) { (weights) throws(USearchError) in
+                try callState.pass(config.devices) { (devices) throws(USearchError) in
                     var arguments = usearch_sequence_load_vram_t(
                         index: index,
                         executor: config.executor?.raw,
@@ -349,10 +349,10 @@ public final class SequenceIndex: @unchecked Sendable {
     ) throws(USearchError) -> SequenceIndex {
         let callState = CallState()
         let index = callState.slots(usearch_sequence_index_t?.none)
-        let progress = callState.lend(config.progress, steps: config.progressSteps)
+        let progress = callState.pass(config.progress, steps: config.progressSteps)
         try buffer.withUnsafeBytes { (bytes) throws(USearchError) in
-            try callState.lend(weights) { (weights) throws(USearchError) in
-                try callState.lend(config.memoryDomains) { (domains) throws(USearchError) in
+            try callState.pass(weights) { (weights) throws(USearchError) in
+                try callState.pass(config.memoryDomains) { (domains) throws(USearchError) in
                     var arguments = usearch_sequence_load_ram_buffer_t(
                         index: index,
                         executor: config.executor?.raw,
@@ -380,10 +380,10 @@ public final class SequenceIndex: @unchecked Sendable {
     ) throws(USearchError) -> SequenceIndex {
         let callState = CallState()
         let index = callState.slots(usearch_sequence_index_t?.none)
-        let progress = callState.lend(config.progress, steps: config.progressSteps)
+        let progress = callState.pass(config.progress, steps: config.progressSteps)
         try buffer.withUnsafeBytes { (bytes) throws(USearchError) in
-            try callState.lend(weights) { (weights) throws(USearchError) in
-                try callState.lend(config.devices) { (devices) throws(USearchError) in
+            try callState.pass(weights) { (weights) throws(USearchError) in
+                try callState.pass(config.devices) { (devices) throws(USearchError) in
                     var arguments = usearch_sequence_load_vram_buffer_t(
                         index: index,
                         executor: config.executor?.raw,
@@ -411,9 +411,9 @@ public final class SequenceIndex: @unchecked Sendable {
     ) throws(USearchError) -> SequenceIndex {
         let callState = CallState()
         let index = callState.slots(usearch_sequence_index_t?.none)
-        try callState.lend(path) { (path) throws(USearchError) in
-            try callState.lend(weights) { (weights) throws(USearchError) in
-                try callState.lend(memoryDomains) { (domains) throws(USearchError) in
+        try callState.pass(path) { (path) throws(USearchError) in
+            try callState.pass(weights) { (weights) throws(USearchError) in
+                try callState.pass(memoryDomains) { (domains) throws(USearchError) in
                     var arguments = usearch_sequence_view_ram_t(
                         index: index,
                         outcome: callState.outcome,
@@ -437,8 +437,8 @@ public final class SequenceIndex: @unchecked Sendable {
     ) throws(USearchError) -> SequenceIndex {
         let callState = CallState()
         let index = callState.slots(usearch_sequence_index_t?.none)
-        try callState.lend(path) { (path) throws(USearchError) in
-            try callState.lend(weights) { (weights) throws(USearchError) in
+        try callState.pass(path) { (path) throws(USearchError) in
+            try callState.pass(weights) { (weights) throws(USearchError) in
                 withPaths(config.paths, config.cpuClassCeiling) { nvme in
                     var arguments = usearch_sequence_view_nvme_t(
                         index: index,
@@ -463,7 +463,7 @@ public final class SequenceIndex: @unchecked Sendable {
     ) throws(USearchError) -> SequenceMetadata {
         let callState = CallState()
         let metadata = callState.slots(SequenceMetadata())
-        try callState.lend(path) { (path) throws(USearchError) in
+        try callState.pass(path) { (path) throws(USearchError) in
             var arguments = usearch_sequence_metadata_read_t(
                 executor: executor?.raw,
                 outcome: callState.outcome,
@@ -731,7 +731,7 @@ public struct SequenceIndexOn: Sendable {
 }
 
 /// A sequence index's verbs submitted to an executor, each answering a `Deferred` at once; see
-/// `SequenceIndex` and `DenseIndexDeferredOn`, whose borrowing rules these follow.
+/// `SequenceIndex` and `DenseIndexDeferredOn`, whose viewing rules these follow.
 public struct SequenceIndexDeferredOn: Sendable {
     /// The index every verb addresses.
     let index: SequenceIndex
@@ -939,14 +939,14 @@ struct SequenceCall {
         _ sequences: [[UInt8]],
         config: DenseInsertConfig
     ) throws(USearchError) -> Submission<Void> {
-        // The key run carries no count of its own, so only this side can see it disagree.
+        // The key run holds no count of its own, so only this side can see it disagree.
         guard keys.count == sequences.count else {
             throw USearchError(status: .shapeMismatch, message: "the key count does not match the sequence count")
         }
         callState.anchor(config.stats)
-        let progress = callState.lend(config.progress, steps: config.progressSteps)
-        try callState.lend(keys) { (keys) throws(USearchError) in
-            try callState.lend(tape: sequences, valuesPerElement: 1) { (tape) throws(USearchError) in
+        let progress = callState.pass(config.progress, steps: config.progressSteps)
+        try callState.pass(keys) { (keys) throws(USearchError) in
+            try callState.pass(tape: sequences, valuesPerElement: 1) { (tape) throws(USearchError) in
                 var arguments = usearch_sequence_insert_t(
                     index: index.raw,
                     executor: executor?.raw,
@@ -976,7 +976,7 @@ struct SequenceCall {
             completion: completion,
             report: report.pointer(to: \.raw)!,
             refine: config.options,
-            progress: callState.lend(config.progress, steps: config.progressSteps),
+            progress: callState.pass(config.progress, steps: config.progressSteps),
             stats: config.stats?.raw,
             plan: config.plan?.raw.pointer(to: \.handle),
             phase: config.plan?.raw.pointer(to: \.phase.raw)
@@ -1021,7 +1021,7 @@ struct SequenceCall {
     ) throws(USearchError) -> Submission<Matches> {
         callState.anchor(config.stats)
         let matches = callState.slots(Matches(arena: arena, endIndex: queries.count))
-        try callState.lend(tape: queries, valuesPerElement: 1) { (tape) throws(USearchError) in
+        try callState.pass(tape: queries, valuesPerElement: 1) { (tape) throws(USearchError) in
             var arguments = usearch_sequence_search_t(
                 index: index.raw,
                 executor: executor?.raw,
@@ -1034,8 +1034,8 @@ struct SequenceCall {
                 wanted: wanted,
                 expansion_factor: config.expansionFactor,
                 traversal: config.traversal.raw,
-                predicate: callState.lend(config.predicate),
-                progress: callState.lend(config.progress, steps: config.progressSteps),
+                predicate: callState.pass(config.predicate),
+                progress: callState.pass(config.progress, steps: config.progressSteps),
                 stats: config.stats?.raw
             )
             usearch_sequence_search(&arguments)
@@ -1063,7 +1063,7 @@ struct SequenceCall {
             report: report.pointer(to: \.raw)!,
             refine: config.options,
             seed: config.seed,
-            progress: callState.lend(config.progress, steps: config.progressSteps),
+            progress: callState.pass(config.progress, steps: config.progressSteps),
             stats: config.stats?.raw,
             plan: config.plan?.raw.pointer(to: \.handle),
             phase: config.plan?.raw.pointer(to: \.phase.raw)
@@ -1094,10 +1094,10 @@ struct SequenceCall {
         }
         callState.anchor(config.stats)
         let draws = callState.slots(DenseDraws(arena: arena))
-        let progress = callState.lend(config.progress, steps: config.progressSteps)
-        try callState.lend(config.shown) { (shown) throws(USearchError) in
-            try callState.lend(config.focus) { (focus) throws(USearchError) in
-                try callState.lend(config.shownCoordinates) { (shownCoordinates) throws(USearchError) in
+        let progress = callState.pass(config.progress, steps: config.progressSteps)
+        try callState.pass(config.shown) { (shown) throws(USearchError) in
+            try callState.pass(config.focus) { (focus) throws(USearchError) in
+                try callState.pass(config.shownCoordinates) { (shownCoordinates) throws(USearchError) in
                     var arguments = usearch_sequence_sample_t(
                         index: index.raw,
                         executor: executor?.raw,
@@ -1128,8 +1128,8 @@ struct SequenceCall {
     }
 
     func save(_ path: String, config: DenseSaveConfig) throws(USearchError) -> Submission<Void> {
-        let progress = callState.lend(config.progress, steps: config.progressSteps)
-        try callState.lend(path) { (path) throws(USearchError) in
+        let progress = callState.pass(config.progress, steps: config.progressSteps)
+        try callState.pass(path) { (path) throws(USearchError) in
             var arguments = usearch_sequence_save_t(
                 index: index.raw,
                 executor: executor?.raw,
@@ -1152,7 +1152,7 @@ struct SequenceCall {
             completion: completion,
             monolith: monolith.pointer(to: \.monolith)!,
             arena: arena.raw,
-            progress: callState.lend(config.progress, steps: config.progressSteps)
+            progress: callState.pass(config.progress, steps: config.progressSteps)
         )
         usearch_sequence_save_buffer(&arguments)
         return try callState.submitted(monolith)

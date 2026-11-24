@@ -104,7 +104,7 @@ Expect["folded multi-head attention", Max[Abs[Flatten[$attended["Outputs"] - $or
 Expect["online softmax maximum", Max[Abs[$attended["Carry"][[All, 1]] - (Max /@ $logits)]] < 0.00005, True]
 Expect["online softmax partition", Max[Abs[$attended["Carry"][[All, 2]] -
     (Total /@ Exp[Map[# - Max[#] &, $logits]])]] < 0.00005, True]
-Expect["borrowed rows are unchanged", Normal[$typed], $rows]
+Expect["viewed rows are unchanged", Normal[$typed], $rows]
 Expect["duplicate value keys", DenseValues[$index, {43, 43}, $rows][[1]], "invalid-argument"]
 Expect["missing attention value", DenseAttend[$index, $typed,
     DenseValues[$index, {43}, {Last[$rows]}], $arena][[1]], "shape-mismatch"]

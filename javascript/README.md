@@ -12,7 +12,7 @@ npm install usearch
 
 ### Building From Source
 
-The addon links against the C interface as a static archive, so `usearch.node` carries the engine inside it rather than beside it.
+The addon links against the C interface as a static archive, so `usearch.node` holds the engine inside it rather than beside it.
 `cmake-js` compiles it, and `prebuild` stages it where `node-gyp-build` looks:
 
 ```sh
@@ -21,7 +21,7 @@ npm run build-js
 npm test
 ```
 
-The addon carries the dense storage types its CMake configure compiled: `npm run build-native` and the prebuilt addons pass `USEARCH_DENSE_DTYPES=11`, while a plain configure compiles `bf16`, `u1x8`, `i8` and `e4m3` alone, and the suite skips the kinds such a build refuses.
+The addon holds the dense storage types its CMake configure compiled: `npm run build-native` and the prebuilt addons pass `USEARCH_DENSE_DTYPES=11`, while a plain configure compiles `bf16`, `u1x8`, `i8` and `e4m3` alone, and the suite skips the kinds such a build refuses.
 
 ## Quickstart
 
@@ -72,7 +72,7 @@ const matches = await call; // or: call.wait()
 
 `await` polls the status between turns of the event loop, then every millisecond, so no thread waits, while `wait()` blocks the calling thread.
 Both answer the same cached result, or throw the same failure, however often they are asked, and `status` reads the outcome without blocking.
-`using call = ...` waits for the call before its block ends, and one dropped unfinished is handed back to the collector until it is final, so nothing it borrowed is freed under the library.
+`using call = ...` waits for the call before its block ends, and one dropped unfinished is handed back to the collector until it is final, so nothing it reads is freed under the library.
 Refusals this binding catches before the call crosses, like keys that do not match the rows, throw at submission.
 
 One call holds an executor at a time, so a second call finding it held finishes at once with `Status.Contended`, and nothing queues.
@@ -108,7 +108,7 @@ Every output whose length only the call knows, such as matches, rows, products, 
 Each call rewinds its arena, so the previous call's views die and a steady loop allocates once.
 To keep a result past the next call, or to read one while making the next, pass that call another arena.
 An arena serves one call at a time, so each deferred call needs its own.
-A deferred call borrows its arena as a blocking one does: another call naming it before the first is final finishes with `Status.Contended`, and `free()` waits for it.
+A deferred call uses its arena as a blocking one does: another call naming it before the first is final finishes with `Status.Contended`, and `free()` waits for it.
 A view ends at the next call on its arena, as a pointer into it would: its typed arrays read whatever the arena holds from then on, and a call naming a freed arena is refused with `Status.InvalidArgument`.
 An arena from a VRAM executor holds device memory, which `arena.describe()` names and only device code reads.
 It grows, fills and frees on that executor's first stream, so it serves only calls on that executor and keeps it alive until freed, and the executor's `free()` refuses with `Status.Contended` while such an arena lives; a host arena may outlive its executor.
@@ -137,7 +137,7 @@ Only fixed-size reports, like `describe` and the telemetry readings, come back a
 ## Keys
 
 A key is __sixteen opaque bytes__, most significant first, and that is the only form a full 128-bit key survives.
-Matches carry them as one `Uint8Array` of sixteen bytes per match, which is byte-for-byte what the engine writes, so a batch of results needs no conversion pass and no object per match.
+Matches hold them as one `Uint8Array` of sixteen bytes per match, which is byte-for-byte what the engine writes, so a batch of results needs no conversion pass and no object per match.
 The canonical rendering is the lowercase dashed UUID the ABI fixes, and that is a rendering rather than a second carrier.
 
 ```js
@@ -149,7 +149,7 @@ usearch.integerFromKey(usearch.keyAt(matches.keys, 0)); // its integer, when it 
 ```
 
 An integer key parks in the trailing eight bytes with the leading eight zeroed, so `42n` prints as `00000000-0000-0000-0000-00000000002a`.
-`integerFromKey` throws on a key whose leading bytes carry anything, since no integer spells it.
+`integerFromKey` throws on a key whose leading bytes hold anything, since no integer spells it.
 
 Keys are accepted in every one of those spellings, plus a `BigUint64Array` of integer keys, which stays the convenient path for services that number their entries:
 
@@ -165,7 +165,7 @@ A single key broadcasts across every row of a batch, and a `Uint8Array` of keys 
 ## Errors
 
 Failures throw an `Error` whose `code` is a `usearch.Status`, one member per status of the C interface, spelled as its canonical name such as `'shape-mismatch'`.
-Refusals this binding raises before a call crosses carry the same codes, so a caller branches on the fault rather than on which side of the boundary saw it.
+Refusals this binding raises before a call crosses hold the same codes, so a caller branches on the fault rather than on which side of the boundary saw it.
 The engine checks every row's width against the geometry it froze, so a narrow row surfaces as its `ShapeMismatch`:
 
 ```js
@@ -205,7 +205,7 @@ const loaded = usearch.DenseIndex.loadRam('index.safegraphs', { executor, memory
 const onDevice = usearch.DenseIndex.loadVram('index.safegraphs', { executor: devicePool, devices: [0] });
 const viewed = usearch.DenseIndex.viewRam('index.safegraphs'); // Read-only, served from a memory mapping
 
-const monolith = index.on(executor).saveBuffer(arena); // A Monolith viewing the arena
+const monolith = index.on(executor).saveBuffer(arena); // A Monolith using the arena
 const restored = usearch.DenseIndex.loadRamBuffer(monolith, { executor });
 ```
 
@@ -238,7 +238,7 @@ const index = usearch.DenseIndex.initRam(
 
 ### Rows & Scalars
 
-A bare `TypedArray` is one row, and a `RowsView` is a run of them borrowed in place.
+A bare `TypedArray` is one row, and a `RowsView` is a run of them read in place.
 It names the array, the row count, the columns, the bytes between rows, and the scalar kind, so a memory-mapped dataset reaches the index with no reshape and no copy.
 `RowsView.of` reads a packed array as rows of the width it is given:
 
@@ -278,7 +278,7 @@ matches.counts;    // BigUint64Array, the matches every query found
 matches.keys;      // Uint8Array, sixteen bytes per cell, queries laid end to end
 matches.scores;    // Float64Array, one distance per cell
 
-const found = matches.get(0); // A QueryMatches, borrowed out of the run rather than copied
+const found = matches.get(0); // A QueryMatches pointing into the run rather than a copy
 found.count;                  // Matches this query found, never above `wanted`
 found.keys;                   // Sixteen bytes per match found
 found.scores;                 // One distance per match found
@@ -418,7 +418,7 @@ drawn.coordinates.data; // three f32 values per draw
 ### Sparse Multiplication
 
 `multiply` is the sparse sibling of `search`: every left row emits one pair per column the walk scored rather than one ranked match, so the scores are unnormalized logits and the index must hold the `Inner` kind.
-How many pairs a walk scores is known only once it ends, so the call answers with a `DenseProducts` run viewing its arena, laid out with Apache Arrow offsets:
+How many pairs a walk scores is known only once it ends, so the call answers with a `DenseProducts` run using its arena, laid out with Apache Arrow offsets:
 
 ```js
 const index = usearch.DenseIndex.initRam({ metric: usearch.DenseMetric.Inner, dimensions: 128 });
@@ -451,15 +451,15 @@ const best = documents.get(0); // A QueryMatches over the first query's document
 
 `attend` is softmax attention over every key a query's graph walk scores, folded as Flash Attention folds key tiles, with no top-k cut: the long tail the walk scores is what brings it toward exact dense attention.
 It lands one key-wide row per query in the arena, in the queries' own kind unless `scalar` names another.
-The index stores no values: every key a walk scores, 16 bytes apiece, resolves through `rowOf` to a row of `values`, borrowed for the call rather than copied, as wide as the keys and stored in the index's own scalar kind.
-Answering with no row of `values`, or lending values of another width or kind, refuses the call with `ShapeMismatch`, since a missing row is a wrong softmax rather than a smaller one.
+The index stores no values: every key a walk scores, 16 bytes apiece, resolves through `rowOf` to a row of `values`, read only during the call rather than copied, as wide as the keys and stored in the index's own scalar kind.
+Answering with no row of `values`, or passing values of another width or kind, refuses the call with `ShapeMismatch`, since a missing row is a wrong softmax rather than a smaller one.
 
 ```js
 // One value row per indexed key, stored like the keys
 const values = usearch.RowsView.of(valueMatrix, dimensions);
 // The row of `values` a 16-byte key resolves to
 const rowOf = (key) => tokenRows.get(usearch.integerFromKey(key));
-// A largest logit and a partition per query row, lent and updated in place
+// A largest logit and a partition per query row, which the caller owns and the call updates in place
 const carry = new Float32Array(queries.rows * 2);
 // Row `t * 8 + h` is head `h` of token `t`
 const outputs = index.attend(queries, values, rowOf, arena, { headCount: 8, carry, scoreScale });
@@ -493,7 +493,7 @@ usearch.capabilitiesAvailable();
 ## Sequence Indexes
 
 `SequenceIndex` searches byte strings, UTF-8 text, DNA, RNA and proteins under edit distances and alignments.
-Its verbs and receivers are the dense ones, and its sequences cross as one Apache Arrow `Tape`, bytes end to end around their offsets: text and `Uint8Array` lists are packed by `Tape.ofSequences`, and a packed `Tape` is borrowed in place.
+Its verbs and receivers are the dense ones, and its sequences cross as one Apache Arrow `Tape`, bytes end to end around their offsets: text and `Uint8Array` lists are packed by `Tape.ofSequences`, and a packed `Tape` is read in place.
 
 ```js
 const { Arena, SequenceIndex, SequenceMetric, integerFromKey } = require("usearch");
@@ -505,7 +505,7 @@ console.log(integerFromKey(matches.get(0).keys), matches.get(0).scores[0]); // 2
 console.log(new TextDecoder().decode(words.get(2n, new Arena()).get(0))); // "sitting"
 ```
 
-`SequenceMetric.NeedlemanWunsch` takes a `substitutionMatrix`, an `Int8Array` of 256 × 256 scores, and a `gap` cost, borrowed for the call; `SequenceMetric.Overlap` takes `windowWidths` in bytes.
+`SequenceMetric.NeedlemanWunsch` takes a `substitutionMatrix`, an `Int8Array` of 256 × 256 scores, and a `gap` cost, read only during the call; `SequenceMetric.Overlap` takes `windowWidths` in bytes.
 A checkpoint records neither weight, so `loadRam`, `loadVram`, their `Buffer` forms and the views take them again.
 `count` answers `{entries, totalBytes, largestBytes}`, and `get` answers a `Tape` viewed inside its arena.
 
@@ -532,7 +532,7 @@ A non-zero `points` option freezes the count every shape holds, and `quantizatio
 ## Geospatial Indexes
 
 `GeospatialIndex` searches observations on and above the Earth, like photos, video frames and sensor fixes, under nearness and view cones.
-An observation is eleven doubles in natural units, NaN wherever nothing was recorded, and `observationsOf` packs objects naming the fields into the `Float64Array` every verb borrows.
+An observation is eleven doubles in natural units, NaN wherever nothing was recorded, and `observationsOf` packs objects naming the fields into the `Float64Array` every verb reads.
 
 ```js
 const { Arena, GeospatialIndex, GeospatialRelation, observationsOf } = require("usearch");
@@ -550,7 +550,7 @@ console.log(nearby.get(0).count); // 2: the two Paris stops, a kilometre apart
 
 `search` ranks the `wanted` nearest entries a relation admits, in chord metres, and `within` reports every entry inside the radius as one ragged run per query; a config's `seconds` widen each query's time interval.
 `GeospatialRelation` holds the C enumerator values, since the library names no spelling for them.
-No handle here carries a terrain, so `Visible` is refused, and `get` returns observations within the stored rounding.
+No handle here holds a terrain, so `Visible` is refused, and `get` returns observations within the stored rounding.
 
 ## What This Binding Does Not Expose
 
@@ -572,7 +572,7 @@ The same reasoning excludes the progress handlers every long verb takes, and the
   `status` polls through `usearch_outcome_status`, `wait()` blocks through `usearch_outcome_wait`, and `await` polls `status` on the event loop, `setImmediate` first and a 1 ms timer after, since the library has no wake-up to register and a parked libuv worker would starve file I/O.
 - __No life of its own.__
   The binding starts no threads and keeps no queues; releasing a `Deferred` rides `using` and `Symbol.dispose`, which waits for the call first.
-- __Arenas are lent and reused, never shared.__
+- __Arenas belong to the caller and are reused, never shared.__
   Every output whose length scales with the call lands in an arena the caller passes, and its views end at the arena's next call, as in C.
 - __Nothing costs anything until it is used.__
   Submitting a call allocates nothing, and an arena allocates only when a call writes into it.

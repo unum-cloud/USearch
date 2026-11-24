@@ -171,8 +171,8 @@ public final class GeospatialIndex implements AutoCloseable {
 
     /**
      * The elevation every line of sight is tested over: a north-up grid of heights above the WGS-84
-     * ellipsoid, borrowed for the life of every index it is given to, or a dataset path. No
-     * checkpoint carries it, so every load and view names it again. Mirrors
+     * ellipsoid, viewed for the life of every index it is given to, or a dataset path. No
+     * checkpoint holds it, so every load and view names it again. Mirrors
      * {@code usearch_geospatial_terrain_t}, less the fill callback.
      */
     public static final class GeospatialTerrain {
@@ -264,7 +264,7 @@ public final class GeospatialIndex implements AutoCloseable {
                 throw new USearchException(Status.SHAPE_MISMATCH, "the grid overruns the heights");
             }
             if (!heights.isNative()) {
-                throw new USearchException(Status.INVALID_ARGUMENT, "borrowed heights live in native memory");
+                throw new USearchException(Status.INVALID_ARGUMENT, "viewed heights live in native memory");
             }
             return new GeospatialTerrain(
                     rows,
@@ -300,12 +300,12 @@ public final class GeospatialIndex implements AutoCloseable {
             if (terrain.path != null) {
                 call.path(at + TERRAIN_PATH, terrain.path);
             }
-            call.lend(terrain);
+            call.pass(terrain);
         }
     }
 
     /**
-     * The terrain an empty index borrows and the bounds it freezes - the fields
+     * The terrain an empty index views and the bounds it freezes - the fields
      * {@code usearch_geospatial_init_ram_t} and {@code usearch_geospatial_init_vram_t} share. Every
      * setter returns this instance.
      */
@@ -873,7 +873,7 @@ public final class GeospatialIndex implements AutoCloseable {
 
     final Handle handle;
 
-    /** Adopts a created handle, keeping the terrain it borrows reachable until the handle is freed. */
+    /** Adopts a created handle, keeping the terrain it views reachable until the handle is freed. */
     private GeospatialIndex(MemorySegment created, @Nullable GeospatialTerrain terrain) {
         handle = new Handle(created, FAMILY.free(), terrain);
     }

@@ -9,8 +9,9 @@
  *  @c dense_index_t::on blocks on an executor, or on the caller's own thread without one, and
  *  answers an @c outcome; @c dense_index_t::deferred submits to an executor and answers a
  *  @c deferred call its one owner polls or waits on. Each verb names the scalar of the matrix it
- *  passes, as in @c search<float>, and takes its handlers as @c noexcept callables borrowed for the
- *  call. Each verb answers the statuses its C function lists in @c usearch/dense_index.h.
+ *  passes, as in @c search<float>, and takes its handlers as @c noexcept callables it calls only
+ *  during the call. Each verb answers the statuses its C function lists in
+ *  @c usearch/dense_index.h.
  *
  *  @code{.cpp}
  *  namespace us = unum::usearch;
@@ -88,7 +89,8 @@ template <typename handler_type_>
 concept value_lookup_handler = std::is_nothrow_invocable_r_v<void, handler_type_&, usearch_key_t const*, std::size_t,
                                                              usearch_scalar_t, std::size_t, void const**>;
 
-/** The value rows @c attend gathers: a host handler borrowed for the call, or a device function. */
+/** The value rows @c attend gathers: a host handler read only during the call, or a device
+ *  function. */
 class value_lookup_t {
   public:
     value_lookup_t() noexcept = default;
@@ -235,7 +237,7 @@ struct dense_attend_config_t {
     /** Query heads sharing the index's key-value head, dividing the row count; zero means one. */
     std::size_t head_count = 0;
 
-    /** One online-softmax state per query row, lent by the caller; @c nullptr skips it. */
+    /** One online-softmax state per query row, passed by the caller; @c nullptr skips it. */
     usearch_dense_softmax_state_t* carry = nullptr;
 
     /** The breadth of the candidates the walk explores; zero derives. */
@@ -286,8 +288,9 @@ struct dense_maxsim_config_t {
  *      @c outcome, deferred answers a @c deferred call. Made by @c dense_index_t::on and
  *      @c dense_index_t::deferred.
  *
- *  Each verb is written once, filling its C struct with the result as its output slot. Every
- *  input, handler, plan and arena a deferred call names stays borrowed until it is final.
+ *  Each verb is written once, filling its C struct with the result as its output slot. Every input,
+ *  handler, plan and arena a deferred call names must stay allocated and unchanged until the call
+ *  is final, whichever verb it is.
  */
 template <usearch_completion_t completion_>
 class dense_index_on {

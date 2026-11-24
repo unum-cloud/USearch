@@ -1083,7 +1083,7 @@ fn Receiver(comptime completion: Completion, comptime Into: type) type {
         /// The result of a blocking call, final on return; nothing for a submitted one.
         fn end(self: Self, held: anytype) Answer(@TypeOf(held.result)) {
             if (completion == .deferred) return;
-            if (self.diagnostics) |lent| lent.* = held.outcome;
+            if (self.diagnostics) |passed| passed.* = held.outcome;
             try held.outcome.check();
             return held.result;
         }
@@ -1102,9 +1102,9 @@ fn Receiver(comptime completion: Completion, comptime Into: type) type {
         pub const contains = if (completion == .blocking) containsBlocking else {};
 
         fn diagnosedBlocking(self: Self, outcome: *Outcome) Self {
-            var lending = self;
-            lending.diagnostics = outcome;
-            return lending;
+            var passing = self;
+            passing.diagnostics = outcome;
+            return passing;
         }
 
         fn containsBlocking(self: Self, key: Key) Error!bool {
@@ -1475,7 +1475,7 @@ test "sequences cross as one tape, and each search finds its own entry first" {
     try index.on(executor).insert(&keys, try .of(u8, u64, words, &offsets), .{});
     try std.testing.expectEqual(@as(usize, 3), (try index.describe()).size);
 
-    // A lent outcome carries the binding's own refusal, as the dense verbs lend it.
+    // A passed outcome holds the binding's own refusal, as the dense verbs pass it.
     var outcome: Outcome = .{};
     try std.testing.expectError(Error.ShapeMismatch, index.diagnosed(&outcome).insert(keys[0..2], try .of(u8, u64, words, &offsets), .{}));
     try std.testing.expectEqualStrings("The key run and the tape disagree in length", outcome.text());

@@ -146,7 +146,7 @@ GeospatialSaveBuffer::usage = "GeospatialSaveBuffer[receiver, arena] saves the i
 GeospatialDescribe::usage = "GeospatialDescribe[receiver] reports the index's frozen connectivity and its current counters."
 
 VersionName::usage = "VersionName[] gives the library's semantic version."
-CapabilitiesCompiled::usage = "CapabilitiesCompiled[] lists the kernel families this build carries."
+CapabilitiesCompiled::usage = "CapabilitiesCompiled[] lists the kernel families this build holds."
 CapabilitiesAvailable::usage = "CapabilitiesAvailable[] lists the kernel families this machine can run."
 
 Begin["`Private`"]
@@ -164,9 +164,9 @@ receivingRows[name_String, before_List, after_List] := Quiet[<|
     NumericArray -> receiving[name, Join[before, {{LibraryDataType[NumericArray], "Shared"}, Boolean}, after]]|>,
     LibraryFunction::overload]
 
-lent = {LibraryDataType[NumericArray], "Shared"};
+passed = {LibraryDataType[NumericArray], "Shared"};
 weights = Sequence["Boolean", {LibraryDataType[NumericArray], "Constant"}, Integer];
-bytesTape = Sequence[lent, {Integer, 1, "Shared"}];
+bytesTape = Sequence[passed, {Integer, 1, "Shared"}];
 pointsTape = Sequence[{Real, 2, "Shared"}, {Integer, 1, "Shared"}];
 observed = Sequence[{Real, 2, "Constant"}, {Integer, 2, "Constant"}];
 reshardLists = Sequence["DataStore", "DataStore", Integer, Integer, Integer, Integer];
@@ -196,7 +196,7 @@ denseMetadataRead = verb["DenseMetadataRead", {Integer, "UTF8String"}];
 denseMetadataReadBuffer = verb["DenseMetadataReadBuffer", {Integer, LibraryDataType[NumericArray]}];
 denseReserve = receiving["DenseReserve", {Integer}];
 denseClear = receiving["DenseClear", {}];
-denseInsert = receivingRows["DenseInsert", {lent}, {Integer}];
+denseInsert = receivingRows["DenseInsert", {passed}, {Integer}];
 denseRefine = receiving["DenseRefine", {Integer, Integer, Integer}];
 denseRefinePlanFinish = receiving["DenseRefinePlanFinish", {Integer}];
 denseReshard = receiving["DenseReshard", {"DataStore", "DataStore", "Boolean", "DataStore", "Boolean", "DataStore",
@@ -211,8 +211,8 @@ denseSave = receiving["DenseSave", {"UTF8String"}];
 denseSaveBuffer = receiving["DenseSaveBuffer", {Integer}];
 denseDescribe = receiving["DenseDescribe", {}];
 denseMultiply = receivingRows["DenseMultiply", {}, {Integer, Integer, Integer}];
-denseValues = receivingRows["DenseValues", {lent}, {}];
-denseAttend = receivingRows["DenseAttend", {}, {lent, lent, "UTF8String", Integer, Integer, Integer, Integer, Real}];
+denseValues = receivingRows["DenseValues", {passed}, {}];
+denseAttend = receivingRows["DenseAttend", {}, {passed, passed, "UTF8String", Integer, Integer, Integer, Integer, Real}];
 
 sequenceInitRam = verb["SequenceInitRam", {Integer, "UTF8String", weights, "DataStore", Integer, Integer, "DataStore"}];
 sequenceInitVram = verb["SequenceInitVram", {Integer, "UTF8String", weights, "DataStore", Integer, Integer, "DataStore"}];
@@ -228,7 +228,7 @@ sequenceMetadataRead = verb["SequenceMetadataRead", {Integer, "UTF8String"}];
 sequenceMetadataReadBuffer = verb["SequenceMetadataReadBuffer", {Integer, LibraryDataType[NumericArray]}];
 sequenceReserve = receiving["SequenceReserve", {Integer, Integer}];
 sequenceClear = receiving["SequenceClear", {}];
-sequenceInsert = receiving["SequenceInsert", {lent, bytesTape, Integer}];
+sequenceInsert = receiving["SequenceInsert", {passed, bytesTape, Integer}];
 sequenceRefine = receiving["SequenceRefine", {Integer, Integer, Integer}];
 sequenceRefinePlanFinish = receiving["SequenceRefinePlanFinish", {Integer}];
 sequenceReshard = receiving["SequenceReshard", {reshardLists}];
@@ -255,7 +255,7 @@ shapesMetadataRead = verb["ShapesMetadataRead", {Integer, "UTF8String"}];
 shapesMetadataReadBuffer = verb["ShapesMetadataReadBuffer", {Integer, LibraryDataType[NumericArray]}];
 shapesReserve = receiving["ShapesReserve", {Integer, Integer}];
 shapesClear = receiving["ShapesClear", {}];
-shapesInsert = receiving["ShapesInsert", {lent, pointsTape, Integer}];
+shapesInsert = receiving["ShapesInsert", {passed, pointsTape, Integer}];
 shapesRefine = receiving["ShapesRefine", {Integer, Integer, Integer}];
 shapesRefinePlanFinish = receiving["ShapesRefinePlanFinish", {Integer}];
 shapesReshard = receiving["ShapesReshard", {reshardLists}];
@@ -282,7 +282,7 @@ geospatialMetadataRead = verb["GeospatialMetadataRead", {Integer, "UTF8String"}]
 geospatialMetadataReadBuffer = verb["GeospatialMetadataReadBuffer", {Integer, LibraryDataType[NumericArray]}];
 geospatialReserve = receiving["GeospatialReserve", {Integer}];
 geospatialClear = receiving["GeospatialClear", {}];
-geospatialInsert = receiving["GeospatialInsert", {lent, observed, Integer}];
+geospatialInsert = receiving["GeospatialInsert", {passed, observed, Integer}];
 geospatialRefine = receiving["GeospatialRefine", {Integer, Integer, Integer}];
 geospatialRefinePlanFinish = receiving["GeospatialRefinePlanFinish", {Integer}];
 geospatialReshard = receiving["GeospatialReshard", {reshardLists}];
@@ -319,7 +319,7 @@ offsets[lengths_List] := Developer`ToPackedArray[Prepend[Accumulate[lengths], 0]
 sequenceBytes[text_String] := ToCharacterCode[text, "UTF-8"]
 sequenceBytes[bytes_ByteArray] := Normal[bytes]
 sequenceBytes[bytes : {___Integer}] := bytes
-(* No NumericArray or packed matrix holds zero cells, so a tape of empty entries lends one cell its offsets never
+(* No NumericArray or packed matrix holds zero cells, so a tape of empty entries passes one cell its offsets never
    reach. *)
 sequencesTape[sequences_List] := With[{bytes = sequenceBytes /@ sequences},
     {NumericArray[Replace[Join @@ bytes, {} -> {0}], "UnsignedInteger8"], offsets[Length /@ bytes]}]

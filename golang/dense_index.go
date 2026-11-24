@@ -20,7 +20,7 @@ import (
 // Two unchecked promises, so each is asserted per verb rather than per group.
 //
 // `nocallback` says the C function can never re-enter Go, and cgo then skips the machinery that
-// makes a Go-to-C-to-Go crossing safe. It is claimed only where the argument structure carries no
+// makes a Go-to-C-to-Go crossing safe. It is claimed only where the argument structure holds no
 // callback and no executor.
 //
 // `noescape` says the call retains none of its pointer arguments, so Go may leave them on the
@@ -145,7 +145,7 @@ func DefaultDenseOptions() DenseOptions {
 // without opening it, and nothing a reader must choose for itself.
 //
 // ValuesPerKey is absent because it bounds a live handle's mutable state rather than anything
-// the serialized form carries, and the placement is absent because a checkpoint records where it
+// the serialized form holds, and the placement is absent because a checkpoint records where it
 // was written, never where a reader must keep it. Both stay yours to set in the load config.
 type DenseMetadata struct {
 	// Metric is the distance kind the checkpoint scores with.
@@ -297,7 +297,7 @@ type DenseSoftmaxState struct {
 	Partition float32
 }
 
-// stats lends optional telemetry as the pointer the C interface fills.
+// stats passes optional telemetry as the pointer the C interface fills.
 func (call *call) stats(stats *DenseTraversalStats) *C.usearch_traversal_stats_t {
 	if stats == nil {
 		return nil
@@ -321,7 +321,7 @@ type ValueLookup struct {
 	Row    func(key Key) (row uint, found bool)
 }
 
-// DenseLoadRamConfig carries the optional settings of DenseLoadRam.
+// DenseLoadRamConfig holds the optional settings of DenseLoadRam.
 type DenseLoadRamConfig struct {
 	// Executor is the one the read fans out over; nil reads on the calling goroutine.
 	Executor *Executor
@@ -341,7 +341,7 @@ type DenseLoadRamConfig struct {
 	ProgressSteps uint
 }
 
-// DenseLoadVramConfig carries the optional settings of DenseLoadVram.
+// DenseLoadVramConfig holds the optional settings of DenseLoadVram.
 type DenseLoadVramConfig struct {
 	// Executor is the one the upload runs on; nil uploads on the default stream of each device.
 	Executor *Executor
@@ -360,7 +360,7 @@ type DenseLoadVramConfig struct {
 	ProgressSteps uint
 }
 
-// DenseLoadRamBufferConfig carries the optional settings of DenseLoadRamBuffer.
+// DenseLoadRamBufferConfig holds the optional settings of DenseLoadRamBuffer.
 type DenseLoadRamBufferConfig struct {
 	// Executor is the one the copy fans out over; nil copies on the calling goroutine.
 	Executor *Executor
@@ -378,7 +378,7 @@ type DenseLoadRamBufferConfig struct {
 	ProgressSteps uint
 }
 
-// DenseLoadVramBufferConfig carries the optional settings of DenseLoadVramBuffer.
+// DenseLoadVramBufferConfig holds the optional settings of DenseLoadVramBuffer.
 type DenseLoadVramBufferConfig struct {
 	// Executor is the one the upload runs on; nil uploads on the default stream of each device.
 	Executor *Executor
@@ -397,7 +397,7 @@ type DenseLoadVramBufferConfig struct {
 	ProgressSteps uint
 }
 
-// DenseViewNvmeConfig carries the optional settings of DenseViewNvme.
+// DenseViewNvmeConfig holds the optional settings of DenseViewNvme.
 type DenseViewNvmeConfig struct {
 	// Executor is the NVMe executor whose rings read the checkpoint's headers; nil reads on the
 	// calling goroutine.
@@ -413,19 +413,19 @@ type DenseViewNvmeConfig struct {
 	KeyTableDomains []int32
 }
 
-// DenseMetadataReadConfig carries the optional settings of DenseMetadataRead.
+// DenseMetadataReadConfig holds the optional settings of DenseMetadataRead.
 type DenseMetadataReadConfig struct {
 	// Executor is the one the read runs on; nil reads on the calling goroutine.
 	Executor *Executor
 }
 
-// DenseMetadataReadBufferConfig carries the optional settings of DenseMetadataReadBuffer.
+// DenseMetadataReadBufferConfig holds the optional settings of DenseMetadataReadBuffer.
 type DenseMetadataReadBufferConfig struct {
 	// Executor is the one the read runs on; nil reads on the calling goroutine.
 	Executor *Executor
 }
 
-// DenseInsertConfig carries the optional settings of Insert. A zero value derives every setting.
+// DenseInsertConfig holds the optional settings of Insert. A zero value derives every setting.
 type DenseInsertConfig struct {
 	// ExpansionFactor is the breadth of the candidates the build walk explores; zero derives it
 	// from the geometry.
@@ -439,7 +439,7 @@ type DenseInsertConfig struct {
 	Stats *DenseTraversalStats
 }
 
-// DenseRefineConfig carries the optional settings of Refine. A zero value derives every setting.
+// DenseRefineConfig holds the optional settings of Refine. A zero value derives every setting.
 type DenseRefineConfig struct {
 	// ExpansionFactor is the breadth of the candidates the re-selection walk explores; zero derives
 	// it from the geometry.
@@ -458,7 +458,7 @@ type DenseRefineConfig struct {
 	Plan *DenseRefinePlan
 }
 
-// DenseSearchConfig carries the optional settings of Search. A zero value derives every setting.
+// DenseSearchConfig holds the optional settings of Search. A zero value derives every setting.
 type DenseSearchConfig struct {
 	// ExpansionFactor is the breadth of the candidates the walk explores; zero derives it from
 	// the geometry, and a scan ignores it.
@@ -479,7 +479,7 @@ type DenseSearchConfig struct {
 	Stats *DenseTraversalStats
 }
 
-// DenseMaxsimConfig carries the optional settings of Maxsim. A zero value derives every setting.
+// DenseMaxsimConfig holds the optional settings of Maxsim. A zero value derives every setting.
 type DenseMaxsimConfig struct {
 	// ExpansionFactor is the breadth of the candidates the walk explores; zero derives it from
 	// the geometry.
@@ -492,7 +492,7 @@ type DenseMaxsimConfig struct {
 	Stats *DenseTraversalStats
 }
 
-// DenseMultiplyConfig carries the optional settings of Multiply. A zero value derives every
+// DenseMultiplyConfig holds the optional settings of Multiply. A zero value derives every
 // setting.
 type DenseMultiplyConfig struct {
 	// Wanted bounds the pairs kept per left row, the first ones its walk scored; zero keeps every
@@ -509,12 +509,12 @@ type DenseMultiplyConfig struct {
 	Stats *DenseTraversalStats
 }
 
-// DenseAttendConfig carries the optional settings of Attend. A zero value derives every setting.
+// DenseAttendConfig holds the optional settings of Attend. A zero value derives every setting.
 type DenseAttendConfig struct {
 	// HeadCount is the query heads sharing the index's key-value head, and with it one walk per
 	// token: row t * HeadCount + h is head h of token t, so it must divide the rows; zero means one.
 	HeadCount uint
-	// Carry is the online-softmax state, one entry per query row and lent by the caller, which
+	// Carry is the online-softmax state, one entry per query row and passed by the caller, which
 	// folds this call into another over the same queries by partial-softmax rescaling.
 	Carry []DenseSoftmaxState
 	// OutputsScalar is the scalar type the attended rows land as; zero takes the queries' own.
@@ -533,7 +533,7 @@ type DenseAttendConfig struct {
 	Stats *DenseTraversalStats
 }
 
-// DenseReshardConfig carries the optional placements and settings of Reshard. A nil placement keeps
+// DenseReshardConfig holds the optional placements and settings of Reshard. A nil placement keeps
 // the handle's own.
 type DenseReshardConfig struct {
 	// MemoryDomains are the NUMA node IDs of a RAM placement of a handle recut in place, one shard
@@ -565,7 +565,7 @@ type DenseReshardConfig struct {
 	Plan *DenseReshardPlan
 }
 
-// DenseSampleConfig carries the optional settings of Sample. A zero value draws across the whole
+// DenseSampleConfig holds the optional settings of Sample. A zero value draws across the whole
 // index with nothing shown.
 type DenseSampleConfig struct {
 	// Shown holds the keys already shown: never drawn again, and the paths reach toward them.
@@ -587,7 +587,7 @@ type DenseSampleConfig struct {
 	Stats *DenseTraversalStats
 }
 
-// DenseSaveConfig carries the optional settings of Save.
+// DenseSaveConfig holds the optional settings of Save.
 type DenseSaveConfig struct {
 	// Progress reports the shards written and stops wherever it says to.
 	Progress ProgressCallback
@@ -595,7 +595,7 @@ type DenseSaveConfig struct {
 	ProgressSteps uint
 }
 
-// DenseSaveBufferConfig carries the optional settings of SaveBuffer.
+// DenseSaveBufferConfig holds the optional settings of SaveBuffer.
 type DenseSaveBufferConfig struct {
 	// Progress reports the bytes written and stops wherever it says to; a stopped save leaves no
 	// monolith.
@@ -604,7 +604,7 @@ type DenseSaveBufferConfig struct {
 	ProgressSteps uint
 }
 
-// DenseSearchStreamInitConfig carries the optional settings of SearchStream.
+// DenseSearchStreamInitConfig holds the optional settings of SearchStream.
 type DenseSearchStreamInitConfig struct {
 	// ExpansionFactor is the breadth of the candidates the walk explores; zero derives it from the
 	// geometry.
@@ -621,7 +621,7 @@ type DenseRefinePlan struct {
 	handle C.usearch_dense_refine_plan_t
 }
 
-// lower lends the plan's handle and phase to a call, both nil for no plan.
+// lower passes the plan's handle and phase to a call, both nil for no plan.
 func (plan *DenseRefinePlan) lower(call *call) (*C.usearch_dense_refine_plan_t, *C.usearch_phase_progress_t) {
 	if plan == nil {
 		return nil, nil
@@ -651,7 +651,7 @@ type DenseReshardPlan struct {
 	handle C.usearch_dense_reshard_plan_t
 }
 
-// lower lends the plan's handle and phase to a call, both nil for no plan.
+// lower passes the plan's handle and phase to a call, both nil for no plan.
 func (plan *DenseReshardPlan) lower(call *call) (*C.usearch_dense_reshard_plan_t, *C.usearch_phase_progress_t) {
 	if plan == nil {
 		return nil, nil
@@ -694,7 +694,7 @@ func (vectors DenseVectors) Columns() uint { return uint(vectors.raw.columns) }
 // Scalar reports the scalar type the rows were written as.
 func (vectors DenseVectors) Scalar() Scalar { return Scalar(vectors.raw.scalar) }
 
-// DenseValues borrows the rows from their arena as one slab of values, rows end to end, refused with
+// DenseValues views the rows from their arena as one slab of values, rows end to end, refused with
 // StatusInvalidArgument when Value is not the scalar type they were written as.
 func DenseValues[Value Element](vectors DenseVectors) ([]Value, error) {
 	if vectors.rows == 0 {
@@ -723,7 +723,7 @@ func (products DenseProducts) Queries() uint { return products.queries }
 // across every query, before the wanted bound cut any.
 func (products DenseProducts) Required() uint { return products.required }
 
-// Query borrows one left row's pairs from the arena - a key naming each indexed entry, and its
+// Query views one left row's pairs from the arena - a key naming each indexed entry, and its
 // product - or one query's keys; query must be below Queries.
 func (products DenseProducts) Query(query uint) ([]Key, []Distance) {
 	offsets := unsafe.Slice((*uint)(unsafe.Pointer(products.raw.offsets)), products.queries+1)
@@ -737,7 +737,7 @@ type Monolith struct {
 	raw C.usearch_bytes_view_t
 }
 
-// Bytes borrows the monolith from its arena.
+// Bytes views the monolith from its arena.
 func (monolith Monolith) Bytes() []byte {
 	return unsafe.Slice((*byte)(unsafe.Pointer(monolith.raw.data)), monolith.raw.length)
 }
@@ -753,12 +753,12 @@ type DenseBatch struct {
 // Written reports the entries the pull wrote; zero means the walk is exhausted.
 func (batch DenseBatch) Written() uint { return batch.written }
 
-// Keys borrows the entries' keys from the arena.
+// Keys views the entries' keys from the arena.
 func (batch DenseBatch) Keys() []Key {
 	return unsafe.Slice((*Key)(unsafe.Pointer(batch.keys.data)), batch.written)
 }
 
-// Links borrows the keys one entry links to from the arena, nil after NextKeys; entry must be below
+// Links views the keys one entry links to from the arena, nil after NextKeys; entry must be below
 // Written.
 func (batch DenseBatch) Links(entry uint) []Key {
 	if batch.links.offsets == nil {
@@ -782,12 +782,12 @@ type DenseDraws struct {
 // Written reports the draws; fewer than wanted only once the region is exhausted.
 func (draws DenseDraws) Written() uint { return draws.written }
 
-// Keys borrows the drawn keys from the arena.
+// Keys views the drawn keys from the arena.
 func (draws DenseDraws) Keys() []Key {
 	return unsafe.Slice((*Key)(unsafe.Pointer(draws.keys.data)), draws.written)
 }
 
-// EntryOrdinals borrows which of its key's entries each draw is, in the order Get writes them.
+// EntryOrdinals views which of its key's entries each draw is, in the order Get writes them.
 func (draws DenseDraws) EntryOrdinals() []uint {
 	return unsafe.Slice((*uint)(unsafe.Pointer(draws.entryOrdinals)), draws.written)
 }
@@ -856,35 +856,35 @@ func (index *DenseIndex) Close() error {
 // DenseInitRam creates an empty, mutable index in host memory, one shard per NUMA node
 // memoryDomains names; empty derives every node the process may use.
 func DenseInitRam(options DenseOptions, memoryDomains []int32) (*DenseIndex, error) {
-	lent := open[C.usearch_dense_index_t]()
+	call := open[C.usearch_dense_index_t]()
 	C.usearch_dense_init_ram(&C.usearch_dense_init_ram_t{
-		index:          lent.result,
-		outcome:        lent.outcome,
+		index:          call.result,
+		outcome:        call.outcome,
 		metric:         C.usearch_dense_metric_t(options.Metric),
 		quantization:   C.usearch_scalar_t(options.Quantization),
 		dimensions:     C.size_t(options.Dimensions),
 		connectivity:   C.size_t(options.Connectivity),
 		values_per_key: C.size_t(options.ValuesPerKey),
-		ram:            lent.ram(memoryDomains, options.CPUClassCeiling),
+		ram:            call.ram(memoryDomains, options.CPUClassCeiling),
 	})
-	return denseIndexOf(block(lent))
+	return denseIndexOf(block(call))
 }
 
 // DenseInitVram creates an empty, mutable index in device memory, sharded across the CUDA
 // ordinals devices names and never replicated; empty derives one free device.
 func DenseInitVram(options DenseOptions, devices []int32) (*DenseIndex, error) {
-	lent := open[C.usearch_dense_index_t]()
+	call := open[C.usearch_dense_index_t]()
 	C.usearch_dense_init_vram(&C.usearch_dense_init_vram_t{
-		index:          lent.result,
-		outcome:        lent.outcome,
+		index:          call.result,
+		outcome:        call.outcome,
 		metric:         C.usearch_dense_metric_t(options.Metric),
 		quantization:   C.usearch_scalar_t(options.Quantization),
 		dimensions:     C.size_t(options.Dimensions),
 		connectivity:   C.size_t(options.Connectivity),
 		values_per_key: C.size_t(options.ValuesPerKey),
-		vram:           lent.vram(devices, options.GPUClassCeiling),
+		vram:           call.vram(devices, options.GPUClassCeiling),
 	})
-	return denseIndexOf(block(lent))
+	return denseIndexOf(block(call))
 }
 
 // DenseLoadRam copies a checkpoint into a new, mutable index in host memory. The path names a
@@ -897,17 +897,17 @@ func DenseLoadRam(path string, config *DenseLoadRamConfig) (*DenseIndex, error) 
 	if refusal != nil {
 		return nil, refusal
 	}
-	lent := open[C.usearch_dense_index_t]()
+	call := open[C.usearch_dense_index_t]()
 	C.usearch_dense_load_ram(&C.usearch_dense_load_ram_t{
-		index:          lent.result,
+		index:          call.result,
 		executor:       executor,
-		outcome:        lent.outcome,
-		path:           lent.text(path),
-		ram:            lent.ram(config.MemoryDomains, config.CPUClassCeiling),
+		outcome:        call.outcome,
+		path:           call.text(path),
+		ram:            call.ram(config.MemoryDomains, config.CPUClassCeiling),
 		values_per_key: C.size_t(config.ValuesPerKey),
-		progress:       lent.progress(config.Progress, config.ProgressSteps),
+		progress:       call.progress(config.Progress, config.ProgressSteps),
 	})
-	return denseIndexOf(block(lent))
+	return denseIndexOf(block(call))
 }
 
 // DenseLoadVram copies a checkpoint into a new, mutable index in device memory, with the placement
@@ -920,17 +920,17 @@ func DenseLoadVram(path string, config *DenseLoadVramConfig) (*DenseIndex, error
 	if refusal != nil {
 		return nil, refusal
 	}
-	lent := open[C.usearch_dense_index_t]()
+	call := open[C.usearch_dense_index_t]()
 	C.usearch_dense_load_vram(&C.usearch_dense_load_vram_t{
-		index:          lent.result,
+		index:          call.result,
 		executor:       executor,
-		outcome:        lent.outcome,
-		path:           lent.text(path),
-		vram:           lent.vram(config.Devices, config.GPUClassCeiling),
+		outcome:        call.outcome,
+		path:           call.text(path),
+		vram:           call.vram(config.Devices, config.GPUClassCeiling),
 		values_per_key: C.size_t(config.ValuesPerKey),
-		progress:       lent.progress(config.Progress, config.ProgressSteps),
+		progress:       call.progress(config.Progress, config.ProgressSteps),
 	})
-	return denseIndexOf(block(lent))
+	return denseIndexOf(block(call))
 }
 
 // DenseLoadRamBuffer copies a monolith from a buffer into a new, mutable index in host memory, as
@@ -943,17 +943,17 @@ func DenseLoadRamBuffer(buffer []byte, config *DenseLoadRamBufferConfig) (*Dense
 	if refusal != nil {
 		return nil, refusal
 	}
-	lent := open[C.usearch_dense_index_t]()
+	call := open[C.usearch_dense_index_t]()
 	C.usearch_dense_load_ram_buffer(&C.usearch_dense_load_ram_buffer_t{
-		index:          lent.result,
+		index:          call.result,
 		executor:       executor,
-		outcome:        lent.outcome,
-		buffer:         lent.bytes(buffer),
-		ram:            lent.ram(config.MemoryDomains, config.CPUClassCeiling),
+		outcome:        call.outcome,
+		buffer:         call.bytes(buffer),
+		ram:            call.ram(config.MemoryDomains, config.CPUClassCeiling),
 		values_per_key: C.size_t(config.ValuesPerKey),
-		progress:       lent.progress(config.Progress, config.ProgressSteps),
+		progress:       call.progress(config.Progress, config.ProgressSteps),
 	})
-	return denseIndexOf(block(lent))
+	return denseIndexOf(block(call))
 }
 
 // DenseLoadVramBuffer copies a monolith from a buffer into a new, mutable index in device memory.
@@ -965,29 +965,29 @@ func DenseLoadVramBuffer(buffer []byte, config *DenseLoadVramBufferConfig) (*Den
 	if refusal != nil {
 		return nil, refusal
 	}
-	lent := open[C.usearch_dense_index_t]()
+	call := open[C.usearch_dense_index_t]()
 	C.usearch_dense_load_vram_buffer(&C.usearch_dense_load_vram_buffer_t{
-		index:          lent.result,
+		index:          call.result,
 		executor:       executor,
-		outcome:        lent.outcome,
-		buffer:         lent.bytes(buffer),
-		vram:           lent.vram(config.Devices, config.GPUClassCeiling),
+		outcome:        call.outcome,
+		buffer:         call.bytes(buffer),
+		vram:           call.vram(config.Devices, config.GPUClassCeiling),
 		values_per_key: C.size_t(config.ValuesPerKey),
-		progress:       lent.progress(config.Progress, config.ProgressSteps),
+		progress:       call.progress(config.Progress, config.ProgressSteps),
 	})
-	return denseIndexOf(block(lent))
+	return denseIndexOf(block(call))
 }
 
 // DenseViewRam serves a checkpoint in place through a memory mapping, as a read-only index
 // whose mutating verbs report StatusReadOnly; the files must stay unmodified while it lives.
 func DenseViewRam(path string) (*DenseIndex, error) {
-	lent := open[C.usearch_dense_index_t]()
+	call := open[C.usearch_dense_index_t]()
 	C.usearch_dense_view_ram(&C.usearch_dense_view_ram_t{
-		index:   lent.result,
-		outcome: lent.outcome,
-		path:    lent.text(path),
+		index:   call.result,
+		outcome: call.outcome,
+		path:    call.text(path),
 	})
-	return denseIndexOf(block(lent))
+	return denseIndexOf(block(call))
 }
 
 // DenseViewNvme serves a checkpoint in place from NVMe drives, read through the executor's
@@ -1000,16 +1000,16 @@ func DenseViewNvme(path string, config *DenseViewNvmeConfig) (*DenseIndex, error
 	if refusal != nil {
 		return nil, refusal
 	}
-	lent := open[C.usearch_dense_index_t]()
+	call := open[C.usearch_dense_index_t]()
 	C.usearch_dense_view_nvme(&C.usearch_dense_view_nvme_t{
-		index:    lent.result,
+		index:    call.result,
 		executor: executor,
-		outcome:  lent.outcome,
-		path:     lent.text(path),
-		nvme:     lent.nvme(config.Paths, config.CPUClassCeiling),
-		ram:      lent.keyTable(config.KeyTableDomains, config.CPUClassCeiling),
+		outcome:  call.outcome,
+		path:     call.text(path),
+		nvme:     call.nvme(config.Paths, config.CPUClassCeiling),
+		ram:      call.keyTable(config.KeyTableDomains, config.CPUClassCeiling),
 	})
-	return denseIndexOf(block(lent))
+	return denseIndexOf(block(call))
 }
 
 // DenseLoadNvme opens a checkpoint's manifest from NVMe drives as a writable index: it answers
@@ -1023,19 +1023,19 @@ func DenseLoadNvme(path string, config *DenseViewNvmeConfig) (*DenseIndex, error
 	if refusal != nil {
 		return nil, refusal
 	}
-	lent := open[C.usearch_dense_index_t]()
+	call := open[C.usearch_dense_index_t]()
 	C.usearch_dense_load_nvme(&C.usearch_dense_load_nvme_t{
-		index:    lent.result,
+		index:    call.result,
 		executor: executor,
-		outcome:  lent.outcome,
-		path:     lent.text(path),
-		nvme:     lent.nvme(config.Paths, config.CPUClassCeiling),
-		ram:      lent.keyTable(config.KeyTableDomains, config.CPUClassCeiling),
+		outcome:  call.outcome,
+		path:     call.text(path),
+		nvme:     call.nvme(config.Paths, config.CPUClassCeiling),
+		ram:      call.keyTable(config.KeyTableDomains, config.CPUClassCeiling),
 	})
-	return denseIndexOf(block(lent))
+	return denseIndexOf(block(call))
 }
 
-// keyTable lends the optional RAM placement of an NVMe handle's key table, nil holding none.
+// keyTable passes the optional RAM placement of an NVMe handle's key table, nil holding none.
 func (call *call) keyTable(memoryDomains []int32, cpuClassCeiling CPUClass) *C.usearch_ram_options_t {
 	if memoryDomains == nil {
 		return nil
@@ -1054,14 +1054,14 @@ func DenseMetadataRead(path string, config *DenseMetadataReadConfig) (DenseMetad
 	if refusal != nil {
 		return DenseMetadata{}, refusal
 	}
-	lent := open[DenseMetadata]()
+	call := open[DenseMetadata]()
 	C.usearch_dense_metadata_read(&C.usearch_dense_metadata_read_t{
 		executor: executor,
-		outcome:  lent.outcome,
-		path:     lent.text(path),
-		metadata: (*C.usearch_dense_metadata_t)(unsafe.Pointer(lent.result)),
+		outcome:  call.outcome,
+		path:     call.text(path),
+		metadata: (*C.usearch_dense_metadata_t)(unsafe.Pointer(call.result)),
 	})
-	return block(lent)
+	return block(call)
 }
 
 // DenseMetadataReadBuffer reads geometry and metric out of a serialized monolith buffer.
@@ -1073,14 +1073,14 @@ func DenseMetadataReadBuffer(buffer []byte, config *DenseMetadataReadBufferConfi
 	if refusal != nil {
 		return DenseMetadata{}, refusal
 	}
-	lent := open[DenseMetadata]()
+	call := open[DenseMetadata]()
 	C.usearch_dense_metadata_read_buffer(&C.usearch_dense_metadata_read_buffer_t{
 		executor: executor,
-		outcome:  lent.outcome,
-		buffer:   lent.bytes(buffer),
-		metadata: (*C.usearch_dense_metadata_t)(unsafe.Pointer(lent.result)),
+		outcome:  call.outcome,
+		buffer:   call.bytes(buffer),
+		metadata: (*C.usearch_dense_metadata_t)(unsafe.Pointer(call.result)),
 	})
-	return block(lent)
+	return block(call)
 }
 
 // endregion: Index
@@ -1113,7 +1113,7 @@ type DenseIndexOn struct {
 // cursors and streams. Binding-only.
 //
 // The library reads a deferred call's inputs until the call is final, so the slices a verb is
-// handed must not change until then; its arena is borrowed, as a blocking verb borrows it.
+// handed must not change until then; its arena is viewed, as a blocking verb views it.
 type DenseIndexDeferredOn struct {
 	denseReceiver
 }
@@ -1233,7 +1233,7 @@ func (on DenseIndexDeferredOn) Health() *Deferred[DenseReachability] {
 }
 
 // Search resolves a matrix of queries into up to wanted nearest matches apiece, written into arena
-// - the native batch path, parallelized internally, and filtered when the config carries a predicate.
+// - the native batch path, parallelized internally, and filtered when the config holds a predicate.
 //
 // Never writes to the graph, so any number of these may overlap with concurrent insertions. A
 // zero wanted walks nothing and lands only the counts, every one zero.
@@ -1386,317 +1386,317 @@ func (on DenseIndexDeferredOn) SaveBuffer(arena *Arena, config *DenseSaveBufferC
 
 // region: Calls
 
-func (receiver denseReceiver) reserve(completion C.usearch_completion_t, capacity uint) *lent[struct{}] {
-	lent := open[struct{}]()
+func (receiver denseReceiver) reserve(completion C.usearch_completion_t, capacity uint) *callWithResult[struct{}] {
+	call := open[struct{}]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	C.usearch_dense_reserve(&C.usearch_dense_reserve_t{
 		index:      index,
 		executor:   executor,
-		outcome:    lent.outcome,
+		outcome:    call.outcome,
 		completion: completion,
 		capacity:   C.size_t(capacity),
 	})
-	return lent
+	return call
 }
 
-func (receiver denseReceiver) clear(completion C.usearch_completion_t) *lent[struct{}] {
-	lent := open[struct{}]()
+func (receiver denseReceiver) clear(completion C.usearch_completion_t) *callWithResult[struct{}] {
+	call := open[struct{}]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	C.usearch_dense_clear(&C.usearch_dense_clear_t{
 		index:      index,
 		executor:   executor,
-		outcome:    lent.outcome,
+		outcome:    call.outcome,
 		completion: completion,
 	})
-	return lent
+	return call
 }
 
-func (receiver denseReceiver) describe(completion C.usearch_completion_t) *lent[DenseIndexDescription] {
-	lent := open[DenseIndexDescription]()
+func (receiver denseReceiver) describe(completion C.usearch_completion_t) *callWithResult[DenseIndexDescription] {
+	call := open[DenseIndexDescription]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	C.usearch_dense_describe(&C.usearch_dense_describe_t{
 		index:       index,
 		executor:    executor,
-		outcome:     lent.outcome,
+		outcome:     call.outcome,
 		completion:  completion,
-		description: (*C.usearch_dense_index_description_t)(unsafe.Pointer(lent.result)),
+		description: (*C.usearch_dense_index_description_t)(unsafe.Pointer(call.result)),
 	})
-	return lent
+	return call
 }
 
-func (receiver denseReceiver) count(completion C.usearch_completion_t, key Key) *lent[uint] {
-	lent := open[uint]()
+func (receiver denseReceiver) count(completion C.usearch_completion_t, key Key) *callWithResult[uint] {
+	call := open[uint]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	C.usearch_dense_count(&C.usearch_dense_count_t{
 		index:      index,
 		executor:   executor,
-		outcome:    lent.outcome,
+		outcome:    call.outcome,
 		completion: completion,
 		key:        key.toRaw(),
-		entries:    (*C.size_t)(unsafe.Pointer(lent.result)),
+		entries:    (*C.size_t)(unsafe.Pointer(call.result)),
 	})
-	return lent
+	return call
 }
 
 func (receiver denseReceiver) get(completion C.usearch_completion_t, key Key, outputsScalar Scalar,
-	arena *Arena) *lent[DenseVectors] {
-	lent := open[DenseVectors]()
+	arena *Arena) *callWithResult[DenseVectors] {
+	call := open[DenseVectors]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	C.usearch_dense_get(&C.usearch_dense_get_t{
 		index:          index,
 		executor:       executor,
-		outcome:        lent.outcome,
+		outcome:        call.outcome,
 		completion:     completion,
 		key:            key.toRaw(),
-		vectors:        &lent.result.raw,
-		written:        (*C.size_t)(unsafe.Pointer(&lent.result.rows)),
+		vectors:        &call.result.raw,
+		written:        (*C.size_t)(unsafe.Pointer(&call.result.rows)),
 		arena:          arena.lower(),
 		outputs_scalar: C.usearch_scalar_t(outputsScalar),
 	})
-	return lent
+	return call
 }
 
 func (receiver denseReceiver) insert(completion C.usearch_completion_t, keys []Key, vectors RowsView,
-	config *DenseInsertConfig) *lent[struct{}] {
+	config *DenseInsertConfig) *callWithResult[struct{}] {
 	if config == nil {
 		config = new(DenseInsertConfig)
 	}
-	lent := open[struct{}]()
+	call := open[struct{}]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	// The call has one count, so only this side sees the keys and the rows disagree.
 	if uint(len(keys)) != vectors.rows {
-		return lent.refuse(fail(StatusShapeMismatch, "the key count does not match the vector row count"))
+		return call.refuse(fail(StatusShapeMismatch, "the key count does not match the vector row count"))
 	}
 	C.usearch_dense_insert(&C.usearch_dense_insert_t{
 		index:            index,
 		executor:         executor,
-		outcome:          lent.outcome,
+		outcome:          call.outcome,
 		completion:       completion,
 		count:            C.size_t(vectors.rows),
-		keys:             lent.keys(keys),
-		vectors:          vectors.lower(&lent.call),
+		keys:             call.keys(keys),
+		vectors:          vectors.lower(&call.call),
 		expansion_factor: C.size_t(config.ExpansionFactor),
-		progress:         lent.progress(config.Progress, config.ProgressSteps),
-		stats:            lent.stats(config.Stats),
+		progress:         call.progress(config.Progress, config.ProgressSteps),
+		stats:            call.stats(config.Stats),
 	})
-	return lent
+	return call
 }
 
 func (receiver denseReceiver) refine(completion C.usearch_completion_t,
-	config *DenseRefineConfig) *lent[DenseRefineReport] {
+	config *DenseRefineConfig) *callWithResult[DenseRefineReport] {
 	if config == nil {
 		config = new(DenseRefineConfig)
 	}
-	lent := open[DenseRefineReport]()
+	call := open[DenseRefineReport]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
-	plan, phase := config.Plan.lower(&lent.call)
+	plan, phase := config.Plan.lower(&call.call)
 	C.usearch_dense_refine(&C.usearch_dense_refine_t{
 		index:      index,
 		executor:   executor,
-		outcome:    lent.outcome,
+		outcome:    call.outcome,
 		completion: completion,
-		report:     (*C.usearch_refine_report_t)(unsafe.Pointer(lent.result)),
+		report:     (*C.usearch_refine_report_t)(unsafe.Pointer(call.result)),
 		refine: C.usearch_refine_options_t{
 			expansion_factor: C.size_t(config.ExpansionFactor),
 			memory_limit:     C.size_t(config.MemoryLimit),
 		},
-		progress: lent.progress(config.Progress, config.ProgressSteps),
-		stats:    lent.stats(config.Stats),
+		progress: call.progress(config.Progress, config.ProgressSteps),
+		stats:    call.stats(config.Stats),
 		plan:     plan,
 		phase:    phase,
 	})
-	return lent
+	return call
 }
 
 func (receiver denseReceiver) refinePlanFinish(completion C.usearch_completion_t,
-	plan *DenseRefinePlan) *lent[DenseRefineReport] {
-	lent := open[DenseRefineReport]()
+	plan *DenseRefinePlan) *callWithResult[DenseRefineReport] {
+	call := open[DenseRefineReport]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	C.usearch_dense_refine_plan_finish(&C.usearch_dense_refine_plan_finish_t{
 		index:      index,
 		executor:   executor,
-		outcome:    lent.outcome,
+		outcome:    call.outcome,
 		completion: completion,
 		plan:       plan.take(),
-		report:     (*C.usearch_refine_report_t)(unsafe.Pointer(lent.result)),
+		report:     (*C.usearch_refine_report_t)(unsafe.Pointer(call.result)),
 	})
-	return lent
+	return call
 }
 
-func (receiver denseReceiver) health(completion C.usearch_completion_t) *lent[DenseReachability] {
-	lent := open[DenseReachability]()
+func (receiver denseReceiver) health(completion C.usearch_completion_t) *callWithResult[DenseReachability] {
+	call := open[DenseReachability]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	C.usearch_dense_health(&C.usearch_dense_health_t{
 		index:        index,
 		executor:     executor,
-		outcome:      lent.outcome,
+		outcome:      call.outcome,
 		completion:   completion,
-		reachability: (*C.usearch_reachability_t)(unsafe.Pointer(lent.result)),
+		reachability: (*C.usearch_reachability_t)(unsafe.Pointer(call.result)),
 	})
-	return lent
+	return call
 }
 
 func (receiver denseReceiver) search(completion C.usearch_completion_t, queries RowsView, wanted uint,
-	arena *Arena, config *DenseSearchConfig) *lent[MatchesView] {
+	arena *Arena, config *DenseSearchConfig) *callWithResult[MatchesView] {
 	if config == nil {
 		config = new(DenseSearchConfig)
 	}
-	lent := open[MatchesView]()
+	call := open[MatchesView]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
-	lent.result.queries = queries.rows
+	call.result.queries = queries.rows
 	C.usearch_dense_search(&C.usearch_dense_search_t{
 		index:            index,
 		executor:         executor,
-		outcome:          lent.outcome,
+		outcome:          call.outcome,
 		completion:       completion,
 		count:            C.size_t(queries.rows),
-		queries:          queries.lower(&lent.call),
-		matches:          &lent.result.raw,
+		queries:          queries.lower(&call.call),
+		matches:          &call.result.raw,
 		arena:            arena.lower(),
 		wanted:           C.size_t(wanted),
 		expansion_factor: C.size_t(config.ExpansionFactor),
 		traversal:        C.usearch_traversal_t(config.Traversal),
-		predicate:        lent.predicate(config.Predicate),
-		progress:         lent.progress(config.Progress, config.ProgressSteps),
-		stats:            lent.stats(config.Stats),
+		predicate:        call.predicate(config.Predicate),
+		progress:         call.progress(config.Progress, config.ProgressSteps),
+		stats:            call.stats(config.Stats),
 	})
-	return lent
+	return call
 }
 
 func (receiver denseReceiver) maxsim(completion C.usearch_completion_t, queries RowsView, rowsPerQuery, wanted uint,
-	arena *Arena, config *DenseMaxsimConfig) *lent[DenseProducts] {
+	arena *Arena, config *DenseMaxsimConfig) *callWithResult[DenseProducts] {
 	if config == nil {
 		config = new(DenseMaxsimConfig)
 	}
-	lent := open[DenseProducts]()
+	call := open[DenseProducts]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	// The call counts queries, so only this side sees the matrix's rows fail to divide.
 	if rowsPerQuery == 0 || queries.rows%rowsPerQuery != 0 {
-		return lent.refuse(fail(StatusShapeMismatch, "the query rows do not divide into whole queries"))
+		return call.refuse(fail(StatusShapeMismatch, "the query rows do not divide into whole queries"))
 	}
-	lent.result.queries = queries.rows / rowsPerQuery
+	call.result.queries = queries.rows / rowsPerQuery
 	C.usearch_dense_maxsim(&C.usearch_dense_maxsim_t{
 		index:            index,
 		executor:         executor,
-		outcome:          lent.outcome,
+		outcome:          call.outcome,
 		completion:       completion,
-		count:            C.size_t(lent.result.queries),
-		queries:          queries.lower(&lent.call),
+		count:            C.size_t(call.result.queries),
+		queries:          queries.lower(&call.call),
 		rows_per_query:   C.size_t(rowsPerQuery),
-		matches:          &lent.result.raw,
-		required:         (*C.size_t)(unsafe.Pointer(&lent.result.required)),
+		matches:          &call.result.raw,
+		required:         (*C.size_t)(unsafe.Pointer(&call.result.required)),
 		arena:            arena.lower(),
 		wanted:           C.size_t(wanted),
 		expansion_factor: C.size_t(config.ExpansionFactor),
-		progress:         lent.progress(config.Progress, config.ProgressSteps),
-		stats:            lent.stats(config.Stats),
+		progress:         call.progress(config.Progress, config.ProgressSteps),
+		stats:            call.stats(config.Stats),
 	})
-	return lent
+	return call
 }
 
 func (receiver denseReceiver) multiply(completion C.usearch_completion_t, left RowsView, arena *Arena,
-	config *DenseMultiplyConfig) *lent[DenseProducts] {
+	config *DenseMultiplyConfig) *callWithResult[DenseProducts] {
 	if config == nil {
 		config = new(DenseMultiplyConfig)
 	}
-	lent := open[DenseProducts]()
+	call := open[DenseProducts]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
-	lent.result.queries = left.rows
+	call.result.queries = left.rows
 	C.usearch_dense_multiply(&C.usearch_dense_multiply_t{
 		index:            index,
 		executor:         executor,
-		outcome:          lent.outcome,
+		outcome:          call.outcome,
 		completion:       completion,
 		count:            C.size_t(left.rows),
-		left:             left.lower(&lent.call),
-		products:         &lent.result.raw,
-		required:         (*C.size_t)(unsafe.Pointer(&lent.result.required)),
+		left:             left.lower(&call.call),
+		products:         &call.result.raw,
+		required:         (*C.size_t)(unsafe.Pointer(&call.result.required)),
 		arena:            arena.lower(),
 		wanted:           C.size_t(config.Wanted),
 		expansion_factor: C.size_t(config.ExpansionFactor),
-		progress:         lent.progress(config.Progress, config.ProgressSteps),
-		stats:            lent.stats(config.Stats),
+		progress:         call.progress(config.Progress, config.ProgressSteps),
+		stats:            call.stats(config.Stats),
 	})
-	return lent
+	return call
 }
 
 func (receiver denseReceiver) attend(completion C.usearch_completion_t, queries RowsView, lookup ValueLookup,
-	arena *Arena, config *DenseAttendConfig) *lent[DenseVectors] {
+	arena *Arena, config *DenseAttendConfig) *callWithResult[DenseVectors] {
 	if config == nil {
 		config = new(DenseAttendConfig)
 	}
-	lent := open[DenseVectors]()
+	call := open[DenseVectors]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	// The carry pointer has no length, so only this side can see it fall short.
 	if config.Carry != nil && uint(len(config.Carry)) < queries.rows {
-		return lent.refuse(fail(StatusShapeMismatch, "the softmax carry holds fewer entries than there are queries"))
+		return call.refuse(fail(StatusShapeMismatch, "the softmax carry holds fewer entries than there are queries"))
 	}
 	var valueLookup C.usearch_value_lookup_t
 	var valueLookupState unsafe.Pointer
 	if lookup.Row != nil {
-		lent.pinner.Pin(lookup.Values.pointer)
-		valueLookup, valueLookupState = C.usearch_go_looks_up_values(), lent.callback(lookup)
+		call.pinner.Pin(lookup.Values.pointer)
+		valueLookup, valueLookupState = C.usearch_go_looks_up_values(), call.callback(lookup)
 	}
-	lent.result.rows = queries.rows
+	call.result.rows = queries.rows
 	C.usearch_dense_attend(&C.usearch_dense_attend_t{
 		index:              index,
 		executor:           executor,
-		outcome:            lent.outcome,
+		outcome:            call.outcome,
 		completion:         completion,
 		count:              C.size_t(queries.rows),
-		queries:            queries.lower(&lent.call),
+		queries:            queries.lower(&call.call),
 		head_count:         C.size_t(config.HeadCount),
 		value_lookup:       valueLookup,
 		value_lookup_state: valueLookupState,
-		carry:              (*C.usearch_dense_softmax_state_t)(unsafe.Pointer(lend(&lent.call, config.Carry))),
-		outputs:            &lent.result.raw,
+		carry:              (*C.usearch_dense_softmax_state_t)(unsafe.Pointer(pinSlice(&call.call, config.Carry))),
+		outputs:            &call.result.raw,
 		arena:              arena.lower(),
 		outputs_scalar:     C.usearch_scalar_t(config.OutputsScalar),
 		expansion_factor:   C.size_t(config.ExpansionFactor),
 		score_scale:        C.float(config.ScoreScale),
-		progress:           lent.progress(config.Progress, config.ProgressSteps),
-		stats:              lent.stats(config.Stats),
+		progress:           call.progress(config.Progress, config.ProgressSteps),
+		stats:              call.stats(config.Stats),
 	})
-	return lent
+	return call
 }
 
 //export usearchLooksUpValues
@@ -1719,58 +1719,58 @@ func usearchLooksUpValues(state unsafe.Pointer, keys *C.usearch_key_t, count C.s
 }
 
 func (receiver denseReceiver) reshard(completion C.usearch_completion_t, sources, targets []*DenseIndex,
-	config *DenseReshardConfig) *lent[DenseRefineReport] {
+	config *DenseReshardConfig) *callWithResult[DenseRefineReport] {
 	if config == nil {
 		config = new(DenseReshardConfig)
 	}
-	lent := open[DenseRefineReport]()
-	// A reshard names its handles in its lists, so the receiver lends only its executor.
+	call := open[DenseRefineReport]()
+	// A reshard names its handles in its lists, so the receiver passes only its executor.
 	executor, refusal := receiver.executor.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	var ram *C.usearch_ram_options_t
 	if config.MemoryDomains != nil {
-		placement := lent.ram(config.MemoryDomains, 0)
+		placement := call.ram(config.MemoryDomains, 0)
 		placement.shard_capacity = C.size_t(config.ShardCapacity)
-		ram = pin(&lent.call, &placement)
+		ram = pin(&call.call, &placement)
 	}
 	var vram *C.usearch_vram_options_t
 	if config.Devices != nil {
-		placement := lent.vram(config.Devices, 0)
+		placement := call.vram(config.Devices, 0)
 		placement.shard_capacity = C.size_t(config.ShardCapacity)
-		vram = pin(&lent.call, &placement)
+		vram = pin(&call.call, &placement)
 	}
 	var nvme *C.usearch_nvme_options_t
 	if config.Paths != nil {
-		placement := lent.nvme(config.Paths, 0)
-		nvme = pin(&lent.call, &placement)
+		placement := call.nvme(config.Paths, 0)
+		nvme = pin(&call.call, &placement)
 	}
 	sourceHandles, targetHandles := denseHandles(sources), denseHandles(targets)
-	plan, phase := config.Plan.lower(&lent.call)
+	plan, phase := config.Plan.lower(&call.call)
 	C.usearch_dense_reshard(&C.usearch_dense_reshard_t{
 		sources_count: C.size_t(len(sourceHandles)),
-		sources:       lend(&lent.call, sourceHandles),
+		sources:       pinSlice(&call.call, sourceHandles),
 		targets_count: C.size_t(len(targetHandles)),
-		targets:       lend(&lent.call, targetHandles),
+		targets:       pinSlice(&call.call, targetHandles),
 		executor:      executor,
-		outcome:       lent.outcome,
+		outcome:       call.outcome,
 		completion:    completion,
 		ram:           ram,
 		vram:          vram,
 		nvme:          nvme,
-		report:        (*C.usearch_refine_report_t)(unsafe.Pointer(lent.result)),
+		report:        (*C.usearch_refine_report_t)(unsafe.Pointer(call.result)),
 		refine: C.usearch_refine_options_t{
 			expansion_factor: C.size_t(config.ExpansionFactor),
 			memory_limit:     C.size_t(config.MemoryLimit),
 		},
 		seed:     C.uint64_t(config.Seed),
-		progress: lent.progress(config.Progress, config.ProgressSteps),
-		stats:    lent.stats(config.Stats),
+		progress: call.progress(config.Progress, config.ProgressSteps),
+		stats:    call.stats(config.Stats),
 		plan:     plan,
 		phase:    phase,
 	})
-	return lent
+	return call
 }
 
 // denseHandles lists the handles of indexes.
@@ -1783,103 +1783,103 @@ func denseHandles(indexes []*DenseIndex) []C.usearch_dense_index_t {
 }
 
 func (receiver denseReceiver) reshardPlanFinish(completion C.usearch_completion_t,
-	plan *DenseReshardPlan) *lent[DenseRefineReport] {
-	lent := open[DenseRefineReport]()
-	// A reshard names its handles in its lists, so the receiver lends only its executor.
+	plan *DenseReshardPlan) *callWithResult[DenseRefineReport] {
+	call := open[DenseRefineReport]()
+	// A reshard names its handles in its lists, so the receiver passes only its executor.
 	executor, refusal := receiver.executor.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	C.usearch_dense_reshard_plan_finish(&C.usearch_dense_reshard_plan_finish_t{
 		executor:   executor,
-		outcome:    lent.outcome,
+		outcome:    call.outcome,
 		completion: completion,
 		plan:       plan.take(),
-		report:     (*C.usearch_refine_report_t)(unsafe.Pointer(lent.result)),
+		report:     (*C.usearch_refine_report_t)(unsafe.Pointer(call.result)),
 	})
-	return lent
+	return call
 }
 
 func (receiver denseReceiver) sample(completion C.usearch_completion_t, wanted uint, arena *Arena,
-	config *DenseSampleConfig) *lent[DenseDraws] {
+	config *DenseSampleConfig) *callWithResult[DenseDraws] {
 	if config == nil {
 		config = new(DenseSampleConfig)
 	}
-	lent := open[DenseDraws]()
+	call := open[DenseDraws]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	// The call has one count for both, so only this side sees the keys and their places disagree.
 	if len(config.Shown) != len(config.ShownCoordinates) {
-		return lent.refuse(fail(StatusShapeMismatch, "the shown keys and coordinates disagree in length"))
+		return call.refuse(fail(StatusShapeMismatch, "the shown keys and coordinates disagree in length"))
 	}
 	C.usearch_dense_sample(&C.usearch_dense_sample_t{
 		index:             index,
 		executor:          executor,
-		outcome:           lent.outcome,
+		outcome:           call.outcome,
 		completion:        completion,
 		shown_count:       C.size_t(len(config.Shown)),
-		shown:             lent.keys(config.Shown),
-		shown_coordinates: lent.points(config.ShownCoordinates),
+		shown:             call.keys(config.Shown),
+		shown_coordinates: call.points(config.ShownCoordinates),
 		focus_count:       C.size_t(len(config.Focus)),
-		focus:             lent.keys(config.Focus),
-		keys:              &lent.result.keys,
-		entry_ordinals:    &lent.result.entryOrdinals,
-		parents:           &lent.result.parents,
-		coordinates:       &lent.result.coordinates,
-		written:           (*C.size_t)(unsafe.Pointer(&lent.result.written)),
+		focus:             call.keys(config.Focus),
+		keys:              &call.result.keys,
+		entry_ordinals:    &call.result.entryOrdinals,
+		parents:           &call.result.parents,
+		coordinates:       &call.result.coordinates,
+		written:           (*C.size_t)(unsafe.Pointer(&call.result.written)),
 		arena:             arena.lower(),
 		wanted:            C.size_t(wanted),
 		seed:              C.uint64_t(config.Seed),
 		expansion_factor:  C.size_t(config.ExpansionFactor),
-		progress:          lent.progress(config.Progress, config.ProgressSteps),
-		stats:             lent.stats(config.Stats),
+		progress:          call.progress(config.Progress, config.ProgressSteps),
+		stats:             call.stats(config.Stats),
 	})
-	return lent
+	return call
 }
 
 func (receiver denseReceiver) save(completion C.usearch_completion_t, path string,
-	config *DenseSaveConfig) *lent[struct{}] {
+	config *DenseSaveConfig) *callWithResult[struct{}] {
 	if config == nil {
 		config = new(DenseSaveConfig)
 	}
-	lent := open[struct{}]()
+	call := open[struct{}]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	C.usearch_dense_save(&C.usearch_dense_save_t{
 		index:      index,
 		executor:   executor,
-		outcome:    lent.outcome,
+		outcome:    call.outcome,
 		completion: completion,
-		path:       lent.text(path),
-		progress:   lent.progress(config.Progress, config.ProgressSteps),
+		path:       call.text(path),
+		progress:   call.progress(config.Progress, config.ProgressSteps),
 	})
-	return lent
+	return call
 }
 
 func (receiver denseReceiver) saveBuffer(completion C.usearch_completion_t, arena *Arena,
-	config *DenseSaveBufferConfig) *lent[Monolith] {
+	config *DenseSaveBufferConfig) *callWithResult[Monolith] {
 	if config == nil {
 		config = new(DenseSaveBufferConfig)
 	}
-	lent := open[Monolith]()
+	call := open[Monolith]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	C.usearch_dense_save_buffer(&C.usearch_dense_save_buffer_t{
 		index:      index,
 		executor:   executor,
-		outcome:    lent.outcome,
+		outcome:    call.outcome,
 		completion: completion,
-		monolith:   &lent.result.raw,
+		monolith:   &call.result.raw,
 		arena:      arena.lower(),
-		progress:   lent.progress(config.Progress, config.ProgressSteps),
+		progress:   call.progress(config.Progress, config.ProgressSteps),
 	})
-	return lent
+	return call
 }
 
 // endregion: Calls
@@ -1901,15 +1901,15 @@ func (on DenseIndexOn) Cursor(starts ...Key) (*DenseCursor, error) {
 	if refusal != nil {
 		return nil, refusal
 	}
-	lent := open[C.usearch_dense_cursor_t]()
+	call := open[C.usearch_dense_cursor_t]()
 	C.usearch_dense_cursor_init(&C.usearch_dense_cursor_init_t{
 		index:        index,
-		outcome:      lent.outcome,
+		outcome:      call.outcome,
 		starts_count: C.size_t(len(starts)),
-		starts:       (*C.usearch_key_t)(unsafe.Pointer(lend(&lent.call, starts))),
-		cursor:       lent.result,
+		starts:       (*C.usearch_key_t)(unsafe.Pointer(pinSlice(&call.call, starts))),
+		cursor:       call.result,
 	})
-	handle, err := block(lent)
+	handle, err := block(call)
 	if err != nil {
 		return nil, err
 	}
@@ -1933,24 +1933,24 @@ func (cursor *DenseCursor) next(wanted uint, linked bool, arena *Arena) (DenseBa
 	if refusal != nil {
 		return DenseBatch{}, refusal
 	}
-	lent := open[DenseBatch]()
+	call := open[DenseBatch]()
 	var links *C.usearch_keys_tape_view_t
 	if linked {
-		links = &lent.result.links
+		links = &call.result.links
 	}
 	C.usearch_dense_cursor_next(&C.usearch_dense_cursor_next_t{
 		index:      index,
 		executor:   executor,
-		outcome:    lent.outcome,
+		outcome:    call.outcome,
 		completion: C.usearch_completion_blocking_k,
 		cursor:     cursor.handle,
-		keys:       &lent.result.keys,
+		keys:       &call.result.keys,
 		links:      links,
-		written:    (*C.size_t)(unsafe.Pointer(&lent.result.written)),
+		written:    (*C.size_t)(unsafe.Pointer(&call.result.written)),
 		arena:      arena.lower(),
 		wanted:     C.size_t(wanted),
 	})
-	return block(lent)
+	return block(call)
 }
 
 // Close releases the cursor. It is idempotent.
@@ -1979,22 +1979,22 @@ func (on DenseIndexOn) SearchStream(query RowsView, config *DenseSearchStreamIni
 		config = new(DenseSearchStreamInitConfig)
 	}
 	index, _, refusal := on.lower()
-	// The call takes one row and no count, so only this side sees a matrix carrying more.
+	// The call takes one row and no count, so only this side sees a matrix holding more.
 	if refusal == nil && query.rows != 1 {
 		refusal = fail(StatusShapeMismatch, "a stream walks exactly one query row")
 	}
 	if refusal != nil {
 		return nil, refusal
 	}
-	lent := open[C.usearch_dense_search_stream_t]()
+	call := open[C.usearch_dense_search_stream_t]()
 	C.usearch_dense_search_stream_init(&C.usearch_dense_search_stream_init_t{
-		stream:           lent.result,
+		stream:           call.result,
 		index:            index,
-		outcome:          lent.outcome,
-		query:            query.lower(&lent.call),
+		outcome:          call.outcome,
+		query:            query.lower(&call.call),
 		expansion_factor: C.size_t(config.ExpansionFactor),
 	})
-	handle, err := block(lent)
+	handle, err := block(call)
 	if err != nil {
 		return nil, err
 	}
@@ -2008,19 +2008,19 @@ func (stream *DenseSearchStream) Next(wanted uint, arena *Arena) (MatchesView, e
 	if refusal != nil {
 		return MatchesView{}, refusal
 	}
-	lent := open[MatchesView]()
-	lent.result.queries = 1
+	call := open[MatchesView]()
+	call.result.queries = 1
 	C.usearch_dense_search_stream_next(&C.usearch_dense_search_stream_next_t{
 		index:      index,
 		executor:   executor,
-		outcome:    lent.outcome,
+		outcome:    call.outcome,
 		completion: C.usearch_completion_blocking_k,
 		stream:     stream.handle,
-		matches:    &lent.result.raw,
+		matches:    &call.result.raw,
 		arena:      arena.lower(),
 		wanted:     C.size_t(wanted),
 	})
-	return block(lent)
+	return block(call)
 }
 
 // Close releases the stream and the walk state it keeps. It is idempotent.

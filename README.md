@@ -131,13 +131,13 @@ See [contributing](https://github.com/unum-cloud/USearch/blob/main/CONTRIBUTING.
 An index dispatches on its Modality, Residency, stored scalar type, metric, & available hardware.
 The build selects the kernel families it includes; runtime detection picks the newest CPU, GPU, & NVMe classes the machine admits, unless the caller pins one.
 A description reports the classes an index dispatches as & the `shards_count` it spans.
-The graph & its traversal are templated on those kits, so a walk carries the matching vector loads, dot-products, norms, atomics, & wait instructions together.
+The graph & its traversal are templated on those kits, so a walk inlines the matching vector loads, dot-products, norms, atomics, & wait instructions together.
 
 ### Residency
 
 __RAM__ shards follow memory domains, __VRAM__ shards follow devices, & __NVMe__ views follow checkpoint parts.
 Sharding partitions the indexed entries rather than replicating the entire graph.
-[SafeGraphs](https://github.com/unum-cloud/USearch/blob/main/docs/format.md) carries the keys, vectors, norms, & links between those layers.
+[SafeGraphs](https://github.com/unum-cloud/USearch/blob/main/docs/format.md) holds the keys, vectors, norms, & links between those layers.
 
 The useful unit of parallelism changes with residency.
 CPU workers overlap independent walks; GPU warps cooperate on their candidates & vector fragments; NVMe workers keep many pending walks alive while reads complete.
@@ -288,7 +288,7 @@ Construction & maintenance have their own cost, & neither arbitrary data nor arb
 ## Sequence Modality
 
 The C++ RAM index works with variable-length byte sequences & UTF-8 text, using [StringZilla][stringzilla] for Levenshtein & overlap kernels and its own for Needleman-Wunsch global alignment, & the C interface exports it.
-Sequence search is useful when edit operations & local matches carry more meaning than a dense embedding's geometry.
+Sequence search is useful when edit operations & local matches hold more meaning than a dense embedding's geometry.
 
 ## Geospatial Modality
 
@@ -331,7 +331,6 @@ USearch is used in databases, frameworks & applications:
 - [x] Music Assistant: [Python](https://github.com/music-assistant/server/blob/dev/music_assistant/providers/sonic_similarity/vectors.py), [docs](https://www.music-assistant.io/plugins/sonic-similarity/).
 
 USearch builds on sibling libraries: [NumKong][numkong] supplies every dense kernel, [StringZilla][stringzilla] the sequence kernels, & [ForkUnion][forkunion] the thread pools behind RAM & NVMe executors.
-Lending an application's own ForkUnion pool through `usearch_executor_on_pool` is in progress.
 [UStore](https://github.com/unum-cloud/UStore) pairing documents with their vectors, so both become visible in one transaction, is planned.
 
 Related applications include [SwiftSemanticSearch](https://github.com/ashvardanian/SwiftSemanticSearch) for multimodal retrieval & [USearch Molecules](https://github.com/unum-science/USearchMolecules), indexing 7 billion molecules through 28 billion fingerprints.
@@ -344,7 +343,7 @@ USearch compiles in one of two shapes, picked by `USEARCH_MULTIVERSIONED`.
   One binary runs well across diverse machines, because each CPU and each GPU picks its own class at runtime.
   This is the default, and the shape of the Python wheels, the Rust crate and the JavaScript, Swift, Go, Java and C# packages.
 - __Monoversioned builds are for throughput.__
-  For common hardware and data-center deployments, the binary carries only the best code for one machine.
+  For common hardware and data-center deployments, the binary holds only the best code for one machine.
   These are the leanest binaries: they start fast and take little memory and disk.
   Outside that machine they refuse cleanly with `usearch_status_unsupported_k`, never crashing and never falling back to slower code in silence.
 - __The switches.__
@@ -352,7 +351,7 @@ USearch compiles in one of two shapes, picked by `USEARCH_MULTIVERSIONED`.
   The `xeon4_hopper`, `xeon6_blackwell`, `grace_hopper`, `vera_rubin` and `venice_mi450` presets spell whole machines.
 
 A monoversioned build compiles the single `monoversioned` CPU class in place of the ladder of named ones.
-It needs no monoversioned GPU class, as a preset's one GPU architecture already matches a named class, and CMake builds only the class units carrying code for it.
+It needs no monoversioned GPU class, as a preset's one GPU architecture already matches a named class, and CMake builds only the class units holding code for it.
 
 ## Compatibility
 

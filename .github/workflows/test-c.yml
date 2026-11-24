@@ -263,7 +263,7 @@ jobs:
             -D CMAKE_CUDA_HOST_COMPILER=clang++-22
           cmake --build --preset ${{ matrix.preset }} --parallel 2
 
-  # Compile-only: one library carries both GPU vendors' kernels and links neither runtime, since each driver opens at
+  # Compile-only: one library holds both GPU vendors' kernels and links neither runtime, since each driver opens at
   # first use, so a machine without a GPU still loads it.
   build_cuda_rocm:
     name: Build CUDA and ROCm Library without GPU Runtimes
@@ -297,7 +297,7 @@ jobs:
           readelf -d build_linux_cuda_rocm/libusearch_shared.so
           ! readelf -d build_linux_cuda_rocm/libusearch_shared.so | grep -E 'NEEDED.*(libcudart|libcuda\.|libamdhip64)'
 
-  # One row per checked-in WebAssembly toolchain. A module carries one SIMD tier, width and threads choice, so each
+  # One row per checked-in WebAssembly toolchain. A module holds one SIMD tier, width and threads choice, so each
   # row is a whole build; its C test runs under the matrix's Node for Emscripten and under Wasmtime for WASI.
   test_wasm:
     name: Test on WebAssembly ${{ matrix.preset }}

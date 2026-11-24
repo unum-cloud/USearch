@@ -6,8 +6,8 @@
  *
  *  The @c CompiledGeospatialIndex class and the lifecycle verbs that instantiate it, the cursor it
  *  opens, and the checkpoint metadata readers that need no index at all. Observations cross as a
- *  @c Float64Array of eleven fields apiece, NaN where nothing was recorded, borrowed in place, and
- *  no handle carries a terrain.
+ *  @c Float64Array of eleven fields apiece, NaN where nothing was recorded, viewed in place, and
+ *  no handle holds a terrain.
  *
  *  Every instance verb takes the executor and the completion first, so one native function serves
  *  the calling thread, a blocking receiver and a deferred one alike.
@@ -22,7 +22,7 @@
 /** Fields one observation spans, the doubles of @c usearch_geospatial_observation_t. */
 enum { usearch_js_geospatial_fields_k = sizeof(usearch_geospatial_observation_t) / sizeof(double) };
 
-/** Borrows a @c Float64Array of whole observations in place. */
+/** Views a @c Float64Array of whole observations in place. */
 static bool usearch_js_observations_from_value(napi_env env, napi_value value, char const* field,
                                                usearch_geospatial_observation_t const** observations, size_t* count) {
     napi_typedarray_type type = napi_int8_array;
@@ -502,7 +502,7 @@ static napi_value usearch_js_geospatial_insert(napi_env env, napi_callback_info 
         usearch_js_call_abandon(&call->call, &local.call);
         return NULL;
     }
-    // The keys view carries no count, so only this side can see the two disagree.
+    // The keys view holds no count, so only this side can see the two disagree.
     if (keys_count != insert.count) {
         usearch_js_call_abandon(&call->call, &local.call);
         usearch_js_throw(env, usearch_status_shape_mismatch_k, "The keys name one key per observation");
@@ -682,7 +682,7 @@ static napi_value usearch_js_geospatial_sample(napi_env env, napi_callback_info 
         usearch_js_call_abandon(&call->call, &local.call);
         return NULL;
     }
-    // The coordinates carry no count of their own, so only this side can see them disagree.
+    // The coordinates hold no count of their own, so only this side can see them disagree.
     if (placed != sample.shown_count) {
         usearch_js_call_abandon(&call->call, &local.call);
         usearch_js_throw(env, usearch_status_shape_mismatch_k, "The shown keys need one place apiece");

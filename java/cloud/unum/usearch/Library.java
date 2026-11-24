@@ -105,7 +105,7 @@ final class Library {
                     MemoryLayout.sequenceLayout(16, ValueLayout.JAVA_BYTE).withName("bytes"))
             .withName("usearch_key_t");
 
-    /** @c usearch_bytes_view_t - a borrowed byte run, which a path is. */
+    /** @c usearch_bytes_view_t - a viewed byte run, which a path is. */
     static final StructLayout BYTES_VIEW = MemoryLayout.structLayout(POINTER.withName("data"), SIZE.withName("length"))
             .withName("usearch_bytes_view_t");
 
@@ -320,7 +320,7 @@ final class Library {
     }
 
     /**
-     * Raises whatever a final @p outcome carries, and answers nothing on success.
+     * Raises whatever a final @p outcome holds, and answers nothing on success.
      *
      * @throws Types.USearchException when the verb reported a failure.
      */
@@ -337,7 +337,7 @@ final class Library {
     private static final VarHandle OUTCOME_MESSAGE = field(OUTCOME, "message");
 
     /**
-     * Carries a downcall's failure out unchanged when it is already one of ours, and wraps anything
+     * Holds a downcall's failure out unchanged when it is already one of ours, and wraps anything
      * else - a linkage fault, a layout mismatch - as the internal error it is.
      */
     static RuntimeException rethrow(Throwable failure) {
@@ -371,7 +371,7 @@ final class Library {
     }
 
     /**
-     * Tries the platform-specific resource, then the flat one a single-platform JAR carries. Only a
+     * Tries the platform-specific resource, then the flat one a single-platform JAR holds. Only a
      * missing resource advances to the next candidate; one that extracts and then fails to link
      * leaves here as the {@link UnsatisfiedLinkError} it was.
      *
@@ -460,7 +460,7 @@ final class Library {
 
     /**
      * The directory one platform's libraries sit under inside a multi-platform JAR. The
-     * operating-system probe matches substrings because {@code os.name} carries a version -
+     * operating-system probe matches substrings because {@code os.name} holds a version -
      * {@code Mac OS X}, {@code Windows 11} - while the architecture below does not.
      */
     private static String platform() {
@@ -493,7 +493,7 @@ final class Library {
     /**
      * Whether the runtime is Android, whose libraries the JAR names under their own prefix. That
      * prefix is reachable on API 28 and below only, since from API 29 the platform refuses to link a
-     * shared object out of writable application storage; a modern Android app needs an AAR carrying
+     * shared object out of writable application storage; a modern Android app needs an AAR holding
      * the library under {@code lib/<abi>/} instead.
      */
     private static boolean android() {

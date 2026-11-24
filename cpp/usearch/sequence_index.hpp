@@ -84,8 +84,9 @@ struct sequence_search_config_t {
  *      @c outcome, deferred answers a @c deferred call. Made by @c sequence_index_t::on and
  *      @c sequence_index_t::deferred.
  *
- *  Each verb is written once, filling its C struct with the result as its output slot. Every
- *  input, handler, plan and arena a deferred call names stays borrowed until it is final.
+ *  Each verb is written once, filling its C struct with the result as its output slot. Every input,
+ *  handler, plan and arena a deferred call names must stay allocated and unchanged until the call
+ *  is final, whichever verb it is.
  */
 template <usearch_completion_t completion_>
 class sequence_index_on {

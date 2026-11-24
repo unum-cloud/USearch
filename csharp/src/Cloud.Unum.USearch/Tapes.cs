@@ -19,7 +19,7 @@ namespace Cloud.Unum.USearch;
 /// <see cref="ShapesIndex"/> takes point clouds. Mirrors <c>usearch_tape_view_t</c> as an input.
 /// </summary>
 /// <remarks>
-/// A view borrows and never owns: it holds the memory it was built from, and a deferred call pins it
+/// A view only points at memory it never owns: it holds the memory it was built from, and a deferred call pins it
 /// until final. Offsets count in steps of <see cref="Width"/> elements, one byte of a sequence or the
 /// three coordinates of a point.
 /// </remarks>
@@ -46,7 +46,7 @@ public readonly struct TapeView<TElement> where TElement : unmanaged
     /// <summary>The scalar kind the elements hold.</summary>
     public Scalar Scalar { get; }
 
-    /// <summary>How many entries the tape carries, the call's one count.</summary>
+    /// <summary>How many entries the tape holds, the call's one count.</summary>
     public int Count => Math.Max(this.Offsets.Length - 1, 0);
 
     /// <summary>Pins the elements until the handle is disposed.</summary>
@@ -55,7 +55,7 @@ public readonly struct TapeView<TElement> where TElement : unmanaged
     /// <summary>Pins the offsets until the handle is disposed.</summary>
     internal MemoryHandle PinOffsets() => this.Offsets.Pin();
 
-    /// <summary>Lends the tape as the input descriptor every tape verb reads.</summary>
+    /// <summary>Passes the tape as the input descriptor every tape verb reads.</summary>
     /// <param name="elements">The first element, pinned for the call.</param>
     /// <param name="offsets">The first offset, pinned for the call.</param>
     /// <returns>The C struct the library reads.</returns>

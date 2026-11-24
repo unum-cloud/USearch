@@ -66,7 +66,7 @@
 #endif
 
 byte range_first[2];     // the range each commit dispensed, handed to its helper
-bool dispatched[2];      // the fan-out's dispatch, which carries no row
+bool dispatched[2];      // the fan-out's dispatch, which holds no row
 hidden int payload_read; // scratch: a payload a reader read, checked in the same step
 
 // a read of a row a reader admitted: the payload its wirer stored before publishing it

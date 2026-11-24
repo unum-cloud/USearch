@@ -42,7 +42,7 @@ public struct DenseMetric: Hashable, Sendable, CustomStringConvertible {
     /// The metric rendered as the library spells it.
     public var description: String { String(cString: usearch_dense_metric_name(raw)) }
 
-    /// Reads a spelling back, and nil for one no metric carries.
+    /// Reads a spelling back, and nil for one no metric holds.
     public init?(name: String) {
         guard let raw = parsed(name, usearch_dense_metric_from_name, usearch_dense_metric_unknown_k) else { return nil }
         self.raw = raw
@@ -183,7 +183,7 @@ public struct DenseRefineVerdict: Hashable, Sendable, CustomStringConvertible {
     /// The verdict rendered as the library spells it.
     public var description: String { String(cString: usearch_refine_verdict_name(raw)) }
 
-    /// Reads a spelling back, and nil for one no verdict carries.
+    /// Reads a spelling back, and nil for one no verdict holds.
     public init?(name: String) {
         guard let raw = parsed(name, usearch_refine_verdict_from_name, usearch_refine_none_k) else { return nil }
         self.raw = raw
@@ -251,7 +251,7 @@ public final class DenseTraversalStats: @unchecked Sendable {
 ///
 /// The two are one concept: a maximum without its partition is a number nothing can rescale, so
 /// they share an element rather than travelling as two arrays a caller could supply half of.
-/// Carrying them is what folds one attention call into another over the same queries.
+/// Holding them is what folds one attention call into another over the same queries.
 public struct DenseSoftmaxState: Equatable, Sendable {
     /// The largest logit seen so far - the recurrence's `m`.
     public var maximumScore: Float = 0
@@ -964,7 +964,7 @@ public struct Monolith {
     /// The bytes in the monolith.
     public var count: Int { monolith.length }
 
-    /// Lends the serialized checkpoint to `body`, which must not keep the buffer past its return.
+    /// Passes the serialized checkpoint to `body`, which must not keep the buffer past its return.
     public func withUnsafeBytes<Result, Failure: Swift.Error>(
         _ body: (UnsafeRawBufferPointer) throws(Failure) -> Result
     ) throws(Failure) -> Result {
@@ -1003,7 +1003,7 @@ public final class DenseIndex: @unchecked Sendable {
     ) throws(USearchError) -> DenseIndex {
         let callState = CallState()
         let index = callState.slots(usearch_dense_index_t?.none)
-        try callState.lend(memoryDomains) { (domains) throws(USearchError) in
+        try callState.pass(memoryDomains) { (domains) throws(USearchError) in
             var arguments = usearch_dense_init_ram_t(
                 index: index,
                 outcome: callState.outcome,
@@ -1030,7 +1030,7 @@ public final class DenseIndex: @unchecked Sendable {
     public static func initVram(_ options: DenseOptions, devices: [Int32] = []) throws(USearchError) -> DenseIndex {
         let callState = CallState()
         let index = callState.slots(usearch_dense_index_t?.none)
-        try callState.lend(devices) { (lentDevices) throws(USearchError) in
+        try callState.pass(devices) { (passedDevices) throws(USearchError) in
             var arguments = usearch_dense_init_vram_t(
                 index: index,
                 outcome: callState.outcome,
@@ -1040,7 +1040,7 @@ public final class DenseIndex: @unchecked Sendable {
                 connectivity: options.connectivity,
                 values_per_key: options.valuesPerKey,
                 vram: usearch_vram_options_t(
-                    devices: lentDevices,
+                    devices: passedDevices,
                     devices_count: devices.count,
                     shard_capacity: 0,
                     gpu_class_ceiling: options.gpuClassCeiling?.raw ?? usearch_gpu_class_unknown_k
@@ -1062,9 +1062,9 @@ public final class DenseIndex: @unchecked Sendable {
     ) throws(USearchError) -> DenseIndex {
         let callState = CallState()
         let index = callState.slots(usearch_dense_index_t?.none)
-        let progress = callState.lend(config.progress, steps: config.progressSteps)
-        try callState.lend(path) { (path) throws(USearchError) in
-            try callState.lend(config.memoryDomains) { (domains) throws(USearchError) in
+        let progress = callState.pass(config.progress, steps: config.progressSteps)
+        try callState.pass(path) { (path) throws(USearchError) in
+            try callState.pass(config.memoryDomains) { (domains) throws(USearchError) in
                 var arguments = usearch_dense_load_ram_t(
                     index: index,
                     executor: config.executor?.raw,
@@ -1096,9 +1096,9 @@ public final class DenseIndex: @unchecked Sendable {
     ) throws(USearchError) -> DenseIndex {
         let callState = CallState()
         let index = callState.slots(usearch_dense_index_t?.none)
-        let progress = callState.lend(config.progress, steps: config.progressSteps)
-        try callState.lend(path) { (path) throws(USearchError) in
-            try callState.lend(config.devices) { (devices) throws(USearchError) in
+        let progress = callState.pass(config.progress, steps: config.progressSteps)
+        try callState.pass(path) { (path) throws(USearchError) in
+            try callState.pass(config.devices) { (devices) throws(USearchError) in
                 var arguments = usearch_dense_load_vram_t(
                     index: index,
                     executor: config.executor?.raw,
@@ -1127,9 +1127,9 @@ public final class DenseIndex: @unchecked Sendable {
     ) throws(USearchError) -> DenseIndex {
         let callState = CallState()
         let index = callState.slots(usearch_dense_index_t?.none)
-        let progress = callState.lend(config.progress, steps: config.progressSteps)
+        let progress = callState.pass(config.progress, steps: config.progressSteps)
         try buffer.withUnsafeBytes { (bytes) throws(USearchError) in
-            try callState.lend(config.memoryDomains) { (domains) throws(USearchError) in
+            try callState.pass(config.memoryDomains) { (domains) throws(USearchError) in
                 var arguments = usearch_dense_load_ram_buffer_t(
                     index: index,
                     executor: config.executor?.raw,
@@ -1161,9 +1161,9 @@ public final class DenseIndex: @unchecked Sendable {
     ) throws(USearchError) -> DenseIndex {
         let callState = CallState()
         let index = callState.slots(usearch_dense_index_t?.none)
-        let progress = callState.lend(config.progress, steps: config.progressSteps)
+        let progress = callState.pass(config.progress, steps: config.progressSteps)
         try buffer.withUnsafeBytes { (bytes) throws(USearchError) in
-            try callState.lend(config.devices) { (devices) throws(USearchError) in
+            try callState.pass(config.devices) { (devices) throws(USearchError) in
                 var arguments = usearch_dense_load_vram_buffer_t(
                     index: index,
                     executor: config.executor?.raw,
@@ -1190,7 +1190,7 @@ public final class DenseIndex: @unchecked Sendable {
     public static func viewRam(_ path: String) throws(USearchError) -> DenseIndex {
         let callState = CallState()
         let index = callState.slots(usearch_dense_index_t?.none)
-        try callState.lend(path) { (path) throws(USearchError) in
+        try callState.pass(path) { (path) throws(USearchError) in
             var arguments = usearch_dense_view_ram_t(index: index, outcome: callState.outcome, path: path)
             usearch_dense_view_ram(&arguments)
         }
@@ -1206,8 +1206,8 @@ public final class DenseIndex: @unchecked Sendable {
         let callState = CallState()
         let index = callState.slots(usearch_dense_index_t?.none)
         let keyTableDomains = config.keyTableDomains ?? []
-        try callState.lend(path) { (path) throws(USearchError) in
-            try callState.lend(keyTableDomains) { (domains) throws(USearchError) in
+        try callState.pass(path) { (path) throws(USearchError) in
+            try callState.pass(keyTableDomains) { (domains) throws(USearchError) in
                 let keyTable = usearch_ram_options_t(
                     memory_domains: domains,
                     memory_domains_count: keyTableDomains.count,
@@ -1244,8 +1244,8 @@ public final class DenseIndex: @unchecked Sendable {
         let callState = CallState()
         let index = callState.slots(usearch_dense_index_t?.none)
         let keyTableDomains = config.keyTableDomains ?? []
-        try callState.lend(path) { (path) throws(USearchError) in
-            try callState.lend(keyTableDomains) { (domains) throws(USearchError) in
+        try callState.pass(path) { (path) throws(USearchError) in
+            try callState.pass(keyTableDomains) { (domains) throws(USearchError) in
                 let keyTable = usearch_ram_options_t(
                     memory_domains: domains,
                     memory_domains_count: keyTableDomains.count,
@@ -1277,7 +1277,7 @@ public final class DenseIndex: @unchecked Sendable {
     public static func metadataRead(_ path: String, executor: Executor? = nil) throws(USearchError) -> DenseMetadata {
         let callState = CallState()
         let metadata = callState.slots(DenseMetadata())
-        try callState.lend(path) { (path) throws(USearchError) in
+        try callState.pass(path) { (path) throws(USearchError) in
             var arguments = usearch_dense_metadata_read_t(
                 executor: executor?.raw,
                 outcome: callState.outcome,
@@ -1430,7 +1430,7 @@ public final class DenseIndex: @unchecked Sendable {
     /// sibling of `search`, reporting every pair the traversal scored rather than only the
     /// nearest of them.
     ///
-    /// Pairs arrive in traversal order rather than sorted, and carry no duplicates. A non-zero
+    /// Pairs arrive in traversal order rather than sorted, and hold no duplicates. A non-zero
     /// `wanted` keeps the first pairs each row's walk scored, and `required` says how many there
     /// were. The keys, products and row offsets land in `arena` as one ragged run. Runs on an
     /// inner-product index alone, since a product needs logits rather than distances.
@@ -1534,7 +1534,7 @@ public final class DenseIndex: @unchecked Sendable {
 /// An index's verbs on an executor, each blocking until final and refused while another call holds
 /// it; see `DenseIndex.on(_:)` and the index's own verbs for what each one does.
 ///
-/// A blocking call borrows the arena it is given, and its result reads it until the arena's next
+/// A blocking call uses the arena it is given, and its result reads it until the arena's next
 /// call.
 public struct DenseIndexOn: Sendable {
     /// The index every verb addresses.
@@ -1711,8 +1711,8 @@ public struct DenseIndexOn: Sendable {
 ///
 /// A failure this binding catches before the call crosses throws at submission. Every object whose
 /// memory a call reads, like rows built over a `Tensor`, stays alive until it is final, and memory
-/// borrowed from elsewhere must outlive it too. The index, the executor and the arena are borrowed
-/// as a blocking call borrows them, since releasing any of them waits for the calls naming it.
+/// viewed from elsewhere must outlive it too. The index, the executor and the arena are viewed as a
+/// blocking call views them, since releasing any of them waits for the calls naming it.
 public struct DenseIndexDeferredOn: Sendable {
     /// The index every verb addresses.
     let index: DenseIndex
@@ -1971,14 +1971,14 @@ struct DenseCall {
         _ vectors: RowsView,
         config: DenseInsertConfig
     ) throws(USearchError) -> Submission<Void> {
-        // The key run carries no count of its own, so only this side can see it disagree.
+        // The key run holds no count of its own, so only this side can see it disagree.
         guard keys.count == vectors.rows else {
             throw USearchError(status: .shapeMismatch, message: "the key count does not match the vector row count")
         }
         callState.anchor(vectors.owner)
         callState.anchor(config.stats)
-        let progress = callState.lend(config.progress, steps: config.progressSteps)
-        try callState.lend(keys) { (keys) throws(USearchError) in
+        let progress = callState.pass(config.progress, steps: config.progressSteps)
+        try callState.pass(keys) { (keys) throws(USearchError) in
             var arguments = usearch_dense_insert_t(
                 index: index.raw,
                 executor: executor?.raw,
@@ -2003,7 +2003,7 @@ struct DenseCall {
         callState.anchor(config.stats)
         callState.anchor(config.plan)
         let report = callState.slots(DenseRefineReport())
-        let progress = callState.lend(config.progress, steps: config.progressSteps)
+        let progress = callState.pass(config.progress, steps: config.progressSteps)
         var arguments = usearch_dense_refine_t(
             index: index.raw,
             executor: executor?.raw,
@@ -2072,9 +2072,9 @@ struct DenseCall {
             wanted: wanted,
             expansion_factor: config.expansionFactor,
             traversal: config.traversal.raw,
-            predicate: callState.lend(config.predicate),
+            predicate: callState.pass(config.predicate),
             hints: nil,
-            progress: callState.lend(config.progress, steps: config.progressSteps),
+            progress: callState.pass(config.progress, steps: config.progressSteps),
             stats: config.stats?.raw
         )
         usearch_dense_search(&arguments)
@@ -2110,7 +2110,7 @@ struct DenseCall {
             traversal: Traversal.walk.raw,
             predicate: usearch_predicate_t(),
             hints: nil,
-            progress: callState.lend(config.progress, steps: config.progressSteps),
+            progress: callState.pass(config.progress, steps: config.progressSteps),
             stats: config.stats?.raw
         )
         usearch_dense_maxsim(&arguments)
@@ -2140,7 +2140,7 @@ struct DenseCall {
             expansion_factor: config.expansionFactor,
             traversal: Traversal.walk.raw,
             predicate: usearch_predicate_t(),
-            progress: callState.lend(config.progress, steps: config.progressSteps),
+            progress: callState.pass(config.progress, steps: config.progressSteps),
             stats: config.stats?.raw
         )
         usearch_dense_multiply(&arguments)
@@ -2181,7 +2181,7 @@ struct DenseCall {
             score_scale: config.scoreScale,
             traversal: Traversal.walk.raw,
             predicate: usearch_predicate_t(),
-            progress: callState.lend(config.progress, steps: config.progressSteps),
+            progress: callState.pass(config.progress, steps: config.progressSteps),
             stats: config.stats?.raw
         )
         usearch_dense_attend(&arguments)
@@ -2250,7 +2250,7 @@ struct DenseCall {
                 memory_limit: config.memoryLimit
             ),
             seed: config.seed,
-            progress: callState.lend(config.progress, steps: config.progressSteps),
+            progress: callState.pass(config.progress, steps: config.progressSteps),
             stats: config.stats?.raw,
             plan: config.plan?.raw.pointer(to: \.handle),
             phase: config.plan?.raw.pointer(to: \.phase.raw)
@@ -2281,16 +2281,16 @@ struct DenseCall {
         }
         callState.anchor(config.stats)
         let draws = callState.slots(DenseDraws(arena: arena))
-        let progress = callState.lend(config.progress, steps: config.progressSteps)
+        let progress = callState.pass(config.progress, steps: config.progressSteps)
         func view(_ keys: UnsafePointer<Key>?) -> usearch_keys_view_t {
             usearch_keys_view_t(
                 data: UnsafeRawPointer(keys)?.assumingMemoryBound(to: usearch_key_t.self),
                 stride: MemoryLayout<usearch_key_t>.stride
             )
         }
-        try callState.lend(config.shown) { (shown) throws(USearchError) in
-            try callState.lend(config.focus) { (focus) throws(USearchError) in
-                try callState.lend(config.shownCoordinates) { (shownCoordinates) throws(USearchError) in
+        try callState.pass(config.shown) { (shown) throws(USearchError) in
+            try callState.pass(config.focus) { (focus) throws(USearchError) in
+                try callState.pass(config.shownCoordinates) { (shownCoordinates) throws(USearchError) in
                     var arguments = usearch_dense_sample_t(
                         index: index.raw,
                         executor: executor?.raw,
@@ -2326,8 +2326,8 @@ struct DenseCall {
     }
 
     func save(_ path: String, config: DenseSaveConfig) throws(USearchError) -> Submission<Void> {
-        let progress = callState.lend(config.progress, steps: config.progressSteps)
-        try callState.lend(path) { (path) throws(USearchError) in
+        let progress = callState.pass(config.progress, steps: config.progressSteps)
+        try callState.pass(path) { (path) throws(USearchError) in
             var arguments = usearch_dense_save_t(
                 index: index.raw,
                 executor: executor?.raw,
@@ -2350,7 +2350,7 @@ struct DenseCall {
             completion: completion,
             monolith: monolith.pointer(to: \.monolith)!,
             arena: arena.raw,
-            progress: callState.lend(config.progress, steps: config.progressSteps)
+            progress: callState.pass(config.progress, steps: config.progressSteps)
         )
         usearch_dense_save_buffer(&arguments)
         return try callState.submitted(monolith)
@@ -2377,7 +2377,7 @@ struct DenseCall {
         _ query: RowsView,
         config: DenseSearchStreamInitConfig
     ) throws(USearchError) -> DenseSearchStream {
-        // The C call takes one row and no count, so only this side can see a matrix carrying more.
+        // The C call takes one row and no count, so only this side can see a matrix holding more.
         guard query.rows == 1 else {
             throw USearchError(status: .shapeMismatch, message: "a search stream walks one query row")
         }
@@ -2404,8 +2404,8 @@ private let admissionTrampoline: usearch_predicate_callback_t = { keys, admissio
 }
 
 extension CallState {
-    /// Lends an optional predicate as the struct a search takes; nil lends nulls.
-    func lend(_ predicate: (@Sendable (Key) -> Bool)?) -> usearch_predicate_t {
+    /// Passes an optional predicate as the struct a search takes; nil passes nulls.
+    func pass(_ predicate: (@Sendable (Key) -> Bool)?) -> usearch_predicate_t {
         guard let predicate else { return usearch_predicate_t() }
         return usearch_predicate_t(
             callback: admissionTrampoline,

@@ -633,7 +633,7 @@ static napi_value usearch_js_index_insert(napi_env env, napi_callback_info info)
         usearch_js_call_abandon(&call->call, &local.call);
         return NULL;
     }
-    // The keys view carries no count, so only this side can see the two disagree; one key
+    // The keys view holds no count, so only this side can see the two disagree; one key
     // broadcasts.
     if (keys_count != insert.count && keys_count != 1) {
         usearch_js_call_abandon(&call->call, &local.call);
@@ -926,7 +926,7 @@ static napi_value usearch_js_index_sample(napi_env env, napi_callback_info info)
         usearch_js_call_abandon(&call->call, &local.call);
         return NULL;
     }
-    // The coordinates carry no count of their own, so only this side can see them disagree.
+    // The coordinates hold no count of their own, so only this side can see them disagree.
     if (placed != sample.shown_count) {
         usearch_js_call_abandon(&call->call, &local.call);
         usearch_js_throw(env, usearch_status_shape_mismatch_k, "The shown keys need one place apiece");
@@ -1233,7 +1233,7 @@ typedef struct usearch_js_value_rows_t {
     /** The caller's function, reachable for as long as the verb runs. */
     napi_value row_of;
 
-    /** The value rows, borrowed for the whole call. */
+    /** The value rows, viewed for the whole call. */
     usearch_rows_view_t values;
 
     /** Rows @c values holds, which bounds every row @c row_of answers. */
@@ -1328,7 +1328,7 @@ static napi_value usearch_js_finish_attend(napi_env env, usearch_js_call_t* call
  *      row per query in @p arena.
  *
  *  The @p carry is a @c Float32Array of two floats per query row - the largest logit and the
- *  partition taken against it - lent by the caller, since folding a second branch over the same
+ *  partition taken against it - passed by the caller, since folding a second branch over the same
  *  queries needs both, which is why they share a row rather than travelling apart. Every lookup
  *  re-enters JavaScript, which no executor thread may, so the verb takes no executor and no
  *  completion and runs on the calling thread.
@@ -1433,7 +1433,7 @@ usearch_js_walk_t* usearch_js_walk_self(napi_env env, napi_callback_info info, s
     }
     if (napi_get_reference_value(env, walk->index, &index_value) != napi_ok ||
         napi_unwrap(env, index_value, (void**)&wrapper) != napi_ok || !wrapper) {
-        usearch_js_throw(env, usearch_status_internal_k, "The index the walk borrows is missing");
+        usearch_js_throw(env, usearch_status_internal_k, "The index the walk views is missing");
         return NULL;
     }
     if (walk->executor && napi_get_reference_value(env, walk->executor, &executor_value) != napi_ok) {
@@ -1447,7 +1447,7 @@ usearch_js_walk_t* usearch_js_walk_self(napi_env env, napi_callback_info info, s
 
 /**
  *  @brief Wraps an engine walk into an object exposing @p next, @c free and @c [Symbol.dispose],
- *      holding the index the walk borrows and the executor every pull runs on.
+ *      holding the index the walk views and the executor every pull runs on.
  *  @return The object, or @c NULL with an exception pending and the walk released.
  */
 napi_value usearch_js_walk_object(napi_env env, void* handle, napi_value index, napi_value executor, napi_callback next,

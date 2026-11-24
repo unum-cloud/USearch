@@ -98,7 +98,7 @@ final class BasicCalls {
             @Nullable DenseTraversalStats stats) {}
 
     /**
-     * The two slots a plan lends every call naming it: the lazy handle C opens, continues and a
+     * The two slots a plan passes every call naming it: the lazy handle C opens, continues and a
      * finish frees, and where the last call stopped. Each modality's plan types hold one.
      */
     static final class PlanCell {
@@ -111,10 +111,10 @@ final class BasicCalls {
             return PhaseProgress.lift(phase);
         }
 
-        void lend(Call call, VarHandle planField, VarHandle phaseField) {
+        void pass(Call call, VarHandle planField, VarHandle phaseField) {
             call.pointer(planField, plan);
             call.pointer(phaseField, phase);
-            call.lend(this);
+            call.pass(this);
         }
 
         /** The open plan a finish frees, leaving this one to open afresh on its next call. */
@@ -150,7 +150,7 @@ final class BasicCalls {
             call.progress(DenseIndex.REFINE_PROGRESS, rounds.progress());
             call.stats(DenseIndex.REFINE_STATS, rounds.stats());
             if (rounds.plan() != null) {
-                rounds.plan().lend(call, DenseIndex.REFINE_PLAN, DenseIndex.REFINE_PHASE);
+                rounds.plan().pass(call, DenseIndex.REFINE_PLAN, DenseIndex.REFINE_PHASE);
             }
             return () -> RefineReport.lift(report);
         });
@@ -178,7 +178,7 @@ final class BasicCalls {
             call.progress(RESHARD_PROGRESS, rounds.progress());
             call.stats(RESHARD_STATS, rounds.stats());
             if (rounds.plan() != null) {
-                rounds.plan().lend(call, RESHARD_PLAN, RESHARD_PHASE);
+                rounds.plan().pass(call, RESHARD_PLAN, RESHARD_PHASE);
             }
             return () -> RefineReport.lift(report);
         });
@@ -256,12 +256,12 @@ final class BasicCalls {
         return MemoryLayout.structLayout(members);
     }
 
-    /** Lends every handle to the call and copies their addresses into the array C reads. */
+    /** Passes every handle to the call and copies their addresses into the array C reads. */
     private static MemorySegment handles(Call call, Handle[] handles) {
         MemorySegment[] addresses = new MemorySegment[handles.length];
         for (int order = 0; order != handles.length; ++order) {
             addresses[order] = handles[order].address();
-            call.lend(handles[order]);
+            call.pass(handles[order]);
         }
         return call.addresses(addresses);
     }

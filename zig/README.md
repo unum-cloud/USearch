@@ -65,7 +65,7 @@ defer call.deinit();
 `DenseIndex.On` and `DenseIndex.DeferredOn(Result)` offer every verb the index does, with the same arguments, the `*Arena` included, because one generic writes each verb once for both; a deferred receiver compiles only the verbs answering the result its storage holds.
 Constructors address no index yet, so no receiver offers them; the ones the C interface lets fan out take an `executor` in their config, and run on the calling thread without one.
 
-A `Deferred` owns what the library reports into until its call is final, the outcome and the result slot the call fills, and borrows the rest, as a blocking call does.
+A `Deferred` owns what the library reports into until its call is final, the outcome and the result slot the call fills, and reads the rest in place from memory the caller keeps alive, as a blocking call does.
 The handles it names, such as the index, the executor, the arena, a cursor or a stream, need nothing more: freeing one waits for every deferred call naming it.
 The plain memory it reads, such as the rows, the keys, the path, the carry and the handlers' contexts, stays yours, and must outlive the call.
 
@@ -101,7 +101,7 @@ var gpus = try usearch.Executor.forVram(.{ .devices = &.{ 0, 1 }, .streams = nul
 var drives = try usearch.Executor.forNvme(.{ .paths = &.{.of("/mnt/nvme0")}, .threads = 0 });
 ```
 
-Zero threads takes 7/8 of the cores, since full occupancy starves the ordered publication path; `forVram` takes no thread count at all, driving one stream per device from the calling thread, either its own or one of the CUDA streams you lend.
+Zero threads takes 7/8 of the cores, since full occupancy starves the ordered publication path; `forVram` takes no thread count at all, driving one stream per device from the calling thread, either the device's per-thread default stream or one of your CUDA streams, which you destroy after freeing the executor.
 `drain(mood)` waits until no call holds the executor, then lets the threads go `.parked` or stay `.spinning` once idle.
 
 ## Arenas
@@ -161,7 +161,7 @@ const parsed = try usearch.Key.parse("00000000-0000-0000-0000-00000000002a");
 
 Every verb answers `Error!T`, one error per final status of the C interface.
 The engine checks every shape it can see; the binding checks only what never crosses the boundary, like a key run longer than its rows, and reports the status the engine would have.
-The engine's static detail message rides an `Outcome` you lend: `diagnosed(&outcome)` on the index or a blocking receiver copies every call's final outcome into it, a constructor's config takes one as `diagnostics`, and a `Deferred` answers its own through `message`.
+The engine's static detail message rides an `Outcome` you pass: `diagnosed(&outcome)` on the index or a blocking receiver copies every call's final outcome into it, a constructor's config takes one as `diagnostics`, and a `Deferred` answers its own through `message`.
 The binding's own refusals land there too, with a message of their own.
 One set covers every verb rather than a narrower one per verb, since nothing in the ABI bounds which status a given call may report.
 
@@ -216,7 +216,7 @@ var mapped = try usearch.DenseIndex.viewRam("index.safegraphs"); // read-only, s
 const metadata = try usearch.DenseIndex.metadataRead("index.safegraphs", .{}); // without loading a shard
 ```
 
-The result carries only the four fields a checkpoint froze, so `values_per_key` and the placement stay yours to set in the load config.
+The result holds only the four fields a checkpoint froze, so `values_per_key` and the placement stay yours to set in the load config.
 
 Checkpoints are residency-portable: one file copies into RAM, uploads to a device, or is served in place on disk, decided by the constructor that reads it.
 In-memory buffers hold single monoliths only.
@@ -328,7 +328,7 @@ const vectors = try index.get(f32, key, &arena);
 for (0..vectors.rows) |row| consume(vectors.row(row));
 ```
 
-`DenseVectors(Element).view` carries the byte pitch of each row as `stride` and its dimensions as `columns`, as the call reported them, which is how a sub-byte kind like `Scalar.U1x8` is read without arithmetic on its packing.
+`DenseVectors(Element).view` holds the byte pitch of each row as `stride` and its dimensions as `columns`, as the call reported them, which is how a sub-byte kind like `Scalar.U1x8` is read without arithmetic on its packing.
 
 A cursor walks the index contents, reading each shard's publication watermark as it enters that shard, so an entry once passed is never revisited.
 Without start keys it yields every entry as stored; with them, the starts' own entries first, then the entries those link to breadth-first, each once.
@@ -457,7 +457,7 @@ The index stores no values, so a `ValueLookup` resolves each scored key to its r
 Its trampoline checks the kind and width every batch states, so a missing row, or one of another kind or width, refuses the call with `Error.ShapeMismatch`.
 It runs on the executor's threads, so it must tolerate concurrent calls.
 That trampoline is a host function, which serves RAM and NVMe indexes; a VRAM walk calls the lookup on the device, so a VRAM index takes a `ValueLookup` whose `callback` is device-callable, set directly.
-The `head_count` query heads of grouped-query attention share one walk per token, row `t · head_count + h` being head `h` of token `t`, and a carry of one `DenseSoftmaxState` per query row, lent rather than written in the arena, folds this branch into another over the same queries.
+The `head_count` query heads of grouped-query attention share one walk per token, row `t · head_count + h` being head `h` of token `t`, and a `carry` of one `DenseSoftmaxState` per query row, in the caller's memory rather than in the arena, folds this branch into another over the same queries.
 The attended rows land in the arena as the element type the call names.
 
 ```zig
@@ -554,12 +554,12 @@ const ranked = try index.search(stops[0..1], 1, &arena, .{ .relation = .near });
 
 `within` reports every entry the relation admits inside the radius, however many, as a ragged `GeospatialMatches` with Arrow offsets, while `search` ranks the `wanted` nearest, a zero `metres` ranking by distance alone.
 The relation is a field of each call's config: `.near` widens the radius by both positions' accuracies, `.sees` and `.seen` test the view cones, and `.visible` tests a line of sight over the `GeospatialTerrain` the handle was built with, refused with `Error.Unsupported` on a handle without one.
-A terrain borrows its heights for the handle's lifetime or fills windows of them on demand through `GeospatialTerrainFill.of`, a trampoline generated per call site that runs on the executor's threads; no checkpoint carries it, so every load and view names it again.
+A terrain points at heights that outlive the handle, or fills windows of them on demand through `GeospatialTerrainFill.of`, a trampoline generated per call site that runs on the executor's threads; no checkpoint holds it, so every load and view names it again.
 `get` returns a key's observations within the stored rounding.
 
 ## What This Binding Does Not Expose
 
-- The `hints` of a dense or shape search, which the C argument structures carry and this module leaves null.
+- The `hints` of a dense or shape search, which the C argument structures hold and this module leaves null.
 - An NVMe `load`, search streams, and the sparse verbs, for the sequence, shape and geospatial indexes, since the C library declares none for them.
 - The numeric `usearch_version` triple; `usearch.version()` answers the library's version string instead.
 
@@ -574,7 +574,7 @@ A terrain borrows its heights for the handle's lifetime or fills windows of them
   `status` polls through `usearch_outcome_status`, `wait` blocks through `usearch_outcome_wait`, and with no `async` left in Zig, waiting is how a result is collected.
 - __No life of its own.__
   The binding starts no threads and keeps no queues; releasing a `Deferred` rides `defer call.deinit()`, which waits for the call first.
-- __Arenas are lent and reused, never shared.__
+- __Arenas belong to the caller and are reused, never shared.__
   Every output whose length scales with the call lands in an arena the caller passes, and its views read the arena directly until the arena's next call.
 - __Nothing costs anything until it is used.__
   Submitting a call allocates nothing, and an arena allocates only when a call writes into it.

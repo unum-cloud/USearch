@@ -79,7 +79,7 @@ export interface ShapesOptions {
   points?: number;
   /** Neighbors per node; absent derives it. */
   connectivity?: number;
-  /** Entries one key may carry; absent is unbounded. */
+  /** Entries one key may hold; absent is unbounded. */
   valuesPerKey?: number;
   /** The newest CPU class dispatch may pick, by canonical name; absent means no ceiling. */
   cpuClassCeiling?: string;
@@ -93,7 +93,7 @@ export interface ShapesLoadConfig {
   executor?: Executor;
   /** NUMA node IDs for a RAM load, or CUDA ordinals for a VRAM one; absent derives them. */
   placement?: number[];
-  /** Entries one key may carry; absent is unbounded. */
+  /** Entries one key may hold; absent is unbounded. */
   valuesPerKey?: number;
   /** The newest CPU or GPU class dispatch may pick, by canonical name; absent means no ceiling. */
   classCeiling?: string;

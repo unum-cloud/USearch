@@ -18,7 +18,7 @@ Every modality takes the same receivers, `refine` and `reshard`, each with its o
 pip install usearch
 ```
 
-The wheels carry every dense storage type.
+The wheels hold every dense storage type.
 A build from source takes its count from `USEARCH_DENSE_DTYPES` in `pyproject.toml`, eleven, and a leaner one can override it:
 
 ```sh
@@ -122,11 +122,11 @@ Key(uuid.uuid4())  # from a `uuid.UUID`
 ```
 
 A key equals and hashes as the integer or `uuid.UUID` it reads as, and pickles as its sixteen bytes.
-No NumPy dtype holds a 128-bit integer, so batch keys travel as big-endian sixteen-byte rows, an `(N, 16)` buffer of `uint8`, and `usearch.keys` carries `integers_to_keys` and `keys_to_integers` for keys that are entry numbers.
+No NumPy dtype holds a 128-bit integer, so batch keys travel as big-endian sixteen-byte rows, an `(N, 16)` buffer of `uint8`, and `usearch.keys` holds `integers_to_keys` and `keys_to_integers` for keys that are entry numbers.
 
 ## Errors
 
-Every failure raises a subclass of `usearch.Error`, a `RuntimeError` carrying the C status as its `status` attribute, a `usearch.Status` member:
+Every failure raises a subclass of `usearch.Error`, a `RuntimeError` holding the C status as its `status` attribute, a `usearch.Status` member:
 
 ```python
 try:
@@ -385,11 +385,11 @@ assert sorted(keys_to_integers(np.asarray(keys)).tolist()) == [1, 2]  # The two 
 ```
 
 `search` ranks the `wanted` nearest entries a `GeospatialRelation` admits, in chord metres, and `within` reports every entry inside the radius as one ragged run per query; `seconds=` widens each query's time interval.
-No handle here carries a terrain, so `GeospatialRelation.VISIBLE` raises `UnsupportedError`, and `get` returns a key's observations within the stored rounding.
+No handle here holds a terrain, so `GeospatialRelation.VISIBLE` raises `UnsupportedError`, and `get` returns a key's observations within the stored rounding.
 
 ## Tooling
 
-`usearch.io` reads and writes the `fbin` / `ibin` / `i8bin` matrix formats, and `usearch.eval` carries the recall harness, which takes the index or any blocking receiver:
+`usearch.io` reads and writes the `fbin` / `ibin` / `i8bin` matrix formats, and `usearch.eval` holds the recall harness, which takes the index or any blocking receiver:
 
 ```python
 from usearch.eval import self_recall

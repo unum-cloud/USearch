@@ -14,7 +14,7 @@ package usearch
 import "unsafe"
 
 /*
-// `nocallback` only where the argument structure carries no callback and no executor; `noescape`
+// `nocallback` only where the argument structure holds no callback and no executor; `noescape`
 // everywhere, since submission copies the structure and everything it names is pinned.
 #cgo noescape usearch_sequence_init_ram
 #cgo nocallback usearch_sequence_init_ram
@@ -173,7 +173,7 @@ type SequenceKeyStats struct {
 
 // region: Configs
 
-// SequenceViewNvmeConfig carries the optional settings of SequenceViewNvme.
+// SequenceViewNvmeConfig holds the optional settings of SequenceViewNvme.
 type SequenceViewNvmeConfig struct {
 	// Executor is the NVMe executor whose rings read the checkpoint's headers; nil reads on the
 	// calling goroutine.
@@ -186,7 +186,7 @@ type SequenceViewNvmeConfig struct {
 	CPUClassCeiling CPUClass
 }
 
-// SequenceRefineConfig carries the optional settings of Refine. A zero value derives every setting.
+// SequenceRefineConfig holds the optional settings of Refine. A zero value derives every setting.
 type SequenceRefineConfig struct {
 	// ExpansionFactor is the breadth of the candidates the re-selection walk explores; zero derives.
 	ExpansionFactor uint
@@ -203,7 +203,7 @@ type SequenceRefineConfig struct {
 	Plan *SequenceRefinePlan
 }
 
-// SequenceReshardConfig carries the optional settings of Reshard. A zero value derives every
+// SequenceReshardConfig holds the optional settings of Reshard. A zero value derives every
 // setting.
 type SequenceReshardConfig struct {
 	// Seed picks the part roots of a source split among several targets: equal seeds over an
@@ -236,7 +236,7 @@ type SequenceRefinePlan = livePlan[C.usearch_sequence_refine_plan_t]
 // names admits no insertion and no save, and each call names the executor it was opened with.
 type SequenceReshardPlan = livePlan[C.usearch_sequence_reshard_plan_t]
 
-// lower lends optional weights for the call alone, nil for none; a matrix of another size than
+// lower passes optional weights for the call alone, nil for none; a matrix of another size than
 // the 256 × 256 the library reads is refused here, since only this side sees its length.
 func (weights *SequenceWeights) lower(call *call) (*C.usearch_sequence_weights_t, *Error) {
 	if weights == nil {
@@ -246,7 +246,7 @@ func (weights *SequenceWeights) lower(call *call) (*C.usearch_sequence_weights_t
 		return nil, fail(StatusShapeMismatch, "a substitution matrix holds 256 × 256 scores")
 	}
 	return pin(call, &C.usearch_sequence_weights_t{
-		substitution_matrix: (*C.int8_t)(unsafe.Pointer(lend(call, weights.SubstitutionMatrix))),
+		substitution_matrix: (*C.int8_t)(unsafe.Pointer(pinSlice(call, weights.SubstitutionMatrix))),
 		gap:                 C.int8_t(weights.Gap),
 	}), nil
 }
@@ -303,45 +303,45 @@ func (index *SequenceIndex) Close() error {
 // SequenceInitRam creates an empty, mutable index in host memory, one shard per NUMA node
 // memoryDomains names; empty derives every node the process may use.
 func SequenceInitRam(options SequenceOptions, memoryDomains []int32) (*SequenceIndex, error) {
-	lent := open[C.usearch_sequence_index_t]()
-	weights, refusal := options.Weights.lower(&lent.call)
+	call := open[C.usearch_sequence_index_t]()
+	weights, refusal := options.Weights.lower(&call.call)
 	if refusal != nil {
-		return sequenceIndexOf(block(lent.refuse(refusal)))
+		return sequenceIndexOf(block(call.refuse(refusal)))
 	}
 	C.usearch_sequence_init_ram(&C.usearch_sequence_init_ram_t{
-		index:               lent.result,
-		outcome:             lent.outcome,
+		index:               call.result,
+		outcome:             call.outcome,
 		metric:              C.usearch_sequence_metric_t(options.Metric),
 		weights:             weights,
-		window_widths:       (*C.size_t)(unsafe.Pointer(lend(&lent.call, options.WindowWidths))),
+		window_widths:       (*C.size_t)(unsafe.Pointer(pinSlice(&call.call, options.WindowWidths))),
 		window_widths_count: C.size_t(len(options.WindowWidths)),
 		connectivity:        C.size_t(options.Connectivity),
 		values_per_key:      C.size_t(options.ValuesPerKey),
-		ram:                 lent.ram(memoryDomains, options.CPUClassCeiling),
+		ram:                 call.ram(memoryDomains, options.CPUClassCeiling),
 	})
-	return sequenceIndexOf(block(lent))
+	return sequenceIndexOf(block(call))
 }
 
 // SequenceInitVram creates an empty, mutable index in device memory, sharded across the CUDA
 // ordinals devices names and never replicated; empty derives one free device.
 func SequenceInitVram(options SequenceOptions, devices []int32) (*SequenceIndex, error) {
-	lent := open[C.usearch_sequence_index_t]()
-	weights, refusal := options.Weights.lower(&lent.call)
+	call := open[C.usearch_sequence_index_t]()
+	weights, refusal := options.Weights.lower(&call.call)
 	if refusal != nil {
-		return sequenceIndexOf(block(lent.refuse(refusal)))
+		return sequenceIndexOf(block(call.refuse(refusal)))
 	}
 	C.usearch_sequence_init_vram(&C.usearch_sequence_init_vram_t{
-		index:               lent.result,
-		outcome:             lent.outcome,
+		index:               call.result,
+		outcome:             call.outcome,
 		metric:              C.usearch_sequence_metric_t(options.Metric),
 		weights:             weights,
-		window_widths:       (*C.size_t)(unsafe.Pointer(lend(&lent.call, options.WindowWidths))),
+		window_widths:       (*C.size_t)(unsafe.Pointer(pinSlice(&call.call, options.WindowWidths))),
 		window_widths_count: C.size_t(len(options.WindowWidths)),
 		connectivity:        C.size_t(options.Connectivity),
 		values_per_key:      C.size_t(options.ValuesPerKey),
-		vram:                lent.vram(devices, options.GPUClassCeiling),
+		vram:                call.vram(devices, options.GPUClassCeiling),
 	})
-	return sequenceIndexOf(block(lent))
+	return sequenceIndexOf(block(call))
 }
 
 // SequenceLoadRam copies a checkpoint into a new, mutable index in host memory. The path names a
@@ -355,22 +355,22 @@ func SequenceLoadRam(path string, weights *SequenceWeights, config *DenseLoadRam
 	if refusal != nil {
 		return nil, refusal
 	}
-	lent := open[C.usearch_sequence_index_t]()
-	lentWeights, refusal := weights.lower(&lent.call)
+	call := open[C.usearch_sequence_index_t]()
+	loweredWeights, refusal := weights.lower(&call.call)
 	if refusal != nil {
-		return sequenceIndexOf(block(lent.refuse(refusal)))
+		return sequenceIndexOf(block(call.refuse(refusal)))
 	}
 	C.usearch_sequence_load_ram(&C.usearch_sequence_load_ram_t{
-		index:          lent.result,
+		index:          call.result,
 		executor:       executor,
-		outcome:        lent.outcome,
-		path:           lent.text(path),
-		ram:            lent.ram(config.MemoryDomains, config.CPUClassCeiling),
+		outcome:        call.outcome,
+		path:           call.text(path),
+		ram:            call.ram(config.MemoryDomains, config.CPUClassCeiling),
 		values_per_key: C.size_t(config.ValuesPerKey),
-		weights:        lentWeights,
-		progress:       lent.progress(config.Progress, config.ProgressSteps),
+		weights:        loweredWeights,
+		progress:       call.progress(config.Progress, config.ProgressSteps),
 	})
-	return sequenceIndexOf(block(lent))
+	return sequenceIndexOf(block(call))
 }
 
 // SequenceLoadVram copies a checkpoint into a new, mutable index in device memory, with the
@@ -383,22 +383,22 @@ func SequenceLoadVram(path string, weights *SequenceWeights, config *DenseLoadVr
 	if refusal != nil {
 		return nil, refusal
 	}
-	lent := open[C.usearch_sequence_index_t]()
-	lentWeights, refusal := weights.lower(&lent.call)
+	call := open[C.usearch_sequence_index_t]()
+	loweredWeights, refusal := weights.lower(&call.call)
 	if refusal != nil {
-		return sequenceIndexOf(block(lent.refuse(refusal)))
+		return sequenceIndexOf(block(call.refuse(refusal)))
 	}
 	C.usearch_sequence_load_vram(&C.usearch_sequence_load_vram_t{
-		index:          lent.result,
+		index:          call.result,
 		executor:       executor,
-		outcome:        lent.outcome,
-		path:           lent.text(path),
-		vram:           lent.vram(config.Devices, config.GPUClassCeiling),
+		outcome:        call.outcome,
+		path:           call.text(path),
+		vram:           call.vram(config.Devices, config.GPUClassCeiling),
 		values_per_key: C.size_t(config.ValuesPerKey),
-		weights:        lentWeights,
-		progress:       lent.progress(config.Progress, config.ProgressSteps),
+		weights:        loweredWeights,
+		progress:       call.progress(config.Progress, config.ProgressSteps),
 	})
-	return sequenceIndexOf(block(lent))
+	return sequenceIndexOf(block(call))
 }
 
 // SequenceLoadRamBuffer copies a monolith from a buffer into a new, mutable index in host memory,
@@ -412,22 +412,22 @@ func SequenceLoadRamBuffer(buffer []byte, weights *SequenceWeights,
 	if refusal != nil {
 		return nil, refusal
 	}
-	lent := open[C.usearch_sequence_index_t]()
-	lentWeights, refusal := weights.lower(&lent.call)
+	call := open[C.usearch_sequence_index_t]()
+	loweredWeights, refusal := weights.lower(&call.call)
 	if refusal != nil {
-		return sequenceIndexOf(block(lent.refuse(refusal)))
+		return sequenceIndexOf(block(call.refuse(refusal)))
 	}
 	C.usearch_sequence_load_ram_buffer(&C.usearch_sequence_load_ram_buffer_t{
-		index:          lent.result,
+		index:          call.result,
 		executor:       executor,
-		outcome:        lent.outcome,
-		buffer:         lent.bytes(buffer),
-		ram:            lent.ram(config.MemoryDomains, config.CPUClassCeiling),
+		outcome:        call.outcome,
+		buffer:         call.bytes(buffer),
+		ram:            call.ram(config.MemoryDomains, config.CPUClassCeiling),
 		values_per_key: C.size_t(config.ValuesPerKey),
-		weights:        lentWeights,
-		progress:       lent.progress(config.Progress, config.ProgressSteps),
+		weights:        loweredWeights,
+		progress:       call.progress(config.Progress, config.ProgressSteps),
 	})
-	return sequenceIndexOf(block(lent))
+	return sequenceIndexOf(block(call))
 }
 
 // SequenceLoadVramBuffer copies a monolith from a buffer into a new, mutable index in device
@@ -441,39 +441,39 @@ func SequenceLoadVramBuffer(buffer []byte, weights *SequenceWeights,
 	if refusal != nil {
 		return nil, refusal
 	}
-	lent := open[C.usearch_sequence_index_t]()
-	lentWeights, refusal := weights.lower(&lent.call)
+	call := open[C.usearch_sequence_index_t]()
+	loweredWeights, refusal := weights.lower(&call.call)
 	if refusal != nil {
-		return sequenceIndexOf(block(lent.refuse(refusal)))
+		return sequenceIndexOf(block(call.refuse(refusal)))
 	}
 	C.usearch_sequence_load_vram_buffer(&C.usearch_sequence_load_vram_buffer_t{
-		index:          lent.result,
+		index:          call.result,
 		executor:       executor,
-		outcome:        lent.outcome,
-		buffer:         lent.bytes(buffer),
-		vram:           lent.vram(config.Devices, config.GPUClassCeiling),
+		outcome:        call.outcome,
+		buffer:         call.bytes(buffer),
+		vram:           call.vram(config.Devices, config.GPUClassCeiling),
 		values_per_key: C.size_t(config.ValuesPerKey),
-		weights:        lentWeights,
-		progress:       lent.progress(config.Progress, config.ProgressSteps),
+		weights:        loweredWeights,
+		progress:       call.progress(config.Progress, config.ProgressSteps),
 	})
-	return sequenceIndexOf(block(lent))
+	return sequenceIndexOf(block(call))
 }
 
 // SequenceViewRam serves a checkpoint in place through a memory mapping, as a read-only index
 // whose mutating verbs report StatusReadOnly; the files must stay unmodified while it lives.
 func SequenceViewRam(path string, weights *SequenceWeights) (*SequenceIndex, error) {
-	lent := open[C.usearch_sequence_index_t]()
-	lentWeights, refusal := weights.lower(&lent.call)
+	call := open[C.usearch_sequence_index_t]()
+	loweredWeights, refusal := weights.lower(&call.call)
 	if refusal != nil {
-		return sequenceIndexOf(block(lent.refuse(refusal)))
+		return sequenceIndexOf(block(call.refuse(refusal)))
 	}
 	C.usearch_sequence_view_ram(&C.usearch_sequence_view_ram_t{
-		index:   lent.result,
-		outcome: lent.outcome,
-		path:    lent.text(path),
-		weights: lentWeights,
+		index:   call.result,
+		outcome: call.outcome,
+		path:    call.text(path),
+		weights: loweredWeights,
 	})
-	return sequenceIndexOf(block(lent))
+	return sequenceIndexOf(block(call))
 }
 
 // SequenceViewNvme serves a checkpoint in place from NVMe drives, read through the executor's
@@ -486,20 +486,20 @@ func SequenceViewNvme(path string, weights *SequenceWeights, config *SequenceVie
 	if refusal != nil {
 		return nil, refusal
 	}
-	lent := open[C.usearch_sequence_index_t]()
-	lentWeights, refusal := weights.lower(&lent.call)
+	call := open[C.usearch_sequence_index_t]()
+	loweredWeights, refusal := weights.lower(&call.call)
 	if refusal != nil {
-		return sequenceIndexOf(block(lent.refuse(refusal)))
+		return sequenceIndexOf(block(call.refuse(refusal)))
 	}
 	C.usearch_sequence_view_nvme(&C.usearch_sequence_view_nvme_t{
-		index:    lent.result,
+		index:    call.result,
 		executor: executor,
-		outcome:  lent.outcome,
-		path:     lent.text(path),
-		nvme:     lent.nvme(config.Paths, config.CPUClassCeiling),
-		weights:  lentWeights,
+		outcome:  call.outcome,
+		path:     call.text(path),
+		nvme:     call.nvme(config.Paths, config.CPUClassCeiling),
+		weights:  loweredWeights,
 	})
-	return sequenceIndexOf(block(lent))
+	return sequenceIndexOf(block(call))
 }
 
 // SequenceMetadataRead reads a checkpoint's metric and connectivity without loading it.
@@ -511,14 +511,14 @@ func SequenceMetadataRead(path string, config *DenseMetadataReadConfig) (Sequenc
 	if refusal != nil {
 		return SequenceMetadata{}, refusal
 	}
-	lent := open[SequenceMetadata]()
+	call := open[SequenceMetadata]()
 	C.usearch_sequence_metadata_read(&C.usearch_sequence_metadata_read_t{
 		executor: executor,
-		outcome:  lent.outcome,
-		path:     lent.text(path),
-		metadata: (*C.usearch_sequence_metadata_t)(unsafe.Pointer(lent.result)),
+		outcome:  call.outcome,
+		path:     call.text(path),
+		metadata: (*C.usearch_sequence_metadata_t)(unsafe.Pointer(call.result)),
 	})
-	return block(lent)
+	return block(call)
 }
 
 // SequenceMetadataReadBuffer reads the metric and connectivity out of a serialized monolith buffer.
@@ -530,14 +530,14 @@ func SequenceMetadataReadBuffer(buffer []byte, config *DenseMetadataReadBufferCo
 	if refusal != nil {
 		return SequenceMetadata{}, refusal
 	}
-	lent := open[SequenceMetadata]()
+	call := open[SequenceMetadata]()
 	C.usearch_sequence_metadata_read_buffer(&C.usearch_sequence_metadata_read_buffer_t{
 		executor: executor,
-		outcome:  lent.outcome,
-		buffer:   lent.bytes(buffer),
-		metadata: (*C.usearch_sequence_metadata_t)(unsafe.Pointer(lent.result)),
+		outcome:  call.outcome,
+		buffer:   call.bytes(buffer),
+		metadata: (*C.usearch_sequence_metadata_t)(unsafe.Pointer(call.result)),
 	})
-	return block(lent)
+	return block(call)
 }
 
 // endregion: Index
@@ -571,7 +571,7 @@ type SequenceIndexOn struct {
 // sugar and cursors. Binding-only.
 //
 // The library reads a deferred call's inputs until the call is final, so the slices a verb is
-// handed must not change until then; its arena is borrowed, as a blocking verb borrows it.
+// handed must not change until then; its arena is viewed, as a blocking verb views it.
 type SequenceIndexDeferredOn struct {
 	sequenceReceiver
 }
@@ -673,7 +673,7 @@ func (on SequenceIndexDeferredOn) Health() *Deferred[DenseReachability] {
 }
 
 // Search resolves a tape of queries into up to wanted nearest matches apiece, written into arena,
-// and filtered when the config carries a predicate. Never writes to the graph.
+// and filtered when the config holds a predicate. Never writes to the graph.
 func (on SequenceIndexOn) Search(queries Tape, wanted uint, arena *Arena, config *DenseSearchConfig) (MatchesView, error) {
 	return block(on.search(C.usearch_completion_blocking_k, queries, wanted, arena, config))
 }
@@ -757,246 +757,246 @@ func (on SequenceIndexDeferredOn) SaveBuffer(arena *Arena, config *DenseSaveBuff
 
 // region: Calls
 
-func (receiver sequenceReceiver) reserve(completion C.usearch_completion_t, entries, payloadBytes uint) *lent[struct{}] {
-	lent := open[struct{}]()
+func (receiver sequenceReceiver) reserve(completion C.usearch_completion_t, entries, payloadBytes uint) *callWithResult[struct{}] {
+	call := open[struct{}]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	C.usearch_sequence_reserve(&C.usearch_sequence_reserve_t{
 		index:         index,
 		executor:      executor,
-		outcome:       lent.outcome,
+		outcome:       call.outcome,
 		completion:    completion,
 		entries:       C.size_t(entries),
 		payload_bytes: C.size_t(payloadBytes),
 	})
-	return lent
+	return call
 }
 
-func (receiver sequenceReceiver) clear(completion C.usearch_completion_t) *lent[struct{}] {
-	lent := open[struct{}]()
+func (receiver sequenceReceiver) clear(completion C.usearch_completion_t) *callWithResult[struct{}] {
+	call := open[struct{}]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	C.usearch_sequence_clear(&C.usearch_sequence_clear_t{
 		index:      index,
 		executor:   executor,
-		outcome:    lent.outcome,
+		outcome:    call.outcome,
 		completion: completion,
 	})
-	return lent
+	return call
 }
 
-func (receiver sequenceReceiver) describe(completion C.usearch_completion_t) *lent[SequenceIndexDescription] {
-	lent := open[SequenceIndexDescription]()
+func (receiver sequenceReceiver) describe(completion C.usearch_completion_t) *callWithResult[SequenceIndexDescription] {
+	call := open[SequenceIndexDescription]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	C.usearch_sequence_describe(&C.usearch_sequence_describe_t{
 		index:       index,
 		executor:    executor,
-		outcome:     lent.outcome,
+		outcome:     call.outcome,
 		completion:  completion,
-		description: (*C.usearch_sequence_index_description_t)(unsafe.Pointer(lent.result)),
+		description: (*C.usearch_sequence_index_description_t)(unsafe.Pointer(call.result)),
 	})
-	return lent
+	return call
 }
 
-func (receiver sequenceReceiver) count(completion C.usearch_completion_t, key Key) *lent[SequenceKeyStats] {
-	lent := open[SequenceKeyStats]()
+func (receiver sequenceReceiver) count(completion C.usearch_completion_t, key Key) *callWithResult[SequenceKeyStats] {
+	call := open[SequenceKeyStats]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	C.usearch_sequence_count(&C.usearch_sequence_count_t{
 		index:      index,
 		executor:   executor,
-		outcome:    lent.outcome,
+		outcome:    call.outcome,
 		completion: completion,
 		key:        key.toRaw(),
-		key_stats:  (*C.usearch_sequence_key_stats_t)(unsafe.Pointer(lent.result)),
+		key_stats:  (*C.usearch_sequence_key_stats_t)(unsafe.Pointer(call.result)),
 	})
-	return lent
+	return call
 }
 
-func (receiver sequenceReceiver) get(completion C.usearch_completion_t, key Key, arena *Arena) *lent[TapeView] {
-	lent := open[TapeView]()
+func (receiver sequenceReceiver) get(completion C.usearch_completion_t, key Key, arena *Arena) *callWithResult[TapeView] {
+	call := open[TapeView]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
-	lent.result.width = 1
+	call.result.width = 1
 	C.usearch_sequence_get(&C.usearch_sequence_get_t{
 		index:      index,
 		executor:   executor,
-		outcome:    lent.outcome,
+		outcome:    call.outcome,
 		completion: completion,
 		key:        key.toRaw(),
-		sequences:  &lent.result.raw,
-		written:    (*C.size_t)(unsafe.Pointer(&lent.result.written)),
+		sequences:  &call.result.raw,
+		written:    (*C.size_t)(unsafe.Pointer(&call.result.written)),
 		arena:      arena.lower(),
 	})
-	return lent
+	return call
 }
 
 func (receiver sequenceReceiver) insert(completion C.usearch_completion_t, keys []Key, sequences Tape,
-	config *DenseInsertConfig) *lent[struct{}] {
+	config *DenseInsertConfig) *callWithResult[struct{}] {
 	if config == nil {
 		config = new(DenseInsertConfig)
 	}
-	lent := open[struct{}]()
+	call := open[struct{}]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	// The call has one count, so only this side sees the keys and the entries disagree.
 	if uint(len(keys)) != sequences.Entries() {
-		return lent.refuse(fail(StatusShapeMismatch, "the key count does not match the tape's entries"))
+		return call.refuse(fail(StatusShapeMismatch, "the key count does not match the tape's entries"))
 	}
 	C.usearch_sequence_insert(&C.usearch_sequence_insert_t{
 		index:            index,
 		executor:         executor,
-		outcome:          lent.outcome,
+		outcome:          call.outcome,
 		completion:       completion,
 		count:            C.size_t(len(keys)),
-		keys:             lent.keys(keys),
-		sequences:        sequences.lower(&lent.call),
+		keys:             call.keys(keys),
+		sequences:        sequences.lower(&call.call),
 		expansion_factor: C.size_t(config.ExpansionFactor),
-		progress:         lent.progress(config.Progress, config.ProgressSteps),
-		stats:            lent.stats(config.Stats),
+		progress:         call.progress(config.Progress, config.ProgressSteps),
+		stats:            call.stats(config.Stats),
 	})
-	return lent
+	return call
 }
 
 func (receiver sequenceReceiver) refine(completion C.usearch_completion_t,
-	config *SequenceRefineConfig) *lent[DenseRefineReport] {
+	config *SequenceRefineConfig) *callWithResult[DenseRefineReport] {
 	if config == nil {
 		config = new(SequenceRefineConfig)
 	}
-	lent := open[DenseRefineReport]()
+	call := open[DenseRefineReport]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
-	plan, phase := config.Plan.lower(&lent.call)
+	plan, phase := config.Plan.lower(&call.call)
 	C.usearch_sequence_refine(&C.usearch_sequence_refine_t{
 		index:      index,
 		executor:   executor,
-		outcome:    lent.outcome,
+		outcome:    call.outcome,
 		completion: completion,
-		report:     (*C.usearch_refine_report_t)(unsafe.Pointer(lent.result)),
+		report:     (*C.usearch_refine_report_t)(unsafe.Pointer(call.result)),
 		refine: C.usearch_refine_options_t{
 			expansion_factor: C.size_t(config.ExpansionFactor),
 			memory_limit:     C.size_t(config.MemoryLimit),
 		},
-		progress: lent.progress(config.Progress, config.ProgressSteps),
-		stats:    lent.stats(config.Stats),
+		progress: call.progress(config.Progress, config.ProgressSteps),
+		stats:    call.stats(config.Stats),
 		plan:     plan,
 		phase:    phase,
 	})
-	return lent
+	return call
 }
 
 func (receiver sequenceReceiver) refinePlanFinish(completion C.usearch_completion_t,
-	plan *SequenceRefinePlan) *lent[DenseRefineReport] {
-	lent := open[DenseRefineReport]()
+	plan *SequenceRefinePlan) *callWithResult[DenseRefineReport] {
+	call := open[DenseRefineReport]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	C.usearch_sequence_refine_plan_finish(&C.usearch_sequence_refine_plan_finish_t{
 		index:      index,
 		executor:   executor,
-		outcome:    lent.outcome,
+		outcome:    call.outcome,
 		completion: completion,
 		plan:       plan.take(),
-		report:     (*C.usearch_refine_report_t)(unsafe.Pointer(lent.result)),
+		report:     (*C.usearch_refine_report_t)(unsafe.Pointer(call.result)),
 	})
-	return lent
+	return call
 }
 
-func (receiver sequenceReceiver) health(completion C.usearch_completion_t) *lent[DenseReachability] {
-	lent := open[DenseReachability]()
+func (receiver sequenceReceiver) health(completion C.usearch_completion_t) *callWithResult[DenseReachability] {
+	call := open[DenseReachability]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	C.usearch_sequence_health(&C.usearch_sequence_health_t{
 		index:        index,
 		executor:     executor,
-		outcome:      lent.outcome,
+		outcome:      call.outcome,
 		completion:   completion,
-		reachability: (*C.usearch_reachability_t)(unsafe.Pointer(lent.result)),
+		reachability: (*C.usearch_reachability_t)(unsafe.Pointer(call.result)),
 	})
-	return lent
+	return call
 }
 
 func (receiver sequenceReceiver) search(completion C.usearch_completion_t, queries Tape, wanted uint,
-	arena *Arena, config *DenseSearchConfig) *lent[MatchesView] {
+	arena *Arena, config *DenseSearchConfig) *callWithResult[MatchesView] {
 	if config == nil {
 		config = new(DenseSearchConfig)
 	}
-	lent := open[MatchesView]()
+	call := open[MatchesView]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
-	lent.result.queries = queries.Entries()
+	call.result.queries = queries.Entries()
 	C.usearch_sequence_search(&C.usearch_sequence_search_t{
 		index:            index,
 		executor:         executor,
-		outcome:          lent.outcome,
+		outcome:          call.outcome,
 		completion:       completion,
 		count:            C.size_t(queries.Entries()),
-		queries:          queries.lower(&lent.call),
-		matches:          &lent.result.raw,
+		queries:          queries.lower(&call.call),
+		matches:          &call.result.raw,
 		arena:            arena.lower(),
 		wanted:           C.size_t(wanted),
 		expansion_factor: C.size_t(config.ExpansionFactor),
 		traversal:        C.usearch_traversal_t(config.Traversal),
-		predicate:        lent.predicate(config.Predicate),
-		progress:         lent.progress(config.Progress, config.ProgressSteps),
-		stats:            lent.stats(config.Stats),
+		predicate:        call.predicate(config.Predicate),
+		progress:         call.progress(config.Progress, config.ProgressSteps),
+		stats:            call.stats(config.Stats),
 	})
-	return lent
+	return call
 }
 
 func (receiver sequenceReceiver) reshard(completion C.usearch_completion_t, sources, targets []*SequenceIndex,
-	config *SequenceReshardConfig) *lent[DenseRefineReport] {
+	config *SequenceReshardConfig) *callWithResult[DenseRefineReport] {
 	if config == nil {
 		config = new(SequenceReshardConfig)
 	}
-	lent := open[DenseRefineReport]()
-	// A reshard names its handles in its lists, so the receiver lends only its executor.
+	call := open[DenseRefineReport]()
+	// A reshard names its handles in its lists, so the receiver passes only its executor.
 	executor, refusal := receiver.executor.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	sourceHandles, targetHandles := sequenceHandles(sources), sequenceHandles(targets)
-	plan, phase := config.Plan.lower(&lent.call)
+	plan, phase := config.Plan.lower(&call.call)
 	C.usearch_sequence_reshard(&C.usearch_sequence_reshard_t{
 		sources_count: C.size_t(len(sourceHandles)),
-		sources:       lend(&lent.call, sourceHandles),
+		sources:       pinSlice(&call.call, sourceHandles),
 		targets_count: C.size_t(len(targetHandles)),
-		targets:       lend(&lent.call, targetHandles),
+		targets:       pinSlice(&call.call, targetHandles),
 		executor:      executor,
-		outcome:       lent.outcome,
+		outcome:       call.outcome,
 		completion:    completion,
-		report:        (*C.usearch_refine_report_t)(unsafe.Pointer(lent.result)),
+		report:        (*C.usearch_refine_report_t)(unsafe.Pointer(call.result)),
 		refine: C.usearch_refine_options_t{
 			expansion_factor: C.size_t(config.ExpansionFactor),
 			memory_limit:     C.size_t(config.MemoryLimit),
 		},
 		seed:     C.uint64_t(config.Seed),
-		progress: lent.progress(config.Progress, config.ProgressSteps),
-		stats:    lent.stats(config.Stats),
+		progress: call.progress(config.Progress, config.ProgressSteps),
+		stats:    call.stats(config.Stats),
 		plan:     plan,
 		phase:    phase,
 	})
-	return lent
+	return call
 }
 
 // sequenceHandles lists the handles of indexes.
@@ -1009,103 +1009,103 @@ func sequenceHandles(indexes []*SequenceIndex) []C.usearch_sequence_index_t {
 }
 
 func (receiver sequenceReceiver) reshardPlanFinish(completion C.usearch_completion_t,
-	plan *SequenceReshardPlan) *lent[DenseRefineReport] {
-	lent := open[DenseRefineReport]()
-	// A reshard names its handles in its lists, so the receiver lends only its executor.
+	plan *SequenceReshardPlan) *callWithResult[DenseRefineReport] {
+	call := open[DenseRefineReport]()
+	// A reshard names its handles in its lists, so the receiver passes only its executor.
 	executor, refusal := receiver.executor.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	C.usearch_sequence_reshard_plan_finish(&C.usearch_sequence_reshard_plan_finish_t{
 		executor:   executor,
-		outcome:    lent.outcome,
+		outcome:    call.outcome,
 		completion: completion,
 		plan:       plan.take(),
-		report:     (*C.usearch_refine_report_t)(unsafe.Pointer(lent.result)),
+		report:     (*C.usearch_refine_report_t)(unsafe.Pointer(call.result)),
 	})
-	return lent
+	return call
 }
 
 func (receiver sequenceReceiver) sample(completion C.usearch_completion_t, wanted uint, arena *Arena,
-	config *DenseSampleConfig) *lent[DenseDraws] {
+	config *DenseSampleConfig) *callWithResult[DenseDraws] {
 	if config == nil {
 		config = new(DenseSampleConfig)
 	}
-	lent := open[DenseDraws]()
+	call := open[DenseDraws]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	// The call has one count for both, so only this side sees the keys and their places disagree.
 	if len(config.Shown) != len(config.ShownCoordinates) {
-		return lent.refuse(fail(StatusShapeMismatch, "the shown keys and coordinates disagree in length"))
+		return call.refuse(fail(StatusShapeMismatch, "the shown keys and coordinates disagree in length"))
 	}
 	C.usearch_sequence_sample(&C.usearch_sequence_sample_t{
 		index:             index,
 		executor:          executor,
-		outcome:           lent.outcome,
+		outcome:           call.outcome,
 		completion:        completion,
 		shown_count:       C.size_t(len(config.Shown)),
-		shown:             lent.keys(config.Shown),
-		shown_coordinates: lent.points(config.ShownCoordinates),
+		shown:             call.keys(config.Shown),
+		shown_coordinates: call.points(config.ShownCoordinates),
 		focus_count:       C.size_t(len(config.Focus)),
-		focus:             lent.keys(config.Focus),
-		keys:              &lent.result.keys,
-		entry_ordinals:    &lent.result.entryOrdinals,
-		parents:           &lent.result.parents,
-		coordinates:       &lent.result.coordinates,
-		written:           (*C.size_t)(unsafe.Pointer(&lent.result.written)),
+		focus:             call.keys(config.Focus),
+		keys:              &call.result.keys,
+		entry_ordinals:    &call.result.entryOrdinals,
+		parents:           &call.result.parents,
+		coordinates:       &call.result.coordinates,
+		written:           (*C.size_t)(unsafe.Pointer(&call.result.written)),
 		arena:             arena.lower(),
 		wanted:            C.size_t(wanted),
 		seed:              C.uint64_t(config.Seed),
 		expansion_factor:  C.size_t(config.ExpansionFactor),
-		progress:          lent.progress(config.Progress, config.ProgressSteps),
-		stats:             lent.stats(config.Stats),
+		progress:          call.progress(config.Progress, config.ProgressSteps),
+		stats:             call.stats(config.Stats),
 	})
-	return lent
+	return call
 }
 
 func (receiver sequenceReceiver) save(completion C.usearch_completion_t, path string,
-	config *DenseSaveConfig) *lent[struct{}] {
+	config *DenseSaveConfig) *callWithResult[struct{}] {
 	if config == nil {
 		config = new(DenseSaveConfig)
 	}
-	lent := open[struct{}]()
+	call := open[struct{}]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	C.usearch_sequence_save(&C.usearch_sequence_save_t{
 		index:      index,
 		executor:   executor,
-		outcome:    lent.outcome,
+		outcome:    call.outcome,
 		completion: completion,
-		path:       lent.text(path),
-		progress:   lent.progress(config.Progress, config.ProgressSteps),
+		path:       call.text(path),
+		progress:   call.progress(config.Progress, config.ProgressSteps),
 	})
-	return lent
+	return call
 }
 
 func (receiver sequenceReceiver) saveBuffer(completion C.usearch_completion_t, arena *Arena,
-	config *DenseSaveBufferConfig) *lent[Monolith] {
+	config *DenseSaveBufferConfig) *callWithResult[Monolith] {
 	if config == nil {
 		config = new(DenseSaveBufferConfig)
 	}
-	lent := open[Monolith]()
+	call := open[Monolith]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
-		return lent.refuse(refusal)
+		return call.refuse(refusal)
 	}
 	C.usearch_sequence_save_buffer(&C.usearch_sequence_save_buffer_t{
 		index:      index,
 		executor:   executor,
-		outcome:    lent.outcome,
+		outcome:    call.outcome,
 		completion: completion,
-		monolith:   &lent.result.raw,
+		monolith:   &call.result.raw,
 		arena:      arena.lower(),
-		progress:   lent.progress(config.Progress, config.ProgressSteps),
+		progress:   call.progress(config.Progress, config.ProgressSteps),
 	})
-	return lent
+	return call
 }
 
 // endregion: Calls
@@ -1127,15 +1127,15 @@ func (on SequenceIndexOn) Cursor(starts ...Key) (*SequenceCursor, error) {
 	if refusal != nil {
 		return nil, refusal
 	}
-	lent := open[C.usearch_sequence_cursor_t]()
+	call := open[C.usearch_sequence_cursor_t]()
 	C.usearch_sequence_cursor_init(&C.usearch_sequence_cursor_init_t{
 		index:        index,
-		outcome:      lent.outcome,
+		outcome:      call.outcome,
 		starts_count: C.size_t(len(starts)),
-		starts:       (*C.usearch_key_t)(unsafe.Pointer(lend(&lent.call, starts))),
-		cursor:       lent.result,
+		starts:       (*C.usearch_key_t)(unsafe.Pointer(pinSlice(&call.call, starts))),
+		cursor:       call.result,
 	})
-	handle, err := block(lent)
+	handle, err := block(call)
 	if err != nil {
 		return nil, err
 	}
@@ -1159,24 +1159,24 @@ func (cursor *SequenceCursor) next(wanted uint, linked bool, arena *Arena) (Dens
 	if refusal != nil {
 		return DenseBatch{}, refusal
 	}
-	lent := open[DenseBatch]()
+	call := open[DenseBatch]()
 	var links *C.usearch_keys_tape_view_t
 	if linked {
-		links = &lent.result.links
+		links = &call.result.links
 	}
 	C.usearch_sequence_cursor_next(&C.usearch_sequence_cursor_next_t{
 		index:      index,
 		executor:   executor,
-		outcome:    lent.outcome,
+		outcome:    call.outcome,
 		completion: C.usearch_completion_blocking_k,
 		cursor:     cursor.handle,
-		keys:       &lent.result.keys,
+		keys:       &call.result.keys,
 		links:      links,
-		written:    (*C.size_t)(unsafe.Pointer(&lent.result.written)),
+		written:    (*C.size_t)(unsafe.Pointer(&call.result.written)),
 		arena:      arena.lower(),
 		wanted:     C.size_t(wanted),
 	})
-	return block(lent)
+	return block(call)
 }
 
 // Close releases the cursor. It is idempotent.

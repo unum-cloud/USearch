@@ -4,7 +4,7 @@
  *  @date September 9, 2026
  *  @brief The Node-API vocabulary every modality shares.
  *
- *  Closed-set naming, argument parsing, identities, row borrowing, the @c Executor whose threads or
+ *  Closed-set naming, argument parsing, identities, row viewing, the @c Executor whose threads or
  *  streams every fanned-out verb runs on, the @c Arena every scaling output lands in, and the
  *  @c CompiledDeferred a deferred call answers.
  */
@@ -482,7 +482,7 @@ bool usearch_js_tape_from_value(napi_env env, napi_value const* arguments, char 
     uint32_t const* const offsets_u32 = (uint32_t const*)offsets;
     uint64_t const last = wide ? offsets_u64[offsets_count - 1] : offsets_u32[offsets_count - 1];
     size_t const element_bytes = usearch_js_row_bytes(view->scalar, scalars_per_element);
-    // The tape carries no length, so only this side can see its last offset overrun the array.
+    // The tape holds no length, so only this side can see its last offset overrun the array.
     if (!element_bytes || last > bytes / element_bytes)
         return usearch_js_throw(env, usearch_status_shape_mismatch_k, "The offsets reach past the end of their array");
     view->data = data;

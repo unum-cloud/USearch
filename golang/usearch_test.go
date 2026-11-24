@@ -173,7 +173,7 @@ func ExampleDenseIndex_Deferred() {
 	}
 	defer arena.Close()
 	call := index.Deferred(executor).Search(usearch.RowsOf([]float32{0, 0, 1}, 3), 1, arena, nil)
-	matches, err := call.Wait() // a view borrowing arena, as a blocking call's does
+	matches, err := call.Wait() // a view using arena, as a blocking call's does
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -182,7 +182,7 @@ func ExampleDenseIndex_Deferred() {
 	// Output: 00000000-0000-0000-0000-000000000003
 }
 
-// Mirrors the Sequence Indexes snippet of golang/README.md, adding the arena it borrows and the
+// Mirrors the Sequence Indexes snippet of golang/README.md, adding the arena it views and the
 // checks it skips.
 func ExampleSequenceIndex() {
 	index, err := usearch.SequenceInitRam(usearch.SequenceOptions{Metric: usearch.SequenceMetricLevenshteinUTF8}, nil)
@@ -211,7 +211,7 @@ func ExampleSequenceIndex() {
 	// Output: 00000000-0000-0000-0000-000000000002 1
 }
 
-// Mirrors the Shape Indexes snippet of golang/README.md, adding the arena it borrows and the checks
+// Mirrors the Shape Indexes snippet of golang/README.md, adding the arena it views and the checks
 // it skips.
 func ExampleShapesIndex() {
 	index, err := usearch.ShapesInitRam(usearch.DefaultShapesOptions(), nil)
@@ -241,7 +241,7 @@ func ExampleShapesIndex() {
 	// Output: 00000000-0000-0000-0000-000000000001
 }
 
-// Mirrors the Geospatial Indexes snippet of golang/README.md, adding the arena it borrows and the
+// Mirrors the Geospatial Indexes snippet of golang/README.md, adding the arena it views and the
 // checks it skips.
 func ExampleGeospatialIndex() {
 	index, err := usearch.GeospatialInitRam(usearch.GeospatialOptions{}, nil)

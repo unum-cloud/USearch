@@ -224,7 +224,7 @@ export interface DenseLoadRamConfig {
   /** The newest CPU class dispatch may pick, by canonical name, intersected with what the machine
    *  runs, so a class it lacks narrows rather than refuses; absent means no ceiling. */
   cpuClassCeiling?: string;
-  /** Entries one key may carry, which no checkpoint records; absent is unbounded. */
+  /** Entries one key may hold, which no checkpoint records; absent is unbounded. */
   valuesPerKey?: number;
 }
 
@@ -238,7 +238,7 @@ export interface DenseLoadVramConfig {
    *  named device loads; a ceiling no named device loads is refused as unsupported; absent means
    *  no ceiling. */
   gpuClassCeiling?: string;
-  /** Entries one key may carry, which no checkpoint records; absent is unbounded. */
+  /** Entries one key may hold, which no checkpoint records; absent is unbounded. */
   valuesPerKey?: number;
 }
 
@@ -251,7 +251,7 @@ export interface DenseLoadRamBufferConfig {
   /** The newest CPU class dispatch may pick, by canonical name, intersected with what the machine
    *  runs, so a class it lacks narrows rather than refuses; absent means no ceiling. */
   cpuClassCeiling?: string;
-  /** Entries one key may carry, which no checkpoint records; absent is unbounded. */
+  /** Entries one key may hold, which no checkpoint records; absent is unbounded. */
   valuesPerKey?: number;
 }
 
@@ -265,7 +265,7 @@ export interface DenseLoadVramBufferConfig {
    *  named device loads; a ceiling no named device loads is refused as unsupported; absent means
    *  no ceiling. */
   gpuClassCeiling?: string;
-  /** Entries one key may carry, which no checkpoint records; absent is unbounded. */
+  /** Entries one key may hold, which no checkpoint records; absent is unbounded. */
   valuesPerKey?: number;
 }
 
@@ -396,7 +396,7 @@ export interface DenseOptions {
   quantization?: Scalar;
   /** Neighbors per node; absent derives it from the geometry. */
   connectivity?: number;
-  /** Entries one key may carry; absent is unbounded. */
+  /** Entries one key may hold; absent is unbounded. */
   valuesPerKey?: number;
   /** The newest CPU class dispatch may pick, by canonical name, intersected with what the machine
    *  runs, so a class it lacks narrows rather than refuses; absent means no ceiling. */
@@ -407,7 +407,7 @@ export interface DenseOptions {
   gpuClassCeiling?: string;
 }
 
-/** Resolves one scored key to its row of the values `attend` borrows, on the calling thread.
+/** Resolves one scored key to its row of the values `attend` views, on the calling thread.
  *
  *  Anything but the index of a row the values hold refuses the call with
  *  {@link Status.ShapeMismatch}; an exception it throws goes to the process's `uncaughtException`
@@ -476,7 +476,7 @@ export class DenseProducts {
   }
 
   /**
-   *  Borrows the pairs of one left row or the documents of one query, without copying. Binding-only.
+   *  Views the pairs of one left row or the documents of one query, without copying. Binding-only.
    *
    *  @param query - Which left row or query to read.
    *  @returns The keys and products that query's walk scored.
@@ -508,7 +508,7 @@ export class DenseCursorLinks {
   }
 
   /**
-   *  Borrows the keys one entry links to, without copying. Binding-only.
+   *  Views the keys one entry links to, without copying. Binding-only.
    *
    *  @param entry - Which pulled entry to read.
    *  @returns Sixteen bytes per key the entry links to.
@@ -1037,7 +1037,7 @@ export class DenseIndexOn {
  *  `index.deferred(executor)`. Cursors, streams and `contains` stay blocking, so this receiver
  *  offers none of them.
  *
- *  A verb with outputs borrows its arena as the blocking one does and waits into the same view. */
+ *  A verb with outputs uses its arena as the blocking one does and waits into the same view. */
 export class DenseIndexDeferredOn {
   readonly #index: CompiledIndex;
   /** The executor every verb is submitted to. */
@@ -1231,7 +1231,7 @@ export class DenseIndex implements Disposable {
   /**
    *  Add vectors to the index.
    *
-   *  A typed array is one row, and a {@link RowsView} is a batch borrowed in place. A single key
+   *  A typed array is one row, and a {@link RowsView} is a batch viewed in place. A single key
    *  broadcasts across every row. A batch is all-or-nothing: a rejected one leaves the index
    *  untouched.
    *
@@ -1443,11 +1443,11 @@ export class DenseIndex implements Disposable {
    *  Attention folds key tiles, writing one attended row per query in `arena`.
    *
    *  The index stores no values: every key a walk scores resolves through `rowOf` to a row of
-   *  `values`, borrowed for the call, so only the keys a walk scores are ever resolved. The values
-   *  must be as wide as the keys and stored in the index's own scalar kind, and a key resolving
-   *  outside them refuses the call with `ShapeMismatch`, since a missing row is a wrong softmax
-   *  rather than a smaller one. Row `t * headCount + h` of the queries, outputs and carry is head
-   *  `h` of token `t`, every head of a token sharing one walk.
+   *  `values`, read only during the call, so only the keys a walk scores are ever resolved. The
+   *  values must be as wide as the keys and stored in the index's own scalar kind, and a key
+   *  resolving outside them refuses the call with `ShapeMismatch`, since a missing row is a wrong
+   *  softmax rather than a smaller one. Row `t * headCount + h` of the queries, outputs and carry
+   *  is head `h` of token `t`, every head of a token sharing one walk.
    *
    *  `rowOf` runs on the calling thread, which no executor's thread is, so only the index itself
    *  offers `attend`. An exception it throws never unwinds through the library: it reaches the

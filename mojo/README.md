@@ -2,7 +2,7 @@
 
 The Mojo package binds the C ABI in `c/usearch/`, opening the engine's shared library with `dlopen` rather than linking it, so a consumer builds with no linker flags of its own.
 It needs Mojo 1.2 through pixi, on Linux x86-64, Linux AArch64 or macOS on Apple silicon.
-On Linux it needs glibc 2.39 or newer, the first conda-forge sysroot whose kernel headers carry the `io_uring` flags the NVMe engine sets.
+On Linux it needs glibc 2.39 or newer, the first conda-forge sysroot whose kernel headers hold the `io_uring` flags the NVMe engine sets.
 It exposes dense, sequence, shape and geospatial indexes.
 
 ## Installation
@@ -60,7 +60,7 @@ var call = index.deferred(executor).search(queries, 10, arena)  # Deferred[...],
 The blocking verbs are written once, in the `DenseVerbs` trait both the index and `DenseIndexOn` conform to.
 Constructors address no index yet, so no receiver offers them; the ones whose C structure names an executor take one.
 
-A `Deferred` owns its outcome and outputs until the call is final, and borrows the index, the executor, the arena and every input it was handed, which Mojo keeps alive for as long as the `Deferred` is.
+A `Deferred` owns its outcome and outputs until the call is final, and uses the index, the executor, the arena and every input it was handed, which Mojo keeps alive for as long as the `Deferred` is.
 
 ```mojo
 var call = index.deferred(executor).search(queries, 10, arena)
@@ -70,7 +70,7 @@ print(call.wait().query_keys(0)[0])  # the matches, read in place from your aren
 ```
 
 Mojo has no runtime of its own to await on, so `wait` is the whole interface: it blocks in `usearch_outcome_wait` until the call is final, then answers the result or raises the failure, as many times as it is asked.
-The result is the very `Matches` a blocking search answers, borrowing the same arena, and `status` reads the outcome without blocking.
+The result is the very `Matches` a blocking search answers, viewing the same arena, and `status` reads the outcome without blocking.
 A failure this binding catches before the call crosses is final at once, and arrives through the same `status` and `wait`.
 Mojo destroys a value at its last use, and destroying an unfinished `Deferred` waits for it.
 Calls depending on each other are ordered by waiting on the first before submitting the second.
@@ -141,7 +141,7 @@ print(key.as_integer().value()) # 42
 ## Errors
 
 Every fallible entry point raises `Error` and nothing else, since Mojo allows one error type per function.
-An `Error` carries a `Status` shared with the C interface, so a fault this binding catches before the boundary reports the status the engine would have reported for the same fault:
+An `Error` holds a `Status` shared with the C interface, so a fault this binding catches before the boundary reports the status the engine would have reported for the same fault:
 
 ```mojo
 try:
@@ -193,7 +193,7 @@ var copied = DenseIndex.load_ram_buffer(executor, monolith.bytes())
 ```
 
 Loading creates the index, freezing its geometry from the checkpoint's own headers.
-The metadata carries only the four fields a checkpoint froze, so `values_per_key` and the placement stay yours to pass to the load.
+The metadata holds only the four fields a checkpoint froze, so `values_per_key` and the placement stay yours to pass to the load.
 
 ## Dense Indexes
 
@@ -205,7 +205,7 @@ Insertions and searches overlap freely on one handle: a search never writes to t
 ### Rows & Scalars
 
 Every verb is a batch over strided rows, so a memory-mapped dataset reaches the index with no reshape and no copy, and a single vector is a one-row view.
-A `RowsView` borrows a caller-owned run as rows of equal width, and it is the shape every batch argument takes.
+A `RowsView` views a caller-owned run as rows of equal width, and it is the shape every batch argument takes.
 `RowsView.of` derives the row count and the byte pitch from a packed run, and the scalar kind from its element type.
 
 ```mojo
@@ -233,10 +233,10 @@ _ = index.on(executor).search(queries, 10, arena, DenseSearchConfig(expansion_fa
 print(stats.computed_distances, "distances computed")
 ```
 
-A `stats` slot is overwritten whole by every call it is lent to, so a reused one reads the last call's figures rather than a running total.
+A `stats` slot is overwritten whole by every call it is passed to, so a reused one reads the last call's figures rather than a running total.
 
 A search answers `Matches`: a queries-by-`wanted` grid of keys, the distances paired with them, and one match count per query, all written into the arena.
-`query_keys` and `query_distances` borrow one query's results, nearest first, trimmed to the count that query reported:
+`query_keys` and `query_distances` view one query's results, nearest first, trimmed to the count that query reported:
 
 ```mojo
 var matches = index.search(queries, 10, arena)
@@ -303,7 +303,7 @@ while True:
 ```
 
 Cursors and streams open on the blocking receivers alone, the index and `index.on(executor)`, and every pull blocks.
-Both borrow the index and the executor, so neither can be released while a cursor or a stream lives, and a drained one answers an empty view rather than raising.
+Both view the index and the executor, so neither can be released while a cursor or a stream lives, and a drained one answers an empty view rather than raising.
 
 ### Refinement
 
@@ -315,7 +315,7 @@ while index.on(executor).refine().verdict == RefineVerdict.IMPROVED:
     pass
 ```
 
-A `DenseRefinePlan` lent through the config makes the rounds resumable: the first refine opens it, a cancel from the progress handler leaves it live, the next refine continues where it stopped, and `refine_plan_finish` closes it and reports the whole plan.
+A `DenseRefinePlan` passed through the config makes the rounds resumable: the first refine opens it, a cancel from the progress handler leaves it live, the next refine continues where it stopped, and `refine_plan_finish` closes it and reports the whole plan.
 A `PhaseProgress` slot receives where each call stopped, its `Phase` spelled by `library.phase_name`.
 
 ```mojo
@@ -402,7 +402,7 @@ var context = index.on(executor).attend[DType.float32](
 ```
 
 With `head_count=8`, row `t * 8 + h` of the queries is head `h` of token `t`, and the heads of one token share its walk.
-A `carry` of one `DenseSoftmaxState` per query row, lent by you, folds this branch into another over the same queries, such as a recent window kept out of the index; a shorter one is refused, since the C structure carries no count for it.
+A `carry` of one `DenseSoftmaxState` per query row, which you own, folds this branch into another over the same queries, such as a recent window kept out of the index; a shorter one is refused, since the C structure holds no count for it.
 
 ### Introspection
 
@@ -421,7 +421,7 @@ print(library.version_name(), library.capabilities_available())
 ## Sequence Indexes
 
 A `SequenceIndex` searches byte strings, UTF-8 text, DNA, RNA and proteins under edit distances and alignments.
-Its sequences cross as a `TapeView`, the Apache Arrow `Binary` layout of bytes end to end around one more offset than entries: a `Tape` packs separate entries, and `TapeView.of` borrows the two runs of an Arrow column as they are.
+Its sequences cross as a `TapeView`, the Apache Arrow `Binary` layout of bytes end to end around one more offset than entries: a `Tape` packs separate entries, and `TapeView.of` wraps the two runs of an Arrow column as they are.
 
 ```mojo
 var index = SequenceIndex.init_ram(library, SequenceOptions(SequenceMetric.LEVENSHTEIN_UTF8))
@@ -480,7 +480,7 @@ print(len(nearby.query_keys(0)))  # 2: both Paris stops within two kilometres, i
 ```
 
 `within` reports every entry the relation admits inside the radius, however many, while `search` ranks the `wanted` nearest, a zero `metres` ranking by distance alone.
-The relation is a field of each call's config: `NEAR` widens the radius by both positions' accuracies, `SEES` and `SEEN` test the view cones, and `VISIBLE` tests a line of sight over the `GeospatialTerrain` the handle was built with, borrowed whole by `GeospatialTerrain.of` or filled on demand by `GeospatialTerrain.filled`.
+The relation is a field of each call's config: `NEAR` widens the radius by both positions' accuracies, `SEES` and `SEEN` test the view cones, and `VISIBLE` tests a line of sight over the `GeospatialTerrain` the handle was built with, read in place whole by `GeospatialTerrain.of` or filled on demand by `GeospatialTerrain.filled`.
 `get` returns a key's observations within the stored rounding.
 
 ## What This Binding Does Not Expose
@@ -490,21 +490,21 @@ The relation is a field of each call's config: `NEAR` widens the radius by both 
 - __Deferred cursors and streams.__
   `DenseIndexDeferredOn` and the deferred receivers of the other modalities offer neither, since their pulls block.
 - __Terrain datasets on disk.__
-  `GeospatialTerrain` borrows heights or fills them, and never names a dataset path, which every residency refuses.
+  `GeospatialTerrain` points at heights or fills them, and never names a dataset path, which every residency refuses.
 
 ## Design
 
 - __A thin layer over the C ABI.__
   Every name follows `c/usearch/`: a C verb `usearch_dense_<verb>` is a `<verb>` here, and enums mirror C enums, never strings.
-- __Pointers keep their types and their borrows.__
-  A C pointer that may be null is an `Optional[Pointer]`, a view carries the origin of what it borrows into its pointer, and only opaque handles and `void *` state cross as an integer `Address`.
+- __Pointers keep their types and their origins.__
+  A C pointer that may be null is an `Optional[Pointer]`, a view's pointer type keeps the origin of the memory it points into, and only opaque handles and `void *` state cross as an integer `Address`.
 - __The receiver chooses, the verb stays.__
   The index runs a verb on the calling thread, `on(executor)` blocks on an executor, and `deferred(executor)` submits it, all with the same arguments.
 - __Deferred calls use the language's own idioms.__
-  `status` polls through `usearch_outcome_status`, `wait` blocks through `usearch_outcome_wait`, and the origins a `Deferred` carries keep everything it borrows alive until it is gone.
+  `status` polls through `usearch_outcome_status`, `wait` blocks through `usearch_outcome_wait`, and the origins a `Deferred` holds keep everything it reads alive until it is gone.
 - __No life of its own.__
   The binding starts no threads and keeps no queues; releasing a `Deferred` rides Mojo's destruction at last use, which waits for the call first.
-- __Arenas are lent and reused, never shared.__
+- __Arenas belong to the caller and are reused, never shared.__
   Every output whose length scales with the call lands in an arena the caller passes; the binding stamps each arena with a counter that every view checks before reading, and keeps no call counts.
 - __Nothing costs anything until it is used.__
   Submitting a call allocates nothing, and an arena allocates only when a call writes into it.

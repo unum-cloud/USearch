@@ -574,7 +574,7 @@ unsafe extern "C" fn terrain_trampoline(
 
 /// The elevation every line of sight is tested over: a north-up grid of heights in metres above
 /// the WGS-84 ellipsoid, given by borrowed heights or a fill function, which the handle reads for
-/// as long as it lives. A checkpoint never carries it, so every load and view names it again.
+/// as long as it lives. A checkpoint never holds it, so every load and view names it again.
 #[derive(Clone, Copy, Debug)]
 pub struct GeospatialTerrain {
     /// The grid's row count; rows run south from the north edge.
@@ -1527,7 +1527,7 @@ pub trait GeospatialVerbs<'index>: Copy {
         Self::Completion::answer((keys, config.into()), (), |call, completion| {
             let (keys, config) = &mut call.inputs;
             let keys = keys.as_ref();
-            // The keys view carries no count, so only this side can see the two disagree.
+            // The keys view holds no count, so only this side can see the two disagree.
             let observations = config.observations.as_ref();
             if observations.len() != keys.len() {
                 return Err(crate::types::fail(
@@ -1849,7 +1849,7 @@ pub trait GeospatialVerbs<'index>: Copy {
         })
     }
 
-    /// Saves the index as one monolith into the arena its config carries.
+    /// Saves the index as one monolith into the arena its config holds.
     #[allow(clippy::type_complexity)]
     fn save_buffer<'config, 'arena>(
         self,

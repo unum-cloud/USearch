@@ -68,7 +68,7 @@ static struct {
 };
 
 int usearch_py_raise(usearch_status_t status, char const* format, ...) {
-    // A status this specific supersedes whatever the caller was carrying.
+    // A status this specific supersedes whatever the caller was holding.
     PyErr_Clear();
     PyObject* type = (size_t)status < usearch_py_table_size_(status_error_types) ? status_error_types[status] : NULL;
     if (!type) {
@@ -142,7 +142,7 @@ static char const doc_Error[] =                                                 
     "Attributes:\n"                                                                            //
     "  status (Status): The status the raised subclass mirrors, such as\n"                     //
     "    `Status.SHAPE_MISMATCH`.\n"                                                           //
-    "  args (tuple): The detail the status cannot carry, as on any exception.";
+    "  args (tuple): The detail the status cannot hold, as on any exception.";
 
 int usearch_py_register_error_types(PyObject* module) {
     ErrorType = PyErr_NewExceptionWithDoc("usearch.Error", (char*)doc_Error, PyExc_RuntimeError, NULL);
@@ -179,7 +179,7 @@ static char const* spell_sequence_metric(int value) {
 }
 static char const* spell_shapes_metric(int value) { return usearch_shapes_metric_name((usearch_shapes_metric_t)value); }
 
-/** The C surface spells no relation, so the members carry the names the header documents. */
+/** The C surface spells no relation, so the members hold the names the header documents. */
 static char const* spell_geospatial_relation(int value) {
     static char const* const names[] = {"unknown", "near", "visible", "sees", "seen"};
     return value >= 0 && (size_t)value < usearch_py_table_size_(names) ? names[value] : "unknown";
@@ -864,7 +864,7 @@ typedef struct DLManagedTensorVersioned {
     DLTensor dl_tensor;
 } DLManagedTensorVersioned;
 
-/** The DLPack release this module speaks, and the flag a read-only tensor carries. */
+/** The DLPack release this module speaks, and the flag a read-only tensor holds. */
 enum {
     dlpack_major_version_k = 1,
     dlpack_minor_version_k = 0,
@@ -1483,7 +1483,7 @@ int usearch_py_keys_from_object(PyObject* object, size_t expected, usearch_py_ke
         if (PyErr_Occurred()) return -1;
     }
 
-    // An identity matrix is borrowed outright and an integer vector gathered in C; everything else
+    // An identity matrix is viewed outright and an integer vector gathered in C; everything else
     // walks the sequence below.
     if (PyObject_CheckBuffer(object)) {
         if (PyObject_GetBuffer(object, &batch->backing.buffer, PyBUF_STRIDES | PyBUF_FORMAT) != 0) {
@@ -1602,7 +1602,7 @@ PyObject* usearch_py_size_getter(PyObject* self, void* closure) {
 static char const doc_DenseReachability[] = //
     "DenseReachability\n"                   //
     "\n"                                    //
-    "One reachability audit, as `health` takes it and a `RefineReport` carries it twice.";
+    "One reachability audit, as `health` takes it and a `RefineReport` holds it twice.";
 
 static PyGetSetDef DenseReachability_getset[] = {
     {"audited", usearch_py_size_getter, NULL, "Entries published when the audit started, the population it judged.",
@@ -1916,7 +1916,7 @@ static PyObject* call_answer(usearch_py_call_t* call) {
     return Py_NewRef(call->result ? call->result : Py_None);
 }
 
-/** Lets go of everything @p call holds and lends, keeping whatever exception is set. */
+/** Lets go of everything @p call holds and passes, keeping whatever exception is set. */
 static void call_release(usearch_py_call_t* call) {
     PyObject* const raised = PyErr_GetRaisedException();
     Py_CLEAR(call->arena);
@@ -1973,7 +1973,7 @@ int usearch_py_callable_from_object(PyObject* object, char const* field, PyObjec
  *  @brief Re-enters Python for one progress report, from whichever library thread advances.
  *
  *  Reports are serialized, but nothing guarantees they land on the calling thread, so the GIL is
- *  taken here rather than assumed. A handler answering None carries on and a falsy one cancels;
+ *  taken here rather than assumed. A handler answering None continues and a falsy one cancels;
  *  one that raises reports through the unraisable hook and cancels.
  */
 static usearch_continuation_t progress_trampoline(size_t completed, size_t total, void* state) {
@@ -2169,7 +2169,7 @@ static char const doc_Deferred[] =                                              
     "instead. Either answers what the blocking verb would have answered, or raises what it\n"  //
     "would have raised, as many times as it is asked; `status` polls without waiting. It\n"    //
     "holds the call and the buffers it reads until the call is final, so dropping it waits,\n" //
-    "and lends its arena as the blocking verb would.\n"                                        //
+    "and passes its arena as the blocking verb would.\n"                                       //
     "\n"                                                                                       //
     "Example:\n"                                                                               //
     "  >>> import asyncio\n"                                                                   //
@@ -2259,7 +2259,8 @@ static PyObject* Deferred_await(PyObject* self) {
 
 static void Deferred_dealloc(Deferred* self) {
     PyObject_GC_UnTrack(self);
-    // The library writes into the call this object holds, and reads the inputs it borrows, until the call is final.
+    // The library writes into the call this object holds, and reads the inputs it views, until the
+    // call is final.
     if (!atomic_load(&self->answering)) {
         deferred_block(self);
         call_release(&self->call);
@@ -2424,7 +2425,7 @@ int usearch_py_optional_executor_from_object(PyObject* object, usearch_executor_
 }
 
 static char const doc_Executor_for_ram[] =                                                                //
-    "``for_ram(threads=0, *, memory_domains=None, cpu_class_ceiling=None) -> Executor``\n"                //
+    "``for_ram(threads=0, *, memory_domains=None, cpu_class_ceiling=None, scratch_limit=0)``\n"           //
     "\n"                                                                                                  //
     "Spawns host worker threads for a RAM-resident index.\n"                                              //
     "Calls `usearch_executor_for_ram`.\n"                                                                 //
@@ -2535,7 +2536,7 @@ static PyObject* Executor_for_vram(PyTypeObject* type, PyObject* const* args, Py
 }
 
 static char const doc_Executor_for_nvme[] =                                                               //
-    "``for_nvme(threads=0, *, paths=None, nvme_class=None, cpu_class_ceiling=None) -> Executor``\n"       //
+    "``for_nvme(threads=0, *, paths=None, nvme_class=None, cpu_class_ceiling=None, scratch_limit=0)``\n"  //
     "\n"                                                                                                  //
     "Opens one submission ring per worker for an NVMe-resident index.\n"                                  //
     "Calls `usearch_executor_for_nvme`.\n"                                                                //
@@ -2608,7 +2609,7 @@ static char const doc_Executor_drain[] =                                        
     "Args:\n"                                                                              //
     "  mood (Mood, optional): `Mood.PARKED` lets idle workers sleep, so the next call\n"   //
     "    pays a wake-up; `Mood.SPINNING` keeps them hot, trading power for the next\n"     //
-    "    call's latency. A borrowed pool keeps its lender's mood.\n"                       //
+    "    call's latency.\n"                                                                //
     "\n"                                                                                   //
     "Raises:\n"                                                                            //
     "  Error: What befell the executor itself, such as a lost device; every call\n"        //
@@ -3427,7 +3428,7 @@ static PyObject* DenseProducts_repr(DenseProducts* self) {
 
 static PyMethodDef DenseProducts_methods[] = {
     {"query", (PyCFunction)DenseProducts_query, METH_O,
-     "The (keys, scores) of left row or query `i`, viewing the arena. Python-only."},
+     "The (keys, scores) of left row or query `i`, using the arena. Python-only."},
     {"__arrow_c_array__", (PyCFunction)ArenaOutput_arrow_c_array, usearch_py_method_flags_k,
      doc_ArenaOutput_arrow_c_array},
     {"__arrow_c_device_array__", (PyCFunction)ArenaOutput_arrow_c_device_array, usearch_py_method_flags_k,
@@ -3861,10 +3862,10 @@ char const doc_version[] =              //
     "The library's semantic version.\n" //
     "Calls `usearch_version_name`.";
 
-char const doc_capabilities_compiled[] =                                     //
-    "capabilities_compiled() -> str\n"                                       //
-    "\n"                                                                     //
-    "The kernel families this build carries, whatever the machine offers.\n" //
+char const doc_capabilities_compiled[] =                                   //
+    "capabilities_compiled() -> str\n"                                     //
+    "\n"                                                                   //
+    "The kernel families this build holds, whatever the machine offers.\n" //
     "Calls `usearch_capabilities_compiled`.";
 
 char const doc_capabilities_available[] =                                           //

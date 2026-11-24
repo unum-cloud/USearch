@@ -1705,7 +1705,7 @@ impl DenseIndex {
     /// The receiver whose verbs submit their calls to `executor`, answering a
     /// [`Deferred`](crate::Deferred) from the same verbs given owned arguments.
     ///
-    /// The library reads a deferred call's inputs after the verb returns, so lending a borrowed
+    /// The library reads a deferred call's inputs after the verb returns, so passing a borrowed
     /// query does not compile:
     ///
     /// ```compile_fail,E0277
@@ -2108,7 +2108,7 @@ pub trait DenseVerbs<'index>: Copy {
         Self::Completion::answer((keys, config.into()), (), |call, completion| {
             let (keys, config) = &mut call.inputs;
             let (keys, batch) = (keys.as_ref(), config.vectors.batch()?);
-            // The keys view carries no count, so only this side can see the two disagree.
+            // The keys view holds no count, so only this side can see the two disagree.
             if batch.count != keys.len() {
                 return Err(fail(Status::ShapeMismatch, "the key count does not match the vector row count"));
             }
@@ -2603,7 +2603,7 @@ pub trait DenseVerbs<'index>: Copy {
         })
     }
 
-    /// Saves the index as one monolith into the arena its config carries.
+    /// Saves the index as one monolith into the arena its config holds.
     #[allow(clippy::type_complexity)]
     fn save_buffer<'config, 'arena>(
         self,
@@ -2712,7 +2712,7 @@ impl<'index, Completion: crate::types::Completion> DenseVerbs<'index> for On<'in
     }
 }
 
-/// The handle lists and placements a reshard lends, laid out as the library reads them.
+/// The handle lists and placements a reshard passes, laid out as the library reads them.
 #[doc(hidden)]
 pub struct ReshardLists {
     sources: Vec<usearch_dense_index_t>,
@@ -2729,7 +2729,7 @@ pub struct ReshardLists {
 unsafe impl Send for ReshardLists {}
 
 /// # Safety
-/// `state` must address the `&ValueLookup` lent to the call, and `keys` and `rows` must hold
+/// `state` must address the `&ValueLookup` passed to the call, and `keys` and `rows` must hold
 /// `count` entries each.
 unsafe extern "C" fn value_lookup_trampoline<Value: Element>(
     state: *mut c_void,
@@ -3149,7 +3149,7 @@ mod tests {
         ));
     }
 
-    /// Every view carries the width the caller laid out, so the call refuses a narrow row before
+    /// Every view holds the width the caller laid out, so the call refuses a narrow row before
     /// reading past it.
     #[test]
     fn rejects_wrong_dimension_matrices() {
@@ -3181,7 +3181,7 @@ mod tests {
         let slab = seeded_rows(2, DIMENSIONS * 2, case_stream_key(0));
         let element = core::mem::size_of::<f32>() as isize;
         // A column stride of two elements interleaves the rows, which the boundary forbids:
-        // the ABI carries one row stride and no column stride.
+        // the ABI holds one row stride and no column stride.
         let interleaved: MatrixView<'_, f32> =
             unsafe { MatrixView::from_raw_parts(slab.as_ptr(), &[2, DIMENSIONS], &[element * 8, element * 2]) }
                 .unwrap();
@@ -4196,7 +4196,7 @@ mod tests {
         assert!(report.changed <= report.reselected);
     }
 
-    /// A plan carries a refine across calls: a stop leaves it live, the next call ends the round,
+    /// A plan holds a refine across calls: a stop leaves it live, the next call ends the round,
     /// and the finish reports the whole plan.
     #[test]
     fn a_refine_plan_resumes_and_finishes() {

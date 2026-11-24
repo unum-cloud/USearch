@@ -3171,6 +3171,18 @@ assert_accepts "span of C strings spelled const char" include/$project_directory
 void probe_name(std::span<const char* const> names) noexcept;
 FIXTURE
 
+assert_rejects "executor address comparison" "compares executor addresses" src/probe.cpp <<'FIXTURE'
+std::size_t probe_thread(probe_view_t const& view, probe_state_t const& state) noexcept {
+    return view.executor == state.executor ? view.thread_index : 0;
+}
+FIXTURE
+
+assert_accepts "null executor test and an executor's width" src/probe.cpp <<'FIXTURE'
+std::size_t probe_threads(probe_view_t const& view) noexcept {
+    return view.executor != nullptr && view.executor->size() != 0 ? view.executor->size() : 1;
+}
+FIXTURE
+
 assert_rejects "N-API mutex in a binding" "locks in a binding" javascript/probe.c <<'FIXTURE'
 static uv_mutex_t probe_guard;
 FIXTURE
@@ -4619,14 +4631,14 @@ struct probe_t {
 };
 FIXTURE
 
-assert_rejects "owner beside a borrowed handle" "holds an owning unique_ptr beside a raw pointer" include/usearch/probe.hpp <<'FIXTURE'
+assert_rejects "owner beside a non-owning pointer" "holds an owning unique_ptr beside a raw pointer" include/usearch/probe.hpp <<'FIXTURE'
 struct probe_t {
     std::unique_ptr<device_t> owned_;
-    device_t *borrowed_;
+    device_t *pointed_;
 };
 FIXTURE
 
-assert_accepts "owner alone, and a borrowed handle of another type" include/usearch/probe.hpp <<'FIXTURE'
+assert_accepts "owner alone, and a non-owning handle of another type" include/usearch/probe.hpp <<'FIXTURE'
 struct probe_t {
     std::unique_ptr<device_t> device_;
     stream_t *stream_;
@@ -4667,6 +4679,14 @@ FIXTURE
 
 assert_rejects "refused identifier word" "names a concept by a refused word" include/usearch/probe.hpp <<'FIXTURE'
 inline void probe(int join_count) {}
+FIXTURE
+
+assert_rejects "hand-over word in an identifier" "names a concept by a refused word" include/usearch/probe.hpp <<'FIXTURE'
+inline void probe(int lent_count) {}
+FIXTURE
+
+assert_accepts "Rust std borrow names" include/usearch/probe.hpp <<'FIXTURE'
+inline void probe(BorrowedFd descriptor) {}
 FIXTURE
 
 assert_accepts "vocabulary words, lanes_k and a SIMD lane" include/usearch/probe.hpp <<'FIXTURE'
@@ -4726,6 +4746,7 @@ stage_fixture_verbatim CONTRIBUTING.md <<'FIXTURE'
 | the nodes a walk has met and the ones it still has to expand | visited, frontier | met, seen, queue |
 | device row storage | flat matrix, flat column | plane |
 | a sharded index's shard, the thread it claims and the work it hands out | shard, thread, partition | pool, seat, deal, landed |
+| who owns what a call reads | owner; the caller allocates, valid until final | lent, lend, lends, lending, lender, borrow, borrowed, borrows, borrowing, loan, lease |
 | a member of a plan, cursor or walk | what it holds and when it holds it | bits, current, state, data, flags, tmp, scratch, bitset, buffer |
 FIXTURE
 run_precommit

@@ -43,7 +43,7 @@ sibling_projects='numkong|stringzilla|forkunion|smashtable|ucall|ustore|uform'
 abbreviations_refused="hi lo bot acc accum tmp temp res bcast ext idx cnt buf len str val obj elem iter"
 # Name prefixes of third-party APIs the code calls, whose abbreviations are not this project's to spell out.
 third_party_identifier_prefixes='vec_'
-identifier_words_refused="landing landed lander join seat deal pool home plane dirty met seen"
+identifier_words_refused="landing landed lander join seat deal pool home plane dirty met seen lent lend lends lending lender borrow borrowed borrows borrowing loan lease"
 member_names_refused="bits current state data flags tmp scratch bitset buffer"
 width_free_directories="include/usearch/utilities include/usearch/basic"
 rustfmt_command="cargo +stable fmt"
@@ -3082,7 +3082,7 @@ check_single_space_between_sentences() {
 # region Shared Bindings
 
 # The runtime guards a binding cannot avoid, removed before the lock check reads a line: CPython's
-# free-threaded guard around a borrowed sequence's items, and the thread pin cgo calls need.
+# free-threaded guard around a caller-owned sequence's items, and the thread pin cgo calls need.
 binding_locks_inherent='Py_(BEGIN|END)_CRITICAL_SECTION_SEQUENCE_FAST|runtime\.(Lock|Unlock)OSThread\('
 
 # Rejects a lock in a binding source, because one owner per deferred call polls its atomic outcome and
@@ -3179,12 +3179,28 @@ check_query_pointer_spans_absent() {
         "            a static extent:"
 }
 
+# Rejects an added comparison of executor addresses in the library, because every lane is equal: a
+# database or index owns its media, cache and epochs and never remembers an executor, so no path is
+# picked by which executor calls. A test against a null executor stays.
+check_executor_comparisons_absent() {
+    local compared
+    compared=$(grep -E 'executor[[:space:]]*[!=]=[^=]|[!=]=[[:space:]]*[A-Za-z_][A-Za-z0-9_.>-]*executor([^A-Za-z0-9_(.>-]|$)' \
+        "$staged_added_code_path" | grep -vE 'executor[[:space:]]*[!=]=[[:space:]]*(nullptr|NULL)([^A-Za-z0-9_]|$)' || true)
+    [ -z "$compared" ] || reject_with_reason "$compared" \
+        "$staged_path compares executor addresses; every lane is equal, so keep what differs in the lane's own" \
+        "            state, as rings key media by identity and epoch:"
+}
+
 # Routes one staged file through the binding checks, reading the code of a binding source with its
 # comments and literal contents blanked; tests drive a binding as users do, so they are exempt. Each
 # project's own rules region calls it, as no shared dispatch does.
 run_binding_checks() {
     case "$staged_path" in
     include/*.h | include/*.hpp | include/*.cuh | include/*.hip) check_query_pointer_spans_absent ;;
+    esac
+    case "$staged_path" in
+    src/*.h | src/*.hpp | src/*.c | src/*.cpp | src/*.cu | src/*.cuh | src/*.hip | include/*.h | include/*.hpp | \
+        include/*.cuh | include/*.hip) check_executor_comparisons_absent ;;
     esac
     case "$staged_path" in
     *[Tt]est*) return 0 ;;
@@ -5237,21 +5253,21 @@ check_bool_members() {
 }
 
 # Rejects a `std::unique_ptr<T>` member beside a `T *` or `T const *` member of the same T in one
-# record, because the owner and the borrowed handle of one object are one member: ownership is a
-# type, and borrowing is the absence of an owner. The whole file is read, since membership is
+# record, because the owner and the non-owning handle of one object are one member: ownership is a
+# type, and a non-owning pointer is the absence of an owner. The whole file is read, since membership is
 # context, and only added lines report.
-check_owned_beside_borrowed() {
+check_owned_beside_pointer() {
     local pairs
     pairs=$(scan_staged_file_marking_added_lines "$record_scope_awk"'
         function close_record(d,    key, parts) {
             for (key in owned) {
                 split(key, parts, SUBSEP)
-                if (parts[1] != d || !((d, parts[2]) in borrowed)) continue
+                if (parts[1] != d || !((d, parts[2]) in pointing)) continue
                 if (owned[key] in added) printf "line %d: %s\n", owned[key], text[owned[key]]
-                if (borrowed[d, parts[2]] in added) printf "line %d: %s\n", borrowed[d, parts[2]], text[borrowed[d, parts[2]]]
+                if (pointing[d, parts[2]] in added) printf "line %d: %s\n", pointing[d, parts[2]], text[pointing[d, parts[2]]]
             }
             for (key in owned) { split(key, parts, SUBSEP); if (parts[1] == d) delete owned[key] }
-            for (key in borrowed) { split(key, parts, SUBSEP); if (parts[1] == d) delete borrowed[key] }
+            for (key in pointing) { split(key, parts, SUBSEP); if (parts[1] == d) delete pointing[key] }
         }
         {
             text[FNR] = $0
@@ -5261,7 +5277,7 @@ check_owned_beside_borrowed() {
                     owned[depth, held] = FNR
                 } else if (match($0, /^[[:space:]]*[A-Za-z_][A-Za-z0-9_:<>]*([[:space:]]+const)?[[:space:]]*\*[[:space:]]*(const[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*[[:space:]]*(=[^;]*|\{[^}]*\})?;/)) {
                     held = $0; sub(/^[[:space:]]*/, "", held); sub(/([[:space:]]+const)?[[:space:]]*\*.*$/, "", held)
-                    borrowed[depth, held] = FNR
+                    pointing[depth, held] = FNR
                 }
             }
             closing = depth
@@ -5270,7 +5286,7 @@ check_owned_beside_borrowed() {
         }' "$staged_code_path")
     [ -z "$pairs" ] || reject_with_reason "$pairs" \
         "$staged_path holds an owning unique_ptr beside a raw pointer to the same type; ownership is a type," \
-        "            and a borrowed handle is the absence of an owner, so keep one member:"
+        "            and a non-owning handle is the absence of an owner, so keep one member:"
 }
 
 # Rejects `f64_t` or `double` declaring a score, distance, accumulator or product under dense/,
@@ -5288,7 +5304,7 @@ check_dense_f64() {
 }
 
 # Rejects a hot-entry struct added under include/ without a `static_assert(sizeof(` within five
-# lines after its closing brace, because a struct a thread keeps or carries along a hot path is 8,
+# lines after its closing brace, because a struct a thread keeps or moves along a hot path is 8,
 # 16 or 32 bytes, and the assertion beside the definition is what pins it; a name ending in
 # `_entry_t`, `_match_t`, `_node_t`, `_flight` or `_payload` marks one.
 check_hot_entry_asserts() {
@@ -5314,7 +5330,7 @@ check_hot_entry_asserts() {
             }
         }' "$staged_code_path")
     [ -z "$unpinned" ] || reject_with_reason "$unpinned" \
-        "$staged_path adds a hot entry without pinning its size; a struct a thread carries along a hot path is 8, 16" \
+        "$staged_path adds a hot entry without pinning its size; a struct a thread moves along a hot path is 8, 16" \
         "            or 32 bytes, so write static_assert(sizeof(entry_t) == 16) right below it:"
 }
 
@@ -5333,8 +5349,8 @@ check_identifier_words() {
             while (match(rest, /[A-Za-z_][A-Za-z0-9_]*/)) {
                 token = substr(rest, RSTART, RLENGTH); rest = substr(rest, RSTART + RLENGTH)
                 if (token ~ /^fu_pool_/) continue # the ForkUnion C API spells its thread pools so
-                if (token ~ /^(usearch_executor_)?on_pool(_t)?$/) continue # the C executor verb that adopts a pool
                 if (token == "seen_k") continue # the C++ twin of usearch_geospatial_relation_seen_k, a C ABI value
+                if (token ~ /^(borrow|borrow_mut|Borrow|BorrowMut|Borrowed|BorrowedFd|BorrowedHandle)$/) continue # Rust std names
                 total = split(tolower(token), parts, "_")
                 for (part = 1; part <= total; ++part) {
                     if (!(parts[part] in banned)) continue
@@ -5640,7 +5656,7 @@ run_project_checks() {
         check_standard_atomics
         check_decltype
         check_bool_members
-        check_owned_beside_borrowed
+        check_owned_beside_pointer
         ;;
     esac
     case "$staged_path" in

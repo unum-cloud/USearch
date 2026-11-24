@@ -66,7 +66,7 @@ import cloud.unum.usearch.Types.Verb;
  * an exception escaping one terminates the process.
  *
  * <p>
- * Every method here reports failure as an unchecked {@link USearchException} carrying the
+ * Every method here reports failure as an unchecked {@link USearchException} holding the
  * {@link Status} the engine named, so the per-method tags below list only the statuses that method
  * distinctly produces. An {@link IllegalStateException} on a handle that was closed applies to all
  * of them and is not repeated.
@@ -118,7 +118,7 @@ public final class DenseIndex implements AutoCloseable {
             return code;
         }
 
-        /** Names the metric a code carries; a code this build cannot name becomes UNKNOWN. */
+        /** Names the metric a code holds; a code this build cannot name becomes UNKNOWN. */
         public static DenseMetric of(int code) {
             for (DenseMetric candidate : values()) {
                 if (candidate.code == code) {
@@ -525,7 +525,7 @@ public final class DenseIndex implements AutoCloseable {
      * exception escaping it terminates the process.
      *
      * <p>
-     * The values are borrowed once, here, and so is the upcall every call hands across: a native slab
+     * The values are viewed once, here, and so is the upcall every call hands across: a native slab
      * is read in place and must stay open while the lookup is used, and a heap one is copied once.
      *
      * <p>
@@ -541,11 +541,11 @@ public final class DenseIndex implements AutoCloseable {
         /** The value rows the upcall addresses: the caller's native slab, or the one copy of a heap one. */
         private final MemorySegment base;
 
-        /** The upcall stub, freed once the lookup and every call lending it are unreachable. */
+        /** The upcall stub, freed once the lookup and every call passing it are unreachable. */
         private final MemorySegment upcall;
 
         /**
-         * Borrows the values and builds the upcall once.
+         * Views the values and builds the upcall once.
          *
          * @param values the value rows, in the index's quantization and as wide as its keys.
          * @param row the row of {@code values} a key's value lives in.
@@ -583,9 +583,9 @@ public final class DenseIndex implements AutoCloseable {
         }
 
         /** Hands the upcall across, keeping it alive until the call is final. */
-        void lend(Call call) {
+        void pass(Call call) {
             call.pointer(ATTEND_VALUE_LOOKUP, upcall);
-            call.lend(this);
+            call.pass(this);
         }
 
         /** The geometry and function every call's upcall resolves keys with. */
@@ -1129,10 +1129,10 @@ public final class DenseIndex implements AutoCloseable {
             return PhaseProgress.lift(phase);
         }
 
-        void lend(Call call) {
+        void pass(Call call) {
             call.pointer(REFINE_PLAN, plan);
             call.pointer(REFINE_PHASE, phase);
-            call.lend(this);
+            call.pass(this);
         }
 
         /** The open plan a finish frees, leaving this one to open afresh on its next call. */
@@ -1164,10 +1164,10 @@ public final class DenseIndex implements AutoCloseable {
             return PhaseProgress.lift(phase);
         }
 
-        void lend(Call call) {
+        void pass(Call call) {
             call.pointer(RESHARD_PLAN, plan);
             call.pointer(RESHARD_PHASE, phase);
-            call.lend(this);
+            call.pass(this);
         }
 
         /** The open plan a finish frees, leaving this one to open afresh on its next call. */
@@ -1566,7 +1566,7 @@ public final class DenseIndex implements AutoCloseable {
             boolean linked,
             Arena arena) {
         return Call.block(verb, index, executor, call -> {
-            call.lease(CURSOR_NEXT_CURSOR, cursor);
+            call.reference(CURSOR_NEXT_CURSOR, cursor);
             MemorySegment keys = call.output(CURSOR_NEXT_KEYS, Library.KEYS_VIEW);
             MemorySegment tape =
                     linked ? call.output(CURSOR_NEXT_LINKS, Library.KEYS_TAPE_VIEW) : MemorySegment.NULL;
@@ -1624,7 +1624,7 @@ public final class DenseIndex implements AutoCloseable {
          */
         public Matches next(long wanted, Arena arena) {
             return Call.block(SEARCH_STREAM_NEXT, index.handle, executor, call -> {
-                call.lease(SEARCH_STREAM_NEXT_STREAM, handle);
+                call.reference(SEARCH_STREAM_NEXT_STREAM, handle);
                 MemorySegment matches = call.output(SEARCH_STREAM_NEXT_MATCHES, Library.MATCHES_VIEW);
                 call.arena(SEARCH_STREAM_NEXT_ARENA, arena);
                 call.size(SEARCH_STREAM_NEXT_WANTED, wanted);
@@ -1819,7 +1819,7 @@ public final class DenseIndex implements AutoCloseable {
     /**
      * The receiver whose verbs submit their calls to an executor, each answering a {@link Deferred}
      * that owns what the call reads until final, and whose join answers the view the blocking verb
-     * would, over the same borrowed arena. Its verbs are those of {@link DenseIndex}, which each
+     * would, over the same viewed arena. Its verbs are those of {@link DenseIndex}, which each
      * documents, less the scans that pull one batch at a time.
      */
     public static final class DeferredOn {
@@ -2060,7 +2060,7 @@ public final class DenseIndex implements AutoCloseable {
      *
      * @param key the key to look up.
      * @param outputsScalar the scalar kind the rows are converted into.
-     * @param arena the arena the output lands in, borrowed until the call returns.
+     * @param arena the arena the output lands in, read until the call returns.
      * @return the rows read in place, none when the key holds nothing.
      * @throws USearchException UNKNOWN_KIND on a scalar the engine cannot convert into, and
      *     CONTENDED when the arena serves another call.
@@ -2159,7 +2159,7 @@ public final class DenseIndex implements AutoCloseable {
      *
      * @param queries the query rows, as wide as the frozen geometry.
      * @param wanted the most matches kept per query.
-     * @param arena the arena the output lands in, borrowed until the call returns.
+     * @param arena the arena the output lands in, read until the call returns.
      * @throws USearchException the statuses {@link #search(RowsView, DenseSearchConfig, Arena)} names.
      */
     public Matches search(RowsView queries, long wanted, Arena arena) {
@@ -2173,7 +2173,7 @@ public final class DenseIndex implements AutoCloseable {
      *
      * @param queries the query rows, as wide as the frozen geometry.
      * @param config the wanted count and the other search knobs.
-     * @param arena the arena the output lands in, borrowed until the call returns.
+     * @param arena the arena the output lands in, read until the call returns.
      * @throws USearchException SHAPE_MISMATCH when the rows are not as wide as the frozen geometry,
      *     UNKNOWN_KIND on a scalar the engine cannot convert, and CONTENDED when the arena serves
      *     another call.
@@ -2187,9 +2187,9 @@ public final class DenseIndex implements AutoCloseable {
      * query scored, with every other knob derived.
      *
      * @param queries the query rows, as wide as the frozen geometry.
-     * @param rowsPerQuery the token rows every query carries.
+     * @param rowsPerQuery the token rows every query holds.
      * @param wanted the most keys kept per query, zero keeping every key it scored.
-     * @param arena the arena the output lands in, borrowed until the call returns.
+     * @param arena the arena the output lands in, read until the call returns.
      * @throws USearchException the statuses {@link #maxsim(RowsView, long, DenseMaxsimConfig, Arena)}
      *     names.
      */
@@ -2204,16 +2204,16 @@ public final class DenseIndex implements AutoCloseable {
      * rows.
      *
      * <p>
-     * Every query carries the same number of rows, so a padded token batch applies as is, and the
+     * Every query holds the same number of rows, so a padded token batch applies as is, and the
      * query count is the row count divided by that. Approximate in the same way a search is: a key
      * can score below its exact value but never above it. Runs on the inner-product kinds alone.
      * Each query's keys land in {@code arena} largest score first, as one ragged output like
      * {@link #multiply}'s. Calls {@code usearch_dense_maxsim}.
      *
      * @param queries the query rows, as wide as the frozen geometry.
-     * @param rowsPerQuery the token rows every query carries.
+     * @param rowsPerQuery the token rows every query holds.
      * @param config the wanted count and the other scoring knobs.
-     * @param arena the arena the output lands in, borrowed until the call returns.
+     * @param arena the arena the output lands in, read until the call returns.
      * @throws USearchException CONFIG_MISMATCH on a graph frozen under a distance kind,
      *     SHAPE_MISMATCH when the token rows do not divide into whole queries or the rows are not as
      *     wide as the frozen geometry, and CONTENDED when the arena serves another call.
@@ -2226,7 +2226,7 @@ public final class DenseIndex implements AutoCloseable {
      * Approximate sparse product keeping every pair, with every other knob derived.
      *
      * @param left the rows multiplied against the indexed vectors.
-     * @param arena the arena the output lands in, borrowed until the call returns.
+     * @param arena the arena the output lands in, read until the call returns.
      * @throws USearchException the statuses {@link #multiply(RowsView, DenseMultiplyConfig, Arena)}
      *     names.
      */
@@ -2246,7 +2246,7 @@ public final class DenseIndex implements AutoCloseable {
      *
      * @param left the rows multiplied against the indexed vectors.
      * @param config the product knobs.
-     * @param arena the arena the output lands in, borrowed until the call returns.
+     * @param arena the arena the output lands in, read until the call returns.
      * @throws USearchException CONFIG_MISMATCH on a graph frozen under a distance kind,
      *     SHAPE_MISMATCH when the rows are not as wide as the frozen geometry, and CONTENDED when the
      *     arena serves another call.
@@ -2260,7 +2260,7 @@ public final class DenseIndex implements AutoCloseable {
      *
      * @param queries the query rows, as wide as the frozen geometry.
      * @param valueLookup resolves every scored key to its value row.
-     * @param arena the arena the output lands in, borrowed until the call returns.
+     * @param arena the arena the output lands in, read until the call returns.
      * @throws USearchException the statuses
      *     {@link #attend(RowsView, ValueLookup, DenseAttendConfig, Arena)} names.
      */
@@ -2281,7 +2281,7 @@ public final class DenseIndex implements AutoCloseable {
      * @param queries the query rows, as wide as the frozen geometry.
      * @param valueLookup resolves every scored key to its value row.
      * @param config the attention knobs.
-     * @param arena the arena the output lands in, borrowed until the call returns.
+     * @param arena the arena the output lands in, read until the call returns.
      * @throws USearchException SHAPE_MISMATCH when a scored key resolves to no row or the head count
      *     does not divide the rows, CONFIG_MISMATCH on a graph frozen under a distance kind, and
      *     CONTENDED when the arena serves another call.
@@ -2333,7 +2333,7 @@ public final class DenseIndex implements AutoCloseable {
      * draws a superset; only a RAM index samples yet. Calls {@code usearch_dense_sample}.
      *
      * @param wanted the most draws written.
-     * @param arena the arena the output lands in, borrowed until the call returns.
+     * @param arena the arena the output lands in, read until the call returns.
      * @param config the focus, seed and other sampling knobs.
      * @throws USearchException UNSUPPORTED on a GPU or NVMe handle, and CONTENDED when the arena
      *     serves another call.
@@ -2372,7 +2372,7 @@ public final class DenseIndex implements AutoCloseable {
      * {@link #save} writes to a {@code .safegraphs} path, into {@code arena}. Calls
      * {@code usearch_dense_save_buffer}.
      *
-     * @param arena the arena the output lands in, borrowed until the call returns.
+     * @param arena the arena the output lands in, read until the call returns.
      * @throws USearchException CONTENDED when the arena serves another call.
      */
     public Monolith saveBuffer(Arena arena) {
@@ -2383,7 +2383,7 @@ public final class DenseIndex implements AutoCloseable {
      * Writes the index as one monolith into {@code arena}, as {@link #saveBuffer(Arena)} does,
      * reporting each shard written.
      *
-     * @param arena the arena the output lands in, borrowed until the call returns.
+     * @param arena the arena the output lands in, read until the call returns.
      * @param progress hears each shard written, and may cancel the write.
      * @throws USearchException the statuses {@link #saveBuffer(Arena)} names, and CANCELLED once the
      *     progress handler stopped it.

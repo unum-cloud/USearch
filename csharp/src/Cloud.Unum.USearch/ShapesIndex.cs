@@ -159,7 +159,7 @@ public sealed unsafe class ShapesIndex : IDisposable
 
     private ShapesIndex(NativeShapesIndexHandle handle) => this._handle = handle;
 
-    /// <summary>The engine handle the verbs lease.</summary>
+    /// <summary>The engine handle the verbs reference.</summary>
     internal NativeShapesIndexHandle Handle => this._handle;
 
     /// <summary>Creates an empty, mutable shapes index in host memory. Calls
@@ -236,7 +236,7 @@ public sealed unsafe class ShapesIndex : IDisposable
         CPUClass? cpuClassCeiling = null)
     {
         byte[] encoded = Encoding.UTF8.GetBytes(path);
-        using Lease pool = Lease.Of(executor?.Handle, "executor");
+        using HandleReference pool = HandleReference.Of(executor?.Handle, "executor");
         IntPtr created = IntPtr.Zero;
         NativeOutcome outcome = default;
         fixed (byte* data = encoded)
@@ -244,7 +244,7 @@ public sealed unsafe class ShapesIndex : IDisposable
         {
             NativeShapesLoadRam arguments = new()
             {
-                Index = &created, Executor = pool.Pointer, Outcome = &outcome, Path = Borrow(data, encoded.Length),
+                Index = &created, Executor = pool.Pointer, Outcome = &outcome, Path = View(data, encoded.Length),
                 Ram = new NativeRamOptions
                 {
                     MemoryDomains = (IntPtr)domains, MemoryDomainsCount = (nuint)memoryDomains.Length,
@@ -271,7 +271,7 @@ public sealed unsafe class ShapesIndex : IDisposable
         GPUClass? gpuClassCeiling = null)
     {
         byte[] encoded = Encoding.UTF8.GetBytes(path);
-        using Lease pool = Lease.Of(executor?.Handle, "executor");
+        using HandleReference pool = HandleReference.Of(executor?.Handle, "executor");
         IntPtr created = IntPtr.Zero;
         NativeOutcome outcome = default;
         fixed (byte* data = encoded)
@@ -279,7 +279,7 @@ public sealed unsafe class ShapesIndex : IDisposable
         {
             NativeShapesLoadVram arguments = new()
             {
-                Index = &created, Executor = pool.Pointer, Outcome = &outcome, Path = Borrow(data, encoded.Length),
+                Index = &created, Executor = pool.Pointer, Outcome = &outcome, Path = View(data, encoded.Length),
                 Vram = new NativeVramOptions
                 {
                     Devices = (IntPtr)ordinals, DevicesCount = (nuint)devices.Length,
@@ -305,7 +305,7 @@ public sealed unsafe class ShapesIndex : IDisposable
         ReadOnlySpan<byte> buffer, ReadOnlySpan<int> memoryDomains = default, ulong valuesPerKey = 0,
         Executor? executor = null, CPUClass? cpuClassCeiling = null)
     {
-        using Lease pool = Lease.Of(executor?.Handle, "executor");
+        using HandleReference pool = HandleReference.Of(executor?.Handle, "executor");
         IntPtr created = IntPtr.Zero;
         NativeOutcome outcome = default;
         fixed (byte* source = buffer)
@@ -313,7 +313,7 @@ public sealed unsafe class ShapesIndex : IDisposable
         {
             NativeShapesLoadRamBuffer arguments = new()
             {
-                Index = &created, Executor = pool.Pointer, Outcome = &outcome, Buffer = Borrow(source, buffer.Length),
+                Index = &created, Executor = pool.Pointer, Outcome = &outcome, Buffer = View(source, buffer.Length),
                 Ram = new NativeRamOptions
                 {
                     MemoryDomains = (IntPtr)domains, MemoryDomainsCount = (nuint)memoryDomains.Length,
@@ -339,7 +339,7 @@ public sealed unsafe class ShapesIndex : IDisposable
         ReadOnlySpan<byte> buffer, ReadOnlySpan<int> devices = default, ulong valuesPerKey = 0,
         Executor? executor = null, GPUClass? gpuClassCeiling = null)
     {
-        using Lease pool = Lease.Of(executor?.Handle, "executor");
+        using HandleReference pool = HandleReference.Of(executor?.Handle, "executor");
         IntPtr created = IntPtr.Zero;
         NativeOutcome outcome = default;
         fixed (byte* source = buffer)
@@ -347,7 +347,7 @@ public sealed unsafe class ShapesIndex : IDisposable
         {
             NativeShapesLoadVramBuffer arguments = new()
             {
-                Index = &created, Executor = pool.Pointer, Outcome = &outcome, Buffer = Borrow(source, buffer.Length),
+                Index = &created, Executor = pool.Pointer, Outcome = &outcome, Buffer = View(source, buffer.Length),
                 Vram = new NativeVramOptions
                 {
                     Devices = (IntPtr)ordinals, DevicesCount = (nuint)devices.Length,
@@ -378,7 +378,7 @@ public sealed unsafe class ShapesIndex : IDisposable
         {
             NativeShapesViewRam arguments = new()
             {
-                Index = &created, Outcome = &outcome, Path = Borrow(data, encoded.Length),
+                Index = &created, Outcome = &outcome, Path = View(data, encoded.Length),
                 Ram = new NativeRamOptions
                 {
                     MemoryDomains = (IntPtr)domains, MemoryDomainsCount = (nuint)memoryDomains.Length,
@@ -404,7 +404,7 @@ public sealed unsafe class ShapesIndex : IDisposable
         string path, ReadOnlySpan<string> paths = default, Executor? executor = null, CPUClass? cpuClassCeiling = null)
     {
         byte[] encoded = Encoding.UTF8.GetBytes(path);
-        using Lease pool = Lease.Of(executor?.Handle, "executor");
+        using HandleReference pool = HandleReference.Of(executor?.Handle, "executor");
         IntPtr created = IntPtr.Zero;
         NativeOutcome outcome = default;
         NativeBytesView* views = Paths.Encode(paths);
@@ -414,7 +414,7 @@ public sealed unsafe class ShapesIndex : IDisposable
             {
                 NativeShapesViewNvme arguments = new()
                 {
-                    Index = &created, Executor = pool.Pointer, Outcome = &outcome, Path = Borrow(data, encoded.Length),
+                    Index = &created, Executor = pool.Pointer, Outcome = &outcome, Path = View(data, encoded.Length),
                     Nvme = new NativeNvmeOptions
                     {
                         Paths = (IntPtr)views, PathsCount = (nuint)paths.Length,
@@ -440,14 +440,14 @@ public sealed unsafe class ShapesIndex : IDisposable
     public static ShapesMetadata MetadataRead(string path, Executor? executor = null)
     {
         byte[] encoded = Encoding.UTF8.GetBytes(path);
-        using Lease pool = Lease.Of(executor?.Handle, "executor");
+        using HandleReference pool = HandleReference.Of(executor?.Handle, "executor");
         NativeShapesMetadata lowered = default;
         NativeOutcome outcome = default;
         fixed (byte* data = encoded)
         {
             NativeShapesMetadataRead arguments = new()
             {
-                Executor = pool.Pointer, Outcome = &outcome, Path = Borrow(data, encoded.Length), Metadata = &lowered,
+                Executor = pool.Pointer, Outcome = &outcome, Path = View(data, encoded.Length), Metadata = &lowered,
             };
             usearch_shapes_metadata_read(&arguments);
         }
@@ -463,14 +463,14 @@ public sealed unsafe class ShapesIndex : IDisposable
     /// <returns>What the checkpoint froze.</returns>
     public static ShapesMetadata MetadataReadBuffer(ReadOnlySpan<byte> buffer, Executor? executor = null)
     {
-        using Lease pool = Lease.Of(executor?.Handle, "executor");
+        using HandleReference pool = HandleReference.Of(executor?.Handle, "executor");
         NativeShapesMetadata lowered = default;
         NativeOutcome outcome = default;
         fixed (byte* source = buffer)
         {
             NativeShapesMetadataReadBuffer arguments = new()
             {
-                Executor = pool.Pointer, Outcome = &outcome, Buffer = Borrow(source, buffer.Length),
+                Executor = pool.Pointer, Outcome = &outcome, Buffer = View(source, buffer.Length),
                 Metadata = &lowered,
             };
             usearch_shapes_metadata_read_buffer(&arguments);
@@ -570,7 +570,7 @@ public sealed unsafe class ShapesIndex : IDisposable
     /// <c>usearch_shapes_free</c>.</summary>
     public void Dispose() => this._handle.Dispose();
 
-    private static NativeBytesView Borrow(byte* data, int length) =>
+    private static NativeBytesView View(byte* data, int length) =>
         new() { Data = (IntPtr)data, Length = (nuint)length };
 }
 
@@ -879,11 +879,11 @@ public sealed unsafe class ShapesCursor : IDisposable
 
     internal static ShapesCursor Open(CallHandles handles, ReadOnlySpan<Key> starts)
     {
-        Lease held = handles.LendIndex();
-        Lease pool;
+        HandleReference held = handles.ReferenceIndex();
+        HandleReference pool;
         try
         {
-            pool = handles.LendExecutor();
+            pool = handles.ReferenceExecutor();
         }
         catch
         {
@@ -922,8 +922,8 @@ public sealed unsafe class ShapesCursor : IDisposable
     public DenseBatch Next(int wanted, Arena arena, bool links = false)
     {
         nuint bound = Calls.Bound(wanted);
-        using Lease cursor = Lease.Of(this._handle, "cursor");
-        using Lease lent = Arena.Lend(arena);
+        using HandleReference cursor = HandleReference.Of(this._handle, "cursor");
+        using HandleReference passed = Arena.Reference(arena);
         nuint written = 0;
         NativeOutcome outcome = default;
         NativeKeysView keys = default;
@@ -932,7 +932,7 @@ public sealed unsafe class ShapesCursor : IDisposable
         {
             Index = this._handle.Index, Executor = this._handle.Executor, Outcome = &outcome,
             Cursor = cursor.Pointer, Keys = &keys, Links = links ? &linked : null, Written = &written,
-            Arena = lent.Pointer, Wanted = bound,
+            Arena = passed.Pointer, Wanted = bound,
         };
         usearch_shapes_cursor_next(&arguments);
         outcome.ThrowIfFailed();
@@ -953,8 +953,8 @@ internal unsafe struct ShapesReserveCall(CallHandles handles, ulong entries, ulo
 {
     public readonly void Submit(CallOutputs* outputs, Completion completion)
     {
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
         NativeShapesReserve arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
@@ -973,8 +973,8 @@ internal unsafe struct ShapesClearCall(CallHandles handles) : ICall
 {
     public readonly void Submit(CallOutputs* outputs, Completion completion)
     {
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
         NativeShapesClear arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
@@ -994,8 +994,8 @@ internal unsafe struct ShapesDescribeCall(CallHandles handles) : ICall<ShapesInd
 
     public readonly void Submit(CallOutputs* outputs, Completion completion)
     {
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
         NativeShapesDescribe arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
@@ -1028,8 +1028,8 @@ internal unsafe struct ShapesCountCall(CallHandles handles, Key key) : ICall<Sha
 
     public readonly void Submit(CallOutputs* outputs, Completion completion)
     {
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
         NativeShapesCount arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
@@ -1056,13 +1056,13 @@ internal unsafe struct ShapesGetCall(CallHandles handles, Key key, Arena arena, 
 
     public readonly void Submit(CallOutputs* outputs, Completion completion)
     {
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
-        using Lease lent = Arena.Lend(arena);
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
+        using HandleReference passed = Arena.Reference(arena);
         NativeShapesGet arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
-            Key = key, Shapes = (NativeTapeView*)outputs->View, Written = &outputs->Written, Arena = lent.Pointer,
+            Key = key, Shapes = (NativeTapeView*)outputs->View, Written = &outputs->Written, Arena = passed.Pointer,
             OutputsScalar = outputsScalar,
         };
         usearch_shapes_get(&arguments);
@@ -1100,8 +1100,8 @@ internal unsafe struct ShapesInsertCall<TScalar>(
         this._keys = keys.Pin();
         this._elements = shapes.PinElements();
         this._offsets = shapes.PinOffsets();
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
         NativeShapesInsert arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
@@ -1140,8 +1140,8 @@ internal unsafe struct ShapesRefineCall(
 
     public void Submit(CallOutputs* outputs, Completion completion)
     {
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
         NativeShapesRefine arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
@@ -1171,8 +1171,8 @@ internal unsafe struct ShapesRefinePlanFinishCall(CallHandles handles, ShapesRef
 
     public readonly void Submit(CallOutputs* outputs, Completion completion)
     {
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
         NativeShapesRefinePlanFinish arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
@@ -1198,8 +1198,8 @@ internal unsafe struct ShapesHealthCall(CallHandles handles) : ICall<DenseReacha
 
     public readonly void Submit(CallOutputs* outputs, Completion completion)
     {
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
         NativeShapesHealth arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
@@ -1235,14 +1235,14 @@ internal unsafe struct ShapesSearchCall<TScalar>(
         nuint bound = Calls.Bound(wanted);
         this._elements = queries.PinElements();
         this._offsets = queries.PinOffsets();
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
-        using Lease lent = Arena.Lend(arena);
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
+        using HandleReference passed = Arena.Reference(arena);
         NativeShapesSearch arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
             Count = (nuint)queries.Count, Queries = queries.AsView(this._elements.Pointer, this._offsets.Pointer),
-            Matches = (NativeMatchesView*)outputs->View, Arena = lent.Pointer, Wanted = bound,
+            Matches = (NativeMatchesView*)outputs->View, Arena = passed.Pointer, Wanted = bound,
             ExpansionFactor = (nuint)expansionFactor, Traversal = traversal,
             Predicate = this._predicate.Predicate(predicate), Progress = this._progress.Progress(progress),
             Stats = (NativeDenseTraversalStats*)outputs->Report,
@@ -1272,7 +1272,7 @@ internal unsafe struct ShapesReshardCall(
     ulong memoryLimit, DenseTraversalStats? stats, Progress? progress, ShapesReshardPlan? plan)
     : ICall<RefineReport>
 {
-    private readonly Lease[] _leases = new Lease[sources.Length + targets.Length];
+    private readonly HandleReference[] _references = new HandleReference[sources.Length + targets.Length];
     private readonly IntPtr[] _slots = new IntPtr[sources.Length + targets.Length];
     private MemoryHandle _pinnedSlots;
     private Registration _progress;
@@ -1284,13 +1284,13 @@ internal unsafe struct ShapesReshardCall(
         for (int position = 0; position < this._slots.Length; position++)
         {
             ShapesIndex named = position < sources.Length ? sources[position] : targets[position - sources.Length];
-            this._leases[position] = Lease.Of(named?.Handle, "index");
-            this._slots[position] = this._leases[position].Pointer;
+            this._references[position] = HandleReference.Of(named?.Handle, "index");
+            this._slots[position] = this._references[position].Pointer;
         }
 
         this._pinnedSlots = this._slots.AsMemory().Pin();
         IntPtr* slots = (IntPtr*)this._pinnedSlots.Pointer;
-        using Lease executor = handles.LendExecutor();
+        using HandleReference executor = handles.ReferenceExecutor();
         NativeShapesReshard arguments = new()
         {
             SourcesCount = (nuint)sources.Length, Sources = slots, TargetsCount = (nuint)targets.Length,
@@ -1306,9 +1306,9 @@ internal unsafe struct ShapesReshardCall(
 
     public void Release(CallOutputs* outputs)
     {
-        for (int position = 0; position < this._leases.Length; position++)
+        for (int position = 0; position < this._references.Length; position++)
         {
-            this._leases[position].Dispose();
+            this._references[position].Dispose();
         }
 
         this._pinnedSlots.Dispose();
@@ -1331,7 +1331,7 @@ internal unsafe struct ShapesReshardPlanFinishCall(CallHandles handles, ShapesRe
 
     public readonly void Submit(CallOutputs* outputs, Completion completion)
     {
-        using Lease executor = handles.LendExecutor();
+        using HandleReference executor = handles.ReferenceExecutor();
         NativeShapesReshardPlanFinish arguments = new()
         {
             Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
@@ -1376,9 +1376,9 @@ internal unsafe struct ShapesSampleCall(CallHandles handles, int wanted, Arena a
         this._shown = shown.Pin();
         this._shownCoordinates = shownCoordinates.Pin();
         this._focus = focus.Pin();
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
-        using Lease lent = Arena.Lend(arena);
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
+        using HandleReference passed = Arena.Reference(arena);
         NativeShapesSample arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
@@ -1393,7 +1393,7 @@ internal unsafe struct ShapesSampleCall(CallHandles handles, int wanted, Arena a
             Focus = new NativeKeysView { Data = (IntPtr)this._focus.Pointer, Stride = (nuint)sizeof(Key) },
             Keys = &reports->Keys, EntryOrdinals = &reports->EntryOrdinals,
             Parents = (NativeMatchesView*)outputs->View, Coordinates = &reports->Coordinates,
-            Written = &outputs->Written, Arena = lent.Pointer, Wanted = bound, Seed = config.Seed,
+            Written = &outputs->Written, Arena = passed.Pointer, Wanted = bound, Seed = config.Seed,
             ExpansionFactor = (nuint)config.ExpansionFactor, Progress = this._progress.Progress(config.Progress),
             Stats = &reports->Stats,
         };
@@ -1429,8 +1429,8 @@ internal unsafe struct ShapesSaveCall(CallHandles handles, string path, Progress
     public void Submit(CallOutputs* outputs, Completion completion)
     {
         this._pinnedPath = this._path.AsMemory().Pin();
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
         NativeShapesSave arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
@@ -1458,13 +1458,13 @@ internal unsafe struct ShapesSaveBufferCall(CallHandles handles, Arena arena, Pr
 
     public void Submit(CallOutputs* outputs, Completion completion)
     {
-        using Lease index = handles.LendIndex();
-        using Lease executor = handles.LendExecutor();
-        using Lease lent = Arena.Lend(arena);
+        using HandleReference index = handles.ReferenceIndex();
+        using HandleReference executor = handles.ReferenceExecutor();
+        using HandleReference passed = Arena.Reference(arena);
         NativeShapesSaveBuffer arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
-            Monolith = (NativeBytesView*)outputs->View, Arena = lent.Pointer,
+            Monolith = (NativeBytesView*)outputs->View, Arena = passed.Pointer,
             Progress = this._progress.Progress(progress),
         };
         usearch_shapes_save_buffer(&arguments);
@@ -2008,14 +2008,14 @@ internal sealed class NativeShapesIndexHandle : EngineHandle
     }
 }
 
-/// <summary>A <c>usearch_shapes_cursor_t</c> and the leases on the index and executor every pull
+/// <summary>A <c>usearch_shapes_cursor_t</c> and the references on the index and executor every pull
 /// names, all released when the wrapper is disposed or collected.</summary>
 internal sealed class NativeShapesCursorHandle : EngineHandle
 {
-    private Lease _index;
-    private Lease _executor;
+    private HandleReference _index;
+    private HandleReference _executor;
 
-    internal NativeShapesCursorHandle(IntPtr cursor, Lease index, Lease executor)
+    internal NativeShapesCursorHandle(IntPtr cursor, HandleReference index, HandleReference executor)
     {
         this.SetHandle(cursor);
         this._index = index;

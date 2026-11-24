@@ -96,7 +96,7 @@ def version() -> str:
     ...
 
 def capabilities_compiled() -> str:
-    """The kernel families this build carries."""
+    """The kernel families this build holds."""
     ...
 
 def capabilities_available() -> str:
@@ -293,7 +293,7 @@ class CPUClass(IntEnum):
     SERIAL = 1
     """The portable floor: no SIMD assumptions."""
     MONOVERSIONED = 2
-    """The one class of a monoversioned build, carrying every capability its floor implies."""
+    """The one class of a monoversioned build, holding every capability its floor implies."""
     INTEL_HASWELL = 3
     """Haswell-class x86: AVX2 and FMA, the 256-bit floor."""
     INTEL_SIERRA = 4
@@ -591,7 +591,7 @@ class DenseProducts(_ArrowOutput):
         ...
 
     def query(self, query: int, /) -> tuple[_ArenaBuffer, _ArenaBuffer]:
-        """The (keys, scores) of left row or query `query`, viewing the arena. Python-only."""
+        """The (keys, scores) of left row or query `query`, using the arena. Python-only."""
         ...
 
     def __len__(self) -> int: ...
@@ -1072,7 +1072,7 @@ class On[IndexT]:
     ) -> DenseProducts:
         """Approximate sparse product of a matrix against the indexed vectors - the linear algebra
         sibling of `search`, reporting every pair the traversal scored rather than only the
-        nearest. Pairs arrive in traversal order rather than sorted, and carry no duplicates.
+        nearest. Pairs arrive in traversal order rather than sorted, and hold no duplicates.
         How many a walk scores is known only once it ends, so the pairs come back ragged.
 
         Args:
@@ -1126,7 +1126,7 @@ class On[IndexT]:
           queries (buffer): A (Q, dimensions) matrix; row `t * head_count + h` is head `h`
             of token `t`.
           values (buffer): An (N, dimensions) matrix of value rows, as wide as the keys and
-            stored in the index's quantization, borrowed until the call is final.
+            stored in the index's quantization, read until the call is final.
           row_of (callable): Called with each scored Key, answers its row of `values`. None, or
             a row outside them, refuses the call with `ShapeMismatchError`, as do values of
             another width or scalar type. It re-enters Python from the library's threads, so it
@@ -1910,7 +1910,7 @@ class DeferredOn[IndexT]:
     ) -> Deferred[DenseProducts]:
         """Approximate sparse product of a matrix against the indexed vectors - the linear algebra
         sibling of `search`, reporting every pair the traversal scored rather than only the
-        nearest. Pairs arrive in traversal order rather than sorted, and carry no duplicates.
+        nearest. Pairs arrive in traversal order rather than sorted, and hold no duplicates.
         How many a walk scores is known only once it ends, so the pairs come back ragged.
 
         Args:
@@ -1964,7 +1964,7 @@ class DeferredOn[IndexT]:
           queries (buffer): A (Q, dimensions) matrix; row `t * head_count + h` is head `h`
             of token `t`.
           values (buffer): An (N, dimensions) matrix of value rows, as wide as the keys and
-            stored in the index's quantization, borrowed until the call is final.
+            stored in the index's quantization, read until the call is final.
           row_of (callable): Called with each scored Key, answers its row of `values`. None, or
             a row outside them, refuses the call with `ShapeMismatchError`, as do values of
             another width or scalar type. It re-enters Python from the library's threads, so it

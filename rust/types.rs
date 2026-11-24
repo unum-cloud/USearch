@@ -57,7 +57,7 @@ impl Default for usearch_bytes_view_t {
     }
 }
 
-/// A strided run of keys - how a batch names the identities it carries, or a cursor pull the
+/// A strided run of keys - how a batch names the identities it holds, or a cursor pull the
 /// ones it wrote into its arena.
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -550,7 +550,7 @@ pub trait RowsView {
 
 /// Every way a call can end besides success, numbered as the library numbers them.
 ///
-/// An [`Error`] never carries [`Status::Deferred`], which only [`Deferred::status`] reports.
+/// An [`Error`] never holds [`Status::Deferred`], which only [`Deferred::status`] reports.
 #[repr(i32)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 #[non_exhaustive]
@@ -645,7 +645,7 @@ impl FromStr for Status {
 pub struct Error {
     /// The identity of the failure, shared by every binding of the library.
     pub status: Status,
-    /// The detail the status alone cannot carry.
+    /// The detail the status alone cannot hold.
     pub message: &'static str,
 }
 
@@ -840,8 +840,8 @@ pub enum Scalar {
     BF16 = 3,
     /// IEEE-754 binary16: ±65504, epsilon 9.77e-4, subnormals to 5.96e-8, with infinities and NaNs.
     F16 = 4,
-    /// FP8 with a 5-bit exponent: ±57344, epsilon 0.25, with infinities and NaNs - f16's dynamic range carried
-    /// on two mantissa bits.
+    /// FP8 with a 5-bit exponent: ±57344, epsilon 0.25, with infinities and NaNs - f16's dynamic
+    /// range held on two mantissa bits.
     E5M2 = 5,
     /// FP8 with a 4-bit exponent: ±448, epsilon 0.125, no infinities, and two NaN codes at 0x7F and 0xFF.
     E4M3 = 6,
@@ -864,7 +864,7 @@ pub enum Scalar {
     /// Two unsigned nibbles per byte spanning 0 to 15, even dimensions in the low nibble and odd ones in the high.
     U4x2 = 21,
     /// Eight single-bit dimensions per byte - the form the Hamming & Jaccard metrics score, where only the
-    /// set-bit count of a XOR or AND carries meaning.
+    /// set-bit count of a XOR or AND holds meaning.
     U1x8 = 22,
 }
 
@@ -1132,7 +1132,7 @@ impl<'data, Element: Clone, Offset: TapeOffset> Tape<'data, Element, Offset> {
         self.offsets.len().saturating_sub(1)
     }
 
-    /// Lends the tape as the view the C interface reads, its elements tagged `scalar`.
+    /// Passes the tape as the view the C interface reads, its elements tagged `scalar`.
     pub(crate) fn view(&self, scalar: Scalar) -> usearch_tape_view_t {
         usearch_tape_view_t {
             data: self.elements.as_ptr().cast(),
@@ -1199,7 +1199,7 @@ impl<'arena, Element: 'arena> TapeEntries<'arena, Element> {
     }
 }
 
-/// The source and target handles a reshard lends, laid out as the library reads them.
+/// The source and target handles a reshard passes, laid out as the library reads them.
 #[doc(hidden)]
 pub struct ReshardHandles {
     pub(crate) sources: Vec<*mut c_void>,
@@ -1703,7 +1703,7 @@ pub(crate) fn path_views(paths: &[impl AsRef<Path>]) -> Result<Vec<usearch_bytes
 pub type ProgressCallback<'a> = dyn FnMut(usize, usize) -> ControlFlow<()> + Send + 'a;
 
 /// # Safety
-/// `state` must address the `&mut ProgressCallback` lent to the call.
+/// `state` must address the `&mut ProgressCallback` passed to the call.
 unsafe extern "C" fn progress_trampoline(finished: usize, total: usize, state: *mut c_void) -> c_int {
     unsafe {
         let handler = &mut **state.cast::<&mut ProgressCallback>();
@@ -1711,8 +1711,8 @@ unsafe extern "C" fn progress_trampoline(finished: usize, total: usize, state: *
     }
 }
 
-/// Lends an optional handler and its step count as the progress every reporting verb takes, the
-/// state pointing at the handler itself; `None` lends nulls.
+/// Passes an optional handler and its step count as the progress every reporting verb takes, the
+/// state pointing at the handler itself; `None` passes nulls.
 pub(crate) fn lower_progress(handler: &mut Option<&mut ProgressCallback>, steps: usize) -> usearch_progress_t {
     match handler {
         Some(handler) => {
@@ -1726,7 +1726,7 @@ pub(crate) fn lower_progress(handler: &mut Option<&mut ProgressCallback>, steps:
 pub type Predicate<'a> = dyn Fn(Key) -> bool + Sync + 'a;
 
 /// # Safety
-/// `state` must address the `&Predicate` lent to the call, and `keys` and `admissions` must each
+/// `state` must address the `&Predicate` passed to the call, and `keys` and `admissions` must each
 /// address `count` elements.
 unsafe extern "C" fn admission_trampoline(keys: *const Key, admissions: *mut c_int, count: usize, state: *mut c_void) {
     unsafe {
@@ -1739,8 +1739,8 @@ unsafe extern "C" fn admission_trampoline(keys: *const Key, admissions: *mut c_i
     }
 }
 
-/// Lends an optional predicate as the struct every filtering verb takes, the state pointing at the
-/// predicate itself; `None` lends nulls.
+/// Passes an optional predicate as the struct every filtering verb takes, the state pointing at the
+/// predicate itself; `None` passes nulls.
 pub(crate) fn lower_predicate(predicate: &Option<&Predicate>) -> usearch_predicate_t {
     match predicate {
         Some(predicate) => usearch_predicate_t {
@@ -1752,7 +1752,7 @@ pub(crate) fn lower_predicate(predicate: &Option<&Predicate>) -> usearch_predica
     }
 }
 
-/// Lends an optional output as the pointer the library writes it through; `None` lends null.
+/// Passes an optional output as the pointer the library writes it through; `None` passes null.
 pub(crate) fn output_slot<Value>(output: &mut Option<&mut Value>) -> *mut Value {
     output.as_deref_mut().map_or(ptr::null_mut(), ptr::from_mut)
 }
@@ -2006,7 +2006,7 @@ impl Executor {
     /// Spawns host workers for RAM-resident indexes, interleaved across the compute domains local
     /// to `memory_domains`, which is the same list the indexes were initialized with.
     ///
-    /// Zero `threads` takes 7/8 of the cores those domains carry, since full occupancy starves
+    /// Zero `threads` takes 7/8 of the cores those domains hold, since full occupancy starves
     /// the ordered publication path.
     ///
     /// A `cpu_class_ceiling` caps the class the threads' waiters and atomics dispatch as,
@@ -2053,8 +2053,8 @@ impl Executor {
         check(outcome).map(|()| executor)
     }
 
-    /// Opens one submission stream on every named device, all of them driven by the one host
-    /// thread that calls the verbs - which is why this takes no thread count.
+    /// Orders work on each named device's per-thread default stream, all of them driven by the one
+    /// host thread that calls the verbs - which is why this takes no thread count.
     ///
     /// Zero `scratch_limit` lets scratch grow as geometry asks. A `gpu_class_ceiling` no named
     /// device loads is refused with [`Status::Unsupported`].
@@ -2062,11 +2062,13 @@ impl Executor {
         unsafe { Self::for_vram_on_streams(devices, gpu_class_ceiling, &[], scratch_limit) }
     }
 
-    /// Borrows the caller's CUDA streams, one per device in `devices` order, as
-    /// [`Executor::for_vram`] opens its own.
+    /// Orders work on the caller's CUDA streams, one per device in `devices` order, where
+    /// [`Executor::for_vram`] takes each device's per-thread default stream; the executor creates
+    /// and destroys no stream.
     ///
     /// # Safety
-    /// Every stream must be a live CUDA stream on its device that outlives the executor.
+    /// Every stream must be a live CUDA stream on its device, which the caller destroys only after
+    /// dropping the executor.
     pub unsafe fn for_vram_on_streams(
         devices: &[i32],
         gpu_class_ceiling: Option<GPUClass>,
@@ -2597,7 +2599,7 @@ mod tests {
     }
 
     #[test]
-    fn errors_carry_a_status_and_a_message() {
+    fn errors_hold_a_status_and_a_message() {
         let failure = fail(Status::ShapeMismatch, "something specific went wrong");
         assert_eq!(failure.status, Status::ShapeMismatch);
         assert_eq!(failure.to_string(), "something specific went wrong");

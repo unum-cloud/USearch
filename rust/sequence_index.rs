@@ -1371,7 +1371,7 @@ pub trait SequenceVerbs<'index>: Copy {
         Self::Completion::answer((keys, config.into()), (), |call, completion| {
             let (keys, config) = &mut call.inputs;
             let keys = keys.as_ref();
-            // The keys view carries no count, so only this side can see the two disagree.
+            // The keys view holds no count, so only this side can see the two disagree.
             if config.sequences.count() != keys.len() {
                 return Err(crate::types::fail(
                     Status::ShapeMismatch,
@@ -1643,7 +1643,7 @@ pub trait SequenceVerbs<'index>: Copy {
         })
     }
 
-    /// Saves the index as one monolith into the arena its config carries.
+    /// Saves the index as one monolith into the arena its config holds.
     #[allow(clippy::type_complexity)]
     fn save_buffer<'config, 'arena>(
         self,

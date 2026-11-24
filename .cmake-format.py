@@ -59,8 +59,8 @@ with section("parse"):
     }
 
 with section("markup"):
-    # Never reflow hand-authored comment blocks: a file-level docstring can carry multi-line apt,
-    # uv or cmake usage that a reflow would restitch into an unreadable run. Disabling markup keeps
+    # Never reflow hand-authored comment blocks: a file-level docstring can hold multi-line apt, uv
+    # or cmake usage that a reflow would restitch into an unreadable run. Disabling markup keeps
     # every comment verbatim, so the docstring survives without a `cmake-format: off` guard.
     enable_markup = False
     first_comment_is_literal = True

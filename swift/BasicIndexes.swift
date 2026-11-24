@@ -16,23 +16,23 @@ import USearchC
 // MARK: - Tapes
 
 extension CallState {
-    /// Lends `entries` as one tape, each entry's values end to end and the 64-bit offsets counting
+    /// Passes `entries` as one tape, each entry's values end to end and the 64-bit offsets counting
     /// them in units of `valuesPerElement` values, so a shape's offsets count points rather than
     /// coordinates.
-    func lend<Element: ScalarValue, Value>(
+    func pass<Element: ScalarValue, Value>(
         tape entries: [[Element]],
         valuesPerElement: Int,
         _ body: (usearch_tape_view_t) throws(USearchError) -> Value
     ) throws(USearchError) -> Value {
-        // The tape carries elements, so only this side can see an entry holding part of one.
+        // The tape holds elements, so only this side can see an entry holding part of one.
         guard entries.allSatisfy({ $0.count % valuesPerElement == 0 }) else {
             throw USearchError(status: .shapeMismatch, message: "an entry holds a partial element")
         }
         var offsets: [UInt64] = [0]
         offsets.reserveCapacity(entries.count + 1)
         for entry in entries { offsets.append(offsets.last! + UInt64(entry.count / valuesPerElement)) }
-        return try lend(entries.flatMap { $0 }) { (values) throws(USearchError) -> Value in
-            try lend(offsets) { (offsets) throws(USearchError) -> Value in
+        return try pass(entries.flatMap { $0 }) { (values) throws(USearchError) -> Value in
+            try pass(offsets) { (offsets) throws(USearchError) -> Value in
                 var tape = usearch_tape_view_t()
                 tape.data = UnsafeRawPointer(values)
                 tape.layout = usearch_tape_u64_k
@@ -184,7 +184,7 @@ public struct BasicViewNvmeConfig {
 
 // MARK: - Placements
 
-/// The host placement every RAM lifecycle verb takes, borrowing `domains` for the call.
+/// The host placement every RAM lifecycle verb takes, viewing `domains` for the call.
 func ramOptions(
     _ domains: UnsafePointer<Int32>?,
     _ count: Int,
@@ -199,7 +199,7 @@ func ramOptions(
     )
 }
 
-/// The device placement every VRAM lifecycle verb takes, borrowing `devices` for the call.
+/// The device placement every VRAM lifecycle verb takes, viewing `devices` for the call.
 func vramOptions(
     _ devices: UnsafePointer<Int32>?,
     _ count: Int,

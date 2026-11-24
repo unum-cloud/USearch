@@ -58,7 +58,7 @@ import {
 export enum GeospatialRelation {
   /** Within the radius, widened by three standard deviations of both positions combined. */
   Near = 1,
-  /** Near, with a clear line of sight over the handle's terrain, which no handle here carries. */
+  /** Near, with a clear line of sight over the handle's terrain, which no handle here holds. */
   Visible = 2,
   /** Near, and the entry's view cone holds the query. */
   Sees = 3,
@@ -131,7 +131,7 @@ export function observationsOf(observations: ReadonlyArray<GeospatialObservation
 export interface GeospatialOptions {
   /** Neighbors per node; absent derives it. */
   connectivity?: number;
-  /** Entries one key may carry; absent is unbounded. */
+  /** Entries one key may hold; absent is unbounded. */
   valuesPerKey?: number;
   /** The newest CPU class dispatch may pick, by canonical name; absent means no ceiling. */
   cpuClassCeiling?: string;
@@ -159,7 +159,7 @@ export interface GeospatialLoadConfig {
   executor?: Executor;
   /** NUMA node IDs for a RAM load, or CUDA ordinals for a VRAM one; absent derives them. */
   placement?: number[];
-  /** Entries one key may carry; absent is unbounded. */
+  /** Entries one key may hold; absent is unbounded. */
   valuesPerKey?: number;
   /** The newest CPU or GPU class dispatch may pick, by canonical name; absent means no ceiling. */
   classCeiling?: string;

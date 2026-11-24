@@ -14,7 +14,7 @@
  *
  *  @verify pass sc,rc11,far
  *  @verify fail rc11,far covered_order=order_relaxed: relaxed, the finisher reads no key, and under
- *      `far` the add is posted and arrives carrying nothing
+ *      @c far the add is posted and arrives holding nothing
  *  @verify fail rc11 counters_before_watermark=false: reversed, the reader finds the dispenser
  *      behind the watermark, and `watermark_` reports a settled load contended
  */

@@ -8,8 +8,8 @@
  *  The index starts empty on one shard of one row. The planner makes two calls, each holding the
  *  gate's shared side: `plan_insert` claims the row, and the step dispenses it. The clearer takes
  *  the unique side or is refused, closes the shard through the claim-aware `close`, and inside its
- *  window forgets the shard in place. The orderings the gate and the window carry are `epoch.pml`'s
- *  and `basic_shared_mutex.pml`'s.
+ *  window forgets the shard in place. @c epoch.pml and @c basic_shared_mutex.pml check the
+ *  orderings the gate and the window hold.
  *
  *  - Every dispense consumes a claim that still stands.
  *

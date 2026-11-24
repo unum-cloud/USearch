@@ -125,9 +125,9 @@ public struct GeospatialTolerance: Sendable {
 
 /// The elevation every line of sight is tested over: a north-up grid of `f32` heights in metres
 /// above the WGS-84 ellipsoid, or a dataset only an NVMe residency reads. A checkpoint never
-/// carries it, so every load and view names it again.
+/// holds it, so every load and view names it again.
 public struct GeospatialTerrain: Sendable {
-    /// The grid, rows running south and columns east, borrowed for the index's lifetime; an index
+    /// The grid, rows running south and columns east, viewed for the index's lifetime; an index
     /// built over a `Tensor` keeps it alive itself.
     public var heights: RowsView?
     /// The latitude of the centre of cell [0,0], in degrees.
@@ -159,18 +159,18 @@ public struct GeospatialTerrain: Sendable {
 }
 
 extension CallState {
-    /// Lends an optional terrain as the record every geospatial lifecycle verb takes; nil lends the
-    /// zeroed one that means none.
-    func lend<Value>(
+    /// Passes an optional terrain as the record every geospatial lifecycle verb takes; nil passes
+    /// the zeroed one that means none.
+    func pass<Value>(
         _ terrain: GeospatialTerrain?,
         _ body: (usearch_geospatial_terrain_t) throws(USearchError) -> Value
     ) throws(USearchError) -> Value {
         guard let terrain else { return try body(usearch_geospatial_terrain_t()) }
-        // The record carries no scalar of its own, so only this side can see heights of another.
+        // The record holds no scalar of its own, so only this side can see heights of another.
         if let heights = terrain.heights, heights.scalar != .f32 {
             throw USearchError(status: .invalidArgument, message: "terrain heights are f32")
         }
-        return try lend(terrain.path ?? "") { (path) throws(USearchError) -> Value in
+        return try pass(terrain.path ?? "") { (path) throws(USearchError) -> Value in
             var raw = usearch_geospatial_terrain_t()
             raw.rows = terrain.heights?.rows ?? 0
             raw.columns = terrain.heights?.columns ?? 0
@@ -352,7 +352,7 @@ public final class GeospatialReshardPlan: @unchecked Sendable {
 public final class GeospatialIndex: @unchecked Sendable {
     /// The native handle, released by `deinit`.
     let raw: usearch_geospatial_index_t
-    /// The storage of the terrain heights the handle borrows, held for its lifetime.
+    /// The storage of the terrain heights the handle views, held for its lifetime.
     private let terrainOwner: AnyObject?
 
     private init(raw: usearch_geospatial_index_t, terrainOwner: AnyObject?) {
@@ -371,8 +371,8 @@ public final class GeospatialIndex: @unchecked Sendable {
     ) throws(USearchError) -> GeospatialIndex {
         let callState = CallState()
         let index = callState.slots(usearch_geospatial_index_t?.none)
-        try callState.lend(options.terrain) { (terrain) throws(USearchError) in
-            try callState.lend(memoryDomains) { (domains) throws(USearchError) in
+        try callState.pass(options.terrain) { (terrain) throws(USearchError) in
+            try callState.pass(memoryDomains) { (domains) throws(USearchError) in
                 var arguments = usearch_geospatial_init_ram_t(
                     index: index,
                     outcome: callState.outcome,
@@ -394,15 +394,15 @@ public final class GeospatialIndex: @unchecked Sendable {
     ) throws(USearchError) -> GeospatialIndex {
         let callState = CallState()
         let index = callState.slots(usearch_geospatial_index_t?.none)
-        try callState.lend(options.terrain) { (terrain) throws(USearchError) in
-            try callState.lend(devices) { (lentDevices) throws(USearchError) in
+        try callState.pass(options.terrain) { (terrain) throws(USearchError) in
+            try callState.pass(devices) { (passedDevices) throws(USearchError) in
                 var arguments = usearch_geospatial_init_vram_t(
                     index: index,
                     outcome: callState.outcome,
                     terrain: terrain,
                     connectivity: options.connectivity,
                     values_per_key: options.valuesPerKey,
-                    vram: vramOptions(lentDevices, devices.count, options.gpuClassCeiling)
+                    vram: vramOptions(passedDevices, devices.count, options.gpuClassCeiling)
                 )
                 usearch_geospatial_init_vram(&arguments)
             }
@@ -419,10 +419,10 @@ public final class GeospatialIndex: @unchecked Sendable {
     ) throws(USearchError) -> GeospatialIndex {
         let callState = CallState()
         let index = callState.slots(usearch_geospatial_index_t?.none)
-        let progress = callState.lend(config.progress, steps: config.progressSteps)
-        try callState.lend(path) { (path) throws(USearchError) in
-            try callState.lend(terrain) { (lentTerrain) throws(USearchError) in
-                try callState.lend(config.memoryDomains) { (domains) throws(USearchError) in
+        let progress = callState.pass(config.progress, steps: config.progressSteps)
+        try callState.pass(path) { (path) throws(USearchError) in
+            try callState.pass(terrain) { (passedTerrain) throws(USearchError) in
+                try callState.pass(config.memoryDomains) { (domains) throws(USearchError) in
                     var arguments = usearch_geospatial_load_ram_t(
                         index: index,
                         executor: config.executor?.raw,
@@ -431,7 +431,7 @@ public final class GeospatialIndex: @unchecked Sendable {
                         path: path,
                         ram: ramOptions(domains, config.memoryDomains.count, config.cpuClassCeiling),
                         values_per_key: config.valuesPerKey,
-                        terrain: lentTerrain,
+                        terrain: passedTerrain,
                         progress: progress
                     )
                     usearch_geospatial_load_ram(&arguments)
@@ -449,10 +449,10 @@ public final class GeospatialIndex: @unchecked Sendable {
     ) throws(USearchError) -> GeospatialIndex {
         let callState = CallState()
         let index = callState.slots(usearch_geospatial_index_t?.none)
-        let progress = callState.lend(config.progress, steps: config.progressSteps)
-        try callState.lend(path) { (path) throws(USearchError) in
-            try callState.lend(terrain) { (lentTerrain) throws(USearchError) in
-                try callState.lend(config.devices) { (devices) throws(USearchError) in
+        let progress = callState.pass(config.progress, steps: config.progressSteps)
+        try callState.pass(path) { (path) throws(USearchError) in
+            try callState.pass(terrain) { (passedTerrain) throws(USearchError) in
+                try callState.pass(config.devices) { (devices) throws(USearchError) in
                     var arguments = usearch_geospatial_load_vram_t(
                         index: index,
                         executor: config.executor?.raw,
@@ -461,7 +461,7 @@ public final class GeospatialIndex: @unchecked Sendable {
                         path: path,
                         vram: vramOptions(devices, config.devices.count, config.gpuClassCeiling),
                         values_per_key: config.valuesPerKey,
-                        terrain: lentTerrain,
+                        terrain: passedTerrain,
                         progress: progress
                     )
                     usearch_geospatial_load_vram(&arguments)
@@ -479,10 +479,10 @@ public final class GeospatialIndex: @unchecked Sendable {
     ) throws(USearchError) -> GeospatialIndex {
         let callState = CallState()
         let index = callState.slots(usearch_geospatial_index_t?.none)
-        let progress = callState.lend(config.progress, steps: config.progressSteps)
+        let progress = callState.pass(config.progress, steps: config.progressSteps)
         try buffer.withUnsafeBytes { (bytes) throws(USearchError) in
-            try callState.lend(terrain) { (lentTerrain) throws(USearchError) in
-                try callState.lend(config.memoryDomains) { (domains) throws(USearchError) in
+            try callState.pass(terrain) { (passedTerrain) throws(USearchError) in
+                try callState.pass(config.memoryDomains) { (domains) throws(USearchError) in
                     var arguments = usearch_geospatial_load_ram_buffer_t(
                         index: index,
                         executor: config.executor?.raw,
@@ -491,7 +491,7 @@ public final class GeospatialIndex: @unchecked Sendable {
                         buffer: usearch_bytes_view_t(bytes),
                         ram: ramOptions(domains, config.memoryDomains.count, config.cpuClassCeiling),
                         values_per_key: config.valuesPerKey,
-                        terrain: lentTerrain,
+                        terrain: passedTerrain,
                         progress: progress
                     )
                     usearch_geospatial_load_ram_buffer(&arguments)
@@ -510,10 +510,10 @@ public final class GeospatialIndex: @unchecked Sendable {
     ) throws(USearchError) -> GeospatialIndex {
         let callState = CallState()
         let index = callState.slots(usearch_geospatial_index_t?.none)
-        let progress = callState.lend(config.progress, steps: config.progressSteps)
+        let progress = callState.pass(config.progress, steps: config.progressSteps)
         try buffer.withUnsafeBytes { (bytes) throws(USearchError) in
-            try callState.lend(terrain) { (lentTerrain) throws(USearchError) in
-                try callState.lend(config.devices) { (devices) throws(USearchError) in
+            try callState.pass(terrain) { (passedTerrain) throws(USearchError) in
+                try callState.pass(config.devices) { (devices) throws(USearchError) in
                     var arguments = usearch_geospatial_load_vram_buffer_t(
                         index: index,
                         executor: config.executor?.raw,
@@ -522,7 +522,7 @@ public final class GeospatialIndex: @unchecked Sendable {
                         buffer: usearch_bytes_view_t(bytes),
                         vram: vramOptions(devices, config.devices.count, config.gpuClassCeiling),
                         values_per_key: config.valuesPerKey,
-                        terrain: lentTerrain,
+                        terrain: passedTerrain,
                         progress: progress
                     )
                     usearch_geospatial_load_vram_buffer(&arguments)
@@ -541,14 +541,14 @@ public final class GeospatialIndex: @unchecked Sendable {
     ) throws(USearchError) -> GeospatialIndex {
         let callState = CallState()
         let index = callState.slots(usearch_geospatial_index_t?.none)
-        try callState.lend(path) { (path) throws(USearchError) in
-            try callState.lend(terrain) { (lentTerrain) throws(USearchError) in
-                try callState.lend(memoryDomains) { (domains) throws(USearchError) in
+        try callState.pass(path) { (path) throws(USearchError) in
+            try callState.pass(terrain) { (passedTerrain) throws(USearchError) in
+                try callState.pass(memoryDomains) { (domains) throws(USearchError) in
                     var arguments = usearch_geospatial_view_ram_t(
                         index: index,
                         outcome: callState.outcome,
                         path: path,
-                        terrain: lentTerrain,
+                        terrain: passedTerrain,
                         ram: ramOptions(domains, memoryDomains.count, cpuClassCeiling)
                     )
                     usearch_geospatial_view_ram(&arguments)
@@ -567,8 +567,8 @@ public final class GeospatialIndex: @unchecked Sendable {
     ) throws(USearchError) -> GeospatialIndex {
         let callState = CallState()
         let index = callState.slots(usearch_geospatial_index_t?.none)
-        try callState.lend(path) { (path) throws(USearchError) in
-            try callState.lend(terrain) { (lentTerrain) throws(USearchError) in
+        try callState.pass(path) { (path) throws(USearchError) in
+            try callState.pass(terrain) { (passedTerrain) throws(USearchError) in
                 withPaths(config.paths, config.cpuClassCeiling) { nvme in
                     var arguments = usearch_geospatial_view_nvme_t(
                         index: index,
@@ -577,7 +577,7 @@ public final class GeospatialIndex: @unchecked Sendable {
                         completion: callState.completion,
                         path: path,
                         nvme: nvme,
-                        terrain: lentTerrain
+                        terrain: passedTerrain
                     )
                     usearch_geospatial_view_nvme(&arguments)
                 }
@@ -593,7 +593,7 @@ public final class GeospatialIndex: @unchecked Sendable {
     ) throws(USearchError) -> GeospatialMetadata {
         let callState = CallState()
         let metadata = callState.slots(GeospatialMetadata())
-        try callState.lend(path) { (path) throws(USearchError) in
+        try callState.pass(path) { (path) throws(USearchError) in
             var arguments = usearch_geospatial_metadata_read_t(
                 executor: executor?.raw,
                 outcome: callState.outcome,
@@ -628,7 +628,7 @@ public final class GeospatialIndex: @unchecked Sendable {
         return metadata.pointee
     }
 
-    /// Adopts the handle a blocking lifecycle verb wrote, holding the terrain storage it borrows,
+    /// Adopts the handle a blocking lifecycle verb wrote, holding the terrain storage it views,
     /// or throws its failure.
     private static func adopted(
         _ index: UnsafeMutablePointer<usearch_geospatial_index_t?>,
@@ -909,7 +909,7 @@ public struct GeospatialIndexOn: Sendable {
 }
 
 /// A geospatial index's verbs submitted to an executor, each answering a `Deferred` at once; see
-/// `GeospatialIndex` and `DenseIndexDeferredOn`, whose borrowing rules these follow.
+/// `GeospatialIndex` and `DenseIndexDeferredOn`, whose viewing rules these follow.
 public struct GeospatialIndexDeferredOn: Sendable {
     /// The index every verb addresses.
     let index: GeospatialIndex
@@ -1138,14 +1138,14 @@ struct GeospatialCall {
         _ observations: [GeospatialObservation],
         config: DenseInsertConfig
     ) throws(USearchError) -> Submission<Void> {
-        // The key run carries no count of its own, so only this side can see it disagree.
+        // The key run holds no count of its own, so only this side can see it disagree.
         guard keys.count == observations.count else {
             throw USearchError(status: .shapeMismatch, message: "the key count does not match the observation count")
         }
         callState.anchor(config.stats)
-        let progress = callState.lend(config.progress, steps: config.progressSteps)
-        try callState.lend(keys) { (keys) throws(USearchError) in
-            try callState.lend(observations) { (lentObservations) throws(USearchError) in
+        let progress = callState.pass(config.progress, steps: config.progressSteps)
+        try callState.pass(keys) { (keys) throws(USearchError) in
+            try callState.pass(observations) { (passedObservations) throws(USearchError) in
                 var arguments = usearch_geospatial_insert_t(
                     index: index.raw,
                     executor: executor?.raw,
@@ -1153,7 +1153,7 @@ struct GeospatialCall {
                     completion: completion,
                     count: observations.count,
                     keys: keysView(keys),
-                    observations: observationsView(lentObservations),
+                    observations: observationsView(passedObservations),
                     expansion_factor: config.expansionFactor,
                     progress: progress,
                     stats: config.stats?.raw
@@ -1175,7 +1175,7 @@ struct GeospatialCall {
             completion: completion,
             report: report.pointer(to: \.raw)!,
             refine: config.options,
-            progress: callState.lend(config.progress, steps: config.progressSteps),
+            progress: callState.pass(config.progress, steps: config.progressSteps),
             stats: config.stats?.raw,
             plan: config.plan?.raw.pointer(to: \.handle),
             phase: config.plan?.raw.pointer(to: \.phase.raw)
@@ -1222,14 +1222,14 @@ struct GeospatialCall {
     ) throws(USearchError) -> Submission<Matches> {
         callState.anchor(config.stats)
         let matches = callState.slots(Matches(arena: arena, endIndex: queries.count))
-        try callState.lend(queries) { (lentQueries) throws(USearchError) in
+        try callState.pass(queries) { (passedQueries) throws(USearchError) in
             var arguments = usearch_geospatial_search_t(
                 index: index.raw,
                 executor: executor?.raw,
                 outcome: callState.outcome,
                 completion: completion,
                 count: queries.count,
-                queries: observationsView(lentQueries),
+                queries: observationsView(passedQueries),
                 relation: relation.raw,
                 tolerance: tolerance.raw,
                 matches: matches.pointer(to: \.view)!,
@@ -1237,8 +1237,8 @@ struct GeospatialCall {
                 wanted: wanted,
                 expansion_factor: config.expansionFactor,
                 traversal: config.traversal.raw,
-                predicate: callState.lend(config.predicate),
-                progress: callState.lend(config.progress, steps: config.progressSteps),
+                predicate: callState.pass(config.predicate),
+                progress: callState.pass(config.progress, steps: config.progressSteps),
                 stats: config.stats?.raw
             )
             usearch_geospatial_search(&arguments)
@@ -1255,22 +1255,22 @@ struct GeospatialCall {
     ) throws(USearchError) -> Submission<DenseProducts> {
         callState.anchor(config.stats)
         let products = callState.slots(DenseProducts(arena: arena, endIndex: queries.count))
-        try callState.lend(queries) { (lentQueries) throws(USearchError) in
+        try callState.pass(queries) { (passedQueries) throws(USearchError) in
             var arguments = usearch_geospatial_within_t(
                 index: index.raw,
                 executor: executor?.raw,
                 outcome: callState.outcome,
                 completion: completion,
                 count: queries.count,
-                queries: observationsView(lentQueries),
+                queries: observationsView(passedQueries),
                 relation: relation.raw,
                 tolerance: tolerance.raw,
                 matches: products.pointer(to: \.products)!,
                 written: nil,
                 arena: arena.raw,
                 traversal: config.traversal.raw,
-                predicate: callState.lend(config.predicate),
-                progress: callState.lend(config.progress, steps: config.progressSteps),
+                predicate: callState.pass(config.predicate),
+                progress: callState.pass(config.progress, steps: config.progressSteps),
                 stats: config.stats?.raw
             )
             usearch_geospatial_within(&arguments)
@@ -1298,7 +1298,7 @@ struct GeospatialCall {
             report: report.pointer(to: \.raw)!,
             refine: config.options,
             seed: config.seed,
-            progress: callState.lend(config.progress, steps: config.progressSteps),
+            progress: callState.pass(config.progress, steps: config.progressSteps),
             stats: config.stats?.raw,
             plan: config.plan?.raw.pointer(to: \.handle),
             phase: config.plan?.raw.pointer(to: \.phase.raw)
@@ -1329,10 +1329,10 @@ struct GeospatialCall {
         }
         callState.anchor(config.stats)
         let draws = callState.slots(DenseDraws(arena: arena))
-        let progress = callState.lend(config.progress, steps: config.progressSteps)
-        try callState.lend(config.shown) { (shown) throws(USearchError) in
-            try callState.lend(config.focus) { (focus) throws(USearchError) in
-                try callState.lend(config.shownCoordinates) { (shownCoordinates) throws(USearchError) in
+        let progress = callState.pass(config.progress, steps: config.progressSteps)
+        try callState.pass(config.shown) { (shown) throws(USearchError) in
+            try callState.pass(config.focus) { (focus) throws(USearchError) in
+                try callState.pass(config.shownCoordinates) { (shownCoordinates) throws(USearchError) in
                     var arguments = usearch_geospatial_sample_t(
                         index: index.raw,
                         executor: executor?.raw,
@@ -1363,8 +1363,8 @@ struct GeospatialCall {
     }
 
     func save(_ path: String, config: DenseSaveConfig) throws(USearchError) -> Submission<Void> {
-        let progress = callState.lend(config.progress, steps: config.progressSteps)
-        try callState.lend(path) { (path) throws(USearchError) in
+        let progress = callState.pass(config.progress, steps: config.progressSteps)
+        try callState.pass(path) { (path) throws(USearchError) in
             var arguments = usearch_geospatial_save_t(
                 index: index.raw,
                 executor: executor?.raw,
@@ -1387,7 +1387,7 @@ struct GeospatialCall {
             completion: completion,
             monolith: monolith.pointer(to: \.monolith)!,
             arena: arena.raw,
-            progress: callState.lend(config.progress, steps: config.progressSteps)
+            progress: callState.pass(config.progress, steps: config.progressSteps)
         )
         usearch_geospatial_save_buffer(&arguments)
         return try callState.submitted(monolith)

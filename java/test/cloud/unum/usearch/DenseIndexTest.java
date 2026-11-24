@@ -468,7 +468,7 @@ public class DenseIndexTest {
     public void aColumnsMismatchSurfacesFromTheEngine() {
         try (DenseIndex index = empty(twoDimensional())) {
             index.reserve(1);
-            // The view carries its own width, so C refuses it and its message comes through.
+            // The view holds its own width, so C refuses it and its message comes through.
             USearchException refused = assertThrows(
                     USearchException.class,
                     () -> index.insert(new Key[] {Key.of(1)}, RowsView.of(new float[] {0, 1, 2}, 3)));
@@ -639,9 +639,9 @@ public class DenseIndexTest {
         }
     }
 
-    /** A call leases its index, so closing the index from inside its own call is refused, not a use-after-free. */
+    /** A call references its index, so closing the index from inside its own call is refused, not a use-after-free. */
     @Test
-    public void aCallLeasesItsIndex() {
+    public void aCallReferencesItsIndex() {
         DenseIndex index = empty(new DenseOptions().dimensions(2).metric(DenseMetric.INNER));
         index.reserve(1);
         index.insert(new Key[] {Key.of(0)}, RowsView.of(new float[] {1, 0}, 2));
@@ -649,8 +649,8 @@ public class DenseIndexTest {
         ValueLookup closing = new ValueLookup(bf16RowsOf(2, 5, 5), key -> {
             try {
                 index.close();
-            } catch (IllegalStateException leased) {
-                refused.set(leased);
+            } catch (IllegalStateException referenced) {
+                refused.set(referenced);
             }
             return 0;
         });
@@ -820,7 +820,7 @@ public class DenseIndexTest {
         }
     }
 
-    /** A deferred call borrows its arena, so closing the arena first waits for the call and voids its view. */
+    /** A deferred call uses its arena, so closing the arena first waits for the call and voids its view. */
     @Test
     public void closingAnArenaWaitsForTheDeferredCallsNamingIt() {
         try (DenseIndex index = populated()) {

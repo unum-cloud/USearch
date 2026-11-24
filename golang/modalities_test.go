@@ -215,7 +215,7 @@ func TestModalityMetricsSpellTheLibrarysNames(t *testing.T) {
 	}
 }
 
-// Every metric reads back from its own spelling, and a spelling no metric carries is refused.
+// Every metric reads back from its own spelling, and a spelling no metric holds is refused.
 func TestModalityMetricsReadBackFromTheirNames(t *testing.T) {
 	t.Parallel()
 	for _, metric := range []SequenceMetric{SequenceMetricLevenshteinBytes, SequenceMetricLevenshteinUTF8,

@@ -20,15 +20,15 @@ null the ABI asks for and costs nothing to pass, in a field, as an argument, or 
 Opaque handles and `void *` state name no element type, so they cross as `Address`, their numeric
 value. A struct holding an `Optional` is not `TrivialRegisterPassable`, so C reads those by address.
 
-Every descriptor that borrows caller storage carries that storage's origin as a struct parameter,
+Every descriptor that views caller storage holds that storage's origin as a struct parameter,
 because Mojo destroys a value at its last use rather than at the end of its scope, and an address
 laundered through `Address` is not a use. A descriptor built from a list and handed straight to a
 call was measured destroying that list before the call ran, leaving the engine reading a freed
 allocation; naming the origin in the descriptor's type moved the destruction after the call. The
-pointer fields carry that origin too, so the compiler tracks the pointer itself, and `arguments`
+pointer fields hold that origin too, so the compiler tracks the pointer itself, and `arguments`
 erases it inside the verb, while the descriptor is still alive, to reach the one instantiation the
-ABI signatures name. A `Deferred` carries the union of every origin its call
-borrows the same way, which keeps the index, the executor, and the inputs alive until it is gone.
+ABI signatures name. A `Deferred` holds the union of every origin its call
+views the same way, which keeps the index, the executor, and the inputs alive until it is gone.
 
 A struct whose address crosses to C is materialized into a `stack_allocation` slot rather than held
 in a local whose address is taken. An `alloca` is not a value Mojo owns, so nothing destroys it and
@@ -50,7 +50,7 @@ from usearch.library import Library
 # region Pointers
 
 comptime CString = Pointer[Int8, ImmUntrackedOrigin]
-"""A borrowed null-terminated C string, such as an enumerator's spelling or an outcome's message."""
+"""A viewed null-terminated C string, such as an enumerator's spelling or an outcome's message."""
 
 comptime Address = Int
 """An opaque handle or a `void *` crossing as its numeric value, zero for null.
@@ -78,7 +78,7 @@ def _anchor[origin: Origin]() -> ref[origin] NoneType:
 struct Status(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
     """Why a call into the engine failed - the `usearch_status_t` vocabulary, verbatim.
 
-    An `Error` never carries `SUCCESS` or `DEFERRED`: only a `Deferred` reports the latter, and only
+    An `Error` never holds `SUCCESS` or `DEFERRED`: only a `Deferred` reports the latter, and only
     until its call is final. `Library.status_name` spells each one as the engine does.
     """
 
@@ -135,7 +135,7 @@ struct Status(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
             code: Whatever the C call reported, named by this build or not.
 
         Returns:
-            The matching status, or one carrying the unrecognized code verbatim.
+            The matching status, or one holding the unrecognized code verbatim.
         """
         return Self(Int32(code))
 
@@ -168,7 +168,7 @@ struct Error(Copyable, ImplicitlyCopyable, Writable):
     var detail: StaticString
     """The entry point it was about, for a reader rather than for a branch."""
     var message: Optional[CString]
-    """The engine's own static message, or `None` when it carried none.
+    """The engine's own static message, or `None` when it held none.
 
     Messages are static storage inside the shared object, so keeping the address costs nothing and
     outlives the call. `write_to` walks it; there is nothing to free.
@@ -267,7 +267,7 @@ struct Key(Equatable, ImplicitlyCopyable, TrivialRegisterPassable, Writable):
         """The integer identity in bytes 8 through 15, and nothing when the leading ones are set.
 
         Returns:
-            The trailing word read big-endian, or `None` for a key whose leading bytes carry
+            The trailing word read big-endian, or `None` for a key whose leading bytes hold
             identity of their own and so has no 64-bit one.
         """
         if self.leading != 0:
@@ -576,7 +576,7 @@ struct ProgressArguments(Defaultable, ImplicitlyCopyable):
 
 @fieldwise_init
 struct Continuation(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
-    """Whether the call a progress handler watches carries on or unwinds - `usearch_continuation_t`."""
+    """Whether the call a progress handler watches continues or unwinds - `usearch_continuation_t`."""
 
     var code: c_int
     """The raw `usearch_continuation_t` value the ABI exchanges."""
@@ -599,7 +599,7 @@ def _progress_trampoline[
 
 @fieldwise_init
 struct PredicateCost(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
-    """How costly one predicate call is, which decides how many keys each call carries."""
+    """How costly one predicate call is, which decides how many keys each call holds."""
 
     var code: c_int
     """The raw value the ABI exchanges."""
@@ -619,7 +619,7 @@ struct PredicateArguments(ImplicitlyCopyable):
     var state: Address
     """Forwarded into every `callback` call."""
     var cost: PredicateCost
-    """How many keys each `callback` call carries."""
+    """How many keys each `callback` call holds."""
 
     def __init__(out self):
         """No handler, which admits every key."""
@@ -641,7 +641,7 @@ struct PredicateArguments(ImplicitlyCopyable):
 
         Args:
             state: What the handler reads; it must outlive the call.
-            cost: How many keys each call carries.
+            cost: How many keys each call holds.
 
         Returns:
             The predicate a filtered search takes.
@@ -679,22 +679,22 @@ def _predicate_trampoline[
 
 @fieldwise_init
 struct BytesView[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable, TrivialRegisterPassable):
-    """A borrowed run of bytes and its length - `usearch_bytes_view_t`, never null-terminated.
+    """A viewed run of bytes and its length - `usearch_bytes_view_t`, never null-terminated.
 
     Crosses by value, which the two-word argument class handles on both x86-64 and AArch64.
 
     Parameters:
-        origin: The borrowed storage, named so it outlives every call this view crosses.
+        origin: The viewed storage, named so it outlives every call this view crosses.
     """
 
     var data: Pointer[Int8, Self.origin]
-    """The first byte, borrowed for the duration of the call."""
+    """The first byte, read only during the call."""
     var length: c_size_t
     """How many bytes the run covers, since nothing terminates it."""
 
     @staticmethod
     def of[text_origin: ImmOrigin, //](text: StringSlice[text_origin]) -> BytesView[text_origin]:
-        """Borrows a Mojo string's bytes, which the caller keeps alive across the call.
+        """Views a Mojo string's bytes, which the caller keeps alive across the call.
 
         Parameters:
             text_origin: The string's origin, inferred from the argument.
@@ -709,7 +709,7 @@ struct BytesView[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable, Tri
 
     @staticmethod
     def of[bytes_origin: ImmOrigin, //](bytes: Span[UInt8, bytes_origin]) -> BytesView[bytes_origin]:
-        """Borrows a run of raw bytes, such as the monolith `save_buffer` returns.
+        """Views a run of raw bytes, such as the monolith `save_buffer` returns.
 
         Parameters:
             bytes_origin: The run's origin, inferred from the argument.
@@ -723,7 +723,7 @@ struct BytesView[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable, Tri
         return BytesView[bytes_origin](bytes.unsafe_ptr().unsafe_bitcast[Int8](), c_size_t(len(bytes)))
 
     def arguments(self) -> BytesView[ImmUntrackedOrigin]:
-        """The same run with its borrow erased - the one instantiation the ABI signatures name.
+        """The same run with its view erased - the one instantiation the ABI signatures name.
 
         Returns:
             A view of the same bytes, whose type no longer keeps their storage alive.
@@ -738,23 +738,23 @@ struct BytesView[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable, Tri
 
 @fieldwise_init
 struct KeysView[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable, TrivialRegisterPassable):
-    """A borrowed, strided run of keys - `usearch_keys_view_t`, one per row of the call's count.
+    """A viewed, strided run of keys - `usearch_keys_view_t`, one per row of the call's count.
 
-    Carries no count: the verb's own count is the one batch axis. A zero stride repeats the first
+    Holds no count: the verb's own count is the one batch axis. A zero stride repeats the first
     key for every row.
 
     Parameters:
-        origin: The borrowed storage, named so it outlives every call this view crosses.
+        origin: The viewed storage, named so it outlives every call this view crosses.
     """
 
     var data: Pointer[Key, Self.origin]
-    """The first key, borrowed for the duration of the call."""
+    """The first key, read only during the call."""
     var stride: c_size_t
     """Bytes between consecutive keys; zero repeats the first."""
 
     @staticmethod
     def of[keys_origin: ImmOrigin, //](keys: Span[Key, keys_origin]) -> KeysView[keys_origin]:
-        """Borrows a contiguous run of keys as the view the engine reads.
+        """Views a contiguous run of keys as the view the engine reads.
 
         Parameters:
             keys_origin: The run's origin, inferred from the argument.
@@ -768,7 +768,7 @@ struct KeysView[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable, Triv
         return KeysView[keys_origin](keys.unsafe_ptr(), c_size_t(size_of[Key]()))
 
     def arguments(self) -> KeysView[ImmUntrackedOrigin]:
-        """The same run with its borrow erased - the one instantiation the ABI layouts name.
+        """The same run with its view erased - the one instantiation the ABI layouts name.
 
         Returns:
             A view of the same keys, whose type no longer keeps their storage alive.
@@ -791,7 +791,7 @@ struct KeyBytes(ImplicitlyCopyable, TrivialRegisterPassable):
         """Splits a key into the four words its sixteen bytes occupy.
 
         Args:
-            key: The identity to carry.
+            key: The identity to hold.
 
         Returns:
             The same bytes, in the same order.
@@ -822,7 +822,7 @@ struct RowsViewArguments(ImplicitlyCopyable, TrivialRegisterPassable):
 
 @fieldwise_init
 struct RowsView[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
-    """A borrowed run of rows of one width - `usearch_rows_view_t`, the batch currency every verb reads.
+    """A viewed run of rows of one width - `usearch_rows_view_t`, the batch currency every verb reads.
 
     One vector is a one-row view. The row count becomes the verb's `count`, and the column count
     crosses with the rows, so the engine checks it against the geometry the index froze. The row
@@ -830,13 +830,13 @@ struct RowsView[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
     row for every one of them, as BLAS reads it.
 
     Parameters:
-        origin: The borrowed rows, named so they outlive every call this view crosses.
+        origin: The viewed rows, named so they outlive every call this view crosses.
     """
 
     var data: Pointer[NoneType, Self.origin]
-    """Base pointer of the first row, borrowed for the duration of the call."""
+    """Base pointer of the first row, read only during the call."""
     var rows: c_size_t
-    """Rows the view carries, which the verb takes as its `count`."""
+    """Rows the view holds, which the verb takes as its `count`."""
     var columns: c_size_t
     """Logical scalars per row, as the caller counts them."""
     var stride: c_size_t
@@ -952,7 +952,7 @@ struct Matches[origin: MutOrigin](Movable, Sized):
     count is the number of matches written for its query, never more than `wanted`.
 
     Parameters:
-        origin: The arena the run lives in, which this result borrows.
+        origin: The arena the run lives in, which this result views.
     """
 
     var view: MatchesViewArguments
@@ -975,7 +975,7 @@ struct Matches[origin: MutOrigin](Movable, Sized):
             query: The query's offset in the batch, below `len(self)`.
 
         Returns:
-            The keys, borrowed from the arena this result reads.
+            The keys, viewed from the arena this result reads.
         """
         var start = self.view.keys + query * Int(self.view.columns) * size_of[Key]()
         return _in_arena[Key, origin_of(self)](start, self._found(query))
@@ -987,7 +987,7 @@ struct Matches[origin: MutOrigin](Movable, Sized):
             query: The query's offset in the batch, below `len(self)`.
 
         Returns:
-            The scores, borrowed from the arena this result reads.
+            The scores, viewed from the arena this result reads.
         """
         var start = self.view.scores + query * Int(self.view.columns) * size_of[Distance]()
         return _in_arena[Distance, origin_of(self)](start, self._found(query))
@@ -1058,7 +1058,7 @@ struct RamOptions[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
     huge pages, falling back to base pages where none are provisioned.
 
     Parameters:
-        origin: The borrowed node-id array, named so it outlives the constructor that reads it.
+        origin: The viewed node-id array, named so it outlives the constructor that reads it.
     """
 
     var memory_domains: Optional[Pointer[Int32, Self.origin]]
@@ -1083,7 +1083,7 @@ struct RamOptions[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
 
     @staticmethod
     def on[domains_origin: ImmOrigin, //](memory_domains: Span[Int32, domains_origin]) -> RamOptions[domains_origin]:
-        """Names the NUMA nodes explicitly, borrowing the caller's array for the call.
+        """Names the NUMA nodes explicitly, viewing the caller's array for the call.
 
         Parameters:
             domains_origin: The run's origin, inferred from the argument.
@@ -1099,7 +1099,7 @@ struct RamOptions[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
         )
 
     def arguments(self) -> RamOptions[ImmUntrackedOrigin]:
-        """The same options with the borrow erased - the one instantiation the ABI signature names.
+        """The same options with the view erased - the one instantiation the ABI signature names.
 
         Returns:
             Options naming the same array, whose type no longer keeps it alive.
@@ -1121,7 +1121,7 @@ struct VramOptions[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
     than paging to the host, and the answer is to name more devices.
 
     Parameters:
-        origin: The borrowed ordinal array, named so it outlives the constructor that reads it.
+        origin: The viewed ordinal array, named so it outlives the constructor that reads it.
     """
 
     var devices: Optional[Pointer[Int32, Self.origin]]
@@ -1143,7 +1143,7 @@ struct VramOptions[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
 
     @staticmethod
     def on[devices_origin: ImmOrigin, //](devices: Span[Int32, devices_origin]) -> VramOptions[devices_origin]:
-        """Names the device ordinals explicitly, borrowing the caller's array for the call.
+        """Names the device ordinals explicitly, viewing the caller's array for the call.
 
         Parameters:
             devices_origin: The run's origin, inferred from the argument.
@@ -1157,7 +1157,7 @@ struct VramOptions[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
         return VramOptions[devices_origin](devices.unsafe_ptr(), c_size_t(len(devices)), c_size_t(0), GPUClass.UNKNOWN)
 
     def arguments(self) -> VramOptions[ImmUntrackedOrigin]:
-        """The same options with the borrow erased - the one instantiation the ABI signature names.
+        """The same options with the view erased - the one instantiation the ABI signature names.
 
         Returns:
             Options naming the same array, whose type no longer keeps it alive.
@@ -1178,7 +1178,7 @@ struct NvmeOptions[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
     too. Naming nothing opens every shard where its manifest already points and moves no bytes.
 
     Parameters:
-        origin: The borrowed path array, named so it outlives the constructor that reads it.
+        origin: The viewed path array, named so it outlives the constructor that reads it.
     """
 
     var paths: Optional[Pointer[BytesView[ImmUntrackedOrigin], Self.origin]]
@@ -1199,7 +1199,7 @@ struct NvmeOptions[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
     def on[
         paths_origin: ImmOrigin, //
     ](paths: Span[BytesView[ImmUntrackedOrigin], paths_origin]) -> NvmeOptions[paths_origin]:
-        """Names the devices or directories explicitly, borrowing the caller's array for the call.
+        """Names the devices or directories explicitly, viewing the caller's array for the call.
 
         Parameters:
             paths_origin: The run's origin, inferred from the argument.
@@ -1213,7 +1213,7 @@ struct NvmeOptions[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
         return NvmeOptions[paths_origin](paths.unsafe_ptr(), c_size_t(len(paths)), CPUClass.UNKNOWN)
 
     def arguments(self) -> NvmeOptions[ImmUntrackedOrigin]:
-        """The same options with the borrow erased - the one instantiation the ABI signature names.
+        """The same options with the view erased - the one instantiation the ABI signature names.
 
         Returns:
             Options naming the same array, whose type no longer keeps it alive.
@@ -1347,7 +1347,7 @@ struct Executor:
         domains agree, leaving no second place to name hardware.
 
         Parameters:
-            ram_origin: The options' borrowed node-id array, inferred from the argument.
+            ram_origin: The options' viewed node-id array, inferred from the argument.
 
         Args:
             library: The loaded engine, kept so the shared object stays mapped.
@@ -1393,7 +1393,7 @@ struct Executor:
         so an external-memory walk never coordinates with a sibling to issue a read.
 
         Parameters:
-            nvme_origin: The options' borrowed path array, inferred from the argument.
+            nvme_origin: The options' viewed path array, inferred from the argument.
 
         Args:
             library: The loaded engine, kept so the shared object stays mapped.
@@ -1437,14 +1437,14 @@ struct Executor:
         streams: Address = NULL_ADDRESS,
         scratch_limit: Int = 0,
     ) raises Error -> Self:
-        """Opens one submission stream on every named device, all driven by the calling thread.
+        """Orders work on one stream on every named device, all driven by the calling thread.
         Calls `usearch_executor_for_vram`.
 
         One stream per device is the whole design: a single host thread keeps every device fed, and
         adding host threads would buy nothing, which is why this constructor takes no thread count.
 
         Parameters:
-            vram_origin: The options' borrowed ordinal array, inferred from the argument.
+            vram_origin: The options' viewed ordinal array, inferred from the argument.
 
         Args:
             library: The loaded engine, kept so the shared object stays mapped.
@@ -1545,7 +1545,7 @@ struct Arena:
     call at a time; a second concurrent use is refused by the engine as `CONTENDED`, which leaves
     the holder's results readable.
 
-    Every verb takes it as its last required argument, deferred ones too, and the result borrows it
+    Every verb takes it as its last required argument, deferred ones too, and the result views it
     in turn, so the arena outlives both; a failed call leaves it valid.
 
     A result reads the arena in place until its next call rewinds it, and `describe` says where that
@@ -1648,7 +1648,7 @@ struct Monolith[origin: MutOrigin](Movable):
     """The serialized index `save_buffer` lands in its arena, read in place.
 
     Parameters:
-        origin: The arena the bytes live in, which this result borrows.
+        origin: The arena the bytes live in, which this result views.
     """
 
     var data: Address
@@ -1657,7 +1657,7 @@ struct Monolith[origin: MutOrigin](Movable):
     """Bytes the monolith spans."""
 
     def bytes(ref self) -> Span[UInt8, origin_of(self)]:
-        """The monolith, borrowed from the arena this result reads.
+        """The monolith, viewed from the arena this result reads.
 
         Returns:
             The bytes, valid until the arena's next call.
@@ -1703,7 +1703,7 @@ struct CallHead(ImplicitlyCopyable):
 
 
 trait Call(Deinitable, Movable):
-    """One verb crossing into the engine: what it lends until final, and how its outputs become a result.
+    """One verb crossing into the engine: what it passes until final, and how its outputs become a result.
 
     Each receiver routes the same `Call` - the index and `index.on(executor)` block on it, and
     `index.deferred(executor)` wraps it in a `Deferred` - which is what keeps the verbs symmetric.
@@ -1716,7 +1716,7 @@ trait Call(Deinitable, Movable):
     comptime Result: Movable & Deinitable
     """What a successful call answers."""
     comptime symbol: StaticString
-    """The C entry point, carried into every error."""
+    """The C entry point, held into every error."""
 
     @staticmethod
     def verb(library: Library) -> Verb[Self.Arguments]:
@@ -1779,9 +1779,9 @@ struct Deferred[C: Call, origin: ImmOrigin](Movable):
 
     `status` reads `DEFERRED` until then, without blocking, and `wait` blocks until the call is
     final and answers its result or raises its failure, as many times as it is asked. The result is
-    the view a blocking call answers, borrowing the same arena. Dropping an unfinished one waits the
+    the view a blocking call answers, viewing the same arena. Dropping an unfinished one waits the
     same way, so nothing the engine still writes is ever freed under it. The origins keep the index,
-    the executor, the arena and every borrowed input alive for as long as this is.
+    the executor, the arena and every viewed input alive for as long as this is.
 
     A caller-exclusive pool runs a deferred call on its own thread 0, so polling alone finishes it,
     while an executor without threads of its own runs it at submission; a `wait` - or the last use
@@ -1789,7 +1789,7 @@ struct Deferred[C: Call, origin: ImmOrigin](Movable):
 
     Parameters:
         C: The verb's crossing, which names the result.
-        origin: The union of everything the call borrows.
+        origin: The union of everything the call views.
     """
 
     var library: Library
@@ -1797,7 +1797,7 @@ struct Deferred[C: Call, origin: ImmOrigin](Movable):
     var slots: OwnedPointer[CallSlots[Self.C.Outputs]]
     """The outcome and scalar outputs the engine writes, on the heap since they outlive the verb."""
     var call: Optional[Self.C]
-    """What the call lends the engine, until a wait concludes it."""
+    """What the call passes the engine, until a wait concludes it."""
     var answer: Optional[Self.C.Result]
     """The result, once a wait found the call succeeded."""
     var failure: Optional[Error]
@@ -1831,7 +1831,7 @@ struct Deferred[C: Call, origin: ImmOrigin](Movable):
         )
 
     def __deinit__(deinit self):
-        """Waits until the call is final, then frees what it lent. Calls `usearch_outcome_wait`."""
+        """Waits until the call is final, then frees what it passed. Calls `usearch_outcome_wait`."""
         if self.call:
             var slots = Pointer[CallSlots[Self.C.Outputs], MutAnyOrigin](
                 unsafe_from_address=Int(Pointer(to=self.slots[]))
@@ -1857,10 +1857,10 @@ struct Deferred[C: Call, origin: ImmOrigin](Movable):
         Calls `usearch_outcome_wait`.
 
         Returns:
-            The result, owned by this `Deferred` and borrowed for as long as it is.
+            The result, owned by this `Deferred` and viewed for as long as it is.
 
         Raises:
-            `Error` carrying the call's failure, whether the engine or the binding refused it.
+            `Error` holding the call's failure, whether the engine or the binding refused it.
         """
         if self.call:
             var slots = self._slots()

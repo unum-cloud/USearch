@@ -228,11 +228,11 @@ struct GeospatialTerrainArguments(ImplicitlyCopyable):
 @fieldwise_init
 struct GeospatialTerrain[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
     """The elevation every line of sight is tested over: a north-up grid of heights in metres above
-    the WGS-84 ellipsoid, borrowed whole or filled on demand, which the handle reads for as long as it
-    lives. A checkpoint never carries it, so every load and view names it again.
+    the WGS-84 ellipsoid, viewed whole or filled on demand, which the handle reads for as long as it
+    lives. A checkpoint never holds it, so every load and view names it again.
 
     Parameters:
-        origin: The borrowed heights or fill state, named so they outlive the handle built over them.
+        origin: The viewed heights or fill state, named so they outlive the handle built over them.
     """
 
     var arguments: GeospatialTerrainArguments
@@ -254,7 +254,7 @@ struct GeospatialTerrain[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopya
         column_step_degrees: Float64,
         heights: Span[Float32, heights_origin],
     ) -> GeospatialTerrain[heights_origin]:
-        """Borrows a whole grid, row-major and packed. Binding-only.
+        """Views a whole grid, row-major and packed. Binding-only.
 
         Parameters:
             heights_origin: The heights' origin, inferred from the argument.
@@ -334,7 +334,7 @@ struct GeospatialOptions[terrain_origin: ImmOrigin = ImmUntrackedOrigin](Implici
     `usearch_geospatial_init_vram_t` share, without the placement each names its own way.
 
     Parameters:
-        terrain_origin: The borrowed terrain, inferred where one is named.
+        terrain_origin: The viewed terrain, inferred where one is named.
     """
 
     var terrain: GeospatialTerrain[Self.terrain_origin]
@@ -424,7 +424,7 @@ struct GeospatialObservations[origin: MutOrigin](Movable, Sized):
     """The observations `get` wrote into its arena, read in place.
 
     Parameters:
-        origin: The arena the observations live in, which this result borrows.
+        origin: The arena the observations live in, which this result views.
     """
 
     var address: Address
@@ -444,7 +444,7 @@ struct GeospatialObservations[origin: MutOrigin](Movable, Sized):
         """Every observation, within the rounding the index stores them at.
 
         Returns:
-            The observations, borrowed from the arena this result reads.
+            The observations, viewed from the arena this result reads.
         """
         return _in_arena[GeospatialObservation, origin_of(self)](self.address, self.written)
 
@@ -455,7 +455,7 @@ struct GeospatialMatches[origin: MutOrigin](Movable):
     query `i` spans matches `offsets()[i]` up to `offsets()[i + 1]` of `keys()` and `distances()`.
 
     Parameters:
-        origin: The arena the matches live in, which this result borrows.
+        origin: The arena the matches live in, which this result views.
     """
 
     var view: MatchesTapeViewArguments
@@ -469,12 +469,12 @@ struct GeospatialMatches[origin: MutOrigin](Movable):
         """One more offset than queries, as Apache Arrow lays a ragged batch out.
 
         Returns:
-            The offsets into `keys()` and `distances()`, borrowed from the arena this result reads.
+            The offsets into `keys()` and `distances()`, viewed from the arena this result reads.
         """
         return _in_arena[c_size_t, origin_of(self)](self.view.offsets, self.queries + 1)
 
     def keys(ref self) -> Span[Key, origin_of(self)]:
-        """Each match's entry, borrowed from the arena this result reads.
+        """Each match's entry, viewed from the arena this result reads.
 
         Returns:
             One key per match.
@@ -496,7 +496,7 @@ struct GeospatialMatches[origin: MutOrigin](Movable):
             query: The query's offset in the batch, below `queries`.
 
         Returns:
-            The keys, borrowed from the arena this result reads.
+            The keys, viewed from the arena this result reads.
         """
         var begin = self._offset(query)
         return _in_arena[Key, origin_of(self)](self.view.keys + begin * size_of[Key](), self._offset(query + 1) - begin)
@@ -508,7 +508,7 @@ struct GeospatialMatches[origin: MutOrigin](Movable):
             query: The query's offset in the batch, below `queries`.
 
         Returns:
-            The distances, borrowed from the arena this result reads.
+            The distances, viewed from the arena this result reads.
         """
         var begin = self._offset(query)
         return _in_arena[Distance, origin_of(self)](
@@ -525,7 +525,7 @@ struct GeospatialMatches[origin: MutOrigin](Movable):
 struct GeospatialRefinePlan(Movable):
     """One refine in flight - `usearch_geospatial_refine_plan_t`. Binding-only.
 
-    Lent through `GeospatialRefineConfig.plan`, it opens on the first refine, stays live past a cancel
+    Passed through `GeospatialRefineConfig.plan`, it opens on the first refine, stays live past a cancel
     or the end of a round, continues on every later refine, and closes with `refine_plan_finish`.
     While it lives, the index admits no insertion and no save.
     """
@@ -542,7 +542,7 @@ struct GeospatialReshardPlan(Movable):
     """One reshard in flight - `usearch_geospatial_reshard_plan_t`, with its own lists of sources and
     targets. Binding-only.
 
-    Lent through `GeospatialReshardConfig.plan`, it opens on the first reshard, stays live past a
+    Passed through `GeospatialReshardConfig.plan`, it opens on the first reshard, stays live past a
     cancel, moves what is still pending and continues the rounds on every later one, and closes with
     `geospatial_reshard_plan_finish`. While it lives, every index it names admits no insertion and no
     save.
@@ -569,9 +569,9 @@ struct GeospatialRefineConfig[
     """The knobs of `usearch_geospatial_refine_t`; zeroed or absent ones derive what the C interface derives.
 
     Parameters:
-        stats_origin: The lent telemetry slot's origin, inferred where one is lent.
-        plan_origin: The lent plan's origin, inferred where one is lent.
-        phase_origin: The lent phase slot's origin, inferred where one is lent.
+        stats_origin: The passed telemetry slot's origin, inferred where one is passed.
+        plan_origin: The passed plan's origin, inferred where one is passed.
+        phase_origin: The passed phase slot's origin, inferred where one is passed.
     """
 
     var expansion_factor: Int
@@ -629,9 +629,9 @@ struct GeospatialReshardConfig[
     """The knobs of `usearch_geospatial_reshard_t`; zeroed or absent ones derive what the C interface derives.
 
     Parameters:
-        stats_origin: The lent telemetry slot's origin, inferred where one is lent.
-        plan_origin: The lent plan's origin, inferred where one is lent.
-        phase_origin: The lent phase slot's origin, inferred where one is lent.
+        stats_origin: The passed telemetry slot's origin, inferred where one is passed.
+        plan_origin: The passed plan's origin, inferred where one is passed.
+        phase_origin: The passed phase slot's origin, inferred where one is passed.
     """
 
     var expansion_factor: Int
@@ -694,7 +694,7 @@ struct GeospatialSearchConfig[stats_origin: MutOrigin = MutUntrackedOrigin](Impl
     wants a wider `expansion_factor`, and a query may hold fewer than `wanted` matches.
 
     Parameters:
-        stats_origin: The lent telemetry slot's origin, inferred where one is lent.
+        stats_origin: The passed telemetry slot's origin, inferred where one is passed.
     """
 
     var relation: GeospatialRelation
@@ -758,7 +758,7 @@ struct GeospatialWithinConfig[stats_origin: MutOrigin = MutUntrackedOrigin](Impl
     caller could make the report incomplete with.
 
     Parameters:
-        stats_origin: The lent telemetry slot's origin, inferred where one is lent.
+        stats_origin: The passed telemetry slot's origin, inferred where one is passed.
     """
 
     var relation: GeospatialRelation
@@ -1185,7 +1185,7 @@ struct GeospatialGetOutputs(Defaultable, ImplicitlyCopyable):
 
 @fieldwise_init
 struct _GeospatialGetCall[origin: MutOrigin](Call):
-    """The crossing of `usearch_geospatial_get`, which borrows the arena its observations land in."""
+    """The crossing of `usearch_geospatial_get`, which uses the arena its observations land in."""
 
     comptime Arguments = GeospatialGetArguments
     comptime Outputs = GeospatialGetOutputs
@@ -1420,7 +1420,7 @@ struct _GeospatialReshardPlanFinishCall(Call):
 
 @fieldwise_init
 struct _GeospatialSampleCall[origin: MutOrigin](Call):
-    """The crossing of `usearch_geospatial_sample`, which borrows the arena its draws are written in."""
+    """The crossing of `usearch_geospatial_sample`, which uses the arena its draws are written in."""
 
     comptime Arguments = DenseSampleArguments
     comptime Outputs = DenseSampleOutputs
@@ -1474,7 +1474,7 @@ struct _GeospatialSampleCall[origin: MutOrigin](Call):
 
 @fieldwise_init
 struct _GeospatialSearchCall[origin: MutOrigin](Call):
-    """The crossing of `usearch_geospatial_search`, which borrows the arena its matches land in."""
+    """The crossing of `usearch_geospatial_search`, which uses the arena its matches land in."""
 
     comptime Arguments = GeospatialSearchArguments
     comptime Outputs = MatchesViewArguments
@@ -1535,7 +1535,7 @@ struct GeospatialWithinOutputs(Defaultable, ImplicitlyCopyable):
 
 @fieldwise_init
 struct _GeospatialWithinCall[origin: MutOrigin](Call):
-    """The crossing of `usearch_geospatial_within`, which borrows the arena its report lands in."""
+    """The crossing of `usearch_geospatial_within`, which uses the arena its report lands in."""
 
     comptime Arguments = GeospatialWithinArguments
     comptime Outputs = GeospatialWithinOutputs
@@ -1601,7 +1601,7 @@ struct _GeospatialSaveCall(Call):
 
 @fieldwise_init
 struct _GeospatialSaveBufferCall[origin: MutOrigin](Call):
-    """The crossing of `usearch_geospatial_save_buffer`, which borrows the arena the monolith lands in."""
+    """The crossing of `usearch_geospatial_save_buffer`, which uses the arena the monolith lands in."""
 
     comptime Arguments = DenseSaveBufferArguments
     comptime Outputs = DenseSaveBufferOutputs
@@ -1622,7 +1622,7 @@ struct _GeospatialSaveBufferCall[origin: MutOrigin](Call):
 
 @fieldwise_init
 struct _GeospatialCursorNextCall[origin: MutOrigin](Call):
-    """The crossing of `usearch_geospatial_cursor_next`, which borrows the arena its batch lands in."""
+    """The crossing of `usearch_geospatial_cursor_next`, which uses the arena its batch lands in."""
 
     comptime Arguments = DenseCursorNextArguments
     comptime Outputs = DenseCursorNextOutputs
@@ -1696,8 +1696,8 @@ struct GeospatialIndex(GeospatialVerbs, Movable):
         """Initializes an empty, mutable index in host memory. Calls `usearch_geospatial_init_ram`.
 
         Parameters:
-            terrain_origin: The options' borrowed terrain, inferred from the argument.
-            ram_origin: The placement's borrowed domain array, inferred from the argument.
+            terrain_origin: The options' viewed terrain, inferred from the argument.
+            ram_origin: The placement's viewed domain array, inferred from the argument.
 
         Args:
             library: The loaded engine, kept so the shared object stays mapped.
@@ -1708,7 +1708,7 @@ struct GeospatialIndex(GeospatialVerbs, Movable):
             The new index.
 
         Raises:
-            `Error` with `INVALID_ARGUMENT` for a terrain both borrowed and filled, or
+            `Error` with `INVALID_ARGUMENT` for a terrain both viewed and filled, or
             `CONFIG_MISMATCH` for one whose steps are not positive.
         """
         var created = stack_allocation[1, Address]()
@@ -1740,8 +1740,8 @@ struct GeospatialIndex(GeospatialVerbs, Movable):
         """Initializes an empty, mutable index in device memory. Calls `usearch_geospatial_init_vram`.
 
         Parameters:
-            terrain_origin: The options' borrowed terrain, inferred from the argument.
-            vram_origin: The placement's borrowed ordinal array, inferred from the argument.
+            terrain_origin: The options' viewed terrain, inferred from the argument.
+            vram_origin: The placement's viewed ordinal array, inferred from the argument.
 
         Args:
             library: The loaded engine, kept so the shared object stays mapped.
@@ -1787,15 +1787,15 @@ struct GeospatialIndex(GeospatialVerbs, Movable):
 
         Parameters:
             path_origin: The path bytes' origin, inferred from the argument.
-            ram_origin: The placement's borrowed domain array, inferred from the argument.
-            terrain_origin: The borrowed terrain, inferred from the argument.
+            ram_origin: The placement's viewed domain array, inferred from the argument.
+            terrain_origin: The viewed terrain, inferred from the argument.
 
         Args:
-            executor: The executor the read fans out over; it also lends its engine.
+            executor: The executor the read fans out over; it also supplies its queues.
             path: The manifest of a sharded checkpoint, or a single `.safegraphs` monolith.
             ram: The memory domains to place the parts on.
             values_per_key: Upper bound on observations sharing one key, which no checkpoint records.
-            terrain: The elevation sight lines clear, which no checkpoint carries.
+            terrain: The elevation sight lines clear, which no checkpoint holds.
 
         Returns:
             The new index; a failed load creates none.
@@ -1828,15 +1828,15 @@ struct GeospatialIndex(GeospatialVerbs, Movable):
 
         Parameters:
             buffer_origin: The source bytes' origin, inferred from the argument.
-            ram_origin: The placement's borrowed domain array, inferred from the argument.
-            terrain_origin: The borrowed terrain, inferred from the argument.
+            ram_origin: The placement's viewed domain array, inferred from the argument.
+            terrain_origin: The viewed terrain, inferred from the argument.
 
         Args:
-            executor: The executor the copy fans out over; it also lends its engine.
+            executor: The executor the copy fans out over; it also supplies its queues.
             buffer: Source holding one serialized monolith.
             ram: The memory domains to place shards on; the monolith lands whole on the first.
             values_per_key: Upper bound on observations sharing one key, which no checkpoint records.
-            terrain: The elevation sight lines clear, which no checkpoint carries.
+            terrain: The elevation sight lines clear, which no checkpoint holds.
 
         Returns:
             The new index; a failed load creates none.
@@ -1900,15 +1900,15 @@ struct GeospatialIndex(GeospatialVerbs, Movable):
 
         Parameters:
             path_origin: The path bytes' origin, inferred from the argument.
-            vram_origin: The placement's borrowed ordinal array, inferred from the argument.
-            terrain_origin: The borrowed terrain, inferred from the argument.
+            vram_origin: The placement's viewed ordinal array, inferred from the argument.
+            terrain_origin: The viewed terrain, inferred from the argument.
 
         Args:
-            executor: The executor the upload runs on; it also lends its engine.
+            executor: The executor the upload runs on; it also supplies its queues.
             path: The manifest of a sharded checkpoint, or a single `.safegraphs` monolith.
             vram: The device to place the index on.
             values_per_key: Upper bound on observations sharing one key, which no checkpoint records.
-            terrain: The elevation sight lines clear, which no checkpoint carries.
+            terrain: The elevation sight lines clear, which no checkpoint holds.
 
         Returns:
             The new index; a failed load creates none.
@@ -1941,15 +1941,15 @@ struct GeospatialIndex(GeospatialVerbs, Movable):
 
         Parameters:
             buffer_origin: The source bytes' origin, inferred from the argument.
-            vram_origin: The placement's borrowed ordinal array, inferred from the argument.
-            terrain_origin: The borrowed terrain, inferred from the argument.
+            vram_origin: The placement's viewed ordinal array, inferred from the argument.
+            terrain_origin: The viewed terrain, inferred from the argument.
 
         Args:
-            executor: The executor the upload runs on; it also lends its engine.
+            executor: The executor the upload runs on; it also supplies its queues.
             buffer: Source holding one serialized monolith.
             vram: The device to place the index on.
             values_per_key: Upper bound on observations sharing one key, which no checkpoint records.
-            terrain: The elevation sight lines clear, which no checkpoint carries.
+            terrain: The elevation sight lines clear, which no checkpoint holds.
 
         Returns:
             The new index; a failed load creates none.
@@ -2012,12 +2012,12 @@ struct GeospatialIndex(GeospatialVerbs, Movable):
 
         Parameters:
             path_origin: The path bytes' origin, inferred from the argument.
-            terrain_origin: The borrowed terrain, inferred from the argument.
+            terrain_origin: The viewed terrain, inferred from the argument.
 
         Args:
             library: The loaded engine, kept so the shared object stays mapped.
             path: The manifest of a sharded checkpoint, or a single `.safegraphs` monolith.
-            terrain: The elevation sight lines clear, which no checkpoint carries.
+            terrain: The elevation sight lines clear, which no checkpoint holds.
 
         Returns:
             The read-only index.
@@ -2056,14 +2056,14 @@ struct GeospatialIndex(GeospatialVerbs, Movable):
 
         Parameters:
             path_origin: The path bytes' origin, inferred from the argument.
-            nvme_origin: The options' borrowed path array, inferred from the argument.
-            terrain_origin: The borrowed terrain, inferred from the argument.
+            nvme_origin: The options' viewed path array, inferred from the argument.
+            terrain_origin: The viewed terrain, inferred from the argument.
 
         Args:
-            executor: The NVMe executor whose rings read the checkpoint; it also lends its engine.
+            executor: The NVMe executor whose rings read the checkpoint; it also supplies its queues.
             path: The manifest of a sharded checkpoint, or a single `.safegraphs` monolith.
             nvme: The devices the parts are served from; naming none serves each where it points.
-            terrain: The elevation sight lines clear, which no checkpoint carries.
+            terrain: The elevation sight lines clear, which no checkpoint holds.
 
         Returns:
             The read-only index.
@@ -2112,7 +2112,7 @@ struct GeospatialIndex(GeospatialVerbs, Movable):
             executor: The executor every verb runs on; its kind must match the handle's residency.
 
         Returns:
-            A receiver borrowing both, which neither may outlive.
+            A receiver viewing both, which neither may outlive.
         """
         return GeospatialIndexOn[ImmOrigin(origin_of(self, executor))](
             Pointer[GeospatialIndex, ImmOrigin(origin_of(self, executor))](unsafe_from_address=Int(Pointer(to=self))),
@@ -2126,7 +2126,7 @@ struct GeospatialIndex(GeospatialVerbs, Movable):
             executor: The executor every verb is submitted to; its kind must match the handle's residency.
 
         Returns:
-            A receiver borrowing both, which neither it nor any `Deferred` it answers may outlive.
+            A receiver viewing both, which neither it nor any `Deferred` it answers may outlive.
         """
         return GeospatialIndexDeferredOn[ImmOrigin(origin_of(self, executor))](
             Pointer[GeospatialIndex, ImmOrigin(origin_of(self, executor))](unsafe_from_address=Int(Pointer(to=self))),
@@ -2142,7 +2142,7 @@ struct GeospatialIndex(GeospatialVerbs, Movable):
         Calls `usearch_geospatial_cursor_init`.
 
         Returns:
-            The cursor, which borrows the index and cannot outlive it.
+            The cursor, which uses the index and cannot outlive it.
 
         Raises:
             `Error` if the residency has no cursor, as VRAM does not.
@@ -2161,7 +2161,7 @@ struct GeospatialIndex(GeospatialVerbs, Movable):
             starts: The keys to walk from, the walk yielding their entries first.
 
         Returns:
-            The cursor, which borrows the index and cannot outlive it.
+            The cursor, which uses the index and cannot outlive it.
 
         Raises:
             `Error` if the residency has no cursor, as VRAM does not.
@@ -2228,7 +2228,7 @@ trait GeospatialVerbs:
         Parameters:
             keys_origin: The key run's origin, inferred from the argument.
             observations_origin: The observations' origin, inferred with it.
-            stats_origin: The lent telemetry slot's origin, inferred with it.
+            stats_origin: The passed telemetry slot's origin, inferred with it.
 
         Args:
             keys: One key per observation; keys need not be unique, so frames of one clip share it.
@@ -2251,9 +2251,9 @@ trait GeospatialVerbs:
         continues `config.plan`. Calls `usearch_geospatial_refine`.
 
         Parameters:
-            stats_origin: The lent telemetry slot's origin, inferred from the argument.
-            plan_origin: The lent plan's origin, inferred with it.
-            phase_origin: The lent phase slot's origin, inferred with it.
+            stats_origin: The passed telemetry slot's origin, inferred from the argument.
+            plan_origin: The passed plan's origin, inferred with it.
+            phase_origin: The passed phase slot's origin, inferred with it.
 
         Args:
             config: The round's spending, the handler, the telemetry slot, and the plan and phase slots.
@@ -2311,7 +2311,7 @@ trait GeospatialVerbs:
 
         Args:
             wanted: The upper bound on draws.
-            arena: The arena to rewind and refill, which the result borrows; a failed call leaves it valid.
+            arena: The arena to rewind and refill, which the result views; a failed call leaves it valid.
             config: The shown keys and their coordinates, the focus and the seed.
 
         Returns:
@@ -2332,16 +2332,16 @@ trait GeospatialVerbs:
         config: GeospatialSearchConfig[stats_origin] = GeospatialSearchConfig(),
     ) raises Error -> Matches[origin_of(arena)]:
         """Finds the `wanted` nearest entries of every query observation that the relation admits,
-        writing the matches in a lent arena. Calls `usearch_geospatial_search`.
+        writing the matches in a passed arena. Calls `usearch_geospatial_search`.
 
         Parameters:
             queries_origin: The query observations' origin, inferred from the argument.
-            stats_origin: The lent telemetry slot's origin, inferred with it.
+            stats_origin: The passed telemetry slot's origin, inferred with it.
 
         Args:
             queries: The query observations.
             wanted: Matches per query - the "k"; zero lands only the counts.
-            arena: The arena to rewind and refill, which the result borrows; a failed call leaves it valid.
+            arena: The arena to rewind and refill, which the result views; a failed call leaves it valid.
             config: The relation, the radius and time slack, the breadth, the predicate and the telemetry slot.
 
         Returns:
@@ -2363,16 +2363,16 @@ trait GeospatialVerbs:
         config: GeospatialWithinConfig[stats_origin] = GeospatialWithinConfig(),
     ) raises Error -> GeospatialMatches[origin_of(arena)]:
         """Reports every entry within `metres` of each query observation that the relation admits,
-        however many, writing them in a lent arena. Calls `usearch_geospatial_within`.
+        however many, writing them in a passed arena. Calls `usearch_geospatial_within`.
 
         Parameters:
             queries_origin: The query observations' origin, inferred from the argument.
-            stats_origin: The lent telemetry slot's origin, inferred with it.
+            stats_origin: The passed telemetry slot's origin, inferred with it.
 
         Args:
             queries: The query observations.
             metres: The radius, positive.
-            arena: The arena to rewind and refill, which the result borrows; a failed call leaves it valid.
+            arena: The arena to rewind and refill, which the result views; a failed call leaves it valid.
             config: The relation, the time slack, the traversal, the predicate and the telemetry slot.
 
         Returns:
@@ -2399,12 +2399,12 @@ trait GeospatialVerbs:
         return self._route(_GeospatialCountCall(key))
 
     def get(self, key: Key, mut arena: Arena) raises Error -> GeospatialObservations[origin_of(arena)]:
-        """Exports every observation stored under one key into a lent arena, in insertion order and
+        """Exports every observation stored under one key into a passed arena, in insertion order and
         within the rounding the index stores them at. Calls `usearch_geospatial_get`.
 
         Args:
             key: The key whose entries are exported.
-            arena: The arena to rewind and refill, which the result borrows; a failed call leaves it valid.
+            arena: The arena to rewind and refill, which the result views; a failed call leaves it valid.
 
         Returns:
             The observations, read in place from the arena; none when the key is absent.
@@ -2429,10 +2429,10 @@ trait GeospatialVerbs:
         _ = self._route(_GeospatialSaveCall(BytesView.of(path).arguments()))
 
     def save_buffer(self, mut arena: Arena) raises Error -> Monolith[origin_of(arena)]:
-        """Serializes the index as one monolith into a lent arena. Calls `usearch_geospatial_save_buffer`.
+        """Serializes the index as one monolith into a passed arena. Calls `usearch_geospatial_save_buffer`.
 
         Args:
-            arena: The arena to rewind and refill, which the result borrows; a failed call leaves it valid.
+            arena: The arena to rewind and refill, which the result views; a failed call leaves it valid.
 
         Returns:
             The monolith, read in place from the arena.
@@ -2447,7 +2447,7 @@ struct GeospatialIndexOn[origin: ImmOrigin](GeospatialVerbs, ImplicitlyCopyable)
     """An index bound to the executor its verbs block on, as `index.on(executor)` answers it. Binding-only.
 
     Parameters:
-        origin: The index and the executor, which this receiver borrows.
+        origin: The index and the executor, which this receiver views.
     """
 
     var index: Pointer[GeospatialIndex, Self.origin]
@@ -2474,7 +2474,7 @@ struct GeospatialIndexOn[origin: ImmOrigin](GeospatialVerbs, ImplicitlyCopyable)
         Calls `usearch_geospatial_cursor_init`.
 
         Returns:
-            The cursor, which borrows the index and the executor and cannot outlive them.
+            The cursor, which uses the index and the executor and cannot outlive them.
 
         Raises:
             `Error` if the residency has no cursor, as VRAM does not.
@@ -2493,7 +2493,7 @@ struct GeospatialIndexOn[origin: ImmOrigin](GeospatialVerbs, ImplicitlyCopyable)
             starts: The keys to walk from, the walk yielding their entries first.
 
         Returns:
-            The cursor, which borrows the index and the executor and cannot outlive them.
+            The cursor, which uses the index and the executor and cannot outlive them.
 
         Raises:
             `Error` if the residency has no cursor, as VRAM does not.
@@ -2510,7 +2510,7 @@ struct GeospatialIndexOn[origin: ImmOrigin](GeospatialVerbs, ImplicitlyCopyable)
 def _refine_call[
     stats_origin: MutOrigin, plan_origin: MutOrigin, phase_origin: MutOrigin
 ](config: GeospatialRefineConfig[stats_origin, plan_origin, phase_origin]) -> _GeospatialRefineCall:
-    """Lowers a refinement's lent slots into its crossing."""
+    """Lowers a refinement's passed slots into its crossing."""
     return _GeospatialRefineCall(
         RefineOptionsArguments(c_size_t(config.expansion_factor), c_size_t(config.memory_limit)),
         config.progress,
@@ -2527,7 +2527,7 @@ def _insert_call[
     observations: Span[GeospatialObservation, observations_origin],
     config: DenseInsertConfig[stats_origin],
 ) -> _GeospatialInsertCall:
-    """Lowers an insertion's borrowed inputs into its crossing."""
+    """Lowers an insertion's viewed inputs into its crossing."""
     return _GeospatialInsertCall(
         KeysView.of(keys).arguments(),
         len(keys),
@@ -2546,7 +2546,7 @@ def _sample_call[
     arena: Address,
     config: DenseSampleConfig[shown_origin, coordinates_origin, focus_origin],
 ) -> _GeospatialSampleCall[origin]:
-    """Lowers a sample's borrowed inputs into its crossing."""
+    """Lowers a sample's viewed inputs into its crossing."""
     return _GeospatialSampleCall[origin](
         KeysView.of(config.shown).arguments(),
         len(config.shown),
@@ -2571,7 +2571,7 @@ def _search_call[
     arena: Address,
     config: GeospatialSearchConfig[stats_origin],
 ) -> _GeospatialSearchCall[origin]:
-    """Lowers a search's borrowed inputs into its crossing."""
+    """Lowers a search's viewed inputs into its crossing."""
     return _GeospatialSearchCall[origin](
         Int(queries.unsafe_ptr()),
         len(queries),
@@ -2595,7 +2595,7 @@ def _within_call[
     arena: Address,
     config: GeospatialWithinConfig[stats_origin],
 ) -> _GeospatialWithinCall[origin]:
-    """Lowers a containment query's borrowed inputs into its crossing."""
+    """Lowers a containment query's viewed inputs into its crossing."""
     return _GeospatialWithinCall[origin](
         Int(queries.unsafe_ptr()),
         len(queries),
@@ -2614,7 +2614,7 @@ struct GeospatialIndexDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
     it: every verb answers a `Deferred` at once. Binding-only.
 
     Parameters:
-        origin: The index and the executor, which this receiver borrows.
+        origin: The index and the executor, which this receiver views.
     """
 
     var index: Pointer[GeospatialIndex, Self.origin]
@@ -2664,7 +2664,7 @@ struct GeospatialIndexDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
             )
         ),
     ]:
-        """Submits `GeospatialVerbs.insert`; the keys, observations and telemetry slot stay borrowed until
+        """Submits `GeospatialVerbs.insert`; the keys, observations and telemetry slot must stay allocated and unchanged until
         final. Calls `usearch_geospatial_insert`."""
         return {self.index[].library, _insert_call(keys, observations, config), self.index[].address, self.executor}
 
@@ -2678,7 +2678,7 @@ struct GeospatialIndexDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
             origin_of(_anchor[Self.origin](), _anchor[stats_origin](), _anchor[plan_origin](), _anchor[phase_origin]())
         ),
     ]:
-        """Submits `GeospatialVerbs.refine`; the telemetry, plan and phase slots stay borrowed until final.
+        """Submits `GeospatialVerbs.refine`; the telemetry, plan and phase slots must stay allocated and unchanged until final.
         Calls `usearch_geospatial_refine`."""
         return {self.index[].library, _refine_call(config), self.index[].address, self.executor}
 
@@ -2715,7 +2715,7 @@ struct GeospatialIndexDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
             )
         ),
     ]:
-        """Submits `GeospatialVerbs.sample`; the shown keys, focus and arena stay borrowed until final.
+        """Submits `GeospatialVerbs.sample`; the shown keys, focus and arena must stay allocated and unchanged until final.
         Calls `usearch_geospatial_sample`."""
         return {
             self.index[].library,
@@ -2736,7 +2736,7 @@ struct GeospatialIndexDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
         _GeospatialSearchCall[origin_of(arena)],
         ImmOrigin(origin_of(_anchor[Self.origin](), _anchor[queries_origin](), _anchor[stats_origin]())),
     ]:
-        """Submits `GeospatialVerbs.search`; the queries, telemetry slot and arena stay borrowed until final.
+        """Submits `GeospatialVerbs.search`; the queries, telemetry slot and arena must stay allocated and unchanged until final.
         Calls `usearch_geospatial_search`."""
         return {
             self.index[].library,
@@ -2757,7 +2757,7 @@ struct GeospatialIndexDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
         _GeospatialWithinCall[origin_of(arena)],
         ImmOrigin(origin_of(_anchor[Self.origin](), _anchor[queries_origin](), _anchor[stats_origin]())),
     ]:
-        """Submits `GeospatialVerbs.within`; the queries, telemetry slot and arena stay borrowed until final.
+        """Submits `GeospatialVerbs.within`; the queries, telemetry slot and arena must stay allocated and unchanged until final.
         Calls `usearch_geospatial_within`."""
         return {
             self.index[].library,
@@ -2771,7 +2771,7 @@ struct GeospatialIndexDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
         return {self.index[].library, _GeospatialCountCall(key), self.index[].address, self.executor}
 
     def get(self, key: Key, mut arena: Arena) -> Deferred[_GeospatialGetCall[origin_of(arena)], Self.origin]:
-        """Submits `GeospatialVerbs.get`; the arena stays borrowed until final. Calls `usearch_geospatial_get`."""
+        """Submits `GeospatialVerbs.get`; the arena must stay allocated and unchanged until final. Calls `usearch_geospatial_get`."""
         return {
             self.index[].library,
             _GeospatialGetCall[origin_of(arena)](key, arena._address),
@@ -2784,7 +2784,7 @@ struct GeospatialIndexDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
     ](self, path: StringSlice[path_origin]) -> Deferred[
         _GeospatialSaveCall, ImmOrigin(origin_of(_anchor[Self.origin](), _anchor[path_origin]()))
     ]:
-        """Submits `GeospatialVerbs.save`; the path stays borrowed until final. Calls `usearch_geospatial_save`."""
+        """Submits `GeospatialVerbs.save`; the path must stay allocated and unchanged until final. Calls `usearch_geospatial_save`."""
         return {
             self.index[].library,
             _GeospatialSaveCall(BytesView.of(path).arguments()),
@@ -2793,7 +2793,7 @@ struct GeospatialIndexDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
         }
 
     def save_buffer(self, mut arena: Arena) -> Deferred[_GeospatialSaveBufferCall[origin_of(arena)], Self.origin]:
-        """Submits `GeospatialVerbs.save_buffer`; the arena stays borrowed until final.
+        """Submits `GeospatialVerbs.save_buffer`; the arena must stay allocated and unchanged until final.
         Calls `usearch_geospatial_save_buffer`."""
         return {
             self.index[].library,
@@ -2806,11 +2806,11 @@ struct GeospatialIndexDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
 struct GeospatialCursor[origin: ImmOrigin]:
     """A walk over the index contents - `usearch_geospatial_cursor_t`.
 
-    Export, migration, and visualization feed off it. It borrows the index and the executor its
+    Export, migration, and visualization feed off it. It uses the index and the executor its
     pulls run on, so neither can be released while it lives.
 
     Parameters:
-        origin: The index and the executor, which the cursor borrows.
+        origin: The index and the executor, which the cursor views.
     """
 
     var library: Library
@@ -2869,12 +2869,12 @@ struct GeospatialCursor[origin: ImmOrigin]:
         _ = self.library^
 
     def next_keys(self, wanted: Int, mut arena: Arena) raises Error -> DenseBatch[origin_of(arena)]:
-        """Copies up to `wanted` next keys into a lent arena, skipping their links.
+        """Copies up to `wanted` next keys into a passed arena, skipping their links.
         Calls `usearch_geospatial_cursor_next`.
 
         Args:
             wanted: The upper bound on keys this pull writes.
-            arena: The arena to rewind and refill, which the batch borrows; a failed call leaves it valid.
+            arena: The arena to rewind and refill, which the batch views; a failed call leaves it valid.
 
         Returns:
             The keys, read in place from the arena; an empty batch once the walk is exhausted.
@@ -2885,12 +2885,12 @@ struct GeospatialCursor[origin: ImmOrigin]:
         return self._next(_GeospatialCursorNextCall[origin_of(arena)](self.address, False, wanted, arena._address))
 
     def next_links(self, wanted: Int, mut arena: Arena) raises Error -> DenseBatch[origin_of(arena)]:
-        """Copies up to `wanted` next keys into a lent arena, each with the keys it links to.
+        """Copies up to `wanted` next keys into a passed arena, each with the keys it links to.
         Calls `usearch_geospatial_cursor_next`.
 
         Args:
             wanted: The upper bound on entries this pull writes.
-            arena: The arena to rewind and refill, which the batch borrows; a failed call leaves it valid.
+            arena: The arena to rewind and refill, which the batch views; a failed call leaves it valid.
 
         Returns:
             The keys and their links, read in place from the arena; an empty batch once the walk is exhausted.
@@ -2933,12 +2933,12 @@ def geospatial_reshard[
     Parameters:
         sources_origin: The sources' origin, inferred from the argument.
         targets_origin: The targets' origin, inferred from the argument.
-        stats_origin: The lent telemetry slot's origin, inferred from the config.
-        plan_origin: The lent plan's origin, inferred with it.
-        phase_origin: The lent phase slot's origin, inferred with it.
+        stats_origin: The passed telemetry slot's origin, inferred from the config.
+        plan_origin: The passed plan's origin, inferred with it.
+        phase_origin: The passed phase slot's origin, inferred with it.
 
     Args:
-        executor: The executor every move and the closing rounds fan out over; it also lends its engine.
+        executor: The executor every move and the closing rounds fan out over; it also supplies its queues.
         sources: The indexes whose entries move, each named once.
         targets: The indexes the entries move into, each named once, a source itself or empty.
         config: The rounds' spending, the seed of a cut, the handler, and the telemetry, plan and
@@ -2992,7 +2992,7 @@ def geospatial_reshard_plan_finish(
     Calls `usearch_geospatial_reshard_plan_finish`.
 
     Args:
-        executor: The executor the plan was opened with; it also lends its engine.
+        executor: The executor the plan was opened with; it also supplies its queues.
         plan: The plan a reshard opened, consumed by the call.
 
     Returns:
@@ -3048,7 +3048,7 @@ def geospatial_metadata_read[
         path_origin: The path bytes' origin, inferred from the argument.
 
     Args:
-        executor: The executor the read runs on; it also lends its engine.
+        executor: The executor the read runs on; it also supplies its queues.
         path: The manifest of a sharded checkpoint, or a single monolith.
 
     Returns:
@@ -3075,7 +3075,7 @@ def geospatial_metadata_read_buffer[
         buffer_origin: The source bytes' origin, inferred from the argument.
 
     Args:
-        executor: The executor the read runs on; it also lends its engine.
+        executor: The executor the read runs on; it also supplies its queues.
         buffer: Source holding one serialized monolith.
 
     Returns:

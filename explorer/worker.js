@@ -9,8 +9,9 @@
  *  Behind the factory may be the engine, the `src_stub` stand-in, or a forwarder to a server, so a call may block on a
  *  synchronous fetch. A NULL executor runs every call on this thread, and one arena serves them all in turn.
  *
- *  Nothing here is written per modality. A modality's entries travel as whatever its `insert` takes after `keys` -
- *  rows, a tape, or an array of records - and every other verb carries them in the member of that same type.
+ *  Nothing here is written per modality. A modality's entries travel as whatever its `insert` takes
+ *  after `keys` - rows, a tape, or an array of records - and every other verb holds them in the
+ *  member of that same type.
  */
 
 /** @typedef {'unsigned' | 'signed' | 'float' | 'structure'} Kind */
@@ -69,13 +70,14 @@ const enumerators = new Map();
 let library;
 let modality = "";
 let tapeColumns = 1;
-/** The member `insert` carries entries in, whose type every other verb's entries share. @type {Member} */
+/** The member `insert` holds entries in, whose type every other verb's entries share. @type
+ *  {Member} */
 let entries;
 let arena = 0;
 let outcome = 0;
 let index = 0;
-/** Heap copies the current request borrows, freed once it is answered. @type {number[]} */
-let borrowed = [];
+/** Heap copies the current request views, freed once it is answered. @type {number[]} */
+let viewed = [];
 
 /**
  *  Reads every typedef of C `source` in order - enumerations, handles, function pointers, aliases, and structures laid
@@ -258,11 +260,11 @@ function room(type) {
   return address;
 }
 
-/** A heap copy of `bytes` the current request borrows. @param {Uint8Array} bytes */
+/** A heap copy of `bytes` the current request views. @param {Uint8Array} bytes */
 function place(bytes) {
   const address = library._malloc(Math.max(1, bytes.byteLength));
   library.HEAPU8.set(bytes, address);
-  borrowed.push(address);
+  viewed.push(address);
   return address;
 }
 
@@ -317,18 +319,20 @@ function readOutput(name, member, address) {
   return type.kind === "structure" ? read(address, type) : load(address, type);
 }
 
-/** The member of `name`'s arguments that carries entries - typed as `insert`'s - `depth` pointers deeper. @param {string} name @param {number} depth */
+/** The member of `name`'s arguments that holds entries - typed as `insert`'s - `depth` pointers
+ *  deeper. @param {string} name @param {number} depth */
 function entriesMember(name, depth) {
   for (const member of typeNamed(`${name}_t`).members?.values() ?? [])
     if (member.type === entries.type && member.pointers === entries.pointers + depth) return member.name;
-  throw new Error(`${name} carries no ${entries.type}`);
+  throw new Error(`${name} holds no ${entries.type}`);
 }
 
 /**
- *  Copies `payloads` into the heap, joined end to end, and answers the member value that borrows them with their count.
+ *  Copies `payloads` into the heap, joined end to end, and answers the member value that views them
+ *  with their count.
  *  @param {Payload[]} payloads
  */
-function borrow(payloads) {
+function view(payloads) {
   const count = payloads.reduce((sum, payload) => sum + payload.count, 0);
   const [first] = payloads;
   if ("records" in first) {
@@ -410,7 +414,7 @@ const handlers = {
 
   insert({ keys, payload }) {
     const name = named("insert");
-    const entries = borrow([payload]);
+    const entries = view([payload]);
     const out = outputs(name, "stats");
     call(name, {
       index,
@@ -498,7 +502,7 @@ const handlers = {
 
   search({ queries, options }) {
     const name = named("search");
-    const entries = borrow([queries]);
+    const entries = view([queries]);
     const out = outputs(name, "matches", "stats");
     call(name, {
       ...options,
@@ -612,8 +616,8 @@ self.onmessage = (/** @type {MessageEvent} */ event) => {
           response = { ...(await handler(request)), ...reported() };
         } finally {
           library.stackRestore(saved);
-          for (const address of borrowed) library._free(address);
-          borrowed = [];
+          for (const address of viewed) library._free(address);
+          viewed = [];
         }
       }
     } catch (error) {

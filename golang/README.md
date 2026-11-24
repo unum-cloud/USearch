@@ -18,7 +18,7 @@ cmake --preset library -B build_release && cmake --build build_release
 export CGO_CFLAGS="-I$PWD/c" CGO_LDFLAGS="-L$PWD/build_release"
 ```
 
-Every release also carries prebuilt libraries and headers, where `<release_tag>`, `<arch>` and `<usearch_version>` name the release and the machine:
+Every release also holds prebuilt libraries and headers, where `<release_tag>`, `<arch>` and `<usearch_version>` name the release and the machine:
 
 - __Linux__: `dpkg -i usearch_linux_<arch>_<usearch_version>.deb` installs into `/usr/local`.
 - __macOS__: unpack `usearch_macos_<arch>_<usearch_version>.zip`, then move the library into `/usr/local/lib` and the `usearch` directory into `/usr/local/include`.
@@ -127,7 +127,7 @@ call := index.Deferred(executor).Search(queries, 10, arena, nil)
 if call.Status() == usearch.StatusDeferred {
 	// other work
 }
-matches, err := call.Wait() // a view borrowing arena, as a blocking call's does
+matches, err := call.Wait() // a view into arena, as a blocking call's is
 ```
 
 Go needs nothing more: a goroutine that wants to overlap the wait simply calls `Wait` there, and a `select` waits on a channel that goroutine closes.
@@ -249,8 +249,8 @@ Keys satisfy `encoding.TextMarshaler` and `encoding.TextUnmarshaler`, so they ro
 
 ## Errors
 
-Every failure carries a status shared with the C interface, so a fault this binding catches before the boundary reports the identity the engine would have reported for the same fault.
-A `Status` is itself an `error`, so `errors.Is` matches any failure carrying it, and an `*usearch.Error` adds its message:
+Every failure holds a status shared with the C interface, so a fault this binding catches before the boundary reports the identity the engine would have reported for the same fault.
+A `Status` is itself an `error`, so `errors.Is` matches any failure holding it, and an `*usearch.Error` adds its message:
 
 ```go
 if err := index.Insert(keys, vectors, nil); err != nil {
@@ -265,7 +265,7 @@ if err := index.Insert(keys, vectors, nil); err != nil {
 }
 ```
 
-`Status`, like `Mood`, `Residency`, `Traversal`, `DenseMetric` and `Scalar`, carries the C enumerators' values, and its `String` spells the name the C tables own.
+`Status`, like `Mood`, `Residency`, `Traversal`, `DenseMetric` and `Scalar`, holds the C enumerators' values, and its `String` spells the name the C tables own.
 `StatusUnsupported` marks a verb declared for every residency that this one does not implement yet, and `StatusContended` a call refused rather than waited for.
 
 ## Residency
@@ -310,7 +310,7 @@ metadata, err := usearch.DenseMetadataRead("index.safegraphs", nil) // a nil con
 fmt.Println(metadata.Dimensions, metadata.Metric, metadata.Quantization)
 ```
 
-The result carries only the four fields a checkpoint froze, so `ValuesPerKey` and the placement stay yours to set in the load config.
+The result holds only the four fields a checkpoint froze, so `ValuesPerKey` and the placement stay yours to set in the load config.
 Serving a checkpoint in place, rather than copying it, yields a read-only handle whose mutating verbs fail with `StatusReadOnly`, through a memory mapping with `DenseViewRam`, or from drives with `DenseViewNvme`:
 
 ```go
@@ -330,7 +330,7 @@ Without `KeyTableDomains`, an NVMe view holds nothing per entry, so `Count`, `Ge
 ### Rows & Scalars
 
 Every verb is a batch over strided matrices, so a memory-mapped dataset reaches the index with no reshape and no copy, and a single vector is a one-row matrix.
-A `RowsView` borrows a caller-owned slab as rows of equal width, and it is the shape every batch argument takes.
+A `RowsView` views a caller-owned slab as rows of equal width, and it is the shape every batch argument takes.
 `RowsOf` derives the row count and the byte pitch from a packed slice; `StridedRowsOf` takes a pitch wider than the row, which is how a memory-mapped dataset with padded rows arrives.
 
 ```go
@@ -363,7 +363,7 @@ fmt.Println(stats.ComputedDistances, "distances computed")
 ```
 
 A search returns a `MatchesView` over its arena, holding up to `wanted` keys per query and the distances paired with them.
-`Query` borrows one query's results, trimmed to the count that query reported, and copies nothing:
+`Query` views one query's results, trimmed to the count that query reported, and copies nothing:
 
 ```go
 for query := range matches.Queries() {
@@ -416,7 +416,7 @@ report, err := index.On(executor).Refine(&usearch.DenseRefineConfig{
 })
 ```
 
-A handler never runs on two threads at once, so it may carry a counter or a deadline without a lock.
+A handler never runs on two threads at once, so it may hold a counter or a deadline without a lock.
 A predicate, a handler or a value lookup must not panic: a panic unwinding through the library's frames is a bug, and nothing here recovers it.
 
 ### Retrieval and Streaming
@@ -495,7 +495,7 @@ On a loaded NVMe handle `MemoryLimit` bounds the bytes a round holds for the one
 
 ### Resharding
 
-`Reshard` moves the entries of its sources into its targets, keeping their links rather than re-inserting their vectors, then runs a round on every target that took entries; the receiver lends only its executor, so every handle is named.
+`Reshard` moves the entries of its sources into its targets, keeping their links rather than re-inserting their vectors, then runs a round on every target that took entries; the receiver passes only its executor, so every handle is named.
 Several sources gather into one target, itself among them, and each other source ends empty and live, still yours to close.
 Every handle must share the first source's residency, scalar, class, metric and geometry, or the call answers `StatusConfigMismatch`, and a refusal moves nothing.
 
@@ -595,7 +595,7 @@ context, _ := usearch.DenseValues[float32](attended)
 ```
 
 The attended rows take the queries' scalar type unless the config's `OutputsScalar` names another.
-A `Carry` of one `DenseSoftmaxState` per query row, lent rather than written into the arena, folds this branch into another over the same queries, such as a recent window kept out of the index.
+A `Carry` of one `DenseSoftmaxState` per query row, in the caller's memory rather than in the arena, folds this branch into another over the same queries, such as a recent window kept out of the index.
 
 ### Introspection
 
@@ -618,7 +618,7 @@ fmt.Println(usearch.Version(), usearch.CapabilitiesCompiled(), usearch.Capabilit
 ## Sequence Indexes
 
 A sequence index searches byte strings, UTF-8 text, DNA and proteins under edit distances and alignments.
-Variable-length entries cross as a `Tape`, the Apache Arrow layout: elements end to end and one more offset than entries, which `SequencesOf` packs and `SequencesTape` borrows from an Arrow column as it is:
+Variable-length entries cross as a `Tape`, the Apache Arrow layout: elements end to end and one more offset than entries, which `SequencesOf` packs and `SequencesTape` wraps an Arrow column as it is:
 
 ```go
 index, _ := usearch.SequenceInitRam(usearch.SequenceOptions{Metric: usearch.SequenceMetricLevenshteinUTF8}, nil)
@@ -696,6 +696,6 @@ The relation is an argument of each call: `Near` widens the radius by both posit
 - __The receiver chooses, the verb stays.__ The index runs a verb on the calling goroutine, `On(executor)` blocks on an executor, and `Deferred(executor)` submits it, all with the same arguments.
 - __Deferred calls use the language's own idioms.__ `Status` polls through `usearch_outcome_status` and `Wait` blocks through `usearch_outcome_wait`; a goroutine calling `Wait` overlaps the wait, and a `select` reaches it through a channel that goroutine closes.
 - __No life of its own.__ The binding starts no goroutines and keeps no queues; releasing a `Deferred` rides `Close`, which waits for the call first, or the collector's cleanup, which frees it only once final.
-- __Arenas are lent and reused, never shared.__ Every output whose length scales with the call lands in an arena the caller passes, and its views end at the arena's next call.
+- __Arenas belong to the caller and are reused, never shared.__ Every output whose length scales with the call lands in an arena the caller passes, and its views end at the arena's next call.
 - __Nothing costs anything until it is used.__ Submitting a call allocates nothing, and an arena allocates only when a call writes into it.
 - __Types and configs are the header's.__ Every type is its C name without `usearch_` and `_t`, a verb's argument structure becomes its `Dense*Config`, which the other modalities share wherever their fields agree, and every wrapper's documentation names the C symbol it calls or says it is binding-only.

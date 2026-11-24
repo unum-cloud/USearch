@@ -73,7 +73,7 @@ template <typename handler_type_>
 concept terrain_handler = std::is_nothrow_invocable_r_v<void, handler_type_&, std::size_t, std::size_t, std::size_t,
                                                         std::size_t, float*, std::size_t>;
 
-/** The @p grid filled on demand by @p handler, which every index naming it borrows for its life
+/** The @p grid filled on demand by @p handler, which every index naming it keeps for its life
  *  and calls from the executor's threads. */
 template <terrain_handler handler_type_>
 usearch_geospatial_terrain_t geospatial_terrain(handler_type_& handler, usearch_geospatial_terrain_t grid) noexcept {
@@ -125,8 +125,9 @@ struct geospatial_within_config_t {
  *      @c outcome, deferred answers a @c deferred call. Made by @c geospatial_index_t::on and
  *      @c geospatial_index_t::deferred.
  *
- *  Each verb is written once, filling its C struct with the result as its output slot. Every
- *  input, handler, plan and arena a deferred call names stays borrowed until it is final.
+ *  Each verb is written once, filling its C struct with the result as its output slot. Every input,
+ *  handler, plan and arena a deferred call names must stay allocated and unchanged until the call
+ *  is final, whichever verb it is.
  */
 template <usearch_completion_t completion_>
 class geospatial_index_on {
@@ -240,7 +241,7 @@ class geospatial_index_on {
         });
     }
 
-    /** Writes the index to the checkpoint at @p path, which carries no terrain. */
+    /** Writes the index to the checkpoint at @p path, which holds no terrain. */
     answer<completion_, void> save(usearch_bytes_view_t path, progress_t progress = {}) const noexcept {
         return answered_<completion_, void>([&](usearch_outcome_t* outcome, auto*) noexcept {
             usearch_geospatial_save_t arguments {index_, executor_, outcome, completion_, path, progress.raw()};
@@ -431,12 +432,12 @@ class geospatial_index_t {
 
 #pragma region Lifecycle
 
-    /** Creates an empty RAM index over the terrain @p options borrows, if any. */
+    /** Creates an empty RAM index over the terrain @p options names, if any. */
     static outcome<geospatial_index_t> init_ram(usearch_geospatial_init_ram_t options) noexcept {
         return opened_<geospatial_index_t>(usearch_geospatial_init_ram, options);
     }
 
-    /** Creates an empty VRAM index over the borrowed heights @p options names, if any, on the
+    /** Creates an empty VRAM index over the heights @p options points at, if any, on the
      *  devices it names. */
     static outcome<geospatial_index_t> init_vram(usearch_geospatial_init_vram_t options) noexcept {
         return opened_<geospatial_index_t>(usearch_geospatial_init_vram, options);
