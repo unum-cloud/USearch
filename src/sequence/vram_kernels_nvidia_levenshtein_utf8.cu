@@ -10,4 +10,4 @@
 #include "sequence_specializations.cuh"
 
 template __device__ void
-us::sequence::cuda_instantiate<sequence_nvidia_kit<usearch_sequence_metric_levenshtein_utf8_k>, u32_t>();
+us::sequence::cuda_instantiate<sequence_nvidia_kit<usearch_sequence_metric_levenshtein_utf8_k>, util::u32_t>();

@@ -88,7 +88,7 @@ inline static util::bytes_view_t bundled_code() noexcept {
 template <gpu_class_t gpu_class_, nk_dtype_t dtype_>
 struct cuda_fatbin {
     inline static constexpr nk_capability_t capability_k = numkong_capabilities_of(gpu_class_);
-    static bytes_view_t bytes() noexcept { return bundled_code<gpu_class_, dtype_>(); }
+    static util::bytes_view_t bytes() noexcept { return bundled_code<gpu_class_, dtype_>(); }
 };
 
 /** One NVIDIA variant: the class names the rung and its capability ceiling, and with the dtype the
@@ -105,7 +105,7 @@ using vram_nvidia_indexes = dense::vram_nvidia_indexes<util::uuid128_t, dtype_, 
 template <gpu_class_t gpu_class_, nk_dtype_t dtype_>
 struct hip_code_object {
     inline static constexpr nk_capability_t capability_k = numkong_capabilities_of(gpu_class_);
-    static bytes_view_t bytes() noexcept { return bundled_code<gpu_class_, dtype_>(); }
+    static util::bytes_view_t bytes() noexcept { return bundled_code<gpu_class_, dtype_>(); }
 };
 
 /** One AMD variant: the class names the rung and its capability ceiling, and with the dtype the

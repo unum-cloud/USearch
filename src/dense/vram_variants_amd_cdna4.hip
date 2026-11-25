@@ -15,9 +15,9 @@
 
 /** The bounds of each dtype's code object, linked in as raw bytes beside the variants, in the table
  *  CMake writes. */
-extern "C" byte_t const* const dense_amd_cdna4_bundles[];
+extern "C" util::byte_t const* const dense_amd_cdna4_bundles[];
 template <>
-std::span<byte_t const* const> bundle_bounds<gpu_class_t::amd_cdna4_k>() noexcept {
+std::span<util::byte_t const* const> bundle_bounds<gpu_class_t::amd_cdna4_k>() noexcept {
     return {dense_amd_cdna4_bundles, 2 * dense_dtypes_t::size_k};
 }
 template struct dense_class_tables<vendored_residency_t::vram_amd_k, gpu_class_t::amd_cdna4_k>;

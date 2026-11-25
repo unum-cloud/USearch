@@ -10,11 +10,13 @@ target_include_directories(
 target_link_libraries(usearch_cpp INTERFACE usearch::abi usearch::static)
 target_compile_features(usearch_cpp INTERFACE cxx_std_20)
 
-# The smoke test against the engine, linked as the C one is; `usearch_setup_target` adds warnings and sanitizers.
+# The smoke test against the engine, linked as the C one is. It skips `usearch_setup_target`, whose SPDK archives the
+# engine's archive already carries in its interface, and takes only the warnings and sanitizers from it.
 if (USEARCH_BUILD_TEST AND USEARCH_BUILD_SHARED)
     add_executable(usearch_test_cpp test.cpp)
-    usearch_setup_target(usearch_test_cpp)
-    target_link_libraries(usearch_test_cpp PRIVATE usearch::cpp fmt::fmt ${USEARCH_PUNNED_LIBRARIES})
+    target_link_libraries(
+        usearch_test_cpp PRIVATE usearch::cpp fmt::fmt ${USEARCH_PUNNED_LIBRARIES} usearch_warnings usearch_sanitizers
+    )
     add_test(NAME usearch_test_cpp COMMAND usearch_test_cpp)
 endif ()
 

@@ -9,4 +9,5 @@
  */
 #include "sequence_specializations.cuh"
 
-template void us::sequence::amd_instantiate<sequence_amd_kit<usearch_sequence_metric_levenshtein_bytes_k>, u32_t>();
+template void
+us::sequence::amd_instantiate<sequence_amd_kit<usearch_sequence_metric_levenshtein_bytes_k>, util::u32_t>();

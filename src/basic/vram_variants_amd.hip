@@ -100,11 +100,11 @@ template void amd_instantiate<u32_t>();
 /** The bounds of the code object every basic face loads, linked in as raw bytes, from the table
  *  CMake writes for the class this unit compiles as; the tables of the other classes stay
  *  unreferenced by it. */
-extern "C" byte_t const* const basic_amd_cdna3_bundles[];
-extern "C" byte_t const* const basic_amd_cdna4_bundles[];
-extern "C" byte_t const* const basic_amd_cdna5_bundles[];
+extern "C" util::byte_t const* const basic_amd_cdna3_bundles[];
+extern "C" util::byte_t const* const basic_amd_cdna4_bundles[];
+extern "C" util::byte_t const* const basic_amd_cdna5_bundles[];
 template <gpu_class_t gpu_class_>
-byte_t const* const* basic_bundles() noexcept {
+util::byte_t const* const* basic_bundles() noexcept {
     if constexpr (gpu_class_ == gpu_class_t::amd_cdna5_k) return basic_amd_cdna5_bundles;
     else if constexpr (gpu_class_ == gpu_class_t::amd_cdna4_k) return basic_amd_cdna4_bundles;
     else return basic_amd_cdna3_bundles;
@@ -112,7 +112,7 @@ byte_t const* const* basic_bundles() noexcept {
 
 template <>
 bytes_view_t hip_graph_code_object<numkong_capabilities_of(hip_class_k)>::bytes() noexcept {
-    byte_t const* const* const bounds = basic_bundles<hip_class_k>();
+    util::byte_t const* const* const bounds = basic_bundles<hip_class_k>();
     return {bounds[0], bounds[1]};
 }
 

@@ -357,7 +357,7 @@ util::expected<util::sample_result_t> sequence_nvme_variant<cpu_class_>::sample(
  *  the bytes it embeds. */
 template <usearch_sequence_metric_t metric_>
 struct sequence_nvidia_fatbin {
-    static bytes_view_t bytes() noexcept;
+    static util::bytes_view_t bytes() noexcept;
 };
 
 /** The capabilities the sequence kits compile under on NVIDIA: StringZilla's tiers of the class
@@ -379,15 +379,16 @@ using sequence_nvidia_kit = std::conditional_t<
 
 /** The faces' members reading the kits, defined in @c src/sequence/vram_variants_nvidia.cpp. */
 extern template struct us::sequence::vram_nvidia_index<
-    sequence_nvidia_kit<usearch_sequence_metric_levenshtein_bytes_k>, u32_t,
+    sequence_nvidia_kit<usearch_sequence_metric_levenshtein_bytes_k>, util::u32_t,
     sequence_nvidia_fatbin<usearch_sequence_metric_levenshtein_bytes_k>>;
 extern template struct us::sequence::vram_nvidia_index<
-    sequence_nvidia_kit<usearch_sequence_metric_levenshtein_utf8_k>, u32_t,
+    sequence_nvidia_kit<usearch_sequence_metric_levenshtein_utf8_k>, util::u32_t,
     sequence_nvidia_fatbin<usearch_sequence_metric_levenshtein_utf8_k>>;
-extern template struct us::sequence::vram_nvidia_index<sequence_nvidia_kit<usearch_sequence_metric_overlap_k>, u32_t,
+extern template struct us::sequence::vram_nvidia_index<sequence_nvidia_kit<usearch_sequence_metric_overlap_k>,
+                                                       util::u32_t,
                                                        sequence_nvidia_fatbin<usearch_sequence_metric_overlap_k>>;
 extern template struct us::sequence::vram_nvidia_index<
-    sequence_nvidia_kit<usearch_sequence_metric_needleman_wunsch_k>, u32_t,
+    sequence_nvidia_kit<usearch_sequence_metric_needleman_wunsch_k>, util::u32_t,
     sequence_nvidia_fatbin<usearch_sequence_metric_needleman_wunsch_k>>;
 
 /** A GPU overlap index scores in the same fixed point as the RAM metric. */
@@ -434,7 +435,7 @@ inline util::expected<us::sequence::needleman_wunsch_costs_t> parameters_of(
 template <usearch_sequence_metric_t metric_>
 struct sequence_vram_nvidia_build {
     using face_t =
-        us::sequence::vram_nvidia_index<sequence_nvidia_kit<metric_>, u32_t, sequence_nvidia_fatbin<metric_>>;
+        us::sequence::vram_nvidia_index<sequence_nvidia_kit<metric_>, util::u32_t, sequence_nvidia_fatbin<metric_>>;
 
     /** The geometry and costs of the variant holding the shards, frozen before the first is
      *  placed. */
@@ -442,9 +443,9 @@ struct sequence_vram_nvidia_build {
     us::sequence::needleman_wunsch_costs_t const* costs = nullptr;
 
     std::unique_ptr<face_t> operator()(int device) const noexcept {
-        std::unique_ptr<face_t> face {new (std::nothrow)
-                                          face_t(cuda_virtual_memory_allocator<byte_t> {gpu_drivers().cuda, device})};
-        growing_buffer<u32_t, std::allocator<byte_t>> widths {std::allocator<byte_t> {}};
+        std::unique_ptr<face_t> face {
+            new (std::nothrow) face_t(util::cuda_virtual_memory_allocator<util::byte_t> {gpu_drivers().cuda, device})};
+        util::growing_buffer<util::u32_t, std::allocator<util::byte_t>> widths {std::allocator<util::byte_t> {}};
         auto const [parameters, parameters_status] = parameters_of(std::type_identity<typename face_t::parameters_t> {},
                                                                    *geometry, *costs, widths);
         if (face && (failed(parameters_status) || failed(face->parameters(parameters)))) face.reset();
@@ -457,7 +458,7 @@ struct sequence_vram_nvidia_build {
  *  with 32-bit node IDs. */
 template <usearch_sequence_metric_t metric_, gpu_class_t gpu_class_>
 struct sequence_vram_nvidia_variant {
-    using executor_t = cuda_executor_t;
+    using executor_t = util::cuda_executor_t;
     using build_t = sequence_vram_nvidia_build<metric_>;
     using face_t = typename build_t::face_t;
     using index_t = basic::vram_nvidia_indexes<face_t, util::uuid128_t, build_t>;
@@ -472,16 +473,17 @@ struct sequence_vram_nvidia_variant {
     /** Holds no shard until the handle places them; their kind is the template's, and their window
      *  widths and costs the geometry's. */
     sequence_vram_nvidia_variant(int, sequence_geometry_t const&) noexcept
-        : index(forkunion_allocator_t {no_memory_domain_k}, build_t {&geometry, &costs}) {}
+        : index(util::forkunion_allocator_t {util::no_memory_domain_k}, build_t {&geometry, &costs}) {}
 
-    status_t reserve(reserve_capacity_t capacity) noexcept {
+    util::status_t reserve(reserve_capacity_t capacity) noexcept {
         return vram_nvidia_reserve(index, capacity.entries, geometry.connectivity, capacity.bytes);
     }
 
-    expected<traversal_stats_t> insert(usearch_keys_view_t keys, caller_tape_t sequences, insert_config_t config,
-                                       cuda_executor_t& executor, progress_ticks_t& ticks) noexcept {
+    util::expected<traversal_stats_t> insert(usearch_keys_view_t keys, caller_tape_t sequences, insert_config_t config,
+                                             util::cuda_executor_t& executor, progress_ticks_t& ticks) noexcept {
         // The batch's own pages, since batches routed to disjoint shards may land at once.
-        growing_arena<forkunion_allocator_t> staging {forkunion_allocator_t {no_memory_domain_k}};
+        util::growing_arena<util::forkunion_allocator_t> staging {
+            util::forkunion_allocator_t {util::no_memory_domain_k}};
         auto const [entries, lower_status] = counted_tape_of(sequences.tape, sequences.count, staging);
         if (failed(lower_status)) return {{}, lower_status};
         return vram_nvidia_insert(index, keys, bytes_tape_of(entries), geometry.connectivity, config.expansion_factor,
@@ -489,16 +491,16 @@ struct sequence_vram_nvidia_variant {
     }
 
     /** A device walk takes no host predicate. */
-    expected<traversal_stats_t> search(counted_tape_t queries, matches_outputs_t& outputs, search_config_t config,
-                                       cuda_executor_t& executor, progress_ticks_t& ticks) noexcept {
+    util::expected<traversal_stats_t> search(counted_tape_t queries, matches_outputs_t& outputs, search_config_t config,
+                                             util::cuda_executor_t& executor, progress_ticks_t& ticks) noexcept {
         return vram_nvidia_search(index, bytes_tape_of(queries), outputs.wanted, config.expansion_factor, outputs,
                                   ticks, executor);
     }
 
     /** Writes the strings as the RAM variants write them: a lone live shard's monolith, or one per
      *  live shard beside the manifest the path names. */
-    status_t save(std::string_view path, cuda_executor_t& executor, progress_ticks_t& ticks) noexcept {
-        return with_sequence_provenance(geometry, costs, [&](save_config_t const& config) noexcept {
+    util::status_t save(std::string_view path, util::cuda_executor_t& executor, progress_ticks_t& ticks) noexcept {
+        return with_sequence_provenance(geometry, costs, [&](util::save_config_t const& config) noexcept {
             return vram_nvidia_save(index, path, us::sequence::codec_t {}, config, token_of(geometry.metric), executor,
                                     ticks);
         });
@@ -507,19 +509,20 @@ struct sequence_vram_nvidia_variant {
     /** Reads a checkpoint any residency wrote, at a path or in host memory, into the placed shards,
      *  one part per shard. */
     template <typename checkpoint_type_>
-    status_t load(checkpoint_type_ checkpoint, cuda_executor_t& executor, progress_ticks_t& ticks) noexcept {
-        return index.load(checkpoint, us::sequence::codec_t {}, executor, load_config_t {},
-                          static_cast<connectivity_t>(geometry.connectivity), ticks);
+    util::status_t load(checkpoint_type_ checkpoint, util::cuda_executor_t& executor,
+                        progress_ticks_t& ticks) noexcept {
+        return index.load(checkpoint, us::sequence::codec_t {}, executor, util::load_config_t {},
+                          static_cast<util::connectivity_t>(geometry.connectivity), ticks);
     }
 
     /** Empties the index, retiring every shard behind a fresh shard generation on the same
      *  devices. */
-    status_t clear() noexcept { return index.clear(); }
+    util::status_t clear() noexcept { return index.clear(); }
 
     /** Sampling answers @c unsupported_k until the shards sample on their devices. */
-    expected<sample_result_t> sample(basic_sample_inputs_t, basic_sample_outputs_t, sample_config_t,
-                                     executor_t&) noexcept {
-        return {{}, status_code_t::unsupported_k};
+    util::expected<util::sample_result_t> sample(basic_sample_inputs_t, basic_sample_outputs_t, util::sample_config_t,
+                                                 executor_t&) noexcept {
+        return {{}, util::status_code_t::unsupported_k};
     }
 };
 
@@ -648,7 +651,7 @@ struct sequence_vram_apple_variant {
 template <usearch_sequence_metric_t metric_, gpu_class_t gpu_class_>
 struct sequence_amd_code_object {
     inline static constexpr nk_capability_t capability_k = numkong_capabilities_of(gpu_class_);
-    static bytes_view_t bytes() noexcept;
+    static util::bytes_view_t bytes() noexcept;
 };
 
 /** The capabilities the sequence kits compile under on AMD: StringZilla's tiers of the class this
@@ -671,16 +674,16 @@ using sequence_amd_kit = std::conditional_t<
 /*  The faces' members reading the kits, defined in @c src/sequence/vram_variants_amd.hip for its
  *  class. */
 extern template struct us::sequence::vram_amd_index<
-    sequence_amd_kit<usearch_sequence_metric_levenshtein_bytes_k>, u32_t,
+    sequence_amd_kit<usearch_sequence_metric_levenshtein_bytes_k>, util::u32_t,
     sequence_amd_code_object<usearch_sequence_metric_levenshtein_bytes_k, hip_class_k>>;
 extern template struct us::sequence::vram_amd_index<
-    sequence_amd_kit<usearch_sequence_metric_levenshtein_utf8_k>, u32_t,
+    sequence_amd_kit<usearch_sequence_metric_levenshtein_utf8_k>, util::u32_t,
     sequence_amd_code_object<usearch_sequence_metric_levenshtein_utf8_k, hip_class_k>>;
 extern template struct us::sequence::vram_amd_index<
-    sequence_amd_kit<usearch_sequence_metric_overlap_k>, u32_t,
+    sequence_amd_kit<usearch_sequence_metric_overlap_k>, util::u32_t,
     sequence_amd_code_object<usearch_sequence_metric_overlap_k, hip_class_k>>;
 extern template struct us::sequence::vram_amd_index<
-    sequence_amd_kit<usearch_sequence_metric_needleman_wunsch_k>, u32_t,
+    sequence_amd_kit<usearch_sequence_metric_needleman_wunsch_k>, util::u32_t,
     sequence_amd_code_object<usearch_sequence_metric_needleman_wunsch_k, hip_class_k>>;
 
 /** A GPU overlap index scores in the same fixed point as the RAM metric. */
@@ -694,8 +697,8 @@ inline constexpr usearch_distance_t distance_unit<
  *  reservation uploads to the device. */
 template <usearch_sequence_metric_t metric_, gpu_class_t gpu_class_>
 struct sequence_vram_amd_build {
-    using face_t =
-        us::sequence::vram_amd_index<sequence_amd_kit<metric_>, u32_t, sequence_amd_code_object<metric_, gpu_class_>>;
+    using face_t = us::sequence::vram_amd_index<sequence_amd_kit<metric_>, util::u32_t,
+                                                sequence_amd_code_object<metric_, gpu_class_>>;
 
     /** The geometry and costs of the variant holding the shards, frozen before the first is
      *  placed. */
@@ -703,9 +706,9 @@ struct sequence_vram_amd_build {
     us::sequence::needleman_wunsch_costs_t const* costs = nullptr;
 
     std::unique_ptr<face_t> operator()(int device) const noexcept {
-        std::unique_ptr<face_t> face {new (std::nothrow)
-                                          face_t(hip_virtual_memory_allocator<byte_t> {gpu_drivers().hip, device})};
-        growing_buffer<u32_t, std::allocator<byte_t>> widths {std::allocator<byte_t> {}};
+        std::unique_ptr<face_t> face {
+            new (std::nothrow) face_t(util::hip_virtual_memory_allocator<util::byte_t> {gpu_drivers().hip, device})};
+        util::growing_buffer<util::u32_t, std::allocator<util::byte_t>> widths {std::allocator<util::byte_t> {}};
         auto const [parameters, parameters_status] = parameters_of(std::type_identity<typename face_t::parameters_t> {},
                                                                    *geometry, *costs, widths);
         if (face && (failed(parameters_status) || failed(face->parameters(parameters)))) face.reset();
@@ -718,7 +721,7 @@ struct sequence_vram_amd_build {
  *  32-bit node IDs. */
 template <usearch_sequence_metric_t metric_, gpu_class_t gpu_class_>
 struct sequence_vram_amd_variant {
-    using executor_t = hip_executor_t;
+    using executor_t = util::hip_executor_t;
     using build_t = sequence_vram_amd_build<metric_, gpu_class_>;
     using face_t = typename build_t::face_t;
     using index_t = basic::vram_amd_indexes<face_t, util::uuid128_t, build_t>;
@@ -733,16 +736,17 @@ struct sequence_vram_amd_variant {
     /** Holds no shard until the handle places them; their kind is the template's, and their window
      *  widths and costs the geometry's. */
     sequence_vram_amd_variant(int, sequence_geometry_t const&) noexcept
-        : index(forkunion_allocator_t {no_memory_domain_k}, build_t {&geometry, &costs}) {}
+        : index(util::forkunion_allocator_t {util::no_memory_domain_k}, build_t {&geometry, &costs}) {}
 
-    status_t reserve(reserve_capacity_t capacity) noexcept {
+    util::status_t reserve(reserve_capacity_t capacity) noexcept {
         return vram_amd_reserve(index, capacity.entries, geometry.connectivity, capacity.bytes);
     }
 
-    expected<traversal_stats_t> insert(usearch_keys_view_t keys, caller_tape_t sequences, insert_config_t config,
-                                       hip_executor_t& executor, progress_ticks_t& ticks) noexcept {
+    util::expected<traversal_stats_t> insert(usearch_keys_view_t keys, caller_tape_t sequences, insert_config_t config,
+                                             util::hip_executor_t& executor, progress_ticks_t& ticks) noexcept {
         // The batch's own pages, since batches routed to disjoint shards may land at once.
-        growing_arena<forkunion_allocator_t> staging {forkunion_allocator_t {no_memory_domain_k}};
+        util::growing_arena<util::forkunion_allocator_t> staging {
+            util::forkunion_allocator_t {util::no_memory_domain_k}};
         auto const [entries, lower_status] = counted_tape_of(sequences.tape, sequences.count, staging);
         if (failed(lower_status)) return {{}, lower_status};
         return vram_amd_insert(index, keys, bytes_tape_of(entries), geometry.connectivity, config.expansion_factor,
@@ -750,16 +754,16 @@ struct sequence_vram_amd_variant {
     }
 
     /** A device walk takes no host predicate. */
-    expected<traversal_stats_t> search(counted_tape_t queries, matches_outputs_t& outputs, search_config_t config,
-                                       hip_executor_t& executor, progress_ticks_t& ticks) noexcept {
+    util::expected<traversal_stats_t> search(counted_tape_t queries, matches_outputs_t& outputs, search_config_t config,
+                                             util::hip_executor_t& executor, progress_ticks_t& ticks) noexcept {
         return vram_amd_search(index, bytes_tape_of(queries), outputs.wanted, config.expansion_factor, outputs, ticks,
                                executor);
     }
 
     /** Writes the strings as the RAM variants write them: a lone live shard's monolith, or one per
      *  live shard beside the manifest the path names. */
-    status_t save(std::string_view path, hip_executor_t& executor, progress_ticks_t& ticks) noexcept {
-        return with_sequence_provenance(geometry, costs, [&](save_config_t const& config) noexcept {
+    util::status_t save(std::string_view path, util::hip_executor_t& executor, progress_ticks_t& ticks) noexcept {
+        return with_sequence_provenance(geometry, costs, [&](util::save_config_t const& config) noexcept {
             return vram_amd_save(index, path, us::sequence::codec_t {}, config, token_of(geometry.metric), executor,
                                  ticks);
         });
@@ -768,19 +772,19 @@ struct sequence_vram_amd_variant {
     /** Reads a checkpoint any residency wrote, at a path or in host memory, into the placed shards,
      *  one part per shard. */
     template <typename checkpoint_type_>
-    status_t load(checkpoint_type_ checkpoint, hip_executor_t& executor, progress_ticks_t& ticks) noexcept {
-        return index.load(checkpoint, us::sequence::codec_t {}, executor, load_config_t {},
-                          static_cast<connectivity_t>(geometry.connectivity), ticks);
+    util::status_t load(checkpoint_type_ checkpoint, util::hip_executor_t& executor, progress_ticks_t& ticks) noexcept {
+        return index.load(checkpoint, us::sequence::codec_t {}, executor, util::load_config_t {},
+                          static_cast<util::connectivity_t>(geometry.connectivity), ticks);
     }
 
     /** Empties the index, retiring every shard behind a fresh shard generation on the same
      *  devices. */
-    status_t clear() noexcept { return index.clear(); }
+    util::status_t clear() noexcept { return index.clear(); }
 
     /** Sampling answers @c unsupported_k until the shards sample on their devices. */
-    expected<sample_result_t> sample(basic_sample_inputs_t, basic_sample_outputs_t, sample_config_t,
-                                     executor_t&) noexcept {
-        return {{}, status_code_t::unsupported_k};
+    util::expected<util::sample_result_t> sample(basic_sample_inputs_t, basic_sample_outputs_t, util::sample_config_t,
+                                                 executor_t&) noexcept {
+        return {{}, util::status_code_t::unsupported_k};
     }
 };
 

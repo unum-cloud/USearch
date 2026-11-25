@@ -3009,7 +3009,7 @@ struct vram_amd_indexes {
                                                   (queries_count + 1) * sizeof(std::size_t), first.stream());
             return status;
         };
-        auto const [walked, walk_status] = fanout.await_every_shard(first_walk_bytes, walk_shard, nominate);
+        auto [walked, walk_status] = fanout.await_every_shard(first_walk_bytes, walk_shard, nominate);
         if (failed(walk_status)) return {walked, walk_status};
 
         // The nominees' keys up to the host, 16 B each, then every shard's entries of them through
@@ -3136,9 +3136,9 @@ struct vram_amd_indexes {
         };
         if (status_t const selected = fanout.await_every_shard(widest_rescore_bytes, rescore_shard, select).status;
             failed(selected))
-            return {walked.value, selected};
-        walked.value.count = fanout.traversal(0).matched();
-        return walked;
+            return {walked, selected};
+        walked.count = fanout.traversal(0).matched();
+        return {walked, walk_status};
     }
 
     /** The body of the batched @c search into rankings on the first shard's device, when all three

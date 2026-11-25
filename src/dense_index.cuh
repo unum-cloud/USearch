@@ -1767,12 +1767,13 @@ USEARCH_EXPORT void usearch_executor_for_nvme(usearch_executor_for_nvme_t* argum
 #if USEARCH_WITH_LINUX_SPDK
         // Fabrics copy every byte through a socket, so only PCIe controllers need hugepages to DMA
         // into.
-        linux_spdk_process_t::config_t environment;
-        environment.memory = pcie_ids ? linux_spdk_memory_t::hugepages_k : linux_spdk_memory_t::plain_pages_k;
-        if (status_t const acquired = linux_spdk_process_t::acquire<fu::standard_yield_t>(environment);
-            failed(acquired))
+        util::linux_spdk_process_t::config_t environment;
+        environment.memory = pcie_ids ? util::linux_spdk_memory_t::hugepages_k
+                                      : util::linux_spdk_memory_t::plain_pages_k;
+        if (util::status_t const acquired = util::linux_spdk_process_t::acquire<fu::standard_yield_t>(environment);
+            util::failed(acquired))
             return propagate_error(acquired, outcome), void();
-        config.transport = io_transport_t::linux_spdk_k;
+        config.transport = util::io_transport_t::linux_spdk_k;
 #else
         (void)pcie_ids;
         return propagate_error(usearch_status_unsupported_k, outcome, "Transport identifiers need an SPDK build"),

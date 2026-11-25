@@ -18,33 +18,33 @@
 #if __HIP_DEVICE_COMPILE__
 
 template void us::geospatial::amd_instantiate<
-    us::geospatial::geospatial_ladder<geospatial_amd_capabilities<hip_class_k>>::kit_t, u32_t>();
+    us::geospatial::geospatial_ladder<geospatial_amd_capabilities<hip_class_k>>::kit_t, util::u32_t>();
 
 #else
 
 /** The bounds of the unit's code object, linked in as raw bytes, from the table CMake writes for
  *  the class this unit compiles as; the other classes' tables stay unreferenced. */
-extern "C" byte_t const* const geospatial_amd_cdna3_bundles[];
-extern "C" byte_t const* const geospatial_amd_cdna4_bundles[];
-extern "C" byte_t const* const geospatial_amd_cdna5_bundles[];
+extern "C" util::byte_t const* const geospatial_amd_cdna3_bundles[];
+extern "C" util::byte_t const* const geospatial_amd_cdna4_bundles[];
+extern "C" util::byte_t const* const geospatial_amd_cdna5_bundles[];
 template <gpu_class_t gpu_class_>
-byte_t const* const* geospatial_bundles() noexcept {
+util::byte_t const* const* geospatial_bundles() noexcept {
     if constexpr (gpu_class_ == gpu_class_t::amd_cdna5_k) return geospatial_amd_cdna5_bundles;
     else if constexpr (gpu_class_ == gpu_class_t::amd_cdna4_k) return geospatial_amd_cdna4_bundles;
     else return geospatial_amd_cdna3_bundles;
 }
 
 template <>
-bytes_view_t geospatial_amd_code_object<hip_class_k>::bytes() noexcept {
-    byte_t const* const* const bounds = geospatial_bundles<hip_class_k>();
+util::bytes_view_t geospatial_amd_code_object<hip_class_k>::bytes() noexcept {
+    util::byte_t const* const* const bounds = geospatial_bundles<hip_class_k>();
     return {bounds[0], bounds[1]};
 }
 
 template struct us::geospatial::vram_amd_index<
-    typename us::geospatial::geospatial_ladder<geospatial_amd_capabilities<hip_class_k>>::kit_t, u32_t,
+    typename us::geospatial::geospatial_ladder<geospatial_amd_capabilities<hip_class_k>>::kit_t, util::u32_t,
     geospatial_amd_code_object<hip_class_k>>;
 template struct us::geospatial::vram_amd_kits<
-    typename us::geospatial::geospatial_ladder<geospatial_amd_capabilities<hip_class_k>>::kit_t, u32_t,
+    typename us::geospatial::geospatial_ladder<geospatial_amd_capabilities<hip_class_k>>::kit_t, util::u32_t,
     geospatial_amd_code_object<hip_class_k>>;
 
 template struct basic_class_tables<geospatial_traits_t, vendored_residency_t::vram_amd_k, hip_class_k>;

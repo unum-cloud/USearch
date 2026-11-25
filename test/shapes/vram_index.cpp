@@ -47,7 +47,7 @@ namespace util = unum::usearch::utilities;
  *  @c src/shapes/vram_variants_nvidia*.cpp unit. */
 template <gpu_class_t gpu_class_, nk_dtype_t dtype_>
 struct shapes_nvidia_fatbin {
-    static bytes_view_t bytes() noexcept;
+    static util::bytes_view_t bytes() noexcept;
 };
 
 #endif
@@ -58,7 +58,7 @@ struct shapes_nvidia_fatbin {
 template <gpu_class_t gpu_class_, nk_dtype_t dtype_>
 struct shapes_amd_code_object {
     inline static constexpr nk_capability_t capability_k = numkong_capabilities_of(gpu_class_);
-    static bytes_view_t bytes() noexcept;
+    static util::bytes_view_t bytes() noexcept;
 };
 
 #endif

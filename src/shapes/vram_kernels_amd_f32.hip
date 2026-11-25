@@ -11,5 +11,5 @@
 #include "shapes_specializations.cuh"
 #include "usearch/shapes/vram_amd_metric.hip"
 
-template void
-us::shapes::amd_instantiate<us::shapes::shapes_ladder<nk::f32_t, numkong_capabilities_of(hip_class_k)>::kit_t, u32_t>();
+template void us::shapes::amd_instantiate<
+    us::shapes::shapes_ladder<nk::f32_t, numkong_capabilities_of(hip_class_k)>::kit_t, util::u32_t>();

@@ -1190,7 +1190,7 @@ util::expected<util::sample_result_t> geospatial_nvme_variant<cpu_class_>::sampl
 /** The fatbin of the geospatial kit and its judging kernel, defined in
  *  @c src/geospatial/vram_variants_nvidia.cu. */
 struct geospatial_nvidia_fatbin_t {
-    static bytes_view_t bytes() noexcept;
+    static util::bytes_view_t bytes() noexcept;
 };
 
 /** The capabilities the geospatial kit compiles under on NVIDIA: the Ampere floor, which one cubin
@@ -1199,18 +1199,18 @@ inline constexpr nk_capability_t geospatial_nvidia_capabilities_k = nk_cap_cuda_
 
 /* The face's members reading the kit, defined in @c src/geospatial/vram_variants_nvidia.cu. */
 extern template struct us::geospatial::vram_nvidia_index<
-    typename us::geospatial::geospatial_ladder<geospatial_nvidia_capabilities_k>::kit_t, u32_t,
+    typename us::geospatial::geospatial_ladder<geospatial_nvidia_capabilities_k>::kit_t, util::u32_t,
     geospatial_nvidia_fatbin_t>;
 
 /** Builds one shard of the geospatial face on a CUDA device. */
 struct geospatial_vram_nvidia_build_t {
     using face_t = us::geospatial::vram_nvidia_index<
-        typename us::geospatial::geospatial_ladder<geospatial_nvidia_capabilities_k>::kit_t, u32_t,
+        typename us::geospatial::geospatial_ladder<geospatial_nvidia_capabilities_k>::kit_t, util::u32_t,
         geospatial_nvidia_fatbin_t>;
 
     std::unique_ptr<face_t> operator()(int device) const noexcept {
-        return std::unique_ptr<face_t> {new (std::nothrow)
-                                            face_t(cuda_virtual_memory_allocator<byte_t> {gpu_drivers().cuda, device})};
+        return std::unique_ptr<face_t> {
+            new (std::nothrow) face_t(util::cuda_virtual_memory_allocator<util::byte_t> {gpu_drivers().cuda, device})};
     }
 };
 
@@ -1222,9 +1222,9 @@ struct geospatial_vram_nvidia_build_t {
  *  shards placed there. */
 template <gpu_class_t gpu_class_>
 struct geospatial_vram_nvidia_variant {
-    using executor_t = cuda_executor_t;
+    using executor_t = util::cuda_executor_t;
     using face_t = geospatial_vram_nvidia_build_t::face_t;
-    using index_t = basic::vram_nvidia_indexes<face_t, util::uuid128_t, geospatial_vram_nvidia_build_t, f64_t>;
+    using index_t = basic::vram_nvidia_indexes<face_t, util::uuid128_t, geospatial_vram_nvidia_build_t, util::f64_t>;
     using refine_plan_t = index_t::refine_plan_t;
     using value_t = us::geospatial::earth_observation_t;
     using node_id_t = face_t::node_id_t;
@@ -1235,7 +1235,8 @@ struct geospatial_vram_nvidia_variant {
     /** Holds no shard until the handle places it on CUDA device @p device, where the judging
      *  kernel and the terrain load. */
     geospatial_vram_nvidia_variant(int device, geospatial_geometry_t const&) noexcept
-        : index(forkunion_allocator_t {no_memory_domain_k}, geospatial_vram_nvidia_build_t {}), device(device) {}
+        : index(util::forkunion_allocator_t {util::no_memory_domain_k}, geospatial_vram_nvidia_build_t {}),
+          device(device) {}
 
     geospatial_geometry_t geometry;
 
@@ -1248,55 +1249,58 @@ struct geospatial_vram_nvidia_variant {
 
     /** The terrain's heights and its pack on the index's device, where the judging kernel reads
      *  them; empty for none. */
-    cuda_unique_ptr<f32_t> device_heights;
-    cuda_unique_ptr<byte_t> device_terrain_pack;
+    util::cuda_unique_ptr<util::f32_t> device_heights;
+    util::cuda_unique_ptr<util::byte_t> device_terrain_pack;
 
     /** The largest stored deviation in whole metres, raised through a reference; it widens every
      *  radius walk. */
-    u32_t largest_deviation_metres = 0;
+    util::u32_t largest_deviation_metres = 0;
 
     /** The index's fatbin, loaded once more for the kernel judging the walks' candidates, and that
      *  kernel. */
-    cuda_module_t admit_module;
-    cuda_function_handle_t admit = nullptr;
+    util::cuda_module_t admit_module;
+    util::cuda_function_handle_t admit = nullptr;
 
     /** Loads the judging kernel onto the index's device. */
-    status_t load_admit() noexcept {
-        auto [module, status] = cuda_module_t::load(gpu_drivers().cuda, device, geospatial_nvidia_fatbin_t::bytes());
+    util::status_t load_admit() noexcept {
+        auto [module, status] = util::cuda_module_t::load(gpu_drivers().cuda, device,
+                                                          geospatial_nvidia_fatbin_t::bytes());
         if (failed(status)) return status;
         admit_module = std::move(module);
-        vram_kernel_symbol_t symbol;
-        vram_kernel_symbol(symbol, "geospatial", "cuda_admit", {"cuda_admit_arguments", 1},
-                           itanium_type<us::geospatial::geospatial_ladder<geospatial_nvidia_capabilities_k>::kit_t> {},
-                           itanium_type<node_id_t> {});
+        util::vram_kernel_symbol_t symbol;
+        vram_kernel_symbol(
+            symbol, "geospatial", "cuda_admit", {"cuda_admit_arguments", 1},
+            util::itanium_type<us::geospatial::geospatial_ladder<geospatial_nvidia_capabilities_k>::kit_t> {},
+            util::itanium_type<node_id_t> {});
         admit = admit_module.function(symbol.text);
-        return admit ? status_code_t::success_k : status_code_t::device_k;
+        return admit ? util::status_code_t::success_k : util::status_code_t::device_k;
     }
 
-    status_t reserve(reserve_capacity_t capacity) noexcept {
+    util::status_t reserve(reserve_capacity_t capacity) noexcept {
         return vram_nvidia_reserve(index, capacity.entries, geometry.connectivity, capacity.entries * sizeof(value_t));
     }
 
     /** Adopts @p grid on the host and copies its heights and pack to the index's device, whose
      *  kernels must be loaded; refuses a grid filled by a callback, which no device can call. */
-    status_t adopt_terrain(us::geospatial::terrain_t const& grid) noexcept {
-        if (grid.callback) return status_code_t::unsupported_k;
-        if (status_t const adopted = host_terrain.adopt_terrain(grid); failed(adopted)) return adopted;
-        if (!host_terrain.has_terrain()) return status_code_t::success_k;
+    util::status_t adopt_terrain(us::geospatial::terrain_t const& grid) noexcept {
+        if (grid.callback) return util::status_code_t::unsupported_k;
+        if (util::status_t const adopted = host_terrain.adopt_terrain(grid); failed(adopted)) return adopted;
+        if (!host_terrain.has_terrain()) return util::status_code_t::success_k;
         us::geospatial::terrain_t const& host_grid = host_terrain.grid;
         std::size_t const heights_bytes = (host_grid.rows - 1) * host_grid.heights_stride +
-                                          host_grid.columns * sizeof(f32_t);
+                                          host_grid.columns * sizeof(util::f32_t);
         std::size_t const pack_bytes = host_terrain.terrain_pack.size();
-        cuda_api_t const& api = gpu_drivers().cuda;
-        if (cuda_set_device(api, device) != cuda_success_k) return status_code_t::device_k;
-        device_heights = cuda_make_unique(cuda_device_allocator<f32_t> {api},
-                                          divide_round_up(heights_bytes, sizeof(f32_t)));
-        device_terrain_pack = cuda_make_unique(cuda_device_allocator_t {api}, pack_bytes);
-        if (!device_heights || !device_terrain_pack) return status_code_t::out_of_memory_k;
-        if (cuda_copy(api, device_heights.get(), host_grid.heights, heights_bytes) != cuda_success_k ||
-            cuda_copy(api, device_terrain_pack.get(), host_terrain.terrain_pack.data(), pack_bytes) != cuda_success_k)
-            return status_code_t::device_k;
-        return status_code_t::success_k;
+        util::cuda_api_t const& api = gpu_drivers().cuda;
+        if (cuda_set_device(api, device) != util::cuda_success_k) return util::status_code_t::device_k;
+        device_heights = cuda_make_unique(util::cuda_device_allocator<util::f32_t> {api},
+                                          util::divide_round_up(heights_bytes, sizeof(util::f32_t)));
+        device_terrain_pack = cuda_make_unique(util::cuda_device_allocator_t {api}, pack_bytes);
+        if (!device_heights || !device_terrain_pack) return util::status_code_t::out_of_memory_k;
+        if (cuda_copy(api, device_heights.get(), host_grid.heights, heights_bytes) != util::cuda_success_k ||
+            cuda_copy(api, device_terrain_pack.get(), host_terrain.terrain_pack.data(), pack_bytes) !=
+                util::cuda_success_k)
+            return util::status_code_t::device_k;
+        return util::status_code_t::success_k;
     }
 
     /** Whether a terrain was adopted, which lines of sight need. */
@@ -1304,38 +1308,40 @@ struct geospatial_vram_nvidia_variant {
 
     /** Bytes the terrain holds: its pack on the host, and its heights and pack on the device. */
     std::size_t terrain_memory_usage() const noexcept {
-        return host_terrain.terrain_memory_usage() + device_heights.get_deleter().count * sizeof(f32_t) +
+        return host_terrain.terrain_memory_usage() + device_heights.get_deleter().count * sizeof(util::f32_t) +
                device_terrain_pack.get_deleter().count;
     }
 
-    expected<traversal_stats_t> insert(usearch_keys_view_t keys, observations_view_t observations,
-                                       insert_config_t config, executor_t& executor, progress_ticks_t& ticks) noexcept;
+    util::expected<traversal_stats_t> insert(usearch_keys_view_t keys, observations_view_t observations,
+                                             insert_config_t config, executor_t& executor,
+                                             progress_ticks_t& ticks) noexcept;
 
     /** Walks every query to candidates of the call's breadth, then keeps the first wanted entries
      *  of all of them that the relation and tolerance admit, on the device too. The queries encode
      *  into @p pages, the call arena's host pages, and the matches land in @p outputs there. A
      *  device walk takes no host predicate. */
-    expected<traversal_stats_t> search(geospatial_queries_t query_batch, matches_outputs_t& outputs,
-                                       search_config_t search, growing_arena<forkunion_allocator_t>& pages,
-                                       executor_t& executor, progress_ticks_t& ticks) noexcept;
+    util::expected<traversal_stats_t> search(geospatial_queries_t query_batch, matches_outputs_t& outputs,
+                                             search_config_t search,
+                                             util::growing_arena<util::forkunion_allocator_t>& pages,
+                                             executor_t& executor, progress_ticks_t& ticks) noexcept;
 
     /** Reports every observation the relation and tolerance admit, doubling the walks' breadth from
      *  the call's until each query's farthest candidate passes the radius the cone graph's spanner
      *  bound widens, every shard counting then writing its admitted candidates on the device,
      *  appended shard by shard into @p outputs on @p pages; an exact scan answers
      *  @c unsupported_k, and a device walk takes no host predicate. */
-    expected<traversal_stats_t> within(geospatial_queries_t query_batch, within_outputs_t& outputs,
-                                       search_config_t search, predicate_t const& predicate,
-                                       growing_arena<forkunion_allocator_t>& pages, executor_t& executor,
-                                       progress_ticks_t& ticks) noexcept;
+    util::expected<traversal_stats_t> within(geospatial_queries_t query_batch, within_outputs_t& outputs,
+                                             search_config_t search, predicate_t const& predicate,
+                                             util::growing_arena<util::forkunion_allocator_t>& pages,
+                                             executor_t& executor, progress_ticks_t& ticks) noexcept;
 
     /** Writes the observations as the RAM variants write them: a lone live shard's monolith, or one
      *  per live shard beside the manifest the path names. */
-    status_t save(std::string_view path, executor_t& executor, progress_ticks_t& ticks) noexcept {
+    util::status_t save(std::string_view path, executor_t& executor, progress_ticks_t& ticks) noexcept {
         std::array<char, 24> connectivity_text;
-        std::array<safegraphs_custom_field_t, 1> const fields {
+        std::array<util::safegraphs_custom_field_t, 1> const fields {
             {{"connectivity", decimal_of(geometry.connectivity, connectivity_text)}}};
-        save_config_t config;
+        util::save_config_t config;
         config.provenance = fields;
         return vram_nvidia_save(index, path, us::geospatial::earth_observation_codec_t {}, config, token_of(geometry),
                                 executor, ticks);
@@ -1344,40 +1350,41 @@ struct geospatial_vram_nvidia_variant {
     /** Reads a checkpoint any residency wrote, at a path or in host memory, into the placed shards,
      *  one part per shard. */
     template <typename checkpoint_type_>
-    status_t load(checkpoint_type_ checkpoint, executor_t& executor, progress_ticks_t& ticks) noexcept {
-        if (status_t const loaded = index.load(checkpoint, us::geospatial::earth_observation_codec_t {}, executor,
-                                               load_config_t {}, static_cast<connectivity_t>(geometry.connectivity),
-                                               ticks);
+    util::status_t load(checkpoint_type_ checkpoint, executor_t& executor, progress_ticks_t& ticks) noexcept {
+        if (util::status_t const loaded = index.load(checkpoint, us::geospatial::earth_observation_codec_t {}, executor,
+                                                     util::load_config_t {},
+                                                     static_cast<util::connectivity_t>(geometry.connectivity), ticks);
             failed(loaded))
             return loaded;
         // The observations went straight to the device, so their deviations come back once.
-        growing_buffer<value_t, forkunion_allocator_t> stored {forkunion_allocator_t {no_memory_domain_k}};
+        util::growing_buffer<value_t, util::forkunion_allocator_t> stored {
+            util::forkunion_allocator_t {util::no_memory_domain_k}};
         for (face_t const& shard : index.live_shards()) {
-            if (failed(stored.resize_uninitialized(shard.size()))) return status_code_t::out_of_memory_k;
+            if (failed(stored.resize_uninitialized(shard.size()))) return util::status_code_t::out_of_memory_k;
             if (stored.empty()) continue;
             if (cuda_copy(shard.api(), stored.data(), shard.storage().values, stored.size() * sizeof(value_t)) !=
-                cuda_success_k)
-                return status_code_t::device_k;
+                util::cuda_success_k)
+                return util::status_code_t::device_k;
             for (value_t const& value : stored)
-                raise_to<fu::standard_atomic_ref>(largest_deviation_metres, u32_t {value.deviation_metres});
+                raise_to<fu::standard_atomic_ref>(largest_deviation_metres, util::u32_t {value.deviation_metres});
         }
-        return status_code_t::success_k;
+        return util::status_code_t::success_k;
     }
 
     /** Empties the index and its largest deviation, retiring every shard behind a fresh shard
      *  generation on the same devices. */
-    status_t clear() noexcept {
-        status_t const cleared = index.clear();
+    util::status_t clear() noexcept {
+        util::status_t const cleared = index.clear();
         if (succeeded(cleared))
-            fu::standard_atomic_ref<u32_t>(largest_deviation_metres).store(0, std::memory_order_relaxed);
+            fu::standard_atomic_ref<util::u32_t>(largest_deviation_metres).store(0, std::memory_order_relaxed);
         return cleared;
     }
 
     /** Widens the largest deviation to an emptied @p source 's, whose nodes this index holds. */
     void count_packed_source(geospatial_vram_nvidia_variant const& source) noexcept {
-        raise_to<fu::standard_atomic_ref>(
-            largest_deviation_metres,
-            fu::standard_atomic_ref<u32_t const>(source.largest_deviation_metres).load(std::memory_order_relaxed));
+        raise_to<fu::standard_atomic_ref>(largest_deviation_metres,
+                                          fu::standard_atomic_ref<util::u32_t const>(source.largest_deviation_metres)
+                                              .load(std::memory_order_relaxed));
     }
 
     /** Bounds the deviation of the part @p target now holds by this index's, which held it. */
@@ -1386,9 +1393,9 @@ struct geospatial_vram_nvidia_variant {
     }
 
     /** Sampling answers @c unsupported_k until the shards sample on their devices. */
-    expected<sample_result_t> sample(basic_sample_inputs_t, basic_sample_outputs_t, sample_config_t,
-                                     executor_t&) noexcept {
-        return {{}, status_code_t::unsupported_k};
+    util::expected<util::sample_result_t> sample(basic_sample_inputs_t, basic_sample_outputs_t, util::sample_config_t,
+                                                 executor_t&) noexcept {
+        return {{}, util::status_code_t::unsupported_k};
     }
 
   private:
@@ -1417,11 +1424,12 @@ struct geospatial_vram_nvidia_variant {
 
     /** The @p count observations encoded on @p pages as staged entries, standing those without an
      *  altitude on the terrain. */
-    expected<tape_view<byte_t const>> encode_(usearch_geospatial_observation_t const* observations, std::size_t count,
-                                              growing_arena<forkunion_allocator_t>& pages) const noexcept {
+    util::expected<util::tape_view<util::byte_t const>> encode_(
+        usearch_geospatial_observation_t const* observations, std::size_t count,
+        util::growing_arena<util::forkunion_allocator_t>& pages) const noexcept {
         value_t* const values = carve<value_t>(pages, count);
         std::size_t* const offsets = carve<std::size_t>(pages, count + 1);
-        if (!values || !offsets) return {{}, status_code_t::out_of_memory_k};
+        if (!values || !offsets) return {{}, util::status_code_t::out_of_memory_k};
         // An in-place grid never grows the sight's buffers, which serve filled grids alone.
         line_of_sight_buffers_t sight {thread_allocator_t {}};
         for (std::size_t offset = 0; offset != count; ++offset) {
@@ -1430,236 +1438,251 @@ struct geospatial_vram_nvidia_variant {
             offsets[offset] = offset * sizeof(value_t);
         }
         offsets[count] = count * sizeof(value_t);
-        return {{reinterpret_cast<byte_t const*>(values), {offsets, count + 1}}, status_code_t::success_k};
+        return {{reinterpret_cast<util::byte_t const*>(values), {offsets, count + 1}}, util::status_code_t::success_k};
     }
 };
 
 template <gpu_class_t gpu_class_>
-expected<traversal_stats_t> geospatial_vram_nvidia_variant<gpu_class_>::insert(usearch_keys_view_t keys,
-                                                                               observations_view_t observations,
-                                                                               insert_config_t config,
-                                                                               executor_t& executor,
-                                                                               progress_ticks_t& ticks) noexcept {
+util::expected<traversal_stats_t> geospatial_vram_nvidia_variant<gpu_class_>::insert(usearch_keys_view_t keys,
+                                                                                     observations_view_t observations,
+                                                                                     insert_config_t config,
+                                                                                     executor_t& executor,
+                                                                                     progress_ticks_t& ticks) noexcept {
     std::size_t const count = observations.size();
     // The batch's own pages, since batches routed to disjoint shards may land at once.
-    growing_arena<forkunion_allocator_t> staging {forkunion_allocator_t {no_memory_domain_k}};
+    util::growing_arena<util::forkunion_allocator_t> staging {util::forkunion_allocator_t {util::no_memory_domain_k}};
     auto const [entries, encode_status] = encode_(observations.data(), count, staging);
     if (failed(encode_status)) return {{}, encode_status};
-    expected<traversal_stats_t> const inserted = vram_nvidia_insert(index, keys, entries, geometry.connectivity,
-                                                                    config.expansion_factor, ticks, executor);
-    if (failed(inserted.status)) return inserted;
+    auto const [inserted, insert_status] = vram_nvidia_insert(index, keys, entries, geometry.connectivity,
+                                                              config.expansion_factor, ticks, executor);
+    if (failed(insert_status)) return {inserted, insert_status};
     value_t const* const values = reinterpret_cast<value_t const*>(entries.elements);
     for (std::size_t entry = 0; entry != count; ++entry)
-        raise_to<fu::standard_atomic_ref>(largest_deviation_metres, u32_t {values[entry].deviation_metres});
-    return inserted;
+        raise_to<fu::standard_atomic_ref>(largest_deviation_metres, util::u32_t {values[entry].deviation_metres});
+    return {inserted, insert_status};
 }
 
 template <gpu_class_t gpu_class_>
-expected<traversal_stats_t> geospatial_vram_nvidia_variant<gpu_class_>::search(
+util::expected<traversal_stats_t> geospatial_vram_nvidia_variant<gpu_class_>::search(
     geospatial_queries_t query_batch, matches_outputs_t& outputs, search_config_t search,
-    growing_arena<forkunion_allocator_t>& pages, executor_t& executor, progress_ticks_t& ticks) noexcept {
+    util::growing_arena<util::forkunion_allocator_t>& pages, executor_t& executor, progress_ticks_t& ticks) noexcept {
     std::size_t const count = query_batch.observations.size(), wanted = outputs.wanted,
                       expansion = search.expansion_factor;
     if (!wanted) {
         for (std::size_t query = 0; query != count; ++query) outputs.counts[query] = 0;
-        return {{}, status_code_t::success_k};
+        return {{}, util::status_code_t::success_k};
     }
     auto const [queries, encode_status] = encode_(query_batch.observations.data(), count, pages);
     if (failed(encode_status)) return {{}, encode_status};
     // Candidates fewer than the ranking they fill would short every query.
-    std::size_t const candidates_count = max_of(expansion ? expansion : default_expansion_factor(geometry.connectivity),
-                                                wanted);
-    face_t::search_config_t const config {static_cast<u32_t>(candidates_count), static_cast<u32_t>(candidates_count)};
+    std::size_t const candidates_count = util::max_of(
+        expansion ? expansion : util::default_expansion_factor(geometry.connectivity), wanted);
+    face_t::search_config_t const config {static_cast<util::u32_t>(candidates_count),
+                                          static_cast<util::u32_t>(candidates_count)};
 
     // Past the walk's own scratch: the queries, the judged metres and counts, the candidates and
     // the judged IDs, each column its own aligned carve.
     std::size_t const listed_count = count * candidates_count, judged = count * wanted;
-    auto const aligned = [](std::size_t bytes) noexcept { return round_up_to_multiple(bytes, default_alignment_k); };
-    std::size_t const judging_bytes = aligned(count * sizeof(value_t)) + aligned(judged * sizeof(f64_t)) +
-                                      aligned(count * sizeof(u64_t)) + aligned(listed_count * sizeof(node_id_t)) +
-                                      aligned(listed_count * sizeof(f32_t)) + aligned(judged * sizeof(node_id_t));
+    auto const aligned = [](std::size_t bytes) noexcept {
+        return util::round_up_to_multiple(bytes, util::default_alignment_k);
+    };
+    std::size_t const judging_bytes = aligned(count * sizeof(value_t)) + aligned(judged * sizeof(util::f64_t)) +
+                                      aligned(count * sizeof(util::u64_t)) + aligned(listed_count * sizeof(node_id_t)) +
+                                      aligned(listed_count * sizeof(util::f32_t)) + aligned(judged * sizeof(node_id_t));
     // Each shard judges its own candidates on its stream into the sharded index's outputs, which
     // merges them by distance.
-    auto judge = [&](face_t& face, nk::matrix_span<node_id_t> host_ids, nk::matrix_span<f64_t> host_metres,
+    auto judge = [&](face_t& face, nk::matrix_span<node_id_t> host_ids, nk::matrix_span<util::f64_t> host_metres,
                      std::span<std::size_t> host_counts, face_t::traversal_context_t& context,
-                     std::size_t) noexcept -> status_t {
+                     std::size_t) noexcept -> util::status_t {
         // The judging kernel and the terrain load on one device, which every shard it judges
         // shares.
-        if (face.device_specs().ordinal != device) return status_code_t::unsupported_k;
+        if (face.device_specs().ordinal != device) return util::status_code_t::unsupported_k;
         face_t::traversal_context_t::allocator_t const allocator = context.allocator();
-        value_t* const device_queries = cuda_arena_allocator<value_t>(allocator).allocate(count);
-        f64_t* const matched_metres = cuda_arena_allocator<f64_t>(allocator).allocate(judged);
-        u64_t* const matched_counts = cuda_arena_allocator<u64_t>(allocator).allocate(count);
-        node_id_t* const candidate_ids = cuda_arena_allocator<node_id_t>(allocator).allocate(listed_count);
-        f32_t* const candidate_distances = cuda_arena_allocator<f32_t>(allocator).allocate(listed_count);
-        node_id_t* const matched_ids = cuda_arena_allocator<node_id_t>(allocator).allocate(judged);
+        value_t* const device_queries = util::cuda_arena_allocator<value_t>(allocator).allocate(count);
+        util::f64_t* const matched_metres = util::cuda_arena_allocator<util::f64_t>(allocator).allocate(judged);
+        util::u64_t* const matched_counts = util::cuda_arena_allocator<util::u64_t>(allocator).allocate(count);
+        node_id_t* const candidate_ids = util::cuda_arena_allocator<node_id_t>(allocator).allocate(listed_count);
+        util::f32_t* const candidate_distances = util::cuda_arena_allocator<util::f32_t>(allocator).allocate(
+            listed_count);
+        node_id_t* const matched_ids = util::cuda_arena_allocator<node_id_t>(allocator).allocate(judged);
         if (!device_queries || !matched_metres || !matched_counts || !candidate_ids || !candidate_distances ||
             !matched_ids)
-            return status_code_t::out_of_memory_k;
+            return util::status_code_t::out_of_memory_k;
         us::geospatial::cuda_admit_arguments<node_id_t> admitting = admitting_(face, query_batch);
         admitting.queries = device_queries;
         admitting.candidate_ids = candidate_ids;
         admitting.matched_ids = matched_ids;
         admitting.matched_metres = matched_metres;
         admitting.matched_counts = matched_counts;
-        admitting.queries_count = static_cast<u32_t>(count);
-        admitting.candidates_count = static_cast<u32_t>(candidates_count);
-        admitting.wanted = static_cast<u32_t>(wanted);
-        cuda_api_t const& api = admit_module.api();
+        admitting.queries_count = static_cast<util::u32_t>(count);
+        admitting.candidates_count = static_cast<util::u32_t>(candidates_count);
+        admitting.wanted = static_cast<util::u32_t>(wanted);
+        util::cuda_api_t const& api = admit_module.api();
         if (cuda_copy_async(api, device_queries, queries.elements, count * sizeof(value_t), context.stream()) !=
-            cuda_success_k)
-            return status_code_t::device_k;
-        if (status_t const searched = face.search(queries, {candidate_ids, {count, candidates_count}},
-                                                  {candidate_distances, {count, candidates_count}}, config, context)
-                                          .status;
+            util::cuda_success_k)
+            return util::status_code_t::device_k;
+        if (util::status_t const searched = face.search(queries, {candidate_ids, {count, candidates_count}},
+                                                        {candidate_distances, {count, candidates_count}}, config,
+                                                        context)
+                                                .status;
             failed(searched))
             return searched;
-        u32_t const blocks = static_cast<u32_t>(
-            min_of<std::size_t>(divide_round_up<std::size_t>(count, vram_warps_per_block_k),
-                                std::size_t {face.device_specs().multiprocessor_count} * 8));
-        if (failed(cuda_launch(api, admit, blocks, vram_warps_per_block_k * 32, 0, context.stream(),
-                               cuda_overlap_t::serialized_k, admitting)) ||
+        util::u32_t const blocks = static_cast<util::u32_t>(
+            util::min_of<std::size_t>(util::divide_round_up<std::size_t>(count, util::vram_warps_per_block_k),
+                                      std::size_t {face.device_specs().multiprocessor_count} * 8));
+        if (failed(cuda_launch(api, admit, blocks, util::vram_warps_per_block_k * 32, 0, context.stream(),
+                               util::cuda_overlap_t::serialized_k, admitting)) ||
             cuda_copy_async(api, host_ids.data(), matched_ids, judged * sizeof(node_id_t), context.stream()) !=
-                cuda_success_k ||
-            cuda_copy_async(api, host_metres.data(), matched_metres, judged * sizeof(f64_t), context.stream()) !=
-                cuda_success_k ||
-            cuda_copy_async(api, host_counts.data(), matched_counts, count * sizeof(u64_t), context.stream()) !=
-                cuda_success_k)
-            return status_code_t::device_k;
+                util::cuda_success_k ||
+            cuda_copy_async(api, host_metres.data(), matched_metres, judged * sizeof(util::f64_t), context.stream()) !=
+                util::cuda_success_k ||
+            cuda_copy_async(api, host_counts.data(), matched_counts, count * sizeof(util::u64_t), context.stream()) !=
+                util::cuda_success_k)
+            return util::status_code_t::device_k;
         return context.wait();
     };
     auto const [found, status] = index.search_every_shard(
         count, executor, judge,
         nk::matrix_span<util::uuid128_t> {reinterpret_cast<util::uuid128_t*>(outputs.keys), count, wanted},
-        nk::matrix_span<f64_t> {outputs.scores, count, wanted}, std::span<std::size_t> {outputs.counts, count}, queries,
-        config, judging_bytes);
+        nk::matrix_span<util::f64_t> {outputs.scores, count, wanted}, std::span<std::size_t> {outputs.counts, count},
+        queries, config, judging_bytes);
     if (failed(status)) return {{}, status};
-    [[maybe_unused]] continuation_t const heard = ticks(count - 1);
+    [[maybe_unused]] util::continuation_t const heard = ticks(count - 1);
     return {{.computed_distances = found.computed_distances,
              .visited_members = found.visited_members,
              .restarts = found.restarts},
-            status_code_t::success_k};
+            util::status_code_t::success_k};
 }
 
 template <gpu_class_t gpu_class_>
-expected<traversal_stats_t> geospatial_vram_nvidia_variant<gpu_class_>::within(
+util::expected<traversal_stats_t> geospatial_vram_nvidia_variant<gpu_class_>::within(
     geospatial_queries_t query_batch, within_outputs_t& outputs, search_config_t search, predicate_t const&,
-    growing_arena<forkunion_allocator_t>& pages, executor_t& executor, progress_ticks_t& ticks) noexcept {
+    util::growing_arena<util::forkunion_allocator_t>& pages, executor_t& executor, progress_ticks_t& ticks) noexcept {
     std::size_t const count = query_batch.observations.size(), shards = index.live_shards_count();
-    if (search.traversal == traversal_t::scan_k) return {{}, status_code_t::unsupported_k};
+    if (search.traversal == util::traversal_t::scan_k) return {{}, util::status_code_t::unsupported_k};
     std::size_t* const offsets = carve<std::size_t>(pages, count + 1);
-    if (!offsets) return {{}, status_code_t::out_of_memory_k};
+    if (!offsets) return {{}, util::status_code_t::out_of_memory_k};
     for (std::size_t query = 0; query != count + 1; ++query) offsets[query] = 0;
     outputs = {{nullptr, nullptr, offsets}, 0};
-    if (!count || !shards) return {{}, status_code_t::success_k};
+    if (!count || !shards) return {{}, util::status_code_t::success_k};
     auto const [queries, encode_status] = encode_(query_batch.observations.data(), count, pages);
     if (failed(encode_status)) return {{}, encode_status};
     // The squared chord each query's candidates must pass, the walk's reach as the RAM variants
     // take it, widened by the cone graph's spanner bound.
-    f64_t* const covering_chords = carve<f64_t>(pages, count);
-    if (!covering_chords) return {{}, status_code_t::out_of_memory_k};
+    util::f64_t* const covering_chords = carve<util::f64_t>(pages, count);
+    if (!covering_chords) return {{}, util::status_code_t::out_of_memory_k};
     value_t const* const encoded = reinterpret_cast<value_t const*>(queries.elements);
-    f64_t const largest_deviation =
-        fu::standard_atomic_ref<u32_t>(largest_deviation_metres).load(std::memory_order_relaxed);
+    util::f64_t const largest_deviation =
+        fu::standard_atomic_ref<util::u32_t>(largest_deviation_metres).load(std::memory_order_relaxed);
     for (std::size_t query = 0; query != count; ++query) {
-        f64_t const query_deviation = encoded[query].deviation_metres;
-        f64_t const deviations = std::sqrt(query_deviation * query_deviation + largest_deviation * largest_deviation);
-        f64_t const reach = std::ceil((query_batch.tolerance.metres + 3 * deviations) *
-                                      us::geospatial::centimetres_per_metre_k);
-        f64_t const widened = reach * (1.0 + 2.0 * us::geospatial::cone_graph_stretch_k);
+        util::f64_t const query_deviation = encoded[query].deviation_metres;
+        util::f64_t const deviations = std::sqrt(query_deviation * query_deviation +
+                                                 largest_deviation * largest_deviation);
+        util::f64_t const reach = std::ceil((query_batch.tolerance.metres + 3 * deviations) *
+                                            us::geospatial::centimetres_per_metre_k);
+        util::f64_t const widened = reach * (1.0 + 2.0 * us::geospatial::cone_graph_stretch_k);
         covering_chords[query] = widened * widened;
     }
     // The fan-out's own rankings stay one entry wide and empty, since every shard keeps its run.
     util::uuid128_t* const unused_keys = carve<util::uuid128_t>(pages, count);
-    f64_t* const unused_scores = carve<f64_t>(pages, count);
+    util::f64_t* const unused_scores = carve<util::f64_t>(pages, count);
     std::size_t* const unused_counts = carve<std::size_t>(pages, count);
-    if (!unused_keys || !unused_scores || !unused_counts) return {{}, status_code_t::out_of_memory_k};
-    auto const aligned = [](std::size_t bytes) noexcept { return round_up_to_multiple(bytes, default_alignment_k); };
+    if (!unused_keys || !unused_scores || !unused_counts) return {{}, util::status_code_t::out_of_memory_k};
+    auto const aligned = [](std::size_t bytes) noexcept {
+        return util::round_up_to_multiple(bytes, util::default_alignment_k);
+    };
     std::size_t const published = index.size();
     std::size_t breadth = search.expansion_factor ? search.expansion_factor
-                                                  : default_expansion_factor(geometry.connectivity);
+                                                  : util::default_expansion_factor(geometry.connectivity);
     std::size_t listed_count = 0, walked = 0;
-    u64_t* runs_offsets = nullptr;
+    util::u64_t* runs_offsets = nullptr;
     node_id_t* runs_ids = nullptr;
-    f64_t* runs_metres = nullptr;
+    util::f64_t* runs_metres = nullptr;
     face_t const** runs_faces = nullptr;
     traversal_stats_t stats;
-    for (;; breadth = min_of(breadth * 2, published)) {
-        face_t::search_config_t const config {static_cast<u32_t>(breadth), static_cast<u32_t>(breadth)};
+    for (;; breadth = util::min_of(breadth * 2, published)) {
+        face_t::search_config_t const config {static_cast<util::u32_t>(breadth), static_cast<util::u32_t>(breadth)};
         // Each shard's run comes back whole: its offsets from zero, then the IDs and metres they
         // span, at most a breadth per query; the shard is remembered to resolve its IDs into keys.
         listed_count = count * breadth;
         walked = 0;
-        runs_offsets = carve<u64_t>(pages, shards * (count + 1));
+        runs_offsets = carve<util::u64_t>(pages, shards * (count + 1));
         runs_ids = carve<node_id_t>(pages, shards * listed_count);
-        runs_metres = carve<f64_t>(pages, shards * listed_count);
+        runs_metres = carve<util::f64_t>(pages, shards * listed_count);
         runs_faces = carve<face_t const*>(pages, shards);
-        f32_t* const runs_distances = carve<f32_t>(pages, shards * listed_count);
+        util::f32_t* const runs_distances = carve<util::f32_t>(pages, shards * listed_count);
         if (!runs_offsets || !runs_ids || !runs_metres || !runs_faces || !runs_distances)
-            return {{}, status_code_t::out_of_memory_k};
-        std::size_t const judging_bytes =
-            aligned(count * sizeof(value_t)) + aligned(count * sizeof(u64_t)) + aligned((count + 1) * sizeof(u64_t)) +
-            aligned(listed_count * sizeof(node_id_t)) + aligned(listed_count * sizeof(f32_t)) +
-            aligned(listed_count * sizeof(node_id_t)) + aligned(listed_count * sizeof(f64_t));
-        auto judge = [&](face_t& face, nk::matrix_span<node_id_t>, nk::matrix_span<f64_t>,
+            return {{}, util::status_code_t::out_of_memory_k};
+        std::size_t const judging_bytes = aligned(count * sizeof(value_t)) + aligned(count * sizeof(util::u64_t)) +
+                                          aligned((count + 1) * sizeof(util::u64_t)) +
+                                          aligned(listed_count * sizeof(node_id_t)) +
+                                          aligned(listed_count * sizeof(util::f32_t)) +
+                                          aligned(listed_count * sizeof(node_id_t)) +
+                                          aligned(listed_count * sizeof(util::f64_t));
+        auto judge = [&](face_t& face, nk::matrix_span<node_id_t>, nk::matrix_span<util::f64_t>,
                          std::span<std::size_t> host_counts, face_t::traversal_context_t& context,
-                         std::size_t) noexcept -> status_t {
+                         std::size_t) noexcept -> util::status_t {
             for (std::size_t& counted : host_counts) counted = 0;
-            if (face.device_specs().ordinal != device) return status_code_t::unsupported_k;
+            if (face.device_specs().ordinal != device) return util::status_code_t::unsupported_k;
             std::size_t const run = walked++;
             runs_faces[run] = &face;
-            u64_t* const run_offsets = runs_offsets + run * (count + 1);
+            util::u64_t* const run_offsets = runs_offsets + run * (count + 1);
             face_t::traversal_context_t::allocator_t const allocator = context.allocator();
-            value_t* const device_queries = cuda_arena_allocator<value_t>(allocator).allocate(count);
-            u64_t* const matched_counts = cuda_arena_allocator<u64_t>(allocator).allocate(count);
-            u64_t* const matched_offsets = cuda_arena_allocator<u64_t>(allocator).allocate(count + 1);
-            node_id_t* const candidate_ids = cuda_arena_allocator<node_id_t>(allocator).allocate(listed_count);
-            f32_t* const candidate_distances = cuda_arena_allocator<f32_t>(allocator).allocate(listed_count);
-            node_id_t* const matched_ids = cuda_arena_allocator<node_id_t>(allocator).allocate(listed_count);
-            f64_t* const matched_metres = cuda_arena_allocator<f64_t>(allocator).allocate(listed_count);
+            value_t* const device_queries = util::cuda_arena_allocator<value_t>(allocator).allocate(count);
+            util::u64_t* const matched_counts = util::cuda_arena_allocator<util::u64_t>(allocator).allocate(count);
+            util::u64_t* const matched_offsets = util::cuda_arena_allocator<util::u64_t>(allocator).allocate(count + 1);
+            node_id_t* const candidate_ids = util::cuda_arena_allocator<node_id_t>(allocator).allocate(listed_count);
+            util::f32_t* const candidate_distances = util::cuda_arena_allocator<util::f32_t>(allocator).allocate(
+                listed_count);
+            node_id_t* const matched_ids = util::cuda_arena_allocator<node_id_t>(allocator).allocate(listed_count);
+            util::f64_t* const matched_metres = util::cuda_arena_allocator<util::f64_t>(allocator).allocate(
+                listed_count);
             if (!device_queries || !matched_counts || !matched_offsets || !candidate_ids || !candidate_distances ||
                 !matched_ids || !matched_metres)
-                return status_code_t::out_of_memory_k;
+                return util::status_code_t::out_of_memory_k;
             us::geospatial::cuda_admit_arguments<node_id_t> admitting = admitting_(face, query_batch);
             admitting.queries = device_queries;
             admitting.candidate_ids = candidate_ids;
-            admitting.queries_count = static_cast<u32_t>(count);
-            admitting.candidates_count = static_cast<u32_t>(breadth);
+            admitting.queries_count = static_cast<util::u32_t>(count);
+            admitting.candidates_count = static_cast<util::u32_t>(breadth);
             admitting.matched_ids = matched_ids;
             admitting.matched_metres = matched_metres;
             admitting.matched_counts = matched_counts;
             admitting.matched_offsets = matched_offsets;
-            cuda_api_t const& api = face.api();
+            util::cuda_api_t const& api = face.api();
             run_offsets[0] = 0;
             if (cuda_copy_async(api, device_queries, queries.elements, count * sizeof(value_t), context.stream()) !=
-                    cuda_success_k ||
-                cuda_copy_async(api, matched_offsets, run_offsets, sizeof(u64_t), context.stream()) != cuda_success_k)
-                return status_code_t::device_k;
-            if (status_t const searched = face.search(queries, {candidate_ids, {count, breadth}},
-                                                      {candidate_distances, {count, breadth}}, config, context)
-                                              .status;
+                    util::cuda_success_k ||
+                cuda_copy_async(api, matched_offsets, run_offsets, sizeof(util::u64_t), context.stream()) !=
+                    util::cuda_success_k)
+                return util::status_code_t::device_k;
+            if (util::status_t const searched = face.search(queries, {candidate_ids, {count, breadth}},
+                                                            {candidate_distances, {count, breadth}}, config, context)
+                                                    .status;
                 failed(searched))
                 return searched;
-            if (status_t const counted = face.launch_within_count_(admitting, context); failed(counted)) return counted;
-            if (status_t const written = face.launch_within_write_(admitting, context); failed(written)) return written;
-            if (cuda_copy_async(api, run_offsets, matched_offsets, (count + 1) * sizeof(u64_t), context.stream()) !=
-                    cuda_success_k ||
+            if (util::status_t const counted = face.launch_within_count_(admitting, context); failed(counted))
+                return counted;
+            if (util::status_t const written = face.launch_within_write_(admitting, context); failed(written))
+                return written;
+            if (cuda_copy_async(api, run_offsets, matched_offsets, (count + 1) * sizeof(util::u64_t),
+                                context.stream()) != util::cuda_success_k ||
                 cuda_copy_async(api, runs_distances + run * listed_count, candidate_distances,
-                                listed_count * sizeof(f32_t), context.stream()) != cuda_success_k)
-                return status_code_t::device_k;
-            if (status_t const waited = context.wait(); failed(waited)) return waited;
+                                listed_count * sizeof(util::f32_t), context.stream()) != util::cuda_success_k)
+                return util::status_code_t::device_k;
+            if (util::status_t const waited = context.wait(); failed(waited)) return waited;
             std::size_t const admitted = static_cast<std::size_t>(run_offsets[count]);
             if (cuda_copy_async(api, runs_ids + run * listed_count, matched_ids, admitted * sizeof(node_id_t),
-                                context.stream()) != cuda_success_k ||
-                cuda_copy_async(api, runs_metres + run * listed_count, matched_metres, admitted * sizeof(f64_t),
-                                context.stream()) != cuda_success_k)
-                return status_code_t::device_k;
+                                context.stream()) != util::cuda_success_k ||
+                cuda_copy_async(api, runs_metres + run * listed_count, matched_metres, admitted * sizeof(util::f64_t),
+                                context.stream()) != util::cuda_success_k)
+                return util::status_code_t::device_k;
             return context.wait();
         };
         auto const [found, status] = index.search_every_shard(
             count, executor, judge, nk::matrix_span<util::uuid128_t> {unused_keys, count, 1},
-            nk::matrix_span<f64_t> {unused_scores, count, 1}, std::span<std::size_t> {unused_counts, count}, queries,
-            config, judging_bytes);
+            nk::matrix_span<util::f64_t> {unused_scores, count, 1}, std::span<std::size_t> {unused_counts, count},
+            queries, config, judging_bytes);
         if (failed(status)) return {{}, status};
         stats.computed_distances += found.computed_distances;
         stats.visited_members += found.visited_members;
@@ -1682,19 +1705,19 @@ expected<traversal_stats_t> geospatial_vram_nvidia_variant<gpu_class_>::within(
     std::size_t const total = offsets[count];
     usearch_key_t* const keys = carve<usearch_key_t>(pages, total);
     usearch_distance_t* const scores = carve<usearch_distance_t>(pages, total);
-    if (total && (!keys || !scores)) return {{}, status_code_t::out_of_memory_k};
+    if (total && (!keys || !scores)) return {{}, util::status_code_t::out_of_memory_k};
     for (std::size_t query = 0, slot = 0; query != count; ++query)
         for (std::size_t run = 0; run != walked; ++run) {
-            u64_t const* const run_offsets = runs_offsets + run * (count + 1);
-            for (u64_t match = run_offsets[query]; match != run_offsets[query + 1]; ++match, ++slot) {
+            util::u64_t const* const run_offsets = runs_offsets + run * (count + 1);
+            for (util::u64_t match = run_offsets[query]; match != run_offsets[query + 1]; ++match, ++slot) {
                 std::size_t const position = run * listed_count + static_cast<std::size_t>(match);
                 keys[slot] = std::bit_cast<usearch_key_t>(runs_faces[run]->key_of(runs_ids[position]).value);
                 scores[slot] = runs_metres[position];
             }
         }
     outputs = {{keys, scores, offsets}, total};
-    [[maybe_unused]] continuation_t const heard = ticks(count - 1);
-    return {stats, status_code_t::success_k};
+    [[maybe_unused]] util::continuation_t const heard = ticks(count - 1);
+    return {stats, util::status_code_t::success_k};
 }
 
 #endif
@@ -1706,7 +1729,7 @@ expected<traversal_stats_t> geospatial_vram_nvidia_variant<gpu_class_>::within(
 template <gpu_class_t gpu_class_>
 struct geospatial_amd_code_object {
     inline static constexpr nk_capability_t capability_k = numkong_capabilities_of(gpu_class_);
-    static bytes_view_t bytes() noexcept;
+    static util::bytes_view_t bytes() noexcept;
 };
 
 /** The capabilities the geospatial kit compiles under on AMD class @p gpu_class_ : its ceiling, as
@@ -1716,19 +1739,19 @@ inline constexpr nk_capability_t geospatial_amd_capabilities = numkong_capabilit
 
 /* The face's members reading the kit, defined in the class unit this one compiles as. */
 extern template struct us::geospatial::vram_amd_index<
-    typename us::geospatial::geospatial_ladder<geospatial_amd_capabilities<hip_class_k>>::kit_t, u32_t,
+    typename us::geospatial::geospatial_ladder<geospatial_amd_capabilities<hip_class_k>>::kit_t, util::u32_t,
     geospatial_amd_code_object<hip_class_k>>;
 
 /** Builds one shard of the geospatial face for @p gpu_class_ on a HIP device. */
 template <gpu_class_t gpu_class_>
 struct geospatial_vram_amd_build {
     using face_t = us::geospatial::vram_amd_index<
-        typename us::geospatial::geospatial_ladder<geospatial_amd_capabilities<gpu_class_>>::kit_t, u32_t,
+        typename us::geospatial::geospatial_ladder<geospatial_amd_capabilities<gpu_class_>>::kit_t, util::u32_t,
         geospatial_amd_code_object<gpu_class_>>;
 
     std::unique_ptr<face_t> operator()(int device) const noexcept {
-        return std::unique_ptr<face_t> {new (std::nothrow)
-                                            face_t(hip_virtual_memory_allocator<byte_t> {gpu_drivers().hip, device})};
+        return std::unique_ptr<face_t> {
+            new (std::nothrow) face_t(util::hip_virtual_memory_allocator<util::byte_t> {gpu_drivers().hip, device})};
     }
 };
 
@@ -1740,9 +1763,10 @@ struct geospatial_vram_amd_build {
  *  shards placed there. */
 template <gpu_class_t gpu_class_>
 struct geospatial_vram_amd_variant {
-    using executor_t = hip_executor_t;
+    using executor_t = util::hip_executor_t;
     using face_t = typename geospatial_vram_amd_build<gpu_class_>::face_t;
-    using index_t = basic::vram_amd_indexes<face_t, util::uuid128_t, geospatial_vram_amd_build<gpu_class_>, f64_t>;
+    using index_t =
+        basic::vram_amd_indexes<face_t, util::uuid128_t, geospatial_vram_amd_build<gpu_class_>, util::f64_t>;
     using refine_plan_t = typename index_t::refine_plan_t;
     using value_t = us::geospatial::earth_observation_t;
     using node_id_t = typename face_t::node_id_t;
@@ -1753,7 +1777,8 @@ struct geospatial_vram_amd_variant {
     /** Holds no shard until the handle places it on HIP device @p device, where the judging
      *  kernel and the terrain load. */
     geospatial_vram_amd_variant(int device, geospatial_geometry_t const&) noexcept
-        : index(forkunion_allocator_t {no_memory_domain_k}, geospatial_vram_amd_build<gpu_class_> {}), device(device) {}
+        : index(util::forkunion_allocator_t {util::no_memory_domain_k}, geospatial_vram_amd_build<gpu_class_> {}),
+          device(device) {}
 
     geospatial_geometry_t geometry;
 
@@ -1766,58 +1791,60 @@ struct geospatial_vram_amd_variant {
 
     /** The terrain's heights and its pack on the index's device, where the judging kernel reads
      *  them; empty for none. */
-    hip_unique_ptr<f32_t> device_heights;
-    hip_unique_ptr<byte_t> device_terrain_pack;
+    util::hip_unique_ptr<util::f32_t> device_heights;
+    util::hip_unique_ptr<util::byte_t> device_terrain_pack;
 
     /** The largest stored deviation in whole metres, raised through a reference; it widens every
      *  radius walk. */
-    u32_t largest_deviation_metres = 0;
+    util::u32_t largest_deviation_metres = 0;
 
     /** The judging kernel, and the index's code object it comes from, loaded once more on the
      *  index's device. */
-    hip_module_t admit_module;
-    hip_function_handle_t admit = nullptr;
+    util::hip_module_t admit_module;
+    util::hip_function_handle_t admit = nullptr;
 
     /** Loads the judging kernel onto the index's device. */
-    status_t load_admit() noexcept {
-        auto [module, status] = hip_module_t::load(gpu_drivers().hip, device,
-                                                   geospatial_amd_code_object<gpu_class_>::bytes());
+    util::status_t load_admit() noexcept {
+        auto [module, status] = util::hip_module_t::load(gpu_drivers().hip, device,
+                                                         geospatial_amd_code_object<gpu_class_>::bytes());
         if (failed(status)) return status;
         admit_module = std::move(module);
-        vram_kernel_symbol_t symbol;
+        util::vram_kernel_symbol_t symbol;
         vram_kernel_symbol(
             symbol, "geospatial", "amd_admit", {"hip_admit_arguments", 1},
-            itanium_type<typename us::geospatial::geospatial_ladder<geospatial_amd_capabilities<gpu_class_>>::kit_t> {},
-            itanium_type<node_id_t> {});
+            util::itanium_type<
+                typename us::geospatial::geospatial_ladder<geospatial_amd_capabilities<gpu_class_>>::kit_t> {},
+            util::itanium_type<node_id_t> {});
         admit = admit_module.function(symbol.text);
-        return admit ? status_code_t::success_k : status_code_t::device_k;
+        return admit ? util::status_code_t::success_k : util::status_code_t::device_k;
     }
 
-    status_t reserve(reserve_capacity_t capacity) noexcept {
+    util::status_t reserve(reserve_capacity_t capacity) noexcept {
         return vram_amd_reserve(index, capacity.entries, geometry.connectivity, capacity.entries * sizeof(value_t));
     }
 
     /** Adopts @p grid on the host and copies its heights and pack to the index's device, whose
      *  kernels must be loaded; refuses a grid filled by a callback, which no device can call. */
-    status_t adopt_terrain(us::geospatial::terrain_t const& grid) noexcept {
-        if (grid.callback) return status_code_t::unsupported_k;
-        if (status_t const adopted = host_terrain.adopt_terrain(grid); failed(adopted)) return adopted;
-        if (!host_terrain.has_terrain()) return status_code_t::success_k;
+    util::status_t adopt_terrain(us::geospatial::terrain_t const& grid) noexcept {
+        if (grid.callback) return util::status_code_t::unsupported_k;
+        if (util::status_t const adopted = host_terrain.adopt_terrain(grid); failed(adopted)) return adopted;
+        if (!host_terrain.has_terrain()) return util::status_code_t::success_k;
         us::geospatial::terrain_t const& host_grid = host_terrain.grid;
         std::size_t const heights_bytes = (host_grid.rows - 1) * host_grid.heights_stride +
-                                          host_grid.columns * sizeof(f32_t);
+                                          host_grid.columns * sizeof(util::f32_t);
         std::size_t const pack_bytes = host_terrain.terrain_pack.size();
-        hip_api_t const& api = gpu_drivers().hip;
-        if (hip_set_device(api, device) != hip_success_k) return status_code_t::device_k;
-        device_heights = hip_make_unique(hip_device_allocator<f32_t> {api},
-                                         divide_round_up(heights_bytes, sizeof(f32_t)));
-        device_terrain_pack = hip_make_unique(hip_device_allocator_t {api}, pack_bytes);
-        if (!device_heights || !device_terrain_pack) return status_code_t::out_of_memory_k;
-        if (api.copy(device_heights.get(), host_grid.heights, heights_bytes, hip_copy_default_k) != hip_success_k ||
-            api.copy(device_terrain_pack.get(), host_terrain.terrain_pack.data(), pack_bytes, hip_copy_default_k) !=
-                hip_success_k)
-            return status_code_t::device_k;
-        return status_code_t::success_k;
+        util::hip_api_t const& api = gpu_drivers().hip;
+        if (hip_set_device(api, device) != util::hip_success_k) return util::status_code_t::device_k;
+        device_heights = hip_make_unique(util::hip_device_allocator<util::f32_t> {api},
+                                         util::divide_round_up(heights_bytes, sizeof(util::f32_t)));
+        device_terrain_pack = hip_make_unique(util::hip_device_allocator_t {api}, pack_bytes);
+        if (!device_heights || !device_terrain_pack) return util::status_code_t::out_of_memory_k;
+        if (api.copy(device_heights.get(), host_grid.heights, heights_bytes, util::hip_copy_default_k) !=
+                util::hip_success_k ||
+            api.copy(device_terrain_pack.get(), host_terrain.terrain_pack.data(), pack_bytes,
+                     util::hip_copy_default_k) != util::hip_success_k)
+            return util::status_code_t::device_k;
+        return util::status_code_t::success_k;
     }
 
     /** Whether a terrain was adopted, which lines of sight need. */
@@ -1825,38 +1852,40 @@ struct geospatial_vram_amd_variant {
 
     /** Bytes the terrain holds: its pack on the host, and its heights and pack on the device. */
     std::size_t terrain_memory_usage() const noexcept {
-        return host_terrain.terrain_memory_usage() + device_heights.get_deleter().count * sizeof(f32_t) +
+        return host_terrain.terrain_memory_usage() + device_heights.get_deleter().count * sizeof(util::f32_t) +
                device_terrain_pack.get_deleter().count;
     }
 
-    expected<traversal_stats_t> insert(usearch_keys_view_t keys, observations_view_t observations,
-                                       insert_config_t config, executor_t& executor, progress_ticks_t& ticks) noexcept;
+    util::expected<traversal_stats_t> insert(usearch_keys_view_t keys, observations_view_t observations,
+                                             insert_config_t config, executor_t& executor,
+                                             progress_ticks_t& ticks) noexcept;
 
     /** Walks every query to candidates of the call's breadth, then keeps the first wanted entries
      *  of all of them that the relation and tolerance admit, on the device too. The queries encode
      *  into @p pages, the call arena's host pages, and the matches land in @p outputs there. A
      *  device walk takes no host predicate. */
-    expected<traversal_stats_t> search(geospatial_queries_t query_batch, matches_outputs_t& outputs,
-                                       search_config_t search, growing_arena<forkunion_allocator_t>& pages,
-                                       executor_t& executor, progress_ticks_t& ticks) noexcept;
+    util::expected<traversal_stats_t> search(geospatial_queries_t query_batch, matches_outputs_t& outputs,
+                                             search_config_t search,
+                                             util::growing_arena<util::forkunion_allocator_t>& pages,
+                                             executor_t& executor, progress_ticks_t& ticks) noexcept;
 
     /** Reports every observation the relation and tolerance admit, doubling the walks' breadth from
      *  the call's until each query's farthest candidate passes the radius the cone graph's spanner
      *  bound widens, every shard counting then writing its admitted candidates on the device,
      *  appended shard by shard into @p outputs on @p pages. An exact scan answers @c unsupported_k,
      *  and a device walk takes no host predicate. */
-    expected<traversal_stats_t> within(geospatial_queries_t query_batch, within_outputs_t& outputs,
-                                       search_config_t search, predicate_t const& predicate,
-                                       growing_arena<forkunion_allocator_t>& pages, executor_t& executor,
-                                       progress_ticks_t& ticks) noexcept;
+    util::expected<traversal_stats_t> within(geospatial_queries_t query_batch, within_outputs_t& outputs,
+                                             search_config_t search, predicate_t const& predicate,
+                                             util::growing_arena<util::forkunion_allocator_t>& pages,
+                                             executor_t& executor, progress_ticks_t& ticks) noexcept;
 
     /** Writes the observations as the RAM variants write them: a lone live shard's monolith, or one
      *  per live shard beside the manifest the path names. */
-    status_t save(std::string_view path, executor_t& executor, progress_ticks_t& ticks) noexcept {
+    util::status_t save(std::string_view path, executor_t& executor, progress_ticks_t& ticks) noexcept {
         std::array<char, 24> connectivity_text;
-        std::array<safegraphs_custom_field_t, 1> const fields {
+        std::array<util::safegraphs_custom_field_t, 1> const fields {
             {{"connectivity", decimal_of(geometry.connectivity, connectivity_text)}}};
-        save_config_t config;
+        util::save_config_t config;
         config.provenance = fields;
         return vram_amd_save(index, path, us::geospatial::earth_observation_codec_t {}, config, token_of(geometry),
                              executor, ticks);
@@ -1865,49 +1894,50 @@ struct geospatial_vram_amd_variant {
     /** Reads a checkpoint any residency wrote, at a path or in host memory, into the placed shards,
      *  one part per shard. */
     template <typename checkpoint_type_>
-    status_t load(checkpoint_type_ checkpoint, executor_t& executor, progress_ticks_t& ticks) noexcept {
-        if (status_t const loaded = index.load(checkpoint, us::geospatial::earth_observation_codec_t {}, executor,
-                                               load_config_t {}, static_cast<connectivity_t>(geometry.connectivity),
-                                               ticks);
+    util::status_t load(checkpoint_type_ checkpoint, executor_t& executor, progress_ticks_t& ticks) noexcept {
+        if (util::status_t const loaded = index.load(checkpoint, us::geospatial::earth_observation_codec_t {}, executor,
+                                                     util::load_config_t {},
+                                                     static_cast<util::connectivity_t>(geometry.connectivity), ticks);
             failed(loaded))
             return loaded;
         // The observations went straight to the device, so their deviations come back once.
-        growing_buffer<value_t, forkunion_allocator_t> stored {forkunion_allocator_t {no_memory_domain_k}};
+        util::growing_buffer<value_t, util::forkunion_allocator_t> stored {
+            util::forkunion_allocator_t {util::no_memory_domain_k}};
         for (face_t const& shard : index.live_shards()) {
-            if (failed(stored.resize_uninitialized(shard.size()))) return status_code_t::out_of_memory_k;
+            if (failed(stored.resize_uninitialized(shard.size()))) return util::status_code_t::out_of_memory_k;
             if (stored.empty()) continue;
             if (shard.api().copy(stored.data(), shard.storage().values, stored.size() * sizeof(value_t),
-                                 hip_copy_default_k) != hip_success_k)
-                return status_code_t::device_k;
+                                 util::hip_copy_default_k) != util::hip_success_k)
+                return util::status_code_t::device_k;
             for (value_t const& value : stored)
-                raise_to<fu::standard_atomic_ref>(largest_deviation_metres, u32_t {value.deviation_metres});
+                raise_to<fu::standard_atomic_ref>(largest_deviation_metres, util::u32_t {value.deviation_metres});
         }
-        return status_code_t::success_k;
+        return util::status_code_t::success_k;
     }
 
     /** Empties the index and its largest deviation, retiring every shard behind a fresh shard
      *  generation on the same devices. */
-    status_t clear() noexcept {
-        status_t const cleared = index.clear();
+    util::status_t clear() noexcept {
+        util::status_t const cleared = index.clear();
         if (succeeded(cleared))
-            fu::standard_atomic_ref<u32_t>(largest_deviation_metres).store(0, std::memory_order_relaxed);
+            fu::standard_atomic_ref<util::u32_t>(largest_deviation_metres).store(0, std::memory_order_relaxed);
         return cleared;
     }
 
     /** Widens the largest deviation to an emptied @p source 's, whose nodes this index holds. */
     void count_packed_source(geospatial_vram_amd_variant const& source) noexcept {
-        raise_to<fu::standard_atomic_ref>(
-            largest_deviation_metres,
-            fu::standard_atomic_ref<u32_t const>(source.largest_deviation_metres).load(std::memory_order_relaxed));
+        raise_to<fu::standard_atomic_ref>(largest_deviation_metres,
+                                          fu::standard_atomic_ref<util::u32_t const>(source.largest_deviation_metres)
+                                              .load(std::memory_order_relaxed));
     }
 
     /** Bounds the deviation of the part @p target now holds by this index's, which held it. */
     void count_split_target(geospatial_vram_amd_variant& target) const noexcept { target.count_packed_source(*this); }
 
     /** Sampling answers @c unsupported_k until the shards sample on their devices. */
-    expected<sample_result_t> sample(basic_sample_inputs_t, basic_sample_outputs_t, sample_config_t,
-                                     executor_t&) noexcept {
-        return {{}, status_code_t::unsupported_k};
+    util::expected<util::sample_result_t> sample(basic_sample_inputs_t, basic_sample_outputs_t, util::sample_config_t,
+                                                 executor_t&) noexcept {
+        return {{}, util::status_code_t::unsupported_k};
     }
 
   private:
@@ -1936,11 +1966,12 @@ struct geospatial_vram_amd_variant {
 
     /** The @p count observations encoded on @p pages as staged entries, standing those without an
      *  altitude on the terrain. */
-    expected<tape_view<byte_t const>> encode_(usearch_geospatial_observation_t const* observations, std::size_t count,
-                                              growing_arena<forkunion_allocator_t>& pages) const noexcept {
+    util::expected<util::tape_view<util::byte_t const>> encode_(
+        usearch_geospatial_observation_t const* observations, std::size_t count,
+        util::growing_arena<util::forkunion_allocator_t>& pages) const noexcept {
         value_t* const values = carve<value_t>(pages, count);
         std::size_t* const offsets = carve<std::size_t>(pages, count + 1);
-        if (!values || !offsets) return {{}, status_code_t::out_of_memory_k};
+        if (!values || !offsets) return {{}, util::status_code_t::out_of_memory_k};
         // An in-place grid never grows the sight's buffers, which serve filled grids alone.
         line_of_sight_buffers_t sight {thread_allocator_t {}};
         for (std::size_t offset = 0; offset != count; ++offset) {
@@ -1949,236 +1980,251 @@ struct geospatial_vram_amd_variant {
             offsets[offset] = offset * sizeof(value_t);
         }
         offsets[count] = count * sizeof(value_t);
-        return {{reinterpret_cast<byte_t const*>(values), {offsets, count + 1}}, status_code_t::success_k};
+        return {{reinterpret_cast<util::byte_t const*>(values), {offsets, count + 1}}, util::status_code_t::success_k};
     }
 };
 
 template <gpu_class_t gpu_class_>
-expected<traversal_stats_t> geospatial_vram_amd_variant<gpu_class_>::insert(usearch_keys_view_t keys,
-                                                                            observations_view_t observations,
-                                                                            insert_config_t config,
-                                                                            executor_t& executor,
-                                                                            progress_ticks_t& ticks) noexcept {
+util::expected<traversal_stats_t> geospatial_vram_amd_variant<gpu_class_>::insert(usearch_keys_view_t keys,
+                                                                                  observations_view_t observations,
+                                                                                  insert_config_t config,
+                                                                                  executor_t& executor,
+                                                                                  progress_ticks_t& ticks) noexcept {
     std::size_t const count = observations.size();
     // The batch's own pages, since batches routed to disjoint shards may land at once.
-    growing_arena<forkunion_allocator_t> staging {forkunion_allocator_t {no_memory_domain_k}};
+    util::growing_arena<util::forkunion_allocator_t> staging {util::forkunion_allocator_t {util::no_memory_domain_k}};
     auto const [entries, encode_status] = encode_(observations.data(), count, staging);
     if (failed(encode_status)) return {{}, encode_status};
-    expected<traversal_stats_t> const inserted = vram_amd_insert(index, keys, entries, geometry.connectivity,
-                                                                 config.expansion_factor, ticks, executor);
-    if (failed(inserted.status)) return inserted;
+    auto const [inserted, insert_status] = vram_amd_insert(index, keys, entries, geometry.connectivity,
+                                                           config.expansion_factor, ticks, executor);
+    if (failed(insert_status)) return {inserted, insert_status};
     value_t const* const values = reinterpret_cast<value_t const*>(entries.elements);
     for (std::size_t entry = 0; entry != count; ++entry)
-        raise_to<fu::standard_atomic_ref>(largest_deviation_metres, u32_t {values[entry].deviation_metres});
-    return inserted;
+        raise_to<fu::standard_atomic_ref>(largest_deviation_metres, util::u32_t {values[entry].deviation_metres});
+    return {inserted, insert_status};
 }
 
 template <gpu_class_t gpu_class_>
-expected<traversal_stats_t> geospatial_vram_amd_variant<gpu_class_>::search(
+util::expected<traversal_stats_t> geospatial_vram_amd_variant<gpu_class_>::search(
     geospatial_queries_t query_batch, matches_outputs_t& outputs, search_config_t search,
-    growing_arena<forkunion_allocator_t>& pages, executor_t& executor, progress_ticks_t& ticks) noexcept {
+    util::growing_arena<util::forkunion_allocator_t>& pages, executor_t& executor, progress_ticks_t& ticks) noexcept {
     std::size_t const count = query_batch.observations.size(), wanted = outputs.wanted,
                       expansion = search.expansion_factor;
     if (!wanted) {
         for (std::size_t query = 0; query != count; ++query) outputs.counts[query] = 0;
-        return {{}, status_code_t::success_k};
+        return {{}, util::status_code_t::success_k};
     }
     auto const [queries, encode_status] = encode_(query_batch.observations.data(), count, pages);
     if (failed(encode_status)) return {{}, encode_status};
     // Candidates fewer than the ranking they fill would short every query.
-    std::size_t const candidates_count = max_of(expansion ? expansion : default_expansion_factor(geometry.connectivity),
-                                                wanted);
-    typename face_t::search_config_t const config {static_cast<u32_t>(candidates_count),
-                                                   static_cast<u32_t>(candidates_count)};
+    std::size_t const candidates_count = util::max_of(
+        expansion ? expansion : util::default_expansion_factor(geometry.connectivity), wanted);
+    typename face_t::search_config_t const config {static_cast<util::u32_t>(candidates_count),
+                                                   static_cast<util::u32_t>(candidates_count)};
 
     // Past the walk's own scratch: the queries, the judged metres and counts, the candidates and
     // the judged IDs, each column its own aligned carve.
     std::size_t const listed_count = count * candidates_count, judged = count * wanted;
-    auto const aligned = [](std::size_t bytes) noexcept { return round_up_to_multiple(bytes, default_alignment_k); };
-    std::size_t const judging_bytes = aligned(count * sizeof(value_t)) + aligned(judged * sizeof(f64_t)) +
-                                      aligned(count * sizeof(u64_t)) + aligned(listed_count * sizeof(node_id_t)) +
-                                      aligned(listed_count * sizeof(f32_t)) + aligned(judged * sizeof(node_id_t));
+    auto const aligned = [](std::size_t bytes) noexcept {
+        return util::round_up_to_multiple(bytes, util::default_alignment_k);
+    };
+    std::size_t const judging_bytes = aligned(count * sizeof(value_t)) + aligned(judged * sizeof(util::f64_t)) +
+                                      aligned(count * sizeof(util::u64_t)) + aligned(listed_count * sizeof(node_id_t)) +
+                                      aligned(listed_count * sizeof(util::f32_t)) + aligned(judged * sizeof(node_id_t));
     // Each shard judges its own candidates on its stream into the sharded index's outputs, which
     // merges them by distance.
-    auto judge = [&](face_t& face, nk::matrix_span<node_id_t> host_ids, nk::matrix_span<f64_t> host_metres,
+    auto judge = [&](face_t& face, nk::matrix_span<node_id_t> host_ids, nk::matrix_span<util::f64_t> host_metres,
                      std::span<std::size_t> host_counts, typename face_t::traversal_context_t& context,
-                     std::size_t) noexcept -> status_t {
+                     std::size_t) noexcept -> util::status_t {
         // The judging kernel and the terrain sit on one device, where every judged shard sits too.
-        if (face.device_specs().ordinal != device) return status_code_t::unsupported_k;
+        if (face.device_specs().ordinal != device) return util::status_code_t::unsupported_k;
         typename face_t::traversal_context_t::allocator_t const allocator = context.allocator();
-        value_t* const device_queries = hip_arena_allocator<value_t>(allocator).allocate(count);
-        f64_t* const matched_metres = hip_arena_allocator<f64_t>(allocator).allocate(judged);
-        u64_t* const matched_counts = hip_arena_allocator<u64_t>(allocator).allocate(count);
-        node_id_t* const candidate_ids = hip_arena_allocator<node_id_t>(allocator).allocate(listed_count);
-        f32_t* const candidate_distances = hip_arena_allocator<f32_t>(allocator).allocate(listed_count);
-        node_id_t* const matched_ids = hip_arena_allocator<node_id_t>(allocator).allocate(judged);
+        value_t* const device_queries = util::hip_arena_allocator<value_t>(allocator).allocate(count);
+        util::f64_t* const matched_metres = util::hip_arena_allocator<util::f64_t>(allocator).allocate(judged);
+        util::u64_t* const matched_counts = util::hip_arena_allocator<util::u64_t>(allocator).allocate(count);
+        node_id_t* const candidate_ids = util::hip_arena_allocator<node_id_t>(allocator).allocate(listed_count);
+        util::f32_t* const candidate_distances = util::hip_arena_allocator<util::f32_t>(allocator).allocate(
+            listed_count);
+        node_id_t* const matched_ids = util::hip_arena_allocator<node_id_t>(allocator).allocate(judged);
         if (!device_queries || !matched_metres || !matched_counts || !candidate_ids || !candidate_distances ||
             !matched_ids)
-            return status_code_t::out_of_memory_k;
+            return util::status_code_t::out_of_memory_k;
         us::geospatial::hip_admit_arguments<node_id_t> admitting = admitting_(face, query_batch);
         admitting.queries = device_queries;
         admitting.candidate_ids = candidate_ids;
         admitting.matched_ids = matched_ids;
         admitting.matched_metres = matched_metres;
         admitting.matched_counts = matched_counts;
-        admitting.queries_count = static_cast<u32_t>(count);
-        admitting.candidates_count = static_cast<u32_t>(candidates_count);
-        admitting.wanted = static_cast<u32_t>(wanted);
-        hip_api_t const& api = admit_module.api();
-        if (failed(
-                hip_vendor_t::copy(api, device_queries, queries.elements, count * sizeof(value_t), context.stream())))
-            return status_code_t::device_k;
-        if (status_t const searched = face.search(queries, {candidate_ids, {count, candidates_count}},
-                                                  {candidate_distances, {count, candidates_count}}, config, context)
-                                          .status;
+        admitting.queries_count = static_cast<util::u32_t>(count);
+        admitting.candidates_count = static_cast<util::u32_t>(candidates_count);
+        admitting.wanted = static_cast<util::u32_t>(wanted);
+        util::hip_api_t const& api = admit_module.api();
+        if (failed(util::hip_vendor_t::copy(api, device_queries, queries.elements, count * sizeof(value_t),
+                                            context.stream())))
+            return util::status_code_t::device_k;
+        if (util::status_t const searched = face.search(queries, {candidate_ids, {count, candidates_count}},
+                                                        {candidate_distances, {count, candidates_count}}, config,
+                                                        context)
+                                                .status;
             failed(searched))
             return searched;
-        u32_t const blocks = static_cast<u32_t>(
-            min_of<std::size_t>(divide_round_up<std::size_t>(count, vram_warps_per_block_k),
-                                std::size_t {face.device_specs().multiprocessor_count} * 8));
-        if (failed(hip_launch(api, admit, blocks, vram_warps_per_block_k * face.device_specs().warp_lanes, 0,
+        util::u32_t const blocks = static_cast<util::u32_t>(
+            util::min_of<std::size_t>(util::divide_round_up<std::size_t>(count, util::vram_warps_per_block_k),
+                                      std::size_t {face.device_specs().multiprocessor_count} * 8));
+        if (failed(hip_launch(api, admit, blocks, util::vram_warps_per_block_k * face.device_specs().warp_lanes, 0,
                               context.stream(), admitting)) ||
-            failed(
-                hip_vendor_t::copy(api, host_ids.data(), matched_ids, judged * sizeof(node_id_t), context.stream())) ||
-            failed(hip_vendor_t::copy(api, host_metres.data(), matched_metres, judged * sizeof(f64_t),
-                                      context.stream())) ||
-            failed(
-                hip_vendor_t::copy(api, host_counts.data(), matched_counts, count * sizeof(u64_t), context.stream())))
-            return status_code_t::device_k;
+            failed(util::hip_vendor_t::copy(api, host_ids.data(), matched_ids, judged * sizeof(node_id_t),
+                                            context.stream())) ||
+            failed(util::hip_vendor_t::copy(api, host_metres.data(), matched_metres, judged * sizeof(util::f64_t),
+                                            context.stream())) ||
+            failed(util::hip_vendor_t::copy(api, host_counts.data(), matched_counts, count * sizeof(util::u64_t),
+                                            context.stream())))
+            return util::status_code_t::device_k;
         return context.wait();
     };
     auto const [found, status] = index.search_every_shard(
         count, executor, judge,
         nk::matrix_span<util::uuid128_t> {reinterpret_cast<util::uuid128_t*>(outputs.keys), count, wanted},
-        nk::matrix_span<f64_t> {outputs.scores, count, wanted}, std::span<std::size_t> {outputs.counts, count}, queries,
-        config, judging_bytes);
+        nk::matrix_span<util::f64_t> {outputs.scores, count, wanted}, std::span<std::size_t> {outputs.counts, count},
+        queries, config, judging_bytes);
     if (failed(status)) return {{}, status};
-    [[maybe_unused]] continuation_t const heard = ticks(count - 1);
+    [[maybe_unused]] util::continuation_t const heard = ticks(count - 1);
     return {{.computed_distances = found.computed_distances,
              .visited_members = found.visited_members,
              .restarts = found.restarts},
-            status_code_t::success_k};
+            util::status_code_t::success_k};
 }
 
 template <gpu_class_t gpu_class_>
-expected<traversal_stats_t> geospatial_vram_amd_variant<gpu_class_>::within(
+util::expected<traversal_stats_t> geospatial_vram_amd_variant<gpu_class_>::within(
     geospatial_queries_t query_batch, within_outputs_t& outputs, search_config_t search, predicate_t const&,
-    growing_arena<forkunion_allocator_t>& pages, executor_t& executor, progress_ticks_t& ticks) noexcept {
+    util::growing_arena<util::forkunion_allocator_t>& pages, executor_t& executor, progress_ticks_t& ticks) noexcept {
     std::size_t const count = query_batch.observations.size(), shards = index.live_shards_count();
-    if (search.traversal == traversal_t::scan_k) return {{}, status_code_t::unsupported_k};
+    if (search.traversal == util::traversal_t::scan_k) return {{}, util::status_code_t::unsupported_k};
     std::size_t* const offsets = carve<std::size_t>(pages, count + 1);
-    if (!offsets) return {{}, status_code_t::out_of_memory_k};
+    if (!offsets) return {{}, util::status_code_t::out_of_memory_k};
     for (std::size_t query = 0; query != count + 1; ++query) offsets[query] = 0;
     outputs = {{nullptr, nullptr, offsets}, 0};
-    if (!count || !shards) return {{}, status_code_t::success_k};
+    if (!count || !shards) return {{}, util::status_code_t::success_k};
     auto const [queries, encode_status] = encode_(query_batch.observations.data(), count, pages);
     if (failed(encode_status)) return {{}, encode_status};
     // The squared chord each query's candidates must pass, the walk's reach as the RAM variants
     // take it, widened by the cone graph's spanner bound.
-    f64_t* const covering_chords = carve<f64_t>(pages, count);
-    if (!covering_chords) return {{}, status_code_t::out_of_memory_k};
+    util::f64_t* const covering_chords = carve<util::f64_t>(pages, count);
+    if (!covering_chords) return {{}, util::status_code_t::out_of_memory_k};
     value_t const* const encoded = reinterpret_cast<value_t const*>(queries.elements);
-    f64_t const largest_deviation =
-        fu::standard_atomic_ref<u32_t>(largest_deviation_metres).load(std::memory_order_relaxed);
+    util::f64_t const largest_deviation =
+        fu::standard_atomic_ref<util::u32_t>(largest_deviation_metres).load(std::memory_order_relaxed);
     for (std::size_t query = 0; query != count; ++query) {
-        f64_t const query_deviation = encoded[query].deviation_metres;
-        f64_t const deviations = std::sqrt(query_deviation * query_deviation + largest_deviation * largest_deviation);
-        f64_t const reach = std::ceil((query_batch.tolerance.metres + 3 * deviations) *
-                                      us::geospatial::centimetres_per_metre_k);
-        f64_t const widened = reach * (1.0 + 2.0 * us::geospatial::cone_graph_stretch_k);
+        util::f64_t const query_deviation = encoded[query].deviation_metres;
+        util::f64_t const deviations = std::sqrt(query_deviation * query_deviation +
+                                                 largest_deviation * largest_deviation);
+        util::f64_t const reach = std::ceil((query_batch.tolerance.metres + 3 * deviations) *
+                                            us::geospatial::centimetres_per_metre_k);
+        util::f64_t const widened = reach * (1.0 + 2.0 * us::geospatial::cone_graph_stretch_k);
         covering_chords[query] = widened * widened;
     }
     // The fan-out's own rankings stay one entry wide and empty, since every shard keeps its run.
     util::uuid128_t* const unused_keys = carve<util::uuid128_t>(pages, count);
-    f64_t* const unused_scores = carve<f64_t>(pages, count);
+    util::f64_t* const unused_scores = carve<util::f64_t>(pages, count);
     std::size_t* const unused_counts = carve<std::size_t>(pages, count);
-    if (!unused_keys || !unused_scores || !unused_counts) return {{}, status_code_t::out_of_memory_k};
-    auto const aligned = [](std::size_t bytes) noexcept { return round_up_to_multiple(bytes, default_alignment_k); };
+    if (!unused_keys || !unused_scores || !unused_counts) return {{}, util::status_code_t::out_of_memory_k};
+    auto const aligned = [](std::size_t bytes) noexcept {
+        return util::round_up_to_multiple(bytes, util::default_alignment_k);
+    };
     std::size_t const published = index.size();
     std::size_t breadth = search.expansion_factor ? search.expansion_factor
-                                                  : default_expansion_factor(geometry.connectivity);
+                                                  : util::default_expansion_factor(geometry.connectivity);
     std::size_t listed_count = 0, walked = 0;
-    u64_t* runs_offsets = nullptr;
+    util::u64_t* runs_offsets = nullptr;
     node_id_t* runs_ids = nullptr;
-    f64_t* runs_metres = nullptr;
+    util::f64_t* runs_metres = nullptr;
     face_t const** runs_faces = nullptr;
     traversal_stats_t stats;
-    for (;; breadth = min_of(breadth * 2, published)) {
-        typename face_t::search_config_t const config {static_cast<u32_t>(breadth), static_cast<u32_t>(breadth)};
+    for (;; breadth = util::min_of(breadth * 2, published)) {
+        typename face_t::search_config_t const config {static_cast<util::u32_t>(breadth),
+                                                       static_cast<util::u32_t>(breadth)};
         // Each shard's run comes back whole: its offsets from zero, then the IDs and metres they
         // span, at most a breadth per query; the shard is remembered to resolve its IDs into keys.
         listed_count = count * breadth;
         walked = 0;
-        runs_offsets = carve<u64_t>(pages, shards * (count + 1));
+        runs_offsets = carve<util::u64_t>(pages, shards * (count + 1));
         runs_ids = carve<node_id_t>(pages, shards * listed_count);
-        runs_metres = carve<f64_t>(pages, shards * listed_count);
+        runs_metres = carve<util::f64_t>(pages, shards * listed_count);
         runs_faces = carve<face_t const*>(pages, shards);
-        f32_t* const runs_distances = carve<f32_t>(pages, shards * listed_count);
+        util::f32_t* const runs_distances = carve<util::f32_t>(pages, shards * listed_count);
         if (!runs_offsets || !runs_ids || !runs_metres || !runs_faces || !runs_distances)
-            return {{}, status_code_t::out_of_memory_k};
-        std::size_t const judging_bytes =
-            aligned(count * sizeof(value_t)) + aligned(count * sizeof(u64_t)) + aligned((count + 1) * sizeof(u64_t)) +
-            aligned(listed_count * sizeof(node_id_t)) + aligned(listed_count * sizeof(f32_t)) +
-            aligned(listed_count * sizeof(node_id_t)) + aligned(listed_count * sizeof(f64_t));
-        auto judge = [&](face_t& face, nk::matrix_span<node_id_t>, nk::matrix_span<f64_t>,
+            return {{}, util::status_code_t::out_of_memory_k};
+        std::size_t const judging_bytes = aligned(count * sizeof(value_t)) + aligned(count * sizeof(util::u64_t)) +
+                                          aligned((count + 1) * sizeof(util::u64_t)) +
+                                          aligned(listed_count * sizeof(node_id_t)) +
+                                          aligned(listed_count * sizeof(util::f32_t)) +
+                                          aligned(listed_count * sizeof(node_id_t)) +
+                                          aligned(listed_count * sizeof(util::f64_t));
+        auto judge = [&](face_t& face, nk::matrix_span<node_id_t>, nk::matrix_span<util::f64_t>,
                          std::span<std::size_t> host_counts, typename face_t::traversal_context_t& context,
-                         std::size_t) noexcept -> status_t {
+                         std::size_t) noexcept -> util::status_t {
             for (std::size_t& counted : host_counts) counted = 0;
-            if (face.device_specs().ordinal != device) return status_code_t::unsupported_k;
+            if (face.device_specs().ordinal != device) return util::status_code_t::unsupported_k;
             std::size_t const run = walked++;
             runs_faces[run] = &face;
-            u64_t* const run_offsets = runs_offsets + run * (count + 1);
+            util::u64_t* const run_offsets = runs_offsets + run * (count + 1);
             typename face_t::traversal_context_t::allocator_t const allocator = context.allocator();
-            value_t* const device_queries = hip_arena_allocator<value_t>(allocator).allocate(count);
-            u64_t* const matched_counts = hip_arena_allocator<u64_t>(allocator).allocate(count);
-            u64_t* const matched_offsets = hip_arena_allocator<u64_t>(allocator).allocate(count + 1);
-            node_id_t* const candidate_ids = hip_arena_allocator<node_id_t>(allocator).allocate(listed_count);
-            f32_t* const candidate_distances = hip_arena_allocator<f32_t>(allocator).allocate(listed_count);
-            node_id_t* const matched_ids = hip_arena_allocator<node_id_t>(allocator).allocate(listed_count);
-            f64_t* const matched_metres = hip_arena_allocator<f64_t>(allocator).allocate(listed_count);
+            value_t* const device_queries = util::hip_arena_allocator<value_t>(allocator).allocate(count);
+            util::u64_t* const matched_counts = util::hip_arena_allocator<util::u64_t>(allocator).allocate(count);
+            util::u64_t* const matched_offsets = util::hip_arena_allocator<util::u64_t>(allocator).allocate(count + 1);
+            node_id_t* const candidate_ids = util::hip_arena_allocator<node_id_t>(allocator).allocate(listed_count);
+            util::f32_t* const candidate_distances = util::hip_arena_allocator<util::f32_t>(allocator).allocate(
+                listed_count);
+            node_id_t* const matched_ids = util::hip_arena_allocator<node_id_t>(allocator).allocate(listed_count);
+            util::f64_t* const matched_metres = util::hip_arena_allocator<util::f64_t>(allocator).allocate(
+                listed_count);
             if (!device_queries || !matched_counts || !matched_offsets || !candidate_ids || !candidate_distances ||
                 !matched_ids || !matched_metres)
-                return status_code_t::out_of_memory_k;
+                return util::status_code_t::out_of_memory_k;
             us::geospatial::hip_admit_arguments<node_id_t> admitting = admitting_(face, query_batch);
             admitting.queries = device_queries;
             admitting.candidate_ids = candidate_ids;
-            admitting.queries_count = static_cast<u32_t>(count);
-            admitting.candidates_count = static_cast<u32_t>(breadth);
+            admitting.queries_count = static_cast<util::u32_t>(count);
+            admitting.candidates_count = static_cast<util::u32_t>(breadth);
             admitting.matched_ids = matched_ids;
             admitting.matched_metres = matched_metres;
             admitting.matched_counts = matched_counts;
             admitting.matched_offsets = matched_offsets;
-            hip_api_t const& api = face.api();
+            util::hip_api_t const& api = face.api();
             run_offsets[0] = 0;
-            if (failed(hip_vendor_t::copy(api, device_queries, queries.elements, count * sizeof(value_t),
-                                          context.stream())) ||
-                failed(hip_vendor_t::copy(api, matched_offsets, run_offsets, sizeof(u64_t), context.stream())))
-                return status_code_t::device_k;
-            if (status_t const searched = face.search(queries, {candidate_ids, {count, breadth}},
-                                                      {candidate_distances, {count, breadth}}, config, context)
-                                              .status;
+            if (failed(util::hip_vendor_t::copy(api, device_queries, queries.elements, count * sizeof(value_t),
+                                                context.stream())) ||
+                failed(
+                    util::hip_vendor_t::copy(api, matched_offsets, run_offsets, sizeof(util::u64_t), context.stream())))
+                return util::status_code_t::device_k;
+            if (util::status_t const searched = face.search(queries, {candidate_ids, {count, breadth}},
+                                                            {candidate_distances, {count, breadth}}, config, context)
+                                                    .status;
                 failed(searched))
                 return searched;
-            if (status_t const counted = face.launch_within_count_(admitting, context); failed(counted)) return counted;
-            if (status_t const written = face.launch_within_write_(admitting, context); failed(written)) return written;
-            if (failed(hip_vendor_t::copy(api, run_offsets, matched_offsets, (count + 1) * sizeof(u64_t),
-                                          context.stream())) ||
-                failed(hip_vendor_t::copy(api, runs_distances + run * listed_count, candidate_distances,
-                                          listed_count * sizeof(f32_t), context.stream())))
-                return status_code_t::device_k;
-            if (status_t const waited = context.wait(); failed(waited)) return waited;
+            if (util::status_t const counted = face.launch_within_count_(admitting, context); failed(counted))
+                return counted;
+            if (util::status_t const written = face.launch_within_write_(admitting, context); failed(written))
+                return written;
+            if (failed(util::hip_vendor_t::copy(api, run_offsets, matched_offsets, (count + 1) * sizeof(util::u64_t),
+                                                context.stream())) ||
+                failed(util::hip_vendor_t::copy(api, runs_distances + run * listed_count, candidate_distances,
+                                                listed_count * sizeof(util::f32_t), context.stream())))
+                return util::status_code_t::device_k;
+            if (util::status_t const waited = context.wait(); failed(waited)) return waited;
             std::size_t const admitted = static_cast<std::size_t>(run_offsets[count]);
-            if (failed(hip_vendor_t::copy(api, runs_ids + run * listed_count, matched_ids, admitted * sizeof(node_id_t),
-                                          context.stream())) ||
-                failed(hip_vendor_t::copy(api, runs_metres + run * listed_count, matched_metres,
-                                          admitted * sizeof(f64_t), context.stream())))
-                return status_code_t::device_k;
+            if (failed(util::hip_vendor_t::copy(api, runs_ids + run * listed_count, matched_ids,
+                                                admitted * sizeof(node_id_t), context.stream())) ||
+                failed(util::hip_vendor_t::copy(api, runs_metres + run * listed_count, matched_metres,
+                                                admitted * sizeof(util::f64_t), context.stream())))
+                return util::status_code_t::device_k;
             return context.wait();
         };
         auto const [found, status] = index.search_every_shard(
             count, executor, judge, nk::matrix_span<util::uuid128_t> {unused_keys, count, 1},
-            nk::matrix_span<f64_t> {unused_scores, count, 1}, std::span<std::size_t> {unused_counts, count}, queries,
-            config, judging_bytes);
+            nk::matrix_span<util::f64_t> {unused_scores, count, 1}, std::span<std::size_t> {unused_counts, count},
+            queries, config, judging_bytes);
         if (failed(status)) return {{}, status};
         stats.computed_distances += found.computed_distances;
         stats.visited_members += found.visited_members;
@@ -2201,19 +2247,19 @@ expected<traversal_stats_t> geospatial_vram_amd_variant<gpu_class_>::within(
     std::size_t const total = offsets[count];
     usearch_key_t* const keys = carve<usearch_key_t>(pages, total);
     usearch_distance_t* const scores = carve<usearch_distance_t>(pages, total);
-    if (total && (!keys || !scores)) return {{}, status_code_t::out_of_memory_k};
+    if (total && (!keys || !scores)) return {{}, util::status_code_t::out_of_memory_k};
     for (std::size_t query = 0, slot = 0; query != count; ++query)
         for (std::size_t run = 0; run != walked; ++run) {
-            u64_t const* const run_offsets = runs_offsets + run * (count + 1);
-            for (u64_t match = run_offsets[query]; match != run_offsets[query + 1]; ++match, ++slot) {
+            util::u64_t const* const run_offsets = runs_offsets + run * (count + 1);
+            for (util::u64_t match = run_offsets[query]; match != run_offsets[query + 1]; ++match, ++slot) {
                 std::size_t const position = run * listed_count + static_cast<std::size_t>(match);
                 keys[slot] = std::bit_cast<usearch_key_t>(runs_faces[run]->key_of(runs_ids[position]).value);
                 scores[slot] = runs_metres[position];
             }
         }
     outputs = {{keys, scores, offsets}, total};
-    [[maybe_unused]] continuation_t const heard = ticks(count - 1);
-    return {stats, status_code_t::success_k};
+    [[maybe_unused]] util::continuation_t const heard = ticks(count - 1);
+    return {stats, util::status_code_t::success_k};
 }
 
 #endif
@@ -2310,10 +2356,10 @@ struct variant_bodies<geospatial_traits_t> {
     /** Takes @p geometry into the GPU @p variant, its connectivity rounded up to the power of two a
      *  GPU neighbor row takes, loads its judging kernel, and copies the terrain to its device. */
     template <gpu_class_t gpu_class_>
-    static status_t adopt(geospatial_vram_nvidia_variant<gpu_class_>& variant, geometry_t const& geometry,
-                          geometry_extras_t const& terrain) noexcept {
+    static util::status_t adopt(geospatial_vram_nvidia_variant<gpu_class_>& variant, geometry_t const& geometry,
+                                geometry_extras_t const& terrain) noexcept {
         variant.geometry.connectivity = std::bit_ceil(connectivity_of(geometry));
-        if (status_t const loaded = variant.load_admit(); failed(loaded)) return loaded;
+        if (util::status_t const loaded = variant.load_admit(); failed(loaded)) return loaded;
         return variant.adopt_terrain(terrain_of(terrain));
     }
 #endif
@@ -2321,10 +2367,10 @@ struct variant_bodies<geospatial_traits_t> {
 
     /** Takes @p geometry into the AMD GPU @p variant, as the NVIDIA one above. */
     template <gpu_class_t gpu_class_>
-    static status_t adopt(geospatial_vram_amd_variant<gpu_class_>& variant, geometry_t const& geometry,
-                          geometry_extras_t const& terrain) noexcept {
+    static util::status_t adopt(geospatial_vram_amd_variant<gpu_class_>& variant, geometry_t const& geometry,
+                                geometry_extras_t const& terrain) noexcept {
         variant.geometry.connectivity = std::bit_ceil(connectivity_of(geometry));
-        if (status_t const loaded = variant.load_admit(); failed(loaded)) return loaded;
+        if (util::status_t const loaded = variant.load_admit(); failed(loaded)) return loaded;
         return variant.adopt_terrain(terrain_of(terrain));
     }
 #endif

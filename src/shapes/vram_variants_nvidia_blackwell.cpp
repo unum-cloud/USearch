@@ -13,7 +13,7 @@
 #include "shapes_specializations.cuh"
 #include "usearch/shapes/vram_nvidia_metric.cuh"
 
-extern "C" byte_t const shapes_nvidia_blackwell_f16_bundle_start[], shapes_nvidia_blackwell_f16_bundle_end[];
+extern "C" util::byte_t const shapes_nvidia_blackwell_f16_bundle_start[], shapes_nvidia_blackwell_f16_bundle_end[];
 template <>
 bytes_view_t shapes_nvidia_fatbin<gpu_class_t::nvidia_blackwell_k, nk_f16_k>::bytes() noexcept {
     return {

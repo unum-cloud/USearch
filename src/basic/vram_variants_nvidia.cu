@@ -24,13 +24,13 @@
 
 /** The bounds of the fatbin every basic face loads, linked in as raw bytes, from the table CMake
  *  writes for the class this unit compiles as; the other classes' tables stay unreferenced. */
-extern "C" byte_t const* const basic_nvidia_ampere_bundles[];
-extern "C" byte_t const* const basic_nvidia_ada_bundles[];
-extern "C" byte_t const* const basic_nvidia_hopper_bundles[];
-extern "C" byte_t const* const basic_nvidia_blackwell_bundles[];
-extern "C" byte_t const* const basic_nvidia_blackwellrtx_bundles[];
+extern "C" util::byte_t const* const basic_nvidia_ampere_bundles[];
+extern "C" util::byte_t const* const basic_nvidia_ada_bundles[];
+extern "C" util::byte_t const* const basic_nvidia_hopper_bundles[];
+extern "C" util::byte_t const* const basic_nvidia_blackwell_bundles[];
+extern "C" util::byte_t const* const basic_nvidia_blackwellrtx_bundles[];
 template <gpu_class_t gpu_class_>
-byte_t const* const* basic_bundles() noexcept {
+util::byte_t const* const* basic_bundles() noexcept {
     if constexpr (gpu_class_ == gpu_class_t::nvidia_ada_k) return basic_nvidia_ada_bundles;
     else if constexpr (gpu_class_ == gpu_class_t::nvidia_hopper_k) return basic_nvidia_hopper_bundles;
     else if constexpr (gpu_class_ == gpu_class_t::nvidia_blackwell_k) return basic_nvidia_blackwell_bundles;
@@ -41,7 +41,7 @@ byte_t const* const* basic_bundles() noexcept {
 namespace unum::usearch::basic {
 
 bytes_view_t cuda_graph_fatbin_t::bytes() noexcept {
-    byte_t const* const* const bounds = basic_bundles<cuda_class_k>();
+    util::byte_t const* const* const bounds = basic_bundles<cuda_class_k>();
     return {bounds[0], bounds[1]};
 }
 

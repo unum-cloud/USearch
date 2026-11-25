@@ -30,42 +30,48 @@ util::byte_t const* const* sequence_bundles() noexcept {
 
 template <>
 util::bytes_view_t sequence_nvidia_fatbin<usearch_sequence_metric_levenshtein_bytes_k>::bytes() noexcept {
-    byte_t const* const* const bounds = sequence_bundles<cuda_class_k>();
+    util::byte_t const* const* const bounds = sequence_bundles<cuda_class_k>();
     return {bounds[0], bounds[1]};
 }
-template struct us::sequence::vram_nvidia_index<sequence_nvidia_kit<usearch_sequence_metric_levenshtein_bytes_k>, u32_t,
+template struct us::sequence::vram_nvidia_index<sequence_nvidia_kit<usearch_sequence_metric_levenshtein_bytes_k>,
+                                                util::u32_t,
                                                 sequence_nvidia_fatbin<usearch_sequence_metric_levenshtein_bytes_k>>;
-template struct us::sequence::vram_nvidia_kits<sequence_nvidia_kit<usearch_sequence_metric_levenshtein_bytes_k>, u32_t,
+template struct us::sequence::vram_nvidia_kits<sequence_nvidia_kit<usearch_sequence_metric_levenshtein_bytes_k>,
+                                               util::u32_t,
                                                sequence_nvidia_fatbin<usearch_sequence_metric_levenshtein_bytes_k>>;
 
 template <>
 util::bytes_view_t sequence_nvidia_fatbin<usearch_sequence_metric_levenshtein_utf8_k>::bytes() noexcept {
-    byte_t const* const* const bounds = sequence_bundles<cuda_class_k>();
+    util::byte_t const* const* const bounds = sequence_bundles<cuda_class_k>();
     return {bounds[2], bounds[3]};
 }
-template struct us::sequence::vram_nvidia_index<sequence_nvidia_kit<usearch_sequence_metric_levenshtein_utf8_k>, u32_t,
+template struct us::sequence::vram_nvidia_index<sequence_nvidia_kit<usearch_sequence_metric_levenshtein_utf8_k>,
+                                                util::u32_t,
                                                 sequence_nvidia_fatbin<usearch_sequence_metric_levenshtein_utf8_k>>;
-template struct us::sequence::vram_nvidia_kits<sequence_nvidia_kit<usearch_sequence_metric_levenshtein_utf8_k>, u32_t,
+template struct us::sequence::vram_nvidia_kits<sequence_nvidia_kit<usearch_sequence_metric_levenshtein_utf8_k>,
+                                               util::u32_t,
                                                sequence_nvidia_fatbin<usearch_sequence_metric_levenshtein_utf8_k>>;
 
 template <>
 util::bytes_view_t sequence_nvidia_fatbin<usearch_sequence_metric_overlap_k>::bytes() noexcept {
-    byte_t const* const* const bounds = sequence_bundles<cuda_class_k>();
+    util::byte_t const* const* const bounds = sequence_bundles<cuda_class_k>();
     return {bounds[4], bounds[5]};
 }
-template struct us::sequence::vram_nvidia_index<sequence_nvidia_kit<usearch_sequence_metric_overlap_k>, u32_t,
+template struct us::sequence::vram_nvidia_index<sequence_nvidia_kit<usearch_sequence_metric_overlap_k>, util::u32_t,
                                                 sequence_nvidia_fatbin<usearch_sequence_metric_overlap_k>>;
-template struct us::sequence::vram_nvidia_kits<sequence_nvidia_kit<usearch_sequence_metric_overlap_k>, u32_t,
+template struct us::sequence::vram_nvidia_kits<sequence_nvidia_kit<usearch_sequence_metric_overlap_k>, util::u32_t,
                                                sequence_nvidia_fatbin<usearch_sequence_metric_overlap_k>>;
 
 template <>
 util::bytes_view_t sequence_nvidia_fatbin<usearch_sequence_metric_needleman_wunsch_k>::bytes() noexcept {
-    byte_t const* const* const bounds = sequence_bundles<cuda_class_k>();
+    util::byte_t const* const* const bounds = sequence_bundles<cuda_class_k>();
     return {bounds[6], bounds[7]};
 }
-template struct us::sequence::vram_nvidia_index<sequence_nvidia_kit<usearch_sequence_metric_needleman_wunsch_k>, u32_t,
+template struct us::sequence::vram_nvidia_index<sequence_nvidia_kit<usearch_sequence_metric_needleman_wunsch_k>,
+                                                util::u32_t,
                                                 sequence_nvidia_fatbin<usearch_sequence_metric_needleman_wunsch_k>>;
-template struct us::sequence::vram_nvidia_kits<sequence_nvidia_kit<usearch_sequence_metric_needleman_wunsch_k>, u32_t,
+template struct us::sequence::vram_nvidia_kits<sequence_nvidia_kit<usearch_sequence_metric_needleman_wunsch_k>,
+                                               util::u32_t,
                                                sequence_nvidia_fatbin<usearch_sequence_metric_needleman_wunsch_k>>;
 
 template struct basic_class_tables<sequence_traits_t, vendored_residency_t::vram_nvidia_k, cuda_class_k>;

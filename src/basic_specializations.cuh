@@ -822,11 +822,11 @@ util::expected<std::span<usearch_key_t const>> pull_entries(variant_type_& varia
 /** Reserves @p entries nodes of @p connectivity neighbors and @p bytes of values over every shard
  *  of a GPU variant's @p index, freezing the connectivity. */
 template <typename indexes_type_>
-status_t vram_nvidia_reserve(indexes_type_& index, std::size_t entries, std::size_t connectivity,
-                             std::size_t bytes) noexcept {
+util::status_t vram_nvidia_reserve(indexes_type_& index, std::size_t entries, std::size_t connectivity,
+                                   std::size_t bytes) noexcept {
     typename indexes_type_::reserve_capacity_t config {};
     config.capacity = entries;
-    config.connectivity = static_cast<connectivity_t>(connectivity);
+    config.connectivity = static_cast<util::connectivity_t>(connectivity);
     config.bytes = bytes;
     return index.reserve(config).status;
 }
@@ -835,36 +835,37 @@ status_t vram_nvidia_reserve(indexes_type_& index, std::size_t entries, std::siz
  *  the wire format the RAM variants share: a lone live shard's monolith, or one per live shard
  *  beside the manifest @p path names. */
 template <typename indexes_type_, typename codec_type_>
-status_t vram_nvidia_save(indexes_type_& index, std::string_view path, codec_type_ const& codec,
-                          save_config_t const& config, std::string_view metric, cuda_executor_t& executor,
-                          progress_ticks_t& ticks) noexcept {
+util::status_t vram_nvidia_save(indexes_type_& index, std::string_view path, codec_type_ const& codec,
+                                util::save_config_t const& config, std::string_view metric,
+                                util::cuda_executor_t& executor, progress_ticks_t& ticks) noexcept {
     return index.save(path, codec, executor, config, metric, ticks);
 }
 
 /** Inserts the entries of @p tape under the keys of @p keys_view as one batch over the shards of
  *  @p index, freezing @p connectivity first unless a reservation did. */
 template <typename indexes_type_>
-expected<traversal_stats_t> vram_nvidia_insert(indexes_type_& index, usearch_keys_view_t keys_view,
-                                               tape_view<byte_t const> tape, std::size_t connectivity,
-                                               std::size_t expansion, progress_ticks_t& ticks,
-                                               cuda_executor_t& executor) noexcept {
+util::expected<traversal_stats_t> vram_nvidia_insert(indexes_type_& index, usearch_keys_view_t keys_view,
+                                                     util::tape_view<util::byte_t const> tape, std::size_t connectivity,
+                                                     std::size_t expansion, progress_ticks_t& ticks,
+                                                     util::cuda_executor_t& executor) noexcept {
     std::size_t const count = tape.size();
     if (!index.capacity())
-        if (status_t const reserved = vram_nvidia_reserve(index, count, connectivity,
-                                                          tape.offsets[count] - tape.offsets[0]);
+        if (util::status_t const reserved = vram_nvidia_reserve(index, count, connectivity,
+                                                                tape.offsets[count] - tape.offsets[0]);
             failed(reserved))
             return {{}, reserved};
-    growing_buffer<util::uuid128_t, forkunion_allocator_t> keys {forkunion_allocator_t {no_memory_domain_k}};
-    if (failed(keys.reserve_exactly(count))) return {{}, status_code_t::out_of_memory_k};
+    util::growing_buffer<util::uuid128_t, util::forkunion_allocator_t> keys {
+        util::forkunion_allocator_t {util::no_memory_domain_k}};
+    if (failed(keys.reserve_exactly(count))) return {{}, util::status_code_t::out_of_memory_k};
     for (std::size_t offset = 0; offset != count; ++offset) keys.push_back_reserved(uuid_of(key_at(keys_view, offset)));
-    typename indexes_type_::insert_config_t const config {static_cast<u32_t>(expansion)};
+    typename indexes_type_::insert_config_t const config {static_cast<util::u32_t>(expansion)};
     auto const [inserted, status] = index.insert(to_span(keys), tape, executor, config);
     if (failed(status)) return {{}, status};
-    [[maybe_unused]] continuation_t const heard = ticks(count - 1);
+    [[maybe_unused]] util::continuation_t const heard = ticks(count - 1);
     return {{.computed_distances = inserted.computed_distances,
              .visited_members = inserted.visited_members,
              .restarts = inserted.restarts},
-            status_code_t::success_k};
+            util::status_code_t::success_k};
 }
 
 /** Searches the queries of @p queries a progress step at a time, each step one merged search over
@@ -872,22 +873,24 @@ expected<traversal_stats_t> vram_nvidia_insert(indexes_type_& index, usearch_key
  *  answering cancel stops the steps not begun. A search wanting no matches answers before reading
  *  a query. */
 template <typename indexes_type_>
-expected<traversal_stats_t> vram_nvidia_search(indexes_type_& index, tape_view<byte_t const> queries,
-                                               std::size_t wanted, std::size_t expansion, matches_outputs_t& outputs,
-                                               progress_ticks_t& ticks, cuda_executor_t& executor) noexcept {
+util::expected<traversal_stats_t> vram_nvidia_search(indexes_type_& index, util::tape_view<util::byte_t const> queries,
+                                                     std::size_t wanted, std::size_t expansion,
+                                                     matches_outputs_t& outputs, progress_ticks_t& ticks,
+                                                     util::cuda_executor_t& executor) noexcept {
     using face_t = typename indexes_type_::index_t;
     std::size_t const count = queries.size();
     if (!wanted) {
         for (std::size_t query = 0; query != count; ++query) outputs.counts[query] = 0;
-        return {{}, status_code_t::success_k};
+        return {{}, util::status_code_t::success_k};
     }
     using key_t = util::uuid128_t;
     static_assert(sizeof(key_t) == sizeof(usearch_key_t), "Keys land whole in the caller's outputs");
-    typename face_t::search_config_t const config {static_cast<u32_t>(expansion), static_cast<u32_t>(wanted)};
+    typename face_t::search_config_t const config {static_cast<util::u32_t>(expansion),
+                                                   static_cast<util::u32_t>(wanted)};
     std::size_t const step = ticks.slice();
     traversal_stats_t total;
     for (std::size_t first = 0; first != count;) {
-        std::size_t const taking = min_of(step, count - first);
+        std::size_t const taking = util::min_of(step, count - first);
         std::size_t const first_match = first * wanted, matches = taking * wanted;
         usearch_distance_t* const scores = outputs.scores + first_match;
         auto const [found, status] = index.search(
@@ -901,19 +904,30 @@ expected<traversal_stats_t> vram_nvidia_search(indexes_type_& index, tape_view<b
         total.restarts += found.restarts;
         for (std::size_t match = 0; match != matches; ++match) scores[match] *= distance_unit<face_t>;
         first += taking;
-        if (ticks(first, count) == continuation_t::cancel_k) return {total, status_code_t::cancelled_k};
+        if (ticks(first, count) == util::continuation_t::cancel_k) return {total, util::status_code_t::cancelled_k};
     }
-    return {total, status_code_t::success_k};
+    return {total, util::status_code_t::success_k};
 }
 
 /** Counts the entries a GPU variant stores under @p key on every shard's host key map; their
  *  values stay on the devices, so the extents stay zero. */
 template <typename traits_type_, typename variant_type_, typename stats_type_>
     requires is_vram_index<variant_type_>
-status_t count_entries(variant_type_& variant, usearch_key_t key, stats_type_& stats, cuda_executor_t&) noexcept {
+util::status_t count_entries(variant_type_& variant, usearch_key_t key, stats_type_& stats,
+                             util::cuda_executor_t&) noexcept {
     stats.entries = variant.index.count(uuid_of(key));
-    return status_code_t::success_k;
+    return util::status_code_t::success_k;
 }
+
+/** Whether @p traits_type_ reads each stored value back as it keeps it, and a shard of
+ *  @p graph_type_ gathers its stored values into one tape on a CUDA stream. */
+template <typename traits_type_, typename graph_type_>
+concept a_cuda_gathering_graph = requires(typename variant_bodies<traits_type_>::kept_t& kept, graph_type_& graph,
+                                          util::cuda_executor_t::traversal_context_t const& context) {
+    variant_bodies<traits_type_>::keep_stored(util::bytes_view_t {}, kept);
+    graph.launch_gather_tape_(std::span<typename graph_type_::node_id_t const> {}, nullptr, std::span<util::u64_t> {},
+                              context);
+};
 
 /**
  *  @brief Writes the entries a GPU variant stores under @p key to @p outputs, carved from
@@ -927,25 +941,22 @@ status_t count_entries(variant_type_& variant, usearch_key_t key, stats_type_& s
  */
 template <typename traits_type_, typename variant_type_>
     requires is_vram_index<variant_type_>
-expected<std::size_t> get_entries(variant_type_& variant, usearch_key_t key,
-                                  typename traits_type_::get_outputs_t outputs,
-                                  growing_arena<forkunion_allocator_t>& memory, cuda_executor_t& executor) noexcept {
+util::expected<std::size_t> get_entries(variant_type_& variant, usearch_key_t key,
+                                        typename traits_type_::get_outputs_t outputs,
+                                        util::growing_arena<util::forkunion_allocator_t>& memory,
+                                        util::cuda_executor_t& executor) noexcept {
     using bodies_t = variant_bodies<traits_type_>;
     using kept_t = typename bodies_t::kept_t;
     using graph_t = typename variant_type_::index_t::index_t;
     using node_id_t = typename graph_t::node_id_t;
-    if constexpr (!requires(kept_t& kept, graph_t& graph, cuda_executor_t::traversal_context_t const& context) {
-                      bodies_t::keep_stored(bytes_view_t {}, kept);
-                      graph.launch_gather_tape_(std::span<node_id_t const> {}, nullptr, std::span<u64_t> {}, context);
-                  })
-        return {0, status_code_t::unsupported_k};
+    if constexpr (!a_cuda_gathering_graph<traits_type_, graph_t>) return {0, util::status_code_t::unsupported_k};
     else {
         util::uuid128_t const identity = uuid_of(key);
         std::size_t const held = variant.index.count(identity);
-        if (!held) return {0, status_code_t::success_k};
+        if (!held) return {0, util::status_code_t::success_k};
         node_id_t* const listed = carve<node_id_t>(memory, held);
         kept_t* const kept = carve<kept_t>(memory, held);
-        if (!listed || !kept) return {0, status_code_t::out_of_memory_k};
+        if (!listed || !kept) return {0, util::status_code_t::out_of_memory_k};
         auto [claim, claim_status] = executor.claim();
         if (failed(claim_status)) return {0, claim_status};
         std::size_t found = 0;
@@ -958,49 +969,55 @@ expected<std::size_t> get_entries(variant_type_& variant, usearch_key_t key,
             if (!count) continue;
             std::size_t stream = 0;
             while (stream != executor.size() && executor.device(stream) != graph.device_specs().ordinal) ++stream;
-            if (stream == executor.size()) return {0, status_code_t::config_mismatch_k};
-            cuda_api_t const& api = graph.api();
+            if (stream == executor.size()) return {0, util::status_code_t::config_mismatch_k};
+            util::cuda_api_t const& api = graph.api();
             // Each node's extent comes off the device's offsets column, so the tape is sized first.
-            u64_t const* const stored_offsets = graph.storage().offsets;
+            util::u64_t const* const stored_offsets = graph.storage().offsets;
             std::size_t tape_bytes = 0, sized = first;
-            for (std::array<u64_t, 2> extent {};
+            for (std::array<util::u64_t, 2> extent {};
                  sized != found &&
-                 cuda_copy(api, extent.data(), stored_offsets + listed[sized], sizeof(extent)) == cuda_success_k;
+                 cuda_copy(api, extent.data(), stored_offsets + listed[sized], sizeof(extent)) == util::cuda_success_k;
                  ++sized)
                 tape_bytes += static_cast<std::size_t>(extent[1] - extent[0]);
-            if (sized != found) return {0, status_code_t::device_k};
-            std::size_t const listed_bytes = round_up_to_multiple(count * sizeof(node_id_t), default_alignment_k);
-            std::size_t const offsets_bytes = round_up_to_multiple((count + 1) * sizeof(u64_t), default_alignment_k);
+            if (sized != found) return {0, util::status_code_t::device_k};
+            std::size_t const listed_bytes = util::round_up_to_multiple(count * sizeof(node_id_t),
+                                                                        util::default_alignment_k);
+            std::size_t const offsets_bytes = util::round_up_to_multiple((count + 1) * sizeof(util::u64_t),
+                                                                         util::default_alignment_k);
             // The last gather was awaited, so its run rewinds for this carve, which grows it at
             // most once per call; a stream's first context is born on its device.
             std::size_t const staging_bytes = listed_bytes + offsets_bytes + tape_bytes;
-            if (status_t const reserved = executor.reserve(staging_bytes, 1); failed(reserved)) return {0, reserved};
-            if (cuda_set_device(api, graph.device_specs().ordinal) != cuda_success_k)
-                return {0, status_code_t::device_k};
-            std::span<cuda_executor_t::traversal_context_t> const stream_traversals = executor.traversals(stream);
-            cuda_executor_t::traversal_context_t& context = stream_traversals[0];
-            byte_t* const staging = context.allocator().allocate(staging_bytes);
-            u64_t* const host_offsets = carve<u64_t>(memory, count + 1);
-            byte_t* const host_tape = carve<byte_t>(memory, tape_bytes);
-            if (!staging || !host_offsets || (tape_bytes && !host_tape)) return {0, status_code_t::out_of_memory_k};
+            if (util::status_t const reserved = executor.reserve(staging_bytes, 1); failed(reserved))
+                return {0, reserved};
+            if (cuda_set_device(api, graph.device_specs().ordinal) != util::cuda_success_k)
+                return {0, util::status_code_t::device_k};
+            std::span<util::cuda_executor_t::traversal_context_t> const stream_traversals = executor.traversals(stream);
+            util::cuda_executor_t::traversal_context_t& context = stream_traversals[0];
+            util::byte_t* const staging = context.allocator().allocate(staging_bytes);
+            util::u64_t* const host_offsets = carve<util::u64_t>(memory, count + 1);
+            util::byte_t* const host_tape = carve<util::byte_t>(memory, tape_bytes);
+            if (!staging || !host_offsets || (tape_bytes && !host_tape))
+                return {0, util::status_code_t::out_of_memory_k};
             node_id_t* const device_listed = reinterpret_cast<node_id_t*>(staging);
-            u64_t* const device_offsets = reinterpret_cast<u64_t*>(staging + listed_bytes);
-            byte_t* const device_tape = staging + listed_bytes + offsets_bytes;
+            util::u64_t* const device_offsets = reinterpret_cast<util::u64_t*>(staging + listed_bytes);
+            util::byte_t* const device_tape = staging + listed_bytes + offsets_bytes;
             host_offsets[0] = 0;
-            if (cuda_copy(api, device_listed, listed + first, count * sizeof(node_id_t)) != cuda_success_k ||
-                cuda_copy(api, device_offsets, host_offsets, sizeof(u64_t)) != cuda_success_k)
-                return {0, status_code_t::device_k};
-            if (status_t const gathered = graph.launch_gather_tape_({device_listed, count}, device_tape,
-                                                                    {device_offsets, count + 1}, context);
+            if (cuda_copy(api, device_listed, listed + first, count * sizeof(node_id_t)) != util::cuda_success_k ||
+                cuda_copy(api, device_offsets, host_offsets, sizeof(util::u64_t)) != util::cuda_success_k)
+                return {0, util::status_code_t::device_k};
+            if (util::status_t const gathered = graph.launch_gather_tape_({device_listed, count}, device_tape,
+                                                                          {device_offsets, count + 1}, context);
                 failed(gathered))
                 return {0, gathered};
-            if (status_t const waited = context.wait(); failed(waited)) return {0, waited};
-            if (cuda_copy(api, host_offsets, device_offsets, (count + 1) * sizeof(u64_t)) != cuda_success_k ||
-                (tape_bytes && cuda_copy(api, host_tape, device_tape, tape_bytes) != cuda_success_k))
-                return {0, status_code_t::device_k};
+            if (util::status_t const waited = context.wait(); failed(waited)) return {0, waited};
+            if (cuda_copy(api, host_offsets, device_offsets, (count + 1) * sizeof(util::u64_t)) !=
+                    util::cuda_success_k ||
+                (tape_bytes && cuda_copy(api, host_tape, device_tape, tape_bytes) != util::cuda_success_k))
+                return {0, util::status_code_t::device_k};
             for (std::size_t entry = 0; entry != count; ++entry) {
-                bytes_view_t const stored {host_tape + host_offsets[entry],
-                                           static_cast<std::size_t>(host_offsets[entry + 1] - host_offsets[entry])};
+                util::bytes_view_t const stored {
+                    host_tape + host_offsets[entry],
+                    static_cast<std::size_t>(host_offsets[entry + 1] - host_offsets[entry])};
                 if (util::status_t const read = bodies_t::keep_stored(stored, kept[first + entry]); failed(read))
                     return {0, read};
             }
@@ -1019,11 +1036,11 @@ expected<std::size_t> get_entries(variant_type_& variant, usearch_key_t key,
 /** Reserves @p entries nodes of @p connectivity neighbors and @p bytes of values over every shard
  *  of a GPU variant's @p index, freezing the connectivity. */
 template <typename indexes_type_>
-status_t vram_amd_reserve(indexes_type_& index, std::size_t entries, std::size_t connectivity,
-                          std::size_t bytes) noexcept {
+util::status_t vram_amd_reserve(indexes_type_& index, std::size_t entries, std::size_t connectivity,
+                                std::size_t bytes) noexcept {
     typename indexes_type_::reserve_capacity_t config {};
     config.capacity = entries;
-    config.connectivity = static_cast<connectivity_t>(connectivity);
+    config.connectivity = static_cast<util::connectivity_t>(connectivity);
     config.bytes = bytes;
     return index.reserve(config).status;
 }
@@ -1032,36 +1049,37 @@ status_t vram_amd_reserve(indexes_type_& index, std::size_t entries, std::size_t
  *  the wire format the RAM variants share: a lone live shard's monolith, or one per live shard
  *  beside the manifest @p path names. */
 template <typename indexes_type_, typename codec_type_>
-status_t vram_amd_save(indexes_type_& index, std::string_view path, codec_type_ const& codec,
-                       save_config_t const& config, std::string_view metric, hip_executor_t& executor,
-                       progress_ticks_t& ticks) noexcept {
+util::status_t vram_amd_save(indexes_type_& index, std::string_view path, codec_type_ const& codec,
+                             util::save_config_t const& config, std::string_view metric, util::hip_executor_t& executor,
+                             progress_ticks_t& ticks) noexcept {
     return index.save(path, codec, executor, config, metric, ticks);
 }
 
 /** Inserts the entries of @p tape under the keys of @p keys_view as one batch over the shards of
  *  @p index, freezing @p connectivity first unless a reservation did. */
 template <typename indexes_type_>
-expected<traversal_stats_t> vram_amd_insert(indexes_type_& index, usearch_keys_view_t keys_view,
-                                            tape_view<byte_t const> tape, std::size_t connectivity,
-                                            std::size_t expansion, progress_ticks_t& ticks,
-                                            hip_executor_t& executor) noexcept {
+util::expected<traversal_stats_t> vram_amd_insert(indexes_type_& index, usearch_keys_view_t keys_view,
+                                                  util::tape_view<util::byte_t const> tape, std::size_t connectivity,
+                                                  std::size_t expansion, progress_ticks_t& ticks,
+                                                  util::hip_executor_t& executor) noexcept {
     std::size_t const count = tape.size();
     if (!index.capacity())
-        if (status_t const reserved = vram_amd_reserve(index, count, connectivity,
-                                                       tape.offsets[count] - tape.offsets[0]);
+        if (util::status_t const reserved = vram_amd_reserve(index, count, connectivity,
+                                                             tape.offsets[count] - tape.offsets[0]);
             failed(reserved))
             return {{}, reserved};
-    growing_buffer<util::uuid128_t, forkunion_allocator_t> keys {forkunion_allocator_t {no_memory_domain_k}};
-    if (failed(keys.reserve_exactly(count))) return {{}, status_code_t::out_of_memory_k};
+    util::growing_buffer<util::uuid128_t, util::forkunion_allocator_t> keys {
+        util::forkunion_allocator_t {util::no_memory_domain_k}};
+    if (failed(keys.reserve_exactly(count))) return {{}, util::status_code_t::out_of_memory_k};
     for (std::size_t offset = 0; offset != count; ++offset) keys.push_back_reserved(uuid_of(key_at(keys_view, offset)));
-    typename indexes_type_::insert_config_t const config {static_cast<u32_t>(expansion)};
+    typename indexes_type_::insert_config_t const config {static_cast<util::u32_t>(expansion)};
     auto const [inserted, status] = index.insert(to_span(keys), tape, executor, config);
     if (failed(status)) return {{}, status};
-    [[maybe_unused]] continuation_t const heard = ticks(count - 1);
+    [[maybe_unused]] util::continuation_t const heard = ticks(count - 1);
     return {{.computed_distances = inserted.computed_distances,
              .visited_members = inserted.visited_members,
              .restarts = inserted.restarts},
-            status_code_t::success_k};
+            util::status_code_t::success_k};
 }
 
 /** Searches the queries of @p queries a progress step at a time, each step one merged search over
@@ -1069,22 +1087,23 @@ expected<traversal_stats_t> vram_amd_insert(indexes_type_& index, usearch_keys_v
  *  answering cancel stops the steps not begun. A search wanting no matches answers before it reads
  *  any of the queries. */
 template <typename indexes_type_>
-expected<traversal_stats_t> vram_amd_search(indexes_type_& index, tape_view<byte_t const> queries, std::size_t wanted,
-                                            std::size_t expansion, matches_outputs_t& outputs, progress_ticks_t& ticks,
-                                            hip_executor_t& executor) noexcept {
+util::expected<traversal_stats_t> vram_amd_search(indexes_type_& index, util::tape_view<util::byte_t const> queries,
+                                                  std::size_t wanted, std::size_t expansion, matches_outputs_t& outputs,
+                                                  progress_ticks_t& ticks, util::hip_executor_t& executor) noexcept {
     using face_t = typename indexes_type_::index_t;
     std::size_t const count = queries.size();
     if (!wanted) {
         for (std::size_t query = 0; query != count; ++query) outputs.counts[query] = 0;
-        return {{}, status_code_t::success_k};
+        return {{}, util::status_code_t::success_k};
     }
     using key_t = util::uuid128_t;
     static_assert(sizeof(key_t) == sizeof(usearch_key_t), "Keys land whole in the caller's outputs");
-    typename face_t::search_config_t const config {static_cast<u32_t>(expansion), static_cast<u32_t>(wanted)};
+    typename face_t::search_config_t const config {static_cast<util::u32_t>(expansion),
+                                                   static_cast<util::u32_t>(wanted)};
     std::size_t const step = ticks.slice();
     traversal_stats_t total;
     for (std::size_t first = 0; first != count;) {
-        std::size_t const taking = min_of(step, count - first);
+        std::size_t const taking = util::min_of(step, count - first);
         std::size_t const first_match = first * wanted, matches = taking * wanted;
         usearch_distance_t* const scores = outputs.scores + first_match;
         auto const [found, status] = index.search(
@@ -1098,18 +1117,19 @@ expected<traversal_stats_t> vram_amd_search(indexes_type_& index, tape_view<byte
         total.restarts += found.restarts;
         for (std::size_t match = 0; match != matches; ++match) scores[match] *= distance_unit<face_t>;
         first += taking;
-        if (ticks(first, count) == continuation_t::cancel_k) return {total, status_code_t::cancelled_k};
+        if (ticks(first, count) == util::continuation_t::cancel_k) return {total, util::status_code_t::cancelled_k};
     }
-    return {total, status_code_t::success_k};
+    return {total, util::status_code_t::success_k};
 }
 
 /** Counts the entries a GPU variant stores under @p key on every shard's host key map; their
  *  values stay on the devices, so the extents stay zero. */
 template <typename traits_type_, typename variant_type_, typename stats_type_>
     requires is_vram_index<variant_type_>
-status_t count_entries(variant_type_& variant, usearch_key_t key, stats_type_& stats, hip_executor_t&) noexcept {
+util::status_t count_entries(variant_type_& variant, usearch_key_t key, stats_type_& stats,
+                             util::hip_executor_t&) noexcept {
     stats.entries = variant.index.count(uuid_of(key));
-    return status_code_t::success_k;
+    return util::status_code_t::success_k;
 }
 
 /**
@@ -1122,21 +1142,22 @@ status_t count_entries(variant_type_& variant, usearch_key_t key, stats_type_& s
  */
 template <typename traits_type_, typename variant_type_>
     requires is_vram_index<variant_type_> && requires(typename variant_bodies<traits_type_>::kept_t& kept) {
-        variant_bodies<traits_type_>::keep_stored(bytes_view_t {}, kept);
+        variant_bodies<traits_type_>::keep_stored(util::bytes_view_t {}, kept);
     }
-expected<std::size_t> get_entries(variant_type_& variant, usearch_key_t key,
-                                  typename traits_type_::get_outputs_t outputs,
-                                  growing_arena<forkunion_allocator_t>& memory, hip_executor_t& executor) noexcept {
+util::expected<std::size_t> get_entries(variant_type_& variant, usearch_key_t key,
+                                        typename traits_type_::get_outputs_t outputs,
+                                        util::growing_arena<util::forkunion_allocator_t>& memory,
+                                        util::hip_executor_t& executor) noexcept {
     using bodies_t = variant_bodies<traits_type_>;
     using kept_t = typename bodies_t::kept_t;
     using graph_t = typename variant_type_::index_t::index_t;
     using node_id_t = typename graph_t::node_id_t;
     util::uuid128_t const identity = uuid_of(key);
     std::size_t const held = variant.index.count(identity);
-    if (!held) return {0, status_code_t::success_k};
+    if (!held) return {0, util::status_code_t::success_k};
     node_id_t* const listed = carve<node_id_t>(memory, held);
     kept_t* const kept = carve<kept_t>(memory, held);
-    if (!listed || !kept) return {0, status_code_t::out_of_memory_k};
+    if (!listed || !kept) return {0, util::status_code_t::out_of_memory_k};
     auto [claim, claim_status] = executor.claim();
     if (failed(claim_status)) return {0, claim_status};
     std::size_t found = 0;
@@ -1149,49 +1170,56 @@ expected<std::size_t> get_entries(variant_type_& variant, usearch_key_t key,
         if (!count) continue;
         std::size_t stream = 0;
         while (stream != executor.size() && executor.device(stream) != graph.device_specs().ordinal) ++stream;
-        if (stream == executor.size()) return {0, status_code_t::config_mismatch_k};
-        hip_api_t const& api = graph.api();
+        if (stream == executor.size()) return {0, util::status_code_t::config_mismatch_k};
+        util::hip_api_t const& api = graph.api();
         // Each node's extent comes off the device's offsets column, so the tape is sized first.
-        u64_t const* const stored_offsets = graph.storage().offsets;
+        util::u64_t const* const stored_offsets = graph.storage().offsets;
         std::size_t tape_bytes = 0;
         for (std::size_t entry = first; entry != found; ++entry) {
-            std::array<u64_t, 2> extent {};
-            if (api.copy(extent.data(), stored_offsets + listed[entry], sizeof(extent), hip_copy_default_k) !=
-                hip_success_k)
-                return {0, status_code_t::device_k};
+            std::array<util::u64_t, 2> extent {};
+            if (api.copy(extent.data(), stored_offsets + listed[entry], sizeof(extent), util::hip_copy_default_k) !=
+                util::hip_success_k)
+                return {0, util::status_code_t::device_k};
             tape_bytes += static_cast<std::size_t>(extent[1] - extent[0]);
         }
-        std::size_t const listed_bytes = round_up_to_multiple(count * sizeof(node_id_t), default_alignment_k);
-        std::size_t const offsets_bytes = round_up_to_multiple((count + 1) * sizeof(u64_t), default_alignment_k);
+        std::size_t const listed_bytes = util::round_up_to_multiple(count * sizeof(node_id_t),
+                                                                    util::default_alignment_k);
+        std::size_t const offsets_bytes = util::round_up_to_multiple((count + 1) * sizeof(util::u64_t),
+                                                                     util::default_alignment_k);
         // The last gather was awaited, so its run rewinds for this carve, which grows it at
         // most once per call; a stream's first context is born on its device.
         std::size_t const staging_bytes = listed_bytes + offsets_bytes + tape_bytes;
-        if (status_t const reserved = executor.reserve(staging_bytes, 1); failed(reserved)) return {0, reserved};
-        if (hip_set_device(api, graph.device_specs().ordinal) != hip_success_k) return {0, status_code_t::device_k};
-        std::span<hip_executor_t::traversal_context_t> const stream_traversals = executor.traversals(stream);
-        hip_executor_t::traversal_context_t& context = stream_traversals[0];
-        byte_t* const staging = context.allocator().allocate(staging_bytes);
-        u64_t* const host_offsets = carve<u64_t>(memory, count + 1);
-        byte_t* const host_tape = carve<byte_t>(memory, tape_bytes);
-        if (!staging || !host_offsets || (tape_bytes && !host_tape)) return {0, status_code_t::out_of_memory_k};
+        if (util::status_t const reserved = executor.reserve(staging_bytes, 1); failed(reserved)) return {0, reserved};
+        if (hip_set_device(api, graph.device_specs().ordinal) != util::hip_success_k)
+            return {0, util::status_code_t::device_k};
+        std::span<util::hip_executor_t::traversal_context_t> const stream_traversals = executor.traversals(stream);
+        util::hip_executor_t::traversal_context_t& context = stream_traversals[0];
+        util::byte_t* const staging = context.allocator().allocate(staging_bytes);
+        util::u64_t* const host_offsets = carve<util::u64_t>(memory, count + 1);
+        util::byte_t* const host_tape = carve<util::byte_t>(memory, tape_bytes);
+        if (!staging || !host_offsets || (tape_bytes && !host_tape)) return {0, util::status_code_t::out_of_memory_k};
         node_id_t* const device_listed = reinterpret_cast<node_id_t*>(staging);
-        u64_t* const device_offsets = reinterpret_cast<u64_t*>(staging + listed_bytes);
-        byte_t* const device_tape = staging + listed_bytes + offsets_bytes;
+        util::u64_t* const device_offsets = reinterpret_cast<util::u64_t*>(staging + listed_bytes);
+        util::byte_t* const device_tape = staging + listed_bytes + offsets_bytes;
         host_offsets[0] = 0;
-        if (api.copy(device_listed, listed + first, count * sizeof(node_id_t), hip_copy_default_k) != hip_success_k ||
-            api.copy(device_offsets, host_offsets, sizeof(u64_t), hip_copy_default_k) != hip_success_k)
-            return {0, status_code_t::device_k};
-        if (status_t const gathered = graph.launch_gather_tape_({device_listed, count}, device_tape,
-                                                                {device_offsets, count + 1}, context);
+        if (api.copy(device_listed, listed + first, count * sizeof(node_id_t), util::hip_copy_default_k) !=
+                util::hip_success_k ||
+            api.copy(device_offsets, host_offsets, sizeof(util::u64_t), util::hip_copy_default_k) !=
+                util::hip_success_k)
+            return {0, util::status_code_t::device_k};
+        if (util::status_t const gathered = graph.launch_gather_tape_({device_listed, count}, device_tape,
+                                                                      {device_offsets, count + 1}, context);
             failed(gathered))
             return {0, gathered};
-        if (status_t const waited = context.wait(); failed(waited)) return {0, waited};
-        if (api.copy(host_offsets, device_offsets, (count + 1) * sizeof(u64_t), hip_copy_default_k) != hip_success_k ||
-            (tape_bytes && api.copy(host_tape, device_tape, tape_bytes, hip_copy_default_k) != hip_success_k))
-            return {0, status_code_t::device_k};
+        if (util::status_t const waited = context.wait(); failed(waited)) return {0, waited};
+        if (api.copy(host_offsets, device_offsets, (count + 1) * sizeof(util::u64_t), util::hip_copy_default_k) !=
+                util::hip_success_k ||
+            (tape_bytes &&
+             api.copy(host_tape, device_tape, tape_bytes, util::hip_copy_default_k) != util::hip_success_k))
+            return {0, util::status_code_t::device_k};
         for (std::size_t entry = 0; entry != count; ++entry) {
-            bytes_view_t const stored {host_tape + host_offsets[entry],
-                                       static_cast<std::size_t>(host_offsets[entry + 1] - host_offsets[entry])};
+            util::bytes_view_t const stored {host_tape + host_offsets[entry],
+                                             static_cast<std::size_t>(host_offsets[entry + 1] - host_offsets[entry])};
             if (util::status_t const read = bodies_t::keep_stored(stored, kept[first + entry]); failed(read))
                 return {0, read};
         }
@@ -1204,11 +1232,12 @@ expected<std::size_t> get_entries(variant_type_& variant, usearch_key_t key,
  *  GPU variant, so it answers @c unsupported_k, as on NVIDIA. */
 template <typename traits_type_, typename variant_type_>
     requires is_vram_index<variant_type_> && (!requires(typename variant_bodies<traits_type_>::kept_t& kept) {
-                 variant_bodies<traits_type_>::keep_stored(bytes_view_t {}, kept);
+                 variant_bodies<traits_type_>::keep_stored(util::bytes_view_t {}, kept);
              })
-expected<std::size_t> get_entries(variant_type_&, usearch_key_t, typename traits_type_::get_outputs_t,
-                                  growing_arena<forkunion_allocator_t>&, hip_executor_t&) noexcept {
-    return {0, status_code_t::unsupported_k};
+util::expected<std::size_t> get_entries(variant_type_&, usearch_key_t, typename traits_type_::get_outputs_t,
+                                        util::growing_arena<util::forkunion_allocator_t>&,
+                                        util::hip_executor_t&) noexcept {
+    return {0, util::status_code_t::unsupported_k};
 }
 
 #pragma endregion AMD GPU Variants

@@ -56,7 +56,7 @@ namespace util = unum::usearch::utilities;
  *  @c src/sequence/vram_variants_nvidia.cpp. */
 template <usearch_sequence_metric_t metric_>
 struct sequence_nvidia_fatbin {
-    static bytes_view_t bytes() noexcept;
+    static util::bytes_view_t bytes() noexcept;
 };
 
 #endif
@@ -67,7 +67,7 @@ struct sequence_nvidia_fatbin {
 template <usearch_sequence_metric_t metric_, gpu_class_t gpu_class_>
 struct sequence_amd_code_object {
     inline static constexpr nk_capability_t capability_k = numkong_capabilities_of(gpu_class_);
-    static bytes_view_t bytes() noexcept;
+    static util::bytes_view_t bytes() noexcept;
 };
 
 #endif
@@ -467,7 +467,7 @@ static void expect_sequence_vram_reloaded(indexes_type_& saved, std::size_t shar
         std::string const second_name {parts == 1 ? std::string_view {second_path} : second_named};
         auto const [first_mapping, first_map_status] = mapped_file_t::read(first_name);
         auto const [second_mapping, second_map_status] = mapped_file_t::read(second_name);
-        bytes_view_t const first_bytes = first_mapping.view(), second_bytes = second_mapping.view();
+        util::bytes_view_t const first_bytes = first_mapping.view(), second_bytes = second_mapping.view();
         expect_true(succeeded(first_map_status) && succeeded(second_map_status) &&
                     first_bytes.size() == second_bytes.size() &&
                     std::memcmp(first_bytes.data(), second_bytes.data(), first_bytes.size()) == 0);

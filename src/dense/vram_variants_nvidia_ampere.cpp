@@ -14,9 +14,9 @@
 
 /** The bounds of each dtype's fatbin, linked in as raw bytes beside the variants, in the table
  *  CMake writes. */
-extern "C" byte_t const* const dense_nvidia_ampere_bundles[];
+extern "C" util::byte_t const* const dense_nvidia_ampere_bundles[];
 template <>
-std::span<byte_t const* const> bundle_bounds<gpu_class_t::nvidia_ampere_k>() noexcept {
+std::span<util::byte_t const* const> bundle_bounds<gpu_class_t::nvidia_ampere_k>() noexcept {
     return {dense_nvidia_ampere_bundles, 2 * dense_dtypes_t::size_k};
 }
 template struct dense_class_tables<vendored_residency_t::vram_nvidia_k, gpu_class_t::nvidia_ampere_k>;

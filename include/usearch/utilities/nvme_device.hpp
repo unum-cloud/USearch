@@ -1090,7 +1090,8 @@ struct spdk_medium_t {
                                        ? spdk_nvme_ns_get_sector_size(name_space)
                                        : 0;
         if (!sector_bytes || byte_base % sector_bytes)
-            return medium.release<wait_type_>(), expected {std::move(medium), status_code_t::invalid_argument_k};
+            return medium.release<wait_type_>(),
+                   expected<spdk_medium_t> {std::move(medium), status_code_t::invalid_argument_k};
         medium.name_space = name_space;
         medium.byte_base = byte_base;
         medium.block_bytes = sector_bytes;
