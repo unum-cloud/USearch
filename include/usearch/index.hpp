@@ -75,7 +75,7 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-#include <Windows.h>
+#include <windows.h>
 #include <sys/stat.h> // `fstat` for file size
 #undef NOMINMAX
 #undef _USE_MATH_DEFINES
@@ -88,18 +88,20 @@
 #endif
 
 // STL includes
-#include <algorithm> // `std::sort_heap`
-#include <atomic>    // `std::atomic`
-#include <bitset>    // `std::bitset`
-#include <climits>   // `CHAR_BIT`
-#include <cmath>     // `std::sqrt`
-#include <cstring>   // `std::memset`
-#include <iterator>  // `std::reverse_iterator`
-#include <mutex>     // `std::unique_lock` - replacement candidate
-#include <random>    // `std::uniform_real_distribution`
-#include <stdexcept> // `std::runtime_exception`
-#include <thread>    // `std::thread`
-#include <utility>   // `std::pair`
+#include <algorithm>   // `std::sort_heap`
+#include <atomic>      // `std::atomic`
+#include <bitset>      // `std::bitset`
+#include <climits>     // `CHAR_BIT`
+#include <cmath>       // `std::sqrt`
+#include <cstring>     // `std::memset`
+#include <exception>   // `std::uncaught_exceptions`
+#include <iterator>    // `std::reverse_iterator`
+#include <mutex>       // `std::unique_lock` - replacement candidate
+#include <random>      // `std::uniform_real_distribution`
+#include <stdexcept>   // `std::runtime_exception`
+#include <thread>      // `std::thread`
+#include <type_traits> // `std::is_pod`
+#include <utility>     // `std::pair`
 
 // Helper macros for concatenation and stringification
 #define usearch_concat_helper_m(a, b) a##b
