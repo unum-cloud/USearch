@@ -269,7 +269,7 @@ An executor is its threads and their queues, one arena per thread, and its resid
 A `NULL` executor runs the call on the calling thread.
 It creates no pool, thread, ring, SPDK queue pair or stream and probes no topology; its scratch and blocking queues live for that call only.
 Name an executor for calls that allocate nothing once warm.
-Such a call runs on `ram_executor_t::on_calling_thread()`, whose threads are ForkUnion's `fu::dummy_pool_t` and whose one arena serves that call alone; NVMe reads go through blocking queues over the files the index already holds, and VRAM work goes on each device's null legacy stream.
+Such a call runs on `ram_executor_t::on_calling_thread()`, whose threads are an empty `fu::pool_t` and whose one arena serves that call alone; NVMe reads go through blocking queues over the files the index already holds, and VRAM work goes on each device's null legacy stream.
 A VRAM executor owns one non-blocking stream per device, created with it, and caller-passed streams answer `unsupported_k`.
 Tools and benchmarks open one executor and pass it to every call, and nothing outside `include/usearch/utilities/ram_device.hpp` dispatches on a raw `fu_pool_t`.
 Every executor creates its own threads and pins them to the first cores the creating thread may run on, so a caller sharing a machine between executors narrows its affinity mask before creating each.

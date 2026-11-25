@@ -271,11 +271,11 @@ func TestSequenceRefinePlanResumesAndFinishes(t *testing.T) {
 	if _, err := on.Refine(&SequenceRefineConfig{Plan: &plan, Progress: stops}); err != nil && !errors.Is(err, StatusCancelled) {
 		t.Fatalf("the stopped round reported %v", err)
 	}
-	if plan.Phase.Phase == PhaseDone || plan.Phase.Completed > plan.Phase.Total {
-		t.Errorf("a stopped round left %+v", plan.Phase)
+	if plan.Progress.Phase == PhaseDone || plan.Progress.Completed > plan.Progress.Total {
+		t.Errorf("a stopped round left %+v", plan.Progress)
 	}
-	if _, err := on.Refine(&SequenceRefineConfig{Plan: &plan}); err != nil || plan.Phase.Phase != PhaseDone {
-		t.Fatalf("the resumed round ended in %+v: %v", plan.Phase, err)
+	if _, err := on.Refine(&SequenceRefineConfig{Plan: &plan}); err != nil || plan.Progress.Phase != PhaseDone {
+		t.Fatalf("the resumed round ended in %+v: %v", plan.Progress, err)
 	}
 	if report, err := on.RefinePlanFinish(&plan); err != nil || report.Reachability.Audited != 64 {
 		t.Errorf("the finished plan reported %+v: %v", report, err)
@@ -348,12 +348,12 @@ func TestSequenceReshardCutRunsThroughAPlanAndADeferredFinish(t *testing.T) {
 	if _, err := source.On(executor).Reshard(sources, targets, config); err != nil && !errors.Is(err, StatusCancelled) {
 		t.Fatalf("the stopped cut reported %v", err)
 	}
-	if moved := sizeSequence(t, targets[0]) + sizeSequence(t, targets[1]); moved != 64 || plan.Phase.Phase == PhaseDone {
-		t.Errorf("a stop moved %d of 64 entries and left %+v", moved, plan.Phase)
+	if moved := sizeSequence(t, targets[0]) + sizeSequence(t, targets[1]); moved != 64 || plan.Progress.Phase == PhaseDone {
+		t.Errorf("a stop moved %d of 64 entries and left %+v", moved, plan.Progress)
 	}
 	if _, err := source.On(executor).Reshard(sources, targets, &SequenceReshardConfig{Plan: &plan}); err != nil ||
-		plan.Phase.Phase != PhaseDone {
-		t.Fatalf("the continued cut ended in %+v: %v", plan.Phase, err)
+		plan.Progress.Phase != PhaseDone {
+		t.Fatalf("the continued cut ended in %+v: %v", plan.Progress, err)
 	}
 	finished, err := source.Deferred(executor).ReshardPlanFinish(&plan)
 	if err != nil {

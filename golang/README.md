@@ -522,11 +522,11 @@ recut := &usearch.DenseReshardConfig{MemoryDomains: []int32{}, ShardCapacity: 10
 report, err := index.On(executor).Reshard(self, self, recut)
 ```
 
-A `Plan` in a `DenseRefineConfig` or `DenseReshardConfig` keeps a stopped call live: the next call naming it continues where the stop came, its `Phase` says where each call stopped, and `RefinePlanFinish` or `ReshardPlanFinish` closes it and lands what the whole plan did.
+A `Plan` in a `DenseRefineConfig` or `DenseReshardConfig` keeps a stopped call live: the next call naming it continues where the stop came, its `Progress` says where each call stopped, and `RefinePlanFinish` or `ReshardPlanFinish` closes it and lands what the whole plan did.
 
 ```go
 var plan usearch.DenseRefinePlan
-for plan.Phase.Phase != usearch.PhaseDone {
+for plan.Progress.Phase != usearch.PhaseDone {
 	_, err := index.On(executor).Refine(&usearch.DenseRefineConfig{Plan: &plan, Progress: withinBudget})
 	if err != nil && !errors.Is(err, usearch.StatusCancelled) {
 		return err

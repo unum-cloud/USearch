@@ -2331,8 +2331,7 @@ struct hopper_tma_schedule_t {
  *  A walking kernel binds each warp's gathers to its parameter's tensor map at entry, through
  *  @ref bind; @ref score_batch then copies the batch through @ref cuda_tma_gather_quads, or loads
  *  it lane by lane where the kernel bound no map or the map misses any of the batch's rows. The
- *  stages of every walking warp live in static shared memory, sized by the kernel's resident blocks
- *  through @ref gather_window_bytes.
+ *  stages of every walking warp live in static shared memory, @ref gather_window_bytes_k wide.
  */
 struct blackwell_tma_schedule_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_blackwell_k;
@@ -2341,24 +2340,15 @@ struct blackwell_tma_schedule_t {
     inline static constexpr u32_t stages_k = 2;
     inline static constexpr u32_t fragments_per_load_k = 2;
 
-    /** Shared memory of one multiprocessor, and what the driver keeps of it per resident block. */
-    inline static constexpr u32_t multiprocessor_shared_bytes_k = 228 * 1024;
-    inline static constexpr u32_t block_reserved_shared_bytes_k = 1024;
+    /** Bytes of one row a gather copies at most: one 16-byte column per lane. The two stages of
+     *  four rows every warp of a block keeps then fit the 48 KiB of static shared memory nvcc
+     *  admits per block, so no resident-block count narrows it. */
+    inline static constexpr u32_t gather_window_bytes_k = warp_t::width_k * 16;
 
-    /** Bytes of one row a gather copies at most under @p resident_blocks blocks per multiprocessor:
-     *  one 16-byte column per lane, halved while the two stages of four rows that every warp of a
-     *  block keeps outgrow the block's share of the multiprocessor. */
-    static constexpr u32_t gather_window_bytes(u32_t resident_blocks) noexcept {
-        u32_t window = warp_t::width_k * 16;
-        while (vram_warps_per_block_k * stages_k * 4 * window >
-               multiprocessor_shared_bytes_k / resident_blocks - block_reserved_shared_bytes_k)
-            window /= 2;
-        return window;
-    }
-
-    /** One warp's gathered rows under @p resident_blocks_ blocks per multiprocessor. */
-    template <u32_t resident_blocks_>
-    using gather_stages = cuda_gather_stages<gather_window_bytes(resident_blocks_)>;
+    /** One warp's gathered rows. */
+    using gather_stages_t = cuda_gather_stages<gather_window_bytes_k>;
+    static_assert(vram_warps_per_block_k * sizeof(gather_stages_t) <= 48 * 1024,
+                  "Every warp's gather stages fit the static shared memory nvcc admits per block");
 
     /** One barrier per stage, in the warp's static shared memory. */
     struct shared_t {
@@ -2379,12 +2369,10 @@ struct blackwell_tma_schedule_t {
         cuda_tma_initialize_barriers(barriers_, stages_k, lane);
     }
 
-    /** Binds the calling warp's gathers under @p resident_blocks_ blocks per multiprocessor to
-     *  @p rows_map, the kernel's own parameter, warming its tensor map, and arms their barriers;
-     *  a map whose windows outgrow the stages binds no rows. */
-    template <u32_t resident_blocks_>
+    /** Binds the calling warp's gathers to @p rows_map, the kernel's own parameter, warming its
+     *  tensor map, and arms their barriers; a map with windows past the stages binds no rows. */
     static __device__ __forceinline__ void bind(cuda_rows_map_t const& rows_map, u32_t lane) noexcept {
-        gather_stages<resident_blocks_>& gather = gather_stages_<resident_blocks_>();
+        gather_stages_t& gather = gather_stages_();
         if (lane == 0) {
             bool const fits = 4 * rows_map.window_bytes <= sizeof(gather.stages[0]);
             gather.tensor_map = &rows_map.tensor_map;
@@ -2405,7 +2393,7 @@ struct blackwell_tma_schedule_t {
         vram_flat_view<kit_> const& storage, typename kit_::fragment_t const* query_span,
         typename kit_::norms_t query_state, vram_gathered<kit_, warp_t>& gathered, u32_t gathered_count,
         u32_t lane) noexcept {
-        gather_stages<resident_blocks_>& gather = gather_stages_<resident_blocks_>();
+        gather_stages_t& gather = gather_stages_();
         bool const unmapped = lane < gathered_count && gathered.ids[lane] >= gather.rows_count;
         if (warp_t::ballot(unmapped))
             return cuda_score_batch<kit_, resident_blocks_, fragments_per_load_k>( //
@@ -2446,9 +2434,8 @@ struct blackwell_tma_schedule_t {
   private:
 
     /** The calling warp's gathered rows, one per warp of the block, in its static shared memory. */
-    template <u32_t resident_blocks_>
-    static __device__ __forceinline__ gather_stages<resident_blocks_>& gather_stages_() noexcept {
-        __shared__ gather_stages<resident_blocks_> gathers[vram_warps_per_block_k];
+    static __device__ __forceinline__ gather_stages_t& gather_stages_() noexcept {
+        __shared__ gather_stages_t gathers[vram_warps_per_block_k];
         return gathers[threadIdx.x / warp_t::width_k];
     }
 };

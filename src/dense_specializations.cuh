@@ -382,7 +382,7 @@ struct specialized_index {
     static util::status_t view(void* index, std::string_view path, std::span<std::string_view const> paths,
                                usearch_ram_options_t const* ram, usearch_executor_t executor) noexcept {
         if constexpr (viewed_k) {
-            executor_t* const engines = executor ? std::get_if<executor_t>(&executor->executor) : nullptr;
+            executor_t* const engines = executor ? std::get_if<executor_t>(&executor->residency) : nullptr;
             if (ram && !engines) return util::status_code_t::invalid_argument_k;
             if (util::status_t const viewed = of(index).view(path, paths); failed(viewed) || !ram) return viewed;
             return of(index).hold_keys(util::forkunion_allocator_t {tables_domain(*ram)}, ram->memory_limit, *engines);
@@ -393,7 +393,7 @@ struct specialized_index {
                                     usearch_executor_t executor) noexcept
         requires is_nvme_index<index_type_>
     {
-        executor_t* const engines = executor ? std::get_if<executor_t>(&executor->executor) : nullptr;
+        executor_t* const engines = executor ? std::get_if<executor_t>(&executor->residency) : nullptr;
         if (ram && !engines) return util::status_code_t::invalid_argument_k;
         if (util::status_t const loaded = of(index).load(path); failed(loaded) || !ram) return loaded;
         return of(index).hold_keys(util::forkunion_allocator_t {tables_domain(*ram)}, ram->memory_limit, *engines);

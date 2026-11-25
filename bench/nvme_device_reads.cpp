@@ -238,7 +238,7 @@ int bench_nvme_device_reads(int argc, char const* const* argv) {
             std::array<nvme_executor_t::medium_t, 1>& media;
             nvme_executor_t& executor;
             ~holds_t() noexcept {
-                executor.release();
+                executor = nvme_executor_t {};
                 release_medium<fu::standard_yield_t>(media[0]);
             }
         } const holds {media, executor};

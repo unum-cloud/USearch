@@ -636,8 +636,9 @@ enum connectivity_t : u32_t {
     connectivity_128_k = 128,
 };
 
-/** The walk breadth a walk takes when its config asks for none: twice the neighbors one node
- *  holds, in every design and residency. */
+/** The walk breadth a walk takes when its config asks for none, in every design and residency:
+ *  twice the neighbors one node holds, since an insertion's candidates must hold every neighbor
+ *  of the node and, as many again, the back-links its neighbors may point at it. */
 constexpr std::size_t default_expansion_factor(std::size_t connectivity) noexcept { return connectivity * 2; }
 
 /** Element types USearch speaks when exchanging payloads - NumKong's numeric dtypes
@@ -1241,11 +1242,6 @@ constexpr std::size_t part_of(std::span<node_id_type_ const> part_bases, node_id
     while (part + 1 < part_bases.size() && part_bases[part + 1] <= node_id) ++part;
     return part;
 }
-
-/** The universal matrix-engine row count: Intel AMX tiles, Arm SME's ZA at SVL-512,
- *  and NVIDIA mma fragments all speak 16 rows natively - Hopper's warpgroups speak 4×16.
- *  Tiled paths across every index design derive their shapes from it, never tune it. */
-inline constexpr std::size_t tile_span_k = 16;
 
 /**
  *  @brief The first position in the @p values, ascending under @p comparator, not ordered before
@@ -1908,29 +1904,6 @@ struct gpu_device_t {
 /** Devices one vendor's listing holds at most, so the process-wide listing needs no heap. */
 inline constexpr std::size_t gpu_devices_capacity_k = 64;
 
-/** Feature bits an I/O engine answers through @c capabilities() once open, since a refused
- *  registration turns @c fixed_buffers_k off at run time, so callers, tests, and docs introspect
- *  variants uniformly instead of by type name. */
-enum class io_capability_t : u32_t {
-    none_k = 0,
-
-    /** Staging buffers are pre-registered with the kernel/ring - no per-read
-     *  page pinning; roughly an 11% throughput gain at NVMe rates. */
-    fixed_buffers_k = 1u << 0,
-
-    /** Completions are polled from device queues instead of interrupt-driven;
-     *  needs poll-capable queues & direct I/O; ~21% on top of the fixed path. */
-    polled_k = 1u << 1,
-
-    /** Requests address raw LBAs on a namespace, not file offsets - the
-     *  filesystem & block layer are bypassed; ~20-30% over the block path. */
-    lba_addressing_k = 1u << 2,
-};
-
-inline constexpr io_capability_t operator|(io_capability_t first, io_capability_t second) noexcept {
-    return static_cast<io_capability_t>(static_cast<u32_t>(first) | static_cast<u32_t>(second));
-}
-
 /** Whether this build holds @p kit_ 's body: every kit but a stub, which alone states
  *  @c compiled_k, as false. */
 template <typename kit_>
@@ -2155,6 +2128,15 @@ constexpr u64_t vram_admission_wave_end(u64_t wave_first, u64_t end_id, u32_t sh
  *  width - this times the warp's lanes, 512 on 32-lane warps - takes the arena frontier instead, so
  *  no expansion or count is capped by it. */
 inline constexpr u32_t vram_widest_candidate_slots_k = 16;
+
+/** Largest physical slab a VRAM column maps, rounded to the driver's granularity at reservation;
+ *  smaller ones double up to it, so a sparse shard maps a single granularity where a column would
+ *  otherwise take a whole slab. */
+inline constexpr std::size_t preferred_slab_bytes_k = 128u << 20;
+
+/** Telemetry slots a device's first pin holds, more than the shards one device usually serves;
+ *  past them the run pins twice as many. */
+inline constexpr std::size_t slots_per_pin_k = 64;
 
 /** Device-resident telemetry counters, one block per driving context, zeroed at each submission
  *  and read after its drain. */

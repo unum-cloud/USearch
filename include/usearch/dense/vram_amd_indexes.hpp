@@ -212,9 +212,9 @@ struct vram_amd_indexes {
     /** The vendor whose devices the shards sit on, beside the vendors' twins of this index. */
     inline static constexpr gpu_vendor_t vendor_k = gpu_vendor_t::amd_k;
 
-    /** Rows one window of a batch verb stages on a shard at most: one slab, the granularity
-     *  checkpoints move by, so a batch of any size crosses in bounded staging. */
-    inline static constexpr std::size_t window_rows_k = power_of_two<std::size_t>(index_t::batch_rows_log2_k);
+    /** Rows one window of a batch verb stages on a shard at most, so a batch of any size crosses
+     *  in bounded staging. */
+    inline static constexpr std::size_t window_rows_k = power_of_two<std::size_t>(window_rows_log2_k);
 
 #pragma region Placement
 

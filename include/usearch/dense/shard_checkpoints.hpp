@@ -607,8 +607,8 @@ concept a_neighbor_widening_index = requires(typename index_type_::columns_view_
 template <typename index_type_>
 concept a_run_loading_index = requires(typename index_type_::load_plan_t const& plan) { plan.run_rows; };
 
-/** A part's columns as a task of the plan of an @ref a_run_loading_index reads them: the
- *  column-sources twin of an index's @c columns_view_t. */
+/** A part's columns as a task of the plan by which an index satisfying @ref a_run_loading_index
+ *  reads them: the column-sources twin of an index's @c columns_view_t. */
 struct part_column_sources_t {
     column_source_t vectors;
     column_source_t neighbors;

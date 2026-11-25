@@ -443,7 +443,7 @@ typedef struct plan_t {
     } handle;
 
     /** Where the last call naming the plan stopped. */
-    usearch_phase_progress_t phase;
+    usearch_phase_progress_t progress;
 } plan_t;
 
 #pragma endregion Managed Expressions
@@ -1030,10 +1030,10 @@ EXTERN_C DLLEXPORT int PlanProgress(WolframLibraryData library_data, mint argume
     int const answered = answer_nothing(library_data, result);
     if (answered != LIBRARY_NO_ERROR) return answered;
     DataStore const store = MArgument_getDataStore(result);
-    store_text(library_data, store, "Phase", usearch_phase_name(box->phase.phase));
-    store_size(library_data, store, "Ordinal", box->phase.ordinal);
-    store_size(library_data, store, "Completed", box->phase.completed);
-    store_size(library_data, store, "Total", box->phase.total);
+    store_text(library_data, store, "Phase", usearch_phase_name(box->progress.phase));
+    store_size(library_data, store, "Ordinal", box->progress.ordinal);
+    store_size(library_data, store, "Completed", box->progress.completed);
+    store_size(library_data, store, "Total", box->progress.total);
     return LIBRARY_NO_ERROR;
 }
 
@@ -1841,7 +1841,7 @@ EXTERN_C DLLEXPORT int DenseRefine(WolframLibraryData library_data, mint argumen
             .report = &call->report,
             .refine = refine,
             .plan = call->plan_id ? &call->plan.handle.dense_refine : NULL,
-            .phase = call->plan_id ? &call->plan.phase : NULL,
+            .phase = call->plan_id ? &call->plan.progress : NULL,
         });
     return call_answer(library_data, call, result);
 }
@@ -1920,7 +1920,7 @@ EXTERN_C DLLEXPORT int DenseReshard(WolframLibraryData library_data, mint argume
             .refine = refine,
             .seed = seed,
             .plan = call->plan_id ? &call->plan.handle.dense_reshard : NULL,
-            .phase = call->plan_id ? &call->plan.phase : NULL,
+            .phase = call->plan_id ? &call->plan.progress : NULL,
         });
     }
     return call_answer(library_data, call, result);
@@ -3393,7 +3393,7 @@ EXTERN_C DLLEXPORT int SequenceRefine(WolframLibraryData library_data, mint argu
             .report = &call->report,
             .refine = refine,
             .plan = call->plan_id ? &call->plan.handle.sequence_refine : NULL,
-            .phase = call->plan_id ? &call->plan.phase : NULL,
+            .phase = call->plan_id ? &call->plan.progress : NULL,
         });
     return call_answer(library_data, call, result);
 }
@@ -3537,7 +3537,7 @@ EXTERN_C DLLEXPORT int SequenceReshard(WolframLibraryData library_data, mint arg
             .refine = refine,
             .seed = seed,
             .plan = call->plan_id ? &call->plan.handle.sequence_reshard : NULL,
-            .phase = call->plan_id ? &call->plan.phase : NULL,
+            .phase = call->plan_id ? &call->plan.progress : NULL,
         });
     return call_answer(library_data, call, result);
 }
@@ -3698,7 +3698,7 @@ EXTERN_C DLLEXPORT int ShapesRefine(WolframLibraryData library_data, mint argume
             .report = &call->report,
             .refine = refine,
             .plan = call->plan_id ? &call->plan.handle.shapes_refine : NULL,
-            .phase = call->plan_id ? &call->plan.phase : NULL,
+            .phase = call->plan_id ? &call->plan.progress : NULL,
         });
     return call_answer(library_data, call, result);
 }
@@ -3843,7 +3843,7 @@ EXTERN_C DLLEXPORT int ShapesReshard(WolframLibraryData library_data, mint argum
             .refine = refine,
             .seed = seed,
             .plan = call->plan_id ? &call->plan.handle.shapes_reshard : NULL,
-            .phase = call->plan_id ? &call->plan.phase : NULL,
+            .phase = call->plan_id ? &call->plan.progress : NULL,
         });
     return call_answer(library_data, call, result);
 }
@@ -4001,7 +4001,7 @@ EXTERN_C DLLEXPORT int GeospatialRefine(WolframLibraryData library_data, mint ar
             .report = &call->report,
             .refine = refine,
             .plan = call->plan_id ? &call->plan.handle.geospatial_refine : NULL,
-            .phase = call->plan_id ? &call->plan.phase : NULL,
+            .phase = call->plan_id ? &call->plan.progress : NULL,
         });
     return call_answer(library_data, call, result);
 }
@@ -4188,7 +4188,7 @@ EXTERN_C DLLEXPORT int GeospatialReshard(WolframLibraryData library_data, mint a
             .refine = refine,
             .seed = seed,
             .plan = call->plan_id ? &call->plan.handle.geospatial_reshard : NULL,
-            .phase = call->plan_id ? &call->plan.phase : NULL,
+            .phase = call->plan_id ? &call->plan.progress : NULL,
         });
     return call_answer(library_data, call, result);
 }

@@ -478,9 +478,9 @@ func (matrix RowsView) Stride() uint { return matrix.stride }
 // Scalar reports the scalar type the rows hold.
 func (matrix RowsView) Scalar() Scalar { return matrix.scalar }
 
-// lower passes the rows as the batch view a verb reads; the library checks their width against
+// rows passes the matrix as the batch view a verb reads; the library checks its width against
 // the frozen geometry.
-func (matrix RowsView) lower(call *call) C.usearch_rows_view_t {
+func (call *call) rows(matrix RowsView) C.usearch_rows_view_t {
 	call.pinner.Pin(matrix.pointer)
 	return C.usearch_rows_view_t{
 		data:    matrix.pointer,
@@ -1284,7 +1284,7 @@ func view(text string) C.usearch_bytes_view_t {
 // dropped without Wait or Close is released by the collector once the call is final, never
 // blocking on it: until then every later collection checks it again.
 type Deferred[Result any] struct {
-	call    callWithResult[Result]
+	pending callWithResult[Result]
 	cleanup runtime.Cleanup
 }
 
@@ -1294,7 +1294,7 @@ func submitted[Result any](deferred *Deferred[Result], refusal error) (*Deferred
 	if refusal != nil {
 		return nil, refusal
 	}
-	deferred.cleanup = runtime.AddCleanup(deferred, release, deferred.call.call)
+	deferred.cleanup = runtime.AddCleanup(deferred, release, deferred.pending.call)
 	return deferred, nil
 }
 
@@ -1309,20 +1309,20 @@ func release(call call) {
 }
 
 // Status reports StatusDeferred until the call is final, then its final status, without blocking.
-func (deferred *Deferred[Result]) Status() Status { return deferred.call.status() }
+func (deferred *Deferred[Result]) Status() Status { return deferred.pending.status() }
 
 // Wait blocks until the call is final, releases its pins, then hands back its result, the same
 // every time it is asked.
 func (deferred *Deferred[Result]) Wait() (Result, error) {
 	deferred.cleanup.Stop()
-	return block(&deferred.call, nil)
+	return block(&deferred.pending, nil)
 }
 
 // Close blocks until the call is final, releases its pins, and reports the call's failure. It is
 // idempotent and safe after Wait.
 func (deferred *Deferred[Result]) Close() error {
 	deferred.cleanup.Stop()
-	return deferred.call.settle()
+	return deferred.pending.settle()
 }
 
 // endregion: Calls
@@ -1620,8 +1620,8 @@ func (tape Tape) Entries() uint { return tape.entries }
 // Scalar reports the scalar type the elements hold.
 func (tape Tape) Scalar() Scalar { return tape.scalar }
 
-// lower passes the tape as the batch view a verb reads, with the offsets as wide as it holds them.
-func (tape Tape) lower(call *call) C.usearch_tape_view_t {
+// tape passes a tape as the batch view a verb reads, with the offsets as wide as it holds them.
+func (call *call) tape(tape Tape) C.usearch_tape_view_t {
 	view := C.usearch_tape_view_t{data: call.pin(tape.pointer), layout: tape.layout, scalar: C.usearch_scalar_t(tape.scalar)}
 	*(*unsafe.Pointer)(unsafe.Pointer(&view.offsets)) = call.pin(tape.offsets)
 	return view
@@ -1799,18 +1799,20 @@ func (call *call) stats(stats *TraversalStats) *C.usearch_traversal_stats_t {
 // call naming it, and where the last such call stopped. Every modality's refine and reshard plan is
 // one, each over its own handle type.
 type livePlan[Handle comparable] struct {
-	// Phase is where the last call naming the plan stopped, PhaseDone once its rounds ended.
-	Phase  PhaseProgress
-	handle Handle
+	// Progress is where the last call naming the plan stopped, PhaseDone once its rounds ended.
+	Progress PhaseProgress
+	handle   Handle
 }
 
-// lower passes the plan's handle and phase to a call, both nil for no plan.
-func (plan *livePlan[Handle]) lower(call *call) (*Handle, *C.usearch_phase_progress_t) {
+// lower passes the plan's handle and phase to a call, both nil for no plan, pinned by the call's
+// pinner. It takes the pinner rather than being a method of the call, as methods take no type
+// parameters and the plan's handle type is one.
+func (plan *livePlan[Handle]) lower(pinner *runtime.Pinner) (*Handle, *C.usearch_phase_progress_t) {
 	if plan == nil {
 		return nil, nil
 	}
-	call.pin(unsafe.Pointer(plan))
-	return &plan.handle, (*C.usearch_phase_progress_t)(unsafe.Pointer(&plan.Phase))
+	pinner.Pin(plan)
+	return &plan.handle, (*C.usearch_phase_progress_t)(unsafe.Pointer(&plan.Progress))
 }
 
 // take hands the plan's handle to its finish, leaving the plan fresh; a nil plan hands none, which

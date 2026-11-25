@@ -486,46 +486,6 @@ inline cuda_result_t cuda_fill_async(cuda_api_t const& api, void* destination, u
     return api ? api.fill_async(cuda_address(destination), value, bytes, stream) : cuda_error_not_initialized_k;
 }
 
-/**
- *  @brief GPU generations, one compile target each, named like NumKong's GPU tiers and numbered on
- *      the @c __CUDA_ARCH__ scale, so tiers order against each other.
- *
- *  NVCC compiles three kinds of target, and none of them runs on a GPU older than it names. A plain
- *  one, like @c 80 or @c 89, runs on its own compute capability and every later one of the same
- *  major - an 8.0 cubin runs on 8.6 and 8.9 - and the PTX it embeds is JIT-compiled for any newer
- *  GPU, which makes it the only forward-compatible kind. An @c a target, like @c 90a, adds what
- *  only that exact part keeps, like @c wgmma, so its cubin runs on 9.0 alone and its PTX nowhere
- *  else. An @c f target, from CUDA 12.9 and compute capability 10 on, adds what a whole family
- *  shares: @c 100f runs on 10.0 and 10.3, @c 120f on 12.0 and 12.1, and neither on any other
- *  family. A GPU newer than the newest tier therefore runs the Ampere unit's PTX until a tier of
- *  its own finishes.
- */
-enum cuda_arch_t : int {
-
-    /** @c 80, the floor - A100, A10 & RTX 30: @c dp4a, packed-half & bf16x2 fma, @c cp.async. */
-    cuda_arch_ampere_k = 800,
-
-    /** @c 89 - L4, L40S & RTX 40: the fp8 conversions and FP8 @c mma.sync. */
-    cuda_arch_ada_k = 890,
-
-    /** @c 90a - H100 & H200: TMA, thread-block clusters, distributed shared memory, and
-     *  @c wgmma. */
-    cuda_arch_hopper_k = 900,
-
-    /** @c 100f - B200, B300 & GB300: mixed-precision @c fma.f32.f16 & @c fma.f32.bf16, 256-bit
-     *  loads, TMA @c gather4, the fp6 & fp4 conversions, and @c tcgen05. */
-    cuda_arch_blackwell_k = 1000,
-
-    /** @c 120f - RTX 50, RTX PRO 6000 & DGX Spark: Blackwell's multiply-adds & conversions, without
-     *  @c tcgen05. */
-    cuda_arch_blackwellrtx_k = 1200,
-};
-
-/** Compute capability @p major. @p minor on the @c cuda_arch_t scale, as the driver reports it. */
-constexpr cuda_arch_t cuda_arch_of(u32_t major, u32_t minor) noexcept {
-    return static_cast<cuda_arch_t>(major * 100 + minor * 10);
-}
-
 /** One GPU's hardware specification - the facts runtime dispatch consults; hardware only,
  *  never derived policy. */
 struct cuda_device_specs_t {
@@ -556,9 +516,6 @@ struct cuda_device_specs_t {
 
     /** Shared memory the driver keeps from every resident block beside what it asks for. */
     std::size_t reserved_shared_memory_per_block_bytes = 0;
-
-    /** This device's generation on the @c cuda_arch_t scale - the kit chains' runtime ceiling. */
-    cuda_arch_t arch() const noexcept { return cuda_arch_of(compute_major, compute_minor); }
 
     /** Bytes one block keeps to itself while it holds a whole multiprocessor: the widest grant
      *  within the multiprocessor's share, less the driver's reserve. A device tile is sized by it,
@@ -658,10 +615,6 @@ struct cuda_virtual_memory_allocator {
     struct rebind {
         using other = cuda_virtual_memory_allocator<other_>;
     };
-
-    /** Largest physical slab, rounded to the driver's granularity at reservation; smaller ones
-     *  double up to it, so a sparse shard maps one granularity, not one full slab per column. */
-    inline static constexpr std::size_t preferred_slab_bytes_k = 128u << 20;
 
     cuda_api_t const* api_ = nullptr;
     cuda_device_address_t base_ = 0;
@@ -1293,10 +1246,6 @@ struct cuda_pinned_slots_t {
     /** Bytes one slot holds: a context's telemetry snapshot and its missed word, with room to
      *  spare. */
     inline static constexpr std::size_t slot_bytes_k = 128;
-
-    /** Slots the first pin holds, more than the shards one device usually serves; past them the
-     *  run pins twice as many. */
-    inline static constexpr std::size_t slots_per_pin_k = 64;
 
     /** Pins its slots through @p api beside device @p device. */
     cuda_pinned_slots_t(cuda_api_t const& api, int device) noexcept : slots_ {cuda_pinned_allocator_t {api, device}} {}
@@ -2049,13 +1998,13 @@ struct cuda_executor_t {
     ~cuda_executor_t() noexcept {
         [[maybe_unused]] status_t const drained = wait();
         for (stream_t& opened : streams_)
-            if (cuda_set_device(*api_, opened.device) == cuda_success_k) opened.contexts.reset(), opened.arena.reset();
+            if (cuda_set_device(*opened.api, opened.device) == cuda_success_k)
+                opened.contexts.reset(), opened.arena.reset();
     }
 
     /** Exchanges the stream tables; @c held_ stays, since a move with a call in flight is
      *  misuse. */
     void swap(cuda_executor_t& other) noexcept {
-        std::swap(api_, other.api_);
         std::swap(streams_, other.streams_);
         std::swap(scratch_limit_, other.scratch_limit_);
         std::swap(cache_bytes_per_core_, other.cache_bytes_per_core_);
@@ -2081,7 +2030,6 @@ struct cuda_executor_t {
     static expected<cuda_executor_t> acquire(growing_buffer<stream_t>&& streams) noexcept {
         if (streams.empty()) return {{}, status_code_t::config_mismatch_k};
         cuda_executor_t executor;
-        executor.api_ = streams[0].api;
         // Queried once here; every round reads it from the executor afterwards.
         for (stream_t const& opened : streams) {
             auto const [specs, status] = cuda_device_specs_t::query(*opened.api, opened.device);
@@ -2162,7 +2110,7 @@ struct cuda_executor_t {
         if (scratch_limit_ && bytes_per_stream > scratch_limit_) return status_code_t::out_of_memory_k;
         for (stream_t& opened : streams_) {
             // The null legacy stream is the current device's, so that device is set first.
-            if (cuda_set_device(*api_, opened.device) != cuda_success_k)
+            if (cuda_set_device(*opened.api, opened.device) != cuda_success_k)
                 return {status_code_t::device_k, "Device selection failed"};
             opened.arena.clear();
             // A rewound run holds one chunk, its widest, which a wider call replaces whole.
@@ -2190,7 +2138,8 @@ struct cuda_executor_t {
      *  marking each stream with its device bound, then sleeping on each mark in turn. */
     status_t wait() noexcept {
         for (stream_t& opened : streams_)
-            if (cuda_set_device(*api_, opened.device) != cuda_success_k || failed(opened.event.record(opened.handle)))
+            if (cuda_set_device(*opened.api, opened.device) != cuda_success_k ||
+                failed(opened.event.record(opened.handle)))
                 return status_code_t::device_k;
         for (stream_t& opened : streams_)
             if (status_t const drained = opened.event.wait(); failed(drained)) return drained;
@@ -2214,7 +2163,7 @@ struct cuda_executor_t {
     std::size_t size() const noexcept { return streams_.size(); }
 
     /** The driver table every stream here goes through. */
-    cuda_api_t const& api() const noexcept { return *api_; }
+    cuda_api_t const& api() const noexcept { return *streams_[0].api; }
 
   private:
     /** Appends @p handle to @p bound as the stream of @p device, which is current. */
@@ -2226,8 +2175,6 @@ struct cuda_executor_t {
         bound.push_back_reserved(std::move(stream));
         return status_code_t::success_k;
     }
-
-    cuda_api_t const* api_ = nullptr;
 
     /** One stream per named entry, in the caller's order. */
     growing_buffer<stream_t> streams_ {global_allocator};

@@ -41,43 +41,30 @@ namespace unum::usearch::dense {
 static_assert(vram_nvidia_index<nk_i8_k, void, dummy_waiter_t>::max_node_count_k <=
               vram_scored_node<node_id_t>::id_capacity_k);
 
-/** Shared memory a walking warp keeps for the rows @p schedule_ gathers, at its widest window; none
- *  where it gathers none. */
+/** Shared memory a walking warp keeps for the rows @p schedule_ gathers; none where it gathers
+ *  none. */
 template <typename schedule_>
 constexpr std::size_t cuda_gather_bytes_per_warp() noexcept {
     return 0;
 }
 
 template <typename schedule_>
-    requires requires { schedule_::gather_window_bytes(1u); }
+    requires requires { schedule_::gather_window_bytes_k; }
 constexpr std::size_t cuda_gather_bytes_per_warp() noexcept {
-    return sizeof(typename schedule_::template gather_stages<1>);
+    return sizeof(typename schedule_::gather_stages_t);
 }
 
-/** Bytes of a row one gather under @p schedule_ copies: the narrowest window any walk of
- *  @p capability_ over @p dtype_ fits, so one tensor map serves every walk; zero where the
- *  schedule gathers no rows. */
-template <typename schedule_, nk_capability_t capability_, nk_dtype_t dtype_>
+/** Bytes of a row one gather under @p schedule_ copies, so one tensor map serves every walk; zero
+ *  where the schedule gathers no rows. */
+template <typename schedule_>
 constexpr u32_t cuda_gather_window_bytes() noexcept {
     return 0;
 }
 
-template <typename schedule_, nk_capability_t capability_, nk_dtype_t dtype_>
-    requires requires { schedule_::gather_window_bytes(1u); }
+template <typename schedule_>
+    requires requires { schedule_::gather_window_bytes_k; }
 constexpr u32_t cuda_gather_window_bytes() noexcept {
-    u32_t window = schedule_::gather_window_bytes(1);
-    for (cuda_rung<vram_kernel_t> const rung : cuda_rungs)
-        if (cuda_gathers_rows(rung.kernel))
-            window = min_of(window, schedule_::gather_window_bytes(
-                                        cuda_resident_blocks<capability_, dtype_>(rung.kernel, rung.slots)));
-    for (cuda_rung<vram_dense_kernel_t> const rung : cuda_dense_rungs)
-        if (cuda_gathers_rows(rung.kernel))
-            window = min_of(window, schedule_::gather_window_bytes(
-                                        cuda_resident_blocks<capability_, dtype_>(rung.kernel, rung.slots)));
-    for (u32_t const slots : cuda_walk_rungs)
-        window = min_of(window, schedule_::gather_window_bytes(
-                                    cuda_resident_blocks<capability_, dtype_>(vram_dense_kernel_t::attend_k, slots)));
-    return window;
+    return schedule_::gather_window_bytes_k;
 }
 
 template <nk_dtype_t vector_dtype_, typename kernels_type_, typename wait_type_, typename cache_hints_type_,
@@ -105,7 +92,7 @@ cuda_rows_map_t vram_nvidia_kernels<vector_dtype_, kernels_type_, wait_type_, ca
                                     vectors_allocator_type_, neighbors_allocator_type_, traversals_allocator_type_,
                                     key_type_, key_hash_type_>::rows_map_(core_t& core) noexcept {
     using schedule_t = typename schedule_ladder<capability_k>::schedule_t;
-    constexpr u32_t window_bytes = cuda_gather_window_bytes<schedule_t, capability_k, vector_dtype_>();
+    constexpr u32_t window_bytes = cuda_gather_window_bytes<schedule_t>();
     if constexpr (window_bytes == 0) return {};
     else {
         fu::standard_atomic_ref<u32_t> state {rows_map_state_};
@@ -842,10 +829,10 @@ __device__ __forceinline__ void cuda_restitch(vram_restitch_view<kit_> const& vi
 
 #pragma region Kernels
 
-/** What every NVIDIA dense kernel @p kernel_ does first under @p capability_ with
- *  @p resident_blocks_ blocks per multiprocessor: waits on its stream predecessor where launches
- *  overlap, and, where it gathers rows, binds the tensor map its schedule gathers them through. */
-template <typename kernel_enum_type_, kernel_enum_type_ kernel_, nk_capability_t capability_, u32_t resident_blocks_>
+/** What every NVIDIA dense kernel @p kernel_ does first under @p capability_: waits on its stream
+ *  predecessor where launches overlap, and, where it gathers rows, binds the tensor map its
+ *  schedule gathers them through. */
+template <typename kernel_enum_type_, kernel_enum_type_ kernel_, nk_capability_t capability_>
 __device__ __forceinline__ void cuda_kernel_prologue(cuda_arguments_t const& launch) noexcept {
     using schedule_t = typename schedule_ladder<capability_>::schedule_t;
     using warp_t = typename schedule_t::warp_t;
@@ -853,10 +840,8 @@ __device__ __forceinline__ void cuda_kernel_prologue(cuda_arguments_t const& lau
     // finishes; the successor's blocks may then start as this grid's blocks retire.
     if constexpr (cuda_overlaps_launches(capability_))
         asm volatile("griddepcontrol.wait;\n\tgriddepcontrol.launch_dependents;" ::: "memory");
-    if constexpr (cuda_gathers_rows(kernel_) && requires(cuda_rows_map_t const& rows_map) {
-                      schedule_t::template bind<resident_blocks_>(rows_map, 0u);
-                  })
-        schedule_t::template bind<resident_blocks_>(launch.rows_map, threadIdx.x % warp_t::width_k);
+    if constexpr (cuda_gathers_rows(kernel_) && cuda_gather_window_bytes<schedule_t>() != 0)
+        schedule_t::bind(launch.rows_map, threadIdx.x % warp_t::width_k);
 }
 
 /** Every NVIDIA kernel of a walk basic graphs share: @p kernel_ picks the body, @p capability_ and
@@ -874,7 +859,7 @@ __global__ void __launch_bounds__(vram_warps_per_block_k * 32,
     constexpr u32_t resident_blocks = cuda_resident_blocks<capability_, dtype_>(kernel_, slots_);
     vram_arguments_t const& arguments = launch.records;
     vram_graph_t const& graph = arguments.graph;
-    cuda_kernel_prologue<vram_kernel_t, kernel_, capability_, resident_blocks>(launch);
+    cuda_kernel_prologue<vram_kernel_t, kernel_, capability_>(launch);
     if constexpr (kernel_ == vram_kernel_t::insert_k)
         vram_insert<kit_t, schedule_t, slots_, resident_blocks>(vram_view<kit_t>(arguments.build));
     else if constexpr (kernel_ == vram_kernel_t::back_link_k)
@@ -946,7 +931,7 @@ __global__ void __launch_bounds__(vram_warps_per_block_k * 32,
     constexpr u32_t resident_blocks = cuda_resident_blocks<capability_, dtype_>(kernel_, slots_);
     vram_arguments_t const& arguments = launch.records;
     vram_graph_t const& graph = arguments.graph;
-    cuda_kernel_prologue<vram_dense_kernel_t, kernel_, capability_, resident_blocks>(launch);
+    cuda_kernel_prologue<vram_dense_kernel_t, kernel_, capability_>(launch);
     // Only the floating dtypes take indexer heads; others export a plain walk never launched.
     if constexpr (kernel_ == vram_dense_kernel_t::search_indexer_k && a_floating_scalar<typename kit_t::scalar_t>)
         vram_walk_rung<kit_t, schedule_t, slots_, resident_blocks>(vram_view<kit_t>(arguments.search),

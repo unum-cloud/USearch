@@ -124,8 +124,8 @@ concept a_metric = a_value<value_type_> && requires(metric_type_& metric, value_
 template <typename metric_type_>
 concept a_transparent_metric = requires { typename metric_type_::is_transparent; };
 
-/** A query form @p metric_type_ opens rounds for: the stored value itself, or -
- *  on a @c a_transparent_metric - any other type its @c reset accepts. */
+/** A query form @p metric_type_ opens rounds for: the stored value itself, or - for a metric
+ *  satisfying @c a_transparent_metric - any other type its @c reset accepts. */
 template <typename query_type_, typename metric_type_, typename value_type_>
 concept a_query = (std::same_as<query_type_, value_type_> || a_transparent_metric<metric_type_>) &&
                   requires(metric_type_& metric, query_type_ const& query) {
@@ -141,9 +141,9 @@ concept a_batched_metric = requires(metric_type_& metric, std::span<query_type_ 
     { metric.reset(queries) } noexcept;
 };
 
-/** A @c a_batched_metric over flat views of the stored values: @c query_view turns a stored
- *  @p value_type_ into the @c query_view_t its batched @c reset reads, as a round hands it the
- *  entries it scores as queries. */
+/** A metric satisfying @c a_batched_metric over flat views of the stored values: @c query_view
+ *  turns a stored @p value_type_ into the @c query_view_t its batched @c reset reads, as a round
+ *  hands it the entries it scores as queries. */
 template <typename metric_type_, typename value_type_>
 concept a_view_batched_metric = requires(value_type_ const& value) {
     { metric_type_::query_view(value) } noexcept -> std::same_as<typename metric_type_::query_view_t>;
@@ -154,7 +154,7 @@ concept a_view_batched_metric = requires(value_type_ const& value) {
 template <typename metric_type_, typename query_type_>
 void open_queries(metric_type_&, std::span<query_type_ const>) noexcept {}
 
-/** A @c a_batched_metric prepares every query once for the whole scan. */
+/** A metric satisfying @c a_batched_metric prepares every query once for the whole scan. */
 template <typename metric_type_, typename query_type_>
     requires a_batched_metric<metric_type_, query_type_>
 void open_queries(metric_type_& metric, std::span<query_type_ const> queries) noexcept {
@@ -187,8 +187,8 @@ std::size_t score_queries(metric_type_& metric, std::span<query_type_ const> que
     return end_node;
 }
 
-/** A @c a_batched_metric opened by @ref open_queries scores every query in one round, within the
- *  loosest of @p thresholds, so the nodes end wherever its staging refused. */
+/** A metric satisfying @c a_batched_metric, opened by @ref open_queries, scores every query in
+ *  one round, within the loosest of @p thresholds, so the nodes end where its staging refused. */
 template <typename metric_type_, typename query_type_, typename view_of_type_, typename distance_type_>
     requires a_batched_metric<metric_type_, query_type_>
 std::size_t score_queries(metric_type_& metric, std::span<query_type_ const> queries, view_of_type_&& view_of,
@@ -561,7 +561,7 @@ struct ram_cursor;
  *  own key. Only the sharded indexes the compiled library builds on top narrow the choice, to
  *  32-bit shards whose nodes a shard table locates in 8 bytes.
  *
- *  @tparam value_type_ any payload satisfying @c basic::value; immovable once published.
+ *  @tparam value_type_ any payload satisfying @c basic::a_value; immovable once published.
  *  @tparam key_type_ trivially-copyable caller-visible identity.
  *  @tparam node_id_type_ graph-local identity, dense from zero; @c u32_t or @c u64_t.
  *  @tparam distance_type_ the metrics' result element.
@@ -2609,9 +2609,9 @@ struct ram_index {
          *
          *  @p thresholds_of fills each query's radius before every round from its first entry, and
          *  @p on_scored hears every round's first entry, its entries scored, and its distances,
-         *  @b [queries,scored]. A @c a_view_batched_metric reads the queries at once, as their flat
-         *  views; any other metric reads one query at a time, over every entry. A round the metric
-         *  refused counts a saturated walk and ends the scoring.
+         *  @b [queries,scored]. A metric satisfying @c a_view_batched_metric reads the queries at
+         *  once, as their flat views; any other metric reads one query at a time, over every
+         *  entry. A round the metric refused counts a saturated walk and ends the scoring.
          */
         template <std::size_t extent_, typename query_at_type_, typename value_at_type_, typename thresholds_of_type_,
                   typename on_scored_type_, typename metric_type_, typename context_type_>
@@ -3564,7 +3564,7 @@ struct ram_index {
      *  per round, and the metric need not match the one that built the graph. Once the candidates
      *  are full, their furthest member's distance drains each round as the radius, so a metric may
      *  stop scoring a candidate that cannot come under it. The query is a stored-value reference by
-     *  default; a @c a_transparent_metric accepts other query forms.
+     *  default; a metric satisfying @c a_transparent_metric accepts other query forms.
      *
      *  @param[in] query The similarity target, alive for the whole call.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
@@ -3589,8 +3589,8 @@ struct ram_index {
      *      entry point for verbs that reduce a walk to something other than its nearest matches.
      *
      *  @param[in] query The similarity target, alive for the whole call.
-     *  @param[in,out] fold The reader of every scored round - see @c basic::fold. A @c sated_k ends
-     *      the walk successfully, before that round reaches the candidates.
+     *  @param[in,out] fold The reader of every scored round - see @c basic::a_fold. A @c sated_k
+     *      ends the walk successfully, before that round reaches the candidates.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
      *  @param[in,out] metric This thread's scoring instance.
      *  @param[in,out] context The calling thread's scratch & telemetry over any allocator; holds
@@ -3683,8 +3683,8 @@ struct ram_index {
      *      entries to something other than the nearest few, such as containment.
      *
      *  @param[in] query The query every entry is scored against.
-     *  @param[in,out] fold The reader of every scored round - see @c basic::fold. A @c sated_k ends
-     *      the scan successfully.
+     *  @param[in,out] fold The reader of every scored round - see @c basic::a_fold. A @c sated_k
+     *      ends the scan successfully.
      *  @param[in,out] metric The metric the entries are scored with.
      *  @param[in,out] context The traversal context the scan's buffers come from.
      */

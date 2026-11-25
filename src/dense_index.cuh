@@ -396,7 +396,7 @@ static bool for_each_dense_chunk(punned_dense_index<residency_> punned, usearch_
     if (!rows.data) return propagate_error(usearch_status_invalid_argument_k, outcome, "The rows must name storage");
     nk_dtype_t const source_dtype = rows_dtype_of(rows.scalar, rows.columns, outcome);
     if (source_dtype == nk_dtype_unknown_k) return false;
-    usearch_executor_handle_t call_executor;
+    typename punned_dense_index<residency_>::executor_t call_executor;
     typename punned_dense_index<residency_>::executor_t* const executor = executor_of(punned, executor_handle,
                                                                                       call_executor, outcome);
     if (!executor) return false;
@@ -545,7 +545,7 @@ static void load_dense_index(source_type_ source, residency_options_type_ const&
     if (!loaded) return;
     bool filled = false;
     visit_punned(*loaded, [&]<vendored_residency_t residency_>(punned_dense_index<residency_> punned) noexcept {
-        usearch_executor_handle_t call_executor;
+        typename punned_dense_index<residency_>::executor_t call_executor;
         typename punned_dense_index<residency_>::executor_t* const typed = executor_of(punned, executor, call_executor,
                                                                                        outcome);
         if (!typed) return;
@@ -756,7 +756,7 @@ USEARCH_EXPORT void usearch_dense_view_nvme(usearch_dense_view_nvme_t* arguments
     call_outcome_t outcome(*arguments);
     usearch_nvme_options_t const& nvme = arguments->nvme;
     *arguments->index = nullptr;
-    if (arguments->executor && !std::holds_alternative<nvme_executor_t>(arguments->executor->executor))
+    if (arguments->executor && !std::holds_alternative<nvme_executor_t>(arguments->executor->residency))
         return propagate_error(usearch_status_device_k, outcome,
                                "The executor's kind must match the handle's residency"),
                void();
@@ -786,7 +786,7 @@ USEARCH_EXPORT void usearch_dense_load_nvme(usearch_dense_load_nvme_t* arguments
     if (submitted<usearch_dense_load_nvme>(arguments)) return;
     call_outcome_t outcome(*arguments);
     *arguments->index = nullptr;
-    if (arguments->executor && !std::holds_alternative<nvme_executor_t>(arguments->executor->executor))
+    if (arguments->executor && !std::holds_alternative<nvme_executor_t>(arguments->executor->residency))
         return propagate_error(usearch_status_device_k, outcome,
                                "The executor's kind must match the handle's residency"),
                void();
@@ -886,7 +886,7 @@ USEARCH_EXPORT void usearch_dense_count(usearch_dense_count_t* arguments) {
     *arguments->entries = 0;
     visit_punned(
         *arguments->index, [&]<vendored_residency_t residency_>(punned_dense_index<residency_> punned) noexcept {
-            usearch_executor_handle_t call_executor;
+            typename punned_dense_index<residency_>::executor_t call_executor;
             typename punned_dense_index<residency_>::executor_t* const executor = executor_of(
                 punned, arguments->executor, call_executor, outcome);
             if (!executor) return;
@@ -929,7 +929,7 @@ USEARCH_EXPORT void usearch_dense_insert(usearch_dense_insert_t* arguments) {
                                         punned_dense_index<residency_> punned) noexcept {
         nk_dtype_t const source_dtype = rows_dtype_of(vectors.scalar, vectors.columns, outcome);
         if (source_dtype == nk_dtype_unknown_k) return;
-        usearch_executor_handle_t call_executor;
+        typename punned_dense_index<residency_>::executor_t call_executor;
         typename punned_dense_index<residency_>::executor_t* const executor = executor_of(punned, arguments->executor,
                                                                                           call_executor, outcome);
         if (!executor) return;
@@ -954,7 +954,7 @@ USEARCH_EXPORT void usearch_dense_refine(usearch_dense_refine_t* arguments) {
     if (!accepts_plan(*arguments, outcome)) return;
     visit_punned(
         *arguments->index, [&]<vendored_residency_t residency_>(punned_dense_index<residency_> punned) noexcept {
-            usearch_executor_handle_t call_executor;
+            typename punned_dense_index<residency_>::executor_t call_executor;
             typename punned_dense_index<residency_>::executor_t* const executor = executor_of(
                 punned, arguments->executor, call_executor, outcome);
             if (!executor) return;
@@ -986,7 +986,7 @@ USEARCH_EXPORT void usearch_dense_health(usearch_dense_health_t* arguments) {
     *arguments->reachability = {};
     visit_punned(*arguments->index,
                  [&]<vendored_residency_t residency_>(punned_dense_index<residency_> punned) noexcept {
-                     usearch_executor_handle_t call_executor;
+                     typename punned_dense_index<residency_>::executor_t call_executor;
                      typename punned_dense_index<residency_>::executor_t* const executor = executor_of(
                          punned, arguments->executor, call_executor, outcome);
                      if (!executor) return;
@@ -1060,7 +1060,7 @@ USEARCH_EXPORT void usearch_dense_get(usearch_dense_get_t* arguments) {
             usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, arguments->executor,
                                                               punned.verbs.residency(punned.index, 0), {}, outcome);
             if (!arena) return;
-            usearch_executor_handle_t call_executor;
+            typename punned_dense_index<residency_>::executor_t call_executor;
             typename punned_dense_index<residency_>::executor_t* const executor = executor_of(
                 punned, arguments->executor, call_executor, outcome);
             if (!executor) return;
@@ -1162,7 +1162,7 @@ USEARCH_EXPORT void usearch_dense_cursor_next(usearch_dense_cursor_next_t* argum
                 staging_residency(arguments->arena, punned.verbs.residency(punned.index, 0)), {}, outcome);
             if (!arena) return;
             if (!wanted) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
-            usearch_executor_handle_t call_executor;
+            typename punned_dense_index<residency_>::executor_t call_executor;
             typename punned_dense_index<residency_>::executor_t* const executor = executor_of(
                 punned, arguments->executor, call_executor, outcome);
             if (!executor) return;
@@ -1211,7 +1211,7 @@ USEARCH_EXPORT void usearch_dense_reshard(usearch_dense_reshard_t* arguments) {
             punned_dense_index<residency_> const punned {*verbs, first ? first->index : nullptr};
             if (first && !accepts_dense_reshard(punned, *arguments, outcome)) return;
             if (first && !places_as_handles(*verbs, *arguments, outcome)) return;
-            usearch_executor_handle_t call_executor;
+            typename punned_dense_index<residency_>::executor_t call_executor;
             typename punned_dense_index<residency_>::executor_t* const executor = executor_of(
                 punned, arguments->executor, call_executor, outcome);
             if (!executor) return;
@@ -1243,7 +1243,7 @@ USEARCH_EXPORT void usearch_dense_sample(usearch_dense_sample_t* arguments) {
     visit_punned(
         *arguments->index, [&]<vendored_residency_t residency_>(punned_dense_index<residency_> punned) noexcept {
             using key_t = typename dense_verbs<residency_>::key_t;
-            usearch_executor_handle_t call_executor;
+            typename punned_dense_index<residency_>::executor_t call_executor;
             typename punned_dense_index<residency_>::executor_t* const executor = executor_of(
                 punned, arguments->executor, call_executor, outcome);
             if (!executor) return;
@@ -1453,7 +1453,7 @@ USEARCH_EXPORT void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
         if (rows.stride && rows.stride < us::dense::packed_bytes(source_dtype, rows.columns))
             return propagate_error(usearch_status_unsupported_layout_k, outcome, "The stride is shorter than one row"),
                    void();
-        usearch_executor_handle_t call_executor;
+        typename punned_dense_index<residency_>::executor_t call_executor;
         typename punned_dense_index<residency_>::executor_t* const executor = executor_of(punned, arguments->executor,
                                                                                           call_executor, outcome);
         if (!executor) return;
@@ -1554,7 +1554,7 @@ USEARCH_EXPORT void usearch_dense_save(usearch_dense_save_t* arguments) {
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The path must not be empty"), void();
     visit_punned(
         *arguments->index, [&]<vendored_residency_t residency_>(punned_dense_index<residency_> punned) noexcept {
-            usearch_executor_handle_t call_executor;
+            typename punned_dense_index<residency_>::executor_t call_executor;
             typename punned_dense_index<residency_>::executor_t* const executor = executor_of(
                 punned, arguments->executor, call_executor, outcome);
             if (!executor) return;
@@ -1572,7 +1572,7 @@ USEARCH_EXPORT void usearch_dense_save_buffer(usearch_dense_save_buffer_t* argum
             usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, arguments->executor,
                                                               punned.verbs.residency(punned.index, 0), {}, outcome);
             if (!arena) return;
-            usearch_executor_handle_t call_executor;
+            typename punned_dense_index<residency_>::executor_t call_executor;
             typename punned_dense_index<residency_>::executor_t* const executor = executor_of(
                 punned, arguments->executor, call_executor, outcome);
             if (!executor) return;
@@ -1629,9 +1629,8 @@ USEARCH_EXPORT void usearch_arena_init(usearch_arena_init_t* arguments) {
     // A VRAM executor writes its outputs on its vendor's first stream; every other executor
     // computes on the host.
     if (arguments->executor)
-        if (util::gpu_executor_t* const devices = std::get_if<util::gpu_executor_t>(&arguments->executor->executor)) {
+        if (util::gpu_executor_t* const devices = std::get_if<util::gpu_executor_t>(&arguments->executor->residency)) {
             arena->device_memory = util::gpu_arena_t::on(*devices);
-            arena->residency = vram_residency(static_cast<std::size_t>(arena->device_memory.device()));
             arena->executor = arguments->executor;
         }
     *arguments->arena = arena;
@@ -1651,7 +1650,7 @@ USEARCH_EXPORT void usearch_arena_describe(usearch_arena_describe_t* arguments) 
         return propagate_error(usearch_status_invalid_argument_k, outcome,
                                "The arena and description must not be NULL"),
                void();
-    *arguments->description = {arena->residency.residency, arena_device_ordinal(*arena)};
+    *arguments->description = {arena->residency().residency, arena_device_ordinal(*arena)};
     propagate_error(usearch_status_success_k, outcome, nullptr);
 }
 
@@ -1696,7 +1695,7 @@ USEARCH_EXPORT void usearch_executor_for_vram(usearch_executor_for_vram_t* argum
     usearch_executor_t const executor = new (std::nothrow) usearch_executor_handle_t {};
     if (!executor)
         return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the executor"), void();
-    executor->executor.emplace<util::gpu_executor_t>(std::move(spawned));
+    executor->residency.emplace<util::gpu_executor_t>(std::move(spawned));
     *arguments->executor = executor;
     propagate_error(usearch_status_success_k, outcome, nullptr);
 }
@@ -1810,7 +1809,6 @@ USEARCH_EXPORT void usearch_executor_free(usearch_executor_t executor) {
     if (!executor) return;
     await_delegated_call(*executor);
     wait_while_claimed(*executor);
-    if (nvme_executor_t* const nvme = std::get_if<nvme_executor_t>(&executor->executor)) nvme->release();
     delete executor;
 }
 

@@ -725,7 +725,7 @@ func (on GeospatialIndexOn) Reserve(entries uint) error {
 // Reserve submits GeospatialIndexOn.Reserve.
 func (on GeospatialIndexDeferredOn) Reserve(entries uint) (*Deferred[struct{}], error) {
 	deferred := new(Deferred[struct{}])
-	return submitted(deferred, on.reserve(&deferred.call, C.usearch_completion_deferred_k, entries))
+	return submitted(deferred, on.reserve(&deferred.pending, C.usearch_completion_deferred_k, entries))
 }
 
 // Clear erases all entries, keeping the reserved capacity. No other verb may overlap it on the
@@ -739,7 +739,7 @@ func (on GeospatialIndexOn) Clear() error {
 // Clear submits GeospatialIndexOn.Clear.
 func (on GeospatialIndexDeferredOn) Clear() (*Deferred[struct{}], error) {
 	deferred := new(Deferred[struct{}])
-	return submitted(deferred, on.clear(&deferred.call, C.usearch_completion_deferred_k))
+	return submitted(deferred, on.clear(&deferred.pending, C.usearch_completion_deferred_k))
 }
 
 // Describe reports the frozen metadata and the current counters in one call.
@@ -751,7 +751,7 @@ func (on GeospatialIndexOn) Describe() (GeospatialIndexDescription, error) {
 // Describe submits GeospatialIndexOn.Describe.
 func (on GeospatialIndexDeferredOn) Describe() (*Deferred[GeospatialIndexDescription], error) {
 	deferred := new(Deferred[GeospatialIndexDescription])
-	return submitted(deferred, on.describe(&deferred.call, C.usearch_completion_deferred_k))
+	return submitted(deferred, on.describe(&deferred.pending, C.usearch_completion_deferred_k))
 }
 
 // Count reports how many observations are stored under a key.
@@ -763,7 +763,7 @@ func (on GeospatialIndexOn) Count(key Key) (GeospatialKeyStats, error) {
 // Count submits GeospatialIndexOn.Count.
 func (on GeospatialIndexDeferredOn) Count(key Key) (*Deferred[GeospatialKeyStats], error) {
 	deferred := new(Deferred[GeospatialKeyStats])
-	return submitted(deferred, on.count(&deferred.call, C.usearch_completion_deferred_k, key))
+	return submitted(deferred, on.count(&deferred.pending, C.usearch_completion_deferred_k, key))
 }
 
 // Contains reports whether the index holds at least one entry under a key, as a nonzero Count.
@@ -784,7 +784,7 @@ func (on GeospatialIndexOn) Get(key Key, arena *Arena) (GeospatialObservations, 
 // Get submits GeospatialIndexOn.Get.
 func (on GeospatialIndexDeferredOn) Get(key Key, arena *Arena) (*Deferred[GeospatialObservations], error) {
 	deferred := new(Deferred[GeospatialObservations])
-	return submitted(deferred, on.get(&deferred.call, C.usearch_completion_deferred_k, key, arena))
+	return submitted(deferred, on.get(&deferred.pending, C.usearch_completion_deferred_k, key, arena))
 }
 
 // Insert adds observations under their keys - the native batch operation, where a single
@@ -799,7 +799,7 @@ func (on GeospatialIndexOn) Insert(keys []Key, observations []GeospatialObservat
 func (on GeospatialIndexDeferredOn) Insert(keys []Key, observations []GeospatialObservation,
 	config *GeospatialInsertConfig) (*Deferred[struct{}], error) {
 	deferred := new(Deferred[struct{}])
-	return submitted(deferred, on.insert(&deferred.call, C.usearch_completion_deferred_k, keys, observations, config))
+	return submitted(deferred, on.insert(&deferred.pending, C.usearch_completion_deferred_k, keys, observations, config))
 }
 
 // Refine re-selects the neighbors of every stored entry against the finished graph, as the dense
@@ -812,7 +812,7 @@ func (on GeospatialIndexOn) Refine(config *GeospatialRefineConfig) (RefineReport
 // Refine submits GeospatialIndexOn.Refine.
 func (on GeospatialIndexDeferredOn) Refine(config *GeospatialRefineConfig) (*Deferred[RefineReport], error) {
 	deferred := new(Deferred[RefineReport])
-	return submitted(deferred, on.refine(&deferred.call, C.usearch_completion_deferred_k, config))
+	return submitted(deferred, on.refine(&deferred.pending, C.usearch_completion_deferred_k, config))
 }
 
 // Health measures how much of the graph a search reaches from the root. Read-only.
@@ -824,7 +824,7 @@ func (on GeospatialIndexOn) Health() (Reachability, error) {
 // Health submits GeospatialIndexOn.Health.
 func (on GeospatialIndexDeferredOn) Health() (*Deferred[Reachability], error) {
 	deferred := new(Deferred[Reachability])
-	return submitted(deferred, on.health(&deferred.call, C.usearch_completion_deferred_k))
+	return submitted(deferred, on.health(&deferred.pending, C.usearch_completion_deferred_k))
 }
 
 // Search finds up to wanted nearest entries of each query observation that relation admits,
@@ -840,7 +840,7 @@ func (on GeospatialIndexOn) Search(queries []GeospatialObservation, relation Geo
 func (on GeospatialIndexDeferredOn) Search(queries []GeospatialObservation, relation GeospatialRelation, wanted uint,
 	arena *Arena, config *GeospatialSearchConfig) (*Deferred[MatchesView], error) {
 	deferred := new(Deferred[MatchesView])
-	return submitted(deferred, on.search(&deferred.call, C.usearch_completion_deferred_k, queries, relation, wanted,
+	return submitted(deferred, on.search(&deferred.pending, C.usearch_completion_deferred_k, queries, relation, wanted,
 		arena, config))
 }
 
@@ -856,7 +856,7 @@ func (on GeospatialIndexOn) Within(queries []GeospatialObservation, relation Geo
 func (on GeospatialIndexDeferredOn) Within(queries []GeospatialObservation, relation GeospatialRelation, metres float64,
 	arena *Arena, config *GeospatialWithinConfig) (*Deferred[MatchesTape], error) {
 	deferred := new(Deferred[MatchesTape])
-	return submitted(deferred, on.within(&deferred.call, C.usearch_completion_deferred_k, queries, relation, metres,
+	return submitted(deferred, on.within(&deferred.pending, C.usearch_completion_deferred_k, queries, relation, metres,
 		arena, config))
 }
 
@@ -874,7 +874,7 @@ func (on GeospatialIndexOn) Reshard(sources, targets []*GeospatialIndex, config 
 func (on GeospatialIndexDeferredOn) Reshard(sources, targets []*GeospatialIndex,
 	config *GeospatialReshardConfig) (*Deferred[RefineReport], error) {
 	deferred := new(Deferred[RefineReport])
-	return submitted(deferred, on.reshard(&deferred.call, C.usearch_completion_deferred_k, sources, targets, config))
+	return submitted(deferred, on.reshard(&deferred.pending, C.usearch_completion_deferred_k, sources, targets, config))
 }
 
 // RefinePlanFinish closes a live refine plan and frees it whatever the call answers, reporting
@@ -887,7 +887,7 @@ func (on GeospatialIndexOn) RefinePlanFinish(plan *GeospatialRefinePlan) (Refine
 // RefinePlanFinish submits GeospatialIndexOn.RefinePlanFinish.
 func (on GeospatialIndexDeferredOn) RefinePlanFinish(plan *GeospatialRefinePlan) (*Deferred[RefineReport], error) {
 	deferred := new(Deferred[RefineReport])
-	return submitted(deferred, on.refinePlanFinish(&deferred.call, C.usearch_completion_deferred_k, plan))
+	return submitted(deferred, on.refinePlanFinish(&deferred.pending, C.usearch_completion_deferred_k, plan))
 }
 
 // ReshardPlanFinish closes a live reshard plan on this receiver's executor and frees it whatever
@@ -900,7 +900,7 @@ func (on GeospatialIndexOn) ReshardPlanFinish(plan *GeospatialReshardPlan) (Refi
 // ReshardPlanFinish submits GeospatialIndexOn.ReshardPlanFinish.
 func (on GeospatialIndexDeferredOn) ReshardPlanFinish(plan *GeospatialReshardPlan) (*Deferred[RefineReport], error) {
 	deferred := new(Deferred[RefineReport])
-	return submitted(deferred, on.reshardPlanFinish(&deferred.call, C.usearch_completion_deferred_k, plan))
+	return submitted(deferred, on.reshardPlanFinish(&deferred.pending, C.usearch_completion_deferred_k, plan))
 }
 
 // Sample draws up to wanted keys around the config's Focus, or across the whole index, each
@@ -914,7 +914,7 @@ func (on GeospatialIndexOn) Sample(wanted uint, arena *Arena, config *Geospatial
 func (on GeospatialIndexDeferredOn) Sample(wanted uint, arena *Arena, config *GeospatialSampleConfig) (*Deferred[DenseDraws],
 	error) {
 	deferred := new(Deferred[DenseDraws])
-	return submitted(deferred, on.sample(&deferred.call, C.usearch_completion_deferred_k, wanted, arena, config))
+	return submitted(deferred, on.sample(&deferred.pending, C.usearch_completion_deferred_k, wanted, arena, config))
 }
 
 // Save writes the index under a path, in the layout its extension picks - one .safegraphs
@@ -928,7 +928,7 @@ func (on GeospatialIndexOn) Save(path string, config *GeospatialSaveConfig) erro
 // Save submits GeospatialIndexOn.Save.
 func (on GeospatialIndexDeferredOn) Save(path string, config *GeospatialSaveConfig) (*Deferred[struct{}], error) {
 	deferred := new(Deferred[struct{}])
-	return submitted(deferred, on.save(&deferred.call, C.usearch_completion_deferred_k, path, config))
+	return submitted(deferred, on.save(&deferred.pending, C.usearch_completion_deferred_k, path, config))
 }
 
 // SaveBuffer serializes the index as one monolith into arena.
@@ -941,7 +941,7 @@ func (on GeospatialIndexOn) SaveBuffer(arena *Arena, config *GeospatialSaveBuffe
 func (on GeospatialIndexDeferredOn) SaveBuffer(arena *Arena, config *GeospatialSaveBufferConfig) (*Deferred[Monolith],
 	error) {
 	deferred := new(Deferred[Monolith])
-	return submitted(deferred, on.saveBuffer(&deferred.call, C.usearch_completion_deferred_k, arena, config))
+	return submitted(deferred, on.saveBuffer(&deferred.pending, C.usearch_completion_deferred_k, arena, config))
 }
 
 // endregion: Receivers
@@ -1081,7 +1081,7 @@ func (receiver geospatialReceiver) refine(call *callWithResult[RefineReport], co
 		return err
 	}
 	arguments := open[C.usearch_geospatial_refine_t](call)
-	plan, phase := options.Plan.lower(&call.call)
+	plan, phase := options.Plan.lower(&call.pinner)
 	*arguments = C.usearch_geospatial_refine_t{
 		index:      index,
 		executor:   executor,
@@ -1216,7 +1216,7 @@ func (receiver geospatialReceiver) reshard(call *callWithResult[RefineReport], c
 	}
 	sourceHandles, targetHandles := geospatialHandles(sources), geospatialHandles(targets)
 	arguments := open[C.usearch_geospatial_reshard_t](call)
-	plan, phase := options.Plan.lower(&call.call)
+	plan, phase := options.Plan.lower(&call.pinner)
 	*arguments = C.usearch_geospatial_reshard_t{
 		sources_count: C.size_t(len(sourceHandles)),
 		sources:       (*C.usearch_geospatial_index_t)(call.pinSlice(unsafe.Pointer(unsafe.SliceData(sourceHandles)), len(sourceHandles))),

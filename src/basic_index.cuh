@@ -232,7 +232,7 @@ void basic_init_ram(arguments_type_* arguments) noexcept {
 template <typename traits_type_, vendored_residency_t residency_, typename checkpoint_type_, typename arguments_type_>
 bool basic_load_variant(punned_basic_index<traits_type_, residency_> punned, checkpoint_type_ checkpoint,
                         arguments_type_ const& arguments, usearch_outcome_t* outcome) noexcept {
-    usearch_executor_handle_t call_executor;
+    typename punned_basic_index<traits_type_, residency_>::executor_t call_executor;
     typename punned_basic_index<traits_type_, residency_>::executor_t* const executor = executor_of(
         punned, arguments.executor, call_executor, outcome);
     if (!executor) return false;
@@ -424,7 +424,7 @@ void basic_view_nvme(arguments_type_* arguments) noexcept {
     call_outcome_t outcome(*arguments);
     usearch_nvme_options_t const& nvme = arguments->nvme;
     *arguments->index = nullptr;
-    if (arguments->executor && !std::holds_alternative<nvme_executor_t>(arguments->executor->executor))
+    if (arguments->executor && !std::holds_alternative<nvme_executor_t>(arguments->executor->residency))
         return propagate_error(usearch_status_device_k, outcome,
                                "The executor's kind must match the handle's residency"),
                void();
@@ -441,7 +441,7 @@ void basic_view_nvme(arguments_type_* arguments) noexcept {
     if (util::status_t const recalled = handle_t::traits_t::recall(path, geometry); failed(recalled))
         return propagate_error(recalled, outcome), void();
     auto view = [&](auto punned) noexcept {
-        usearch_executor_handle_t call_executor;
+        nvme_executor_t call_executor;
         nvme_executor_t* const executor = executor_of(punned, arguments->executor, call_executor, outcome);
         return executor && propagate_error(punned.verbs.view(punned.variant, path, to_span(paths), executor), outcome);
     };
@@ -533,7 +533,7 @@ void basic_refine(arguments_type_* arguments) noexcept {
     reset_refined(*arguments);
     if (!accepts_plan(*arguments, outcome)) return;
     visit_basic(*arguments->index, [&]<typename punned_type_>(punned_type_ punned) noexcept {
-        usearch_executor_handle_t call_executor;
+        typename punned_type_::executor_t call_executor;
         typename punned_type_::executor_t* const executor = executor_of(punned, arguments->executor, call_executor,
                                                                         outcome);
         if (!executor) return;
@@ -566,7 +566,7 @@ void basic_reshard(arguments_type_* arguments) noexcept {
         [&]<vendored_residency_t residency_>(basic_verbs<traits_t, residency_> const* verbs) noexcept {
             punned_basic_index<traits_t, residency_> const punned {*verbs, first ? first->basic.variant : nullptr};
             if (first && !accepts_basic_reshard<handle_type_>(punned, *arguments, outcome)) return;
-            usearch_executor_handle_t call_executor;
+            typename punned_basic_index<traits_t, residency_>::executor_t call_executor;
             typename punned_basic_index<traits_t, residency_>::executor_t* const executor = executor_of(
                 punned, arguments->executor, call_executor, outcome);
             if (!executor) return;
@@ -611,7 +611,7 @@ void basic_health(arguments_type_* arguments) noexcept {
     call_outcome_t outcome(*arguments);
     *arguments->reachability = {};
     visit_basic(*arguments->index, [&]<typename punned_type_>(punned_type_ punned) noexcept {
-        usearch_executor_handle_t call_executor;
+        typename punned_type_::executor_t call_executor;
         typename punned_type_::executor_t* const executor = executor_of(punned, arguments->executor, call_executor,
                                                                         outcome);
         if (!executor) return;
@@ -630,7 +630,7 @@ void basic_count(arguments_type_* arguments) noexcept {
     call_outcome_t outcome(*arguments);
     *arguments->key_stats = {};
     visit_basic(*arguments->index, [&]<typename punned_type_>(punned_type_ punned) noexcept {
-        usearch_executor_handle_t call_executor;
+        typename punned_type_::executor_t call_executor;
         typename punned_type_::executor_t* const executor = executor_of(punned, arguments->executor, call_executor,
                                                                         outcome);
         if (!executor) return;
@@ -653,7 +653,7 @@ void basic_insert(arguments_type_* arguments) noexcept {
                void();
     if (!traits_t::accepts(*arguments, outcome)) return;
     visit_basic(*arguments->index, [&]<typename punned_type_>(punned_type_ punned) noexcept {
-        usearch_executor_handle_t call_executor;
+        typename punned_type_::executor_t call_executor;
         typename punned_type_::executor_t* const executor = executor_of(punned, arguments->executor, call_executor,
                                                                         outcome);
         if (!executor) return;
@@ -692,7 +692,7 @@ void basic_search(arguments_type_* arguments) noexcept {
             return propagate_error(admitted, outcome), void();
         auto [outputs, carve_status] = carve_matches(arena->memory, count, wanted);
         if (failed(carve_status)) return propagate_error(carve_status, outcome), void();
-        usearch_executor_handle_t call_executor;
+        typename punned_type_::executor_t call_executor;
         typename punned_type_::executor_t* const executor = executor_of(punned, arguments->executor, call_executor,
                                                                         outcome);
         if (!executor) return;
@@ -738,7 +738,7 @@ void basic_within(arguments_type_* arguments) noexcept {
         if (util::status_t const admitted = punned.verbs.serves_within(punned.variant, queries, predicate);
             failed(admitted))
             return propagate_error(admitted, outcome), void();
-        usearch_executor_handle_t call_executor;
+        typename punned_type_::executor_t call_executor;
         typename punned_type_::executor_t* const executor = executor_of(punned, arguments->executor, call_executor,
                                                                         outcome);
         if (!executor) return;
@@ -768,7 +768,7 @@ void basic_get(arguments_type_* arguments) noexcept {
                                                       ram_residency_k, {}, outcome);
     if (!arena) return;
     visit_basic(*arguments->index, [&]<typename punned_type_>(punned_type_ punned) noexcept {
-        usearch_executor_handle_t call_executor;
+        typename punned_type_::executor_t call_executor;
         typename punned_type_::executor_t* const executor = executor_of(punned, arguments->executor, call_executor,
                                                                         outcome);
         if (!executor) return;
@@ -830,7 +830,7 @@ void basic_cursor_next(arguments_type_* arguments) noexcept {
             arguments->arena, arguments->outcome, arguments->executor,
             staging_residency(arguments->arena, punned.verbs.residency(punned.variant)), {}, outcome);
         if (!arena) return;
-        usearch_executor_handle_t call_executor;
+        typename punned_type_::executor_t call_executor;
         typename punned_type_::executor_t* const executor = executor_of(punned, arguments->executor, call_executor,
                                                                         outcome);
         if (!executor) return;
@@ -862,7 +862,7 @@ void basic_save(arguments_type_* arguments) noexcept {
     std::string_view const path = as_text(arguments->path);
     if (path.empty()) return propagate_error(usearch_status_invalid_argument_k, outcome, "The path is empty"), void();
     visit_basic(*arguments->index, [&]<typename punned_type_>(punned_type_ punned) noexcept {
-        usearch_executor_handle_t call_executor;
+        typename punned_type_::executor_t call_executor;
         typename punned_type_::executor_t* const executor = executor_of(punned, arguments->executor, call_executor,
                                                                         outcome);
         if (!executor) return;
@@ -881,7 +881,7 @@ void basic_save_buffer(arguments_type_* arguments) noexcept {
         usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, arguments->executor,
                                                           punned.verbs.residency(punned.variant), {}, outcome);
         if (!arena) return;
-        usearch_executor_handle_t call_executor;
+        typename punned_type_::executor_t call_executor;
         typename punned_type_::executor_t* const executor = executor_of(punned, arguments->executor, call_executor,
                                                                         outcome);
         if (!executor) return;
@@ -905,7 +905,7 @@ void basic_sample(arguments_type_* arguments) noexcept {
     if (!accepts_sample(*arguments, outcome)) return;
     visit_basic(*arguments->index, [&]<typename punned_type_>(punned_type_ punned) noexcept {
         using key_t = util::uuid128_t;
-        usearch_executor_handle_t call_executor;
+        typename punned_type_::executor_t call_executor;
         typename punned_type_::executor_t* const executor = executor_of(punned, arguments->executor, call_executor,
                                                                         outcome);
         if (!executor) return;

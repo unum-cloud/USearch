@@ -3649,38 +3649,39 @@ static void arrow_hold_release(struct ArrowArray* array) {
 
 /** Exports @p self through the library's converter of its type. */
 static usearch_status_t arena_output_to_arrow(PyObject* self, usearch_arena_t arena, struct ArrowSchema* schema,
-                                              struct ArrowDeviceArray* array) {
+                                              struct ArrowDeviceArray* device_array) {
     if (PyObject_TypeCheck(self, &DenseProductsType)) {
         DenseProducts const* const products = (DenseProducts const*)self;
-        return usearch_matches_tape_view_to_arrow(products->view, products->queries, arena, schema, array);
+        return usearch_matches_tape_view_to_arrow(products->view, products->queries, arena, schema, device_array);
     }
     ArenaBuffer const* const buffer = (ArenaBuffer const*)self;
     usearch_rows_view_t const rows = {.data = buffer->data,
                                       .stride = (size_t)buffer->strides[0],
                                       .columns = buffer->rows.columns,
                                       .scalar = buffer->rows.scalar};
-    return usearch_rows_view_to_arrow(rows, (size_t)buffer->shape[0], arena, schema, array);
+    return usearch_rows_view_to_arrow(rows, (size_t)buffer->shape[0], arena, schema, device_array);
 }
 
-/** Exports @p self into @p schema and @p array in place, holding its arena, which leads every
- *  result as it leads an @c ArenaBuffer, until @p array's release; 0, or -1 with an exception. */
-static int arena_output_export(PyObject* self, struct ArrowSchema* schema, struct ArrowDeviceArray* array) {
+/** Exports @p self into @p schema and @p device_array in place, holding its arena, which leads
+ *  every result as it leads an @c ArenaBuffer, until @p device_array's release; answers 0, or -1
+ *  with a Python exception set. */
+static int arena_output_export(PyObject* self, struct ArrowSchema* schema, struct ArrowDeviceArray* device_array) {
     PyObject* const arena = ((ArenaBuffer const*)self)->arena;
     arrow_hold_t* const hold = (arrow_hold_t*)PyMem_RawMalloc(sizeof(arrow_hold_t));
     if (!hold) {
         PyErr_NoMemory();
         return -1;
     }
-    usearch_status_t const status = arena_output_to_arrow(self, usearch_py_arena_handle(arena), schema, array);
+    usearch_status_t const status = arena_output_to_arrow(self, usearch_py_arena_handle(arena), schema, device_array);
     if (status != usearch_status_success_k) {
         PyMem_RawFree(hold);
         return usearch_py_raise(status, "exporting the output as Arrow failed");
     }
-    hold->release = array->array.release;
-    hold->private_data = array->array.private_data;
+    hold->release = device_array->array.release;
+    hold->private_data = device_array->array.private_data;
     hold->arena = Py_NewRef(arena);
-    array->array.release = arrow_hold_release;
-    array->array.private_data = hold;
+    device_array->array.release = arrow_hold_release;
+    device_array->array.private_data = hold;
     return 0;
 }
 
@@ -3734,7 +3735,7 @@ static struct ArrowArray arrow_compacted_node(arrow_compacted_t* block, int64_t 
  *
  *  The child schema moves out of an export of no rows, so its tags stay the library's.
  */
-static int matches_compact_export(Matches* self, struct ArrowSchema* schema, struct ArrowDeviceArray* array) {
+static int matches_compact_export(Matches* self, struct ArrowSchema* schema, struct ArrowDeviceArray* device_array) {
     usearch_matches_tape_view_t const nothing = {0};
     struct ArrowSchema view_schema;
     struct ArrowDeviceArray view_array;
@@ -3796,19 +3797,20 @@ static int matches_compact_export(Matches* self, struct ArrowSchema* schema, str
     block->nodes[0] = arrow_compacted_node(block, (int64_t)total, block->buffers[1], 1, &block->children[1], 2);
     block->nodes[1] = arrow_compacted_node(block, (int64_t)total, block->buffers[2], 2, NULL, 0);
     block->nodes[2] = arrow_compacted_node(block, (int64_t)total, block->buffers[3], 2, NULL, 0);
-    memset(array, 0, sizeof(*array));
-    array->array = arrow_compacted_node(block, (int64_t)self->queries, block->buffers[0], 2, &block->children[0], 1);
-    array->device_id = -1;
-    array->device_type = ARROW_DEVICE_CPU;
+    memset(device_array, 0, sizeof(*device_array));
+    device_array->array = arrow_compacted_node(block, (int64_t)self->queries, block->buffers[0], 2, &block->children[0],
+                                               1);
+    device_array->device_id = -1;
+    device_array->device_type = ARROW_DEVICE_CPU;
     *schema = list;
     return 0;
 }
 
 /** Exports @p self into a schema and an array, a @c Matches compacted, as no padded run exports in
  *  place. */
-static int arena_output_export_as(PyObject* self, struct ArrowSchema* schema, struct ArrowDeviceArray* array) {
-    return PyObject_TypeCheck(self, &MatchesType) ? matches_compact_export((Matches*)self, schema, array)
-                                                  : arena_output_export(self, schema, array);
+static int arena_output_export_as(PyObject* self, struct ArrowSchema* schema, struct ArrowDeviceArray* device_array) {
+    return PyObject_TypeCheck(self, &MatchesType) ? matches_compact_export((Matches*)self, schema, device_array)
+                                                  : arena_output_export(self, schema, device_array);
 }
 
 /** Binds the one optional argument the protocol's methods take, leaving any request to its
@@ -3834,10 +3836,10 @@ static void arrow_array_capsule_free(PyObject* capsule) {
 }
 
 static void arrow_device_array_capsule_free(PyObject* capsule) {
-    struct ArrowDeviceArray* const array = (struct ArrowDeviceArray*)PyCapsule_GetPointer(capsule,
-                                                                                          "arrow_device_array");
-    if (array->array.release) array->array.release(&array->array);
-    PyMem_Free(array);
+    struct ArrowDeviceArray* const device_array = (struct ArrowDeviceArray*)PyCapsule_GetPointer(capsule,
+                                                                                                 "arrow_device_array");
+    if (device_array->array.release) device_array->array.release(&device_array->array);
+    PyMem_Free(device_array);
 }
 
 /** A new capsule owning @p block under @p name, or NULL, freeing it, with an exception set. */
@@ -3867,9 +3869,9 @@ static PyObject* arrow_capsules_pair(struct ArrowSchema* schema, PyObject* array
 }
 
 /** Refuses device memory, which a host array cannot name; 0, or -1 with the export released. */
-static int arrow_host_only(struct ArrowSchema* schema, struct ArrowDeviceArray* array) {
-    if (array->device_type == ARROW_DEVICE_CPU) return 0;
-    array->array.release(&array->array);
+static int arrow_host_only(struct ArrowSchema* schema, struct ArrowDeviceArray* device_array) {
+    if (device_array->device_type == ARROW_DEVICE_CPU) return 0;
+    device_array->array.release(&device_array->array);
     schema->release(schema);
     return usearch_py_raise(usearch_status_device_k,
                             "the output lives in device memory; read `__arrow_c_device_array__`");
@@ -3879,19 +3881,20 @@ static PyObject* ArenaOutput_arrow_c_array(PyObject* self, PyObject* const* args
                                            PyObject* args_names_tuple) {
     if (arena_output_requested("__arrow_c_array__", args, positional_args_count, args_names_tuple) != 0) return NULL;
     struct ArrowSchema schema;
-    struct ArrowDeviceArray array;
-    if (arena_output_export_as(self, &schema, &array) != 0 || arrow_host_only(&schema, &array) != 0) return NULL;
+    struct ArrowDeviceArray device_array;
+    if (arena_output_export_as(self, &schema, &device_array) != 0 || arrow_host_only(&schema, &device_array) != 0)
+        return NULL;
     struct ArrowArray* const owned = (struct ArrowArray*)PyMem_Malloc(sizeof(*owned));
     if (!owned) {
-        array.array.release(&array.array);
+        device_array.array.release(&device_array.array);
         schema.release(&schema);
         return PyErr_NoMemory();
     }
-    *owned = array.array;
+    *owned = device_array.array;
     PyObject* const capsule = arrow_capsule(owned, "arrow_array", arrow_array_capsule_free);
     if (!capsule) {
         // Freeing the capsule's block left the array to release here.
-        array.array.release(&array.array);
+        device_array.array.release(&device_array.array);
         schema.release(&schema);
         return NULL;
     }
@@ -3903,18 +3906,18 @@ static PyObject* ArenaOutput_arrow_c_device_array(PyObject* self, PyObject* cons
     if (arena_output_requested("__arrow_c_device_array__", args, positional_args_count, args_names_tuple) != 0)
         return NULL;
     struct ArrowSchema schema;
-    struct ArrowDeviceArray array;
-    if (arena_output_export_as(self, &schema, &array) != 0) return NULL;
+    struct ArrowDeviceArray device_array;
+    if (arena_output_export_as(self, &schema, &device_array) != 0) return NULL;
     struct ArrowDeviceArray* const owned = (struct ArrowDeviceArray*)PyMem_Malloc(sizeof(*owned));
     if (!owned) {
-        array.array.release(&array.array);
+        device_array.array.release(&device_array.array);
         schema.release(&schema);
         return PyErr_NoMemory();
     }
-    *owned = array;
+    *owned = device_array;
     PyObject* const capsule = arrow_capsule(owned, "arrow_device_array", arrow_device_array_capsule_free);
     if (!capsule) {
-        array.array.release(&array.array);
+        device_array.array.release(&device_array.array);
         schema.release(&schema);
         return NULL;
     }
@@ -3929,19 +3932,19 @@ typedef struct arrow_stream_state_t {
 
 /** Exports the stream's output with the interpreter taken, a failure read back as @c EIO. */
 static int arrow_stream_export(arrow_stream_state_t* state, struct ArrowSchema* schema,
-                               struct ArrowDeviceArray* array) {
+                               struct ArrowDeviceArray* device_array) {
     PyGILState_STATE const interpreter = PyGILState_Ensure();
-    int status = arena_output_export_as(state->output, schema, array);
-    if (status == 0) status = arrow_host_only(schema, array);
+    int status = arena_output_export_as(state->output, schema, device_array);
+    if (status == 0) status = arrow_host_only(schema, device_array);
     if (status != 0) PyErr_Clear();
     PyGILState_Release(interpreter);
     return status != 0 ? EIO : 0;
 }
 
 static int arrow_stream_get_schema(struct ArrowArrayStream* stream, struct ArrowSchema* out) {
-    struct ArrowDeviceArray array;
-    int const status = arrow_stream_export((arrow_stream_state_t*)stream->private_data, out, &array);
-    if (!status) array.array.release(&array.array);
+    struct ArrowDeviceArray device_array;
+    int const status = arrow_stream_export((arrow_stream_state_t*)stream->private_data, out, &device_array);
+    if (!status) device_array.array.release(&device_array.array);
     return status;
 }
 
@@ -3950,11 +3953,11 @@ static int arrow_stream_get_next(struct ArrowArrayStream* stream, struct ArrowAr
     memset(out, 0, sizeof(*out));
     if (state->finished) return 0;
     struct ArrowSchema schema;
-    struct ArrowDeviceArray array;
-    int const status = arrow_stream_export(state, &schema, &array);
+    struct ArrowDeviceArray device_array;
+    int const status = arrow_stream_export(state, &schema, &device_array);
     if (status) return status;
     schema.release(&schema);
-    *out = array.array;
+    *out = device_array.array;
     state->finished = 1;
     return 0;
 }

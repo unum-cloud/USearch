@@ -7,6 +7,7 @@
  */
 #pragma once
 
+#include <cassert> // `assert` on the candidate slots' contract
 #include <cstddef> // `std::size_t`
 
 #include <bit> // `std::bit_ceil`, `std::bit_width`, `std::countr_zero`
@@ -73,11 +74,11 @@ constexpr gpu_arena_shape_t gpu_arena_shape(u32_t visits, u32_t tail_entries, u3
             scratch_bytes};
 }
 
-/** Rounds @p expansion to the register ladder's rungs of 2 to @c vram_widest_candidate_slots_k
- *  slots of @p lanes ranks each, or to zero past them, where the arena frontier walks the expansion
- *  itself; @p default_slots when it asks for none. */
-constexpr u32_t gpu_candidate_slots(u32_t expansion, u32_t default_slots, u32_t lanes = 32) noexcept {
-    if (!expansion) return default_slots;
+/** Rounds @p expansion, never zero, to the register ladder's rungs of 2 to
+ *  @c vram_widest_candidate_slots_k slots of @p lanes ranks each, or to zero past them, where the
+ *  arena frontier walks the expansion itself. */
+constexpr u32_t gpu_candidate_slots(u32_t expansion, u32_t lanes = 32) noexcept {
+    assert(expansion && "Every walk asks for candidates");
     u32_t const slots = std::bit_ceil(divide_round_up<u32_t>(expansion, lanes));
     return slots > vram_widest_candidate_slots_k ? 0 : max_of(slots, 2u);
 }

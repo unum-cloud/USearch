@@ -552,10 +552,6 @@ struct vram_shard_core {
 
     /** The page-locked host bytes a save moves through, one batch at a time. */
     using bounce_t = growing_buffer<byte_t, typename vendor_t::pinned_allocator_t>;
-
-    /** Rows one checkpoint batch moves between a matrix and the caller: one slab, the row
-     *  granularity the RAM residency grows by. */
-    inline static constexpr std::size_t batch_rows_log2_k = 20;
     using traversal_context_t = typename vendor_t::template traversal_context<traversals_allocator_t>;
 
     /** The strongest @c synchronization_t contract this design honors; nothing routes on it.
@@ -565,9 +561,6 @@ struct vram_shard_core {
 
     /** The scored node's 32-bit ID space, less the sentinel, which marks a closed claim word. */
     inline static constexpr std::size_t max_node_count_k = (std::size_t {1} << 32) - 2u;
-
-    /** Default visited-set slot count; the scratch slice must also fit the candidate cache. */
-    inline static constexpr u32_t default_visited_capacity_k = 2048;
 
     /** Source rows one import window moves at most, so rows in another scalar cross through
      *  bounded staging. */
@@ -902,7 +895,7 @@ struct vram_shard_core {
             return divide_round_up<std::size_t>(bytes, default_alignment_k) * default_alignment_k;
         };
         u32_t const expansion = static_cast<u32_t>(vram_insert_expansion(config.expansion_factor));
-        u32_t const candidate_slots = candidate_slots_for_(expansion, 0);
+        u32_t const candidate_slots = candidate_slots_for_(expansion);
         gpu_arena_shape_t const arena_shape = build_arena_shape_(expansion, candidate_slots, 1);
         std::size_t const arena_warps = device_.multiprocessor_count *
                                         kernels_type_::resident_blocks_(vram_kernel_t::insert_k, candidate_slots) *
@@ -1236,7 +1229,7 @@ struct vram_shard_core {
                                                                            score_scale, context, config, 1,
                                                                            exported_bytes_(outputs), size());
         if (failed(submitted_status) || !rows_count) return {{}, submitted_status};
-        auto const [kernels, kernels_status] = kernels_.kernels_(context);
+        auto const [kernels, kernels_status] = kernels_type_::kernel_table_of(context);
         if (failed(kernels_status)) return {{}, kernels_status};
         if (status_t const copied = copy_attended_(*kernels, submitted, 1, outputs, carry, context.stream());
             failed(copied))
@@ -1581,7 +1574,7 @@ struct vram_shard_core {
             if (!index_) return status_code_t::uninitialized_k;
             if (failed(status_)) return status_;
             if (context.device() != index_->device_.ordinal) return status_code_t::config_mismatch_k;
-            auto const [kernels, kernels_status] = index_->kernels_.kernels_(context);
+            auto const [kernels, kernels_status] = kernels_type_::kernel_table_of(context);
             if (failed(kernels_status)) return kernels_status;
             switch (phase_) {
             case phase_t::health_k: status_ = health.queue(context); break;
@@ -1943,7 +1936,7 @@ struct vram_shard_core {
             vram_shard_core& source = *split_.source;
             if (context.device() != source.device_.ordinal) return status_code_t::config_mismatch_k;
             stream_handle_t const stream = context.stream();
-            auto const [kernels, kernels_status] = source.kernels_.kernels_(context);
+            auto const [kernels, kernels_status] = kernels_type_::kernel_table_of(context);
             if (failed(kernels_status)) return kernels_status;
             if (moves_ == phase_t::scatter_k) status = source.queue_scatter_(*kernels, split_, stream);
             else
@@ -2172,7 +2165,7 @@ struct vram_shard_core {
         for (vram_shard_core* const part : split.targets)
             if (status_t const grown = part->grow_nodes_(split.part_capacity, stream); failed(grown))
                 return {std::move(plan), grown};
-        auto const [kernels, kernels_status] = kernels_.kernels_(context);
+        auto const [kernels, kernels_status] = kernels_type_::kernel_table_of(context);
         if (failed(kernels_status)) return {std::move(plan), kernels_status};
         // The rounds' mirrors take over the split's pinned bytes once the parts publish.
         status_t opened = carve_round_(plan.rounds_, context, split.part_capacity, config.refine.cache_bytes,
@@ -2348,7 +2341,7 @@ struct vram_shard_core {
 
         /** Rows one batch moves - a bounce's worth, or every row when fewer. */
         std::size_t batch_rows() const noexcept {
-            return min_of(static_cast<std::size_t>(visible), power_of_two<std::size_t>(batch_rows_log2_k));
+            return min_of(static_cast<std::size_t>(visible), checkpoint_batch_rows(index_->row_bytes()));
         }
 
         /** Rows one half of the bounce moves: half a batch, so two halves pin what one batch
@@ -2637,8 +2630,8 @@ struct vram_shard_core {
             return {this, index_ && rows ? divide_round_up(rows, batch_rows()) : 0};
         }
 
-        /** Rows one batch moves - a slab, or every row when fewer. */
-        std::size_t batch_rows() const noexcept { return min_of(rows, power_of_two<std::size_t>(batch_rows_log2_k)); }
+        /** Rows one batch moves - a checkpoint batch, or every row when fewer. */
+        std::size_t batch_rows() const noexcept { return min_of(rows, checkpoint_batch_rows(index_->row_bytes())); }
 
         /**
          *  @brief Copies task @p task 's rows out of @p columns on the plan's stream, through
@@ -2876,7 +2869,7 @@ struct vram_shard_core {
                                     std::span<typename kernels_type_::part_source_t const> sources = {}) noexcept {
         if (status_t const kept = status(); failed(kept)) return {{}, kept};
         if (failed(vendor_t::select(api(), device_.ordinal))) return {{}, status_code_t::device_k};
-        auto const [kernels, kernels_status] = kernels_.kernels_(stream);
+        auto const [kernels, kernels_status] = kernels_type_::kernel_table_of(stream);
         if (failed(kernels_status)) return {{}, kernels_status};
         if (!rows)
             return {load_plan_t {*this, stream, *kernels, static_cast<node_id_t>(claimed_()), 0},
@@ -2974,7 +2967,7 @@ struct vram_shard_core {
         if ((import_bytes || packed_row_bytes() != row_bytes()) &&
             failed(vendor_t::fill(api(), staging, 0, rows * row_bytes() + import_bytes, stream)))
             return {{}, {status_code_t::device_k, "Staging fill failed"}};
-        auto const [kernels, kernels_status] = kernels_.kernels_(context);
+        auto const [kernels, kernels_status] = kernels_type_::kernel_table_of(context);
         if (failed(kernels_status)) return {{}, kernels_status};
         if (status_t const imported = import_rows_(*kernels, staging, new_rows, staging + rows * row_bytes(), stream);
             failed(imported))
@@ -2982,7 +2975,7 @@ struct vram_shard_core {
 
         // Every inserting warp owns an arena slice for its exact visited set.
         u32_t const expansion = static_cast<u32_t>(vram_insert_expansion(config.expansion_factor));
-        u32_t const candidate_slots = candidate_slots_for_(expansion, 0);
+        u32_t const candidate_slots = candidate_slots_for_(expansion);
         u32_t const selection_nodes = walk_selection_nodes_(expansion, candidate_slots);
         gpu_arena_shape_t const arena_shape = build_arena_shape_(expansion, candidate_slots, 1);
         std::size_t const arena_warps = device_.multiprocessor_count *
@@ -3471,7 +3464,7 @@ struct vram_shard_core {
      */
     status_t queue_health_(traversal_context_t& context, health_plan_t& plan) noexcept {
         using step_t = typename health_plan_t::step_t;
-        auto const [kernels, kernels_status] = kernels_.kernels_(context);
+        auto const [kernels, kernels_status] = kernels_type_::kernel_table_of(context);
         if (failed(kernels_status)) return kernels_status;
         stream_handle_t const stream = context.stream();
         vram_arguments_t arguments {};
@@ -3548,7 +3541,7 @@ struct vram_shard_core {
     /** Queues the round's start on @p context 's stream, its counters and changed bits zeroed, then
      *  the distance-free heal of every island component @p plan named, on one thread. */
     status_t queue_heal_(traversal_context_t& context, health_plan_t const& plan) noexcept {
-        auto const [kernels, kernels_status] = kernels_.kernels_(context);
+        auto const [kernels, kernels_status] = kernels_type_::kernel_table_of(context);
         if (failed(kernels_status)) return kernels_status;
         stream_handle_t const stream = context.stream();
         vram_arguments_t arguments {};
@@ -3567,7 +3560,7 @@ struct vram_shard_core {
      *  the mirrors, the entries in neighborhood order too past the first gather, then the launch
      *  over a block a multiprocessor, then the labels copied down for the barrier to order. */
     status_t queue_gather_(traversal_context_t& context, refine_plan_t const& plan) noexcept {
-        auto const [kernels, kernels_status] = kernels_.kernels_(context);
+        auto const [kernels, kernels_status] = kernels_type_::kernel_table_of(context);
         if (failed(kernels_status)) return kernels_status;
         stream_handle_t const stream = context.stream();
         round_scratch_t const& scratch = plan.health.columns_;
@@ -3611,7 +3604,7 @@ struct vram_shard_core {
      *  the starts uploaded from the mirrors, then the launch over a block a multiprocessor, each
      *  claiming neighborhoods in turn. */
     status_t queue_restitch_(traversal_context_t& context, refine_plan_t const& plan) noexcept {
-        auto const [kernels, kernels_status] = kernels_.kernels_(context);
+        auto const [kernels, kernels_status] = kernels_type_::kernel_table_of(context);
         if (failed(kernels_status)) return kernels_status;
         stream_handle_t const stream = context.stream();
         round_scratch_t const& scratch = plan.health.columns_;
@@ -4071,7 +4064,7 @@ struct vram_shard_core {
         if (status_t const bound = bind_(rows, ceiling); failed(bound)) return bound;
         if (rows > ceiling_nodes_) return status_code_t::overflow_k;
         if (status_t const covered = keyed_.cover(rows); failed(covered)) return covered;
-        std::size_t const half_keys = min_of(power_of_two<std::size_t>(batch_rows_log2_k),
+        std::size_t const half_keys = min_of(power_of_two<std::size_t>(window_rows_log2_k),
                                              std::bit_ceil(max_of<std::size_t>(rows, 1)));
         if (keys_staging_.size() < 2 * half_keys) {
             // Pinning needs a current device, and the copies out of the old halves must finish.
@@ -4118,8 +4111,8 @@ struct vram_shard_core {
 
     /** Rounds the requested expansion to the register ladder of 2 to 16 slots of the vendor's warp
      *  width, or zero past it, where the arena frontier's rung walks the expansion itself. */
-    u32_t candidate_slots_for_(u32_t expansion_factor, u32_t default_slots) const noexcept {
-        return gpu_candidate_slots(expansion_factor, default_slots, kernels_type_::wave_lanes());
+    u32_t candidate_slots_for_(u32_t expansion_factor) const noexcept {
+        return gpu_candidate_slots(expansion_factor, kernels_type_::wave_lanes());
     }
 
     /** Candidates a walk's diversity selection caches: all of the walk's candidates, as the CPU's

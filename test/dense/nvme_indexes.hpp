@@ -2460,7 +2460,6 @@ struct us::test::dense_indexes_executor<indexes_type_> {
         executor = std::move(spawn_executor);
     }
     ~dense_indexes_executor() noexcept {
-        executor.release();
         executor = executor_t {};
         if (topology) fu_topology_delete(topology);
     }

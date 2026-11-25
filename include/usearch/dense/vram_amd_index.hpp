@@ -262,10 +262,10 @@ struct vram_amd_kernels {
 
     /** The table of this dtype's code object on @p context 's stream, or on @p stream, loaded
      *  there at the first ask; every verb resolves it once per call. */
-    static expected<kernel_table_t const*> kernels_(traversal_context_t const& context) noexcept {
+    static expected<kernel_table_t const*> kernel_table_of(traversal_context_t const& context) noexcept {
         return context.table_of(kernels_type_::bytes(), hip_dense_kernel_speller_t {capability_k, vector_dtype_});
     }
-    static expected<kernel_table_t const*> kernels_(hip_executor_t::stream_t const& stream) noexcept {
+    static expected<kernel_table_t const*> kernel_table_of(hip_executor_t::stream_t const& stream) noexcept {
         return stream.table_of(kernels_type_::bytes(), hip_dense_kernel_speller_t {capability_k, vector_dtype_});
     }
 
@@ -332,8 +332,7 @@ struct vram_amd_kernels {
         u32_t const expansion = max_of<u32_t>(gpu_walk_breadth(config.expansion_factor, config.count),
                                               core.non_zero_expansion_factor(config));
         bool const wide = expansion > vram_widest_candidate_slots_k * wave_lanes();
-        u32_t const count_slots = divide_round_up<u32_t>(config.count, 32);
-        u32_t const candidate_slots = core.candidate_slots_for_(expansion, count_slots > 2 ? count_slots : 2);
+        u32_t const candidate_slots = core.candidate_slots_for_(expansion);
         gpu_arena_shape_t const arena_shape = core.arena_shape_for(
             core.walk_selection_nodes_(expansion, candidate_slots),
             wide ? frontier_kind_t::wide_arena_k : frontier_kind_t::register_ladder_k);
@@ -376,8 +375,7 @@ struct vram_amd_kernels {
     template <typename heads_type_>
     expected<walk_launch_t> stage_walk_(core_t& core, kernel_table_t const& kernels, rows_view_t queries,
                                         [[maybe_unused]] heads_type_ const& heads, traversal_context_t& context,
-                                        u32_t expansion, u32_t minimum_slots, std::size_t outputs_bytes,
-                                        std::size_t visible) noexcept {
+                                        u32_t expansion, std::size_t outputs_bytes, std::size_t visible) noexcept {
         constexpr bool indexer_k = std::is_same_v<heads_type_, indexer_heads<scalar_t>>;
         constexpr bool attend_k = std::is_same_v<heads_type_, attend_heads_t>;
         std::size_t const queries_count = queries.rows;
@@ -402,7 +400,7 @@ struct vram_amd_kernels {
         frontier_kind_t const frontier = expansion > vram_widest_candidate_slots_k * wave_lanes()
                                              ? frontier_kind_t::wide_arena_k
                                              : frontier_kind_t::register_ladder_k;
-        u32_t const candidate_slots = core.candidate_slots_for_(expansion, minimum_slots);
+        u32_t const candidate_slots = core.candidate_slots_for_(expansion);
         gpu_arena_shape_t const arena_shape = core.arena_shape_for(
             core.walk_selection_nodes_(expansion, candidate_slots), frontier);
         // A search, an indexed search and a multiply keep as many blocks resident on one rung.
@@ -503,15 +501,13 @@ struct vram_amd_kernels {
         // The expansion covers the count, so the ladder's candidates hold every rank, and past it
         // the arena frontier ranks everything it saw.
         u32_t const expansion = gpu_walk_breadth(config.expansion_factor, config.count);
-        // The candidates must cover the requested count, whatever the expansion asked for.
-        u32_t const count_slots = divide_round_up<u32_t>(config.count, 32);
         std::size_t const results_count = queries_count * config.count;
         std::size_t const ids_bytes = results_count * sizeof(node_id_t);
         std::size_t const distances_bytes = wants_distances ? results_count * sizeof(distance_t) : 0;
-        auto const [kernels, kernels_status] = kernels_(context);
+        auto const [kernels, kernels_status] = kernel_table_of(context);
         if (failed(kernels_status)) return {{}, kernels_status};
-        auto const staged = stage_walk_(core, *kernels, queries, heads, context, expansion,
-                                        count_slots > 2 ? count_slots : 2, ids_bytes + distances_bytes, visible);
+        auto const staged = stage_walk_(core, *kernels, queries, heads, context, expansion, ids_bytes + distances_bytes,
+                                        visible);
         if (!staged) return {{}, staged.status};
         node_id_t* const device_ids = reinterpret_cast<node_id_t*>(staged.value.outputs);
         distance_t* const device_distances = wants_distances
@@ -555,10 +551,10 @@ struct vram_amd_kernels {
             return {{}, status_code_t::unsupported_layout_k};
         std::size_t const ids_bytes = rows_count * wanted * sizeof(node_id_t);
         std::size_t const products_bytes = rows_count * wanted * sizeof(dot_t);
-        auto const [kernels, kernels_status] = kernels_(context);
+        auto const [kernels, kernels_status] = kernel_table_of(context);
         if (failed(kernels_status)) return {{}, kernels_status};
         auto const staged = stage_walk_(core, *kernels, left, dummy_heads_t {}, context,
-                                        core.non_zero_expansion_factor(config), 2,
+                                        core.non_zero_expansion_factor(config),
                                         ids_bytes + products_bytes + rows_count * sizeof(u32_t), visible);
         if (!staged) return {{}, staged.status};
         node_id_t* const device_ids = reinterpret_cast<node_id_t*>(staged.value.outputs);
@@ -600,10 +596,10 @@ struct vram_amd_kernels {
         std::size_t const outputs_bytes = rows_count * core.dimensions() * sizeof(f32_t);
         rows_view_t const first_heads {queries.data, rows_count / head_count, queries.columns,
                                        queries.stride * head_count, queries.dtype};
-        auto const [kernels, kernels_status] = kernels_(context);
+        auto const [kernels, kernels_status] = kernel_table_of(context);
         if (failed(kernels_status)) return {nullptr, kernels_status};
         auto staged = stage_walk_(core, *kernels, first_heads, attend_heads_t {queries, head_count}, context,
-                                  core.non_zero_expansion_factor(config), 2,
+                                  core.non_zero_expansion_factor(config),
                                   blocks * (outputs_bytes + rows_count * sizeof(softmax_state_t)) + exported_bytes,
                                   visible);
         if (!staged) return {nullptr, staged.status};
@@ -653,7 +649,7 @@ struct vram_amd_kernels {
      *  keeps the failure, since those rows cannot be un-claimed. */
     status_t launch_insert_(core_t& core, vram_build_t const& build, u32_t candidate_slots,
                             traversal_context_t& context) noexcept {
-        auto const [kernels, kernels_status] = kernels_(context);
+        auto const [kernels, kernels_status] = kernel_table_of(context);
         if (failed(kernels_status)) return kernels_status;
         hip_stream_handle_t const stream = context.stream();
         vram_arguments_t arguments {};
@@ -703,7 +699,7 @@ struct vram_amd_kernels {
     status_t launch_fold_(core_t const& core, vram_fold_t fold, traversal_context_t& context) const noexcept {
         static_assert(resident_blocks_(vram_dense_kernel_t::fold_k, 0) <= resident_blocks_(vram_kernel_t::refine_k, 0),
                       "A fold keeps no more blocks resident than the builders its scratch is checked against");
-        auto const [kernels, kernels_status] = kernels_(context);
+        auto const [kernels, kernels_status] = kernel_table_of(context);
         if (failed(kernels_status)) return kernels_status;
         u32_t const scratch_bytes = core.build_scratch_bytes_per_warp(fold.selection_nodes);
         bool const shared = build_scratch_fits(core, scratch_bytes);
@@ -885,7 +881,6 @@ struct vram_amd_index {
     using keys_view_t = typename core_t::keys_view_t;
 
     inline static constexpr nk_dtype_t vector_dtype_k = vector_dtype_;
-    inline static constexpr std::size_t batch_rows_log2_k = core_t::batch_rows_log2_k;
     inline static constexpr std::size_t max_node_count_k = core_t::max_node_count_k;
     inline static constexpr synchronization_t synchronization_ceiling_k = core_t::synchronization_ceiling_k;
 
@@ -1361,7 +1356,7 @@ struct vram_amd_index {
     status_t launch_resolve_matches_(node_id_t const* ids, distance_t const* distances, u32_t walked,
                                      byte_t const* keys, vram_ranking_t const& ranking, u32_t queries_count,
                                      traversal_context_t const& context) const noexcept {
-        auto const [kernels, status] = kernels_t::kernels_(context);
+        auto const [kernels, status] = kernels_t::kernel_table_of(context);
         if (failed(status)) return status;
         return core_.launch_resolve_matches_(*kernels, ids, distances, walked, keys, ranking, queries_count,
                                              context.stream());
@@ -1370,7 +1365,7 @@ struct vram_amd_index {
     status_t launch_merge_matches_(vram_ranking_t const& gathered, std::size_t block_bytes, u32_t shards,
                                    vram_ranking_t const& ranking, u32_t queries_count,
                                    traversal_context_t const& context) const noexcept {
-        auto const [kernels, status] = kernels_t::kernels_(context);
+        auto const [kernels, status] = kernels_t::kernel_table_of(context);
         if (failed(status)) return status;
         return core_.launch_merge_matches_(*kernels, gathered, block_bytes, shards, ranking, queries_count,
                                            context.stream());
@@ -1378,7 +1373,7 @@ struct vram_amd_index {
 
     status_t launch_merge_attention_(byte_t* blocks, u32_t rows, u32_t columns, u32_t shards,
                                      traversal_context_t const& context) noexcept {
-        auto const [kernels, status] = kernels_t::kernels_(context);
+        auto const [kernels, status] = kernels_t::kernel_table_of(context);
         if (failed(status)) return status;
         return core_.launch_merge_attention_(*kernels, blocks, rows, columns, shards, context.stream());
     }
@@ -1389,14 +1384,14 @@ struct vram_amd_index {
 
     status_t launch_gather_vectors_(std::span<vram_gathered_row_t const> rows, rows_span_t outputs,
                                     traversal_context_t const& context) const noexcept {
-        auto const [kernels, status] = kernels_t::kernels_(context);
+        auto const [kernels, status] = kernels_t::kernel_table_of(context);
         if (failed(status)) return status;
         return core_.launch_gather_vectors_(*kernels, rows, outputs, context.stream());
     }
 
     status_t launch_sum_counts_(std::span<std::size_t const> counts, std::size_t* total,
                                 traversal_context_t const& context) const noexcept {
-        auto const [kernels, status] = kernels_t::kernels_(context);
+        auto const [kernels, status] = kernels_t::kernel_table_of(context);
         if (failed(status)) return status;
         return core_.launch_sum_counts_(*kernels, counts, total, context.stream());
     }
@@ -1404,7 +1399,7 @@ struct vram_amd_index {
     status_t launch_resolve_products_(nk::matrix_view<node_id_t> ids, nk::matrix_view<dot_result_t> products,
                                       std::span<u32_t const> scored, vram_ranking_t const& ranking,
                                       traversal_context_t const& context) const noexcept {
-        auto const [kernels, status] = kernels_t::kernels_(context);
+        auto const [kernels, status] = kernels_t::kernel_table_of(context);
         if (failed(status)) return status;
         return core_.launch_resolve_products_(*kernels, ids, products, scored, ranking, context.stream());
     }
@@ -1413,7 +1408,7 @@ struct vram_amd_index {
                                       u32_t queries_count, vram_products_tape_t const& tape,
                                       std::span<std::size_t> scored,
                                       traversal_context_t const& context) const noexcept {
-        auto const [kernels, status] = kernels_t::kernels_(context);
+        auto const [kernels, status] = kernels_t::kernel_table_of(context);
         if (failed(status)) return status;
         return core_.launch_compact_products_(*kernels, gathered, block_bytes, shards, queries_count, tape, scored,
                                               context.stream());
@@ -1422,7 +1417,7 @@ struct vram_amd_index {
     status_t launch_nominate_keys_(vram_ranking_t const& gathered, std::size_t block_bytes, u32_t shards,
                                    std::span<u32_t const> query_offsets, vram_ranking_t const& nominees,
                                    traversal_context_t const& context) const noexcept {
-        auto const [kernels, status] = kernels_t::kernels_(context);
+        auto const [kernels, status] = kernels_t::kernel_table_of(context);
         if (failed(status)) return status;
         return core_.launch_nominate_keys_(*kernels, gathered, block_bytes, shards, query_offsets, nominees,
                                            context.stream());
@@ -1433,7 +1428,7 @@ struct vram_amd_index {
                                     std::span<vram_gathered_row_t const> entries,
                                     nk::matrix_span<dot_result_t> partials,
                                     traversal_context_t const& context) const noexcept {
-        auto const [kernels, status] = kernels_t::kernels_(context);
+        auto const [kernels, status] = kernels_t::kernel_table_of(context);
         if (failed(status)) return status;
         return core_.launch_maxsim_rescore_(*kernels, queries, query_offsets, nominee_offsets, entries, partials,
                                             context.stream());
@@ -1442,7 +1437,7 @@ struct vram_amd_index {
     status_t launch_maxsim_fold_(nk::matrix_span<dot_result_t> partials, std::size_t block_bytes, u32_t shards,
                                  std::span<u32_t const> query_offsets, std::span<std::size_t const> nominee_offsets,
                                  std::span<f64_t> sums, traversal_context_t const& context) const noexcept {
-        auto const [kernels, status] = kernels_t::kernels_(context);
+        auto const [kernels, status] = kernels_t::kernel_table_of(context);
         if (failed(status)) return status;
         return core_.launch_maxsim_fold_(*kernels, partials, block_bytes, shards, query_offsets, nominee_offsets, sums,
                                          context.stream());
@@ -1451,7 +1446,7 @@ struct vram_amd_index {
     status_t launch_top_k_(std::span<f64_t> sums, vram_products_tape_t const& nominated, std::size_t wanted,
                            vram_products_tape_t const& tape, std::span<std::size_t> scored,
                            traversal_context_t const& context) const noexcept {
-        auto const [kernels, status] = kernels_t::kernels_(context);
+        auto const [kernels, status] = kernels_t::kernel_table_of(context);
         if (failed(status)) return status;
         return core_.launch_top_k_(*kernels, sums, nominated, wanted, tape, scored, context.stream());
     }
@@ -1463,7 +1458,7 @@ struct vram_amd_index {
 
     status_t copy_attended_(f32_t* attended, std::size_t blocks, rows_span_t outputs, std::span<softmax_state_t> carry,
                             traversal_context_t const& context) const noexcept {
-        auto const [kernels, status] = kernels_t::kernels_(context);
+        auto const [kernels, status] = kernels_t::kernel_table_of(context);
         if (failed(status)) return status;
         return core_.copy_attended_(*kernels, attended, blocks, outputs, carry, context.stream());
     }

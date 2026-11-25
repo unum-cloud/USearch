@@ -359,8 +359,9 @@ struct punned_basic_index {
  *  device its shards sit on, which the call opens nothing for. */
 template <typename traits_type_, vendored_residency_t residency_>
     requires is_gpu_executor<typename punned_basic_index<traits_type_, residency_>::executor_t>
-usearch_executor_t make_call_executor(punned_basic_index<traits_type_, residency_> const& punned,
-                                      usearch_executor_handle_t& call_executor, usearch_outcome_t* outcome) noexcept {
+bool make_call_executor(punned_basic_index<traits_type_, residency_> const& punned,
+                        typename punned_basic_index<traits_type_, residency_>::executor_t& call_executor,
+                        usearch_outcome_t* outcome) noexcept {
     std::array<arena_residency_t, util::gpu_devices_capacity_k> residencies;
     std::size_t devices_count = punned.verbs.devices(punned.variant, residencies);
     if (!devices_count) residencies[devices_count++] = punned.verbs.residency(punned.variant);
@@ -370,9 +371,9 @@ usearch_executor_t make_call_executor(punned_basic_index<traits_type_, residency
     using executor_t = typename punned_basic_index<traits_type_, residency_>::executor_t;
     auto [built, status] = executor_t::on_default_streams(driver_of(gpu_drivers(), std::type_identity<executor_t> {}),
                                                           std::span<int const> {devices.data(), devices_count});
-    if (failed(status)) return propagate_error(status, outcome), nullptr;
-    call_executor.executor.emplace<util::gpu_executor_t>(std::in_place_type<executor_t>, std::move(built));
-    return &call_executor;
+    if (failed(status)) return propagate_error(status, outcome);
+    call_executor = std::move(built);
+    return true;
 }
 
 #pragma endregion Variant Tables

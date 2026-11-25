@@ -260,50 +260,50 @@ static void release_exported(node_type_* node) noexcept {
 }
 
 /** Exports @p nodes of a column out of @p arena, the first being the column itself, into @p schema
- *  and @p array. Every call filling the arena drained its uploads, so its outputs are final and no
- *  event guards them. */
+ *  and @p device_array. Every call filling the arena drained its uploads, so its outputs are final
+ *  and no event guards them. */
 static usearch_status_t export_column(usearch_arena_handle_t const& arena, std::span<column_node_t const> nodes,
-                                      ArrowSchema* schema, ArrowDeviceArray* array) noexcept {
-    exported_schema_t* const schemas = new (std::nothrow) exported_schema_t {};
-    exported_array_t* const arrays = schemas ? new (std::nothrow) exported_array_t {} : nullptr;
-    if (!arrays) {
-        delete schemas;
+                                      ArrowSchema* schema, ArrowDeviceArray* device_array) noexcept {
+    exported_schema_t* const schema_block = new (std::nothrow) exported_schema_t {};
+    exported_array_t* const array_block = schema_block ? new (std::nothrow) exported_array_t {} : nullptr;
+    if (!array_block) {
+        delete schema_block;
         return usearch_status_out_of_memory_k;
     }
-    schemas->live = nodes.size();
-    arrays->live = nodes.size();
-    *array = {};
+    schema_block->live = nodes.size();
+    array_block->live = nodes.size();
+    *device_array = {};
     for (std::size_t position = 0; position != nodes.size(); ++position) {
         column_node_t const& node = nodes[position];
-        ArrowSchema& exported_schema = position ? schemas->schemas[position] : *schema;
-        ArrowArray& exported_array = position ? arrays->arrays[position] : array->array;
-        schemas->children[position] = &schemas->schemas[position];
-        arrays->children[position] = &arrays->arrays[position];
-        arrays->buffers[position] = node.buffers;
-        node.format.copy(schemas->formats[position].data(), format_capacity_k - 1);
-        exported_schema = {.format = schemas->formats[position].data(),
+        ArrowSchema& exported_schema = position ? schema_block->schemas[position] : *schema;
+        ArrowArray& exported_array = position ? array_block->arrays[position] : device_array->array;
+        schema_block->children[position] = &schema_block->schemas[position];
+        array_block->children[position] = &array_block->arrays[position];
+        array_block->buffers[position] = node.buffers;
+        node.format.copy(schema_block->formats[position].data(), format_capacity_k - 1);
+        exported_schema = {.format = schema_block->formats[position].data(),
                            .name = position ? node.name : "",
                            .metadata = node.metadata,
                            .flags = 0,
                            .n_children = static_cast<std::int64_t>(node.children_count),
-                           .children = node.children_count ? &schemas->children[node.first_child] : nullptr,
+                           .children = node.children_count ? &schema_block->children[node.first_child] : nullptr,
                            .dictionary = nullptr,
                            .release = &release_exported<ArrowSchema, exported_schema_t>,
-                           .private_data = schemas};
+                           .private_data = schema_block};
         exported_array = {.length = static_cast<std::int64_t>(node.length),
                           .null_count = 0,
                           .offset = 0,
                           .n_buffers = node.buffers_count,
                           .n_children = static_cast<std::int64_t>(node.children_count),
-                          .buffers = arrays->buffers[position].data(),
-                          .children = node.children_count ? &arrays->children[node.first_child] : nullptr,
+                          .buffers = array_block->buffers[position].data(),
+                          .children = node.children_count ? &array_block->children[node.first_child] : nullptr,
                           .dictionary = nullptr,
                           .release = &release_exported<ArrowArray, exported_array_t>,
-                          .private_data = arrays};
+                          .private_data = array_block};
     }
     arrow_device_t const device = arrow_device_of(arena);
-    array->device_id = device.ordinal;
-    array->device_type = device.type;
+    device_array->device_id = device.ordinal;
+    device_array->device_type = device.type;
     return usearch_status_success_k;
 }
 
@@ -486,18 +486,18 @@ USEARCH_EXPORT usearch_status_t usearch_tape_view_from_arrow(ArrowSchema const* 
 
 USEARCH_EXPORT usearch_status_t usearch_keys_view_to_arrow(usearch_keys_view_t keys, size_t count,
                                                            usearch_arena_t arena, ArrowSchema* schema,
-                                                           ArrowDeviceArray* array) {
-    if (!arena || !schema || !array || (count && !keys.data)) return usearch_status_invalid_argument_k;
+                                                           ArrowDeviceArray* device_array) {
+    if (!arena || !schema || !device_array || (count && !keys.data)) return usearch_status_invalid_argument_k;
     if (count > 1 && keys.stride != sizeof(usearch_key_t)) return usearch_status_unsupported_layout_k;
     if (!arena_holds(*arena, keys.data, count * sizeof(usearch_key_t))) return usearch_status_invalid_argument_k;
     std::array const nodes {keys_node(count, keys.data, nullptr)};
-    return export_column(*arena, nodes, schema, array);
+    return export_column(*arena, nodes, schema, device_array);
 }
 
 USEARCH_EXPORT usearch_status_t usearch_rows_view_to_arrow(usearch_rows_view_t rows, size_t count,
                                                            usearch_arena_t arena, ArrowSchema* schema,
-                                                           ArrowDeviceArray* array) {
-    if (!arena || !schema || !array || (count && !rows.data)) return usearch_status_invalid_argument_k;
+                                                           ArrowDeviceArray* device_array) {
+    if (!arena || !schema || !device_array || (count && !rows.data)) return usearch_status_invalid_argument_k;
     bool const bits = rows.scalar == usearch_scalar_u1x8_k;
     scalar_layout_t const* const layout = layout_of(rows.scalar);
     if (!rows.columns || (!bits && !layout)) return usearch_status_unsupported_layout_k;
@@ -525,7 +525,7 @@ USEARCH_EXPORT usearch_status_t usearch_rows_view_to_arrow(usearch_rows_view_t r
         nodes[0].metadata = u1x8_metadata.data();
         nodes[0].buffers = {nullptr, data, nullptr};
         nodes[0].buffers_count = 2;
-        return export_column(*arena, std::span {nodes}.first(1), schema, array);
+        return export_column(*arena, std::span {nodes}.first(1), schema, device_array);
     }
     nodes[0].first_child = 1;
     nodes[0].children_count = 1;
@@ -534,13 +534,13 @@ USEARCH_EXPORT usearch_status_t usearch_rows_view_to_arrow(usearch_rows_view_t r
     nodes[1].length = count * width;
     nodes[1].buffers = {nullptr, data, nullptr};
     nodes[1].buffers_count = 2;
-    return export_column(*arena, nodes, schema, array);
+    return export_column(*arena, nodes, schema, device_array);
 }
 
 USEARCH_EXPORT usearch_status_t usearch_tape_view_to_arrow(usearch_tape_view_t tape, size_t count,
                                                            usearch_arena_t arena, ArrowSchema* schema,
-                                                           ArrowDeviceArray* array) {
-    if (!arena || !schema || !array) return usearch_status_invalid_argument_k;
+                                                           ArrowDeviceArray* device_array) {
+    if (!arena || !schema || !device_array) return usearch_status_invalid_argument_k;
     bool const wide = tape.layout == usearch_tape_u64_k;
     if (!wide && tape.layout != usearch_tape_u32_k) return usearch_status_unsupported_layout_k;
     void const* const offsets = wide ? static_cast<void const*>(tape.offsets.u64) : tape.offsets.u32;
@@ -563,7 +563,7 @@ USEARCH_EXPORT usearch_status_t usearch_tape_view_to_arrow(usearch_tape_view_t t
         column.buffers = {nullptr, count ? offsets : no_rows_k, data};
         column.buffers_count = 3;
         std::array const nodes {column};
-        return export_column(*arena, nodes, schema, array);
+        return export_column(*arena, nodes, schema, device_array);
     }
     std::array<column_node_t, 3> nodes {};
     nodes[0] = list_node(count, offsets);
@@ -577,24 +577,24 @@ USEARCH_EXPORT usearch_status_t usearch_tape_view_to_arrow(usearch_tape_view_t t
     nodes[2].length = elements * 3;
     nodes[2].buffers = {nullptr, data, nullptr};
     nodes[2].buffers_count = 2;
-    return export_column(*arena, nodes, schema, array);
+    return export_column(*arena, nodes, schema, device_array);
 }
 
 USEARCH_EXPORT usearch_status_t usearch_keys_tape_view_to_arrow(usearch_keys_tape_view_t keys, size_t count,
                                                                 usearch_arena_t arena, ArrowSchema* schema,
-                                                                ArrowDeviceArray* array) {
-    if (!arena || !schema || !array || (count && !keys.offsets)) return usearch_status_invalid_argument_k;
+                                                                ArrowDeviceArray* device_array) {
+    if (!arena || !schema || !device_array || (count && !keys.offsets)) return usearch_status_invalid_argument_k;
     auto const [elements, status] = last_offset(*arena, keys.offsets, count);
     if (failed(status)) return static_cast<usearch_status_t>(status.code);
     if (!arena_holds(*arena, keys.keys, elements * sizeof(usearch_key_t))) return usearch_status_invalid_argument_k;
     std::array const nodes {list_node(count, keys.offsets), keys_node(elements, keys.keys, "item")};
-    return export_column(*arena, nodes, schema, array);
+    return export_column(*arena, nodes, schema, device_array);
 }
 
 USEARCH_EXPORT usearch_status_t usearch_matches_tape_view_to_arrow(usearch_matches_tape_view_t matches, size_t count,
                                                                    usearch_arena_t arena, ArrowSchema* schema,
-                                                                   ArrowDeviceArray* array) {
-    if (!arena || !schema || !array || (count && !matches.offsets)) return usearch_status_invalid_argument_k;
+                                                                   ArrowDeviceArray* device_array) {
+    if (!arena || !schema || !device_array || (count && !matches.offsets)) return usearch_status_invalid_argument_k;
     auto const [elements, status] = last_offset(*arena, matches.offsets, count);
     if (failed(status)) return static_cast<usearch_status_t>(status.code);
     if (!arena_holds(*arena, matches.keys, elements * sizeof(usearch_key_t)) ||
@@ -603,5 +603,5 @@ USEARCH_EXPORT usearch_status_t usearch_matches_tape_view_to_arrow(usearch_match
     std::array<column_node_t, 4> nodes {};
     nodes[0] = list_node(count, matches.offsets);
     matches_nodes(elements, matches.keys, matches.scores, std::span {nodes}.subspan(1));
-    return export_column(*arena, nodes, schema, array);
+    return export_column(*arena, nodes, schema, device_array);
 }

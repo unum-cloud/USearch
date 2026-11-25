@@ -26,7 +26,7 @@
 #include <type_traits>      // `std::is_same_v` - the residency discrimination
 #include <variant>          // `std::variant`, `std::visit`
 
-#include <forkunion/forkunion.h>      // `fu_topology_new` - the executor factories' discovery
+#include <forkunion/forkunion.hpp>    // `fu::topology_t` - the executor factories' discovery
 #include <forkunion/atomics.hpp>      // `fu::standard_atomic_ref` & kin - the classes' atomic references
 #include <forkunion/capabilities.hpp> // `fu::x86_pause_t`, `fu::arm64_wfe_t` & waiter kin
 #include <forkunion/types.hpp>        // `fu::spin_mutex_t` - the ticks' lock
@@ -34,11 +34,11 @@
 #include <stringzilla/capabilities.h> // `sz_capability_t` - the basic modalities' kit masks
 #include <numkong/vector.hpp>         // `nk::vector_view` - the rows a value lookup resolves
 
-#include "usearch/usearch.h"                 // every modality's argument structures
-#include "usearch/dense/types.hpp"           // `dense::search_config_t` & kin - the configs every verb lowers
-#include "usearch/utilities/nvme_device.hpp" // `nvme_executor`, `default_io_queue`, `io_queue_config_t`
-#include "usearch/utilities/ram_device.hpp"  // `ram_executor_t`, `forkunion_allocator_t`, `no_memory_domain_k`
-#include "usearch/utilities/sample.hpp"      // `sample_inputs`, `sample_outputs` - what SAMPLE reads and writes
+#include "usearch/usearch.h"                       // every modality's argument structures
+#include "usearch/dense/types.hpp"                 // `dense::search_config_t` & kin - the configs every verb lowers
+#include "usearch/utilities/nvme_device.hpp"       // `nvme_executor`, `default_io_queue`, `io_queue_config_t`
+#include "usearch/utilities/ram_device.hpp"        // `ram_executor_t`, `forkunion_allocator_t`, `no_memory_domain_k`
+#include "usearch/utilities/sample.hpp"            // `sample_inputs`, `sample_outputs` - what SAMPLE reads and writes
 #include "usearch/utilities/safegraphs_format.hpp" // `checkpoint_source_t` - a checkpoint on a device
 #include "usearch/utilities/vram_device.hpp"       // `gpu_executor_t`, `gpu_arena_t`
 
@@ -96,9 +96,9 @@ enum class call_claim_t : util::u32_t {
 };
 
 /** The verbs over the words a call's waiters watch - its outcome's status, its executor's claim
- *  and the named-call counts of its handles - lowered onto one CPU class's reference and waiter. A
- *  release store is the same instruction on every class; the wait is what differs, and it watches
- *  the address, so no store notifies. */
+ *  and the named-call counts of its handles - lowered onto one CPU class's reference and waiter.
+ *  Most classes' waiters watch the address, so their stores notify no one; WebAssembly's waiter
+ *  sleeps in @c memory.atomic.wait, so its reference notifies after every releasing store. */
 struct outcome_verbs_t {
     void (*publish)(usearch_outcome_t*, usearch_status_t, std::memory_order) noexcept;
     usearch_status_t (*load)(usearch_outcome_t const*) noexcept;
@@ -184,24 +184,12 @@ inline util::traversal_stats_t traversal_stats_of(result_type_ const& result) no
  *  names none. */
 template <typename emplace_type_>
 util::status_t emplace_on_every_domain(emplace_type_&& emplace) noexcept {
-    fu_topology_t topology = nullptr;
-    if (fu_topology_new(&topology) != fu_success_k) return util::status_code_t::uninitialized_k;
-    // The topology dies on every path, so the domains are walked before it is deleted.
-    auto place_on_every_domain = [&]() noexcept -> util::status_t {
-        std::size_t domains_count = 0;
-        if (fu_memory_domains_count(topology, &domains_count) != fu_success_k || !domains_count)
-            return util::status_code_t::uninitialized_k;
-        for (std::size_t position = 0; position != domains_count; ++position) {
-            fu_memory_domain_id_t domain = -1;
-            if (fu_memory_domain_id_at_index(topology, position, &domain) != fu_success_k)
-                return util::status_code_t::uninitialized_k;
-            if (util::status_t const placed = emplace(domain); util::failed(placed)) return placed;
-        }
-        return util::status_code_t::success_k;
-    };
-    util::status_t const placed = place_on_every_domain();
-    fu_topology_delete(topology);
-    return placed;
+    fu::topology_t topology;
+    if (fu::failed(topology.harvest()) || !topology.memory_domains_count()) return util::status_code_t::uninitialized_k;
+    for (std::size_t position = 0; position != topology.memory_domains_count(); ++position)
+        if (util::status_t const placed = emplace(topology.memory_domain(position)); util::failed(placed))
+            return placed;
+    return util::status_code_t::success_k;
 }
 
 /** The domain host tables sit on: the first @p ram names, else the heap's. */
@@ -2125,17 +2113,14 @@ struct holding_call_t {
     std::thread::id body_thread;
 };
 
-/** The state behind @c usearch_executor_t: the discovered topology a RAM or NVMe executor was
- *  spawned over, the call holding it, and one residency's executor; the variant is the kind tag, so
- *  no second word can disagree. The executor is declared last, so its pool dies before the
- *  topology. */
+/** The state behind @c usearch_executor_t: the call holding it and one residency's executor; the
+ *  variant is the kind tag, so no second word can disagree. */
 struct usearch_executor_handle_t {
-    std::unique_ptr<void, decltype(&fu_topology_delete)> topology {nullptr, &fu_topology_delete};
 
     /** The one call that holds the executor, from its claim to its end. */
     holding_call_t holding_call;
 
-    std::variant<util::ram_executor_t, nvme_executor_t, util::gpu_executor_t> executor;
+    std::variant<util::ram_executor_t, nvme_executor_t, util::gpu_executor_t> residency;
 };
 
 /** Discovers the topology and spawns @p threads over it into @p handle under @p ceiling, near the
@@ -2145,20 +2130,18 @@ struct usearch_executor_handle_t {
 inline usearch_executor_t spawn_ram_executor(usearch_executor_handle_t& handle, std::size_t threads,
                                              cpu_ceiling_t ceiling, usearch_ram_options_t const& ram,
                                              std::size_t scratch_limit, usearch_outcome_t* outcome) noexcept {
-    fu_topology_t topology = nullptr;
-    if (fu_topology_new(&topology) != fu_success_k)
+    fu::topology_t topology;
+    if (fu::failed(topology.harvest()))
         return propagate_error(usearch_status_device_k, outcome, "Topology discovery failed"), nullptr;
-    handle.topology.reset(topology);
     // A pool spawns near one memory domain or across all of them, so several named ones take all.
-    std::size_t domains_count = 0;
-    bool const near_one = ram.memory_domains && ram.memory_domains_count == 1 &&
-                          fu_memory_domains_count(topology, &domains_count) == fu_success_k && domains_count > 1;
-    auto [spawned, status] =
-        near_one ? util::ram_executor_t::spawn_near(topology, static_cast<fu_memory_domain_id_t>(ram.memory_domains[0]),
-                                                    threads, forkunion_allowed_of(ceiling), scratch_limit)
-                 : util::ram_executor_t::spawn(topology, threads, forkunion_allowed_of(ceiling), scratch_limit);
+    bool const near_one = ram.memory_domains && ram.memory_domains_count == 1 && topology.memory_domains_count() > 1;
+    auto [spawned, status] = near_one ? util::ram_executor_t::spawn_near(
+                                            topology.get(), static_cast<fu_memory_domain_id_t>(ram.memory_domains[0]),
+                                            threads, forkunion_allowed_of(ceiling), scratch_limit)
+                                      : util::ram_executor_t::spawn(topology.get(), threads,
+                                                                    forkunion_allowed_of(ceiling), scratch_limit);
     if (util::failed(status)) return propagate_error(status, outcome), nullptr;
-    handle.executor.emplace<util::ram_executor_t>(std::move(spawned));
+    handle.residency.emplace<util::ram_executor_t>(std::move(spawned));
     return &handle;
 }
 
@@ -2202,9 +2185,9 @@ inline nvme_media_shape_t nvme_media_shape(std::span<usearch_bytes_view_t const>
     return shape;
 }
 
-/** The threads an NVMe executor spawns when its caller names none: ForkUnion's default, capped by
- *  @p queues, the fewest hardware queues of its media, so no two threads share a queue; zero,
- *  ForkUnion's own default, when the cores are unknown. */
+/** The threads an NVMe executor spawns when its caller names none: ForkUnion's default for a
+ *  caller-exclusive pool, capped by @p queues, the fewest hardware queues of its media, so no two
+ *  threads share a queue; zero, ForkUnion's own default, when the cores are unknown. */
 inline std::size_t nvme_default_threads(fu_topology_t topology, std::size_t queues) noexcept {
     auto const [cores, cores_status] = util::ram_executor_t::default_threads(topology);
     if (util::failed(cores_status)) return 0;
@@ -2221,10 +2204,6 @@ inline usearch_executor_t spawn_nvme_executor(usearch_executor_handle_t& handle,
                                               usearch_ram_options_t const& ram, util::io_queue_config_t config,
                                               cpu_ceiling_t ceiling, std::size_t scratch_limit,
                                               usearch_outcome_t* outcome) noexcept {
-    fu_topology_t topology = nullptr;
-    if (fu_topology_new(&topology) != fu_success_k)
-        return propagate_error(usearch_status_device_k, outcome, "Topology discovery failed"), nullptr;
-    handle.topology.reset(topology);
     nvme_media_shape_t const shape = nvme_media_shape(paths);
     std::size_t const queues = shape.fewest_queues;
     // Each SPDK thread holds a queue pair of its own, and a controller grants only so many.
@@ -2232,21 +2211,22 @@ inline usearch_executor_t spawn_nvme_executor(usearch_executor_handle_t& handle,
         return propagate_error(usearch_status_config_mismatch_k, outcome,
                                "More threads than the SPDK controller granted I/O queue pairs"),
                nullptr;
-    if (!threads) threads = nvme_default_threads(topology, queues);
+    fu::topology_t topology;
+    if (fu::failed(topology.harvest()))
+        return propagate_error(usearch_status_device_k, outcome, "Topology discovery failed"), nullptr;
+    if (!threads) threads = nvme_default_threads(topology.get(), queues);
     // A named domain wins; drives on one socket keep their issuers there, on several spread out.
-    std::size_t domains_count = 0;
-    if (fu_memory_domains_count(topology, &domains_count) != fu_success_k) domains_count = 0;
     fu_memory_domain_id_t const near_domain = ram.memory_domains && ram.memory_domains_count
                                                   ? static_cast<fu_memory_domain_id_t>(ram.memory_domains[0])
-                                              : domains_count > 1 ? shape.memory_domain
-                                                                  : util::no_memory_domain_k;
+                                              : topology.memory_domains_count() > 1 ? shape.memory_domain
+                                                                                    : util::no_memory_domain_k;
     std::span<util::io_device_queues_t const> const media_queues = util::to_span(shape.queues);
     config.polling = util::nvme_polling(media_queues);
     std::size_t const opening_depth = threads ? util::nvme_queue_depth(media_queues, threads) : 0;
-    auto [spawned, status] = nvme_executor_t::spawn(topology, threads, config, forkunion_allowed_of(ceiling),
+    auto [spawned, status] = nvme_executor_t::spawn(topology.get(), threads, config, forkunion_allowed_of(ceiling),
                                                     near_domain, scratch_limit, opening_depth);
     if (util::failed(status)) return propagate_error(status, outcome), nullptr;
-    handle.executor.emplace<nvme_executor_t>(std::move(spawned));
+    handle.residency.emplace<nvme_executor_t>(std::move(spawned));
     return &handle;
 }
 
@@ -2254,12 +2234,12 @@ inline usearch_executor_t spawn_nvme_executor(usearch_executor_handle_t& handle,
  *  call, built into @p call_executor without a topology probe, a pool or a thread. */
 template <typename multi_type_>
     requires is_ram_index<multi_type_>
-inline usearch_executor_t make_call_executor(multi_type_&, usearch_executor_handle_t& call_executor,
-                                             usearch_outcome_t* outcome) noexcept {
+inline bool make_call_executor(multi_type_&, typename multi_type_::executor_t& call_executor,
+                               usearch_outcome_t* outcome) noexcept {
     auto [threads, threads_status] = util::ram_executor_t::on_calling_thread();
-    if (util::failed(threads_status)) return propagate_error(threads_status, outcome), nullptr;
-    call_executor.executor.emplace<util::ram_executor_t>(std::move(threads));
-    return &call_executor;
+    if (util::failed(threads_status)) return propagate_error(threads_status, outcome);
+    call_executor = std::move(threads);
+    return true;
 }
 
 /** Whether @p multi_type_ 's verbs answer if its media read through SPDK. */
@@ -2270,21 +2250,21 @@ concept an_spdk_reporting_variant = requires(multi_type_& variant) { variant.ver
  *  reading the files the index holds, so a call opens no ring and starts no thread. */
 template <typename multi_type_>
     requires is_nvme_index<multi_type_>
-inline usearch_executor_t make_call_executor(multi_type_& variant, usearch_executor_handle_t& call_executor,
-                                             usearch_outcome_t* outcome) noexcept {
+inline bool make_call_executor(multi_type_& variant, typename multi_type_::executor_t& call_executor,
+                               usearch_outcome_t* outcome) noexcept {
     // No blocking read reaches a namespace, and the executor is the argument the call lacks.
     if constexpr (an_spdk_reporting_variant<multi_type_>)
         if (variant.verbs.reads_spdk(variant.index))
-            return propagate_error(usearch_status_invalid_argument_k, outcome, "SPDK reads need an executor"), nullptr;
+            return propagate_error(usearch_status_invalid_argument_k, outcome, "SPDK reads need an executor");
     auto [threads, threads_status] = util::ram_executor_t::on_calling_thread();
-    if (util::failed(threads_status)) return propagate_error(threads_status, outcome), nullptr;
+    if (util::failed(threads_status)) return propagate_error(threads_status, outcome);
     // Zero leaves each call's depth to the block queues of the media it reads.
     util::io_queue_config_t config;
     config.transport = util::io_transport_t::blocking_k;
     auto [opened, status] = nvme_executor_t::acquire(std::move(threads), config);
-    if (util::failed(status)) return propagate_error(status, outcome), nullptr;
-    call_executor.executor.emplace<nvme_executor_t>(std::move(opened));
-    return &call_executor;
+    if (util::failed(status)) return propagate_error(status, outcome);
+    call_executor = std::move(opened);
+    return true;
 }
 
 /** Applies @p visitor to whichever executor @p executor holds, a GPU one included; an empty GPU
@@ -2300,7 +2280,7 @@ inline util::status_t visit_executor(usearch_executor_handle_t& executor, visito
             if constexpr (std::is_same_v<executor_type_, util::gpu_executor_t>) return std::visit(visit_gpu, typed);
             else return util::status_t {visitor(typed)};
         },
-        executor.executor);
+        executor.residency);
 }
 
 /** The residency's executor inside @p executor 's variant: an NVMe executor serves RAM work through
@@ -2308,13 +2288,13 @@ inline util::status_t visit_executor(usearch_executor_handle_t& executor, visito
 template <typename executor_type_>
 inline executor_type_* residency_executor(usearch_executor_handle_t& executor) noexcept {
     if constexpr (std::is_same_v<executor_type_, util::ram_executor_t>) {
-        if (nvme_executor_t* const nvme = std::get_if<nvme_executor_t>(&executor.executor)) return &nvme->threads();
-        return std::get_if<util::ram_executor_t>(&executor.executor);
+        if (nvme_executor_t* const nvme = std::get_if<nvme_executor_t>(&executor.residency)) return &nvme->threads();
+        return std::get_if<util::ram_executor_t>(&executor.residency);
     }
     else if constexpr (std::is_same_v<executor_type_, nvme_executor_t>)
-        return std::get_if<nvme_executor_t>(&executor.executor);
+        return std::get_if<nvme_executor_t>(&executor.residency);
     else {
-        util::gpu_executor_t* const gpu = std::get_if<util::gpu_executor_t>(&executor.executor);
+        util::gpu_executor_t* const gpu = std::get_if<util::gpu_executor_t>(&executor.residency);
         return gpu ? std::get_if<executor_type_>(gpu) : nullptr;
     }
 }
@@ -2325,10 +2305,9 @@ inline executor_type_* residency_executor(usearch_executor_handle_t& executor) n
  *  GPU variants. */
 template <typename multi_type_>
 inline typename multi_type_::executor_t* executor_of(multi_type_& variant, usearch_executor_t executor,
-                                                     usearch_executor_handle_t& call_executor,
+                                                     typename multi_type_::executor_t& call_executor,
                                                      usearch_outcome_t* outcome) noexcept {
-    if (!executor) executor = make_call_executor(variant, call_executor, outcome);
-    if (!executor) return nullptr;
+    if (!executor) return make_call_executor(variant, call_executor, outcome) ? &call_executor : nullptr;
     typename multi_type_::executor_t* const typed = residency_executor<typename multi_type_::executor_t>(*executor);
     if (!typed)
         propagate_error(usearch_status_device_k, outcome, "The executor's kind must match the handle's residency");
@@ -2360,15 +2339,17 @@ struct usearch_arena_handle_t {
      *  null for host pages, which serve any. */
     usearch_executor_t executor = nullptr;
 
-    /** Where the memory lives: host pages, or a device's VRAM. */
-    arena_residency_t residency = ram_residency_k;
-
     /** The outcome of the call holding the arena, from its claim until just before its final store;
      *  touched through a reference, since a delegated call finishes on a pool thread. */
     usearch_outcome_t const* holder = nullptr;
 
     /** Executor calls naming the arena that have not ended, which its free waits out. */
     util::u32_t named_calls = 0;
+
+    /** Where the memory lives: host pages, or a device's VRAM. */
+    arena_residency_t residency() const noexcept {
+        return device_memory ? vram_residency(static_cast<std::size_t>(device_memory.device())) : ram_residency_k;
+    }
 };
 
 /** Holds @p arena for the call whose outcome is @p call, answering whether it was free or already
@@ -2392,7 +2373,7 @@ inline void release_arena(usearch_arena_t arena, usearch_outcome_t const* call) 
  *  keeps its vendor's own ordinal, which the listing maps back. */
 inline std::size_t arena_device_ordinal(usearch_arena_handle_t const& arena) noexcept {
     util::gpu_executor_t const* const devices = arena.executor
-                                                    ? std::get_if<util::gpu_executor_t>(&arena.executor->executor)
+                                                    ? std::get_if<util::gpu_executor_t>(&arena.executor->residency)
                                                     : nullptr;
     if (!devices) return 0;
     util::gpu_vendor_t const vendor = std::visit(
@@ -2403,7 +2384,7 @@ inline std::size_t arena_device_ordinal(usearch_arena_handle_t const& arena) noe
         *devices);
     std::span<util::gpu_device_t const> const listed = gpu_devices();
     for (std::size_t ordinal = 0; ordinal != listed.size(); ++ordinal)
-        if (listed[ordinal].vendor == vendor && listed[ordinal].vendor_ordinal == arena.residency.device)
+        if (listed[ordinal].vendor == vendor && listed[ordinal].vendor_ordinal == arena.residency().device)
             return ordinal;
     return 0;
 }
@@ -2436,7 +2417,7 @@ inline arrow_device_t arrow_device_of(usearch_arena_handle_t const& arena) noexc
  *  @p residency : a host arena keeps them, and any other must sit on that device to take them over
  *  by @ref publish. */
 inline arena_residency_t staging_residency(usearch_arena_t arena, arena_residency_t residency) noexcept {
-    return arena && arena->residency == ram_residency_k ? ram_residency_k : residency;
+    return arena && arena->residency() == ram_residency_k ? ram_residency_k : residency;
 }
 
 /** Holds @p arena for the call whose outcome is @p call and rewinds it, freeing the previous call's
@@ -2449,7 +2430,7 @@ inline usearch_arena_handle_t* claim_arena(usearch_arena_t arena, usearch_outcom
                                            usearch_outcome_t* outcome) noexcept {
     if (!arena)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The arena must not be null"), nullptr;
-    if (arena->residency != residency)
+    if (arena->residency() != residency)
         return propagate_error(usearch_status_device_k, outcome, "The arena lives where the call does not compute"),
                nullptr;
     if (arena->device_memory && arena->executor != executor)
@@ -2830,8 +2811,8 @@ inline util::bytes_view_t as_bytes(usearch_bytes_view_t bytes) noexcept {
 
 /** The host threads behind @p executor, or null for a VRAM one, which has none. */
 inline util::ram_executor_t* threads_of(usearch_executor_handle_t& executor) noexcept {
-    if (util::ram_executor_t* const threads = std::get_if<util::ram_executor_t>(&executor.executor)) return threads;
-    if (nvme_executor_t* const nvme = std::get_if<nvme_executor_t>(&executor.executor)) return &nvme->threads();
+    if (util::ram_executor_t* const threads = std::get_if<util::ram_executor_t>(&executor.residency)) return threads;
+    if (nvme_executor_t* const nvme = std::get_if<nvme_executor_t>(&executor.residency)) return &nvme->threads();
     return nullptr;
 }
 
@@ -2846,7 +2827,7 @@ inline fu_memory_domain_id_t memory_domain_of(usearch_executor_t executor) noexc
  *  inclusive one, a single thread, WebAssembly and a VRAM executor run them at submission. */
 inline bool delegates(usearch_executor_handle_t& executor) noexcept {
     util::ram_executor_t const* const threads = threads_of(executor);
-    return threads && threads->exclusivity() == fu_caller_exclusive_k;
+    return threads && threads->exclusivity() == fu::caller_exclusive_k;
 }
 
 /** Whether the calling thread runs @p executor 's holding call body, as a callback the body calls
@@ -2978,47 +2959,40 @@ struct plan_verbs {
     void (*free)(void* plan) noexcept;
 };
 
-/** One opened engine plan as one call drives it: its operation's entries, and the plan they
- *  serve. */
-template <typename executor_type_>
-struct punned_plan {
-    plan_verbs<executor_type_> const& verbs;
-    void* plan;
-};
-
 /**
- *  @brief Runs one call of a long verb on @p plan: starts a live one's next round once its last one
- *      ended, then runs it until it ends or @p ticks cancels, and answers its report so far beside
- *      how the call ended.
+ *  @brief Runs one call of a long verb on @p plan through its operation's @p verbs: starts a live
+ *      one's next round once its last one ended, then runs it until it ends or @p ticks cancels,
+ *      and answers its report so far beside how the call ended.
  *
  *  @p phase, when named, hears where the plan stopped; a cancel heard at the barrier closing a
  *  round answers success, since the round had ended.
  */
 template <typename executor_type_>
-util::expected<util::refine_report_t> drive_plan(punned_plan<executor_type_> plan, executor_type_& executor,
-                                                 progress_ticks_t& ticks, usearch_phase_progress_t* phase) noexcept {
-    if (plan.verbs.phase(plan.plan).phase == usearch_phase_done_k) plan.verbs.next_round(plan.plan);
-    util::status_t ran = plan.verbs.run(plan.plan, executor, ticks);
-    usearch_phase_progress_t const reached = plan.verbs.phase(plan.plan);
+util::expected<util::refine_report_t> drive_plan(plan_verbs<executor_type_> const& verbs, void* plan,
+                                                 executor_type_& executor, progress_ticks_t& ticks,
+                                                 usearch_phase_progress_t* phase) noexcept {
+    if (verbs.phase(plan).phase == usearch_phase_done_k) verbs.next_round(plan);
+    util::status_t ran = verbs.run(plan, executor, ticks);
+    usearch_phase_progress_t const reached = verbs.phase(plan);
     if (ran == util::status_code_t::cancelled_k && reached.phase == usearch_phase_done_k)
         ran = util::status_code_t::success_k;
     if (phase) *phase = reached;
-    return {plan.verbs.running(plan.plan), ran};
+    return {verbs.running(plan), ran};
 }
 
 /** Drives @p plan once through @ref drive_plan, then closes and frees it, so a cancel still closes
  *  its round and reports beside @c cancelled_k; the path every call naming no plan takes. */
 template <typename executor_type_>
-util::expected<util::refine_report_t> drive_plan_once(punned_plan<executor_type_> plan, executor_type_& executor,
-                                                      progress_ticks_t& ticks,
+util::expected<util::refine_report_t> drive_plan_once(plan_verbs<executor_type_> const& verbs, void* plan,
+                                                      executor_type_& executor, progress_ticks_t& ticks,
                                                       usearch_phase_progress_t* phase) noexcept {
-    auto [report, status] = drive_plan(plan, executor, ticks, phase);
+    auto [report, status] = drive_plan(verbs, plan, executor, ticks, phase);
     if (succeeded(status) || status == util::status_code_t::cancelled_k) {
-        auto const [finished, finish_status] = plan.verbs.finish(plan.plan, executor);
+        auto const [finished, finish_status] = verbs.finish(plan, executor);
         if (util::failed(finish_status)) status = finish_status;
         report = finished;
     }
-    plan.verbs.free(plan.plan);
+    verbs.free(plan);
     return {report, status};
 }
 
@@ -3098,19 +3072,19 @@ util::expected<util::refine_report_t> drive_planned(handle_type_** planned, plan
                                                     usearch_executor_t executor_handle, executor_type_& executor,
                                                     progress_ticks_t& ticks, usearch_phase_progress_t* phase,
                                                     open_plan_type_ const& open_plan) noexcept {
-    if (planned && *planned) return drive_plan({verbs, (*planned)->held.engine_plan}, executor, ticks, phase);
+    if (planned && *planned) return drive_plan(verbs, (*planned)->held.engine_plan, executor, ticks, phase);
     auto const [opened, open_status] = open_plan();
     if (util::failed(open_status)) return {{}, open_status};
-    if (!planned) return drive_plan_once({verbs, opened}, executor, ticks, phase);
-    handle_type_* const held = new (std::nothrow) handle_type_ {};
-    if (!held)
+    if (!planned) return drive_plan_once(verbs, opened, executor, ticks, phase);
+    handle_type_* const adopted = new (std::nothrow) handle_type_ {};
+    if (!adopted)
         return verbs.free(opened), util::expected<util::refine_report_t> {{}, util::status_code_t::out_of_memory_k};
-    held->held.tables = tables;
-    held->held.engine_plan = opened;
-    held->held.opened_on = index;
-    held->held.opened_with = executor_handle;
-    *planned = held;
-    return drive_plan({verbs, opened}, executor, ticks, phase);
+    adopted->held.tables = tables;
+    adopted->held.engine_plan = opened;
+    adopted->held.opened_on = index;
+    adopted->held.opened_with = executor_handle;
+    *planned = adopted;
+    return drive_plan(verbs, opened, executor, ticks, phase);
 }
 
 /** Writes what a long verb's @p refined result counts into the outputs @p arguments name, and

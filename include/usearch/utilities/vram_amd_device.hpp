@@ -420,10 +420,6 @@ struct hip_virtual_memory_allocator {
         using other = hip_virtual_memory_allocator<other_>;
     };
 
-    /** Largest physical slab, rounded to the runtime's granularity at reservation; smaller ones
-     *  double up to it, so a sparse shard maps one granularity, not one full slab per column. */
-    inline static constexpr std::size_t preferred_slab_bytes_k = 128u << 20;
-
     byte_t* base_ = nullptr;
     std::size_t virtual_address_bytes_ = 0;
 
@@ -937,10 +933,6 @@ struct hip_pinned_slots_t {
     /** Bytes one slot holds: a context's telemetry snapshot and its missed word, with room to
      *  spare. */
     inline static constexpr std::size_t slot_bytes_k = 128;
-
-    /** Slots the first pin holds, more than the shards one device usually serves; past them the
-     *  run pins twice as many. */
-    inline static constexpr std::size_t slots_per_pin_k = 64;
 
     /** Pins its slots through @p api beside device @p device. */
     hip_pinned_slots_t(hip_api_t const& api, int device) noexcept : slots_ {hip_pinned_allocator_t {api, device}} {}
@@ -1628,12 +1620,12 @@ struct hip_executor_t {
     ~hip_executor_t() noexcept {
         [[maybe_unused]] status_t const drained = wait();
         for (stream_t& opened : streams_)
-            if (hip_set_device(*api_, opened.device) == hip_success_k) opened.contexts.reset(), opened.arena.reset();
+            if (hip_set_device(*opened.api, opened.device) == hip_success_k)
+                opened.contexts.reset(), opened.arena.reset();
     }
 
     /** Exchanges the stream tables; @c held_ stays, as a move with a call in flight is misuse. */
     void swap(hip_executor_t& other) noexcept {
-        std::swap(api_, other.api_);
         std::swap(streams_, other.streams_);
         std::swap(scratch_limit_, other.scratch_limit_);
         std::swap(cache_bytes_per_core_, other.cache_bytes_per_core_);
@@ -1659,7 +1651,6 @@ struct hip_executor_t {
     static expected<hip_executor_t> acquire(growing_buffer<stream_t>&& streams) noexcept {
         if (streams.empty()) return {{}, status_code_t::config_mismatch_k};
         hip_executor_t executor;
-        executor.api_ = streams[0].api;
         // Queried once here; every round reads it from the executor afterwards.
         for (stream_t const& opened : streams) {
             auto const [specs, status] = hip_device_specs_t::query(*opened.api, opened.device);
@@ -1739,7 +1730,7 @@ struct hip_executor_t {
         if (scratch_limit_ && bytes_per_stream > scratch_limit_) return status_code_t::out_of_memory_k;
         for (stream_t& opened : streams_) {
             // The null legacy stream is the current device's, so that device is set first.
-            if (hip_set_device(*api_, opened.device) != hip_success_k)
+            if (hip_set_device(*opened.api, opened.device) != hip_success_k)
                 return {status_code_t::device_k, "Device selection failed"};
             opened.arena.clear();
             // A rewound run holds one chunk, its widest, which a wider call replaces whole.
@@ -1767,7 +1758,8 @@ struct hip_executor_t {
      *  marking each stream with its device bound, then sleeping on each mark in turn. */
     status_t wait() noexcept {
         for (stream_t& opened : streams_)
-            if (hip_set_device(*api_, opened.device) != hip_success_k || failed(opened.event.record(opened.handle)))
+            if (hip_set_device(*opened.api, opened.device) != hip_success_k ||
+                failed(opened.event.record(opened.handle)))
                 return status_code_t::device_k;
         for (stream_t& opened : streams_)
             if (status_t const drained = opened.event.wait(); failed(drained)) return drained;
@@ -1791,7 +1783,7 @@ struct hip_executor_t {
     std::size_t size() const noexcept { return streams_.size(); }
 
     /** The runtime every stream of this executor goes through. */
-    hip_api_t const& api() const noexcept { return *api_; }
+    hip_api_t const& api() const noexcept { return *streams_[0].api; }
 
   private:
 
@@ -1806,8 +1798,6 @@ struct hip_executor_t {
     }
 
     /** The runtime the streams were opened through. */
-    hip_api_t const* api_ = nullptr;
-
     /** One stream per named entry, in the caller's order. */
     growing_buffer<stream_t> streams_ {global_allocator};
 

@@ -41,7 +41,7 @@ struct vram_nvidia_kits {
 
     /** The breadth an insert or a refine walks at least: the candidates the cone selector needs to
      *  see each cone's nearest candidate, as @c surface_keep_octants_t documents. */
-    inline static constexpr u32_t build_breadth_k = 128;
+    inline static constexpr u32_t build_breadth_k = surface_keep_octants_t::exact_candidates_k;
 
     /** The rung serving positions of @p longest bytes, or @c rungs_k when none does. Defined in
      *  @c vram_nvidia_metric.cuh, as are the members below reading the kit. */

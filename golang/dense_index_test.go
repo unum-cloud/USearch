@@ -1226,14 +1226,14 @@ func TestRefinePlansResumeUntilFinished(t *testing.T) {
 	if _, err := on.Refine(&DenseRefineConfig{Plan: &plan, Progress: stops}); err != nil && !errors.Is(err, StatusCancelled) {
 		t.Fatalf("the stopped round reported %v", err)
 	}
-	if plan.Phase.Phase == PhaseDone {
-		t.Errorf("a round stopped at its first barrier reported %+v", plan.Phase)
+	if plan.Progress.Phase == PhaseDone {
+		t.Errorf("a round stopped at its first barrier reported %+v", plan.Progress)
 	}
 	if err := on.Insert([]Key{KeyFromUint64(999)}, RowsOf(slab[:dimensions], dimensions), nil); !errors.Is(err, StatusContended) {
 		t.Errorf("an insertion beside a live plan reported %v", err)
 	}
-	if _, err := on.Refine(&DenseRefineConfig{Plan: &plan}); err != nil || plan.Phase.Phase != PhaseDone {
-		t.Fatalf("the resumed round ended in %+v: %v", plan.Phase, err)
+	if _, err := on.Refine(&DenseRefineConfig{Plan: &plan}); err != nil || plan.Progress.Phase != PhaseDone {
+		t.Fatalf("the resumed round ended in %+v: %v", plan.Progress, err)
 	}
 	report, err := on.RefinePlanFinish(&plan)
 	if err != nil || report.Reachability.Audited != count {
@@ -1269,8 +1269,8 @@ func TestReshardPlansContinueUntilFinished(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the continued reshard must submit: %v", err)
 	}
-	if _, err := continued.Wait(); err != nil || plan.Phase.Phase != PhaseDone {
-		t.Fatalf("the continued reshard ended in %+v: %v", plan.Phase, err)
+	if _, err := continued.Wait(); err != nil || plan.Progress.Phase != PhaseDone {
+		t.Fatalf("the continued reshard ended in %+v: %v", plan.Progress, err)
 	}
 	finished, err := index.Deferred(executor).ReshardPlanFinish(&plan)
 	if err != nil {

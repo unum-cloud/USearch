@@ -218,7 +218,7 @@ typedef struct usearch_js_call_t {
 typedef struct usearch_js_index_call_t {
 
     /** The outcome, the answer builder, the held values and the telemetry every modality shares. */
-    usearch_js_call_t call;
+    usearch_js_call_t header;
 
     /** The audit @c health reports. */
     usearch_reachability_t reachability;

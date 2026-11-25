@@ -247,8 +247,9 @@ struct punned_dense_index {
  *  distinct device its shards sit on, shared by every shard there and opened by no call. */
 template <vendored_residency_t residency_>
     requires is_gpu_executor<typename punned_dense_index<residency_>::executor_t>
-usearch_executor_t make_call_executor(punned_dense_index<residency_> const& punned,
-                                      usearch_executor_handle_t& call_executor, usearch_outcome_t* outcome) noexcept {
+bool make_call_executor(punned_dense_index<residency_> const& punned,
+                        typename punned_dense_index<residency_>::executor_t& call_executor,
+                        usearch_outcome_t* outcome) noexcept {
     std::size_t const shards = punned.verbs.shards_count(punned.index);
     std::array<int, util::gpu_devices_capacity_k> devices;
     std::size_t devices_count = 0;
@@ -258,16 +259,15 @@ usearch_executor_t make_call_executor(punned_dense_index<residency_> const& punn
         for (std::size_t earlier = 0; earlier != devices_count; ++earlier) listed |= devices[earlier] == device;
         if (listed) continue;
         if (devices_count == devices.size())
-            return propagate_error(usearch_status_device_k, outcome, "The shards sit on more devices than listed"),
-                   nullptr;
+            return propagate_error(usearch_status_device_k, outcome, "The shards sit on more devices than listed");
         devices[devices_count++] = device;
     }
     using executor_t = typename punned_dense_index<residency_>::executor_t;
     auto [built, status] = executor_t::on_default_streams(driver_of(gpu_drivers(), std::type_identity<executor_t> {}),
                                                           std::span<int const> {devices.data(), devices_count});
-    if (failed(status)) return propagate_error(status, outcome), nullptr;
-    call_executor.executor.emplace<util::gpu_executor_t>(std::in_place_type<executor_t>, std::move(built));
-    return &call_executor;
+    if (failed(status)) return propagate_error(status, outcome);
+    call_executor = std::move(built);
+    return true;
 }
 
 #pragma endregion Variant Tables

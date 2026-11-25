@@ -76,7 +76,7 @@ constexpr std::size_t basic_connectivity_k = 8;
 /** The reader thread performs at least this many searches, even if writers finish first. */
 constexpr std::size_t basic_reader_minimal_searches_k = 16;
 
-/** Contract-auditing wrapper over any @c basic::metric: counts the verbs, verifies every
+/** Contract-auditing wrapper over any @c basic::a_metric: counts the verbs, verifies every
  *  drain is sized to that round's accepted pushes, flags abandoned pushed rounds, and can
  *  refuse pushes after an armed budget to drive every saturation path, or past a round cap to
  *  drive every fold. */

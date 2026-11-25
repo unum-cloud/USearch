@@ -1378,16 +1378,6 @@ concept an_io_queue = requires(queue_type_& queue, io_request_t request, std::sp
     { queue.buffer(buffer) } noexcept -> std::same_as<std::byte*>;
 };
 
-/** A queue holding devices other queues share, as SPDK queue pairs, released on its own thread. */
-template <typename queue_type_>
-concept a_releasing_queue = requires(queue_type_& queue) { queue.release(); };
-
-/** A queue that may read into buffers registered once, and answers whether it does. */
-template <typename queue_type_>
-concept registering_queue = requires(queue_type_ const& queue) {
-    { queue.buffer_registration() } noexcept -> std::same_as<linux_uring_buffer_registration_t>;
-};
-
 /** How a staging region is cut: its buffers and the bytes of each. */
 struct io_buffers_cut_t {
     std::size_t buffers = 0;
@@ -2868,7 +2858,7 @@ struct linux_spdk_dma_allocator {
 
 /**
  *  @brief The SPDK user-space driver: one queue pair per controller this thread reads, kept from
- *      first attach to @c release, DMA buffers from the environment, and polled completions.
+ *      first attach to its death, DMA buffers from the environment, and polled completions.
  *
  *  Nothing here blocks, because the driver offers no interrupt at all:
  *  @c spdk_nvme_qpair_process_completions is the only way a command is ever seen to finish, so a
@@ -2891,7 +2881,10 @@ class linux_spdk_queue {
           namespaces_(allocator), commands_(allocator), request_contexts_(allocator), completions_(allocator) {}
     linux_spdk_queue(linux_spdk_queue&&) noexcept = default;
     linux_spdk_queue& operator=(linux_spdk_queue&&) noexcept = default;
-    ~linux_spdk_queue() noexcept { assert(queue_pairs_.empty() && "A queue is released before it dies"); }
+
+    /** Frees every queue pair and its hold on the controller; the executor replaces each queue on
+     *  its own thread, so this runs there. */
+    ~linux_spdk_queue() noexcept { release_queue_pairs_(); }
 
     /** Sizes the completion queue for @p config's depth, once the environment runs. */
     status_t open(config_t const& config) noexcept {
@@ -2928,9 +2921,6 @@ class linux_spdk_queue {
         }
         return status_code_t::success_k;
     }
-
-    /** Frees every queue pair and its hold on the controller, on the queue's own thread. */
-    void release() noexcept { release_queue_pairs_(); }
 
     status_t enqueue_read(io_request_t request) noexcept {
         if (outstanding_ == queue_depth_) return status_code_t::overflow_k;
@@ -3175,15 +3165,6 @@ class io_queue_variant {
         return std::visit([&](auto& queue) noexcept { return queue.register_media(media, key); }, queues_);
     }
 
-    /** Gives back what the queue holds on devices other queues share, as SPDK queue pairs do. */
-    void release() noexcept {
-        std::visit(
-            []<typename queue_type_>(queue_type_& queue) noexcept {
-                if constexpr (a_releasing_queue<queue_type_>) queue.release();
-            },
-            queues_);
-    }
-
     /**
      *  @brief Queues @p request on the picked queue for the next @c submit.
      *
@@ -3206,17 +3187,6 @@ class io_queue_variant {
 
     std::byte* buffer(io_buffer_id_t buffer) noexcept {
         return std::visit([&](auto& queue) noexcept { return queue.buffer(buffer); }, queues_);
-    }
-
-    /** Whether the picked queue reads into buffers registered once; @c plain_k for one that
-     *  registers none. */
-    linux_uring_buffer_registration_t buffer_registration() const noexcept {
-        return std::visit(
-            []<typename queue_type_>(queue_type_ const& queue) noexcept {
-                if constexpr (registering_queue<queue_type_>) return queue.buffer_registration();
-                else return linux_uring_buffer_registration_t::plain_k;
-            },
-            queues_);
     }
 
   private:
@@ -3306,17 +3276,6 @@ class nvme_executor {
 
     ~nvme_executor() noexcept { close_queues_(); }
 
-    /** Releases every queue on its own thread, which must precede the executor's death once an
-     *  queue holds devices other queues share. */
-    void release() noexcept {
-        if constexpr (a_releasing_queue<queue_t>) {
-            [[maybe_unused]] status_t const released = threads_.for_threads(
-                [&](std::size_t thread, std::size_t) noexcept {
-                    if (thread < queues_.size()) queues_[thread].release();
-                });
-        }
-    }
-
     /**
      *  @brief Spawns @p threads over @p topology under the ForkUnion facilities @p allowed names,
      *      zero threads meaning @c ram_executor_t::default_threads, on the compute domains local to
@@ -3338,13 +3297,11 @@ class nvme_executor {
                                          fu_memory_domain_id_t near_domain = no_memory_domain_k,
                                          std::size_t scratch_limit = 0, std::size_t opening_depth = 0) noexcept {
         // The caller never runs a slice, so each thread index stays one OS thread, the single
-        // issuer a ring wants.
-        bool const os_threads = fu_comptime_capabilities() & fu_capability_os_threads_k;
+        // issuer a ring wants; a build without OS threads runs its one thread on the caller.
         auto [threads_executor, spawn_status] =
-            os_threads && near_domain != no_memory_domain_k
+            near_domain != no_memory_domain_k
                 ? ram_executor_t::spawn_near(topology, near_domain, threads, allowed, scratch_limit)
-                : ram_executor_t::spawn(topology, threads, os_threads ? fu_caller_exclusive_k : fu_caller_inclusive_k,
-                                        allowed, scratch_limit);
+                : ram_executor_t::spawn(topology, threads, fu::caller_exclusive_k, allowed, scratch_limit);
         if (failed(spawn_status)) return {nvme_executor {}, spawn_status};
         return acquire(std::move(threads_executor), config, opening_depth);
     }
@@ -3515,19 +3472,6 @@ class nvme_executor {
 
     /** The depth the spawn's config pinned for every call, zero when each call derives its own. */
     std::size_t pinned_depth() const noexcept { return pinned_depth_; }
-
-    /** Whether every queue reads into buffers registered once: @c plain_k once any kernel refused
-     *  to pin its thread's region, or where the queues register none. */
-    linux_uring_buffer_registration_t buffer_registration() const noexcept {
-        if constexpr (registering_queue<queue_t>) {
-            for (queue_t const& queue : queues_)
-                if (queue.buffer_registration() == linux_uring_buffer_registration_t::plain_k)
-                    return linux_uring_buffer_registration_t::plain_k;
-            return queues_.empty() ? linux_uring_buffer_registration_t::plain_k
-                                   : linux_uring_buffer_registration_t::fixed_k;
-        }
-        return linux_uring_buffer_registration_t::plain_k;
-    }
 
   private:
 

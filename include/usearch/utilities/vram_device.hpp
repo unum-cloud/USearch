@@ -20,6 +20,7 @@
 #include <cstdio>  // `std::snprintf` - a kernel symbol's digits
 #include <cstring> // `std::strlen` - a name's length prefix in a kernel symbol
 
+#include <bit>         // `std::bit_floor` - a checkpoint batch's rows
 #include <span>        // `std::span` - the listing written
 #include <type_traits> // `std::is_enum_v`, `std::is_same_v` - a kernel symbol's arguments
 #include <variant>     // `std::variant`, `std::monostate` - one alternative per vendor
@@ -399,6 +400,26 @@ constexpr char const* kernel_enum_mangling(vram_kernel_t) noexcept { return "NS0
 
 /** Bytes of the longest symbol any kernel's spelling reaches, its terminator included. */
 inline constexpr std::size_t vram_kernel_symbol_capacity_k = 256;
+
+/** Nodes, as a power of two, one half of a save's or a load's bounce moves at most, so its two
+ *  halves pin a few hundred megabytes at the widest nodes. */
+inline constexpr u32_t crossing_nodes_log2_k = 19;
+
+/** Bytes one checkpoint batch pins at most: its four driver calls, tens of microseconds together,
+ *  stay under 1% of the 5 ms its transfer takes at 50 GB/s. */
+inline constexpr std::size_t checkpoint_batch_bytes_k = std::size_t {256} << 20;
+
+/** Rows, as a power of two, one staging window holds at most however narrow they are: a
+ *  checkpoint batch, a half of the key staging and a batch verb's window on one shard, so a half
+ *  of 8-byte keys pins 8 MiB. */
+inline constexpr u32_t window_rows_log2_k = 20;
+
+/** Rows one checkpoint batch of rows @p row_bytes wide moves: a power of two within
+ *  @c checkpoint_batch_bytes_k, at least one and at most a window. */
+constexpr std::size_t checkpoint_batch_rows(std::size_t row_bytes) noexcept {
+    std::size_t const fitting = std::bit_floor(checkpoint_batch_bytes_k / max_of<std::size_t>(row_bytes, 1));
+    return min_of(max_of<std::size_t>(fitting, 1), power_of_two<std::size_t>(window_rows_log2_k));
+}
 
 /** One kernel instantiation's symbol, as a module lookup takes it. */
 struct vram_kernel_symbol_t {

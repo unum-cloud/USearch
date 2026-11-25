@@ -905,8 +905,8 @@ static PyObject* SequenceIndex_refine(PyObject* self, PyObject* const* args, Py_
         !(call = usearch_py_call_open(&receiver, &stack)))
         return NULL;
 
-    RefineReport* const report = usearch_py_call_result(call, &RefineReportType);
-    if (!report || walk_parse(call, progress_object, stats_object) != 0 ||
+    RefineReport* const report_call = usearch_py_call_result(call, &RefineReportType);
+    if (!report_call || walk_parse(call, progress_object, stats_object) != 0 ||
         plan_parse(call, plan_object, &SequenceRefinePlanType) != 0)
         return usearch_py_call_discard(&receiver, call);
 
@@ -917,7 +917,7 @@ static PyObject* SequenceIndex_refine(PyObject* self, PyObject* const* args, Py_
         .executor = receiver.executor,
         .outcome = &call->outcome,
         .completion = receiver.completion,
-        .report = &report->report,
+        .report = &report_call->report,
         .refine = {.expansion_factor = expansion_factor, .memory_limit = memory_limit},
         .progress = usearch_py_progress_registered(call->holds[progress_slot_k], progress_steps),
         .stats = walk_stats(call),
@@ -1246,8 +1246,8 @@ static PyObject* SequenceIndex_reshard(PyObject* self, PyObject* const* args, Py
         return NULL;
 
     size_t sources_count = 0, targets_count = 0;
-    RefineReport* const report = usearch_py_call_result(call, &RefineReportType);
-    if (!report ||
+    RefineReport* const report_call = usearch_py_call_result(call, &RefineReportType);
+    if (!report_call ||
         indexes_from_object(sources_object, "sources", &call->holds[sources_slot_k], &call->blocks[0],
                             &sources_count) != 0 ||
         indexes_from_object(targets_object, "targets", &call->holds[targets_slot_k], &call->blocks[1],
@@ -1266,7 +1266,7 @@ static PyObject* SequenceIndex_reshard(PyObject* self, PyObject* const* args, Py
         .executor = receiver.executor,
         .outcome = &call->outcome,
         .completion = receiver.completion,
-        .report = &report->report,
+        .report = &report_call->report,
         .refine = {.expansion_factor = expansion_factor, .memory_limit = memory_limit},
         .seed = seed,
         .progress = usearch_py_progress_registered(call->holds[progress_slot_k], progress_steps),
@@ -1388,7 +1388,7 @@ static char const doc_SequenceIndex_reshard_plan_finish[] =                     
  *  the plan held, and its handle taken, since the library frees it whatever the call answers. */
 static usearch_py_call_t* plan_finish_open(PyObject* self, PyObject* plan_object, PyTypeObject* type,
                                            usearch_py_receiver_t* receiver, usearch_sequence_index_t* handle,
-                                           usearch_py_call_t* stack, RefineReport** report) {
+                                           usearch_py_call_t* stack, RefineReport** report_call) {
     usearch_py_call_t* call = NULL;
     if (receiver_from_object(self, receiver, handle) != 0 || !(call = usearch_py_call_open(receiver, stack)))
         return NULL;
@@ -1397,7 +1397,7 @@ static usearch_py_call_t* plan_finish_open(PyObject* self, PyObject* plan_object
         usearch_py_call_discard(receiver, call);
         return NULL;
     }
-    if (plan_parse(call, plan_object, type) != 0 || !(*report = usearch_py_call_result(call, &RefineReportType))) {
+    if (plan_parse(call, plan_object, type) != 0 || !(*report_call = usearch_py_call_result(call, &RefineReportType))) {
         usearch_py_call_discard(receiver, call);
         return NULL;
     }
@@ -1408,9 +1408,9 @@ static PyObject* SequenceIndex_refine_plan_finish(PyObject* self, PyObject* plan
     usearch_py_receiver_t receiver;
     usearch_sequence_index_t handle = NULL;
     usearch_py_call_t stack;
-    RefineReport* report = NULL;
+    RefineReport* report_call = NULL;
     usearch_py_call_t* const call = plan_finish_open(self, plan_object, &SequenceRefinePlanType, &receiver, &handle,
-                                                     &stack, &report);
+                                                     &stack, &report_call);
     if (!call) return NULL;
     SequencePlan* const plan = (SequencePlan*)plan_object;
     usearch_sequence_refine_plan_finish_t* const finish = (usearch_sequence_refine_plan_finish_t*)call->arguments;
@@ -1419,7 +1419,7 @@ static PyObject* SequenceIndex_refine_plan_finish(PyObject* self, PyObject* plan
                                                        .outcome = &call->outcome,
                                                        .completion = receiver.completion,
                                                        .plan = plan->handle.refine,
-                                                       .report = &report->report};
+                                                       .report = &report_call->report};
     plan->handle.refine = NULL;
     Py_BEGIN_ALLOW_THREADS;
     usearch_sequence_refine_plan_finish(finish);
@@ -1431,9 +1431,9 @@ static PyObject* SequenceIndex_reshard_plan_finish(PyObject* self, PyObject* pla
     usearch_py_receiver_t receiver;
     usearch_sequence_index_t handle = NULL;
     usearch_py_call_t stack;
-    RefineReport* report = NULL;
+    RefineReport* report_call = NULL;
     usearch_py_call_t* const call = plan_finish_open(self, plan_object, &SequenceReshardPlanType, &receiver, &handle,
-                                                     &stack, &report);
+                                                     &stack, &report_call);
     if (!call) return NULL;
     SequencePlan* const plan = (SequencePlan*)plan_object;
     usearch_sequence_reshard_plan_finish_t* const finish = (usearch_sequence_reshard_plan_finish_t*)call->arguments;
@@ -1441,7 +1441,7 @@ static PyObject* SequenceIndex_reshard_plan_finish(PyObject* self, PyObject* pla
                                                         .outcome = &call->outcome,
                                                         .completion = receiver.completion,
                                                         .plan = plan->handle.reshard,
-                                                        .report = &report->report};
+                                                        .report = &report_call->report};
     plan->handle.reshard = NULL;
     Py_BEGIN_ALLOW_THREADS;
     usearch_sequence_reshard_plan_finish(finish);

@@ -61,7 +61,7 @@ static u64_t alignment_distance(std::string_view first, std::string_view second,
 }
 
 /** The unit's batched metric - deliberately non-transparent: queries must be
- *  stored-form reads, proving the same-type fallback of @c basic::query. */
+ *  stored-form reads, proving the same-type fallback of @c basic::a_query. */
 struct alignment_metric_t {
     std::string_view query_;
     std::vector<std::string_view> staged_;

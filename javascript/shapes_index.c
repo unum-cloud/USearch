@@ -365,12 +365,12 @@ static napi_value usearch_js_shapes_describe(napi_env env, napi_callback_info in
         index ? usearch_js_index_open(env, arguments, &local, &describe.executor, &describe.completion) : NULL;
     if (!call) return NULL;
     napi_value const slots[usearch_js_slots_k] = {self, arguments[0]};
-    call->call.finish = usearch_js_shapes_finish_describe;
-    describe.outcome = &call->call.outcome;
+    call->header.finish = usearch_js_shapes_finish_describe;
+    describe.outcome = &call->header.outcome;
     describe.description = &call->description.shapes;
-    if (!usearch_js_call_hold(env, &call->call, &local.call, slots, &deferred)) return NULL;
+    if (!usearch_js_call_hold(env, &call->header, &local.header, slots, &deferred)) return NULL;
     usearch_shapes_describe(&describe);
-    return usearch_js_call_answer(env, &call->call, &local.call, slots, deferred);
+    return usearch_js_call_answer(env, &call->header, &local.header, slots, deferred);
 }
 
 /** <tt>health(executor, completion)</tt> → how much of the graph a search reaches from the root. */
@@ -383,12 +383,12 @@ static napi_value usearch_js_shapes_health(napi_env env, napi_callback_info info
         index ? usearch_js_index_open(env, arguments, &local, &health.executor, &health.completion) : NULL;
     if (!call) return NULL;
     napi_value const slots[usearch_js_slots_k] = {self, arguments[0]};
-    call->call.finish = usearch_js_finish_health;
-    health.outcome = &call->call.outcome;
+    call->header.finish = usearch_js_finish_health;
+    health.outcome = &call->header.outcome;
     health.reachability = &call->reachability;
-    if (!usearch_js_call_hold(env, &call->call, &local.call, slots, &deferred)) return NULL;
+    if (!usearch_js_call_hold(env, &call->header, &local.header, slots, &deferred)) return NULL;
     usearch_shapes_health(&health);
-    return usearch_js_call_answer(env, &call->call, &local.call, slots, deferred);
+    return usearch_js_call_answer(env, &call->header, &local.header, slots, deferred);
 }
 
 /** <tt>reserve(executor, completion, entries, points)</tt> - claims room for a total entry count and the
@@ -403,15 +403,15 @@ static napi_value usearch_js_shapes_reserve(napi_env env, napi_callback_info inf
     if (!call) return NULL;
     if (!usearch_js_size_from_value(env, arguments[2], "entries", &reserve.entries) ||
         !usearch_js_size_from_value(env, arguments[3], "points", &reserve.points)) {
-        usearch_js_call_abandon(&call->call, &local.call);
+        usearch_js_call_abandon(&call->header, &local.header);
         return NULL;
     }
     napi_value const slots[usearch_js_slots_k] = {self, arguments[0]};
-    call->call.finish = usearch_js_finish_nothing;
-    reserve.outcome = &call->call.outcome;
-    if (!usearch_js_call_hold(env, &call->call, &local.call, slots, &deferred)) return NULL;
+    call->header.finish = usearch_js_finish_nothing;
+    reserve.outcome = &call->header.outcome;
+    if (!usearch_js_call_hold(env, &call->header, &local.header, slots, &deferred)) return NULL;
     usearch_shapes_reserve(&reserve);
-    return usearch_js_call_answer(env, &call->call, &local.call, slots, deferred);
+    return usearch_js_call_answer(env, &call->header, &local.header, slots, deferred);
 }
 
 /** <tt>clear(executor, completion)</tt> - erases every entry, keeping capacity. */
@@ -424,11 +424,11 @@ static napi_value usearch_js_shapes_clear(napi_env env, napi_callback_info info)
         index ? usearch_js_index_open(env, arguments, &local, &clear.executor, &clear.completion) : NULL;
     if (!call) return NULL;
     napi_value const slots[usearch_js_slots_k] = {self, arguments[0]};
-    call->call.finish = usearch_js_finish_nothing;
-    clear.outcome = &call->call.outcome;
-    if (!usearch_js_call_hold(env, &call->call, &local.call, slots, &deferred)) return NULL;
+    call->header.finish = usearch_js_finish_nothing;
+    clear.outcome = &call->header.outcome;
+    if (!usearch_js_call_hold(env, &call->header, &local.header, slots, &deferred)) return NULL;
     usearch_shapes_clear(&clear);
-    return usearch_js_call_answer(env, &call->call, &local.call, slots, deferred);
+    return usearch_js_call_answer(env, &call->header, &local.header, slots, deferred);
 }
 
 /** <tt>count(executor, completion, key)</tt> → @c {entries, totalPoints, largestPoints} under one key. */
@@ -441,16 +441,16 @@ static napi_value usearch_js_shapes_count(napi_env env, napi_callback_info info)
         index ? usearch_js_index_open(env, arguments, &local, &count.executor, &count.completion) : NULL;
     if (!call) return NULL;
     if (!usearch_js_key_from_value(env, arguments[2], "key", &count.key)) {
-        usearch_js_call_abandon(&call->call, &local.call);
+        usearch_js_call_abandon(&call->header, &local.header);
         return NULL;
     }
     napi_value const slots[usearch_js_slots_k] = {self, arguments[0]};
-    call->call.finish = usearch_js_shapes_finish_count;
-    count.outcome = &call->call.outcome;
+    call->header.finish = usearch_js_shapes_finish_count;
+    count.outcome = &call->header.outcome;
     count.key_stats = &call->key_stats.shapes;
-    if (!usearch_js_call_hold(env, &call->call, &local.call, slots, &deferred)) return NULL;
+    if (!usearch_js_call_hold(env, &call->header, &local.header, slots, &deferred)) return NULL;
     usearch_shapes_count(&count);
-    return usearch_js_call_answer(env, &call->call, &local.call, slots, deferred);
+    return usearch_js_call_answer(env, &call->header, &local.header, slots, deferred);
 }
 
 /** <tt>insert(executor, completion, keys, data, offsets, scalar, expansion, stats)</tt>. */
@@ -463,28 +463,28 @@ static napi_value usearch_js_shapes_insert(napi_env env, napi_callback_info info
         index ? usearch_js_index_open(env, arguments, &local, &insert.executor, &insert.completion) : NULL;
     if (!call) return NULL;
     size_t keys_count = 0;
-    usearch_key_t** const gathered = (usearch_key_t**)&call->call.owned[0];
+    usearch_key_t** const gathered = (usearch_key_t**)&call->header.owned[0];
     if (!usearch_js_tape_from_value(env, arguments + 3, "shapes", 3, &insert.count, &insert.shapes) ||
         !usearch_js_size_from_value(env, arguments[6], "expansionFactor", &insert.expansion_factor) ||
-        !usearch_js_stats_from_value(env, arguments[7], &call->call, &insert.stats) ||
+        !usearch_js_stats_from_value(env, arguments[7], &call->header, &insert.stats) ||
         !usearch_js_keys_from_value(env, arguments[2], "keys", &insert.keys.data, &keys_count, gathered)) {
-        usearch_js_call_abandon(&call->call, &local.call);
+        usearch_js_call_abandon(&call->header, &local.header);
         return NULL;
     }
     // The keys view holds no count, so only this side can see the two disagree.
     if (keys_count != insert.count) {
-        usearch_js_call_abandon(&call->call, &local.call);
+        usearch_js_call_abandon(&call->header, &local.header);
         usearch_js_throw(env, usearch_status_shape_mismatch_k, "The keys name one key per shape");
         return NULL;
     }
     insert.keys.stride = sizeof(usearch_key_t);
     napi_value const slots[usearch_js_slots_k] = {
         self, arguments[0], NULL, arguments[3], arguments[2], arguments[7], [usearch_js_slot_focus_k] = arguments[4]};
-    call->call.finish = usearch_js_finish_nothing;
-    insert.outcome = &call->call.outcome;
-    if (!usearch_js_call_hold(env, &call->call, &local.call, slots, &deferred)) return NULL;
+    call->header.finish = usearch_js_finish_nothing;
+    insert.outcome = &call->header.outcome;
+    if (!usearch_js_call_hold(env, &call->header, &local.header, slots, &deferred)) return NULL;
     usearch_shapes_insert(&insert);
-    return usearch_js_call_answer(env, &call->call, &local.call, slots, deferred);
+    return usearch_js_call_answer(env, &call->header, &local.header, slots, deferred);
 }
 
 /** <tt>refine(executor, completion, expansion, memoryLimit, stats, plan)</tt> → what the round did
@@ -500,21 +500,21 @@ static napi_value usearch_js_shapes_refine(napi_env env, napi_callback_info info
     usearch_js_plan_t* plan = NULL;
     if (!usearch_js_size_from_value(env, arguments[2], "expansionFactor", &refine.refine.expansion_factor) ||
         !usearch_js_size_from_value(env, arguments[3], "memoryLimit", &refine.refine.memory_limit) ||
-        !usearch_js_stats_from_value(env, arguments[4], &call->call, &refine.stats) ||
+        !usearch_js_stats_from_value(env, arguments[4], &call->header, &refine.stats) ||
         !usearch_js_plan_from_value(env, arguments[5], &plan)) {
-        usearch_js_call_abandon(&call->call, &local.call);
+        usearch_js_call_abandon(&call->header, &local.header);
         return NULL;
     }
     napi_value const slots[usearch_js_slots_k] = {
         self, arguments[0], NULL, NULL, NULL, arguments[4], [usearch_js_slot_plan_k] = arguments[5]};
-    call->call.finish = usearch_js_finish_report;
+    call->header.finish = usearch_js_finish_report;
     refine.plan = plan ? &plan->refine.shapes : NULL;
     refine.phase = plan ? &plan->progress : NULL;
-    refine.outcome = &call->call.outcome;
+    refine.outcome = &call->header.outcome;
     refine.report = &call->report;
-    if (!usearch_js_call_hold(env, &call->call, &local.call, slots, &deferred)) return NULL;
+    if (!usearch_js_call_hold(env, &call->header, &local.header, slots, &deferred)) return NULL;
     usearch_shapes_refine(&refine);
-    return usearch_js_call_answer(env, &call->call, &local.call, slots, deferred);
+    return usearch_js_call_answer(env, &call->header, &local.header, slots, deferred);
 }
 
 /** <tt>refinePlanFinish(executor, completion, plan)</tt> → what the whole plan did to the graph,
@@ -529,19 +529,19 @@ static napi_value usearch_js_shapes_refine_plan_finish(napi_env env, napi_callba
     if (!call) return NULL;
     usearch_js_plan_t* plan = NULL;
     if (!usearch_js_plan_from_value(env, arguments[2], &plan)) {
-        usearch_js_call_abandon(&call->call, &local.call);
+        usearch_js_call_abandon(&call->header, &local.header);
         return NULL;
     }
     napi_value const slots[usearch_js_slots_k] = {self, arguments[0]};
-    call->call.finish = usearch_js_finish_report;
-    finish.outcome = &call->call.outcome;
+    call->header.finish = usearch_js_finish_report;
+    finish.outcome = &call->header.outcome;
     finish.report = &call->report;
-    if (!usearch_js_call_hold(env, &call->call, &local.call, slots, &deferred)) return NULL;
+    if (!usearch_js_call_hold(env, &call->header, &local.header, slots, &deferred)) return NULL;
     // The library frees the plan whatever the call answers.
     finish.plan = plan ? plan->refine.shapes : NULL;
     if (plan) plan->refine.shapes = NULL;
     usearch_shapes_refine_plan_finish(&finish);
-    return usearch_js_call_answer(env, &call->call, &local.call, slots, deferred);
+    return usearch_js_call_answer(env, &call->header, &local.header, slots, deferred);
 }
 
 /** <tt>search(executor, completion, data, offsets, scalar, arena, wanted, expansion, traversal,
@@ -558,20 +558,20 @@ static napi_value usearch_js_shapes_search(napi_env env, napi_callback_info info
         !usearch_js_size_from_value(env, arguments[6], "wanted", &search.wanted) ||
         !usearch_js_size_from_value(env, arguments[7], "expansionFactor", &search.expansion_factor) ||
         !usearch_js_traversal_from_value(env, arguments[8], "traversal", &search.traversal) ||
-        !usearch_js_stats_from_value(env, arguments[9], &call->call, &search.stats) ||
+        !usearch_js_stats_from_value(env, arguments[9], &call->header, &search.stats) ||
         !usearch_js_arena_from_value(env, arguments[5], &search.arena)) {
-        usearch_js_call_abandon(&call->call, &local.call);
+        usearch_js_call_abandon(&call->header, &local.header);
         return NULL;
     }
     napi_value const slots[usearch_js_slots_k] = {self,         arguments[0], arguments[5],
                                                   arguments[2], arguments[3], arguments[9]};
-    call->call.finish = usearch_js_finish_matches;
+    call->header.finish = usearch_js_finish_matches;
     call->count = search.count;
-    search.outcome = &call->call.outcome;
+    search.outcome = &call->header.outcome;
     search.matches = &call->matches;
-    if (!usearch_js_call_hold(env, &call->call, &local.call, slots, &deferred)) return NULL;
+    if (!usearch_js_call_hold(env, &call->header, &local.header, slots, &deferred)) return NULL;
     usearch_shapes_search(&search);
-    return usearch_js_call_answer(env, &call->call, &local.call, slots, deferred);
+    return usearch_js_call_answer(env, &call->header, &local.header, slots, deferred);
 }
 
 /** <tt>get(executor, completion, key, scalar, arena)</tt> → @c {data, offsets, entries}, every shape under
@@ -587,20 +587,20 @@ static napi_value usearch_js_shapes_get(napi_env env, napi_callback_info info) {
     if (!usearch_js_key_from_value(env, arguments[2], "key", &get.key) ||
         !usearch_js_scalar_from_value(env, arguments[3], "scalar", &get.outputs_scalar) ||
         !usearch_js_arena_from_value(env, arguments[4], &get.arena)) {
-        usearch_js_call_abandon(&call->call, &local.call);
+        usearch_js_call_abandon(&call->header, &local.header);
         return NULL;
     }
     napi_value const slots[usearch_js_slots_k] = {self, arguments[0], arguments[4]};
-    call->call.finish = usearch_js_finish_tape;
+    call->header.finish = usearch_js_finish_tape;
     // Three coordinates per point.
     call->count = 3;
     call->scalar = get.outputs_scalar;
-    get.outcome = &call->call.outcome;
+    get.outcome = &call->header.outcome;
     get.shapes = &call->tape;
     get.written = &call->written;
-    if (!usearch_js_call_hold(env, &call->call, &local.call, slots, &deferred)) return NULL;
+    if (!usearch_js_call_hold(env, &call->header, &local.header, slots, &deferred)) return NULL;
     usearch_shapes_get(&get);
-    return usearch_js_call_answer(env, &call->call, &local.call, slots, deferred);
+    return usearch_js_call_answer(env, &call->header, &local.header, slots, deferred);
 }
 
 /** <tt>sample(executor, completion, arena, wanted, shown, data, rows, columns, stride, scalar, focus,
@@ -616,36 +616,36 @@ static napi_value usearch_js_shapes_sample(napi_env env, napi_callback_info info
     size_t seed = 0, placed = 0;
     sample.shown_coordinates = (usearch_rows_view_t) {NULL, 3 * sizeof(float), 3, usearch_scalar_f32_k};
     if (!usearch_js_size_from_value(env, arguments[3], "wanted", &sample.wanted) ||
-        !usearch_js_optional_keys(env, arguments[4], "shown", &call->call, 0, &sample.shown, &sample.shown_count) ||
+        !usearch_js_optional_keys(env, arguments[4], "shown", &call->header, 0, &sample.shown, &sample.shown_count) ||
         (!usearch_js_value_absent(env, arguments[5]) &&
          !usearch_js_rows_from_value(env, arguments + 5, "shownCoordinates", &placed, &sample.shown_coordinates)) ||
-        !usearch_js_optional_keys(env, arguments[10], "focus", &call->call, 1, &sample.focus, &sample.focus_count) ||
+        !usearch_js_optional_keys(env, arguments[10], "focus", &call->header, 1, &sample.focus, &sample.focus_count) ||
         !usearch_js_size_from_value(env, arguments[11], "seed", &seed) ||
         !usearch_js_size_from_value(env, arguments[12], "expansionFactor", &sample.expansion_factor) ||
         !usearch_js_arena_from_value(env, arguments[2], &sample.arena)) {
-        usearch_js_call_abandon(&call->call, &local.call);
+        usearch_js_call_abandon(&call->header, &local.header);
         return NULL;
     }
     // The coordinates hold no count of their own, so only this side can see them disagree.
     if (placed != sample.shown_count) {
-        usearch_js_call_abandon(&call->call, &local.call);
+        usearch_js_call_abandon(&call->header, &local.header);
         usearch_js_throw(env, usearch_status_shape_mismatch_k, "The shown keys need one place apiece");
         return NULL;
     }
     napi_value const slots[usearch_js_slots_k] = {
         self, arguments[0], arguments[2], arguments[5], arguments[4], [usearch_js_slot_focus_k] = arguments[10]};
-    call->call.finish = usearch_js_finish_sample;
+    call->header.finish = usearch_js_finish_sample;
     call->scalar = usearch_scalar_f32_k;
-    sample.outcome = &call->call.outcome;
+    sample.outcome = &call->header.outcome;
     sample.keys = &call->keys;
     sample.entry_ordinals = &call->entry_ordinals;
     sample.parents = &call->matches;
     sample.coordinates = &call->vectors;
     sample.written = &call->written;
     sample.seed = seed;
-    if (!usearch_js_call_hold(env, &call->call, &local.call, slots, &deferred)) return NULL;
+    if (!usearch_js_call_hold(env, &call->header, &local.header, slots, &deferred)) return NULL;
     usearch_shapes_sample(&sample);
-    return usearch_js_call_answer(env, &call->call, &local.call, slots, deferred);
+    return usearch_js_call_answer(env, &call->header, &local.header, slots, deferred);
 }
 
 /** <tt>reshard(executor, completion, sources, targets, seed, expansion, memoryLimit, stats, plan)</tt>
@@ -667,7 +667,7 @@ static napi_value usearch_js_shapes_reshard(napi_env env, napi_callback_info inf
                          usearch_js_handles_count(env, arguments[3], "targets", &targets_count);
     usearch_shapes_index_t* const handles =
         counted ? (usearch_shapes_index_t*)calloc((size_t)sources_count + targets_count + 1, sizeof(void*)) : NULL;
-    call->call.owned[0] = handles;
+    call->header.owned[0] = handles;
     if (counted && !handles) usearch_js_throw(env, usearch_status_out_of_memory_k, "Could not gather the handles");
     if (!handles ||
         !usearch_js_handles_from_value(env, arguments[2], "sources", sources_count, addon->shapes_index_class,
@@ -677,15 +677,15 @@ static napi_value usearch_js_shapes_reshard(napi_env env, napi_callback_info inf
         !usearch_js_size_from_value(env, arguments[4], "seed", &seed) ||
         !usearch_js_size_from_value(env, arguments[5], "expansionFactor", &reshard.refine.expansion_factor) ||
         !usearch_js_size_from_value(env, arguments[6], "memoryLimit", &reshard.refine.memory_limit) ||
-        !usearch_js_stats_from_value(env, arguments[7], &call->call, &reshard.stats) ||
+        !usearch_js_stats_from_value(env, arguments[7], &call->header, &reshard.stats) ||
         !usearch_js_plan_from_value(env, arguments[8], &plan)) {
-        usearch_js_call_abandon(&call->call, &local.call);
+        usearch_js_call_abandon(&call->header, &local.header);
         return NULL;
     }
     napi_value const slots[usearch_js_slots_k] = {
         NULL, arguments[0], NULL, arguments[2], arguments[3], arguments[7], [usearch_js_slot_plan_k] = arguments[8]};
-    call->call.finish = usearch_js_finish_report;
-    reshard.outcome = &call->call.outcome;
+    call->header.finish = usearch_js_finish_report;
+    reshard.outcome = &call->header.outcome;
     reshard.sources_count = sources_count;
     reshard.sources = handles;
     reshard.targets_count = targets_count;
@@ -694,9 +694,9 @@ static napi_value usearch_js_shapes_reshard(napi_env env, napi_callback_info inf
     reshard.report = &call->report;
     reshard.plan = plan ? &plan->reshard.shapes : NULL;
     reshard.phase = plan ? &plan->progress : NULL;
-    if (!usearch_js_call_hold(env, &call->call, &local.call, slots, &deferred)) return NULL;
+    if (!usearch_js_call_hold(env, &call->header, &local.header, slots, &deferred)) return NULL;
     usearch_shapes_reshard(&reshard);
-    return usearch_js_call_answer(env, &call->call, &local.call, slots, deferred);
+    return usearch_js_call_answer(env, &call->header, &local.header, slots, deferred);
 }
 
 /** <tt>reshardPlanFinish(executor, completion, plan)</tt> → what the whole plan did to the graph,
@@ -711,18 +711,18 @@ static napi_value usearch_js_shapes_reshard_plan_finish(napi_env env, napi_callb
     if (!call) return NULL;
     usearch_js_plan_t* plan = NULL;
     if (!usearch_js_plan_from_value(env, arguments[2], &plan)) {
-        usearch_js_call_abandon(&call->call, &local.call);
+        usearch_js_call_abandon(&call->header, &local.header);
         return NULL;
     }
     napi_value const slots[usearch_js_slots_k] = {NULL, arguments[0]};
-    call->call.finish = usearch_js_finish_report;
-    finish.outcome = &call->call.outcome;
+    call->header.finish = usearch_js_finish_report;
+    finish.outcome = &call->header.outcome;
     finish.report = &call->report;
-    if (!usearch_js_call_hold(env, &call->call, &local.call, slots, &deferred)) return NULL;
+    if (!usearch_js_call_hold(env, &call->header, &local.header, slots, &deferred)) return NULL;
     finish.plan = plan ? plan->reshard.shapes : NULL;
     if (plan) plan->reshard.shapes = NULL;
     usearch_shapes_reshard_plan_finish(&finish);
-    return usearch_js_call_answer(env, &call->call, &local.call, slots, deferred);
+    return usearch_js_call_answer(env, &call->header, &local.header, slots, deferred);
 }
 
 #pragma endregion Index Verbs
@@ -738,17 +738,17 @@ static napi_value usearch_js_shapes_save(napi_env env, napi_callback_info info) 
     usearch_js_index_call_t* const call =
         index ? usearch_js_index_open(env, arguments, &local, &save.executor, &save.completion) : NULL;
     if (!call) return NULL;
-    call->call.owned[0] = usearch_js_string_from_value(env, arguments[2], "path", &save.path);
-    if (!call->call.owned[0]) {
-        usearch_js_call_abandon(&call->call, &local.call);
+    call->header.owned[0] = usearch_js_string_from_value(env, arguments[2], "path", &save.path);
+    if (!call->header.owned[0]) {
+        usearch_js_call_abandon(&call->header, &local.header);
         return NULL;
     }
     napi_value const slots[usearch_js_slots_k] = {self, arguments[0]};
-    call->call.finish = usearch_js_finish_nothing;
-    save.outcome = &call->call.outcome;
-    if (!usearch_js_call_hold(env, &call->call, &local.call, slots, &deferred)) return NULL;
+    call->header.finish = usearch_js_finish_nothing;
+    save.outcome = &call->header.outcome;
+    if (!usearch_js_call_hold(env, &call->header, &local.header, slots, &deferred)) return NULL;
     usearch_shapes_save(&save);
-    return usearch_js_call_answer(env, &call->call, &local.call, slots, deferred);
+    return usearch_js_call_answer(env, &call->header, &local.header, slots, deferred);
 }
 
 /** <tt>saveBuffer(executor, completion, arena)</tt> → one monolith's bytes, viewed inside @p arena. */
@@ -761,16 +761,16 @@ static napi_value usearch_js_shapes_save_buffer(napi_env env, napi_callback_info
         index ? usearch_js_index_open(env, arguments, &local, &save.executor, &save.completion) : NULL;
     if (!call) return NULL;
     if (!usearch_js_arena_from_value(env, arguments[2], &save.arena)) {
-        usearch_js_call_abandon(&call->call, &local.call);
+        usearch_js_call_abandon(&call->header, &local.header);
         return NULL;
     }
     napi_value const slots[usearch_js_slots_k] = {self, arguments[0], arguments[2]};
-    call->call.finish = usearch_js_finish_save_buffer;
-    save.outcome = &call->call.outcome;
+    call->header.finish = usearch_js_finish_save_buffer;
+    save.outcome = &call->header.outcome;
     save.monolith = &call->monolith;
-    if (!usearch_js_call_hold(env, &call->call, &local.call, slots, &deferred)) return NULL;
+    if (!usearch_js_call_hold(env, &call->header, &local.header, slots, &deferred)) return NULL;
     usearch_shapes_save_buffer(&save);
-    return usearch_js_call_answer(env, &call->call, &local.call, slots, deferred);
+    return usearch_js_call_answer(env, &call->header, &local.header, slots, deferred);
 }
 
 #pragma endregion Serialization
@@ -805,15 +805,15 @@ static napi_value usearch_js_shapes_cursor_next(napi_env env, napi_callback_info
         !usearch_js_arena_from_value(env, arguments[2], &next.arena))
         return NULL;
     napi_value const slots[usearch_js_slots_k] = {NULL, NULL, arguments[2]};
-    call.call.finish = exports_links ? usearch_js_finish_cursor_links : usearch_js_finish_cursor_keys;
+    call.header.finish = exports_links ? usearch_js_finish_cursor_links : usearch_js_finish_cursor_keys;
     next.index = index;
-    next.outcome = &call.call.outcome;
+    next.outcome = &call.header.outcome;
     next.cursor = (usearch_shapes_cursor_t)walk->handle;
     next.keys = &call.keys;
     next.links = exports_links ? &call.links : NULL;
     next.written = &call.written;
     usearch_shapes_cursor_next(&next);
-    return usearch_js_call_answer(env, &call.call, &call.call, slots, NULL);
+    return usearch_js_call_answer(env, &call.header, &call.header, slots, NULL);
 }
 
 /** @c free() - releases the walk; a second call is a no-op. */

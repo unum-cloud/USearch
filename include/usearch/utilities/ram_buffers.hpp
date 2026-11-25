@@ -833,7 +833,7 @@ class growing_buffer {
     element_t* elements_;
     std::size_t size_;
     std::size_t capacity_;
-    allocator_t allocator_;
+    [[no_unique_address]] allocator_t allocator_;
 
   public:
 

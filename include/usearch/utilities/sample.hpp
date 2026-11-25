@@ -328,8 +328,8 @@ std::size_t sample_greedy_walk(source_type_ const& source, shard_node<typename s
 }
 
 /**
- *  @brief One SAMPLE call over a @ref a_sample_source, its steps run in order: @ref draw, then
- *      @ref assign_ordinals, then @ref assign_coordinates.
+ *  @brief One SAMPLE call over a source satisfying @ref a_sample_source, its steps run in order:
+ *      @ref draw, then @ref assign_ordinals, then @ref assign_coordinates.
  *
  *  A one-call plan: unlike the resumable refine, load and health plans, it lives inside a single
  *  SAMPLE call and has no @c plan_sample opening it. Every buffer is carved once from the

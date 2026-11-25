@@ -2573,10 +2573,6 @@ struct vram_apple_graph {
      *  faults. */
     inline static constexpr std::size_t tape_margin_k = sizeof(u64_t);
 
-    /** Nodes one run of a load stores at once, so the kits' staging stays a few hundred megabytes
-     *  at the widest nodes. */
-    inline static constexpr u32_t crossing_nodes_log2_k = 19;
-
     /** Lanes per simdgroup, the width every kernel's collectives span. */
     static constexpr u32_t wave_lanes() noexcept { return metal_simdgroup_width_k; }
 
@@ -2695,7 +2691,7 @@ struct vram_apple_graph {
     build_shape_t build_shape_(u32_t expansion_factor, u32_t span_bytes) const noexcept {
         build_shape_t shape;
         shape.expansion = build_expansion_(expansion_factor);
-        shape.candidate_slots = gpu_candidate_slots(shape.expansion, 2, wave_lanes());
+        shape.candidate_slots = gpu_candidate_slots(shape.expansion, wave_lanes());
         shape.walk_selection_nodes = walk_selection_nodes_(shape.expansion, shape.candidate_slots);
         shape.reselection_nodes = reselection_nodes_();
         shape.scratch_bytes = build_scratch_bytes_(span_bytes,
@@ -2727,8 +2723,7 @@ struct vram_apple_graph {
 
     /** The register rung a walk keeps, covering both its breadth and its count. */
     u32_t walk_slots_(search_config_t config) const noexcept {
-        u32_t const count_slots = divide_round_up<u32_t>(config.count, wave_lanes());
-        return gpu_candidate_slots(walk_expansion_(config), count_slots > 2 ? count_slots : 2, wave_lanes());
+        return gpu_candidate_slots(walk_expansion_(config), wave_lanes());
     }
 
     /** One walker's slice: the register rung's visited set, or the arena frontier's with its tail

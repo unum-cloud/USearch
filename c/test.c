@@ -806,7 +806,7 @@ void test_reshard(size_t const dimensions) {
     usearch_refine_report_t report = {0};
     size_t calls = 0;
     do {
-        usearch_phase_progress_t phase = {0};
+        usearch_phase_progress_t progress = {0};
         usearch_dense_reshard(
             &(usearch_dense_reshard_t) {.sources_count = 1,
                                         .sources = &index,
@@ -818,13 +818,13 @@ void test_reshard(size_t const dimensions) {
                                         .report = &report,
                                         .progress = {cancel_progress},
                                         .plan = &plan,
-                                        .phase = &phase});
+                                        .phase = &progress});
         bool const cancelled = outcome.status == usearch_status_cancelled_k;
         if (!expect_at(cancelled || !outcome.message, __FILE__, __LINE__, outcome.message)) return;
-        expect_at(plan != NULL && phase.phase != usearch_phase_none_k, __FILE__, __LINE__,
+        expect_at(plan != NULL && progress.phase != usearch_phase_none_k, __FILE__, __LINE__,
                   "Every call through a plan must keep it live and name a phase");
         if (!cancelled) break;
-        expect_at(phase.phase != usearch_phase_done_k && phase.completed <= phase.total, __FILE__, __LINE__,
+        expect_at(progress.phase != usearch_phase_done_k && progress.completed <= progress.total, __FILE__, __LINE__,
                   "A stopped round must stand in one of its phases");
     } while (++calls != rows_count);
     usearch_dense_reshard_plan_finish(&(usearch_dense_reshard_plan_finish_t) {.executor = executor,
@@ -959,7 +959,7 @@ void test_reshard_gather(size_t const dimensions) {
     size_t calls = 0;
     do {
         usearch_refine_report_t pulled = {0};
-        usearch_phase_progress_t phase = {0};
+        usearch_phase_progress_t progress = {0};
         usearch_dense_reshard(&(usearch_dense_reshard_t) {.sources_count = 2,
                                                           .sources = last_sources,
                                                           .targets_count = 1,
@@ -969,17 +969,17 @@ void test_reshard_gather(size_t const dimensions) {
                                                           .report = &pulled,
                                                           .progress = {record_and_cancel, &reports},
                                                           .plan = &plan,
-                                                          .phase = &phase});
+                                                          .phase = &progress});
         bool const cancelled = outcome.status == usearch_status_cancelled_k;
         if (!expect_at(cancelled || !outcome.message, __FILE__, __LINE__, outcome.message)) return;
         if (!expect_at(plan != NULL, __FILE__, __LINE__, "The first call must open the plan")) return;
-        expect_at(phase.phase != usearch_phase_none_k, __FILE__, __LINE__,
+        expect_at(progress.phase != usearch_phase_none_k, __FILE__, __LINE__,
                   "Every call through a plan must name a phase");
         expect_at(pulled.changed <= rows_count && pulled.reselected >= running.reselected, __FILE__, __LINE__,
                   "The round so far must never shrink, nor change more rows than the index holds");
         running = pulled;
         if (!cancelled) break;
-        expect_at(phase.phase != usearch_phase_done_k && phase.completed <= phase.total, __FILE__, __LINE__,
+        expect_at(progress.phase != usearch_phase_done_k && progress.completed <= progress.total, __FILE__, __LINE__,
                   "A stopped round must stand in one of its phases");
         if (++calls != 1) continue;
         usearch_key_t const late_key = key_of(rows_count);
@@ -1132,22 +1132,22 @@ void test_refine_plan(size_t const dimensions, size_t const rows_count) {
     size_t calls = 0;
     plan = NULL;
     do {
-        usearch_phase_progress_t phase = {0};
+        usearch_phase_progress_t progress = {0};
         usearch_dense_refine(&(usearch_dense_refine_t) {.index = resumed_index,
                                                         .executor = executor,
                                                         .outcome = &outcome,
                                                         .report = &resumed,
                                                         .progress = {cancel_progress},
                                                         .plan = &plan,
-                                                        .phase = &phase});
+                                                        .phase = &progress});
         ++calls;
-        expect_at(phase.phase != usearch_phase_none_k, __FILE__, __LINE__,
+        expect_at(progress.phase != usearch_phase_none_k, __FILE__, __LINE__,
                   "Every call through a plan must name a phase");
         if (outcome.status != usearch_status_cancelled_k) break;
         if (!expect_at(plan != NULL, __FILE__, __LINE__, "A cancel must leave the plan live")) return;
-        expect_at(phase.phase != usearch_phase_done_k && phase.completed <= phase.total, __FILE__, __LINE__,
+        expect_at(progress.phase != usearch_phase_done_k && progress.completed <= progress.total, __FILE__, __LINE__,
                   "A stopped round must stand in one of its phases");
-        gather_stopped = gather_stopped || phase.phase == usearch_phase_gather_k;
+        gather_stopped = gather_stopped || progress.phase == usearch_phase_gather_k;
         if (calls != 1) continue;
         usearch_key_t const late_key = key_of(rows_count);
         usearch_dense_insert(
@@ -1174,7 +1174,7 @@ void test_refine_plan(size_t const dimensions, size_t const rows_count) {
     usearch_dense_free(resumed_index);
 
     usearch_dense_index_t const stopped = create_index_holding(data, rows_count, dimensions, executor);
-    usearch_phase_progress_t phase = {0};
+    usearch_phase_progress_t progress = {0};
     plan = NULL;
     do {
         usearch_dense_refine(&(usearch_dense_refine_t) {.index = stopped,
@@ -1182,10 +1182,10 @@ void test_refine_plan(size_t const dimensions, size_t const rows_count) {
                                                         .outcome = &outcome,
                                                         .progress = {cancel_progress},
                                                         .plan = &plan,
-                                                        .phase = &phase});
+                                                        .phase = &progress});
         expect_at(outcome.status == usearch_status_cancelled_k, __FILE__, __LINE__,
                   "A round must not end before its gather");
-    } while (phase.phase != usearch_phase_gather_k);
+    } while (progress.phase != usearch_phase_gather_k);
     usearch_refine_report_t closing = {0};
     usearch_dense_refine_plan_finish(&(usearch_dense_refine_plan_finish_t) {.index = stopped,
                                                                             .executor = executor,
@@ -1245,7 +1245,7 @@ void test_reshard_cut_plan(size_t const dimensions) {
     usearch_refine_report_t report = {0};
     size_t calls = 0;
     do {
-        usearch_phase_progress_t phase = {0};
+        usearch_phase_progress_t progress = {0};
         usearch_dense_reshard(&(usearch_dense_reshard_t) {.sources_count = 1,
                                                           .sources = &index,
                                                           .targets_count = 2,
@@ -1255,13 +1255,13 @@ void test_reshard_cut_plan(size_t const dimensions) {
                                                           .report = &report,
                                                           .progress = {cancel_progress},
                                                           .plan = &plan,
-                                                          .phase = &phase});
+                                                          .phase = &progress});
         bool const cancelled = outcome.status == usearch_status_cancelled_k;
         if (!expect_at(cancelled || !outcome.message, __FILE__, __LINE__, outcome.message)) return;
-        expect_at(plan != NULL && phase.phase != usearch_phase_none_k, __FILE__, __LINE__,
+        expect_at(plan != NULL && progress.phase != usearch_phase_none_k, __FILE__, __LINE__,
                   "Every call through a plan must keep it live and name a phase");
         if (!cancelled) break;
-        expect_at(phase.phase != usearch_phase_done_k && phase.completed <= phase.total, __FILE__, __LINE__,
+        expect_at(progress.phase != usearch_phase_done_k && progress.completed <= progress.total, __FILE__, __LINE__,
                   "A stopped round must stand in one of its phases");
         if (++calls != 1) continue;
         usearch_key_t const late_key = key_of(rows_count);
@@ -1394,7 +1394,7 @@ void test_sequence_reshard(void) {
     size_t calls = 0;
     do {
         usearch_refine_report_t pulled = {0};
-        usearch_phase_progress_t phase = {0};
+        usearch_phase_progress_t progress = {0};
         usearch_sequence_reshard(&(usearch_sequence_reshard_t) {.sources_count = 2,
                                                                 .sources = last_sources,
                                                                 .targets_count = 1,
@@ -1404,17 +1404,17 @@ void test_sequence_reshard(void) {
                                                                 .report = &pulled,
                                                                 .progress = {record_and_cancel, &reports},
                                                                 .plan = &plan,
-                                                                .phase = &phase});
+                                                                .phase = &progress});
         bool const cancelled = outcome.status == usearch_status_cancelled_k;
         if (!expect_at(cancelled || !outcome.message, __FILE__, __LINE__, outcome.message)) return;
         if (!expect_at(plan != NULL, __FILE__, __LINE__, "The first call must open the plan")) return;
-        expect_at(phase.phase != usearch_phase_none_k, __FILE__, __LINE__,
+        expect_at(progress.phase != usearch_phase_none_k, __FILE__, __LINE__,
                   "Every call through a plan must name a phase");
         expect_at(pulled.changed <= reads_count && pulled.reselected >= running.reselected, __FILE__, __LINE__,
                   "The round so far must never shrink, nor change more reads than the index holds");
         running = pulled;
         if (!cancelled) break;
-        expect_at(phase.phase != usearch_phase_done_k && phase.completed <= phase.total, __FILE__, __LINE__,
+        expect_at(progress.phase != usearch_phase_done_k && progress.completed <= progress.total, __FILE__, __LINE__,
                   "A stopped round must stand in one of its phases");
         if (++calls != 1) continue;
         usearch_key_t const late_key = key_of(reads_count);
@@ -3687,7 +3687,7 @@ void test_shapes_and_geospatial_reshard(void) {
         usearch_##family##_reshard_plan_t plan = NULL;                                                             \
         size_t calls = 0;                                                                                          \
         do {                                                                                                       \
-            usearch_phase_progress_t phase = {0};                                                                  \
+            usearch_phase_progress_t progress = {0};                                                               \
             usearch_##family##_reshard(&(usearch_##family##_reshard_t) {.sources_count = 1,                        \
                                                                         .sources = &source,                        \
                                                                         .targets_count = 2,                        \
@@ -3696,18 +3696,18 @@ void test_shapes_and_geospatial_reshard(void) {
                                                                         .outcome = &outcome,                       \
                                                                         .progress = {cancel_progress},             \
                                                                         .plan = &plan,                             \
-                                                                        .phase = &phase});                         \
+                                                                        .phase = &progress});                      \
             bool const cancelled = outcome.status == usearch_status_cancelled_k;                                   \
             if (!expect_at(cancelled || !outcome.message, __FILE__, __LINE__, outcome.message)) return;            \
-            expect_at(plan != NULL && phase.phase != usearch_phase_none_k, __FILE__, __LINE__,                     \
+            expect_at(plan != NULL && progress.phase != usearch_phase_none_k, __FILE__, __LINE__,                  \
                       "Every call through a plan must keep it live and name a phase");                             \
             if (!cancelled) {                                                                                      \
-                expect_at(phase.phase == usearch_phase_done_k, __FILE__, __LINE__,                                 \
+                expect_at(progress.phase == usearch_phase_done_k, __FILE__, __LINE__,                              \
                           "A call whose rounds ended names the closing phase");                                    \
                 break;                                                                                             \
             }                                                                                                      \
-            expect_at(phase.phase != usearch_phase_done_k && phase.completed <= phase.total, __FILE__, __LINE__,   \
-                      "A stopped round must stand in one of its phases");                                          \
+            expect_at(progress.phase != usearch_phase_done_k && progress.completed <= progress.total, __FILE__,    \
+                      __LINE__, "A stopped round must stand in one of its phases");                                \
         } while (++calls != entries);                                                                              \
         usearch_refine_report_t report = {0};                                                                      \
         usearch_##family##_reshard_plan_finish(&(usearch_##family##_reshard_plan_finish_t) {.executor = executor,  \

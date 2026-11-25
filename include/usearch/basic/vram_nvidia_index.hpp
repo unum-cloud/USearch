@@ -3006,7 +3006,7 @@ struct vram_ragged_graph {
     build_shape_t build_shape_(u32_t expansion_factor, u32_t span_bytes, std::size_t rung) const noexcept {
         build_shape_t shape;
         shape.expansion = build_expansion_(expansion_factor);
-        shape.candidate_slots = gpu_candidate_slots(shape.expansion, 2);
+        shape.candidate_slots = gpu_candidate_slots(shape.expansion);
         shape.walk_selection_nodes = walk_selection_nodes_(shape.expansion, shape.candidate_slots);
         shape.reselection_nodes = reselection_nodes_();
         u32_t const walk_bytes = build_scratch_bytes_(span_bytes, shape.walk_selection_nodes);
@@ -3049,10 +3049,7 @@ struct vram_ragged_graph {
     }
 
     /** The register rung a walk keeps, covering both its breadth and its count. */
-    u32_t walk_slots_(search_config_t config) const noexcept {
-        u32_t const count_slots = divide_round_up<u32_t>(config.count, wave_lanes());
-        return gpu_candidate_slots(walk_expansion_(config), count_slots > 2 ? count_slots : 2);
-    }
+    u32_t walk_slots_(search_config_t config) const noexcept { return gpu_candidate_slots(walk_expansion_(config)); }
 
     /** One walker's slice: the register rung's visited set, or the arena frontier's with its tail
      *  past the ladder, then the query span when shared memory cannot fit it. */
@@ -3198,10 +3195,6 @@ struct vram_ragged_graph {
         }
         return status_code_t::success_k;
     }
-
-    /** Nodes one half of a save's or a load's bounce moves at most, so its two halves pin a few
-     *  hundred megabytes at the widest nodes. */
-    inline static constexpr u32_t crossing_nodes_log2_k = 19;
 
     /** Bytes of stored values one half of a bounce holds: a half's share of @p total over @p nodes,
      *  and never less than the @p longest value, so every crossing moves at least one. */
