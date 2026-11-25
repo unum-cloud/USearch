@@ -221,16 +221,16 @@ inline util::forkunion_allocator_t host_allocator_of(residency_options_type_ con
 
 /** Whether a result holds traversal telemetry - one probe both crossings read. */
 template <typename value_type_>
-concept holds_telemetry = requires(value_type_ const& value) { value.visited_members; } ||
-                          requires(value_type_ const& value) { value.telemetry.visited_members; } ||
-                          requires(value_type_ const& value) { value.traversal_stats.visited_members; };
+concept a_telemetry_holder = requires(value_type_ const& value) { value.visited_members; } ||
+                             requires(value_type_ const& value) { value.telemetry.visited_members; } ||
+                             requires(value_type_ const& value) { value.traversal_stats.visited_members; };
 
 /** The one crossing for a fallible step: folds telemetry into @p stats when the payload holds
  *  any, finishes @p outcome only on failure, and answers whether @c .value is readable. */
 template <typename value_type_>
 inline bool crossed(util::expected<value_type_> const& result, usearch_traversal_stats_t* stats,
                     usearch_outcome_t* outcome) noexcept {
-    if constexpr (holds_telemetry<value_type_>) accumulate_stats(stats, result.value);
+    if constexpr (a_telemetry_holder<value_type_>) accumulate_stats(stats, result.value);
     return result || propagate_error(result.status, outcome);
 }
 
@@ -2264,7 +2264,7 @@ inline usearch_executor_t make_call_executor(multi_type_&, usearch_executor_hand
 
 /** Whether @p multi_type_ 's verbs answer if its media read through SPDK. */
 template <typename multi_type_>
-concept verbs_report_spdk_reads = requires(multi_type_& variant) { variant.verbs.reads_spdk(variant.index); };
+concept an_spdk_reporting_variant = requires(multi_type_& variant) { variant.verbs.reads_spdk(variant.index); };
 
 /** The executor a null handle runs NVMe work on: one blocking queue on the calling thread alone,
  *  reading the files the index holds, so a call opens no ring and starts no thread. */
@@ -2273,7 +2273,7 @@ template <typename multi_type_>
 inline usearch_executor_t make_call_executor(multi_type_& variant, usearch_executor_handle_t& call_executor,
                                              usearch_outcome_t* outcome) noexcept {
     // No blocking read reaches a namespace, and the executor is the argument the call lacks.
-    if constexpr (verbs_report_spdk_reads<multi_type_>)
+    if constexpr (an_spdk_reporting_variant<multi_type_>)
         if (variant.verbs.reads_spdk(variant.index))
             return propagate_error(usearch_status_invalid_argument_k, outcome, "SPDK reads need an executor"), nullptr;
     auto [threads, threads_status] = util::ram_executor_t::on_calling_thread();

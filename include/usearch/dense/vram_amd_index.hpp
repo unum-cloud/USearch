@@ -1073,7 +1073,7 @@ struct vram_amd_index {
                                      nk::matrix_span<distance_t> result_distances, search_config_t config,
                                      traversal_context_t& context,
                                      completion_t completion = completion_t::blocking_k) noexcept
-        requires floating_scalar<scalar_t>
+        requires a_floating_scalar<scalar_t>
     {
         return core_.search(queries, heads, result_ids, result_distances, config, context, completion);
     }

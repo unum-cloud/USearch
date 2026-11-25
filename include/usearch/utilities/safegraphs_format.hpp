@@ -1590,7 +1590,7 @@ expected<safegraphs_metadata_t> safegraphs_read_metadata(checkpoint_source_t sou
 /** A value codec that also names the dtype of the elements it emits, so a header can
  *  describe its column; elements only, since the prefix sums delimit every value. */
 template <typename codec_type_>
-concept interchange_value_codec = requires {
+concept an_interchange_value_codec = requires {
     { codec_type_::value_dtype_k } -> std::convertible_to<dtype_t const&>;
 };
 
@@ -1636,7 +1636,7 @@ struct safegraphs_index_layout_t {
  */
 template <typename key_type_, typename node_id_type_, typename codec_type_,
           typename allocator_type_ = std::allocator<byte_t>>
-    requires interchange_value_codec<codec_type_>
+    requires an_interchange_value_codec<codec_type_>
 expected<safegraphs_index_layout_t> safegraphs_index_layout(std::size_t nodes, std::size_t neighbors,
                                                             std::size_t value_bytes, save_config_t const& config,
                                                             std::span<safegraphs_custom_field_t const> custom_fields,
@@ -1721,7 +1721,7 @@ std::span<element_type_> safegraphs_typed_span_(std::span<byte_type_> segment, s
  *    interchange dtype, or a fixed shape disagrees with the value bytes.
  */
 template <typename index_type_, typename codec_type_, typename allocator_type_ = std::allocator<byte_t>>
-    requires interchange_value_codec<codec_type_>
+    requires an_interchange_value_codec<codec_type_>
 expected<std::size_t> safegraphs_storage_requirements(index_type_& index, codec_type_ const& codec,
                                                       save_config_t const& config, std::string_view metric,
                                                       allocator_type_ allocator = {}) noexcept {
@@ -1767,7 +1767,7 @@ expected<std::size_t> safegraphs_storage_requirements(index_type_& index, codec_
  */
 template <typename index_type_, typename codec_type_, typename executor_type_,
           typename progress_type_ = dummy_progress_t, typename allocator_type_ = std::allocator<byte_t>>
-    requires interchange_value_codec<codec_type_>
+    requires an_interchange_value_codec<codec_type_>
 status_t safegraphs_write_index(bytes_span_t monolith, index_type_& index, codec_type_ const& codec,
                                 executor_type_& executor, save_config_t const& config, std::string_view metric,
                                 progress_type_&& progress = {}, allocator_type_ allocator = {}) noexcept {
@@ -1866,7 +1866,7 @@ status_t safegraphs_write_index(bytes_span_t monolith, index_type_& index, codec
  */
 template <typename index_type_, typename codec_type_, typename executor_type_,
           typename progress_type_ = dummy_progress_t, typename allocator_type_ = std::allocator<byte_t>>
-    requires interchange_value_codec<codec_type_>
+    requires an_interchange_value_codec<codec_type_>
 status_t safegraphs_write_index(std::string_view path, index_type_& index, codec_type_ const& codec,
                                 executor_type_& executor, save_config_t const& config, std::string_view metric,
                                 progress_type_&& progress = {}, allocator_type_ allocator = {}) noexcept {
@@ -2169,7 +2169,7 @@ status_t safegraphs_load_columns_(index_type_& index, safegraphs_saved_columns<n
  */
 template <typename index_type_, typename codec_type_, typename executor_type_,
           typename progress_type_ = dummy_progress_t, typename allocator_type_ = std::allocator<byte_t>>
-    requires interchange_value_codec<codec_type_>
+    requires an_interchange_value_codec<codec_type_>
 status_t safegraphs_read_index(bytes_view_t monolith, index_type_& index, codec_type_ const& codec,
                                executor_type_& executor, load_config_t const& config, progress_type_&& progress = {},
                                allocator_type_ allocator = {}) noexcept {
@@ -2278,7 +2278,7 @@ status_t safegraphs_read_index(bytes_view_t monolith, index_type_& index, codec_
  */
 template <typename index_type_, typename codec_type_, typename executor_type_,
           typename progress_type_ = dummy_progress_t, typename allocator_type_ = std::allocator<byte_t>>
-    requires interchange_value_codec<codec_type_>
+    requires an_interchange_value_codec<codec_type_>
 status_t safegraphs_read_index(std::string_view path, index_type_& index, codec_type_ const& codec,
                                executor_type_& executor, load_config_t const& config, progress_type_&& progress = {},
                                allocator_type_ allocator = {}) noexcept {

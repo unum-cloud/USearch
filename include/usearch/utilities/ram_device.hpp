@@ -153,7 +153,7 @@ struct forkunion_allocator {
 /** The byte specialization every container and index places its storage through. */
 using forkunion_allocator_t = forkunion_allocator<byte_t>;
 
-static_assert(buffer_allocator<forkunion_allocator_t>);
+static_assert(a_buffer_allocator<forkunion_allocator_t>);
 static_assert(std::allocator_traits<forkunion_allocator_t>::propagate_on_container_move_assignment::value &&
               std::allocator_traits<forkunion_allocator_t>::propagate_on_container_swap::value &&
               !std::allocator_traits<forkunion_allocator_t>::is_always_equal::value);

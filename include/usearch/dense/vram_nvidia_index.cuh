@@ -206,7 +206,7 @@ bool vram_nvidia_kernels<vector_dtype_, kernels_type_, wait_type_, cache_hints_t
  *  one past it of each. Per 64 bytes of depth a lane loads one fragment of each of its queries and
  *  rows, its first two words feeding one kit tile step and its last two the next; a kit without a
  *  tile step dots whole fragments instead, gathered from the four lanes holding them. */
-template <vram_quads_kit kit_>
+template <a_vram_quads_kit kit_>
 __device__ __forceinline__ void cuda_scan_products(typename kit_::fragment_t const* (&query_rows)[2][2],
                                                    typename kit_::fragment_t const* (&rows)[4], u32_t row_fragments,
                                                    u32_t group, u32_t quarter,
@@ -299,7 +299,7 @@ __device__ __forceinline__ void cuda_scan_products(typename kit_::fragment_t con
  *  metric, as a walk's do. @p resident_blocks_ is the grid's share of every multiprocessor, which
  *  the host split the ranges by.
  */
-template <vram_quads_kit kit_, nk_kernel_kind_t kernel_, u32_t resident_blocks_>
+template <a_vram_quads_kit kit_, nk_kernel_kind_t kernel_, u32_t resident_blocks_>
 __device__ __forceinline__ void cuda_scan(vram_search_view<kit_> const& view, vram_search_sink<kit_> const& sink) {
     using fragment_t = typename kit_::fragment_t;
     using dot_t = typename kit_::dot_t;
@@ -545,7 +545,7 @@ __device__ __forceinline__ void cuda_scan(vram_search_view<kit_> const& view, vr
  *  goes through @ref unum::usearch::dense::vram_scored_pair, as the SIMT gather's do. Hubs and
  *  entries are read in place, as a scan reads its queries and rows.
  */
-template <vram_quads_kit kit_, nk_kernel_kind_t kernel_>
+template <a_vram_quads_kit kit_, nk_kernel_kind_t kernel_>
 __device__ __forceinline__ void cuda_gather_neighborhoods(vram_gather_neighborhoods_view<kit_> const& view) {
     using fragment_t = typename kit_::fragment_t;
     using norms_t = typename kit_::norms_t;
@@ -647,7 +647,7 @@ __device__ __forceinline__ void cuda_gather_neighborhoods(vram_gather_neighborho
 
 /** The tile gather under the metric of @p view 's storage, fixed per instantiation, as the scan
  *  picks its own: each kit's last metric is the one its @c distance falls back to. */
-template <vram_quads_kit kit_>
+template <a_vram_quads_kit kit_>
 __device__ __forceinline__ void cuda_gather_by_metric(vram_gather_neighborhoods_view<kit_> const& view) {
     if constexpr (std::is_same_v<typename kit_::scalar_t, nk::u1x8_t>) switch (view.storage.geometry.kernel) {
         case nk_kernel_dot_k: cuda_gather_neighborhoods<kit_, nk_kernel_dot_k>(view); break;
@@ -673,7 +673,7 @@ __device__ __forceinline__ void cuda_gather_by_metric(vram_gather_neighborhoods_
  *  scan merges its matches. Distances go through @ref unum::usearch::dense::vram_scored_pair, as
  *  the SIMT mates' do.
  */
-template <vram_quads_kit kit_, nk_kernel_kind_t kernel_>
+template <a_vram_quads_kit kit_, nk_kernel_kind_t kernel_>
 __device__ __forceinline__ void cuda_score_mates(vram_flat_view<kit_> const& storage, u32_t const* entries, u32_t count,
                                                  vram_scored_node<node_id_t>* staged,
                                                  vram_scored_node<node_id_t>* mates,
@@ -805,7 +805,7 @@ __device__ __forceinline__ void cuda_score_mates(vram_flat_view<kit_> const& sto
  *  with every row read in place. */
 template <nk_kernel_kind_t kernel_>
 struct cuda_tile_mates {
-    template <vram_quads_kit kit_, typename warp_type_>
+    template <a_vram_quads_kit kit_, typename warp_type_>
     static __device__ __forceinline__ void score(vram_restitch_view<kit_> const& view, u32_t const* entries,
                                                  u32_t count, byte_t* shared, vram_scored_node<node_id_t>* mates,
                                                  u32_t warp, u32_t lane, vram_telemetry_t& telemetry) noexcept {
@@ -818,7 +818,7 @@ struct cuda_tile_mates {
 
 /** The restitch with tile mates under the metric of @p view 's storage, picked as
  *  @ref cuda_gather_by_metric picks it. */
-template <vram_quads_kit kit_, vram_schedule<kit_> schedule_, u32_t resident_blocks_>
+template <a_vram_quads_kit kit_, a_vram_schedule<kit_> schedule_, u32_t resident_blocks_>
 __device__ __forceinline__ void cuda_restitch(vram_restitch_view<kit_> const& view) {
     if constexpr (std::is_same_v<typename kit_::scalar_t, nk::u1x8_t>) switch (view.storage.geometry.kernel) {
         case nk_kernel_dot_k:
@@ -947,16 +947,14 @@ __global__ void __launch_bounds__(vram_warps_per_block_k * 32,
     vram_arguments_t const& arguments = launch.records;
     vram_graph_t const& graph = arguments.graph;
     cuda_kernel_prologue<vram_dense_kernel_t, kernel_, capability_, resident_blocks>(launch);
-    if constexpr (kernel_ == vram_dense_kernel_t::search_indexer_k) {
-        // Only the floating dtypes take indexer heads; others export a plain walk never launched.
-        if constexpr (floating_scalar<typename kit_t::scalar_t>)
-            vram_walk_rung<kit_t, schedule_t, slots_, resident_blocks>(vram_view<kit_t>(arguments.search),
-                                                                       vram_view<kit_t>(arguments.search_sink),
-                                                                       vram_view<kit_t, warp_t>(arguments.rescoring));
-        else
-            vram_walk_rung<kit_t, schedule_t, slots_, resident_blocks>(
-                vram_view<kit_t>(arguments.search), vram_view<kit_t>(arguments.search_sink), vram_no_rescoring {});
-    }
+    // Only the floating dtypes take indexer heads; others export a plain walk never launched.
+    if constexpr (kernel_ == vram_dense_kernel_t::search_indexer_k && a_floating_scalar<typename kit_t::scalar_t>)
+        vram_walk_rung<kit_t, schedule_t, slots_, resident_blocks>(vram_view<kit_t>(arguments.search),
+                                                                   vram_view<kit_t>(arguments.search_sink),
+                                                                   vram_view<kit_t, warp_t>(arguments.rescoring));
+    else if constexpr (kernel_ == vram_dense_kernel_t::search_indexer_k)
+        vram_walk_rung<kit_t, schedule_t, slots_, resident_blocks>(
+            vram_view<kit_t>(arguments.search), vram_view<kit_t>(arguments.search_sink), vram_no_rescoring {});
     else if constexpr (kernel_ == vram_dense_kernel_t::scan_k) {
         vram_search_view<kit_t> const view = vram_view<kit_t>(arguments.search);
         vram_search_sink<kit_t> const sink = vram_view<kit_t>(arguments.search_sink);

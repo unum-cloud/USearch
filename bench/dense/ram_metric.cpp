@@ -5,15 +5,15 @@
  *  @brief Throughput benchmarks for @c dense/ram_metric.hpp distance functions for 1-to-1, 1-to-4,
  *      and tiled kernels against NumKong's monolithic 1-to-1 reference.
  *
- *  Mirrors the structure of @c test/dense/ram_metric.hpp - the @c dense::quads_supported concept
- *  gates each cell so unadapted (kernel, scalar, caps) tuples never run, and new kits or ladders
- *  light up matching rows automatically. Three flavors per supported tuple: USearch's @c distance
- *  (1-to-1), USearch's @c distances (1-to-4 fan-out), and NumKong's @c nk::dot / @c nk::angular /
- *  @c nk::euclidean / @c nk::hamming / @c nk::jaccard monolithic baseline using the
- *  @c nk::default_capabilities() mask (run once per kernel-scalar, since the baseline isn't
- *  caps-parameterized). Where a tile engine is adapted and the machine offers it, a fourth row
- *  measures one 16×16 tile of distances per call - gather, pack, and the depth walk - so the tile
- *  engine's primitive throughput reads next to 256 quads-path distances.
+ *  Mirrors the structure of @c test/dense/ram_metric.hpp: the concept
+ *  @c dense::a_quads_supported_kernel gates each cell so unadapted kernel, scalar and capability
+ *  tuples never run, and new kits or ladders light up matching rows automatically. Three flavors
+ *  per supported tuple: USearch's @c distance (1-to-1), USearch's @c distances (1-to-4 fan-out),
+ *  and NumKong's @c nk::dot / @c nk::angular / @c nk::euclidean / @c nk::hamming / @c nk::jaccard
+ *  monolithic baseline using the @c nk::default_capabilities() mask (run once per kernel-scalar,
+ *  since the baseline isn't caps-parameterized). Where a tile engine is adapted and the machine
+ *  offers it, a fourth row measures one 16×16 tile of distances per call - gather, pack, and the
+ *  depth walk - so the tile engine's primitive throughput reads next to 256 quads-path distances.
  *
  *  Rows are named <tt>dense.ram_metric.<kernel>.<scalar>.<caps>.<shape>.<dimensions></tt>, like
  *  <tt>dense.ram_metric.dot.f32.neon.1to4.768d</tt>, and every setting has a default:
@@ -217,12 +217,13 @@ constexpr std::array<std::size_t, 3> dimensions_to_bench = {256, 768, 1536};
 /** True iff USearch has any kit for this (kernel, scalar) pair across capability
  *  tiers - serial is the always-available floor, so checking it covers the matrix. */
 template <nk_kernel_kind_t kernel_, typename scalar_>
-concept quads_in_scope = quads_supported<kernel_, scalar_, nk_cap_serial_k>;
+concept a_quads_scoped_kernel = a_quads_supported_kernel<kernel_, scalar_, nk_cap_serial_k>;
 
 /** True iff a tile engine is compiled for this tuple - the tiles ladder always names
  *  a kit, so the gate is its @c has_tiles_k verdict, never the alias's existence. */
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
-concept tiles_supported = quads_supported<kernel_, scalar_, caps_> && tiles_ladder<scalar_, caps_>::has_tiles_k;
+concept a_tiles_supported_kernel = a_quads_supported_kernel<kernel_, scalar_, caps_> &&
+                                   tiles_ladder<scalar_, caps_>::has_tiles_k;
 
 /** Whether this machine runs every bit of @p caps_; serial always runs. */
 template <nk_capability_t caps_>
@@ -443,7 +444,7 @@ static void measure_baseline(loop_t& loop, environment_t const& env, std::size_t
  *  matrix engine, then the quads kit's finalizer - comparable against as many quads-path
  *  distances. */
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
-    requires tiles_supported<kernel_, scalar_, caps_>
+    requires a_tiles_supported_kernel<kernel_, scalar_, caps_>
 static void measure_distances_tile(loop_t& loop, environment_t const& env, std::size_t dim) {
     if (!runs_on<caps_>(env.machine)) return loop.skip("capabilities missing at runtime");
     nk_capability_t available = 0;
@@ -503,7 +504,7 @@ static void measure_distances_tile(loop_t& loop, environment_t const& env, std::
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
 static void bench_quads(environment_t const& env, std::string_view kernel_name, std::string_view scalar_name,
                         std::string_view caps_name) {
-    if constexpr (quads_supported<kernel_, scalar_, caps_>)
+    if constexpr (a_quads_supported_kernel<kernel_, scalar_, caps_>)
         for (std::size_t const dim : dimensions_to_bench) {
             run_benchmark(env,
                           fmt::format("dense.ram_metric.{}.{}.{}.1to1.{}d", kernel_name, scalar_name, caps_name, dim),
@@ -518,7 +519,7 @@ static void bench_quads(environment_t const& env, std::string_view kernel_name, 
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
 static void bench_tiles(environment_t const& env, std::string_view kernel_name, std::string_view scalar_name,
                         std::string_view caps_name) {
-    if constexpr (tiles_supported<kernel_, scalar_, caps_>)
+    if constexpr (a_tiles_supported_kernel<kernel_, scalar_, caps_>)
         for (std::size_t const dim : dimensions_to_bench)
             run_benchmark(env,
                           fmt::format("dense.ram_metric.{}.{}.{}.tiles.{}d", kernel_name, scalar_name, caps_name, dim),
@@ -528,7 +529,7 @@ static void bench_tiles(environment_t const& env, std::string_view kernel_name, 
 template <nk_kernel_kind_t kernel_, typename scalar_>
 static void bench_kernel(environment_t const& env, std::string_view kernel_name, std::string_view scalar_name) {
     // The NumKong baseline is caps-agnostic: its `nk::default_capabilities()` mask picks the best backend it holds.
-    if constexpr (quads_in_scope<kernel_, scalar_>)
+    if constexpr (a_quads_scoped_kernel<kernel_, scalar_>)
         for (std::size_t const dim : dimensions_to_bench)
             run_benchmark(env, fmt::format("dense.ram_metric.{}.{}.numkong.1to1.{}d", kernel_name, scalar_name, dim),
                           measure_baseline<kernel_, scalar_>, dim);

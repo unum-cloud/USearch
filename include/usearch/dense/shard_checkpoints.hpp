@@ -599,16 +599,16 @@ struct [[nodiscard]] shard_save_plan {
 /** Whether the load plans of @p index_type_ take neighbor rows narrower than the index's own,
  *  padding them with empty slots - those whose columns name their width. */
 template <typename index_type_>
-concept widens_neighbors = requires(typename index_type_::columns_view_t columns) { columns.connectivity; };
+concept a_neighbor_widening_index = requires(typename index_type_::columns_view_t columns) { columns.connectivity; };
 
 /** Whether the load plans of @p index_type_ read their tasks a run at a time straight into
  *  chunks they cover unfilled at planning, filing each run's keys themselves - the host's plans,
  *  where a reservation ahead of the plan would only fill rows that the runs then overwrite. */
 template <typename index_type_>
-concept loads_in_runs = requires(typename index_type_::load_plan_t const& plan) { plan.run_rows; };
+concept a_run_loading_index = requires(typename index_type_::load_plan_t const& plan) { plan.run_rows; };
 
-/** A part's columns as a task of a plan that @ref loads_in_runs reads them: the column-sources
- *  twin of an index's @c columns_view_t. */
+/** A part's columns as a task of the plan of an @ref a_run_loading_index reads them: the
+ *  column-sources twin of an index's @c columns_view_t. */
 struct part_column_sources_t {
     column_source_t vectors;
     column_source_t neighbors;
@@ -625,8 +625,9 @@ struct part_column_sources_t {
  *  Each part goes to a shard of its own, placed or opened for it, and the shards past the parts
  *  stay empty; @ref finish publishes every shard at once. Every shard's claim word stays closed
  *  from opening until the plan finishes or dies, so no insertion goes beside it. A dying plan
- *  releases every claim and publishes nothing. Where the shards @ref loads_in_runs, every part's
- *  file opens a second time past the page cache, and each thread reads its runs straight from it.
+ *  releases every claim and publishes nothing. Where each shard is @ref a_run_loading_index, every
+ *  part's file opens a second time past the page cache, and each thread reads its own runs
+ *  straight from that second file.
  */
 template <typename shards_type_, typename residency_type_>
 struct [[nodiscard]] shard_load_plan {
@@ -679,8 +680,8 @@ struct [[nodiscard]] shard_load_plan {
      *
      *  The reservation comes from @p config, and part @c p goes to live shard @c p, which the
      *  residency opens past the placed ones. Every shard's claim word closes first, and the plan's
-     *  death reopens them. Shards that @ref widens_neighbors take parts of a narrower connectivity,
-     *  their rows padded with empty slots.
+     *  death reopens them. A shard that is @ref a_neighbor_widening_index takes parts of a narrower
+     *  connectivity, their rows padded with empty slots.
      *
      *  @par Statuses:
      *  - @c uninitialized_k No shard is placed, or on VRAM a shard never grew.
@@ -706,7 +707,7 @@ struct [[nodiscard]] shard_load_plan {
         if constexpr (requires { plan.residency_.open_sources(to_writable_span(plan.mappings_)); })
             if (status_t const opened = plan.residency_.open_sources(to_writable_span(plan.mappings_)); failed(opened))
                 return {{}, opened};
-        if constexpr (loads_in_runs<index_t>) {
+        if constexpr (a_run_loading_index<index_t>) {
             if (failed(plan.directs_.reserve_exactly(plan.mappings_.size())))
                 return {{}, status_code_t::out_of_memory_k};
             for (mapped_file_t const& mapping : plan.mappings_) plan.directs_.push_back_reserved(mapping.open_direct());
@@ -835,7 +836,7 @@ struct [[nodiscard]] shard_load_plan {
             part.header.data_of(part.monolith, part.header.value),
             part.header.data_of(part.monolith, part.header.neighbors),
             norms_column_of(part.header, part.monolith, shard_norms_dtype(*shards_))};
-        if constexpr (widens_neighbors<index_t>)
+        if constexpr (a_neighbor_widening_index<index_t>)
             columns.connectivity = regular_width(part.header.neighbors.shape).value_or(0);
         std::size_t const stored_bytes = part.header.key.row_bytes();
         bytes_view_t const part_keys = keys_of_(task.part);
@@ -909,7 +910,7 @@ struct [[nodiscard]] shard_load_plan {
         if (!shards_) return status_code_t::uninitialized_k;
         for (std::size_t shard = 0; shard != plans_.size(); ++shard) {
             // Every plan finishes, an empty one included, since finishing releases the claim.
-            if constexpr (!loads_in_runs<index_t>) plans_[shard].publish_keys();
+            if constexpr (!a_run_loading_index<index_t>) plans_[shard].publish_keys();
             if (status_t const finished = plans_[shard].finish(); failed(finished)) return finished;
         }
         for (std::size_t shard = 0; shard != plans_.size(); ++shard)
@@ -986,7 +987,7 @@ struct [[nodiscard]] shard_load_plan {
         // shards that widen rows have room for them.
         std::size_t const shard_connectivity = shards[0].index->connectivity();
         if (dimensions != shards[0].index->dimensions() || connectivity > shard_connectivity ||
-            (connectivity != shard_connectivity && !widens_neighbors<index_t>))
+            (connectivity != shard_connectivity && !a_neighbor_widening_index<index_t>))
             return {status_code_t::config_mismatch_k, "Shard geometry differs from the parts"};
         if (!shards.capacity() && !total && !config.capacity) return status_code_t::success_k;
 
@@ -1015,8 +1016,9 @@ struct [[nodiscard]] shard_load_plan {
         // A device's plans need their storage grown ahead, while plans that load in runs cover
         // their part's rows unfilled: ahead of those a shard takes its ceiling alone, and after
         // them the config's share past its part.
-        status_t const reserved_ahead = loads_in_runs<index_t> ? reserve_live([](std::size_t) noexcept { return 0; })
-                                                               : reserve_live(share_of);
+        status_t const reserved_ahead = a_run_loading_index<index_t>
+                                            ? reserve_live([](std::size_t) noexcept { return 0; })
+                                            : reserve_live(share_of);
         if (failed(reserved_ahead)) return reserved_ahead;
 
         if (failed(plans_.reserve_exactly(shards_count))) return status_code_t::out_of_memory_k;
@@ -1027,7 +1029,7 @@ struct [[nodiscard]] shard_load_plan {
             if (failed(status)) return status;
             plans_.push_back_reserved(std::move(inner));
         }
-        return loads_in_runs<index_t> ? reserve_live(share_of) : status_code_t::success_k;
+        return a_run_loading_index<index_t> ? reserve_live(share_of) : status_code_t::success_k;
     }
 
     /** Copies every part's key column off device @p device into @c keys_, in part order, so a
@@ -1081,7 +1083,7 @@ struct [[nodiscard]] shard_load_plan {
     growing_buffer<mapped_file_t, forkunion_allocator_t> mappings_;
 
     /** Each part's file opened again past the page cache, empty where it would not open, or none
-     *  at all where the shards do not @ref loads_in_runs or the parts came from a buffer. */
+     *  at all where the shards do not @ref a_run_loading_index or the parts came from a buffer. */
     growing_buffer<seekable_file_t, forkunion_allocator_t> directs_;
 
     /** The checkpoint's parts, vetted at opening. */

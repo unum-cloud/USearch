@@ -59,8 +59,8 @@ struct vram_entry_t {
  *  @ref unum::usearch::basic::vram_lanes_per_entry and @ref unum::usearch::basic::vram_score tell
  *  apart. A round's entries have no order: results go by slot, and ties break by node ID. */
 template <typename kit_>
-concept vram_basic_kit = requires(typename kit_::query_t const& query, vram_entry_t entry, byte_t* span,
-                                  byte_t const* parameters, nk_kernel_kind_t kernel, u32_t lane) {
+concept a_vram_basic_kit = requires(typename kit_::query_t const& query, vram_entry_t entry, byte_t* span,
+                                    byte_t const* parameters, nk_kernel_kind_t kernel, u32_t lane) {
     typename kit_::warp_t;
     typename kit_::scan_t;
     typename kit_::query_t;
@@ -75,7 +75,7 @@ concept vram_basic_kit = requires(typename kit_::query_t const& query, vram_entr
 
 /** Lays @p entry out as @p kit_ 's query in @p span, handing a kit with runtime parameters the
  *  ones at @p parameters; every lane of the warp calls it. */
-template <vram_basic_kit kit_>
+template <a_vram_basic_kit kit_>
 __device__ __forceinline__ typename kit_::query_t vram_prepare(byte_t const* parameters, vram_entry_t entry,
                                                                byte_t* span, u32_t lane) noexcept {
     if constexpr (requires { kit_::prepare(parameters, entry, span, lane); })
@@ -85,7 +85,7 @@ __device__ __forceinline__ typename kit_::query_t vram_prepare(byte_t const* par
 
 /** Lanes @p kit_ scores one entry with on @p rung_: its @c lanes_per_entry_k at rung zero, its
  *  @c lanes_per_row of the rung past it. */
-template <vram_basic_kit kit_, u32_t rung_>
+template <a_vram_basic_kit kit_, u32_t rung_>
 constexpr u32_t vram_lanes_per_entry() noexcept {
     if constexpr (rung_ == 0) return kit_::lanes_per_entry_k;
     else return kit_::lanes_per_row(rung_);
@@ -93,7 +93,7 @@ constexpr u32_t vram_lanes_per_entry() noexcept {
 
 /** The distance @p kit_ scores on @p rung_ under @p kernel from @p query to @p entry, exact within
  *  @p radius; every lane of the entry's group calls it. */
-template <vram_basic_kit kit_, u32_t rung_>
+template <a_vram_basic_kit kit_, u32_t rung_>
 __device__ __forceinline__ distance_t vram_score(nk_kernel_kind_t kernel, typename kit_::query_t const& query,
                                                  vram_entry_t entry, distance_t radius, u32_t lane) noexcept {
     if constexpr (rung_ == 0) return kit_::score(kernel, query, entry, radius, lane);
@@ -276,7 +276,7 @@ __device__ __forceinline__ void vram_split_by_bytes(vram_ragged_view<node_id_typ
 
 /** Scores each lane's entry in place on @p rung_ of @p kit_, the schedule of every kit whose lane
  *  scores an entry alone, so a warp walks one query by itself. */
-template <vram_basic_kit kit_, u32_t rung_, typename node_id_type_>
+template <a_vram_basic_kit kit_, u32_t rung_, typename node_id_type_>
 struct vram_lane_schedule {
     inline static constexpr u32_t lanes_per_entry_k = 1;
 
@@ -330,7 +330,7 @@ struct vram_lane_schedule {
  *  @return How many it staged: zero once every published node of the range is visited, or the
  *      visited set saturated.
  */
-template <vram_basic_kit kit_, typename node_id_type_, vram_frontier frontier_>
+template <a_vram_basic_kit kit_, typename node_id_type_, a_vram_frontier frontier_>
 __device__ __forceinline__ u32_t vram_sample_landmarks( //
     vram_ragged_view<node_id_type_> const& storage, node_id_type_ sampling_first, node_id_type_ sampling_bound,
     vram_visited_set<typename kit_::warp_t, node_id_type_>& visited, frontier_ const& frontier,
@@ -374,7 +374,7 @@ __device__ __forceinline__ u32_t vram_sample_landmarks( //
  *  first. Past the full candidates' worst rank nothing enters, so each entry is scored within it;
  *  unfilled candidates bound nothing. No dedup: the exact visited set upstream stages every ID
  *  once. */
-template <vram_basic_kit kit_, typename schedule_, vram_frontier frontier_, typename node_id_type_>
+template <a_vram_basic_kit kit_, typename schedule_, a_vram_frontier frontier_, typename node_id_type_>
 __device__ __forceinline__ void vram_score_into_frontier( //
     vram_ragged_view<node_id_type_> const& storage, schedule_& schedule, typename kit_::query_t const& query,
     node_id_type_ const* gathered_ids, u32_t gathered_count, vram_warp_context<frontier_>& context,
@@ -402,7 +402,7 @@ __device__ __forceinline__ void vram_score_into_frontier( //
  *  dense walk does: landmarks from @b [sampling_first,sampling_bound), a transiently locked
  *  candidate held through one other expansion and dropped if still locked then, and no neighbor at
  *  or past @p first_invisible_id followed. Read-only on the graph. */
-template <vram_basic_kit kit_, typename schedule_, vram_frontier frontier_, typename node_id_type_>
+template <a_vram_basic_kit kit_, typename schedule_, a_vram_frontier frontier_, typename node_id_type_>
 __device__ __forceinline__ void vram_search_ahead( //
     vram_ragged_view<node_id_type_> const& storage, schedule_& schedule, typename kit_::query_t const& query,
     node_id_type_ sampling_first, node_id_type_ sampling_bound, node_id_type_ first_invisible_id,
@@ -477,7 +477,7 @@ __device__ __forceinline__ void vram_search_ahead( //
 
 /** Greedy best-first walk from random published landmarks toward @p query: a fresh frontier handed
  *  to @ref vram_search_ahead. */
-template <vram_basic_kit kit_, typename schedule_, vram_frontier frontier_, typename node_id_type_>
+template <a_vram_basic_kit kit_, typename schedule_, a_vram_frontier frontier_, typename node_id_type_>
 __device__ __forceinline__ void vram_search_around( //
     vram_ragged_view<node_id_type_> const& storage, schedule_& schedule, typename kit_::query_t const& query,
     node_id_type_ sampling_bound, node_id_type_ first_invisible_id,
@@ -503,7 +503,7 @@ struct vram_keep_diverse_t {
 
     /** Prepares each candidate as the pivot in @p pivot_span, which scores the kept ones through
      *  @p schedule, exiting each candidate on its first violation. */
-    template <vram_basic_kit kit_, typename schedule_, typename node_id_type_>
+    template <a_vram_basic_kit kit_, typename schedule_, typename node_id_type_>
     static __device__ __forceinline__ u32_t select( //
         vram_ragged_view<node_id_type_> const& storage, schedule_& schedule, typename kit_::query_t const&,
         byte_t* pivot_span, node_id_type_ const* candidate_ids, f32_t const* candidate_distances,
@@ -558,7 +558,8 @@ struct vram_keep_diverse_t {
  *  @p selection.kept_positions.
  *  @return The kept count.
  */
-template <vram_basic_kit kit_, typename selector_, typename schedule_, vram_frontier frontier_, typename node_id_type_>
+template <a_vram_basic_kit kit_, typename selector_, typename schedule_, a_vram_frontier frontier_,
+          typename node_id_type_>
 __device__ __forceinline__ u32_t vram_select_neighbors( //
     vram_ragged_view<node_id_type_> const& storage, schedule_& schedule, typename kit_::query_t const& query,
     byte_t* pivot_span, u32_t selection_nodes, vram_selection_scratch<node_id_type_> selection,
@@ -609,7 +610,8 @@ __device__ __forceinline__ void vram_thread_back_links(vram_build_view<node_id_t
 /** Inserts the node identified by @p new_node_id, whose bytes already sit in the values tape:
  *  writes its two entry offsets, walks the published graph, selects diverse neighbors, publishes
  *  with one release store, and threads its picks for the back-link launch, one warp per node. */
-template <vram_basic_kit kit_, typename selector_ = vram_keep_diverse_t, typename schedule_, vram_frontier frontier_,
+template <a_vram_basic_kit kit_, typename selector_ = vram_keep_diverse_t, typename schedule_,
+          a_vram_frontier frontier_,
           typename node_id_type_>
 __device__ __forceinline__ void vram_insert_one( //
     vram_build_view<node_id_type_> const& view, schedule_& schedule, node_id_type_ new_node_id,
@@ -664,7 +666,7 @@ __device__ __forceinline__ void vram_insert_one( //
  *  reads the row plainly, while walks on other streams may read it throughout: every slot changes
  *  by one relaxed store and slot 0 last, with a release.
  */
-template <vram_basic_kit kit_, typename selector_, typename schedule_, typename node_id_type_>
+template <a_vram_basic_kit kit_, typename selector_, typename schedule_, typename node_id_type_>
 __device__ __forceinline__ void vram_back_link_one( //
     vram_build_view<node_id_type_> const& view, schedule_& schedule, node_id_type_ node_id, byte_t* query_span,
     byte_t* pivot_span, vram_selection_scratch<node_id_type_> selection, vram_telemetry_t& telemetry,
@@ -770,7 +772,8 @@ __device__ __forceinline__ void vram_back_link_one( //
  *  reachable from one another: walks from the row's own neighbors over every node below the view's
  *  sampling bound and selects again, threads the new picks, and rewrites the row in place, tail
  *  slots relaxed and slot 0 last with a release, so walks on other streams read either row. */
-template <vram_basic_kit kit_, typename selector_ = vram_keep_diverse_t, typename schedule_, vram_frontier frontier_,
+template <a_vram_basic_kit kit_, typename selector_ = vram_keep_diverse_t, typename schedule_,
+          a_vram_frontier frontier_,
           typename node_id_type_>
 __device__ __forceinline__ void vram_reselect_one( //
     vram_build_view<node_id_type_> const& view, schedule_& schedule, node_id_type_ node_id,
@@ -818,7 +821,7 @@ __device__ __forceinline__ void vram_reselect_one( //
 /** One query's full walk: prepares the query into its span, walks the graph, and writes its nearest
  *  @c count IDs and distances, ascending, sentinel IDs past the live prefix. Safe against
  *  concurrent insertions: the walk gates on every slot-0 word and never writes the graph. */
-template <vram_basic_kit kit_, typename schedule_, vram_frontier frontier_, typename node_id_type_>
+template <a_vram_basic_kit kit_, typename schedule_, a_vram_frontier frontier_, typename node_id_type_>
 __device__ __forceinline__ void vram_walk_one( //
     vram_search_view<node_id_type_> const& view, schedule_& schedule, u32_t query_index, byte_t* query_span,
     vram_visited_set<typename kit_::warp_t, node_id_type_>& visited, frontier_ frontier, node_id_type_* gathered_ids,
@@ -917,7 +920,7 @@ __device__ __forceinline__ u32_t vram_span_of(u32_t const* starts, u32_t count, 
  *
  *  An entry that no distance reached joins its run's first hub.
  */
-template <vram_basic_kit kit_, typename schedule_, typename node_id_type_>
+template <a_vram_basic_kit kit_, typename schedule_, typename node_id_type_>
 __device__ __forceinline__ void vram_gather_one(vram_round_view<node_id_type_> const& view, schedule_& schedule,
                                                 u32_t position, byte_t* query_span, vram_telemetry_t& telemetry,
                                                 u32_t lane) noexcept {
@@ -964,7 +967,7 @@ __device__ __forceinline__ void vram_gather_one(vram_round_view<node_id_type_> c
  *  slot 0 last with a release, so walks on other streams read it whole, and counted once in the
  *  changed bits; its additions and drops add to @p added and @p dropped, identical on every lane.
  */
-template <vram_basic_kit kit_, typename selector_, typename schedule_, typename node_id_type_>
+template <a_vram_basic_kit kit_, typename selector_, typename schedule_, typename node_id_type_>
 __device__ __forceinline__ void vram_restitch_one(vram_round_view<node_id_type_> const& view, schedule_& schedule,
                                                   u32_t position, byte_t* query_span, byte_t* pivot_span,
                                                   vram_selection_scratch<node_id_type_> selection,

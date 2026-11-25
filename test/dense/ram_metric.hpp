@@ -11,8 +11,8 @@
  *  metric a runtime argument of its epilogue. The test:
  *
  *  1. Walks every stored scalar in shrinking dynamic range and every @c (kernel,scalar,capability)
- *     tuple inside @c test_ram_metric. The @c dense::quads_supported concept gates each call, so
- *     combinations not yet adapted compile to no-ops and new kits light up their cells.
+ *     tuple inside @c test_ram_metric. The concept @c dense::a_quads_supported_kernel gates each
+ *     call, so combinations not yet adapted compile to no-ops and new kits light up their cells.
  *  2. For each supported tuple and three dimensions, computes a baseline distance with NumKong's
  *     monolithic API - @c nk::dot returns the raw inner product, wrapped to <tt>1 - dot</tt> for the dot
  *     kernel; @c nk::sqeuclidean is compared to USearch's squared euclidean), then calls
@@ -58,7 +58,8 @@ constexpr std::array<std::size_t, 3> dimensions_to_test = {7, 64, 257};
  *  kit - @c no_tiles_kit_t at minimum - so the gate is its @c has_tiles_k verdict, never
  *  the alias's existence. */
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
-concept tiles_supported = quads_supported<kernel_, scalar_, caps_> && tiles_ladder<scalar_, caps_>::has_tiles_k;
+concept a_tiles_supported_kernel = a_quads_supported_kernel<kernel_, scalar_, caps_> &&
+                                   tiles_ladder<scalar_, caps_>::has_tiles_k;
 
 /** Populates the input @p vec with small scalars - universally representable in any stored datatype
  *  from BF16 to E2M1 nibble-sized floats, but at a different cyclic rotation. */
@@ -118,7 +119,7 @@ static void check_quads(std::size_t /*dim*/) noexcept {}
 /** Runs one (kernel, scalar, caps, dim) check - returns the number of mismatches across both the
  *  1-to-1 and 1-to-4 paths. Body instantiates only for adapted tuples. */
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
-    requires quads_supported<kernel_, scalar_, caps_>
+    requires a_quads_supported_kernel<kernel_, scalar_, caps_>
 static void check_quads(std::size_t dim) noexcept {
     // With a single capability bit requested, exactly one cascade row can match, so the
     // winner is either that tier or the serial fallback. Anything else means a row names
@@ -198,7 +199,7 @@ static void check_tiles() noexcept {}
  *  quads kit under the runtime metric, must match the 1-to-1 distance. Skips silently when the
  *  machine lacks the engine at runtime. */
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
-    requires tiles_supported<kernel_, scalar_, caps_>
+    requires a_tiles_supported_kernel<kernel_, scalar_, caps_>
 static void check_tiles() noexcept {
     nk_capability_t available = 0;
     if (nk_capabilities_enabled_cpu(&available) != nk_success_k || (available & caps_) != caps_) return;

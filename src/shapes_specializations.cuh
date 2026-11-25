@@ -60,7 +60,7 @@ auto shapes_metric_factory(usearch_shapes_metric_t metric) noexcept {
 /** One shapes alternative: the basic shards over packs of @p scalar_type_, the kind they score
  *  with, and the kits @p cpu_class_ picks; verbs defined below the class, like the sequence ones.
  *  Checkpoints and refinements serve an index of one shard. */
-template <nk::shapes_dtype scalar_type_, cpu_class_t cpu_class_>
+template <nk::a_shapes_dtype scalar_type_, cpu_class_t cpu_class_>
 struct shapes_ram_variant {
     using executor_t = util::ram_executor_t;
     template <typename word_type_>
@@ -172,7 +172,7 @@ struct shapes_ram_variant {
 /** Packs entry @p entry of @p tape into @p packed under @p allocator, casting the caller's scalar
  *  into @p scalar_type_ with @p kit_type_ through @p scratch where they differ; refuses a count
  *  other than a frozen nonzero @p points. */
-template <nk::shapes_dtype scalar_type_, typename kit_type_, typename packed_type_, typename allocator_type_>
+template <nk::a_shapes_dtype scalar_type_, typename kit_type_, typename packed_type_, typename allocator_type_>
 util::status_t pack_entry(counted_tape_t const& tape, std::size_t entry, std::size_t points, packed_type_& packed,
                           allocator_type_ const& allocator, thread_allocator_t const& scratch) noexcept {
     constexpr nk_dtype_t dtype_k = scalar_type_::dtype();
@@ -200,7 +200,7 @@ util::status_t pack_entry(counted_tape_t const& tape, std::size_t entry, std::si
     return util::status_code_t::success_k;
 }
 
-template <nk::shapes_dtype scalar_type_, cpu_class_t cpu_class_>
+template <nk::a_shapes_dtype scalar_type_, cpu_class_t cpu_class_>
 util::expected<traversal_stats_t> shapes_ram_variant<scalar_type_, cpu_class_>::insert(
     usearch_keys_view_t keys, caller_tape_t shapes, insert_config_t config, executor_t& executor,
     progress_ticks_t& ticks) noexcept {
@@ -218,7 +218,7 @@ util::expected<traversal_stats_t> shapes_ram_variant<scalar_type_, cpu_class_>::
     return {inserted, insert_status};
 }
 
-template <nk::shapes_dtype scalar_type_, cpu_class_t cpu_class_>
+template <nk::a_shapes_dtype scalar_type_, cpu_class_t cpu_class_>
 util::expected<traversal_stats_t> shapes_ram_variant<scalar_type_, cpu_class_>::search(
     counted_tape_t queries, usearch_matches_view_t const* hints, matches_outputs_t& outputs, search_config_t config,
     predicate_t const& predicate, executor_t& executor, progress_ticks_t& ticks) noexcept {
@@ -238,7 +238,7 @@ util::expected<traversal_stats_t> shapes_ram_variant<scalar_type_, cpu_class_>::
                           executor, ticks, hints);
 }
 
-template <nk::shapes_dtype scalar_type_, cpu_class_t cpu_class_>
+template <nk::a_shapes_dtype scalar_type_, cpu_class_t cpu_class_>
 util::expected<util::sample_result_t> shapes_ram_variant<scalar_type_, cpu_class_>::sample(
     basic_sample_inputs_t inputs, basic_sample_outputs_t outputs, util::sample_config_t config,
     executor_t& executor) noexcept {
@@ -246,7 +246,7 @@ util::expected<util::sample_result_t> shapes_ram_variant<scalar_type_, cpu_class
                           outputs, config, executor);
 }
 
-template <nk::shapes_dtype scalar_type_, cpu_class_t cpu_class_>
+template <nk::a_shapes_dtype scalar_type_, cpu_class_t cpu_class_>
 template <typename plan_type_>
 util::status_t shapes_ram_variant<scalar_type_, cpu_class_>::drive(plan_type_& plan, executor_t& executor,
                                                                    progress_ticks_t& ticks) noexcept {
@@ -256,7 +256,7 @@ util::status_t shapes_ram_variant<scalar_type_, cpu_class_>::drive(plan_type_& p
     return drive_refinement(plan, scratch, basic::keep_diverse_t {geometry.connectivity}, ticks, executor);
 }
 
-template <nk::shapes_dtype scalar_type_, cpu_class_t cpu_class_>
+template <nk::a_shapes_dtype scalar_type_, cpu_class_t cpu_class_>
 util::status_t shapes_ram_variant<scalar_type_, cpu_class_>::export_points(
     value_t const& value, nk_dtype_t dtype, void* output, thread_allocator_t const& scratch) const noexcept {
     if (value.empty()) return util::status_code_t::success_k;
@@ -287,7 +287,7 @@ util::status_t with_shapes_provenance(shapes_geometry_t const& geometry, write_t
     return write(config);
 }
 
-template <nk::shapes_dtype scalar_type_, cpu_class_t cpu_class_>
+template <nk::a_shapes_dtype scalar_type_, cpu_class_t cpu_class_>
 template <typename checkpoint_type_>
 util::status_t shapes_ram_variant<scalar_type_, cpu_class_>::save(checkpoint_type_ checkpoint, executor_t& executor,
                                                                   progress_ticks_t& ticks) noexcept {
@@ -296,7 +296,7 @@ util::status_t shapes_ram_variant<scalar_type_, cpu_class_>::save(checkpoint_typ
     });
 }
 
-template <nk::shapes_dtype scalar_type_, cpu_class_t cpu_class_>
+template <nk::a_shapes_dtype scalar_type_, cpu_class_t cpu_class_>
 util::expected<std::size_t> shapes_ram_variant<scalar_type_, cpu_class_>::storage_requirements() const noexcept {
     std::size_t required = 0;
     util::status_t const sized = with_shapes_provenance(geometry, [&](util::save_config_t const& config) noexcept {
@@ -307,7 +307,7 @@ util::expected<std::size_t> shapes_ram_variant<scalar_type_, cpu_class_>::storag
     return {required, sized};
 }
 
-template <nk::shapes_dtype scalar_type_, cpu_class_t cpu_class_>
+template <nk::a_shapes_dtype scalar_type_, cpu_class_t cpu_class_>
 template <typename checkpoint_type_>
 util::status_t shapes_ram_variant<scalar_type_, cpu_class_>::load(checkpoint_type_ checkpoint, executor_t& executor,
                                                                   progress_ticks_t& ticks) noexcept {
@@ -324,7 +324,7 @@ util::status_t shapes_ram_variant<scalar_type_, cpu_class_>::load(checkpoint_typ
  *  a RAM variant saved, read-only, each shape its points as saved, scored with the RAM variant's
  *  metric and the kits @p cpu_class_ picks. Its verbs are instantiated in the class's unit, as the
  *  RAM variant's are. */
-template <nk::shapes_dtype scalar_type_, cpu_class_t cpu_class_>
+template <nk::a_shapes_dtype scalar_type_, cpu_class_t cpu_class_>
 struct shapes_nvme_variant {
     using executor_t = nvme_executor_t;
     template <typename word_type_>
@@ -382,7 +382,7 @@ struct shapes_nvme_variant {
                                                  util::sample_config_t config, executor_t& executor) noexcept;
 };
 
-template <nk::shapes_dtype scalar_type_, cpu_class_t cpu_class_>
+template <nk::a_shapes_dtype scalar_type_, cpu_class_t cpu_class_>
 util::expected<traversal_stats_t> shapes_nvme_variant<scalar_type_, cpu_class_>::search(
     counted_tape_t queries, matches_outputs_t& outputs, search_config_t config, predicate_t const& predicate,
     executor_t& executor, progress_ticks_t& ticks) noexcept {
@@ -400,7 +400,7 @@ util::expected<traversal_stats_t> shapes_nvme_variant<scalar_type_, cpu_class_>:
 
 /** Packs each stored cloud into a query as a search packs a tape entry, its points already in the
  *  stored scalar. */
-template <nk::shapes_dtype scalar_type_, cpu_class_t cpu_class_>
+template <nk::a_shapes_dtype scalar_type_, cpu_class_t cpu_class_>
 util::expected<util::sample_result_t> shapes_nvme_variant<scalar_type_, cpu_class_>::sample(
     basic_sample_inputs_t inputs, basic_sample_outputs_t outputs, util::sample_config_t config,
     executor_t& executor) noexcept {
@@ -441,7 +441,7 @@ extern template struct us::shapes::vram_nvidia_index<
 
 /** Builds one shard of the shapes face over packs of @p scalar_type_ for @p gpu_class_ on a CUDA
  *  device, scoring under the kernel the variant's frozen geometry names. */
-template <nk::shapes_dtype scalar_type_, gpu_class_t gpu_class_>
+template <nk::a_shapes_dtype scalar_type_, gpu_class_t gpu_class_>
 struct shapes_vram_nvidia_build {
     using face_t = us::shapes::vram_nvidia_index<
         typename us::shapes::shapes_ladder<scalar_type_, numkong_capabilities_of(gpu_class_)>::kit_t, u32_t,
@@ -460,7 +460,7 @@ struct shapes_vram_nvidia_build {
  *  packs of @p scalar_type_, scoring Chamfer or Hausdorff as the geometry names, with 32-bit node
  *  IDs. A batch packs its clouds on the host end to end through the CPU floor's kit, as the RAM
  *  variants pack them. */
-template <nk::shapes_dtype scalar_type_, gpu_class_t gpu_class_>
+template <nk::a_shapes_dtype scalar_type_, gpu_class_t gpu_class_>
 struct shapes_vram_nvidia_variant {
     using executor_t = cuda_executor_t;
     using build_t = shapes_vram_nvidia_build<scalar_type_, gpu_class_>;
@@ -548,7 +548,7 @@ struct shapes_vram_nvidia_variant {
                                             growing_arena<forkunion_allocator_t>& pages) const noexcept;
 };
 
-template <nk::shapes_dtype scalar_type_, gpu_class_t gpu_class_>
+template <nk::a_shapes_dtype scalar_type_, gpu_class_t gpu_class_>
 expected<tape_view<byte_t const>> shapes_vram_nvidia_variant<scalar_type_, gpu_class_>::pack_(
     counted_tape_t const& tape, growing_arena<forkunion_allocator_t>& pages) const noexcept {
     using raw_t = typename scalar_type_::raw_t;
@@ -591,7 +591,7 @@ expected<tape_view<byte_t const>> shapes_vram_nvidia_variant<scalar_type_, gpu_c
     return {{packed, {offsets, count + 1}}, status_code_t::success_k};
 }
 
-template <nk::shapes_dtype scalar_type_, gpu_class_t gpu_class_>
+template <nk::a_shapes_dtype scalar_type_, gpu_class_t gpu_class_>
 expected<traversal_stats_t> shapes_vram_nvidia_variant<scalar_type_, gpu_class_>::insert(
     usearch_keys_view_t keys, caller_tape_t shapes, insert_config_t config, cuda_executor_t& executor,
     progress_ticks_t& ticks) noexcept {
@@ -608,7 +608,7 @@ expected<traversal_stats_t> shapes_vram_nvidia_variant<scalar_type_, gpu_class_>
     return inserted;
 }
 
-template <nk::shapes_dtype scalar_type_, gpu_class_t gpu_class_>
+template <nk::a_shapes_dtype scalar_type_, gpu_class_t gpu_class_>
 status_t shapes_vram_nvidia_variant<scalar_type_, gpu_class_>::save(std::string_view path, cuda_executor_t& executor,
                                                                     progress_ticks_t& ticks) noexcept {
     return with_shapes_provenance(geometry, [&](save_config_t const& config) noexcept {
@@ -616,7 +616,7 @@ status_t shapes_vram_nvidia_variant<scalar_type_, gpu_class_>::save(std::string_
     });
 }
 
-template <nk::shapes_dtype scalar_type_, gpu_class_t gpu_class_>
+template <nk::a_shapes_dtype scalar_type_, gpu_class_t gpu_class_>
 template <typename checkpoint_type_>
 status_t shapes_vram_nvidia_variant<scalar_type_, gpu_class_>::load(checkpoint_type_ checkpoint,
                                                                     cuda_executor_t& executor,
@@ -632,7 +632,7 @@ status_t shapes_vram_nvidia_variant<scalar_type_, gpu_class_>::load(checkpoint_t
     return status_code_t::success_k;
 }
 
-template <nk::shapes_dtype scalar_type_, gpu_class_t gpu_class_>
+template <nk::a_shapes_dtype scalar_type_, gpu_class_t gpu_class_>
 expected<traversal_stats_t> shapes_vram_nvidia_variant<scalar_type_, gpu_class_>::search(
     counted_tape_t queries, matches_outputs_t& outputs, search_config_t config,
     growing_arena<forkunion_allocator_t>& pages, cuda_executor_t& executor, progress_ticks_t& ticks) noexcept {
@@ -646,7 +646,7 @@ expected<traversal_stats_t> shapes_vram_nvidia_variant<scalar_type_, gpu_class_>
 
 /** Builds one shard of the shapes face over packs of @p scalar_type_ on an Apple device, scoring
  *  under the kernel the variant's frozen geometry names. */
-template <nk::shapes_dtype scalar_type_>
+template <nk::a_shapes_dtype scalar_type_>
 struct shapes_vram_apple_build {
     using face_t = us::shapes::vram_apple_index<scalar_type_, util::u32_t>;
 
@@ -664,7 +664,7 @@ struct shapes_vram_apple_build {
 /** The shapes alternative on Apple GPUs of @p gpu_class_ or newer: the basic Apple shards over
  *  packs of @p scalar_type_, scoring Chamfer or Hausdorff as the geometry names, with 32-bit node
  *  IDs, as @c shapes_vram_nvidia_variant. Only f16 packs score here, so only they have one. */
-template <nk::shapes_dtype scalar_type_, gpu_class_t gpu_class_>
+template <nk::a_shapes_dtype scalar_type_, gpu_class_t gpu_class_>
 struct shapes_vram_apple_variant {
     using executor_t = util::metal_executor_t;
     using build_t = shapes_vram_apple_build<scalar_type_>;
@@ -844,7 +844,7 @@ extern template struct us::shapes::vram_amd_index<
 
 /** Builds one shard of the shapes face over packs of @p scalar_type_ for @p gpu_class_ on a HIP
  *  device, scoring under the kernel the variant's frozen geometry names. */
-template <nk::shapes_dtype scalar_type_, gpu_class_t gpu_class_>
+template <nk::a_shapes_dtype scalar_type_, gpu_class_t gpu_class_>
 struct shapes_vram_amd_build {
     using face_t = us::shapes::vram_amd_index<
         typename us::shapes::shapes_ladder<scalar_type_, numkong_capabilities_of(gpu_class_)>::kit_t, u32_t,
@@ -863,7 +863,7 @@ struct shapes_vram_amd_build {
  *  @p scalar_type_, scoring Chamfer or Hausdorff as the geometry names, with 32-bit node IDs. A
  *  batch packs its clouds on the host end to end through the CPU floor's kit, the same way every
  *  RAM variant packs them. */
-template <nk::shapes_dtype scalar_type_, gpu_class_t gpu_class_>
+template <nk::a_shapes_dtype scalar_type_, gpu_class_t gpu_class_>
 struct shapes_vram_amd_variant {
     using executor_t = hip_executor_t;
     using build_t = shapes_vram_amd_build<scalar_type_, gpu_class_>;
@@ -951,7 +951,7 @@ struct shapes_vram_amd_variant {
                                             growing_arena<forkunion_allocator_t>& pages) const noexcept;
 };
 
-template <nk::shapes_dtype scalar_type_, gpu_class_t gpu_class_>
+template <nk::a_shapes_dtype scalar_type_, gpu_class_t gpu_class_>
 expected<tape_view<byte_t const>> shapes_vram_amd_variant<scalar_type_, gpu_class_>::pack_(
     counted_tape_t const& tape, growing_arena<forkunion_allocator_t>& pages) const noexcept {
     using raw_t = typename scalar_type_::raw_t;
@@ -994,7 +994,7 @@ expected<tape_view<byte_t const>> shapes_vram_amd_variant<scalar_type_, gpu_clas
     return {{packed, {offsets, count + 1}}, status_code_t::success_k};
 }
 
-template <nk::shapes_dtype scalar_type_, gpu_class_t gpu_class_>
+template <nk::a_shapes_dtype scalar_type_, gpu_class_t gpu_class_>
 expected<traversal_stats_t> shapes_vram_amd_variant<scalar_type_, gpu_class_>::insert(
     usearch_keys_view_t keys, caller_tape_t shapes, insert_config_t config, hip_executor_t& executor,
     progress_ticks_t& ticks) noexcept {
@@ -1011,7 +1011,7 @@ expected<traversal_stats_t> shapes_vram_amd_variant<scalar_type_, gpu_class_>::i
     return inserted;
 }
 
-template <nk::shapes_dtype scalar_type_, gpu_class_t gpu_class_>
+template <nk::a_shapes_dtype scalar_type_, gpu_class_t gpu_class_>
 status_t shapes_vram_amd_variant<scalar_type_, gpu_class_>::save(std::string_view path, hip_executor_t& executor,
                                                                  progress_ticks_t& ticks) noexcept {
     return with_shapes_provenance(geometry, [&](save_config_t const& config) noexcept {
@@ -1019,7 +1019,7 @@ status_t shapes_vram_amd_variant<scalar_type_, gpu_class_>::save(std::string_vie
     });
 }
 
-template <nk::shapes_dtype scalar_type_, gpu_class_t gpu_class_>
+template <nk::a_shapes_dtype scalar_type_, gpu_class_t gpu_class_>
 template <typename checkpoint_type_>
 status_t shapes_vram_amd_variant<scalar_type_, gpu_class_>::load(checkpoint_type_ checkpoint, hip_executor_t& executor,
                                                                  progress_ticks_t& ticks) noexcept {
@@ -1034,7 +1034,7 @@ status_t shapes_vram_amd_variant<scalar_type_, gpu_class_>::load(checkpoint_type
     return status_code_t::success_k;
 }
 
-template <nk::shapes_dtype scalar_type_, gpu_class_t gpu_class_>
+template <nk::a_shapes_dtype scalar_type_, gpu_class_t gpu_class_>
 expected<traversal_stats_t> shapes_vram_amd_variant<scalar_type_, gpu_class_>::search(
     counted_tape_t queries, matches_outputs_t& outputs, search_config_t config,
     growing_arena<forkunion_allocator_t>& pages, hip_executor_t& executor, progress_ticks_t& ticks) noexcept {

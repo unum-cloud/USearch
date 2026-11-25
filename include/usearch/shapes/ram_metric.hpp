@@ -523,7 +523,7 @@ struct f16_v128relaxed_shapes_kit_t {
 /** The widest shapes kit of @p scalar_ this build compiled in among the backends @p caps_ admits,
  *  newest first; each kit states its @c capability_k, and a stub its @c compiled_k as false, so an
  *  unselected kit's body never has to exist. Only the scalars some kit stores specialize it. */
-template <nk::shapes_dtype scalar_, nk_capability_t caps_>
+template <nk::a_shapes_dtype scalar_, nk_capability_t caps_>
 struct shapes_ladder;
 
 template <nk_capability_t caps_>

@@ -558,8 +558,8 @@ struct reading_predicate_t {
     bool operator()(usearch_key_t key) const noexcept { return key.bytes[0] != refused_first_byte; }
 };
 
-static_assert(!us::key_predicate_handler<counting_predicate_t>, "a predicate runs on several threads at once");
-static_assert(us::key_predicate_handler<reading_predicate_t>);
+static_assert(!us::a_key_predicate_handler<counting_predicate_t>, "a predicate runs on several threads at once");
+static_assert(us::a_key_predicate_handler<reading_predicate_t>);
 
 /** A batch predicate counting the batches it is asked about, as a @c mutable lambda would. */
 struct counting_batch_predicate_t {
@@ -574,8 +574,8 @@ struct admitting_batch_predicate_t {
     }
 };
 
-static_assert(!us::keys_predicate_handler<counting_batch_predicate_t>, "a predicate runs on several threads at once");
-static_assert(us::keys_predicate_handler<admitting_batch_predicate_t>);
+static_assert(!us::a_keys_predicate_handler<counting_batch_predicate_t>, "a predicate runs on several threads at once");
+static_assert(us::a_keys_predicate_handler<admitting_batch_predicate_t>);
 
 /** A terrain counting the tiles it fills, as a @c mutable lambda would. */
 struct counting_terrain_t {
@@ -593,8 +593,8 @@ struct flat_terrain_t {
     }
 };
 
-static_assert(!us::terrain_handler<counting_terrain_t>, "a terrain fills tiles on several threads at once");
-static_assert(us::terrain_handler<flat_terrain_t>);
+static_assert(!us::a_terrain_handler<counting_terrain_t>, "a terrain fills tiles on several threads at once");
+static_assert(us::a_terrain_handler<flat_terrain_t>);
 
 #pragma region Modality Fixtures
 

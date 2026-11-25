@@ -20,7 +20,7 @@
 #include <type_traits> // `std::is_same_v` - the one scalar Apple GPUs score
 
 #include <numkong/capabilities.h> // `nk_kernel_chamfers_packed_k` & kin - the metric the kit scores under
-#include <numkong/shapes.hpp>     // `nk::shapes_dtype` - the scalars a kit stores
+#include <numkong/shapes.hpp>     // `nk::a_shapes_dtype` - the scalars a kit stores
 #include <numkong/shapes/metal.h> // `nk_shapes_source_metal_` - the simdgroup bodies the kit calls
 
 #include "usearch/utilities/types.hpp"
@@ -50,7 +50,7 @@ inline constexpr char metal_shapes_metric_source_k[] = {
 /** The kit hooks a shapes graph on Apple GPUs reads: Chamfer and Hausdorff between packs of
  *  @p scalar_ clouds, over node IDs of @p node_id_type_. Only f16 packs score; the face refuses
  *  others before any of these runs. */
-template <nk::shapes_dtype scalar_, typename node_id_type_>
+template <nk::a_shapes_dtype scalar_, typename node_id_type_>
 struct vram_apple_kits {
 
     /** Rungs of the kit's kernels: one, serving every cloud. */
@@ -135,7 +135,7 @@ struct vram_apple_kits {
  *  as the kernel kind it is built with names: a threadgroup walks each query, a simdgroup scoring
  *  each candidate. Node IDs are @p node_id_type_. It owns a @c basic::vram_apple_graph over its
  *  kits and forwards its verbs, types and constants, which that graph documents. */
-template <nk::shapes_dtype scalar_, typename node_id_type_>
+template <nk::a_shapes_dtype scalar_, typename node_id_type_>
 struct vram_apple_index {
     /* Components */
     using kits_t = vram_apple_kits<scalar_, node_id_type_>;

@@ -1325,7 +1325,7 @@ constexpr std::string_view to_string_view(characters_type_ const& characters) no
 /** Any entry pairing a graph-local @c node_id with a @c distance - the shape that
  *  search results share across index designs. */
 template <typename entry_type_>
-concept scored_node = requires(entry_type_ entry) {
+concept a_scored_node = requires(entry_type_ entry) {
     entry.node_id;
     entry.distance;
 };
@@ -1333,32 +1333,33 @@ concept scored_node = requires(entry_type_ entry) {
 /** A two-stage save or load in flight: move-only and never assigned over, its tasks handed to
  *  threads one at a time, spent by @c finish. */
 template <typename plan_type_>
-concept index_plan = std::move_constructible<plan_type_> && !std::copy_constructible<plan_type_> &&
-                     !std::is_copy_assignable_v<plan_type_> && !std::is_move_assignable_v<plan_type_> &&
-                     requires(plan_type_ plan) {
-                         plan.tasks().size();
-                         { plan.finish() } noexcept -> std::same_as<status_t>;
-                     };
+concept an_index_plan = std::move_constructible<plan_type_> && !std::copy_constructible<plan_type_> &&
+                        !std::is_copy_assignable_v<plan_type_> && !std::is_move_assignable_v<plan_type_> &&
+                        requires(plan_type_ plan) {
+                            plan.tasks().size();
+                            { plan.finish() } noexcept -> std::same_as<status_t>;
+                        };
 
 /** Entries taken against a ceiling: move-only, released by its own death unless consumed. */
 template <typename claim_type_>
-concept index_claim = std::move_constructible<claim_type_> && !std::copy_constructible<claim_type_> &&
-                      requires(claim_type_ claim) {
-                          { claim.entries() } noexcept -> std::same_as<std::size_t>;
-                          { claim.consume() } noexcept;
-                      };
+concept an_index_claim = std::move_constructible<claim_type_> && !std::copy_constructible<claim_type_> &&
+                         requires(claim_type_ claim) {
+                             { claim.entries() } noexcept -> std::same_as<std::size_t>;
+                             { claim.consume() } noexcept;
+                         };
 
 /** @brief The protocol every dense index answers, at one shard and across many: the verbs a
  *      sharded layer drives its shards by, and the plans they hand out. */
 template <typename index_type_>
-concept index_family = index_plan<typename index_type_::save_plan_t> && index_plan<typename index_type_::load_plan_t> &&
-                       requires(index_type_& index, index_type_ const& constant) {
-                           { constant.size() } noexcept -> std::same_as<std::size_t>;
-                           { constant.capacity() } noexcept -> std::same_as<std::size_t>;
-                           {
-                               index.reserve(typename index_type_::reserve_capacity_t {})
-                           } noexcept -> std::same_as<expected<std::size_t>>;
-                       };
+concept an_index_family = an_index_plan<typename index_type_::save_plan_t> &&
+                          an_index_plan<typename index_type_::load_plan_t> &&
+                          requires(index_type_& index, index_type_ const& constant) {
+                              { constant.size() } noexcept -> std::same_as<std::size_t>;
+                              { constant.capacity() } noexcept -> std::same_as<std::size_t>;
+                              {
+                                  index.reserve(typename index_type_::reserve_capacity_t {})
+                              } noexcept -> std::same_as<expected<std::size_t>>;
+                          };
 
 /**
  *  @brief Merges the ascending @p results of one search into the caller's bounded ranking,
@@ -1376,7 +1377,7 @@ concept index_family = index_plan<typename index_type_::save_plan_t> && index_pl
  *  @param[in] old_count Hits already in the ranking before this merge.
  *  @return The merged hit count, never exceeding the capacity.
  */
-template <scored_node entry_type_, typename keys_of_ids_type_, typename key_type_, typename distance_type_>
+template <a_scored_node entry_type_, typename keys_of_ids_type_, typename key_type_, typename distance_type_>
 std::size_t merge_search_results(std::span<entry_type_ const> results, keys_of_ids_type_ const& keys_of_ids,
                                  std::span<key_type_> keys, std::span<distance_type_> distances,
                                  std::size_t old_count) noexcept {
@@ -1695,16 +1696,16 @@ inline void with_static_extent(std::size_t count, body_type_&& body) noexcept {
 /** A predicate asked as candidates arrive, at most a quad a call, every call at a static extent: a
  *  full quad, or a round's shorter tail. @p item_type_ is a key or a node ID. */
 template <typename predicate_type_, typename item_type_>
-concept immediate_predicate = requires(predicate_type_& predicate, std::span<item_type_ const, quad_lanes_k> items,
-                                       std::span<admission_t, quad_lanes_k> admissions) {
+concept an_immediate_predicate = requires(predicate_type_& predicate, std::span<item_type_ const, quad_lanes_k> items,
+                                          std::span<admission_t, quad_lanes_k> admissions) {
     predicate(items, admissions);
 };
 
 /** A predicate that pays per call, so it gathers candidates beside the engine's @p payload_type_
  *  and answers them together: a drain hands each admitted payload on and leaves it empty. */
 template <typename predicate_type_, typename item_type_, typename payload_type_>
-concept aggregating_predicate = requires(predicate_type_& predicate, std::span<item_type_ const, quad_lanes_k> items,
-                                         std::span<payload_type_ const, quad_lanes_k> payloads) {
+concept an_aggregating_predicate = requires(predicate_type_& predicate, std::span<item_type_ const, quad_lanes_k> items,
+                                            std::span<payload_type_ const, quad_lanes_k> payloads) {
     predicate.push(items, payloads);
     predicate.drain([](payload_type_ const&) noexcept {});
 };
@@ -1712,7 +1713,7 @@ concept aggregating_predicate = requires(predicate_type_& predicate, std::span<i
 /** A family handing each executor thread a predicate of its own, as an engine driving its own
  *  threads needs of an aggregating one. */
 template <typename predicate_type_>
-concept per_thread_predicates = requires(predicate_type_& predicate, std::size_t thread) {
+concept a_per_thread_predicate_family = requires(predicate_type_& predicate, std::size_t thread) {
     { predicate.of_thread(thread) } -> std::same_as<typename predicate_type_::thread_predicate_t&>;
 };
 
@@ -1731,7 +1732,7 @@ inline void ask_quad(predicate_type_& predicate, std::span<item_type_ const, ext
 /** An aggregating @p predicate only gathers the quad, answering it at @ref settle_predicate. */
 template <typename predicate_type_, typename item_type_, typename payload_type_, std::size_t extent_,
           typename on_admitted_type_>
-    requires aggregating_predicate<predicate_type_, item_type_, payload_type_>
+    requires an_aggregating_predicate<predicate_type_, item_type_, payload_type_>
 inline void ask_quad(predicate_type_& predicate, std::span<item_type_ const, extent_> items,
                      std::span<payload_type_ const, extent_> payloads, on_admitted_type_&&) noexcept {
     predicate.push(items, payloads);
@@ -1788,7 +1789,7 @@ inline predicate_type_& thread_predicate(predicate_type_& predicate, std::size_t
 
 /** A family keeping one aggregating predicate per thread hands each thread its own, so an engine
  *  driving its own threads settles each thread's rounds apart. */
-template <per_thread_predicates predicate_type_>
+template <a_per_thread_predicate_family predicate_type_>
 inline typename predicate_type_::thread_predicate_t& thread_predicate(predicate_type_& predicate,
                                                                       std::size_t thread) noexcept {
     return predicate.of_thread(thread);
@@ -1818,7 +1819,7 @@ struct node_predicate {
 
     template <typename node_id_type_, std::size_t extent_,
               typename key_type_ = std::invoke_result_t<key_of_type_ const&, node_id_type_>>
-        requires immediate_predicate<predicate_type_, key_type_>
+        requires an_immediate_predicate<predicate_type_, key_type_>
     void operator()(std::span<node_id_type_ const, extent_> nodes,
                     std::span<admission_t, extent_> admissions) noexcept {
         std::array<key_type_, extent_> keys;
@@ -1828,7 +1829,7 @@ struct node_predicate {
 
     template <typename node_id_type_, typename payload_type_, std::size_t extent_,
               typename key_type_ = std::invoke_result_t<key_of_type_ const&, node_id_type_>>
-        requires aggregating_predicate<predicate_type_, key_type_, payload_type_>
+        requires an_aggregating_predicate<predicate_type_, key_type_, payload_type_>
     void push(std::span<node_id_type_ const, extent_> nodes,
               std::span<payload_type_ const, extent_> payloads) noexcept {
         std::array<key_type_, extent_> keys;

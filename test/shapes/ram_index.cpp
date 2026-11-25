@@ -245,12 +245,13 @@ using chamfer_fixture_t = shapes_fixture<shapes_ladder<nk::f32_t, nk_cap_any_k>:
 using procrustes_fixture_t =
     shapes_fixture<shapes_ladder<nk::f16_t, nk_cap_any_k>::kit_t, nk_kernel_wassersteinprocrustes_packed_k>;
 
-static_assert(us::basic::value<chamfer_fixture_t::value_t>);
-static_assert(metric<chamfer_fixture_t::metric_t, chamfer_fixture_t::value_t, chamfer_fixture_t::distance_t>);
-static_assert(metric<procrustes_fixture_t::metric_t, procrustes_fixture_t::value_t, procrustes_fixture_t::distance_t>);
-static_assert(transparent_metric<procrustes_fixture_t::metric_t>);
-static_assert(value_codec<codec<chamfer_fixture_t::kit_t>, chamfer_fixture_t::value_t>);
-static_assert(value_codec<codec<procrustes_fixture_t::kit_t>, procrustes_fixture_t::value_t>);
+static_assert(us::basic::a_value<chamfer_fixture_t::value_t>);
+static_assert(a_metric<chamfer_fixture_t::metric_t, chamfer_fixture_t::value_t, chamfer_fixture_t::distance_t>);
+static_assert(
+    a_metric<procrustes_fixture_t::metric_t, procrustes_fixture_t::value_t, procrustes_fixture_t::distance_t>);
+static_assert(a_transparent_metric<procrustes_fixture_t::metric_t>);
+static_assert(a_value_codec<codec<chamfer_fixture_t::kit_t>, chamfer_fixture_t::value_t>);
+static_assert(a_value_codec<codec<procrustes_fixture_t::kit_t>, procrustes_fixture_t::value_t>);
 
 /** Rounds of @p metric: the first pack as the query, the rest staged as they fit, drained within
  *  @p radius into @p distances. */

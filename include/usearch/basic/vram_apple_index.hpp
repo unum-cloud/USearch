@@ -321,7 +321,7 @@ struct metal_load_step {
 
 /** Kits whose selector needs a breadth of at least @c build_breadth_k candidates per build walk. */
 template <typename kits_type_>
-concept kits_with_build_breadth = requires { kits_type_::build_breadth_k; };
+concept a_kit_set_with_build_breadth = requires { kits_type_::build_breadth_k; };
 
 #pragma endregion Kernel Records
 
@@ -2654,7 +2654,7 @@ struct vram_apple_graph {
     u32_t build_expansion_(u32_t expansion_factor) const noexcept {
         if (expansion_factor) return expansion_factor;
         u32_t const twice = static_cast<u32_t>(default_expansion_factor(connectivity()));
-        if constexpr (kits_with_build_breadth<kits_type_>) return max_of(twice, kits_type_::build_breadth_k);
+        if constexpr (a_kit_set_with_build_breadth<kits_type_>) return max_of(twice, kits_type_::build_breadth_k);
         else return twice;
     }
 

@@ -32,5 +32,5 @@ static_assert(std::is_move_constructible_v<witnessed_index_t::load_plan_t> &&
 static_assert(std::is_move_constructible_v<witnessed_index_t::capacity_claim_t> &&
               !std::is_copy_constructible_v<witnessed_index_t::capacity_claim_t>);
 
-/** The integer kits' dot results take the extremal atomics; complex scalars publish no limits. */
-static_assert(fu::atomic_integer<nk::i32_t> && !std::numeric_limits<nk::f32c_t>::is_specialized);
+/*  The integer kits' dot results take the extremal atomics; complex scalars publish no limits. */
+static_assert(fu::an_atomic_integer<nk::i32_t> && !std::numeric_limits<nk::f32c_t>::is_specialized);

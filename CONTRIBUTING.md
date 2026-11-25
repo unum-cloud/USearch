@@ -430,9 +430,9 @@ An `else if constexpr` chain is still one level.
 
 ```cpp
 template <typename query_type_>
-concept hinted_query = requires(query_type_& query) { query.find_hinted(0u); };
+concept a_hinted_query = requires(query_type_& query) { query.find_hinted(0u); };
 
-if constexpr (hinted_query<query_type_>) seeds = query.find_hinted(shard); // allowed: a named concept
+if constexpr (a_hinted_query<query_type_>) seeds = query.find_hinted(shard); // allowed: a named concept
 else if constexpr (serial_class_k) seeds = {};                            // allowed: one chain, one level
 ```
 
@@ -589,6 +589,7 @@ New code never names or sizes a type through `decltype`, `decltype(auto)` includ
 Spell the type, or export it as a member alias where it is defined and read it from there, as `typename codec_t::view_t` names what a codec's `view` returns.
 A `decltype` makes every reader evaluate an expression to learn a type its author already knew.
 Templates take no `_t` or `_k` suffix, whether class, alias or variable templates or concepts, while concrete types end in `_t` and constants in `_k`.
+A concept is a singular noun phrase naming what satisfies it, with `an_` before a vowel sound and `a_` otherwise, like `an_io_queue` or `a_vram_quads_kit`.
 
 ### Vocabulary
 
@@ -723,6 +724,29 @@ file build_artifacts/libusearch_shared.so # Verify the output
 ```
 
 The resulting `libusearch_shared.so` can be used in Android projects by placing it in `src/main/jniLibs/armeabi-v7a/` for 32-bit ARM or `arm64-v8a/` for 64-bit ARM.
+
+## Lean State
+
+A type holds only what it cannot recompute, and names each part for what it holds.
+These rules are shared by every sibling library, and the pre-commit hook enforces each rule that names a check.
+
+- Members are named for what they hold, never for their type.
+  Write `request->call` or `call->kept`, never `call->call` or `file.file`.
+  Checked by `check_self_repeat_access`.
+- Derived state is a method, not a field.
+  A count, mask or capacity that follows from other members is computed when asked, so it can never disagree with them.
+- One fact, one constant.
+  Every `_k` constant states its derivation in its docblock, or says "measured" and where, and no other constant restates it.
+- An owner that never moves holds its parts by value.
+  A pointer is for a part that outlives its owner, moves apart from it, or is shared beyond it.
+- Empty allocators take no bytes.
+  An allocator member is declared `[[no_unique_address]]`, so a container over a stateless allocator is no larger than its own state.
+  Checked by `check_empty_member_bytes`.
+- No wrapper without its own state or invariant.
+  A type that only forwards to one member is a name for that member, so use an alias or a function instead.
+- Concepts are `a_`/`an_` noun phrases.
+  A concept names what satisfies it, as `an_allocator` or `a_task_callback`: `an_` before a vowel sound, singular, with no `is_` or `has_` prefix and no `_concept` or `_t` suffix.
+  Checked by `check_concept_names`.
 
 ## Test Suites
 

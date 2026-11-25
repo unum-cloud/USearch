@@ -122,7 +122,7 @@ constexpr nk_capability_t dense_oracle_capability() noexcept {
 /** Gate: a cell's kit is compiled once its requested ceiling is a bit some ladder actually
  *  picked - a build without the kit must not pass its serial floor under a SIMD name. */
 template <nk_dtype_t dtype_, nk_capability_t caps_>
-concept dense_cell_compiled =
+concept a_compiled_dense_cell =
     caps_ == nk_cap_serial_k ||
     std::bit_floor(caps_) == quads_ladder<typename nk::type_for<dtype_>::type, caps_>::kit_t::capability_k ||
     std::bit_floor(caps_) == tiles_ladder<typename nk::type_for<dtype_>::type, caps_>::kit_t::capability_k;
@@ -130,8 +130,9 @@ concept dense_cell_compiled =
 /** Gate: a cell runs once its serial kit finalizes the kernel and its requested ceiling picked a
  *  kit. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_, nk_capability_t caps_>
-concept dense_cell_testable = quads_supported<kernel_, typename nk::type_for<dtype_>::type, nk_cap_serial_k> &&
-                              dense_cell_compiled<dtype_, caps_>;
+concept a_testable_dense_cell =
+    a_quads_supported_kernel<kernel_, typename nk::type_for<dtype_>::type, nk_cap_serial_k> &&
+    a_compiled_dense_cell<dtype_, caps_>;
 
 /** Whether this machine offers every bit a cell's kit and atomic reference declare - both
  *  execute their instructions unconditionally - arming the per-process tile handshake on the way. */
@@ -148,10 +149,10 @@ static bool dense_cell_admitted() noexcept {
 }
 
 /** Why a cell skips whose dtype's serial kernels do not finalize its kernel yet. */
-inline constexpr char needs_serial_kernels_k[] = "needs quads_supported";
+inline constexpr char needs_serial_kernels_k[] = "needs a_quads_supported_kernel";
 
 /** Why a cell skips whose requested kit this build's target does not compile. */
-inline constexpr char needs_kit_target_k[] = "needs dense_cell_testable";
+inline constexpr char needs_kit_target_k[] = "needs a_testable_dense_cell";
 
 /** Why a cell skips on a machine lacking the instructions its kit or atomic reference execute. */
 inline constexpr char needs_capabilities_k[] = "needs dense_cell_admitted";
@@ -341,7 +342,7 @@ struct counting_device_allocator {
 
 /** Whether a sharded index runs on ForkUnion threads - the RAM residency. */
 template <typename indexes_type_>
-concept ram_collection = std::is_same_v<typename indexes_type_::executor_t, ram_executor_t>;
+concept a_ram_collection = std::is_same_v<typename indexes_type_::executor_t, ram_executor_t>;
 
 /** The executor one sharded scenario drives, owned together with whatever it was spawned
  *  over; @c status reports the spawn. Defined per residency, each built from the @c placement
@@ -353,7 +354,7 @@ struct dense_indexes_executor;
 /** The RAM form: two threads, or @p threads_count, over a topology of its own, both released with
  *  it, and one traversal context per thread over an arena of its own, built once and handed to
  *  every batched verb, so the executor's own rewinds never reach them. */
-template <ram_collection indexes_type_>
+template <a_ram_collection indexes_type_>
 struct dense_indexes_executor<indexes_type_> {
     using executor_t = typename indexes_type_::executor_t;
     using traversal_context_t = typename indexes_type_::traversal_context_t;
@@ -409,7 +410,7 @@ template <typename indexes_type_>
 struct dense_indexes_row_driver;
 
 /** The RAM form: a caller-built context over its own arena, sized for the shard geometry. */
-template <ram_collection indexes_type_>
+template <a_ram_collection indexes_type_>
 struct dense_indexes_row_driver<indexes_type_> {
     dense_arena_context<indexes_type_> arena;
     status_t status;
@@ -428,7 +429,7 @@ auto drive_search(indexes_type_& indexes, queries_type_ const& queries,
                   std::span<std::size_t> counts, typename indexes_type_::search_config_t config,
                   dense_indexes_executor<indexes_type_>& driver) noexcept {
     ranked_matches_span<typename indexes_type_::key_t, score_type_> const matches {keys, scores, counts};
-    if constexpr (ram_collection<indexes_type_>)
+    if constexpr (a_ram_collection<indexes_type_>)
         return indexes.search(queries, matches, config, driver.executor, to_writable_span(driver.traversals));
     else return indexes.search(queries, matches, config, driver.executor);
 }
@@ -438,7 +439,7 @@ auto drive_search_if(indexes_type_& indexes, queries_type_ const& queries,
                      std::span<std::size_t> counts, typename indexes_type_::search_config_t config,
                      predicate_type_&& predicate, dense_indexes_executor<indexes_type_>& driver) noexcept {
     ranked_matches_span<typename indexes_type_::key_t, score_type_> const matches {keys, scores, counts};
-    if constexpr (ram_collection<indexes_type_>)
+    if constexpr (a_ram_collection<indexes_type_>)
         return indexes.search_if(queries, matches, config, predicate, driver.executor,
                                  to_writable_span(driver.traversals));
     else return indexes.search_if(queries, matches, config, predicate, driver.executor);
@@ -449,7 +450,7 @@ auto drive_indexer_search(indexes_type_& indexes, queries_type_ const& queries, 
                           std::span<std::size_t> counts, typename indexes_type_::search_config_t config,
                           dense_indexes_executor<indexes_type_>& driver) noexcept {
     ranked_matches_span<typename indexes_type_::key_t, distance_t> const matches {keys, scores, counts};
-    if constexpr (ram_collection<indexes_type_>)
+    if constexpr (a_ram_collection<indexes_type_>)
         return indexes.search(queries, heads, matches, config, driver.executor, to_writable_span(driver.traversals));
     else return indexes.search(queries, heads, matches, config, driver.executor);
 }
@@ -461,7 +462,7 @@ auto drive_multiply(indexes_type_& indexes, left_type_ const& left,
                     products_tape<typename indexes_type_::key_t, product_type_> products, std::span<std::size_t> scored,
                     typename indexes_type_::search_config_t config,
                     dense_indexes_executor<indexes_type_>& driver) noexcept {
-    if constexpr (ram_collection<indexes_type_>)
+    if constexpr (a_ram_collection<indexes_type_>)
         return indexes.multiply(left, products, scored, config, driver.executor, to_writable_span(driver.traversals));
     else if constexpr (requires { indexes_type_::vendor_k; })
         return driver.on_device(products,
@@ -477,7 +478,7 @@ auto drive_maxsim(indexes_type_& indexes, rows_type_ const& rows, std::span<std:
                   typename indexes_type_::search_config_t config,
                   dense_indexes_executor<indexes_type_>& driver) noexcept {
     typename indexes_type_::maxsim_config_t const maxsim_config {config, matches.stride};
-    if constexpr (ram_collection<indexes_type_>)
+    if constexpr (a_ram_collection<indexes_type_>)
         return indexes.maxsim(rows, query_offsets, scored, matches, maxsim_config, driver.executor,
                               to_writable_span(driver.traversals));
     else if constexpr (requires { indexes_type_::vendor_k; })
@@ -490,13 +491,13 @@ auto drive_maxsim(indexes_type_& indexes, rows_type_ const& rows, std::span<std:
 template <typename plan_type_, typename indexes_type_, typename... arguments_types_>
 status_t drive_run(plan_type_& plan, dense_indexes_executor<indexes_type_>& driver,
                    arguments_types_&&... arguments) noexcept {
-    if constexpr (ram_collection<indexes_type_>)
+    if constexpr (a_ram_collection<indexes_type_>)
         return plan.run(driver.executor, to_writable_span(driver.traversals), arguments...);
     else return plan.run(driver.executor, arguments...);
 }
 template <typename plan_type_, typename indexes_type_>
 auto drive_finish(plan_type_& plan, dense_indexes_executor<indexes_type_>& driver) noexcept {
-    if constexpr (ram_collection<indexes_type_>)
+    if constexpr (a_ram_collection<indexes_type_>)
         return plan.finish(driver.executor, to_writable_span(driver.traversals));
     else return plan.finish(driver.executor);
 }
@@ -505,7 +506,7 @@ auto drive_attend(indexes_type_& indexes, queries_type_ const& queries, std::siz
                   f32_t score_scale, outputs_type_ const& outputs, std::span<softmax_state_t> carry,
                   typename indexes_type_::search_config_t config,
                   dense_indexes_executor<indexes_type_>& driver) noexcept {
-    if constexpr (ram_collection<indexes_type_>)
+    if constexpr (a_ram_collection<indexes_type_>)
         return indexes.attend(queries, head_count, lookup, score_scale, outputs, carry, config, driver.executor,
                               to_writable_span(driver.traversals));
     else return indexes.attend(queries, head_count, lookup, score_scale, outputs, carry, config, driver.executor);
@@ -1164,7 +1165,7 @@ void test_dense_indexes_scan(u64_t seed, placement_types_&... placement) {
     using scalar_t = typename indexes_type_::scalar_t;
     using key_t = typename indexes_type_::key_t;
     using distance_t = typename indexes_type_::distance_t;
-    constexpr bool device_k = !ram_collection<indexes_type_>;
+    constexpr bool device_k = !a_ram_collection<indexes_type_>;
     using oracle_kit_t =
         typename quads_ladder<scalar_t, dense_oracle_capability<typename indexes_type_::index_t>()>::kit_t;
     constexpr std::size_t rows_count = 2100, queries_count = 520, wanted = 10, wide_queries_count = 3;
@@ -3540,7 +3541,7 @@ void test_dense_indexes_gather_many(u64_t seed, placement_types_&... placement) 
         expect_equal(
             target.insert(std::span<key_t const> {&late_key, 1}, vectors(nk::range(0, 1), nk::slice), executor).status,
             status_code_t::contended_k);
-        if constexpr (!ram_collection<indexes_type_>) {
+        if constexpr (!a_ram_collection<indexes_type_>) {
             save_config_t const config = dense_indexes_save_config<indexes_type_>();
             auto const [bytes, measure_status] = target.storage_requirements(config);
             expect_true(succeeded(measure_status));
@@ -4276,7 +4277,7 @@ void test_dense_indexes_concurrent_add(u64_t seed, placement_types_&... placemen
         assert_no_locks_held();
     });
     for (std::size_t which = 0; which != executors_count; ++which) {
-        if (outcomes[which] == status_code_t::contended_k && !ram_collection<indexes_type_>)
+        if (outcomes[which] == status_code_t::contended_k && !a_ram_collection<indexes_type_>)
             outcomes[which] = indexes
                                   .insert(to_span(keys.row(which).as_vector()), slices[which].view(),
                                           drivers[which].executor)

@@ -38,10 +38,10 @@ namespace unum::usearch::dense {
 
 /** What a vendor's quads kit binds: one storage dtype on one GPU generation. */
 template <typename kit_>
-concept vram_quads_kit = requires(typename kit_::fragment_t fragment, typename kit_::dot_t dot,
-                                  typename kit_::weighted_t weighted,
-                                  typename kit_::norms_accumulator_t norms_accumulator, typename kit_::norms_t norms,
-                                  distance_t ranked, nk_kernel_kind_t kernel) {
+concept a_vram_quads_kit = requires(typename kit_::fragment_t fragment, typename kit_::dot_t dot,
+                                    typename kit_::weighted_t weighted,
+                                    typename kit_::norms_accumulator_t norms_accumulator, typename kit_::norms_t norms,
+                                    distance_t ranked, nk_kernel_kind_t kernel) {
     typename kit_::scalar_t;
     requires std::is_convertible_v<decltype(kit_::capability_k), nk_capability_t>;
     { kit_::accumulate_dot(fragment, fragment, dot) } -> std::same_as<typename kit_::dot_t>;
@@ -175,7 +175,7 @@ struct vram_row_geometry_t {
 /** Typed views over the device's flat storage, @b [rows,*] each: the packed vectors matrix, the
  *  per-row norms column, and the fixed-capacity neighbors matrix. Under the flat virtual-memory
  *  arena the node ID @b is the location - one multiply, no chunk directory. */
-template <vram_quads_kit kit_>
+template <a_vram_quads_kit kit_>
 struct vram_flat_view {
     using fragment_t = typename kit_::fragment_t;
     using norms_t = typename kit_::norms_t;
@@ -222,7 +222,7 @@ struct vram_flat_view {
 /** The shards of one fold bin as one storage: a bin ID keeps its shard's place in the bin from bit
  *  @c row_bits up and its row below, so one shift finds the shard, whose slabs every device of the
  *  bin maps. The neighbors are the fold's own rows, never a shard's live ones. */
-template <vram_quads_kit kit_>
+template <a_vram_quads_kit kit_>
 struct vram_bin_view {
     using fragment_t = typename kit_::fragment_t;
     using norms_t = typename kit_::norms_t;
@@ -265,7 +265,7 @@ struct vram_bin_view {
 
 /** One warp's staged batch: candidate IDs, then the scored nodes and native dots of up to a
  *  lane-width of them. */
-template <vram_quads_kit kit_, typename warp_type_>
+template <a_vram_quads_kit kit_, typename warp_type_>
 struct vram_gathered {
 
     /** Candidate node IDs of a round's staging, two warp-widths: the scored batch, then the carry
@@ -281,7 +281,7 @@ struct vram_gathered {
 
 /** Graph products of one query row as a device fold: each scored batch appends its node IDs and
  *  native dots to the row until it fills, while @c scored keeps counting past it. */
-template <vram_quads_kit kit_, typename warp_type_>
+template <a_vram_quads_kit kit_, typename warp_type_>
 struct vram_multiply_fold {
     using dot_t = typename kit_::dot_t;
 
@@ -330,7 +330,7 @@ struct vram_multiply_fold {
  *
  *  @return This lane's scored entry, or the sentinel on lanes past @p gathered_count.
  */
-template <vram_quads_kit kit_, typename warp_type_, u32_t resident_blocks_, u32_t fragments_per_load_ = 1,
+template <a_vram_quads_kit kit_, typename warp_type_, u32_t resident_blocks_, u32_t fragments_per_load_ = 1,
           typename storage_>
 __device__ __forceinline__ vram_scored_node<node_id_t> vram_score_batch( //
     storage_ const& storage, typename kit_::fragment_t const* query_span, typename kit_::norms_t query_state,
@@ -427,7 +427,7 @@ __device__ __forceinline__ vram_scored_node<node_id_t> vram_score_batch( //
  *  over its @c shared_t in static shared memory, picked by the class like the kit, and names its
  *  warp policy as @c warp_t and its generation's scan kit as @c scan_t. */
 template <typename schedule_, typename kit_>
-concept vram_schedule = requires(
+concept a_vram_schedule = requires(
     schedule_& schedule, u32_t rows, vram_flat_view<kit_> const& storage, typename kit_::fragment_t const* query_span,
     typename kit_::norms_t query_state, vram_gathered<kit_, typename schedule_::warp_t>& gathered, u32_t lane,
     vram_vector_cache<typename kit_::fragment_t> cache,
@@ -457,7 +457,7 @@ struct schedule_ladder;
 /** The plain walk's rescoring: none, so every batch stays as the kit scored it. */
 struct vram_no_rescoring {
 
-    template <vram_frontier frontier_>
+    template <a_vram_frontier frontier_>
     __device__ __forceinline__ vram_no_rescoring for_query(u32_t, vram_warp_context<frontier_> const&) const noexcept {
         return {};
     }
@@ -466,11 +466,11 @@ struct vram_no_rescoring {
 /** The insertion and refine walks' rescoring: scores stay as the kit scored them, but a
  *  zero-distance lane enters only while @c frontier 's nearest holds no zero, and only the lowest
  *  such lane of its batch, so a duplicate class spends one rank of the pool instead of all. */
-template <vram_frontier frontier_>
+template <a_vram_frontier frontier_>
 struct vram_single_zero_rescoring {
     frontier_ const& frontier;
 
-    template <u32_t resident_blocks_, vram_quads_kit kit_, typename warp_type_>
+    template <u32_t resident_blocks_, a_vram_quads_kit kit_, typename warp_type_>
     __device__ __forceinline__ vram_scored_node<node_id_t> rescore(vram_flat_view<kit_> const&,
                                                                    vram_gathered<kit_, warp_type_>&, u32_t, u32_t lane,
                                                                    vram_scored_node<node_id_t> scored) const noexcept {
@@ -483,7 +483,7 @@ struct vram_single_zero_rescoring {
 
 /** Indexer heads as a device rescoring: each scored dot becomes the score Σₕ wₕ · ReLU(qₕ · k) and its distance
  *  1 − score, the warp scoring the batch once per head exactly as it scored the navigating query. */
-template <vram_quads_kit kit_, typename warp_type_>
+template <a_vram_quads_kit kit_, typename warp_type_>
 struct vram_indexer_rescoring {
     using warp_t = warp_type_;
     using fragment_t = typename kit_::fragment_t;
@@ -500,7 +500,7 @@ struct vram_indexer_rescoring {
     /** Fragments per staged head row. */
     u32_t row_fragments;
 
-    template <vram_frontier frontier_>
+    template <a_vram_frontier frontier_>
     __device__ __forceinline__ vram_indexer_rescoring for_query(u32_t query_index,
                                                                 vram_warp_context<frontier_> const&) const noexcept {
         vram_indexer_rescoring narrowed = *this;
@@ -535,7 +535,7 @@ struct vram_indexer_rescoring {
 /** Scores one gathered batch against the query through @p schedule_ under @p resident_blocks_
  *  blocks per multiprocessor, lets @p rescoring rewrite the scores under the same count, folds it
  *  into the candidates, and hands it to @p fold - whose answer says whether the walk goes on. */
-template <vram_quads_kit kit_, vram_schedule<kit_> schedule_, u32_t resident_blocks_, vram_frontier frontier_,
+template <a_vram_quads_kit kit_, a_vram_schedule<kit_> schedule_, u32_t resident_blocks_, a_vram_frontier frontier_,
           typename fold_, typename rescoring_ = vram_no_rescoring>
 __device__ __forceinline__ walk_demand_t vram_score_into_frontier( //
     vram_flat_view<kit_> const& storage, typename kit_::fragment_t const* query_span,
@@ -583,7 +583,7 @@ __device__ __forceinline__ walk_demand_t vram_score_into_frontier( //
  *  @return The number of staged landmarks; zero once every published row of the range is
  *      visited, or the visited set saturated.
  */
-template <vram_quads_kit kit_, typename warp_type_, vram_frontier frontier_>
+template <a_vram_quads_kit kit_, typename warp_type_, a_vram_frontier frontier_>
 __device__ __forceinline__ u32_t vram_sample_landmarks( //
     vram_flat_view<kit_> const& storage, node_id_t sampling_first, node_id_t sampling_bound,
     vram_visited_set<warp_type_, node_id_t>& visited, frontier_ const& frontier, splitmix64_t& random_generator,
@@ -630,7 +630,7 @@ __device__ __forceinline__ u32_t vram_sample_landmarks( //
  *  expansion and dropped if still locked then, and no neighbor at or past @p first_invisible_id
  *  followed, since a batch's back-links splice its IDs into visible rows before the host turns its
  *  watermark. */
-template <vram_quads_kit kit_, vram_schedule<kit_> schedule_, u32_t resident_blocks_, vram_frontier frontier_,
+template <a_vram_quads_kit kit_, a_vram_schedule<kit_> schedule_, u32_t resident_blocks_, a_vram_frontier frontier_,
           typename fold_ = dummy_fold_t, typename rescoring_ = vram_no_rescoring>
 __device__ __forceinline__ void vram_search_ahead( //
     vram_flat_view<kit_> const& storage, typename kit_::fragment_t const* query_span,
@@ -713,7 +713,7 @@ __device__ __forceinline__ void vram_search_ahead( //
 
 /** Greedy best-first walk from random published landmarks toward the query: a fresh frontier
  *  handed to @ref vram_search_ahead. */
-template <vram_quads_kit kit_, vram_schedule<kit_> schedule_, u32_t resident_blocks_, vram_frontier frontier_,
+template <a_vram_quads_kit kit_, a_vram_schedule<kit_> schedule_, u32_t resident_blocks_, a_vram_frontier frontier_,
           typename fold_ = dummy_fold_t, typename rescoring_ = vram_no_rescoring>
 __device__ __forceinline__ void vram_search_around( //
     vram_flat_view<kit_> const& storage, typename kit_::fragment_t const* query_span,
@@ -738,7 +738,7 @@ __device__ __forceinline__ void vram_search_around( //
  *
  *  @return The kept count; @c selection.selected_ids holds their cache rows in kept order.
  */
-template <vram_quads_kit kit_, typename schedule_, typename storage_>
+template <a_vram_quads_kit kit_, typename schedule_, typename storage_>
 __device__ __forceinline__ u32_t vram_keep_diverse( //
     storage_ const& storage, vram_vector_cache<typename kit_::fragment_t> cache, schedule_& schedule,
     vram_sorted_buffer<typename schedule_::warp_t, node_id_t> const& sorted_candidates, u32_t position_mask,
@@ -799,7 +799,7 @@ __device__ __forceinline__ u32_t vram_keep_diverse( //
  *
  *  @return The kept count; @p selection.selected_ids holds that many node IDs on return.
  */
-template <vram_quads_kit kit_, vram_schedule<kit_> schedule_, vram_frontier frontier_>
+template <a_vram_quads_kit kit_, a_vram_schedule<kit_> schedule_, a_vram_frontier frontier_>
 __device__ __forceinline__ u32_t vram_select_diverse( //
     vram_flat_view<kit_> const& storage, node_id_t node_id, vram_vector_cache<typename kit_::fragment_t> cache,
     u32_t selection_nodes, schedule_& schedule, typename kit_::norms_t* candidate_norms,
@@ -871,7 +871,7 @@ __device__ __forceinline__ u32_t vram_select_diverse( //
 
 /** Geometry & storage pointers one insertion launch operates on. Every storage row an assignable
  *  new_node_id can touch is mapped and sentinel-filled ahead of the launch. */
-template <vram_quads_kit kit_>
+template <a_vram_quads_kit kit_>
 struct vram_build_view {
     vram_flat_view<kit_> storage;
 
@@ -930,7 +930,7 @@ struct vram_build_view {
 
 /** Inputs & outputs of one search launch: a batch of queries in, the nearest IDs and - when
  *  requested - their distances out, both ascending per query. */
-template <vram_quads_kit kit_>
+template <a_vram_quads_kit kit_>
 struct vram_search_view {
     vram_flat_view<kit_> storage;
 
@@ -979,7 +979,7 @@ struct vram_search_view {
 /** Inserts the node identified by @p new_node_id: writes the payload and norms, walks the published
  *  graph, selects diverse neighbors, publishes with one release store, then back-links them - one
  *  warp per node. */
-template <vram_quads_kit kit_, vram_schedule<kit_> schedule_, u32_t resident_blocks_, vram_frontier frontier_>
+template <a_vram_quads_kit kit_, a_vram_schedule<kit_> schedule_, u32_t resident_blocks_, a_vram_frontier frontier_>
 __device__ __forceinline__ void vram_insert_one( //
     vram_build_view<kit_> const& view, node_id_t new_node_id,
     vram_visited_set<typename schedule_::warp_t, node_id_t>& visited, typename kit_::fragment_t* query_span,
@@ -1057,7 +1057,7 @@ __device__ __forceinline__ void vram_insert_one( //
  *
  *  @return The kept count; @c selection.selected_ids holds their cache rows in kept order.
  */
-template <vram_quads_kit kit_, vram_schedule<kit_> schedule_, u32_t resident_blocks_, typename storage_>
+template <a_vram_quads_kit kit_, a_vram_schedule<kit_> schedule_, u32_t resident_blocks_, typename storage_>
 __device__ __forceinline__ u32_t vram_rank_diverse( //
     storage_ const& storage, node_id_t node_id, u32_t candidates_count,
     vram_vector_cache<typename kit_::fragment_t> cache, u32_t query_row, schedule_& schedule,
@@ -1118,7 +1118,7 @@ __device__ __forceinline__ u32_t vram_rank_diverse( //
  *
  *  @return Whether a candidate past them was kept: a member the row lacked.
  */
-template <vram_quads_kit kit_, vram_schedule<kit_> schedule_, u32_t resident_blocks_, typename storage_>
+template <a_vram_quads_kit kit_, a_vram_schedule<kit_> schedule_, u32_t resident_blocks_, typename storage_>
 __device__ __forceinline__ bool vram_reselect_staged( //
     storage_ const& storage, node_id_t node_id, u32_t candidates_count, u32_t incumbents,
     vram_vector_cache<typename kit_::fragment_t> cache, u32_t query_row, schedule_& schedule,
@@ -1185,7 +1185,7 @@ __device__ __forceinline__ bool vram_reselect_staged( //
  *
  *  @return Whether a round kept a member its live row lacked.
  */
-template <vram_quads_kit kit_, vram_schedule<kit_> schedule_, u32_t resident_blocks_, typename storage_>
+template <a_vram_quads_kit kit_, a_vram_schedule<kit_> schedule_, u32_t resident_blocks_, typename storage_>
 __device__ __forceinline__ bool vram_back_link_one( //
     storage_ const& storage, node_id_t node_id, u32_t const* forward_picks, u32_t forward_count, u32_t link_head,
     u32_t const* link_next, node_id_t first_id, vram_vector_cache<typename kit_::fragment_t> cache, u32_t query_row,
@@ -1251,7 +1251,7 @@ __device__ __forceinline__ bool vram_back_link_one( //
 /** One fold launch's view over the rows of one shard of a bin: the bin as one storage, every
  *  shard's fold buffers, the launching shard's place, the cross results each row holds from every
  *  other shard, and the scratch its re-selections or merges carve. */
-template <vram_quads_kit kit_>
+template <a_vram_quads_kit kit_>
 struct vram_fold_view {
     vram_bin_view<kit_> bin;
 
@@ -1298,7 +1298,7 @@ struct vram_fold_view {
  *  the sentinel past what a shard returned. The shards' live rows stay as they were, and every
  *  chain head this row moves belongs to its own shard, so no other device contends for it.
  */
-template <vram_quads_kit kit_, vram_schedule<kit_> schedule_, u32_t resident_blocks_>
+template <a_vram_quads_kit kit_, a_vram_schedule<kit_> schedule_, u32_t resident_blocks_>
 __device__ __forceinline__ void vram_fold_reselect_one( //
     vram_fold_view<kit_> const& view, node_id_t node_id, vram_vector_cache<typename kit_::fragment_t> cache,
     schedule_& schedule, vram_selection_scratch<node_id_t> selection, typename kit_::norms_t* candidate_norms,
@@ -1366,7 +1366,7 @@ __device__ __forceinline__ void vram_fold_reselect_one( //
  *
  *  @return Whether a round kept a member the row lacked.
  */
-template <vram_quads_kit kit_, vram_schedule<kit_> schedule_, u32_t resident_blocks_>
+template <a_vram_quads_kit kit_, a_vram_schedule<kit_> schedule_, u32_t resident_blocks_>
 __device__ __forceinline__ bool vram_fold_merge_one( //
     vram_fold_view<kit_> const& view, node_id_t node_id, vram_vector_cache<typename kit_::fragment_t> cache,
     schedule_& schedule, vram_selection_scratch<node_id_t> selection, typename kit_::norms_t* candidate_norms,
@@ -1425,7 +1425,7 @@ __device__ __forceinline__ bool vram_fold_merge_one( //
 
 /** Writes each query's nearest @c count IDs and distances out of a search walk, ascending, with
  *  sentinel IDs past the live prefix. */
-template <vram_quads_kit kit_>
+template <a_vram_quads_kit kit_>
 struct vram_search_sink {
     using fold_t = dummy_fold_t;
 
@@ -1441,12 +1441,12 @@ struct vram_search_sink {
     /** The metric the ranked distances convert out of. */
     nk_kernel_kind_t kernel;
 
-    template <vram_frontier frontier_>
+    template <a_vram_frontier frontier_>
     __device__ __forceinline__ fold_t open(u32_t, vram_warp_context<frontier_> const&, u32_t) const noexcept {
         return {};
     }
 
-    template <vram_frontier frontier_>
+    template <a_vram_frontier frontier_>
     __device__ __forceinline__ void close(fold_t const&, vram_warp_context<frontier_>& context, u32_t query_index,
                                           u32_t lane) const noexcept {
         // The rank extraction shuffles - every lane participates, only in-range ones store.
@@ -1461,7 +1461,7 @@ struct vram_search_sink {
 };
 
 /** Writes each query's kept node IDs and native dots out of a multiply walk, and the pairs it scored. */
-template <vram_quads_kit kit_, typename warp_type_>
+template <a_vram_quads_kit kit_, typename warp_type_>
 struct vram_multiply_sink {
     using fold_t = vram_multiply_fold<kit_, warp_type_>;
 
@@ -1477,13 +1477,13 @@ struct vram_multiply_sink {
     /** Pairs kept per query. */
     u32_t wanted;
 
-    template <vram_frontier frontier_>
+    template <a_vram_frontier frontier_>
     __device__ __forceinline__ fold_t open(u32_t query_index, vram_warp_context<frontier_> const&,
                                            u32_t) const noexcept {
         return {vram_row(ids, query_index, wanted), vram_row(products, query_index, wanted), wanted};
     }
 
-    template <vram_frontier frontier_>
+    template <a_vram_frontier frontier_>
     __device__ __forceinline__ void close(fold_t const& fold, vram_warp_context<frontier_>&, u32_t query_index,
                                           u32_t lane) const noexcept {
         for (u32_t slot = fold.written + lane; slot < wanted; slot += warp_type_::width_k)
@@ -1495,8 +1495,8 @@ struct vram_multiply_sink {
 /** One query's full walk: stages the query into its shared span, walks the graph under the fold the
  *  sink opens and the query's slice of @p rescorings, and lets the sink close the query. It is safe
  *  against concurrent insertions, since the walk gates on every slot-0 word and writes nothing. */
-template <vram_quads_kit kit_, vram_schedule<kit_> schedule_, u32_t resident_blocks_, typename sink_,
-          typename rescoring_, vram_frontier frontier_>
+template <a_vram_quads_kit kit_, a_vram_schedule<kit_> schedule_, u32_t resident_blocks_, typename sink_,
+          typename rescoring_, a_vram_frontier frontier_>
 __device__ __forceinline__ void vram_walk_one( //
     vram_search_view<kit_> const& view, sink_ const& sink, rescoring_ const& rescorings, u32_t query_index,
     typename kit_::fragment_t* query_span, vram_visited_set<typename schedule_::warp_t, node_id_t>& visited,
@@ -1943,7 +1943,7 @@ __device__ __forceinline__ u32_t vram_query_of(std::size_t const* offsets, u32_t
  *  @p queries, fragment rows as the storage pads them, @p query_offsets apart per query; the
  *  dots, in the kit's own type, land @p rows_stride apart per nominee in @p partials.
  */
-template <vram_quads_kit kit_, typename warp_type_>
+template <a_vram_quads_kit kit_, typename warp_type_>
 __device__ __forceinline__ void vram_maxsim_rescore(vram_flat_view<kit_> const& storage,
                                                     typename kit_::fragment_t const* queries,
                                                     u32_t const* query_offsets, u32_t queries_count,
@@ -1978,7 +1978,7 @@ __device__ __forceinline__ void vram_maxsim_rescore(vram_flat_view<kit_> const& 
 /** Folds every shard's partials into each nominee's score, one warp per nominee: per token row of
  *  its query the largest of the @p shards partials @p block_bytes apart from @p partials, summed
  *  over the rows in f64. */
-template <vram_quads_kit kit_, typename warp_type_>
+template <a_vram_quads_kit kit_, typename warp_type_>
 __device__ __forceinline__ void vram_maxsim_fold(typename kit_::dot_t const* partials, std::size_t block_bytes,
                                                  u32_t shards, u32_t rows_stride, u32_t const* query_offsets,
                                                  u32_t queries_count, std::size_t const* nominee_offsets,
@@ -2050,7 +2050,7 @@ __device__ __forceinline__ void vram_top_k(f64_t const* totals, vram_products_ta
 static_assert(sizeof(vram_scored_node<node_id_t>) == gpu_scored_node_bytes<node_id_t>);
 
 /** The shared views and sinks, field by field from the host's records. */
-template <vram_quads_kit kit_>
+template <a_vram_quads_kit kit_>
 __device__ __forceinline__ vram_flat_view<kit_> vram_view(vram_flat_storage_t const& storage) noexcept {
     return {reinterpret_cast<typename kit_::fragment_t*>(storage.vectors),
             reinterpret_cast<typename kit_::norms_t*>(storage.norms),
@@ -2059,7 +2059,7 @@ __device__ __forceinline__ vram_flat_view<kit_> vram_view(vram_flat_storage_t co
             {storage.row_fragments, storage.lanes_per_row, storage.steps_per_row, storage.row_fragments_magic,
              storage.kernel}};
 }
-template <vram_quads_kit kit_>
+template <a_vram_quads_kit kit_>
 __device__ __forceinline__ vram_build_view<kit_> vram_view(vram_build_t const& build) noexcept {
     return {vram_view<kit_>(build.storage),
             reinterpret_cast<typename kit_::fragment_t const*>(build.staging),
@@ -2079,7 +2079,7 @@ __device__ __forceinline__ vram_build_view<kit_> vram_view(vram_build_t const& b
             build.touched_ids,
             build.touched_count};
 }
-template <vram_quads_kit kit_>
+template <a_vram_quads_kit kit_>
 __device__ __forceinline__ vram_search_view<kit_> vram_view(vram_search_t const& search) noexcept {
     return {vram_view<kit_>(search.storage),
             reinterpret_cast<typename kit_::fragment_t const*>(search.queries),
@@ -2096,21 +2096,21 @@ __device__ __forceinline__ vram_search_view<kit_> vram_view(vram_search_t const&
             search.concurrent_walks,
             search.filling_nodes};
 }
-template <vram_quads_kit kit_>
+template <a_vram_quads_kit kit_>
 __device__ __forceinline__ vram_search_sink<kit_> vram_view(vram_search_sink_t const& sink) noexcept {
     return {sink.result_ids, sink.result_distances, sink.count, sink.kernel};
 }
-template <vram_quads_kit kit_, typename warp_type_>
+template <a_vram_quads_kit kit_, typename warp_type_>
 __device__ __forceinline__ vram_multiply_sink<kit_, warp_type_> vram_view(vram_multiply_sink_t const& sink) noexcept {
     return {sink.ids, reinterpret_cast<typename kit_::dot_t*>(sink.products), sink.counts, sink.wanted};
 }
-template <vram_quads_kit kit_, typename warp_type_>
+template <a_vram_quads_kit kit_, typename warp_type_>
 __device__ __forceinline__ vram_indexer_rescoring<kit_, warp_type_> vram_view(
     vram_rescoring_t const& rescoring) noexcept {
     return {reinterpret_cast<typename kit_::fragment_t const*>(rescoring.heads), rescoring.weights,
             rescoring.heads_count, rescoring.row_fragments};
 }
-template <vram_quads_kit kit_>
+template <a_vram_quads_kit kit_>
 __device__ __forceinline__ vram_fold_view<kit_> vram_view(vram_fold_t const& fold) noexcept {
     return {{fold.bin_shards, fold.storage.connectivity, vram_view<kit_>(fold.storage).geometry, fold.row_bits,
              (1u << fold.row_bits) - 1u},
@@ -2154,7 +2154,7 @@ __device__ __forceinline__ vram_ranking_view vram_view(vram_ranking_t const& ran
  *  batch at a time and in claim order, and follow no neighbor at or past the watermark they
  *  launched under.
  */
-template <vram_quads_kit kit_, vram_schedule<kit_> schedule_, u32_t candidate_slots_, u32_t resident_blocks_>
+template <a_vram_quads_kit kit_, a_vram_schedule<kit_> schedule_, u32_t candidate_slots_, u32_t resident_blocks_>
 __device__ __forceinline__ void vram_insert(vram_build_view<kit_> const& view) {
     using warp_t = typename schedule_::warp_t;
     // The scratch slice hosts the query span while traversing, then the candidate cache while
@@ -2204,7 +2204,7 @@ __device__ __forceinline__ void vram_insert(vram_build_view<kit_> const& view) {
 /** Back-links an insertion wave: one warp per node any appended node picked, each assigned from the
  *  launch counter, the only writer of that node's row, so no row is locked. Each node's chain head
  *  resets to unknown once merged, leaving the heads ready for the next wave. */
-template <vram_quads_kit kit_, vram_schedule<kit_> schedule_, u32_t resident_blocks_>
+template <a_vram_quads_kit kit_, a_vram_schedule<kit_> schedule_, u32_t resident_blocks_>
 __device__ __forceinline__ void vram_back_link(vram_build_view<kit_> const& view) {
     using warp_t = typename schedule_::warp_t;
     extern __shared__ byte_t dynamic_scratch[];
@@ -2239,7 +2239,7 @@ __device__ __forceinline__ void vram_back_link(vram_build_view<kit_> const& view
 /** One warp folds one row of the launching shard at a time, assigning itself rows from the pass
  *  counter: a re-selection reads every shard of the bin and writes only its own rows' fold rows,
  *  picks and links, and a merge writes only its own rows' fold rows. */
-template <vram_quads_kit kit_, vram_schedule<kit_> schedule_, u32_t resident_blocks_>
+template <a_vram_quads_kit kit_, a_vram_schedule<kit_> schedule_, u32_t resident_blocks_>
 __device__ __forceinline__ void vram_fold(vram_fold_view<kit_> const& view) {
     using warp_t = typename schedule_::warp_t;
     extern __shared__ byte_t dynamic_scratch[];
@@ -2281,7 +2281,7 @@ __device__ __forceinline__ void vram_fold(vram_fold_view<kit_> const& view) {
 
 /** Rebuilds the norms column from the vectors matrix for rows @c [first_row,first_row+rows_count),
  *  one warp per row; norms are derived state, never serialized. */
-template <vram_quads_kit kit_, typename warp_type_, typename scan_type_>
+template <a_vram_quads_kit kit_, typename warp_type_, typename scan_type_>
 __device__ __forceinline__ void vram_derive_norms(vram_flat_view<kit_> const& storage, u32_t first_row,
                                                   u32_t rows_count) {
     using warp_t = warp_type_;
@@ -2303,7 +2303,7 @@ __device__ __forceinline__ void vram_derive_norms(vram_flat_view<kit_> const& st
  *  its dots, the warp reads the batch once more for every further head, every head's dots go into
  *  the warp's scratch for the attend fold, and a node's distance is 1 − maxₕ qₕ · k, so every
  *  head's own region is explored. */
-template <vram_quads_kit kit_, typename warp_type_>
+template <a_vram_quads_kit kit_, typename warp_type_>
 struct vram_heads_rescoring {
     using warp_t = warp_type_;
     using fragment_t = typename kit_::fragment_t;
@@ -2321,7 +2321,7 @@ struct vram_heads_rescoring {
     /** Fragments per staged head row. */
     u32_t row_fragments;
 
-    template <vram_frontier frontier_>
+    template <a_vram_frontier frontier_>
     __device__ __forceinline__ vram_heads_rescoring
     for_query(u32_t query_index, vram_warp_context<frontier_> const& context) const noexcept {
         vram_heads_rescoring narrowed = *this;
@@ -2379,7 +2379,7 @@ struct vram_heads_rescoring {
  *  into every head, so the rows accumulate in place without atomics, and a row's last, partial
  *  fragment is read whole bytes at a time.
  */
-template <vram_quads_kit kit_, typename warp_type_>
+template <a_vram_quads_kit kit_, typename warp_type_>
 __device__ __forceinline__ void vram_gather_weighted_rows( //
     typename kit_::fragment_t const* row, u32_t count, f32_t const* weights, f32_t const* rescales, u32_t heads_count,
     u32_t columns, f32_t* accumulators, u32_t lane) noexcept {
@@ -2443,7 +2443,7 @@ __device__ __forceinline__ void const* vram_value_row(vram_keyed_lookup<key_type
  *  added into every head's accumulator row. The running maxima, partitions and rescales are
  *  warp-uniform, as every lane derives them from the same reductions.
  */
-template <vram_quads_kit kit_, typename warp_type_, typename value_lookup_type_>
+template <a_vram_quads_kit kit_, typename warp_type_, typename value_lookup_type_>
 struct vram_attend_fold {
     using warp_t = warp_type_;
     using fragment_t = typename kit_::fragment_t;
@@ -2511,7 +2511,7 @@ struct vram_attend_fold {
 /** Writes each token's attention out of its walk: opens the fold over the warp's scratch, then
  *  writes every head's normalized row and its carry once the walk ends, and raises the miss word if
  *  the walk visited a row-less node. */
-template <vram_quads_kit kit_, typename warp_type_, typename value_lookup_type_>
+template <a_vram_quads_kit kit_, typename warp_type_, typename value_lookup_type_>
 struct vram_attend_sink {
     using warp_t = warp_type_;
     using fold_t = vram_attend_fold<kit_, warp_type_, value_lookup_type_>;
@@ -2534,7 +2534,7 @@ struct vram_attend_sink {
     /** Heads per token, and columns per value and output row. */
     u32_t heads_count, columns;
 
-    template <vram_frontier frontier_>
+    template <a_vram_frontier frontier_>
     __device__ __forceinline__ fold_t open(u32_t, vram_warp_context<frontier_> const& context,
                                            u32_t lane) const noexcept {
         constexpr u32_t lanes_k = warp_t::width_k;
@@ -2555,7 +2555,7 @@ struct vram_attend_sink {
         return fold;
     }
 
-    template <vram_frontier frontier_>
+    template <a_vram_frontier frontier_>
     __device__ __forceinline__ void close(fold_t const& fold, vram_warp_context<frontier_>&, u32_t query_index,
                                           u32_t lane) const noexcept {
         constexpr u32_t lanes_k = warp_t::width_k;
@@ -2580,7 +2580,7 @@ struct vram_attend_sink {
 /** One warp per query over the register frontier - expansions within the ladder - each walk
  *  scored through the schedule under @p rescorings and written out through @p sink; warps take
  *  queries from the batch counter, as builders take rows. */
-template <vram_quads_kit kit_, vram_schedule<kit_> schedule_, u32_t candidate_slots_, u32_t resident_blocks_,
+template <a_vram_quads_kit kit_, a_vram_schedule<kit_> schedule_, u32_t candidate_slots_, u32_t resident_blocks_,
           typename sink_, typename rescoring_>
 __device__ __forceinline__ void vram_walk(vram_search_view<kit_> const& view, sink_ const& sink,
                                           rescoring_ const& rescorings) {
@@ -2604,7 +2604,7 @@ __device__ __forceinline__ void vram_walk(vram_search_view<kit_> const& view, si
 
 /** One warp per query past the register ladder's width: the same walk over the arena frontier,
  *  whose budget is the requested expansion itself, ranking everything it kept at the end. */
-template <vram_quads_kit kit_, vram_schedule<kit_> schedule_, u32_t resident_blocks_, typename sink_,
+template <a_vram_quads_kit kit_, a_vram_schedule<kit_> schedule_, u32_t resident_blocks_, typename sink_,
           typename rescoring_>
 __device__ __forceinline__ void vram_walk_wide(vram_search_view<kit_> const& view, sink_ const& sink,
                                                rescoring_ const& rescorings) {
@@ -2631,7 +2631,7 @@ __device__ __forceinline__ void vram_walk_wide(vram_search_view<kit_> const& vie
 
 /** Runs one walk family on its rung, the arena frontier at slot zero, under @p resident_blocks_
  *  blocks per multiprocessor. */
-template <vram_quads_kit kit_, vram_schedule<kit_> schedule_, u32_t slots_, u32_t resident_blocks_, typename sink_,
+template <a_vram_quads_kit kit_, a_vram_schedule<kit_> schedule_, u32_t slots_, u32_t resident_blocks_, typename sink_,
           typename rescoring_>
 __device__ __forceinline__ void vram_walk_rung(vram_search_view<kit_> const& view, sink_ const& sink,
                                                rescoring_ const& rescorings) {
@@ -3492,7 +3492,7 @@ __device__ __forceinline__ void vram_health_pass(vram_health_t const& health) no
 #pragma region Rounds
 
 /** One gather launch as its blocks read it, field by field from @c vram_gather_neighborhoods_t. */
-template <vram_quads_kit kit_>
+template <a_vram_quads_kit kit_>
 struct vram_gather_neighborhoods_view {
     vram_flat_view<kit_> storage;
 
@@ -3518,7 +3518,7 @@ struct vram_gather_neighborhoods_view {
 };
 
 /** One restitch launch as its blocks read it, field by field from @c vram_restitch_t. */
-template <vram_quads_kit kit_>
+template <a_vram_quads_kit kit_>
 struct vram_restitch_view {
     vram_flat_view<kit_> storage;
 
@@ -3551,7 +3551,7 @@ struct vram_restitch_view {
     vram_telemetry_block_t* telemetry;
 };
 
-template <vram_quads_kit kit_>
+template <a_vram_quads_kit kit_>
 __device__ __forceinline__ vram_gather_neighborhoods_view<kit_> vram_view(
     vram_gather_neighborhoods_t const& gather) noexcept {
     return {vram_view<kit_>(gather.storage),
@@ -3565,7 +3565,7 @@ __device__ __forceinline__ vram_gather_neighborhoods_view<kit_> vram_view(
             gather.assigned_items,
             gather.telemetry};
 }
-template <vram_quads_kit kit_>
+template <a_vram_quads_kit kit_>
 __device__ __forceinline__ vram_restitch_view<kit_> vram_view(vram_restitch_t const& restitch) noexcept {
     return {vram_view<kit_>(restitch.storage),
             restitch.neighborhood_entries,
@@ -3586,7 +3586,7 @@ __device__ __forceinline__ vram_restitch_view<kit_> vram_view(vram_restitch_t co
 /** The entry scored against @p id from their @p dot and norms, the one epilogue every gather and
  *  mate scoring finalizes a dot through, on SIMT dots and kit tiles alike, so no two paths can rank
  *  by different formulas. */
-template <vram_quads_kit kit_>
+template <a_vram_quads_kit kit_>
 __device__ __forceinline__ vram_scored_node<node_id_t> vram_scored_pair(nk_kernel_kind_t kernel,
                                                                         typename kit_::dot_t dot,
                                                                         typename kit_::norms_t entry_norms,
@@ -3618,7 +3618,7 @@ __device__ __forceinline__ vram_gather_item_t vram_gather_item(view_ const& view
 }
 
 /** The dot of @p fragments fragments of @p first and @p second, on one lane. */
-template <vram_quads_kit kit_>
+template <a_vram_quads_kit kit_>
 __device__ __forceinline__ typename kit_::dot_t vram_whole_dot(typename kit_::fragment_t const* first,
                                                                typename kit_::fragment_t const* second,
                                                                u32_t fragments) noexcept {
@@ -3637,7 +3637,7 @@ __device__ __forceinline__ typename kit_::dot_t vram_whole_dot(typename kit_::fr
  *  per hub; only the nearest crosses lanes. An entry that no distance reached joins its run's
  *  first hub, as the RAM gather files it.
  */
-template <vram_quads_kit kit_, typename warp_type_>
+template <a_vram_quads_kit kit_, typename warp_type_>
 __device__ __forceinline__ void vram_gather_neighborhoods(vram_gather_neighborhoods_view<kit_> const& view) {
     using fragment_t = typename kit_::fragment_t;
     using norms_t = typename kit_::norms_t;
@@ -3696,7 +3696,7 @@ __device__ __forceinline__ void vram_gather_neighborhoods(vram_gather_neighborho
  *  the sentinel past the last; both directions of every pair are scored and none with itself, so
  *  no atomic merges a pair. Rows come from @p staged_rows when staged, and from storage in place
  *  where no shared memory holds them. */
-template <vram_quads_kit kit_, typename warp_type_>
+template <a_vram_quads_kit kit_, typename warp_type_>
 __device__ __forceinline__ void vram_score_mates(vram_flat_view<kit_> const& storage, u32_t const* entries, u32_t count,
                                                  typename kit_::fragment_t const* staged_rows,
                                                  typename kit_::norms_t const* staged_norms,
@@ -3743,7 +3743,7 @@ __device__ __forceinline__ void vram_score_mates(vram_flat_view<kit_> const& sto
  *  The row is rewritten slot by slot only where it changed, counted once in the changed bits; its
  *  additions and drops add to @p added and @p dropped, identical on every lane.
  */
-template <vram_quads_kit kit_, vram_schedule<kit_> schedule_, u32_t resident_blocks_>
+template <a_vram_quads_kit kit_, a_vram_schedule<kit_> schedule_, u32_t resident_blocks_>
 __device__ __forceinline__ void vram_stitch_entry(vram_restitch_view<kit_> const& view, u32_t const* entries,
                                                   u32_t position, vram_scored_node<node_id_t> const* mates,
                                                   vram_vector_cache<typename kit_::fragment_t> cache,
@@ -3813,7 +3813,7 @@ __device__ __forceinline__ void vram_stitch_entry(vram_restitch_view<kit_> const
  *  at @p shared when the launch granted them, then every warp scores its entries' mates on whole
  *  dots, as @ref unum::usearch::dense::vram_score_mates does. */
 struct vram_simt_mates {
-    template <vram_quads_kit kit_, typename warp_type_>
+    template <a_vram_quads_kit kit_, typename warp_type_>
     static __device__ __forceinline__ void score(vram_restitch_view<kit_> const& view, u32_t const* entries,
                                                  u32_t count, byte_t* shared, vram_scored_node<node_id_t>* mates,
                                                  u32_t warp, u32_t lane, vram_telemetry_t& telemetry) noexcept {
@@ -3845,7 +3845,7 @@ struct vram_simt_mates {
  *  A block writes only its own neighborhood's rows, and an entry sits in one neighborhood, so no
  *  row is locked; the links added and dropped and the rows changed add to the counters.
  */
-template <vram_quads_kit kit_, vram_schedule<kit_> schedule_, u32_t resident_blocks_, typename mates_type_>
+template <a_vram_quads_kit kit_, a_vram_schedule<kit_> schedule_, u32_t resident_blocks_, typename mates_type_>
 __device__ __forceinline__ void vram_restitch(vram_restitch_view<kit_> const& view) {
     using warp_t = typename schedule_::warp_t;
     using fragment_t = typename kit_::fragment_t;

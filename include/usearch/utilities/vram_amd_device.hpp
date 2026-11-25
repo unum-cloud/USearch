@@ -385,7 +385,7 @@ enum class hip_address_space_t : u32_t {
 /** The device analog of @c std::allocator, with the ordering stream and the target device bound at
  *  construction; @c address_space_k fixes host visibility. */
 template <typename allocator_>
-concept hip_allocator = requires(allocator_ allocator, typename allocator_::value_type* pointer, std::size_t count) {
+concept a_hip_allocator = requires(allocator_ allocator, typename allocator_::value_type* pointer, std::size_t count) {
     typename allocator_::value_type;
     { allocator_::address_space_k } -> std::convertible_to<hip_address_space_t>;
     { allocator.allocate(count) } -> std::same_as<typename allocator_::value_type*>;
@@ -395,9 +395,9 @@ concept hip_allocator = requires(allocator_ allocator, typename allocator_::valu
 };
 
 /** The flat storage backend contract: a reserve-once / commit-on-demand address range whose base
- *  never moves. Not a refinement of @c hip_allocator, since flat storage never frees mid-life. */
+ *  never moves. Not a refinement of @c a_hip_allocator, since flat storage never frees mid-life. */
 template <typename allocator_>
-concept hip_reservable_allocator = requires(allocator_ allocator, std::size_t bytes) {
+concept a_hip_reservable_allocator = requires(allocator_ allocator, std::size_t bytes) {
     typename allocator_::value_type;
     { allocator_::address_space_k } -> std::convertible_to<hip_address_space_t>;
     { allocator.reserve_range(bytes) } -> std::same_as<status_t>;
@@ -1274,11 +1274,11 @@ status_t hip_launch(hip_api_t const& api, hip_function_handle_t function, u32_t 
                : status_code_t::device_k;
 }
 
-static_assert(hip_reservable_allocator<hip_virtual_memory_allocator<byte_t>>);
-static_assert(hip_reservable_allocator<hip_managed_allocator<byte_t>>);
-static_assert(hip_allocator<hip_device_allocator_t>);
-static_assert(hip_allocator<hip_arena_allocator_t>);
-static_assert(hip_allocator<hip_pinned_allocator_t>);
+static_assert(a_hip_reservable_allocator<hip_virtual_memory_allocator<byte_t>>);
+static_assert(a_hip_reservable_allocator<hip_managed_allocator<byte_t>>);
+static_assert(a_hip_allocator<hip_device_allocator_t>);
+static_assert(a_hip_allocator<hip_arena_allocator_t>);
+static_assert(a_hip_allocator<hip_pinned_allocator_t>);
 static_assert(std::allocator_traits<hip_device_allocator_t>::propagate_on_container_move_assignment::value &&
               std::allocator_traits<hip_device_allocator_t>::propagate_on_container_swap::value &&
               !std::allocator_traits<hip_device_allocator_t>::is_always_equal::value);
@@ -1296,7 +1296,7 @@ static_assert(!std::allocator_traits<hip_arena_allocator_t>::propagate_on_contai
  *  call's own scratch, from a run its owner rewinds. Two contexts on one index share only the
  *  storage and the published counter, never scratch. Callers observe it through @c results,
  *  @ref spent, @ref missed and @ref matched, its scratch being the index's verbs' alone. */
-template <hip_allocator allocator_type_ = hip_device_allocator_t>
+template <a_hip_allocator allocator_type_ = hip_device_allocator_t>
 struct hip_traversal_context {
     using allocator_t = allocator_type_;
     using kernel_table_t = hip_kernel_table_t;

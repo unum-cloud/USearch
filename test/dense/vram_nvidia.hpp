@@ -56,7 +56,7 @@ struct dense_nvidia_fatbin {
 /** The ledgered virtual-memory flat-matrix backend every CUDA fixture places its index through. */
 using counting_cuda_allocator_t = counting_device_allocator<cuda_virtual_memory_allocator<byte_t>>;
 
-static_assert(cuda_reservable_allocator<counting_cuda_allocator_t>);
+static_assert(a_cuda_reservable_allocator<counting_cuda_allocator_t>);
 
 /** The NVIDIA index of one (dtype, kernel) cell over the ledgered flat matrices and its sharded
  *  collection, built over the stream of the executor the CUDA entry opened. */

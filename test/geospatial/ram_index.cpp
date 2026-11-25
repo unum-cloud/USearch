@@ -106,11 +106,11 @@ struct positions_fixture_t {
     }
 };
 
-static_assert(us::basic::value<earth_observation_t>);
-static_assert(us::basic::metric<chord_metric_t, earth_observation_t, nk_u64_t>);
-static_assert(us::basic::transparent_metric<chord_metric_t>);
-static_assert(us::basic::query<geodetic_t, chord_metric_t, earth_observation_t>);
-static_assert(us::basic::value_codec<earth_observation_codec_t, earth_observation_t>);
+static_assert(us::basic::a_value<earth_observation_t>);
+static_assert(us::basic::a_metric<chord_metric_t, earth_observation_t, nk_u64_t>);
+static_assert(us::basic::a_transparent_metric<chord_metric_t>);
+static_assert(us::basic::a_query<geodetic_t, chord_metric_t, earth_observation_t>);
+static_assert(us::basic::a_value_codec<earth_observation_codec_t, earth_observation_t>);
 
 /** The datum: known Earth-fixed images of the equator and the pole, and a round trip
  *  through both conversions within a centimetre and a ten-millionth of a degree. */

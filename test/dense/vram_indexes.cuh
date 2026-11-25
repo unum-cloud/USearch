@@ -34,7 +34,7 @@ bool dense_download(void* destination, void const* source, std::size_t bytes) no
 
 /** Whether a sharded index places its shards on GPUs - the VRAM residency, whichever vendor's. */
 template <typename indexes_type_>
-concept vram_collection = requires { indexes_type_::vendor_k; };
+concept a_vram_collection = requires { indexes_type_::vendor_k; };
 
 /** The VRAM reading of the search race: the index admits no search during a mutation, so the
  *  exclusion is the executor's - a search on a claimed executor is refused, and the reader walks
@@ -920,7 +920,7 @@ void run_vram_indexes_cases(executor_type_& executor);
 
 /** The VRAM form: one stream or queue of its own on the device of @p placement, the executor the
  *  vendor's entry opened. */
-template <us::test::dense::vram_collection indexes_type_>
+template <us::test::dense::a_vram_collection indexes_type_>
 struct us::test::dense_indexes_executor<indexes_type_> {
     using executor_t = typename indexes_type_::executor_t;
 
@@ -982,7 +982,7 @@ struct us::test::dense_indexes_executor<indexes_type_> {
 
 /** The VRAM form: the one-row verbs take the executor itself, as no single context can
  *  walk every device. */
-template <us::test::dense::vram_collection indexes_type_>
+template <us::test::dense::a_vram_collection indexes_type_>
 struct us::test::dense_indexes_row_driver<indexes_type_> {
     typename indexes_type_::executor_t& executor;
     util::status_t status = util::status_code_t::success_k;

@@ -157,11 +157,11 @@ struct sentences_fixture {
 
 using sentences_fixture_t = sentences_fixture<flaky_waiter_t>;
 
-static_assert(value<std::string>);
-static_assert(metric<levenshtein_metric_t, std::string, u64_t>);
-static_assert(transparent_metric<levenshtein_metric_t>);
-static_assert(query<std::string_view, levenshtein_metric_t, std::string>);
-static_assert(value_codec<sentence_codec_t, std::string>);
+static_assert(a_value<std::string>);
+static_assert(a_metric<levenshtein_metric_t, std::string, u64_t>);
+static_assert(a_transparent_metric<levenshtein_metric_t>);
+static_assert(a_query<std::string_view, levenshtein_metric_t, std::string>);
+static_assert(a_value_codec<sentence_codec_t, std::string>);
 
 /** The transparency case: a @c string_view query - never a stored value - opens the
  *  metric's rounds, and its self-match still ranks at distance zero. */

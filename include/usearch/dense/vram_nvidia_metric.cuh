@@ -1662,7 +1662,7 @@ struct u1x8_ampere_quads_kit_t {
  *  entries, which a reduce-scatter folds once per pass of 16 candidates. Rows past a short batch
  *  re-read its first row, and rows split into whole 32-byte pieces.
  */
-template <vram_quads_kit kit_, u32_t lanes_per_row_>
+template <a_vram_quads_kit kit_, u32_t lanes_per_row_>
 __device__ __forceinline__ vram_scored_node<node_id_t> cuda_score_tiles( //
     vram_flat_view<kit_> const& storage, typename kit_::fragment_t const* query_span,
     typename kit_::norms_t query_state, vram_gathered<kit_, cuda_warp_t>& gathered, u32_t gathered_count,
@@ -1763,7 +1763,7 @@ __device__ __forceinline__ vram_scored_node<node_id_t> cuda_score_tiles( //
 
 /** A walk's batch under a kit without a tensor-core step: its scalar dots, @p fragments_per_load_
  *  adjacent fragments a load. */
-template <vram_quads_kit kit_, u32_t resident_blocks_, u32_t fragments_per_load_>
+template <a_vram_quads_kit kit_, u32_t resident_blocks_, u32_t fragments_per_load_>
 __device__ __forceinline__ vram_scored_node<node_id_t> cuda_score_batch( //
     vram_flat_view<kit_> const& storage, typename kit_::fragment_t const* query_span,
     typename kit_::norms_t query_state, vram_gathered<kit_, cuda_warp_t>& gathered, u32_t gathered_count,
@@ -1776,7 +1776,7 @@ __device__ __forceinline__ vram_scored_node<node_id_t> cuda_score_batch( //
  *  rows up and of 128-byte ones under them, and the scalar dots for rows of an odd fragment count,
  *  which split into no whole 32-byte pieces. Binary rows keep their scalar popcounts, which score
  *  one query's batch faster than the bit tile. */
-template <vram_quads_kit kit_, u32_t resident_blocks_, u32_t fragments_per_load_>
+template <a_vram_quads_kit kit_, u32_t resident_blocks_, u32_t fragments_per_load_>
     requires requires(typename kit_::fragment_t a, uint2 b, std::array<typename kit_::dot_t, 4> tile) {
         kit_::accumulate_tile(a, b, tile);
     }
@@ -1805,7 +1805,7 @@ inline constexpr u32_t cuda_tile_rows_k = 16;
  *  dimensions, and a fragment past the row reads as zeros. Every tile-capable kit's step spans 32
  *  bytes of depth, so one permutation serves them all.
  */
-template <vram_quads_kit kit_, typename storage_>
+template <a_vram_quads_kit kit_, typename storage_>
 __device__ __forceinline__ std::array<std::array<typename kit_::dot_t, 4>, 2> cuda_block_tiles( //
     storage_ const& storage, vram_vector_cache<typename kit_::fragment_t> cache, u32_t top, u32_t bottom,
     u32_t const (&columns)[2], u32_t lane) noexcept {
@@ -1846,7 +1846,7 @@ __device__ __forceinline__ std::array<std::array<typename kit_::dot_t, 4>, 2> cu
  *  greedy would test, and the zero rule and the stop at a full row cut where it would: the verdicts
  *  are the serial greedy's for the distances the tiles give.
  */
-template <vram_quads_kit kit_, typename schedule_, typename storage_>
+template <a_vram_quads_kit kit_, typename schedule_, typename storage_>
     requires requires(typename kit_::fragment_t a, uint2 b, std::array<typename kit_::dot_t, 4> tile) {
         kit_::accumulate_tile(a, b, tile);
     }
@@ -1956,7 +1956,7 @@ __device__ __forceinline__ u32_t cuda_keep_diverse_tiles( //
 
 /** The greedy diversity prefix: on the kit's tensor-core tiles where it has a step, the serial
  *  greedy otherwise. No argument deduces the kit, so a branch picks the body, not an overload. */
-template <vram_quads_kit kit_, typename schedule_, typename storage_>
+template <a_vram_quads_kit kit_, typename schedule_, typename storage_>
 __device__ __forceinline__ u32_t cuda_keep_diverse( //
     storage_ const& storage, vram_vector_cache<typename kit_::fragment_t> cache, schedule_& schedule,
     vram_sorted_buffer<cuda_warp_t, node_id_t> const& sorted_candidates, u32_t position_mask, u32_t candidates_count,
@@ -1995,7 +1995,7 @@ struct ampere_cp_async_schedule_t {
     __device__ __forceinline__ ampere_cp_async_schedule_t(shared_t&, u32_t) noexcept {}
 
     /** Scores a walk's batch as @ref cuda_score_batch does at this schedule's load width. */
-    template <vram_quads_kit kit_, u32_t resident_blocks_>
+    template <a_vram_quads_kit kit_, u32_t resident_blocks_>
     static __device__ __forceinline__ vram_scored_node<node_id_t> score_batch( //
         vram_flat_view<kit_> const& storage, typename kit_::fragment_t const* query_span,
         typename kit_::norms_t query_state, vram_gathered<kit_, warp_t>& gathered, u32_t gathered_count,
@@ -2005,7 +2005,7 @@ struct ampere_cp_async_schedule_t {
     }
 
     /** The greedy diversity prefix as @ref cuda_keep_diverse runs it, on this schedule. */
-    template <vram_quads_kit kit_, typename storage_>
+    template <a_vram_quads_kit kit_, typename storage_>
     __device__ __forceinline__ u32_t keep_diverse( //
         storage_ const& storage, vram_vector_cache<typename kit_::fragment_t> cache,
         vram_sorted_buffer<warp_t, node_id_t> const& sorted, u32_t position_mask, u32_t candidates_count,
@@ -2184,7 +2184,7 @@ __device__ __forceinline__ void cuda_tma_gather_unit(cuda_gather_stages<window_b
  *
  *  @return This lane's scored entry, or the sentinel on lanes past @p gathered_count.
  */
-template <vram_quads_kit kit_, u32_t window_bytes_>
+template <a_vram_quads_kit kit_, u32_t window_bytes_>
 __device__ __forceinline__ vram_scored_node<node_id_t> cuda_tma_gather_quads( //
     cuda_gather_stages<window_bytes_>& gather, vram_flat_view<kit_> const& storage,
     typename kit_::fragment_t const* query_span, typename kit_::norms_t query_state,
@@ -2283,7 +2283,7 @@ struct hopper_tma_schedule_t {
     }
 
     /** Scores a walk's batch as @ref cuda_score_batch does at this schedule's load width. */
-    template <vram_quads_kit kit_, u32_t resident_blocks_>
+    template <a_vram_quads_kit kit_, u32_t resident_blocks_>
     static __device__ __forceinline__ vram_scored_node<node_id_t> score_batch( //
         vram_flat_view<kit_> const& storage, typename kit_::fragment_t const* query_span,
         typename kit_::norms_t query_state, vram_gathered<kit_, warp_t>& gathered, u32_t gathered_count,
@@ -2293,7 +2293,7 @@ struct hopper_tma_schedule_t {
     }
 
     /** The greedy diversity prefix as @ref cuda_keep_diverse runs it, on this schedule. */
-    template <vram_quads_kit kit_, typename storage_>
+    template <a_vram_quads_kit kit_, typename storage_>
     __device__ __forceinline__ u32_t keep_diverse( //
         storage_ const& storage, vram_vector_cache<typename kit_::fragment_t> cache,
         vram_sorted_buffer<warp_t, node_id_t> const& sorted, u32_t position_mask, u32_t candidates_count,
@@ -2400,7 +2400,7 @@ struct blackwell_tma_schedule_t {
 
     /** Scores a walk's batch from rows gathered four at a time, or as @ref cuda_score_batch does at
      *  this schedule's load width where the bound map misses any of them. */
-    template <vram_quads_kit kit_, u32_t resident_blocks_>
+    template <a_vram_quads_kit kit_, u32_t resident_blocks_>
     static __device__ __forceinline__ vram_scored_node<node_id_t> score_batch( //
         vram_flat_view<kit_> const& storage, typename kit_::fragment_t const* query_span,
         typename kit_::norms_t query_state, vram_gathered<kit_, warp_t>& gathered, u32_t gathered_count,
@@ -2414,7 +2414,7 @@ struct blackwell_tma_schedule_t {
     }
 
     /** The greedy diversity prefix as @ref cuda_keep_diverse runs it, on this schedule. */
-    template <vram_quads_kit kit_, typename storage_>
+    template <a_vram_quads_kit kit_, typename storage_>
     __device__ __forceinline__ u32_t keep_diverse( //
         storage_ const& storage, vram_vector_cache<typename kit_::fragment_t> cache,
         vram_sorted_buffer<warp_t, node_id_t> const& sorted, u32_t position_mask, u32_t candidates_count,
@@ -2482,7 +2482,7 @@ struct blackwellrtx_tma_schedule_t {
     }
 
     /** Scores a walk's batch as @ref cuda_score_batch does at this schedule's load width. */
-    template <vram_quads_kit kit_, u32_t resident_blocks_>
+    template <a_vram_quads_kit kit_, u32_t resident_blocks_>
     static __device__ __forceinline__ vram_scored_node<node_id_t> score_batch( //
         vram_flat_view<kit_> const& storage, typename kit_::fragment_t const* query_span,
         typename kit_::norms_t query_state, vram_gathered<kit_, warp_t>& gathered, u32_t gathered_count,
@@ -2492,7 +2492,7 @@ struct blackwellrtx_tma_schedule_t {
     }
 
     /** The greedy diversity prefix as @ref cuda_keep_diverse runs it, on this schedule. */
-    template <vram_quads_kit kit_, typename storage_>
+    template <a_vram_quads_kit kit_, typename storage_>
     __device__ __forceinline__ u32_t keep_diverse( //
         storage_ const& storage, vram_vector_cache<typename kit_::fragment_t> cache,
         vram_sorted_buffer<warp_t, node_id_t> const& sorted, u32_t position_mask, u32_t candidates_count,

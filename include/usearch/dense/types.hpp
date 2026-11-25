@@ -36,7 +36,7 @@ static_assert(sizeof(shard_node_t) == 8);
  *  CPU's in @c ram_metric.hpp, NVIDIA's in @c vram_nvidia_metric.cuh - specializes it under a
  *  constraint on @p caps_. Reading order is the priority order; the first kit this build compiled
  *  whose @c capability_k @p caps_ admits wins, else the fallback does. */
-template <nk::numeric_dtype scalar_, nk_capability_t caps_>
+template <nk::a_numeric_dtype scalar_, nk_capability_t caps_>
 struct quads_ladder;
 
 /** The GPU kernels only dense indexes launch, the first template argument of each vendor's dense
@@ -400,7 +400,7 @@ static_assert(sizeof(index_header_t) == 32 && std::is_trivially_copyable_v<index
 
 /** Whether @p scalar_type_ stores real numbers, as indexer scoring needs of its keys. */
 template <typename scalar_type_>
-concept floating_scalar = !nk::is_integral_dtype<scalar_type_>();
+concept a_floating_scalar = !nk::is_integral_dtype<scalar_type_>();
 
 /** A lightning indexer, as DeepSeek V4 and GLM 5 pick sparse-attention keys: a node scores <tt>Σₕ
  *  wₕ·ReLU(qₕ·k)</tt> against these heads, and its distance is <tt>1 − score</tt>, while the walk
@@ -495,11 +495,11 @@ nk::shape_storage_<2> rows_shape_of(std::size_t rows, std::size_t stride, std::s
 
 /** A scalar rows may hold: a NumKong scalar, or a builtin float the engines keep as their own. */
 template <typename scalar_type_>
-concept row_scalar = nk::numeric_dtype<scalar_type_> || std::is_same_v<scalar_type_, f32_t> ||
-                     std::is_same_v<scalar_type_, f64_t>;
+concept a_row_scalar = nk::a_numeric_dtype<scalar_type_> || std::is_same_v<scalar_type_, f32_t> ||
+                       std::is_same_v<scalar_type_, f64_t>;
 
 /** The NumKong dtype rows of @p scalar_type_ hold. */
-template <row_scalar scalar_type_>
+template <a_row_scalar scalar_type_>
 constexpr nk_dtype_t dtype_of() noexcept {
     if constexpr (std::is_same_v<scalar_type_, f32_t>) return nk_f32_k;
     else if constexpr (std::is_same_v<scalar_type_, f64_t>) return nk_f64_k;
@@ -525,11 +525,11 @@ struct rows_view_t {
     rows_view_t(byte_t const* data, std::size_t rows, std::size_t columns, std::size_t stride,
                 nk_dtype_t dtype) noexcept
         : data(data), rows(rows), columns(columns), stride(stride), dtype(dtype) {}
-    template <row_scalar scalar_type_>
+    template <a_row_scalar scalar_type_>
     rows_view_t(nk::matrix_view<scalar_type_> typed) noexcept
         : data(reinterpret_cast<byte_t const*>(typed.byte_data())), rows(typed.extent(0)), columns(typed.extent(1)),
           stride(static_cast<std::size_t>(typed.stride_bytes(0))), dtype(dtype_of<scalar_type_>()) {}
-    template <row_scalar scalar_type_>
+    template <a_row_scalar scalar_type_>
     rows_view_t(nk::matrix_span<scalar_type_> typed) noexcept : rows_view_t(nk::matrix_view<scalar_type_>(typed)) {}
 
     byte_t const* row(std::size_t row) const noexcept { return data + row * stride; }
@@ -540,13 +540,13 @@ struct rows_view_t {
     }
 
     /** Whether the rows can be viewed as @p scalar_type_ in place: that scalar, not repeated. */
-    template <row_scalar scalar_type_>
+    template <a_row_scalar scalar_type_>
     bool holds() const noexcept {
         return dtype == dtype_of<scalar_type_>() && stride;
     }
 
     /** The rows as @p scalar_type_, which they must @ref holds. */
-    template <row_scalar scalar_type_>
+    template <a_row_scalar scalar_type_>
     nk::matrix_view<scalar_type_> as() const noexcept {
         return {reinterpret_cast<char const*>(data), rows_shape_of<scalar_type_>(rows, stride, columns)};
     }
@@ -564,7 +564,7 @@ struct rows_span_t {
     rows_span_t() = default;
     rows_span_t(byte_t* data, std::size_t rows, std::size_t columns, std::size_t stride, nk_dtype_t dtype) noexcept
         : data(data), rows(rows), columns(columns), stride(stride), dtype(dtype) {}
-    template <row_scalar scalar_type_>
+    template <a_row_scalar scalar_type_>
     rows_span_t(nk::matrix_span<scalar_type_> typed) noexcept
         : data(reinterpret_cast<byte_t*>(typed.byte_data())), rows(typed.extent(0)), columns(typed.extent(1)),
           stride(static_cast<std::size_t>(typed.stride_bytes(0))), dtype(dtype_of<scalar_type_>()) {}
@@ -577,13 +577,13 @@ struct rows_span_t {
     }
 
     /** Whether the rows already are @p scalar_type_, so a verb may write them in place. */
-    template <row_scalar scalar_type_>
+    template <a_row_scalar scalar_type_>
     bool holds() const noexcept {
         return dtype == dtype_of<scalar_type_>();
     }
 
     /** The rows as @p scalar_type_, which they must @ref holds. */
-    template <row_scalar scalar_type_>
+    template <a_row_scalar scalar_type_>
     nk::matrix_span<scalar_type_> as() const noexcept {
         return {reinterpret_cast<char*>(data), rows_shape_of<scalar_type_>(rows, stride, columns)};
     }

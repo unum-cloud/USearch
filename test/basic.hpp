@@ -4504,7 +4504,8 @@ void test_basic_nvme_search(fixture_type_ const& fixture, u64_t seed) {
     // admitting everything hears each entry at most once whatever the queries, changing nothing.
     using metric_t = typename fixture_type_::scratch_metric_t;
     using query_t = typename fixture_type_::query_t;
-    static_assert(batched_metric<metric_t, query_t> && !batched_metric<per_query_metric<metric_t, query_t>, query_t>);
+    static_assert(a_batched_metric<metric_t, query_t> &&
+                  !a_batched_metric<per_query_metric<metric_t, query_t>, query_t>);
     auto make_per_query_metric = [&](basic_nvme_scratch_t const& allocator, std::size_t staging) noexcept {
         auto [metric, metric_status] = make_metric(allocator, staging);
         return expected<per_query_metric<metric_t, query_t>> {{std::move(metric)}, metric_status};

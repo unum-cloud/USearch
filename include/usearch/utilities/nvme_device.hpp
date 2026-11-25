@@ -12,7 +12,7 @@
  *
  *  @section nvme_device_queues I/O Queues
  *
- *  Every queue satisfies the same @c io_queue concept and is named after the exact facility it
+ *  Every queue satisfies the same @c an_io_queue concept and is named after the exact facility it
  *  drives:
  *
  *  - @c blocking_files_queue: blocking @c pread or @c ReadFile, the portable reference & macOS
@@ -1366,10 +1366,10 @@ inline expected<u64_t> media_identity_from_entropy() noexcept {
  *  @c reserve and @c register_media run with nothing outstanding, on the queue's own thread.
  */
 template <typename queue_type_>
-concept io_queue = requires(queue_type_& queue, io_request_t request, std::span<io_completion_t> completions,
-                            io_wait_t wait, io_buffer_id_t buffer,
-                            std::span<typename queue_type_::medium_t const> media, media_list_key_t key,
-                            std::size_t buffers, std::size_t buffer_bytes) {
+concept an_io_queue = requires(queue_type_& queue, io_request_t request, std::span<io_completion_t> completions,
+                               io_wait_t wait, io_buffer_id_t buffer,
+                               std::span<typename queue_type_::medium_t const> media, media_list_key_t key,
+                               std::size_t buffers, std::size_t buffer_bytes) {
     { queue.reserve(buffers, buffer_bytes) } noexcept -> std::same_as<status_t>;
     { queue.register_media(media, key) } noexcept -> std::same_as<status_t>;
     { queue.enqueue_read(request) } noexcept -> std::same_as<status_t>;
@@ -1380,7 +1380,7 @@ concept io_queue = requires(queue_type_& queue, io_request_t request, std::span<
 
 /** A queue holding devices other queues share, as SPDK queue pairs, released on its own thread. */
 template <typename queue_type_>
-concept releasing_queue = requires(queue_type_& queue) { queue.release(); };
+concept a_releasing_queue = requires(queue_type_& queue) { queue.release(); };
 
 /** A queue that may read into buffers registered once, and answers whether it does. */
 template <typename queue_type_>
@@ -3179,7 +3179,7 @@ class io_queue_variant {
     void release() noexcept {
         std::visit(
             []<typename queue_type_>(queue_type_& queue) noexcept {
-                if constexpr (releasing_queue<queue_type_>) queue.release();
+                if constexpr (a_releasing_queue<queue_type_>) queue.release();
             },
             queues_);
     }
@@ -3298,7 +3298,7 @@ class nvme_executor {
     using arena_t = ram_executor_t::arena_t;
     using claim_t = ram_executor_t::claim_t;
 
-    static_assert(io_queue<queue_t>, "An executor drives queues through the I/O queue concept");
+    static_assert(an_io_queue<queue_t>, "An executor drives queues through the I/O queue concept");
 
     nvme_executor() noexcept = default;
     nvme_executor(nvme_executor&&) noexcept = default;
@@ -3309,7 +3309,7 @@ class nvme_executor {
     /** Releases every queue on its own thread, which must precede the executor's death once an
      *  queue holds devices other queues share. */
     void release() noexcept {
-        if constexpr (releasing_queue<queue_t>) {
+        if constexpr (a_releasing_queue<queue_t>) {
             [[maybe_unused]] status_t const released = threads_.for_threads(
                 [&](std::size_t thread, std::size_t) noexcept {
                     if (thread < queues_.size()) queues_[thread].release();

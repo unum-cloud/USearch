@@ -188,11 +188,11 @@ struct bioinformatics_fixture {
 
 using bioinformatics_fixture_t = bioinformatics_fixture<>;
 
-static_assert(value<dna_t>);
-static_assert(metric<alignment_metric_t, dna_t, u64_t>);
-static_assert(!transparent_metric<alignment_metric_t>);
-static_assert(query<dna_t, alignment_metric_t, dna_t>);
-static_assert(value_codec<packed_dna_codec_t, dna_t>);
+static_assert(a_value<dna_t>);
+static_assert(a_metric<alignment_metric_t, dna_t, u64_t>);
+static_assert(!a_transparent_metric<alignment_metric_t>);
+static_assert(a_query<dna_t, alignment_metric_t, dna_t>);
+static_assert(a_value_codec<packed_dna_codec_t, dna_t>);
 
 /** The codec on its own: a bit-exact pack/unpack roundtrip at every length modulo
  *  four, and a length prefix disagreeing with its slice refused as malformed. */

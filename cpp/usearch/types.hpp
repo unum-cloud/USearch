@@ -93,11 +93,11 @@ struct outputs<void> {};
 /** Runs @p poll with @p state later on its own loop, storing the two words and allocating
  *  nothing. */
 template <typename scheduler_type_>
-concept scheduler = requires(scheduler_type_& loop, void (*poll)(void*) noexcept, void* state) {
+concept a_scheduler = requires(scheduler_type_& loop, void (*poll)(void*) noexcept, void* state) {
     loop.post(poll, state);
 };
 
-template <typename value_type_, scheduler scheduler_type_>
+template <typename value_type_, a_scheduler scheduler_type_>
 class awaiter;
 
 /**
@@ -158,7 +158,7 @@ class [[nodiscard]] deferred {
     }
 
     /** Awaits the call on @p loop, which polls its status until it is final. */
-    template <scheduler scheduler_type_>
+    template <a_scheduler scheduler_type_>
     awaiter<value_type_, scheduler_type_> wait(scheduler_type_& loop) noexcept {
         return {*this, loop};
     }
@@ -166,7 +166,7 @@ class [[nodiscard]] deferred {
 
 /** A @c deferred being awaited, living in the awaiting coroutine's frame: each poll reads the
  *  status word, and one not yet final posts itself again. */
-template <typename value_type_, scheduler scheduler_type_>
+template <typename value_type_, a_scheduler scheduler_type_>
 class awaiter {
     deferred<value_type_>& call_;
     scheduler_type_& loop_;
@@ -297,7 +297,7 @@ struct caller_owned {
 
 /** Only an owning receiver opens, loads and hands out cursors. */
 template <typename receiver_type_>
-concept owns_handle = requires(receiver_type_& receiver) { receiver.handle_field(); };
+concept a_handle_owner = requires(receiver_type_& receiver) { receiver.handle_field(); };
 
 #pragma region Scalars Rows and Tapes
 
@@ -364,10 +364,10 @@ inline constexpr usearch_scalar_t scalar_of<u1x8_t> = usearch_scalar_u1x8_k;
 
 /** An element type a call can state as the scalar of the matrix it passes or asks for. */
 template <typename element_type_>
-concept element = scalar_of<element_type_> != usearch_scalar_unknown_k;
+concept an_element = scalar_of<element_type_> != usearch_scalar_unknown_k;
 
 /** Values one element packs: eight for bit sets, two for nibbles, one otherwise. */
-template <element element_type_>
+template <an_element element_type_>
 inline constexpr std::size_t values_per_element = 1;
 template <>
 inline constexpr std::size_t values_per_element<i4x2_t> = 2;
@@ -382,7 +382,7 @@ inline usearch_bytes_view_t bytes_view(std::string_view text) noexcept {
 }
 
 /** Rows of @p element_type_ the caller passes a call, along its batch axis. */
-template <element element_type_>
+template <an_element element_type_>
 struct rows_view {
 
     /** The first row. */
@@ -413,7 +413,7 @@ struct rows_view {
 
 /** Entries of @p element_type_ the caller passes a call end to end, as an Apache Arrow tape: one
  *  more offset than entries, counted in the modality's own elements, bytes or points. */
-template <element element_type_>
+template <an_element element_type_>
 struct tape_view {
 
     /** The first element, which every offset counts from. */
@@ -456,7 +456,7 @@ struct tape_view {
 
 /** Entries a call wrote end to end into its arena as @p element_type_, @p lanes_ values per
  *  element its offsets count, readable until the arena's next call. */
-template <element element_type_, std::size_t lanes_ = 1>
+template <an_element element_type_, std::size_t lanes_ = 1>
 struct tape_entries {
 
     /** The tape as the call wrote it, with offsets as wide as @c std::size_t. */
@@ -527,17 +527,17 @@ struct cursor_batch_t {
 
 /** A progress handler: hears units completed of a total and answers whether the call goes on. */
 template <typename handler_type_>
-concept progress_handler =
+concept a_progress_handler =
     std::is_nothrow_invocable_r_v<usearch_continuation_t, handler_type_&, std::size_t, std::size_t>;
 
 /** A per-key predicate handler: answers whether one candidate key may be reported, through a const
  *  call operator, since every executor thread may ask it at once. */
 template <typename handler_type_>
-concept key_predicate_handler = std::is_nothrow_invocable_r_v<bool, handler_type_ const&, usearch_key_t>;
+concept a_key_predicate_handler = std::is_nothrow_invocable_r_v<bool, handler_type_ const&, usearch_key_t>;
 
 /** A batch predicate handler: writes one admission per key of a batch it is asked about. */
 template <typename handler_type_>
-concept keys_predicate_handler =
+concept a_keys_predicate_handler =
     std::is_nothrow_invocable_r_v<void, handler_type_ const&, std::span<usearch_key_t const>,
                                   std::span<usearch_admission_t>>;
 
@@ -547,7 +547,7 @@ class progress_t {
     progress_t() noexcept = default;
 
     /** Hears @p handler after each of @p steps slices of a batch verb; zero derives. */
-    template <progress_handler handler_type_>
+    template <a_progress_handler handler_type_>
     progress_t(handler_type_& handler, std::size_t steps = 0) noexcept
         : raw_ {&trampoline_<handler_type_>, &handler, steps} {}
 
@@ -568,12 +568,12 @@ class predicate_t {
     predicate_t() noexcept = default;
 
     /** Asks @p handler one key at a time, which is cheap, as candidates are scored. */
-    template <key_predicate_handler handler_type_>
+    template <a_key_predicate_handler handler_type_>
     predicate_t(handler_type_& handler) noexcept
         : raw_ {&each_<handler_type_>, &handler, usearch_predicate_cost_cheap_k} {}
 
     /** Asks @p handler a batch at a time, once per round unless @p cost says it is cheap. */
-    template <keys_predicate_handler handler_type_>
+    template <a_keys_predicate_handler handler_type_>
     predicate_t(handler_type_& handler, usearch_predicate_cost_t cost = usearch_predicate_cost_expensive_k) noexcept
         : raw_ {&batch_<handler_type_>, &handler, cost} {}
 

@@ -38,10 +38,11 @@
 using namespace unum::usearch;
 namespace util = unum::usearch::utilities;
 
-/** The geospatial tier's witnesses: its metric, codec & index alias satisfy the basic concepts. */
-static_assert(basic::metric<geospatial::chord_metric_t, geospatial::earth_observation_t, nk_u64_t>);
-static_assert(basic::value_codec<geospatial::earth_observation_codec_t, geospatial::earth_observation_t>);
-static_assert(basic::selector<geospatial::surface_keep_octants_t, geospatial::ram_index_t, geospatial::chord_metric_t>);
+/*  The geospatial tier's witnesses: its metric, codec & index alias satisfy the basic concepts. */
+static_assert(basic::a_metric<geospatial::chord_metric_t, geospatial::earth_observation_t, nk_u64_t>);
+static_assert(basic::a_value_codec<geospatial::earth_observation_codec_t, geospatial::earth_observation_t>);
+static_assert(
+    basic::a_selector<geospatial::surface_keep_octants_t, geospatial::ram_index_t, geospatial::chord_metric_t>);
 
 /** Hamming distance over eight-byte tags - the smallest metric the concept admits. */
 struct header_only_metric_t {
@@ -88,14 +89,14 @@ struct header_only_codec_t {
 using narrow_index_t = basic::ram_index<std::array<char, 8>, util::u64_t, util::u32_t, util::u64_t>;
 using wide_index_t = basic::ram_index<std::array<char, 8>, util::uuid128_t, util::u64_t, util::u64_t>;
 
-static_assert(basic::value<std::array<char, 8>>);
-static_assert(basic::metric<header_only_metric_t, std::array<char, 8>, util::u64_t>);
-static_assert(!basic::transparent_metric<header_only_metric_t>);
-static_assert(basic::transparent_metric<header_only_transparent_metric_t>);
-static_assert(basic::query<std::array<char, 8>, header_only_metric_t, std::array<char, 8>>);
-static_assert(basic::value_codec<header_only_codec_t, std::array<char, 8>>);
-static_assert(basic::selector<basic::keep_closest_t, narrow_index_t, header_only_metric_t>);
-static_assert(basic::selector<basic::keep_diverse_t, wide_index_t, header_only_metric_t>);
+static_assert(basic::a_value<std::array<char, 8>>);
+static_assert(basic::a_metric<header_only_metric_t, std::array<char, 8>, util::u64_t>);
+static_assert(!basic::a_transparent_metric<header_only_metric_t>);
+static_assert(basic::a_transparent_metric<header_only_transparent_metric_t>);
+static_assert(basic::a_query<std::array<char, 8>, header_only_metric_t, std::array<char, 8>>);
+static_assert(basic::a_value_codec<header_only_codec_t, std::array<char, 8>>);
+static_assert(basic::a_selector<basic::keep_closest_t, narrow_index_t, header_only_metric_t>);
+static_assert(basic::a_selector<basic::keep_diverse_t, wide_index_t, header_only_metric_t>);
 static_assert(util::walk_step_t::exhausted_k != util::walk_step_t::advanced_k);
 static_assert(
     std::is_same_v<narrow_index_t::columns_t, basic::columns<util::u64_t, util::u32_t, util::byte_t, util::u64_t>>);

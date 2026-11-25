@@ -120,7 +120,7 @@ struct no_fixed_coordinates_t {};
  *  solving from distances; a callable of the wrong signature then fails to compile rather than
  *  falling back silently. */
 template <typename coordinates_type_>
-concept fixed_coordinates = !std::same_as<coordinates_type_, no_fixed_coordinates_t>;
+concept a_coordinates_provider = !std::same_as<coordinates_type_, no_fixed_coordinates_t>;
 
 /** SplitMix64's output at @p counter of the stream @p seed starts: what @c splitmix64_t {seed}
  *  answers after discarding @p counter outputs, its state @p counter + 1 steps on, mixed. */
@@ -249,7 +249,7 @@ inline void sample_gauss_newton(f32_t const* references, f32_t const* distances,
 }
 #pragma float_control(pop)
 
-/** A callback that ignores every node, spelling the callbacks @ref sample_source checks. */
+/** A callback that ignores every node, spelling the callbacks @ref a_sample_source checks. */
 struct ignore_nodes_t {
     template <typename node_id_type_>
     void operator()(shard_node<node_id_type_>) const noexcept {}
@@ -277,7 +277,7 @@ struct ignore_nodes_t {
  *  answers a dense entry's values as f32 for the projection to read.
  */
 template <typename source_type_>
-concept sample_source = requires(
+concept a_sample_source = requires(
     source_type_ const& source, shard_node<typename source_type_::node_id_t> node,
     typename source_type_::key_t const& key, std::span<shard_node<typename source_type_::node_id_t> const> nodes,
     std::span<f32_t> distances, std::span<shard_node<typename source_type_::node_id_t>> chain, ignore_nodes_t sink) {
@@ -328,7 +328,7 @@ std::size_t sample_greedy_walk(source_type_ const& source, shard_node<typename s
 }
 
 /**
- *  @brief One SAMPLE call over a @ref sample_source, its steps run in order: @ref draw, then
+ *  @brief One SAMPLE call over a @ref a_sample_source, its steps run in order: @ref draw, then
  *      @ref assign_ordinals, then @ref assign_coordinates.
  *
  *  A one-call plan: unlike the resumable refine, load and health plans, it lives inside a single
@@ -339,7 +339,7 @@ std::size_t sample_greedy_walk(source_type_ const& source, shard_node<typename s
  *  that solves by it.
  */
 template <typename source_type_>
-    requires sample_source<source_type_>
+    requires a_sample_source<source_type_>
 struct sample_plan {
     using source_t = source_type_;
     using key_t = typename source_t::key_t;

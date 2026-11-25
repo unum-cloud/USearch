@@ -913,8 +913,8 @@ struct vram_telemetry_t {
  *  take a scored batch, return the nearest unexpanded entry, tell a staged ID it already holds,
  *  and count what its tail compacted and dropped. */
 template <typename frontier_>
-concept vram_frontier = requires(frontier_& frontier, frontier_ const& held, typename frontier_::scored_node_t entry,
-                                 u32_t lane) {
+concept a_vram_frontier = requires(frontier_& frontier, frontier_ const& held, typename frontier_::scored_node_t entry,
+                                   u32_t lane) {
     frontier.clear(lane);
     frontier.renew();
     frontier.insert_batch(entry, lane);
@@ -928,7 +928,7 @@ concept vram_frontier = requires(frontier_& frontier, frontier_ const& held, typ
 
 /** One walking warp's state: the candidates, the random stream, the running telemetry, and the
  *  shared scratch past its walk span, where a rescoring hands its fold what the fold keeps. */
-template <vram_frontier frontier_>
+template <a_vram_frontier frontier_>
 struct vram_warp_context {
     frontier_ frontier;
     splitmix64_t random_generator;
@@ -956,7 +956,7 @@ struct vram_warp_context {
  *
  *  @return @c sated_k when a scored batch sated the fold.
  */
-template <typename warp_type_, typename node_id_type_, vram_frontier frontier_, typename storage_,
+template <typename warp_type_, typename node_id_type_, a_vram_frontier frontier_, typename storage_,
           typename score_type_>
 __device__ __forceinline__ walk_demand_t vram_expand_round( //
     frontier_& frontier, vram_visited_set<warp_type_, node_id_type_>& visited, vram_telemetry_t& telemetry,

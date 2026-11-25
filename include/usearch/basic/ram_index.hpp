@@ -68,9 +68,9 @@ struct scored_node {
  *  through one move-assignment at publication, are read as @c const& after, and are destroyed at
  *  teardown or replaced by a fresh one in @c clear - that is the whole lifecycle. */
 template <typename value_type_>
-concept value = std::is_nothrow_default_constructible_v<value_type_> && //
-                std::is_nothrow_move_assignable_v<value_type_> &&       //
-                std::is_nothrow_destructible_v<value_type_>;
+concept a_value = std::is_nothrow_default_constructible_v<value_type_> && //
+                  std::is_nothrow_move_assignable_v<value_type_> &&       //
+                  std::is_nothrow_destructible_v<value_type_>;
 
 /** A batched metric's answer to one @c push: whether the candidate entered the
  *  staging of the current scoring round - a capacity answer, never a failure. */
@@ -112,8 +112,8 @@ constexpr distance_type_ unbounded_radius() noexcept {
  *  A round's entries hold no order: results go by slot, and ties break by node ID.
  */
 template <typename metric_type_, typename value_type_, typename distance_type_>
-concept metric = value<value_type_> && requires(metric_type_& metric, value_type_ const& value, distance_type_ radius,
-                                                std::span<distance_type_> distances) {
+concept a_metric = a_value<value_type_> && requires(metric_type_& metric, value_type_ const& value,
+                                                    distance_type_ radius, std::span<distance_type_> distances) {
     { metric.reset(value) } noexcept;
     { metric.push(value) } noexcept -> std::same_as<metric_staging_t>;
     { metric.drain(distances, radius) } noexcept;
@@ -122,41 +122,41 @@ concept metric = value<value_type_> && requires(metric_type_& metric, value_type
 /** Marks a metric whose @c reset also accepts query forms other than the stored
  *  value - the standard @c is_transparent convention. */
 template <typename metric_type_>
-concept transparent_metric = requires { typename metric_type_::is_transparent; };
+concept a_transparent_metric = requires { typename metric_type_::is_transparent; };
 
 /** A query form @p metric_type_ opens rounds for: the stored value itself, or -
- *  on a @c transparent_metric - any other type its @c reset accepts. */
+ *  on a @c a_transparent_metric - any other type its @c reset accepts. */
 template <typename query_type_, typename metric_type_, typename value_type_>
-concept query = (std::same_as<query_type_, value_type_> || transparent_metric<metric_type_>) &&
-                requires(metric_type_& metric, query_type_ const& query) {
-                    { metric.reset(query) } noexcept;
-                };
+concept a_query = (std::same_as<query_type_, value_type_> || a_transparent_metric<metric_type_>) &&
+                  requires(metric_type_& metric, query_type_ const& query) {
+                      { metric.reset(query) } noexcept;
+                  };
 
 /** A metric that prepares many queries at once: @c reset over a span of them prepares every one for
  *  all the rounds that follow, and each @c drain writes @b [queries,staged] distances, query @c q
  *  to staged entry @c r at <tt>distances[q * staged + r]</tt>, exact within the one radius they
  *  share. */
 template <typename metric_type_, typename query_type_>
-concept batched_metric = requires(metric_type_& metric, std::span<query_type_ const> queries) {
+concept a_batched_metric = requires(metric_type_& metric, std::span<query_type_ const> queries) {
     { metric.reset(queries) } noexcept;
 };
 
-/** A @c batched_metric over flat views of the stored values: @c query_view turns a stored
+/** A @c a_batched_metric over flat views of the stored values: @c query_view turns a stored
  *  @p value_type_ into the @c query_view_t its batched @c reset reads, as a round hands it the
  *  entries it scores as queries. */
 template <typename metric_type_, typename value_type_>
-concept view_batched_metric = requires(value_type_ const& value) {
+concept a_view_batched_metric = requires(value_type_ const& value) {
     { metric_type_::query_view(value) } noexcept -> std::same_as<typename metric_type_::query_view_t>;
-} && batched_metric<metric_type_, typename metric_type_::query_view_t>;
+} && a_batched_metric<metric_type_, typename metric_type_::query_view_t>;
 
 /** Opens a scan of many queries: a metric scoring one query at a time reopens each one per round in
  *  @ref score_queries, so nothing is prepared here. */
 template <typename metric_type_, typename query_type_>
 void open_queries(metric_type_&, std::span<query_type_ const>) noexcept {}
 
-/** A @c batched_metric prepares every query once for the whole scan. */
+/** A @c a_batched_metric prepares every query once for the whole scan. */
 template <typename metric_type_, typename query_type_>
-    requires batched_metric<metric_type_, query_type_>
+    requires a_batched_metric<metric_type_, query_type_>
 void open_queries(metric_type_& metric, std::span<query_type_ const> queries) noexcept {
     metric.reset(queries);
 }
@@ -187,10 +187,10 @@ std::size_t score_queries(metric_type_& metric, std::span<query_type_ const> que
     return end_node;
 }
 
-/** A @c batched_metric opened by @ref open_queries scores every query in one round, within the
+/** A @c a_batched_metric opened by @ref open_queries scores every query in one round, within the
  *  loosest of @p thresholds, so the nodes end wherever its staging refused. */
 template <typename metric_type_, typename query_type_, typename view_of_type_, typename distance_type_>
-    requires batched_metric<metric_type_, query_type_>
+    requires a_batched_metric<metric_type_, query_type_>
 std::size_t score_queries(metric_type_& metric, std::span<query_type_ const> queries, view_of_type_&& view_of,
                           std::size_t first_node, std::size_t end_node, std::span<distance_type_ const> thresholds,
                           std::span<distance_type_> distances) noexcept {
@@ -207,16 +207,16 @@ std::size_t score_queries(metric_type_& metric, std::span<query_type_ const> que
  *  distances, both valid only for the call and exact only within the round's radius - and answers
  *  whether the walk should go on. */
 template <typename fold_type_, typename node_id_type_, typename distance_type_>
-concept fold = requires(fold_type_& fold, std::span<node_id_type_ const> node_ids,
-                        std::span<distance_type_ const> distances) {
+concept a_fold = requires(fold_type_& fold, std::span<node_id_type_ const> node_ids,
+                          std::span<distance_type_ const> distances) {
     { fold.absorb(node_ids, distances) } noexcept -> std::same_as<walk_demand_t>;
 };
 
 /** Serializes stored values into caller-owned buffers and back - the payload half
  *  of @c save & @c load, supplied by the caller because values are arbitrary objects. */
 template <typename codec_type_, typename value_type_>
-concept value_codec = requires(codec_type_ const& codec, value_type_ const& immutable_value, value_type_& mutable_value,
-                               bytes_span_t output, bytes_view_t input) {
+concept a_value_codec = requires(codec_type_ const& codec, value_type_ const& immutable_value,
+                                 value_type_& mutable_value, bytes_span_t output, bytes_view_t input) {
     { codec.storage_requirements(immutable_value) } noexcept -> std::same_as<std::size_t>;
     { codec.save(immutable_value, output) } noexcept -> std::same_as<status_t>;
     { codec.load(input, mutable_value) } noexcept -> std::same_as<status_t>;
@@ -405,8 +405,8 @@ void fill_selection(context_type_& context, std::size_t connectivity) noexcept {
  *  calling traversal. The context's allocator is the caller's, so a selector takes any
  *  @c traversal_context; the concept checks the index's own. */
 template <typename selector_type_, typename index_type_, typename metric_type_>
-concept selector = requires(selector_type_ const& selector, index_type_ const& index, metric_type_& metric,
-                            typename index_type_::traversal_context_t& context) {
+concept a_selector = requires(selector_type_ const& selector, index_type_ const& index, metric_type_& metric,
+                              typename index_type_::traversal_context_t& context) {
     { selector(index, metric, context) } noexcept;
     { selector.connectivity } -> std::convertible_to<std::size_t>;
 };
@@ -584,7 +584,7 @@ template <                                                                //
     typename allocator_type_ = std::allocator<byte_t>,                    //
     typename cache_hints_type_ = dummy_cache_hints_t                      //
     >
-    requires value<value_type_> && (std::same_as<node_id_type_, u32_t> || std::same_as<node_id_type_, u64_t>)
+    requires a_value<value_type_> && (std::same_as<node_id_type_, u32_t> || std::same_as<node_id_type_, u64_t>)
 struct ram_index {
 
     using value_t = value_type_;
@@ -858,7 +858,7 @@ struct ram_index {
      */
     template <synchronization_t synchronization_ = synchronization_t::concurrent_k, typename metric_type_,
               typename context_allocator_type_, typename selector_type_ = keep_diverse_t>
-        requires metric<metric_type_, value_t, distance_t> && selector<selector_type_, ram_index, metric_type_>
+        requires a_metric<metric_type_, value_t, distance_t> && a_selector<selector_type_, ram_index, metric_type_>
     expected<insert_result_t> insert(std::span<value_t> incoming_values, std::span<key_t const> keys,
                                      metric_type_& metric, std::span<node_id_t> assigned_ids,
                                      traversal_context_over<context_allocator_type_>& context,
@@ -930,7 +930,7 @@ struct ram_index {
          */
         template <synchronization_t synchronization_ = synchronization_t::concurrent_k, typename metric_type_,
                   typename context_allocator_type_, typename selector_type_ = keep_diverse_t>
-            requires metric<metric_type_, value_t, distance_t> && selector<selector_type_, ram_index, metric_type_>
+            requires a_metric<metric_type_, value_t, distance_t> && a_selector<selector_type_, ram_index, metric_type_>
         void insert(std::size_t first, std::span<value_t> values, std::span<key_t const> keys, metric_type_& metric,
                     traversal_context_over<context_allocator_type_>& context, selector_type_ selector = {},
                     insert_config_t config = {}) noexcept {
@@ -2187,7 +2187,7 @@ struct ram_index {
          *  - @c uninitialized_k The plan is bound to no index.
          */
         template <typename metric_type_, typename context_allocator_type_, typename selector_type_ = keep_diverse_t>
-            requires metric<metric_type_, value_t, distance_t> && selector<selector_type_, ram_index, metric_type_>
+            requires a_metric<metric_type_, value_t, distance_t> && a_selector<selector_type_, ram_index, metric_type_>
         status_t run(task_t const& task, metric_type_& metric, traversal_context_over<context_allocator_type_>& context,
                      selector_type_ const& selector = {}) noexcept {
             if (!index_) return status_code_t::uninitialized_k;
@@ -2609,7 +2609,7 @@ struct ram_index {
          *
          *  @p thresholds_of fills each query's radius before every round from its first entry, and
          *  @p on_scored hears every round's first entry, its entries scored, and its distances,
-         *  @b [queries,scored]. A @c view_batched_metric reads the queries at once, as their flat
+         *  @b [queries,scored]. A @c a_view_batched_metric reads the queries at once, as their flat
          *  views; any other metric reads one query at a time, over every entry. A round the metric
          *  refused counts a saturated walk and ends the scoring.
          */
@@ -2620,7 +2620,7 @@ struct ram_index {
                                           on_scored_type_ const& on_scored, metric_type_& metric,
                                           context_type_& context) noexcept {
             std::array<distance_t, extent_> thresholds;
-            if constexpr (view_batched_metric<metric_type_, value_t>) {
+            if constexpr (a_view_batched_metric<metric_type_, value_t>) {
                 using query_view_t = typename metric_type_::query_view_t;
                 std::array<query_view_t, extent_> views;
                 for (std::size_t lane = 0; lane != extent_; ++lane)
@@ -3029,7 +3029,7 @@ struct ram_index {
          *  - @c uninitialized_k The plan is bound to no index.
          */
         template <typename metric_type_, typename context_allocator_type_, typename selector_type_ = keep_diverse_t>
-            requires metric<metric_type_, value_t, distance_t> && selector<selector_type_, ram_index, metric_type_>
+            requires a_metric<metric_type_, value_t, distance_t> && a_selector<selector_type_, ram_index, metric_type_>
         status_t run(task_t const& task, metric_type_& metric, traversal_context_over<context_allocator_type_>& context,
                      selector_type_ const& selector = {}) noexcept {
             if (!rounds_.index_) return status_code_t::uninitialized_k;
@@ -3370,7 +3370,7 @@ struct ram_index {
      *  - @c out_of_memory_k The audit or the round's columns cannot be placed.
      */
     template <typename selector_type_, typename codec_type_>
-        requires value_codec<codec_type_, value_t>
+        requires a_value_codec<codec_type_, value_t>
     expected<refine_plan_t> plan_refine(refine_config_t config, selector_type_ const& selector,
                                         codec_type_ const& codec, traversal_context_t& context) noexcept {
         refine_plan_t plan {context.allocator};
@@ -3427,7 +3427,7 @@ struct ram_index {
      *  - @c overflow_k Nodes past the reserved ceiling, or part slots past the node ID type.
      */
     template <typename selector_type_, typename codec_type_>
-        requires value_codec<codec_type_, value_t>
+        requires a_value_codec<codec_type_, value_t>
     expected<reshard_plan_t> plan_reshard(std::span<ram_index* const> sources, std::span<ram_index* const> targets,
                                           reshard_config_t config, selector_type_ const& selector,
                                           codec_type_ const& codec, traversal_context_t& context) noexcept {
@@ -3495,8 +3495,8 @@ struct ram_index {
      *  - @c out_of_memory_k No room for the audit, the round's columns or @p context 's scratch.
      */
     template <typename metric_type_, typename selector_type_, typename codec_type_>
-        requires metric<metric_type_, value_t, distance_t> && selector<selector_type_, ram_index, metric_type_> &&
-                 value_codec<codec_type_, value_t>
+        requires a_metric<metric_type_, value_t, distance_t> && a_selector<selector_type_, ram_index, metric_type_> &&
+                 a_value_codec<codec_type_, value_t>
     expected<refine_report_t> refine(refine_config_t config, selector_type_ const& selector, codec_type_ const& codec,
                                      metric_type_& metric, traversal_context_t& context) noexcept {
         auto [plan, status] = plan_refine(config, selector, codec, context);
@@ -3517,8 +3517,8 @@ struct ram_index {
      *  - @c out_of_memory_k The plan's columns or @p context 's scratch cannot be placed.
      */
     template <typename metric_type_, typename selector_type_, typename codec_type_>
-        requires metric<metric_type_, value_t, distance_t> && selector<selector_type_, ram_index, metric_type_> &&
-                 value_codec<codec_type_, value_t>
+        requires a_metric<metric_type_, value_t, distance_t> && a_selector<selector_type_, ram_index, metric_type_> &&
+                 a_value_codec<codec_type_, value_t>
     expected<refine_report_t> reshard(std::span<ram_index* const> sources, std::span<ram_index* const> targets,
                                       reshard_config_t config, selector_type_ const& selector, codec_type_ const& codec,
                                       metric_type_& metric, traversal_context_t& context) noexcept {
@@ -3564,7 +3564,7 @@ struct ram_index {
      *  per round, and the metric need not match the one that built the graph. Once the candidates
      *  are full, their furthest member's distance drains each round as the radius, so a metric may
      *  stop scoring a candidate that cannot come under it. The query is a stored-value reference by
-     *  default; a @c transparent_metric accepts other query forms.
+     *  default; a @c a_transparent_metric accepts other query forms.
      *
      *  @param[in] query The similarity target, alive for the whole call.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
@@ -3578,7 +3578,7 @@ struct ram_index {
      */
     template <synchronization_t synchronization_ = synchronization_t::concurrent_k, //
               typename metric_type_, typename context_allocator_type_, typename query_type_ = value_t>
-        requires metric<metric_type_, value_t, distance_t> && query<query_type_, metric_type_, value_t>
+        requires a_metric<metric_type_, value_t, distance_t> && a_query<query_type_, metric_type_, value_t>
     expected<search_result_t> search(query_type_ const& query, search_config_t config, metric_type_& metric,
                                      traversal_context_over<context_allocator_type_>& context) noexcept {
         return search<synchronization_>(query, dummy_fold_t {}, config, metric, context);
@@ -3603,8 +3603,8 @@ struct ram_index {
     template <synchronization_t synchronization_ = synchronization_t::concurrent_k, //
               typename metric_type_, typename fold_type_, typename context_allocator_type_,
               typename query_type_ = value_t>
-        requires metric<metric_type_, value_t, distance_t> && query<query_type_, metric_type_, value_t> &&
-                 fold<std::remove_cvref_t<fold_type_>, node_id_t, distance_t>
+        requires a_metric<metric_type_, value_t, distance_t> && a_query<query_type_, metric_type_, value_t> &&
+                 a_fold<std::remove_cvref_t<fold_type_>, node_id_t, distance_t>
     expected<search_result_t> search(query_type_ const& query, fold_type_&& fold, search_config_t config,
                                      metric_type_& metric,
                                      traversal_context_over<context_allocator_type_>& context) noexcept {
@@ -3632,7 +3632,7 @@ struct ram_index {
     template <synchronization_t synchronization_ = synchronization_t::concurrent_k, //
               typename metric_type_, typename relation_type_, typename predicate_type_,
               typename context_allocator_type_, typename query_type_ = value_t>
-        requires metric<metric_type_, value_t, distance_t> && query<query_type_, metric_type_, value_t>
+        requires a_metric<metric_type_, value_t, distance_t> && a_query<query_type_, metric_type_, value_t>
     expected<search_result_t> search_if(query_type_ const& query, search_config_t config, relation_type_& relation,
                                         predicate_type_& predicate, metric_type_& metric,
                                         traversal_context_over<context_allocator_type_>& context) noexcept {
@@ -3664,7 +3664,7 @@ struct ram_index {
      */
     template <typename metric_type_, typename relation_type_, typename predicate_type_,
               typename context_allocator_type_, typename query_type_ = value_t>
-        requires metric<metric_type_, value_t, distance_t> && query<query_type_, metric_type_, value_t>
+        requires a_metric<metric_type_, value_t, distance_t> && a_query<query_type_, metric_type_, value_t>
     expected<search_result_t> scan(query_type_ const& query, std::size_t wanted, relation_type_& relation,
                                    predicate_type_& predicate, metric_type_& metric,
                                    traversal_context_over<context_allocator_type_>& context) noexcept {
@@ -3690,8 +3690,8 @@ struct ram_index {
      */
     template <typename metric_type_, typename fold_type_, typename context_allocator_type_,
               typename query_type_ = value_t>
-        requires metric<metric_type_, value_t, distance_t> && query<query_type_, metric_type_, value_t> &&
-                 fold<std::remove_cvref_t<fold_type_>, node_id_t, distance_t>
+        requires a_metric<metric_type_, value_t, distance_t> && a_query<query_type_, metric_type_, value_t> &&
+                 a_fold<std::remove_cvref_t<fold_type_>, node_id_t, distance_t>
     expected<search_result_t> scan(query_type_ const& query, fold_type_&& fold, metric_type_& metric,
                                    traversal_context_over<context_allocator_type_>& context) noexcept {
         context.results.clear();
@@ -3994,7 +3994,7 @@ struct ram_index {
          *  - @c config_mismatch_k @p node_range falls outside the plan's nodes.
          */
         template <typename value_codec_type_>
-            requires value_codec<value_codec_type_, value_t>
+            requires a_value_codec<value_codec_type_, value_t>
         status_t save(iota_view<node_id_t> node_range, value_codec_type_ const& codec) noexcept {
             if (!index_) return status_code_t::uninitialized_k;
             std::size_t const node_count = columns.keys.size();
@@ -4073,7 +4073,7 @@ struct ram_index {
      *  - @c overflow_k The neighbor IDs or the value bytes are shorter than the sums need.
      */
     template <typename value_codec_type_>
-        requires value_codec<value_codec_type_, value_t>
+        requires a_value_codec<value_codec_type_, value_t>
     expected<save_plan_t> plan_save(columns_t columns, value_codec_type_ const& codec) noexcept {
         unique_lock_t hold {shared_mutex_, std::try_to_lock};
         if (!hold) return {{}, status_code_t::contended_k};
@@ -4116,7 +4116,7 @@ struct ram_index {
      *    yet to publish.
      */
     template <typename value_codec_type_>
-        requires value_codec<value_codec_type_, value_t>
+        requires a_value_codec<value_codec_type_, value_t>
     expected<columns_extents_t> columns_extents(value_codec_type_ const& codec) noexcept {
         unique_lock_t unique_lock {shared_mutex_, std::try_to_lock};
         if (!unique_lock) return {{}, status_code_t::contended_k};
@@ -4148,7 +4148,7 @@ struct ram_index {
      *  - @c config_mismatch_k The key or a prefix-sum column is longer than its count.
      */
     template <typename value_codec_type_>
-        requires value_codec<value_codec_type_, value_t>
+        requires a_value_codec<value_codec_type_, value_t>
     status_t save(columns_t columns, value_codec_type_ const& codec) noexcept {
         auto [plan, status] = plan_save(columns, codec);
         if (failed(status)) return status;
@@ -4188,7 +4188,7 @@ struct ram_index {
          *  - @c config_mismatch_k @p node_range falls outside the plan's nodes.
          */
         template <typename value_codec_type_>
-            requires value_codec<value_codec_type_, value_t>
+            requires a_value_codec<value_codec_type_, value_t>
         status_t load(iota_view<node_id_t> node_range, value_codec_type_ const& codec) noexcept {
             if (!index_) return status_code_t::uninitialized_k;
             std::size_t const node_count = columns.keys.size();
@@ -4317,7 +4317,7 @@ struct ram_index {
      *  - @c overflow_k The nodes pass @c max_node_count_k, or a node's capacity wraps.
      */
     template <typename value_codec_type_>
-        requires value_codec<value_codec_type_, value_t>
+        requires a_value_codec<value_codec_type_, value_t>
     status_t load(columns_view_t columns, value_codec_type_ const& codec) noexcept {
         auto [plan, status] = plan_load(columns);
         if (failed(status)) return status;

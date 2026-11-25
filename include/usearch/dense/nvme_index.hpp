@@ -345,7 +345,7 @@ struct nvme_index {
                                      nk::matrix_span<node_id_t> node_ids, nk::matrix_span<distance_t> distances,
                                      std::span<std::size_t> counts, search_config_t config,
                                      executor_t& executor) noexcept
-        requires floating_scalar<scalar_t>
+        requires a_floating_scalar<scalar_t>
     {
         if (kernel_ != nk_kernel_dot_k) return {{}, status_code_t::config_mismatch_k};
         return search_(queries, heads, executor, config, node_ids, distances, counts);

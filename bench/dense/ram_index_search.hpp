@@ -453,7 +453,7 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const&, nk_kernel_kind_t ke
  *  @p kernel, and hands it to @p workload. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_capability_t capability_, typename wait_type_,
           typename workload_type_>
-    requires quads_adapted<typename nk::type_for<stored_dtype_>::type, capability_>
+    requires a_quads_adapted_scalar<typename nk::type_for<stored_dtype_>::type, capability_>
 int stage_and_run(bench_launch<dataset_scalar_type_> const& launch, nk_kernel_kind_t kernel,
                   workload_type_ const& workload) {
     using allocator_t = forkunion_allocator<std::byte>;

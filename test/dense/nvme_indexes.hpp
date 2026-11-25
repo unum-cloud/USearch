@@ -54,7 +54,7 @@ using nvme_indexes_for = nvme_indexes<
 
 /** Whether a sharded index reads its parts from storage: the NVMe residency. */
 template <typename indexes_type_>
-concept nvme_collection =
+concept an_nvme_collection =
     std::is_same_v<typename indexes_type_::executor_t, nvme_executor<typename indexes_type_::executor_t::queue_t>>;
 
 /** Reads every queue of an NVMe scenario keeps outstanding: small enough that a walk's flights
@@ -2210,7 +2210,7 @@ struct nvme_staged_indexes {
 
 /** Whether a sharded index is the NVMe view the shared scenarios build through its RAM group. */
 template <typename indexes_type_>
-concept nvme_staged = nvme_collection<indexes_type_> && requires { typename indexes_type_::ram_t; };
+concept an_nvme_staged_collection = an_nvme_collection<indexes_type_> && requires { typename indexes_type_::ram_t; };
 
 /** A monolith keyed @c u32, as the benches write one, viewed by a @c uuid collection: the cursor,
  *  the key scans and a ranking's resolved keys read every key zero-extended, big-endian as the
@@ -2433,7 +2433,7 @@ case_result_t test_nvme_spdk_configuration(u64_t seed, std::span<std::string_vie
 
 /** The NVMe form: two threads over a topology of its own, each opening the queue of the index's
  *  type, its queue @p queue_depth reads deep. */
-template <us::test::dense::nvme_collection indexes_type_>
+template <us::test::dense::an_nvme_collection indexes_type_>
 struct us::test::dense_indexes_executor<indexes_type_> {
     using executor_t = typename indexes_type_::executor_t;
 
@@ -2477,7 +2477,7 @@ struct us::test::dense_indexes_executor<indexes_type_> {
 
 /** The staged NVMe form: one-row insertions go into the RAM group, through a context over its own
  *  arena. */
-template <us::test::dense::nvme_staged indexes_type_>
+template <us::test::dense::an_nvme_staged_collection indexes_type_>
 struct us::test::dense_indexes_row_driver<indexes_type_> {
     us::test::dense_arena_context<typename indexes_type_::ram_t> arena;
     util::status_t status;

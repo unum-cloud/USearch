@@ -55,7 +55,7 @@ template <                                          //
     cpu_class_t cpu_class_ = cpu_class_t::serial_k, //
     template <typename> class atomic_ref_ = fu::standard_atomic_ref>
 static case_result_t test_ram_indexes_configuration(u64_t) {
-    if constexpr (!quads_supported<kernel_, typename nk::type_for<dtype_>::type, nk_cap_serial_k>)
+    if constexpr (!a_quads_supported_kernel<kernel_, typename nk::type_for<dtype_>::type, nk_cap_serial_k>)
         return case_result_t::skipped(needs_serial_kernels_k);
     else return case_result_t::skipped(needs_kit_target_k);
 }
@@ -1033,7 +1033,7 @@ template <                                          //
     typename waiter_type_ = fu::standard_yield_t,   //
     cpu_class_t cpu_class_ = cpu_class_t::serial_k, //
     template <typename> class atomic_ref_ = fu::standard_atomic_ref>
-    requires dense_cell_testable<dtype_, kernel_, numkong_capabilities_of(cpu_class_)>
+    requires a_testable_dense_cell<dtype_, kernel_, numkong_capabilities_of(cpu_class_)>
 static case_result_t test_ram_indexes_configuration(u64_t seed) {
 
     using indexes_t = ram_indexes_for<dtype_, cpu_class_, waiter_type_, atomic_ref_>;
@@ -1084,7 +1084,7 @@ template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_, cpu_class_t cpu_class_>
 case_result_t test_ram_scan_configuration(u64_t seed) {
     constexpr nk_capability_t caps_k = numkong_capabilities_of(cpu_class_);
     using indexes_t = ram_indexes_for<dtype_, cpu_class_>;
-    if constexpr (!dense_cell_testable<dtype_, kernel_, caps_k>) return case_result_t::skipped(needs_kit_target_k);
+    if constexpr (!a_testable_dense_cell<dtype_, kernel_, caps_k>) return case_result_t::skipped(needs_kit_target_k);
     else if (!dense_cell_admitted<caps_k, fu::standard_atomic_ref>())
         return case_result_t::skipped(needs_capabilities_k);
     else {

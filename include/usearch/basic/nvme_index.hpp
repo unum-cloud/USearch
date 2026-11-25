@@ -234,8 +234,8 @@ class nvme_parts_catalog {
                                      std::span<key_t> keys, std::span<score_type_> distances,
                                      std::span<std::size_t> counts, search_config_t config, predicate_type_&& predicate,
                                      relation_type_&& relation, executor_t& executor) noexcept {
-        static_assert(!aggregating_predicate<std::remove_cvref_t<predicate_type_>, key_t, walk_payload_t> ||
-                          per_thread_predicates<std::remove_cvref_t<predicate_type_>>,
+        static_assert(!an_aggregating_predicate<std::remove_cvref_t<predicate_type_>, key_t, walk_payload_t> ||
+                          a_per_thread_predicate_family<std::remove_cvref_t<predicate_type_>>,
                       "A queue driving its own threads takes an aggregating predicate per thread");
         if (parts_.empty()) return {{}, status_code_t::uninitialized_k};
         if (counts.size() != count || keys.size() != distances.size() || (count && keys.size() % count))
@@ -284,8 +284,8 @@ class nvme_parts_catalog {
                                    std::span<key_t> keys, std::span<score_type_> distances,
                                    std::span<std::size_t> counts, predicate_type_&& predicate,
                                    relation_type_&& relation, executor_t& executor) noexcept {
-        static_assert(!aggregating_predicate<std::remove_cvref_t<predicate_type_>, key_t, scan_payload_t> ||
-                          per_thread_predicates<std::remove_cvref_t<predicate_type_>>,
+        static_assert(!an_aggregating_predicate<std::remove_cvref_t<predicate_type_>, key_t, scan_payload_t> ||
+                          a_per_thread_predicate_family<std::remove_cvref_t<predicate_type_>>,
                       "A queue driving its own threads takes an aggregating predicate per thread");
         using query_t =
             typename std::invoke_result_t<query_of_type_&, std::size_t, scratch_allocator_t const&>::value_t;
@@ -1664,7 +1664,7 @@ class nvme_parts_catalog {
 #pragma region Sampling
 
     /** Every part as SAMPLE reads it, each verb a blocking read on thread zero's queue; see
-     *  @c sample_source. A failed read lands in @c rows.failure, and its verb answers nothing. */
+     *  @c a_sample_source. A failed read lands in @c rows.failure, and its verb answers nothing. */
     template <typename metric_type_, typename query_of_type_, typename coordinates_type_>
     struct nvme_sample_source {
         using key_t = key_type_;
@@ -1742,7 +1742,7 @@ class nvme_parts_catalog {
         }
 
         void coordinates_of(shard_node_t node, std::span<f32_t, 3> xyz) const noexcept
-            requires fixed_coordinates<coordinates_type_>
+            requires a_coordinates_provider<coordinates_type_>
         {
             bytes_view_t const row = rows.read_row(catalog.row_extent_(node, nvme_purpose_t::score_k));
             if (succeeded(*rows.failure)) fixed_coordinates_of(codec_t {}.view(row), xyz);

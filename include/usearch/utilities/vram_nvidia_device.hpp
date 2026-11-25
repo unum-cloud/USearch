@@ -15,8 +15,8 @@
  *  Plain C++ needing no CUDA SDK, hence the @c .hpp extension: the few driver types, constants and
  *  prototypes USearch calls are spelled here, copied from the driver's stable ABI, so any host
  *  compiler builds it. The warp policy the shared walk code is written against lives in
- *  @c vram_nvidia_device.cuh. The flat @c cuda_allocator exposes @c std::allocator's call surface
- *  with the stream bound at construction; the @c cuda_reservable_allocator is the flat storage
+ *  @c vram_nvidia_device.cuh. The flat @c a_cuda_allocator exposes @c std::allocator's call surface
+ *  with the stream bound at construction; the @c a_cuda_reservable_allocator is the flat storage
  *  backend, a reserve-once / commit-on-demand range whose base survives growth. Nothing models
  *  both.
  *
@@ -622,7 +622,7 @@ enum class cuda_address_space_t : u32_t {
 /** The device analog of @c std::allocator, with the ordering stream and the target device
  *  bound at construction; @c address_space_k fixes host visibility. */
 template <typename allocator_>
-concept cuda_allocator = requires(allocator_ allocator, typename allocator_::value_type* pointer, std::size_t count) {
+concept a_cuda_allocator = requires(allocator_ allocator, typename allocator_::value_type* pointer, std::size_t count) {
     typename allocator_::value_type;
     { allocator_::address_space_k } -> std::convertible_to<cuda_address_space_t>;
     { allocator.allocate(count) } -> std::same_as<typename allocator_::value_type*>;
@@ -633,9 +633,9 @@ concept cuda_allocator = requires(allocator_ allocator, typename allocator_::val
 };
 
 /** The flat storage backend contract: a reserve-once / commit-on-demand address range whose base
- *  never moves. Not a refinement of @c cuda_allocator, since flat storage never frees mid-life. */
+ *  never moves. Not a refinement of @c a_cuda_allocator, as flat storage never frees mid-life. */
 template <typename allocator_>
-concept cuda_reservable_allocator = requires(allocator_ allocator, std::size_t bytes) {
+concept a_cuda_reservable_allocator = requires(allocator_ allocator, std::size_t bytes) {
     typename allocator_::value_type;
     { allocator_::address_space_k } -> std::convertible_to<cuda_address_space_t>;
     { allocator.reserve_range(bytes) } -> std::same_as<status_t>;
@@ -1686,7 +1686,7 @@ status_t cuda_launch(cuda_api_t const& api, cuda_function_handle_t function, u32
                                                                                       : status_code_t::device_k;
 }
 
-static_assert(cuda_reservable_allocator<cuda_virtual_memory_allocator<byte_t>>);
+static_assert(a_cuda_reservable_allocator<cuda_virtual_memory_allocator<byte_t>>);
 
 /** Claim counters a traversal context keeps: three for each of the insert waves one fill zeroes
  *  ahead, so overlapping launches chain wave after wave with no fill between them. Waves double
@@ -1701,7 +1701,7 @@ inline constexpr u32_t cuda_claim_counters_k = 3 * (std::numeric_limits<u32_t>::
  *  call's own scratch, from a run its owner rewinds. Two contexts on one index share only the
  *  storage and the published counter, never scratch. Callers observe it through @c results,
  *  @ref spent, @ref missed and @ref matched, its scratch being the indexes' verbs' alone. */
-template <cuda_allocator allocator_type_ = cuda_device_allocator_t>
+template <a_cuda_allocator allocator_type_ = cuda_device_allocator_t>
 struct cuda_traversal_context {
     using allocator_t = allocator_type_;
     using kernel_table_t = cuda_kernel_table_t;
@@ -1950,10 +1950,10 @@ struct cuda_traversal_context {
     }
 };
 
-static_assert(cuda_reservable_allocator<cuda_managed_allocator<byte_t>>);
-static_assert(cuda_allocator<cuda_device_allocator_t>);
-static_assert(cuda_allocator<cuda_arena_allocator_t>);
-static_assert(cuda_allocator<cuda_pinned_allocator_t>);
+static_assert(a_cuda_reservable_allocator<cuda_managed_allocator<byte_t>>);
+static_assert(a_cuda_allocator<cuda_device_allocator_t>);
+static_assert(a_cuda_allocator<cuda_arena_allocator_t>);
+static_assert(a_cuda_allocator<cuda_pinned_allocator_t>);
 static_assert(std::allocator_traits<cuda_device_allocator_t>::propagate_on_container_move_assignment::value &&
               std::allocator_traits<cuda_device_allocator_t>::propagate_on_container_swap::value &&
               !std::allocator_traits<cuda_device_allocator_t>::is_always_equal::value);

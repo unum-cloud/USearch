@@ -693,14 +693,15 @@ util::expected<util::sample_result_t> sample_entries(variant_type_& variant, mak
 /** Whether @p traits_type_ measures a key's entries from their values of @p value_type_, which a
  *  count then reads. */
 template <typename traits_type_, typename stats_type_, typename value_type_>
-concept tallies = requires(stats_type_& stats, value_type_ const& value) {
+concept a_tallying_traits = requires(stats_type_& stats, value_type_ const& value) {
     variant_bodies<traits_type_>::tally(stats, value);
 };
 
 /** Adds @p value to @p stats, from any thread, where @p traits_type_ measures such values. */
 template <typename traits_type_, typename stats_type_, typename value_type_>
 void tally_entry(stats_type_& stats, value_type_ const& value) noexcept {
-    if constexpr (tallies<traits_type_, stats_type_, value_type_>) variant_bodies<traits_type_>::tally(stats, value);
+    if constexpr (a_tallying_traits<traits_type_, stats_type_, value_type_>)
+        variant_bodies<traits_type_>::tally(stats, value);
 }
 
 /** Counts the entries a RAM variant stores under @p key into @p stats, tallying their sizes where
@@ -724,7 +725,7 @@ template <typename traits_type_, typename variant_type_, typename stats_type_>
 util::status_t count_entries(variant_type_& variant, usearch_key_t key, stats_type_& stats,
                              nvme_executor_t& executor) noexcept {
     using view_t = typename variant_type_::index_t::codec_t::view_t;
-    if constexpr (tallies<traits_type_, stats_type_, view_t>) {
+    if constexpr (a_tallying_traits<traits_type_, stats_type_, view_t>) {
         auto take_count = [&](std::size_t entries) noexcept {
             return stats.entries = entries, util::status_code_t::success_k;
         };
@@ -1387,27 +1388,29 @@ enum class reshard_shape_t : util::u8_t { pack_k, split_k };
 
 /** Whether a reshard plan of @p plan_type_ tells which variant of @p variant_type_ it emptied. */
 template <typename plan_type_, typename variant_type_>
-concept names_emptied = requires(plan_type_ const& plan, variant_type_ const& variant) { plan.moved(&variant.index); };
+concept an_emptied_naming_plan = requires(plan_type_ const& plan, variant_type_ const& variant) {
+    plan.moved(&variant.index);
+};
 
 /** Whether a variant of @p variant_type_ folds the counts of a source a pack emptied into it. */
 template <typename variant_type_>
-concept folds_packed_sources = requires(variant_type_& driven, variant_type_& source) {
+concept a_pack_folding_variant = requires(variant_type_& driven, variant_type_& source) {
     driven.count_packed_source(source);
 };
 
 /** Whether a variant of @p variant_type_ counts the part each target of its split took. */
 template <typename variant_type_>
-concept counts_split_targets = requires(variant_type_& driven, variant_type_& target) {
+concept a_split_counting_variant = requires(variant_type_& driven, variant_type_& target) {
     driven.count_split_target(target);
 };
 
 /** Whether a variant of @p variant_type_ pins one scalar type, which its verb table reports. */
 template <typename variant_type_>
-concept pins_dtype = requires { variant_type_::dtype_k; };
+concept a_dtype_pinning_variant = requires { variant_type_::dtype_k; };
 
 /** Whether a variant of @p variant_type_ pins one metric, which its verb table reports. */
 template <typename variant_type_>
-concept pins_metric = requires { variant_type_::metric_k; };
+concept a_metric_pinning_variant = requires { variant_type_::metric_k; };
 
 /** A refine plan in flight: the variant whose rounds it drives, and the engine plan, which also
  *  says where the calls stand. */
@@ -1748,7 +1751,7 @@ struct specialized_variant {
         return false;
     }
     template <typename plan_type_>
-        requires names_emptied<plan_type_, variant_t>
+        requires an_emptied_naming_plan<plan_type_, variant_t>
     static bool emptied_by_(plan_type_ const& plan, variant_t const& variant) noexcept {
         return plan.moved(&variant.index);
     }
@@ -1756,7 +1759,7 @@ struct specialized_variant {
     /** Folds the counts of @p source, which @p driven took in, into @p driven 's own. */
     static void fold_packed_(variant_t&, variant_t&) noexcept {}
     static void fold_packed_(variant_t& driven, variant_t& source) noexcept
-        requires folds_packed_sources<variant_t>
+        requires a_pack_folding_variant<variant_t>
     {
         driven.count_packed_source(source);
     }
@@ -1764,7 +1767,7 @@ struct specialized_variant {
     /** Counts the part @p target took from @p driven 's split. */
     static void count_split_(variant_t&, variant_t&) noexcept {}
     static void count_split_(variant_t& driven, variant_t& target) noexcept
-        requires counts_split_targets<variant_t>
+        requires a_split_counting_variant<variant_t>
     {
         driven.count_split_target(target);
     }
@@ -1863,8 +1866,8 @@ struct specialized_variant {
     static constexpr verbs_t verbs() noexcept {
         nk_dtype_t dtype = nk_dtype_unknown_k;
         util::u32_t metric = 0;
-        if constexpr (pins_dtype<variant_t>) dtype = variant_t::dtype_k;
-        if constexpr (pins_metric<variant_t>) metric = static_cast<util::u32_t>(variant_t::metric_k);
+        if constexpr (a_dtype_pinning_variant<variant_t>) dtype = variant_t::dtype_k;
+        if constexpr (a_metric_pinning_variant<variant_t>) metric = static_cast<util::u32_t>(variant_t::metric_k);
         return {
             .dtype = dtype,
             .metric = metric,

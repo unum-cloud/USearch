@@ -71,12 +71,12 @@ struct geospatial_within_t {
 /** A terrain handler: fills a block of heights in metres, leaving NaN where it has none, through a
  *  const call operator, since every executor thread may ask it at once. */
 template <typename handler_type_>
-concept terrain_handler = std::is_nothrow_invocable_r_v<void, handler_type_ const&, std::size_t, std::size_t,
-                                                        std::size_t, std::size_t, float*, std::size_t>;
+concept a_terrain_handler = std::is_nothrow_invocable_r_v<void, handler_type_ const&, std::size_t, std::size_t,
+                                                          std::size_t, std::size_t, float*, std::size_t>;
 
 /** The @p grid filled on demand by @p handler, which every index naming it keeps for its life
  *  and calls from the executor's threads. */
-template <terrain_handler handler_type_>
+template <a_terrain_handler handler_type_>
 usearch_geospatial_terrain_t geospatial_terrain(handler_type_& handler, usearch_geospatial_terrain_t grid) noexcept {
     grid.callback = [](std::size_t first_row, std::size_t first_column, std::size_t rows, std::size_t columns,
                        float* heights, std::size_t heights_stride, void* state) noexcept {
@@ -143,14 +143,14 @@ class geospatial_index {
 
   public:
     geospatial_index() noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     = default;
 
     usearch_geospatial_index_t handle() const noexcept { return receiver_.handle(); }
 
     /** The output field a lifecycle verb writes the new handle into. */
     usearch_geospatial_index_t* handle_field() noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     {
         return receiver_.handle_field();
     }
@@ -442,7 +442,7 @@ class geospatial_index {
 
     /** Creates an empty RAM index over the terrain @p arguments names, if any. */
     static expected<geospatial_index> init_ram(usearch_geospatial_init_ram_t arguments) noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     {
         return opened_<geospatial_index>(usearch_geospatial_init_ram, arguments, &usearch_geospatial_init_ram_t::index);
     }
@@ -450,7 +450,7 @@ class geospatial_index {
     /** Creates an empty VRAM index over the heights @p arguments points at, if any, on the
      *  devices it names. */
     static expected<geospatial_index> init_vram(usearch_geospatial_init_vram_t arguments) noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     {
         return opened_<geospatial_index>(usearch_geospatial_init_vram, arguments,
                                          &usearch_geospatial_init_vram_t::index);
@@ -459,7 +459,7 @@ class geospatial_index {
     /** Copies a checkpoint into a new, mutable index in host memory. */
     static expected<geospatial_index> load_ram(usearch_geospatial_load_ram_t arguments, executor_t const& executor = {},
                                                progress_t progress = {}) noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     {
         return opened_<geospatial_index>(usearch_geospatial_load_ram, arguments, &usearch_geospatial_load_ram_t::index,
                                          executor, progress);
@@ -468,7 +468,7 @@ class geospatial_index {
     /** Copies a checkpoint into a new, mutable index in device memory. */
     static expected<geospatial_index> load_vram(usearch_geospatial_load_vram_t arguments,
                                                 executor_t const& executor = {}, progress_t progress = {}) noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     {
         return opened_<geospatial_index>(usearch_geospatial_load_vram, arguments,
                                          &usearch_geospatial_load_vram_t::index, executor, progress);
@@ -478,7 +478,7 @@ class geospatial_index {
     static expected<geospatial_index> load_ram_buffer(usearch_geospatial_load_ram_buffer_t arguments,
                                                       executor_t const& executor = {},
                                                       progress_t progress = {}) noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     {
         return opened_<geospatial_index>(usearch_geospatial_load_ram_buffer, arguments,
                                          &usearch_geospatial_load_ram_buffer_t::index, executor, progress);
@@ -488,7 +488,7 @@ class geospatial_index {
     static expected<geospatial_index> load_vram_buffer(usearch_geospatial_load_vram_buffer_t arguments,
                                                        executor_t const& executor = {},
                                                        progress_t progress = {}) noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     {
         return opened_<geospatial_index>(usearch_geospatial_load_vram_buffer, arguments,
                                          &usearch_geospatial_load_vram_buffer_t::index, executor, progress);
@@ -496,7 +496,7 @@ class geospatial_index {
 
     /** Serves a checkpoint in place through a memory mapping, as a read-only index. */
     static expected<geospatial_index> view_ram(usearch_geospatial_view_ram_t arguments) noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     {
         return opened_<geospatial_index>(usearch_geospatial_view_ram, arguments, &usearch_geospatial_view_ram_t::index);
     }
@@ -505,7 +505,7 @@ class geospatial_index {
      *  it through @p executor 's engines. */
     static expected<geospatial_index> view_nvme(usearch_geospatial_view_nvme_t arguments,
                                                 executor_t const& executor = {}) noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     {
         return opened_<geospatial_index>(usearch_geospatial_view_nvme, arguments,
                                          &usearch_geospatial_view_nvme_t::index, executor);
@@ -514,7 +514,7 @@ class geospatial_index {
     /** Reads a checkpoint's connectivity without loading it. */
     static expected<usearch_geospatial_metadata_t> metadata_read(usearch_geospatial_metadata_read_t arguments,
                                                                  executor_t const& executor = {}) noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     {
         return metadata_read_<usearch_geospatial_metadata_t>(usearch_geospatial_metadata_read, arguments,
                                                              executor.handle());
@@ -523,7 +523,7 @@ class geospatial_index {
     /** Reads connectivity from a serialized checkpoint buffer. */
     static expected<usearch_geospatial_metadata_t> metadata_read_buffer(
         usearch_geospatial_metadata_read_buffer_t arguments, executor_t const& executor = {}) noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     {
         return metadata_read_<usearch_geospatial_metadata_t>(usearch_geospatial_metadata_read_buffer, arguments,
                                                              executor.handle());
@@ -531,7 +531,7 @@ class geospatial_index {
 
     /** Opens a cursor over every entry, or over the entries @p starts names first. */
     expected<geospatial_cursor_t> cursor_init(std::span<usearch_key_t const> starts = {}) const noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     {
         usearch_geospatial_cursor_init_t arguments {handle(), nullptr, nullptr, starts.size(), starts.data(), nullptr};
         return opened_<geospatial_cursor_t>(usearch_geospatial_cursor_init, arguments,

@@ -1009,7 +1009,7 @@ struct vram_nvidia_kernels {
         arguments.search = search_view_(core, walk, context);
         arguments.search_sink = {ids, distances, count, core.kernel_};
         // Only the floating dtypes take indexer heads, so only they rescore.
-        if constexpr (floating_scalar<scalar_t>)
+        if constexpr (a_floating_scalar<scalar_t>)
             if (walk.weights) {
                 arguments.rescoring = {reinterpret_cast<byte_t const*>(walk.heads), walk.weights, walk.heads_count,
                                        core.row_fragments()};
@@ -1380,7 +1380,7 @@ struct vram_nvidia_index {
                                      nk::matrix_span<distance_t> result_distances, search_config_t config,
                                      traversal_context_t& context,
                                      completion_t completion = completion_t::blocking_k) noexcept
-        requires floating_scalar<scalar_t>
+        requires a_floating_scalar<scalar_t>
     {
         return core_.search(queries, heads, result_ids, result_distances, config, context, completion);
     }

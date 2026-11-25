@@ -241,18 +241,18 @@ struct reshard_plan_of<index_type_> {
 
 /** Whether @p index_type_ walks its entries through a cursor. */
 template <typename index_type_>
-concept walks_cursors = requires { typename index_type_::cursor_t; };
+concept a_cursor_walking_index = requires { typename index_type_::cursor_t; };
 
 /** Whether @p index_type_ loads a checkpoint where it sits, a device's included. */
 template <typename index_type_>
-concept loads_checkpoint_sources = requires(index_type_& index, util::checkpoint_source_t source,
-                                            typename index_type_::executor_t& executor, progress_ticks_t& ticks) {
+concept a_checkpoint_source_loader = requires(index_type_& index, util::checkpoint_source_t source,
+                                              typename index_type_::executor_t& executor, progress_ticks_t& ticks) {
     index.load(source, util::load_config_t {}, executor, ticks);
 };
 
 /** Whether @p index_type_ answers if its media read through SPDK, as a loaded NVMe index does. */
 template <typename index_type_>
-concept reports_spdk_reads = requires(index_type_ const& index) { index.reads_spdk(); };
+concept an_spdk_reporting_index = requires(index_type_ const& index) { index.reads_spdk(); };
 
 /**
  *  @brief One variant's bodies, every one a static member its verb table points at, taking the
@@ -414,7 +414,7 @@ struct specialized_index {
     }
     static std::size_t shards_count(void const* index) noexcept { return of(index).shards_count(); }
     static bool reads_spdk(void const* index) noexcept {
-        if constexpr (reports_spdk_reads<index_type_>) return of(index).reads_spdk();
+        if constexpr (an_spdk_reporting_index<index_type_>) return of(index).reads_spdk();
         else return false;
     }
     static usearch_load_path_t load_path(void const* index) noexcept {
@@ -798,7 +798,7 @@ struct specialized_index {
      *  cursor answers @c unsupported_k. */
     static util::expected<void*> cursor_init(void* index, std::span<key_t const> starts,
                                              util::forkunion_allocator_t allocator) noexcept {
-        if constexpr (walks_cursors<index_t>) {
+        if constexpr (a_cursor_walking_index<index_t>) {
             typename index_t::cursor_t* const opened = new (std::nothrow) typename index_t::cursor_t(allocator);
             if (!opened) return {nullptr, util::status_code_t::out_of_memory_k};
             if (util::status_t const walking = opened->open(of(index), starts); failed(walking))
@@ -809,7 +809,7 @@ struct specialized_index {
     }
     static util::expected<std::size_t> cursor_next(void* index, void* cursor, std::span<key_t> keys,
                                                    links_outputs_t* links, executor_t& executor) noexcept {
-        if constexpr (!walks_cursors<index_t>) return {0, util::status_code_t::unsupported_k};
+        if constexpr (!a_cursor_walking_index<index_t>) return {0, util::status_code_t::unsupported_k};
         else {
             typename index_t::cursor_t& walk = *static_cast<typename index_t::cursor_t*>(cursor);
             if constexpr (viewed_k)
@@ -821,7 +821,7 @@ struct specialized_index {
         }
     }
     static void cursor_free(void* cursor) noexcept {
-        if constexpr (walks_cursors<index_t>) delete static_cast<typename index_t::cursor_t*>(cursor);
+        if constexpr (a_cursor_walking_index<index_t>) delete static_cast<typename index_t::cursor_t*>(cursor);
     }
 
     /** Samples a RAM index or an NVMe view; a GPU index does not sample yet. */
@@ -854,7 +854,7 @@ struct specialized_index {
     static util::status_t load_buffer(void* index, util::checkpoint_source_t source, executor_t& executor,
                                       progress_ticks_t& ticks) noexcept {
         if constexpr (viewed_k) return refuses_writes(index);
-        else if constexpr (loads_checkpoint_sources<index_t>)
+        else if constexpr (a_checkpoint_source_loader<index_t>)
             return of(index).load(source, util::load_config_t {}, executor, ticks);
         else if (source.device != util::host_device_k) return util::status_code_t::unsupported_k;
         else return of(index).load(source.bytes, util::load_config_t {}, executor, ticks);

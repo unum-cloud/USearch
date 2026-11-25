@@ -22,7 +22,7 @@ namespace unum::usearch::test::dense {
 /** The ledgered virtual-memory flat-matrix backend every AMD fixture places its index through. */
 using counting_hip_allocator_t = counting_device_allocator<hip_virtual_memory_allocator<byte_t>>;
 
-static_assert(hip_reservable_allocator<counting_hip_allocator_t>);
+static_assert(a_hip_reservable_allocator<counting_hip_allocator_t>);
 
 /** The ceiling of the suite's own code object: the CDNA3 class's, which CDNA3 and CDNA4 run. */
 inline constexpr nk_capability_t dense_amd_capabilities_k = nk_cap_rocm_k | nk_cap_cdna3_k;

@@ -158,7 +158,7 @@ status_t nvme_read_round(queue_type_& queue, std::span<typename queue_type_::med
 
 /** A reader whose medium reports its length, which bounds a header before it sizes a buffer. */
 template <typename source_type_>
-concept measurable_medium = requires(source_type_ const& source) { medium_bytes_of(source); };
+concept a_measurable_medium = requires(source_type_ const& source) { medium_bytes_of(source); };
 
 /**
  *  @brief Reads the prefix and the header of the part @p source holds, any reader with
@@ -178,7 +178,7 @@ status_t nvme_read_header(source_type_ const& source, growing_buffer<byte_t, all
     if (prefix.magic != safegraphs_prefix_t::magic_k) return status_code_t::malformed_k;
     std::size_t const header_length = static_cast<std::size_t>(little_endian(prefix.header_length));
     // A damaged length is checked against the medium before it sizes an allocation.
-    if constexpr (measurable_medium<source_type_>) {
+    if constexpr (a_measurable_medium<source_type_>) {
         auto const [medium_bytes, measure_status] = medium_bytes_of(source);
         if (failed(measure_status)) return measure_status;
         if (header_length > medium_bytes - sizeof(prefix)) return status_code_t::malformed_k;
@@ -2459,7 +2459,8 @@ struct nvme_parts_cursor {
  *  @brief What every NVMe tier's SAMPLE source reads beside its scores: the shown and focus keys'
  *      entries, the keys of nodes already read, neighbor lists, and blocking rounds on one queue.
  *
- *  Each tower's source owns one, names its own rows' extents, and scores; see @c sample_source.
+ *  Each tower's source owns one, names its own entries' extents, and scores; see
+ *  @c a_sample_source.
  *  Every read lands in the queue's staging buffers, valid until the next read. A failed read
  *  lands in @c failure, and every later row read answers no row.
  */

@@ -336,8 +336,8 @@ class chord_metric {
 
 using chord_metric_t = chord_metric<i32_serial_geospatial_kit_t>;
 
-static_assert(basic::metric<chord_metric_t, earth_observation_t, nk_u64_t>);
-static_assert(basic::transparent_metric<chord_metric_t>);
+static_assert(basic::a_metric<chord_metric_t, earth_observation_t, nk_u64_t>);
+static_assert(basic::a_transparent_metric<chord_metric_t>);
 
 #pragma endregion Metric
 

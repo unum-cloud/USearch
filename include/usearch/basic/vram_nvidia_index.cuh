@@ -42,7 +42,7 @@ static_assert(sizeof(std::size_t) == sizeof(u64_t), "The caller's offsets cross 
  *  barriers bracket every round, so the posted entries and the span are read between them alone and
  *  rewritten outside them.
  */
-template <vram_basic_kit kit_, u32_t rung_, typename node_id_type_>
+template <a_vram_basic_kit kit_, u32_t rung_, typename node_id_type_>
 struct cuda_block_schedule {
     using query_t = typename kit_::query_t;
     inline static constexpr u32_t lanes_per_entry_k = vram_lanes_per_entry<kit_, rung_>();
@@ -142,7 +142,7 @@ struct cuda_block_schedule {
 
 /** The schedule a kit scores through on @p rung_: in place when a lane scores an entry alone, with
  *  the whole block when an entry takes several lanes. */
-template <vram_basic_kit kit_, u32_t rung_, typename node_id_type_>
+template <a_vram_basic_kit kit_, u32_t rung_, typename node_id_type_>
 using cuda_schedule =
     std::conditional_t<vram_lanes_per_entry<kit_, rung_>() == 1, vram_lane_schedule<kit_, rung_, node_id_type_>,
                        cuda_block_schedule<kit_, rung_, node_id_type_>>;
@@ -176,7 +176,7 @@ __device__ __forceinline__ void cuda_for_each_assigned(schedule_& schedule,
  *  links are already merged, and re-selects behind its own, so its nodes reach one another. Nodes
  *  keep the neighbors the kit's @c selector_t picks.
  */
-template <vram_basic_kit kit_, u32_t rung_, u32_t candidate_slots_, vram_kernel_t kernel_, typename node_id_type_>
+template <a_vram_basic_kit kit_, u32_t rung_, u32_t candidate_slots_, vram_kernel_t kernel_, typename node_id_type_>
 __device__ __forceinline__ void cuda_insert(vram_build_view<node_id_type_> const& view) {
     using selector_t = typename kit_::selector_t;
     using schedule_t = cuda_schedule<kit_, rung_, node_id_type_>;
@@ -224,7 +224,7 @@ __device__ __forceinline__ void cuda_insert(vram_build_view<node_id_type_> const
 
 /** One walker back-links one node the walk launch before it touched, assigning itself the touched
  *  list's offsets from the launch counter, and resets the node's chain for the next walk launch. */
-template <vram_basic_kit kit_, u32_t rung_, typename node_id_type_>
+template <a_vram_basic_kit kit_, u32_t rung_, typename node_id_type_>
 __device__ __forceinline__ void cuda_back_link(vram_build_view<node_id_type_> const& view) {
     using schedule_t = cuda_schedule<kit_, rung_, node_id_type_>;
     extern __shared__ byte_t dynamic_scratch[];
@@ -248,7 +248,7 @@ __device__ __forceinline__ void cuda_back_link(vram_build_view<node_id_type_> co
 
 /** One walker files one entry of a gather's runs at a time under its nearest hub, assigning itself
  *  the runs' positions from the launch counter. */
-template <vram_basic_kit kit_, u32_t rung_, typename node_id_type_>
+template <a_vram_basic_kit kit_, u32_t rung_, typename node_id_type_>
 __device__ __forceinline__ void cuda_gather_neighborhoods(vram_round_view<node_id_type_> const& view) {
     using schedule_t = cuda_schedule<kit_, rung_, node_id_type_>;
     extern __shared__ byte_t dynamic_scratch[];
@@ -267,7 +267,7 @@ __device__ __forceinline__ void cuda_gather_neighborhoods(vram_round_view<node_i
  *  positions from the launch counter; an entry sits in one neighborhood and its walker alone writes
  *  its row, so no row is locked, and the links added and dropped and the rows changed add to the
  *  counters once per warp. */
-template <vram_basic_kit kit_, u32_t rung_, typename node_id_type_>
+template <a_vram_basic_kit kit_, u32_t rung_, typename node_id_type_>
 __device__ __forceinline__ void cuda_restitch(vram_round_view<node_id_type_> const& view) {
     using schedule_t = cuda_schedule<kit_, rung_, node_id_type_>;
     extern __shared__ byte_t dynamic_scratch[];
@@ -296,7 +296,7 @@ __device__ __forceinline__ void cuda_restitch(vram_round_view<node_id_type_> con
 
 /** One walker per query on the rung of @p slots_, the arena frontier at zero; walkers take queries
  *  from the batch counter, as builders take entries. */
-template <vram_basic_kit kit_, u32_t rung_, u32_t slots_, typename node_id_type_>
+template <a_vram_basic_kit kit_, u32_t rung_, u32_t slots_, typename node_id_type_>
 __device__ __forceinline__ void cuda_walk(vram_search_view<node_id_type_> const& view) {
     using schedule_t = cuda_schedule<kit_, rung_, node_id_type_>;
     extern __shared__ byte_t dynamic_scratch[];
@@ -403,7 +403,7 @@ __device__ __forceinline__ vram_round_view<node_id_type_> vram_view(vram_round<n
  *  @p rung_, @p slots_ is the register rung, and @p node_id_type_ the IDs of the records. Each
  *  modality's @c cuda_kernel names the kit its ladder picks and calls it under its launch
  *  bounds. */
-template <vram_kernel_t kernel_, vram_basic_kit kit_, u32_t rung_, u32_t slots_, typename node_id_type_>
+template <vram_kernel_t kernel_, a_vram_basic_kit kit_, u32_t rung_, u32_t slots_, typename node_id_type_>
 __device__ __forceinline__ void cuda_kernel_body(vram_arguments<node_id_type_> const& arguments) {
     vram_build<node_id_type_> const& build = arguments.build;
     if constexpr (kernel_ == vram_kernel_t::insert_k || kernel_ == vram_kernel_t::refine_k)

@@ -180,7 +180,7 @@ struct vram_apple_indexes {
     };
     using refine_report_t = typename index_t::refine_report_t;
     using reachability_t = typename index_t::reachability_t;
-    static_assert(index_family<index_t>);
+    static_assert(an_index_family<index_t>);
 
     /** The stored scalar vocabulary, re-exported for dispatchers gating crossing rows. */
     inline static constexpr nk_dtype_t vector_dtype_k = vector_dtype_;
@@ -1381,7 +1381,7 @@ struct vram_apple_indexes {
     expected<search_result_t> search(rows_view_t queries, indexer_heads<scalar_t> const& heads,
                                      ranked_matches_span<key_t, distance_t> matches, search_config_t config,
                                      executor_t& executor) noexcept
-        requires floating_scalar<scalar_t>
+        requires a_floating_scalar<scalar_t>
     {
         return bracketed_([&]() noexcept -> expected<search_result_t> {
             if (kernel() != nk_kernel_dot_k) return {{}, status_code_t::config_mismatch_k};

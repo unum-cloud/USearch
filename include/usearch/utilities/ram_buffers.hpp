@@ -75,13 +75,14 @@ constexpr std::size_t reserved_capacity(std::size_t capacity) noexcept {
 /** The allocator surface these containers use; narrower than the standard's, since none of
  *  them constructs or destroys through it. */
 template <typename allocator_>
-concept buffer_allocator = requires(allocator_ allocator, typename allocator_::value_type* pointer, std::size_t count) {
+concept a_buffer_allocator = requires(allocator_ allocator, typename allocator_::value_type* pointer,
+                                      std::size_t count) {
     typename allocator_::value_type;
     { allocator.allocate(count) } -> std::same_as<typename allocator_::value_type*>;
     allocator.deallocate(pointer, count);
 };
 
-static_assert(buffer_allocator<std::allocator<byte_t>>);
+static_assert(a_buffer_allocator<std::allocator<byte_t>>);
 
 /**
  *  @brief Similar to @c std::priority_queue, but allows raw access to underlying
@@ -1567,7 +1568,7 @@ struct caller_span_allocator {
     }
 };
 
-static_assert(buffer_allocator<caller_span_allocator<std::byte>>);
+static_assert(a_buffer_allocator<caller_span_allocator<std::byte>>);
 static_assert(std::allocator_traits<caller_span_allocator<std::byte>>::propagate_on_container_move_assignment::value &&
               std::allocator_traits<caller_span_allocator<std::byte>>::propagate_on_container_swap::value &&
               !std::allocator_traits<caller_span_allocator<std::byte>>::is_always_equal::value);
@@ -1628,7 +1629,7 @@ struct arena_allocator {
     }
 };
 
-static_assert(buffer_allocator<arena_allocator<std::byte>>);
+static_assert(a_buffer_allocator<arena_allocator<std::byte>>);
 static_assert(std::same_as<std::allocator_traits<arena_allocator<std::byte>>::rebind_alloc<int>, //
                            arena_allocator<int>>);
 static_assert(std::allocator_traits<arena_allocator<std::byte>>::propagate_on_container_move_assignment::value &&

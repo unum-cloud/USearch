@@ -166,8 +166,8 @@ struct predicate_fold {
 /** Reads every scored quad - live lanes in kernel order beside their native dots, both valid only
  *  for the call - and answers whether the walk should go on. */
 template <typename fold_type_, typename dot_result_type_>
-concept fold = requires(fold_type_& fold, std::span<scored_node_t const> scored_nodes,
-                        std::span<dot_result_type_ const> dots) {
+concept a_fold = requires(fold_type_& fold, std::span<scored_node_t const> scored_nodes,
+                          std::span<dot_result_type_ const> dots) {
     { fold.absorb(scored_nodes, dots) } noexcept -> std::same_as<walk_demand_t>;
 };
 
@@ -246,7 +246,7 @@ void ask_contenders(admits_type_& admits, quad<node_id_t> const& nodes, quad<sca
 /** The scorer of an exact scan's blocks where no matrix engine multiplies the scalar: a block of
  *  queries stays resident in cache while each stored row of a task scores against four of them a
  *  call, through @c score_step_loop under the kit's target. */
-template <quads_kit quads_kit_type_>
+template <a_quads_kit quads_kit_type_>
 struct quads_scorer {
     using scalar_t = typename quads_kit_type_::scalar_t;
     using norms_t = vector_norms<typename scalar_t::dot_result_t>;
@@ -295,7 +295,7 @@ struct quads_scorer {
 /** The scorer of an exact scan's blocks where a matrix engine multiplies the scalar: a block of
  *  queries is packed once, stored rows stream against the pack a task at a time, and every quad
  *  of a row's dots finalizes through @p quads_kit_type_, so the distances match a walk's. */
-template <typename tiles_kit_type_, quads_kit quads_kit_type_>
+template <typename tiles_kit_type_, a_quads_kit quads_kit_type_>
 struct tiles_scorer {
     using scalar_t = typename quads_kit_type_::scalar_t;
     using dot_result_t = typename scalar_t::dot_result_t;
@@ -377,12 +377,12 @@ struct tiles_scorer {
 
 /** The scorer of an exact scan's blocks: the matrix engine's where the class has one for the
  *  scalar, the walk's quads kit otherwise. */
-template <typename tiles_kit_type_, quads_kit quads_kit_type_>
+template <typename tiles_kit_type_, a_quads_kit quads_kit_type_>
 struct scan_scorer {
     using scorer_t = tiles_scorer<tiles_kit_type_, quads_kit_type_>;
 };
 
-template <quads_kit quads_kit_type_>
+template <a_quads_kit quads_kit_type_>
 struct scan_scorer<no_tiles_kit_t, quads_kit_type_> {
     using scorer_t = quads_scorer<quads_kit_type_>;
 };
@@ -713,7 +713,7 @@ inline std::size_t staged_rows_bytes(nk_dtype_t dtype, std::size_t rows, std::si
 
 /** Rows @b [first,first+count) of @p source as @p scalar_type_, through @ref import_rows into
  *  @p staged laid out as @ref staged_rows_bytes counts it. */
-template <typename elementwise_kit_type_, typename rmscast_kit_type_, nk::numeric_dtype scalar_type_>
+template <typename elementwise_kit_type_, typename rmscast_kit_type_, nk::a_numeric_dtype scalar_type_>
 nk::matrix_view<scalar_type_> import_staged_rows(rows_view_t source, std::size_t first, std::size_t count,
                                                  nk_kernel_kind_t kernel, byte_t* staged) noexcept {
     std::size_t const columns = source.columns;
@@ -4112,7 +4112,7 @@ struct ram_index {
      */
     expected<search_result_t> search(vector_view_t query_vector, indexer_heads<scalar_t> const& heads,
                                      search_config_t config, traversal_context_t& context) noexcept
-        requires floating_scalar<scalar_t>
+        requires a_floating_scalar<scalar_t>
     {
         if (kernel_ != nk_kernel_dot_k) return {{}, status_code_t::config_mismatch_k};
         return walk_(query_vector, dummy_fold_t {}, indexer_rescoring<quads_kit_t> {heads}, context, config,
@@ -4135,7 +4135,7 @@ struct ram_index {
      *  - @c overflow_k A queue capacity of @p context wraps when rounded.
      */
     template <typename fold_type_>
-        requires fold<std::remove_cvref_t<fold_type_>, dot_result_t>
+        requires a_fold<std::remove_cvref_t<fold_type_>, dot_result_t>
     expected<search_result_t> search(vector_view_t query_vector, fold_type_&& fold, search_config_t config,
                                      traversal_context_t& context) noexcept {
         return walk_(query_vector, fold, dummy_rescoring_t {}, context, config, static_cast<node_id_t>(size()));
@@ -4280,7 +4280,7 @@ struct ram_index {
      *  - @c overflow_k A queue capacity of @p context wraps when rounded.
      */
     template <synchronization_t synchronization_, typename fold_type_, typename rescoring_type_>
-        requires fold<std::remove_cvref_t<fold_type_>, dot_result_t>
+        requires a_fold<std::remove_cvref_t<fold_type_>, dot_result_t>
     expected<search_result_t> search_typed(vector_view_t query_vector, traversal_context_t& context,
                                            search_config_t config, fold_type_&& fold, results_array_t const& bound,
                                            rescoring_type_ const& rescoring) noexcept {

@@ -168,7 +168,7 @@ struct ram_indexes {
     /* Predicate payloads */
     using walk_payload_t = typename index_t::walk_payload_t;
     using scan_payload_t = dense::scan_payload_t;
-    static_assert(index_family<index_t> && index_claim<shard_capacity_claim_t>);
+    static_assert(an_index_family<index_t> && an_index_claim<shard_capacity_claim_t>);
 
     /** The stored scalar vocabulary, re-exported for dispatchers gating crossing rows. */
     inline static constexpr nk_dtype_t vector_dtype_k = index_t::vector_dtype_k;
@@ -1082,7 +1082,7 @@ struct ram_indexes {
     expected<search_result_t> search(rows_view_t queries, indexer_heads<scalar_t> const& heads,
                                      ranked_matches_span<key_t, distance_t> matches, search_config_t config,
                                      executor_t& executor, std::span<traversal_context_t> traversals) noexcept
-        requires floating_scalar<scalar_t>
+        requires a_floating_scalar<scalar_t>
     {
         if (kernel() != nk_kernel_dot_k) return {{}, status_code_t::config_mismatch_k};
         if (!config.cache_bytes) config.cache_bytes = executor.cache_bytes_per_core();
@@ -1121,9 +1121,9 @@ struct ram_indexes {
                                         search_config_t config, predicate_type_&& predicate, executor_t& executor,
                                         std::span<traversal_context_t> traversals,
                                         ranked_hints_view<key_t> hints = {}) noexcept {
-        static_assert((!aggregating_predicate<std::remove_cvref_t<predicate_type_>, key_t, walk_payload_t> &&
-                       !aggregating_predicate<std::remove_cvref_t<predicate_type_>, key_t, scan_payload_t>) ||
-                          per_thread_predicates<std::remove_cvref_t<predicate_type_>>,
+        static_assert((!an_aggregating_predicate<std::remove_cvref_t<predicate_type_>, key_t, walk_payload_t> &&
+                       !an_aggregating_predicate<std::remove_cvref_t<predicate_type_>, key_t, scan_payload_t>) ||
+                          a_per_thread_predicate_family<std::remove_cvref_t<predicate_type_>>,
                       "An engine driving its own threads takes an aggregating predicate per thread");
         if (!config.cache_bytes) config.cache_bytes = executor.cache_bytes_per_core();
         if (config.traversal == traversal_t::scan_k)
@@ -1150,8 +1150,8 @@ struct ram_indexes {
      *  - @c overflow_k A queue capacity wraps when rounded.
      */
     template <typename score_type_, typename predicate_type_>
-        requires aggregating_predicate<typename std::remove_cvref_t<predicate_type_>::thread_predicate_t, key_t,
-                                       walk_payload_t>
+        requires an_aggregating_predicate<typename std::remove_cvref_t<predicate_type_>::thread_predicate_t, key_t,
+                                          walk_payload_t>
     expected<search_result_t> search_if(rows_view_t queries, ranked_matches_span<key_t, score_type_> matches,
                                         search_config_t config, predicate_type_&& predicate, executor_t& executor,
                                         std::span<traversal_context_t> traversals,
@@ -1176,8 +1176,8 @@ struct ram_indexes {
      *    destructive windows overlapped a block.
      */
     template <typename score_type_, typename predicate_type_>
-        requires aggregating_predicate<typename std::remove_cvref_t<predicate_type_>::thread_predicate_t, key_t,
-                                       scan_payload_t>
+        requires an_aggregating_predicate<typename std::remove_cvref_t<predicate_type_>::thread_predicate_t, key_t,
+                                          scan_payload_t>
     expected<search_result_t> search_if(rows_view_t queries, ranked_matches_span<key_t, score_type_> matches,
                                         search_config_t config, predicate_type_&& predicate, executor_t& executor,
                                         std::span<traversal_context_t> traversals,
@@ -1379,9 +1379,9 @@ struct ram_indexes {
                                         maxsim_config_t maxsim_config, predicate_type_&& predicate,
                                         executor_t& executor, std::span<traversal_context_t> traversals,
                                         ranked_hints_view<key_t> hints = {}) noexcept {
-        static_assert((!aggregating_predicate<std::remove_cvref_t<predicate_type_>, key_t, walk_payload_t> &&
-                       !aggregating_predicate<std::remove_cvref_t<predicate_type_>, key_t, scan_payload_t>) ||
-                          per_thread_predicates<std::remove_cvref_t<predicate_type_>>,
+        static_assert((!an_aggregating_predicate<std::remove_cvref_t<predicate_type_>, key_t, walk_payload_t> &&
+                       !an_aggregating_predicate<std::remove_cvref_t<predicate_type_>, key_t, scan_payload_t>) ||
+                          a_per_thread_predicate_family<std::remove_cvref_t<predicate_type_>>,
                       "An engine driving its own threads takes an aggregating predicate per thread");
         if (shards_.empty()) return {{}, status_code_t::uninitialized_k};
         if (kernel() != nk_kernel_dot_k || query_offsets.empty()) return {{}, status_code_t::config_mismatch_k};
@@ -2054,7 +2054,7 @@ struct ram_indexes {
   private:
 
     /** Every shard as SAMPLE reads it, below the watermarks of @c watermarks_snapshot; see
-     *  @c sample_source. */
+     *  @c a_sample_source. */
     struct dense_sample_source_t {
         using key_t = key_type_;
         using node_id_t = dense::node_id_t;

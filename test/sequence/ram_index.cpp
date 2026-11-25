@@ -334,14 +334,14 @@ struct needleman_wunsch_fixture_t {
     }
 };
 
-static_assert(value<sequence_value_t>);
-static_assert(metric<levenshtein_bytes_fixture_t::metric_t, sequence_value_t, sz_size_t>);
-static_assert(metric<levenshtein_runes_fixture_t::metric_t, sequence_value_t, sz_size_t>);
-static_assert(metric<overlap_fixture_t::metric_t, sequence_value_t, sz_size_t>);
-static_assert(metric<needleman_wunsch_fixture_t::metric_t, sequence_value_t, sz_size_t>);
-static_assert(query<std::string_view, levenshtein_runes_fixture_t::metric_t, sequence_value_t>);
-static_assert(query<std::string_view, overlap_fixture_t::metric_t, sequence_value_t>);
-static_assert(value_codec<codec_t, sequence_value_t>);
+static_assert(a_value<sequence_value_t>);
+static_assert(a_metric<levenshtein_bytes_fixture_t::metric_t, sequence_value_t, sz_size_t>);
+static_assert(a_metric<levenshtein_runes_fixture_t::metric_t, sequence_value_t, sz_size_t>);
+static_assert(a_metric<overlap_fixture_t::metric_t, sequence_value_t, sz_size_t>);
+static_assert(a_metric<needleman_wunsch_fixture_t::metric_t, sequence_value_t, sz_size_t>);
+static_assert(a_query<std::string_view, levenshtein_runes_fixture_t::metric_t, sequence_value_t>);
+static_assert(a_query<std::string_view, overlap_fixture_t::metric_t, sequence_value_t>);
+static_assert(a_value_codec<codec_t, sequence_value_t>);
 
 /** One Levenshtein kit against the Wagner-Fischer oracle: exact within the radius and above it
  *  otherwise, at an unbounded radius and at a tight one that cuts by length and freezes flights.

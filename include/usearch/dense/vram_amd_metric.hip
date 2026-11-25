@@ -1493,7 +1493,7 @@ struct rocm_registers_schedule_t {
     __device__ __forceinline__ rocm_registers_schedule_t(shared_t&, u32_t) noexcept {}
 
     /** Scores a walk's batch through the kit's scalar dots, one fragment a load. */
-    template <vram_quads_kit kit_, u32_t resident_blocks_>
+    template <a_vram_quads_kit kit_, u32_t resident_blocks_>
     static __device__ __forceinline__ vram_scored_node<node_id_t> score_batch( //
         vram_flat_view<kit_> const& storage, typename kit_::fragment_t const* query_span,
         typename kit_::norms_t query_state, vram_gathered<kit_, warp_t>& gathered, u32_t gathered_count,
@@ -1503,7 +1503,7 @@ struct rocm_registers_schedule_t {
     }
 
     /** The greedy diversity prefix as @ref vram_keep_diverse runs it, on this schedule. */
-    template <vram_quads_kit kit_, typename storage_>
+    template <a_vram_quads_kit kit_, typename storage_>
     __device__ __forceinline__ u32_t keep_diverse( //
         storage_ const& storage, vram_vector_cache<typename kit_::fragment_t> cache,
         vram_sorted_buffer<warp_t, node_id_t> const& sorted, u32_t position_mask, u32_t candidates_count,
@@ -1538,7 +1538,7 @@ struct cdna5_registers_schedule_t {
     __device__ __forceinline__ cdna5_registers_schedule_t(shared_t&, u32_t) noexcept {}
 
     /** Scores a walk's batch through the kit's scalar dots, one fragment a load. */
-    template <vram_quads_kit kit_, u32_t resident_blocks_>
+    template <a_vram_quads_kit kit_, u32_t resident_blocks_>
     static __device__ __forceinline__ vram_scored_node<node_id_t> score_batch( //
         vram_flat_view<kit_> const& storage, typename kit_::fragment_t const* query_span,
         typename kit_::norms_t query_state, vram_gathered<kit_, warp_t>& gathered, u32_t gathered_count,
@@ -1548,7 +1548,7 @@ struct cdna5_registers_schedule_t {
     }
 
     /** The greedy diversity prefix as @ref vram_keep_diverse runs it, on this schedule. */
-    template <vram_quads_kit kit_, typename storage_>
+    template <a_vram_quads_kit kit_, typename storage_>
     __device__ __forceinline__ u32_t keep_diverse( //
         storage_ const& storage, vram_vector_cache<typename kit_::fragment_t> cache,
         vram_sorted_buffer<warp_t, node_id_t> const& sorted, u32_t position_mask, u32_t candidates_count,
@@ -1599,7 +1599,7 @@ struct cdna3_lds_schedule_t {
     __device__ __forceinline__ cdna3_lds_schedule_t(shared_t&, u32_t) noexcept {}
 
     /** Scores a walk's batch as @ref rocm_registers_schedule_t does. */
-    template <vram_quads_kit kit_, u32_t resident_blocks_>
+    template <a_vram_quads_kit kit_, u32_t resident_blocks_>
     static __device__ __forceinline__ vram_scored_node<node_id_t> score_batch( //
         vram_flat_view<kit_> const& storage, typename kit_::fragment_t const* query_span,
         typename kit_::norms_t query_state, vram_gathered<kit_, warp_t>& gathered, u32_t gathered_count,
@@ -1609,7 +1609,7 @@ struct cdna3_lds_schedule_t {
     }
 
     /** The greedy diversity prefix as @ref vram_keep_diverse runs it, on this schedule. */
-    template <vram_quads_kit kit_, typename storage_>
+    template <a_vram_quads_kit kit_, typename storage_>
     __device__ __forceinline__ u32_t keep_diverse( //
         storage_ const& storage, vram_vector_cache<typename kit_::fragment_t> cache,
         vram_sorted_buffer<warp_t, node_id_t> const& sorted, u32_t position_mask, u32_t candidates_count,
@@ -1655,7 +1655,7 @@ struct cdna4_lds_schedule_t {
     __device__ __forceinline__ cdna4_lds_schedule_t(shared_t&, u32_t) noexcept {}
 
     /** Scores a walk's batch as @ref rocm_registers_schedule_t does. */
-    template <vram_quads_kit kit_, u32_t resident_blocks_>
+    template <a_vram_quads_kit kit_, u32_t resident_blocks_>
     static __device__ __forceinline__ vram_scored_node<node_id_t> score_batch( //
         vram_flat_view<kit_> const& storage, typename kit_::fragment_t const* query_span,
         typename kit_::norms_t query_state, vram_gathered<kit_, warp_t>& gathered, u32_t gathered_count,
@@ -1665,7 +1665,7 @@ struct cdna4_lds_schedule_t {
     }
 
     /** The greedy diversity prefix as @ref vram_keep_diverse runs it, on this schedule. */
-    template <vram_quads_kit kit_, typename storage_>
+    template <a_vram_quads_kit kit_, typename storage_>
     __device__ __forceinline__ u32_t keep_diverse( //
         storage_ const& storage, vram_vector_cache<typename kit_::fragment_t> cache,
         vram_sorted_buffer<warp_t, node_id_t> const& sorted, u32_t position_mask, u32_t candidates_count,

@@ -79,7 +79,7 @@ __device__ __forceinline__ tangent_frame_t cuda_tangent_frame(earth_fixed_t base
  */
 struct vram_keep_octants_t {
 
-    template <basic::vram_basic_kit kit_, typename schedule_, typename node_id_type_>
+    template <basic::a_vram_basic_kit kit_, typename schedule_, typename node_id_type_>
     static __device__ __forceinline__ u32_t select( //
         basic::vram_ragged_view<node_id_type_> const& storage, schedule_&, typename kit_::query_t const& query, byte_t*,
         node_id_type_ const* candidate_ids, f32_t const*, u32_t candidates_count, u32_t* kept_positions,

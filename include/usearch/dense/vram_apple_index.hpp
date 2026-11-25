@@ -705,7 +705,7 @@ struct vram_apple_index {
                                      nk::matrix_span<node_id_t> result_ids,
                                      nk::matrix_span<distance_t> result_distances, search_config_t config,
                                      traversal_context_t& context, completion_t = completion_t::blocking_k) noexcept
-        requires floating_scalar<scalar_t>
+        requires a_floating_scalar<scalar_t>
     {
         if (kernel_ != nk_kernel_dot_k) return {{}, status_code_t::config_mismatch_k};
         return search_(queries, result_ids, result_distances, context, config, size(), heads);

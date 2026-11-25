@@ -586,7 +586,7 @@ template <                                        //
     nk_capability_t caps_ = nk_cap_serial_k,      //
     template <typename> class atomic_ref_ = fu::standard_atomic_ref>
 static case_result_t test_ram_index_configuration(u64_t) {
-    if constexpr (!quads_supported<kernel_, typename nk::type_for<dtype_>::type, nk_cap_serial_k>)
+    if constexpr (!a_quads_supported_kernel<kernel_, typename nk::type_for<dtype_>::type, nk_cap_serial_k>)
         return case_result_t::skipped(needs_serial_kernels_k);
     else return case_result_t::skipped(needs_kit_target_k);
 }
@@ -596,7 +596,7 @@ template <                                        //
     typename waiter_type_ = fu::standard_yield_t, //
     nk_capability_t caps_ = nk_cap_serial_k,      //
     template <typename> class atomic_ref_ = fu::standard_atomic_ref>
-    requires dense_cell_testable<dtype_, kernel_, caps_>
+    requires a_testable_dense_cell<dtype_, kernel_, caps_>
 static case_result_t test_ram_index_configuration(u64_t seed) {
 
     using index_t = ram_index<typename quads_ladder<typename nk::type_for<dtype_>::type, caps_>::kit_t,
@@ -654,7 +654,7 @@ static case_result_t test_ram_index_configuration(u64_t seed) {
 /** The starved cell: the same index over ledgered traversal scratch, so a refused re-table
  *  has somewhere to come from, walked by the saturation scenario alone. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
-    requires quads_supported<kernel_, typename nk::type_for<dtype_>::type, nk_cap_serial_k>
+    requires a_quads_supported_kernel<kernel_, typename nk::type_for<dtype_>::type, nk_cap_serial_k>
 static void test_starved_configuration(u64_t seed) {
     using index_t = ram_index<typename quads_ladder<typename nk::type_for<dtype_>::type, nk_cap_serial_k>::kit_t,
                               typename tiles_ladder<typename nk::type_for<dtype_>::type, nk_cap_serial_k>::kit_t,

@@ -62,7 +62,7 @@ inline constexpr std::size_t shapes_point_scalars = 3;
 
 /** The point tapes @c get wrote into its arena as @p element_type_, one entry per shape stored
  *  under the key, each in the pose it was inserted in. */
-template <element element_type_>
+template <an_element element_type_>
 using shapes_entries = tape_entries<element_type_, shapes_point_scalars>;
 
 /** The knobs of @c search. */
@@ -109,14 +109,14 @@ class shapes_index {
 
   public:
     shapes_index() noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     = default;
 
     usearch_shapes_index_t handle() const noexcept { return receiver_.handle(); }
 
     /** The output field a lifecycle verb writes the new handle into. */
     usearch_shapes_index_t* handle_field() noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     {
         return receiver_.handle_field();
     }
@@ -155,7 +155,7 @@ class shapes_index {
     }
 
     /** Adds @p shapes under @p keys, one key per entry, all or nothing per call. */
-    template <element element_type_>
+    template <an_element element_type_>
     deferrable<> insert(std::span<usearch_key_t const> keys, tape_view<element_type_> shapes,
                         insert_config_t const& config = {}) const noexcept {
         // The call has one count, so only this side sees the keys and the tape disagree.
@@ -291,7 +291,7 @@ class shapes_index {
     }
 
     /** Reads every shape stored under @p key into @p arena, one tape of @p element_type_ points. */
-    template <element element_type_>
+    template <an_element element_type_>
     deferrable<shapes_entries<element_type_>> get(usearch_key_t key, arena_t& arena) const noexcept {
         return answered_<deferrable<shapes_entries<element_type_>>>(
             [&](usearch_outcome_t* outcome, outputs<shapes_entries<element_type_>>* written) noexcept {
@@ -330,7 +330,7 @@ class shapes_index {
     }
 
     /** Finds the @p wanted nearest entries of every shape of @p queries, written into @p arena. */
-    template <element element_type_>
+    template <an_element element_type_>
     deferrable<usearch_matches_view_t> search(tape_view<element_type_> queries, std::size_t wanted, arena_t& arena,
                                               shapes_search_config_t const& config = {}) const noexcept {
         return answered_<deferrable<usearch_matches_view_t>>(
@@ -382,7 +382,7 @@ class shapes_index {
 
     /** Creates an empty RAM index of the metric and quantization @p arguments freezes. */
     static expected<shapes_index> init_ram(usearch_shapes_init_ram_t arguments) noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     {
         return opened_<shapes_index>(usearch_shapes_init_ram, arguments, &usearch_shapes_init_ram_t::index);
     }
@@ -390,7 +390,7 @@ class shapes_index {
     /** Creates an empty VRAM index of the metric and quantization @p arguments freezes, on the
      *  devices those arguments name. */
     static expected<shapes_index> init_vram(usearch_shapes_init_vram_t arguments) noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     {
         return opened_<shapes_index>(usearch_shapes_init_vram, arguments, &usearch_shapes_init_vram_t::index);
     }
@@ -398,7 +398,7 @@ class shapes_index {
     /** Copies a checkpoint into a new, mutable index in host memory. */
     static expected<shapes_index> load_ram(usearch_shapes_load_ram_t arguments, executor_t const& executor = {},
                                            progress_t progress = {}) noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     {
         return opened_<shapes_index>(usearch_shapes_load_ram, arguments, &usearch_shapes_load_ram_t::index, executor,
                                      progress);
@@ -407,7 +407,7 @@ class shapes_index {
     /** Copies a checkpoint into a new, mutable index in device memory. */
     static expected<shapes_index> load_vram(usearch_shapes_load_vram_t arguments, executor_t const& executor = {},
                                             progress_t progress = {}) noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     {
         return opened_<shapes_index>(usearch_shapes_load_vram, arguments, &usearch_shapes_load_vram_t::index, executor,
                                      progress);
@@ -416,7 +416,7 @@ class shapes_index {
     /** Copies a checkpoint from a memory buffer into a new, mutable index in host memory. */
     static expected<shapes_index> load_ram_buffer(usearch_shapes_load_ram_buffer_t arguments,
                                                   executor_t const& executor = {}, progress_t progress = {}) noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     {
         return opened_<shapes_index>(usearch_shapes_load_ram_buffer, arguments,
                                      &usearch_shapes_load_ram_buffer_t::index, executor, progress);
@@ -425,7 +425,7 @@ class shapes_index {
     /** Copies a checkpoint from a memory buffer into a new, mutable index in device memory. */
     static expected<shapes_index> load_vram_buffer(usearch_shapes_load_vram_buffer_t arguments,
                                                    executor_t const& executor = {}, progress_t progress = {}) noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     {
         return opened_<shapes_index>(usearch_shapes_load_vram_buffer, arguments,
                                      &usearch_shapes_load_vram_buffer_t::index, executor, progress);
@@ -433,7 +433,7 @@ class shapes_index {
 
     /** Serves a checkpoint in place through a memory mapping, as a read-only index. */
     static expected<shapes_index> view_ram(usearch_shapes_view_ram_t arguments) noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     {
         return opened_<shapes_index>(usearch_shapes_view_ram, arguments, &usearch_shapes_view_ram_t::index);
     }
@@ -442,7 +442,7 @@ class shapes_index {
      *  it through @p executor 's engines. */
     static expected<shapes_index> view_nvme(usearch_shapes_view_nvme_t arguments,
                                             executor_t const& executor = {}) noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     {
         return opened_<shapes_index>(usearch_shapes_view_nvme, arguments, &usearch_shapes_view_nvme_t::index, executor);
     }
@@ -450,7 +450,7 @@ class shapes_index {
     /** Reads a checkpoint's metric, quantization, points & connectivity without loading it. */
     static expected<usearch_shapes_metadata_t> metadata_read(usearch_shapes_metadata_read_t arguments,
                                                              executor_t const& executor = {}) noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     {
         return metadata_read_<usearch_shapes_metadata_t>(usearch_shapes_metadata_read, arguments, executor.handle());
     }
@@ -458,7 +458,7 @@ class shapes_index {
     /** Reads metric, quantization, points & connectivity from a serialized checkpoint buffer. */
     static expected<usearch_shapes_metadata_t> metadata_read_buffer(usearch_shapes_metadata_read_buffer_t arguments,
                                                                     executor_t const& executor = {}) noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     {
         return metadata_read_<usearch_shapes_metadata_t>(usearch_shapes_metadata_read_buffer, arguments,
                                                          executor.handle());
@@ -466,7 +466,7 @@ class shapes_index {
 
     /** Opens a cursor over every entry, or over the entries @p starts names first. */
     expected<shapes_cursor_t> cursor_init(std::span<usearch_key_t const> starts = {}) const noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     {
         usearch_shapes_cursor_init_t arguments {handle(), nullptr, nullptr, starts.size(), starts.data(), nullptr};
         return opened_<shapes_cursor_t>(usearch_shapes_cursor_init, arguments, &usearch_shapes_cursor_init_t::cursor);

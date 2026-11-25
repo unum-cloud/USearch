@@ -142,10 +142,10 @@ struct embeddings_fixture {
 
 using embeddings_fixture_t = embeddings_fixture<u64_t, u32_t>;
 
-static_assert(value<embedding_t>);
-static_assert(metric<angular_metric_t, embedding_t, f32_t>);
-static_assert(value_codec<embedding_codec_t, embedding_t>);
-static_assert(interchange_value_codec<embedding_codec_t>);
+static_assert(a_value<embedding_t>);
+static_assert(a_metric<angular_metric_t, embedding_t, f32_t>);
+static_assert(a_value_codec<embedding_codec_t, embedding_t>);
+static_assert(an_interchange_value_codec<embedding_codec_t>);
 
 /** A UUID-keyed RAM index over the embeddings, the target every narrower key column widens into. */
 using widened_index_t = ram_index<embedding_t, util::uuid128_t, u32_t, f32_t, dummy_waiter_t, fu::standard_atomic_ref,

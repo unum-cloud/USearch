@@ -124,7 +124,7 @@ struct ram_indexes {
     };
 
     /** Every shard as SAMPLE reads it below the watermarks of @c watermarks_snapshot, scored by the
-     *  caller's metric; see @c sample_source. */
+     *  caller's metric; see @c a_sample_source. */
     template <typename metric_type_, typename context_type_, typename coordinates_type_>
     struct basic_sample_source {
         using key_t = typename index_t::key_t;
@@ -202,7 +202,7 @@ struct ram_indexes {
         }
 
         void coordinates_of(shard_node_t node, std::span<f32_t, 3> xyz) const noexcept
-            requires fixed_coordinates<coordinates_type_>
+            requires a_coordinates_provider<coordinates_type_>
         {
             fixed_coordinates_of(value_(node), xyz);
         }

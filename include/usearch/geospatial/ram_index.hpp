@@ -652,7 +652,7 @@ struct earth_observation_codec_t {
     }
 };
 
-static_assert(basic::value_codec<earth_observation_codec_t, earth_observation_t>);
+static_assert(basic::a_value_codec<earth_observation_codec_t, earth_observation_t>);
 
 /** Similarity Search over observations: 32-byte values, squared chords in square centimetres as
  *  distances, and 32-bit node IDs. */

@@ -101,14 +101,14 @@ class sequence_index {
 
   public:
     sequence_index() noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     = default;
 
     usearch_sequence_index_t handle() const noexcept { return receiver_.handle(); }
 
     /** The output field a lifecycle verb writes the new handle into. */
     usearch_sequence_index_t* handle_field() noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     {
         return receiver_.handle_field();
     }
@@ -364,14 +364,14 @@ class sequence_index {
 
     /** Creates an empty RAM index scoring with the metric @p arguments freezes. */
     static expected<sequence_index> init_ram(usearch_sequence_init_ram_t arguments) noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     {
         return opened_<sequence_index>(usearch_sequence_init_ram, arguments, &usearch_sequence_init_ram_t::index);
     }
 
     /** Creates an empty VRAM index of the metric @p arguments freezes, on the device it names. */
     static expected<sequence_index> init_vram(usearch_sequence_init_vram_t arguments) noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     {
         return opened_<sequence_index>(usearch_sequence_init_vram, arguments, &usearch_sequence_init_vram_t::index);
     }
@@ -379,7 +379,7 @@ class sequence_index {
     /** Copies a checkpoint into a new, mutable index in host memory. */
     static expected<sequence_index> load_ram(usearch_sequence_load_ram_t arguments, executor_t const& executor = {},
                                              progress_t progress = {}) noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     {
         return opened_<sequence_index>(usearch_sequence_load_ram, arguments, &usearch_sequence_load_ram_t::index,
                                        executor, progress);
@@ -388,7 +388,7 @@ class sequence_index {
     /** Copies a checkpoint into a new, mutable index in device memory. */
     static expected<sequence_index> load_vram(usearch_sequence_load_vram_t arguments, executor_t const& executor = {},
                                               progress_t progress = {}) noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     {
         return opened_<sequence_index>(usearch_sequence_load_vram, arguments, &usearch_sequence_load_vram_t::index,
                                        executor, progress);
@@ -397,7 +397,7 @@ class sequence_index {
     /** Copies a checkpoint from a memory buffer into a new, mutable index in host memory. */
     static expected<sequence_index> load_ram_buffer(usearch_sequence_load_ram_buffer_t arguments,
                                                     executor_t const& executor = {}, progress_t progress = {}) noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     {
         return opened_<sequence_index>(usearch_sequence_load_ram_buffer, arguments,
                                        &usearch_sequence_load_ram_buffer_t::index, executor, progress);
@@ -406,7 +406,7 @@ class sequence_index {
     /** Copies a checkpoint from a memory buffer into a new, mutable index in device memory. */
     static expected<sequence_index> load_vram_buffer(usearch_sequence_load_vram_buffer_t arguments,
                                                      executor_t const& executor = {}, progress_t progress = {}) noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     {
         return opened_<sequence_index>(usearch_sequence_load_vram_buffer, arguments,
                                        &usearch_sequence_load_vram_buffer_t::index, executor, progress);
@@ -414,7 +414,7 @@ class sequence_index {
 
     /** Serves a checkpoint in place through a memory mapping, as a read-only index. */
     static expected<sequence_index> view_ram(usearch_sequence_view_ram_t arguments) noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     {
         return opened_<sequence_index>(usearch_sequence_view_ram, arguments, &usearch_sequence_view_ram_t::index);
     }
@@ -423,7 +423,7 @@ class sequence_index {
      *  it through @p executor 's engines. */
     static expected<sequence_index> view_nvme(usearch_sequence_view_nvme_t arguments,
                                               executor_t const& executor = {}) noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     {
         return opened_<sequence_index>(usearch_sequence_view_nvme, arguments, &usearch_sequence_view_nvme_t::index,
                                        executor);
@@ -432,7 +432,7 @@ class sequence_index {
     /** Reads a checkpoint's metric & connectivity without loading it. */
     static expected<usearch_sequence_metadata_t> metadata_read(usearch_sequence_metadata_read_t arguments,
                                                                executor_t const& executor = {}) noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     {
         return metadata_read_<usearch_sequence_metadata_t>(usearch_sequence_metadata_read, arguments,
                                                            executor.handle());
@@ -441,7 +441,7 @@ class sequence_index {
     /** Reads metric & connectivity from a serialized checkpoint buffer. */
     static expected<usearch_sequence_metadata_t> metadata_read_buffer(usearch_sequence_metadata_read_buffer_t arguments,
                                                                       executor_t const& executor = {}) noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     {
         return metadata_read_<usearch_sequence_metadata_t>(usearch_sequence_metadata_read_buffer, arguments,
                                                            executor.handle());
@@ -449,7 +449,7 @@ class sequence_index {
 
     /** Opens a cursor over every entry, or over the entries @p starts names first. */
     expected<sequence_cursor_t> cursor_init(std::span<usearch_key_t const> starts = {}) const noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     {
         usearch_sequence_cursor_init_t arguments {handle(), nullptr, nullptr, starts.size(), starts.data(), nullptr};
         return opened_<sequence_cursor_t>(usearch_sequence_cursor_init, arguments,

@@ -50,7 +50,7 @@ inline expected<usearch_dense_metric_t> dense_metric_from_name(usearch_bytes_vie
 
 /** Rows a call wrote packed into its arena as @p element_type_, readable until the arena's next
  *  call: the entries @c get found under a key, or the outputs of @c attend. */
-template <element element_type_>
+template <an_element element_type_>
 struct dense_vectors {
 
     /** The rows as the call wrote them. */
@@ -85,8 +85,8 @@ struct dense_products_t {
 
 /** A value lookup handler: points each key at one row of the columns and scalar asked for. */
 template <typename handler_type_>
-concept value_lookup_handler = std::is_nothrow_invocable_r_v<void, handler_type_&, usearch_key_t const*, std::size_t,
-                                                             usearch_scalar_t, std::size_t, void const**>;
+concept a_value_lookup_handler = std::is_nothrow_invocable_r_v<void, handler_type_&, usearch_key_t const*, std::size_t,
+                                                               usearch_scalar_t, std::size_t, void const**>;
 
 /** The value rows @c attend gathers: a host handler read only during the call, or a device
  *  function. */
@@ -95,7 +95,7 @@ class value_lookup_t {
     value_lookup_t() noexcept = default;
 
     /** Resolves keys on the host through @p handler, for a RAM handle. */
-    template <value_lookup_handler handler_type_>
+    template <a_value_lookup_handler handler_type_>
     value_lookup_t(handler_type_& handler) noexcept
         : function_(&trampoline_<handler_type_>), handler_state_(&handler) {}
 
@@ -286,14 +286,14 @@ class dense_index {
 
   public:
     dense_index() noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     = default;
 
     usearch_dense_index_t handle() const noexcept { return receiver_.handle(); }
 
     /** The output field a lifecycle verb writes the new handle into. */
     usearch_dense_index_t* handle_field() noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     {
         return receiver_.handle_field();
     }
@@ -332,7 +332,7 @@ class dense_index {
     }
 
     /** Adds @p vectors under @p keys, one key per row, all or nothing per call. */
-    template <element element_type_>
+    template <an_element element_type_>
     deferrable<> insert(std::span<usearch_key_t const> keys, rows_view<element_type_> vectors,
                         insert_config_t const& config = {}) const noexcept {
         // The call has one count, so only this side sees the keys and the rows disagree.
@@ -473,7 +473,7 @@ class dense_index {
     }
 
     /** Reads every vector stored under @p key into @p arena as @p element_type_ rows. */
-    template <element element_type_>
+    template <an_element element_type_>
     deferrable<dense_vectors<element_type_>> get(usearch_key_t key, arena_t& arena) const noexcept {
         return answered_<deferrable<dense_vectors<element_type_>>>(
             [&](usearch_outcome_t* outcome, outputs<dense_vectors<element_type_>>* written) noexcept {
@@ -512,7 +512,7 @@ class dense_index {
     }
 
     /** Finds the @p wanted nearest entries of every row of @p queries, written into @p arena. */
-    template <element element_type_>
+    template <an_element element_type_>
     deferrable<usearch_matches_view_t> search(rows_view<element_type_> queries, std::size_t wanted, arena_t& arena,
                                               dense_search_config_t const& config = {}) const noexcept {
         return answered_<deferrable<usearch_matches_view_t>>(
@@ -539,7 +539,7 @@ class dense_index {
     }
 
     /** Scores every row of @p left against the index, written into @p arena. */
-    template <element element_type_>
+    template <an_element element_type_>
     deferrable<dense_products_t> multiply(rows_view<element_type_> left, arena_t& arena,
                                           dense_multiply_config_t const& config = {}) const noexcept {
         return answered_<deferrable<dense_products_t>>(
@@ -568,7 +568,7 @@ class dense_index {
 
     /** Attends every row of @p queries over the values @p value_lookup resolves, writing one
      *  @p output_type_ row per query into @p arena. */
-    template <element output_type_, element element_type_>
+    template <an_element output_type_, an_element element_type_>
     deferrable<dense_vectors<output_type_>> attend(rows_view<element_type_> queries, value_lookup_t value_lookup,
                                                    arena_t& arena,
                                                    dense_attend_config_t const& config = {}) const noexcept {
@@ -602,7 +602,7 @@ class dense_index {
 
     /** Scores groups of @p rows_per_query rows of @p queries by late interaction, keeping the
      *  @p wanted best keys per query in @p arena. */
-    template <element element_type_>
+    template <an_element element_type_>
     deferrable<dense_products_t> maxsim(rows_view<element_type_> queries, std::size_t rows_per_query,
                                         std::size_t wanted, arena_t& arena,
                                         dense_maxsim_config_t const& config = {}) const noexcept {
@@ -674,14 +674,14 @@ class dense_index {
 
     /** Creates an empty RAM index of the geometry @p arguments freezes. */
     static expected<dense_index> init_ram(usearch_dense_init_ram_t arguments) noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     {
         return opened_<dense_index>(usearch_dense_init_ram, arguments, &usearch_dense_init_ram_t::index);
     }
 
     /** Creates an empty VRAM index of the geometry @p arguments freezes, on the devices named. */
     static expected<dense_index> init_vram(usearch_dense_init_vram_t arguments) noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     {
         return opened_<dense_index>(usearch_dense_init_vram, arguments, &usearch_dense_init_vram_t::index);
     }
@@ -689,7 +689,7 @@ class dense_index {
     /** Copies a checkpoint into a new, mutable index in host memory. */
     static expected<dense_index> load_ram(usearch_dense_load_ram_t arguments, executor_t const& executor = {},
                                           progress_t progress = {}) noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     {
         return opened_<dense_index>(usearch_dense_load_ram, arguments, &usearch_dense_load_ram_t::index, executor,
                                     progress);
@@ -698,7 +698,7 @@ class dense_index {
     /** Copies a checkpoint into a new, mutable index in device memory. */
     static expected<dense_index> load_vram(usearch_dense_load_vram_t arguments, executor_t const& executor = {},
                                            progress_t progress = {}) noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     {
         return opened_<dense_index>(usearch_dense_load_vram, arguments, &usearch_dense_load_vram_t::index, executor,
                                     progress);
@@ -707,7 +707,7 @@ class dense_index {
     /** Copies a checkpoint from a memory buffer into a new, mutable index in host memory. */
     static expected<dense_index> load_ram_buffer(usearch_dense_load_ram_buffer_t arguments,
                                                  executor_t const& executor = {}, progress_t progress = {}) noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     {
         return opened_<dense_index>(usearch_dense_load_ram_buffer, arguments, &usearch_dense_load_ram_buffer_t::index,
                                     executor, progress);
@@ -716,7 +716,7 @@ class dense_index {
     /** Copies a checkpoint from a memory buffer into a new, mutable index in device memory. */
     static expected<dense_index> load_vram_buffer(usearch_dense_load_vram_buffer_t arguments,
                                                   executor_t const& executor = {}, progress_t progress = {}) noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     {
         return opened_<dense_index>(usearch_dense_load_vram_buffer, arguments, &usearch_dense_load_vram_buffer_t::index,
                                     executor, progress);
@@ -724,7 +724,7 @@ class dense_index {
 
     /** Serves a checkpoint in place through a memory mapping, as a read-only index. */
     static expected<dense_index> view_ram(usearch_dense_view_ram_t arguments) noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     {
         return opened_<dense_index>(usearch_dense_view_ram, arguments, &usearch_dense_view_ram_t::index);
     }
@@ -733,7 +733,7 @@ class dense_index {
      *  it through @p executor 's engines. */
     static expected<dense_index> view_nvme(usearch_dense_view_nvme_t arguments,
                                            executor_t const& executor = {}) noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     {
         return opened_<dense_index>(usearch_dense_view_nvme, arguments, &usearch_dense_view_nvme_t::index, executor);
     }
@@ -742,7 +742,7 @@ class dense_index {
      *  parts, reading it through @p executor 's engines. */
     static expected<dense_index> load_nvme(usearch_dense_load_nvme_t arguments,
                                            executor_t const& executor = {}) noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     {
         return opened_<dense_index>(usearch_dense_load_nvme, arguments, &usearch_dense_load_nvme_t::index, executor);
     }
@@ -750,7 +750,7 @@ class dense_index {
     /** Reads a checkpoint's geometry & metric without loading it. */
     static expected<usearch_dense_metadata_t> metadata_read(usearch_dense_metadata_read_t arguments,
                                                             executor_t const& executor = {}) noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     {
         return metadata_read_<usearch_dense_metadata_t>(usearch_dense_metadata_read, arguments, executor.handle());
     }
@@ -758,7 +758,7 @@ class dense_index {
     /** Reads geometry & metric from a serialized checkpoint buffer. */
     static expected<usearch_dense_metadata_t> metadata_read_buffer(usearch_dense_metadata_read_buffer_t arguments,
                                                                    executor_t const& executor = {}) noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     {
         return metadata_read_<usearch_dense_metadata_t>(usearch_dense_metadata_read_buffer, arguments,
                                                         executor.handle());
@@ -766,17 +766,17 @@ class dense_index {
 
     /** Opens a cursor over every entry, or over the entries @p starts names first. */
     expected<dense_cursor_t> cursor_init(std::span<usearch_key_t const> starts = {}) const noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     {
         usearch_dense_cursor_init_t arguments {handle(), nullptr, nullptr, starts.size(), starts.data(), nullptr};
         return opened_<dense_cursor_t>(usearch_dense_cursor_init, arguments, &usearch_dense_cursor_init_t::cursor);
     }
 
     /** Opens a stream of matches around the one row of @p query that later calls extend. */
-    template <element element_type_>
+    template <an_element element_type_>
     expected<dense_search_stream_t> search_stream_init(rows_view<element_type_> query,
                                                        std::size_t expansion_factor = 0) const noexcept
-        requires owns_handle<receiver_type_>
+        requires a_handle_owner<receiver_type_>
     {
         usearch_dense_search_stream_init_t arguments {nullptr, handle(), nullptr, query.view(), expansion_factor};
         return opened_<dense_search_stream_t>(usearch_dense_search_stream_init, arguments,
