@@ -16,7 +16,7 @@ One header, `usearch/usearch.h`, pulls in every modality: `dense_index.h`, `sequ
 `ctest --test-dir build_release -R usearch_test_c` runs the smoke test in `c/test.c`.
 
 `-D USEARCH_INSTALL=1` adds the CMake package and a `.pc` file, and `cpack` then archives the preview SDK.
-It holds both stripped libraries, the C headers, the C++ wrappers in `cpp/usearch/`, the package, the `.pc` and the license, but not the header-only templates.
+It holds both stripped libraries, the C headers, the C++ wrappers in `cpp/usearch/`, the package, the `.pc` and the license, but not the header-only engine.
 
 ```sh
 cmake -B build_release -D CMAKE_BUILD_TYPE=Release -D USEARCH_BUILD_SHARED=1 -D USEARCH_INSTALL=1 -D USEARCH_DENSE_DTYPES=11
@@ -25,7 +25,7 @@ cpack --config build_release/CPackConfig.cmake # usearch-<version>-<platform>-sd
 ```
 
 Consumers link `usearch::shared` or `usearch::static` after `find_package(usearch)`, `usearch::abi` for the C headers alone, and `usearch::cpp` for the C++ wrappers, or go through `pkg-config --cflags --libs usearch`.
-`cmake --install build_release --component templates` adds the header-only templates as `usearch::templates`.
+`cmake --install build_release --component header` adds the header-only engine as `usearch::header`, over `usearch::abi`.
 
 `-D USEARCH_BUILD_STUB=1` adds a brute-force stand-in under the same library names in `build_release/stub/`.
 It answers every verb of every modality by exhaustive scan with the C++ standard library alone, so a binding links and runs its suite in seconds without building the engine.

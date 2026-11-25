@@ -82,14 +82,15 @@ class USearchConan(ConanFile):
     def package_info(self):
         self.cpp_info.set_property("cmake_file_name", "usearch")
 
-        # The targets the tree exports: the header-only templates, the C headers alone, a library,
+        # The targets the tree exports: the header-only engine, the C headers alone, a library,
         # and the C++ wrappers over that library.
-        self.cpp_info.components["templates"].set_property("cmake_target_name", "usearch::templates")
-        self.cpp_info.components["templates"].bindirs = []
-        self.cpp_info.components["templates"].libdirs = []
+        self.cpp_info.components["header"].set_property("cmake_target_name", "usearch::header")
+        self.cpp_info.components["header"].bindirs = []
+        self.cpp_info.components["header"].libdirs = []
+        self.cpp_info.components["header"].requires = ["abi"]
         # A media list draws its identity from `BCryptGenRandom` on Windows.
         if self.settings.os == "Windows":
-            self.cpp_info.components["templates"].system_libs = ["bcrypt"]
+            self.cpp_info.components["header"].system_libs = ["bcrypt"]
 
         self.cpp_info.components["abi"].set_property("cmake_target_name", "usearch::abi")
         self.cpp_info.components["abi"].bindirs = []

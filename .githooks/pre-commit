@@ -41,14 +41,22 @@ project_namespace="unum::usearch"
 project_include_prefix="usearch"
 sibling_projects='numkong|stringzilla|forkunion|smashtable|ucall|ustore|uform'
 abbreviations_refused="hi lo bot acc accum tmp temp res bcast ext idx cnt buf len str val obj elem iter"
+# Words a member access may repeat beyond the shared idioms, such as a symmetric link `rival->rival`.
+self_repeat_words_kept=''
+# Words no library C or C++ name carries as a whole snake_case word; the Vocabulary table in CONTRIBUTING.md
+# names the word that replaces each.
+identifier_words_refused="landing landed lander join seat deal pool home plane dirty met seen"
+# Hand-over words no name carries in any language, split at camelCase too: say who owns a thing and until when.
+ownership_words_refused="lent lend lends lending lender borrow borrowed borrows borrowing loan loans loaned lease leases leased"
+# Names no library record member carries, trailing underscore stripped: say what it holds and when.
+member_names_refused="bits current state data flags tmp scratch bitset buffer"
+# Names the word lists above let pass: spellings of the languages and libraries called, qualified as `fu::pool_t`
+# or ending in `*` for a prefix.
+identifier_words_exempt="fu_pool_* fu::pool_t dummy_pool_t seen_k borrow borrow_mut borrow_raw Borrow BorrowMut Borrowed BorrowedFd BorrowedHandle"
 # Name prefixes of third-party APIs the code calls, whose abbreviations are not this project's to spell out.
 third_party_identifier_prefixes='vec_'
-identifier_words_refused="landing landed lander join seat deal pool home plane dirty met seen"
 # The static objects that predate the hardening rules: the GPU driver tables each process loads once.
 static_objects_kept='gpu_runtime_t'
-# Hand-over words, refused in identifiers of every language, split at camelCase too, since a name says who owns a buffer.
-ownership_words_refused="lent lend lends lending lender borrow borrowed borrows borrowing loan loans loaned lease leases leased"
-member_names_refused="bits current state data flags tmp scratch bitset buffer"
 width_free_directories="include/usearch/utilities include/usearch/basic"
 rustfmt_command="cargo +stable fmt"
 std_collections_baseline_paths=''
@@ -1229,7 +1237,12 @@ check_include_groups() {
                     while (sub(/[^\/.][^\/]*\/\.\.\//, "", beside)) {}
                     search = "git ls-files \":(glob)**/" header "\""
                     if (touched && !system("git cat-file -e \":" beside "\" 2>/dev/null")) found = beside
-                    else if (touched) { search | getline found; close(search) }
+                    # A name both public and private, like `cpp/<project>/x.hpp` beside `src/x.hpp`, is the private one.
+                    else if (touched) {
+                        while ((search | getline candidate) > 0)
+                            if (found == "" || found ~ "^(c|cpp|include)/" project "/") found = candidate
+                        close(search)
+                    }
                     if (touched && found == "")
                         printf "line %d: \"%s\" is not in this repository - write <%s>\n", FNR, header, header
                     if (match(found, "^(c|cpp|include)/" project "/"))
@@ -2735,6 +2748,247 @@ check_vendor_switches_independent() {
         "            unit assumes a single vendor:"
 }
 
+# Prints the staged file's added lines, each behind a `+`, with comments, docstrings and string literals blanked,
+# in every language the engines and bindings are written in. The sources `speaks_c_comments` names start from the
+# blanked comments and drop quotes; Python and Mojo blank `#` comments and triple-quoted docstrings; the rest blank
+# C comments and drop quotes and backtick spans.
+added_code_without_literals() {
+    if speaks_c_comments "$staged_path"; then
+        sed -E 's/"([^"\\]|\\.)*"//g' "$staged_added_code_path"
+        return
+    fi
+    case "$staged_path" in
+    *.py | *.pyi | *.mojo)
+        "$fastest_awk" '
+            function blank(span) { gsub(/./, " ", span); return span }
+            {
+                line = $0; output = ""
+                while (line != "") {
+                    if (quotes != "") {
+                        if (!(closing = index(line, quotes))) { output = output blank(line); line = ""; break }
+                        output = output blank(substr(line, 1, closing + 2)); line = substr(line, closing + 3); quotes = ""
+                        continue
+                    }
+                    if (!match(line, /"""|\047\047\047|"([^"\\]|\\.)*"|\047([^\047\\]|\\.)*\047|#/)) break
+                    token = substr(line, RSTART, RLENGTH); output = output substr(line, 1, RSTART - 1)
+                    line = substr(line, RSTART + RLENGTH)
+                    if (token == "#") { output = output blank(token line); line = ""; break }
+                    if (token == "\"\"\"" || token == "\047\047\047") quotes = token
+                    output = output blank(token)
+                }
+                print output line
+            }' "$staged_text_path" | scan_staged_file_marking_added_lines 'FNR in added { print "+" $0 }' -
+        ;;
+    *)
+        blank_c_comments_preserving_columns < "$staged_text_path" |
+            scan_staged_file_marking_added_lines 'FNR in added { print "+" $0 }' - | sed -E 's/"([^"\\]|\\.)*"//g; s/`[^`]*`//g'
+        ;;
+    esac
+}
+
+# Rejects one word on both sides of a member access, as `call.call`, `executor->executor` or `cursor->cursor`,
+# because a wrapper then shares its word with the thing it wraps and every reader has to count the hops. Name the
+# outer variable after the wrapper, as `request->call` does, or the member after what it holds, as `call->kept`
+# does; in Go, make the helper a method on the embedded type, so `call.pin(handles)` reads through the embedding.
+# A chain that starts at a member, as `node.next.next` or `entry->parent.parent`, walks a structure and stays, as do
+# the module idioms in `self_repeat_words_kept`, such as Python's `time.time` or a span's `data.data()`.
+check_self_repeat_access() {
+    local repeated kept="time glob datetime signal copy socket data $self_repeat_words_kept"
+    repeated=$(added_code_without_literals | "$fastest_awk" -v kept="$kept" '
+        BEGIN { count = split(kept, words, " "); for (word = 1; word <= count; ++word) allowed[words[word]] = 1 }
+        {
+            line = substr($0, 2); offset = 0
+            while (match(substr(line, offset + 1), /[A-Za-z_][A-Za-z0-9_]*[ \t]*(\.|->)[ \t]*[A-Za-z_][A-Za-z0-9_]*/)) {
+                start = offset + RSTART; access = substr(line, start, RLENGTH)
+                match(access, /^[A-Za-z_][A-Za-z0-9_]*/); first = substr(access, 1, RLENGTH)
+                second = access; sub(/^.*(\.|->)[ \t]*/, "", second)
+                offset = start + length(first) - 1
+                before = substr(line, 1, start - 1); sub(/[ \t]+$/, "", before)
+                if (before ~ /(\.|->)$/) continue # a walk that starts at a member
+                if (first != second || first in allowed) continue
+                print "    " first ": " line
+                next
+            }
+        }' || true)
+    [ -z "$repeated" ] || reject_with_reason "$repeated" \
+        "$staged_path names one word on both sides of a member access; name the outer variable after the wrapper," \
+        "            as request->call, or the member after what it holds, as call->kept:"
+}
+
+# Rejects an identifier carrying a refused word. A word of `identifier_words_refused` is refused as a whole
+# snake_case word of a name in the library's C and C++ sources, such as `join_every_shard`, because the Vocabulary
+# table in CONTRIBUTING.md names each concept once; a word of `ownership_words_refused` is refused in every
+# language, split at camelCase too, such as `lentDevices` or `checkpoint_borrow`, because a name says who owns a
+# thing and until when it is valid, never a hand-over. Comments, docstrings and string literals are blanked first.
+# A name in `identifier_words_exempt` stays, qualified as `fu::pool_t` or ending in `*` to match a prefix, for the
+# spellings of the languages and libraries this project calls, such as Rust's `std::borrow` names.
+check_identifier_words() {
+    local concept_words="" refused vocabulary handover
+    case "$staged_path" in
+    include/* | src/* | c/* | cpp/*)
+        case "$staged_path" in
+        *.c | *.h | *.hpp | *.cpp | *.cc | *.cxx | *.cu | *.cuh | *.hip | *.metal) concept_words=$identifier_words_refused ;;
+        esac
+        ;;
+    esac
+    [ -n "$concept_words$ownership_words_refused" ] || return 0
+    refused=$(added_code_without_literals | "$fastest_awk" -v concepts="$concept_words" \
+        -v ownership="$ownership_words_refused" -v exempt="$identifier_words_exempt" '
+        BEGIN {
+            count = split(concepts, list, " "); for (index_ = 1; index_ <= count; ++index_) concept[list[index_]] = 1
+            count = split(ownership, list, " "); for (index_ = 1; index_ <= count; ++index_) owned[list[index_]] = 1
+            exempt_count = split(exempt, exempted, " ")
+        }
+        function is_exempt(name,    index_, entry) {
+            for (index_ = 1; index_ <= exempt_count; ++index_) {
+                entry = exempted[index_]
+                if (name == entry) return 1
+                if (entry ~ /\*$/ && index(name, substr(entry, 1, length(entry) - 1)) == 1) return 1
+            }
+            return 0
+        }
+        # Splits at underscores and before each capital opening a word; with `acronyms`, a capital that opens a
+        # word after an acronym splits too, so `HTTPLease` gives http and lease, and without, `LEASEd` stays whole.
+        function words_of(token, acronyms,    split_, position, character, before, after) {
+            split_ = ""
+            for (position = 1; position <= length(token); ++position) {
+                character = substr(token, position, 1)
+                before = substr(token, position - 1, 1); after = substr(token, position + 1, 1)
+                if (character ~ /[A-Z]/ && (before ~ /[a-z0-9]/ || (acronyms && before ~ /[A-Z]/ && after ~ /[a-z]/))) split_ = split_ "_"
+                split_ = split_ character
+            }
+            return tolower(split_)
+        }
+        {
+            line = substr($0, 2); rest = line
+            while (match(rest, /[A-Za-z_][A-Za-z0-9_]*(::[A-Za-z_][A-Za-z0-9_]*)*/)) {
+                qualified = substr(rest, RSTART, RLENGTH); rest = substr(rest, RSTART + RLENGTH)
+                if (is_exempt(qualified)) continue
+                names = split(qualified, components, "::")
+                for (component = 1; component <= names; ++component) {
+                    token = components[component]
+                    if (is_exempt(token)) continue
+                    total = split(tolower(token), parts, "_")
+                    for (part = 1; part <= total; ++part) if (parts[part] in concept) { print "V    " token ": " line; next }
+                    total = split(words_of(token, 1) "_" words_of(token, 0), parts, "_")
+                    for (part = 1; part <= total; ++part) if (parts[part] in owned) { print "O    " token ": " line; next }
+                }
+            }
+        }' || true)
+    vocabulary=$(sed -n 's/^V//p' <<< "$refused")
+    handover=$(sed -n 's/^O//p' <<< "$refused")
+    [ -z "$vocabulary" ] || reject_with_reason "$vocabulary" \
+        "$staged_path names a concept by a refused word; the Vocabulary table in CONTRIBUTING.md names the word" \
+        "            to use instead:"
+    [ -z "$handover" ] || reject_with_reason "$handover" \
+        "$staged_path names a thing by a hand-over word; name who owns it and until when it is valid," \
+        "            as caller_owned or valid_until_release do, never lend, borrow, loan or lease:"
+}
+
+# The brace stack the member checks share: `kind[depth]` is "record" inside a struct, class or union body, "code"
+# inside a function body, and "namespace" elsewhere, so a local or a parameter never counts as a member. The caller
+# steps each line, without comments, after judging it.
+record_scope_awk='
+    function step_scope(code,    position, character) {
+        statement = statement " " code
+        for (position = 1; position <= length(code); ++position) {
+            character = substr(code, position, 1)
+            if (character == "{") {
+                ++depth
+                if (kind[depth - 1] == "code") kind[depth] = "code"
+                else if (statement ~ /(^|[^A-Za-z0-9_])(struct|class|union)([^A-Za-z0-9_]|$)/ &&
+                         statement !~ /(^|[^A-Za-z0-9_])enum([^A-Za-z0-9_]|$)/ && statement !~ /\)/) kind[depth] = "record"
+                else if (statement ~ /(^|[^A-Za-z0-9_])namespace([^A-Za-z0-9_]|$)/) kind[depth] = "namespace"
+                else kind[depth] = "code"
+                statement = ""
+            } else if (character == "}") { if (depth > 0) delete kind[depth--]; statement = "" }
+            else if (character == ";") statement = ""
+        }
+    }
+'
+
+# Rejects an added data member of a library record whose name, trailing underscore stripped, is a word of
+# `member_names_refused` or ends in `_bits`, `_buffer` or `_bitset`, because a member names what it holds and when
+# it holds it, as the Lean State section of CONTRIBUTING.md says, never its type or a role word alone.
+check_member_names() {
+    [ -n "$member_names_refused" ] || return 0
+    local misnamed
+    misnamed=$(refused="$member_names_refused" scan_staged_file_marking_added_lines "$record_scope_awk"'
+        BEGIN { count = split(ENVIRON["refused"], list, " "); for (index_ = 1; index_ <= count; ++index_) banned[list[index_]] = 1 }
+        {
+            if (kind[depth] == "record" && (FNR in added) && $0 !~ /\(/ &&
+                $0 !~ /^[[:space:]]*(using|typedef|return|static_assert|friend|static|constexpr)[[:space:]]/ &&
+                match($0, /^[[:space:]]*[A-Za-z_][A-Za-z0-9_:<>, ]*[[:space:]*&]+(const[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*[[:space:]]*(=[^;]*|\{[^}]*\})?;[[:space:]]*$/)) {
+                name = $0; sub(/[[:space:]]*(=[^;]*|\{[^}]*\})?;[[:space:]]*$/, "", name); sub(/.*[[:space:]*&]/, "", name)
+                stem = name; sub(/_$/, "", stem)
+                if ((stem in banned) || stem ~ /_(bits|buffer|bitset)$/) printf "line %d: %s\n", FNR, $0
+            }
+            step_scope($0)
+        }' "$staged_code_path")
+    [ -z "$misnamed" ] || reject_with_reason "$misnamed" \
+        "$staged_path names a member by its type or a role word alone; say what it holds and when, as the Lean" \
+        "            State section of CONTRIBUTING.md asks:"
+}
+
+# Rejects `std::make_shared` and `std::make_unique` in the gated library sources, because both throw
+# `std::bad_alloc` when the heap runs out, and the library reports failure as a status: allocate with
+# `new (std::nothrow)` or through the caller's allocator, and check the result. A line marked `vendor-boundary`
+# stays, where a third-party API, such as cuDF's readers, demands the owner it throws into.
+check_nothrow_construction() {
+    local throwing
+    throwing=$(blank_c_comments_preserving_columns literals < "$staged_code_path" | "$fastest_awk" '
+        FILENAME == ARGV[1] { added[$1 + 0]; next }
+        FILENAME == ARGV[2] { marked[FNR] = /vendor-boundary/; text[FNR] = $0; next }
+        (FNR in added) && !marked[FNR] && /(^|[^A-Za-z0-9_])std::make_(shared|unique)(_for_overwrite)?[[:space:]]*</ {
+            printf "line %d: %s\n", FNR, text[FNR]
+        }' "$staged_lines_path" "$staged_text_path" - || true)
+    [ -z "$throwing" ] || reject_with_reason "$throwing" \
+        "$staged_path calls std::make_shared/make_unique in library code; allocate nothrow and check, or mark" \
+        "            the line vendor-boundary where a third-party API demands the owner:"
+}
+
+# Rejects a concept whose name is not a noun phrase opening with `a_` or `an_`, such as `concept resettable` or
+# `concept integral_like`, because a constraint then reads as a sentence in the signature it guards, as
+# `template <a_resettable value_type_>` and `requires an_allocator<allocator_type_>` do.
+check_concept_names() {
+    local misnamed
+    misnamed=$(sed -E 's/"([^"\\]|\\.)*"//g' "$staged_added_code_path" |
+        grep -E '(^\+|>)[[:space:]]*concept[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*(=|$)' |
+        grep -vE '(^\+|>)[[:space:]]*concept[[:space:]]+an?_[A-Za-z0-9]' || true)
+    [ -z "$misnamed" ] || reject_with_reason "$misnamed" \
+        "$staged_path declares a concept outside the a_/an_ noun-phrase form; name the requirement as" \
+        "            a_resettable or an_allocator, so a constraint reads as a sentence:"
+}
+
+# Rejects a record member that holds an allocator by value, its type's last name carrying `allocator` or being
+# `upstream_t`, without `[[no_unique_address]]` on its line or the one above, because a stateless allocator then
+# pads every object that holds it by a whole aligned word. A macro spelling the attribute for MSVC, such as
+# `sz_no_unique_address_`, counts. A pointer or a reference to an allocator is no allocator; NumKong's and
+# StringZilla's C `nk_allocator_t` and `sz_allocator_t` carry function pointers and are never empty; and a line
+# declaring several members of one type stays, since two members of one type never share an address.
+check_empty_member_bytes() {
+    local padded
+    padded=$(scan_staged_file_marking_added_lines "$record_scope_awk"'
+        {
+            if (kind[depth] == "record" && (FNR in added) && $0 !~ /[()]/ && tolower($0 previous) !~ /no_unique_address/ &&
+                $0 !~ /^[[:space:]]*(using|typedef|return|static_assert|friend|static|constexpr|inline)[[:space:]]/) {
+                member = $0; gsub(/\[\[[^]]*\]\]/, " ", member); while (gsub(/<[^<>]*>/, "", member)) { }
+                declarators = member; sub(/(=|\{).*$/, "", declarators)
+                if (declarators !~ /,/ && match(member, /^[[:space:]]*[A-Za-z_][A-Za-z0-9_: ]*[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*(=[^;]*|\{[^}]*\})?;[[:space:]]*$/)) {
+                    type = member; sub(/[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*(=[^;]*|\{[^}]*\})?;[[:space:]]*$/, "", type)
+                    sub(/^[[:space:]]*((mutable|const|volatile)[[:space:]]+)*/, "", type); sub(/[[:space:]]+const$/, "", type)
+                    sub(/.*::/, "", type)
+                    if ((type ~ /allocator/ && type !~ /^(nk|sz)_allocator_t$/) || type == "upstream_t") printf "line %d: %s\n", FNR, $0
+                }
+            }
+            previous = $0
+            step_scope($0)
+        }' "$staged_code_path")
+    [ -z "$padded" ] || reject_with_reason "$padded" \
+        "$staged_path holds an allocator without [[no_unique_address]]; mark the member, so an empty allocator" \
+        "            takes no bytes:"
+}
+
 # endregion C and C++ Idioms
 
 # region Formatters
@@ -4008,6 +4262,28 @@ run_shared_checks() {
             rejection_count=$((rejection_count + 1))
         ;;
     esac
+    case "$staged_path" in
+    *.c | *.h | *.hpp | *.cpp | *.cc | *.cxx | *.cu | *.cuh | *.hip | *.metal | *.rs | *.go | *.py | *.pyi | *.mojo | \
+        *.swift | *.ts | *.mts | *.js | *.mjs | *.zig) check_self_repeat_access ;;
+    esac
+    case "$staged_path" in
+    *.c | *.h | *.hpp | *.cpp | *.cc | *.cxx | *.cu | *.cuh | *.hip | *.metal | *.rs | *.go | *.py | *.pyi | *.mojo | \
+        *.swift | *.ts | *.mts | *.js | *.mjs | *.cjs | *.zig | *.java | *.kt | *.cs | *.m) check_identifier_words ;;
+    esac
+    case "$staged_path" in
+    *.hpp | *.h | *.cpp | *.cc | *.cu | *.cuh | *.hip | *.metal) check_concept_names ;;
+    esac
+    case "$staged_path" in
+    *.hpp | *.cpp | *.cc | *.cu | *.cuh | *.hip) check_empty_member_bytes ;;
+    esac
+    case "$staged_path" in
+    c/* | cpp/* | include/* | src/*)
+        case "$staged_path" in
+        *.c | *.h | *.hpp | *.cpp | *.cc | *.cu | *.cuh | *.hip | *.metal) check_member_names ;;
+        esac
+        ;;
+    esac
+    if in_gated_sources; then check_nothrow_construction; fi
     if speaks_c_comments "$staged_path"; then
         check_docblock_documents_a_declaration
         check_file_header_tag_order
@@ -4974,11 +5250,12 @@ check_call_value_unwrap() {
 }
 
 # Rejects a local declared as `expected<...>` from a call, because it spells the return type twice: bind the result
-# with `auto [value, status] = call(...);`. Return types, parameters and members have no `=` or `{` after the name,
-# and a function's parameter list keeps its defaults out of the template argument.
+# with `auto [value, status] = call(...);`. Return types and parameters have no `=` or `{` after the name, a function's
+# parameter list keeps its defaults out of the template argument, and a default like `{}` or `{{}, status}` builds the
+# value rather than calling anything.
 check_expected_local_binding() {
     local declared
-    declared=$(grep -E '^\+[[:space:]]*([A-Za-z_]+::)?expected<[^()]*>([[:space:]]+const)?[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*(=|\{)' "$staged_added_code_path" |
+    declared=$(grep -E '^\+[[:space:]]*([A-Za-z_]+::)?expected<[^()]*>([[:space:]]+const)?[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*(=|\{)[[:space:]]*[A-Za-z_]' "$staged_added_code_path" |
         grep -vE '^\+[[:space:]]*(return|using|typedef|template)\b' || true)
     [ -z "$declared" ] || reject_with_reason "$declared" \
         "$staged_path declares an expected<…> local; bind it as auto [value, status] = call(...):"
@@ -5268,28 +5545,6 @@ check_decltype() {
         "            exists, as Spelling Types in CONTRIBUTING.md says:"
 }
 
-# The brace stack every member check below shares: `kind[depth]` is "record" inside a struct, class
-# or union body, "code" inside a function body, and "namespace" elsewhere, so a local or a parameter
-# never counts as a member. The caller sets `code` to the line without comments before each step.
-record_scope_awk='
-    function step_scope(code,    position, character) {
-        statement = statement " " code
-        for (position = 1; position <= length(code); ++position) {
-            character = substr(code, position, 1)
-            if (character == "{") {
-                ++depth
-                if (kind[depth - 1] == "code") kind[depth] = "code"
-                else if (statement ~ /(^|[^A-Za-z0-9_])(struct|class|union)([^A-Za-z0-9_]|$)/ &&
-                         statement !~ /(^|[^A-Za-z0-9_])enum([^A-Za-z0-9_]|$)/ && statement !~ /\)/) kind[depth] = "record"
-                else if (statement ~ /(^|[^A-Za-z0-9_])namespace([^A-Za-z0-9_]|$)/) kind[depth] = "namespace"
-                else kind[depth] = "code"
-                statement = ""
-            } else if (character == "}") { if (depth > 0) delete kind[depth--]; statement = "" }
-            else if (character == ";") statement = ""
-        }
-    }
-'
-
 # Rejects an added `bool` data member under include/ or src/, because an enum, a type or a protocol
 # says what a flag would; a `static` or `constexpr` constant is a value, not a flag, and a local or
 # a parameter is no member.
@@ -5387,98 +5642,6 @@ check_hot_entry_asserts() {
     [ -z "$unpinned" ] || reject_with_reason "$unpinned" \
         "$staged_path adds a hot entry without pinning its size; a struct a thread moves along a hot path is 8, 16" \
         "            or 32 bytes, so write static_assert(sizeof(entry_t) == 16) right below it:"
-}
-
-# Blanks `#` comments and triple-quoted docstrings, keeping every line, for Python and Mojo sources.
-blank_hash_comments() { # blank_hash_comments < source
-    "$fastest_awk" '
-        BEGIN { openers = "\"\"\"|\047\047\047|#" }
-        {
-            output = ""; rest = $0
-            while (rest != "") {
-                if (quote != "") {
-                    if (!(closing = index(rest, quote))) { gsub(/./, " ", rest); output = output rest; break }
-                    span = substr(rest, 1, closing + 2); gsub(/./, " ", span); output = output span
-                    rest = substr(rest, closing + 3); quote = ""
-                    continue
-                }
-                if (!match(rest, openers)) { output = output rest; break }
-                output = output substr(rest, 1, RSTART - 1); span = substr(rest, RSTART)
-                if (substr(span, 1, 1) == "#") { gsub(/./, " ", span); output = output span; break }
-                quote = substr(span, 1, 3); output = output "   "; rest = substr(span, 4)
-            }
-            print output
-        }'
-}
-
-# Rejects an identifier carrying a word from `identifier_words_refused` as a whole snake_case word,
-# such as `join_every_shard`, `dirty_` or `landed_match_t`, because the Vocabulary table in
-# CONTRIBUTING.md names each concept once, and one from `ownership_words_refused` split at `_` and at
-# camelCase alike, such as `lentDevices` or `checkpoint_borrow`, because a name says who owns a buffer
-# and until when. Comments and string literals are blanked first; Rust's std names stay.
-check_identifier_words() { # check_identifier_words <words refused at snake_case words>
-    local refused added_code=${staged_added_code_path:-}
-    if ! speaks_c_comments "$staged_path"; then
-        added_code=$results_directory/$ordinal.added-identifiers
-        case "$staged_path" in
-        *.py | *.pyi | *.mojo) blank_hash_comments < "$staged_text_path" ;;
-        *) blank_c_comments_preserving_columns < "$staged_text_path" ;;
-        esac | scan_staged_file_marking_added_lines 'FNR in added { print "+" $0 }' - > "$added_code"
-    fi
-    refused=$(sed -E 's/"([^"\\]|\\.)*"//g' "$added_code" |
-        "$fastest_awk" -v words="$1" -v ownership="$ownership_words_refused" '
-        BEGIN {
-            count = split(words, list, " "); for (index_ = 1; index_ <= count; ++index_) banned[list[index_]] = 1
-            count = split(ownership, list, " "); for (index_ = 1; index_ <= count; ++index_) owned[list[index_]] = 1
-        }
-        function camel_split(token,    split_, position, character, previous) {
-            split_ = ""; previous = ""
-            for (position = 1; position <= length(token); ++position) {
-                character = substr(token, position, 1)
-                if (character ~ /[A-Z]/ && previous ~ /[a-z0-9]/) split_ = split_ "_"
-                split_ = split_ character; previous = character
-            }
-            return tolower(split_)
-        }
-        {
-            line = substr($0, 2); rest = line
-            while (match(rest, /[A-Za-z_][A-Za-z0-9_]*/)) {
-                token = substr(rest, RSTART, RLENGTH); rest = substr(rest, RSTART + RLENGTH)
-                if (token ~ /^fu_pool_/ || token == "dummy_pool_t") continue # ForkUnion spells its thread pools so
-                if (token == "seen_k") continue # the C++ twin of usearch_geospatial_relation_seen_k, a C ABI value
-                if (token ~ /^(borrow|borrow_mut|borrow_raw|Borrow|BorrowMut|Borrowed|BorrowedFd|BorrowedHandle)$/) continue # Rust std names
-                total = split(tolower(token), parts, "_")
-                for (part = 1; part <= total; ++part) if (parts[part] in banned) { print "    " token ": " line; next }
-                total = split(camel_split(token), parts, "_")
-                for (part = 1; part <= total; ++part) if (parts[part] in owned) { print "    " token ": " line; next }
-            }
-        }' || true)
-    [ -z "$refused" ] || reject_with_reason "$refused" \
-        "$staged_path names a concept by a refused word; the Vocabulary table in CONTRIBUTING.md names each one," \
-        "            residency for home, await for join, picked for dirty, visited for seen, owner for lent, and so on:"
-}
-
-# Rejects an added data member whose name, trailing underscore stripped, is in
-# `member_names_refused`, or ends in `_bits`, `_buffer` or `_bitset`, because a member names what it
-# holds and when it holds it, as the Transient State rules in CONTRIBUTING.md say, never its type or
-# a role word alone.
-check_member_names() {
-    local misnamed
-    misnamed=$(refused="$member_names_refused" scan_staged_file_marking_added_lines "$record_scope_awk"'
-        BEGIN { count = split(ENVIRON["refused"], list, " "); for (index_ = 1; index_ <= count; ++index_) banned[list[index_]] = 1 }
-        {
-            if (kind[depth] == "record" && (FNR in added) && $0 !~ /\(/ &&
-                $0 !~ /^[[:space:]]*(using|typedef|return|static_assert|friend|static|constexpr)[[:space:]]/ &&
-                match($0, /^[[:space:]]*[A-Za-z_][A-Za-z0-9_:<>, ]*[[:space:]*&]+(const[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*[[:space:]]*(=[^;]*|\{[^}]*\})?;[[:space:]]*$/)) {
-                name = $0; sub(/[[:space:]]*(=[^;]*|\{[^}]*\})?;[[:space:]]*$/, "", name); sub(/.*[[:space:]*&]/, "", name)
-                stem = name; sub(/_$/, "", stem)
-                if ((stem in banned) || stem ~ /_(bits|buffer|bitset)$/) printf "line %d: %s\n", FNR, $0
-            }
-            step_scope($0)
-        }' "$staged_code_path")
-    [ -z "$misnamed" ] || reject_with_reason "$misnamed" \
-        "$staged_path names a member by its type or a role word alone; say what it holds and when, as the Transient" \
-        "            State rules in CONTRIBUTING.md do with picked_this_round_ and visited_:"
 }
 
 # Rejects `row`, `rows`, `vector`, `vectors`, `dimension`, `dimensions`, `norm`, `norms`, `head` and
@@ -5776,20 +5939,6 @@ run_project_checks() {
     include/usearch/dense/*.h | include/usearch/dense/*.hpp | include/usearch/dense/*.cuh | include/usearch/dense/*.hip | \
         include/usearch/dense/*.metal)
         check_dense_f64
-        ;;
-    esac
-    case "$staged_path" in
-    include/* | src/* | c/* | cpp/*)
-        case "$staged_path" in
-        *.c | *.h | *.hpp | *.cpp | *.cc | *.cu | *.cuh | *.hip | *.metal)
-            check_identifier_words "$identifier_words_refused"
-            check_member_names
-            ;;
-        esac
-        ;;
-    *.c | *.h | *.hpp | *.cpp | *.cc | *.cu | *.cuh | *.hip | *.metal | *.rs | *.go | *.swift | *.zig | *.ts | *.mts | \
-        *.js | *.mjs | *.cjs | *.java | *.kt | *.cs | *.py | *.pyi | *.mojo | *.m)
-        check_identifier_words ""
         ;;
     esac
     case "$staged_path" in

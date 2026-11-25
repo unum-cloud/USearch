@@ -8,7 +8,7 @@ foreach (name_ IN ITEMS dense_index_search dense_index_algebra sequence_index_se
     usearch_setup_target(usearch_bench_${name_} HOST)
     target_include_directories(usearch_bench_${name_} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/tools)
     target_link_libraries(
-        usearch_bench_${name_} PRIVATE fmt::fmt yyjson forkunion::static stringzilla::header
+        usearch_bench_${name_} PRIVATE fmt::fmt yyjson forkunion::cpp stringzilla::header
                                        ${USEARCH_PUNNED_LIBRARIES} ${CMAKE_DL_LIBS}
     )
 endforeach ()
@@ -21,7 +21,7 @@ target_include_directories(
     usearch_bench_dense_ram_index_search PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/tools
 )
 target_link_libraries(
-    usearch_bench_dense_ram_index_search PRIVATE fmt::fmt yyjson forkunion::static stringzilla::header
+    usearch_bench_dense_ram_index_search PRIVATE fmt::fmt yyjson forkunion::cpp stringzilla::header
                                                  ${USEARCH_PUNNED_LIBRARIES}
 )
 
@@ -33,7 +33,7 @@ target_include_directories(
     usearch_bench_nvme_device_reads PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/tools
 )
 target_link_libraries(
-    usearch_bench_nvme_device_reads PRIVATE fmt::fmt yyjson forkunion::static ${USEARCH_PUNNED_LIBRARIES}
+    usearch_bench_nvme_device_reads PRIVATE fmt::fmt yyjson forkunion::cpp ${USEARCH_PUNNED_LIBRARIES}
 )
 
 # The kernel microbench times the distance kits alone, one row per kernel, dtype, capability tier and shape; it links

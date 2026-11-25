@@ -13,6 +13,42 @@ set -u
 export LC_ALL=C
 
 hooks_directory=$(cd "$(dirname "$0")" && pwd)
+
+# With `--siblings`, runs no fixture: compares every region of `pre-commit` and `selftest` against the same region
+# in each sibling project checked out beside this one, as `../NumKong-v8/.githooks/`, and prints `identical` or how
+# many lines differ. Project Settings and this project's own Rules and Fixtures regions are skipped, a region a
+# sibling lacks prints `absent`, and any difference exits nonzero.
+if [ "${1:-}" = --siblings ]; then
+    project_name=$(sed -n 's/^project_name="\(.*\)"$/\1/p' "$hooks_directory/pre-commit")
+    sibling_pattern=$(sed -n "s/^sibling_projects='\(.*\)'$/\1/p" "$hooks_directory/pre-commit")
+    region_text() { # region_text <name> <file>
+        awk -v name="$1" '$0 == "# region " name { inside = 1 } inside { print } $0 == "# endregion " name { exit }' "$2"
+    }
+    differing_count=0
+    for hook_name in pre-commit selftest; do
+        while IFS= read -r region_name; do
+            case "$region_name" in
+            "Project Settings" | "$project_name Rules" | "$project_name Fixtures") continue ;;
+            esac
+            for sibling_hooks in "$hooks_directory"/../../*-v*/.githooks; do
+                sibling_checkout=$(basename "$(dirname "$sibling_hooks")")
+                printf '%s\n' "${sibling_checkout%-v*}" | tr '[:upper:]' '[:lower:]' | grep -qxE "$sibling_pattern" || continue
+                if ! grep -qxF "# region $region_name" "$sibling_hooks/$hook_name" 2> /dev/null; then
+                    verdict=absent
+                else
+                    differing_lines=$(diff <(region_text "$region_name" "$hooks_directory/$hook_name") \
+                        <(region_text "$region_name" "$sibling_hooks/$hook_name") | grep -c '^[<>]')
+                    verdict=identical
+                    [ "$differing_lines" -eq 0 ] || { verdict="$differing_lines lines differ"; differing_count=$((differing_count + 1)); }
+                fi
+                printf '%s: %s against %s: %s\n' "$hook_name" "$region_name" "$sibling_checkout" "$verdict"
+            done
+        done < <(sed -n 's/^# region //p' "$hooks_directory/$hook_name")
+    done
+    printf '%d region comparisons differ\n' "$differing_count"
+    [ "$differing_count" -eq 0 ]
+    exit
+fi
 scratch_root=${SELFTEST_DIR:-${TMPDIR:-/tmp}/pre-commit-selftest-$$}
 rm -rf "$scratch_root"
 mkdir -p "$scratch_root"
@@ -732,7 +768,7 @@ struct probe_t {
 
 /** Types whose alignment fits @c max_align_t. */
 template <typename type_>
-concept aligned_type = requires(type_ value) { alignof(type_) <= alignof(max_align_t); };
+concept an_aligned_type = requires(type_ value) { alignof(type_) <= alignof(max_align_t); };
 FIXTURE
 
 assert_rejects "suffixed variable template" "suffixes a variable template" test/probe.cpp <<'FIXTURE'
@@ -1928,6 +1964,110 @@ assert_accepts "_ITERATOR_DEBUG_LEVEL tested" test/probe.cpp <<'FIXTURE'
 #if defined(_ITERATOR_DEBUG_LEVEL) && _ITERATOR_DEBUG_LEVEL > 0
 int probe() { return 1; }
 #endif
+FIXTURE
+
+assert_rejects "one word on both sides of an arrow" "names one word on both sides of a member access" src/probe.cpp <<'FIXTURE'
+struct probe_call_t {
+    int call;
+};
+struct probe_request_t {
+    probe_call_t call;
+};
+int probe(probe_request_t const *call) noexcept { return call->call.call; }
+FIXTURE
+
+assert_rejects "a Go embedding read through its own word" "names one word on both sides of a member access" golang/probe.go <<'FIXTURE'
+package probe
+
+type call struct{ outcome int }
+type callWithResult struct {
+	call
+	result *int
+}
+
+func probe(call *callWithResult) int { return call.call.outcome }
+FIXTURE
+
+assert_rejects "a Python C glue member read through its own word" "names one word on both sides of a member access" python/probe.c <<'FIXTURE'
+typedef struct probe_call_t {
+    int outcome;
+} probe_call_t;
+typedef struct probe_verb_t {
+    probe_call_t call;
+} probe_verb_t;
+int probe(probe_verb_t *call) { return call->call.outcome; }
+FIXTURE
+
+assert_accepts "walks, module idioms and repeats in comments or strings" src/probe.cpp <<'FIXTURE'
+struct probe_node_t {
+    probe_node_t *next;
+};
+probe_node_t *probe(probe_node_t *node, char const **note) noexcept {
+    // The old binding wrote call.call here
+    *note = "call.call";
+    return node->next->next;
+}
+FIXTURE
+
+assert_accepts "a Python module idiom and a repeat in a docstring" python/probe.py <<'FIXTURE'
+"""Times the call.call path."""
+
+import time
+
+
+def probe():
+    return time.time()  # never call.call
+FIXTURE
+
+assert_rejects "std::make_unique in library code" "calls std::make_shared/make_unique in library code" include/$project_directory/probe.hpp <<'FIXTURE'
+struct probe_state_t {
+    int count;
+};
+inline void probe() noexcept { [[maybe_unused]] auto state = std::make_unique<probe_state_t>(); }
+FIXTURE
+
+assert_accepts "a nothrow allocation, a prefixed helper and a vendor boundary" include/$project_directory/probe.hpp <<'FIXTURE'
+struct probe_state_t {
+    int count;
+};
+probe_state_t *cuda_make_unique() noexcept;
+inline void probe() noexcept {
+    // Never std::make_shared here: it throws
+    [[maybe_unused]] auto first = cuda_make_unique();
+    [[maybe_unused]] auto second = std::make_shared<probe_state_t>(); // vendor-boundary: the reader demands one
+}
+FIXTURE
+
+assert_rejects "a concept named as an adjective" "declares a concept outside the a_/an_ noun-phrase form" include/$project_directory/probe.hpp <<'FIXTURE'
+template <typename value_type_>
+concept resettable = requires(value_type_ &value) { value.reset(); };
+FIXTURE
+
+assert_accepts "concepts named as a_ and an_ noun phrases" include/$project_directory/probe.hpp <<'FIXTURE'
+template <typename value_type_>
+concept a_resettable = requires(value_type_ &value) { value.reset(); };
+
+template <typename allocator_type_>
+concept an_allocator = requires(allocator_type_ &allocator) { allocator.allocate(1); };
+FIXTURE
+
+assert_rejects "an allocator member without no_unique_address" "holds an allocator without [[no_unique_address]]" include/$project_directory/probe.hpp <<'FIXTURE'
+struct probe_allocator_t {};
+struct probe_owner_t {
+    int count;
+    probe_allocator_t allocator;
+};
+FIXTURE
+
+assert_accepts "allocators marked, pointed to or passed" include/$project_directory/probe.hpp <<'FIXTURE'
+struct probe_allocator_t {};
+struct probe_owner_t {
+    [[no_unique_address]] probe_allocator_t allocator;
+    [[no_unique_address]]
+    probe_allocator_t upstream;
+    probe_allocator_t *shared_allocator;
+    void reset(probe_allocator_t allocator) noexcept;
+};
 FIXTURE
 
 # endregion C and C++ Idiom Fixtures
@@ -3794,11 +3934,11 @@ FIXTURE
 
 assert_accepts "a named concept in an if constexpr" include/$project_directory/probe.hpp <<'FIXTURE'
 template <typename value_type_>
-concept resettable = requires(value_type_ &value) { value.reset(); };
+concept a_resettable = requires(value_type_ &value) { value.reset(); };
 
 template <typename value_type_>
 inline void probe(value_type_ &value) noexcept {
-    if constexpr (resettable<value_type_>) value.reset();
+    if constexpr (a_resettable<value_type_>) value.reset();
 }
 FIXTURE
 
@@ -4424,7 +4564,7 @@ inline int probe(text_t text) { auto [value, status] = parse(text); static_asser
 FIXTURE
 
 assert_rejects "expected local spelling the return type twice" "declares an expected" include/usearch/probe.hpp <<'FIXTURE'
-    nk::expected<nk::matrix<f32_t>> made = nk::matrix<f32_t>::zeros({2, 3});
+    util::expected<matrix_t> made = matrix_t::make(2, 3);
 FIXTURE
 
 assert_rejects "const expected local" "declares an expected" include/usearch/probe.hpp <<'FIXTURE'
@@ -4436,7 +4576,7 @@ assert_rejects "expected local with brace initializer" "declares an expected" in
 FIXTURE
 
 assert_accepts "expected local bound as a structure" include/usearch/probe.hpp <<'FIXTURE'
-    auto [made, status] = nk::matrix<f32_t>::zeros({2, 3});
+    auto [matrix, status] = matrix_t::make(2, 3);
 FIXTURE
 
 assert_accepts "expected return type of a declaration" include/usearch/probe.hpp <<'FIXTURE'
@@ -4445,6 +4585,15 @@ FIXTURE
 
 assert_accepts "expected return type of a declaration with a defaulted parameter" include/usearch/probe.hpp <<'FIXTURE'
     expected<cursor_t> cursor_init(std::span<key_t const> starts = {}) const noexcept;
+FIXTURE
+
+assert_accepts "expected defaulted from empty braces" include/usearch/probe.hpp <<'FIXTURE'
+    expected<index_t> built {};
+    expected<index_t> assigned = {};
+FIXTURE
+
+assert_accepts "expected member defaulting to a status" include/usearch/probe.hpp <<'FIXTURE'
+    expected<response_t> response {{}, status_t {status_code_t::would_block_k}};
 FIXTURE
 
 assert_rejects "iterator laundered through a reference" "launders an iterator through &*" include/usearch/probe.hpp <<'FIXTURE'
@@ -4742,7 +4891,7 @@ assert_rejects "refused identifier word" "names a concept by a refused word" inc
 inline void probe(int join_count) {}
 FIXTURE
 
-assert_rejects "hand-over word in an identifier" "names a concept by a refused word" include/usearch/probe.hpp <<'FIXTURE'
+assert_rejects "hand-over word in an identifier" "names a thing by a hand-over word" include/usearch/probe.hpp <<'FIXTURE'
 inline void probe(int lent_count) {}
 FIXTURE
 
@@ -4750,11 +4899,15 @@ assert_accepts "Rust std borrow names" include/usearch/probe.hpp <<'FIXTURE'
 inline void probe(BorrowedFd descriptor) {}
 FIXTURE
 
-assert_rejects "camelCase hand-over word in Swift" "names a concept by a refused word" swift/Probe.swift <<'FIXTURE'
+assert_accepts "ForkUnion's spellings of its thread pools" include/usearch/probe.hpp <<'FIXTURE'
+inline void probe(fu::pool_t &threads, fu_pool_t created, fu::dummy_pool_t &inline_threads) noexcept {}
+FIXTURE
+
+assert_rejects "camelCase hand-over word in Swift" "names a thing by a hand-over word" swift/Probe.swift <<'FIXTURE'
 let lentDevices: [Int] = []
 FIXTURE
 
-assert_rejects "hand-over word in a Python identifier" "names a concept by a refused word" python/probe.py <<'FIXTURE'
+assert_rejects "hand-over word in a Python identifier" "names a thing by a hand-over word" python/probe.py <<'FIXTURE'
 
 def probe(checkpoint_borrow: int) -> int:
     return checkpoint_borrow

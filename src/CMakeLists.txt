@@ -650,7 +650,7 @@ function (usearch_object_library target_)
     )
     target_include_directories(${target_} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_compile_definitions(${target_} PRIVATE USEARCH_EXPORTING=1 ${arg_DEFINITIONS})
-    target_link_libraries(${target_} PRIVATE yyjson forkunion::static ${arg_LIBRARIES})
+    target_link_libraries(${target_} PRIVATE yyjson forkunion::cpp ${arg_LIBRARIES})
 endfunction ()
 
 # Declares the @p modality_ variants resident in @p residency_ on @p backend_, over the classes after it that are kept,

@@ -29,7 +29,7 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_library(usearch_test_kernel_abi OBJECT kernel_abi.cpp)
     target_compile_features(usearch_test_kernel_abi PRIVATE cxx_std_20)
     target_include_directories(usearch_test_kernel_abi PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/c)
-    target_link_libraries(usearch_test_kernel_abi PRIVATE forkunion::header numkong::header)
+    target_link_libraries(usearch_test_kernel_abi PRIVATE forkunion::cpp numkong::header)
 endif ()
 
 # The VRAM cells compile once per vendor, so each unit sees the SDK facts of the one vendor it composes over: the dense
@@ -56,7 +56,7 @@ function (usearch_test_vram_shards vendor_ architecture_macro_)
         endif ()
     endforeach ()
     target_compile_definitions(${target_} PRIVATE ${arg_DEFINITIONS})
-    target_link_libraries(${target_} PRIVATE fmt::fmt yyjson forkunion::static stringzilla::header)
+    target_link_libraries(${target_} PRIVATE fmt::fmt yyjson forkunion::cpp stringzilla::header)
     if (vendor_ STREQUAL "nvidia" OR vendor_ STREQUAL "amd")
         set(device_)
         if (arg_DEVICE)
@@ -153,7 +153,7 @@ target_link_libraries(
     PRIVATE ${usearch_test_vram_shards_}
             fmt::fmt
             yyjson
-            forkunion::static
+            forkunion::cpp
             stringzilla::header
             ${USEARCH_PUNNED_LIBRARIES}
             ${CMAKE_DL_LIBS}
@@ -182,7 +182,7 @@ usearch_setup_target(usearch_test_placement HOST)
 target_include_directories(
     usearch_test_placement PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/tools ${PROJECT_SOURCE_DIR}/src
 )
-target_link_libraries(usearch_test_placement PRIVATE fmt::fmt yyjson forkunion::static stringzilla::header)
+target_link_libraries(usearch_test_placement PRIVATE fmt::fmt yyjson forkunion::cpp stringzilla::header)
 add_test(NAME usearch_test_placement COMMAND usearch_test_placement)
 
 # The command-line tools' suite: the Arrow export and import behind `usearch export` and `usearch import`,
@@ -192,6 +192,6 @@ add_executable(usearch_test_tools tools.cpp)
 usearch_setup_target(usearch_test_tools HOST)
 target_include_directories(usearch_test_tools PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/tools)
 target_link_libraries(
-    usearch_test_tools PRIVATE fmt::fmt yyjson forkunion::static stringzilla::header ${USEARCH_PUNNED_LIBRARIES}
+    usearch_test_tools PRIVATE fmt::fmt yyjson forkunion::cpp stringzilla::header ${USEARCH_PUNNED_LIBRARIES}
 )
 add_test(NAME usearch_test_tools COMMAND usearch_test_tools)

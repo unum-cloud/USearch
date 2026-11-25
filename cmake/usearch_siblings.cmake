@@ -72,22 +72,31 @@ usearch_sibling(
     e44798287a3aca9a263ba4fd7a98076d7a803f7f
 )
 
-# The siblings are the engine rather than an option: every header reaches for them unguarded, so `usearch_templates`
-# holds them all. Include directories are copied onto it, because `usearch_setup_target` reads
-# `INTERFACE_INCLUDE_DIRECTORIES` directly, a genex that sees only what this target declares, to keep the C++20 feature
-# requirement off the pure-C targets. The export set collects them, as their interfaces hold a language level and
-# `Threads::Threads` the copied paths do not, and each sibling's `header` export takes a name that cannot collide with
-# ours under `usearch::`.
+# The siblings are the engine rather than an option: every header reaches for them unguarded, so `usearch_header` holds
+# them all. Include directories are copied onto it, the C ABI's that a sibling's `header` links among them, because
+# `usearch_setup_target` reads `INTERFACE_INCLUDE_DIRECTORIES` directly, a genex that sees only what this target
+# declares, to keep the C++20 feature requirement off the pure-C targets. The export set collects them, as their
+# interfaces hold a language level and `Threads::Threads` the copied paths do not, and each sibling's export takes a
+# name that cannot collide with ours under `usearch::`. ForkUnion's `cpp/` holds `fu::pool_t`, which the executors own,
+# and its archive comes with the engine that links `forkunion::cpp`.
 set(usearch_sibling_targets_)
 foreach (sibling_ IN ITEMS numkong forkunion stringzilla smashtable)
-    target_link_libraries(usearch_templates INTERFACE ${sibling_}::header)
-    target_include_directories(
-        usearch_templates SYSTEM INTERFACE $<TARGET_PROPERTY:${sibling_}::header,INTERFACE_INCLUDE_DIRECTORIES>
-    )
-    get_target_property(sibling_target_ ${sibling_}::header ALIASED_TARGET)
-    if (NOT sibling_target_)
-        set(sibling_target_ ${sibling_}::header)
-    endif ()
-    set_target_properties(${sibling_target_} PROPERTIES EXPORT_NAME ${sibling_}_header)
-    list(APPEND usearch_sibling_targets_ ${sibling_target_})
+    target_link_libraries(usearch_header INTERFACE ${sibling_}::header)
+    foreach (part_ IN ITEMS abi header)
+        if (NOT TARGET ${sibling_}::${part_})
+            continue()
+        endif ()
+        target_include_directories(
+            usearch_header SYSTEM INTERFACE $<TARGET_PROPERTY:${sibling_}::${part_},INTERFACE_INCLUDE_DIRECTORIES>
+        )
+        get_target_property(sibling_target_ ${sibling_}::${part_} ALIASED_TARGET)
+        if (NOT sibling_target_)
+            set(sibling_target_ ${sibling_}::${part_})
+        endif ()
+        set_target_properties(${sibling_target_} PROPERTIES EXPORT_NAME ${sibling_}_${part_})
+        list(APPEND usearch_sibling_targets_ ${sibling_target_})
+    endforeach ()
 endforeach ()
+target_include_directories(
+    usearch_header SYSTEM INTERFACE $<TARGET_PROPERTY:forkunion::cpp,INTERFACE_INCLUDE_DIRECTORIES>
+)

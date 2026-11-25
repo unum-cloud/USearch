@@ -16,7 +16,7 @@ add_executable(
 usearch_setup_target(usearch_tools HOST)
 set_target_properties(usearch_tools PROPERTIES OUTPUT_NAME usearch)
 target_link_libraries(
-    usearch_tools PRIVATE ${USEARCH_PUNNED_LIBRARIES} fmt::fmt forkunion::static yyjson smashtable::header
+    usearch_tools PRIVATE ${USEARCH_PUNNED_LIBRARIES} fmt::fmt forkunion::cpp yyjson smashtable::header
                           stringzilla::header
 )
 if (USEARCH_INSTALL)
@@ -45,7 +45,7 @@ if (MPI_C_FOUND)
         usearch_tools_mpi
         PRIVATE ${USEARCH_PUNNED_LIBRARIES}
                 fmt::fmt
-                forkunion::static
+                forkunion::cpp
                 yyjson
                 smashtable::header
                 stringzilla::header

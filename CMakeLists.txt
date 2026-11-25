@@ -127,30 +127,26 @@ endforeach ()
 # The compiled siblings land as archives inside our shared objects, so every one is position-independent.
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-# Include roots that add no path component: the C interface in `c/` and the templates in `include/`; the C++ SDK in
-# `cpp/` reaches only its own interface target, `usearch::cpp`.
-set(usearch_include_build_dirs_ "${PROJECT_SOURCE_DIR}/c/" "${PROJECT_SOURCE_DIR}/include/")
-
-# The header-only templates of `include/`: every header, the siblings it reaches into, and the type verdicts below. The
-# file set names the basic graph index and the utilities it stands on, six headers on the standard library alone, no
-# sibling library in sight. Concepts are the main reason C++20 is the base language level, with `std::atomic_ref` and
-# the `<bit>` helpers close behind - and the interface target must say so, or external consumers get an unbuildable
+# The header-only engine of `include/`: every header, the siblings it reaches into, and the type verdicts below, over
+# the C types of `usearch::abi`; the C++ SDK in `cpp/` reaches only its own interface target, `usearch::cpp`. The file
+# set names the basic graph index and the utilities it stands on, six headers on the standard library alone, no sibling
+# library in sight. Concepts are the main reason C++20 is the base language level, with `std::atomic_ref` and the
+# `<bit>` helpers close behind - and the interface target must say so, or external consumers get an unbuildable
 # contract.
-add_library(usearch_templates INTERFACE)
-add_library(${PROJECT_NAME}::templates ALIAS usearch_templates)
-set_target_properties(usearch_templates PROPERTIES EXPORT_NAME templates)
+add_library(usearch_header INTERFACE)
+add_library(${PROJECT_NAME}::header ALIAS usearch_header)
+set_target_properties(usearch_header PROPERTIES EXPORT_NAME header)
 # MSVC reads BOM-less UTF-8 in the system code page, so consumers of these Unicode-commented headers need `/utf-8`.
 target_compile_options(
-    usearch_templates INTERFACE "$<$<OR:$<COMPILE_LANG_AND_ID:C,MSVC>,$<COMPILE_LANG_AND_ID:CXX,MSVC>>:/utf-8>"
+    usearch_header INTERFACE "$<$<OR:$<COMPILE_LANG_AND_ID:C,MSVC>,$<COMPILE_LANG_AND_ID:CXX,MSVC>>:/utf-8>"
 )
 target_sources(
-    usearch_templates
+    usearch_header
     INTERFACE FILE_SET
               HEADERS
               BASE_DIRS
-              ${usearch_include_build_dirs_}
+              "${PROJECT_SOURCE_DIR}/include/"
               FILES
-              c/usearch/types.h
               include/usearch/utilities/types.hpp
               include/usearch/utilities/sanitizers.hpp
               include/usearch/utilities/ram_buffers.hpp
@@ -158,14 +154,14 @@ target_sources(
               include/usearch/utilities/ram_tables.hpp
               include/usearch/basic/ram_index.hpp
 )
-target_compile_features(usearch_templates INTERFACE cxx_std_20)
+target_compile_features(usearch_header INTERFACE cxx_std_20)
 # A media list draws its identity from `BCryptGenRandom` on Windows.
-target_link_libraries(usearch_templates INTERFACE $<$<PLATFORM_ID:Windows>:bcrypt>)
+target_link_libraries(usearch_header INTERFACE usearch_abi $<$<PLATFORM_ID:Windows>:bcrypt>)
 include(GNUInstallDirs)
 
 target_include_directories(
-    usearch_templates INTERFACE "$<BUILD_INTERFACE:${usearch_include_build_dirs_}>"
-                                "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
+    usearch_header INTERFACE "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include/>"
+                             "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
 )
 
 # Dependencies: the siblings through `usearch_sibling`, the rest each acquired by its own `cmake/<dependency>.cmake`,
@@ -231,9 +227,12 @@ function (usearch_setup_target target_)
 
     # One source of truth for header paths: whatever the interface target advertises, including what the dependencies
     # carry, without inheriting its compile features onto pure-C targets.
-    target_include_directories(${target_} PRIVATE $<TARGET_PROPERTY:usearch_templates,INTERFACE_INCLUDE_DIRECTORIES>)
     target_include_directories(
-        ${target_} SYSTEM PRIVATE $<TARGET_PROPERTY:usearch_templates,INTERFACE_SYSTEM_INCLUDE_DIRECTORIES>
+        ${target_} PRIVATE $<TARGET_PROPERTY:usearch_abi,INTERFACE_INCLUDE_DIRECTORIES>
+                           $<TARGET_PROPERTY:usearch_header,INTERFACE_INCLUDE_DIRECTORIES>
+    )
+    target_include_directories(
+        ${target_} SYSTEM PRIVATE $<TARGET_PROPERTY:usearch_header,INTERFACE_SYSTEM_INCLUDE_DIRECTORIES>
     )
     # Host-tuned units read the compiler; every other unit takes each sibling's compiled capabilities and instantiates
     # its kits per CPU class, never by a template's default capability, so the class units and the dispatch unit name
@@ -370,39 +369,40 @@ else ()
 endif ()
 include(cmake/usearch_install.cmake)
 
-# The header-only templates are a component of their own, with `usearchTemplatesTargets`, which records the siblings
-# without headers, as each owns its own, so `usearch::templates` names nothing a consumer cannot resolve. The export
-# reads its set as it stands when called, so it trails every target that belongs to it.
+# The header-only engine is a component of its own, with `usearchHeaderTargets`, which records the siblings without
+# headers, as each owns its own, so `usearch::header` names nothing a consumer cannot resolve; it links `usearch::abi`
+# from `usearchTargets`. The export reads its set as it stands when called, so it trails every target that belongs to
+# it.
 if (USEARCH_INSTALL)
     install(
         DIRECTORY include/usearch
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-        COMPONENT templates
+        COMPONENT header
     )
     install(
-        TARGETS usearch_templates
-        EXPORT ${PROJECT_NAME}TemplatesTargets
+        TARGETS usearch_header
+        EXPORT ${PROJECT_NAME}HeaderTargets
         FILE_SET HEADERS
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-        COMPONENT templates
+        COMPONENT header
         INCLUDES
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
     )
     install(
         TARGETS ${usearch_sibling_targets_}
-        EXPORT ${PROJECT_NAME}TemplatesTargets
-        COMPONENT templates
+        EXPORT ${PROJECT_NAME}HeaderTargets
+        COMPONENT header
     )
     export(
-        TARGETS usearch_templates ${usearch_sibling_targets_}
+        TARGETS usearch_header usearch_abi ${usearch_sibling_targets_}
         NAMESPACE ${PROJECT_NAME}::
-        FILE "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}TemplatesTargets.cmake"
+        FILE "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}HeaderTargets.cmake"
     )
     install(
-        EXPORT ${PROJECT_NAME}TemplatesTargets
+        EXPORT ${PROJECT_NAME}HeaderTargets
         NAMESPACE ${PROJECT_NAME}::
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/${PROJECT_NAME}
-        COMPONENT templates
+        COMPONENT header
     )
 endif ()
 
