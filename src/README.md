@@ -129,10 +129,10 @@ Every call naming an executor enters through `submitted<verb>`, and one call hol
 - It raises `named_calls` on every index, cursor, plan and arena it names, which every free and every reshard naming the handle waits to fall to zero.
 - A blocking call, or a deferred one on a pool that needs its caller, runs the verb's body on the calling thread.
 - A deferred call on a caller-exclusive pool copies its arguments into `holding_call.delegated_arguments` and dispatches them with `fu_pool_unsafe_for_threads`, whose slice on thread 0 runs the body and `end_call` while the others return at once; the body's fan-outs fork the other threads as a caller's would.
-- The next call, a drain and a free first await any dispatch in flight, which waits at most for the tail of thread 0's slice.
+- The next call, a drain and a free first take the claim, then await any dispatch in flight, which waits at most for the tail of thread 0's slice; only the claim holder joins or parks the pool, as exactly one thread joins each split dispatch.
 - The body meets its own arguments again in `submitted`, recognised by `holding_call.arguments`, and runs in place; `call_outcome_t` records into `holding_call.recorded`.
 - `end_call` lowers the counts, gives back the claim, then publishes the message and the status.
-- Drains and frees only wait on the claim; VRAM verbs all run at submission, since each reads its device results back before it ends.
+- Drains and frees wait for the claim to fall free and take it in `take_idle_claim`, where a call would finish contended; a drain holds it through the park and the device drain. VRAM verbs all run at submission, since each reads its device results back before it ends.
 
 ## NVMe
 

@@ -1797,19 +1797,20 @@ USEARCH_EXPORT void usearch_executor_drain(usearch_executor_drain_t* arguments) 
     usearch_executor_handle_t& executor = *arguments->executor;
     if (runs_holding_call(executor))
         return propagate_error(usearch_status_contended_k, outcome, "A callback cannot drain its executor"), void();
-    await_delegated_call(executor);
-    wait_while_claimed(executor);
+    // Held through the park and the device drain, so no submitter joins or dispatches meanwhile.
+    take_idle_claim(executor);
     // Threads spin after every dispatch already, so only parking needs a word to them.
     if (util::ram_executor_t* const threads = threads_of(executor);
         threads && arguments->mood != usearch_mood_spinning_k)
         threads->park();
-    propagate_error(visit_executor(executor, [](auto& typed) noexcept { return typed.wait(); }), outcome);
+    util::status_t const drained = visit_executor(executor, [](auto& typed) noexcept { return typed.wait(); });
+    host_outcome_verbs().release_claim(&executor.holding_call.claim);
+    propagate_error(drained, outcome);
 }
 
 USEARCH_EXPORT void usearch_executor_free(usearch_executor_t executor) {
     if (!executor) return;
-    await_delegated_call(*executor);
-    wait_while_claimed(*executor);
+    take_idle_claim(*executor);
     delete executor;
 }
 

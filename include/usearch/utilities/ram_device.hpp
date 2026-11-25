@@ -11,6 +11,8 @@
  */
 #pragma once
 
+#include <cassert> // `assert` - only a caller-exclusive pool splits a dispatch
+
 #include <memory>      // `std::allocator_traits` - the placing allocator's propagation
 #include <mutex>       // `std::unique_lock`, `std::adopt_lock` - the executor's one-caller hold
 #include <new>         // `std::align_val_t`, `std::nothrow` - the heap fallback of a domainless allocator
@@ -353,6 +355,7 @@ struct ram_executor_t {
     /** Waits until the dispatch in flight, if any, is over; only the claim holder waits. */
     void unsafe_await() noexcept {
         // An exclusive pool reads no token, while an inclusive one stays held on zero.
+        assert(threads_.caller_exclusivity() == fu::caller_exclusive_k && "Only an exclusive pool splits a dispatch");
         if (fu_pool_t const spawned = threads_.get()) fu_pool_unsafe_join(spawned, 0);
     }
 

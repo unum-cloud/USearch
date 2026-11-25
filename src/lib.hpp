@@ -2838,9 +2838,10 @@ inline bool runs_holding_call(usearch_executor_handle_t& executor) noexcept {
     return body_thread == std::this_thread::get_id();
 }
 
-/** Waits out the tail of the last delegated call's slice on thread 0, after its status went out. */
+/** Waits out the tail of the last delegated call's slice on thread 0, after its status went out;
+ *  only the claim holder may, as exactly one thread joins each split dispatch. */
 inline void await_delegated_call(usearch_executor_handle_t& executor) noexcept {
-    if (util::ram_executor_t* const threads = threads_of(executor)) threads->unsafe_await();
+    if (delegates(executor)) threads_of(executor)->unsafe_await();
 }
 
 /** Returns once no call naming the handle that owns @p named_calls is left: what every free and
@@ -2910,9 +2911,12 @@ inline bool submitted(arguments_type_* arguments) noexcept {
     return true;
 }
 
-/** Returns once no call holds @p executor, on the class waiter. */
-inline void wait_while_claimed(usearch_executor_handle_t& executor) noexcept {
-    host_outcome_verbs().wait_claim(&executor.holding_call.claim);
+/** Takes the claim of @p executor once no call holds it, then joins the slice thread 0 may still be
+ *  leaving, so the caller alone joins, parks or frees its pool. */
+inline void take_idle_claim(usearch_executor_handle_t& executor) noexcept {
+    call_claim_t& claim = executor.holding_call.claim;
+    while (host_outcome_verbs().take_claim(&claim) == call_claim_t::held_k) host_outcome_verbs().wait_claim(&claim);
+    await_delegated_call(executor);
 }
 
 #pragma endregion Holding Calls

@@ -1542,8 +1542,9 @@ typedef struct usearch_executor_drain_t {
 } usearch_executor_drain_t;
 
 /** Waits until no call holds the executor and its devices finished their work, then applies the
- *  mood. Reports only executor-level failures, and @c usearch_status_contended_k from a callback of
- *  the call it would wait on. */
+ *  mood. Holds the executor meanwhile, so a call submitted during a drain finishes
+ *  @c usearch_status_contended_k. Reports only executor-level failures, and
+ *  @c usearch_status_contended_k from a callback of the call it would wait on. */
 USEARCH_EXPORT void usearch_executor_drain(usearch_executor_drain_t* arguments);
 
 /** Waits until no call holds the executor and its devices finished their work, releases its
