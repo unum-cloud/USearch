@@ -3010,6 +3010,12 @@ static int arena_buffer_on_device(ArenaBuffer const* buffer) {
 }
 
 static int ArenaBuffer_getbuffer(ArenaBuffer* self, Py_buffer* view, int flags) {
+    // A device output's address is no host one, so the buffer protocol refuses it, Metal's too.
+    view->obj = NULL;
+    int const on_device = arena_buffer_on_device(self);
+    if (on_device < 0) return -1;
+    if (on_device)
+        return usearch_py_raise(usearch_status_device_k, "the output lives in device memory; read `__dlpack__`");
     Py_ssize_t bytes = self->item_bytes;
     for (int axis = 0; axis != self->rank; ++axis) bytes *= self->shape[axis];
     view->obj = Py_NewRef((PyObject*)self);

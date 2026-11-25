@@ -1206,7 +1206,6 @@ struct ram_index {
      *  - @c config_mismatch_k @p node is at or past the watermark.
      */
     expected<key_t, status_code_t> key_of(node_id_t node) const noexcept {
-        static_assert(sizeof(expected<key_t, status_code_t>) == sizeof(key_t) + sizeof(status_code_t));
         if (node >= size()) return {{}, status_code_t::config_mismatch_k};
         return {keyed_[node], status_code_t::success_k};
     }

@@ -2248,7 +2248,7 @@ static char const doc_DenseCursor_next[] =                                      
     "Raises:\n"                                                                                  //
     "  InvalidArgumentError: When the cursor was closed.";
 
-static PyObject* DenseCursor_next(DenseCursor* self, PyObject* const* args, Py_ssize_t positional_args_count,
+static PyObject* DenseCursor_next(PyObject* self, PyObject* const* args, Py_ssize_t positional_args_count,
                                   PyObject* args_names_tuple) {
     PyObject *wanted_object, *arena_object, *links_object;
     usearch_py_argument_t const arguments[] = {

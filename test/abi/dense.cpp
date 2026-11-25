@@ -181,15 +181,15 @@ static void expect_repeatable_walks(handle<dense_verbs_t>& index, usearch_rows_v
     expect_true(std::ranges::equal(pooled.keys, alone.keys));
 }
 
-/** Bytes behind a foreign prefix magic load as @c malformed, with no handle and an engine note in
- *  place of the status's own name. */
+/** Bytes behind a foreign prefix magic read as a manifest and load as @c malformed, with no handle
+ *  and the engine's note that the manifest is no JSON object in place of the status's own name. */
 static void test_dense_foreign_magic() {
     std::string_view const foreign {"SAFEGRPX\0\0\0\0\0\0\0\0", 16};
     dense_verbs_t::index_t index = nullptr;
     usearch_outcome_t outcome {};
     dense_verbs_t::load_ram_buffer(&index, nullptr, bytes_view(foreign), {}, {}, &outcome);
     expect_status(outcome, usearch_status_malformed_k);
-    expect_true(outcome.message && std::strcmp(outcome.message, usearch_status_name(outcome.status)) != 0);
+    expect_true(outcome.message && std::strcmp(outcome.message, "Header is not a JSON object") == 0);
     expect_true(index == nullptr);
 }
 

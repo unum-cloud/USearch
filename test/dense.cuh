@@ -475,9 +475,8 @@ auto drive_multiply(indexes_type_& indexes, left_type_ const& left,
 template <typename indexes_type_, typename rows_type_, typename score_type_>
 auto drive_maxsim(indexes_type_& indexes, rows_type_ const& rows, std::span<std::size_t const> query_offsets,
                   std::span<std::size_t> scored, products_tape<typename indexes_type_::key_t, score_type_> matches,
-                  typename indexes_type_::search_config_t config,
+                  typename indexes_type_::maxsim_config_t maxsim_config,
                   dense_indexes_executor<indexes_type_>& driver) noexcept {
-    typename indexes_type_::maxsim_config_t const maxsim_config {config, matches.stride};
     if constexpr (a_ram_collection<indexes_type_>)
         return indexes.maxsim(rows, query_offsets, scored, matches, maxsim_config, driver.executor,
                               to_writable_span(driver.traversals));
@@ -2606,10 +2605,11 @@ void test_dense_indexes_products(u64_t seed, placement_types_&... placement) {
 
 /** Sharded MaxSim against the native dots: 64 documents of 4 token rows share their keys, a walk
  *  as wide as the index ranks the oracle's best documents, a default one ranks only keys of the
- *  index, and offsets past the rows refuse. Host towers also rank a scan, cut queries of 3 and 5
- *  rows from one batch, and rank a 16-row query, as wide as a matrix engine's tile. Every score is
- *  recorded against its exact one and warns past three sigmas: the reducer truncates each row's
- *  ranking and imputes the rows it misses at the floor, so no path promises exact scores. */
+ *  index, every query keeps the wanted count on a tape with room for more, and offsets past the
+ *  rows refuse. Host towers also rank a scan, cut queries of 3 and 5 rows from one batch, and rank
+ *  a 16-row query, as wide as a matrix engine's tile. Every score is recorded against its exact
+ *  one and warns past three sigmas: the reducer truncates each row's ranking and imputes the rows
+ *  it misses at the floor, so no path promises exact scores. */
 template <typename indexes_type_, typename... placement_types_>
 void dense_expect_indexes_maxsim(u64_t seed, placement_types_&... placement) {
     using scalar_t = typename indexes_type_::scalar_t;
@@ -2617,7 +2617,8 @@ void dense_expect_indexes_maxsim(u64_t seed, placement_types_&... placement) {
     using search_config_t = typename indexes_type_::search_config_t;
     constexpr std::size_t rows_count = dense_thread_nodes_k, tokens_per_document = 4;
     constexpr std::size_t documents_count = rows_count / tokens_per_document;
-    constexpr std::size_t tokens_per_query = 4, queries_count = 3, wanted = 5;
+    // The tape holds more than a query wants, so a publish cutting runs at the stride shows.
+    constexpr std::size_t tokens_per_query = 4, queries_count = 3, wanted = 5, stride = wanted + 3;
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
 
     dense_indexes_executor<indexes_type_> driver {placement...};
@@ -2654,8 +2655,8 @@ void dense_expect_indexes_maxsim(u64_t seed, placement_types_&... placement) {
         for (std::size_t document = 0; document != documents_count; ++document)
             exact(query, document) = exact_of(query * tokens_per_query, (query + 1) * tokens_per_query, document);
 
-    nk::vector<key_t> found_keys = make_vector<key_t>(queries_count * wanted);
-    nk::vector<f64_t> found_scores = make_vector<f64_t>(queries_count * wanted);
+    nk::vector<key_t> found_keys = make_vector<key_t>(queries_count * stride);
+    nk::vector<f64_t> found_scores = make_vector<f64_t>(queries_count * stride);
     std::array<std::size_t, queries_count + 1> offsets {};
     std::array<std::size_t, queries_count> scored {};
     std::array<std::size_t, queries_count + 1> uniform_offsets;
@@ -2666,8 +2667,9 @@ void dense_expect_indexes_maxsim(u64_t seed, placement_types_&... placement) {
         std::size_t const placed = query_offsets.size() - 1;
         offsets[0] = 0;
         products_tape<key_t, f64_t> const matches {to_writable_span(found_keys), to_writable_span(found_scores),
-                                                   std::span {offsets}.first(placed + 1), wanted};
-        return drive_maxsim(indexes, rows, query_offsets, std::span {scored}.first(placed), matches, config, driver);
+                                                   std::span {offsets}.first(placed + 1), stride};
+        return drive_maxsim(indexes, rows, query_offsets, std::span {scored}.first(placed), matches, {config, wanted},
+                            driver);
     };
     auto maxsim = [&](nk::matrix_view<scalar_t> rows, search_config_t config) noexcept {
         return maxsim_cut(rows, std::span<std::size_t const> {uniform_offsets}, config);
