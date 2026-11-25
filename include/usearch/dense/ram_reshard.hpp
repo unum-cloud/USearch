@@ -223,19 +223,11 @@ struct [[nodiscard]] ram_reshard_plan {
         return 0;
     }
 
-    /** Units of that phase done and in all, summed over the target shards. */
+    /** Units of that phase done and in all, summed over the target shards in it. */
     std::size_t completed() const noexcept {
-        if (!splits_()) return rounds_.completed();
-        std::size_t sum = 0;
-        for (shard_plan_t const& plan : shard_plans_) sum += plan.completed();
-        return sum;
+        return splits_() ? lead_phase_units(shard_plans_).completed : rounds_.completed();
     }
-    std::size_t total() const noexcept {
-        if (!splits_()) return rounds_.total();
-        std::size_t sum = 0;
-        for (shard_plan_t const& plan : shard_plans_) sum += plan.total();
-        return sum;
-    }
+    std::size_t total() const noexcept { return splits_() ? lead_phase_units(shard_plans_).total : rounds_.total(); }
 
     /** Opens every target shard's next round once each one's ended; a no-op in the moves and while
      *  any target shard is mid-round. */
@@ -514,22 +506,19 @@ struct [[nodiscard]] ram_reshard_plan {
                 source.shards_.begin_window();
                 for (indexes_t* target : targets_) target->shards_.begin_commit();
             }
+            phase_units_t const units = lead_phase_units(shard_plans_);
             advancing = 0;
-            std::size_t completed = 0, total = 0;
-            for (shard_plan_t& plan : shard_plans_) {
-                completed += plan.completed();
-                total += plan.total();
-                advancing += plan.advance();
-            }
+            for (shard_plan_t& plan : shard_plans_) advancing += plan.advance();
             if (moving) {
                 for (indexes_t* target : targets_) target->shards_.end_commit();
                 if (!shard_plans_[0].moving()) source.clear_();
                 source.shards_.end_window();
             }
             std::memset(cursors.data(), 0, cursors.size_bytes());
-            // A round hears every barrier with the phase it closed, in that phase's own units; the
-            // moves hear none.
-            if (total && on_visited(completed, total) == continuation_t::cancel_k) return status_code_t::cancelled_k;
+            // A round hears every barrier with the phase the lead shard closed, in that phase's own
+            // units; the moves hear none.
+            if (units.total && on_visited(units.completed, units.total) == continuation_t::cancel_k)
+                return status_code_t::cancelled_k;
         } while (advancing);
         return status_code_t::success_k;
     }

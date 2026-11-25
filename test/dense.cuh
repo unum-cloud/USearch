@@ -3110,9 +3110,10 @@ void test_dense_indexes_growth(u64_t seed) {
     expect_true(indexes.capacity() >= rows * 2);
 }
 
-/** A sharded pass under narrow build candidates: the first re-wires nodes, the second fewer, each
- *  heals the islands it leaves without losing reach, and the audit after them counts what the last
- *  pass ended on. */
+/** A sharded pass under narrow build candidates: the first, cancelled at every barrier and resumed,
+ *  re-wires nodes and reports one phase's units at each barrier, summed over the shards in that
+ *  phase alone; the second re-wires fewer; each heals the islands it leaves without losing reach,
+ *  and the audit after them counts what the last pass ended on. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_, typename... placement_types_>
 void test_dense_indexes_refine(u64_t seed, placement_types_&... placement) {
     using index_t = typename indexes_type_::index_t;
@@ -3134,7 +3135,30 @@ void test_dense_indexes_refine(u64_t seed, placement_types_&... placement) {
     typename index_t::insert_config_t const narrow {4};
     expect_true(succeeded(indexes.insert(to_span(keys), vectors.view(), executor, narrow).status));
 
-    auto const [first, first_status] = indexes.refine({}, executor);
+    // The first pass is cancelled at every barrier and resumed. Shards drift apart - a health check
+    // takes one barrier per depth of its own - so a barrier's units are the lead shard's phase's:
+    // twice the entries of the shards in a health check, once those of the shards re-stitching.
+    auto one_phase_units = [&](std::size_t total, std::size_t unit) noexcept {
+        std::size_t const shards = indexes.shards_count();
+        for (std::size_t subset = 1; subset != (std::size_t {1} << shards); ++subset) {
+            std::size_t entries = 0;
+            for (std::size_t shard = 0; shard != shards; ++shard)
+                if (subset >> shard & 1) entries += indexes.shard(shard).size();
+            if (total == unit * entries) return true;
+        }
+        return false;
+    };
+    auto refine_resumed = [&] {
+        auto [plan, plan_status] = indexes.plan_refine({}, executor);
+        expect_equal(plan_status, status_code_t::success_k);
+        auto cancel = [](std::size_t, std::size_t) noexcept { return continuation_t::cancel_k; };
+        while (drive_run(plan, driver, cancel) == status_code_t::cancelled_k) {
+            if (plan.phase() == phase_t::health_k) expect_true(one_phase_units(plan.total(), 2));
+            if (plan.phase() == phase_t::restitch_k) expect_true(one_phase_units(plan.total(), 1));
+        }
+        return drive_finish(plan, driver);
+    };
+    auto const [first, first_status] = refine_resumed();
     expect_true(succeeded(first_status));
     expect_true(first.reselected_nodes >= rows && first.changed_nodes <= first.reselected_nodes);
     expect_true(first.changed_nodes > 0);
@@ -3502,9 +3526,7 @@ void test_dense_indexes_gather_many(u64_t seed, placement_types_&... placement) 
                          std::span<indexes_type_* const> {baseline_targets}, executor, {}, proceed)
                      .status,
                  status_code_t::success_k);
-    // Every restitch barrier reports each shard's entries, so the furthest count covers them all.
     std::size_t const baseline_visited = reported.exchange(0);
-    expect_true(baseline_visited >= rows);
 
     indexes_type_ target {kernel_, {dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
     expect_true(succeeded(place_shards(target, placement...)));
@@ -3552,7 +3574,6 @@ void test_dense_indexes_gather_many(u64_t seed, placement_types_&... placement) 
         expect_equal(drive_run(plan, driver, proceed), status_code_t::success_k);
         auto const [gathered, finish_status] = drive_finish(plan, driver);
         expect_equal(finish_status, status_code_t::success_k);
-        expect_true(reported.load() >= rows);
         expect_true(gathered.graph.reselected_nodes >= rows);
         expect_true(gathered.graph.verdict != refine_verdict_t::stopped_k);
         expect_equal(gathered.graph.traversal_stats.visited_members, 0u);

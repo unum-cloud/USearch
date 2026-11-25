@@ -796,9 +796,9 @@ struct vram_apple_indexes {
         /** Where that phase sits among a round's six; zero once every shard's round ended. */
         std::size_t ordinal() const noexcept { return ordinal_(shard_plans_); }
 
-        /** Units of that phase done and in all, summed over the shards as the drive sums them. */
-        std::size_t completed() const noexcept { return completed_(shard_plans_); }
-        std::size_t total() const noexcept { return total_(shard_plans_); }
+        /** Units of that phase done and in all, summed over the shards in that phase. */
+        std::size_t completed() const noexcept { return lead_phase_units(shard_plans_).completed; }
+        std::size_t total() const noexcept { return lead_phase_units(shard_plans_).total; }
 
         /** Opens every shard's next round once each one's ended, from the roots their closing
          *  checks kept; a no-op while any shard is mid-round. The claim words stay closed. */
@@ -834,18 +834,6 @@ struct vram_apple_indexes {
             for (auto const& plan : plans)
                 if (plan.rounding()) return plan.ordinal();
             return 0;
-        }
-        template <typename plans_type_>
-        static std::size_t completed_(plans_type_ const& plans) noexcept {
-            std::size_t sum = 0;
-            for (auto const& plan : plans) sum += plan.completed();
-            return sum;
-        }
-        template <typename plans_type_>
-        static std::size_t total_(plans_type_ const& plans) noexcept {
-            std::size_t sum = 0;
-            for (auto const& plan : plans) sum += plan.total();
-            return sum;
         }
         template <typename plans_type_>
         static void next_round_(plans_type_& plans) noexcept {
@@ -908,17 +896,12 @@ struct vram_apple_indexes {
                     if (status_t const waited = plans[shard].wait(traversals_[shard]);
                         failed(waited) && succeeded(outcome))
                         outcome = waited;
-                // A round's every barrier is heard in its phase's own units, as the RAM drain does.
-                std::size_t completed = 0, total = 0;
-                bool rounding = false;
+                // Each barrier is heard in the lead shard's phase's units, as in the RAM drain.
+                phase_units_t const units = lead_phase_units(plans);
                 advancing = 0;
-                for (std::size_t shard = 0; shard != plans.size(); ++shard) {
-                    auto& plan = plans[shard];
-                    rounding |= plan.rounding();
-                    completed += plan.completed(), total += plan.total();
-                    advancing += plan.advance(traversals_[shard]);
-                }
-                if (advancing && rounding && on_visited(completed, total) == continuation_t::cancel_k)
+                for (std::size_t shard = 0; shard != plans.size(); ++shard)
+                    advancing += plans[shard].advance(traversals_[shard]);
+                if (advancing && units.total && on_visited(units.completed, units.total) == continuation_t::cancel_k)
                     return status_code_t::cancelled_k;
             } while (advancing);
             return outcome;
@@ -1042,10 +1025,10 @@ struct vram_apple_indexes {
             return splitting_() ? refine_plan_t::ordinal_(shard_splits_) : rounds_.ordinal();
         }
         std::size_t completed() const noexcept {
-            return splitting_() ? refine_plan_t::completed_(shard_splits_) : rounds_.completed();
+            return splitting_() ? lead_phase_units(shard_splits_).completed : rounds_.completed();
         }
         std::size_t total() const noexcept {
-            return splitting_() ? refine_plan_t::total_(shard_splits_) : rounds_.total();
+            return splitting_() ? lead_phase_units(shard_splits_).total : rounds_.total();
         }
 
         /** Opens every target shard's next round once each one's ended, a split's from its first

@@ -803,8 +803,8 @@ struct vram_nvidia_indexes {
          *  in all, summed over the shards. */
         phase_t phase() const noexcept { return shard_plans_phase_(shard_plans_); }
         std::size_t ordinal() const noexcept { return shard_plans_ordinal_(shard_plans_); }
-        std::size_t completed() const noexcept { return shard_plans_completed_(shard_plans_); }
-        std::size_t total() const noexcept { return shard_plans_total_(shard_plans_); }
+        std::size_t completed() const noexcept { return lead_phase_units(shard_plans_).completed; }
+        std::size_t total() const noexcept { return lead_phase_units(shard_plans_).total; }
 
         /** Opens every shard's next round once each one's ended; a no-op while any is mid-round. */
         void next_round() noexcept { next_shard_rounds_(shard_plans_); }
@@ -896,8 +896,8 @@ struct vram_nvidia_indexes {
          *  reports them. */
         phase_t phase() const noexcept { return shard_plans_phase_(shard_plans_); }
         std::size_t ordinal() const noexcept { return shard_plans_ordinal_(shard_plans_); }
-        std::size_t completed() const noexcept { return shard_plans_completed_(shard_plans_); }
-        std::size_t total() const noexcept { return shard_plans_total_(shard_plans_); }
+        std::size_t completed() const noexcept { return lead_phase_units(shard_plans_).completed; }
+        std::size_t total() const noexcept { return lead_phase_units(shard_plans_).total; }
 
         /** Opens every target shard's next round once each one's ended; a no-op mid-round. */
         void next_round() noexcept { next_shard_rounds_(shard_plans_); }
@@ -1069,16 +1069,12 @@ struct vram_nvidia_indexes {
             for (std::size_t shard = 0; shard != plans.size(); ++shard)
                 if (status_t const waited = plans[shard].wait(traversals[shard]); failed(waited) && succeeded(outcome))
                     outcome = waited;
-            // A round's every barrier is heard in its phase's own units, as the RAM drain does.
-            std::size_t completed = 0, total = 0, advanced = 0;
-            bool rounding = false;
-            for (auto& plan : plans) {
-                rounding |= plan.rounding();
-                completed += plan.completed(), total += plan.total();
-                advanced += plan.advance();
-            }
+            // Each barrier is heard in the lead shard's phase's units, as in the RAM drain.
+            phase_units_t const units = lead_phase_units(plans);
+            std::size_t advanced = 0;
+            for (auto& plan : plans) advanced += plan.advance();
             advancing = advanced != 0;
-            if (advancing && rounding && on_visited(completed, total) == continuation_t::cancel_k)
+            if (advancing && units.total && on_visited(units.completed, units.total) == continuation_t::cancel_k)
                 return status_code_t::cancelled_k;
         }
         return outcome;
@@ -1127,20 +1123,6 @@ struct vram_nvidia_indexes {
         for (auto const& plan : plans)
             if (plan.rounding()) return plan.ordinal();
         return 0;
-    }
-
-    /** Units of the phases in hand done and in all, summed over @p plans. */
-    template <typename plans_type_>
-    static std::size_t shard_plans_completed_(plans_type_ const& plans) noexcept {
-        std::size_t sum = 0;
-        for (auto const& plan : plans) sum += plan.completed();
-        return sum;
-    }
-    template <typename plans_type_>
-    static std::size_t shard_plans_total_(plans_type_ const& plans) noexcept {
-        std::size_t sum = 0;
-        for (auto const& plan : plans) sum += plan.total();
-        return sum;
     }
 
     /** Opens every next round of @p plans once each one's ended; a no-op while any is not done. */

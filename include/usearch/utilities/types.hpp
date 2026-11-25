@@ -1221,6 +1221,29 @@ constexpr std::size_t round_ordinal(phase_t phase, phase_t swept_after) noexcept
     return static_cast<std::size_t>(phase) - health + 1;
 }
 
+/** Units of one phase, done and in all, as a progress callback hears them. */
+struct phase_units_t {
+    std::size_t completed = 0;
+    std::size_t total = 0;
+};
+
+/** Units of the phase the first rounding plan of @p plans is in, summed over the plans in that
+ *  phase, which @c ordinal tells apart, the opening health check from the closing one; none while
+ *  no plan rounds. Shards drift apart - a health check takes one barrier per depth of its own, a
+ *  gather repeats while a neighborhood overflows, a shard heals after its closing check - so a sum
+ *  over every plan would mix units of different phases. */
+template <typename plans_type_>
+phase_units_t lead_phase_units(plans_type_ const& plans) noexcept {
+    phase_units_t units;
+    std::size_t lead = 0;
+    for (auto const& plan : plans) {
+        if (!plan.rounding()) continue;
+        if (!lead) lead = plan.ordinal();
+        if (plan.ordinal() == lead) units.completed += plan.completed(), units.total += plan.total();
+    }
+    return units;
+}
+
 /** The nodes that @p node_id walks across first in round @p round of merging @p parts parts, whose
  *  ascending @p part_bases start below @p nodes: the neighboring group of <tt>2^round</tt> parts,
  *  or none when no group neighbors its own. */

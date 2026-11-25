@@ -817,17 +817,9 @@ struct ram_indexes {
             return 0;
         }
 
-        /** Units of that phase done and in all, summed over the shards as the drain sums them. */
-        std::size_t completed() const noexcept {
-            std::size_t sum = 0;
-            for (typename index_t::refine_plan_t const& plan : shard_plans_) sum += plan.completed();
-            return sum;
-        }
-        std::size_t total() const noexcept {
-            std::size_t sum = 0;
-            for (typename index_t::refine_plan_t const& plan : shard_plans_) sum += plan.total();
-            return sum;
-        }
+        /** Units of that phase done and in all, summed over the shards in that phase. */
+        std::size_t completed() const noexcept { return lead_phase_units(shard_plans_).completed; }
+        std::size_t total() const noexcept { return lead_phase_units(shard_plans_).total; }
 
         /** Opens every shard's next round once each one's ended, from the roots their closing
          *  audits kept; a no-op while any shard is mid-round. The dispensers stay closed. */
@@ -2733,7 +2725,7 @@ struct ram_indexes {
 
     /** Drains every shard plan of @p plans from where @p cursors stand, advancing each between
      *  phases, until none follows or a task fails or @p on_visited cancels: a round hears every
-     *  barrier with the phase it closed, in that phase's own units. */
+     *  barrier with the phase the lead shard closed, in that phase's own units. */
     template <typename plan_type_, typename progress_type_>
     status_t drain_rounds_(growing_buffer<plan_type_, forkunion_allocator_t>& plans, std::span<std::size_t> cursors,
                            executor_t& executor, std::span<traversal_context_t> traversals,
@@ -2747,15 +2739,12 @@ struct ram_indexes {
             // Every claimed task ran, so a stopped drain's cursors say where the next starts.
             if (status_t const drained = drain_tasks_(plans, cursors, executor, run_task); failed(drained))
                 return drained;
+            phase_units_t const units = lead_phase_units(plans);
             advancing = 0;
-            std::size_t completed = 0, total = 0;
-            for (plan_type_& plan : plans) {
-                completed += plan.completed();
-                total += plan.total();
-                advancing += plan.advance();
-            }
+            for (plan_type_& plan : plans) advancing += plan.advance();
             std::memset(cursors.data(), 0, cursors.size_bytes());
-            if (total && on_visited(completed, total) == continuation_t::cancel_k) return status_code_t::cancelled_k;
+            if (units.total && on_visited(units.completed, units.total) == continuation_t::cancel_k)
+                return status_code_t::cancelled_k;
         } while (advancing);
         return status_code_t::success_k;
     }

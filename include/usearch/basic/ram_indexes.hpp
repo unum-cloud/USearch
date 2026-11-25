@@ -979,10 +979,10 @@ struct ram_indexes {
         /** The budget planning reserved every neighbor list for, which every shard shares. */
         std::size_t connectivity() const noexcept { return widest_connectivity(shard_plans_); }
 
-        /** Units of the phase every shard plan's round is in, done and in all, summed over the
-         *  shards: what a driver's progress hears at every barrier. */
-        std::size_t completed() const noexcept { return completed_units(shard_plans_); }
-        std::size_t total() const noexcept { return total_units(shard_plans_); }
+        /** Units of the phase the first rounding shard plan is in, done and in all, summed over the
+         *  shards in it: what a driver's progress hears at every barrier. */
+        std::size_t completed() const noexcept { return lead_phase_units(shard_plans_).completed; }
+        std::size_t total() const noexcept { return lead_phase_units(shard_plans_).total; }
 
         /**
          *  @brief Grows @p context to what any shard plan's gather or restitch task touches, which
@@ -1131,10 +1131,10 @@ struct ram_indexes {
         /** The budget planning reserved every neighbor list for, which every shard shares. */
         std::size_t connectivity() const noexcept { return widest_connectivity(shard_plans_); }
 
-        /** Units of the phase every shard plan's round is in, done and in all, summed over the
-         *  shards; none in the moves. */
-        std::size_t completed() const noexcept { return completed_units(shard_plans_); }
-        std::size_t total() const noexcept { return total_units(shard_plans_); }
+        /** Units of the phase the first rounding shard plan is in, done and in all, summed over the
+         *  shards in it; none in the moves. */
+        std::size_t completed() const noexcept { return lead_phase_units(shard_plans_).completed; }
+        std::size_t total() const noexcept { return lead_phase_units(shard_plans_).total; }
 
         /** Grows @p context to what any shard plan's round task touches. */
         template <typename context_allocator_type_>
@@ -1485,20 +1485,6 @@ struct ram_indexes {
         std::size_t widest = 0;
         for (plan_type_ const& plan : plans) widest = max_of(widest, plan.connectivity());
         return widest;
-    }
-
-    /** Units of the phase every plan of @p plans is in, done and in all, summed. */
-    template <typename plan_type_>
-    static std::size_t completed_units(growing_buffer<plan_type_, forkunion_allocator_t> const& plans) noexcept {
-        std::size_t sum = 0;
-        for (plan_type_ const& plan : plans) sum += plan.completed();
-        return sum;
-    }
-    template <typename plan_type_>
-    static std::size_t total_units(growing_buffer<plan_type_, forkunion_allocator_t> const& plans) noexcept {
-        std::size_t sum = 0;
-        for (plan_type_ const& plan : plans) sum += plan.total();
-        return sum;
     }
 
     /** Grows @p context to what any plan of @p plans touches. */
