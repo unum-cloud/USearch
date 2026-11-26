@@ -94,7 +94,7 @@ struct vram_nvidia_indexes {
     using executor_t = cuda_executor_t;
 
   private:
-    using fanout_t = utilities::vram_shard_fanout<shards_t, cuda_vendor_t, shard_score_type_>;
+    using fanout_t = util::vram_shard_fanout<shards_t, cuda_vendor_t, shard_score_type_>;
     using traversals_t = typename fanout_t::traversals_t;
     using shard_insert_plan_t = typename index_t::insert_plan_t;
     using graph_t = typename index_t::graph_t;
@@ -500,7 +500,7 @@ struct vram_nvidia_indexes {
         /** The stream on shard @p shard 's device, made current; null when the executor drives
          *  none there. */
         typename executor_t::stream_t* stream_(shards_t const& shards, std::size_t shard) noexcept {
-            std::size_t const stream = utilities::stream_of(shards, *executor, shard);
+            std::size_t const stream = util::stream_of(shards, *executor, shard);
             if (stream == executor->size() || failed(fanout_t::enter(shards, shard))) return nullptr;
             return &executor->stream(stream);
         }
@@ -1161,8 +1161,7 @@ struct vram_nvidia_indexes {
         for (std::size_t shard = 0; shard != live; ++shard) {
             // The run grows on the current device's stream, so that device is bound first.
             if (status_t const entered = fanout_t::enter(shards_, first + shard); failed(entered)) return entered;
-            typename executor_t::stream_t& stream = executor.stream(
-                utilities::stream_of(shards_, executor, first + shard));
+            typename executor_t::stream_t& stream = executor.stream(util::stream_of(shards_, executor, first + shard));
             plan.arenas_.push_back_reserved(typename executor_t::scratch_t::arena_t {stream.memory.arena.upstream()});
             if (failed(plan.arenas_[shard].reserve_exactly(walk_bytes))) return status_code_t::out_of_memory_k;
             plan.traversals_.push_back_reserved(

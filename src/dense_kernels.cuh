@@ -13,7 +13,7 @@
  */
 #pragma once
 
-#include <bit> // `std::bit_cast` - the C key struct & `us::utilities::uuid128_t` share sixteen bytes
+#include <bit> // `std::bit_cast` - the C key struct & `us::util::uuid128_t` share sixteen bytes
 
 #include "usearch/dense/vram_index.hpp" // `dense::vram_keyed_lookup`
 

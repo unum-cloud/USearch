@@ -19,7 +19,7 @@
 #include <cstring> // `std::memcpy` - an entry in an NVMe read's buffer, kept past the read
 
 #include <array>       // `std::array` - the one key a view scans for
-#include <bit>         // `std::bit_cast` - the C key struct & `us::utilities::uuid128_t` share sixteen bytes
+#include <bit>         // `std::bit_cast` - the C key struct & `us::util::uuid128_t` share sixteen bytes
 #include <limits>      // `std::numeric_limits` - a GPU index's sentinel node ID
 #include <memory>      // `std::make_obj_using_allocator` - values built from the index's allocator
 #include <span>        // `std::span`

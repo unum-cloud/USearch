@@ -5,7 +5,7 @@
  *  @brief The bioinformatics unit of the basic-index suite.
  *
  *  ACGT reads under an alignment distance with transition/transversion-weighted substitutions - the
- *  non-transparent, integer-exact, wide-ID, @c utilities::uuid128_t-keyed corner, and the only unit
+ *  non-transparent, integer-exact, wide-ID, @c util::uuid128_t-keyed corner, and the only unit
  *  whose serialized bytes differ from the in-RAM form.
  *
  *  Reads are drawn from planted reference sequences with a few point mutations & indels

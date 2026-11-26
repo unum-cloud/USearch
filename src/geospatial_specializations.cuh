@@ -15,7 +15,7 @@
 #include <cmath> // `std::sqrt`, `std::floor`, `std::ceil`, `std::fmin`, `std::fmax`
 
 #include <array>       // `std::array` - a quad of stored observations, a sight line's points
-#include <bit>         // `std::bit_cast` - the C key struct & `us::utilities::uuid128_t` share sixteen bytes
+#include <bit>         // `std::bit_cast` - the C key struct & `us::util::uuid128_t` share sixteen bytes
 #include <memory>      // `std::unique_ptr` - a GPU shard built on its device
 #include <new>         // `std::nothrow` - a GPU shard built on its device
 #include <span>        // `std::span` - a quad's entries and verdicts

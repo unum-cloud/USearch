@@ -21,7 +21,7 @@ A `*_index` is a mono-index and a `*_indexes` the sharded index over shards of i
 
 - `utilities/ram_shards.hpp` - the shard table every sharded index but the NVMe one owns, basic ones included: shards each tower builds, reserves and shape-checks, each owning its keys, the reads spanning them, rotation-balanced routing, and the commit word a reader spanning the shards snapshots by.
 - `shard_checkpoints.hpp` - the SafeGraphs save and load plans those sharded indexes open over their shard set, one monolith or a manifest of parts, with what differs per residency handed in as a policy object.
-- `utilities/vram_shards.hpp` - `utilities::vram_shard_fanout`, one batched read over NVIDIA or AMD shards: the executor's claim, one context per shard, one snapshot of the visible entries, and the await on the first shard's stream, where every shard's rankings merge before the host sleeps once.
+- `utilities/vram_shards.hpp` - `util::vram_shard_fanout`, one batched read over NVIDIA or AMD shards: the executor's claim, one context per shard, one snapshot of the visible entries, and the await on the first shard's stream, where every shard's rankings merge before the host sleeps once.
 - `ram_indexes.hpp` - the sharded index over CPU-resident shards with compute-domain routing and merged cross-shard search, one shard per memory domain.
 - `vram_nvidia_indexes.hpp` and `vram_amd_indexes.hpp` - the sharded indexes over NVIDIA and AMD shards with round-robin ingestion and merged cross-shard search, any number of shards per device.
 - `vram_apple_indexes.hpp` - the Apple twin over its one device, so one shard.
@@ -42,6 +42,6 @@ Every residency builds through the same two verbs, in this order:
 `health` is the read-only check the heal starts from - the same sweep from the root, reporting the reachable population, its depths, islands and components, with no edit.
 Use it to judge a graph without changing it.
 
-Every sharded index and residency runs the same round and reports one `utilities::refine_report_t`, whose counts and verdicts mean the same everywhere.
+Every sharded index and residency runs the same round and reports one `util::refine_report_t`, whose counts and verdicts mean the same everywhere.
 The sharded index fans the rounds over one executor, each shard's on its own device in VRAM.
 The RAM mono-index hands out plans instead - `plan_refine` and `plan_health` cut each phase into tasks any number of threads may run, with `advance` the one barrier between phases - since one index knows nothing about pools.

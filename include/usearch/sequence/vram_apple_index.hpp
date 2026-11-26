@@ -536,7 +536,7 @@ struct vram_apple_index {
 
     /** A sharded index's shard table measures, closes and reopens the graph's claims. */
     template <typename, template <typename> class atomic_ref_template_, typename, typename>
-    friend struct utilities::shard_set;
+    friend struct util::shard_set;
 
     /** A sharded index walks the graph below its snapshot and publishes its batches inside one
      *  commit. */

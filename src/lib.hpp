@@ -15,7 +15,7 @@
 #include <cstring> // `std::memcpy` - strided keys and coordinates packed into the arena
 
 #include <array>            // `std::array` - the predicate's batch
-#include <bit>              // `std::bit_cast` - the C key struct & `us::utilities::uuid128_t` share sixteen bytes
+#include <bit>              // `std::bit_cast` - the C key struct & `us::util::uuid128_t` share sixteen bytes
 #include <initializer_list> // `std::initializer_list` - the inputs a call checks against its arena
 #include <memory>           // `std::unique_ptr` - the executor's topology
 #include <mutex>            // `std::lock_guard` over the ticks' lock
@@ -222,7 +222,7 @@ inline bool crossed(util::expected<value_type_> const& result, usearch_traversal
     return result || propagate_error(result.status, outcome);
 }
 
-/** The C key struct and the engine's @c utilities::uuid128_t share sixteen bytes: one bit cast. */
+/** The C key struct and the engine's @c util::uuid128_t share sixteen bytes: one bit cast. */
 inline util::uuid128_t uuid_of(usearch_key_t key) noexcept { return std::bit_cast<util::uuid128_t>(key); }
 
 /** Admits every candidate, for a call that names no predicate. */

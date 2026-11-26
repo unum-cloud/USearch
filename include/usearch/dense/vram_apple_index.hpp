@@ -2257,7 +2257,7 @@ struct vram_apple_index {
     template <typename, nk_dtype_t, nk_capability_t, typename, typename>
     friend struct vram_apple_indexes;
     template <typename, template <typename> class shards_atomic_ref_template_, typename, typename>
-    friend struct utilities::shard_set;
+    friend struct util::shard_set;
 
   private:
 

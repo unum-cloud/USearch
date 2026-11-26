@@ -1636,7 +1636,7 @@ struct vram_apple_indexes {
         if (!rows_count) return {{}, status_code_t::success_k};
         if (queries.columns != dimensions()) return {{}, status_code_t::config_mismatch_k};
         traversal_context_t traversal {
-            metal_shared_allocator_t {executor.stream(utilities::stream_of(shards_, executor, 0))}};
+            metal_shared_allocator_t {executor.stream(util::stream_of(shards_, executor, 0))}};
         return shards_[0].index->attend(queries, head_count, std::forward<value_lookup_type_>(value_lookup),
                                         score_scale, outputs, carry, config, traversal);
     }
@@ -2103,7 +2103,7 @@ struct vram_apple_indexes {
         static status_t pairs_with(shards_t const& shards, executor_t const& executor) noexcept {
             if (shards.empty()) return status_code_t::uninitialized_k;
             for (std::size_t shard = 0; shard != shards.size(); ++shard)
-                if (utilities::stream_of(shards, executor, shard) == executor.size())
+                if (util::stream_of(shards, executor, shard) == executor.size())
                     return status_code_t::config_mismatch_k;
             return status_code_t::success_k;
         }
@@ -2115,7 +2115,7 @@ struct vram_apple_indexes {
             if (failed(traversals.reserve_exactly(shards.size()))) return status_code_t::out_of_memory_k;
             for (std::size_t shard = 0; shard != shards.size(); ++shard) {
                 traversals.push_back_reserved(traversal_context_t {
-                    metal_shared_allocator_t {executor.stream(utilities::stream_of(shards, executor, shard))}});
+                    metal_shared_allocator_t {executor.stream(util::stream_of(shards, executor, shard))}});
                 if (!traversals.back()) return status_code_t::out_of_memory_k;
             }
             return status_code_t::success_k;

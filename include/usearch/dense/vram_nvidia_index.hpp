@@ -1608,9 +1608,9 @@ struct vram_nvidia_index {
     template <typename, nk_dtype_t, typename, typename, typename, typename>
     friend struct vram_nvidia_indexes;
     template <typename, template <typename> class shards_atomic_ref_template_, typename, typename>
-    friend struct utilities::shard_set;
+    friend struct util::shard_set;
     template <typename, typename, typename>
-    friend struct utilities::vram_shard_fanout;
+    friend struct util::vram_shard_fanout;
     template <typename, typename>
     friend struct vram_nvidia_reshard_plan;
 

@@ -2377,11 +2377,11 @@ namespace util = utilities;
 template <>
 struct std::hash<unum::usearch::utilities::uuid128_t> {
     std::size_t operator()(unum::usearch::utilities::uuid128_t const& key) const noexcept {
-        namespace utilities = unum::usearch::utilities;
+        namespace util = unum::usearch::utilities;
         struct halves_t {
-            utilities::u64_t low, high;
+            util::u64_t low, high;
         };
         auto const halves = std::bit_cast<halves_t>(key);
-        return static_cast<std::size_t>(utilities::mix_bits(halves.low ^ utilities::mix_bits(halves.high)));
+        return static_cast<std::size_t>(util::mix_bits(halves.low ^ util::mix_bits(halves.high)));
     }
 };

@@ -41,8 +41,8 @@ struct quads_ladder;
 
 /** The GPU kernels only dense indexes launch, the first template argument of each vendor's dense
  *  kernel template - @c cuda_dense_kernel and @c amd_dense_kernel - and the words of Apple's dense
- *  exported names; the walks basic graphs share stay in @c utilities::vram_kernel_t. A vendor
- *  sizes its table of loaded dense kernels by @c count_k. */
+ *  exported names; the walks basic graphs share stay in @c util::vram_kernel_t. A vendor sizes its
+ *  table of loaded dense kernels by @c count_k. */
 enum class vram_dense_kernel_t : u32_t {
 
     /** A search rescoring its candidates through the indexer heads. */

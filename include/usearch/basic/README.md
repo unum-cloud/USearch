@@ -71,16 +71,16 @@ Every record builds its value from the index's allocator by uses-allocator const
 Each thread brings its own metric instance and its own traversal context, which holds the walk's scratch, sits on any allocator such as a per-thread arena, and receives the matches:
 
 ```cpp
-using index_t = us::basic::ram_index<std::vector<float>, us::utilities::u64_t>;
+using index_t = us::basic::ram_index<std::vector<float>, us::util::u64_t>;
 index_t index;
 if (!index.reserve(1000)) return 1;
 
 manhattan_metric_t metric;
 index_t::traversal_context_t context {/* seed */ 42};
 std::vector<std::vector<float>> values = {{0, 0, 1}, {0, 1, 0}, {1, 0, 0}};
-std::vector<us::utilities::u64_t> keys = {10, 20, 30};
-auto const [inserted, insert_status] = index.insert(std::span {values}, std::span<us::utilities::u64_t const> {keys},
-                                                    metric, std::span<us::utilities::u64_t> {}, context,
+std::vector<us::util::u64_t> keys = {10, 20, 30};
+auto const [inserted, insert_status] = index.insert(std::span {values}, std::span<us::util::u64_t const> {keys},
+                                                    metric, std::span<us::util::u64_t> {}, context,
                                                     us::basic::keep_diverse_t {16});
 
 std::vector<float> const query = {0, 0, 0.9f};
@@ -138,20 +138,20 @@ The RAM index of the example above fills the five columns, the tool writes them 
 ```cpp
 #include <usearch/basic/nvme_index.hpp>
 
-using us::utilities::dtype_t;
+using us::util::dtype_t;
 float_vectors_codec_t codec; // the caller's codec from Serialization above
 
 auto const [extents, extents_status] = index.columns_extents(codec);
-std::vector<us::utilities::u64_t> keys(extents.nodes), neighbor_sums(extents.nodes + 1), value_sums(extents.nodes + 1);
-std::vector<us::utilities::u64_t> neighbor_ids(extents.neighbors);
+std::vector<us::util::u64_t> keys(extents.nodes), neighbor_sums(extents.nodes + 1), value_sums(extents.nodes + 1);
+std::vector<us::util::u64_t> neighbor_ids(extents.neighbors);
 std::vector<std::byte> values(extents.value_bytes);
-if (us::utilities::failed(index.save({keys, neighbor_sums, neighbor_ids, value_sums, values}, codec))) return 1;
+if (us::util::failed(index.save({keys, neighbor_sums, neighbor_ids, value_sums, values}, codec))) return 1;
 // Write `graph.odd` with any I/O: the header, `neighbor_ids`, `neighbor_sums` cast to `u32`, `keys`,
 // `values` and `value_sums` cast to `u32`, noting where each one starts.
 
-using us::utilities::prefix_sums_t;
+using us::util::prefix_sums_t;
 std::size_t const sums_bytes = (extents.nodes + 1) * 4;
-us::utilities::persisted_columns_t persisted;
+us::util::persisted_columns_t persisted;
 persisted.nodes = extents.nodes;
 persisted.neighbors = {.dtype = dtype_t::u64_k,
                        .data = {neighbor_ids_at, neighbor_ids_at + neighbor_ids.size() * 8},
@@ -161,9 +161,9 @@ persisted.values = {.dtype = dtype_t::u8_k,
                     .data = {values_at, values_at + values.size()},
                     .offsets = prefix_sums_t {dtype_t::u32_k, {value_sums_at, value_sums_at + sums_bytes}}};
 
-us::basic::nvme_index<float_vectors_codec_t, us::utilities::u64_t, us::utilities::u64_t> view {
-    us::utilities::forkunion_allocator_t {}};
-if (us::utilities::failed(view.open("graph.odd", persisted))) return 1;
+us::basic::nvme_index<float_vectors_codec_t, us::util::u64_t, us::util::u64_t> view {
+    us::util::forkunion_allocator_t {}};
+if (us::util::failed(view.open("graph.odd", persisted))) return 1;
 ```
 
 The index never learns the format: only where each column starts, how wide its elements are, and how its rows are found.

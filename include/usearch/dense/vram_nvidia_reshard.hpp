@@ -297,7 +297,7 @@ struct [[nodiscard]] vram_nvidia_reshard_plan {
     /** The executor's stream on the device of the source shard @p global numbers. */
     typename device_executor_t::stream_t& stream_at_(device_executor_t& executor, std::size_t global) const noexcept {
         located_shard_t const located = locate_(global);
-        return executor.stream(utilities::stream_of(located.indexes->shards_, executor, located.shard));
+        return executor.stream(util::stream_of(located.indexes->shards_, executor, located.shard));
     }
 
     /** Rows the members of @p bin hold together. */
@@ -702,7 +702,7 @@ struct [[nodiscard]] vram_nvidia_reshard_plan {
                     bytes_of(neighbors + offset * neighbors_row_bytes, part_rows * neighbors_row_bytes),
                     {}};
                 typename device_executor_t::stream_t& stream = device_executor.stream(
-                    utilities::stream_of(source.shards_, device_executor, from));
+                    util::stream_of(source.shards_, device_executor, from));
                 if (status_t const entered = fanout_t::enter(source.shards_, from); failed(entered)) return entered;
                 auto [saving, save_status] = from_slot.index->plan_save(staged, synchronization_t::immutable_k, stream);
                 if (failed(save_status)) return save_status;

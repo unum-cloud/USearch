@@ -1202,7 +1202,7 @@ struct vram_ragged_graph {
     };
 
     using refine_report_t = basic::refine_report_t;
-    using reachability_t = utilities::reachability_t;
+    using reachability_t = util::reachability_t;
 
     struct refine_plan_t;
     struct reshard_plan_t;

@@ -78,7 +78,7 @@ template <typename codec_type_, typename key_type_ = uuid128_t, typename node_id
     requires std::same_as<node_id_type_, u32_t> || std::same_as<node_id_type_, u64_t>
 class nvme_parts_catalog {
     template <typename, typename, typename>
-    friend class utilities::query_walker;
+    friend class util::query_walker;
 
   public:
     using codec_t = codec_type_;
@@ -750,7 +750,7 @@ class nvme_parts_catalog {
 
 #pragma region Health
 
-    using reachability_t = utilities::reachability_t;
+    using reachability_t = util::reachability_t;
 
     /**
      *  @brief Reachability of every part from one drawn root each, the root's strong component

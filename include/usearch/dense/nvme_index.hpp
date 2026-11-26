@@ -129,7 +129,7 @@ struct nvme_index {
     template <typename, typename, typename, typename, typename, typename, typename, template <typename> class, typename>
     friend struct nvme_indexes;
     template <typename, typename, typename>
-    friend class utilities::query_walker;
+    friend class util::query_walker;
     template <typename>
     friend struct nvme_reshard_plan;
 

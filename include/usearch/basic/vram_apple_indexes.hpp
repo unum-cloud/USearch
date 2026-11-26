@@ -1030,15 +1030,14 @@ struct vram_apple_indexes {
     status_t pairs_with_(executor_t const& executor) const noexcept {
         if (shards_.empty()) return status_code_t::uninitialized_k;
         for (std::size_t shard = 0; shard != shards_.size(); ++shard)
-            if (utilities::stream_of(shards_, executor, shard) == executor.size())
-                return status_code_t::config_mismatch_k;
+            if (util::stream_of(shards_, executor, shard) == executor.size()) return status_code_t::config_mismatch_k;
         return status_code_t::success_k;
     }
 
     /** A context of its own over the stream on shard @p shard 's device, which grows its buffers at
      *  its first verb; one that cannot submit when the executor drives no stream there. */
     traversal_context_t traversal_(executor_t& executor, std::size_t shard) const noexcept {
-        std::size_t const stream = utilities::stream_of(shards_, executor, shard);
+        std::size_t const stream = util::stream_of(shards_, executor, shard);
         if (stream == executor.size()) return traversal_context_t {};
         return traversal_context_t {metal_shared_allocator_t {executor.stream(stream)}};
     }

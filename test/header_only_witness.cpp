@@ -275,7 +275,7 @@ int main() {
     if (util::failed(restored_degree_status) || util::failed(saved_degree_status) || restored_degree != saved_degree)
         return 1;
 
-    // The wide instantiation: uuid keys through `std::hash<utilities::uuid128_t>`, 64-bit IDs.
+    // The wide instantiation: uuid keys through `std::hash<util::uuid128_t>`, 64-bit IDs.
     std::unique_ptr<wide_index_t> const wide_index_ptr {new (std::nothrow) wide_index_t};
     if (!wide_index_ptr) return 1;
     wide_index_t& wide_index = *wide_index_ptr;

@@ -853,8 +853,8 @@ class growing_buffer {
     /** Qualified, since an element type from @c std drags @c std::exchange into the
      *  overload set through argument-dependent lookup and makes the call ambiguous. */
     growing_buffer(growing_buffer&& other) noexcept
-        : elements_(utilities::exchange(other.elements_, nullptr)), size_(utilities::exchange(other.size_, 0)),
-          capacity_(utilities::exchange(other.capacity_, 0)), allocator_(std::move(other.allocator_)) {}
+        : elements_(util::exchange(other.elements_, nullptr)), size_(util::exchange(other.size_, 0)),
+          capacity_(util::exchange(other.capacity_, 0)), allocator_(std::move(other.allocator_)) {}
 
     growing_buffer& operator=(growing_buffer&& other) noexcept {
         std::swap(elements_, other.elements_);
@@ -1442,7 +1442,7 @@ class growing_arena {
     /** The allocator every chunk of this arena comes from. */
     upstream_t const& upstream() const noexcept { return upstream_; }
     growing_arena(growing_arena&& other) noexcept
-        : runs_(std::move(other.runs_)), chunks_(utilities::exchange(other.chunks_, 0)), upstream_(other.upstream_),
+        : runs_(std::move(other.runs_)), chunks_(util::exchange(other.chunks_, 0)), upstream_(other.upstream_),
           limit_(other.limit_) {}
     growing_arena& operator=(growing_arena&& other) noexcept {
         std::swap(runs_, other.runs_);
